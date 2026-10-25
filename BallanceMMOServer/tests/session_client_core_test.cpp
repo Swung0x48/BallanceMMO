@@ -111,6 +111,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(window_rewind_reach)
         BMMO_CORE_STEP(drain_pending_deaths)
         BMMO_CORE_STEP(settle_held_tick)
+        BMMO_CORE_STEP(check_own_body)
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -4140,20 +4141,17 @@ namespace {
     }
 
     // lifecycle_rewind off (design 1.2; R1): late births and a late death are
-    // made at the drain, at the live tick, with no rewind; with
-    // mirror_start_from_row a birth whose player has a newer snapshot row
-    // starts from it (its pose, no kick, then the row written), one without
-    // starts from the event (kicked).
+    // made at the drain, at the live tick, with no rewind; each birth from
+    // its event (kicked).  (R3 deleted mirror_start_from_row, the retail
+    // policy that started such a birth from its player's newer snapshot row:
+    // a newer row changes nothing now.)
     TEST(SessionClientCoreR1, LifecycleRewindOffMakesLateChangesLive) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
         run_to_tick_125_four(core, fake);
         core.config.lifecycle_rewind = false;
-        core.config.mirror_start_from_row = true;
         state_of(core).spawn_impulse_ = 3.0f;
         core.on_session_snapshot(snapshot_message(9, 124, false, {ball_row(4, 7.0, true)}));
-        ASSERT_EQ(state_of(core).ball_rows_.count(4), 1u);
-        EXPECT_EQ(state_of(core).ball_rows_.at(4).tick, 124u);
         auto four = event_message(4, bmmo::session::event_type::Physicalize, 121, 121);
         four.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
         four.position[0] = 1.0f;
@@ -4171,15 +4169,13 @@ namespace {
         }
         ASSERT_EQ(fake.specs.size(), 2u);
         EXPECT_EQ(fake.specs[0].player, 4u) << "join order 0 first";
-        EXPECT_FALSE(fake.specs[0].kick) << "the row carries the server's kick";
-        EXPECT_FLOAT_EQ(fake.specs[0].position[0], 7.0f) << "the row's pose";
-        EXPECT_FLOAT_EQ(fake.specs[0].rotation[0], 1.0f);
+        EXPECT_TRUE(fake.specs[0].kick) << "the event's spawn kick, a newer row or not";
+        EXPECT_FLOAT_EQ(fake.specs[0].position[0], 1.0f) << "the event's pose, not the row's";
         EXPECT_EQ(fake.specs[1].player, 5u);
-        EXPECT_TRUE(fake.specs[1].kick) << "no row: the event's spawn kick";
+        EXPECT_TRUE(fake.specs[1].kick) << "the event's spawn kick";
         EXPECT_FLOAT_EQ(fake.specs[1].position[0], 2.0f);
-        EXPECT_NE(std::find(calls.begin(), calls.end(), "write_body:Ball_0_BMMO_4:7.000000:wake"), calls.end());
-        EXPECT_EQ(std::count_if(calls.begin(), calls.end(), [](const std::string& c) { return c.rfind("write_body:", 0) == 0; }), 1)
-            << "only the row's mirror is written";
+        EXPECT_EQ(std::count_if(calls.begin(), calls.end(), [](const std::string& c) { return c.rfind("write_body:", 0) == 0; }), 0)
+            << "no mirror is written from a row";
         EXPECT_EQ(state_of(core).remotes_.at(4).born_tick, 126u) << "made live: the next tick";
         EXPECT_EQ(state_of(core).remotes_.at(5).born_tick, 126u);
         EXPECT_TRUE(state_of(core).pending_births_.empty());
@@ -4192,11 +4188,6 @@ namespace {
         EXPECT_NE(std::find(calls.begin(), calls.end(), "unmake_mirror:Ball_0_BMMO_4"), calls.end());
         for (const auto& call: calls) EXPECT_NE(call, "bind_world") << "no rewind";
         EXPECT_FALSE(state_of(core).remotes_.at(4).physicalized);
-        // The policy off: no rows kept.
-        session_client_core plain(fake.make_flow(), session_capabilities{});
-        run_to_tick_125_four(plain, fake);
-        plain.on_session_snapshot(snapshot_message(9, 124, false, {ball_row(4, 7.0, true)}));
-        EXPECT_TRUE(state_of(plain).ball_rows_.empty());
     }
 
     // own_body_backstop (design 4.1; R1): 30 snapshots in a row without a
@@ -4255,6 +4246,46 @@ namespace {
         ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
         EXPECT_EQ(core.own_body_backstops(), 0u);
         EXPECT_TRUE(state_of(core).last_backstop_ == std::chrono::steady_clock::time_point{});
+    }
+
+    // R3: own_body_backstop beside the acted-on own echoes.  While an own
+    // birth still waits for its echo (verdict sent) the backstop does not
+    // count: the echo or its deadline answers it (expire_own_echoes), and a
+    // backstop re-report beside it would be a second Physicalize at the
+    // server.  Once the birth is answered the backstop counts from scratch;
+    // with the own echoes off (R1, R2) a pending birth gates nothing.
+    TEST(SessionClientCoreR1, OwnBodyBackstopWaitsForAPendingOwnEcho) {
+        for (const bool echoes: {true, false}) {
+            SCOPED_TRACE(echoes ? "own echoes on" : "own echoes off");
+            flow_fake fake;
+            session_client_core core(fake.make_flow(), session_capabilities{});
+            run_to_tick_125(core, fake);
+            core.config.own_body_backstop = true;
+            core.config.own_echoes = echoes;
+            state_of(core).own_physicalized_ = true;
+            fake.own_physical = true;
+            state_of(core).own_last_birth_.valid = true;
+            state_of(core).own_last_birth_.ball_type = 1;
+            state_of(core).own_life_ = {own_birth(122)};
+            uint32_t tick = 100;
+            for (int i = 0; i < 40; ++i) steps{core}.check_own_body(snapshot_message(9, ++tick, false, {}));
+            EXPECT_EQ(core.own_body_backstops(), echoes ? 0u : 1u);
+            EXPECT_EQ(state_of(core).snapshots_without_own_, echoes ? 0u : 10u);
+            if (!echoes) continue;
+            // A retired record, or one already answered, waits for nothing.
+            state_of(core).own_life_[0].state = client_core_state::own_life::verdict::missing;
+            for (int i = 0; i < 29; ++i) steps{core}.check_own_body(snapshot_message(9, ++tick, false, {}));
+            EXPECT_EQ(core.own_body_backstops(), 0u) << "counted from scratch";
+            steps{core}.check_own_body(snapshot_message(9, ++tick, false, {}));
+            EXPECT_EQ(core.own_body_backstops(), 1u);
+            // A beam's record (no deadline of its own) gates nothing either.
+            auto beam = own_birth(130);
+            beam.what = client_core_state::own_life::kind::beam;
+            state_of(core).own_life_ = {beam};
+            fake.advance(std::chrono::milliseconds(2000));
+            for (int i = 0; i < 30; ++i) steps{core}.check_own_body(snapshot_message(9, ++tick, false, {}));
+            EXPECT_EQ(core.own_body_backstops(), 2u);
+        }
     }
 
     // acked_input (R1): the snapshots' acked_input_tick under the current

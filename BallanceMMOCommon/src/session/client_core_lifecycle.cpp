@@ -258,37 +258,11 @@ namespace bmmo::session {
                 } else ++it;
             return;
         }
-        // mirror_start_from_row (R1): without the lifecycle rewind the
-        // birth is made at the live tick, where the newest snapshot row of
-        // the player is what the server has - started from it.
-        if (!config.lifecycle_rewind && config.mirror_start_from_row && physicalize_remote_from_row(event)) return;
+        // (Retail's mirror_start_from_row, the 9.17 workaround that started
+        // a live birth from its player's newest snapshot row, was deleted at
+        // R3: with the lifecycle rewind the birth is made at its stamp.)
         physicalize_remote(pending_birth::of(event), live_first_tick(event.tick));
         rewind_for_lifecycle(event);
-    }
-
-    // The retail mod's 9.17 workaround (PSC apply_event): the event carries
-    // the pose of its stamp, while the rows of that player are newer by the
-    // relay's delay - the mirror starts on the row (pose, then the row's
-    // velocity and sleep state), and without the spawn kick, which the row
-    // already carries.  Only for a row newer than the stamp.
-    bool session_client_core::physicalize_remote_from_row(const bmmo::session_event_msg& event) {
-        const auto cached = s.ball_rows_.find(event.player);
-        if (cached == s.ball_rows_.end() || !cached->second.have || !(cached->second.tick > event.tick)) return false;
-        const client_core_state::ball_row row = cached->second;
-        pending_birth birth = pending_birth::of(event);
-        birth.flags = static_cast<uint8_t>(birth.flags & ~bmmo::session::PHYSICALIZE_FLAG_SPAWN);
-        for (int k = 0; k < 3; ++k) birth.position[k] = static_cast<float>(row.position[k]);
-        quaternion_rows(row.rotation, birth.rotation);
-        if (!physicalize_remote(birth, live_first_tick(event.tick))) return true;   // logged; not again from the event
-        const auto it = s.remotes_.find(event.player);
-        if (it == s.remotes_.end()) return true;
-        it->second.birth_known = false;   // started from the row, not from its Physicalize: no remake (step LB)
-        std::string error;
-        if (!platform_.write_body(it->second.entity, row.position, row.rotation, row.linear, row.angular, row.simulated, error))
-            logf("remote physicalize %s from the row of tick %u: %s", it->second.entity.c_str(), row.tick, error.c_str());
-        else
-            logf("remote player %u started from its row of tick %u (stamp %u)", event.player, row.tick, event.tick);
-        return true;
     }
 
     void session_client_core::apply_event(const bmmo::session_event_msg& event) {

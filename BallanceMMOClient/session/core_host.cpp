@@ -242,6 +242,20 @@ namespace {
         uint64_t nav_source_differs = 0;
         uint64_t mute_source_differs = 0;
 
+        // The mirror-birth log (a diagnostic, R3's check "mirror birth pose
+        // at its stamp"): after the frame's rewinds, a mirror made at its
+        // stamp (birth_known) has its record of the stamp tick and the next
+        // one logged whenever a replay changed them, so the last line per
+        // birth is the pose the history keeps, comparable with the owner's
+        // own checkpoints.  Key (player, stamp); value the last positions
+        // logged (stamp, stamp + 1) and the lines so far.
+        struct birth_seen {
+            double at[2][3] = {};
+            bool have[2] = {false, false};
+            uint32_t lines = 0;
+        };
+        std::map<std::pair<uint32_t, uint32_t>, birth_seen> mirror_births;
+
         // 'net lag <ms> [up|down]' and 'net blackout <ms> [up|down]', each
         // now or 'at <tick>': GNS's fake lag and loss (global configuration
         // values), a deadline per direction.  A blackout ends at a frame
@@ -448,6 +462,45 @@ namespace {
         host.beam_in_flight = false;
         host.beam_in_flight_armed = 0;
         host.nav_source_differs = host.mute_source_differs = 0;
+        host.mirror_births.clear();
+    }
+
+    // The mirror-birth log (R3, a diagnostic; see retail_host::mirror_births):
+    // read after the frame's rewinds, nothing decided on it.
+    void log_mirror_births(logger_wrapper* logger, const bs::session_client_core& core) {
+        constexpr uint32_t kLinesPerBirth = 24;
+        for (const auto& [player, remote]: core.remotes()) {
+            if (!remote.physicalized || !remote.birth_known || remote.born_tick == 0 || remote.entity.empty()) continue;
+            auto& seen = host.mirror_births[{player, remote.born_tick}];
+            bool changed = false;
+            double now[2][3] = {};
+            bool have[2] = {false, false};
+            for (int k = 0; k < 2; ++k) {
+                bmmo_physics_body_state state{};
+                if (!core.recorded_body_state(remote.entity, remote.born_tick + static_cast<uint32_t>(k), state)) continue;
+                have[k] = true;
+                for (int c = 0; c < 3; ++c) now[k][c] = state.position[c];
+                if (!seen.have[k] || std::memcmp(seen.at[k], now[k], sizeof(now[k])) != 0) changed = true;
+            }
+            if (!changed || seen.lines > kLinesPerBirth) continue;
+            if (seen.lines++ == kLinesPerBirth) {
+                // The last line logged is no longer what the history keeps:
+                // said once, so a reader can set this birth aside.
+                logger->Info("Physics session: mirror birth record player=%u entity=%s stamp=%u at local %u: "
+                             "cap reached, not logged further",
+                             player, remote.entity.c_str(), remote.born_tick, core.current_tick());
+                continue;
+            }
+            for (int k = 0; k < 2; ++k) {
+                seen.have[k] = have[k];
+                std::memcpy(seen.at[k], now[k], sizeof(now[k]));
+            }
+            logger->Info("Physics session: mirror birth record player=%u entity=%s stamp=%u at local %u: "
+                         "t0=%s%.6f,%.6f,%.6f t1=%s%.6f,%.6f,%.6f",
+                         player, remote.entity.c_str(), remote.born_tick, core.current_tick(),
+                         have[0] ? "" : "none ", now[0][0], now[0][1], now[0][2],
+                         have[1] ? "" : "none ", now[1][0], now[1][1], now[1][2]);
+        }
     }
 
     // The ball table's "Force" column per ball type (the navigation's force;
@@ -576,10 +629,14 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // here.  The engine runs as the legacy path's does - its defaults, the
     // exact restore (savestate) on with the binding's lenient flags 0, no
     // clock rewind (the clock guard replaces it); the feature switches of
-    // design 6.2 R2: snapshot rollback and the input rewind (a relayed frame
-    // that differs from the prediction replays from its tick), no lifecycle
-    // rewind, the echoes and the held section counted only, the two retail
-    // policies on.
+    // design 6.2 R3: snapshot rollback, the input rewind (a relayed frame
+    // that differs from the prediction replays from its tick), the
+    // lifecycle rewind (a late remote birth is made at its stamp inside a
+    // replay, a late death rewinds) and the own echoes acted on with the
+    // design 2.3 fallback this host's capabilities select (no own body
+    // control: a moved own birth is the snapshots' or a resync, a rejected
+    // or missing one re-reported while current, a superseded one nothing);
+    // the held section counted only (R4), own_body_backstop on.
     bs::core_config config;
     config.journal_checkpoint_ticks = static_cast<uint32_t>(bs::client_journal::kCheckpointTicks);
     if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
@@ -607,10 +664,9 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     config.rollback = physics_session_.rollback_enabled;   // 'session rollback on|off'
     config.correct = true;
     config.input_rewind = true;   // R2
-    config.lifecycle_rewind = false;
-    config.own_echoes = false;
+    config.lifecycle_rewind = true;   // R3
+    config.own_echoes = true;   // R3
     config.own_corrections = false;
-    config.mirror_start_from_row = true;
     config.own_body_backstop = true;
     // R1's policy (the legacy frame's order) only stood in for the input
     // rewind: with it a key edge relayed between the frames replays from its
@@ -1693,6 +1749,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // 'session force-rollback E:D' (design 3.1's --force-rollback, the retail
     // verb): after the frame's own rewinds, every E ticks, D deep.
     p.hooks.after_rewinds = [this](uint32_t) {
+        if (host.core) log_mirror_births(logger_, *host.core);
         if (!host.force_every || !host.core) return;
         // The cadence is the verb's; whether the rewind can run this early
         // is the core's (force_rewind does nothing before depth + 2 ticks).
@@ -1751,8 +1808,8 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
             if (!connected()) core_latched.store(false);
             core_on.store(on);
             if (!on) return "ok session core off: the next session runs on the legacy path";
-            return "ok session core on: the next session runs on the shared core (step R2: snapshot rollback and the "
-                   "input rewind, no lifecycle rewind)";
+            return "ok session core on: the next session runs on the shared core (step R3: snapshot rollback, the "
+                   "input and lifecycle rewinds, the own echoes)";
         }
         if (!value.empty() && value != "status") return "error usage: session core on|off|status";
         return std::format("ok core={} latched={} made={} error='{}' sessions={} host_phase={} frames={} refused={} "

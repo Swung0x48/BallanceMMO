@@ -2414,6 +2414,12 @@ TEST(RollbackEngine, ARemoteBornInsideTheReplayIsDrivenAndRecordedFromItsBirthTi
     }
     EXPECT_FALSE(engine.recorded_body("Remote", kBorn - 1));
     const double x_after_birth_tick = remote_x_before.at(kBorn + 1);
+    // The diagnostic reader (R3): the birth tick's record is the state its
+    // replayed step left.
+    bmmo_physics_body_state at_birth{};
+    ASSERT_TRUE(engine.recorded_body_state("Remote", kBorn, at_birth));
+    EXPECT_DOUBLE_EQ(at_birth.position[0], x_after_birth_tick);
+    EXPECT_FALSE(engine.recorded_body_state("Remote", kBorn - 1, at_birth));
 
     // The live tick 11 tracks it, under the generation it has now.
     rollback_tracked alive = dead;

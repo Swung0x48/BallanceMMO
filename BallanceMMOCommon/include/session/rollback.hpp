@@ -1945,6 +1945,18 @@ namespace bmmo::session {
             const tick_state* at = find_const(tick);
             return at && at->bodies.find(entity) != at->bodies.end();
         }
+        // The state the record of `tick` holds for `entity` (the end of that
+        // tick, as the last capture or replay left it); false when the tick
+        // is not recorded or has no such body.  Diagnostics only (the retail
+        // host's mirror-birth log, R3): nothing decides on it.
+        bool recorded_body_state(const std::string& entity, uint32_t tick, bmmo_physics_body_state& out) const {
+            const tick_state* at = find_const(tick);
+            if (!at) return false;
+            const auto it = at->bodies.find(entity);
+            if (it == at->bodies.end()) return false;
+            out = it->second;
+            return true;
+        }
 
         // Re-anchor on a tick in the past because the WORLD changed there, not
         // because an authoritative snapshot disagreed: the caller has created a

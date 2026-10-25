@@ -193,8 +193,8 @@ namespace bmmo::session {
             // every later restore anchored before born_tick makes it again
             // from this at that tick (remake_mirror_birth), so the birth
             // tick's step is re-simulated with the inputs the history has
-            // then.  False for a body started elsewhere (a late live birth,
-            // a row start): it keeps the parking path.
+            // then.  False for a body started elsewhere (a late live birth;
+            // before R3 also retail's row start): it keeps the parking path.
             pending_birth birth{};
             bool birth_known = false;
             std::map<uint32_t, bmmo::session::input_frame> inputs;   // relayed frames by tick
@@ -654,20 +654,8 @@ namespace bmmo::session {
         // core::client_journal at E2 (session_client_core::journal()).
 
         // ---- R1 (design 4.1, the retail host's policies and readers) ----
-        // mirror_start_from_row: the newest snapshot row of every player's
-        // ball, physicalized here or not (the retail mod's latest_ball_rows,
-        // PSC cache_ball_row): a mirror made live starts from it when it is
-        // newer than the birth's stamp.  Kept only with the policy on.
-        struct ball_row {
-            bool have = false;
-            uint32_t tick = 0;
-            double position[3] = {};
-            double rotation[4] = {};
-            float linear[3] = {};
-            float angular[3] = {};
-            bool simulated = false;
-        };
-        std::map<uint32_t, ball_row> ball_rows_;
+        // (mirror_start_from_row's row cache was deleted at R3: with the
+        // lifecycle rewind a late birth is made at its stamp in a replay.)
         // own_body_backstop: the last own Physicalize sent (what a re-report
         // carries but the pose), the snapshots in a row that named no body of
         // ours while ours was physicalized, the last re-report, and the count
@@ -740,21 +728,21 @@ namespace bmmo::session {
         // Design 1.2 feature switch (R1): `lifecycle_rewind` - a remote birth
         // stamped in the past is made inside a replay at its tick
         // (make_remote_birth's pending path) and a late body change rewinds
-        // (rewind_for_lifecycle).  Off (retail until R3), each is made or
-        // taken out at the drain, at the live tick, with no rewind.  Needs
-        // `rollback` too; the headless client leaves it on, so with it its
-        // behaviour is today's `rollback` alone.
+        // (rewind_for_lifecycle).  Off, each is made or taken out at the
+        // drain, at the live tick, with no rewind (both hosts set it on
+        // since R3).  Needs `rollback` too; the headless client leaves it
+        // on, so with it its behaviour is today's `rollback` alone.
         bool lifecycle_rewind = true;
-        // Retail policies (design 4.1; R1), off by default (the headless
-        // client never sets them).  `mirror_start_from_row`: a mirror made
-        // live starts from its player's newest snapshot row when that row is
-        // newer than the birth's stamp - pose and velocity, no spawn kick
-        // (the row carries the server's) - the 9.17 workaround, needed only
-        // while lifecycle_rewind is off.  `own_body_backstop`: 30 snapshots
-        // in a row without a body of ours while our ball is physicalized
-        // re-report its last Physicalize (without the spawn flag, at most
-        // every 2 s; design 7.1 decision 2: retail-only until R6).
-        bool mirror_start_from_row = false;
+        // Retail policy (design 4.1; R1), off by default (the headless
+        // client never sets it).  `own_body_backstop`: 30 snapshots in a row
+        // without a body of ours while our ball is physicalized re-report its
+        // last Physicalize (without the spawn flag, at most every 2 s; design
+        // 7.1 decision 2: retail-only until R6); while the own echoes are
+        // acted on, not while an own birth still waits for its echo (R3:
+        // the echo or its deadline answers that one).  (The other R1 policy,
+        // `mirror_start_from_row` - a mirror made live started from its
+        // player's newest snapshot row, the 9.17 workaround - was deleted at
+        // R3 with the retail lifecycle rewind on, design 4.2.)
         bool own_body_backstop = false;
         // Retail policy (R1, while input_rewind is off): a predicted mirror's
         // frame for the step of T is chosen at pre_step(T), from the relay
@@ -816,8 +804,8 @@ namespace bmmo::session {
 
     // A body's quaternion (x, y, z, w) as the rows of the 3x3 rotation a
     // Physicalize event carries (rotation[r * 3 + k] = row r), the formula of
-    // VxQuaternion::ToMatrix (R1: a mirror started from a snapshot row, the
-    // own_body_backstop's re-report).
+    // VxQuaternion::ToMatrix (R1: the own_body_backstop's re-report; until
+    // R3 also a mirror started from a snapshot row).
     inline void quaternion_rows(const double q[4], float rows[9]) {
         const float x = static_cast<float>(q[0]), y = static_cast<float>(q[1]);
         const float z = static_cast<float>(q[2]), w = static_cast<float>(q[3]);
@@ -1093,6 +1081,11 @@ namespace bmmo::session {
         const bmmo::session::correction_stats& own_correction_stats() const { return s.corrector_.stats(); }
         const std::vector<uint8_t>* recorded_savestate(uint32_t tick) const { return s.rollback_.recorded_savestate(tick); }
         const std::vector<uint8_t>* recorded_scripts(uint32_t tick) const { return s.rollback_.recorded_scripts(tick); }
+        // A body's state in the record of `tick` (diagnostics: the retail
+        // host's mirror-birth log, R3).
+        bool recorded_body_state(const std::string& entity, uint32_t tick, bmmo_physics_body_state& out) const {
+            return s.rollback_.recorded_body_state(entity, tick, out);
+        }
         // What the retail host reads (R1): the snapshots' acked input (its
         // transitional starvation detector), the own_body_backstop's
         // re-reports, and the resync requests sent.
@@ -1367,10 +1360,6 @@ namespace bmmo::session {
         void unphysicalize_mirror(const std::string& entity);
         // True when the mirror's body was made.
         bool physicalize_remote(const client_core_state::pending_birth& event, uint32_t first_tick);
-        // mirror_start_from_row (R1): a live birth started from its player's
-        // newest snapshot row; false (nothing done) when no row is newer
-        // than the stamp.
-        bool physicalize_remote_from_row(const bmmo::session_event_msg& event);
         // The snapshot path's retail policy (R1): own_body_backstop.
         void check_own_body(const bmmo::session_snapshot_msg& snapshot);
         // The mechanisms a record tracks (step P): the platform's movable

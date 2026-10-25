@@ -258,7 +258,6 @@ namespace bmmo::session {
         s.pending_deaths_.clear();
         // R1: the retail policies' and readers' state, and no frame
         // prepared (post_step refuses one no pre_step of this session made).
-        s.ball_rows_.clear();
         s.own_last_birth_ = {};
         s.snapshots_without_own_ = 0;
         s.own_backstops_ = 0;

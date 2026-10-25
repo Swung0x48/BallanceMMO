@@ -12,7 +12,9 @@ R3's switch). Step P (the pieces tracked as mechanisms in both hosts, "As
 built (step P)") is implemented but OPEN: R2 (a) now passes on retail, the
 headless trafo run does not. Step Q (the anchor restores the proximity
 blocks' countdown, "As built (step Q)") is built: R0's baseline check holds.
-R3-R7 are not built.
+R3 is built ("As built (step R3)": the retail lifecycle rewind and own
+echoes; with it R2 (b)'s mirror p99 is below every O run). R4-R7 are not
+built.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -212,7 +214,8 @@ The R steps (§6.2) turn the switches on one by one for retail.
 
 There are also two retail-only policies (§4.1):
 
-- `mirror_start_from_row`, needed only while `lifecycle_rewind` is off;
+- `mirror_start_from_row`, needed only while `lifecycle_rewind` is off
+  (deleted at R3, "As built (step R3)");
 - `own_body_backstop`.
 
 ### 1.3 Entry points per frame
@@ -5796,6 +5799,243 @@ core, engine and binding.
     past the first (the hello, which carries the build id) - the failure
     path was never taken in them (status `remake=` 3-24 made, 0 lost, per
     journal).
+
+**As built (step R3): the retail host's lifecycle rewind and own echoes.**
+Where the code made R3 differ from §1.2, §2.3, §4.2 and the R3 row:
+
+- **What R3 turns on.** The retail `core_config` sets `lifecycle_rewind`
+  and `own_echoes` (core_host.cpp, the session start); `own_corrections`
+  stays off (R4), `own_body_backstop` on. No retail platform code changed for
+  either: the binding has been the shared `bind_session_world` since R0, the
+  retail `make_mirror` keeps one spirit ball per player and type, so a remake
+  (step LB) finds the same entity, and the capabilities (no own body
+  control) select §2.3's fallback inside the core (E7's `move_own_birth`,
+  `resync_own_life`, `re_report_own_birth`, `expire_own_echoes`). The verb's
+  answer says "step R3".
+- **`mirror_start_from_row` is deleted** from the core: the `core_config`
+  field, the snapshot intake's row cache (`client_core_state::ball_rows_`
+  and its `begin` reset) and `physicalize_remote_from_row`. The headless
+  client never set it (inert there; WIRE-CHECK below). The R1 test
+  `LifecycleRewindOffMakesLateChangesLive` keeps the switch-off half (late
+  births and a late death made at the drain, no rewind) and now checks that
+  a newer snapshot row changes nothing (the event's pose and kick, no
+  `write_body`). `quaternion_rows` stays (the backstop's re-report uses it).
+  The legacy path's own row start (PSC, `latest_ball_rows`) is untouched.
+- **A diagnostic the row's first criterion needed (an addition).** A
+  mirror's pose at its stamp exists only in the history: the LOCAL
+  checkpoints are written live, and a remote birth arrives input_delay + a
+  trip after its stamp (20-23 ticks here), so no checkpoint of the stamp tick
+  has the mirror. `rollback_engine::recorded_body_state(entity, tick, out)`
+  (const; no member, so `physics_session_state` keeps its layout) and its
+  core pass-through read a record's body; the retail host's
+  `hooks.after_rewinds` logs, for each mirror made at its stamp
+  (`birth_known`), the records of the stamp tick and the next one whenever a
+  replay changed them ("mirror birth record player=P entity=E stamp=T at
+  local L: t0=... t1=...", at most 24 lines per birth, then one "cap
+  reached, not logged further" line, after which the last record line is
+  no longer what the history keeps and the judge sets that birth aside;
+  the runs logged at most 3 per birth). It runs on every core-on frame (two
+  history reads per remote) and goes with the other retail diagnostics at
+  R7. The last line per birth is what the history keeps; the scratch tool
+  `.local-tools/work/r3/r3_judge.py` compares it with the owner's LOCAL
+  checkpoint of the same tick (every 2 ticks, so t0 or t1) and with the
+  server's FULL one. Nothing decides on it.
+- **The beams' births: the criterion holds against the server, not against
+  the owner (§2.3, measured).** A beam is an Unphysicalize + Physicalize pair
+  at the server and in every other world (a fresh body at the beam pose); in
+  the owner's world without own body control it is an in-place write of the
+  old body. At the stamp the mirror equals the server's ball (≤ 1e-6 m, the
+  log's precision) and the owner differs from both by the same amount:
+  0.000794 m (the trafo beam, 4 above the floor), 0.001946 m (the lane
+  beam), 0.009914 m (the death-zone beam), identical for both clients. Every
+  birth the game's scripts made (spawn, trafo, respawn) is 0.000000-0.000001
+  m from the owner. The owner's residual is R6's (own body control); R3
+  reports it as §2.3 asks. It predates R3: R1 (c) (`r1_cg_on*`, core on,
+  no lifecycle rewind) measured the own ball after its 4 m beam 0.0000-
+  0.0005 m from the server and after the death beam 0.03-0.20 m (client 1)
+  and 3.47-4.97 m (client 2) - the same in-place write. After R3's lane
+  beam the error was measured only from the stamp to stamp + 66 (0.0019-
+  0.0243 m); how long it lasts beyond that is not measured.
+- **A late birth without a rewind starts from the event's pose and kick.**
+  With `mirror_start_from_row` gone, a remote birth the core makes at the
+  drain (no rewind: `session rollback off` on retail, `lifecycle_rewind`
+  off, or a stamp older than the history, `knows_tick` false) is made from
+  its Physicalize's pose with the spawn kick at the live tick
+  (client_core_lifecycle.cpp, make_remote_birth), not from a newer snapshot
+  row as under R2; the snapshots (when on) correct it like any other body.
+- **The backstop waits while an own birth waits for its echo (a gate-round
+  fix; §4.1 and §7.1 decision 2 did not consider the pair).** R3 is the
+  first configuration with `own_echoes` and `own_body_backstop` both on.
+  With snapshots on and an own Physicalize lost, the backstop re-reported
+  the ball after 30 snapshots (~60 ticks; R1 (c)'s exercise: 1558 -> 1623)
+  while the birth's record stayed `sent` (send_event writes no own_life), so
+  at stamp + 192 `expire_own_echoes` gave it up as missing and
+  `re_report_own_birth` sent a second Physicalize and the client resynced,
+  although the backstop had already given the server its body: two answers
+  to one lost event, the second a resync nothing needed. (The second
+  Physicalize itself moves nothing at the server when the ball type is the
+  same - physics_world.cpp clones the same entity and `physicalize` returns
+  early for an entity that has a body, physics_state.cpp - so the "teleport
+  back" the review expected does not happen; a different type would
+  replace the body.) Now
+  `check_own_body` does not count while the echoes are acted on and a
+  non-retired own birth record is `sent`: the echo or its deadline answers
+  that birth; once it is answered (or with `own_echoes` off, as at R1/R2,
+  or for a beam's record, which has no deadline) the backstop counts as
+  before. Test `SessionClientCoreR1.OwnBodyBackstopWaitsForAPendingOwnEcho`.
+  Inert on headless (the backstop is off there).
+- **The re-report carries the stamp's pose (as LPD 3.5 / E7 built it), so
+  the resync pulls the player back.** `re_report_own_birth` sends the
+  birth's pose of its stamp for now + 1; on retail the player's ball has
+  rolled on meanwhile, and the resync then makes it the server's, made at
+  the stamp's pose. Measured in the gate run below: 78.8 m at the re-made
+  tick, 92.2 m just before the resync landed, 0.0000 m from 1548 on. The
+  worlds agree after it; only the player sees the jump. Sending the current
+  own pose instead is a design change left to R6 (with own body control the
+  own birth is moved instead), recorded here.
+- **A pre-existing world disagreement shows in the snapshots-off row run
+  (G-c3, not R3).** "Snapshots off" (`arch_server_lp.sh ... 100000 100000`)
+  still sends a full snapshot on every body-set change (timeline.hpp
+  `decide`, session_runner.cpp `body_set_changed`; lockstep-without-
+  snapshots.md: "The cadence still forces a full ... on every body-set
+  change"): 20 per client in `r3_arena_1`. One of them corrected client 1:
+  "rollback to tick 1250 (P_Modul_30_Wippe off by 0.339371 m)" (the same
+  number in `r3_exercise_1`: deterministic), `snaps=20 ok=19 mism=1`.
+  Symptom: client 1's Wippe stays asleep at (399.649, 4.056, 43.150) while
+  the server's and client 2's start to tip at 1136 (0.0005 m, 0.33 m by
+  1170), no ball within 40 m. Cause: client 2's world woke it and reported
+  BodyRevived (server S5 `type=BodyRevived origin=1136` from client 2
+  alone), the server applied the wake, and no client applies another
+  player's BodyRevived (client_core_frame.cpp drain_body_events only sends
+  it; the legacy PSC likewise). The wakes are per-world: every BodyRevived
+  of the run that only one client reported came when that client's own
+  ball was 44-49 m from the body (1136: client 2 at 47.8 m; 987 Bridge
+  46.9; 2177 Wippe, client 1 at 48.9; 2448 Schiebestein 48.1; 2553 Bridge
+  44.5 - `work/r3/revived_dist.py`), the module's proximity wake reading
+  the local player's ball. Pre-existing: A4's `a4_r1c_on1` (no lifecycle
+  rewind) shows the same single-reporter wakes at 47-53 m
+  (P_Modul_01_Pusher001 at 512 / 523). This is world-agreement-gaps G-c3
+  (with G-c2's identity reads), queued as its own step (§2.6 part F);
+  client 1's numbers after 1250 in that run come after the snapshot's
+  correction.
+- **Remakes (step LB's retail check, placed here).** The plain row run
+  never remade a mirror (`remake=0/0`); the remake path ran in
+  `r3_exercise_1` (client 1 1, client 2 5), `r3_r2b_1` (client 1 1),
+  `r3_spawn_1` (1 per client) and the gate run (2 per client), none lost,
+  and the births of those runs were judged at their stamps as below (r2b:
+  8 births 0.000000-0.000001 m).
+- **The row's scenario is split into a plain run and an exercise run.** With
+  no late own event the plain run has no resync, so the fallback's resync
+  path is reached only on purpose: `session drop-birth` on client 1 after its
+  death beam keeps its respawn's Physicalize off the wire (R1's tool).
+- **The run scripts** (the temp tree's `r2_run.py`, `p3_two.py`,
+  `r2_mirror.py` were lost) are rebuilt as `.local-tools/work/r3/r3_retail.py`
+  (recipes `arena`, `exercise`, `r2b`, `spawn`; `arena-install|restore` puts
+  the arena into slot 13 of both Downloads game copies, the originals kept
+  beside it), `r3_judge.py` (the checks below) and `r3_mirror_ranges.py`
+  (where a run's mirror error is).
+
+Measured (x86 mod and x64 build of f1073ff + R3; the x86 client objects
+deleted first, client_core.hpp's layout changed; the mod and the Arch server
+built with the slot-13 hack for the retail runs, build id
+`ballanced-3e4289e95f25+bmmo-f1073ff77e36-dirty`, the hack reverted and the
+Arch server rebuilt plain afterwards; the two Downloads game copies with the
+arena in slot 13 for the arena runs, restored after):
+
+- 471 tests pass (the R1 test changed, `recorded_body_state` asserted in
+  `RollbackEngine`'s late-birth replay test); `linux_test_syntax.sh` 26 lines
+  ok; x64 BUILD-OK (`build-agent-rR3`); x86 CLIENT-BUILD-OK. **Headless
+  unchanged:** `wire_check.sh rT1 rR3 rR3w` WIRE-CHECK: ALL SAME (24 journals
+  IDENTICAL, 24 sends SAME); solo snapshots off (`e0_solo.sh rR3`) IDENTICAL
+  to A5's `rA5c` (2380 TICK hash + pose common, 0 differ; LOCAL 1190/1190).
+- **The row** (`r3_arena_1`: arena, snapshots off, `net lag 150` both ways
+  on both, both `replay session` of `r0_keys.bmrc`; client 1 beamed onto
+  P_Trafo_Wood at 650, to the lane at 850, into the death zone at 1000; client
+  2 the same at 1250 / 1450 / 1600, after client 1's pieces were reset, so no
+  ball meets the other's local pieces): stone ball unphysicalized by the trafo
+  at 652 / 1252, wood ball 817 / 1417, death 1069 / 1669, respawn 1267 / 1867.
+  Mirror birth pose at its stamp: 12 births, every script-made one 0.000000-
+  0.000001 m from the owner and the server; the beams as above (mirror =
+  server). Life rewinds 11 / 11 (none missed); `inrew` 226 / 160; resyncs
+  0/0 and rebases 0 on both; `overtaken` 0 / 0 and `echo=13/0/0/0/0` (no own
+  echo superseded, moved, rejected or missing) on both, against the server's
+  S5 lines: per player 6 Physicalize, 5 Unphysicalize, 2 Sector, none
+  re-stamped, none superseded, no birth overtaken by a death. Server journal
+  exact in the SimTool (2554 matched, 0 checkpoint mismatches). The own ball
+  against the server after each beam (LOCAL against FULL, stamp to stamp +
+  66): trafo beam 0.0008 m (captured at stamp + 2), lane beam 0.0019-0.0243
+  m, death beam 0.0099-0.3079 m (falling until its unphysicalize). The live
+  mirror error of this run is not R2 (b)'s measure: a beam is unknown at the
+  live tick for a trip, so the LOCAL checkpoints carry the beam distance for
+  that long (406 m once, at client 2's trafo beam).
+- **The fallback** (`r3_exercise_1`, the row's run plus the dropped respawn):
+  client 1 "own birth moved 1267 -> never at local tick 1484: no echo by the
+  server's tick 1460, resync", then "resync requested (own birth: resync) at
+  tick 1484" (the only resync in the run, its reason on the line before it,
+  as the row asks); the birth re-reported for 1485 without the spawn flag
+  (the server made it: 6 Physicalize S5 lines; client 2's mirror of it equals
+  the server's ball at its stamp); the resync applied (base 1511, re-stepped
+  1510 -> 1547, 19 rows equal), and client 1's own ball equals the server's at
+  every LOCAL checkpoint from 1548 to the end. `echo=12/0/0/0/1`,
+  `ownlife=0/0/1/0/0`; client 2 no resync; server journal exact (2575).
+  Not reached by any run: a moved own birth (with snapshots off: the resync
+  "no own body control, no snapshots") and a superseded one (nothing); the
+  core's unit tests (E7) cover both.
+- **R2 (b), held open there** (`r3_r2b_1`: level 11, snapshots off, `net lag
+  150`, `r0_keys.bmrc` on both): `inrew` 248 / 238, life rewinds 7 / 7,
+  resyncs 0/0, rebases 0; the 8 births 0.000000-0.000001 m at their stamps.
+  Mirror against the owner's LOCAL checkpoints: pooled p99 **4.99 m** (client
+  1 sees 2: 4.85, client 2 sees 1: 5.14; p50 0.0000, max 5.74) against the
+  E11 lane O runs' 6.56 / 13.94 / 18.04 / 6.10 m and R2's 18.35 / 19.18 m:
+  below every O run, so R2 (b)'s bar holds with R3's switch. Server journal
+  exact (2529).
+- **P's spawn race, held open there** (`r3_spawn_1`: level 11, snapshots on
+  2 / 66, both clients beamed onto sector 1's P_Trafo_Stone, y 9.095, at 300
+  / 340): **no mismatch at 214-218 on either client** - both made the peer's
+  tick-212 birth inside the replay at local 214 and the snapshot of 214
+  matched; mism client 1 **4** (the pusher 580 / 582, the peer 1154 / 1654),
+  client 2 **7** (the same plus the bridge at 614 / 639 / 664), against
+  HEAD's five-run band c1 6-11 / c2 10-16 and option (i)'s c1 8-13; `rb` 65
+  / 65, unmatched / far / frozen 0, resyncs 0/0, rebases 0; server journal
+  exact (2575). One run: the race was a frame-timing outcome of the live
+  birth, and with the birth made at its stamp in a replay no drain frame
+  changes the world. (Client 2's LOCAL checkpoint of 214 still shows its own
+  ball 0.1709 m from the server - P's state-B number: the live frame of 214,
+  written before the late birth was known; the history was right by the time
+  the snapshot of 214 was compared.)
+- **A test trap, not R3** (`scripts/retail/r3_spawn_bad_y5`): the first
+  spawn run beamed to y 5.095, the trafo's own origin. The step after the
+  ball was made inside the trafo's mesh took 4.8 s (tick 300) and 10.3 s
+  (340) in every world: both games froze, their tick drivers rebased
+  (resyncs), and the SimTool replay of that server journal spends the same
+  4.8 / 10.3 s with HEAD's binary (`rT1`) as with R3's (both exact, 2534
+  matched). P's recipe used y 9.095 (4 above), as the rerun does. Nothing in
+  play makes a ball inside a mesh; recorded only.
+- Core off (the BAR) is not re-measured: the legacy path (PSC) and the
+  legacy binding are unchanged, and `recorded_body_state` is a const reader
+  no legacy code calls. No data member was added to `BallanceMMOClient`; 12
+  game launches of the final mod, none hung.
+- **Gate round** (the backstop gate and the cap line; shared core and
+  retail host changed): 472 tests pass; `linux_test_syntax.sh` 26 ok; x64
+  BUILD-OK (`build-agent-rR3` re-copied); x86 CLIENT-BUILD-OK. Headless
+  unchanged: `wire_check.sh rT1 rR3 rR3w` ALL SAME (24 journals IDENTICAL);
+  solo snapshots off (`e0_solo.sh rR3g`) IDENTICAL to `rA5c` (2408 TICK
+  hash + pose common, 0 differ; LOCAL 1204/1204). The affected arm, the
+  exercise with snapshots ON (`r3_gate_exsnap_1`: `r3_retail.py
+  exercise-snap`, 2 / 66, `net lag 150`, client 1's respawn stamped 1267
+  kept off the wire): `backstops=0` (without the gate the backstop fires
+  ~60 ticks after the stamp, R1 (c)); client 1 "own birth moved 1267 ->
+  never at local tick 1485: no echo by the server's tick 1464, resync",
+  then "resync requested (own birth: resync) at tick 1485", the run's only
+  resync; the server made exactly one more Physicalize of client 1 (origin
+  1486; 6 in all, none re-stamped or superseded), client 2's mirror of it
+  equal to the server's ball at its stamp (0.000000 m); the resync landed
+  (tick base 1513) and client 1's own ball equals the server's at every
+  LOCAL checkpoint from 1548 to the end (the pull-back above before it);
+  `echo=12/0/0/0/1`, `ownlife=0/0/1/0/0`, client 2 no resync; every other
+  birth as in the row run (script-made 0.000000 m; the beams 0.000794 /
+  0.001946 / 0.009914 m owner-server, mirror-server <= 1e-6); server
+  journal exact in the SimTool (2575 matched, 0 checkpoint mismatches).
 
 ## 7. Open questions
 

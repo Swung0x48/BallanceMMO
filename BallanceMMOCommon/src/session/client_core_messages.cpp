@@ -25,24 +25,6 @@ namespace bmmo::session {
     void session_client_core::on_session_snapshot(const bmmo::session_snapshot_msg& msg) {
         ++s.snapshots_received_;
         if (msg.session != s.session_ || s.phase_ != client_core_state::phase::running) return;
-        // mirror_start_from_row (R1): every snapshot's ball rows, stale ones
-        // included, before anything decides about the snapshot - the newest
-        // row of each player is what a mirror made live starts from.
-        if (config.mirror_start_from_row)
-            for (const auto& body: msg.bodies) {
-                if (body.kind != bmmo::session::body_kind::Ball) continue;
-                auto& row = s.ball_rows_[body.owner];
-                if (row.have && row.tick > msg.tick) continue;   // an older snapshot, arriving late
-                row.have = true;
-                row.tick = msg.tick;
-                for (int k = 0; k < 3; ++k) {
-                    row.position[k] = body.position[k];
-                    row.linear[k] = body.linear[k];
-                    row.angular[k] = body.angular[k];
-                }
-                for (int k = 0; k < 4; ++k) row.rotation[k] = body.rotation[k];
-                row.simulated = (body.flags & bmmo::session::BODY_FLAG_SIMULATED) != 0;
-            }
         apply_snapshot(msg);
     }
 
@@ -305,11 +287,27 @@ namespace bmmo::session {
     // the ball has now and without the spawn flag (the body was kicked, or
     // deliberately not, already): the retail mod's check_own_body (design
     // 4.1 own_body_backstop, R1).
+    //
+    // While the own echoes are acted on (R3), an own birth still waiting
+    // for its echo is theirs: its answer is the echo, or the deadline
+    // (expire_own_echoes: re-reported while current, then a resync).  A
+    // backstop re-report beside it leaves that record `sent` (send_event
+    // keeps no own_life), so the deadline would still give the birth up,
+    // re-report it again and resync: two answers to one lost event.  So
+    // the count waits until no birth is pending (the echoes' answer, made
+    // or given up, ends the wait).
     void session_client_core::check_own_body(const bmmo::session_snapshot_msg& snapshot) {
         bool present = false;
         for (const auto& body: snapshot.bodies)
             if (body.kind == bmmo::session::body_kind::Ball && body.owner == s.own_id_) { present = true; break; }
-        if (present || !s.own_physicalized_ || !s.own_last_birth_.valid || s.resync_pending_) {
+        bool awaiting_echo = false;
+        if (acting_on_echoes())
+            for (const auto& life: s.own_life_)
+                if (!life.retired && life.what == own_life::kind::birth && life.state == own_life::verdict::sent) {
+                    awaiting_echo = true;
+                    break;
+                }
+        if (present || !s.own_physicalized_ || !s.own_last_birth_.valid || s.resync_pending_ || awaiting_echo) {
             s.snapshots_without_own_ = 0;
             return;
         }
