@@ -1,6 +1,6 @@
 # Sector placement: one object per PH row
 
-Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1 and S2 built (as-built notes in 2.2, 2.3 and 2.6); revision 2
+Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1, S2 and S3 built (as-built notes in 2.2, 2.3, 2.6 and 7.3); revision 2
 after two reviews (answers in §10). Base: HEAD 4882ec2 (R2) plus the
 uncommitted step P in the working tree; line numbers are the working tree's on
 2026-10-23 and drift with step P, so each one is given with the function or
@@ -1234,6 +1234,129 @@ the s4 pass). An arm that fails with placement on is a coupling between
 sectors that is not pooling (a global IVP or CK state): report it with the
 first differing field, symptom, cause and options; do not waive it.
 
+**As built (step S3, 2026-10-25).**
+
+- **Where.** `BallanceMMOServer/sim/placement_trace.hpp` (new: the trace
+  writer); SimTool (`sim_tool.cpp`): an option block at the end of
+  `arguments`, three branches in `parse_placement_arg` and two names in the
+  line that routes to it, new functions after `settle_world` (`scene_trace`,
+  `scene_tick`, `settle_scene`, `open_scene_trace`, `close_scene_trace`,
+  `check_scene_switches`), one changed line in `setup_sector_scene` (its
+  settle runs through `settle_scene`), three in `run_drop` (open the trace,
+  tick through `scene_tick`, close), one check line in `main` (before every
+  mode's dispatch, so `--replay-session` with a trace is refused, not
+  silently traceless, until S8 builds it) and the usage lines;
+  `scripts/placement_check.py` (new). Of the files trafo T3 also
+  changes, none is touched (T3 does not change `sim_tool.cpp`); nothing under
+  `BallanceMMOCommon`, the headless client or the server changed.
+- **The switches.** `--second-move SECTOR TICK` (repeatable) needs
+  `--drop-second-sector`; `--placement-trace PATH` traces the `--drop-sector`
+  rows (a relative path is resolved against the working directory at parse
+  time, before the engine makes the game directory the working directory);
+  all S3 switches are refused outside the plain `--drop` scene
+  (`--savestate-check` takes a pass inside its window at S7, `--replay-session`
+  the networked trace at S8). Addition: `--drop-again X Y Z TICK`
+  (repeatable) beams the player's ball there at rest before that tick, for
+  L8-b's second drop.
+- **Adaptation: ticks are world ticks** (the world's tick index; the drop
+  scene's settle, 30 ticks, counts, so the ball is dropped before world tick
+  30 and `2 @0` is a pass during the settle). The table's ticks are used as
+  written in that unit; L11-b's `3 @130` is therefore 30 ticks earlier than
+  V4's sack run (`--drop-move 3 130` = world tick 160), still inside the
+  swing.
+- **Adaptation: both arms have the second player**, parked in the watched
+  sector (`--drop-second-sector` = the watched sector), so the arms differ by
+  the `--second-move` passes alone.
+- **Adaptation: a joint block's handle is traced as present or not, not by
+  value.** Cause: the heap does not give two processes the same addresses
+  (Windows' low-fragmentation heap randomizes them), so whether a re-created
+  constraint reuses the freed address differs from run to run. Measured: three
+  runs of one command (L11-c's control, `--placement off`, 130 ticks) gave
+  three different handle sequences (one run kept two handles at reused
+  addresses for 123 lines, the others did not), and a first version that
+  traced the value as a first-seen ordinal failed V10's L11-c at tick 14,
+  before its first pass, on `P_Modul_19_MF001`'s hinge alone (ordinal 2 vs 8).
+  A rebuild from a moved frame shows in the referential's matrix (traced), and
+  any rebuild that changes the constraint shows in the bodies' states. Blind
+  spot left: a test-arm-only rebuild from the same frame, with the same
+  constraint, while the bodies sleep, shows nowhere until they wake (L8-b's
+  second drop is the arm that wakes them); the script activity below narrows
+  it to a rebuild by a script that is active in both arms.
+- **Addition: every script's activity** (`a=1/0` per script of the
+  hierarchy): a script a later pass deactivates (the principle that entering
+  the next sector changes nothing in the previous one) or a joint script that
+  runs again in one arm shows even while the bodies sleep.
+- **Addition: player 1's ball** (`--placement-trace-ball`, one line per tick
+  after the rows: the entity and its body as above). The ball is the watched
+  bodies' contact partner, which the PH rows do not hold, so it is what shows
+  §9 Q9's "and contacts". The script traces it on every arm except L8-c,
+  where the ball sits on the s2 copy, which only the test arm places (a
+  legitimate difference).
+- **Addition: every body, asleep or not.** `describe_cores_exact` lists only
+  the manager's moving objects, so a sleeping body's core is absent from it;
+  each entity therefore carries `list_bodies`' description of its body
+  (movable, simulated, collision, movement state, pose, speeds, `%a`; "-" for
+  none) and, while the core is moving, the full core state.
+- **Additions to the script**: `--repeat` (each arm's control twice: the
+  trace's own reproducibility) and, on a failure, every differing hierarchy
+  with its first differing tick and the entities and blocks that differ. An
+  arm is an ERROR, not a PASS, when its runs did not do what it asks: a
+  test-arm pass not reported or its sector never activated (`world: sector
+  +S`), the control activating any sector but the watched one, a
+  `--drop-again` not done, a `sector event failed` or `tick failed`, or an
+  empty trace (0 lines or 0 hierarchies: a missing PH array or a sector with
+  no rows). V10 also requires the row the arm names (`v10_row`: row 0
+  `P_Modul_30_MF`, the s1 Wippe, for L8-a/b/c) among the differing rows.
+- **Scenes** (`--drop-at`; the drop height 4 m is added): L8-a/b/c the
+  s1 see-saw (75.202, 8.5, 0.031), L8-c with `--drop-player-at` the s2 site
+  (402.572, 21.815, -58.067), L8-d the dome r41 (637.863, 13.52, -337.955), L1-a
+  10 m off the s1 trafo (-163.793, 16.59, -272.917), L11-a the s1 bridge row 14
+  (115.885, -26.41, -75.984), L11-b the sack (90.729, -23.725, -50.767), L11-c the
+  s2 P_Modul_37 row 30 (429.639, -46.793, -83.437). The plank is awake at the
+  L8-a passes (movement state 1 at 30/50/70) and asleep at L8-b's (8 at
+  150-190); L8-b's second drop wakes it (asleep at 310, awake at 400).
+- **Results** (`.local-tools/work/SP3/fix/check_on.log`, `check_off.log`, the
+  review round's final runs; 930 world ticks per run; the 16 runs of a mode
+  take 5 s together).
+  - **I1, placement on: all eight arms PASS**, traces byte-identical, every
+    pass reported and activated, the control activating nothing else: L8-a
+    and b 11160 lines (11 hierarchies and the ball line; 2 movable bodies
+    besides the ball, as in every count here, 2
+    joints, 1 force block, 9 proximities, 33 scripts), L8-c 10230 (no ball
+    line), L8-d 13950 (14 hierarchies, 8 movable and 1 fixed body, 8 joints,
+    8 force blocks, 12 proximities, 29 scripts), L1-a 15810, L11-a and b 16740
+    (17 hierarchies, 15 movable and 4 fixed bodies, 7 joints, 4 force blocks,
+    8 proximities, 28 scripts), L11-c 15810 (sector 2, 7 joints, 15
+    proximities, 37 scripts). `--repeat`: every control reproduces, on and
+    off.
+  - **V10, placement off: all eight arms FAIL, each after its first later
+    pass**: L8-a at tick 34 (pass 30) on row 0 `P_Modul_30_MF`: the root, the
+    HingeFrame, the proximity and the hinge (the s1 Wippe); L8-b at 154 (pass
+    150), the Wippe's body as well; L8-c at 13 (the s2 pass starts at 9 under
+    the union gate); L8-d at 64 (pass 60) on the s3 trafo, fan and extras
+    rows; the dome r41 and the ball do not differ in either mode over the
+    900 ticks, and the ball is on the dome's crown at the pass (y 15.21 at
+    world tick 59, 0.07 m off its centre, rolling slowly; it rolls off to
+    y 11.5 by tick 330): §9 Q9's re-placement of the same-pose dome is a no-op
+    for its body and its contact here; L1-a at 34 (pass 30) on row 0 `P_Extra_Life_MF` and
+    row 10 `P_Trafo_Wood_MF` - the s1 trafo moves at the **s3** pass already,
+    since with the placement off row 37 (s3) names the same object as rows 10
+    and 38; L11-a at 34 on the s1 modules (P_Modul_37, both P_Modul_25), later
+    the stone balls, the sack and both P_Modul_01; L11-b at 134 (pass 130); L11-c
+    at 64 (pass 60) on the s2 P_Modul_19, P_Modul_25, P_Modul_34, P_Modul_37.
+- **Limit found: Level 1's physics is frozen in the session world.** On L1
+  the full world hash (environment clock included) is constant over 201 ticks
+  of the drop scene and the dropped ball never moves. Measured cause: the
+  physics time factor is 0 at the end of the L1-a run (`get_clock`: time
+  factor 0, physics delta 0; 0.002 and 0.030303 on L8 and L11), the
+  tutorial's pause (the known item "switch the Level 1 tutorial off",
+  roadmap). So L1-a
+  checks the CK side of I1 there (the trafo pair r37/r38, the extras, the
+  proximities) and its bodies only at rest; its physics side waits for that
+  item. In L8-c the ball wakes the s2 copy (`P_Modul_30_Wippe_R15` moves
+  0.33 m) and then rolls off it (y -602 at the end), which is the remote-wake
+  case the arm is for.
+
 ### 7.4 Headless harness arms
 
 New headless options: `--sector-at SECTOR:TICK` (repeatable; through
@@ -1330,7 +1453,7 @@ networked run that can build copies (S6, S8, S10); S9 precedes S10.
 | Q6 | Do any copies of a shared Collision Surface name get different hulls depending on which row physicalizes first (§3.4)? | V8. If yes: (a) drop that surface's cached hull before each row's first Physicalize with the #9 entry point (a bridge call, no engine change), so each row compiles its own hull; this also changes today's shared hull of the builder's pooled boxes, so it needs the arena and L13 A/B before it lands; (b) if V8 shows equal hulls, nothing to do. |
 | Q7 | CPU: does the larger selection fit the deployed interval 2 on L9, L10, L12 and on retail x86? | §7.6. If not: (a) leave out of the selection scripts proven to touch no physics (`P_Modul_18_Particle Script`: particles and a Rotate of its own frame, 183 parameters per copy); (b) skip capture and restore of a script never activated since the anchor (a "never started" bit in the record); (c) interval 3 for levels above a measured size. |
 | Q8 | Does the retail CK2 `CKDependenciesContext::Copy` produce the same hierarchy, names (after the rename), meshes and scene flags as Ballanced's? | The signature and censuses at §7.5 run 1; on a mismatch, both hosts' logs print the per-row fingerprints, which name the row and the field. Scene flags are not in the signature: the `scripts` verb (retail) and `--list-scripts` (SimTool) must show the same active set after the anchor. |
-| Q9 | Is re-placing the shared same-pose dome (L8 r41/r52, L3 r8/r16) a no-op for its body and contacts? | §7.3 arm L8-d. If not: report; the choices are copying those rows too (against the decision, so the user decides) or skipping that row's pass with a pinned Set? (which brings back option A's re-assert trap). |
+| Q9 | Is re-placing the shared same-pose dome (L8 r41/r52, L3 r8/r16) a no-op for its body and contacts? **Answered at S3 for L8: yes** (arm L8-d: the dome's body and the ball on its crown at the pass are byte-identical with the placement on and off; as-built note S3 in §7.3; L3 r8/r16 not run). | §7.3 arm L8-d. If not: report; the choices are copying those rows too (against the decision, so the user decides) or skipping that row's pass with a pinned Set? (which brings back option A's re-assert trap). |
 
 ## 10. Review (revision 2)
 

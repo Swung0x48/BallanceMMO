@@ -56,6 +56,7 @@
 #include "process_qos.hpp"
 #include "physics_world.hpp"
 #include "placement_tool.hpp"
+#include "placement_trace.hpp"
 #include <entity/session.hpp>
 #include <game/script_replay.hpp>
 #include <game/session_host_support.hpp>
@@ -343,6 +344,21 @@ namespace {
         int placement_fail_at = -1;
         bool tick_hashes = false;
         std::vector<std::string> watch_entities;
+        // The invariant check I1 (design 7.3, step S3), in the drop scene:
+        // --second-move SECTOR TICK, repeatable: the parked second player of
+        // --drop-second-sector reports that sector before world tick TICK
+        // (the world's tick index: the settle's ticks count, so 0 is before
+        // the first settle tick).  --drop-again X Y Z TICK, repeatable: the
+        // player's ball is beamed there at rest before world tick TICK (a
+        // second drop).  --placement-trace PATH: after every world tick, the
+        // --drop-sector rows' hierarchies (sim/placement_trace.hpp);
+        // --placement-trace-ball: player 1's ball too, its own line.
+        struct second_move { int sector = 0; long long tick = 0; };
+        std::vector<second_move> second_moves;
+        struct drop_again { double at[3] = {}; long long tick = 0; };
+        std::vector<drop_again> drops_again;
+        std::string placement_trace;
+        bool placement_trace_ball = false;
     };
 
     // The sector placement switches (step S2); false: not one of them, or a
@@ -358,6 +374,28 @@ namespace {
         else if (arg == "--placement-fail-at") { if (!(v = next())) return false; out.placement_fail_at = std::atoi(v); }
         else if (arg == "--tick-hashes") out.tick_hashes = true;
         else if (arg == "--watch-entity") { if (!(v = next())) return false; out.watch_entities.emplace_back(v); }
+        else if (arg == "--placement-trace") {
+            // Resolved now: the engine makes the game directory the working directory.
+            if (!(v = next())) return false;
+            std::error_code ec;
+            out.placement_trace = std::filesystem::absolute(v, ec).string();
+            if (ec) return false;
+        }
+        else if (arg == "--placement-trace-ball") out.placement_trace_ball = true;
+        else if (arg == "--second-move") {
+            arguments::second_move m;
+            if (!(v = next())) return false; m.sector = std::atoi(v);
+            if (!(v = next())) return false; m.tick = std::atoll(v);
+            if (m.sector < 1 || m.tick < 0) return false;
+            out.second_moves.push_back(m);
+        }
+        else if (arg == "--drop-again") {
+            arguments::drop_again d;
+            for (double& k: d.at) { if (!(v = next())) return false; k = std::atof(v); }
+            if (!(v = next())) return false; d.tick = std::atoll(v);
+            if (d.tick < 0) return false;
+            out.drops_again.push_back(d);
+        }
         else return false;
         return true;
     }
@@ -499,7 +537,8 @@ namespace {
         else if (arg == "--list-placement") out.list_placement = true;
         // Every --placement* option goes to parse_placement_arg, which rejects one it does not know:
         // a new one (S3's --placement-trace) is added there.
-        else if (arg.rfind("--placement", 0) == 0 || arg == "--tick-hashes" || arg == "--watch-entity")
+        else if (arg.rfind("--placement", 0) == 0 || arg == "--tick-hashes" || arg == "--watch-entity"
+                 || arg == "--second-move" || arg == "--drop-again")
             return parse_placement_arg(arg, next, out);
         else if (arg == "--beam-again") {
             arguments::beam_write b;
@@ -1557,6 +1596,114 @@ namespace {
         return true;
     }
 
+    // ---- the invariant check I1's scene (sector placement design 7.3, step S3)
+
+    // --placement-trace's writer while a drop scene runs; null otherwise.
+    std::unique_ptr<bmmo::sim::placement_trace>& scene_trace() {
+        static std::unique_ptr<bmmo::sim::placement_trace> trace;
+        return trace;
+    }
+
+    // One world tick of the drop scene: the second player's --second-move
+    // passes and the ball's --drop-again due before this tick, the tick, then
+    // the trace's lines for it.
+    bool scene_tick(const arguments& args, bmmo::sim::physics_world& world, std::string& error) {
+        const uint32_t tick = world.tick_index();
+        for (const arguments::second_move& m: args.second_moves)
+            if (m.tick == static_cast<long long>(tick)) {
+                report_sector(world, 2, m.sector);
+                std::printf("tick=%u player 2 moved to sector %d\n", tick, m.sector);
+            }
+        for (const arguments::drop_again& d: args.drops_again) {
+            if (d.tick != static_cast<long long>(tick)) continue;
+            const std::string ball = world.player_ball_entity(1);
+            const double upright[4] = {0.0, 0.0, 0.0, 1.0};
+            const float still[3] = {0.0f, 0.0f, 0.0f};
+            std::string beam_error;
+            if (ball.empty() || !bmmo::physics::set_body_state(world.physics(), ball.c_str(), d.at, upright, still, still,
+                                                               true, beam_error)) {
+                error = "--drop-again at tick " + std::to_string(tick) + ": "
+                      + (ball.empty() ? std::string("player 1 has no ball") : beam_error);
+                return false;
+            }
+            std::printf("tick=%u ball %s dropped again at (%.3f,%.3f,%.3f)\n", tick, ball.c_str(), d.at[0], d.at[1], d.at[2]);
+        }
+        if (!world.tick(error)) return false;
+        if (const auto& trace = scene_trace()) {
+            trace->set_ball(world.player_ball_entity(1));
+            trace->write(tick);
+        }
+        return true;
+    }
+
+    // The sector scene's settle through scene_tick.
+    bool settle_scene(const arguments& args, bmmo::sim::physics_world& world) {
+        std::string error;
+        for (int i = 0; i < args.drop_settle; ++i)
+            if (!scene_tick(args, world, error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return false; }
+        return true;
+    }
+
+    // Opens --placement-trace on the drop scene's world (watched sector:
+    // --drop-sector); 0 = done (or nothing asked).
+    int open_scene_trace(const arguments& args, bmmo::sim::physics_world& world) {
+        if (args.placement_trace.empty()) return 0;
+        auto trace = std::make_unique<bmmo::sim::placement_trace>(world.engine().context(), world.physics(),
+                                                                   args.drop_sector);
+        std::string error;
+        if (!trace->open(args.placement_trace, error)) {
+            std::fprintf(stderr, "--placement-trace: %s\n", error.c_str());
+            return 1;
+        }
+        trace->trace_ball(args.placement_trace_ball);
+        scene_trace() = std::move(trace);
+        return 0;
+    }
+
+    // Closes the trace and prints what its last tick held, and the world's
+    // physics time factor (0 stops every body: Level 1's tutorial).
+    void close_scene_trace(bmmo::sim::physics_world& world) {
+        auto& trace = scene_trace();
+        if (!trace) return;
+        const auto& t = trace->last();
+        std::printf("placement trace: sector %d, %lld lines; last tick: %d hierarchies, %d entities, %d movable bodies"
+                    " (%d simulated), %d fixed, %d joint blocks (%d holding a handle), %d force blocks, %d proximity"
+                    " blocks, %d scripts (%d active)\n",
+                    trace->sector(), trace->lines(), t.hierarchies, t.entities, t.movable, t.simulated, t.fixed, t.joints,
+                    t.joints_held, t.forces, t.proximities, t.scripts, t.scripts_active);
+        float time_factor = 0.0f, physics_delta = 0.0f;
+        std::string error;
+        if (bmmo::physics::get_clock(world.physics(), time_factor, physics_delta, error))
+            std::printf("placement trace: physics time factor %g, physics delta %g\n", time_factor, physics_delta);
+        else
+            std::printf("placement trace: physics clock unavailable: %s\n", error.c_str());
+        trace.reset();
+    }
+
+    // The S3 switches belong to the drop scene alone; 0 = fine.
+    int check_scene_switches(const arguments& args) {
+        if (args.second_moves.empty() && args.drops_again.empty() && args.placement_trace.empty()
+            && !args.placement_trace_ball)
+            return 0;
+        const char* why = nullptr;
+        if (args.drop_entity.empty()) why = "need --drop (--replay-session takes the trace at S8)";
+        else if (!args.replay_session.empty() || !args.synth_trafo_session.empty() || !args.describe_script.empty()
+                 || !args.nav_mode.empty() || !args.savestate_diff[0].empty() || !args.savestate_describe.empty())
+            why = "are for the --drop scene only";
+        else if (args.placement_trace_ball && args.placement_trace.empty())
+            why = "--placement-trace-ball needs --placement-trace";
+        else if (args.savestate_check || !args.late_run.empty() || args.late_sector_check || args.resync_check
+                 || args.portable_scripts_check || args.list_placement)
+            why = "are for the --drop scene only (--savestate-check takes a pass inside the window at S7)";
+        else if (!args.second_moves.empty() && args.drop_second_sector <= 0)
+            why = "--second-move moves the second player: it needs --drop-second-sector";
+        for (const arguments::drop_again& d: args.drops_again)
+            if (!why && d.tick < args.drop_settle) why = "--drop-again's tick is before the ball's drop (--drop-settle)";
+        if (!why) return 0;
+        std::fprintf(stderr, "--second-move / --drop-again / --placement-trace: %s\n", why);
+        return 2;
+    }
+
     // The sector scene: player 1 (and, with --drop-second-sector, player 2
     // parked there) reports its sector, then --drop-settle world ticks run
     // the union's passes and let the sector's bodies come to rest.
@@ -1574,7 +1721,7 @@ namespace {
             report_sector(world, 2, args.drop_second_sector);
         }
         report_sector(world, 1, args.drop_sector);
-        if (!settle_world(world, args.drop_settle)) return 1;
+        if (!settle_scene(args, world)) return 1;   // settle_world plus the S3 switches (step S3)
         if (!args.dump_array.empty()) dump_array(world.engine(), args.dump_array);
         return 0;
     }
@@ -1682,6 +1829,7 @@ namespace {
     int run_drop(const arguments& args) {
         auto world = create_session_world(args, 0.0f);
         if (!world) return 1;
+        if (const int code = open_scene_trace(args, *world)) return code;   // step S3
         if (const int code = setup_drop_scene(args, *world)) return code;
         std::string error;
         // The trafo sets in the drop scene (S11, sim/trafo_tool.hpp): built
@@ -1728,7 +1876,7 @@ namespace {
                 std::printf("tick=%d player 1 moved to sector %d\n", i, args.drop_move_sector);
             }
             if (trafo) trafo->apply_inputs(static_cast<uint32_t>(i));
-            if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
+            if (!scene_tick(args, *world, error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
             if (trafo) trafo->after_frame(i, {});
             if (args.report_every > 0 && i % args.report_every == 0) report_parts(i);
             placement_tick_report(args, *world, i, (args.report_every > 0 && i % args.report_every == 0) || i + 1 == args.ticks);
@@ -1739,6 +1887,7 @@ namespace {
             if (it != start.end()) fell = std::max(fell, it->second - body.position[1]);
         }
         std::printf("summary: the lowest watched part of %s fell %.3f m\n", args.drop_entity.c_str(), fell);
+        close_scene_trace(*world);   // step S3
         std::fflush(stdout);
         if (trafo) return trafo->finish();
         return 0;
@@ -6927,6 +7076,11 @@ int main(int argc, char** argv) {
             "            fingerprints, signatures, the name review; with the fail row the all-or-nothing check V12)\n"
             "       --placement on|off  (any physics_world mode: the sector placement at the anchor, default off)\n"
             "       --drop ... [--tick-hashes] [--watch-entity NAME]...  (world hash per tick; entity positions)\n"
+            "       --drop ... --drop-second-sector N [--second-move SECTOR TICK]... [--drop-again X Y Z TICK]...\n"
+            "           [--placement-trace PATH [--placement-trace-ball]]  (the invariant check I1,\n"
+            "            scripts/placement_check.py: the second player's passes and the ball's second drops before\n"
+            "            those world ticks; the --drop-sector rows' hierarchies, and player 1's ball, after every\n"
+            "            world tick)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --resync-check S B [--resync-arms ERSA]\n"
             "           [--resync-stamp SECTOR TICK ...] [--resync-sector K] [--resync-shift N] [--resync-perturb M]\n"
             "           [--resync-perturb-ticks N] [--resync-after N] [--resync-drop TICK --drop <entity> <ball type>\n"
@@ -6949,6 +7103,7 @@ int main(int argc, char** argv) {
             "            pass leaves too, --late-reference), 2 bad arguments)\n");
         return 2;
     }
+    if (const int code = check_scene_switches(args)) return code;   // step S3: before every dispatch
     if (!args.replay_session.empty()) return run_replay_session(args);
     if (!args.synth_trafo_session.empty()) {
         if (args.root.empty()) {
