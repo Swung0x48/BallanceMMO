@@ -1,7 +1,10 @@
 # Rollback engine gaps: the PreSimulate queue, lives that end inside the window, the retail beam's generation
 
-Status: design, revision 2, 2026-10-23. Nothing here is built. Revision 2
-answers two reviews; §10 lists every point and what became of it.
+Status: design, revision 2, 2026-10-23. Revision 2 answers two reviews; §10
+lists every point and what became of it. Step G0 (diagnostics, 2026-10-25)
+is done: its measured facts are written into §1.2, §1.3, §2.2.4 and §2.3.4,
+its new question is §9.7, and "As built (step EG0)" at the end records the
+runs and tools. Nothing else is built.
 
 Scope: three gaps of the rollback coverage audit
 (`scratchpad/audit/rollback-coverage-audit.md`, the "audit"):
@@ -271,10 +274,36 @@ bodiless pieces (TRD 4.4, 9.2), in every world including the server.
   line 352). It is the only replay after 1369 whose scripts end differently
   from the live record ("differ in float parameters only: P_Modul_18_MF
   Script / TT Scaleable Proximity: output 0 (Current Distance)", line 351).
-  - This is consistent with the own ball's absence over 1355-1368.
-  - The proximity measures 3D entity 52384 against 46336
-    (`audit/d_P_Modul_18_MF_Script.txt`, block 46429), so the "unrecorded CK
-    matrix" class of audit #8 is not excluded. Step G0 settles it.
+  - **Cause (step G0, measured).** The block is P_Modul_18's outer
+    proximity 46382 (80 units, a check every 10-60 frames; the inner 46429
+    and the sound's 46540 only run in range, and the ball was ~230 units
+    away). Its ObjectA is `Ball_Pos_Frame`, a child of the current ball
+    entity, against `P_Modul_18_Particle` (46336). 52384 is not a client
+    entity: it is the server world's per-player probe frame for 46429
+    (`physics_world::rewire_proximity_probes`), which `--describe-script`
+    shows because it loads that world; the plain level (`--dump-script`) and
+    every client world have `Ball_Pos_Frame` in all three P_Modul_18
+    proximities.
+  - The rerun `eg0_f13` (same recipe and events, `BMMO_TRACE_ENTITY`) traces
+    the same window 1354→1378: in every replayed tick 1355..1370
+    `Ball_Pos_Frame` is at (-20.000, 3.650, 15.000)@Ball_Wood, the live run
+    had it falling at (300.773, -57.537, 15) .. (300.851, -65.772, 15):
+    up to 328.28 m (`work/EG0/entity_trace_cmp.py`).
+  - Two halves make it. The own ball has no body over 1355..1368 (this gap,
+    L), so nothing moves its entity; and the entity's CK matrix is no
+    rollback state, so it stays where the live frames had put it by the
+    rewind: the resetpoint, to which the death sequence (outside the replay)
+    moved the dead ball at frame 1370 (live trace: 1369 (300.851, -65.772,
+    15), 1370 (-20, 3.65, 15)). Not the "unrecorded CK matrix" class alone,
+    and not the absence alone: L's revive fixes 1355..1368, but not the
+    ticks after D (§2.3.4 "found at G0", §9.7).
+  - Symptom vs cause: the frame differs in every window across the death
+    (also 1367→1391); the script record only shows it when the proximity's
+    own schedule puts a check inside 1355..1370. r2_a_f13 had one there
+    (line 351); eg0_f13, with its diff logs uncapped, had none. Later r2
+    arms (pr2_a_f13, pi_a_f13) also lacked the line because the core host
+    logs only 8 script differences (`script_diff_logs`), already used up by
+    650-819.
 - Physical effect on another body: not yet measured (audit).
 
 **Invariant L.** For every life of a tracked name and every replayed tick t
@@ -327,10 +356,34 @@ in (A, now]:
   - `r2_a_f131` `…/3`
   - `r2_a_f97` `…/0`
 - These counters also count every parked own birth (spawn 212, trafo 817,
-  respawn 1567) that lies in a window. My count of windows over those births
-  and the three beam stamps does not reproduce the totals exactly: one of
-  f13's 11 is unexplained, and f131 is one short. Step G0 attributes them
-  with the plan trace before G1 is judged.
+  respawn 1567) that lies in a window.
+- **Attributed (step G0).** The rule (RB:885-920, `birth_record`
+  RB:2252-2259): the own ball gets an item in the restore to A iff its
+  current lifetime (the generation of the newest record) has a body now and
+  its first record S lies in (A, now]. A beam's lifetime starts at record T
+  (the bump is after record(T-1)); a lifetime that has ended by now gives no
+  item. Each item is a refused destroy (a ball), counted once:
+  - `r2_a_f13` (11): spawn 212 at anchors 197 and 210; beam 650 at 626
+    only (639→663 finds the stone dead since 652: no item); trafo birth 817
+    at 795 and 808; beam 900 at 886 and 899; beam 1300 at 1276 and 1289;
+    respawn 1567 at 1549 and 1562.
+  - `r2_a_f50` (3): beam 650 at 638, beam 900 at 888, beam 1300 at 1288.
+  - `r2_a_f131` (3): beam 900 at 870, beam 1300 at 1263, respawn 1567 at
+    1525 (the respawn was the "one short").
+  - `r2_a_f97` (0): no window of 97:24 contains a birth or a beam stamp.
+  - The model reproduces every arm's total from its log
+    (`work/EG0/birth_items.py`); the rerun `eg0_f13` with the plan trace
+    (`BMMO_TRACE_PLAN`) logs exactly these 11 items at these anchors, one
+    refused-destroy line each ("plan trace: birth item <name>@<tick> not
+    destroyed" in that run; the line now reads "refused destroy of
+    <name>@<tick>", since the savestate-failure path's uncounted
+    `destroy_body(entity, 0)` goes through the same wrapper; a refused
+    `recreate_body`, also counted, is not logged by it and did not occur).
+    f50's and f131's items (f131's "one short" included) are the model's,
+    from their r2 logs, not a plan trace: the model is validated on the f13
+    rerun only.
+  - So after G1 (B1): f13 has 6 items (the births), f50 0, f131 1, and all
+    of them count `births_parked_balls`; `birth_recreate_failures` is 0.
 - No body has diverged yet. `write_beam` has 2 callers and is automation only.
 
 **Own death and respawn inside a window (examined, both hosts).**
@@ -556,14 +609,69 @@ out of the queue for the whole replay and goes back to its place after it.
 - **What the replay then lacks.** An outside entry that ran live at r in
   (A, now] does not run at r in the replay. Its effect is already present in
   the live world, and the replay starts with it (the controller from A on).
-  For the one known producer that effect is:
-  - SetPhysicsForce 26432: a zero-force controller (retail navigation leaves
-    are zeroed, audit §3). §7.2 L-S3 measures the body states;
-  - WakeUp 26418: a pending WakeUp runs when its body appears, i.e. on a
-    ball made in that frame. Whether that ball is already simulated, so that
-    the wake changes nothing, is checked by G0 (the own ball's `simulated` at
-    its birth record in lp19_a6_drop, with and without the entry), not
-    assumed.
+  For the producers that effect is:
+  - SetPhysicsForce 26432 (and 26354, 26392, 26414, 26447): a zero-force
+    controller (retail navigation leaves are zeroed, audit §3). §7.2 L-S3
+    measures the body states;
+  - WakeUp 26418 (and 25094, 27403): nothing, measured (below).
+
+**The outside producers (Q-S3, step G0).** `SimTool --list-callback-blocks`
+over L1-L12, the original L13 and the arena lists the same 28 blocks outside
+the session selection in every level (same ids), all in four global scripts:
+
+| script | blocks | target |
+|---|---|---|
+| Gameplay_Ingame | Physics WakeUp 25094, 26418, 27403; SetPhysicsForce 26354, 26392, 26414, 26432, 26447 | the current ball (a Gameplay_Ingame local) |
+| Sound_Manager | Physics Collision Detection 6271, 6471, 6489, 6507; Physics Continuous Contact 6619, 6675 | the current ball (a Sound_Manager local) |
+| Sound_Manager | Physics Collision Detection 7346 | each stopper (a Group Iterator) |
+| Event_handler | Delete Collision Surfaces 4547 | none (the Level); its callback returns CKBR_OK, i.e. stays queued, while any physics object exists (`DeleteCollisionSurfaces.cpp`) |
+| Ball_CollSound_Pieces | 12 Physics Collision Detection (41668-41797 stone, 41869-41998 wood) | the retail stone and wood pieces |
+
+- **Which of them queue.** `--queue-trace` on the arena (`r0_keys.bmrc`, a
+  key held) finds the queue empty in every frame through the spawn, a death
+  and its respawn, and two trafos (stone to wood, wood to paper): when the
+  game itself takes a ball's body away, its navigation is inactive and the
+  sound blocks run after the new body exists. An entry appears only in a
+  session's own state, the body taken out while Gameplay_Ingame still
+  drives the ball (`--ball-off 600 700`, the A6 drop's state): two key
+  edges queue 26418 four times, 26414 and 26432. Every refusal logged under
+  `maps/arena-test` (all runs on disk) names, of these 28, only 26418 and
+  26432.
+- So the observed producers are Gameplay_Ingame's. Sound_Manager,
+  Event_handler and Ball_CollSound_Pieces are producers by code only (a
+  missing target when they run); none was seen queued. Q4 holds every
+  outside entry whoever made it, so none needs a rule of its own; if one is
+  ever seen, its effect is the argument above (collision listeners for the
+  sounds, no force). Delete Collision Surfaces 4547 has no target and
+  nothing to wake or push; once queued it stays queued (the table above), and
+  Q4 holds it outside every replay with the rest, so no replay runs it.
+
+**The WakeUp fact (step G0, measured).** A WakeUp queued against a bodiless
+ball runs in the first `Process()` that finds the body: the step of the frame
+that made it (the retail Physicalize and the bridge's `physicalize` make the
+body before that frame's step). The ball is not simulated yet then: a
+non-frozen Physicalize calls `ensure_in_simulation` (CKIpionManager.cpp:643-644,
+669-670), which for an object in `IVP_MT_NOT_SIM` only puts its core in the
+revive list (ivp_object.cxx:1324-1329), and `add_revive_core` returns at once
+for a core already there (ivp_physic_private.cxx:872-877). The WakeUp's own
+`ensure_in_simulation` therefore changes nothing; its `NotifyScriptWakeup`
+only adds a `script_wakeup <own ball>` event-log entry, which the core drops
+(`reportable_wakeup` excludes the own ball). Measured with `--ball-off 600 700`
+on the arena (`r0_keys.bmrc`, SimTool `--replay`), two arms with the same
+inputs: the four WakeUps pending at the re-make (the two forces dropped,
+`--ball-off-wake-only`) against every entry dropped (`--ball-off-drop-all`,
+queue empty): world hash, pose hash, IVP time and core count identical in
+all 2400 frames (`bmrc_hash_cmp.py`), the ball `sim=1` at the re-make in
+both (`--queue-trace`). The first measurement's control flattened the two
+key edges out of the record instead (inputs different), with the same
+result. In lp19_a6_drop every own birth record (231, 2522, 2642, 2772,
+2780) has `st=1` too; that run is a session journal, which `--ball-off`
+(a `--replay` switch) cannot run, so its with/without pair is the arena's
+above, whose state is the A6 drop's (the own body out while
+Gameplay_Ingame drives the ball and its blocks queue). Condition: a body made
+after its frame's step would be found simulated, and the WakeUp would reset
+its calm references (`reset_freeze_check_values`, ivp_object.cxx:1320-1323);
+no session path makes the own body there.
 
 **Hooks.** `rollback_world` gains two optional hooks, filled by
 `bind_script_replay`:
@@ -937,7 +1045,29 @@ is step 2 with the row, then step 3. One implementation.
   (the fan) is created on its Box-Box test of the ActiveBall cell (Get Cell
   46392, audit #13; `d_P_Modul_18_MF_Script.txt`), so its target is the own
   ball. Q3 restores its entry; inside [A, D) it acts on the revived body as it
-  did live. G0 confirms the target with `--dump-script`.
+  did live. **Confirmed (step G0):** `--list-callback-blocks` gives 46475's
+  target parameter's source as Get Cell 46392's output (CurrentLevel[0][1],
+  the ActiveBall cell; null until it runs), and `--dump-script` shows its Pos
+  Referential and Box Box Intersection's Entity 0 from the same Get Cell, which
+  runs on the inner proximity 46429's Out Range. The ids are the level
+  file's, the same in every world (the retail and headless refusals name
+  Gameplay_Ingame's 26418/26432 with the inventory's ids).
+- **Found at G0: the dead own entity moves live after D.** Scripts no replay
+  runs move a dead own ball's CK entity, and `Ball_Pos_Frame` with it (every
+  proximity reads that frame):
+  - the death sequence puts it on the resetpoint at D+1 (eg0_f13: 1369
+    (300.851, -65.772, 15), 1370 (-20, 3.65, 15));
+  - the Trafo Manager moves the dead stone through the trafo animation
+    (0.83 m at 653, < 0.0001 m by 731).
+  `own_death.matrix` (the matrix after frame D) is right for D only: a
+  replayed tick after D+1 needs that tick's live matrix, or its proximities
+  read another frame than the live ones did. In eg0_f13, 22 of 207 rewinds
+  replay `Ball_Pos_Frame` differently from the live run: 11 over a birth or
+  a beam stamp (the parked pose; B and parked births), 7 after the stone's
+  death in the trafo (652→676 .. 730→754, ≤ 0.83 m), 3 across a death
+  (639→663, 1354→1378, 1367→1391; up to 328 m) and the one-tick snapshot
+  correction 1300→1301 (8.6 mm: the retail in-place beam's own residual,
+  which the control without forced rollbacks has too, As built EG0). §9.7.
 
 #### 2.3.5 L4: mechanisms (host support)
 
@@ -1181,7 +1311,7 @@ cause and options, and is not waived.
 | check | recipe | pass |
 |---|---|---|
 | Q-S1 queue restore matrix | `--savestate-check` on the arena sector-4 scene (`--drop-sector 4`) with a new switch `--queue-block <block id>:<from>:<to>` that unphysicalizes the block's target between the two ticks so the module's own edge queues the entry (P_Modul_34's WakeUp 48462 and P_Modul_08's force 45709; ids re-read with `--list-scripts` on the current build), scope = the session selection | chained seeded restores reproduce every blob byte for byte; the selected queue equals the record at every restore; after the target's body returns, exactly one controller exists per force block (`describe_force_blocks`) |
-| Q-S2 outside entries | the same with Gameplay_Ingame's WakeUp 26418 and force 26432 queued against an unphysicalized own ball (`--drop-player-at` + a new `--ball-off <from>:<to>`), `--hold-outside` | no restore refused; no outside entry runs inside a replay; the queue after each round, order included, equals the straight run's; one controller per force block; the own ball's `simulated` at its re-birth equals the straight run's (the WakeUp fact of 2.2.4) |
+| Q-S2 outside entries | the same with Gameplay_Ingame's WakeUp 26418 and force 26432 queued against an unphysicalized own ball (`--drop-player-at` + `--ball-off FROM TO`; G0 built `--ball-off` for `--replay` runs only, with two arguments instead of `<from>:<to>`: G4 adds it to the scene it uses), `--hold-outside` | no restore refused; no outside entry runs inside a replay; the queue after each round, order included, equals the straight run's; one controller per force block; the own ball's `simulated` at its re-birth equals the straight run's (the WakeUp fact of 2.2.4) |
 | Q-S3 G0 inventory | `--list-scripts` + `--dump-script` over L1-L13 and the arena: every block of the ten prototypes, its owner script, selected or not, and its target parameter | the outside producers are exactly Gameplay_Ingame's (else each new one is listed with its effect, and 2.2.4's argument is made for it); the fan 46475's target recorded |
 | Q-S4 portable section | `--portable-scripts-check` (RSD A1) with a queued selected entry at the capture tick | bytes identical after capture → localize; `unportable` = 0 on the arena |
 | L-S0 single explosion across a reset | `--explode wood 300 --activate Ball_ResetPieces_Wood 330` with `--savestate-check --max-depth 48` | every restore anchored in (300, 330) revives the pieces; the replayed reset removes them at 330; blobs byte for byte (step P's case, after its move into `restore_lives`) |
@@ -1205,7 +1335,18 @@ cause and options, and is not waived.
 | L-H5 pieces across a reset (after TRD) | TRD H5's forced pairs over a run with an explosion, reset and second explosion of one set within a window | every piece exact against the control |
 | L-H6 remote births remade vs parked | the start pile at `--latency-ms 150`, 4 clients, same batch: arm (L) vs `remote_births_parked` | `births_recreated_exact` for every remote birth in the arm; start-pile host error against the server (`worst_bodies.py`) no worse than the parked arm; `births_parked_balls` counts only own births |
 
-### 7.4 Retail (Level 13 arena with `r2_keys.bmrc`, core on, Arch server of the step's commit)
+### 7.4 Retail (Level 13 arena, core on, Arch server of the step's commit)
+
+`r2_keys.bmrc` and `r2_run.py` no longer exist (As built EG0). The `r2_a`
+arms below are rebuilt with `.local-tools/work/EG0/eg0_retail.py LABEL
+EVERY:DEPTH` (`EVERY` 0 for the control): `work/a4/r0_keys.bmrc` and the three
+r2 beams (650, 900, 1300), whose events land on r2's ticks (spawn 212, stone
+dead 652, wood 817, death 1369, respawn 1567); the arm and its control are
+run with the same binaries. With this record the server's full snapshot of
+the beam stamp 1300 corrects the own ball by 8.6 mm in every run, the control
+too (As built EG0): the own ball's LOCAL rows from 1300 to that correction
+depend on the snapshot's arrival tick and are compared from the correction
+on.
 
 | check | recipe | pass |
 |---|---|---|
@@ -1331,6 +1472,29 @@ shows only the controller-list difference.**
   10; otherwise protocol 11 (or the next free number at landing).
 - *Settle:* the landing order; no user decision.
 
+**9.7 The own entity's CK matrix while it has no body (found at G0). Settle at G8.**
+
+- *Symptom.* After an own death D (and through a trafo animation), a replay
+  leaves the dead own entity, and `Ball_Pos_Frame` under it, where the live
+  frames had put it by the rewind; live, scripts outside the replay moved it
+  tick by tick (§2.3.4 "found at G0": the resetpoint at D+1, the trafo
+  animation). Proximities read the frame: a check inside such a window reads
+  another distance than the live one (§1.2, the 1378 line).
+- *Cause.* The entity's CK matrix is no rollback state; with no body, no
+  replayed step writes it. L3's `own_death.matrix` covers D, not D+1..now.
+- *Options.* (a) Record the own entity's world matrix in every tick's record
+  while the own ball has no body, and write it before each replayed tick's
+  scripts (the live tick's value; the guard then puts the pre-rewind one
+  back): one matrix per tick, no protocol. (b) (a) for `Ball_Pos_Frame`'s
+  parent chain as well, if a level re-parents the frame while the ball is
+  dead. (c) Leave it: the difference is CK-only and reaches physics only
+  through a proximity that fires inside the window (the fan's force, a
+  module's activation).
+- *Settle:* G8, with L-R1 extended by `BMMO_TRACE_ENTITY` (no replayed
+  `Ball_Pos_Frame` differing from the live run in a window across an own
+  death). (a) is my recommendation; it also covers the trafo animation of a
+  live run.
+
 ---
 
 ## 10. Review (revision 2)
@@ -1374,3 +1538,159 @@ fixed.
   own items: the snapshot row not re-applied inside a later replay (a new
   gap, fixed as its own step), and the spawn frame-timing race (measured
   again after R3).
+
+## As built (step EG0)
+
+Step G0 of §8, 2026-10-25, on HEAD 5cd1c11. Diagnostics only: no session
+code changed; every switch below is off by default and changes no simulation
+result. Its facts are in §1.2 (the 1378 cause), §1.3 (the counted failures),
+§2.2.4 (the outside producers, the WakeUp fact), §2.3.4 (the fan's target, the
+dead own entity) and §9.7.
+
+**Tools.**
+
+- SimTool (`BallanceMMOServer/sim/sim_tool.cpp`, a file TRD's T3 also
+  changes; the additions are their own region `namespace eg0` before
+  `run_free`, four fields at the end of `arguments`, four parse lines before
+  the `parse_trafo_arg` fallback, two calls in `run_free` beside
+  `--list-scripts`, two lines in `run_replay` and the `PhysicsCallback.h`
+  include):
+  - `--list-callback-blocks` (a level run, at `--dump-at` or the end): every
+    block of the ten queueing prototypes (§1.1) with its root script and
+    owner, selected by `session_script_selection` or OUTSIDE, and its target
+    parameter's source;
+  - `--queue-trace` (a `--replay` run): a line whenever the PreSimulate queue
+    or the current ball's body changes - every entry (`slot:block<prototype>
+    @script`, or the C++ class of a bridge entry) and the ball's `sim` flag;
+  - `--ball-off FROM TO` (a `--replay` run; §7.2 Q-S2's switch, two
+    arguments instead of `<from>:<to>`): the current ball's body out before
+    frame FROM, made again before frame TO with the retail recipe
+    (`physics_world::retail_recipe`'s fields from the Physicalize_GameBall
+    row) at its entity's matrix;
+  - `--ball-off-wake-only`: the non-WakeUp entries of the ten prototypes
+    dropped before the re-make; `--ball-off-drop-all` (added at the review):
+    every entry dropped there, the WakeUp fact's control arm with the same
+    inputs. Both drop through the container's own `ClearBehavior`, which
+    keeps `m_HasCallbacks` right (measurement switches: they change that
+    run). The `--ball-off` recipe is a copy of `physics_world::retail_recipe`
+    (a `--replay` run has no `physics_world`); both say so in a comment.
+  - The usage text lists the five switches.
+- Retail core host (`BallanceMMOClient/session/core_host.cpp`), environment
+  switches read at the session start (file-scope helpers, no
+  `BallanceMMOClient` member): `BMMO_TRACE_PLAN=1` (the engine's plan trace
+  of its first 16 restores, a "plan trace: refused destroy of <name>@<tick>"
+  line for every refused destroy - the binding's `destroy_body` wrapped after
+  `bind_session_world`; the runs below logged it as "birth item ... not
+  destroyed" - and the rollback log uncapped),
+  `BMMO_SCRIPT_DIFF_LOGS=N` (the core's `script_diff_logs`, default 8),
+  `BMMO_TRACE_ENTITY=a,b,...` (each entity's world position and parent, hex
+  floats, after every live `post_step` and before every replayed tick's
+  scripts, the host's `before_replayed_tick`; solo runs only: the entity is
+  the first object of that name, which with peers can be a clone's child).
+- Scripts in `.local-tools/work/EG0`: `birth_items.py` (§1.3's model over a
+  client.log), `entity_trace_cmp.py` (replayed vs live entity lines per
+  rewind), `eg0_retail.py` (the solo retail arm below; `EG0_NO_DIAG=1` runs
+  it with every switch off, `EVERY` 0 the control without forced
+  rollbacks), `bmrc_flatten.py`, `bmrc_hash_cmp.py`, `ball_at_beam.py`
+  (every ball's journal row in a server and a client journal over a tick
+  range) and `bodies_near.py` (the bodies near a point at one tick).
+
+**Runs.**
+
+- Retail, solo, arena, core on, snapshots off, the Arch server rebuilt from
+  HEAD with the slot-13 hack (`ballanced-3e4289e95f25+bmmo-5cd1c11b5243-dirty`):
+  `maps/arena-test/eg0_f13` (forced 13:24, all switches on) and
+  `eg0_f13_nodiag` (the same, all off). `r2_keys.bmrc` and `r2_run.py` no
+  longer exist: the arm runs `work/a4/r0_keys.bmrc` with the r2 beams (650,
+  900, 1300). The events land on r2's ticks (spawn 212, stone dead 652, wood
+  817, death 1369, respawn 1567). Both runs: `rb=207 sv=207/0/0`,
+  `birth_recreate_failures` 11. Their journals (`e0_compare.py --live`):
+  TICK hash and pose equal at 2702 of 2703 common ticks. 1302 differs
+  because the server's full snapshot of the beam stamp 1300, which corrects
+  the wood ball by 8.6 mm in both runs (below), arrived at local tick 1301 in
+  the traced run (corrected before the LOCAL checkpoint 1302) and at 1302 in
+  the other (after it): network timing, not the switches. The births
+  counters differ (51 vs 45 pieces re-created) because the traced run's last
+  status line comes after sector 3's activation at 2712.
+- The control `maps/arena-test/eg0_ctl` (the same arm without forced
+  rollbacks, `eg0_retail.py eg0_ctl 0`, switches on; added at the review):
+  `rb=1`, the beam stamp's correction alone, with the same numbers.
+- SimTool, arena: `--list-callback-blocks` over L1-L12, the original L13
+  (scratchpad `root_l13orig`) and the arena; `--queue-trace` with
+  `--beam 60 -30 15 300` (death), `--beam 0 4 43 300` (trafos) and
+  `--ball-off 600 700` (with `--ball-off-wake-only`, with
+  `--ball-off-drop-all`, with every entry pending, and over the flattened
+  record; all four identical in every frame).
+
+**The beam stamp 1300 correction (a pre-existing residual, root-caused).**
+
+- **Symptom.** In every run of the arm, the control without forced
+  rollbacks included, the server's full snapshot of the beam stamp (sent on
+  the body-set change with snapshots off, core design As built R3) trips one
+  rollback: "mismatch at tick 1300: Ball_Wood dp=0.0086 dv=0.879",
+  local (300.008, -40.022, 15) against the server's (300.010, -40.014, 15).
+  `first_divergence.py` at 1 mm: the client's ball equals the server's at
+  every checkpoint up to 1298 (position, rotation and both velocities as the
+  journal prints them) and first differs at 1300, the stamp. At 1300 the
+  server's ball has the identity rotation, angular velocity 0 and linear
+  (0.4495, -0.6019, 0); the client's is turned, with angular (0, 0, -0.0807)
+  and linear (0.3858, -1.4789, 0).
+- **Cause.** A beam is two different operations (core design §2.3,
+  "Beam"). The server, and every mirror, makes a fresh body at the beam pose
+  (Unphysicalize + Physicalize, `client_core_lifecycle.cpp:845-858`). The
+  retail owner, without `own_body_control`, writes its existing body in
+  place: `write_body` → `physics_view::set_body_state` → the legacy
+  `physics_state.cpp:1520` entry, `beam_object_to_new_position` on the
+  optimized path (no recheck, the PSI anchor not restored). The written
+  body keeps the IVP collision state it had rolling on the lane at x = 385.7
+  (15.24 m/s, -7.62 rad/s) into its first tick 42 m below that lane; a fresh
+  body has none. The pose and velocity written are not the difference: the
+  server's fresh ball at the same pose and velocity gets no angular velocity
+  in free fall, the client's gets -0.0807 rad/s; the lane beam 900 of the
+  same run, a ball rolling at 12.83 m/s written the same way 2 m above the
+  same lane, is exact; and once the correction has written the server's
+  1300 row into the same body (the restore's write, three ticks into free
+  fall), the client follows the server exactly (the replayed 1301-1303 and
+  the live 1304 equal the server's). Which item of the carried state
+  (contacts, distances, collision timers) makes the 0.879 m/s is not
+  separated: the fix below removes all of it.
+- **Pre-existing.** The same disagreement at the same stamp is in every r2
+  arm on disk (`r2_a_f13`, `pr2_a_f13`, `r2f_a_f13`, `pi_a_ctl`; builds of
+  2026-10-23, before this chain): the client (300.0000, -40.0040) with v_y
+  -0.2833 against the server's (300.0000, -40.0137) with -0.6019, 9.7 mm and
+  0.319 m/s; R3 measured the death beam's owner residual at 0.009914 m.
+  That is under the ball's velocity tolerance of 0.5 m/s
+  (`rollback.hpp:702-720`), so nothing was corrected or logged. With
+  `r0_keys.bmrc` the ball reaches the stamp faster (15.24 m/s and
+  -7.62 rad/s against r2's 6.86 and -3.43), with a key held (the server's
+  fresh ball gains +0.4495 m/s in x in its first tick; r2's gains 0), and
+  the carried state gives 0.879 m/s, over the tolerance. The beam path
+  (`client_core_lifecycle.cpp`, `client_core_frame.cpp`, `physics_view.cpp`,
+  the retail `write_body`, `physics_state.cpp`'s write) is unchanged since
+  b64fe49, so neither S2, S9 nor TR2 is in it; the server's result at the
+  stamp is the r2 arms' in y. Not run: the pre-chain mod with
+  `r0_keys.bmrc` (that mod was not kept).
+- **Where it is queued.** R6 part three (own body control: the beam made
+  as `unmake_own` + `make_own`, a fresh body), roadmap §4 item 12, where
+  this measurement is now recorded. A narrower option, untested: write the
+  beam stamp with a recheck (`set_body_state_ex(..., recheck)`), so IVP
+  re-evaluates the moved body's collision state. G1's B-R1 compares the own
+  ball against the control from the correction on (§7.4).
+
+**Adaptations.** 52384 (§1.2's draft) is the server world's probe frame, not
+a client entity (§1.2). Q-S3 uses the plain level engine (`run_free`), not
+the session world `--describe-script` loads, whose ball-identity reads are
+rewired. The design's "outside producers are exactly Gameplay_Ingame's" holds
+for what was observed queued, not for the static inventory (§2.2.4).
+
+**Review fix-up.** The beam stamp 1300 correction root-caused above (the
+first draft called it a traced-run-only network effect); the control
+`eg0_ctl` run; the WakeUp fact's same-input control arm
+(`--ball-off-drop-all`); §7.4 points at `eg0_retail.py`; §1.3 marks f50's
+and f131's items as the model's; §2.2.4 adds 4547's effect; the queue drops
+go through `ClearBehavior`; the SimTool usage text; the refused-destroy log
+line reworded; the `--ball-off` recipe and `physics_world::retail_recipe`
+cross-referenced (one comment above `retail_recipe` in
+`BallanceMMOServer/sim/physics_world.cpp`, a file T3 also changes, away
+from its hunks). Files of T3's set touched by this step: `sim_tool.cpp`
+(its own region and call sites, as above) and that one comment.

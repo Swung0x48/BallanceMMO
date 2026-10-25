@@ -71,6 +71,8 @@
 
 #include "CKAll.h"
 #include "CKIpionManager.h"
+#include "PhysicsCallback.h"   // step EG0: --queue-trace reads m_PreSimulateCallbacks
+#include <typeinfo>
 
 #include <physics/tick_record.hpp>
 
@@ -359,6 +361,27 @@ namespace {
         std::vector<drop_again> drops_again;
         std::string placement_trace;
         bool placement_trace_ball = false;
+        // Step EG0 (rollback-engine-gaps-design.md §8 G0), diagnostics only,
+        // off by default: --list-callback-blocks (a level run, at --dump-at
+        // or the end): every block of the ten prototypes that queue into the
+        // PreSimulate queue, with its root script, selected or not, and its
+        // target; --queue-trace (a --replay run): after every frame where it
+        // changes, the queue's entries and the current ball's body.
+        bool list_callback_blocks = false;
+        bool queue_trace = false;
+        // --ball-off FROM TO (a --replay run; design 7.2 Q-S2's switch): the
+        // current ball's body taken out before replay frame FROM and made
+        // again before frame TO with the retail recipe, while the game goes
+        // on as if it had one (the A6 drop's state: its blocks queue).
+        long long ball_off_from = -1, ball_off_to = -1;
+        // --ball-off-wake-only: before the body is made again, every queued
+        // entry of the ten prototypes but the Physics WakeUps is dropped (the
+        // WakeUp fact of design 2.2.4 measured alone; changes the run).
+        bool ball_off_wake_only = false;
+        // --ball-off-drop-all: every queued entry of the ten prototypes
+        // dropped there, WakeUps too (the fact's control arm: the same
+        // inputs as --ball-off-wake-only, nothing pending at the re-make).
+        bool ball_off_drop_all = false;
     };
 
     // The sector placement switches (step S2); false: not one of them, or a
@@ -755,6 +778,15 @@ namespace {
             else if (arg == "--frames") out.savestate_frames = true;
             else if (arg == "--legacy-restore") out.legacy_restore = true;
             else if (arg == "--savestate-trace") { if (!(v = next())) return false; out.savestate_trace = v; }
+            else if (arg == "--list-callback-blocks") out.list_callback_blocks = true;   // step EG0
+            else if (arg == "--queue-trace") out.queue_trace = true;                     // step EG0
+            else if (arg == "--ball-off") {                                              // step EG0
+                if (!(v = next())) return false; out.ball_off_from = std::atoll(v);
+                if (!(v = next())) return false; out.ball_off_to = std::atoll(v);
+                if (out.ball_off_from < 0 || out.ball_off_to <= out.ball_off_from) return false;
+            }
+            else if (arg == "--ball-off-wake-only") out.ball_off_wake_only = true;      // step EG0
+            else if (arg == "--ball-off-drop-all") out.ball_off_drop_all = true;        // step EG0
             else if (!parse_trafo_arg(arg, next, out)) return false;
         }
         // --list of a journal and the savestate file verbs are pure file
@@ -1132,6 +1164,198 @@ namespace {
         std::fflush(stdout);
     }
 
+    // ------------------------------------------------------------------
+    // Step EG0 (rollback-engine-gaps-design.md §8 G0): the PreSimulate
+    // queue's producers and contents.  Read-only diagnostics.
+    // ------------------------------------------------------------------
+    namespace eg0 {
+        // The ten prototypes whose blocks queue a callback when their target
+        // has no physics object (physics_RT Behaviors/*.cpp SetGuid lines).
+        struct queue_prototype { CKDWORD a, b; const char* name; };
+        constexpr queue_prototype kQueuePrototypes[] = {
+            {0x56e20c57, 0x0b926068, "SetPhysicsForce"},
+            {0x38b851b5, 0x72ca74ac, "Physics WakeUp"},
+            {0x7435488d, 0x201d1188, "Physics Collision Detection"},
+            {0x5e624f0a, 0x35160450, "Set Physics Ball Joint"},
+            {0x41cd3653, 0x0de60c1d, "Set Physics Hinge"},
+            {0x2973360e, 0x23d31aa7, "Set Physics Slider"},
+            {0x24a06a3a, 0x07100fce, "Set Physics Spring"},
+            {0x2c015f2b, 0x5b147512, "Physics Buoyancy"},
+            {0x199e4cf1, 0x545a78fe, "Physics Continuous Contact"},
+            {0x53bf75aa, 0x770c7021, "Delete Collision Surfaces"},
+        };
+        const char* queue_prototype_of(CKBehavior* beh) {
+            if (!beh) return nullptr;
+            const CKGUID guid = beh->GetPrototypeGuid();
+            for (const auto& p: kQueuePrototypes)
+                if (guid == CKGUID(p.a, p.b)) return p.name;
+            return nullptr;
+        }
+        CKBehavior* root_of(CKBehavior* beh) {
+            while (beh && beh->GetParent()) beh = beh->GetParent();
+            return beh;
+        }
+        std::string object_text(CKObject* object) {
+            if (!object) return "null";
+            return std::string(object->GetName() ? object->GetName() : "?") + "#" + std::to_string(object->GetID());
+        }
+        // A block's target: its target parameter's real source (the value and
+        // the object that owns the source: a Get Cell's output, a script
+        // local, ...), or the owner when the block has no target parameter.
+        std::string target_text(CKBehavior* beh) {
+            CKParameterIn* target = beh->GetTargetParameter();
+            if (!target) return "owner " + object_text(beh->GetOwner());
+            CKParameter* source = target->GetRealSource();
+            if (!source) return "target unset";
+            std::string out = "value " + object_text(source->GetValueObject());
+            if (CKObject* owner = source->GetOwner()) {
+                out += " source " + object_text(owner);
+                if (auto* b = CKBehavior::Cast(owner); b && b->GetPrototype() && b->GetPrototype()->GetName())
+                    out += std::string(" <") + b->GetPrototype()->GetName() + ">";
+            }
+            return out;
+        }
+        void list_callback_blocks(const bmmo::sim::headless_engine& engine) {
+            CKContext* context = engine.context();
+            const bmmo::game::script_replay::selection sel = bmmo::game::session_script_selection(context);
+            const std::set<CK_ID> selected(sel.scripts.begin(), sel.scripts.end());
+            const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
+            CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
+            int listed = 0, outside = 0;
+            for (int i = 0; i < count; ++i) {
+                auto* beh = CKBehavior::Cast(context->GetObject(ids[i]));
+                const char* proto = queue_prototype_of(beh);
+                if (!proto) continue;
+                CKBehavior* root = root_of(beh);
+                const bool in = root && selected.count(root->GetID()) != 0;
+                if (!in) ++outside;
+                ++listed;
+                std::printf("callback block %u %s script=%s owner=%s %s active=%d target: %s\n",
+                            static_cast<unsigned>(beh->GetID()), proto, object_text(root).c_str(),
+                            object_text(root ? root->GetOwner() : nullptr).c_str(), in ? "selected" : "OUTSIDE",
+                            root && root->IsActive() ? 1 : 0, target_text(beh).c_str());
+            }
+            std::printf("[callback blocks tick %llu] %d blocks of the ten prototypes, %d outside the selection (%zu scripts selected)\n",
+                        static_cast<unsigned long long>(engine.ticks()), listed, outside, sel.scripts.size());
+            std::fflush(stdout);
+        }
+        // --queue-trace: one line whenever the queue or the current ball's
+        // body changes - every entry (slot:block <prototype>@script, or the
+        // C++ class of the bridge's own) and the ball CurrentLevel[0][1]
+        // names, with its body's simulated flag.
+        // --ball-off: the current ball's body out, then back with the retail
+        // "physicalize new Ball" recipe at its entity's matrix, frozen = false
+        // as the block makes it.  The recipe is a copy of
+        // physics_world::retail_recipe (physics_world.cpp), read from the
+        // Physicalize_GameBall row of the ball's name: a --replay run has no
+        // physics_world to ask; change the two together.
+        struct ball_off {
+            std::string entity;
+            bool apply(const bmmo::sim::headless_engine& engine, long long frame, long long from, long long to,
+                       bool wake_only, bool drop_all) {
+                if (frame != from && frame != to) return true;
+                std::string error;
+                if (frame == to && (wake_only || drop_all))
+                    if (PhysicsCallbackContainer* q = engine.physics() ? engine.physics()->m_PreSimulateCallbacks : nullptr) {
+                        // Through the container's own ClearBehavior, which also
+                        // keeps m_HasCallbacks right when the queue empties.
+                        std::vector<CK_ID> drop;
+                        for (int slot = 0; slot < 3; ++slot)
+                            for (int i = 0; i < q->m_Callbacks[slot].len(); ++i) {
+                                PhysicsCallback* cb = q->m_Callbacks[slot].element_at(i);
+                                auto* beh = cb ? CKBehavior::Cast(engine.context()->GetObject(cb->m_BehaviorID)) : nullptr;
+                                const char* proto = queue_prototype_of(beh);
+                                if (!proto || (!drop_all && std::strcmp(proto, "Physics WakeUp") == 0)) continue;
+                                std::printf("ball-off: entry %u <%s> dropped before frame %lld\n",
+                                            static_cast<unsigned>(cb->m_BehaviorID), proto, frame);
+                                if (std::find(drop.begin(), drop.end(), cb->m_BehaviorID) == drop.end())
+                                    drop.push_back(cb->m_BehaviorID);
+                            }
+                        for (CK_ID id: drop) q->ClearBehavior(id);
+                    }
+                if (frame == from) {
+                    CKDataArray* level = engine.data_array("CurrentLevel");
+                    auto* ball = level ? CK3dEntity::Cast(level->GetElementObject(0, 1)) : nullptr;
+                    if (!ball || !ball->GetName()) { std::fprintf(stderr, "ball-off: no current ball\n"); return false; }
+                    entity = ball->GetName();
+                    const bool ok = bmmo::physics::unphysicalize(engine.physics(), entity.c_str(), error);
+                    std::printf("ball-off: %s body taken out before frame %lld%s%s\n", entity.c_str(), frame,
+                                ok ? "" : ": ", ok ? "" : error.c_str());
+                    std::fflush(stdout);
+                    return ok;
+                }
+                CKDataArray* table = engine.data_array("Physicalize_GameBall");
+                bmmo_physics_ball_recipe recipe{};
+                bool found = false;
+                for (int row = 0; table && row < table->GetRowCount(); ++row) {
+                    char name[128] = {};
+                    table->GetElementStringValue(row, 0, name, static_cast<int>(sizeof(name)));
+                    name[sizeof(name) - 1] = 0;
+                    if (entity != name) continue;
+                    recipe.fixed = false;
+                    recipe.start_frozen = false;
+                    recipe.enable_collision = true;
+                    recipe.calc_mass_center = false;
+                    table->GetElementValue(row, 1, &recipe.friction);
+                    table->GetElementValue(row, 2, &recipe.elasticity);
+                    table->GetElementValue(row, 3, &recipe.mass);
+                    table->GetElementValue(row, 5, &recipe.linear_damp);
+                    table->GetElementValue(row, 6, &recipe.rot_damp);
+                    const std::string mesh = entity + "_Mesh";
+                    std::snprintf(recipe.collision_surface, sizeof(recipe.collision_surface), "%s", mesh.c_str());
+                    if (entity == "Ball_Paper") {
+                        recipe.convex_count = 1;
+                        std::snprintf(recipe.convex[0], sizeof(recipe.convex[0]), "%s", mesh.c_str());
+                    } else {
+                        recipe.ball_count = 1;
+                        recipe.ball_radius[0] = 2.0f;
+                    }
+                    found = true;
+                }
+                if (!found) { std::fprintf(stderr, "ball-off: no Physicalize_GameBall row for %s\n", entity.c_str()); return false; }
+                const bool ok = bmmo::physics::physicalize(engine.physics(), entity.c_str(), recipe, "", error);
+                std::printf("ball-off: %s body made again before frame %lld%s%s\n", entity.c_str(), frame,
+                            ok ? "" : ": ", ok ? "" : error.c_str());
+                std::fflush(stdout);
+                return ok;
+            }
+        };
+
+        struct queue_tracer {
+            std::string last;
+            void after_frame(const bmmo::sim::headless_engine& engine, long long frame) {
+                CKContext* context = engine.context();
+                std::string queue;
+                if (PhysicsCallbackContainer* q = engine.physics() ? engine.physics()->m_PreSimulateCallbacks : nullptr) {
+                    for (int slot = 0; slot < 3; ++slot)
+                        for (int i = 0; i < q->m_Callbacks[slot].len(); ++i) {
+                            PhysicsCallback* cb = q->m_Callbacks[slot].element_at(i);
+                            if (!cb) continue;
+                            auto* beh = CKBehavior::Cast(context->GetObject(cb->m_BehaviorID));
+                            const char* proto = queue_prototype_of(beh);
+                            queue += " " + std::to_string(slot) + ":";
+                            if (proto) queue += std::to_string(cb->m_BehaviorID) + "<" + proto + ">@" + object_text(root_of(beh));
+                            else queue += std::string("bmmo/") + typeid(*cb).name();
+                        }
+                }
+                std::string ball = "none";
+                if (CKDataArray* level = engine.data_array("CurrentLevel"))
+                    if (auto* entity = CK3dEntity::Cast(level->GetElementObject(0, 1))) {
+                        bmmo::physics::body_state body;
+                        std::string error;
+                        ball = std::string(entity->GetName() ? entity->GetName() : "?")
+                             + (bmmo::physics::get_body_state(engine.physics(), entity->GetName(), body, error)
+                                    ? (body.simulated ? " body sim=1" : " body sim=0") : " no body");
+                    }
+                const std::string now = "ball " + ball + " | queue" + (queue.empty() ? " empty" : queue);
+                if (now == last) return;
+                last = now;
+                std::printf("queue frame=%lld %s\n", frame, now.c_str());
+                std::fflush(stdout);
+            }
+        };
+    }
+
     int run_free(bmmo::sim::headless_engine& engine, const arguments& args) {
         std::string error;
         // The trafo sets (sim/trafo_tool.hpp): inputs and the trafo frame
@@ -1288,6 +1512,7 @@ namespace {
             if (!args.trace_script.empty() && i < args.trace_ticks) trace_script(engine, args.trace_script);
             if (!args.dump_script.empty() && i == args.dump_at) dump_script(engine, args.dump_script);
             if (!args.list_scripts.empty() && i == args.dump_at) list_scripts(engine, args.list_scripts);
+            if (args.list_callback_blocks && i == args.dump_at) eg0::list_callback_blocks(engine);   // step EG0
             if (!args.dump_array.empty() && i == args.dump_at) dump_array(engine, args.dump_array);
             if (args.list_trafos && i == args.dump_at) list_trafos(engine);
             if (!args.list_entities.empty() && i == args.dump_at) list_trafos(engine, args.list_entities);
@@ -1298,6 +1523,7 @@ namespace {
         }
         if (!args.dump_script.empty() && args.dump_at < 0) dump_script(engine, args.dump_script);
         if (!args.list_scripts.empty() && args.dump_at < 0) list_scripts(engine, args.list_scripts);
+        if (args.list_callback_blocks && args.dump_at < 0) eg0::list_callback_blocks(engine);   // step EG0
         if (!args.dump_array.empty() && args.dump_at < 0) dump_array(engine, args.dump_array);
         if (args.list_trafos && args.dump_at < 0) list_trafos(engine);
         if (trafo) return trafo->finish();
@@ -1365,6 +1591,8 @@ namespace {
                 return 1;
             }
         }
+        eg0::queue_tracer queue_trace;   // step EG0: --queue-trace
+        eg0::ball_off ball_off;          // step EG0: --ball-off
         for (size_t frame = 0; frame < record.frames.size(); ++frame) {
             const auto& expected = record.frames[frame];
             if (args.ivp_trace_from >= 0) {
@@ -1427,6 +1655,10 @@ namespace {
                 std::fprintf(stderr, "beam: %s to (%.3f,%.3f,%.3f) before replay frame %zu\n", ball->GetName(),
                              args.beam_at[0], args.beam_at[1], args.beam_at[2], frame);
             }
+            if (args.ball_off_from >= 0
+                    && !ball_off.apply(engine, static_cast<long long>(frame), args.ball_off_from, args.ball_off_to,
+                                       args.ball_off_wake_only, args.ball_off_drop_all))
+                return 2;   // step EG0: --ball-off
             engine.set_keyboard_state(expected.keys.data());
             const long long frame_index = static_cast<long long>(frame);
             if (args.debug_from >= 0 && frame_index >= args.debug_from && frame_index <= args.debug_to) {
@@ -1442,6 +1674,7 @@ namespace {
                 if (!ok) { std::fprintf(stderr, "debug tick failed: %s\n", error.c_str()); return 1; }
             } else if (!engine.tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
             dump_entities("after");
+            if (args.queue_trace) queue_trace.after_frame(engine, frame_index);   // step EG0
             if (args.bodies_from >= 0 && frame_index >= args.bodies_from && frame_index <= args.bodies_to) {
                 std::printf("bodies frame%lld: %s\nevents frame%lld: %s\n", frame_index,
                     bmmo::physics::describe_physics_objects(engine.physics()).c_str(), frame_index,
@@ -7100,7 +7333,15 @@ int main(int argc, char** argv) {
             "           (step B1: sector K stamped at T and delivered at A - the late rewind with the union re-derived -\n"
             "            against an on-time control, each run a child process; every boundary A..A+N compared; exit 0\n"
             "            PASS, 3 FAIL, 4 PASS-EXCEPT-REFERENCE (every difference is one an ordinary rewind across the\n"
-            "            pass leaves too, --late-reference), 2 bad arguments)\n");
+            "            pass leaves too, --late-reference), 2 bad arguments)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --list-callback-blocks [--dump-at T]\n"
+            "           (step EG0: every block of the ten PreSimulate-queueing prototypes, its root script, selected\n"
+            "            or OUTSIDE the session selection, and its target's source; read-only)\n"
+            "       --replay ... [--queue-trace] [--ball-off FROM TO [--ball-off-wake-only | --ball-off-drop-all]]\n"
+            "           (step EG0: the PreSimulate queue and the current ball's body whenever they change; the ball's\n"
+            "            body out before frame FROM and made again before TO with the retail recipe, and before the\n"
+            "            re-make every queued entry but the WakeUps, or every entry, dropped - measurement switches\n"
+            "            that change the run)\n");
         return 2;
     }
     if (const int code = check_scene_switches(args)) return code;   // step S3: before every dispatch

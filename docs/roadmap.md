@@ -135,7 +135,12 @@ left. Each design named here has its own document with its step table.
    queue in the script record (engine access change #20), lives that end
    inside a window, the retail beam's generation, and F (found at B1): the
    script replay consumes the next-frame flags of scripts the live frame
-   skips (`P_Modul_18_Particle Script`). Also the CPU cliff (found at B2,
+   skips (`P_Modul_18_Particle Script`). G0 (diagnostics) is done: the
+   r2 arms' `birth_recreate_failures` are all own-ball birth items, the
+   1378 difference is the dead own entity's CK matrix, which scripts
+   outside the replay move after the death (the resetpoint at D+1, the trafo
+   animation): L3 needs it per tick while the ball has no body (design
+   §9.7, decided at G8). Also the CPU cliff (found at B2,
    no design yet): three respawns within 15 ticks (A5u at 150 ms, 2596-2612)
    make every frame a 38-39-tick lifecycle rewind, the frame loop falls
    about 33 ticks behind wall time, the schedule rebases and the client
@@ -180,6 +185,13 @@ left. Each design named here has its own document with its step table.
 
 12. R6 retail own-body control (bridge and script work; after plan step 21's
     measurement), R7 delete the legacy path; three launches without a hang.
+    R6 also removes the retail beam's own residual (measured at EG0,
+    rollback-engine-gaps-design As built EG0): the owner writes its body in
+    place where the server makes a fresh one, and the body carries its lane
+    state into the stamp; the arena's death beam at 1300 with
+    `r0_keys.bmrc` is 8.6 mm / 0.879 m/s off the server, over the ball's
+    0.5 m/s tolerance, so with snapshots off the beam stamp's full snapshot
+    corrects it (9.7 mm / 0.319 m/s with r2's keys, under it, since R3).
 
 **Stage D - the original levels.**
 

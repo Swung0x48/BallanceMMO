@@ -606,6 +606,72 @@ namespace {
     double seconds_since(clock_type::time_point t) {
         return std::chrono::duration<double>(clock_type::now() - t).count();
     }
+
+    // ------------------------------------------------- diagnostics (step EG0)
+    // Environment switches, all off by default; none changes what the session
+    // does, only what it logs (rollback-engine-gaps-design.md, As built EG0):
+    //   BMMO_TRACE_PLAN=1        the engine's plan trace (core_config::trace_plan,
+    //                            its first 16 restores), every destroy_body the
+    //                            binding refuses (a birth item's refusal is what
+    //                            the engine counts as birth_recreate_failures;
+    //                            the savestate-failure path's destroy_body(e, 0)
+    //                            is uncounted, and a refused recreate_body, also
+    //                            counted, is not logged here), and the rollback
+    //                            log uncapped;
+    //   BMMO_SCRIPT_DIFF_LOGS=N  the script replay's "differ" lines (default 8);
+    //   BMMO_TRACE_ENTITY=a,b    each named 3D entity's world position and parent
+    //                            after every live frame's post_step and before
+    //                            every replayed tick (the state that tick's
+    //                            scripts read).  Solo runs: the entity is the
+    //                            first of that name, which in a session with
+    //                            peers can be a remote clone's child.
+    bool diag_trace_plan() {
+        static const bool on = [] {
+            const char* v = std::getenv("BMMO_TRACE_PLAN");
+            return v && *v && std::strcmp(v, "0") != 0;
+        }();
+        return on;
+    }
+    uint32_t diag_script_diff_logs(uint32_t fallback) {
+        const char* v = std::getenv("BMMO_SCRIPT_DIFF_LOGS");
+        if (!v || !*v) return fallback;
+        const long n = std::strtol(v, nullptr, 10);
+        return n > 0 ? static_cast<uint32_t>(n) : fallback;
+    }
+    const std::vector<std::string>& diag_trace_entities() {
+        static const std::vector<std::string> names = [] {
+            std::vector<std::string> out;
+            const char* v = std::getenv("BMMO_TRACE_ENTITY");
+            std::string s = v ? v : "";
+            size_t start = 0;
+            while (start < s.size()) {
+                size_t comma = s.find(',', start);
+                if (comma == std::string::npos) comma = s.size();
+                if (comma > start) out.push_back(s.substr(start, comma - start));
+                start = comma + 1;
+            }
+            return out;
+        }();
+        return names;
+    }
+    // One line: "<when> t=<tick> name=(x,y,z)@parent ..." (hex floats, so a
+    // live and a replayed line compare bit for bit).
+    std::string diag_entity_line(CKContext* context, const char* when, uint32_t tick) {
+        std::string out = std::format("entity trace {} t={}", when, tick);
+        for (const std::string& name: diag_trace_entities()) {
+            auto* entity = context ? CK3dEntity::Cast(context->GetObjectByNameAndParentClass(
+                    const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr)) : nullptr;
+            if (!entity) {
+                out += std::format(" {}=none", name);
+                continue;
+            }
+            const VxMatrix& m = entity->GetWorldMatrix();
+            CK3dEntity* parent = entity->GetParent();
+            out += std::format(" {}=({:a},{:a},{:a})@{}", name, m[3][0], m[3][1], m[3][2],
+                               parent && parent->GetName() ? parent->GetName() : "-");
+        }
+        return out;
+    }
 }
 
 bool bmmo::session::retail::core_enabled() {
@@ -740,8 +806,8 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     config.sleep_as_recorded = true;
     config.script_replay = true;
     config.savestate = true;
-    config.script_diff_logs = 8;
-    config.trace_plan = false;
+    config.script_diff_logs = diag_script_diff_logs(8);   // BMMO_SCRIPT_DIFF_LOGS (step EG0 diagnostics)
+    config.trace_plan = diag_trace_plan();                  // BMMO_TRACE_PLAN (step EG0 diagnostics), off by default
     config.rollback = physics_session_.rollback_enabled;   // 'session rollback on|off'
     config.correct = true;
     config.input_rewind = true;   // R2
@@ -1265,7 +1331,11 @@ void BallanceMMOClient::core_host_frame() {
         // post_step(T) records what the replica stepped T with: the mute
         // that was in force during the step (observe_input reads
         // host.input_muted before it changes below; design 2.2, 4.2 R2).
-        if (!core.post_step(true)) ++host.refused;
+        const bool stepped = core.post_step(true);
+        if (!diag_trace_entities().empty())   // step EG0 diagnostics (BMMO_TRACE_ENTITY), off by default
+            logger_->Info("Physics session: %s",
+                          diag_entity_line(m_bml->GetCKContext(), "live", core.current_tick()).c_str());
+        if (!stepped) ++host.refused;
         else if (host.beam_in_flight) {
             // post_step(T) consumed the request and stamped it T + 1.
             host.beam_in_flight = false;
@@ -1884,7 +1954,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             physics_view_.navigation_input(host.own_replica.entity.c_str(), 0, cam[0], cam[1], cam[2], false, error);
         };
         o.log = [this](const std::string& text) {
-            if (host.line_logs++ < 200) logger_->Info("Physics session: %s", text.c_str());
+            if (host.line_logs++ < 200 || diag_trace_plan()) logger_->Info("Physics session: %s", text.c_str());
         };
         // Inside the replay (an explosion's referential is placed); the
         // rewinds' end re-issues with inside = false (keep_live_cells).
@@ -1921,7 +1991,29 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             };
             bs::bind_script_replay(world, physics_view_, so);
         };
-        return bs::bind_session_world(physics_view_, hooks, w);
+        // Step EG0 diagnostics (off by default): the traced entities before
+        // every replayed tick, after the core's births and the activation
+        // (session_world_options::before_replayed_tick, the host's traces).
+        if (!diag_trace_entities().empty())
+            w.before_replayed_tick = [this](uint32_t tick) {
+                logger_->Info("Physics session: %s", diag_entity_line(m_bml->GetCKContext(), "replay", tick).c_str());
+            };
+        bs::rollback_world world = bs::bind_session_world(physics_view_, hooks, w);
+        // Step EG0 diagnostics: every destroy_body the binding refuses (for a
+        // birth item - a ball - the engine counts it as
+        // birth_recreate_failures; the savestate-failure path's
+        // destroy_body(entity, 0) is not counted; a refused recreate_body is
+        // counted but not logged here).
+        if (diag_trace_plan() && world.destroy_body) {
+            auto destroy = world.destroy_body;
+            world.destroy_body = [this, destroy](const std::string& entity, uint32_t birth_tick) {
+                const bool ok = destroy(entity, birth_tick);
+                if (!ok) logger_->Info("Physics session: plan trace: refused destroy of %s@%u at the restore",
+                                       entity.c_str(), birth_tick);
+                return ok;
+            };
+        }
+        return world;
     };
     p.keep_live_cells = [this](const bs::session_client_core& core) {
         auto guard = std::make_shared<bmmo::game::live_cells_guard>(

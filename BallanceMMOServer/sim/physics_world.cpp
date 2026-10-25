@@ -655,7 +655,9 @@ namespace bmmo::sim {
 
     // "physicalize new Ball" (Gameplay_Ingame): Paper is a convex hull of its
     // mesh, Wood and Stone are spheres of radius 2; the rest comes from the
-    // Physicalize_GameBall row; mass centre explicitly (0,0,0).
+    // Physicalize_GameBall row; mass centre explicitly (0,0,0).  Copied field
+    // by field by session_client.cpp's fill_retail_recipe and SimTool's
+    // --ball-off (sim_tool.cpp, eg0::ball_off): change them together.
     bmmo_physics_ball_recipe physics_world::retail_recipe(uint8_t ball_type) const {
         bmmo_physics_ball_recipe recipe{};
         if (ball_type >= ball_rows_.size()) return recipe;
