@@ -290,6 +290,12 @@ namespace bmmo::sim {
         // Ball type index of a ball entity name ("Ball_Wood" -> row), -1 if none.
         int ball_type_of(const std::string& entity_name) const;
 
+        // Called by tick() after the sector union's pass and before the
+        // engine's frame: where the trafo frame runs (trafo-replication
+        // design 2.5; step T1 uses it from SimTool, step T2 from the
+        // world itself).  Unset: nothing runs.
+        void set_frame_hook(std::function<void()> hook) { frame_hook_ = std::move(hook); }
+
     private:
         physics_world() = default;
         // Shared by snapshot() and snapshot_for_journal(); `bookkeeping` says
@@ -326,6 +332,7 @@ namespace bmmo::sim {
         std::unique_ptr<headless_engine> engine_;
         uint64_t anchor_hash_ = 0, anchor_surfaces_ = 0;
         uint32_t tick_ = 0;
+        std::function<void()> frame_hook_;
         bmmo::game::navigation_graph navigation_;
         bool navigation_keys_known_ = false;
         // The mechanism Sequencer counters as the level file has them (design

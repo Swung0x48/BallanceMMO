@@ -740,6 +740,17 @@ caller replays the sector activation (`replay_activation`), in which mode every
 selected script is written and executed.  `select()` takes
 `Gameplay_SectorManager` into the scripts.  Public CK API throughout.
 
+Version 3 (trafo-replication design 4.5, step T1) is written only when a
+trafo part is passed (`script_replay::trafo_part`: the trafo sets' scripts
+and their built states, kept beside the selection, never in it): the version
+word 3, the v2 record byte for byte, then the sets' scripts keyed by id.  The
+restore writes every recorded trafo script (active or not), fails on a
+recorded id that no longer exists, and puts every selected trafo script the
+record does not list (its set was made later) to its built state; a v2
+record restored with a trafo part puts all of them to built.  Without a
+trafo part every record is v2, as before.  The portable record (resync design
+2.4) keeps its version 1: its bytes are on the wire (protocol 10).
+
 ---
 
 ## Bridge notes: a body put where its Physicalize made it (bridge API v19, engine change #19 for the record only)
@@ -1028,6 +1039,53 @@ headless client and the SimTool's savestate check share it, and the SimTool's
 rounds are the engine's own `rewind_to` rather than a copy of the restore. The
 retail client binds the same hooks through the plugin API (`physics_view`),
 the one copy that cannot share the in-process code.
+
+---
+
+## Bridge notes: the trafo sets (bridge API v21, no engine change)
+
+`docs/trafo-replication-design.md` 2.4, 2.6, 2.10, step T1 (the design names
+the version v20; A3's travelling savestate took v20, so the sets are v21).
+The bridge keeps one registry per physics manager (`physics_state.cpp`,
+`trafo_bridge_state`): every registered set's three piece frames by type, the
+entities the body guard leaves alone, the piece names, and a seed per piece
+frame.  Entries (C++ `bmmo::physics::trafo_set_*`, the plugin API's
+`trafo_set_register/unregister/seed/unmake/filter`):
+
+- `register` routes the set's explosions' Random blocks through the
+  deterministic generator and wraps their opening Set Position (idempotent: a
+  copy may carry the patched function already), puts the frames and every
+  piece below them on the exemption list of change #13, and the piece names
+  into the filter's registry; it reports what is routed, exempt and
+  registered (the builder's invariant I5).  Registering a player that has a
+  registered set fails (unregister first).  A set whose frame ids no longer
+  name the frames it registered (a world torn down without unregistering, a
+  manager at a reused address, CK reusing freed ids) is dropped before any
+  decision reads the registry (register, the Set Position wrapper, the
+  exemption rebuild): a stale id never sends an original's explosion down the
+  per-set path nor takes an unrelated object off the guard.  `restore_explosion_pieces` now
+  rebuilds the exemption list from the originals and then appends every
+  registered set (none outside a session with sets: the list is the
+  originals' as before).
+- The wrapped Set Position restores a registered set's frame alone (the
+  originals' restore, for that one frame: initial conditions, detached and
+  squared, the pieces' hulls forgotten while they have no body - each set
+  has its own meshes, so its own hull names) and the originals as before for
+  any other target; then, when the seed registry has an entry for the target
+  frame, the generator restarts from it (an original's entry is test-only;
+  without one the cursor is left alone, as before).
+- `unmake` takes a registered frame's pieces' bodies (`delete_silently`, as
+  the Unphysicalize block) and restores the frame.
+- `filter` installs (once per environment, the first time it is switched on)
+  an `IVP_Collision_Filter` into the environment's meta filter that answers
+  `IVP_FALSE` only for a registered piece against a body the resync's
+  keep-local predicate names (`PE_Balloon*`, `PE_Box_slide`); off, and for
+  every other pair, `IVP_TRUE`, which the meta filter ANDs with the others'.
+
+Nothing here runs without registered sets: SimTool's `--explode wood 300`
+traces, the 9.14 two-explosion pose hashes and every per-tick world hash of
+those free runs are identical to HEAD's binary (step T1's S9), and the wire
+check's 24 captures replay identically.  IVP and physics_RT are untouched.
  that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

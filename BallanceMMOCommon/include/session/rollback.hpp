@@ -572,6 +572,21 @@ namespace bmmo::session {
             while (history_.size() > thresholds_.history_ticks) history_.pop_front();
         }
 
+        // Test support (SimTool --savestate-check with bodies born and
+        // destroyed inside its window, trafo-replication design 7.2 S6):
+        // every record after `tick` dropped, so the newest record is the
+        // round's live tick, as a session's always is - the lifetime
+        // generations a restore compares against are the newest record's.
+        // No host calls it.  Returns the records dropped.
+        size_t forget_after(uint32_t tick) {
+            size_t n = 0;
+            while (!history_.empty() && static_cast<int32_t>(history_.back().tick - tick) > 0) {
+                history_.pop_back();
+                ++n;
+            }
+            return n;
+        }
+
         // The corrections a live frame applies after its physics step (snapshot
         // rollback, blend, mechanism) change the state the next step starts
         // from, so the record for that tick must reflect them: a later rollback

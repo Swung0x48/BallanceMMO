@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 20u  /* v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
+#define BMMO_PHYSICS_API_VERSION 21u  /* v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -132,6 +132,17 @@ typedef struct bmmo_physics_core_extra {
      * change. */
     int32_t unit_next_movement_check;
 } bmmo_physics_core_extra;
+
+/* What a trafo set's registration left in place (v21, game/trafo_sets.hpp
+ * invariant I5): its explosions' Random blocks routed through the generator
+ * and opening Set Position blocks wrapped, its entities on the body guard's
+ * exemption list, its pieces in the collision filter's registry. */
+typedef struct bmmo_physics_trafo_set_report {
+    int32_t randoms;
+    int32_t set_positions;
+    int32_t exempt;
+    int32_t pieces;
+} bmmo_physics_trafo_set_report;
 
 /* A SetPhysicsForce block's controller (v14, game/script_replay.hpp). */
 typedef struct bmmo_physics_force_block {
@@ -587,6 +598,27 @@ typedef struct bmmo_physics_api_v2 {
                                         const char* renames, const char* excluded_prefixes, char* error,
                                         uint32_t error_size, char* dropped, uint32_t dropped_size, char* unknown,
                                         uint32_t unknown_size, char* summary, uint32_t summary_size);
+
+    /* ---- v21: the trafo sets (docs/trafo-replication-design.md 2.4, 2.6,
+     * 2.10, step T1; game/trafo_sets.hpp, bmmo::physics::trafo_set_*) ----
+     * register: player's three piece frames by type (wood, stone, paper) and
+     * its explosion scripts - Random blocks routed, Set Position wrapped,
+     * entities exempt from the body guard, piece names in the filter's
+     * registry; `out` may be NULL; fails for a player already registered.
+ * A registered set whose frame ids no longer name the frames it registered
+ * (a world torn down without unregister) is dropped before the registry is
+ * read.  unregister: all of that undone.  seed:
+     * the seed the frame's next explosion draws from (0 removes it).  unmake:
+     * the frame's pieces unphysicalized and the frame restored (returns the
+     * bodies removed, -1 with a message).  filter: the piece x keep-local
+     * body rule on or off. */
+    int32_t (*trafo_set_register)(void* ipion_manager, uint32_t player, const uint32_t frames[3],
+                                  const uint32_t* explosions, int32_t explosion_count,
+                                  bmmo_physics_trafo_set_report* out, char* error, uint32_t error_size);
+    int32_t (*trafo_set_unregister)(void* ipion_manager, uint32_t player, char* error, uint32_t error_size);
+    void (*trafo_set_seed)(void* ipion_manager, uint32_t frame_id, int32_t seed);
+    int32_t (*trafo_set_unmake)(void* ipion_manager, uint32_t frame_id, char* error, uint32_t error_size);
+    int32_t (*trafo_set_filter)(void* ipion_manager, int32_t enable, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

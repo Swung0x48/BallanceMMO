@@ -25,6 +25,7 @@ namespace bmmo::physics {
     // C boundary, and the two sides can never drift apart.
     using body_state = bmmo_physics_body_state;
     using ball_recipe = bmmo_physics_ball_recipe;
+    using trafo_set_report = bmmo_physics_trafo_set_report;
 
     bool capture_world_hash(CKIpionManager* physics, bmmo::physics::world_hash& out,
                             std::string& error);
@@ -269,6 +270,45 @@ namespace bmmo::physics {
     // destroy again within a session.  Returns the number of objects
     // restored, -1 without a scene.
     int restore_explosion_pieces(CKContext* context);
+
+    // ---- bridge API v21: the trafo sets (docs/trafo-replication-design.md
+    // 2.4, 2.6, 2.10; game/trafo_sets.hpp) ----
+
+    // Registers player's piece set: `frames` are its three piece frames by
+    // type (wood, stone, paper), `explosions` its explosion scripts.  The
+    // scripts' Random blocks are routed through the generator and their
+    // opening Set Position blocks wrapped (idempotent; a copy may carry the
+    // patched functions already); the frames and every piece below them go
+    // on the body guard's exemption list (engine change #13); the pieces'
+    // names into the collision filter's registry.  `out` counts what the
+    // set has routed, exempt and registered afterwards (invariant I5).
+    // Registering a player that has a registered set fails (unregister
+    // first).  A set whose frame ids no longer name the registered frames (a
+    // world torn down without unregistering) is dropped before any decision
+    // reads the registry.
+    bool trafo_set_register(CKIpionManager* physics, uint32_t player, const uint32_t frames[3], const uint32_t* explosions,
+                            int explosion_count, trafo_set_report& out, std::string& error);
+    // The set's entries removed from the registry, the seed registry and the
+    // exemption list.
+    bool trafo_set_unregister(CKIpionManager* physics, uint32_t player, std::string& error);
+    // The seed the next explosion of `frame_id` (a piece frame) draws from:
+    // its wrapped Set Position restarts the generator from it, after the
+    // per-set restore.  0 removes the entry.  An original frame may have one
+    // (tests only); without an entry the generator's cursor is left alone.
+    void trafo_set_seed(CKIpionManager* physics, uint32_t frame_id, int32_t seed);
+    // The per-set restore for an unmake (the reconcile, the teardown): every
+    // piece of the registered frame loses its body, then the frame is put
+    // back detached, squared and at its initial conditions, its pieces' hulls
+    // forgotten.  Returns the bodies removed, -1 with `error`.
+    int trafo_set_unmake(CKIpionManager* physics, uint32_t frame_id, std::string& error);
+    // The piece x local-body rule (design 2.10) on or off: while on, a
+    // registered piece never collides with a body the resync's keep-local
+    // predicate names (session/resync_rules.hpp keep_local_body).  The
+    // filter is installed into the environment's meta filter the first time
+    // it is switched on there; off, it lets every pair through.
+    bool trafo_set_filter(CKIpionManager* physics, bool enable, std::string& error);
+    // Diagnostics: the registry as one line.
+    std::string describe_trafo_sets(CKIpionManager* physics);
 
     // ---- bridge API v8: session clock guard ----
 

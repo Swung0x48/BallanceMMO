@@ -1,7 +1,8 @@
 # Trafo replication: the explosion, the paper wind and the reset as lockstep inputs
 
 Status: design (track 2 of the post-audit designs), revision 2 after two
-reviews (§10), nothing built. It implements the user's decision of 2026-10-23
+reviews (§10); step T1 built (host support, bridge v21, SimTool; no wire:
+§8, "As built (step T1)"), T2-T5 not. It implements the user's decision of 2026-10-23
 on audit item #2 (and #11): option (b), the trafo becomes a replicated input
 and its explosion, wind and reset run in every world for every player's trafo,
 identically.
@@ -951,8 +952,11 @@ scripts are selected.
     history (2.4), so a correct session never hits this.
   - A recorded set that has been deselected but not yet destroyed is restored
     (it is inert by the retirement rule, so the restore is a no-op).
-- **Replay execution.** `execute_frame` runs the satellites, then the `trafo`
-  list, then the scripts, matching the live frame (2.5).
+- **Replay execution.** `execute_frame` runs the `trafo` list first, then the
+  satellites, then the scripts, matching the live frame (2.5: the trafo frame
+  runs before the engine's whole behaviour pass, Gameplay_Ingame's satellites
+  included). (Corrected at T1's review: this line said "satellites, then
+  trafo", which contradicted 2.5.)
 - **Stale exemptions.** `kept_live` / `reset_skips` do not apply to the sets:
   nothing outside the replay activates them.
 
@@ -1258,13 +1262,306 @@ style).
 |---|---|---|
 | **T0** prerequisites | step P closed (its open headless trafo arm exact); F3 landed (resync and join re-step with the portable script record); F4 recommended (late Sector rewind); the protocol number agreed with F3 and option B. R3 is **not** a prerequisite: the trafo inputs ride the input-rewind path (4.6) | step P's own gate; F3's gate |
 | **T1** host support + bridge, no wire | `game/trafo_sets.hpp` (quiesce, builder, invariants I0-I7, hold and effect checks, `run_trafo`, trafo list, unmake/remake, retirement); `session/trafo_input.hpp` (seed, ledger, input log); bridge v20 (registry, per-set restore, seed, exemption rebuild, filter rule); SimTool modes; record v3 in SRP | 7.1 (ledger, seed, log, record v3), S0-S9, S11-S13; S8's outcome decides 9.2 before T3 starts |
-| **T2** wire and server | event type, payload, flags, key, rank, caps, world option, acceptance through the ledger, validation, deadline, leaver resets, journal v4; PW sets at `add_player`, anchor quiesce, `apply_event` Trafo, trafo frame in `tick`, server hold, the ledger in the resync and join state | 7.1 (messages, acceptance, validation), S10 on synthetic journals, `kTrafoReach` set from the trafo positions of the existing R2 and `p3_h4` logs (9.3) |
+| **T2** wire and server | event type, payload, flags, key, rank, caps, world option, acceptance through the ledger, validation, deadline, leaver resets, journal v4; PW sets at `add_player`, anchor quiesce, `apply_event` Trafo, trafo frame in `tick`, server hold, the ledger in the resync and join state; the sets' scripts in the portable script record (its version bump with this protocol: T1 kept it at 1) | 7.1 (messages, acceptance, validation), S10 on synthetic journals, `kTrafoReach` set from the trafo positions of the existing R2 and `p3_h4` logs (9.3) |
 | **T3** core + headless host | `hold_trafo` and its pre-assignment deferral, the input log, live and replayed application, the trafo rewind and the missed-input resync, MOVED/REJECTED/SUPERSEDED echoes, `make_trafo_set` on first sight, reconcile, retirement, journal records; SC platform ops; remove step P's trafo `activations` and referential override; `explosion_pieces` over every set | 7.1 (core), H1-H11 |
 | **T4** retail host | CH platform ops through `game/trafo_sets.hpp` and `physics_view` hooks, the `trafo_host` file-scope static, the quiesce at `core_host_anchor`, the hold in `post_step`, session-end teardown | R1-R5 |
 | **T5** records | `docs/engine-changes.md` bridge note (v20, no engine change); session-client-core design "As built (step T)"; collision-overhaul-design 9.x entry; this document's status | review only |
 
 Every gate reports symptom, cause and options for any check that fails. None is
 waived.
+
+**As built (step T1, 2026-10-24; HEAD b64fe49 + the working tree).** Host
+support, the bridge and SimTool; no wire, no host uses any of it yet (T2-T4).
+
+- **Where.** `session/trafo_input.hpp` (new, CK-free): the flags
+  (`TRAFO_RESET` bit 0, `TRAFO_SERVER`, `TRAFO_FINAL`), `kTrafoResetSpan` 140,
+  `kTrafoLife` 1320, `trafo_seed` (FNV-1a over the four values' bytes, folded
+  to a nonzero int32), `trafo_acceptance` (explode: rule 1's server reset at
+  `max(N, live.applied + 1)`, then `applied = max(o, N, last_reset + 140)`;
+  reset: superseded when older than the newest explosion's origin, else
+  `max(o, N, live.applied + 1)`; `deadline(N, L)`; `leaver(p, F)`: three
+  `RESET|SERVER|FINAL` decisions, the live one at `max(F, live.applied + 1)`),
+  `trafo_input_log` (by applied tick, (player, type, kind, origin) order inside
+  a tick; `newest(p, T, reset, t)`, `move`, `drop`, `prune` keeping each type
+  set's newest explosion and reset) and `plan_trafo_record_restore`.
+  `game/trafo_sets.hpp` (new; only CK API the retail SDK headers declare,
+  checked by name - the mod first compiles it at T4): `quiesce_originals`, `build_trafo_set` (I0-I7, the
+  reference-map digest), `trafo_registry` (value type, `part()` = the trafo
+  list with the built states), `run_trafo`, `trafo_frame`, `trafo_hold`
+  (option E and the activation hold), `trafo_effect_check`,
+  `unmake_type_set` / `remake_type_set`, `trafo_set_final`,
+  `retire_trafo_sets`, `reselect_trafo_set`, `teardown_trafo_sets`; the
+  bridge is reached through `trafo_set_hooks`.  `game/script_replay.hpp`:
+  record v3 (`trafo_part`), `execute_scripts`, `capture_script_block` /
+  `restore_script_block`; `execute_frame` takes the trafo list (run before the
+  selection).  `session/rollback_binding_scripts.hpp`: `script_binding_options::
+  trafo`.  Bridge: `physics_state.cpp` / `.hpp`, `physics_rt_api.h`,
+  `physics_rt_bridge.cpp` (`docs/engine-changes.md`, "Bridge notes: the trafo
+  sets").  `session/resync_rules.hpp`: `is_trafo_script_name` leaves the
+  copies (`_Trafo` in the name) out, so no name rule ever selects a copy
+  (4.3).  `physics_world::set_frame_hook` (called after `update_sectors()`,
+  before the engine's frame; unset in the server and the headless client).
+  `rollback_engine::forget_after` (test support; no host calls it).  SimTool:
+  `sim/trafo_tool.hpp` and the switches in `sim_tool.cpp` (below).
+- **Adaptations** (no principle touched):
+  - Bridge API **v21**, not v20: A3's travelling savestate took v20.
+  - **Record v3 is the local record** (design 4.5, 7.1): the version word 3,
+    then the v2 record byte for byte, then the trafo scripts keyed by id;
+    written only when a trafo part is passed, so every record without sets
+    stays v2.  The **portable record keeps version 1**: its bytes are A3's
+    resync state on the wire (protocol 10), and T1 is "no wire"; the sets'
+    scripts enter the portable record with T2/T3.  `selection` is unchanged
+    (held by `physics_session_state`, a `BallanceMMOClient` member): the trafo
+    list travels beside it.
+  - **Materials from the pieces' meshes**, not by name: stone has two
+    (`Ball_Stone_Pieces_Inside`, `_Outside`, the reset's two Restore IC / fade
+    targets).  The list is 120 objects per set on every level (54 entities,
+    51 meshes, 3 groups, 4 materials, 8 scripts).
+  - **The copy's dependencies are explicit**: the default copy options with
+    the BeObject's scripts and groups off (no `All_Balls` scripts pulled, no
+    copy put into the originals' groups), the mesh's materials and the 3D
+    entity's meshes and children on, textures off.  The reimplementation's
+    `CKBehavior::PrepareDependencies` pulls a script's owner only in BUILD
+    mode, so I0 found 0 extras on every level; the retail CK2.dll is T4's
+    (9.1).  The extras check is by new root objects (root scripts and
+    BeObjects), the copies' kinds against the list's.
+  - **Step 5 runs first**: every copied block's pointer-typed local is
+    NULLed right after the copy, before any owner change (`AddScript`'s
+    detach/attach callbacks would act on a copied controller or listener
+    pointer).
+  - **The quiesce also** resets the original collision sound's
+    `PhysicsCollDetection` blocks (their listeners) and restores the
+    pieces' materials' initial conditions (a fade the anchor interrupted).
+  - **The digest is structural**: input sources and output destinations by
+    place (script / block walk index / name), the objects constant locals
+    hold - not runtime values.  493 lines.  The runtime values are made
+    equal instead (the level reference, below) and have a digest of their
+    own (`value_digest`, 597 lines).
+  - **The level reference** (added at the review; 2.4 step 6's built
+    state): `CopyObjects` copies the originals' current values, which are
+    the last run's.  Measured on L2 (SimTool `--trafo-built-params`): an
+    original paper explosion before the anchor left 11 values different in
+    the copies (the Random outputs, Group Iterator's and Identity's outputs,
+    `W?ndOn?`, the Paper explosion's In 0), and an original wood or stone
+    explosion left `PhysicsCollDetection`'s Entity output naming
+    `A02_Floor_02`, which failed I2 - the build refused.  So
+    `trafo_reference` (`game/trafo_sets.hpp`): the 8 originals' non-opaque
+    locals and outputs and their IO flags, captured once when the scripts
+    first exist and before any original explosion
+    (`capture_trafo_reference`; the scripts are `Balls.nmo`'s, loaded at
+    game start in every world - SimTool captures at tick 16), kept in the
+    registry; the builder refuses without it and writes it into every copy
+    right after the copy (object references mapped as `CopyObjects` maps
+    them; through the buffer, no propagation), before I2.  Result: the
+    value digest `bf8575545ab7fbe0/597` for every set on L1-L13 and on L2
+    after an original wood, stone or paper explosion before the anchor (0
+    values rewritten in a fresh world, so every fresh-world check above is
+    unchanged; 29 / 25 / 10 after wood / stone / paper); a wood set exploded
+    at 1000 after each of the three histories gives 9600 piece lines
+    bit-equal to the fresh world's.  Hosts (T2-T4): the server and the
+    headless client capture at their world's load, the retail host when
+    `Balls.nmo`'s scripts first exist (before the first level).
+  - **Option E's detection is host support** (`trafo_hold::poll`): the
+    Trafo Manager's Delayer whose Out reaches "start Explosion" is found
+    structurally at `arm`; its start (its transition from inactive to
+    active since the previous poll, or a restart: its elapsed time went
+    back - not "elapsed exactly one delta", which a host whose frame delta
+    is not bit-exactly 1000/66 would never match; changed at the review)
+    predicts the explosion at that frame + `frames_until(1000 ms)` = 67
+    (the float sum of 15.151515 ms); the later activation, cancelled, is
+    confirmed and not reported again.  Stamping and the lead > 66 fallback
+    are the core's (T3).  The hold's position is the referential's
+    translation (Ball_Pos_Frame's parent, or the frame without one).
+  - `run_trafo` sets the next-frame flags with `ModifyFlags` (2.5), not
+    through `CKScene::Activate`.
+- **S8 decides 9.2: no entries.** L2, player 1 paper exploded at 300, reset
+  at 900 (+600), run to 1500, the PreSimulate queue dumped every tick: no
+  non-BMMO entry at any tick (`presim max non-BMMO entries 0, of them from
+  _Trafo blocks 0`).  The paper branch of `Ball_CollSound_Pieces` is a Wave
+  Player only (no `PhysicsCollDetection`).  Also measured for wood and stone
+  (the branches with listeners), resets at +2, +30, +60 and +600: 0 entries
+  every time.  (The explanation first written here - the Delayer fires
+  `Stop` and `Create` together - was wrong; corrected at the review from a
+  per-tick dump of every copied `PhysicsCollDetection` block, SimTool
+  `--trafo-colldump`.)  Why no entry: an entry is a `Create` that finds no
+  listener in local 0 and no body (`PhysicsCallbackContainer::Process(pc)`
+  executes the callback at once and keeps it queued only when
+  `GetPhysicsObject` fails).  The dump (wood and stone, reset at +60 and
+  +600): the collision sound's `Create`s come from its activation alone (In
+  0), which the explosion issues in the frame after its Physicalize -
+  explosion at 300, every block's listener set at 301 with its body there;
+  the 3 s Delayer (E+198 = 498) issues `Stop` only (listener deleted, block
+  inactive, in that frame: had it also sent `Create`, the block would have
+  handled `Create` first and kept the listener one frame longer); the
+  reset's De Physicalize (R+132: 492 for the reset at +60, 1032 for +600)
+  leaves the listener in local 0 (`event_collision_object_deleted` clears
+  only its object pointer) until that `Stop` deletes it.  No collision
+  `Stop` was seen in these runs (the listener never dropped between 301 and
+  498).  So no `Create` reaches a bodiless piece.  Positive control (the
+  sampler sees such an entry): `--trafo-poke-create 1 290` gives one idle
+  block of the copy its `Create` by hand on a bodiless piece - the sampler
+  counts 1 non-BMMO entry from a `_Trafo` block (`Ball_CollSound_Pieces_
+  Trafo1/PhysicsCollDetection on Ball_Wood_piece11_Trafo1`) at every tick
+  from 290 to 399; the wood explosion at 400 physicalizes the piece and the
+  queued callback then creates its listener (0 entries from 400).  A path
+  not measured: a collision `Stop` followed by a `Create` from another
+  source after the De Physicalize; the graph has no other `Create` source
+  than the activation, and T3's H5 (the PreSimulate queue compared at every
+  restore) is the backstop.  `flags.s8_entries = false`.
+- **Checks** (x64 `build-agent-rTR1`, x86 SimTool `build/sim-x86-a3`, Linux
+  `bmmo-build-arch`, Linux ASan `bmmo-build-asan-tr1`; every run its own
+  process, outputs in `.local-tools/work/tr1/`):
+  - 7.1: 485 tests (471 + 14: the ledger, the seed vectors, the log, the
+    record plan, the copies' names).  Record v3's bytes (CK) by SimTool
+    `--trafo-record-check`: (1) the v3 record's mechanism part equals the v2
+    record (43,561 / 61,689 bytes); (2) a record of set 1 alone restored with
+    both sets selected puts set 2's 8 perturbed scripts back at their built
+    state; (3) a record naming a destroyed set is refused ("a recorded trafo
+    script is gone"); (4) a v2 record with the trafo part puts all 16 to
+    built.  All PASS.
+  - S0: L1-L13 (13 = the arena installed in slot 13; the original Level 13
+    is not on this machine's slot; L1's explosion at 2000, the tutorial holds
+    physics before), paper exploded, anchor 100 ticks later, 4 sets each:
+    quiesce `18 bodies, 18 controllers` on every level, I0-I7 hold for all 52
+    builds, 0 extras, I5 `randoms=5 set_positions=3 exempt=54 pieces=51`,
+    digest `90f856e0c8c20dd4/493` on every level and every set.
+  - S1: L2, wood at (948.741, 2.066, -56.514), tick 600, seed 930656193: the
+    original set (test seed entry, test referential) vs player 7's copy:
+    9600 piece lines (16 x 600 ticks) bit-equal; with player 7's collision
+    sound left out of the trafo list: bit-equal too (physics-inert).
+  - S2/S3: arena, 4 sets (wood, stone, paper, wood) at x = 20/60/100/140 on
+    the lane (z = 15), tick 600: each set bit-equal to its solo run over 600
+    ticks (9600 / 10200 / 10800 / 9600 lines); built in reverse order:
+    30600 lines bit-identical.
+  - S4: S2 on x64, x86 and Linux: 701 per-tick pose hashes identical, 35751
+    piece lines bit-equal.
+  - S5: L2 (p1 wood 300, p2 wood 320, p1 reset 900, p1 wood 1040, p2 resets
+    1200, p3 wood + stone 1300 at two places, resets 1400): every reset's
+    bodies gone in R+132 (1032, 1332, 1532) and the pieces back at their
+    initial conditions in R+133; p1's re-explosion recompiles p1's hulls
+    (new signature) while p2's stay; p3's two type sets start at their own
+    positions; cores and world pose at 1599 equal the control without inputs
+    (`a74e0c13a0b4149b`, 1 core).  Linux ASan: 43560 piece lines bit-equal to
+    Windows; the ASan reports are exactly the control's without trafo sets
+    (31849 `alloc-dealloc-mismatch` in `CKFileObject::CleanData`, known in
+    engine-changes.md; one `stack-buffer-overflow`, below): none from the sets.
+  - S6: `--savestate-check --frames --level 2 --drop-settle 250 --trafo-sets
+    2`, p1 wood explode +10, p2 paper explode +20, resets +60 / +100, window
+    300, 50 rounds: `PASS rounds=50 failed=0`; 6 rounds crossed a piece birth
+    (138 bodies destroyed at the restore and made again by the replayed
+    explosion, 138 exactly at their birth records, 0 missing), 5 crossed a
+    piece death (revived at the restore).  The harness binds the session
+    world (`bind_session_world`: destroy, revive, the births from the event
+    log's recipes), drops the engine's records after the round's live tick
+    (`forget_after`), and re-makes each round's live world from the record
+    of t0 (the rounds are no longer chained when the window changes the body
+    set: a world chained from another tick has another set of pieces than
+    the record it is rewound from).
+  - S7: L2, hold armed at 280: `--activate Ball_Explosion_Paper 500` (after
+    the frame) cancelled and reported, `trafo_original_leaks=0`; with
+    `--trafo-hold-slip` the leak is detected in the frame it runs (501: 18
+    bodies, then the script).  With a real trafo (ball beamed onto
+    P_Trafo_Stone_MF at 600): the Delayer starts at 691, explosion predicted
+    for 758, the activation cancelled after 757 and confirmed, its position
+    bit-equal to the Delayer-time one; the Fadeout reset at 1919 reported;
+    0 leaks.
+  - S9: the free runs `--explode wood 300` and 9.14's two explosions
+    (guarded and unguarded) give every per-tick world hash, every pose line
+    and the bodies at 610 identical to HEAD's binary (`build-agent-rR5`);
+    215 pose hashes guarded = unguarded.  `rec_m3b.bmrc` no longer exists
+    on this machine; replaced by the key record `work/a4/r0_keys.bmrc`
+    replayed by both binaries: identical output.
+  - S11: L2, sector 5 world (`--drop` scene), player 1's paper set 3 m above
+    `PE_Balloon_Platform`: filter on, 0 piece x keep-local contacts or
+    mindists; off, 11 contacts and 13 mindists from the explosion's frame.
+    Beside the ramp (1585, 27.7, 74): off has 8 piece x `PE_Balloon_Platte*`
+    mindists (no contact), on none; the piece tracks are bit-identical over
+    580 ticks and every other contact identical.
+  - S12 (information): normal play: the Fadeout reset at detection + 1320
+    (1919); a death with lives left (ball beamed into a DepthTestCube at
+    1058): all three resets at 1061 and the Fadeout reset still at 1919.
+    Game Over, Finish and pause were not reached in a free run (the lives
+    live in the Energy array behind Gameplay_Energy, the last sector is
+    inactive, no pause verb); the graph shows `Test.False -> Deactivate
+    Ball.Game Over` bypassing `reset Ballpieces` (1.5).  The deadline covers
+    every case.
+  - S13: the reach measurement's reference (`design/track2/reach/`) is gone,
+    so the check is re-run as a pair: for each of 77 distinct `P_Trafo_*_MF`
+    positions of L2-L13 (as listed by `--list-trafos` at 600) and each type,
+    the original set (seeded, placed 1.3 m above) against player 7's copy at
+    the same tick and seed, 1400 ticks tracked: 231 of 231 runs bit-equal.
+    Reach on the level (within 20 m below the trafo) 32.5 m wood, 43.0 m
+    stone, 133.7 m paper (the wind); a fall > 20 m in 73 / 73 / 77 runs, up
+    to 2737 m (`work/tr1/s13.tsv`).
+  - The reconcile's halves, retirement and teardown (SimTool
+    `--trafo-unmake/--trafo-remake/--trafo-final/--trafo-retire/
+    --trafo-teardown`): p1 paper exploded at 300, unmade at 400 (18 bodies),
+    remade at 401 with 401's seed: 10782 piece lines bit-equal to a direct
+    explosion at 401; p2's final resets at 500: deselected at 633 (inert),
+    destroyed at 729; the teardown at 1000 leaves 0 set objects and the
+    exemption list at the originals' 54.
+  - Builds and the BAR: x64 BUILD-OK, x86 CLIENT-BUILD-OK (client objects
+    deleted first; no client file changed), `linux_test_syntax.sh` 27 lines
+    ok; `wire_check.sh rR5 rTR1 rTR1w`: WIRE-CHECK: ALL SAME (24 journals
+    IDENTICAL, 24 sends SAME); solo snapshots off (`e0_solo.sh rTR1b`, Arch
+    server rebuilt with the tree): IDENTICAL to `rR4` (2227 TICK hash + pose
+    common, 0 differ; LOCAL 1114/1114), server journal 2409/2409 matched (a
+    first run, `rTR1`, had 26 starved input frames on the host: LOCAL
+    1114/1114 equal, its input records' timing different).
+- **The reviews' fixes** (two reviews; every should-fix confirmed in the
+  code and fixed; reruns below):
+  - `trafo_input_log::prune` took each key's newest over the whole log, so
+    an input already logged for a later tick (a lead's pending explosion)
+    let it drop the one still newest at or before every t up to it; the
+    newest is now taken among the entries applied before the prune tick
+    (test `PruningKeepsTheLiveExplosionWhenALaterOneIsPending`).
+  - The builder's early I0 failures (after `CopyObjects`, before the
+    renaming) returned without destroying the copies, which still carried
+    the originals' exact names; every root object the copy made is now
+    destroyed on those paths too (`undo_copy`).
+  - `execute_frame` ran the trafo list after the satellites; the live frame
+    runs the trafo frame before the engine's whole behaviour pass
+    (Gameplay_Ingame's satellites included), so the replay runs it first
+    now (4.5's line corrected; it contradicted 2.5).
+  - The bridge registry could outlive its world (keyed by the manager,
+    never cleared on a teardown that skipped `teardown_trafo_sets`): stale
+    sets are now dropped before any decision reads it (frame id must still
+    name the registered frame), and a second registration of a player is
+    refused.  The piece-name map is looked up without building strings
+    (`std::less<>`).
+  - Option E's start detection (above).  The level reference (above).
+  - S6 counts a round whose re-made live world is not the straight pass's
+    (or whose t0 restore is refused) as failed (`premise:`), not only
+    printed.
+  - Reruns (x64, the fixed tree): 486 tests pass (485 + 1); S0 on L1-L13
+    (4 sets, anchor 400) and on L2 after an original wood / stone / paper
+    explosion: 0 failures, digest `90f856e0c8c20dd4/493` and value digest
+    `bf8575545ab7fbe0/597` for every set; record check (1)-(4) PASS; S6
+    `PASS rounds=50 failed=0` (138 / 138 births exact, 0 missing, the same
+    as before the order change); S7 unchanged (the held activation
+    cancelled, the slip leak at 501, the real trafo's Delayer at 691
+    predicting 758 and confirmed, the Fadeout reset at 1919, 0 leaks); the
+    reconcile halves / retirement / teardown exercise unchanged; S8 above.
+    The fresh-world checks (S1-S5, S9, S11, S13) are not affected: the
+    reference rewrites 0 values in a fresh world, the order change and the
+    hold change are not on their paths, and the bridge's prune drops
+    nothing while the sets live.
+- **Found on the way** (not this step's, reported per principle (d)):
+  - SimTool's `--savestate-check --frames` on L2's default sector scene (the
+    window from tick 31) refuses its first round on HEAD's binary too: the
+    retail ball is parked at 204, inside the window, and Gameplay_Ingame's
+    `Physics WakeUp` and Sound_Manager's four `PhysicsCollDetection` then
+    queue on the bodiless ball for good, so every anchor before 204 has
+    another PreSimulate queue.  A harness scene property; S6 runs with
+    `--drop-settle 250`.
+  - ASan, headless x64/Linux only: `GeneralParticleSystemCallback`
+    (TT_ParticleSystems_RT `GeneralParticleSystem.cpp:415`) clears its
+    emitter pointer with `CKBehavior::SetLocalParameterObject(0, NULL)`,
+    which hands a 4-byte `CK_ID` to `SetValue` of a pointer-sized local:
+    4 stack bytes past `objID` are read (CKBehavior.cpp:1151-1154).  On the
+    retail x86 build both are 4 bytes.  The local is the particle emitter's,
+    deleted right before; no physics state.  Same in the control without
+    sets.
 
 ## 9. Open questions
 

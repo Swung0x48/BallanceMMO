@@ -41,6 +41,11 @@ namespace bmmo::session {
         // after it, keeps its live state and is not executed.
         bool replay_activation = false;
         std::function<void(const std::string& error)> on_restore_failed;
+        // The trafo sets' scripts (game/trafo_sets.hpp, step T1): captured
+        // in record v3, restored (a script the record does not list to its
+        // set's built state), and run by the replayed frame before the
+        // selection, as the trafo frame runs them live.  Null: none.
+        const bmmo::game::script_replay::trafo_part* trafo = nullptr;
     };
 
     // Installs capture/restore/diff and runs the scripts' frame after the
@@ -52,10 +57,11 @@ namespace bmmo::session {
         CKContext* context = o.context;
         const auto* selection = o.scripts;
         const auto* hooks = o.hooks;
-        world.capture_scripts = [context, selection, hooks](std::vector<uint8_t>& out) {
-            return bmmo::game::script_replay::capture(context, *selection, *hooks, out);
+        const auto* trafo = o.trafo;
+        world.capture_scripts = [context, selection, hooks, trafo](std::vector<uint8_t>& out) {
+            return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo);
         };
-        world.restore_scripts = [o, context, selection, hooks](const std::vector<uint8_t>& bytes, uint32_t anchor) {
+        world.restore_scripts = [o, context, selection, hooks, trafo](const std::vector<uint8_t>& bytes, uint32_t anchor) {
             std::vector<CK_ID> kept_live;
             if (o.reset_ticks)
                 for (const auto& [id, reset_tick]: *o.reset_ticks)
@@ -63,7 +69,7 @@ namespace bmmo::session {
             if (o.reset_skips) *o.reset_skips += kept_live.size();
             std::string error;
             const bool ok = bmmo::game::script_replay::restore(context, *selection, *hooks, bytes, &error, o.scripts_replayed,
-                                                               &kept_live, o.replay_activation);
+                                                               &kept_live, o.replay_activation, trafo);
             if (!ok && o.on_restore_failed) o.on_restore_failed(error);
             return ok;
         };
@@ -98,11 +104,12 @@ namespace bmmo::session {
             };
         }
         const auto before = world.pre_step;
-        world.pre_step = [b, o, before, context, selection](uint32_t tick) {
+        world.pre_step = [b, o, before, context, selection, trafo](uint32_t tick) {
             if (before) before(tick);
             std::string error;
             b->set_event_log_muted(true, error);
-            bmmo::game::script_replay::execute_frame(context, *selection, o.delta_ms, o.scripts_replayed);
+            bmmo::game::script_replay::execute_frame(context, *selection, o.delta_ms, o.scripts_replayed,
+                                                     trafo && !trafo->empty() ? &trafo->scripts : nullptr);
             b->set_event_log_muted(false, error);
         };
     }

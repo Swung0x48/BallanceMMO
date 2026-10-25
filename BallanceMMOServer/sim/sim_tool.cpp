@@ -50,6 +50,7 @@
 // prop there too) or, with neither, the sector union started by --drop-sector.
 
 #include "headless_engine.hpp"
+#include "trafo_tool.hpp"
 #include "crash_report.hpp"
 #include "process_qos.hpp"
 #include "physics_world.hpp"
@@ -82,6 +83,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -296,7 +298,143 @@ namespace {
         bool savestate_frames = false;
         bool legacy_restore = false;
         std::string savestate_trace;
+        // The trafo sets (docs/trafo-replication-design.md 7.2, step T1):
+        // --trafo-sets N / --trafo-players a,b,.. [--trafo-reverse]
+        // [--trafo-anchor TICK] [--trafo-seed S] [--explode-player ID TYPE
+        // TICK X Y Z] [--reset-player ID TYPE TICK] [--explode-original TYPE
+        // TICK X Y Z SEED] [--describe-trafo] [--trafo-hold
+        // [--trafo-hold-slip] [--trafo-no-option-e]] [--trafo-filter on|off]
+        // [--trafo-track ID|orig TYPE] [--trafo-presim] [--trafo-contacts]
+        // [--trafo-surfaces] [--trafo-no-collsound] [--trafo-record-check]
+        // [--trafo-colldump] [--trafo-poke-create ID TICK]
+        // [--trafo-built-params] [--list-trafos].  See sim/trafo_tool.hpp.
+        bmmo::sim::trafo_tool_options trafo;
+        bool list_trafos = false;
+        // --set-local SCRIPT LOCAL VALUE TICK, repeatable (free run, S12): an
+        // integer local of a root script set before that tick's frame (the
+        // lives of Gameplay_Ingame, "ActLifes", for a Game Over).
+        struct local_write { std::string script, local; int value = 0; long long tick = 0; };
+        std::vector<local_write> local_writes;
+        // --beam-again X Y Z TICK, repeatable (free run, S12): --beam's move
+        // of the current ball at further ticks (a death below the level).
+        struct beam_write { double at[3] = {}; long long tick = 0; };
+        std::vector<beam_write> beams_again;
+        std::string list_entities;   // --list-entities PREFIX: as --list-trafos, any name prefix
     };
+
+    // The trafo set switches (sim/trafo_tool.hpp) and --set-local: parse()'s
+    // chain is at the compiler's nesting limit.  False: not one of them, or a
+    // value is missing.
+    bool parse_trafo_arg(const std::string& arg, const std::function<const char*()>& next, arguments& out) {
+        const char* v = nullptr;
+        if (arg == "--trafo-sets") {
+            if (!(v = next())) return false;
+            out.trafo.players.clear();
+            for (int k = 1; k <= std::atoi(v); ++k) out.trafo.players.push_back(static_cast<uint32_t>(k));
+        }
+        else if (arg == "--trafo-players") {
+            if (!(v = next())) return false;
+            out.trafo.players.clear();
+            for (const char* c = v; *c;) {
+                out.trafo.players.push_back(static_cast<uint32_t>(std::strtoul(c, nullptr, 10)));
+                while (*c && *c != ',') ++c;
+                if (*c == ',') ++c;
+            }
+        }
+        else if (arg == "--trafo-reverse") out.trafo.reverse = true;
+        else if (arg == "--trafo-anchor") { if (!(v = next())) return false; out.trafo.anchor = std::atoll(v); }
+        else if (arg == "--trafo-seed") { if (!(v = next())) return false; out.trafo.session_seed = static_cast<uint32_t>(std::strtoul(v, nullptr, 0)); }
+        else if (arg == "--explode-player" || arg == "--reset-player") {
+            bmmo::sim::trafo_tool_options::input in;
+            const bool reset = arg == "--reset-player";
+            in.flags = reset ? bmmo::session::TRAFO_RESET : bmmo::session::TRAFO_EXPLODE;
+            if (!(v = next())) return false; in.player = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+            if (!(v = next()) || !bmmo::sim::trafo_type_of(v, in.type)) return false;
+            if (!(v = next())) return false; in.tick = std::atoll(v);
+            if (!reset)
+                for (int k = 0; k < 3; ++k) { if (!(v = next())) return false; in.position[k] = static_cast<float>(std::atof(v)); }
+            out.trafo.inputs.push_back(in);
+        }
+        else if (arg == "--explode-original") {
+            bmmo::sim::trafo_tool_options::original o;
+            if (!(v = next()) || !bmmo::sim::trafo_type_of(v, o.type)) return false;
+            if (!(v = next())) return false; o.tick = std::atoll(v);
+            for (int k = 0; k < 3; ++k) { if (!(v = next())) return false; o.position[k] = static_cast<float>(std::atof(v)); }
+            if (!(v = next())) return false; o.seed = static_cast<int32_t>(std::strtol(v, nullptr, 0));
+            out.trafo.originals.push_back(o);
+        }
+        else if (arg == "--describe-trafo") out.trafo.describe = true;
+        else if (arg == "--trafo-hold") out.trafo.hold = true;
+        else if (arg == "--trafo-hold-slip") out.trafo.hold_slip = true;
+        else if (arg == "--trafo-no-option-e") out.trafo.option_e = false;
+        else if (arg == "--trafo-filter") { if (!(v = next())) return false; out.trafo.filter = std::string(v) == "on" ? 1 : 0; }
+        else if (arg == "--trafo-track") {
+            std::string who;
+            uint8_t type = 0;
+            if (!(v = next())) return false; who = v;
+            if (!(v = next()) || !bmmo::sim::trafo_type_of(v, type)) return false;
+            out.trafo.track.emplace_back(who, type);
+        }
+        else if (arg == "--trafo-presim") out.trafo.presim = true;
+        else if (arg == "--trafo-colldump") out.trafo.colldump = true;
+        else if (arg == "--trafo-built-params") out.trafo.built_params = true;
+        else if (arg == "--trafo-poke-create") {
+            bmmo::sim::trafo_tool_options::poke k;
+            if (!(v = next())) return false; k.player = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+            if (!(v = next())) return false; k.tick = std::atoll(v);
+            out.trafo.pokes.push_back(k);
+        }
+        else if (arg == "--trafo-contacts") out.trafo.contacts = true;
+        else if (arg == "--trafo-surfaces") out.trafo.surfaces = true;
+        else if (arg == "--trafo-no-collsound") out.trafo.no_collsound = true;
+        else if (arg == "--trafo-record-check") out.trafo.record_check = true;
+        else if (arg == "--list-trafos") out.list_trafos = true;
+        else if (arg == "--trafo-unmake" || arg == "--trafo-remake") {
+            bmmo::sim::trafo_tool_options::unmake u;
+            u.remake = arg == "--trafo-remake";
+            if (!(v = next())) return false; u.player = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+            if (!(v = next()) || !bmmo::sim::trafo_type_of(v, u.type)) return false;
+            if (!(v = next())) return false; u.tick = std::atoll(v);
+            if (u.remake) {
+                for (int k = 0; k < 3; ++k) { if (!(v = next())) return false; u.position[k] = static_cast<float>(std::atof(v)); }
+                if (!(v = next())) return false; u.seed_tick = std::atoll(v);
+            }
+            out.trafo.unmakes.push_back(u);
+        }
+        else if (arg == "--trafo-final") {
+            uint32_t player = 0;
+            long long tick = 0;
+            if (!(v = next())) return false; player = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+            if (!(v = next())) return false; tick = std::atoll(v);
+            for (uint8_t t = 0; t < 3; ++t) {
+                bmmo::sim::trafo_tool_options::input in;
+                in.player = player;
+                in.type = t;
+                in.flags = bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER | bmmo::session::TRAFO_FINAL;
+                in.tick = tick;
+                out.trafo.inputs.push_back(in);
+            }
+        }
+        else if (arg == "--trafo-retire") out.trafo.retire = true;
+        else if (arg == "--trafo-teardown") { if (!(v = next())) return false; out.trafo.teardown = std::atoll(v); }
+        else if (arg == "--list-entities") { if (!(v = next())) return false; out.list_entities = v; }
+        else if (arg == "--beam-again") {
+            arguments::beam_write b;
+            for (int k = 0; k < 3; ++k) { if (!(v = next())) return false; b.at[k] = std::atof(v); }
+            if (!(v = next())) return false; b.tick = std::atoll(v);
+            out.beams_again.push_back(b);
+        }
+        else if (arg == "--set-local") {
+            arguments::local_write w;
+            if (!(v = next())) return false; w.script = v;
+            if (!(v = next())) return false; w.local = v;
+            if (!(v = next())) return false; w.value = std::atoi(v);
+            if (!(v = next())) return false; w.tick = std::atoll(v);
+            out.local_writes.push_back(w);
+        }
+        else return false;
+        return true;
+    }
 
     bool parse(int argc, char** argv, arguments& out) {
         if (argc > 0) {
@@ -493,7 +631,7 @@ namespace {
             else if (arg == "--frames") out.savestate_frames = true;
             else if (arg == "--legacy-restore") out.legacy_restore = true;
             else if (arg == "--savestate-trace") { if (!(v = next())) return false; out.savestate_trace = v; }
-            else return false;
+            else if (!parse_trafo_arg(arg, next, out)) return false;
         }
         // --list of a journal and the savestate file verbs are pure file
         // reading: no game data needed.
@@ -852,8 +990,33 @@ namespace {
         return nullptr;
     }
 
+    // --list-trafos: every P_Trafo_* entity of the level with its world
+    // position (the trafos' positions for the trafo set checks).
+    void list_trafos(const bmmo::sim::headless_engine& engine, const std::string& prefix = "P_Trafo_") {
+        auto* context = engine.context();
+        const XObjectPointerArray& all = context->GetObjectListByType(CKCID_3DENTITY, TRUE);
+        int n = 0;
+        for (int i = 0; i < all.Size(); ++i) {
+            auto* e = CK3dEntity::Cast(all[i]);
+            if (!e || !e->GetName() || std::strncmp(e->GetName(), prefix.c_str(), prefix.size()) != 0) continue;
+            VxVector p;
+            e->GetPosition(&p);
+            std::printf("trafo %s %.4f %.4f %.4f\n", e->GetName(), p.x, p.y, p.z);
+            ++n;
+        }
+        std::printf("trafos: %d\n", n);
+        std::fflush(stdout);
+    }
+
     int run_free(bmmo::sim::headless_engine& engine, const arguments& args) {
         std::string error;
+        // The trafo sets (sim/trafo_tool.hpp): inputs and the trafo frame
+        // before every engine frame from the anchor on, the hold and the
+        // diagnostics after it.  With the hold armed, --activate lands after
+        // the frame (as a script of that frame would have activated it).
+        std::unique_ptr<bmmo::sim::trafo_tool> trafo;
+        if (args.trafo.any()) trafo = std::make_unique<bmmo::sim::trafo_tool>(args.trafo, engine.physics(), engine.context());
+        const bool post_frame_activations = trafo && args.trafo.hold;
         // --explode: activated once at args.explode_at_tick, then the pose
         // hash and movable core count print for 200 ticks (determinism check,
         // Part B: the trafo pieces draw Random through the hooked block).
@@ -896,12 +1059,19 @@ namespace {
                 std::fprintf(stderr, "body guard armed at tick %d (except %s, %d entities exempt)\n", i,
                              args.body_guard_entity.c_str(), engine.physics()->m_KeepLevelBodiesFree.Size());
             }
+            std::vector<CKBehavior*> post_activations;
             for (const auto& [name, tick]: args.activations) {
                 if (static_cast<long long>(i) != tick) continue;
                 CKBehavior* script = bmmo::game::find_root_script(engine.context(), name.c_str());
                 if (!script) {
                     std::fprintf(stderr, "activate: no root script named %s\n", name.c_str());
                     return 1;
+                }
+                if (post_frame_activations) {
+                    post_activations.push_back(script);
+                    std::fprintf(stderr, "activate: %s after the frame of tick %d%s\n", name.c_str(), i,
+                                 args.trafo.hold_slip ? " (slipping past the hold)" : "");
+                    continue;
                 }
                 script->Activate(TRUE, TRUE);
                 std::fprintf(stderr, "activate: %s at tick %d\n", name.c_str(), i);
@@ -922,6 +1092,31 @@ namespace {
                 explode_ticks_left = 200;
                 std::fprintf(stderr, "explode: activated %s at tick %d\n", script_name, i);
             }
+            for (const auto& b: args.beams_again) {
+                if (b.tick != i) continue;
+                CKDataArray* level = engine.data_array("CurrentLevel");
+                CK3dEntity* ball = level ? CK3dEntity::Cast(level->GetElementObject(0, 1)) : nullptr;
+                const double upright[4] = {0.0, 0.0, 0.0, 1.0};
+                const float still[3] = {0.0f, 0.0f, 0.0f};
+                if (!ball || !bmmo::physics::set_body_state(engine.physics(), ball->GetName(), b.at, upright, still, still, true, error))
+                    std::fprintf(stderr, "beam-again failed at tick %d: %s\n", i, error.c_str());
+                else
+                    std::fprintf(stderr, "beam-again: %s to (%.3f,%.3f,%.3f) at tick %d\n", ball->GetName(), b.at[0], b.at[1], b.at[2], i);
+            }
+            for (const auto& w: args.local_writes) {
+                if (w.tick != i) continue;
+                CKBehavior* script = bmmo::game::find_root_script(engine.context(), w.script.c_str());
+                bool done = false;
+                for (int k = 0; script && k < script->GetLocalParameterCount(); ++k)
+                    if (CKParameterLocal* l = script->GetLocalParameter(k); l && l->GetName() && w.local == l->GetName()) {
+                        int value = w.value;
+                        l->SetValue(&value);
+                        done = true;
+                    }
+                std::fprintf(stderr, "set-local: %s/%s = %d at tick %d%s\n", w.script.c_str(), w.local.c_str(), w.value, i,
+                             done ? "" : " (NOT FOUND)");
+            }
+            if (trafo) trafo->before_frame(i);
             if (i < args.debug_ticks) {
                 std::string last;
                 const bool ok = engine.tick_debug([&](const std::string& script, const std::string& block,
@@ -952,6 +1147,7 @@ namespace {
                 std::fprintf(stderr, "restore: %d bodies written back at tick %d (%s)\n", written, i,
                              what.c_str());
             }
+            if (trafo) trafo->after_frame(i, post_activations);
             // After the restore: the state the tick really ends with.
             for (const auto& entity: args.tracked) track_body(engine, entity);
             if (explode_ticks_left > 0) {
@@ -969,6 +1165,8 @@ namespace {
             if (!args.dump_script.empty() && i == args.dump_at) dump_script(engine, args.dump_script);
             if (!args.list_scripts.empty() && i == args.dump_at) list_scripts(engine, args.list_scripts);
             if (!args.dump_array.empty() && i == args.dump_at) dump_array(engine, args.dump_array);
+            if (args.list_trafos && i == args.dump_at) list_trafos(engine);
+            if (!args.list_entities.empty() && i == args.dump_at) list_trafos(engine, args.list_entities);
             if (args.list_bodies_at >= 0 && i == args.list_bodies_at) list_bodies(engine);
             if (args.dump_surfaces_at >= 0 && i == args.dump_surfaces_at) dump_surfaces(engine);
             if (args.report_every > 0 && engine.ticks() % static_cast<uint64_t>(args.report_every) == 0)
@@ -977,6 +1175,8 @@ namespace {
         if (!args.dump_script.empty() && args.dump_at < 0) dump_script(engine, args.dump_script);
         if (!args.list_scripts.empty() && args.dump_at < 0) list_scripts(engine, args.list_scripts);
         if (!args.dump_array.empty() && args.dump_at < 0) dump_array(engine, args.dump_array);
+        if (args.list_trafos && args.dump_at < 0) list_trafos(engine);
+        if (trafo) return trafo->finish();
         return 0;
     }
 
@@ -1355,6 +1555,16 @@ namespace {
         if (!world) return 1;
         if (const int code = setup_drop_scene(args, *world)) return code;
         std::string error;
+        // The trafo sets in the drop scene (S11, sim/trafo_tool.hpp): built
+        // after the scene, their inputs keyed by the run's tick index, the
+        // trafo frame inside the world's frame (its frame hook).
+        std::unique_ptr<bmmo::sim::trafo_tool> trafo;
+        if (args.trafo.any()) {
+            trafo = std::make_unique<bmmo::sim::trafo_tool>(args.trafo, world->physics(), world->engine().context());
+            if (!trafo->anchor(0)) return 1;
+            bmmo::sim::trafo_tool* tool = trafo.get();
+            world->set_frame_hook([tool]() { tool->run_frame(); });
+        }
         // The parts of the mechanism this run watches: every physics body whose
         // name carries the --drop name.
         const auto watched = [&args](const bmmo::sim::physics_world& w) {
@@ -1387,7 +1597,9 @@ namespace {
                 report_sector(*world, 1, args.drop_move_sector);
                 std::printf("tick=%d player 1 moved to sector %d\n", i, args.drop_move_sector);
             }
+            if (trafo) trafo->apply_inputs(static_cast<uint32_t>(i));
             if (!world->tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
+            if (trafo) trafo->after_frame(i, {});
             if (args.report_every > 0 && i % args.report_every == 0) report_parts(i);
         }
         double fell = 0.0;
@@ -1397,6 +1609,7 @@ namespace {
         }
         std::printf("summary: the lowest watched part of %s fell %.3f m\n", args.drop_entity.c_str(), fell);
         std::fflush(stdout);
+        if (trafo) return trafo->finish();
         return 0;
     }
 
@@ -1861,6 +2074,40 @@ namespace {
             return 1;
         }
 
+        // ---- the trafo sets (S6, trafo-replication design 7.2): built after
+        // the scene, their inputs inside the window.  An input's TICK is a
+        // window offset i: it is applied before the straight pass's step i -
+        // the step a rewind re-runs as tick t0 + i + 1, which is the key the
+        // input log keeps it under - and the trafo frame runs inside the
+        // world's frame (physics_world's frame hook), after the union's pass.
+        // The window then has births and deaths of the pieces, so the
+        // binding is the session world's (bind_session_world): a window-born
+        // piece is destroyed at the restore and made again by the replayed
+        // explosion, a piece the window's reset took is revived at the
+        // restore, from the births this harness logs (the event log's
+        // recipes) - the hosts' path.
+        std::unique_ptr<bmmo::sim::trafo_tool> trafo;
+        if (!args.trafo.players.empty()) {
+            if (!frames) {
+                std::fprintf(stderr, "savestate-check: trafo inputs need --frames (the explosions are scripts)\n");
+                return 2;
+            }
+            bmmo::sim::trafo_tool_options o = args.trafo;
+            o.anchor = -1;
+            for (auto& in: o.inputs) in.tick = static_cast<long long>(world->tick_index()) + in.tick + 1;
+            trafo = std::make_unique<bmmo::sim::trafo_tool>(o, physics, context);
+            if (!trafo->anchor(world->tick_index())) return 1;
+            bmmo::sim::trafo_tool* tool = trafo.get();
+            world->set_frame_hook([tool]() { tool->run_frame(); });
+            bmmo::physics::drain_event_log(physics);   // the window's births only
+        }
+        bmmo::session::local_birth_log trafo_births;
+        std::map<std::string, uint32_t> trafo_generations;
+        size_t trafo_birth_count = 0;
+        std::set<uint32_t> trafo_birth_ticks, trafo_death_ticks;   // record ticks a piece first / no longer has
+        int trafo_rounds_births = 0, trafo_rounds_deaths = 0;
+        uint64_t trafo_recreated = 0, trafo_recreated_exact = 0, trafo_missing = 0;
+
         // ---- the script replay (--frames): the mechanism scripts and the
         // hooks that carry the force blocks' controllers, as the headless
         // client installs them.
@@ -1958,9 +2205,11 @@ namespace {
         binding_options.savestate = !legacy;
         binding_options.savestate_flags = bmmo::physics::SAVESTATE_STRICT;
         binding_options.before_replayed_tick = [&](uint32_t tick) {
-            if (tick != probe_tick) return;
-            std::string probe_error;
-            if (!bmmo::physics::get_savestate(physics, restored_blob, probe_error)) capture_error = probe_error;
+            if (tick == probe_tick) {
+                std::string probe_error;
+                if (!bmmo::physics::get_savestate(physics, restored_blob, probe_error)) capture_error = probe_error;
+            }
+            if (trafo) trafo->apply_inputs(tick, true);
         };
         binding_options.on_savestate_restored = [&](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
             if (!ok) {
@@ -1975,15 +2224,40 @@ namespace {
             engine_log = text;
             if (args.verbose) std::printf("  engine: %s\n", text.c_str());
         };
-        bmmo::session::rollback_world binding = bmmo::session::bind_rollback_world(backend, binding_options);
-        if (frames) {
-            bmmo::session::script_binding_options script_options;
-            script_options.context = context;
-            script_options.scripts = &scripts;
-            script_options.hooks = &hooks;
-            script_options.scripts_replayed = &scripts_replayed;
-            script_options.delta_ms = bmmo::sim::kFixedDeltaMs;
-            bmmo::session::bind_script_replay(binding, backend, script_options);
+        bmmo::session::script_binding_options script_options;
+        script_options.context = context;
+        script_options.scripts = &scripts;
+        script_options.hooks = &hooks;
+        script_options.scripts_replayed = &scripts_replayed;
+        script_options.delta_ms = bmmo::sim::kFixedDeltaMs;
+        if (trafo) script_options.trafo = &trafo->registry().part();
+        bmmo::session::rollback_world binding;
+        if (trafo) {
+            std::set<std::string> pieces;
+            for (const auto& set: trafo->registry().sets())
+                for (const auto& ts: set.types)
+                    for (CK_ID id: ts.pieces)
+                        if (CKObject* o = context->GetObject(id)) pieces.insert(o->GetName());
+            bmmo::session::core_world_hooks core;
+            core.replay_mechanisms = [physics]() { return bmmo::physics::movable_body_names(physics); };
+            bmmo::session::session_world_options so;
+            so.binding = binding_options;
+            // bind_session_world composes before_replayed_tick from the
+            // core's births, the activation and the host's own: the probe
+            // and the inputs are the host's.
+            so.before_replayed_tick = binding_options.before_replayed_tick;
+            so.births = &trafo_births;
+            so.revivable = [pieces](const std::string& entity) { return pieces.count(entity) != 0; };
+            so.put_back = [context](const std::string& entity, const bmmo::session::local_birth& birth) {
+                bmmo::game::put_back_birth(context, entity, birth);
+            };
+            so.bind_scripts = [&backend, &script_options](bmmo::session::rollback_world& w) {
+                bmmo::session::bind_script_replay(w, backend, script_options);
+            };
+            binding = bmmo::session::bind_session_world(backend, core, so);
+        } else {
+            binding = bmmo::session::bind_rollback_world(backend, binding_options);
+            if (frames) bmmo::session::bind_script_replay(binding, backend, script_options);
         }
         {
             // The world's own PreSimulate pass before the physics step (the
@@ -2071,6 +2345,10 @@ namespace {
             // The engine's record of this tick: bodies, extras, contacts,
             // scripts and (unless --legacy-restore) the blob - what a rewind
             // to this tick restores.
+            if (trafo) {
+                tracked.mechanisms = bmmo::physics::movable_body_names(physics);
+                tracked.generations = trafo_generations;
+            }
             engine.record(binding, t, tracked, no_inputs);
             if (!legacy) {
                 const std::vector<uint8_t>* recorded = engine.recorded_savestate(t);
@@ -2086,9 +2364,24 @@ namespace {
                 rec.hash.cores, blob.size(), report.contacts, report.collisions, report.systems);
             trace.put(line);
             if (args.verbose || (args.report_every > 0 && i % args.report_every == 0)) std::printf("%s\n", line);
+            if (trafo) trafo->apply_inputs(t + 1u, false);
             if (!step(error)) {
                 std::fprintf(stderr, "savestate-check: the straight pass's step at tick %u failed: %s\n", t, error.c_str());
                 return 1;
+            }
+            if (trafo) {
+                // The step's births (the recipes), keyed by the record that
+                // first carries them, and every lifetime change.
+                const std::string events = bmmo::physics::drain_event_log(physics);
+                bmmo::session::parse_event_log(events, [&](const std::string& kind, const std::string& name) {
+                    if (kind == "recipe") {
+                        bmmo::session::local_birth birth;
+                        if (bmmo::session::parse_recipe_event(name, birth)) { trafo_births.add(t + 1u, std::move(birth)); ++trafo_birth_count; }
+                    } else if (kind == "created" || kind == "deleted") {
+                        ++trafo_generations[name];
+                        (kind == "created" ? trafo_birth_ticks : trafo_death_ticks).insert(t + 1u);
+                    }
+                });
             }
         }
         const double straight_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
@@ -2137,10 +2430,54 @@ namespace {
             bool crosses_reset = false;
             for (int t: reset_ticks) crosses_reset = crosses_reset || (t > a && t <= e);
 
+            // Trafo inputs (S6): the window's births and deaths change the
+            // body set, and a rewind's body plan reads it from the engine's
+            // records - the live world has to be the one the record of the
+            // round's live tick e describes, as a session's always is.  A
+            // world chained from the previous round's end (another tick, so
+            // another set of pieces) is not, so each round's live world is
+            // made again: every piece body taken out, the record of t0 put
+            // back (no piece, every set's scripts at t0), and the straight
+            // pass's steps re-run to e with its inputs.
+            // The round's premise: a live world that is not the straight
+            // pass's (or a refused t0 restore) fails the round.
+            std::string premise;
+            if (trafo) {
+                std::string remake_error;
+                for (const auto& set: trafo->registry().sets())
+                    for (const auto& ts: set.types)
+                        for (CK_ID id: ts.pieces)
+                            if (CKObject* o = context->GetObject(id); o && trafo->hooks().has_body(o->GetName()))
+                                trafo->hooks().unphysicalize(o->GetName(), remake_error);
+                world->restore_step_state(straight[0].counters);
+                engine = pristine;
+                engine.forget_after(t0);
+                if (!engine.rewind_to(binding, t0, t0, no_input, "savestate-check: the round's live world")) {
+                    std::printf("  round %zu: the restore of t0 for its live world was refused\n", r);
+                    premise = "the restore of t0 for the round's live world was refused";
+                }
+                for (int i = 0; i < e; ++i) {
+                    trafo->apply_inputs(t0 + static_cast<uint32_t>(i) + 1u, true);
+                    if (!step(remake_error)) {
+                        std::fprintf(stderr, "savestate-check: re-stepping round %zu's live world failed: %s\n", r, remake_error.c_str());
+                        return 1;
+                    }
+                }
+                bmmo::physics::drain_event_log(physics);
+                std::vector<uint8_t> live;
+                if (!bmmo::physics::get_savestate(physics, live, remake_error) || !straight[static_cast<size_t>(e)].kept
+                        || live != straight[static_cast<size_t>(e)].blob) {
+                    std::printf("  round %zu: the re-made live world at %u is not the straight pass's%s\n", r,
+                                t0 + static_cast<uint32_t>(e), straight[static_cast<size_t>(e)].kept ? "" : " (not kept)");
+                    if (premise.empty())
+                        premise = "the re-made live world at " + std::to_string(t0 + static_cast<uint32_t>(e)) + " is not the straight pass's";
+                }
+            }
             // The world's own per-tick bookkeeping (tick index, RNG cursors,
             // the sector union) at the anchor; the engine knows the physics.
             world->restore_step_state(anchor.counters);
             engine = pristine;
+            if (trafo) engine.forget_after(t0 + static_cast<uint32_t>(e));
             probe_tick = t0 + static_cast<uint32_t>(a) + 1u;
             restored_blob.clear();
             replayed_blobs.clear();
@@ -2236,6 +2573,19 @@ namespace {
                 }
             }
 
+            if (trafo) {
+                const auto crosses = [&](const std::set<uint32_t>& ticks) {
+                    for (uint32_t x: ticks)
+                        if (x > t0 + static_cast<uint32_t>(a) && x <= t0 + static_cast<uint32_t>(e)) return true;
+                    return false;
+                };
+                if (crosses(trafo_birth_ticks)) ++trafo_rounds_births;
+                if (crosses(trafo_death_ticks)) ++trafo_rounds_deaths;
+                trafo_recreated += engine.stats().births_recreated - pristine.stats().births_recreated;
+                trafo_recreated_exact += engine.stats().births_recreated_exact - pristine.stats().births_recreated_exact;
+                trafo_missing += engine.stats().births_missing - pristine.stats().births_missing;
+            }
+            if (failure.empty() && !premise.empty()) failure = "premise: " + premise;
             char line[1024];
             if (!failure.empty()) {
                 ++failed;
@@ -2276,7 +2626,16 @@ namespace {
         std::fprintf(stderr, "savestate-check: straight pass %.2f s, %d rounds %.2f s\n", straight_seconds, run,
                      rounds_seconds);
         summary(run, failed);
-        const bool pass = failed == 0 && run == static_cast<int>(schedule.size());
+        if (trafo) {
+            std::printf("savestate-check: trafo births logged %zu, lifetimes changed %zu, inputs %zu, sets %zu\n",
+                        trafo_birth_count, trafo_generations.size(), trafo->log().size(), trafo->registry().sets().size());
+            std::printf("savestate-check: trafo rounds crossing a piece birth %d, a piece death %d (birth ticks %zu, death"
+                        " ticks %zu); bodies destroyed at a restore and made again by the replay %llu, %llu of them exactly at"
+                        " their birth record, missing %llu\n", trafo_rounds_births, trafo_rounds_deaths, trafo_birth_ticks.size(),
+                        trafo_death_ticks.size(), static_cast<unsigned long long>(trafo_recreated),
+                        static_cast<unsigned long long>(trafo_recreated_exact), static_cast<unsigned long long>(trafo_missing));
+        }
+        const bool pass = failed == 0 && run == static_cast<int>(schedule.size()) && (!trafo || trafo->failures() == 0);
         std::printf("%s rounds=%d failed=%d\n", pass ? "PASS" : "FAIL", run, failed);
         std::fflush(stdout);
         return pass ? 0 : 3;

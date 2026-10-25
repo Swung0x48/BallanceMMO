@@ -13,6 +13,7 @@
 #include "ivp_friction.hxx"
 #include "ivp_clustering_longrange.hxx"
 #include <physics/ball_navigation.hpp>
+#include <session/resync_rules.hpp>
 #include "ivp_time.hxx"
 #include <physics/ivp_private_access.hpp>
 #include <ivp_time.hxx>
@@ -2250,15 +2251,162 @@ namespace bmmo::physics {
             return CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name), CKCID_3DENTITY, nullptr));
         }
 
+        // ---- bridge API v21 (docs/trafo-replication-design.md 2.4, 2.6,
+        // 2.10; step T1): the per-player piece sets of game/trafo_sets.hpp.
+        // One registry per physics manager: every registered set's three
+        // piece frames (by type), the entities the body guard leaves alone,
+        // the piece names the collision filter knows, and the seed registry
+        // (frame -> the seed its next explosion draws from).  Nothing here
+        // changes a world without registered sets: the originals keep today's
+        // path, the filter is installed only when switched on.
+        class trafo_piece_filter;
+        struct trafo_bridge_set {
+            uint32_t frames[3] = {};
+            std::string frame_names[3];           // what each frame id named when registered (stale-entry check)
+            std::vector<CK_ID> entities;          // the three frames and every piece below them
+            std::vector<std::string> pieces;      // the pieces' names (their bodies' IVP names)
+        };
+        struct trafo_bridge_state {
+            std::map<uint32_t, trafo_bridge_set> sets;    // by player
+            std::map<CK_ID, int32_t> seeds;               // piece frame -> seed (an original's: tests only)
+            std::map<std::string, uint32_t, std::less<>> pieces;   // piece name -> player (looked up by IVP's const char*)
+            bool filter_enabled = false;
+            std::vector<trafo_piece_filter*> filters;     // installed, per environment
+        };
+        // Never destroyed: an IVP environment (and its filter) may outlive
+        // static storage at process exit.
+        std::map<CKIpionManager*, trafo_bridge_state>& trafo_states() {
+            static auto* states = new std::map<CKIpionManager*, trafo_bridge_state>();
+            return *states;
+        }
+        trafo_bridge_state* find_trafo_state(CKIpionManager* physics) {
+            auto& states = trafo_states();
+            const auto it = states.find(physics);
+            return it == states.end() ? nullptr : &it->second;
+        }
+        bool is_set_frame(const trafo_bridge_state& state, CK_ID frame) {
+            for (const auto& [player, set]: state.sets)
+                for (uint32_t f: set.frames)
+                    if (f == frame) return true;
+            return false;
+        }
+        // A registered set whose frames are gone, or whose ids now name other
+        // objects (a world torn down without teardown_trafo_sets, an abort
+        // path, a manager at a reused address, CK reusing the freed ids), is
+        // dropped before the registry is read for a decision: a stale frame id
+        // must never send an original's explosion down the per-set path (the
+        // body guard would then swallow the reset's Unphysicalize, the
+        // regression engine change #13 fixed) nor take an unrelated object
+        // off the guard.  The exemption list is not touched here: every
+        // reader that rebuilds it (restore_explosion_pieces) prunes first.
+        void prune_stale_sets(CKIpionManager* physics, trafo_bridge_state& state) {
+            CKContext* context = physics ? physics->m_Context : nullptr;
+            for (auto it = state.sets.begin(); it != state.sets.end();) {
+                bool alive = context != nullptr;
+                for (int t = 0; alive && t < 3; ++t) {
+                    CKObject* frame = context->GetObject(static_cast<CK_ID>(it->second.frames[t]));
+                    alive = frame && CKIsChildClassOf(frame, CKCID_3DENTITY) && frame->GetName()
+                         && it->second.frame_names[t] == frame->GetName();
+                }
+                if (alive) {
+                    ++it;
+                    continue;
+                }
+                for (const std::string& name: it->second.pieces) state.pieces.erase(name);
+                for (uint32_t frame: it->second.frames) state.seeds.erase(static_cast<CK_ID>(frame));
+                it = state.sets.erase(it);
+            }
+        }
+
+        // The piece x local-body rule (design 2.10): while the trafo inputs
+        // are on, a registered piece never collides with a body whose name
+        // the resync's keep-local predicate names (the level-end balloon and
+        // its airship, exception (c)).  Asked when a pair first becomes a
+        // collision candidate, so it is a static pair rule; every other pair
+        // gets IVP_TRUE, which the meta filter ANDs with the others' - no
+        // other pair's result changes.
+        class trafo_piece_filter : public IVP_Collision_Filter {
+        public:
+            CKIpionManager* physics = nullptr;
+            IVP_Environment* environment = nullptr;
+            IVP_BOOL check_objects_for_collision_detection(IVP_Real_Object* object0, IVP_Real_Object* object1) override {
+                const trafo_bridge_state* state = find_trafo_state(physics);
+                if (!state || !state->filter_enabled || state->pieces.empty()) return IVP_TRUE;
+                const char* n0 = object0 ? object0->get_name() : nullptr;
+                const char* n1 = object1 ? object1->get_name() : nullptr;
+                if (!n0 || !n1) return IVP_TRUE;
+                const bool piece0 = state->pieces.count(n0) != 0, piece1 = state->pieces.count(n1) != 0;
+                if (piece0 && !piece1 && bmmo::session::keep_local_body(n1)) return IVP_FALSE;
+                if (piece1 && !piece0 && bmmo::session::keep_local_body(n0)) return IVP_FALSE;
+                return IVP_TRUE;
+            }
+            void environment_will_be_deleted(IVP_Environment*) override {
+                if (trafo_bridge_state* state = find_trafo_state(physics))
+                    state->filters.erase(std::remove(state->filters.begin(), state->filters.end(), this), state->filters.end());
+                delete this;
+            }
+        };
+
+        // Detached, squared and back at its initial conditions: one piece
+        // frame and every piece below it, with their stale hulls forgotten
+        // while they have no body - restore_explosion_pieces' work for one
+        // frame (see there).  `exempt` gets the frame and its pieces.
+        int restore_piece_frame(CKScene* scene, CKIpionManager* physics, CK3dEntity* frame, std::vector<CK_ID>* exempt) {
+            int restored = 0;
+            if (exempt) exempt->push_back(frame->GetID());
+            restored += restore_initial_condition(scene, frame);
+            frame->SetParent(nullptr, TRUE);
+            VxMatrix world = frame->GetWorldMatrix();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) world[r][c] = r == c ? 1.0f : 0.0f;
+            world[3][3] = 1.0f;
+            frame->SetWorldMatrix(world);
+            for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child)) {
+                restored += restore_initial_condition(scene, child);
+                if (exempt) exempt->push_back(child->GetID());
+                if (physics && !physics->GetPhysicsObject(child))
+                    if (CKMesh* mesh = child->GetCurrentMesh())
+                        if (mesh->GetName()) physics->RemoveCollisionSurface(mesh->GetName());
+            }
+            return restored;
+        }
+
+        // Every registered set's entities appended to the body guard's
+        // exemption list (engine change #13), in player order.
+        void append_set_exemptions(CKIpionManager* physics) {
+            trafo_bridge_state* state = physics ? find_trafo_state(physics) : nullptr;
+            if (!state) return;
+            prune_stale_sets(physics, *state);
+            for (const auto& [player, set]: state->sets)
+                for (CK_ID id: set.entities)
+                    if (!physics->m_KeepLevelBodiesFree.IsHere(id)) physics->m_KeepLevelBodiesFree.PushBack(id);
+        }
+
         // The "Set Position" block (3DTrans) that opens every explosion
         // script: "Set Position (0,0,0, Referential = Ball_Pos_Frame)" on the
         // pieces frame.  Wrapped so the pieces start every explosion from an
-        // exact pose (see restore_explosion_pieces).
+        // exact pose (see restore_explosion_pieces).  A registered set's
+        // frame (bridge v21) is restored alone (its referential is its own
+        // BMMO_TrafoRef, not Ball_Pos_Frame); every other target takes the
+        // originals' path as before.  Then, when the seed registry has an
+        // entry for the target frame, the generator restarts from it: the
+        // explosion's draws are a function of (seed, set) alone (design 2.6).
         const CKGUID kSetPositionGuid(0xe456e78a, 0x456789aa);
         CKBEHAVIORFCT g_set_position_original = nullptr;
 
         int explosion_set_position(const CKBehaviorContext& behcontext) {
-            restore_explosion_pieces(behcontext.Context);
+            CKBehavior* beh = behcontext.Behavior;
+            CKObject* target = beh ? beh->GetTarget() : nullptr;
+            CKIpionManager* physics = CKIpionManager::GetManager(behcontext.Context);
+            trafo_bridge_state* state = physics ? find_trafo_state(physics) : nullptr;
+            if (state) prune_stale_sets(physics, *state);
+            const CK_ID frame = target ? target->GetID() : 0;
+            CK3dEntity* set_frame = state && frame && is_set_frame(*state, frame) ? CK3dEntity::Cast(target) : nullptr;
+            CKScene* scene = behcontext.Context ? behcontext.Context->GetCurrentScene() : nullptr;
+            if (set_frame && scene) restore_piece_frame(scene, physics, set_frame, nullptr);
+            else restore_explosion_pieces(behcontext.Context);
+            if (state && frame)
+                if (const auto seed = state->seeds.find(frame); seed != state->seeds.end()) random_reset(seed->second);
             return g_set_position_original ? g_set_position_original(behcontext) : CKBR_OK;
         }
 
@@ -2339,6 +2487,9 @@ namespace bmmo::physics {
         // local offset that costs an inexact product per read.
         if (CK3dEntity* pos_frame = find_entity(context, "Ball_Pos_Frame"))
             if (pos_frame->GetParent()) pos_frame->SetLocalMatrix(VxMatrix::Identity());
+        // Bridge v21: the list is rebuilt from the originals and every
+        // registered trafo set (none outside a session with trafo inputs).
+        if (physics) append_set_exemptions(physics);
         return restored;
     }
 
@@ -2356,6 +2507,176 @@ namespace bmmo::physics {
                     patched += patch_random_blocks(behavior) + patch_explosion_placement(behavior);
         }
         return patched;
+    }
+
+    // ---- bridge API v21: the trafo sets (game/trafo_sets.hpp) ----
+
+    namespace {
+        // The blocks a set's explosions route through the bridge: Random
+        // blocks through the generator, opening Set Position blocks through
+        // the wrapper - counted as they stand after the patch (a copy may
+        // carry the patched function already).
+        void count_routed(CKBehavior* behavior, int& randoms, int& set_positions) {
+            if (!behavior) return;
+            if (behavior->IsUsingFunction()) {
+                if (behavior->GetPrototypeGuid() == kRandomBlockGuid && behavior->GetFunction() == &random_block) ++randoms;
+                if (behavior->GetPrototypeGuid() == kSetPositionGuid && behavior->GetFunction() == &explosion_set_position)
+                    ++set_positions;
+            }
+            const int count = behavior->GetSubBehaviorCount();
+            for (int i = 0; i < count; ++i) count_routed(behavior->GetSubBehavior(i), randoms, set_positions);
+        }
+    }
+
+    bool trafo_set_register(CKIpionManager* physics, uint32_t player, const uint32_t frames[3], const uint32_t* explosions,
+                            int explosion_count, trafo_set_report& out, std::string& error) {
+        error.clear();
+        out = trafo_set_report{};
+        CKContext* context = physics ? physics->m_Context : nullptr;
+        if (!context || !frames) {
+            error = "the trafo set registry needs a physics manager with a context";
+            return false;
+        }
+        if (!CKGetPrototypeFromGuid(kRandomBlockGuid)) {
+            error = "the Random building block (Logics) is not registered";
+            return false;
+        }
+        trafo_bridge_set set;
+        for (int t = 0; t < 3; ++t) {
+            auto* frame = CK3dEntity::Cast(context->GetObject(static_cast<CK_ID>(frames[t])));
+            if (!frame) {
+                error = "piece frame " + std::to_string(frames[t]) + " is not a 3D entity";
+                return false;
+            }
+            set.frames[t] = frames[t];
+            set.frame_names[t] = frame->GetName() ? frame->GetName() : "";
+            set.entities.push_back(frame->GetID());
+            for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child)) {
+                set.entities.push_back(child->GetID());
+                if (child->GetName()) set.pieces.emplace_back(child->GetName());
+            }
+        }
+        for (int i = 0; i < explosion_count; ++i) {
+            auto* script = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(explosions ? explosions[i] : 0u)));
+            if (!script) {
+                error = "explosion script " + std::to_string(explosions ? explosions[i] : 0u) + " is not a behavior";
+                return false;
+            }
+            patch_random_blocks(script);
+            patch_explosion_placement(script);
+            count_routed(script, out.randoms, out.set_positions);
+        }
+        trafo_bridge_state& state = trafo_states()[physics];
+        prune_stale_sets(physics, state);
+        // One registration per player: a second one would leave the first's
+        // entities on the guard's exemption list and its frames' seeds behind
+        // (the builder refuses an existing player, reselect unregisters first).
+        if (state.sets.count(player)) {
+            error = "player " + std::to_string(player) + " has a registered trafo set already";
+            return false;
+        }
+        for (const std::string& name: set.pieces) state.pieces[name] = player;
+        out.exempt = static_cast<int32_t>(set.entities.size());
+        out.pieces = static_cast<int32_t>(set.pieces.size());
+        state.sets[player] = std::move(set);
+        append_set_exemptions(physics);
+        return true;
+    }
+
+    bool trafo_set_unregister(CKIpionManager* physics, uint32_t player, std::string& error) {
+        error.clear();
+        trafo_bridge_state* state = physics ? find_trafo_state(physics) : nullptr;
+        if (!state || !state->sets.count(player)) {
+            error = "no trafo set registered for player " + std::to_string(player);
+            return false;
+        }
+        const auto it = state->sets.find(player);
+        for (const std::string& name: it->second.pieces) state->pieces.erase(name);
+        for (uint32_t frame: it->second.frames) state->seeds.erase(static_cast<CK_ID>(frame));
+        const std::vector<CK_ID> entities = it->second.entities;
+        state->sets.erase(it);
+        // Off the guard's exemption list (the originals' and the other sets'
+        // entries stay where they are).
+        for (CK_ID id: entities) physics->m_KeepLevelBodiesFree.Remove(id);
+        // The manager's entry goes with its last set while no filter is
+        // installed (a later manager at the same address starts clean).
+        if (state->sets.empty() && state->filters.empty()) trafo_states().erase(physics);
+        return true;
+    }
+
+    void trafo_set_seed(CKIpionManager* physics, uint32_t frame_id, int32_t seed) {
+        if (!physics) return;
+        trafo_bridge_state& state = trafo_states()[physics];
+        if (seed == 0) state.seeds.erase(static_cast<CK_ID>(frame_id));
+        else state.seeds[static_cast<CK_ID>(frame_id)] = seed;
+    }
+
+    int trafo_set_unmake(CKIpionManager* physics, uint32_t frame_id, std::string& error) {
+        error.clear();
+        CKContext* context = physics ? physics->m_Context : nullptr;
+        CKScene* scene = context ? context->GetCurrentScene() : nullptr;
+        auto* frame = context ? CK3dEntity::Cast(context->GetObject(static_cast<CK_ID>(frame_id))) : nullptr;
+        if (!frame || !scene) {
+            error = "piece frame " + std::to_string(frame_id) + " is not a 3D entity of the current scene";
+            return -1;
+        }
+        const trafo_bridge_state* state = find_trafo_state(physics);
+        if (!state || !is_set_frame(*state, frame->GetID())) {
+            error = "piece frame " + std::to_string(frame_id) + " belongs to no registered trafo set";
+            return -1;
+        }
+        int removed = 0;
+        for (CK3dEntity* child = frame->HierarchyParser(nullptr); child; child = frame->HierarchyParser(child)) {
+            PhysicsObject* object = physics->GetPhysicsObject(child);
+            if (!object || !object->m_RealObject) continue;
+            ++physics->m_DePhysicalizeCalls;
+            object->m_RealObject->delete_silently();
+            ++removed;
+        }
+        restore_piece_frame(scene, physics, frame, nullptr);
+        return removed;
+    }
+
+    bool trafo_set_filter(CKIpionManager* physics, bool enable, std::string& error) {
+        error.clear();
+        IVP_Environment* environment = physics ? physics->GetEnvironment() : nullptr;
+        if (!physics) {
+            error = "no physics manager";
+            return false;
+        }
+        trafo_bridge_state& state = trafo_states()[physics];
+        state.filter_enabled = enable;
+        if (!enable) return true;
+        if (!environment) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        for (trafo_piece_filter* installed: state.filters)
+            if (installed->environment == environment) return true;   // idempotent per environment
+        auto* meta = static_cast<IVP_Meta_Collision_Filter*>(environment->get_collision_filter());
+        if (!meta) {
+            error = "the environment has no collision filter";
+            return false;
+        }
+        auto* filter = new trafo_piece_filter();
+        filter->physics = physics;
+        filter->environment = environment;
+        meta->add_collision_filter(filter);
+        state.filters.push_back(filter);
+        return true;
+    }
+
+    std::string describe_trafo_sets(CKIpionManager* physics) {
+        const trafo_bridge_state* state = physics ? find_trafo_state(physics) : nullptr;
+        if (!state) return "no trafo sets";
+        std::string out = "sets=" + std::to_string(state->sets.size()) + " pieces=" + std::to_string(state->pieces.size())
+                        + " seeds=" + std::to_string(state->seeds.size()) + " filter=" + (state->filter_enabled ? "on" : "off")
+                        + " exempt=" + std::to_string(physics->m_KeepLevelBodiesFree.Size());
+        for (const auto& [player, set]: state->sets)
+            out += " | " + std::to_string(player) + ": frames " + std::to_string(set.frames[0]) + "/"
+                 + std::to_string(set.frames[1]) + "/" + std::to_string(set.frames[2]) + ", "
+                 + std::to_string(set.entities.size()) + " entities";
+        return out;
     }
 
     // ---- bridge API v8: session clock guard ----

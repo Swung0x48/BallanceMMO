@@ -98,7 +98,9 @@ left. Each design named here has its own document with its step table.
    cliff of item 8 meeting the fixed reach of plan step 12, reproduced
    without a raise: core design "As built (step R5)")
    (`session-client-core-design.md` §6.2).
-5. The trafo as a replicated input (`trafo-replication-design.md`): T1-T5.
+5. The trafo as a replicated input (`trafo-replication-design.md`): T1-T5
+   (T1 built: host support, bridge v21, SimTool S0-S13; S8 found no
+   PreSimulate entry, so 9.2 needs nothing: "As built (step T1)").
    Per-player piece sets; explosion, paper wind and reset in every world;
    a 20 s piece life; the explosion stamped at the dephysic (vanilla timing);
    out-of-reach trafos rejected and logged.

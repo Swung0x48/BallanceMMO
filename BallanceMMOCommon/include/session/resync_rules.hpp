@@ -32,7 +32,12 @@
 #include <vector>
 
 namespace bmmo::session {
+    // The originals only: a trafo set's copies (game/trafo_sets.hpp, named
+    // "<original>_Trafo<player>") are selected through the sets' registry,
+    // never by name (trafo-replication design 4.3; the prefixes would match
+    // the copies' explosions and resets).
     inline bool is_trafo_script_name(std::string_view script) {
+        if (script.find("_Trafo") != std::string_view::npos) return false;
         return script.substr(0, 15) == "Ball_Explosion_" || script.substr(0, 17) == "Ball_ResetPieces_"
             || script == "Ball_PaperWind";
     }

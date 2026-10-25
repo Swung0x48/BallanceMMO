@@ -970,6 +970,7 @@ namespace bmmo::sim {
         update_proximity_probes();
         update_ball_identity_reads();
         update_sectors();
+        if (frame_hook_) frame_hook_();
         // Navigation edges and parking run from the PreSimulate pass (see
         // tick_callback); one callback at a time in case a tick had no
         // physics step.

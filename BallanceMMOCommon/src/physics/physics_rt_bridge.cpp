@@ -692,6 +692,55 @@ namespace {
         return 1;
     }
 
+    // v21: the trafo sets.
+    int32_t api_trafo_set_register(void* manager, uint32_t player, const uint32_t frames[3], const uint32_t* explosions,
+                                   int32_t explosion_count, bmmo_physics_trafo_set_report* out, char* error,
+                                   uint32_t error_size) {
+        if (!manager || !frames) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        bmmo_physics_trafo_set_report report{};
+        std::string text;
+        const bool ok = bmmo::physics::trafo_set_register(static_cast<CKIpionManager*>(manager), player, frames, explosions,
+                                                          explosion_count, report, text);
+        if (out) *out = report;
+        if (!ok) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_trafo_set_unregister(void* manager, uint32_t player, char* error, uint32_t error_size) {
+        std::string text;
+        if (!bmmo::physics::trafo_set_unregister(static_cast<CKIpionManager*>(manager), player, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    void api_trafo_set_seed(void* manager, uint32_t frame_id, int32_t seed) {
+        bmmo::physics::trafo_set_seed(static_cast<CKIpionManager*>(manager), frame_id, seed);
+    }
+
+    int32_t api_trafo_set_unmake(void* manager, uint32_t frame_id, char* error, uint32_t error_size) {
+        std::string text;
+        const int removed = bmmo::physics::trafo_set_unmake(static_cast<CKIpionManager*>(manager), frame_id, text);
+        if (removed < 0) set_error(error, error_size, text);
+        return removed;
+    }
+
+    int32_t api_trafo_set_filter(void* manager, int32_t enable, char* error, uint32_t error_size) {
+        std::string text;
+        if (!bmmo::physics::trafo_set_filter(static_cast<CKIpionManager*>(manager), enable != 0, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     int32_t api_set_event_log_muted(void* manager, int32_t muted, char* error, uint32_t error_size) {
         (void)manager; (void)error; (void)error_size;
         bmmo::physics::set_event_log_muted(muted != 0);
@@ -750,6 +799,11 @@ namespace {
         api_savestate_set,
         api_set_body_matrix,
         api_savestate_set_travelling,
+        api_trafo_set_register,
+        api_trafo_set_unregister,
+        api_trafo_set_seed,
+        api_trafo_set_unmake,
+        api_trafo_set_filter,
     };
 }
 

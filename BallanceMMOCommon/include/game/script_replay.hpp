@@ -51,10 +51,12 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
 #include <session/resync_rules.hpp>
+#include <session/trafo_input.hpp>
 
 #include "CKAll.h"
 
@@ -80,6 +82,16 @@ namespace bmmo::game {
         // links, the three data-array cells the sector manager and the modules
         // read (plan doc 10).
         static constexpr uint32_t kVersion = 2;
+        // v3 (docs/trafo-replication-design.md 4.5, step T1): the v2 record,
+        // byte for byte after the version word, then the trafo sets' scripts
+        // keyed by id - written only when a trafo part is selected, so every
+        // record without trafo sets stays v2:
+        //   u32 trafo_count, per script: u32 id, u8 present, block (as v2)
+        // A selected trafo script the record does not list (its set was made
+        // after the record) is restored to its set's built state; a recorded
+        // one that no longer exists fails the restore
+        // (session/trafo_input.hpp plan_trafo_record_restore).
+        static constexpr uint32_t kVersionTrafo = 3;
         // The flags a restore writes: the engine's per-frame activation
         // bookkeeping.  Everything else in the flag word describes the graph.
         static constexpr CKDWORD kRuntimeFlags = CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME
@@ -102,6 +114,18 @@ namespace bmmo::game {
             std::vector<CK_ID> satellites;
             bool empty() const { return scripts.empty() && satellites.empty(); }
             void clear() { scripts.clear(); satellites.clear(); }
+        };
+        // The trafo sets' part of a record (step T1, game/trafo_sets.hpp):
+        // the scripts the trafo frame runs, in its order (sets by player id,
+        // the copied order inside a set), and each one's built state - its
+        // block bytes right after the set was built.  Kept beside the
+        // selection, never in it: `selection` is held by the legacy retail
+        // state (physics_session_state::script_ids), whose layout stays as it
+        // is until R7 (session-core design 3.2).
+        struct trafo_part {
+            std::vector<CK_ID> scripts;
+            std::map<CK_ID, std::vector<uint8_t>> built;
+            bool empty() const { return scripts.empty(); }
         };
         static bool is_force_block(CKBehavior* beh) {
             return beh && beh->IsUsingFunction() && beh->GetPrototypeGuid() == force_block_guid();
@@ -134,6 +158,7 @@ namespace bmmo::game {
             uint32_t joints_reset = 0, joints_missing = 0, links_rearmed = 0, links_unrestorable = 0, links_live_pending = 0;
             uint32_t cells_written = 0;
             uint32_t joints_released = 0;   // handles nulled because the rollback destroyed their body (release_joints)
+            uint32_t trafo_built = 0;       // trafo scripts the record did not list, put to their set's built state (v3)
         };
         static restore_counters& last_restore() {
             static restore_counters counters;
@@ -365,11 +390,12 @@ namespace bmmo::game {
         // deterministic world, so two captures of the same tick compare
         // byte for byte.
         static bool capture(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
-                            std::vector<uint8_t>& out) {
+                            std::vector<uint8_t>& out, const trafo_part* trafo = nullptr) {
             out.clear();
             if (!context) return false;
+            const bool v3 = trafo && !trafo->empty();
             put_u32(out, kMagic);
-            put_u32(out, kVersion);
+            put_u32(out, v3 ? kVersionTrafo : kVersion);
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 put_u32(out, static_cast<uint32_t>(list->size()));
                 for (CK_ID id: *list) {
@@ -389,7 +415,39 @@ namespace bmmo::game {
                 put_u8(out, present ? 1 : 0);
                 put_u32(out, static_cast<uint32_t>(value));
             }
+            if (v3) {
+                put_u32(out, static_cast<uint32_t>(trafo->scripts.size()));
+                for (CK_ID id: trafo->scripts) {
+                    auto* beh = CKBehavior::Cast(context->GetObject(id));
+                    put_u32(out, static_cast<uint32_t>(id));
+                    put_u8(out, beh ? 1 : 0);
+                    if (beh) capture_behavior(beh, hooks, out);
+                }
+            }
             return true;
+        }
+
+        // Whether a record skips a parameter's bytes (is_opaque below): a
+        // trafo set's level reference skips the same (game/trafo_sets.hpp).
+        static bool opaque_parameter(CKParameter* parameter) { return is_opaque(parameter); }
+
+        // One script's block bytes as a record carries them (a trafo set's
+        // built state, game/trafo_sets.hpp).
+        static void capture_script_block(CKBehavior* script, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {
+            out.clear();
+            if (script) capture_behavior(script, hooks, out);
+        }
+        // Those bytes written back into the same script - every block, IO,
+        // parameter and force or joint they name, as a restore writes a
+        // recorded script.  Fails, naming the place, when they do not match
+        // the graph.
+        static bool restore_script_block(CKBehavior* script, const script_replay_hooks& hooks,
+                                         const std::vector<uint8_t>& bytes, std::string* error) {
+            if (error) error->clear();
+            if (!script) return fail(error, "no script");
+            size_t pos = 0;
+            if (!restore_behavior(script, hooks, bytes, pos, error, true)) return false;
+            return pos == bytes.size() || fail(error, "trailing bytes in a script block");
         }
 
         static constexpr int kCellCount = 3;
@@ -441,7 +499,8 @@ namespace bmmo::game {
         // live state and is not executed.
         static bool restore(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
                             const std::vector<uint8_t>& in, std::string* error, std::vector<CK_ID>* replayed = nullptr,
-                            const std::vector<CK_ID>* kept_live = nullptr, bool replay_activation = false) {
+                            const std::vector<CK_ID>* kept_live = nullptr, bool replay_activation = false,
+                            const trafo_part* trafo = nullptr) {
             if (error) error->clear();
             if (replayed) replayed->clear();
             last_restore() = restore_counters{};
@@ -449,7 +508,8 @@ namespace bmmo::game {
             size_t pos = 0;
             uint32_t magic = 0, version = 0;
             if (!get_u32(in, pos, magic) || magic != kMagic) return fail(error, "not a script snapshot");
-            if (!get_u32(in, pos, version) || version != kVersion) return fail(error, "snapshot version");
+            if (!get_u32(in, pos, version) || (version != kVersion && version != kVersionTrafo))
+                return fail(error, "snapshot version");
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 const bool scripts = list == &sel.scripts;
                 uint32_t count = 0;
@@ -479,17 +539,56 @@ namespace bmmo::game {
                 if (!get_u8(in, pos, present) || !get_u32(in, pos, value)) return fail(error, "truncated cells");
                 if (present && replay_activation && write_cell(context, c, static_cast<int>(value))) ++last_restore().cells_written;
             }
-            return pos == in.size() || fail(error, "trailing bytes");
+            // Record v3: the trafo sets' scripts (design 4.5).  Every one is
+            // written, active or not: the trafo frame runs them, and what
+            // activates them is the trafo inputs the replay re-applies.
+            std::vector<uint32_t> recorded;
+            if (version == kVersionTrafo) {
+                uint32_t count = 0;
+                if (!get_u32(in, pos, count)) return fail(error, "truncated trafo scripts");
+                for (uint32_t i = 0; i < count; ++i) {
+                    uint32_t id = 0;
+                    uint8_t present = 0;
+                    if (!get_u32(in, pos, id) || !get_u8(in, pos, present)) return fail(error, "truncated trafo script");
+                    recorded.push_back(id);
+                    if (!present) continue;
+                    auto* beh = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(id)));
+                    if (!beh) return fail(error, "a recorded trafo script is gone");
+                    if (!restore_behavior(beh, hooks, in, pos, error, true)) return false;
+                }
+            }
+            if (pos != in.size()) return fail(error, "trailing bytes");
+            if (trafo && !trafo->empty()) {
+                std::vector<uint32_t> selected;
+                for (CK_ID id: trafo->scripts) selected.push_back(static_cast<uint32_t>(id));
+                const auto plan = bmmo::session::plan_trafo_record_restore(recorded, selected, [context](uint32_t id) {
+                    return CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(id))) != nullptr;
+                });
+                for (uint32_t id: plan.to_built) {
+                    const auto built = trafo->built.find(static_cast<CK_ID>(id));
+                    auto* beh = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(id)));
+                    if (built == trafo->built.end() || !beh) return fail(error, "a trafo script without a built state");
+                    if (!restore_script_block(beh, hooks, built->second, error)) return false;
+                    ++last_restore().trafo_built;
+                }
+            }
+            return true;
         }
 
         // One behaviour frame of the scripts, the way the behaviour manager
         // runs it: the next-frame activation flags first, then every active
         // script's graph.  Called before the physics step of a replayed tick.
+        // `trafo` (step T1): the trafo list, run first - before the
+        // satellites and the scripts - the live frame's order, where the
+        // trafo frame runs before the engine's whole behaviour pass,
+        // Gameplay_Ingame's satellites included (trafo-replication design
+        // 2.5; sim/physics_world.cpp's frame hook).
         static int execute_frame(CKContext* context, const selection& sel, float delta_ms,
-                                 const std::vector<CK_ID>* replayed = nullptr) {
+                                 const std::vector<CK_ID>* replayed = nullptr, const std::vector<CK_ID>* trafo = nullptr) {
             if (!context) return 0;
             int executed = 0;
-            // The satellites first, as the live frame runs Gameplay_Ingame
+            if (trafo) executed += execute_scripts(context, *trafo, delta_ms);
+            // The satellites next, as the live frame runs Gameplay_Ingame
             // before the modules' scripts.  A block is executed the way its
             // graph's iterator executes it, and only while the graph keeps it
             // active (a continuous block stays active between frames).
@@ -499,7 +598,16 @@ namespace bmmo::game {
                 beh->Execute(delta_ms);
                 ++executed;
             }
-            const std::vector<CK_ID>& scripts = replayed ? *replayed : sel.scripts;
+            executed += execute_scripts(context, replayed ? *replayed : sel.scripts, delta_ms);
+            return executed;
+        }
+
+        // One behaviour frame of a list of root scripts: the next-frame flags
+        // of every one first, then every active one in the list's order (the
+        // selection's frame above, and the trafo frame of game/trafo_sets.hpp).
+        static int execute_scripts(CKContext* context, const std::vector<CK_ID>& scripts, float delta_ms) {
+            if (!context) return 0;
+            int executed = 0;
             for (CK_ID id: scripts) {
                 auto* beh = CKBehavior::Cast(context->GetObject(id));
                 if (!beh) continue;
@@ -547,6 +655,7 @@ namespace bmmo::game {
                 d.logical = true; ++d.logical_count; d.where = "header";
                 return d;
             }
+            const bool v3 = va == kVersionTrafo;
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 uint32_t ca = 0, cb = 0;
                 if (!get_u32(a, pa, ca) || !get_u32(b, pb, cb) || ca != cb) {
@@ -579,6 +688,27 @@ namespace bmmo::game {
                                            + "] " + std::to_string(va) + " vs " + std::to_string(vb);
                     if (d.where.empty()) d.where = what;
                     d.note(what);
+                }
+            }
+            if (v3) {
+                uint32_t ca = 0, cb = 0;
+                if (!get_u32(a, pa, ca) || !get_u32(b, pb, cb) || ca != cb) {
+                    d.logical = true; ++d.logical_count;
+                    if (d.where.empty()) d.where = "trafo list count";
+                    return d;
+                }
+                for (uint32_t i = 0; i < ca; ++i) {
+                    uint32_t ia = 0, ib = 0;
+                    uint8_t qa = 0, qb = 0;
+                    if (!get_u32(a, pa, ia) || !get_u32(b, pb, ib) || !get_u8(a, pa, qa) || !get_u8(b, pb, qb) || ia != ib || qa != qb) {
+                        d.logical = true; ++d.logical_count;
+                        if (d.where.empty()) d.where = "trafo list";
+                        return d;
+                    }
+                    if (!qa) continue;
+                    auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(ia))) : nullptr;
+                    const std::string script_name = beh && beh->GetName() ? beh->GetName() : std::to_string(ia);
+                    if (!diff_behavior(beh, script_name, a, pa, b, pb, d)) return d;
                 }
             }
             return d;
@@ -668,8 +798,8 @@ namespace bmmo::game {
             index = {};
             size_t a = 0;
             uint32_t magic = 0, version = 0, count = 0;
-            if (!get_u32(record, a, magic) || magic != kMagic || !get_u32(record, a, version) || version != kVersion
-                    || !get_u32(record, a, count))
+            if (!get_u32(record, a, magic) || magic != kMagic || !get_u32(record, a, version)
+                    || (version != kVersion && version != kVersionTrafo) || !get_u32(record, a, count))
                 return false;
             for (uint32_t i = 0; i < count; ++i) {
                 record_index::script s;
