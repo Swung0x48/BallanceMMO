@@ -41,8 +41,6 @@ namespace bmmo::session {
             journal_.writer().checkpoint(snapshot.tick, flags, snapshot.bodies);
         }
         if (s.have_snapshot_ && snapshot.tick <= s.last_snapshot_tick_ && !snapshot.full) { ++s.snapshots_stale_; return; }
-        // The snapshot stream is alive as of this frame (acked_input, R1).
-        s.snapshot_frame_ = s.frames_since_anchor_;
         // (Whether the server had our input for the tick it simulated is
         // read from the relay header's `acked` now, every tick and with
         // snapshots off too: note_held_section.)
@@ -129,13 +127,6 @@ namespace bmmo::session {
         s.have_snapshot_ = true;
         s.last_snapshot_tick_ = snapshot.tick;
         ++s.snapshots_applied_;
-        // The server's read cursor for our input (acked_input, R1): its first
-        // value of a numbering is the baseline, and every change moves it.
-        if (s.assigned_ && (!s.snapshot_acked_known_ || snapshot.acked_input_tick != s.snapshot_acked_tick_)) {
-            s.snapshot_acked_known_ = true;
-            s.snapshot_acked_tick_ = snapshot.acked_input_tick;
-            s.snapshot_acked_frame_ = s.frames_since_anchor_;
-        }
         if (config.own_body_backstop) check_own_body(snapshot);
         if (config.rollback) {
             for (const auto& body: snapshot.bodies)

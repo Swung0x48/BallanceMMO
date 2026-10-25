@@ -152,13 +152,13 @@ namespace {
         clock_type::time_point restart_deadline{};
         uint64_t last_rebases = 0;
         uint64_t frames = 0, refused = 0;
-        // Transitional host triggers (design 3.2, until R4 and 7.1 decision
-        // 1): the run of snapshots with no record of their tick, and the
-        // starvation detector's window start after it fired.
+        // The transitional host trigger (design 3.2, until 7.1 decision 1):
+        // the run of snapshots with no record of their tick.  (The input
+        // starvation detector beside it went at R4: the core's held
+        // notices and check_held_complete answer what it guessed at.)
         int consecutive_unmatched = 0;
         uint64_t resyncs_seen = 0;
-        int64_t starvation_from = -1;
-        uint64_t unmatched_resyncs = 0, starvation_resyncs = 0;
+        uint64_t unmatched_resyncs = 0;
 
         // The mailbox drain: what the game thread took, dispatched to the
         // core or - while no core session runs (R0: always) - decoded, to
@@ -453,8 +453,7 @@ namespace {
         host.frames = host.refused = 0;
         host.consecutive_unmatched = 0;
         host.resyncs_seen = 0;
-        host.starvation_from = -1;
-        host.unmatched_resyncs = host.starvation_resyncs = 0;
+        host.unmatched_resyncs = 0;
         host.drop_births_armed = 0;
         host.births_dropped = 0;
         host.beams_pending.clear();
@@ -636,7 +635,9 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // design 2.3 fallback this host's capabilities select (no own body
     // control: a moved own birth is the snapshots' or a resync, a rejected
     // or missing one re-reported while current, a superseded one nothing);
-    // the held section counted only (R4), own_body_backstop on.
+    // the own corrections (R4, late-player part one: a held notice of our
+    // own substituted tick amends the tick's record and replays from it),
+    // own_body_backstop on.
     bs::core_config config;
     config.journal_checkpoint_ticks = static_cast<uint32_t>(bs::client_journal::kCheckpointTicks);
     if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
@@ -666,7 +667,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     config.input_rewind = true;   // R2
     config.lifecycle_rewind = true;   // R3
     config.own_echoes = true;   // R3
-    config.own_corrections = false;
+    config.own_corrections = true;   // R4
     config.own_body_backstop = true;
     // R1's policy (the legacy frame's order) only stood in for the input
     // rewind: with it a key edge relayed between the frames replays from its
@@ -1091,27 +1092,10 @@ void BallanceMMOClient::core_host_frame() {
             host.consecutive_unmatched = 0;
         }
     }
-    // ... and input starvation until R4 (the legacy
-    // physics_session_check_input_starvation over core.acked_input()): the
-    // server's read cursor for our input has not moved for 2 s while the
-    // snapshot stream is alive.
-    if (core.assigned() && !core.resync_pending()) {
-        const auto acked = core.acked_input();
-        if (!acked.known || core.frames_since_anchor() < host.starvation_from) {
-            host.starvation_from = -1;
-        } else if (core.frames_since_anchor() - acked.snapshot_frame <= 66) {
-            const int64_t from = std::max(acked.frame, host.starvation_from);
-            const int64_t starved = core.frames_since_anchor() - from;
-            if (starved > 132) {
-                logger_->Warn("Physics session %u: server has not consumed a fresh input for %lld ticks (acked %u, our "
-                              "tick %u); tick numbering hole suspected", core.session_id(), static_cast<long long>(starved),
-                              acked.tick, core.current_tick());
-                ++host.starvation_resyncs;
-                core.request_resync("no fresh input consumed for 2 s");
-                host.starvation_from = core.frames_since_anchor();
-            }
-        }
-    }
+    // (The input-starvation detector that followed here is deleted at R4:
+    // every own tick the server substituted is named by a held notice,
+    // amended and replayed by the core, and a notice that never arrives is
+    // the core's check_held_complete's - late-player design 1.3, 1.4.)
     // Step A3 (resync design 2.6.6): the resync hold.  While a pending exact
     // resync's anchor would leave the history with the next step, nothing
     // steps: the mailbox is drained (its state applies the resync and ends
@@ -1808,18 +1792,18 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
             if (!connected()) core_latched.store(false);
             core_on.store(on);
             if (!on) return "ok session core off: the next session runs on the legacy path";
-            return "ok session core on: the next session runs on the shared core (step R3: snapshot rollback, the "
-                   "input and lifecycle rewinds, the own echoes)";
+            return "ok session core on: the next session runs on the shared core (step R4: snapshot rollback, the "
+                   "input and lifecycle rewinds, the own echoes, the own corrections)";
         }
         if (!value.empty() && value != "status") return "error usage: session core on|off|status";
         return std::format("ok core={} latched={} made={} error='{}' sessions={} host_phase={} frames={} refused={} "
-                           "backstops={} births_dropped={} unmatched_resyncs={} starvation_resyncs={} mailbox: pushed={} "
+                           "backstops={} births_dropped={} unmatched_resyncs={} mailbox: pushed={} "
                            "dropped={} drained={} starts={} discarded={} undecodable={} beams_made={} nav_source_differs={} "
                            "mute_source_differs={}",
                            core_on.load() ? "on" : "off", core_latched.load() ? 1 : 0, host.core ? 1 : 0,
                            host.core_error, host.sessions_seen, host_phase_name(host.phase), host.frames, host.refused,
                            host.core ? host.core->own_body_backstops() : 0, host.births_dropped, host.unmatched_resyncs,
-                           host.starvation_resyncs, mailbox.pushed(), mailbox.dropped(), host.drained,
+                           mailbox.pushed(), mailbox.dropped(), host.drained,
                            host.starts, host.discarded, host.undecodable, host.beams_made, host.nav_source_differs,
                            host.mute_source_differs);
     }
@@ -2314,11 +2298,10 @@ std::string BallanceMMOClient::core_host_status_text() {
     h.activations_replayed = host.activations_replayed;
     h.script_reset_skips = host.script_reset_skips;
     return std::format("session={} phase={} core=1 tick={} assigned={} held={} keys_known={} own_phys={} "
-                       "backstops={} refused={} unmatched_resyncs={} starvation_resyncs={} {}",
+                       "backstops={} refused={} unmatched_resyncs={} {}",
                        core.session_id(), host_phase_name(host.phase), core.current_tick(), core.assigned() ? 1 : 0,
                        core.holding() ? 1 : 0, host.navigation_known ? 1 : 0, core.own_physicalized() ? 1 : 0,
-                       core.own_body_backstops(), host.refused, host.unmatched_resyncs, host.starvation_resyncs,
-                       core.status_text(h));
+                       core.own_body_backstops(), host.refused, host.unmatched_resyncs, core.status_text(h));
 }
 
 // The F3 panel's physics block for a core session.

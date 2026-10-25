@@ -4288,34 +4288,6 @@ namespace {
         }
     }
 
-    // acked_input (R1): the snapshots' acked_input_tick under the current
-    // numbering - its first value the baseline, the frame it last moved at,
-    // the frame of the newest snapshot - and a renumbering forgets it.
-    TEST(SessionClientCoreR1, AckedInputFollowsTheSnapshots) {
-        flow_fake fake;
-        session_client_core core(fake.make_flow(), session_capabilities{});
-        run_to_tick_125(core, fake);
-        core.config.rollback = false;
-        EXPECT_FALSE(core.acked_input().known);
-        auto snapshot = snapshot_message(9, 120, false, {});
-        snapshot.acked_input_tick = 118;
-        core.on_session_snapshot(snapshot);
-        auto acked = core.acked_input();
-        EXPECT_TRUE(acked.known);
-        EXPECT_EQ(acked.tick, 118u);
-        EXPECT_EQ(acked.frame, 6);
-        EXPECT_EQ(acked.snapshot_frame, 6);
-        state_of(core).frames_since_anchor_ = 9;
-        snapshot = snapshot_message(9, 121, false, {});
-        snapshot.acked_input_tick = 118;
-        core.on_session_snapshot(snapshot);
-        acked = core.acked_input();
-        EXPECT_EQ(acked.frame, 6) << "the cursor did not move";
-        EXPECT_EQ(acked.snapshot_frame, 9);
-        core.on_session_assign(assign_message(9, 300));
-        EXPECT_FALSE(core.acked_input().known) << "a renumbering";
-    }
-
     // drive_from_newest_relay (R1): with the policy, the step of T drives a
     // predicted mirror with the frame live_drive chooses at pre_step(T) from
     // the relay as the messages left it; without (the headless setting), with

@@ -76,7 +76,7 @@ left. Each design named here has its own document with its step table.
 | Mechanisms, sector activation as an input (the union), spawn impulse, deterministic explosions, IVP savestate rollbacks, script replay | built |
 | Shared session-client core (E0-E11); the headless client is a host | built |
 | Retail mod hosts the core: R0 plumbing, R1 frame and snapshot path, R2 relay rewind | built |
-| Late-player parts one (own frames substituted -> owner rewinds) and three (events re-stamped at acceptance, owner birth move, no barrier) | built (headless); retail: R4, R6 |
+| Late-player parts one (own frames substituted -> owner rewinds) and three (events re-stamped at acceptance, owner birth move, no barrier) | built (headless); retail: part one at R4 (built), part three at R6 |
 | Late-player part two revision 2 (meter, patience, SessionLead) | built behind flags, off; revision 3 replaces its policy |
 | Trafo pieces tracked as mechanisms, explosion scripts replayed (P) | built |
 | Proximity countdown restored at the anchor (Q) | built |
@@ -93,7 +93,7 @@ left. Each design named here has its own document with its step table.
    T0, B1 late or moved Sector stamps rewind, A1 portable script record, A2
    offline resync fidelity, A3 the exact resync on the wire, **A4 full-tier
    close-out**, A5 late joiner through the same path, B2, T1.
-4. Retail completes goal 3: R3 lifecycle rewind, R4 part one, R5 the slew
+4. Retail completes goal 3: R3 lifecycle rewind, R4 part one (built), R5 the slew
    (`session-client-core-design.md` §6.2).
 5. The trafo as a replicated input (`trafo-replication-design.md`): T1-T5.
    Per-player piece sets; explosion, paper wind and reset in every world;

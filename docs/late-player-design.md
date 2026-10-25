@@ -316,30 +316,45 @@ runs rebased into a resync. So:
 
 ### 1.4 Retail mod (`BallanceMMOClient/session`)
 
-The retail mod has no input rewind yet: `rewind_to` is never called.
+*Corrected at step R4 of `session-client-core-design.md` (§6.2).* The text
+this section held until then ("Applied now": the held section parsed,
+resolved against a sent ring, the own record amended and journaled
+SUBSTITUTED; the starvation detector reading the relay header's `acked`)
+described code the retail mod never had. What the retail mod does:
 
-**Applied now.** `physics_session_apply_queues` (physics_session_client.cpp:
-2187-2228) parses v3 and reads the held section the same way:
+**Session core on (the shared core; `session core on`, R1-R6).** The retail
+host (`session/core_host.cpp`) hosts the shared session-client core, which
+is the headless client's implementation of §1.3 verbatim
+(`BallanceMMOCommon/src/session/client_core_held.cpp`:
+`note_held_section`, `settle_held_tick`, `correct_own_tick`,
+`take_held_ahead`, `check_held_complete`; the replay in
+`client_core_frame.cpp` `replay_corrected_inputs` with the
+`own_replay_pacer`). From R4 the retail `core_config` sets
+`own_corrections`: a held notice of an own tick inside the reach amends
+the tick's record and the own ball is replayed from it; a notice past the
+reach, a source the sent ring no longer holds, a notice every copy of which
+was lost (`check_held_complete`) or an own replay `rewind_to` refuses asks
+for a resync, exactly as on the headless client. The retail replay drives
+the own ball from the amended record through the same navigation input as
+every other retail replay (R2). The counters are the core's
+(`subst=recv/diff/same/bodiless/rew/late`, `subst_skip`, `subst_missed`,
+`subst_coalesce`, `acked`, `held_total` on the status line; the window
+line's `subst`/`substrew`/`substco`). The host's transitional
+input-starvation detector (R1-R3, over the snapshots' `acked_input_tick`)
+is deleted at R4, and with it the core's `acked_input()` reader that only
+it used: what it guessed at from a cursor that stopped moving, the held
+notices now name tick by tick, with snapshots off too.
 
-- epoch check, dedupe, and resolution against a sent ring;
-- amends `s.own_inputs` (physics_session.hpp:174-175) and, through
-  `amend_recorded_input`, the record;
-- journals the frame as SUBSTITUTED and counts it.
-
-Any snapshot rollback anchored inside the held run (`on_snapshot`, 3131-3171)
-then replays the server's input instead of the player's. The starvation
-detector (3185-3211) reads `acked` from the relay header instead of from
-snapshots, so it also works with snapshots off. A held tick past the reach, or
-a `held_total` gap, requests a resync exactly as the headless client does.
-
-**Deferred to the input-rewind card.** The rewind itself:
-
-- factor the `input_at` lambda out of `physics_session_rollback` (3152-3167);
-- call `rewind_to(T-1)` from apply_queues;
-- keep `too_far` from turning an own rewind into a resync (2073-2074).
-
-Until that card lands, a retail player with snapshots off is corrected only
-by a resync.
+**Session core off (the legacy path, deleted at R7).** Unchanged and given
+nothing new (the retail BAR): `physics_session_apply_queues`
+(physics_session_client.cpp) parses v3, keeps the newest header of its
+epoch (`acked`, `held_total`) and counts the held records (`subst=recv/
+dup/stale_epoch`), and nothing else: no frame is resolved, stored, amended
+or journaled SUBSTITUTED, and nothing rewinds. A legacy retail player with
+snapshots off is corrected only by a resync. Its starvation detector
+(`physics_session_check_input_starvation`) still reads the snapshots'
+`acked_input_tick`, so with snapshots off it can judge only within 66
+frames of the full snapshots a body-set change still sends.
 
 ### 1.5 What the player experiences
 

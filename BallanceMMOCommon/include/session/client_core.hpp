@@ -669,14 +669,9 @@ namespace bmmo::session {
         uint32_t snapshots_without_own_ = 0;
         clock_type::time_point last_backstop_{};
         uint64_t own_backstops_ = 0;
-        // The snapshots' acked_input_tick as the retail starvation detector
-        // reads it (session_client_core::acked_input; the retail mod's
-        // acked_input_state): the newest one under this numbering, the frame
-        // it last moved at, and the frame of the newest applied snapshot.
-        bool snapshot_acked_known_ = false;
-        uint32_t snapshot_acked_tick_ = 0;
-        int64_t snapshot_acked_frame_ = -1;
-        int64_t snapshot_frame_ = -1;
+        // (The snapshots' acked_input_tick for the retail starvation
+        // detector went with the detector at R4: the relay header's `acked`
+        // is read in note_held_section, with snapshots off too.)
     };
 
     // Design 1.2 "Configuration": what the host decides for the session, filled
@@ -786,20 +781,6 @@ namespace bmmo::session {
     struct hold_state {
         bool held = false;
         bool timed_out = false;
-    };
-
-    // acked_input (design 1.3; R1): the snapshots' acked_input_tick - the
-    // last tick the server consumed a fresh input frame of ours for - as the
-    // retail starvation detector reads it (transitional host code until R4,
-    // design 3.2): whether a baseline exists for the current numbering, the
-    // newest value, the frames_since_anchor it last moved at, and the
-    // frames_since_anchor of the newest applied snapshot (a stopped stream is
-    // an outage, not a numbering hole).
-    struct acked_input_view {
-        bool known = false;
-        uint32_t tick = 0;
-        int64_t frame = -1;
-        int64_t snapshot_frame = -1;
     };
 
     // A body's quaternion (x, y, z, w) as the rows of the 3x3 rotation a
@@ -1086,12 +1067,8 @@ namespace bmmo::session {
         bool recorded_body_state(const std::string& entity, uint32_t tick, bmmo_physics_body_state& out) const {
             return s.rollback_.recorded_body_state(entity, tick, out);
         }
-        // What the retail host reads (R1): the snapshots' acked input (its
-        // transitional starvation detector), the own_body_backstop's
-        // re-reports, and the resync requests sent.
-        acked_input_view acked_input() const {
-            return {s.snapshot_acked_known_, s.snapshot_acked_tick_, s.snapshot_acked_frame_, s.snapshot_frame_};
-        }
+        // What the retail host reads (R1): the own_body_backstop's
+        // re-reports and the resync requests sent.
         uint64_t own_body_backstops() const { return s.own_backstops_; }
         uint64_t resyncs_sent() const { return s.resyncs_sent_; }
 

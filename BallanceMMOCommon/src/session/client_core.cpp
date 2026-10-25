@@ -262,9 +262,6 @@ namespace bmmo::session {
         s.snapshots_without_own_ = 0;
         s.own_backstops_ = 0;
         s.last_backstop_ = {};
-        s.snapshot_acked_known_ = false;
-        s.snapshot_acked_tick_ = 0;
-        s.snapshot_acked_frame_ = s.snapshot_frame_ = -1;
         frame_ = frame_scratch{};
         return begin_result{};
     }
@@ -417,12 +414,6 @@ namespace bmmo::session {
             return;
         }
         s.last_assign_first_tick_ = msg.first_tick;
-        // Both branches below renumber: what the server acked under the old
-        // numbering says nothing about the new one (R1: the retail
-        // starvation detector's baseline, acked_input).
-        s.snapshot_acked_known_ = false;
-        s.snapshot_acked_tick_ = 0;
-        s.snapshot_acked_frame_ = s.snapshot_frame_ = -1;
         // A newer base answers every resync asked for so far, and any
         // the limiter still owes: its full snapshot replaces the world.
         s.resync_in_flight_ = false;

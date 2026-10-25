@@ -13,8 +13,9 @@ built (step P)") is implemented but OPEN: R2 (a) now passes on retail, the
 headless trafo run does not. Step Q (the anchor restores the proximity
 blocks' countdown, "As built (step Q)") is built: R0's baseline check holds.
 R3 is built ("As built (step R3)": the retail lifecycle rewind and own
-echoes; with it R2 (b)'s mirror p99 is below every O run). R4-R7 are not
-built.
+echoes; with it R2 (b)'s mirror p99 is below every O run). R4 is built
+("As built (step R4)": the retail own corrections; the starvation detector
+deleted). R5-R7 are not built.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -259,7 +260,7 @@ public:
     uint32_t current_tick() const;
     bool assigned() const, holding() const, resync_pending() const;
     const rollback_engine::statistics& rollback_stats() const;
-    acked_input_view acked_input() const;         // {known, frame, tick}: the newest acked input (retail starvation detector)
+    // acked_input(): built at R1 for the retail starvation detector, deleted with it at R4 ("As built (step R4)")
     const float (*previous_cam() const)[3];       // the input basis; nullptr until a camera was seen
     std::string status_text(const host_counters& h) const;      // SC report(): one format literal, host values in place
     std::string window_text(uint32_t tick, const host_counters& h);   // SC report_window(); "" outside a window edge;
@@ -737,7 +738,8 @@ headless host.
     reset (PSC:1362) after SessionReady's hash.
 - **Transitional host code, deleted at the step named:**
   - the input-starvation detector (PSC:3241-3267) reads `core.acked_input()`
-    and calls `core.request_resync(why)` until R4;
+    and calls `core.request_resync(why)` until R4 (deleted there, with
+    `acked_input()`: "As built (step R4)");
   - the 30-`unmatched` trigger (PSC:2062-2087) compares
     `core.rollback_stats()` before and after the mailbox drain and calls
     `core.request_resync`, until open question 1 is decided. `too_far` →
@@ -765,7 +767,7 @@ headless host.
 | receive thread | headless same thread; retail network thread | the host mailbox; the core is game-thread only |
 | pacer origin at re-assignment | headless resets `origin_`; retail's `fixed_tick_` counts independently | `hooks.numbering_restarted` |
 | "server has no body for us" re-report | retail only, after 30 snapshots (PSC:2620-2660) | core policy `own_body_backstop` (retail on, headless off: open question 2) |
-| retail resync on 30 unmatched; starvation | retail only | host-side, transitional (§3.2; open question 1) |
+| retail resync on 30 unmatched; starvation | retail only | host-side, transitional (§3.2; open question 1); starvation deleted at R4 (part one's notices replace it) |
 | relay counters with no input rewind | headless counts `relay_late`, `bodiless`, `birth_frozen` with rollback on | with `input_rewind` off (retail from R1 to R2) `note_input_correction` returns before them, so they stay 0 (E9 review): no check reads them while the switch is off |
 | resync on a frozen clock | retail only (PSC:2084) | a core rule for both hosts from R1: a frozen clock sets the bodies and drops the history with no replay (RB:1031-1042), so a re-anchor is the only recovery. Inert on headless (`frozen=0` in every run; the §5.3 zero rule checks it) |
 
@@ -6036,6 +6038,129 @@ arena in slot 13 for the arena runs, restored after):
   birth as in the row run (script-made 0.000000 m; the beams 0.000794 /
   0.001946 / 0.009914 m owner-server, mirror-server <= 1e-6); server
   journal exact in the SimTool (2575 matched, 0 checkpoint mismatches).
+
+**As built (step R4): the retail own corrections.** Where the code made R4
+differ from §3.2, §4.1, §7 Q1 and the R4 row:
+
+- **What R4 turns on.** The retail `core_config` sets `own_corrections`
+  (core_host.cpp, the session start). No retail platform code changed: the
+  core's part one (client_core_held.cpp: resolve against the sent ring,
+  store, journal SUBSTITUTED, amend the record, the `own_replay_pacer`,
+  `check_held_complete`, the resync on late / unresolved / lost / refused)
+  has run in the retail core since R1 with the switch off, and the replay
+  drives the own ball from the amended record the way every retail replay
+  has since R2. The verb's answer says "step R4".
+- **The switch also turns on the resync-time amendment on retail.**
+  `amend_for_resync` (client_core_held.cpp, gated by the same
+  `own_corrections`) now runs in the retail core too: a held notice for a
+  tick at or after `resync_base_` of a pending exact resync (an exact
+  assignment, or the A5 late join; the host's A3 hold) amends retail's own
+  record to the server's frame before the apply re-steps, where before R4
+  the record kept what the client played (the 0.17 m case of `a5u_lead`).
+  That is the core's intended behaviour, verified on the headless client
+  (A3 / A5); every R4 run had 0 resyncs, so the retail path is not
+  exercised here and is left to the resync track's retail checks.
+- **Part one replaces the detector only for notices that arrive.** A retail
+  client whose input reaches the server but is never consumed (the old
+  detector's case, resynced after 132 frames) is substituted from one stale
+  source; each notice inside the reach is amended and replayed, so its keys
+  stay overridden with no resync. The headless client behaves the same; there
+  is no core trigger for it until the lead / slew work (R5, `caps.slew` is
+  false on retail), as §7 Q1 decides.
+- **The starvation detector is deleted, and with it the core's
+  `acked_input()`** (the `acked_input_view` struct, the four
+  `snapshot_acked_*` / `snapshot_frame_` members of `client_core_state`,
+  their resets in `begin` and `on_session_assign`, their writes in
+  `on_session_snapshot`, and the R1 test `AckedInputFollowsTheSnapshots`):
+  the detector was its only reader (§3.2, the As built (step E11) note).
+  The host's `starvation_from` / `starvation_resyncs` statics and the
+  `starvation_resyncs=` field of the `session` and `session core` answers go
+  too (no tool reads it; `unmatched_resyncs=` stays, §7 Q1). The headless
+  client never read any of it (WIRE-CHECK below). `client_core_state`'s
+  layout changed, so the x86 client objects were deleted before the build.
+  The *legacy* path's own detector (`physics_session_check_input_starvation`)
+  is untouched: it is the legacy path's and goes with it at R7 (the BAR).
+- **LPD §1.4 is rewritten** to what the code does: the core path (this
+  step) and the legacy path, which counts the held records and nothing else.
+- **The row's tick, 1500, cannot satisfy `subst rew > 0` with
+  `r0_keys.bmrc` (adapted: 1640).** The record's own frames change only at
+  1648 / 1673, 2148 / 2173, 2458 and 2525 (keys; the camera is constant), so
+  a 300 ms blackout from 1500 is substituted with the frame of 1500 that the
+  client also played at 1501-1513: every notice is `same`, nothing is
+  amended and nothing replays - correct, and measured (`r4_blackout_1`:
+  `subst=13/0/13/0/0/0`, S2 `ticks=1501..1513 n=13 src=1500`, the own ball
+  0.000000 m from 1561 on). The row's run is made with the blackout from
+  1640, whose episode covers the key edge at 1648 (`r4_retail.py blackout
+  LABEL 1640`).
+- **Tools.** `.local-tools/work/r4/r4_retail.py` (R3's helpers; client 1
+  runs R3's beams at 650 / 850 / 1000 so its numbers compare with
+  `r3_arena_1`'s client 1; client 2 no beam and `net blackout 300 up at T`)
+  and `r4_judge.py` (r3_judge's report, the S2 sum against `recv + late +
+  base`, the own ball from T_off + 48 on, where T_off is the last S2 tick).
+- **A measurement trap the judge does not filter.** The `journal mark`
+  that `retail_two_client_test.stop` sends writes a second LOCAL checkpoint
+  at the mark's tick that holds the world one tick later (client 1 at 2564
+  in the row run: 0.481 m from the server = one tick of its 31 m/s, the
+  tick's own checkpoint 7.9e-7 m; 0.019 m at 2584 in `r4_blackout_1`, the
+  same). Recorded, not a world difference.
+
+Measured (x64 and x86 builds of 91df87d + R4; the x86 client objects
+deleted first; the mod and the Arch server built with the slot-13 hack for
+the retail runs, build id `ballanced-3e4289e95f25+bmmo-91df87daf394-dirty`,
+the hack reverted and the Arch server rebuilt plain for the solo check; the
+two Downloads game copies with the arena in slot 13 for the runs, restored
+after):
+
+- 471 tests pass (472 less the deleted R1 test); `linux_test_syntax.sh` 26
+  lines ok; x64 BUILD-OK (`build-agent-rR4`); x86 CLIENT-BUILD-OK.
+  **Headless unchanged:** `wire_check.sh rR3 rR4 rR4w` WIRE-CHECK: ALL
+  SAME (24 journals IDENTICAL, 24 sends SAME); solo snapshots off
+  (`e0_solo.sh rR4`) IDENTICAL to `rA5c` (2227 TICK hash + pose common, 0
+  differ; LOCAL 1114/1114), its server journal 2227 matched.
+- **The row** (`r4_blackout_1640`: arena, snapshots off, `net lag 150`
+  both ways on both, both `replay session` of `r0_keys.bmrc`, client 2
+  `net blackout 300 up at 1640`, over at 1660): the server's S2 line for
+  client 2 `ticks=1641..1653 n=13 sent=13 total=13 src=1640`; client 2
+  `subst=13/6/7/0/3/0` (recv 13 = the S2 count, diff 6, same 7, rew 3, late
+  0), `subst_skip=403/0/0` (no base), `subst_missed=0`,
+  `subst_coalesce=0/0/0/3` (three amendments rode on another replay),
+  resyncs 0/0, rebases 0. **Client 2's own ball against the server's FULL
+  checkpoints: 0.000000 m at every checkpoint from T_off + 48 = 1701 to the
+  end (406)**; inside the episode the LOCAL checkpoints, written live
+  before the notices arrive, reach 1.67 m (1690). Server journal exact in
+  the SimTool (2537 matched, 0 checkpoint mismatches).
+- **The control** (`r4_ctl_R3build_1640`: the same recipe with 91df87d's
+  x86 mod, `own_corrections` off): S2 n 13 for the episode, recv 13, rew 0,
+  and client 2's own ball 2.08 m from the server at 1702, up to 5.53 m,
+  until the full snapshot of the 1887 body-set change pulled it back
+  (`Ball_Stone dp=5.3645`). With snapshots off nothing else would have.
+- **Client 1 unaffected:** `subst=0/0/0/0/0/0` (its frames all fresh),
+  resyncs 0/0, rebases 0, `echo=13/0/0/0/0` (R3: the same), life rewinds
+  2/0 (R3 11: client 2 beams nothing here), `inrew` 148 (R3 226,
+  likewise); its own ball after each beam exactly R3's (trafo 0.0008 m,
+  lane 0.0019-0.0243 m, death 0.0099-0.3079 m) and 0.000000 m from the
+  episode's start to the end but the mark's trap above; every script-made
+  birth 0.000000-0.000001 m at its stamp, the beams' owner-server residuals
+  R3's (0.000794 / 0.001946 / 0.009914 m, mirror = server).
+- **Client 1's snapshot mismatches (3; pre-existing, not R4).** Snapshots
+  off still send a full snapshot on every body-set change (As built (step
+  R3)), and client 1's three show three world disagreements none of R4's
+  code reaches (client 1 had no held notice):
+  - `P_Modul_30_Wippe` at 1267, 0.339371 m: R3's G-c3 case, the same
+    number (client 2's single-reporter BodyRevived at 1136);
+  - `P_Modul_34_Schiebestein` at 1878, 0.2192 m (y 2.296 against 2.516).
+    Symptom: from 1400 the server's and client 2's worlds lift the stone
+    (y 2.36 at 1400, 4.24 at 1408) and client 1's leaves it at rest, until
+    the snapshot. Cause: the module's proximity trigger reads the local
+    player's ball - client 2's own ball was 41.7-46.0 m away at 1390-1400
+    (just after its Sector event at 1394), client 1's 494-499 m; the server
+    reads the ball near it. This is world-agreement-gaps §1.1.3 (client
+    proximity sensors rewired to the nearest ball, roadmap item 7),
+    reproduced on 91df87d's build in the control (1888, the same 0.2192 m)
+    and in `r4_blackout_1`. `r3_arena_1` did not show it because there
+    client 1 crossed that sector first;
+  - `PE_Balloon_*` at 2514, the level-end balloon (the principles'
+    exception).
 
 ## 7. Open questions
 
