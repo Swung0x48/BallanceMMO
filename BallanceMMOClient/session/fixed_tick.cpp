@@ -50,7 +50,13 @@ namespace bmmo::session {
         time->ChangeLimitOptions(CK_FRAMERATE_SYNC, CK_RATE_NOP);
     }
 
-    uint64_t fixed_tick_driver::on_process(IBML* bml) {
+    void fixed_tick_driver::slew(int ticks) {
+        if (ticks == 0) return;
+        origin_ -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(static_cast<double>(ticks) * kTickSeconds));
+    }
+
+    uint64_t fixed_tick_driver::on_process(IBML* bml, pacer_slew* pacer) {
         if (!enabled_) return 0;
         auto* time = bml->GetTimeManager();
         last_delta_ms_ = time->GetLastDeltaTime();
@@ -65,9 +71,19 @@ namespace bmmo::session {
 
         const uint64_t tick = ticks_++;
         const auto now = std::chrono::steady_clock::now();
+        double max_catch_up = kMaxCatchUpTicks;
+        if (pacer) {
+            // A SessionLead's slew (step R5) moves the origin before the
+            // schedule is read, as the headless pacer does: `ticks_` is the
+            // frame about to run, the one `expected` is compared with below.
+            const double behind = std::chrono::duration<double>(now - origin_).count() * kTickRate
+                                - static_cast<double>(ticks_);
+            slew(pacer->step(now, behind));
+            max_catch_up = pacer->rebase_threshold();
+        }
         const double elapsed = std::chrono::duration<double>(now - origin_).count();
         const double expected = elapsed * kTickRate;
-        if (static_cast<double>(ticks_) + kMaxCatchUpTicks < expected) {
+        if (static_cast<double>(ticks_) + max_catch_up < expected) {
             // Far behind (level load, debugger): fast-forwarding would render
             // nothing for seconds, so restart the schedule from here.
             origin_ = now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(

@@ -19,6 +19,25 @@ namespace bmmo::session {
     inline constexpr double kTickRate = 66.0;
     inline constexpr float kFixedDeltaMs = 1000.0f / 66.0f;
 
+    // A SessionLead's slew of the schedule (late-player design 2.4 "Retail";
+    // session-client-core design 6.2 row R5).  The session that owns the
+    // decision (the core host) implements it; on_process asks it once per
+    // counted frame, before the schedule is read.  Without one (the legacy
+    // path, no core session) the pacing is exactly what it was.
+    class pacer_slew {
+    public:
+        virtual ~pacer_slew() = default;
+        // `now` and how far the schedule is behind (the expected frame less
+        // the frame about to run; >= 0: a frame is due).  Returns the ticks
+        // the origin moves: +1 one tick earlier (the schedule runs ahead, the
+        // pacing catches up by skipping a render: 2x), -1 one tick later (the
+        // pacing waits: 0.9x at one in ten), 0 nothing.
+        virtual int step(std::chrono::steady_clock::time_point now, double behind) = 0;
+        // The rebase threshold: kMaxCatchUpTicks plus what a slew still has
+        // to move, so a slew is not read as a stall.
+        virtual double rebase_threshold() const = 0;
+    };
+
     class fixed_tick_driver {
     public:
         void enable(IBML* bml);
@@ -27,8 +46,15 @@ namespace bmmo::session {
 
         // Call once at the start of OnProcess.  Returns the index of the tick
         // that this behaviour frame represents (0 for the first frame after
-        // enable).  Applies the delta clamp and the wall-clock pacing.
-        uint64_t on_process(IBML* bml);
+        // enable).  Applies the delta clamp and the wall-clock pacing; with a
+        // `pacer` (a core session, step R5) its step moves the origin first
+        // and its threshold replaces kMaxCatchUpTicks.
+        uint64_t on_process(IBML* bml, pacer_slew* pacer = nullptr);
+
+        // Moves the schedule's origin by `ticks` (positive: earlier, the
+        // schedule runs ahead).  No tick is counted or skipped: the pacing
+        // below catches up or waits.
+        void slew(int ticks);
 
         // The anchor hold (design 9.26 phase alignment): the session waits
         // inside the anchor frame, so no frame reaches on_process while held

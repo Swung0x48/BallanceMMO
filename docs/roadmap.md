@@ -94,6 +94,9 @@ left. Each design named here has its own document with its step table.
    offline resync fidelity, A3 the exact resync on the wire, **A4 full-tier
    close-out**, A5 late joiner through the same path, B2, T1.
 4. Retail completes goal 3: R3 lifecycle rewind, R4 part one (built), R5 the slew
+   (built; its A5u analogue ends in one resync of the raised client, the CPU
+   cliff of item 8 meeting the fixed reach of plan step 12, reproduced
+   without a raise: core design "As built (step R5)")
    (`session-client-core-design.md` §6.2).
 5. The trafo as a replicated input (`trafo-replication-design.md`): T1-T5.
    Per-player piece sets; explosion, paper wind and reset in every world;

@@ -491,7 +491,7 @@ void BallanceMMOClient::OnPostStartMenu()
 void BallanceMMOClient::OnProcess() {
     capture_level_sequencers();
     process_command_file();
-    fixed_tick_.on_process(m_bml);
+    fixed_tick_.on_process(m_bml, core_host_pacer());
     process_physics_session();
     core_host_process();
     process_command_pipe();

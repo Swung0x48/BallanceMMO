@@ -781,6 +781,11 @@ reliable copy stands behind them.
   does the 2x.
 - The rebase threshold `kMaxCatchUpTicks` (fixed_tick.hpp:50) gets the same
   `+ |slew|`.
+- (As built, core design step R5: the core host's detector was deleted at
+  R4, so the rule below has no core-path subject; the legacy path keeps its
+  132 frames and sends no `CAP_LEAD`. The slew is `fixed_tick_driver::slew`
+  driven by the core's `slew_step` through `core_host_pacer`, with no field
+  added to the driver: session-client-core-design.md, "As built (step R5)".)
 - The starvation detector moves from 132 to 264 frames and is suppressed
   while an adjustment is outstanding, so the server's raise, which needs 132
   ticks, always lands first.

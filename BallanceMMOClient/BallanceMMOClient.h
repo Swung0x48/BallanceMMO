@@ -769,6 +769,7 @@ private:
 	void core_host_end_local(const std::string& reason);
 	bool core_host_running() const;   // a core session is between its SessionStart and its end
 	bool core_host_session_running() const;   // ... and anchored, the core running it (the legacy phase 'running')
+	bmmo::session::pacer_slew* core_host_pacer();   // R5: the tick driver's slew while a core session runs, else nullptr
 	std::string core_host_status_text();
 	std::string core_host_overlay_text();
 	// The legacy hooks and verbs hand over to the core while a core session runs

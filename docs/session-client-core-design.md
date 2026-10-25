@@ -15,7 +15,9 @@ blocks' countdown, "As built (step Q)") is built: R0's baseline check holds.
 R3 is built ("As built (step R3)": the retail lifecycle rewind and own
 echoes; with it R2 (b)'s mirror p99 is below every O run). R4 is built
 ("As built (step R4)": the retail own corrections; the starvation detector
-deleted). R5-R7 are not built.
+deleted). R5 is built ("As built (step R5)": the retail slew; its row's run
+has one resync at the run's end, pre-existing and root-caused there). R6-R7
+are not built.
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -563,7 +565,7 @@ struct session_capabilities {
 | capability | headless | retail | the core without it |
 |---|---|---|---|
 | `own_body_control` | yes | **no** | (Acting on echoes at all needs `own_echoes`, §1.2; off, every case below is only counted.) `move_own_birth` and `resync_own_life` never touch the own body. **Moved** (made at T' ≠ T): no rewind of the own ball; with snapshots on, the snapshot rollback reconciles it, since the server's ball exists from T'; with snapshots off, `request_resync("own birth moved: no own body control", owed)`. **Rejected or missing** (never made), and only while `own_life_current(life)`: the Physicalize is re-reported at `current + 1` without the spawn flag (LPD §3.5: "the REJECTED echo makes it immediate"), then the self-resync. **Superseded: nothing.** A superseded birth was overtaken by a newer accepted event of the same player (lifecycle.hpp:384-407); re-reporting it would bring a ball back after our own death, at the server and at every remote. `destroy_body`'s moved-own-life branch is inert. **Beam:** the record is kept (§1.3 step 29), but its stamp is applied with `write_body(entity, beam pose, zero velocity, wake)` instead of `unmake_own` + `make_own`: live at T+1 (`live_own_lives`, pre_step step 8) and in every replay that crosses it (`before_replayed_tick`), with the generation bumped at the request as SC:1436 does. That is what removed headless's 540 m (the move outside the replays, SC:1406-1412). The in-place body keeps its floor contact, which the server's fresh body lacks; no resync is asked for, because a resync rebuild writes in place too (`write_body`) and could not remove it. R1/R3 report the own ball's error after each beam. |
-| `slew` | yes | **no** | SessionReady `caps` = 0 (no `CAP_LEAD`), so the server never decides a lead for this client (LPD plan step 10: "no decision without CAP_LEAD"). A SessionLead that arrives anyway is a protocol error: counted, journaled, not applied, not acknowledged. |
+| `slew` | yes | yes since R5 (**no** before: "As built (step R5)") | SessionReady `caps` = 0 (no `CAP_LEAD`), so the server never decides a lead for this client (LPD plan step 10: "no decision without CAP_LEAD"). A SessionLead that arrives anyway is a protocol error: counted, journaled, not applied, not acknowledged. |
 | `nonblocking_hold` | yes | **no** | Same state machine and 10 s deadline (`kAnchorHoldTimeout`, SC:84-88; retail PSC:1537-1559). The host blocks in a 1 ms loop around `poll_hold()` and drains the whole mailbox inside it, as the headless loop does between polls. Retail today drains only the assignment queue. It is needed only at the anchor: the core has no other hold. |
 | `whole_frame` | with `--replay-scripts` | **no** | `bind_world` leaves `whole_frame` empty, and the engine replays with `script_replay::execute_frame` (RBB:203-216 and `rollback_binding_scripts.hpp:76-82`), as both do today. |
 | `own_lifecycle` | `event_log` | `host_hooks` | Not a gap: two ways to learn the same fact. Retail must capture in `OnPhysicalize`, because it applies the spawn offset with `SetWorldMatrix` before the body exists (PSC:2714-2893). |
@@ -714,7 +716,8 @@ headless host.
   flag from `CurrentLevel[0][3]`, the spawn-cell offset, the queued
   `push_impulse`) and `OnUnphysicalize`. These call `core.own_physicalized`
   / `own_unphysicalized`.
-- **Pacing:** `fixed_tick_` (no slew until R5). A rebase calls
+- **Pacing:** `fixed_tick_`, with the core's slew since R5
+  (`core_host_pacer`, "As built (step R5)"). A rebase calls
   `core.schedule_rebased("tick driver rebased")`, as PSC:1709-1712 does.
 - **`core_config`.** The retail host fills every field before `begin`.
   The defaults are the headless argument defaults (`savestate` and
@@ -754,7 +757,7 @@ headless host.
 |---|---|---|
 | own birth capture | headless: PreSimulate capture + event-log `created` (SC:1834-1910, 2302); retail: `OnPhysicalize` before the body exists, with the spawn offset (PSC:2714-2893) | `own_lifecycle_source` (§2.3) |
 | own body re-made / taken out | headless can (SC:1522-1588); retail cannot | `own_body_control` |
-| SessionLead | headless `CAP_LEAD`; retail `caps=0` (PSC:1461-1465) | `slew` (R5 builds it for retail) |
+| SessionLead | headless `CAP_LEAD`; retail `caps=0` (PSC:1461-1465) | `slew` (built for retail at R5) |
 | anchor hold | headless non-blocking; retail blocks inside `OnProcess` | `nonblocking_hold`; one state machine |
 | whole-frame replay | headless `--replay-scripts` only | `whole_frame` |
 | `restore_clock`, savestate flags | headless args; retail false / 0 (PSC:3026-3030; the clock guard replaces the clock rewind) | `core_config` values set by each host |
@@ -6161,6 +6164,132 @@ after):
     client 1 crossed that sector first;
   - `PE_Balloon_*` at 2514, the level-end balloon (the principles'
     exception).
+
+**As built (step R5): the retail slew (late-player part two).** Where the
+code made R5 differ from §2.3, §3.2, §4.1, the R5 row and LPD §2.4
+"Retail":
+
+- **No data member: `fixed_tick_driver::slew` is a method on the existing
+  origin, and the slew's state stays the core's.** `fixed_tick_` is a
+  member of `BallanceMMOClient`, so a field added to the driver would move
+  the class's layout (the BML constraint, §3.2). The driver gets
+  `slew(int ticks)` (moves `origin_` by whole ticks, earlier for a raise)
+  and an optional `pacer_slew*` argument to `on_process` (fixed_tick.hpp:
+  an interface with `step(now, behind)` and `rebase_threshold()`). With
+  one, `on_process` asks `step` with how far the schedule is behind (the
+  expected frame less `ticks_`, the frame about to run - headless's
+  `next_frame`) before it reads the schedule, moves the origin by what it
+  returns, and uses its threshold in place of `kMaxCatchUpTicks`. The core
+  host implements it (core_host.cpp `core_pacer_slew`): `step` is
+  `core.slew_step(now, kTickRate, behind)` while `core.slewing()`,
+  `rebase_threshold` is `core.rebase_threshold()` (`33 + |outstanding|`;
+  a static_assert ties `kMaxCatchUpTicks` to `kPacerRebaseFrames`).
+  `BallanceMMOClient::core_host_pacer()` (a member function, no layout
+  change) returns it only while a core session runs, so the legacy path
+  and every frame outside a core session pass `nullptr` and take the old
+  code path unchanged (the BAR). The 2x is the existing
+  `SkipRenderForNextTick` branch (a raise moves the origin one tick earlier
+  only while less than a frame is due, `lead_slew::kRaiseMaxBehind`), the
+  0.9x the existing wait.
+- **Where the step runs.** At the top of `OnProcess` (MC: the driver runs
+  before `process_physics_session` and `core_host_process`), i.e. after the
+  game stepped T and before `post_step(T)`: the core's `current_tick()` is
+  T - 1 there, as on headless (between `post_step(T-1)` and `pre_step(T)`).
+  The ack (`finish_lead_slew` inside `slew_step`) therefore logs tick T - 1
+  for a slew whose last tick was gained in that frame.
+- **The forced frames needed no new code.** `force_own` / `unforce_own`
+  were built at R0 (polling off + `navigation_input(held)`, then the
+  polling back as the mute says); R5 only makes them reachable by
+  declaring `slew` (`caps.slew = true`, SessionReady `caps` = `CAP_LEAD`).
+- **LPD §2.4's retail starvation-detector rule (132 -> 264 frames,
+  suppressed while an adjustment is outstanding) does not apply:** the core
+  host's detector was deleted at R4 (As built (step R4)); the legacy path's
+  keeps its 132 frames, the legacy path gets nothing new (the BAR), and it
+  sends no `CAP_LEAD`, so the server never decides a lead for it.
+- **Not exercised:** a lower (0.9x; the server's revision-2 policy never
+  lowered in these runs), a slew cut by a rebase or a resync request, and a
+  SessionLead voided by a resync in flight. The arithmetic is the core's
+  (lead_slew.hpp, its unit tests); the host only moves the origin.
+
+Measured (x86 build of abfee28 + R5 with the slot-13 hack, the Arch server
+rebuilt with the hack for the runs and plain after, build id
+`ballanced-3e4289e95f25+bmmo-abfee287a29c-dirty`; the two Downloads game
+copies with the arena in slot 13, restored after; tools
+`.local-tools/work/r5/r5_retail.py`, `tick_ms.py`, `own_ball.py`,
+`r5_status.py`):
+
+- 471 tests pass; `linux_test_syntax.sh` 26 lines ok; x86
+  CLIENT-BUILD-OK. No file under BallanceMMOCommon or the headless client
+  changed, so no x64 build and no wire check (quick tier).
+- **The row** (`r5_a5u_1`: arena, snapshots off, server `lead_adjust` on,
+  patience off, `net lag 150` both ways on both, both `replay session` of
+  `r0_keys.bmrc`, client 2 `net lag 450 up at 1500`, persistent):
+  - **exactly one raise:** the server's `would-raise ... tick=1665 k=20`
+    and `SessionLead 1 ... +20 ticks, held [1666, 1748)`, nothing else
+    (client 1 `decisions=0`);
+  - client 2: `lead: SessionLead 1 applied: k=+20 N=1666 E=1748 at tick
+    1699: amended 34 [1666,1700) forced 48 [1700,1748) ... slewing at 2x`,
+    then `acknowledged at tick 1771: applied +20 of +20, the slew moved +20
+    (slew complete)`; the server `applied +20 ... acked; lead offset 20,
+    L_eff 48`; status `lead_adj=1 lead_offset=20 lead_forced=48
+    rebases=0`. Client 1 `lead_adj=0 lead_offset=0`;
+  - **the slew on the clock** (`tick_ms.py`, client 2's TICK ms against
+    the schedule from 1600): 0 ms off until 1690, +121 ms at 1700 (the
+    amend's 34-tick replay), then -61 / -113 / -180 / -228 / -288 ms at
+    1720 / 1740 / 1750 / 1760 / 1770 and -303 ms (20 ticks ahead) from 1780
+    on, flat to 2180: the 20 ticks gained in about 50 tick periods, no
+    rebase. That is about 1.4x on average, not 2x: `kRaiseMaxBehind`
+    moves the origin only while less than a frame is due, the amend's
+    replay put the loop 121 ms behind first, and a retail frame's own cost
+    limits how often a skipped render can run two ticks per slot. The
+    skipped renders themselves were not counted (`skipped_renders` is not
+    in the run's logs); the 2x path is read from this clock trace only;
+  - **the forced frames are the server's:** client 2's own ball (LOCAL
+    against the server's FULL checkpoints, `own_ball.py`) 0.000000 m over
+    the forced [1700, 1748) and from E to 2472 (337 checkpoints); inside
+    [1666, 1700) the live LOCAL checkpoints, written before the SessionLead
+    arrived, reach 2.58 m (1698) and are amended by its replay; client 1's
+    own ball 0.000000 m throughout;
+  - client 2's server S2 lines: [1666, 1731] and [1732, 1747] (82 = the
+    held range) and then **[2473, 2478], 6 ticks**; client `subst=82/27/55/
+    0/1/6` (recv 82 + late 6 = the server's 88);
+  - **one resync of client 2, at 2536** (`held notice for own tick 2473
+    arrived at tick 2536, past the reach of 48 ticks`).
+  - The A0 control (`r5_a0_1`: the same without the lag step): no
+    decision, both clients `subst=0/...`, `resyncs=0/0`, `lead_adj=0`. So
+    the A0 band is 0, and client 2's substitutions after the raise are 0
+    up to 2472 and 6 at 2473-2478.
+- **The residual (2473-2478 substituted, the resync at 2536) is
+  pre-existing, not R5's.** Symptom: client 2's frame loop falls behind its
+  schedule at the run's end - 351 ms (23.2 ticks) at 2476 against its
+  post-slew baseline - past its frames' 22-tick slack at the server, so
+  2473-2478 arrive 1-2 ticks late (S2 `delay=1*3,2*2,1*1`) and are
+  substituted. Cause, in two parts: (1) **the per-frame rewind cost** (the
+  CPU cliff, roadmap item 8): client 1's ball falls from about 2412 (it
+  dies at 2479), its camera rows change every tick, so every relayed frame
+  of it is a correction and client 2 replays once per frame (2411..2461,
+  30 rewinds in 0.9 s), each as deep as client 2's relay lag; the raise
+  made that lag 41-43 ticks instead of 21-22 (LPD §2.5: a raise of k adds
+  k to everything the raised client hears), and at 25-50 ms a frame
+  against a 15.2 ms tick the loop loses 23 ticks. An unraised client's
+  frame loop lags its schedule by at most 110-124 ms over 1600-2560
+  (client 1 here; both clients of `r4_blackout_1640`, whose client 1
+  replays the same kind of per-tick corrections at depth 17-22). (2) **the fixed
+  48-tick reach** (LPD plan step 12, the per-client reach, roadmap item
+  11): a notice of a substituted own tick reaches a client whose lead plus
+  downlink exceed 48 ticks past the reach, so any substitution of the
+  raised client (L_eff 48 + 10 ticks down) becomes a resync. LPD §2.5
+  foresaw it ("its relay_late and any resync of it are its own cost,
+  reported and not failed in A5u"); the R5 row's "no resync" does not
+  carve it out. **Reproduced on the build before R5**
+  (`r5_ctl_R4down_1`: abfee28's x86 mod, no slew, the same relay lag made
+  by `net lag 450 down at 1500` on client 2 instead of a raise): client 2
+  falls 329 ms behind at 2473, the server substitutes 2473 (`delay=1*1`),
+  the notice arrives at 2536 past the reach, and client 2 resyncs (server
+  2554) - the same ticks. Fixes queued, not R5's: roadmap item 8 (the CPU
+  cliff: one rewind per frame per remote's changing input - coalesce the
+  remote corrections, or cheapen the rewind) and LPD plan step 12 (the
+  per-client reach).
 
 ## 7. Open questions
 

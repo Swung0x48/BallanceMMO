@@ -418,6 +418,27 @@ namespace {
             && host.core->session_phase() == bs::client_core_state::phase::running;
     }
 
+    // ------------------------------------------------------------ the slew
+    // Step R5 (late-player design 2.4 "Retail"): a SessionLead's slew of the
+    // tick driver's schedule.  The core decides it (slew_step: the 2x raise,
+    // the 0.9x lower, the ack when done; rebase_threshold: 33 + what is still
+    // to move); the driver moves its origin by what the step returns, before
+    // it reads the schedule, as the headless pacer does.  A raise then runs
+    // two frames per slot through SkipRenderForNextTick, a lower waits.
+    static_assert(bs::fixed_tick_driver::kMaxCatchUpTicks == bs::kPacerRebaseFrames,
+                  "the retail rebase threshold is the core's lead_rebase_threshold base");
+    class core_pacer_slew final : public bs::pacer_slew {
+    public:
+        int step(clock_type::time_point now, double behind) override {
+            if (!core_session_running() || !host.core->slewing()) return 0;
+            return host.core->slew_step(now, bs::kTickRate, behind);
+        }
+        double rebase_threshold() const override {
+            return core_session_running() ? host.core->rebase_threshold() : bs::fixed_tick_driver::kMaxCatchUpTicks;
+        }
+    };
+    core_pacer_slew slew_pacer;
+
     const char* host_phase_name(retail_host::phase_type phase) {
         switch (phase) {
         case retail_host::phase_type::counting_down: return "counting_down";
@@ -595,6 +616,12 @@ bool BallanceMMOClient::core_host_session_running() const {
     return core_session_running();
 }
 
+// The tick driver's slew (step R5): the core's while a core session runs,
+// none otherwise - the legacy path's pacing is exactly what it was.
+bmmo::session::pacer_slew* BallanceMMOClient::core_host_pacer() {
+    return core_session_running() ? &slew_pacer : nullptr;
+}
+
 // A latched session's SessionStart, taken from the mailbox in arrival order
 // (the legacy physics_session_begin, with the core's begin): a fresh core,
 // its platform checked by the constructor, the login id handed over, the
@@ -605,7 +632,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     if (host.phase != retail_host::phase_type::idle) core_host_end_local("replaced by a new session");
     bs::session_capabilities caps;
     caps.own_body_control = false;   // the game's Physicalize block owns the own ball (design 2.3)
-    caps.slew = false;               // no fixed-tick slew until R5: SessionReady caps = 0
+    caps.slew = true;                // R5: the tick driver slews (core_host_pacer), SessionReady caps = CAP_LEAD
     caps.nonblocking_hold = false;   // the anchor hold blocks inside OnProcess
     caps.whole_frame = false;
     caps.own_lifecycle = bs::own_lifecycle_source::host_hooks;   // OnPhysicalize / OnUnphysicalize
@@ -637,7 +664,9 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // or missing one re-reported while current, a superseded one nothing);
     // the own corrections (R4, late-player part one: a held notice of our
     // own substituted tick amends the tick's record and replays from it),
-    // own_body_backstop on.
+    // own_body_backstop on.  The lead (R5, late-player part two) is the
+    // capability `slew`, not a switch: the core amends, forces and slews
+    // a SessionLead, the tick driver moves its schedule (core_host_pacer).
     bs::core_config config;
     config.journal_checkpoint_ticks = static_cast<uint32_t>(bs::client_journal::kCheckpointTicks);
     if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
@@ -1792,8 +1821,8 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
             if (!connected()) core_latched.store(false);
             core_on.store(on);
             if (!on) return "ok session core off: the next session runs on the legacy path";
-            return "ok session core on: the next session runs on the shared core (step R4: snapshot rollback, the "
-                   "input and lifecycle rewinds, the own echoes, the own corrections)";
+            return "ok session core on: the next session runs on the shared core (step R5: snapshot rollback, the "
+                   "input and lifecycle rewinds, the own echoes, the own corrections, the lead slew)";
         }
         if (!value.empty() && value != "status") return "error usage: session core on|off|status";
         return std::format("ok core={} latched={} made={} error='{}' sessions={} host_phase={} frames={} refused={} "
