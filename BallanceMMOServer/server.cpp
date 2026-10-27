@@ -566,6 +566,10 @@ public:
         std::chrono::steady_clock::time_point start_deadline{};
         bool start_barrier_armed = false;
         uint64_t anchor_hash = 0, anchor_surfaces = 0;
+        // Protocol 12 (sector placement design 2.4): the world's placement
+        // signature at its anchor, compared with every member's that declares
+        // CAP_PLACEMENT (late joiners too).
+        uint64_t anchor_placement = 0;
         float spawn_position[3] = {}, spawn_rotation[4] = {0, 0, 0, 1};
         // Every resetpoint of the level (physics_world::resetpoints): where the
         // event validation expects a spawn or a respawn.
@@ -907,6 +911,13 @@ public:
         s.world_options = config_.physics_trafo_inputs ? bmmo::session::WORLD_TRAFO_INPUTS : 0u;
         if (s.world_options & bmmo::session::WORLD_TRAFO_INPUTS)
             Printf("Room %u: the trafo is an input in this session (world option trafo inputs).", r.id);
+        // Protocol 12 (sector placement design 2.4, step S5): the same rule
+        // for the placement - the config's, refused at SessionReady for a
+        // member without CAP_PLACEMENT.
+        if (config_.physics_placement_clones) {
+            s.world_options |= bmmo::session::WORLD_PLACEMENT_CLONES;
+            Printf("Room %u: every PH row gets its own object in this session (world option placement clones).", r.id);
+        }
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
         std::vector<std::pair<uint32_t, uint8_t>> players;
@@ -1011,6 +1022,7 @@ public:
         s.world_ready = true;
         s.anchor_hash = info.anchor_hash;
         s.anchor_surfaces = info.anchor_surfaces;
+        s.anchor_placement = info.anchor_placement;
         s.ball_rows = info.ball_rows;
         s.trafo_points = info.trafo_points;
         for (int k = 0; k < 3; ++k) s.spawn_position[k] = info.spawn_position[k];
@@ -1023,8 +1035,9 @@ public:
         // members that never answer with SessionReady once the window is up.
         s.start_barrier_armed = true;
         s.start_deadline = std::chrono::steady_clock::now() + bmmo::sim::kStartBarrierTimeout;
-        Printf("Physics session %u: world ready (anchor %016llx), SessionStart sent to %zu players.",
-                s.id, static_cast<unsigned long long>(s.anchor_hash), s.members.size());
+        Printf("Physics session %u: world ready (anchor %016llx, placement %016llx), SessionStart sent to %zu players.",
+                s.id, static_cast<unsigned long long>(s.anchor_hash), static_cast<unsigned long long>(s.anchor_placement),
+                s.members.size());
     }
 
     // Simulation thread: fan a snapshot out to the room.
@@ -1706,6 +1719,32 @@ public:
                         client_it->second.name, theirs.c_str(), ours.c_str()));
                 return;
             }
+        }
+        // Protocol 12 (sector placement design 2.4, 5; step S5): the same
+        // placement, or the two worlds do not hold the same objects.  For
+        // late joiners too - unlike the anchor hashes below, the signature
+        // does not depend on time.  A member whose host does not compute it
+        // (no CAP_PLACEMENT: the legacy retail path, and the session-core
+        // hosts until their step) sends 0 and is not compared, and a session
+        // whose world option builds the copies refuses it, as a session with
+        // trafo inputs refuses a member without them.
+        if (msg.caps & bmmo::session::CAP_PLACEMENT) {
+            if (s.world_ready && msg.anchor_placement != s.anchor_placement) {
+                end_physics_session(msg.session, Sprintf("placement mismatch for %s (client %016llx, server %016llx)",
+                        client_it->second.name, static_cast<unsigned long long>(msg.anchor_placement),
+                        static_cast<unsigned long long>(s.anchor_placement)));
+                return;
+            }
+        } else if (s.world_options & bmmo::session::WORLD_PLACEMENT_CLONES) {
+            const std::string reason = "this session gives every PH row its own object (world option placement clones) "
+                                       "and this client cannot (it needs the session core with the placement: "
+                                       "session core on)";
+            Printf("Physics session %u: %s refused: no CAP_PLACEMENT (caps %08x) in a session with placement clones.", s.id,
+                   client_it->second.name, msg.caps);
+            const uint32_t session = s.id;
+            send_session_end(session, c, reason);
+            physics_session_member_left(c);
+            return;
         }
         // Protocol 11 (trafo-replication design 2.14): a session whose
         // world option makes the trafo an input refuses a member that cannot

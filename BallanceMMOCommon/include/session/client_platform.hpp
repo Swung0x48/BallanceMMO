@@ -690,6 +690,16 @@ namespace bmmo::session {
         // refuses this client in such a session, and a session without the
         // option is the step P path (owner-only pieces).
         bool trafo_inputs = false;
+        // Step S5 (sector placement design 2.4, 5): the host computes the
+        // placement signature of its world at every anchor
+        // (anchor_report::placement) and, when SessionStart's world_options
+        // has WORLD_PLACEMENT_CLONES (world_options()), builds the copies
+        // there first.  SessionReady then declares CAP_PLACEMENT and carries
+        // the signature, which the server compares with its own world's;
+        // without it SessionReady carries 0, nothing is compared, and a
+        // session with the world option refuses this client.  The headless
+        // host computes it from step S6, the retail core host from S10.
+        bool placement = false;
     };
 
     // (legacy_calls, design 6.1 "Linking while the core is incomplete", was

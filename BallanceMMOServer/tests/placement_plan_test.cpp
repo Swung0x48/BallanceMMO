@@ -119,6 +119,28 @@ TEST(PlacementPlan, NameLengthRuleIsTheWires) {
     }
 }
 
+// Step S5 (S2's open bullet a): every host passes the plan the bound step 5
+// enforces, game::kPlacementMaxName = min(MAX_NAME, BMMO_PHYSICS_NAME_SIZE -
+// 1) = 63, so a 64-character copy root is refused by the CK-free plan
+// already instead of passing it and failing the anchor.  (This test does not
+// include the CK header that defines the constant; the value is spelled.)
+TEST(PlacementPlan, TheHostsBoundIs63) {
+    constexpr size_t kHostBound = 63;
+    static_assert(kHostBound < kMaxName, "the bridge's body name is the tighter bound");
+    const std::string base60(kHostBound - 3, 'a'), base61(kHostBound - 2, 'a');
+    {
+        const std::vector<placement_row> rows = {make_row(0, 1, base60, 1.0f), make_row(7, 2, base60, 2.0f)};
+        const placement_plan plan = plan_placements(rows, kHostBound);
+        EXPECT_TRUE(plan.error.empty()) << plan.error;
+        EXPECT_EQ(kHostBound, plan.actions[1].name.size());
+    }
+    {
+        const std::vector<placement_row> rows = {make_row(0, 1, base61, 1.0f), make_row(7, 2, base61, 2.0f)};
+        EXPECT_FALSE(plan_placements(rows, kHostBound).error.empty()) << "64 characters: refused by the plan";
+        EXPECT_TRUE(plan_placements(rows, kMaxName).error.empty()) << "MAX_NAME alone let it through";
+    }
+}
+
 TEST(PlacementPlan, ACopyNameTheTableAlreadyHoldsIsAnError) {
     const std::vector<placement_row> rows = {make_row(0, 1, "X_MF", 1.0f), make_row(1, 1, "X_MF_R2", 5.0f),
                                              make_row(2, 2, "X_MF", 2.0f)};

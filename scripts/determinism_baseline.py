@@ -17,6 +17,10 @@ Recordings are not kept in the repository (they are tens of megabytes of
 binary); point --records at wherever the mech_L*.bmrc sweep and the gameplay
 and explosion recordings live.  Cases whose recording is missing are skipped
 with a note rather than silently dropped.
+
+Every replay passes --placement off: since step S5 SimTool's --replay applies
+the sector placement by default, and these single-player recordings were made
+without its copies.
 """
 import argparse
 import os
@@ -71,14 +75,14 @@ def fingerprint(text):
 
 
 def run_local(exe, game, record, extra):
-    done = subprocess.run([exe, "--root", game, "--replay", record, "--report-every", "1"] + extra,
+    done = subprocess.run([exe, "--root", game, "--replay", record, "--report-every", "1", "--placement", "off"] + extra,
                           capture_output=True, text=True, errors="replace")
     return done.stdout + done.stderr
 
 
 def run_wsl(exe, game, record, extra):
     remote_out = "/tmp/bmmo_baseline_out.txt"
-    args = [exe, "--root", game, "--replay", record, "--report-every", "1"] + extra
+    args = [exe, "--root", game, "--replay", record, "--report-every", "1", "--placement", "off"] + extra
     quoted = " ".join("'%s'" % a if " " in a else a for a in args)
     # write on the Linux side; piping large output back through wsl is unreliable
     subprocess.run(["wsl", "-e", "bash", "-c", "%s > %s 2>&1" % (quoted, remote_out)],
@@ -94,7 +98,7 @@ def run_android(device_root, local_record, extra, scratch):
     subprocess.run(["adb", "shell", "mkdir", "-p", device_root + "/rec"], capture_output=True, env=env)
     subprocess.run(["adb", "push", local_record.replace("/", "\\"), device_root + "/rec/" + name],
                    capture_output=True, text=True, env=env)
-    args = ["./BallanceMMOSimTool", "--root", ".", "--replay", "rec/" + name, "--report-every", "1"]
+    args = ["./BallanceMMOSimTool", "--root", ".", "--replay", "rec/" + name, "--report-every", "1", "--placement", "off"]
     remote_out = device_root + "/baseline_out.txt"
     subprocess.run(["adb", "shell", "cd %s && %s > %s 2>&1"
                     % (device_root, " ".join(args + extra), remote_out)],

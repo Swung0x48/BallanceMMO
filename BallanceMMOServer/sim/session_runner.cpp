@@ -148,7 +148,7 @@ namespace bmmo::sim {
     // logged once and the session runs on without a journal: the recorder must
     // never be able to break a simulation.
     void session_runner::open_journal(session_state& s, float spawn_impulse, uint64_t anchor_hash,
-                                      uint64_t anchor_surfaces, uint32_t first_tick) {
+                                      uint64_t anchor_surfaces, uint32_t first_tick, uint64_t anchor_placement) {
         if (config_.journal_dir.empty()) return;
         const std::string prefix = "[session " + std::to_string(s.id) + "] journal: ";
         std::error_code ec;
@@ -170,6 +170,7 @@ namespace bmmo::sim {
         header.anchor_surfaces = anchor_surfaces;
         header.build_id = bmmo::physics::build_id();
         header.world_options = s.world_options;
+        header.anchor_placement = anchor_placement;   // journal v6 (sector placement step S5)
         const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
         s.journal_start = clock::now();
         std::string error;
@@ -209,6 +210,8 @@ namespace bmmo::sim {
             options.trace = config_.trace;
             options.spawn_impulse = spawn_impulse;
             options.trafo_inputs = (world_option_bits & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
+            // Protocol 12 (sector placement design 2.4, step S5).
+            options.placement_clones = (world_option_bits & bmmo::session::WORLD_PLACEMENT_CLONES) != 0;
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };
@@ -241,7 +244,8 @@ namespace bmmo::sim {
             if (start_base != 0) s->world->set_tick_index(start_base);
             s->start_base = start_base;
             const uint32_t first_tick = s->world->tick_index();
-            open_journal(*s, spawn_impulse, s->world->anchor_hash(), s->world->anchor_surfaces(), first_tick);
+            open_journal(*s, spawn_impulse, s->world->anchor_hash(), s->world->anchor_surfaces(), first_tick,
+                         s->world->anchor_placement());
             if (!note.empty()) s->journal.note(first_tick, "start: " + note);
             // An explicit signal for a reader that only has the file: the world
             // is at its anchor and its first step is numbered `first_tick`.
@@ -276,6 +280,7 @@ namespace bmmo::sim {
             info.ok = true;
             info.anchor_hash = s->world->anchor_hash();
             info.anchor_surfaces = s->world->anchor_surfaces();
+            info.anchor_placement = s->world->anchor_placement();
             info.ball_rows = s->world->ball_rows();
             info.trafo_points = s->world->trafo_points();
             {

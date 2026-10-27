@@ -5602,6 +5602,51 @@ namespace {
         EXPECT_NE(decode<bmmo::session_ready_msg>(off.sent.at(0).first).caps & bmmo::session::CAP_TRAFO_INPUTS, 0u);
     }
 
+    // Step S5 (sector placement design 2.4): a host with the placement
+    // capability sends CAP_PLACEMENT and its anchor's signature in
+    // SessionReady; without it the signature is 0 and no cap is declared,
+    // whatever the host put in its report.  The core keeps the world options.
+    TEST(SessionClientCorePlacement, SessionReadyCarriesTheSignatureOnlyWithTheCapability) {
+        for (const bool capable: {true, false}) {
+            flow_fake fake;
+            session_capabilities caps;
+            caps.placement = capable;
+            session_client_core core(fake.make_flow(), caps);
+            state_of(core).own_id_ = 3;
+            auto start = start_message(9, 3);
+            start.world_options = bmmo::session::WORLD_PLACEMENT_CLONES;
+            ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
+            EXPECT_EQ(bmmo::session::WORLD_PLACEMENT_CLONES, core.world_options());
+            core.level_requested();
+            bmmo::session::anchor_report report;
+            report.build_id = "build-x";
+            report.own_name = "Me";
+            report.placement = 0x5d22d3b5a61c38cbULL;
+            core.anchor(report);
+            const auto ready = decode<bmmo::session_ready_msg>(fake.sent.at(0).first);
+            EXPECT_EQ(capable, (ready.caps & bmmo::session::CAP_PLACEMENT) != 0) << capable;
+            EXPECT_EQ(capable ? 0x5d22d3b5a61c38cbULL : 0u, ready.anchor_placement) << capable;
+        }
+    }
+
+    // Journal v6: the client's header carries the session's world options and
+    // the signature SessionReady carried.
+    TEST(SessionClientCorePlacement, TheJournalHeaderCarriesOptionsAndSignature) {
+        journal_dir dir("placement_header");
+        journal_fake fake;
+        fake.path = dir.path / "client.bmjr";
+        session_client_core core(fake.make_journal(), session_capabilities{});
+        start_session(core);
+        state_of(core).world_options_ = bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS;
+        core.journal().open(bmmo::physics::world_hash{}, "build-x", "Me", 0xabcdef0123456789ULL);
+        core.journal().close("bye");
+        bmmo::session::journal j;
+        std::string error;
+        ASSERT_TRUE(bmmo::session::read_journal(fake.path, j, error)) << error;
+        EXPECT_EQ(bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS, j.header.world_options);
+        EXPECT_EQ(0xabcdef0123456789ULL, j.header.anchor_placement);
+    }
+
     TEST(SessionClientCoreTrafo, SetsAtTheAnchorAndOnFirstSightNeverInAReplay) {
         flow_fake fake;
         trafo_fake t;

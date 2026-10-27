@@ -32,7 +32,7 @@ namespace bmmo::session::core {
     }
 
     void client_journal::open(const bmmo::physics::world_hash& hash, const std::string& build_id,
-                              const std::string& own_name) {
+                              const std::string& own_name, uint64_t anchor_placement) {
         const client_core_state& s = core_.s;
         const session_platform& platform = core_.platform();
         bmmo::session::journal_header header;
@@ -49,6 +49,13 @@ namespace bmmo::session::core {
         header.build_id = build_id;
         header.own_player = s.own_id_;
         header.own_join_order = s.own_join_order_ < 0 ? 255 : static_cast<uint8_t>(s.own_join_order_);
+        // Journal v5/v6 (steps T2, S5): the session's world options and the
+        // anchor's placement signature, so a replay of this file builds the
+        // world the session ran (the copies, the trafo sets) and checks the
+        // placement against it.  Before S5 a client header carried no world
+        // options (0).
+        header.world_options = s.world_options_;
+        header.anchor_placement = anchor_placement;
         const std::filesystem::path path = platform.journal_path ? platform.journal_path(header) : std::filesystem::path();
         if (path.empty()) return;
         close("a new session started");

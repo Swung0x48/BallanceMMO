@@ -371,6 +371,15 @@ namespace {
         uint32_t leave_at = 0;
         int64_t leave_after_unphys = -1;
         int64_t leave_after_trafo = -1;
+        // --placement-signature HEX (step S5, sector placement design 7.4
+        // "mismatch"; a test switch): the host declares the placement
+        // capability and reports HEX as its anchor's placement signature
+        // instead of none.  This host computes no signature before step S6,
+        // so HEX equal to the server's is the matching control and any other
+        // value the mismatch the server must end the session on.  It builds
+        // no copy: not for a session with the world option on.
+        bool placement_signature_given = false;
+        uint64_t placement_signature = 0;
     };
 
     // The record's keys (scripts/arena_map_test.py write_drive_record) are
@@ -396,7 +405,8 @@ namespace {
                   "       [--capture-inbound FILE | --replay-inbound FILE]   (record the inbound messages and clock reads; "
                   "replay them, unpaced, sending nothing)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
-                  "       [--ignore-snapshots] [--no-trafo-cap] [--trafo-no-resets] [--leave-at TICK | --leave-after-unphys D | --leave-after-trafo D]");
+                  "       [--ignore-snapshots] [--no-trafo-cap] [--trafo-no-resets] [--leave-at TICK | --leave-after-unphys D | --leave-after-trafo D]\n"
+                  "       [--placement-signature HEX]   (test: declare the placement and report HEX as the anchor's signature)");
     }
 
     // The event type names (--hold-event, the own-echo lines) are the core's
@@ -465,6 +475,13 @@ namespace {
                 out.brake_tap_n = std::max(0, std::atoi(v));
                 out.brake_tap_p = std::max(0, std::atoi(colon + 1));
                 if (out.brake_tap_n > 0 && out.brake_tap_p <= out.brake_tap_n) return false;
+            }
+            else if (arg == "--placement-signature") {
+                if (!(v = next())) return false;
+                char* end = nullptr;
+                out.placement_signature = std::strtoull(v, &end, 16);
+                if (!end || end == v || *end) return false;
+                out.placement_signature_given = true;
             }
             else if (arg == "--keep-lane-tap") {
                 if (!(v = next())) return false;
@@ -1497,6 +1514,8 @@ namespace {
             // part), which --no-script-replay does not install - a replay
             // would set the inputs' flags and run nothing (review 2 of T3).
             caps.trafo_inputs = !args_.no_trafo_cap && args_.script_replay;
+            // Step S5: only with the test switch (the signature is S6's).
+            caps.placement = args_.placement_signature_given;
             return caps;
         }
         // The core's configuration from the arguments (design 1.2).
@@ -1966,6 +1985,7 @@ namespace {
             report.own_name = args_.name;
             report.load_ticks = load_waited_;
             report.sector_cell = sector_cell;
+            report.placement = args_.placement_signature;   // --placement-signature (step S5 test switch)
             core_.anchor(report);
         }
 

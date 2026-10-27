@@ -65,7 +65,15 @@ namespace bmmo::session {
     //      SessionReady caps CAP_TRAFO_INPUTS; SessionResyncState carries the
     //      trafo ledger; the portable script record carries the trafo sets'
     //      scripts (version 2) when the world option is on.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 11;   // 4: SessionStart carries spawn_spacing
+    //  12  the sector placement on the wire (docs/sector-placement-design.md
+    //      5, step S5): world_options bit WORLD_PLACEMENT_CLONES (a world
+    //      with it gives every PH row its own object); SessionReady carries
+    //      the client's placement signature (`anchor_placement`, after
+    //      `caps`) and CAP_PLACEMENT, and the server compares the signature
+    //      of every member that declares the cap with its own world's -
+    //      late joiners included - and refuses a member without the cap in
+    //      a session with the bit.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 12;   // 4: SessionStart carries spawn_spacing
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its
@@ -84,15 +92,32 @@ namespace bmmo::session {
     // took at protocol 10.  A member that does not declare it is refused by
     // a session whose world_options has WORLD_TRAFO_INPUTS.
     constexpr uint32_t CAP_TRAFO_INPUTS = 1u << 2;
+    // Protocol 12 (sector placement design 2.4, 5; step S5): the client's
+    // host computes the placement signature of its world at every anchor
+    // (session_capabilities::placement) and builds the copies when the
+    // session's world_options has WORLD_PLACEMENT_CLONES.  SessionReady's
+    // anchor_placement is then the host's signature and the server ends the
+    // session when it differs from its own world's (late joiners too: the
+    // signature does not depend on time).  A member without it (the legacy
+    // retail path; the headless host before step S6, the retail core host
+    // before S10) sends 0, which is not compared, and is refused by a
+    // session with WORLD_PLACEMENT_CLONES.
+    constexpr uint32_t CAP_PLACEMENT = 1u << 3;
 
     // session_start_msg::world_options bits (protocol 11): what every world
     // of the session runs, fixed by the server for the session's life (never
-    // a per-client choice).  Bit 0 is the sector placement design's
-    // WORLD_PLACEMENT_CLONES, bit 2 the world-agreement design's, bit 3 the
-    // record-format design's (none built yet).  WORLD_TRAFO_INPUTS
+    // a per-client choice).  Bit 2 is the world-agreement design's, bit 3
+    // the record-format design's (neither built yet).
+    // WORLD_PLACEMENT_CLONES (protocol 12, sector placement design 2.4, step
+    // S5): every PH row whose object another row already places at another
+    // matrix gets its own copy at the anchor (game/sector_placement.hpp), so
+    // a player entering the next sector changes nothing in the previous one;
+    // the server's config physics.placement_clones (default off until the
+    // retail core host builds the copies, step S10).  WORLD_TRAFO_INPUTS
     // (trafo-replication design 2.14): every member has its own trafo piece
     // set in every world, the trafo's explosion and reset are Trafo events,
     // a piece never collides with a local body (PE_Balloon*).
+    constexpr uint32_t WORLD_PLACEMENT_CLONES = 1u << 0;
     constexpr uint32_t WORLD_TRAFO_INPUTS = 1u << 1;
 
     // session_assign_msg::flags (protocol 10).  STATE_FOLLOWS: a

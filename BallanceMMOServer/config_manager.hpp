@@ -87,6 +87,15 @@ public:
     // the trafo inputs (steps T3, T4); off, the server does what it did
     // before the option existed.
     bool physics_trafo_inputs = false;
+    // Sector placement design 2.4, 5 (protocol 12, step S5): the session's
+    // world option WORLD_PLACEMENT_CLONES - every PH row whose object another
+    // row already places at another matrix gets its own copy at the anchor,
+    // in every world.  A member whose SessionReady does not declare
+    // CAP_PLACEMENT is refused by such a session.  Off by default until the
+    // retail core host builds the copies (step S10 turns it on; the design's
+    // "default true from S5" would end every retail session on L1-L13 with a
+    // placement mismatch until then); off, the server builds no copy.
+    bool physics_placement_clones = false;
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

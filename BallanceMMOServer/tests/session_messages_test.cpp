@@ -227,7 +227,7 @@ TEST(SessionReadyMsg, AnOlderProtocolParsesWithoutCaps) {
     msg.build_id = "b";
     ASSERT_TRUE(msg.serialize());
     std::string bytes = stream_payload(msg.raw);
-    bytes.resize(bytes.size() - sizeof(uint32_t));   // what a protocol 7 build wrote
+    bytes.resize(bytes.size() - sizeof(uint32_t) - sizeof(uint64_t));   // what a protocol 7 build wrote
     bmmo::session_ready_msg parsed{};
     parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     ASSERT_TRUE(parsed.deserialize());
@@ -1222,11 +1222,68 @@ TEST(SessionRemoteInputMsg, V3RejectsBadHeldSectionsAndAV6Datagram) {
 // ---------------------------------------------------------------------
 
 TEST(TrafoWire, TheProtocolIs11AndTheBitsAreDistinct) {
-    EXPECT_EQ(11u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_LE(11u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "12 since step S5 (PlacementWire)";
     EXPECT_EQ(5, static_cast<int>(bmmo::session::event_type::Trafo));
     EXPECT_EQ(0u, bmmo::session::CAP_TRAFO_INPUTS & (bmmo::session::CAP_LEAD | bmmo::session::CAP_RESYNC_STATE));
     EXPECT_NE(0u, bmmo::session::CAP_TRAFO_INPUTS);
     EXPECT_EQ(1u << 1, bmmo::session::WORLD_TRAFO_INPUTS) << "bit 0 is the sector placement's, 2 and 3 are claimed";
+}
+
+// ---------------------------------------------------------------------
+// Protocol 12 (sector placement design 5, step S5): the world option, the
+// capability and SessionReady's placement signature.
+// ---------------------------------------------------------------------
+
+TEST(PlacementWire, TheProtocolIs12AndTheBitsAreDistinct) {
+    EXPECT_EQ(12u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(1u << 0, bmmo::session::WORLD_PLACEMENT_CLONES) << "the design's bit 0";
+    EXPECT_EQ(0u, bmmo::session::WORLD_PLACEMENT_CLONES & bmmo::session::WORLD_TRAFO_INPUTS);
+    EXPECT_NE(0u, bmmo::session::CAP_PLACEMENT);
+    EXPECT_EQ(0u, bmmo::session::CAP_PLACEMENT
+                  & (bmmo::session::CAP_LEAD | bmmo::session::CAP_RESYNC_STATE | bmmo::session::CAP_TRAFO_INPUTS));
+}
+
+TEST(PlacementWire, SessionReadyCarriesThePlacementSignature) {
+    bmmo::session_ready_msg msg{};
+    msg.session = 3;
+    msg.caps = bmmo::session::CAP_PLACEMENT | bmmo::session::CAP_LEAD;
+    msg.anchor_hash = 0x1111;
+    msg.build_id = "b";
+    msg.anchor_placement = 0x91a138e4fd6e7254ULL;
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(12u, parsed.protocol);
+    EXPECT_EQ(bmmo::session::CAP_PLACEMENT | bmmo::session::CAP_LEAD, parsed.caps);
+    EXPECT_EQ(0x91a138e4fd6e7254ULL, parsed.anchor_placement);
+    EXPECT_EQ(0x1111u, parsed.anchor_hash);
+    msg.clear();
+    expect_rejects_every_truncation(msg);
+}
+
+// A protocol 11 client sends no signature: its message still parses
+// (placement 0), so the server can say which protocol it runs.
+TEST(PlacementWire, AProtocol11SessionReadyParsesWithoutTheSignature) {
+    bmmo::session_ready_msg msg{};
+    msg.session = 3;
+    msg.protocol = 11;
+    msg.caps = bmmo::session::CAP_TRAFO_INPUTS;
+    msg.anchor_placement = 0x1234;
+    msg.build_id = "b";
+    ASSERT_TRUE(msg.serialize());
+    std::string bytes = stream_payload(msg.raw);
+    bytes.resize(bytes.size() - sizeof(uint64_t));   // what a protocol 11 build wrote
+    bmmo::session_ready_msg parsed{};
+    parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    ASSERT_TRUE(parsed.deserialize());
+    EXPECT_EQ(11u, parsed.protocol);
+    EXPECT_EQ(bmmo::session::CAP_TRAFO_INPUTS, parsed.caps);
+    EXPECT_EQ(0u, parsed.anchor_placement);
+}
+
+TEST(PlacementWire, SessionStartCarriesThePlacementBit) {
+    bmmo::session_start_msg msg{};
+    msg.world_options = bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS;
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS, parsed.world_options);
 }
 
 TEST(TrafoWire, SessionStartCarriesTheWorldOptions) {

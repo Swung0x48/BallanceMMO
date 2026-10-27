@@ -92,9 +92,11 @@ check, pinned paired replays, the physics-free models).
 
 **Protocol numbers.** Protocol 10 / journal v4: the resync track's exact
 resync (A3, 93c13f6). Protocol 11 / journal v5: the trafo replication's wire
-(T2, 074f6d5). The next change of the wire is the sector placement's S5,
-which takes the next free numbers (expected 12 / v6, and makes the
-protocol-11 reference captures refuse). Bridge API: v20 A3, v21 trafo T1,
+(T2, 074f6d5). Protocol 12 / journal v6: the sector placement's wire (S5:
+`WORLD_PLACEMENT_CLONES`, `CAP_PLACEMENT`, SessionReady's
+`anchor_placement`, the header's); the protocol-11 reference captures
+(`core_ref_rc1`, `core_ref_t3`, `core_ref_t3off`) refuse it, so S6
+re-captures the set. Bridge API: v20 A3, v21 trafo T1,
 v22 trafo T4; the next is free. Forward compatibility is deliberately
 broken: server and clients are rebuilt together.
 
@@ -131,6 +133,7 @@ broken: server and clients are rebuilt together.
 | Sector placement S2: apply, signature, release; the world option (off) | 5b536b2 | built (its x64 teardown over-read: §4 item 2) |
 | Sector placement S3: the invariant check I1 (`--second-move`, `--placement-trace`, `placement_check.py`) | 81c6803 | built |
 | Sector placement S9: a level that ran a session is reloaded at the next countdown (retail) | 5cd1c11 | built |
+| Sector placement S5: protocol 12 / journal v6 - the world option bit, `CAP_PLACEMENT`, the signature compare (late joiners too), config default off (M3), SimTool replay honouring the header, the plan bound 63 | (this step) | built |
 | Rollback engine gaps G0 (EG0): diagnostics - the counted birth failures, the 1378 difference, the outside producers | 0b73af2 | built |
 | Record-format gaps K0: SimTool `--array-reads`, `--globals-trace`, `--world-options` | 49e2cc8 | built |
 | Rewind cost RC1: the replay re-predicts a remote's tail past its newest relayed frame with that frame (hold-last) | 5f967b4 | input rewinds -83..-87 % (swing, H1 at 150 ms), -67..-77 % (cliff), -44 % at 50 ms; no rebase in any arm; CPU parity -36 % |
@@ -156,9 +159,11 @@ x64 teardown) are item 2.
 
 **Stage A - everything that affects physics is an input (goal 2).**
 
-1. **Sector placement S5-S11** (`sector-placement-design.md` §8): one object
-   per placement at the anchor; S5 the wire (protocol 12 / journal v6
-   expected; its world-options field exists since T2), S6 the headless host,
+1. **Sector placement S6-S11** (`sector-placement-design.md` §8): one object
+   per placement at the anchor; S5 the wire is built (protocol 12 / journal
+   v6; As built (step S5) in the design's §5), S6 the headless host (it
+   declares `CAP_PLACEMENT` with the real signature, replaces the test switch
+   `--placement-signature`, and re-captures the reference set at protocol 12),
    S7 the savestate check with a pass in the window, S8 the measurement, S10
    the retail host (the track's close-out, a 15-minute step), S11 the
    records. **Adaptation M3** (the orchestrator's): the placement's config
@@ -352,6 +357,26 @@ x64 teardown) are item 2.
      (i) three launches without a hang.
    - TR5 (trafo T5, the records and this roadmap, docs only, 2026-10-27;
      its row's gate is a review): nothing deferred.
+   - SP5 (sector placement S5, the wire, quick tier, 2026-10-27; ran: x64,
+     x86 and Arch builds, 530 tests, GCC 29 ok, a v5 arena server journal
+     replayed matched 4112/4112 with stdout identical to rTR5's, ONE live
+     two-client run of §7.4 "mismatch" (`sp5_mismatch`), its v6 journal
+     replayed matched and refused when its signature is altered, a
+     protocol-11 capture refused): (a) the wire check - impossible until
+     S6 re-captures the reference set at protocol 12; (b) a retail two-copy
+     run of the SP5 x86 build, core off and core on (no retail source
+     changed, but SessionReady's bytes and the journal header changed for
+     both modes; the core-off BAR rests on it); (c) a session with
+     `physics.placement_clones` on: a member without `CAP_PLACEMENT` (the
+     legacy path, the retail core host) refused out of the session, the
+     rest running; (d) SimTool `--replay` (record mode) with its new
+     default on, on a retail tick record of a pooled level made with and
+     without the copies; (e) a `--replay-session` of a CLIENT journal of a
+     trafo-on session (SP5 writes `world_options` into the client header, so
+     it replays with the trafo inputs: does the client journal hold every
+     Trafo event, the server's `TRAFO_SERVER` resets included?); (f) a
+     placement mismatch of a member at session START (only the late joiner
+     ran; same server branch).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

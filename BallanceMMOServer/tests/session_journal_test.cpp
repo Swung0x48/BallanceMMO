@@ -57,6 +57,7 @@ namespace {
         h.own_player = 42;
         h.own_join_order = 1;
         h.world_options = WORLD_TRAFO_INPUTS;
+        h.anchor_placement = 0x629f6128b4fc8389ULL;
         return h;
     }
 
@@ -289,6 +290,7 @@ TEST(SessionJournal, RoundTripOfEveryRecordType) {
     EXPECT_EQ(expected.own_player, out.header.own_player);
     EXPECT_EQ(expected.own_join_order, out.header.own_join_order);
     EXPECT_EQ(expected.world_options, out.header.world_options) << "journal v5: the session's world options";
+    EXPECT_EQ(expected.anchor_placement, out.header.anchor_placement) << "journal v6: the anchor's placement signature";
 
     // the founding members: the ones at first_tick before the first TICK
     ASSERT_EQ(2u, out.initial_players.size());
@@ -453,7 +455,7 @@ TEST(SessionJournal, ResyncRecordRoundTrip) {
     EXPECT_EQ(300u, r.scripts.size());
     EXPECT_EQ(70003u, r.savestate.size());
     EXPECT_EQ("end", r.savestate.substr(70000));
-    EXPECT_EQ(5u, kJournalVersion) << "5: the HEADER's world options and the Trafo EVENT (protocol 11)";
+    EXPECT_EQ(6u, kJournalVersion) << "6: the HEADER's anchor placement (protocol 12)";
     EXPECT_EQ(2u, kJournalOldestReadable) << "version 2, 3 and 4 files still read";
 }
 
@@ -1166,6 +1168,38 @@ TEST(SessionJournal, TrafoEventsOfOneTickAreKeptApartByTheirFlags) {
     EXPECT_EQ(0, left[380][0]);
 }
 
+// Journal v6 (protocol 12, sector placement design 5, step S5): the anchor's
+// placement signature trails the world options; a v5 header (without it)
+// reads as 0 - unknown, not compared - and keeps its world options.
+TEST(SessionJournal, V6AnchorPlacement) {
+    journal_header h = make_header();
+    h.world_options = WORLD_PLACEMENT_CLONES;
+    std::string payload;
+    journal_detail::write_header_payload(payload, h);
+    journal_header back;
+    ASSERT_TRUE(journal_detail::read_header_payload(payload, back));
+    EXPECT_EQ(WORLD_PLACEMENT_CLONES, back.world_options);
+    EXPECT_EQ(0x629f6128b4fc8389ULL, back.anchor_placement);
+    journal_header v5;
+    ASSERT_TRUE(journal_detail::read_header_payload(payload.substr(0, payload.size() - 8), v5)) << "a v5 header";
+    EXPECT_EQ(WORLD_PLACEMENT_CLONES, v5.world_options);
+    EXPECT_EQ(0u, v5.anchor_placement);
+
+    const temp_dir dir("v6_header");
+    const auto path = dir.file("session.bmjr");
+    {
+        journal_writer w;
+        std::string error;
+        ASSERT_TRUE(w.open(path, h, 0, error)) << error;
+        w.close();
+    }
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_EQ(0x629f6128b4fc8389ULL, out.header.anchor_placement);
+    EXPECT_EQ(WORLD_PLACEMENT_CLONES, out.header.world_options);
+}
+
 // Journal v5 (protocol 11, trafo-replication design 5, step T2): a header
 // without the trailing world options (every older file) reads as 0, and a
 // Trafo EVENT record keeps its piece type, flags and position.
@@ -1177,8 +1211,9 @@ TEST(SessionJournal, V5WorldOptionsAndTheTrafoEvent) {
     ASSERT_TRUE(journal_detail::read_header_payload(payload, back));
     EXPECT_EQ(WORLD_TRAFO_INPUTS, back.world_options);
     journal_header old;
-    ASSERT_TRUE(journal_detail::read_header_payload(payload.substr(0, payload.size() - 4), old)) << "a v4 header";
+    ASSERT_TRUE(journal_detail::read_header_payload(payload.substr(0, payload.size() - 12), old)) << "a v4 header";
     EXPECT_EQ(0u, old.world_options);
+    EXPECT_EQ(0u, old.anchor_placement);
     EXPECT_EQ(h.own_join_order, old.own_join_order);
 
     const temp_dir dir("trafo_event");

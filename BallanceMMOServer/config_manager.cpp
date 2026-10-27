@@ -82,6 +82,7 @@ bool config_manager::load() {
         physics_patience = yaml_load_value(physics, "patience", physics_patience);
         physics_lead_adjust = yaml_load_value(physics, "lead_adjust", physics_lead_adjust);
         physics_trafo_inputs = yaml_load_value(physics, "trafo_inputs", physics_trafo_inputs);
+        physics_placement_clones = yaml_load_value(physics, "placement_clones", physics_placement_clones);
         physics_journal_dir = yaml_load_value(physics, "journal_dir", physics_journal_dir);
         physics_journal_max_mb = yaml_load_value(physics, "journal_max_mb", physics_journal_max_mb);
         physics_journal_checkpoint_ticks = yaml_load_value(physics, "journal_checkpoint_ticks",

@@ -73,7 +73,10 @@ namespace bmmo::session {
             // `build_id` is the binary's (the header's build_id); `own_name`
             // names the own player in the start note and its PLAYER record,
             // every other player is named by its id.
-            void open(const bmmo::physics::world_hash& hash, const std::string& build_id, const std::string& own_name);
+            // `anchor_placement`: the header's (journal v6), the signature
+            // SessionReady carried (0 from a host without the placement).
+            void open(const bmmo::physics::world_hash& hash, const std::string& build_id, const std::string& own_name,
+                      uint64_t anchor_placement = 0);
             void close(const std::string& reason);
             void note(const std::string& text);
 

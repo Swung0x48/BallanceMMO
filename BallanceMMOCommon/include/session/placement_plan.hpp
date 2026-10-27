@@ -89,9 +89,11 @@ namespace bmmo::session {
     }
 
     // The plan of a PH table (design 2.2 "Algorithm").  Rows are walked in the
-    // order given (the table's row order); `max_name` is the wire's MAX_NAME:
-    // a copy's root name longer than it is an error, 64 itself is allowed
-    // (the names the level already has are not the plan's).  Two
+    // order given (the table's row order); `max_name` is the longest name a
+    // copy may get - every host passes game::kPlacementMaxName (63: the
+    // wire's MAX_NAME and the bridge's body name, step S5): a copy's root
+    // name longer than it is an error, max_name itself is allowed (the names
+    // the level already has are not the plan's).  Two
     // objects of one plan with the same name - a copy's name equal to another
     // copy's or to an object the table already names - are an error.  On an
     // error the actions are still filled as far as they were planned, for the

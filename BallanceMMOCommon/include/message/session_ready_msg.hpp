@@ -24,6 +24,14 @@ namespace bmmo {
         // dropping a message it cannot read.  The server only sends what a
         // client declared it can apply.
         uint32_t caps = 0;
+        // Protocol 12 (sector placement design 2.4, 5; step S5): the
+        // placement signature of the client's world at its anchor
+        // (game/sector_placement.hpp signature), after `caps`.  Meaningful
+        // when caps has CAP_PLACEMENT (the server compares it with its own
+        // world's, late joiners included); 0 otherwise.  Required from
+        // protocol 12 on; an older client's message still parses (0), so
+        // the server can say which protocol it runs.
+        uint64_t anchor_placement = 0;
 
         session_ready_msg() : serializable_message(bmmo::SessionReady) {}
 
@@ -37,6 +45,7 @@ namespace bmmo {
             message_utils::write_string<uint16_t>(physics_sha256.substr(0, session::MAX_NAME), raw);
             message_utils::write_string<uint16_t>(build_id.substr(0, session::MAX_NAME), raw);
             raw.write(reinterpret_cast<const char*>(&caps), sizeof(caps));
+            raw.write(reinterpret_cast<const char*>(&anchor_placement), sizeof(anchor_placement));
             return raw.good();
         }
 
@@ -54,6 +63,8 @@ namespace bmmo {
             if (build_id.size() > session::MAX_NAME) return false;
             caps = 0;
             if (protocol >= 8 && !message_utils::read_variable(raw, &caps)) return false;
+            anchor_placement = 0;
+            if (protocol >= 12 && !message_utils::read_variable(raw, &anchor_placement)) return false;
             return true;
         }
     };

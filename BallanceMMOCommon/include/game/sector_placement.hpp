@@ -244,6 +244,15 @@ namespace bmmo::game {
 
     // ------------------------------------------------------------ step S2
 
+    // The longest name the placement gives an entity (design 2.3 step 5): the
+    // wire's MAX_NAME, and what the physics bridge's body name holds
+    // (BMMO_PHYSICS_NAME_SIZE with its terminator), since a renamed entity's
+    // name is its body's name everywhere - 63.  Step S5 passes the same bound
+    // to the plan (plan_placements), which before took MAX_NAME (64), so a
+    // 64-character copy root passed the CK-free plan and failed step 5 (S2's
+    // open bullet a).
+    constexpr size_t kPlacementMaxName = std::min<size_t>(session::MAX_NAME, BMMO_PHYSICS_NAME_SIZE - 1);
+
     // What the placement cannot see through CK (design 2.3 step 3): the
     // host's physics.  An unset hook is not checked (the log says so).
     struct placement_hooks {
@@ -504,7 +513,7 @@ namespace bmmo::game {
         std::vector<session::placement_row> rows;
         if (const std::string e = read_placement_rows(context, rows); !e.empty()) return "PH: " + e;
         CKDataArray* ph = ph_array(context);
-        const session::placement_plan plan = session::plan_placements(rows, session::MAX_NAME);
+        const session::placement_plan plan = session::plan_placements(rows, kPlacementMaxName);
         if (!plan.error.empty()) return "plan: " + plan.error;
         std::string same_pose, rewritten;
         for (const session::placement_action& a: plan.actions) {
@@ -659,10 +668,8 @@ namespace bmmo::game {
             }
             const XObjectArray remapped = dc.FillRemappedDependencies();
             if (hooks.fail_at_row == a.row) return refuse("test hook: step 5 refuses at this row (--placement-fail-at)");
-            // The limit: the wire's MAX_NAME, and what the physics bridge's
-            // body name holds (BMMO_PHYSICS_NAME_SIZE with its terminator),
-            // since a renamed entity's name is its body's name everywhere.
-            constexpr size_t kMaxEntityName = std::min<size_t>(session::MAX_NAME, BMMO_PHYSICS_NAME_SIZE - 1);
+            // The limit: kPlacementMaxName (the wire's and the bridge's).
+            constexpr size_t kMaxEntityName = kPlacementMaxName;
             for (size_t i = 0; i < h.size(); ++i) {
                 const std::string name = name_of(h[i]) + suffix;
                 if (name.size() > kMaxEntityName)
@@ -808,7 +815,7 @@ namespace bmmo::game {
                 if (plan.actions[i].what != kind::none && now[i].object != plan.actions[i].name)
                     return undo("row " + std::to_string(now[i].row) + " names " + now[i].object + " after the copies, the plan "
                                 + plan.actions[i].name);
-            const session::placement_plan again = session::plan_placements(now, session::MAX_NAME);
+            const session::placement_plan again = session::plan_placements(now, kPlacementMaxName);
             if (again.copies() != 0 || again.rewrites() != 0 || !again.error.empty())
                 return undo("the placed table re-plans to " + std::to_string(again.copies()) + " copies, "
                             + std::to_string(again.rewrites()) + " rewrites" + (again.error.empty() ? "" : " (" + again.error + ")"));

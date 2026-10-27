@@ -79,7 +79,7 @@ namespace bmmo::sim {
             std::printf("\n");
         }
 
-        const session::placement_plan plan = session::plan_placements(rows, session::MAX_NAME);
+        const session::placement_plan plan = session::plan_placements(rows, bmmo::game::kPlacementMaxName);
         std::map<std::string, int> by_kind;
         size_t longest = 0;
         std::string same_pose, rewritten;
@@ -102,14 +102,14 @@ namespace bmmo::sim {
                     by_kind["trafo"], by_kind["fan"], by_kind["module"], by_kind["prop"]);
         std::printf("plan same-pose rows: %s\n", same_pose.empty() ? "-" : same_pose.c_str());
         std::printf("plan rewritten share rows: %s\n", rewritten.empty() ? "-" : rewritten.c_str());
-        std::printf("plan longest copy name: %zu (MAX_NAME %zu)\n", longest, session::MAX_NAME);
+        std::printf("plan longest copy name: %zu (bound %zu)\n", longest, bmmo::game::kPlacementMaxName);
         const std::vector<session::placement_row> applied = session::placement_applied_rows(rows, plan);
         for (size_t i = 0; i < applied.size(); ++i)
             if (applied[i].object != rows[i].object)
                 std::printf("applied row %d: %s -> %s\n", applied[i].row, rows[i].object.c_str(), applied[i].object.c_str());
         // The plan of the applied table must be all keep/share with nothing
         // to rewrite (design 2.2 "Idempotence").
-        const session::placement_plan again = session::plan_placements(applied, session::MAX_NAME);
+        const session::placement_plan again = session::plan_placements(applied, bmmo::game::kPlacementMaxName);
         std::printf("applied table replanned: %zu copies, %zu rewrites%s\n", again.copies(), again.rewrites(),
                     again.error.empty() ? "" : (" ERROR " + again.error).c_str());
         if (!plan.error.empty()) {

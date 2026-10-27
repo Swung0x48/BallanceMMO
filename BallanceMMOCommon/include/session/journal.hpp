@@ -25,6 +25,13 @@
 // EVENT records of type 5 (Trafo) in the existing ball_type / flags /
 // position fields, the server's own resets (TRAFO_SERVER) among them; an
 // older file reads as options 0.
+// Version 6 (protocol 12, sector placement design 5, step S5) appends the
+// anchor's placement signature (u64 anchor_placement) to the HEADER, after
+// world_options: the server's world's, always; a client's when its host
+// declares the placement (CAP_PLACEMENT), else 0.  A replay builds its world
+// with the header's WORLD_PLACEMENT_CLONES and refuses one whose signature
+// differs from a non-zero anchor_placement; an older file reads as 0
+// (unknown, not compared).
 //
 //   file   = magic "BMMOJRNL" (8 bytes) , u32 version , record*
 //   record = u8 tag , u32 payload_size , payload[payload_size]
@@ -84,7 +91,8 @@ namespace bmmo::session {
 
     // 4: the RESYNC record (protocol 10, resync design 5, step A3).
     // 5: the HEADER's world_options and the Trafo EVENT (protocol 11, step T2).
-    constexpr uint32_t kJournalVersion = 5;
+    // 6: the HEADER's anchor_placement (protocol 12, sector placement step S5).
+    constexpr uint32_t kJournalVersion = 6;
     // The oldest version this reader still takes (see the format note above).
     constexpr uint32_t kJournalOldestReadable = 2;
     constexpr char kJournalMagic[8] = {'B', 'M', 'M', 'O', 'J', 'R', 'N', 'L'};
@@ -134,6 +142,11 @@ namespace bmmo::session {
         uint8_t own_join_order = 255;   // 255 in a server journal
         // Version 5: the session's session::WORLD_* bits (0 in an older file).
         uint32_t world_options = 0;
+        // Version 6: the placement signature at the anchor (sector placement
+        // design 2.4): the server's world's; a client's when its host computes
+        // it (CAP_PLACEMENT), else 0.  0 in an older file: unknown, not
+        // compared.
+        uint64_t anchor_placement = 0;
     };
 
     struct journal_player {
@@ -494,6 +507,7 @@ namespace bmmo::session {
             write_u32(out, h.own_player);
             write_u8(out, h.own_join_order);
             write_u32(out, h.world_options);
+            write_u64(out, h.anchor_placement);
         }
 
         inline bool read_header_payload(const std::string& payload, journal_header& h) {
@@ -516,6 +530,8 @@ namespace bmmo::session {
             h.own_join_order = in.u8();
             // Version 5: trailing, so an older file (none) reads as 0.
             h.world_options = in.ok && in.size - in.pos >= 4 ? in.u32() : 0;
+            // Version 6: trailing after it, so an older file reads as 0.
+            h.anchor_placement = in.ok && in.size - in.pos >= 8 ? in.u64() : 0;
             return in.ok;
         }
     }

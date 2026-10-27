@@ -1,6 +1,6 @@
 # Sector placement: one object per PH row
 
-Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1, S2, S3 and S9 built (as-built notes in 2.2, 2.3, 2.5, 2.6 and 7.3); protocol 10 / journal v4 went to resync A3 and 11 / v5 to trafo T2, so S5 takes the next free numbers (expected 12 / v6; §8's S5 row and §5 still say 10 / v4); revision 2
+Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1, S2, S3, S9 and S5 built (as-built notes in 2.2, 2.3, 2.5, 2.6, 7.3 and 5); protocol 10 / journal v4 went to resync A3 and 11 / v5 to trafo T2, so S5 took protocol 12 / journal v6 (§5, §7.1 and §8 corrected); revision 2
 after two reviews (answers in §10). Base: HEAD 4882ec2 (R2) plus the
 uncommitted step P in the working tree; line numbers are the working tree's on
 2026-10-23 and drift with step P, so each one is given with the function or
@@ -1208,20 +1208,147 @@ any shared surface's hull differs between rows; §9 Q6 has the options.
 
 | item | change |
 |---|---|
-| `PHYSICS_PROTOCOL_VERSION` (entity/session.hpp:51) | 9 -> 10, comment: "10: SessionStart carries world_options; SessionReady carries the placement signature; a world with PLACEMENT_CLONES gives every PH row its own object (docs/sector-placement-design.md)". Forward compatibility deliberately broken. |
+| `PHYSICS_PROTOCOL_VERSION` (entity/session.hpp) | 11 -> 12 (written 9 -> 10 before resync A3 took 10 and trafo T2 took 11, which also brought `world_options` into SessionStart), comment: "12: the world option WORLD_PLACEMENT_CLONES; SessionReady carries the placement signature (docs/sector-placement-design.md)". Forward compatibility deliberately broken. |
 | `entity/session.hpp` | `constexpr uint32_t WORLD_PLACEMENT_CLONES = 1u << 0;` |
-| `session_start_msg` | `uint32_t world_options` appended after `protocol`; the server fills it from config `physics_placement_clones` (default true from S5). It is the switch for the negative control (§7.6) and for replaying old journals; it is never a per-client choice. |
-| `session_ready_msg` | `uint64_t anchor_placement` appended after `caps`, read when `protocol >= 10`; always filled (placement on or off, §2.4). |
+| `session_start_msg` | `uint32_t world_options` after `protocol` (exists since protocol 11, trafo T2); the server sets bit 0 from config `physics_placement_clones` (default **false** until S10: adaptation M3, see As built (step S5) below). It is the switch for the negative control (§7.6) and for replaying old journals; it is never a per-client choice. |
+| `session_ready_msg` | `uint64_t anchor_placement` appended after `caps`, read when `protocol >= 12`; filled by a host that declares `CAP_PLACEMENT` (placement on or off, §2.4), 0 otherwise (As built (step S5)). |
 | `world_ready_info`, `on_world_ready` (SRN hpp:119-131, SV:966-980) | `anchor_placement` from `physics_world`, stored in the session. |
 | server `handle_session_ready` (SV:1537-1577) | after the engine check, before the anchor-hash compare: `anchor_placement != s.anchor_placement` ends the session with "placement mismatch for X (client %016llx, server %016llx)", **for late joiners too** (unlike the anchor hashes, the signature does not depend on time), the way the protocol and engine mismatches already do for any client. |
-| `journal_header` (journal.hpp:102-117) | `uint32_t world_options`, `uint64_t anchor_placement` after `anchor_surfaces`; `kJournalVersion` 3 -> 4; a v2/v3 file reads as options 0 (no copies), placement 0 (unknown, not compared). |
-| SimTool `--replay-session` | builds the world with the header's options and, for a v4 header, refuses a replay whose anchor placement differs from the header's ("journal placement X, replay Y"). |
+| `journal_header` (journal.hpp) | `uint64_t anchor_placement` trailing after `world_options` (which trafo T2 appended at v5); `kJournalVersion` 5 -> 6; an older file reads as placement 0 (unknown, not compared), a file older than v5 as options 0 (no copies). |
+| SimTool `--replay-session` | builds the world with the header's options and, for a header with a non-zero placement, refuses a replay whose anchor placement differs from the header's ("journal placement X, replay Y"). |
 | legacy retail path | parses the new fields (shared message code) and ends locally on `WORLD_PLACEMENT_CLONES` (§2.4). |
 | `docs/rooms-and-sessions-protocol.md` | the two fields. |
 
 Until S5 nothing builds copies outside SimTool: `physics_world`'s option
 defaults to off and the server has no config for it, so the protocol-9 arena
 runs of S4 are unaffected (the arena has 0 copies either way).
+
+**As built (step SP5 = S5, 2026-10-27).**
+
+- **Numbers.** `PHYSICS_PROTOCOL_VERSION` 11 -> **12**, `kJournalVersion` 5
+  -> **6** (the next free ones after resync A3's 10 / v4 and trafo T2's 11 /
+  v5; the table above said 9 -> 10 and 3 -> 4 and is corrected).
+  `WORLD_PLACEMENT_CLONES = 1u << 0` in the `world_options` field trafo T2
+  put into SessionStart (a u32 after `protocol`; nothing added to the
+  message). `CAP_PLACEMENT = 1u << 3` (new, below).
+- **Adaptation M3 (the orchestrator's): the config default is false.** The
+  server's `physics.placement_clones` (`config_manager.hpp`) defaults to
+  **false** until S10, not "true from S5": the retail core host computes no
+  signature and builds no copy before S10, so with the option on every
+  retail session on L1-L13 would refuse the retail members (and with a
+  signature compare against 0, end with "placement mismatch"). As T2 kept
+  `trafo_inputs` off until its hosts ran it. Set, it gives every session
+  bit 0 at `start_physics_session`, logged ("every PH row gets its own
+  object"), and the runner builds the world with `placement_clones`.
+- **Adaptation: a capability, `CAP_PLACEMENT`, instead of "always filled".**
+  §2.4 has every host report its signature at every anchor, but the
+  hosts gain the signature at S6 (headless) and S10 (retail core), and the
+  legacy path never does (no feature is added to it). By §0 (a host that
+  cannot says so with a capability, the core takes the fallback):
+  `session_capabilities::placement` (`client_platform.hpp`); with it the core
+  sends `CAP_PLACEMENT` and `anchor_report::placement` in SessionReady's new
+  `anchor_placement` (and the journal header), without it 0 and no cap.
+  The server (`handle_session_ready`, right after the engine check, before
+  the trafo refusal and the anchor-hash compare): a member **with** the cap
+  whose signature differs ends the session with "placement mismatch for X
+  (client %016llx, server %016llx)", late joiners included (no `late`
+  exemption); a member **without** it is not compared, and in a session with
+  `WORLD_PLACEMENT_CLONES` it is refused (SessionEnd to it alone, out of the
+  session, not the room), as T2 refuses a member without `CAP_TRAFO_INPUTS`.
+  This also covers the legacy path's §2.4 row from the server's side until
+  S10 adds its local end. Once S6 and S10 declare the cap, every session-core
+  member is compared at every anchor, which is §2.4's rule.
+- **Adaptation: the header field trails.** `anchor_placement` is the v6
+  header's last field (after T2's trailing `world_options`), not "after
+  `anchor_surfaces`"; an older file reads 0 = unknown, not compared.
+- **Fix: the client journal header carries `world_options`.** T2 wrote the
+  world options into the server's header only; a client header said 0, so
+  a `--replay-session` of a client journal would build its world without
+  the session's options - with the placement it would then be refused by
+  the signature compare. `client_journal::open` now writes `s.world_options_`
+  and the signature SessionReady carried (0 without the cap). A client
+  journal of a trafo-on session therefore replays with the trafo inputs
+  from now on; that a client journal holds every Trafo event such a replay
+  needs (the server's own `TRAFO_SERVER` resets included) is not checked
+  here (deferred, below).
+- **The headless test switch.** `--placement-signature HEX`
+  (`session_client.cpp`): the host declares the capability and reports HEX
+  (it computes no signature before S6, which replaces the switch's base with
+  the real signature). For a session with the option off only; it builds no
+  copy. Nothing enforces "option off" (the server lets a member with the
+  cap and a matching signature in whatever the host built); S6 replaces the
+  switch with the real signature.
+- **SimTool.** `--replay-session` builds the world with the header's
+  `WORLD_PLACEMENT_CLONES` and refuses (exit 1) a journal whose non-zero
+  `anchor_placement` differs from the replay world's ("journal placement X,
+  replay Y: ... (refused)"); `--write-journal` writes the replay world's
+  signature. `--replay` (record mode) applies the placement at the record's
+  first frame **by default** ("record default on"; `--placement off` for a
+  record made without the copies, i.e. every retail record of a pooled level
+  before S10 and every single-player record whenever made: only a session
+  world with the option holds copies), and prints which.
+  `scripts/determinism_baseline.py` (the `mech_L*.bmrc` single-player
+  corpus) therefore passes `--placement off` in its three replay command
+  lines (review finding of SP5). `--world-options PLACEMENT_CLONES` uses the
+  constant now.
+- **S2's open bullet (a), the plan bound.** `game::kPlacementMaxName` =
+  min(MAX_NAME, BMMO_PHYSICS_NAME_SIZE - 1) = 63 is passed to every
+  `plan_placements` call (`apply`'s plan and its re-plan, `--list-placement`
+  and its re-plan; the listing's line reads "(bound 63)"), so a 64-character
+  copy root is refused by the plan, not at step 5.
+- **Where.** `entity/session.hpp` (protocol, `CAP_PLACEMENT`,
+  `WORLD_PLACEMENT_CLONES`), `message/session_ready_msg.hpp`
+  (`anchor_placement`, read from protocol 12), `session/journal.hpp` (v6),
+  `session/client_platform.hpp` (`placement`), `session/client_core.hpp`
+  (`anchor_report::placement`, `world_options()`), `src/session/client_core.cpp`
+  (begin's log line, anchor's caps, signature and log line),
+  `session/client_journal.hpp/.cpp`, `game/sector_placement.hpp`
+  (`kPlacementMaxName`), `session/placement_plan.hpp` (comment); server
+  `config_manager.*`, `server.cpp` (session field, start, `on_world_ready`,
+  the compare), `sim/session_runner.*` (`world_ready_info::anchor_placement`,
+  the world option, the journal header), `sim/sim_tool.cpp`,
+  `sim/placement_tool.hpp`, `sim/session_client.cpp` (the switch);
+  `scripts/journal_trace.py` reads v6. The retail mod is untouched in
+  source: its core host declares no `placement` (S10), the legacy path
+  sends 0 without the cap (it sets `caps = 0`) and writes a v6 header with
+  0.
+- **Checks (quick tier, 2026-10-27, about 8 minutes of wall clock; tools and
+  outputs in `.local-tools/work/SP5/`).** x64 BUILD-OK, x86
+  CLIENT-BUILD-OK (`BallanceMMOClient` objects deleted first: the
+  capability and message structs changed), Arch ARCH-BUILD-OK
+  (`ballanced-3e4289e95f25+bmmo-168e53eb52d3-dirty`); 530/530 tests
+  (`PlacementWire` x4, `SessionJournal.V6AnchorPlacement`,
+  `SessionClientCorePlacement` x2, `PlacementPlan.TheHostsBoundIs63`); GCC 29
+  ok. **A v5 arena journal still replays matched:**
+  `core_ref_rc1/resync_snapoff/server.bmjr` (protocol 11, 4 clients) with
+  rSP5: 4112/4112 matched, 2056 checkpoints, 0 mismatches, stdout identical
+  to rTR5's. **§7.4 "mismatch"** (one live run, `maps/arena-test/sp5_mismatch`,
+  snapshots off, option off, `work/SP5/mismatch_run.sh`): client 0 with
+  `--placement-signature ecfbfd9b63a330b5` (the server's arena signature)
+  started and ran (assigned, tick 409+, its log "anchor placement signature
+  ecfbfd9b63a330b5"); client 1 joining late at tick 600 with signature 1 ended
+  the session: "placement mismatch for Arena1 (client 0000000000000001, server
+  ecfbfd9b63a330b5)" on the server and both clients. The run's v6 server
+  journal (header `anchor_placement=ecfbfd9b63a330b5`, the client's the same)
+  replays 608/608 matched; the same file with the header's signature set to
+  1 (`work/SP5/tamper.py`) is refused ("journal placement 0000000000000001,
+  replay ecfbfd9b63a330b5"); the rTR5 SimTool refuses the v6 file ("journal
+  version 6 (expected 2..5)"). **The protocol-11 captures refuse**, as
+  expected: `core_ref_rc1/resync_snapoff` capture 0 replayed by rSP5 logs
+  "the server runs physics protocol 11, this client runs 12" and stops; no
+  wire check is possible until S6 re-captures the set (`core_ref_rc1`,
+  `core_ref_t3`, `core_ref_t3off` are all protocol 11). Of "mismatch" only
+  the late joiner ran live; a start member's mismatch takes the same branch
+  of `handle_session_ready` (no `late` condition on it) but no test or run
+  covers it - S6's run starts its mismatching client at session start.
+- **Deferred** (roadmap §4 item 7's list): the wire check (needs S6's
+  re-capture); a retail two-copy run with core off and on (the SessionReady
+  bytes changed for both modes; no retail source changed); a session with
+  `placement_clones` on (its refusal of a member without the cap, and of
+  the retail core host); `--replay` record mode with the new default (no
+  retail tick record of a pooled level at hand, as at S2); a
+  `--replay-session` of a client journal from a trafo-on session (its header
+  now carries `world_options`).
 
 ## 6. What must not change
 
@@ -1254,8 +1381,8 @@ runs of S4 are unaffected (the arena has 0 copies either way).
 ### 7.1 Unit tests (`BallanceMMOMessageTests`)
 
 `placement_plan_test` (§2.2), the union gate cases (§2.6), message round
-trips of `session_start_msg` / `session_ready_msg` at protocol 10 and 9
-(9 parses with options 0), journal header v4 write/read and v3 read. Pass:
+trips of `session_start_msg` / `session_ready_msg` at protocol 12 and 11
+(11 parses with placement 0), journal header v6 write/read and v5 read. Pass:
 all green on x64 MSVC, x86 MSVC and GCC.
 
 ### 7.2 SimTool checks (offline, `--root C:/Users/geekerwan/Desktop/Ballance-Agent`)
@@ -1519,7 +1646,7 @@ investigated to its cause before the next step).
 | S2 | `game/sector_placement.hpp` (`apply` all-or-nothing, `signature`, `holds_copies`, `release`, log); `physics_world` option (default off) and call site; SimTool `--placement` (default off), `--placement-fail-at` | V1 complete, V2, V3, V4, V5, V11, V12; review of every name lookup listed in §4 |
 | S3 | `--second-move`, `--placement-trace`, `scripts/placement_check.py` | §7.3 all arms PASS with placement on, V10 FAIL with it off |
 | S4 | the union gate (SU) with its log line, its unit tests | V6; arena regression (§7.4) unchanged `sector +N` ticks in the 10 recent runs and equal `level walk seen` on every side; `lp1_join` client3 52/52. Protocol 9 and no copies anywhere (§5), so these networked runs need no S5. |
-| S5 | protocol 10: `world_options`, `anchor_placement`, server plumbing and compare (§2.4), config default true, journal v4, SimTool replay honouring the header, SimTool record default on | §7.1 message and journal tests; a v3 arena journal still replays matched; §7.4 "mismatch" |
+| S5 | protocol 12 (written 10 before A3 / T2 took 10 / 11): the `WORLD_PLACEMENT_CLONES` bit of `world_options`, `anchor_placement`, server plumbing and compare (§2.4), config default false until S10 (M3), journal v6, SimTool replay honouring the header, SimTool record default on, the plan bound 63 | §7.1 message and journal tests; a v5 arena journal still replays matched; §7.4 "mismatch" |
 | S6 | headless host: anchor call, `anchor_report.placement`, option-off release path; `--sector-at`, repeatable `--beam` | §7.4 L8 cross (0 ms), L8 late, arena regression |
 | S7 | `--savestate-check` with a pass inside the window; `--perturb-ids`, `--free-ids-before-load` | V7, V8, V9; §7.4 forced rollbacks |
 | S8 | measurement only | §7.6 SimTool and headless; §7.4 L8/L11 cross at 150 ms; the networked invariant replay |

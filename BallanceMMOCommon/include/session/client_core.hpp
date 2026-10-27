@@ -805,6 +805,12 @@ namespace bmmo::session {
         std::string own_name;             // the journal's own player name
         int load_ticks = 0;               // the ticks the level took to load (the anchored log line)
         int sector_cell = 0;              // IngameParameter[0][1] at the anchor (E8: the core's sector_cell_)
+        // Step S5 (sector placement design 2.4): the placement signature of
+        // the host's world at the anchor (game/sector_placement.hpp
+        // signature, placement on or off), read only with
+        // session_capabilities::placement: SessionReady's anchor_placement
+        // and the journal header's.
+        uint64_t placement = 0;
     };
 
     // begin: refused when the server runs another physics protocol.
@@ -1112,6 +1118,10 @@ namespace bmmo::session {
         // Step T3: this session runs the trafo as an input (the host's sets,
         // the hold, the quiesce at its anchor); the counters the gates read.
         bool trafo_active() const { return s.trafo_active_; }
+        // SessionStart's session::WORLD_* bits (step S5: the host builds the
+        // placement copies at its anchor when WORLD_PLACEMENT_CLONES is set
+        // and it declares session_capabilities::placement).
+        uint32_t world_options() const { return s.world_options_; }
         uint64_t trafo_missed() const { return s.trafo_missed_; }
         uint64_t trafo_sent() const { return s.trafo_sent_; }
         uint64_t trafo_original_leaks() const { return s.trafo_leaks_; }

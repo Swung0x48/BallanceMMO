@@ -285,6 +285,12 @@ namespace bmmo::session {
         if (msg.world_options & WORLD_TRAFO_INPUTS)
             logf("session %u: the trafo is an input (world option trafo inputs)%s", s.session_,
                  s.trafo_active_ ? "" : ", which this host cannot run (no trafo_inputs capability)");
+        // Step S5 (sector placement design 2.4): the host builds the copies
+        // at its anchor; a host that cannot is refused by the server at its
+        // SessionReady (no CAP_PLACEMENT).
+        if (msg.world_options & WORLD_PLACEMENT_CLONES)
+            logf("session %u: every PH row gets its own object (world option placement clones)%s", s.session_,
+                 caps_.placement ? "" : ", which this host cannot build (no placement capability)");
         frame_ = frame_scratch{};
         return begin_result{};
     }
@@ -347,14 +353,24 @@ namespace bmmo::session {
         // with the world option refuses a member without it.
         ready.caps = (caps_.slew ? bmmo::session::CAP_LEAD : 0u) | (resync_state ? bmmo::session::CAP_RESYNC_STATE : 0u)
                    | (caps_.trafo_inputs ? bmmo::session::CAP_TRAFO_INPUTS : 0u);
+        // Protocol 12 (sector placement design 2.4, step S5): a host that
+        // computes the placement signature says so and sends it; the server
+        // compares it with its own world's (late joiners too).  Without the
+        // capability: 0, not compared.
+        const uint64_t placement = caps_.placement ? report.placement : 0;
+        if (caps_.placement) ready.caps |= bmmo::session::CAP_PLACEMENT;
+        ready.anchor_placement = placement;
         ready.serialize();
         platform_.send(ready.raw.str(), send_mode::reliable);
         logf("anchored after %d load ticks: pose %016llx surfaces %016llx cores=%d factor=%.6f", report.load_ticks,
              static_cast<unsigned long long>(report.hash.pose), static_cast<unsigned long long>(report.hash.surfaces),
              report.hash.cores, report.hash.time_factor);
+        if (caps_.placement)
+            logf("anchor placement signature %016llx (world option placement clones %s)",
+                 static_cast<unsigned long long>(placement), (s.world_options_ & WORLD_PLACEMENT_CLONES) ? "on" : "off");
         // The box starts where the session does: at the anchor the server
         // has to agree with, before the tick base is known.
-        journal_.open(report.hash, report.build_id, report.own_name);
+        journal_.open(report.hash, report.build_id, report.own_name, placement);
         // Step T3 (design 2.4): every member's piece set and the own one, by
         // player id, after the host's quiesce (its anchor work): the server
         // built the same at add_player.

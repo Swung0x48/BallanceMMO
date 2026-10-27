@@ -616,7 +616,7 @@ namespace {
         while (start <= text.size()) {
             const size_t stop = text.find_first_of(",|", start);
             const std::string name = text.substr(start, stop == std::string::npos ? std::string::npos : stop - start);
-            if (name == "PLACEMENT_CLONES") out |= 1u << 0;   // the sector placement design's bit 0 (no constant before S5)
+            if (name == "PLACEMENT_CLONES") out |= bmmo::session::WORLD_PLACEMENT_CLONES;   // step S5's constant
             else if (name == "TRAFO_INPUTS") out |= bmmo::session::WORLD_TRAFO_INPUTS;
             else return false;
             if (stop == std::string::npos) break;
@@ -1629,13 +1629,21 @@ namespace {
             bmmo::physics::drain_event_log(engine.physics()).c_str());
         // --placement on (step S2): at the record's first frame; the copies are
         // released (root first) before the engine goes, as physics_world does.
+        // Step S5: on by default in this mode (a session world places from
+        // protocol 12 on when its world option says so); --placement off
+        // replays a record made without the copies - every retail record of
+        // a pooled level made before the retail core host places (step S10).
         bmmo::game::sector_placement placement;
         struct release_on_exit {
             bmmo::game::sector_placement& placement;
             CKContext* context;
             ~release_on_exit() { placement.release(context); }
         } release_guard{placement, engine.context()};
-        if (args.placement && !apply_tool_placement(engine.context(), engine.physics(), args, placement)) return 1;
+        const bool place = args.placement_given ? args.placement : true;
+        std::fprintf(stderr, "record replay: placement %s%s\n", place ? "on" : "off",
+                     args.placement_given ? "" : " (the default of --replay since step S5; --placement off for a record "
+                                                 "made without the copies)");
+        if (place && !apply_tool_placement(engine.context(), engine.physics(), args, placement)) return 1;
 
         size_t matched = 0;
         long long first_divergence = -1;
@@ -4328,12 +4336,26 @@ namespace {
         // inputs build every player's piece set at its PLAYER record and run
         // the Trafo EVENT records (the server's own resets among them).
         options.trafo_inputs = (header.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
-        if (header.world_options != 0) std::printf("journal world options %08x%s\n", header.world_options,
-                                                   options.trafo_inputs ? " (trafo inputs)" : "");
+        // Journal v6 (protocol 12, sector placement design 5, step S5): the
+        // placement copies when the session's world option built them.
+        options.placement_clones = (header.world_options & bmmo::session::WORLD_PLACEMENT_CLONES) != 0;
+        if (header.world_options != 0) std::printf("journal world options %08x%s%s\n", header.world_options,
+                                                   options.trafo_inputs ? " (trafo inputs)" : "",
+                                                   options.placement_clones ? " (placement clones)" : "");
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         auto world = bmmo::sim::physics_world::create(options, error);
         if (!world) {
             std::fprintf(stderr, "world create failed: %s\n", error.c_str());
+            return 1;
+        }
+        // Journal v6: the replay's world must hold the objects the recorded
+        // one did.  A header without a signature (an older file, or a client
+        // whose host does not compute it) is not compared.
+        if (header.anchor_placement != 0 && header.anchor_placement != world->anchor_placement()) {
+            std::fprintf(stderr, "journal placement %016llx, replay %016llx: the replay's world does not hold the "
+                                 "recorded world's objects (refused)\n",
+                         static_cast<unsigned long long>(header.anchor_placement),
+                         static_cast<unsigned long long>(world->anchor_placement()));
             return 1;
         }
         // Wrong game data is the first thing to check when everything diverges
@@ -4365,6 +4387,7 @@ namespace {
             out_header.anchor_surfaces = world->anchor_surfaces();
             out_header.build_id = build;
             out_header.world_options = header.world_options;
+            out_header.anchor_placement = world->anchor_placement();   // journal v6
             out_header.utc_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
             const std::filesystem::path path = args.write_journal;
@@ -7431,7 +7454,8 @@ namespace {
         else if (args.world_options_given && (file_mode || !world_mode))
             why = "--world-options sets a session world's bits (a --replay-session takes them from the journal "
                   "header)";
-        else if (args.world_options_given && (args.world_options & ~((1u << 0) | bmmo::session::WORLD_TRAFO_INPUTS)))
+        else if (args.world_options_given
+                 && (args.world_options & ~(bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS)))
             why = "--world-options: only bit 0 (PLACEMENT_CLONES) and bit 1 (TRAFO_INPUTS) exist; bit 2 is the "
                   "world-agreement design's and bit 3 the record-format design's (step K3), neither built";
         else if ((args.world_options & bmmo::session::WORLD_TRAFO_INPUTS)
@@ -7447,13 +7471,13 @@ namespace {
             why = "--world-options TRAFO_INPUTS: only with --array-reads, or --drop without the --trafo-* sets (the "
                   "other modes make their own script selection without the bit)";
         else if (args.world_options_given && args.placement_given
-                 && ((args.world_options & (1u << 0)) != 0) != args.placement)
+                 && ((args.world_options & bmmo::session::WORLD_PLACEMENT_CLONES) != 0) != args.placement)
             why = "--world-options bit 0 (PLACEMENT_CLONES) and --placement disagree";
         if (why) {
             std::fprintf(stderr, "%s\n", why);
             return 2;
         }
-        if (args.world_options & (1u << 0)) args.placement = true;
+        if (args.world_options & bmmo::session::WORLD_PLACEMENT_CLONES) args.placement = true;
         if (args.world_options_given) std::fprintf(stderr, "world options %08x\n", args.world_options);
         return 0;
     }
@@ -7534,7 +7558,9 @@ int main(int argc, char** argv) {
             "            at the anchor, read-only; exit 0, 3 on a block or plan error)\n"
             "           [--placement on [--placement-fail-at ROW]]  (then applies the placement in the tool: censuses,\n"
             "            fingerprints, signatures, the name review; with the fail row the all-or-nothing check V12)\n"
-            "       --placement on|off  (any physics_world mode: the sector placement at the anchor, default off)\n"
+            "       --placement on|off  (any physics_world mode: the sector placement at the anchor, default off;\n"
+            "            --replay: at the record's first frame, default on since step S5; --replay-session follows\n"
+            "            the journal header's world options and refuses a journal whose placement signature differs)\n"
             "       --drop ... [--tick-hashes] [--watch-entity NAME]...  (world hash per tick; entity positions)\n"
             "       --drop ... --drop-second-sector N [--second-move SECTOR TICK]... [--drop-again X Y Z TICK]...\n"
             "           [--placement-trace PATH [--placement-trace-ball]]  (the invariant check I1,\n"

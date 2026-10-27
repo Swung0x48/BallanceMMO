@@ -152,6 +152,10 @@ namespace bmmo::sim {
         // client's Trafo explosion is validated against (protocol 11,
         // session/trafo_input.hpp trafo_validate).
         std::vector<bmmo::session::trafo_point> trafo_points;
+        // The world's placement signature at its anchor (protocol 12, sector
+        // placement design 2.4): what a SessionReady with CAP_PLACEMENT must
+        // carry, late joiners included.
+        uint64_t anchor_placement = 0;
         std::string error;
     };
 
@@ -490,7 +494,7 @@ namespace bmmo::sim {
                              const uint32_t* only = nullptr);
         void log_patience_on(const session_state& s);
         void open_journal(session_state& s, float spawn_impulse, uint64_t anchor_hash,
-                          uint64_t anchor_surfaces, uint32_t first_tick);
+                          uint64_t anchor_surfaces, uint32_t first_tick, uint64_t anchor_placement = 0);
 
         void run();
         void post(std::function<void()> command);
