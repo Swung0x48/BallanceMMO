@@ -749,7 +749,11 @@ recorded id that no longer exists, and puts every selected trafo script the
 record does not list (its set was made later) to its built state; a v2
 record restored with a trafo part puts all of them to built.  Without a
 trafo part every record is v2, as before.  The portable record (resync design
-2.4) keeps its version 1: its bytes are on the wire (protocol 10).
+2.4) kept its version 1 at T1: its bytes are on the wire (protocol 10).  Step
+T2 (protocol 11) made portable version 2 = version 1 plus the trafo scripts by
+name after the cells, written whenever `physics.trafo_inputs` is on (an empty
+trafo part included); a session without the option still sends version 1,
+byte for byte.
 
 ---
 
@@ -1042,10 +1046,13 @@ the one copy that cannot share the in-process code.
 
 ---
 
-## Bridge notes: the trafo sets (bridge API v21, no engine change)
+## Bridge notes: the trafo sets (bridge API v21 and v22, no engine change)
 
 `docs/trafo-replication-design.md` 2.4, 2.6, 2.10, step T1 (the design names
-the version v20; A3's travelling savestate took v20, so the sets are v21).
+the version v20; A3's travelling savestate took v20, so the sets are v21);
+v22 is step T4's controller alias (below).  The trafo design's step T5 wrote
+this note's T2-T4 part; nothing in it is an engine change (physics_RT, IVP
+and CK2 are untouched by T1-T4).
 The bridge keeps one registry per physics manager (`physics_state.cpp`,
 `trafo_bridge_state`): every registered set's three piece frames by type, the
 entities the body guard leaves alone, the piece names, and a seed per piece
@@ -1086,7 +1093,58 @@ Nothing here runs without registered sets: SimTool's `--explode wood 300`
 traces, the 9.14 two-explosion pose hashes and every per-tick world hash of
 those free runs are identical to HEAD's binary (step T1's S9), and the wire
 check's 24 captures replay identically.  IVP and physics_RT are untouched.
- that were verified *not* to need engine changes
+
+**The savestate's controller alias (in-process at T3, bridge API v22 at
+T4).**  The paper wind's force controllers are named `rt:force/<block id>`
+(engine change #18), and a set's block ids differ per world, so a blob that
+crosses worlds (a resync's or a late join's, which is the server's) named
+controllers no live one matched: T3's H7 measured a joiner's remade paper
+pieces 6.6e-7 m off, the restore reporting "no live controller
+'rt:force/54491'" for every remade wind controller.  `physics_savestate.hpp`
+`set_controller_alias(manager, fn)`: per physics manager, `fn` maps a
+controller's own name to the name the capture records it under and the
+restore matches live controllers by; `game/trafo_sets.hpp`
+`trafo_controller_alias` maps `rt:force/<id>` of a registered set's k-th
+force block (script and walk order) to `trafo:<player>/<k>`, which every
+world gives the same block, and keeps every other name.  The server's world
+(with `physics.trafo_inputs`) and the headless client (at its trafo anchor,
+removed at the teardown) install it in process; with it H7's 102/102
+pieces were bit-equal and no controller unmatched.  The retail mod reaches
+the in-process function through the plugin API **v22**
+`set_controller_alias(manager, alias, user)` (`physics_rt_api.h`,
+`physics_rt_bridge.cpp` `api_set_controller_alias`): `alias(user, name,
+out, out_size)` writes the alias (at most 128 bytes with the terminator)
+and returns 1, or returns 0 to keep the name; a NULL `alias` removes it.
+`physics_view::set_controller_alias` refuses a bridge without the entry.
+No alias is installed without trafo sets, so every blob of a session
+without the option is byte for byte what it was.
+
+**What T3 changed in the shared savestate and bridge code, none of it a
+byte of any record or blob** (trafo design §8, "As built (step TR3, fix-up
+round)"): `physics_state.hpp` `entity_lookup_scope_begin/_end`, bound by the
+headless binding only (`rollback_world::capture_scope`), serves a record's
+by-name entity lookups after the first 12 from one pass over the 3D
+entities (checked live against the scan: 1.1-1.5 M lookups per client, 0
+different); the savestate capture's pointer tables, friction-handle table,
+reserves and byte writer (checked live by capturing every blob twice, new
+and original code: 6000-8000 blobs per client on four clients, 0 bytes
+different).  Per capture at H1's peak (about 120 tracked bodies): 2.7 ms ->
+0.9 ms.  The retail mod compiles the savestate changes and does not bind the
+lookup scope.
+
+**What T4 met at the plugin boundary** (not a bridge change, recorded for
+the next builder that copies objects in the mod): `CKCopyDefaultClassDependencies`
+assigns its array inside CK2.dll, which in the game links another C runtime
+than the mod; the mod's `delete[]` of that buffer crashed the retail mod at
+the builder's return (the first anchor aborted silently after the first
+set).  `game/trafo_sets.hpp` `copy_dependencies` reads the defaults through
+`CKGetDefaultClassDependencies` and copies them element by element into the
+mod's own buffer; the headless digests are unchanged
+(`90f856e0c8c20dd4/493`, `bf8575545ab7fbe0/597`, 0 extras on L11).
+
+---
+
+## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off
   -fexcess-precision=standard` (GCC/Clang) give bit-identical arithmetic

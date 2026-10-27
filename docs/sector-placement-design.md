@@ -1,6 +1,6 @@
 # Sector placement: one object per PH row
 
-Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1, S2, S3 and S9 built (as-built notes in 2.2, 2.3, 2.5, 2.6 and 7.3); revision 2
+Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1, S2, S3 and S9 built (as-built notes in 2.2, 2.3, 2.5, 2.6 and 7.3); protocol 10 / journal v4 went to resync A3 and 11 / v5 to trafo T2, so S5 takes the next free numbers (expected 12 / v6; §8's S5 row and §5 still say 10 / v4); revision 2
 after two reviews (answers in §10). Base: HEAD 4882ec2 (R2) plus the
 uncommitted step P in the working tree; line numbers are the working tree's on
 2026-10-23 and drift with step P, so each one is given with the function or

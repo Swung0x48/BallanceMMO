@@ -1,8 +1,11 @@
 # Roadmap: one engine, one world from inputs, run-ahead with rollback
 
-Status as of 2026-10-24 (HEAD a52ce48). The user's three goals, the
-principles that follow from them, what is built, and the order of what is
-left. Each design named here has its own document with its step table.
+Status as of 2026-10-27 (HEAD 3940bf3 = trafo T4, plus step TR5's records).
+The user's three goals, the principles that follow from them, what is
+built (§3, with each step's commit), and the order of what is left (§4,
+the orchestrator's queue of 2026-10-27). Each design named here has its own
+document with its step table and its "As built" notes, which are the record
+of what the code does.
 
 ## 1. The goals
 
@@ -40,9 +43,27 @@ left. Each design named here has its own document with its step table.
   receive the server's state of one tick once (rows, the portable script
   record, the union), apply it as that tick and re-step to their own tick.
   This is not a per-tick correction and stays after snapshots are off.
-- Full verification only when a stage closes; ordinary steps get a quick
-  verification; checks that cannot influence each other run in parallel.
 - The retail legacy session path gets nothing new and is deleted at R7.
+
+**Verification (the user's rules of 2026-10-27, verbatim).**
+
+- "感觉我最多能接受15分钟的验证时间"
+- "以后每轮步骤都要控制在15分钟内，不然推进太慢了。只有完结的时候再跑完整的验证"
+- "每一步应该运行和本步最相关的验证"
+- Asked how a step whose row needs more live runs than 15 minutes hold is
+  gated: "15 分钟内只做最关键的一对" (one run with the change and one
+  same-batch control, judged by the row's criteria as written).
+
+So: every step's verification takes at most 15 minutes of wall clock (the
+writing of the code not counted) and runs the checks most relevant to its
+change - the ones that would catch its likely failures; a track close-out
+(TR4, SP10) is such a step too. Checks that cannot influence each other run
+in parallel; timing-sensitive ones run alone. Each step lists the row checks
+it did not run and appends them to "Deferred to the final verification"
+under §4's stage close-out; the complete verification runs once, at the
+stage close-out (§4 item 7). A single live session is a smoke test; the
+evidence for a behaviour claim comes from deterministic checks (the wire
+check, pinned paired replays, the physics-free models).
 
 **Operating rules while the user is away (accepted 2026-10-24).**
 
@@ -61,284 +82,300 @@ left. Each design named here has its own document with its step table.
   build copies may be deleted; the reference capture sets, the directories a
   design note cites as a reproduction, and the current and previous step's
   build copies are kept.
-- Defaults chosen for likely forks: if the offline resync check (A2) shows
-  rows alone miss 1 mm, the server's IVP savestate travels with the resync
-  state (measured first); if the trafo's collision-sound script leaves
-  PreSimulate entries that refuse the savestate, the rollback engine's
-  idempotent replayed Create comes first rather than a change to the sound
-  script; no further snapshot-path work before the stage A close-out.
+- Defaults chosen for likely forks (both forks have been met): if the
+  offline resync check (A2) shows rows alone miss 1 mm, the server's IVP
+  savestate travels with the resync state (A2: rows alone missed, 14.4 mm
+  and 8.4 mm; the blob travels since A3); if the trafo's collision-sound
+  script leaves PreSimulate entries that refuse the savestate, the rollback
+  engine's idempotent replayed Create comes first (T1's S8: no entries);
+  no further snapshot-path work before the stage A close-out.
+
+**Protocol numbers.** Protocol 10 / journal v4: the resync track's exact
+resync (A3, 93c13f6). Protocol 11 / journal v5: the trafo replication's wire
+(T2, 074f6d5). The next change of the wire is the sector placement's S5,
+which takes the next free numbers (expected 12 / v6, and makes the
+protocol-11 reference captures refuse). Bridge API: v20 A3, v21 trafo T1,
+v22 trafo T4; the next is free. Forward compatibility is deliberately
+broken: server and clients are rebuilt together.
 
 ## 3. Built
 
-| area | state |
-|---|---|
-| Deterministic engine across Windows x86/x64, Linux, ARM | bit-exact |
-| Mechanisms, sector activation as an input (the union), spawn impulse, deterministic explosions, IVP savestate rollbacks, script replay | built |
-| Shared session-client core (E0-E11); the headless client is a host | built |
-| Retail mod hosts the core: R0 plumbing, R1 frame and snapshot path, R2 relay rewind | built |
-| Late-player parts one (own frames substituted -> owner rewinds) and three (events re-stamped at acceptance, owner birth move, no barrier) | built (headless); retail: part one at R4 (built), part three at R6 |
-| Late-player part two revision 2 (meter, patience, SessionLead) | built behind flags, off; revision 3 replaces its policy |
-| Trafo pieces tracked as mechanisms, explosion scripts replayed (P) | built |
-| Proximity countdown restored at the anchor (Q) | built |
-| Applied snapshot rows re-applied in later replays (RR; the last snapshot-path item) | built |
+| area | commit | state |
+|---|---|---|
+| Deterministic engine across Windows x86/x64, Linux, ARM | - | bit-exact |
+| Mechanisms, sector activation as an input (the union), spawn impulse, deterministic explosions, IVP savestate rollbacks, script replay | - | built |
+| Shared session-client core (E0-E11); the headless client is a host | - | built |
+| Retail mod hosts the core: R0 plumbing, R1 frame and snapshot path, R2 relay rewind | - | built (R2's checks: (a) since step P, (b) with R3's switch) |
+| Late-player parts one (own frames substituted -> owner rewinds) and three (events re-stamped at acceptance, owner birth move, no barrier) | - | built (headless); retail: part one at R4, part three at R6 (not built) |
+| Late-player part two revision 2 (meter, patience, SessionLead) | - | built behind flags, off; revision 3 replaces its policy |
+| Trafo pieces tracked as mechanisms, explosion scripts replayed (P) | - | built; the path of every session without `physics.trafo_inputs` |
+| Proximity countdown restored at the anchor (Q) | - | built |
+| RR: applied snapshot rows re-applied in later replays (the last snapshot-path item; closed step P's check-2 residual) | a52ce48 | built |
+| LB: a mirror born inside a replay is made again at its birth tick from the inputs | bf3fa76 | swing c0's four mirrors within 4.1e-6 m/s of the server at 702-712 (RR: 0.17 m/s) |
+| Resync T0: `first_divergence` / `worst_bodies` `--from`, `--exclude` | 2f0c28a | built |
+| REF: the headless reference set `core_ref_e0` re-recorded (765267c); the old set kept as `core_ref_e0_pre_q` | fcb4d37 | built |
+| Resync A1: the portable script record, keep-local scripts | 8dbc0fe | built |
+| Resync A2: `--resync-check` offline; Q1 decided - the server's blob travels (rows alone 14.4 mm / 8.4 mm) | 765267c | built |
+| Resync B1: the sector union is rollback state; a late or moved Sector stamp rewinds and re-derives | 64be32e | built |
+| Resync A3: the exact resync on the wire, protocol 10 / journal v4 | 93c13f6 | built |
+| Resync A4: the full-tier gate; forced rewinds past 48 re-step to the reach; `core_ref_r3` captured | 114fd04, baf9d83 | 81 applies, 0 waits, -50 <= Δ <= +17, reach cap 95 kept (deepest D 59) |
+| Resync A5 + sector placement S4: a late joiner takes the resync-state path behind the level-walk gate | 72108fd | built |
+| Resync B2: a raise of a Sector-rewinding client is bounded by its rewind reach | 3fbc402 | built |
+| Resync T1: `--replay-session` restores a client journal's RESYNC record | f1073ff | built (its findings (a)-(c): §4 item 2) |
+| Retail R3: the lifecycle rewind and own echoes | 91df87d | mirror p99 4.99 m against the O runs' 6.10-18.04 m |
+| Retail R4: the own corrections; the starvation detector deleted | abfee28 | built |
+| Retail R5: the slew for a SessionLead, `CAP_LEAD` | b64fe49 | built (one resync at the run's end: the fixed 48-tick reach, §4 item 2) |
+| Trafo T1: per-player piece sets, host support, bridge v21, SimTool S0-S13 | 2e6f026 | I0-I7 on 52 builds; S13 231/231 runs bit-equal; S8 0 PreSimulate entries |
+| Trafo T2: the Trafo event, ledger, validation (4.5 m), deadline, leavers; protocol 11 / journal v5 | 074f6d5 | S10 22/22 on L2 and L11, server journals 1575/1575 matched |
+| Sector placement S1: the row plan, `--list-placement` | cd501af | built |
+| Sector placement S2: apply, signature, release; the world option (off) | 5b536b2 | built (its x64 teardown over-read: §4 item 2) |
+| Sector placement S3: the invariant check I1 (`--second-move`, `--placement-trace`, `placement_check.py`) | 81c6803 | built |
+| Sector placement S9: a level that ran a session is reloaded at the next countdown (retail) | 5cd1c11 | built |
+| Rollback engine gaps G0 (EG0): diagnostics - the counted birth failures, the 1378 difference, the outside producers | 0b73af2 | built |
+| Record-format gaps K0: SimTool `--array-reads`, `--globals-trace`, `--world-options` | 49e2cc8 | built |
+| Rewind cost RC1: the replay re-predicts a remote's tail past its newest relayed frame with that frame (hold-last) | 5f967b4 | input rewinds -83..-87 % (swing, H1 at 150 ms), -67..-77 % (cliff), -44 % at 50 ms; no rebase in any arm; CPU parity -36 % |
+| Resync lag RL1: a re-anchor's base on the fixed deadline schedule (server only) | 3daa19a | the other clients' relay lag after a resync 36-37 -> 20-21 ticks (resync_snapoff); resync_at150 c0 26.77 -> 22.3 |
+| Trafo T3 (step TR3b): the core and the headless host, merged onto RC1 and RL1 | 3394ffd | H1 at 150 ms, snapshots off: pieces 150/150 bit-equal on four clients, starved 0/0/0/0 against the control's 0/0/0/0 |
+| Trafo T4 (step TR4): the retail host (core on), bridge v22 | 3940bf3 | one two-copy L11 session: pieces 32/32 bit-equal across the clients (5056 rows), drawn on both |
+| Trafo T5 (step TR5): the records | the `docs:` commit after 3940bf3 | `engine-changes.md` bridge note v21/v22, core design "As built (step T)", 9.29 |
 
 ## 4. What is left, in order
 
+**Item numbers before this rewrite.** Notes written before 2026-10-27's
+step TR5 cite this section by its older numbers. From a7afd09 to RC1
+(5f967b4, exclusive): 1 LB, 2 REF, 3 the resync track, 4 retail R3-R5, 5 the
+trafo, 6 sector placement, 7 world agreement, 8 rollback engine gaps, 9
+record-format gaps, 10 the stage close-out, 11 late-player revision 3, 12
+R6 / R7, 13 levels 8 and 11. From RC1 to TR4 (3940bf3): the same 1-9, 10 the
+rewind-cost optimization, 11 the stage close-out, 12 late-player revision
+3, 13 R6 / R7, 14 levels 8 and 11. Today: sector placement 1, rewind cost
+3, rollback engine gaps 4, world agreement 5, record-format gaps 6, the
+stage close-out 7, late-player revision 3 8, R6 / R7 9, levels 8 and 11 10;
+the old items' open findings (N2, F, the CPU cliff, the T1 findings, the
+x64 teardown) are item 2.
+
 **Stage A - everything that affects physics is an input (goal 2).**
 
-1. LB: mirrors born inside a replay are one tick of navigation force short
-   (found by RR). Root cause, then fix.
-2. REF: re-record the headless reference captures with the current binaries.
-3. The resync and sector-timing track (`resync-and-sector-timing-design.md`):
-   T0, B1 late or moved Sector stamps rewind, A1 portable script record, A2
-   offline resync fidelity, A3 the exact resync on the wire, **A4 full-tier
-   close-out**, A5 late joiner through the same path, B2, T1.
-   **RL1 done** (2026-10-27, found by the user's trial; late-player design
-   §2.8, "As built (step RL1)"): every re-anchor's base (resync, resync at
-   `L_eff`, late join) is taken from the session's fixed deadline schedule,
-   `max(tick_at(now, lead), current_tick + 2)`, instead of the current tick,
-   so a resync made while the server waits on that member no longer leaves
-   every other client about 15 ticks behind (resync_snapoff: 36-37 -> 20-21;
-   resync_at150: c0 26.77 -> 22.3). Server only, no protocol change.
-4. Retail completes goal 3: R3 lifecycle rewind, R4 part one (built), R5 the slew
-   (built; its A5u analogue ends in one resync of the raised client, the CPU
-   cliff of item 8 meeting the fixed reach of plan step 12, reproduced
-   without a raise: core design "As built (step R5)")
-   (`session-client-core-design.md` §6.2).
-5. The trafo as a replicated input (`trafo-replication-design.md`): T1-T5
-   (T1 built: host support, bridge v21, SimTool S0-S13; S8 found no
-   PreSimulate entry, so 9.2 needs nothing: "As built (step T1)"; T2 built:
-   the wire and the server, protocol 11 / journal v5; **T3 built**: the
-   core and the headless host, judged with snapshots off, its snapshots-on
-   CPU gate moved to item 10; committed at step TR3b, the commit after
-   RL1 3daa19a that adds this note; the server's
-   `physics.trafo_inputs` stays off, past T4 until item 10's close-out).
-   Per-player piece sets; explosion, paper wind and reset in every world;
-   a 20 s piece life; the explosion stamped at the dephysic (vanilla timing);
-   out-of-reach trafos rejected and logged.
-   T3 (its H1 (c) at 150 ms failing on starvation at its merge round)
-   waited for item 10's step RC1 by the user's decision of 2026-10-25 and
-   was re-gated on top of RC1 and RL1 under its original H1 (c) at TR3b
-   with one H1 pair (the user's one-pair rule of 2026-10-27): starved
-   0 / 0 / 0 / 0 against the same-batch control's 0 / 0 / 0 / 0, input
-   rewinds 25-35 per client (128-181 before RC1; control 21-30), pieces
-   150/150 bit-equal on all four (trafo design §8, "As built (step
-   TR3b)"). T3's remaining CPU (t_rep 2.6-2.9x the control, t_max 43-46
-   ms against 12-14) is item 10's.
-   **T4 built** (step TR4, 2026-10-27, quick tier; trafo design §8, "As
-   built (step TR4 = T4)"): the retail host (core on) builds every
-   member's set, runs the inputs, the hold, the quiesce and the teardown,
-   installs the controller alias (bridge API v22); one two-copy L11
-   session: pieces 32/32 bit-equal across the two clients, the other
-   player's copies drawn; `physics.trafo_inputs` stays off (adaptation M2,
-   until item 10's close-out). Queued from it, each root-caused there:
-   (a) **retail rotation reports under the game's 24-bit x87**: IVP's
-   `calc_at_quaternion` slerp of a body turning > 2.6 degrees per tick is
-   ~1e-7 off unit length on the game thread (Direct3D's precision), so such
-   rows' rotation differs from the server's by <= 3e-8 (state exact;
-   `fpu53 on` makes all 5056 piece rows bit-equal) - fix the report (a
-   53-bit control word around the bridge's body reads) or accept it as a
-   row tolerance; (b) **the reference-map digest across CK2
-   implementations** (R2's criterion) differs on one name: the
-   reimplementation's `CKParameterOperation::Update` renames every
-   operation output `Pout 0`, the game keeps the file's `Out` - describe an
-   operation output by place in the map, or keep the name in the
-   reimplementation; the user's call.  Severity: diagnostic only - both
-   digests are only logged (`trafo_sets.hpp` build step; SimTool's
-   `trafo_tool` compares the value digest, which is equal), nothing on the
-   wire carries them, and the portable script record keys scripts by owner
-   and name, never by an operation output's name, so localization is
-   unaffected.  The cheap option: `trafo_reference_map`'s `where()` names a
-   source parameter outside the blocks by its operation's place (root
-   script + operation index + `:out`) instead of its name - it changes only
-   logged digests (every recorded one once), never a simulation result; (c) the retail birth log in a
-   session without trafo inputs still logs a replayed tick's births at the
-   live tick + 1 (T4 fixed it with the inputs on only).
-6. Sector placement (`sector-placement-design.md`): S1-S11. One object per
-   placement at the anchor; the late joiner's lost sector-1 walk (S4, which
-   may land early). Also found at S2, **the x64 teardown over-read** (not
-   placement-specific): Ballanced's `SetLocalParameterObject` (CK2
-   CKBehavior.cpp:1146-1155) makes `CKParameter::SetValue` copy a pointer
-   parameter's 8 bytes from a 4-byte `CK_ID`, so the particle block's
-   BEHAVIORDETACH (GeneralParticleSystem.cpp:415) leaves 0x00007FF600000000
-   instead of NULL; when the context reset detaches a P_Extra copy's particle
-   block before its Extra block (CK's hash order inside one copy, F5),
-   `DestroyExtra` deactivates the particle scripts and `ShowParticles` reads
-   it: 0xC0000005 at world teardown. S2's `release` orders the placement's
-   own copies; the builder's `*_MF001` copies are unordered, so an x64 server
-   or headless world can crash at session end once an Extra block ran.
-   Retail x86 cannot meet it. Fix: an engine change (write a null of the
-   parameter's size, or have CK2 copy the full size), then an x64 teardown
-   sweep (sector-placement-design.md, As built (step S2)).
-7. World agreement (`world-agreement-gaps-design.md`): client proximity
-   sensors rewired to the nearest ball (own or mirror), the member-added
-   message, leave and rejoin. Also its own step, **N2 on every world**
-   (found at A4; `resync-and-sector-timing-design.md` §7.4, As built (step
-   A4)): the retail mod pins the checkpoint chain's Set Cell of
-   IngameParameter[0][2] to 0 (N2); the headless client and the server's
-   world do not, so an own crossing (or a clone's, on the server) in the
-   frame of a sector pass deactivates the previous sector in that world
-   alone (a4_resync_n2 c1: P_Modul_26_Sack 8498 m; r4_lane_loss10 c1,
-   before B1). N2's rewire moves into a shared `game/` header used by all
-   three; [0][1] stays (the own sector poll reads it).
-8. Rollback engine gaps (`rollback-engine-gaps-design.md`): the PreSimulate
-   queue in the script record (engine access change #20), lives that end
-   inside a window, the retail beam's generation, and F (found at B1): the
-   script replay consumes the next-frame flags of scripts the live frame
-   skips (`P_Modul_18_Particle Script`). G0 (diagnostics) is done: the
-   r2 arms' `birth_recreate_failures` are all own-ball birth items, the
-   1378 difference is the dead own entity's CK matrix, which scripts
-   outside the replay move after the death (the resetpoint at D+1, the trafo
-   animation): L3 needs it per tick while the ball has no body (design
-   §9.7, decided at G8). Also the CPU cliff (found at B2,
-   no design yet): three respawns within 15 ticks (A5u at 150 ms, 2596-2612)
-   make every frame a 38-39-tick lifecycle rewind, the frame loop falls
-   about 33 ticks behind wall time, the schedule rebases and the client
-   resyncs - on all four clients with the flags off, on the raised one with
-   them on (`resync-and-sector-timing-design.md`, As built (step B2)).
-   Root cause the per-frame cost first (one rewind per frame for the
-   frame's lifecycle set, or the rewinds' own cost). Profiled at CPUPROF
-   (item 10): the per-frame rewinds are input corrections, not lifecycle
-   ones, one per frame, 37-40 deep, and one mechanism - the replay keeps a
-   remote's stale tail past its newest relayed frame (item 10, candidate
-   1, removed by RC1's hold-last since), so each key change of the late player and each respawned ball's
-   birth costs one rewind per arriving frame for the relay lag; B2's build
-   paid 1.31 ms per replayed tick, today 0.41 ms, and the recipe no longer
-   rebases.
-9. Record-format gaps (`record-format-gaps-design.md`): time factor and
-   gravity per tick, Level 1 switches the tutorial off (main-branch exit,
-   10-frame delay, every world), the array-read census (K0's tools built;
-   K2 must also decide the sector manager's `PH[*][4]` read that K0's census
-   found - written in play only on extra-point rows, As built (step K0)). Also three found
-   at T1 (`resync-and-sector-timing-design.md`, As built (step T1)):
-   (a) an own BodyRevived the server applies late is in the client journal
-   only at its stamp - the server never echoes it to its owner
-   (server.cpp:2046-2050), so a client journal's replay wakes the body
-   early (`resync_at150_down` c0 not exact after S); fix: the server echoes
-   a moved BodyRevived to its owner and the core journals it without acting
-   on it; (b) SimTool's client-journal replay runs one IVP tick ahead before
-   its first restore (group 0, the founding PLAYER records, steps an empty
-   tick 27); fix in `run_replay_session` with its own A/B, since every
-   client-journal replay's output changes; (c) the same journal has no
-   SUBSTITUTED record for the owner frames the server substituted at
-   1098-1119 (masked there by the second RESYNC, whose state covers them).
-   Known: the client had fallen behind (the schedule rebased at 1067 and
-   asked for that resync; its FRESH records stop at 1106, its old tick at
-   the apply; SUBSTITUTED ones stop at 1097) and its status counts 0
-   stale-epoch notices and 3 base ones, so the server's notices for
-   1098-1106 never reached its old epoch. Not known: whether the server
-   sent them; establish that, then decide whether a client journal should
-   carry them (a replay is the server's world only from S either way).
-10. The rewind-cost optimization (`rewind-cost-design.md`; user's decision,
-    2026-10-25): **RC1 committed with hold-last** (the commit after 49e2cc8
-    that adds this note, `rollback: ...`; the user's ruling of 2026-10-27,
-    `rewind-cost-design.md` §11: "先接受那个吧", "Commit RC1 with hold-last,
-    then fix RL1 right after, then continue the chain under the 15-minute
-    rule.") - the replay re-predicts a remote's tail past
-    its newest relayed frame with that frame (hold-last, the live
-    predictor's rule), so a relayed frame repeating it is no correction; it
-    comes before trafo T3 by the user's decision of 2026-10-25. Measured
-    (snapshots off, same batch, "As built (step RC1)"): input rewinds -83..-87 %
-    on swing and H1 at 150 ms (option off), -67..-77 % on the cliff, -44 % at
-    50 ms; no schedule rebase or rebase resync in any arm (the old build
-    rebased and resynced on every client of five arms); CPU parity -36 %. The
-    drift check's FAIL at the build (unpinned) was settled by the pinned
-    method (Measurement RC1d: 2.6x / 3.4x fewer input rewinds than the old
-    stale tail at 20 / 42 ticks; the drift split by lag) and by the user's own
-    play (Measurement RC1e: hold-last, R6 and R7 within about 2 % in drift,
-    R6 +6-11 % input rewinds pinned, +24 % modelled). RC6 (the R6 / R7 tail
-    refinement) is not adopted; it stays a possible later refinement if
-    human rapid-trigger play shows periods. Remaining: RC2 an incremental capture
-    for sleeping bodies (ceiling 22-24 %), RC3 no body-set full snapshot while
-    snapshots are off (9-11 %, its own drift check), RC4 the dormant-script
-    encoding (5 %), RC5 an incremental restore (3-4 %); the close-out is the
-    trafo design's H4 / H6 with snapshots on (decision (b), 2026-10-25),
-    against T3's snapshots-off CPU numbers (step TR3b, H1 at 150 ms with
-    RC1 in: t_rep 0.99-1.15 s, t_max 43-46 ms, starved 0, against the
-    option-off control's 0.34-0.41 s, 12-14 ms, 0; trafo design §8, "As
-    built (step TR3b)"). The CPUPROF profile and its ranked candidates:
-    `rewind-cost-design.md` §1 and trafo design §8, "The rewind-cost
-    profile".
-11. **Stage close-out:** four clients, 150 ms, 10 % loss, snapshots off: the
-    spawn pile and every mechanism bit-identical to the server at every
-    checkpoint. On pass: snapshots off in the deployed configuration and in
-    the retail default; only the one state transfer remains.
+1. **Sector placement S5-S11** (`sector-placement-design.md` §8): one object
+   per placement at the anchor; S5 the wire (protocol 12 / journal v6
+   expected; its world-options field exists since T2), S6 the headless host,
+   S7 the savestate check with a pass in the window, S8 the measurement, S10
+   the retail host (the track's close-out, a 15-minute step), S11 the
+   records. **Adaptation M3** (the orchestrator's): the placement's config
+   default stays false until S10 (as T2 kept `trafo_inputs` off until its
+   hosts ran it), otherwise every retail session on L1-L13 ends with
+   "placement mismatch" until S10. S2's open points go with it: the plan's
+   name bound of 63 (S5) and a scene that is only logged, not refused
+   (S6 / S10).
+2. **The items found unqueued** (the trial findings' critic,
+   `.local-tools/work/TRIAL1/analysis/final/part4.md`, and the steps'
+   findings), before the stage close-out, ordered by dependency:
+   - **Stalls -> resyncs past the 48-tick reach at 150 ms each way.** With
+     no raise, any server substitution of an own frame becomes a resync,
+     because the substitution notice comes back past the fixed reach (the
+     user's trial: three resyncs, "held notice for own tick 20585 arrived at
+     tick 20648, past the reach of 48 ticks"; R5's run-end resync is the
+     same). Late-player plan step 12 (the per-client reach) and open
+     question 1. Not established: why the trial's client stopped reaching
+     the server at 20485.
+   - **Resync T2**: the trafo scripts out of `keep_local`
+     (`resync-and-sector-timing-design.md` §8), unless TR3b's deferred H3b
+     and a forced resync during a piece life show T3 covers it.
+   - **Resync finding G1**: a script the restore makes active that the
+     live run had finished never runs again in the hosts (it is not
+     re-registered with the behaviour manager); only SimTool's
+     `--resync-reregister` handles it. Fix: the restore re-registers what it
+     activates (shared code, both hosts).
+   - **The core's 30-unmatched-snapshots rule** (session-core design §7.1
+     decision 1): still the retail host's transitional trigger
+     (`core_host.cpp:1558`); into the core for both hosts, closed by an
+     A/B in which it never fires.
+   - **Step P's spawn frame-timing race** (core design "As built (step
+     P)"): one run at R3 showed no mismatch at 214-218; re-measure, and
+     identify what made P land in state B more often.
+   - **Record-format Q5 / A23**: the session-start window's other failures
+     (5 objects fewer at anchors 4-6, the sector manager's active flag at
+     depth 0 for anchors 14-32); first decide session gap or harness gap.
+   - **The x64 teardown over-read** (found at S2): Ballanced's
+     `SetLocalParameterObject` (CK2 CKBehavior.cpp:1146-1155) makes
+     `CKParameter::SetValue` copy a pointer parameter's 8 bytes from a
+     4-byte `CK_ID`, so the particle block's BEHAVIORDETACH
+     (GeneralParticleSystem.cpp:415) leaves 0x00007FF600000000 instead of
+     NULL; a context reset that detaches a P_Extra copy's particle block
+     before its Extra block makes `ShowParticles` read it: 0xC0000005 at
+     world teardown. S2's `release` orders the placement's own copies; the
+     builder's `*_MF001` copies are unordered, so an x64 server or headless
+     world can crash at session end once an Extra block ran (retail x86
+     cannot meet it). Fix: an engine change (write a null of the
+     parameter's size, or have CK2 copy the full size), then an x64
+     teardown sweep (sector-placement design, As built (step S2)).
+   - **N2 on every world** (found at A4; resync design §7.4, As built (step
+     A4)): the retail mod pins the checkpoint chain's Set Cell of
+     IngameParameter[0][2] to 0; the headless client and the server's world
+     do not, so an own crossing (or a clone's, on the server) in the frame
+     of a sector pass deactivates the previous sector in that world alone
+     (a4_resync_n2 c1: P_Modul_26_Sack 8498 m). N2's rewire moves into a
+     shared `game/` header used by all three; [0][1] stays.
+   - **F and the CPU cliff's closing check.** F (found at B1): the script
+     replay consumes the next-frame flags of scripts the live frame skips
+     (`P_Modul_18_Particle Script`; rollback-engine gaps). The CPU cliff
+     (found at B2: three respawns within 15 ticks made every frame a
+     38-39-tick rewind and the schedule rebased): profiled at CPUPROF as one
+     input rewind per frame from the stale tail, removed by RC1 (B2's build
+     1.31 ms per replayed tick, now 0.41 ms; the recipe no longer rebases);
+     what is left is the closing check on the cliff recipe.
+   - **Resync T1's findings** (resync design, As built (step T1)): (a) an
+     own BodyRevived the server applies late is in the client journal only
+     at its stamp - the server never echoes it to its owner
+     (server.cpp:2046-2050); fix: echo a moved BodyRevived to its owner, the
+     core journals it without acting on it (it overlaps world agreement's
+     G5, which retires BodyRevived); (b) SimTool's client-journal replay
+     runs one IVP tick ahead before its first restore; fix in
+     `run_replay_session` with its own A/B; (c) a client journal lacks the
+     SUBSTITUTED records for the owner frames substituted at 1098-1119 -
+     first establish whether the server sent the notices.
+   - **Trafo T4's findings** (trafo design, As built (step TR4 = T4)): (a)
+     the retail rotation report under the game's 24-bit x87 (IVP's
+     `calc_at_quaternion` slerp of a body turning > 2.6 degrees per tick is
+     ~1e-7 off unit length; such rows' rotation differs from the server's
+     by <= 3.1e-8, the state exact, `fpu53 on` makes all 5056 rows equal):
+     a 53-bit control word around the bridge's body reads, or a row
+     tolerance; (b) the reference-map digest across CK2 implementations
+     (the reimplementation's `CKParameterOperation::Update` names every
+     operation output `Pout 0`, the game keeps `Out`; diagnostic only:
+     nothing on the wire, localization keys scripts by owner and name):
+     describe an operation output by its operation's place, or keep the name
+     in the reimplementation - the user's call; (c) the retail birth log in
+     a session without trafo inputs logs a replayed tick's births at the
+     live tick + 1 (T4 fixed it with the inputs on only).
+   - **RL1b** (`.local-tools/work/CHAIN3/queue.md`, the redone review of
+     RL1, no blocker): the As-built note's re-step depths (12 -> 28 on
+     resync_snapoff, 34 -> 29 at 150 ms, and why), the held window, the late
+     joiner off the per-player path, the base-missed fallback limited to
+     `CAP_RESYNC_STATE` members; `tick_at` before `start_`, the floor for
+     members without `CAP_RESYNC_STATE`, stale comments (late_tick.hpp:3-4,
+     server.cpp:1289, :1734, :1791-1792); a runner-level test that both
+     start paths store the schedule. One small step once nothing else is
+     working in `server.cpp`.
+3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
+   RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
+   body-set full snapshot while snapshots are off (9-11 %, its own drift
+   check), RC4 the dormant-script encoding (5 %; trafo design 9.4), RC5 an
+   incremental restore (3-4 %). The close-out is the trafo design's H4 / H6
+   **with snapshots on** (decision (b), 2026-10-25) against T3's
+   snapshots-off numbers (TR3b's H1 at 150 ms: t_rep 0.99-1.15 s, t_max
+   43-46 ms, starved 0, against the option-off control's 0.34-0.41 s, 12-14
+   ms, 0). **On its pass `physics.trafo_inputs` turns on by default**
+   (adaptation M2: it stays off until then; deployments run snapshots on).
+   RC6 (the R6 / R7 tail refinement) is not adopted; it stays a possible
+   later refinement if human rapid-trigger play shows periods (its open
+   points: RC1c's dwell captures not re-measured, the R4 fallback's
+   forward / backward keys, the resync_at150_down d0 cell).
+4. **Rollback engine gaps F5-F7** (`rollback-engine-gaps-design.md`): Q the
+   PreSimulate queue in the script record (engine access change #20,
+   reserved), L lives that end inside a window (gap L), B the retail beam's
+   generation (it also covers TR3's R4: H5 131:47's P_Modul_01_Pusher
+   0.0866 m, the beam's record retired by the trafo's new life). G0 is
+   built (EG0): L3 needs the dead own entity's CK matrix per tick while the
+   ball has no body (design §9.7, decided at G8).
+5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
+   (WAG:1204, order constraint M6): client proximity sensors rewired to
+   the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03
+   1.36 m, P_Modul_19_Flaps 0.8-1.8 mm, P_Modul_34 2.7 m), the
+   member-added message (trafo design 9.7: existing members do not know a
+   late joiner's join order), leave and rejoin, BodyRevived retired (G5).
+   Its Q9 (the protocol landing order) needs the user.
+6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
+   the time factor and gravity per tick; **K3 = the Level 1 tutorial
+   switched off** right after K1 (decision (c): every world activates the
+   tutorial's exit 10 frames after the level start, counted in frames, the
+   delay the main branch uses and the user requires); K2, the ActiveBall
+   census, after world agreement's G3 / G4 (it must also decide the sector
+   manager's `PH[*][4]` read that K0 found, written in play only on
+   extra-point rows).
+7. **Stage close-out (the one FULL verification):** four clients, 150 ms,
+   10 % loss, snapshots off: the spawn pile and every mechanism
+   bit-identical to the server at every checkpoint; and every check below.
+   On pass: snapshots off in the deployed configuration and in the retail
+   default; only the one state transfer remains.
 
-    **Deferred to the final verification** (checks a quick-tier step did
-    not run; each step appends its own, the close-out runs them all):
-    - RC1 (committed 2026-10-27, quick tier; the committed tree is the
-      measured build: wire check ALL SAME, solo IDENTICAL): (a) the live
-      four-client snapshots-off A/B of the committed build (§7 check 5 of
-      `rewind-cost-design.md`; run at the build, not re-run at the commit:
-      nothing changed); (b) its CPU parity (§7 check 7; -36 % at the build,
-      not re-run: FULL only); (c) the repeated drift sessions RC1c named and
-      did not run, O2 / N2 at dwell 30 on cliff and resync_at150; (d) a
-      retail two-copy run of the committed x86 build with core on (built,
-      CLIENT-BUILD-OK; the user's round 1 ran the same tree's hold-last
-      build, `TRIAL1/holdlast`).
-    - RL1 (quick tier, 2026-10-27; ran: the base-rule unit tests, x64
-      build, tests, GCC, the wire check rRC1 -> rRL1 ALL SAME, one live
-      resync_snapoff and one resync_at150 against the rebuilt Arch server,
-      both server journals exact): (a) the late-join arm (the joiner's base
-      moved onto the schedule too); (b) lead_adjust / patience on with a
-      stall-triggered resync (the `L_eff` path); (c) the LAN case (D at its
-      floor of 6, where the floor `current_tick + 2` may bind); (d) a
-      retail two-copy run with a stall-triggered resync (the trial's case;
-      server-only change, the x86 build is unchanged).
-    - TR3b (trafo T3 merged on RC1 + RL1, quick tier, 2026-10-27; ran: x64,
-      x86, Arch builds, 522 tests, GCC 29 ok, the wire check rRL1 -> rTR3b
-      on `core_ref_rc1` (36/36 journals IDENTICAL, one SessionReady send per
-      client), solo IDENTICAL, ONE H1 pair at 150 ms snapshots off (option on
-      and its same-batch option-off control; the user's one-pair rule):
-      (a) the second H1 pair at 150 ms; (b) H1 at 0 ms, for H1 (d) (late
-      Trafo events 0); (c) H3b (missed trafo inputs and their resyncs);
-      (d) H5 (`savestate_check.py` on the pieces); (e) H7 (the late
-      joiner's reconcile); (f) the re-capture of `core_ref_t3` with the
-      final binaries (the pre-RC1 set is not replayable by the merged
-      build: its journals differ from tick 253, hold-last); (g) a retail
-      two-copy run of the merged x86 build, core off and on (built,
-      CLIENT-BUILD-OK; no BallanceMMOClient source changed, but the
-      shared engine and savestate changes reach both retail modes - the
-      savestate index rewrite, and the replay-mismatch counter of
-      `rollback.hpp` now counted only while logged, the first 8; neither
-      changes a simulation result, and the core-off BAR rests on this run).
-    - TR4 (trafo T4, the retail host, quick tier, 2026-10-27; ran: x64 and
-      x86 builds, 522 tests, GCC 29 ok, the wire check rTR3b -> rTR4 ALL
-      SAME twice, ONE two-copy retail session on L11 with core on and
-      `trafo_inputs` on, snapshots off): (a) R1, the solo forced arms
-      (`r2_run.py` R2 scenario, 50:12, 97:24, 131:47, 13:24) and the
-      two-trafo `r2t_run.py`; (b) R2 with the R2 config (lifecycle rewind and
-      own echoes off) and R2b with `net lag 150` (late Trafo events inside
-      input rewinds); (c) R3, a second session in one game process after a
-      single-player paper trafo (sets rebuilt, no `_Trafo` object left,
-      the quiesce's 18/18); (d) R4, core off against `p3_off_P`; (e) R5, the
-      wire on trafo-free captures with the retail build; (f) an out-of-reach
-      trafo rejected and logged; (g) the H arms' A/B; (h) CPU parity;
-      (i) three launches without a hang.
+   **Deferred to the final verification** (checks a quick-tier step did
+   not run; each step appends its own, the close-out runs them all):
+   - RC1 (committed 2026-10-27, quick tier; the committed tree is the
+     measured build: wire check ALL SAME, solo IDENTICAL): (a) the live
+     four-client snapshots-off A/B of the committed build (§7 check 5 of
+     `rewind-cost-design.md`; run at the build, not re-run at the commit:
+     nothing changed); (b) its CPU parity (§7 check 7; -36 % at the build,
+     not re-run: FULL only); (c) the repeated drift sessions RC1c named and
+     did not run, O2 / N2 at dwell 30 on cliff and resync_at150; (d) a
+     retail two-copy run of the committed x86 build with core on (built,
+     CLIENT-BUILD-OK; the user's round 1 ran the same tree's hold-last
+     build, `TRIAL1/holdlast`).
+   - RL1 (quick tier, 2026-10-27; ran: the base-rule unit tests, x64
+     build, tests, GCC, the wire check rRC1 -> rRL1 ALL SAME, one live
+     resync_snapoff and one resync_at150 against the rebuilt Arch server,
+     both server journals exact): (a) the late-join arm (the joiner's base
+     moved onto the schedule too); (b) lead_adjust / patience on with a
+     stall-triggered resync (the `L_eff` path); (c) the LAN case (D at its
+     floor of 6, where the floor `current_tick + 2` may bind); (d) a
+     retail two-copy run with a stall-triggered resync (the trial's case;
+     server-only change, the x86 build is unchanged).
+   - TR3b (trafo T3 merged on RC1 + RL1, quick tier, 2026-10-27; ran: x64,
+     x86, Arch builds, 522 tests, GCC 29 ok, the wire check rRL1 -> rTR3b
+     on `core_ref_rc1` (36/36 journals IDENTICAL, one SessionReady send per
+     client), solo IDENTICAL, ONE H1 pair at 150 ms snapshots off (option on
+     and its same-batch option-off control; the user's one-pair rule):
+     (a) the second H1 pair at 150 ms; (b) H1 at 0 ms, for H1 (d) (late
+     Trafo events 0); (c) H3b (missed trafo inputs and their resyncs);
+     (d) H5 (`savestate_check.py` on the pieces); (e) H7 (the late
+     joiner's reconcile); (f) the re-capture of `core_ref_t3` with the
+     final binaries (the pre-RC1 set is not replayable by the merged
+     build: its journals differ from tick 253, hold-last); (g) a retail
+     two-copy run of the merged x86 build, core off and on (built,
+     CLIENT-BUILD-OK; no BallanceMMOClient source changed, but the
+     shared engine and savestate changes reach both retail modes - the
+     savestate index rewrite, and the replay-mismatch counter of
+     `rollback.hpp` now counted only while logged, the first 8; neither
+     changes a simulation result, and the core-off BAR rests on this run).
+   - TR4 (trafo T4, the retail host, quick tier, 2026-10-27; ran: x64 and
+     x86 builds, 522 tests, GCC 29 ok, the wire check rTR3b -> rTR4 ALL
+     SAME twice, ONE two-copy retail session on L11 with core on and
+     `trafo_inputs` on, snapshots off): (a) R1, the solo forced arms
+     (`r2_run.py` R2 scenario, 50:12, 97:24, 131:47, 13:24) and the
+     two-trafo `r2t_run.py`; (b) R2 with the R2 config (lifecycle rewind and
+     own echoes off) and R2b with `net lag 150` (late Trafo events inside
+     input rewinds); (c) R3, a second session in one game process after a
+     single-player paper trafo (sets rebuilt, no `_Trafo` object left,
+     the quiesce's 18/18); (d) R4, core off against `p3_off_P`; (e) R5, the
+     wire on trafo-free captures with the retail build; (f) an out-of-reach
+     trafo rejected and logged; (g) the H arms' A/B; (h) CPU parity;
+     (i) three launches without a hang.
+   - TR5 (trafo T5, the records and this roadmap, docs only, 2026-10-27;
+     its row's gate is a review): nothing deferred.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 
-12. Late-player design revision 3, R0-R5 (arrival ring, baseline, quorum
-    patience, the lead decision), plus plan steps 12 (per-client reach),
-    21 (events on the input datagram), 22 (own death move).
+8. Late-player design revision 3, R0-R5 (arrival ring, baseline, quorum
+   patience, the lead decision), plus plan steps 12 (per-client reach; see
+   item 2's first entry), 21 (events on the input datagram), 22 (own death
+   move).
 
 **Stage C - close the core (goal 1).**
 
-13. R6 retail own-body control (bridge and script work; after plan step 21's
-    measurement), R7 delete the legacy path; three launches without a hang.
-    R6 also removes the retail beam's own residual (measured at EG0,
-    rollback-engine-gaps-design As built EG0): the owner writes its body in
-    place where the server makes a fresh one, and the body carries its lane
-    state into the stamp; the arena's death beam at 1300 with
-    `r0_keys.bmrc` is 8.6 mm / 0.879 m/s off the server, over the ball's
-    0.5 m/s tolerance, so with snapshots off the beam stamp's full snapshot
-    corrects it (9.7 mm / 0.319 m/s with r2's keys, under it, since R3).
+9. R6 retail own-body control (bridge and script work; after plan step 21's
+   measurement; with it late-player part three on retail, the
+   `own_body_backstop` measurement and the retail hold-event verb), R7
+   delete the legacy path; three launches without a hang. R6 also removes
+   the retail beam's own residual (measured at EG0,
+   rollback-engine-gaps-design As built EG0): the owner writes its body in
+   place where the server makes a fresh one, and the body carries its lane
+   state into the stamp; the arena's death beam at 1300 with
+   `r0_keys.bmrc` is 8.6 mm / 0.879 m/s off the server, over the ball's
+   0.5 m/s tolerance, so with snapshots off the beam stamp's full snapshot
+   corrects it (9.7 mm / 0.319 m/s with r2's keys, under it, since R3).
 
 **Stage D - the original levels.**
 
-14. Levels 8 and 11, sector 1: solo savestate check and four clients,
+10. Levels 8 and 11, sector 1: solo savestate check and four clients,
     snapshots off. The pooled-modules diagnosis's open points (retail CK2
     `Reset`, P_Modul_01's Rinne/Filler) are checked here.
-
-Protocol numbers: the first of the resync track, the trafo replication and
-the sector placement to land takes 10 (journal v4); the next takes the next.

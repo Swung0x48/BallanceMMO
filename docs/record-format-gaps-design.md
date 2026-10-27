@@ -1,7 +1,8 @@
 # Record-format gaps: the ActiveBall cell (F13), the physics globals per tick (F14), the tutorial's clock (G-T)
 
 Status: design, revision 2 (after two reviews; §10 lists every finding and
-what became of it). Nothing is built. Track C of the post-audit designs. It
+what became of it). Step K0 is built (49e2cc8, "As built (step K0)" at the
+end); K1-K3 are not. Track C of the post-audit designs. It
 covers audit items #13 and #14 of the rollback-coverage audit
 (`scratchpad/audit/rollback-coverage-audit.md` §1, §2 F9/F10; the user's order
 in §5 calls them F13/F14), and the gaps found while checking them, reported per
@@ -30,7 +31,11 @@ v19; TRD claims v20, `docs/rollback-engine-gaps-design.md` (REG) v21). World
 option **bit 3** `WORLD_SESSION_CLOCK` (SPD bit 0, TRD `WORLD_TRAFO_INPUTS`,
 WAG bit 2). Protocol: the next free number at C4's commit (12 if WAG takes 11;
 RSD Q5's rule). No script record version, no journal version of its own, no
-engine change, no IVP change.
+engine change, no IVP change. **As landed elsewhere (2026-10-27):** bridge
+v20 went to resync A3, v21 to trafo T1, v22 to trafo T4, and protocol 10 /
+11 to resync A3 / trafo T2; K1 takes the next free bridge version and C4 the
+next free protocol number at their commits (this text's v22 and 12 are
+nominal).
 
 Base: HEAD 4882ec2 (R2) plus the uncommitted step P (the working tree). Line
 numbers are the working tree's as of 2026-10-23; step P is still moving
@@ -623,7 +628,7 @@ the order does not place yet (§9 Q2: proposed with F14).
 | **K0** (read-only tools, any time) | SimTool `--array-reads`, `--globals-trace`, `--world-options` | S2 control (bit clear) lists A1's reads; S5 reproduces A18 |
 | **K1 = C3** (F14 slot) | bridge v22 (`physics_direct`, `physics_view`); RBB hooks; RB record/restore/replay/stats; core status line; `docs/engine-changes.md` bridge note | U1-U6; S1 30/30 (and seeds 1-5, 300 rounds); S1b; H1; H4; R2; §7.5 |
 | **K2 = C2** (F13 slot, after WAG G3/G4) | `script_replay::array_reads`; anchor log + counter in PW, SC, CH | S2 pass on L1-L13; §7.5 |
-| **K3 = C4** (G-T, slot per §9 Q2) | `game/session_clock.hpp`; PW, SC, CH; the bit, config, protocol; RL ends locally; the 9.x text corrected (`docs/collision-overhaul-design.md:20, :333`) | U7; S3, S4; H2, H3, H5; R1 |
+| **K3 = C4** (G-T, right after K1 per §11 Q2) | **option (c) as decided (§11 Q1)**, not §2.4's hold: on Level 1 every world (server, headless, retail core host) activates the tutorial's exit IO (`Kapitel Aktion` / `Tut continue/exit`, the main branch's `edit_Gameplay_Tutorial`) 10 frames after the level start, counted in frames, from shared host support; PW, SC, CH; the bit, config, protocol; RL ends locally; the 9.x text corrected (`docs/collision-overhaul-design.md:20, :333`) | U7; S3, S4; H2, H3, H5; R1 (written for the hold; K3 re-reads each for (c)) |
 
 Each step: same-batch old/new A/B per `docs/session-client-core-design.md`
 §5.3, build from Bash (memory: build-tree pitfalls), implement → review → gate.

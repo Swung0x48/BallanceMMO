@@ -4,13 +4,15 @@ Status: design, revision 2 (two reviews answered; §8 lists every finding and
 what became of it). Steps E0 (§5.2, "As built (step E0)"), E1, E2, E3, E4,
 E5, E6, E7, E8, E9, E10 and E11 (§6.1, "As built (step E1)" ... "As built
 (step E11)") are built: the E steps are done. R0 and R1 are built (§6.2, "As
-built (step R0)", "As built (step R1)"). R2 is implemented but OPEN, not
-closed ("As built (step R2)"): its check (a) fails on the trafo's explosion
-pieces in a window that crosses their birth, and its check (b) fails on the
-mirror p99 (above the headless lane O runs, which have lifecycle rewind on:
-R3's switch). Step P (the pieces tracked as mechanisms in both hosts, "As
-built (step P)") is implemented but OPEN: R2 (a) now passes on retail, the
-headless trafo run does not. Step Q (the anchor restores the proximity
+built (step R0)", "As built (step R1)"). R2 is built ("As built (step R2)"):
+its check (a) passes on retail since step P, its check (b) (the mirror p99)
+holds with R3's switch ("As built (step R3)", 4.99 m against the O runs'
+6.10-18.04 m). Step P (the pieces tracked as mechanisms in both hosts, "As
+built (step P)") is built: its check-2 residual was the snapshot row a
+replay undid, closed by RR ("As built (step RR)"); its spawn frame-timing
+race showed no mismatch in R3's one run and is queued for a re-measurement
+(`docs/roadmap.md` §4). The trafo replication replaced P's path in sessions
+with `physics.trafo_inputs` ("As built (step T)"). Step Q (the anchor restores the proximity
 blocks' countdown, "As built (step Q)") is built: R0's baseline check holds.
 R3 is built ("As built (step R3)": the retail lifecycle rewind and own
 echoes; with it R2 (b)'s mirror p99 is below every O run). R4 is built
@@ -6290,6 +6292,94 @@ copies with the arena in slot 13, restored after; tools
   cliff: one rewind per frame per remote's changing input - coalesce the
   remote corrections, or cheapen the rewind) and LPD plan step 12 (the
   per-client reach).
+
+**As built (step T): the trafo as an input in the core and both hosts.**
+The trafo replication's steps T1-T4 (`docs/trafo-replication-design.md`
+§8: T1 2e6f026, T2 074f6d5, T3 3394ffd at step TR3b, T4 3940bf3; written at
+its step T5). Where the code made them differ from §1.2, §1.3, §2.2-§2.4,
+§3.1 and §3.2 (the server's part is that design's "As built (step TR2 =
+T2)"):
+
+- **Capability and operations (§2.2, §2.3).** `session_capabilities::
+  trafo_inputs` with eight operations, required with it by
+  `missing_platform_operation`: `poll_trafo` (the hold's reports and effect
+  checks after a live frame), `make_trafo_set` (`ensure_trafo_set`: a
+  selected set kept, a retired one not yet destroyed reselected and put back
+  to its built state, else a fresh build), `run_trafo`, `trafo_final`,
+  `trafo_frame`, `trafo_type_set` and `trafo_reconcile` (the reconcile's
+  view and halves), `retire_trafo_sets`. A host without the capability
+  declares no `CAP_TRAFO_INPUTS`; a server with `physics.trafo_inputs`
+  refuses it at SessionReady (SessionEnd with the reason, T3's H10), and in
+  a session without the option the core runs step P's path (the originals'
+  activations recorded and replayed, "As built (step P)") - the fallback,
+  not a second implementation. The legacy retail path (PSC) declares
+  nothing new.
+- **Core state and entry points (§1.2, §1.3).** `trafo_log_`,
+  `trafo_sets_`, `trafo_pending_`, `input_rewind_trafo_` and counters in
+  `client_core.hpp`; the code in `src/session/client_core_trafo.cpp`. The
+  own trafo is stamped `tick + 1 + lead`, under option E at the Trafo
+  Manager's Delayer prediction when that is not earlier, and held before
+  the first assignment; remote and server-stamped inputs are logged at
+  their applied tick and a late one asks for the frame's input rewind
+  (past the history or the reach: `trafo_missed` and a resync). Live, the
+  inputs are applied in `pre_step` after the held lifecycle and before the
+  union pass, the trafo frame after the pass; in a replay from
+  `before_replayed_tick`, before the union's re-derivation, as live.
+  Echoes: MOVED re-keyed with the applied tick's seed and rewound, REJECTED
+  / SUPERSEDED dropped and rewound from the origin. Sets are built at the
+  anchor for every member and on first sight, never inside a replay;
+  retirement deselects a set only after it was inert for `history` ticks
+  (H8: deselects at R+229 on the server and every client).
+- **Resync and join.** The reconcile runs before the resync's restore, on
+  the live world (the design put it after the anchor's restore): the
+  ledger's sets are built, each type set made what the ledger says (unmake
+  or remake, muted, births logged at S), then the piece rows are mapped by
+  name; `resync_spec::gone` keeps the restore from reviving a type set the
+  server has no bodies for. The RESYNC journal record gains a trailing
+  trafo section (it must stay that record's last field).
+- **Rollback engine (§1.2).** `rollback_world::row_on_breach_only`: a set's
+  piece row in a snapshot is a restore source only when it breaches (the
+  pieces are exact by their inputs; a row carries none of their collision
+  state). `rollback_engine::record(..., capture_now)`: one capture per live
+  tick (record, then the amend captures), `stats().captures_never_made` 0
+  in every run. The headless binding's `capture_scope` serves by-name
+  lookups from one pass (bridge note, `docs/engine-changes.md`). Per
+  capture at about 120 tracked bodies: 2.7 -> 0.9 ms.
+- **Host support (§2.4).** `game/trafo_sets.hpp` (the builder, invariants
+  I0-I7, the level reference, `run_trafo`, the trafo frame, the hold with
+  option E, the effect checks, unmake / remake, retirement, teardown,
+  `trafo_controller_alias`) and `session/trafo_input.hpp` (the ledger
+  rules, the seed, the input log), shared by the server, both hosts and
+  SimTool; `sim/trafo_hooks.hpp` binds the in-process bridge (server,
+  headless), `make_retail_trafo_hooks` the plugin API (retail).
+- **Headless host (§3.1).** The registry, hooks, hold and operations in
+  `sim/session_client.cpp`; the level reference captured while the level
+  loads; at the anchor the quiesce, the hold, the piece filter and the
+  controller alias; the selection without the originals and the binding's
+  trafo part with the option; teardown at the session's end.
+- **Retail host (§3.2).** One file-scope static `trafo_host` in
+  `core_host.cpp` (no `BallanceMMOClient` member, the BML constraint); the
+  operations line for line as the headless host's; `trafo_anchor` (hooks,
+  the alias through bridge API v22, the level reference, the quiesce, the
+  hold (1000/66 ms per frame), the filter) right before the session clock reset;
+  `trafo_teardown` from `hooks.ended`, `core_host_end_local` and the next
+  SessionStart; the level reference captured at `OnLoadObject` of
+  `3D Entities\Balls.nmo` whatever the switch (read-only). A replayed
+  tick's births are logged under that tick when the trafo inputs are on
+  (with them off the R steps' feed is unchanged: TR4's finding (c)). The
+  builder's dependency array is copied into the mod's own buffer (CK2.dll
+  allocates it in another C runtime). The core-off BAR: PSC unchanged.
+- **Measured.** Headless (T3 at TR3b, H1 at 150 ms, snapshots off, one
+  pair): pieces 150/150 bit-equal on all four, starved 0 / 0 / 0 / 0
+  against the option-off control's 0 / 0 / 0 / 0, input rewinds 25-35 per
+  client (control 21-30); t_rep 0.99-1.15 s and t_max 43-46 ms against the
+  control's 0.34-0.41 s and 12-14 ms (the rewind-cost optimization's).
+  Retail (T4, one two-copy L11 session, core on): pieces 32/32 bit-equal
+  across the clients over 5056 rows; against the server's rows positions and
+  velocities bit-equal, 126 rows' rotation <= 3.1e-8 under the game's
+  24-bit x87 (32/32 with `fpu53 on`). `physics.trafo_inputs` stays off by
+  default until the rewind-cost close-out (adaptation M2); the deferred
+  checks are `docs/roadmap.md` §4's list.
 
 ## 7. Open questions
 

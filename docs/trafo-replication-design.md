@@ -8,7 +8,7 @@ T2)"); step T3 built and committed (core and headless host: §8, "As
 built (step TR3 = T3)", its fix-up round, its merge round and "As built
 (step TR3b)"; judged with snapshots off by the user's decision of
 2026-10-25, §11: H4 and H6, the CPU gate with snapshots at interval 2,
-moved to the rewind-cost optimization, `docs/roadmap.md` §4 item 10; the
+moved to the rewind-cost optimization, `docs/roadmap.md` §4 item 3; the
 server's `physics.trafo_inputs` stays off, past T4 until that
 optimization's close-out). T3 waited for the rewind-cost step RC1
 (`rewind-cost-design.md`, the hold-last re-prediction) by the user's
@@ -16,9 +16,13 @@ decision of 2026-10-25 and was re-gated at TR3b on top of RC1 and RL1
 under its original H1 (c): one H1 pair at 150 ms, snapshots off (the
 user's one-pair rule of 2026-10-27, §11), starved 0 / 0 / 0 / 0 against
 the same-batch control's 0 / 0 / 0 / 0. Step T4 built (the retail host,
-quick tier, not committed at the time of writing: §8, "As built (step
-TR4 = T4)"; `physics.trafo_inputs` still off by default, adaptation M2).
-T5 not. It implements the user's decision of 2026-10-23
+quick tier: §8, "As built (step TR4 = T4)"; `physics.trafo_inputs` still
+off by default, adaptation M2). Step T5 done (the records: §8, "As built
+(step TR5 = T5)"). Commits: T1 2e6f026, T2 074f6d5, T3 3394ffd (step
+TR3b), T4 3940bf3 (step TR4). **The track is built; what it leaves open**
+(the default of `physics.trafo_inputs`, the deferred checks, three retail
+findings) is listed in "As built (step TR5 = T5)" and queued in
+`docs/roadmap.md` §4. It implements the user's decision of 2026-10-23
 on audit item #2 (and #11): option (b), the trafo becomes a replicated input
 and its explosion, wind and reset run in every world for every player's trafo,
 identically.
@@ -1284,7 +1288,7 @@ style).
 | **T2** wire and server | event type, payload, flags, key, rank, caps, world option, acceptance through the ledger, validation, deadline, leaver resets, journal v4; PW sets at `add_player`, anchor quiesce, `apply_event` Trafo, trafo frame in `tick`, server hold, the ledger in the resync and join state; the sets' scripts in the portable script record (its version bump with this protocol: T1 kept it at 1) | 7.1 (messages, acceptance, validation), S10 on synthetic journals, `kTrafoReach` set from the trafo positions of the existing R2 and `p3_h4` logs (9.3) |
 | **T3** core + headless host | `hold_trafo` and its pre-assignment deferral, the input log, live and replayed application, the trafo rewind and the missed-input resync, MOVED/REJECTED/SUPERSEDED echoes, `make_trafo_set` on first sight, reconcile, retirement, journal records; SC platform ops; remove step P's trafo `activations` and referential override; `explosion_pieces` over every set | 7.1 (core), H1-H3, H3b, H5, H7-H11, judged with snapshots off (user, 2026-10-25, §11); H4 and H6 moved to the rewind-cost optimization (`docs/roadmap.md` §4 item 10), T3 records its snapshots-off CPU numbers as that step's baseline; re-gated at TR3b after the rewind-cost step RC1 with one H1 pair at 150 ms (the one-pair rule, §11), the rest of the row deferred to the final verification |
 | **T4** retail host | CH platform ops through `game/trafo_sets.hpp` and `physics_view` hooks, the `trafo_host` file-scope static, the quiesce at `core_host_anchor`, the hold in `post_step`, session-end teardown | R1-R5 |
-| **T5** records | `docs/engine-changes.md` bridge note (v20, no engine change); session-client-core design "As built (step T)"; collision-overhaul-design 9.x entry; this document's status | review only |
+| **T5** records | `docs/engine-changes.md` bridge note (v21 and v22 as built - the design's v20 went to resync A3 -, no engine change); session-client-core design "As built (step T)"; collision-overhaul-design 9.x entry (9.29); this document's status | review only |
 
 Every gate reports symptom, cause and options for any check that fails. None is
 waived.
@@ -2832,6 +2836,69 @@ quick tier).**  The retail host runs the trafo as an input with
 - **Not done:** T5 (records: `docs/engine-changes.md`'s bridge note for v22
   is T5's, together with v21's); the default of `physics.trafo_inputs`
   (M2).
+
+**As built (step TR5 = T5, 2026-10-27; HEAD 3940bf3, docs only).**  The
+track's records, written from the As-built notes above; no code, build or
+run.
+
+- **Written.**  `docs/engine-changes.md`, "Bridge notes: the trafo sets
+  (bridge API v21 and v22, no engine change)": T1's v21 part as it was, plus
+  the controller alias (in process at T3, plugin API v22 at T4), T3's
+  byte-neutral savestate and lookup changes, and T4's C-runtime boundary
+  finding; the script-record paragraph gains portable version 2 (T2).
+  `docs/session-client-core-design.md` §6.2, "As built (step T): the trafo
+  as an input in the core and both hosts".  `docs/collision-overhaul-design.md`
+  9.29 (Chinese, `docs/glossary-zh.md`'s terms).  This status.
+  `docs/roadmap.md` rewritten (T1-T4 in §3 with their shas).
+- **Adaptations.**  The T5 row named bridge v20; the sets are v21 (A3 took
+  v20) and T4 added v22 - the row now says so.  The 9.x entry is 9.29, the
+  next free number after 9.28.  "As built (step T)" in the core design is
+  one note for T1-T4 (the core's and the hosts' part; the server's part is
+  §8 here, "As built (step TR2 = T2)").
+- **The track in numbers** (each from its note above):
+
+  | step | commit | what it closed | the numbers |
+  |---|---|---|---|
+  | T1 | 2e6f026 | per-player piece sets, host support, bridge v21, SimTool S0-S13 | I0-I7 on 52 builds (L1-L13 x 4 sets), digests `90f856e0c8c20dd4/493` and `bf8575545ab7fbe0/597` on every set; S2/S3 30600 piece lines bit-identical; S4 x64 = x86 = Linux (701 pose hashes); S6 50/50 rounds, 138/138 births exact; S8 0 PreSimulate entries (9.2 needs nothing); S13 231/231 runs bit-equal; 486 tests |
+  | T2 | 074f6d5 | the Trafo event, ledger, validation, deadline, leaver resets, the world option; protocol 11 / journal v5 | `kTrafoReach` 4.5 m (every one of 624 measured trafos 3.000 m above its `P_Trafo_*_MF`); S10 22/22 checks on L2 and L11, their server journals 1575/1575 matched, 0 checkpoint mismatches; 494 tests |
+  | T3 | 3394ffd | the core and the headless host | H1 at 150 ms (snapshots off, one pair): pieces 150/150 bit-equal on all four, starved 0/0/0/0 against the control's 0/0/0/0, input rewinds 25-35 per client (128-181 before RC1); H7 102/102 pieces bit-equal after a join; H3b two missed inputs -> two resyncs, 50/50 after each; H5 33/33 in five arms; 522 tests |
+  | T4 | 3940bf3 | the retail host (core on), bridge v22 | one two-copy L11 session: pieces 32/32 bit-equal across the clients (5056 rows), the other player's copies drawn, explosions at the Delayer's prediction 458 / 498 (vanilla timing); against the server bit-equal but for 126 rows' rotation <= 3.1e-8 (32/32 with `fpu53 on`) |
+  | T5 | (this step) | the records | - |
+
+- **Open questions settled** (§9): 9.1 - the builder runs on the retail
+  CK2.dll (T4) once its dependency array is copied into the mod's buffer;
+  R2's digest criterion fails on one parameter name (finding (b) below);
+  9.2 - no entries (S8); 9.3 - 4.5 m, rejected and logged (T2); 9.4 - the
+  dormant-script encoding is the rewind-cost optimization's RC4; 9.5 -
+  option E, built (T1's hold, T3's stamps, T4's 458 / 498); 9.6 - the 20 s
+  deadline (H11: resets at explosion + 1320 in every world); 9.7 - the
+  member-added message, world agreement's (roadmap §4); 9.8 - no action.
+- **Left open by the track** (each queued in `docs/roadmap.md` §4):
+  - `physics.trafo_inputs` stays **off** by default (adaptation M2) until
+    the rewind-cost close-out (H4 / H6 with snapshots on, decision (b) of
+    2026-10-25) passes; T3's remaining cost is per rewind: t_rep 0.99-1.15 s
+    against the control's 0.34-0.41 s, t_max 43-46 ms against 12-14 ms
+    (TR3b's pair).
+  - The checks deferred to the final verification: TR3b's (a)-(g) and
+    TR4's (a)-(i) (roadmap §4, "Deferred to the final verification").
+  - T4's three retail findings: (a) the rotation report under the game's
+    24-bit x87 (<= 3.1e-8, state exact); (b) the reference-map digest
+    across CK2 implementations (`Out` against `Pout 0`, diagnostic only);
+    (c) the retail birth log of a replayed tick without the trafo inputs.
+  - T3's pre-existing residuals: R4 (H5 131:47's P_Modul_01_Pusher 0.0866 m
+    from 656, the beam's record retired by the trafo's new life:
+    rollback-engine gaps) and R5 (the balls in the fan and mirror recipes).
+    R2's part for the other bodies (the body-set full snapshot while
+    snapshots are off) is the rewind-cost optimization's RC3.
+  - The resync design's T2 (the trafo scripts out of `keep_local`), unless
+    the deferred H3b and a forced resync during a piece life show it is
+    covered (with the option the originals are never selected, 4.3).
+  - TR2's network paths not exercised by a check: the intake rejection
+    with its log line and the REJECTED echo (TR4's deferred (f), an
+    out-of-reach trafo); the SessionReady refusal ran at T3's H10, the
+    server's own resets at H11, the join's resend at H7.
+- **Checks:** none run (docs only, review only, the row's gate).
+  Deferred: nothing beyond TR3b's and TR4's lists.
 
 ## 9. Open questions
 

@@ -46,7 +46,10 @@ sibling designs `record-format-gaps-design.md` and
   design claims #20). Access only, in the style of #17: free functions, no
   data member, no changed path.
 - Bridge API **v21** (`physics_rt_api.h:23` is v19; TRD takes v20; the
-  record-format design also names v21 nominally).
+  record-format design also names v21 nominally). **As landed (2026-10-27):**
+  v20 is resync A3's, v21 trafo T1's, v22 trafo T4's, and protocol 11 /
+  journal v5 trafo T2's; G2 takes the next free bridge version and G5 the
+  next free protocol number at their commits (v21 and 11 here are nominal).
 - Script replay record: one more `kVersion` (SRP:80 is v2; TRD, the
   record-format design and the world-agreement design each take v3
   nominally). Called **v-Q** below.
