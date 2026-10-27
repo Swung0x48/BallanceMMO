@@ -285,6 +285,11 @@ namespace {
         // T (a line at T - 1 closes the window before it), so an episode at T
         // begins a window instead of falling in the middle of one.
         uint32_t window_shift = 0;   // the grid's offset, (T - 1) mod 60; 0 = lines at multiples of 60
+        // --reach N (late-player plan step 12): the rollback's reach pinned
+        // at N ticks (clamped to 48..120; history 128 above 48) instead of
+        // the per-client reach from the relay lag (0, the default): the
+        // arms of open question 1's measurement.
+        uint32_t reach_ticks = 0;
         int hold_event_type = -1;
         uint32_t hold_event_nth = 0;
         int hold_event_ms = 0;
@@ -412,6 +417,7 @@ namespace {
                   "       [--resync-at TICK | --resync-at s<SECTOR>+<TICKS>] [--record-by-tick]\n"
                   "       [--hold-event TYPE:N:MS|TYPE:N:drop]   (the N-th own event of TYPE leaves MS ms late, or never)\n"
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
+                  "       [--reach N]   (the rollback's reach pinned at N ticks, 48..120; default: per client, from the relay lag)\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--beam2 X Y Z TICK] [--keep-lane Z] [--keep-lane-dwell N]\n"
                   "       [--brake-tap N:P]   (while the record holds UP: DOWN instead for N frames in every P)\n"
                   "       [--keep-lane-tap N:M]   (the steer's key pressed N frames, released M, repeating)\n"
@@ -578,6 +584,10 @@ namespace {
                 out.pause_at = std::atoll(spec.substr(0, colon).c_str());
                 out.pause_ms = std::atoi(spec.substr(colon + 1).c_str());
                 out.stall_named = true;
+            }
+            else if (arg == "--reach") {
+                if (!(v = next())) return false;
+                out.reach_ticks = static_cast<uint32_t>(std::max(0, std::atoi(v)));
             }
             else if (arg == "--window-origin") {
                 if (!(v = next())) return false;
@@ -1606,6 +1616,7 @@ namespace {
             c.input_rewind = args_.rollback;
             c.own_corrections = args_.rollback;
             c.window_shift = args_.window_shift;
+            c.reach_ticks = args_.reach_ticks;
             return c;
         }
 
@@ -2406,7 +2417,34 @@ namespace {
                 }
             }
             ++flow_steps_;
+            const auto frame_started = std::chrono::steady_clock::now();
             frame();
+            note_frame_time(std::chrono::steady_clock::now() - frame_started);
+        }
+
+        // Open question 1 (late-player plan step 12): the CPU time of every
+        // frame() in 0.1 ms buckets up to 1 s, for the frame_time line at
+        // each report (count, p50, p99, p99.9, max in ms).  Diagnostic
+        // only: it decides nothing.
+        static constexpr size_t kFrameTimeBuckets = 10001;
+        std::vector<uint32_t> frame_time_hist_ = std::vector<uint32_t>(kFrameTimeBuckets, 0);
+        uint64_t frame_time_count_ = 0;
+        double frame_time_max_ms_ = 0.0;
+        void note_frame_time(std::chrono::steady_clock::duration took) {
+            const double ms = std::chrono::duration<double, std::milli>(took).count();
+            const size_t bucket = std::min(kFrameTimeBuckets - 1, static_cast<size_t>(ms * 10.0));
+            ++frame_time_hist_[bucket];
+            ++frame_time_count_;
+            frame_time_max_ms_ = std::max(frame_time_max_ms_, ms);
+        }
+        double frame_time_quantile(double q) const {
+            if (!frame_time_count_) return 0.0;
+            uint64_t seen = 0;
+            for (size_t b = 0; b < kFrameTimeBuckets; ++b) {
+                seen += frame_time_hist_[b];
+                if (static_cast<double>(seen) >= q * static_cast<double>(frame_time_count_)) return (b + 1) / 10.0;
+            }
+            return kFrameTimeBuckets / 10.0;
         }
 
         // One step of the slew: how far the pacer is behind goes to the
@@ -3462,7 +3500,13 @@ namespace {
             h.script_reset_skips = script_reset_skips_;
             return h;
         }
-        void report() { log_line(core_.status_text(counters())); }
+        void report() {
+            log_line(core_.status_text(counters()));
+            if (frame_time_count_)
+                logf("frame_time: frames=%llu p50=%.1f p99=%.1f p999=%.1f max=%.1f ms",
+                     static_cast<unsigned long long>(frame_time_count_), frame_time_quantile(0.5),
+                     frame_time_quantile(0.99), frame_time_quantile(0.999), frame_time_max_ms_);
+        }
 
         // ------------------------------------------------------------ state
         arguments args_;

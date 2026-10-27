@@ -444,6 +444,15 @@ namespace bmmo::session {
         // ...and for a mirror's birth tick, which no replay can change.
         uint64_t relay_birth_frozen_ = 0;
         uint32_t relay_lag_max_ = 0;
+        // Late-player plan step 12: the relay lag of the server's newest
+        // step at each first arrival of it (current - header tick, the
+        // own notices' lag; it needs no remote) over the last 4 windows,
+        // and what it set: reach changes, the deepest reach of the
+        // session, the change lines logged.
+        bmmo::session::reach_meter reach_meter_;
+        uint64_t reach_changes_ = 0;
+        uint32_t reach_max_ = 0;
+        uint32_t reach_logs_ = 0;
         static constexpr uint32_t kRelayLagBuckets = 129;
         std::array<uint32_t, kRelayLagBuckets> relay_lag_hist_{};
         // The window: line (window_text).  The status line's counters are
@@ -790,6 +799,12 @@ namespace bmmo::session {
         // window on the ticks t with (t - window_shift) % kWindowTicks == 0
         // (headless --window-origin; 0 = lines at multiples of 60).
         uint32_t window_shift = 0;
+        // Late-player plan step 12 (design 2.5): 0 = the per-client reach
+        // (rollback.hpp reach_meter, from the relay lag); N = the reach
+        // pinned at clamp(N, kReachFloorTicks, kReachCapTicks) for the whole
+        // session (headless --reach: the open question 1 measurement, an A/B
+        // arm).  Both hosts leave it 0.
+        uint32_t reach_ticks = 0;
     };
 
     // (legacy_calls, the transitional back-calls of design 6.1 "Linking while
@@ -1384,6 +1399,11 @@ namespace bmmo::session {
         // go: max_resim_ticks, or the resync reach inside the last exact
         // resync's re-step window.
         uint32_t window_rewind_reach(uint32_t tick) const;
+        // Late-player plan step 12: one relay lag sample (the header of a
+        // datagram's first arrival of a server tick) and the reach it gives
+        // (config.reach_ticks 0), or the pinned reach (apply_reach at begin).
+        void sample_reach(uint32_t lag);
+        void apply_reach(uint32_t reach, const char* why);
         // A held notice's tick whose record a pending exact resync's
         // re-step replays (client_core_held.cpp), and its amendment.
         bool resync_amends(uint32_t tick) const;

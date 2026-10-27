@@ -195,7 +195,7 @@ namespace bmmo::session {
                      "resync: restepped=%llu/%llu depth=%llu states=%llu stale=%llu refused=%llu deferred=%llu/%llu "
                      "snaps_dropped=%llu scripts_refused=%llu blobs_refused=%llu destroyed=%llu unexplained=%llu "
                      "unattributed=%llu unmapped=%llu unportable=%llu holds=%llu/%llu hold_max=%.0f window_rew=%llu subsumed=%llu amended=%llu resent=%llu join_wakes_withheld=%llu "
-                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f%s",
+                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f reach=%u/%u/%zu%s",
                      static_cast<int>(s.phase_), s.session_, current_tick(), s.assigned_ ? 1 : 0, s.held_ ? 1 : 0,
                      static_cast<long long>(s.frames_since_anchor_),
                      static_cast<unsigned long long>(s.inputs_sent_), static_cast<unsigned long long>(s.events_sent_),
@@ -347,6 +347,11 @@ namespace bmmo::session {
                      s.input_reports_ ? 100.0 * static_cast<double>(s.input_starved_) / static_cast<double>(s.input_reports_) : 0.0,
                      s.worst_starved_,
                      s.lead_count_ ? static_cast<double>(s.lead_sum_) / static_cast<double>(s.lead_count_) : 0.0,
+                     // reach=now/deepest/history (late-player plan step 12):
+                     // the rollback's reach now, the deepest it reached this
+                     // session, and the history it keeps.
+                     s.rollback_.thresholds().max_resim_ticks,
+                     std::max(s.reach_max_, s.rollback_.thresholds().max_resim_ticks), s.rollback_.thresholds().history_ticks,
                      trafo.c_str());
     }
 

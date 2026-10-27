@@ -175,6 +175,19 @@ namespace bmmo::session {
         s.rollback_.set_exact_restore(config.savestate);
         s.rollback_.set_script_log_cap(config.script_diff_logs);
         s.rollback_.set_trace_plan(config.trace_plan);
+        // Late-player plan step 12: every session starts at the floor with
+        // the default history (a previous session's deeper reach is its
+        // own), or at the pinned reach.  Set without apply_reach's log line:
+        // the tick base is still the previous session's here, and the
+        // starting reach is in the status line anyway.
+        s.reach_meter_.clear();
+        s.reach_changes_ = 0;
+        s.reach_logs_ = 0;
+        s.rollback_.thresholds().history_ticks = bmmo::session::rollback_thresholds{}.history_ticks;
+        s.rollback_.set_reach(config.reach_ticks ? std::clamp(config.reach_ticks, bmmo::session::kReachFloorTicks,
+                                                              bmmo::session::kReachCapTicks)
+                                                 : bmmo::session::kReachFloorTicks);
+        s.reach_max_ = s.rollback_.thresholds().max_resim_ticks;
         s.session_ = msg.session;
         s.snapshot_interval_ = msg.snapshot_interval;
         s.input_delay_ = msg.input_delay;

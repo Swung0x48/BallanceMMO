@@ -75,8 +75,13 @@ namespace bmmo::session {
                 ++s.input_starved_;
                 if (behind > s.worst_starved_) s.worst_starved_ = behind;
             }
-            s.lead_sum_ += static_cast<int32_t>(current_tick() - msg.tick) > 0 ? current_tick() - msg.tick : 0;
+            const uint32_t lag = static_cast<int32_t>(current_tick() - msg.tick) > 0 ? current_tick() - msg.tick : 0;
+            s.lead_sum_ += lag;
             ++s.lead_count_;
+            // Late-player plan step 12: the same lag sizes the reach.  A
+            // notice of our tick T rides on a datagram of server tick >= T,
+            // so its rewind is at least this deep plus one.
+            sample_reach(lag);
         }
         if (msg.epoch != s.tick_base_) {
             for (const auto& record: msg.held)

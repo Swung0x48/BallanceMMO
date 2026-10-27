@@ -1830,6 +1830,65 @@ namespace {
         EXPECT_EQ(state_of(core).held_header_tick_, 124u);
     }
 
+    // Late-player plan step 12 (design 2.5): every first arrival of a server
+    // tick's header is a relay lag sample (current - header tick); the reach
+    // is clamp(p99 of the last 4 windows + 8, 48, 120), re-derived at each
+    // sample, and the history grows to 128 with it.  A pinned reach
+    // (config.reach_ticks) ignores the samples; a new session starts over.
+    TEST(SessionClientCoreRelay, PerClientReachFollowsTheRelayLag) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        auto& st = state_of(core);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 48u);
+        EXPECT_EQ(st.rollback_.thresholds().history_ticks, 96u);
+        // A copy or an older header is no sample.
+        const auto deliver = [&](int frames, uint32_t lag) {
+            st.frames_since_anchor_ = frames;
+            core.on_session_remote_input(relay_message(core.current_tick() - lag, 120));
+        };
+        for (int i = 0; i < 60; ++i) deliver(100 + i, 21);
+        core.on_session_remote_input(relay_message(core.current_tick() - 21, 120));   // the same tick again
+        EXPECT_EQ(st.reach_meter_.samples(), 60u);
+        EXPECT_EQ(st.reach_meter_.p99(), 21u);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 48u) << "21 + 8 is under the floor";
+        EXPECT_EQ(st.reach_changes_, 0u);
+        const size_t from = fake.calls.size();
+        for (int i = 60; i < 120; ++i) deliver(100 + i, 52);   // the lag raised by 31 ticks
+        EXPECT_EQ(st.reach_meter_.p99(), 52u);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 60u);
+        EXPECT_EQ(st.rollback_.thresholds().history_ticks, 128u);
+        EXPECT_EQ(st.rollback_.resync_reach(), 127u);
+        EXPECT_EQ(st.reach_max_, 60u);
+        EXPECT_GE(st.reach_changes_, 1u);
+        int grown = 0;
+        for (const auto& call: since(fake.calls, from))
+            grown += call.find("reach: ") != std::string::npos && call.find("history 128, grown") != std::string::npos;
+        EXPECT_EQ(grown, 1);
+        EXPECT_NE(core.status_text({}).find(" reach=60/60/128"), std::string::npos);
+        // The raised windows age out: 4 windows of 21 bring the floor back,
+        // and the history stays.
+        for (int i = 120; i < 400; ++i) deliver(100 + i, 21);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 48u);
+        EXPECT_EQ(st.rollback_.thresholds().history_ticks, 128u);
+        EXPECT_EQ(st.reach_max_, 60u);
+
+        // Pinned: the samples change nothing; a new session starts over.
+        bmmo::session::core_config pinned;
+        pinned.reach_ticks = 120;
+        ASSERT_FALSE(core.begin(start_message(9, 3), pinned).refused);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 120u);
+        EXPECT_EQ(st.rollback_.thresholds().history_ticks, 128u);
+        EXPECT_EQ(st.reach_meter_.samples(), 0u);
+        pinned.reach_ticks = 30;
+        ASSERT_FALSE(core.begin(start_message(9, 3), pinned).refused);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 48u) << "clamped to the floor";
+        EXPECT_EQ(st.rollback_.thresholds().history_ticks, 96u) << "a new session's history";
+        ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 48u);
+        EXPECT_EQ(st.reach_max_, 48u);
+    }
+
     // replay_corrected_inputs: one replay for the frame's corrections, inside
     // the live-cells scope; a refused one is counted and logged (a remote's)
     // and resyncs when it carried an own correction.  force_rewind keeps the
@@ -2854,6 +2913,33 @@ namespace {
         }
         EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 2u);
         EXPECT_TRUE(state_of(core).own_life_.empty());
+    }
+
+    // Late-player plan step 12: a held notice of our tick 130 that arrives at
+    // 180 needs a rewind 51 deep.  At the fixed reach of 48 it is late and
+    // resyncs; once the relay lag measured 52 (reach 60) it is a notice like
+    // any other, and nothing resyncs.
+    TEST(SessionClientCoreRelay, HeldNoticeInsideThePerClientReachIsNoResync) {
+        for (const bool raised: {false, true}) {
+            SCOPED_TRACE(raised ? "reach 60" : "reach 48");
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_client_core core(replay_platform(fake, bound), session_capabilities{});
+            bound = &core;
+            run_to_tick_125(core, fake);
+            auto& st = state_of(core);
+            st.held_floor_ = 120;
+            st.frames_since_anchor_ = 61;
+            ASSERT_EQ(core.current_tick(), 180u);
+            record_ticks(core, 100, 180);
+            if (raised) core.on_session_remote_input(relay_message(128, 120));   // one sample: lag 52
+            ASSERT_EQ(st.rollback_.thresholds().max_resim_ticks, raised ? 60u : 48u);
+            const uint64_t resyncs_before = st.resyncs_sent_;
+            steps{core}.settle_held_tick(130, bmmo::session::input_frame{});
+            EXPECT_EQ(st.subst_late_, raised ? 0u : 1u);
+            EXPECT_EQ(st.subst_recv_, raised ? 1u : 0u);
+            EXPECT_EQ(st.resyncs_sent_ - resyncs_before, raised ? 0u : 1u);
+        }
     }
 
     // Resync design 9 Q2 (step A4): a forced rewind deeper than
@@ -4122,7 +4208,7 @@ namespace {
         EXPECT_NE(text.find(" lag=40/30 "), std::string::npos) << "the 99th percentile: " << text;
         EXPECT_NE(text.find(" amend_failures=0 rebases=7 resyncs=0/0 "), std::string::npos) << text;
         EXPECT_NE(text.find(" deferred=0 activations=8 scr=0/0/0/0/9 t_rest="), std::string::npos) << text;
-        const std::string tail_text = "input: reports=4 starved=1 (25%) worst=0 lead=0.0";
+        const std::string tail_text = "input: reports=4 starved=1 (25%) worst=0 lead=0.0 reach=48/48/96";
         ASSERT_GE(text.size(), tail_text.size());
         EXPECT_EQ(text.substr(text.size() - tail_text.size()), tail_text) << "the last field, not cut off";
         EXPECT_GT(text.size(), 256u) << "past the first buffer, whole";

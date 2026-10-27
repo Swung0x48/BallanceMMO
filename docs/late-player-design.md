@@ -846,6 +846,144 @@ then happen, both to the late client only:
 Whether the deeper reach fits the CPU is open question 1, measured in plan
 step 12.
 
+**As built (step 12 = roadmap step REACH, 2026-10-27).** The rule is in the
+shared session-client core, so both hosts run it (core design §0: one
+implementation), not in `session_client.cpp`: `rollback.hpp`
+(`kReachFloorTicks` 48, `kReachCapTicks` 120 = `kHeldMaxReachTicks`,
+`kReachMarginTicks` 8, `kReachHistoryTicks` 128, `reach_meter`,
+`rollback_engine::set_reach`), `client_core_held.cpp` (`note_held_section`
+samples), `client_core_resync.cpp` (`sample_reach`, `apply_reach`, a
+`reach: N ticks at tick T (...)` line per change, 32 at most),
+`client_core.cpp` (`begin`: every session starts at 48 / 96, or at the pinned
+reach, set without the log line, whose tick would still be the previous
+session's), the status line's `reach=now/deepest/history`; the headless client's
+`--reach N` pins it (the measurement's arms; 0 = per client, the default)
+and prints a `frame_time:` line (each `frame()`'s CPU time, steady clock).
+Every gate that read `max_resim_ticks` follows it unchanged: the input, own
+and lifecycle rewinds, a late Sector stamp, a snapshot's depth, a held
+notice (`window_rewind_reach`). Adapted where the code differs from the row:
+- **The sample is the header lag**, `current - msg.tick` at the first arrival
+  of each server tick's datagram (the number `input: lead=` already
+  averaged), not the remote frames' first-arrival lag: a notice of our tick T
+  rides a datagram of server tick >= T, so this is the own notices' lag; it
+  needs no remote (a solo client measures it too), and it equals the remote
+  frames' lag within a tick, because the server relays a frame when it steps
+  its tick.
+- **No separate starting value.** The reach is re-derived at every sample
+  over the current window and the three before it (a window is the
+  `window:` line's 60 ticks), from the first sample on; `L_assigned +
+  ceil(rtt/2) + 8` is that lag, measured. The core has neither number
+  (`SessionAssign` carries `first_tick` only).
+- **The history grows to 128 once the reach passes 48 and stays there for
+  the session**, so a pending resync's or a rewind's anchor never leaves it
+  when the reach falls back (the resync reach, `history - 1`, goes 95 ->
+  127 with it). A replay at reach 120 with forced 48-tick rewinds costs the
+  same as at reach 48 (below): the 32 extra records are memory only.
+- **The server's Sector bound stays at 48** (`lead.hpp`
+  `kLeadSectorReachTicks`, step B2): no client's reach is below it, and the
+  server does not know a client's reach (no protocol change). It is now the
+  floor of the reach, not `max_resim_ticks`: `lead_test` asserts
+  `kLeadSectorReachTicks == kReachFloorTicks` at compile time.
+
+Verified (quick tier): `BallanceMMOMessageTests` 542/542 (new:
+`RollbackEngine.PerClientReach120RewindsDeepBitExact` - the lockstep claim at
+depths 49, 80 and 120, every 7 and 20 ticks, bit-exact with reach 120 and
+every one refused at 48, 121 refused at 120; `ReachMeterIsTheRelayLagP99OverFourWindows`;
+`SessionClientCoreRelay.PerClientReachFollowsTheRelayLag`;
+`HeldNoticeInsideThePerClientReachIsNoResync` - a notice 51 deep resyncs at
+48 and is taken at a measured 60); GCC syntax 29/29; `wire_check.sh rSP11
+rREACH` ALL SAME (12/12 sends, 12/12 journals IDENTICAL) although 6 of the
+12 replays raised their reach to 49-50 with history 128 (resync_snapoff
+c0-c3, swing_snapoff c2-c3: nothing in those captures falls in (48, 50]);
+core_ref_s6/solo1 replayed IDENTICAL; one live run of RC1d's 150 ms recipe
+(`resync_at150_down`, snapshots off, `maps/arena-test/reach_live2`): every
+client's reach 49-51 with history 128 (relay lag p99 41-43), client 0's 63
+notices all inside the reach (55 the same frame, 6 bodiless, 2 replayed at
+depth 43; none past it), its one resync the recipe's `--resync-at`, the server
+journal replays 3418/3418. That recipe is the resync one, not the row's;
+the review's fix-up ran the stall recipe once (late-player 5.1 C7, client 0
+`--stall-ms 600:450`, under the pacer's 33-frame rebase; 4 clients, 150 ms,
+snapshots off, driven; `maps/arena-test/reach_stall`): the server waited
+and substituted client 0's ticks 601..608 (`S2 held ... n=8`), and all 8
+notices reached client 0 while it was still stalled at 600, ahead of their
+ticks (`take_held_ahead`: subst=8/0/8/0/0/0, starved=8, no rewind, no
+resync, nothing past the reach); the post-stall burst lifted every client's
+reach to 50 for four windows (header lag p99 42, normally 22); verdict PASS,
+the server journal replays 3516/3516. **A client's own CPU stall cannot put
+a notice behind its tick**: the client is not stepping while the server
+substitutes. A deep notice needs the server (or the downlink) to stall
+while the client steps on, as in the trial; the harness has no server-stall
+knob, so the (48, reach] band is shown by the unit test alone. The
+fix-up's rerun: x64 BUILD-OK, x86 CLIENT-BUILD-OK, 542/542, GCC 29/29,
+`wire_check.sh rSP11 rREACH2` ALL SAME.
+
+**Open question 1, measured** (`work/REACH/cpu_reach.sh`: core_ref_s6
+resync_snapoff client 0 - 150 ms, snapshots off, trafo inputs off - replayed
+unpaced on the x64 headless client, a forced rewind of the reach's depth
+every 30 ticks so the p99 is a rewind frame): no forced rewind p99 11.3 ms
+(max 18.5); 48 deep p99 21.4 ms (max 32.0, longest rewind 25 ms); 120 deep
+p99 50.9 ms (max 61.9, longest rewind 58 ms); reach 120 with 48-deep
+rewinds 21.6 ms. A replayed tick costs about 0.45 ms here (rewind-cost
+design §1: 0.41-0.47 ms, 1.23-1.27 ms with the trafo inputs on, which would
+make a 120-deep rewind about 150 ms). One 120-deep rewind is a hitch of about
+four frames (ten with the trafo inputs), under the pacer's 33-frame rebase,
+but that a live client absorbs it was not shown (no live run reached the
+band); a server stall's burst brings deep notices over several frames, and
+`replay_corrected_inputs` rewinds once per frame, so it is several frames
+over budget in a row. A rewind per frame deeper than about 33 ticks is past
+the 15.15 ms budget at any reach (48 deep is already 21 ms) - the CPU cliff
+of the rewind-cost track, which a deeper reach extends to the corrections it
+no longer refuses. Not measured: the retail x86 client's cost, the trafo-on
+cost (estimated from §1 of the rewind-cost design), and the x86 memory of
+history 128 with savestate records (32 more blobs in a 32-bit process).
+
+**Not settled: the cap is the user's choice** (open question 1, the user's
+rule of 2026-10-27). 120 is past one frame's budget by about 4x (x64, trafo
+off), about 10x estimated with the trafo inputs. (i) **Cap 120 as designed**
+(as built): every notice up to 120 deep is a rewind, a deep one a 58 ms
+(x64) to ~150 ms (trafo, estimated) hitch, several in a row after a server
+stall. (ii) **A lower cap, e.g. 72**: about 36 ms per rewind on x64
+(interpolated: 25 ms at 48, 58 ms at 120, 0.46 ms per tick + about 3 ms of
+restore), covers the trial's 61-64 deep notices; deeper
+ones resync. (iii) **A cap tied to the trafo inputs** (120 off, lower on),
+the cost being 2.7x per tick with them. The code takes any of them by
+changing `kReachCapTicks` (and `kHeldMaxReachTicks`, asserted equal).
+
+**The trial's resyncs** (`.local-tools/work/TRIAL1/rounds/round1-holdlast`):
+client 1 stopped reaching the server at 20485 because both game processes
+hitched about 17 / 13 ticks (client 1 saw client 2's frames at lag 4
+instead of 21, client 2 saw client 1's at 24 instead of 37, and the
+60-tick windows took 1.03 / 0.96 s; the server kept its 15 ms steps from
+20486 after waiting its full 99 ms for 20485) while client 1 had only 6.7
+ticks of slack at the server - the resync-base deadline phase that RL1 fixed
+(its rebase resync at 1851 had dropped it from 21.8). Those 52 notices came
+inside the reach. The three resyncs followed server stalls: the server's
+journal shows 646 ms between steps 20584 and 20585 and 595 ms between 20770
+and 20771 (more than any deadline wait, at most the largest slack, 22 ticks
+= 336 ms), during which both clients received nothing (`window:` relay 29 /
+48, then 92 with 47 / 39 late). Notices for 20585 and 20771 / 20778 reached
+their owners 64, 61 and 61 deep. With this rule (`work/REACH/trial_reach.py`,
+the windows' lag as the sample): client 1 at 20648 had p99 26 -> reach 48 <
+64, **still a resync**; client 1 at 20831 had p99 61 (the first stall's
+burst still in its last 4 windows) -> 69 >= 61, **avoided**; client 2 at
+20838 p99 77 -> 85 >= 61, **avoided**. RC1d's `resync_at150_down` d0 cell
+(notices 49 deep, p99 47 -> 55): **avoided**. What stalled the server is not
+established (the journal flushes every checkpoint, every 2 ticks here, to
+`/mnt/d` from WSL; unmeasured).
+
+**Found: the margin of 8 does not cover the server's wait.** A notice of
+our substituted tick T leaves with the server's step of T, which waits for
+our missing frame until the deadline, while the datagrams we sample leave at
+the normal step, the arrival of the latest member's frame. So a notice is
+`h + w + 1` deep, h the header lag and w that member's slack at the server
+(the smallest slack of the session): about 21 ticks at the arena with
+RL1's slack of 22, 6.7 in the trial (client 1), 6 in RC1d's cell. The rule
+covers it when `w + 1 <= 8 + (p99 - h)`: with small slacks, or after a burst
+has lifted the p99. It does not for the case this step was written for: R5's
+run-end resync (core design, "As built (step R5)": relay lag 41-43, the
+notice 64 deep) gives p99 43 -> reach 51 < 64. Not changed here; it is the
+user's choice (roadmap §2, the user's rule of 2026-10-27).
+
 ### 2.6 The session stops waiting for one player
 
 Part one makes a late frame harmless to the server's state. It does not stop
@@ -2297,7 +2435,12 @@ last sector is entered.
    120 ticks? Step 12 measures its CPU. If it cannot, the cap on `k` is that
    client's CPU budget, and the rest of its lateness stays substituted and
    corrected by part one. At 150 ms each way the relay lag already takes 32-44
-   of 48, which is why A5 is reported and not passed.
+   of 48, which is why A5 is reported and not passed. (Measured at step 12,
+   §2.5 "As built (step 12)": a 120-deep rewind is a 51-62 ms frame on the
+   x64 headless client, 0.45 ms per replayed tick, about 150 ms with the
+   trafo inputs on; a 48-deep one 21-32 ms. The cap - 120, a lower one such
+   as 72, or one tied to the trafo inputs - is open, the user's choice;
+   retail x86 and the trafo-on cost are not measured.)
 2. **Session-wide sizing.** Should `input_delay` and the start base be sized
    from a robust statistic rather than the worst ping, now that part two can
    lift one slow member on its own? The principles freeze them during a

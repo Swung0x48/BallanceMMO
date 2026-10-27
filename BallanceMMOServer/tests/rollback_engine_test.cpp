@@ -466,13 +466,16 @@ namespace {
     // stepped straight through, the arm is recorded and rewound `depth` ticks
     // every `every` ticks (the window replayed from the records), and the two
     // are compared by bit pattern after every rewind and at the end.
-    lockstep_outcome run_lockstep(uint32_t depth, uint32_t every, bool exact_restore) {
+    // `reach` (late-player plan step 12): the engine's per-client reach,
+    // set_reach'd before the run; 0 = the default thresholds.
+    lockstep_outcome run_lockstep(uint32_t depth, uint32_t every, bool exact_restore, uint32_t reach = 0) {
         constexpr uint32_t kTicks = 200;
         fake_world control, arm;
         seed_savestate_world(control);
         seed_savestate_world(arm);
         rollback_engine engine;
         engine.set_exact_restore(exact_restore);
+        if (reach) engine.set_reach(reach);
         const rollback_tracked tracked = savestate_tracked();
         auto straight = control.adapter();
         auto rewound = arm.adapter();
@@ -3279,6 +3282,87 @@ TEST(RollbackEngine, ManyRewindsStayBitExact) {
             EXPECT_EQ(beam.savestates_restored, 0u);
             EXPECT_FALSE(beam.exact) << "the per-body restore stayed bit-exact: the hidden state is not exercised";
         }
+}
+
+// Late-player plan step 12 (design 2.5), rollback_engine_test at reach 120:
+// a per-client reach of 120 grows the history to 128 and rewinds as deep as
+// 120 ticks bit for bit (the same lockstep claim as above), where the fixed
+// reach of 48 refuses every one of them.
+TEST(RollbackEngine, PerClientReach120RewindsDeepBitExact) {
+    {
+        rollback_engine engine;
+        EXPECT_EQ(engine.thresholds().max_resim_ticks, bmmo::session::kReachFloorTicks);
+        EXPECT_EQ(engine.resync_reach(), 95u);
+        EXPECT_FALSE(engine.set_reach(48));                 // the floor: nothing changes
+        EXPECT_EQ(engine.thresholds().history_ticks, 96u);
+        EXPECT_TRUE(engine.set_reach(120));
+        EXPECT_EQ(engine.thresholds().max_resim_ticks, 120u);
+        EXPECT_EQ(engine.thresholds().history_ticks, bmmo::session::kReachHistoryTicks);
+        EXPECT_EQ(engine.resync_reach(), 127u);
+        EXPECT_TRUE(engine.set_reach(52));                  // lower again: the history stays
+        EXPECT_EQ(engine.thresholds().history_ticks, 128u);
+    }
+    for (const uint32_t depth: {49u, 80u, 120u})
+        for (const uint32_t every: {7u, 20u}) {
+            SCOPED_TRACE("depth " + std::to_string(depth) + ", every " + std::to_string(every));
+            const lockstep_outcome deep = run_lockstep(depth, every, true, 120);
+            EXPECT_GT(deep.rewinds, 0u);
+            EXPECT_EQ(deep.refused, 0u);
+            EXPECT_TRUE(deep.exact) << deep.first_difference;
+            EXPECT_EQ(deep.savestates_restored, deep.rewinds);
+            EXPECT_EQ(deep.savestate_failures, 0u);
+
+            const lockstep_outcome fixed = run_lockstep(depth, every, true);
+            EXPECT_EQ(fixed.rewinds, 0u);
+            EXPECT_EQ(fixed.refused, deep.rewinds);
+            EXPECT_TRUE(fixed.exact) << fixed.first_difference;
+        }
+    {
+        SCOPED_TRACE("121 is past even the deepest reach");
+        const lockstep_outcome past = run_lockstep(121, 20, true, 120);
+        EXPECT_EQ(past.rewinds, 0u);
+        EXPECT_GT(past.refused, 0u);
+    }
+}
+
+// The meter behind it: the reach is the floor without samples, the 99th
+// percentile of the last 4 windows' relay lag plus 8 within [48, 120], and a
+// window 4 or more older than the newest sampled one no longer counts.
+TEST(RollbackEngine, ReachMeterIsTheRelayLagP99OverFourWindows) {
+    using bmmo::session::reach_meter;
+    reach_meter meter;
+    EXPECT_EQ(meter.samples(), 0u);
+    EXPECT_EQ(meter.reach(), 48u);
+    for (int i = 0; i < 60; ++i) meter.sample(10, 21);       // a 150 ms client: 21 + 8 < 48
+    EXPECT_EQ(meter.p99(), 21u);
+    EXPECT_EQ(meter.reach(), 48u);
+    for (int i = 0; i < 60; ++i) meter.sample(11, 52);       // its lag raised by 31 ticks
+    EXPECT_EQ(meter.p99(), 52u);
+    EXPECT_EQ(meter.reach(), 60u);
+    meter.sample(11, 200);                                    // one outlier among 121: not the p99
+    EXPECT_EQ(meter.samples(), 121u);
+    EXPECT_EQ(meter.reach(), 60u);
+    for (int i = 0; i < 60; ++i) meter.sample(12, 130);      // past the cap
+    EXPECT_EQ(meter.p99(), reach_meter::kBuckets - 1);
+    EXPECT_EQ(meter.reach(), 120u);
+    // Windows 13 and 14 sample the floor's lag; at 15 window 11 is out, at 16
+    // window 12 is: the high samples age out with their windows.
+    for (uint32_t w = 13; w <= 14; ++w)
+        for (int i = 0; i < 60; ++i) meter.sample(w, 20);
+    EXPECT_EQ(meter.reach(), 120u);                          // 12 still counts
+    for (int i = 0; i < 60; ++i) meter.sample(15, 20);       // 11 out (12..15)
+    EXPECT_EQ(meter.reach(), 120u);
+    for (int i = 0; i < 60; ++i) meter.sample(16, 20);       // 12 out (13..16)
+    EXPECT_EQ(meter.samples(), 240u);
+    EXPECT_EQ(meter.p99(), 20u);
+    EXPECT_EQ(meter.reach(), 48u);
+    // A late sample of a window that already aged out is dropped.
+    meter.sample(11, 100);
+    EXPECT_EQ(meter.samples(), 240u);
+    EXPECT_EQ(meter.reach(), 48u);
+    meter.clear();
+    EXPECT_EQ(meter.samples(), 0u);
+    EXPECT_EQ(meter.reach(), 48u);
 }
 
 // Late-player design 3.3: the owner's own birth, made live at tick 5, was

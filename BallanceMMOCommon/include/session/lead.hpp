@@ -102,9 +102,13 @@ namespace bmmo::session {
 
     // The depth to which a session-core client rewinds for a late remote
     // Sector stamp (late-player design 2.9 and plan step 14, resync design
-    // 2.7 case 3 and step B2): rollback.hpp's max_resim_ticks, which
-    // client_core's sector_rewind_reachable compares the rewind to stamp - 1
-    // against (lead_test checks the two agree).  A stamp that reaches p
+    // 2.7 case 3 and step B2): the floor of the client's reach,
+    // rollback.hpp's kReachFloorTicks.  client_core's
+    // sector_rewind_reachable compares the rewind to stamp - 1 against the
+    // client's runtime max_resim_ticks, which since late-player plan step
+    // 12 is a per-client value never below that floor; the server cannot
+    // know a client's current reach, so it bounds with the floor every
+    // client has (lead_test checks the two agree).  A stamp that reaches p
     // d ticks late rewinds d + 1 ticks.  Past this the client starts the
     // sector live and resyncs: still exact (protocol 10), but a state
     // transfer, which a raise must not make routine; so the bound stays,

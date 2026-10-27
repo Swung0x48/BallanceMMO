@@ -723,8 +723,13 @@ TEST(LeadSector, TheBoundIsTheMarginPlusTheClientsRewindReach) {
     EXPECT_EQ(lead_sector_bound(p, 20), 14 + kLeadSectorReachTicks);
     p.sector_margin.push(-60);
     EXPECT_EQ(lead_sector_bound(p, 20), 0);    // never below 0
-    // The reach is the depth client_core's sector_rewind_reachable allows:
-    // rollback.hpp's max_resim_ticks.  A stamp d ticks late rewinds d + 1.
+    // The reach is the depth client_core's sector_rewind_reachable allows
+    // at the least: the floor of the per-client reach (late-player plan
+    // step 12), which is also the default max_resim_ticks a session starts
+    // at.  A stamp d ticks late rewinds d + 1.
+    static_assert(kLeadSectorReachTicks == static_cast<int64_t>(bmmo::session::kReachFloorTicks),
+                  "the server's Sector bound is the floor of every client's reach");
+    EXPECT_EQ(kLeadSectorReachTicks, static_cast<int64_t>(bmmo::session::kReachFloorTicks));
     EXPECT_EQ(kLeadSectorReachTicks, static_cast<int64_t>(bmmo::session::rollback_thresholds{}.max_resim_ticks));
 }
 

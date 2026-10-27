@@ -11,6 +11,7 @@
 // and the headless session client.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -492,6 +493,96 @@ namespace bmmo::session {
         // when its snapshot arrives.
         size_t history_ticks = 96;
         uint32_t max_resim_ticks = 48;   // give up (hard set only) beyond this lag
+    };
+
+    // Late-player plan step 12 (late-player design 2.5, the per-client
+    // reach): a session client's max_resim_ticks is a runtime value,
+    //     clamp(p99 of its relay lag over the last 4 windows + 8, 48, 120),
+    // and its history becomes 128 once that exceeds 48 (the deepest resync
+    // re-step, history - 1, follows it to 127).  The relay lag is what the
+    // client measures (its lead over the server's newest step plus the
+    // downlink: session_client_core::note_held_section), not the lead
+    // offset; the deeper re-simulation is that player's CPU alone.  The
+    // floor is the fixed reach every side assumed before (lead.hpp's
+    // kLeadSectorReachTicks, the server's Sector bound, stays at it: a
+    // client's reach is never below it), the cap the deepest reach the sent
+    // ring resolves (input_relay.hpp kHeldMaxReachTicks).
+    constexpr uint32_t kReachFloorTicks = 48;
+    constexpr uint32_t kReachCapTicks = 120;
+    constexpr uint32_t kReachMarginTicks = 8;
+    constexpr size_t kReachHistoryTicks = 128;
+    static_assert(kReachCapTicks + 1 <= kReachHistoryTicks, "the deepest reach's anchor must stay in the history");
+
+    // The relay lag samples of the last kWindows windows (a window is the
+    // core's window: line, kWindowTicks of own ticks), as histograms, and
+    // the reach they give.  A window's slot is reused when a newer window
+    // samples into it; a window older than the newest sampled one by
+    // kWindows or more no longer counts.
+    class reach_meter {
+    public:
+        static constexpr size_t kWindows = 4;
+        static constexpr uint32_t kBuckets = 129;   // 0..127 ticks, 128 = 128 or more
+
+        void clear() { *this = reach_meter{}; }
+
+        void sample(uint32_t window, uint32_t lag) {
+            if (!any_ || static_cast<int32_t>(window - newest_) > 0) {
+                newest_ = window;
+                any_ = true;
+            }
+            auto& slot = slots_[window % kWindows];
+            if (!slot.used || slot.window != window) {
+                if (slot.used && static_cast<int32_t>(window - slot.window) < 0) return;   // older than the slot's: gone
+                slot = window_slot{};
+                slot.used = true;
+                slot.window = window;
+            }
+            ++slot.hist[lag < kBuckets - 1 ? lag : kBuckets - 1];
+            ++slot.count;
+        }
+
+        // Samples inside the last kWindows windows (the newest sampled one
+        // and the kWindows - 1 before it).
+        uint64_t samples() const {
+            uint64_t total = 0;
+            for (const auto& slot: slots_)
+                if (counts(slot)) total += slot.count;
+            return total;
+        }
+
+        // The 99th percentile of those samples, in ticks (0 without any).
+        uint32_t p99() const {
+            const uint64_t total = samples();
+            if (!total) return 0;
+            uint64_t seen = 0;
+            for (uint32_t b = 0; b < kBuckets; ++b) {
+                for (const auto& slot: slots_)
+                    if (counts(slot)) seen += slot.hist[b];
+                if (seen * 100 >= total * 99) return b;
+            }
+            return kBuckets - 1;
+        }
+
+        // The reach those samples ask for: the floor without any.
+        uint32_t reach() const {
+            if (!samples()) return kReachFloorTicks;
+            return std::clamp(p99() + kReachMarginTicks, kReachFloorTicks, kReachCapTicks);
+        }
+
+    private:
+        struct window_slot {
+            bool used = false;
+            uint32_t window = 0;
+            uint64_t count = 0;
+            std::array<uint32_t, kBuckets> hist{};
+        };
+        bool counts(const window_slot& slot) const {
+            return slot.used && any_ && static_cast<int32_t>(newest_ - slot.window) >= 0
+                && newest_ - slot.window < kWindows;
+        }
+        std::array<window_slot, kWindows> slots_{};
+        uint32_t newest_ = 0;
+        bool any_ = false;
     };
 
     struct rollback_stats {
@@ -1943,6 +2034,19 @@ namespace bmmo::session {
             return at && at->have_scripts ? &at->scripts : nullptr;
         }
         rollback_thresholds& thresholds() { return thresholds_; }
+        // Late-player plan step 12: the per-client reach (reach_meter, or a
+        // pinned value).  max_resim_ticks takes `reach`; the history grows to
+        // kReachHistoryTicks once the reach exceeds the floor and stays
+        // there (never shrunk under a pending resync's anchor or a rewind's;
+        // the extra 32 records are memory only, every tick is captured once
+        // either way).  Returns whether max_resim_ticks changed.
+        bool set_reach(uint32_t reach) {
+            const bool changed = thresholds_.max_resim_ticks != reach;
+            thresholds_.max_resim_ticks = reach;
+            if (reach > kReachFloorTicks && thresholds_.history_ticks < kReachHistoryTicks)
+                thresholds_.history_ticks = kReachHistoryTicks;
+            return changed;
+        }
         // The tracked set the record of `tick` carries, or null (step A3:
         // the reconcile reads the synthetic anchor's).
         const rollback_tracked* recorded_tracked(uint32_t tick) const {

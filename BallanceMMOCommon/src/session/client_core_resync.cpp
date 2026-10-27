@@ -560,6 +560,37 @@ namespace bmmo::session {
         return true;
     }
 
+    // Late-player plan step 12 (design 2.5): the per-client reach.  Every
+    // first arrival of a server tick's datagram is one sample of the relay
+    // lag; the reach is clamp(p99 over the last 4 windows + 8, 48, 120),
+    // re-derived at every sample (from the first one: the design's starting
+    // value, L_assigned + ceil(rtt/2) + 8, is that lag measured, which the
+    // core has and the assignment does not carry), so it rises within the
+    // window a lag rises in and falls as the windows that held it age out.
+    // Every gate that reads max_resim_ticks follows it (input, own and
+    // lifecycle rewinds, a late Sector stamp, a snapshot's depth).
+    static_assert(bmmo::session::kReachCapTicks == bmmo::session::kHeldMaxReachTicks,
+                  "the deepest reach is the one the sent ring was sized for");
+    void session_client_core::sample_reach(uint32_t lag) {
+        s.reach_meter_.sample(window_index_of(current_tick()), lag);
+        if (config.reach_ticks != 0 || !config.rollback) return;
+        apply_reach(s.reach_meter_.reach(), "relay lag");
+    }
+
+    void session_client_core::apply_reach(uint32_t reach, const char* why) {
+        const size_t history_before = s.rollback_.thresholds().history_ticks;
+        if (!s.rollback_.set_reach(reach)) return;
+        ++s.reach_changes_;
+        s.reach_max_ = std::max(s.reach_max_, reach);
+        if (s.reach_logs_ < 32) {
+            ++s.reach_logs_;
+            logf("reach: %u ticks at tick %u (%s: p99 %u over %llu samples of the last %zu windows; history %zu%s)", reach,
+                 current_tick(), why, s.reach_meter_.p99(), static_cast<unsigned long long>(s.reach_meter_.samples()),
+                 bmmo::session::reach_meter::kWindows, s.rollback_.thresholds().history_ticks,
+                 s.rollback_.thresholds().history_ticks != history_before ? ", grown" : "");
+        }
+    }
+
     uint32_t session_client_core::window_rewind_reach(uint32_t tick) const {
         const uint32_t standard = s.rollback_.thresholds().max_resim_ticks;
         if (!s.resync_window_ || static_cast<int32_t>(tick - 1 - s.resync_window_anchor_) < 0
