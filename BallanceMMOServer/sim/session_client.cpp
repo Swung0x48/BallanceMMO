@@ -39,6 +39,7 @@
 #include <game/menu_driver.hpp>
 #include <game/checkpoint_phase.hpp>
 #include <game/sector_activation.hpp>
+#include <game/sector_placement.hpp>
 #include <game/navigation_graph.hpp>
 #include <game/script_state.hpp>
 #include <game/session_host_support.hpp>
@@ -84,6 +85,7 @@
 #include <memory>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -373,13 +375,25 @@ namespace {
         int64_t leave_after_trafo = -1;
         // --placement-signature HEX (step S5, sector placement design 7.4
         // "mismatch"; a test switch): the host declares the placement
-        // capability and reports HEX as its anchor's placement signature
-        // instead of none.  This host computes no signature before step S6,
-        // so HEX equal to the server's is the matching control and any other
-        // value the mismatch the server must end the session on.  It builds
-        // no copy: not for a session with the world option on.
+        // capability and reports HEX as its anchor's placement signature.
+        // Since step S6 the host computes the world's signature itself
+        // (place_sectors) and HEX replaces it in the report: HEX equal to the
+        // server's is the matching control, any other value the mismatch
+        // the server must end the session on.  The copies are built (or
+        // not) as without it.
         bool placement_signature_given = false;
         uint64_t placement_signature = 0;
+        // --sector-at SECTOR:TICK (step S6, sector placement design 7.4;
+        // repeatable): this client enters SECTOR at TICK - asked for before
+        // the frame that steps TICK, through the core's request_sector like
+        // --start-sector, so it is stamped the sector lead ahead and sent as
+        // this client's own Sector input.  A test switch: like --start-sector
+        // it is not checked against the level's sector count.
+        std::vector<std::pair<int, uint32_t>> sector_at;
+        // A second and later --beam (step S6: --beam is repeatable): each at
+        // its tick, once, after the first --beam and --beam2, one per frame.
+        struct beam_spec { double position[3] = {}; uint32_t tick = 0; };
+        std::vector<beam_spec> more_beams;
     };
 
     // The record's keys (scripts/arena_map_test.py write_drive_record) are
@@ -406,7 +420,8 @@ namespace {
                   "replay them, unpaced, sending nothing)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
                   "       [--ignore-snapshots] [--no-trafo-cap] [--trafo-no-resets] [--leave-at TICK | --leave-after-unphys D | --leave-after-trafo D]\n"
-                  "       [--placement-signature HEX]   (test: declare the placement and report HEX as the anchor's signature)");
+                  "       [--sector-at SECTOR:TICK]...   (enter SECTOR at TICK, an own Sector input; repeatable; --beam is too)\n"
+                  "       [--placement-signature HEX]   (test: report HEX as the anchor's placement signature instead of the world's)");
     }
 
     // The event type names (--hold-event, the own-echo lines) are the core's
@@ -592,13 +607,30 @@ namespace {
                 out.beam2 = true;
             }
             else if (arg == "--beam") {
+                // The first --beam keeps its own fields (--leave-after-unphys
+                // counts from its tick); a later one is appended (step S6).
+                arguments::beam_spec b;
                 for (int k = 0; k < 3; ++k) {
                     if (!(v = next())) return false;
-                    out.beam_position[k] = std::atof(v);
+                    b.position[k] = std::atof(v);
                 }
                 if (!(v = next())) return false;
-                out.beam_tick = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
-                out.beam = true;
+                b.tick = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+                if (!out.beam) {
+                    for (int k = 0; k < 3; ++k) out.beam_position[k] = b.position[k];
+                    out.beam_tick = b.tick;
+                    out.beam = true;
+                } else {
+                    out.more_beams.push_back(b);
+                }
+            }
+            else if (arg == "--sector-at") {
+                if (!(v = next())) return false;
+                const char* colon = std::strchr(v, ':');
+                if (!colon) return false;
+                const int sector = std::atoi(v);
+                if (sector < 1) return false;
+                out.sector_at.emplace_back(sector, static_cast<uint32_t>(std::strtoul(colon + 1, nullptr, 10)));
             }
             else return false;
         }
@@ -666,6 +698,8 @@ namespace {
         friend class own_physicalize_callback;
     public:
         explicit session_client(arguments args) : args_(std::move(args)) {}
+        // Step S6: the copies go before the engine (release_placement).
+        ~session_client() { release_placement("the client exits"); }
         // make_platform() hands core_ lambdas that hold `this`: a moved (or
         // copied) client would leave them calling into the old object.
         session_client(session_client&&) = delete;
@@ -679,6 +713,7 @@ namespace {
             eo.game_root = args_.root;
             eo.log = [](const std::string& text) { logf("[engine] %s", text.c_str()); };
             std::string error;
+            release_placement("the engine reboots");
             engine_.reset();
             engine_ = bmmo::sim::headless_engine::create(eo, error);
             if (!engine_) { logf("engine: %s", error.c_str()); return false; }
@@ -1514,8 +1549,10 @@ namespace {
             // part), which --no-script-replay does not install - a replay
             // would set the inputs' flags and run nothing (review 2 of T3).
             caps.trafo_inputs = !args_.no_trafo_cap && args_.script_replay;
-            // Step S5: only with the test switch (the signature is S6's).
-            caps.placement = args_.placement_signature_given;
+            // Step S6 (sector placement design 2.4): this host computes the
+            // placement signature at every anchor and builds the copies when
+            // the session's world option says so (place_sectors).
+            caps.placement = true;
             return caps;
         }
         // The core's configuration from the arguments (design 1.2).
@@ -1789,6 +1826,8 @@ namespace {
             activations_replayed_ = 0;
             beam_done_ = false;
             beam2_done_ = false;
+            more_beams_done_.assign(args_.more_beams.size(), false);
+            sector_at_done_.assign(args_.sector_at.size(), false);
             own_group_set_ = false;
             own_capture_.valid = false;
             scripts_.clear();
@@ -1809,6 +1848,9 @@ namespace {
             trafo_registry_.set_reference(bmmo::game::trafo_reference{});
             leave_unphys_tick_ = 0;
             leave_trafo_tick_ = 0;
+            // Step S6: the previous session's copies, whatever comes next (a
+            // reboot below, or a level load over a level that is not running).
+            release_placement("a new session begins");
             if (bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
                 // Restart (host started the room again): reboot to the menu.
                 // (The mirrors and the relay's bookkeeping were cleared here
@@ -1877,6 +1919,12 @@ namespace {
                 logf("%d of %zu proximity countdown(s) restored to the level file's (%d differed)", restored,
                      level_proximities_.size(), differed);
             }
+            // Step S6 (sector placement design 2.4): after the restores (a
+            // copy inherits its source's level-file counters), before the
+            // hash, the selection and every pass; a refusal ends the session
+            // here, as a failed hash does.
+            uint64_t placement_signature = 0;
+            if (!place_sectors(placement_signature)) { ended_ = true; return; }
             bmmo::physics::world_hash hash;
             if (!bmmo::physics::capture_world_hash(physics, hash, error)) { logf("hash: %s", error.c_str()); ended_ = true; return; }
             if (!bmmo::physics::install_player_collision_filter(physics, "P#", error)) logf("collision filter: %s", error.c_str());
@@ -1985,8 +2033,85 @@ namespace {
             report.own_name = args_.name;
             report.load_ticks = load_waited_;
             report.sector_cell = sector_cell;
-            report.placement = args_.placement_signature;   // --placement-signature (step S5 test switch)
+            // The world's signature (step S6); --placement-signature (the
+            // step S5 test switch, design 7.4 "mismatch") replaces it.
+            report.placement = args_.placement_signature_given ? args_.placement_signature : placement_signature;
+            if (args_.placement_signature_given)
+                logf("--placement-signature: reporting %016llx instead of the world's %016llx",
+                     static_cast<unsigned long long>(args_.placement_signature),
+                     static_cast<unsigned long long>(placement_signature));
             core_.anchor(report);
+        }
+
+        // The sector placement of this world (docs/sector-placement-design.md
+        // 2.3, 2.4; step S6): the core decides (placement_active: the world
+        // option and the capability), the CK work is game/sector_placement.hpp,
+        // and the physics half of its hot-source check is this host's, as the
+        // server's physics_world::place_sectors has it.  Option off: a level
+        // that still holds copies (a missed release) is released first and
+        // the anchor refused if that did not clear it.  The signature of the
+        // table as it then stands is computed either way.
+        bool place_sectors(uint64_t& signature) {
+            CKContext* context = engine_->context();
+            CKIpionManager* manager = engine_->physics();
+            const auto log_lines = [](const std::string& text) {
+                std::istringstream lines(text);
+                for (std::string line; std::getline(lines, line);) logf("placement: %s", line.c_str());
+            };
+            if (core_.placement_active()) {
+                std::set<std::string> bodies;
+                {
+                    std::vector<bmmo_physics_body_state> list(
+                        static_cast<size_t>(std::max(0, bmmo::physics::list_bodies(manager, nullptr, 0))));
+                    const int count = bmmo::physics::list_bodies(manager, list.data(), static_cast<int>(list.size()));
+                    for (int i = 0; i < count && i < static_cast<int>(list.size()); ++i) bodies.insert(list[static_cast<size_t>(i)].name);
+                }
+                bmmo::game::placement_hooks hooks;
+                hooks.has_body = [&bodies](CK3dEntity* entity) {
+                    return entity && entity->GetName() && bodies.count(entity->GetName()) != 0;
+                };
+                hooks.force_exists = [manager](CKBehavior* block) {
+                    bmmo_physics_force_block state{};
+                    std::string ignored;
+                    return bmmo::physics::force_block_get(manager, static_cast<uint32_t>(block->GetID()), state, ignored)
+                        && state.exists != 0;
+                };
+                const std::string refused = placement_.apply(context, hooks);
+                log_lines(placement_.describe());
+                if (!refused.empty()) {
+                    logf("sector placement refused: %s", refused.c_str());
+                    return false;
+                }
+            } else {
+                std::string why;
+                if (placement_.holds_copies(context, &why)) {
+                    logf("placement: the world option is off and the level holds copies (%s): releasing them", why.c_str());
+                    placement_.release(context);
+                    log_lines(placement_.describe());
+                    if (placement_.holds_copies(context, &why)) {
+                        logf("the level still holds placement copies (%s)", why.c_str());
+                        return false;
+                    }
+                }
+            }
+            std::string signature_error;
+            signature = placement_.signature(context, &signature_error);
+            logf("placement signature %016llx (placement %s, %zu copies)%s%s", static_cast<unsigned long long>(signature),
+                 core_.placement_active() ? "on" : "off", placement_.copies().size(),
+                 signature_error.empty() ? "" : " - the PH table is unreadable: ", signature_error.c_str());
+            return true;
+        }
+
+        // The copies this process made, released before the engine that
+        // holds them goes (sector placement design 2.3, As built (step S2):
+        // the context reset destroys a copy's objects in CK's hash order, so
+        // a P_Extra copy must be torn down root first).
+        void release_placement(const char* why) {
+            if (!engine_ || placement_.copies().empty()) return;
+            const int destroyed = placement_.release(engine_->context());
+            logf("placement: %d copies released (%s)", destroyed, why);
+            std::istringstream lines(placement_.describe());
+            for (std::string line; std::getline(lines, line);) logf("placement: %s", line.c_str());
         }
 
         // hold_sector, request_sector and the sector lead moved into the
@@ -2490,7 +2615,23 @@ namespace {
             } else if (args_.beam2 && !beam2_done_ && core_.next_tick() >= args_.beam2_tick) {
                 beam2_done_ = true;
                 core_.request_beam(args_.beam2_position);
+            } else {
+                // A later --beam (step S6): the first one due, one per frame.
+                for (size_t k = 0; k < args_.more_beams.size() && k < more_beams_done_.size(); ++k) {
+                    if (more_beams_done_[k] || core_.next_tick() < args_.more_beams[k].tick) continue;
+                    more_beams_done_[k] = true;
+                    core_.request_beam(args_.more_beams[k].position);
+                    break;
+                }
             }
+            // --sector-at (step S6): each at its tick, once, once the session
+            // is assigned (request_sector stamps it the lead ahead).
+            if (core_.assigned())
+                for (size_t k = 0; k < args_.sector_at.size() && k < sector_at_done_.size(); ++k) {
+                    if (sector_at_done_[k] || core_.next_tick() < args_.sector_at[k].second) continue;
+                    sector_at_done_[k] = true;
+                    core_.request_sector(args_.sector_at[k].first, "--sector-at");
+                }
             // The flow before the step (shared-core design 1.3 pre_step:
             // the sector stamp, the events and echoes, the rewinds, the held
             // body changes, the union's pass, the drive of this tick), the
@@ -3493,6 +3634,11 @@ namespace {
         int trace_frames_ = 0;
         bool beam_done_ = false;
         bool beam2_done_ = false;   // --beam2
+        std::vector<bool> more_beams_done_;   // a later --beam (step S6)
+        std::vector<bool> sector_at_done_;    // --sector-at (step S6)
+        // The sector placement (step S6): the copies this process made at
+        // its anchor, released before the engine goes (release_placement).
+        bmmo::game::sector_placement placement_;
         // (kOwnEchoDeadlineTicks, kOwnEchoUplinkSettleTicks and
         // kOwnRecordKeepTicks moved into the core state at E7.)
         // The entity mirror_entity named last, which make_mirror poses and

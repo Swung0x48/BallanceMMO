@@ -1590,6 +1590,132 @@ current deployed lead and input delay:
 | arena regression | the existing arena recipes (the 10 recent headless runs) | journals identical to the pre-change build except the header version and fields; `level walk seen at tick N` equal on every side |
 | forced rollbacks | L8 cross with `--force-rollback` windows that contain the s2 pass | 0 bodies diverging vs the control (`worst_bodies.py`), `birth_recreate_failures` 0 |
 
+**As built (step SP6 = S6, 2026-10-27).**
+
+- **Where.** `BallanceMMOServer/sim/session_client.cpp` (the headless host),
+  `session/client_core.hpp` (one accessor), `game/sector_placement.hpp` (the
+  scene refusal); tools `.local-tools/arch_server_lp.sh` (ninth argument
+  `placement_clones`), `.local-tools/wire_check.sh` (default set
+  `core_ref_s6`, labels = the known arms present in the set). No protocol,
+  journal, record or engine change; the server and the retail mod are
+  unchanged in behaviour (the server compiles the shared header's refusal,
+  which no anchor in the level scene reaches; the x86 mod compiles the
+  unused accessor).
+- **The core's part: `session_client_core::placement_active()`** =
+  `capabilities().placement && world_options() & WORLD_PLACEMENT_CLONES`, the
+  decision §2.4 gives the core (a host never re-derives it from the bits).
+- **The headless host.** `make_capabilities` declares `placement` always
+  (S5's switch no longer gates it). `anchor()` calls `place_sectors` after
+  the Sequencer and proximity restores and before `capture_world_hash`,
+  `session_script_selection`, `explosion_pieces` and the reset guard, as the
+  §2.4 table and S2's call-site adaptation have it: with `placement_active()`
+  it runs `apply` with the physics hooks the server's `place_sectors` uses
+  (`list_bodies` names, `force_block_get`), logs `describe()` as
+  `placement: ...` lines, and a refusal ends the session locally ("sector
+  placement refused: ...") before SessionReady, the path of a failed hash.
+  Option off: `holds_copies()` true releases first and refuses the anchor
+  ("the level still holds placement copies (...)") if that did not clear it.
+  Either way `placement signature %016llx (placement on|off, N copies)` is
+  logged and the signature is `anchor_report::placement`.
+  `--placement-signature HEX` stays as the "mismatch" test switch: it
+  replaces the world's signature in the report and logs both.
+- **Release before the engine goes** (S2's teardown finding): the registry is
+  a member `placement_`, released in `boot_engine` before the engine reset
+  (the restart's reboot), at `begin_session` (whatever the next session
+  loads over), and in the client's destructor (before the members, the
+  engine among them, are destroyed).
+- **S2's open bullet (b), the scene: a refusal**, in `apply` itself rather
+  than in each host (one implementation: the server, SimTool and the retail
+  host of S10 get it too). Nothing has been made at that point, so the world
+  is untouched. Every anchor logged so far is in the level scene (146 log
+  lines of SP2's runs, both hosts).
+- **`--sector-at SECTOR:TICK`** (repeatable): before the frame whose
+  `next_tick()` reaches TICK, once the session is assigned, the host calls
+  `core_.request_sector(SECTOR, "--sector-at")`, which stamps it
+  `current_tick() + 1 + lead` and sends it as the own Sector input (the
+  logged `sector N stamped for tick T (--sector-at, ...)`). **Repeatable
+  `--beam`**: the first keeps its fields (`--leave-after-unphys` counts from
+  it), later ones are kept in order and requested after `--beam` and
+  `--beam2`, the first due one per frame (the core holds one beam request).
+- **Checks (quick tier; about 11.5 minutes of wall clock with the
+  re-capture, and 12 more at the review round for the `l8_cross` re-capture
+  and the five option-off control runs that root-caused its divergence;
+  tools and outputs in `.local-tools/work/SP6/`).** x64
+  BUILD-OK, x86 CLIENT-BUILD-OK (no layout change, no objects deleted), Arch
+  ARCH-BUILD-OK (`ballanced-3e4289e95f25+bmmo-bc88b8e392a5-dirty`), 530/530
+  tests, GCC 29 ok.
+  - **L8 cross at 0 ms** (one run, snapshots off, the server's
+    `placement_clones` on; recipe in `maps/arena-test/core_ref_s6/README.md`):
+    the server and all four clients log `placement: 39 copies, 1 shared (0
+    rewritten)` and signature `91a138e4fd6e7254` (S2's V2 value), `level walk
+    seen at tick 11`, `sector +2 at tick 309`, `+4 at 316` (held by the
+    pacer), `+3 at 709`; `mechanisms=45/45` on every client; the copies'
+    bodies `P_Modul_30_Wippe_R15` and `_R48` are in every client journal's
+    LOCAL rows and the server's; the server journal replays matched
+    (2241/2241 in the re-capture below). `first_divergence.py` (0.05 m):
+    client 1 agrees with the server throughout; clients 0, 2, 3 diverge
+    identically at tick 556 on the ORIGINAL s2 rope bridge
+    `P_Modul_29_Platte02` (0.0987 m; every `Platte01..09` from 554, up to
+    1.598 m) and on the original `P_Modul_01_Pusher` (from 554, first error
+    1.377e-02 m, max 0.0952 m).
+    - *Cause of the disagreement*: the queued G-c wake (world-agreement
+      design §1.1). The server journal's BodyRevived records: client 1, whose
+      ball rests on the copy `P_Modul_30_Wippe_R15` from 501, reports
+      `P_Modul_29_Platte04`, `P_Modul_30_Wippe_R15` and `P_Modul_01_Pusher`
+      at 554; client 2, whose ball reaches the same copy at 561, reports the
+      same three at 614; clients 0 and 3 never. Each world makes the wake
+      when its OWN ball arrives and the server at the first ball's (§1.1.3's
+      signature).
+    - *Controls* (review round; the option off, otherwise the same server and
+      binaries; `maps/arena-test/sp6_ctl/`): the same recipe (`l8_cross_off`,
+      client 1's ball falls where the see-saw would be) and two runs placing
+      client 1's ball at the option-on pose at the check tick (`l8_pose_off`,
+      `l8_pose2_off`) reproduce the Pusher half bit for bit (non-leaders
+      diverge at 556, first error 1.377e-02 m at 554, max 0.0952 m, client 1
+      exact): pre-existing, G-c. The bridge is woken in none of them, nor
+      with the ball resting by the bridge's end (`l8_near_off`); a ball
+      dropped onto a plate (`l8_bridge_off`) breaks it in every world alike
+      (a contact, not a probe). So the bridge's cross-world cause is the same
+      G-c wake, but its trigger needs the copy and is not explained: queued
+      as "SP6 bridge trigger" (roadmap §4 item 1) - the bridge's own probe,
+      or the copy's `P_Modul_30_MF_R15` script reaching an original body
+      (which would be a placement fidelity bug in the S2/S3 code the server
+      has run since S3, not in this step's host code).
+  - **The arena regression** (one run, snapshots off, 150 ms, 4 clients,
+    captured: `core_ref_s6/resync_snapoff`): signature `ecfbfd9b63a330b5`
+    (placement off, 0 copies; S5's) and `level walk seen at tick 30` on the
+    server and every client, server journal 3562/3562 matched; the captures
+    replayed by rSP5 and rSP6: per client exactly one send differs (the
+    SessionReady: `CAP_PLACEMENT` and the signature where rSP5 sends 0;
+    besides the login, whose uuid is the clock's) and exactly one journal
+    record (the header: build id and `anchor_placement`). Unchanged except
+    the header, as §7.4 requires.
+  - **The re-capture** `maps/arena-test/core_ref_s6/` (README with recipes
+    and sha256s): `resync_snapoff`, `swing_snapoff`, `l8_cross` and the solo
+    pair; `wire_check.sh - rSP6` ALL SAME (12/12 sends, 12/12 journals); solo1
+    vs solo2 IDENTICAL, and solo1 against the protocol-11 `core_ref_rc1`
+    solo: every TICK hash and LOCAL checkpoint identical, the header alone
+    differs. At the review round `l8_cross` was re-captured with client 2's
+    second `--beam` at 740 instead of 900 (at 900 its ball had died at 810,
+    "no own body to beam", so no second beam was made): the second ball is
+    made at 741 in s3 and the other clients see client 2's s2 body
+    unphysicalized at 741; `LABELS=l8_cross wire_check.sh - rSP6` ALL SAME
+    (4/4 sends, 4/4 journals).
+- **Not exercised live**: the option-off release branch (no run has a level
+  holding copies with the option off) and the scene refusal (every anchor is
+  in the level scene). Both reach S10's retail host (exit to the menu and
+  reload, §7.5 run 3).
+- **`--sector-at` is a test switch and is not bounded** by the level's sector
+  count (like `--start-sector`); a sector the level lacks is sent as an own
+  Sector input as given.
+- **The option-off policy and the hot-source hooks** are written out in this
+  host and in the server's `physics_world::place_sectors` (CK and physics
+  work, not a core decision); S10 lifts them into a shared helper in
+  `game/sector_placement.hpp` instead of a third copy (roadmap §4 item 1).
+- **Deferred** (roadmap §4 item 7's list): L8 late; the rest of
+  `core_ref_rc1`'s and `core_ref_t3`'s arms re-captured at protocol 12; the
+  two branches above that no run reaches.
+
 ### 7.5 Retail runs (core host)
 
 1. Two retail clients and the local server on L8, crossing s1 -> s2 -> s3

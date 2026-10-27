@@ -555,9 +555,15 @@ namespace bmmo::game {
         CKScene* scene = context->GetCurrentScene();
         if (!scene) return "no current scene";
         {
+            // Step S6 (S2's open bullet b): a refusal, not a log line.  Step
+            // 6 deactivates the copies' scripts in this scene and step 7
+            // saves their initial values in it, so a copy made anywhere but
+            // the level scene would start from another scene's state.  Every
+            // host anchors in the level scene; nothing has been made yet.
             CKLevel* level = context->GetCurrentLevel();
-            line(std::string("scene: the current scene ") + (level && level->GetLevelScene() == scene ? "(the level scene)"
-                 : "(NOT the level scene)"));
+            if (!level || level->GetLevelScene() != scene)
+                return "the current scene is not the level scene (the copies' initial values would be saved there)";
+            line("scene: the current scene (the level scene)");
         }
 
         // Step 3: no hot source.

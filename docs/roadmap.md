@@ -172,6 +172,26 @@ x64 teardown) are item 2.
    "placement mismatch" until S10. S2's open points go with it: the plan's
    name bound of 63 (S5) and a scene that is only logged, not refused
    (S6 / S10).
+   Queued by SP6 (each its own item, before or with S8):
+   - **SP6 bridge trigger.** In `core_ref_s6/l8_cross` the ORIGINAL s2 rope
+     bridge (`P_Modul_29_Platte*`) is script-woken at tick 554 in the
+     server's world and in client 1's (whose ball rests on the copy
+     `P_Modul_30_Wippe_R15`), at 614 in client 2's (its ball reaches the
+     same copy at 561), never in clients 0 and 3: the cross-world cause is
+     the queued G-c wake (item 5). But the trigger itself was not reproduced
+     without the copy: with the placement off, client 1's ball at the same
+     pose at the same check tick (`maps/arena-test/sp6_ctl/l8_pose_off`,
+     `l8_pose2_off`) wakes only `P_Modul_01_Pusher`, not the bridge. Find
+     which block wakes `P_Modul_29_Platte04` at 554 (the bridge's 80 m probe,
+     or the copy's `P_Modul_30_MF_R15` script reaching an original body) and
+     whether the copy behaves as a retail module would there; a copy waking
+     an original body would be a placement fidelity bug (S2/S3 code).
+   - **One placement host helper** (SP6 review nit): the option-off policy
+     and the hot-source hooks are written out in the server's
+     `physics_world::place_sectors` and the headless host's `place_sectors`;
+     S10 (the retail host) lifts them into `game/sector_placement.hpp`
+     (`placement_hooks_for(manager)`, `prepare_unplaced(context, why)`)
+     rather than writing a third copy.
 2. **The items found unqueued** (the trial findings' critic,
    `.local-tools/work/TRIAL1/analysis/final/part4.md`, and the steps'
    findings), before the stage close-out, ordered by dependency:
@@ -377,6 +397,28 @@ x64 teardown) are item 2.
      Trafo event, the server's `TRAFO_SERVER` resets included?); (f) a
      placement mismatch of a member at session START (only the late joiner
      ran; same server branch).
+   - SP6 (sector placement S6, the headless host, quick tier, 2026-10-27;
+     ran: x64, x86 and Arch builds, 530 tests, GCC 29 ok, ONE live L8 cross
+     at 0 ms with the server's placement on (signatures, level walk and
+     sector ticks equal on all five sides, copies journalled, server
+     journal matched; non-leader divergence on the original s2 bridge and
+     Pusher = the queued G-c wake, the Pusher half reproduced bit for bit
+     with the placement off, the bridge's trigger queued above as "SP6
+     bridge trigger"; at the review round `l8_cross` re-captured with client
+     2's second `--beam` made live, plus four option-off control runs in
+     `maps/arena-test/sp6_ctl`), ONE arena regression (`resync_snapoff`, 150
+     ms, snapshots off; vs rSP5 only SessionReady and the journal header
+     differ), the minimal re-capture `core_ref_s6` (three arms + solo pair,
+     wire check ALL SAME, solo IDENTICAL to `core_ref_rc1`'s): (a) §7.4
+     "L8 late" (a late joiner after c1/c2 are in s2/s3: walk before its
+     owed passes, signature equal, `mechanisms=K/K`); (b) the re-capture at
+     protocol 12 of the rest of `core_ref_rc1`'s arms (`swing_snapon`,
+     `a6m_snapoff`, `a5u_lead`, `resync_at150`, `resync_at150_down`,
+     `h1_150`, `cliff`) and of `core_ref_t3`'s option-on arms; SP5's (a)
+     wire check is now possible and was run on the new set; (c) the
+     headless host's option-off release branch (a level still holding
+     copies with the option off) and the scene refusal (an anchor outside
+     the level scene) never ran live: no run reaches them (S10 territory).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

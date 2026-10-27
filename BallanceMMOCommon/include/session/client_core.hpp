@@ -1122,6 +1122,14 @@ namespace bmmo::session {
         // placement copies at its anchor when WORLD_PLACEMENT_CLONES is set
         // and it declares session_capabilities::placement).
         uint32_t world_options() const { return s.world_options_; }
+        // Step S6 (sector placement design 2.4, the core's part): whether
+        // this host builds the placement copies at its anchor - the session's
+        // world option and the host's capability.  Without it the host still
+        // reports the signature of its unplaced table (and releases copies a
+        // level still holds, design 2.4 "Option off").
+        bool placement_active() const {
+            return caps_.placement && (s.world_options_ & WORLD_PLACEMENT_CLONES) != 0;
+        }
         uint64_t trafo_missed() const { return s.trafo_missed_; }
         uint64_t trafo_sent() const { return s.trafo_sent_; }
         uint64_t trafo_original_leaks() const { return s.trafo_leaks_; }
