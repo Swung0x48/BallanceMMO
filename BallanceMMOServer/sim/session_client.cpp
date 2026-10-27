@@ -1362,6 +1362,7 @@ namespace {
             };
             p.forget_activations_from = [this](uint32_t tick) {
                 const size_t activations = manager_activations_.forget_from(tick);
+                script_order_.forget_from(tick);   // step RO1: the old numbering's live orders
                 const size_t resets = bmmo::game::forget_reset_ticks_from(script_reset_ticks_, tick);
                 if (activations || resets)
                     logf("resync: %zu activation tick(s) and %zu script reset(s) of the old numbering from tick %u forgotten",
@@ -1445,6 +1446,12 @@ namespace {
             // record_pending, the selection's `activations`).
             p.record_pending_activation = [this](uint32_t tick) {
                 manager_activations_.record_pending(engine_->context(), sector_manager_id_, script_activations_, tick);
+            };
+            // Step RO1: the order this live frame ran the replay's scripts in
+            // (host-local, session/script_order.hpp).
+            p.record_script_order = [this](uint32_t tick) {
+                if (scripts_.empty()) return;
+                script_order_.record(tick, bmmo::game::script_replay::live_frame_order(engine_->context(), scripts_));
             };
             p.discover_navigation = [this](uint32_t tick) {
                 if (navigation_known_) return false;
@@ -1823,6 +1830,7 @@ namespace {
             navigation_known_ = false;
             local_births_.clear();
             manager_activations_.clear();
+            script_order_.clear();
             activations_replayed_ = 0;
             beam_done_ = false;
             beam2_done_ = false;
@@ -3398,6 +3406,10 @@ namespace {
                 // Step T3: the sets' scripts, recorded (v3), restored and run
                 // first in every replayed frame, as the trafo frame live.
                 so.trafo = trafo_on_ ? &trafo_registry_.part() : nullptr;
+                // Step RO1: the live frames' order, and a string parameter
+                // written back at its recorded length.
+                so.live_order = &script_order_;
+                so.resize_strings = true;
                 so.on_restore_failed = [this](const std::string& error) {
                     if (script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
                 };
@@ -3573,6 +3585,7 @@ namespace {
         // support's manager_activations, plan doc 10).
         bmmo::game::manager_activations manager_activations_;
         uint64_t activations_replayed_ = 0;
+        bmmo::session::live_script_order script_order_;   // step RO1: the live frames' script order
         void record_manager_activation(uint32_t tick, bool reset) {
             manager_activations_.record(engine_->context(), tick, reset);
         }

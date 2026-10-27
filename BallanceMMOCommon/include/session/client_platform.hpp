@@ -481,6 +481,14 @@ namespace bmmo::session {
         // An activation the frame's own scripts asked for, pending for the
         // frame of `tick` (E9; post_step step 15): recorded like a pass.
         std::function<void(uint32_t tick)> record_pending_activation;
+        // Optional (step RO1, session/script_order.hpp): after the live frame
+        // of `tick` (post_step, with record_pending_activation), the order
+        // that frame ran the replay's selected scripts in, recorded under
+        // `tick` - the tick a replay re-runs that frame as - for the binding
+        // (script_binding_options::live_order).  Host-local: nothing on the
+        // wire, nothing in a record or the journal.  Unset: the replay runs
+        // the selection's own order (the fallback).
+        std::function<void(uint32_t tick)> record_script_order;
         // Step B1 (resync design 2.8): the union pass a replay re-derived
         // for `tick` - recorded as run_sector's pass would be (cells
         // `sector`, 0, reset) in the tick's pass slot, which the host's

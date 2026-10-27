@@ -9,6 +9,7 @@
 
 #include <game/script_replay.hpp>
 #include <session/rollback_binding.hpp>
+#include <session/script_order.hpp>
 
 #include <cstdint>
 #include <functional>
@@ -46,6 +47,19 @@ namespace bmmo::session {
         // set's built state), and run by the replayed frame before the
         // selection, as the trafo frame runs them live.  Null: none.
         const bmmo::game::script_replay::trafo_part* trafo = nullptr;
+        // Step RO1 (session/script_order.hpp): the order the host's own live
+        // frames ran the selected scripts in, recorded after every live frame
+        // under the tick a replay re-runs that frame as; each replayed frame
+        // runs them in it (order_by_live_rank: a script it does not name
+        // falls back to the selection's order).  Null: the selection's order,
+        // as before (the legacy retail path).  `live_orders_applied` counts
+        // the replayed frames that had one.
+        const live_script_order* live_order = nullptr;
+        uint64_t* live_orders_applied = nullptr;
+        // Step RO1: a string parameter whose length changed since the record
+        // is written back at the record's length (script_replay
+        // resize_strings).  Off: left alone, as before (the legacy path).
+        bool resize_strings = false;
     };
 
     // Installs capture/restore/diff and runs the scripts' frame after the
@@ -68,8 +82,11 @@ namespace bmmo::session {
                     if (reset_tick > anchor) kept_live.push_back(id);
             if (o.reset_skips) *o.reset_skips += kept_live.size();
             std::string error;
+            bool& resize = bmmo::game::script_replay::resize_strings();
+            resize = o.resize_strings;
             const bool ok = bmmo::game::script_replay::restore(context, *selection, *hooks, bytes, &error, o.scripts_replayed,
                                                                &kept_live, o.replay_activation, trafo);
+            resize = false;
             if (!ok && o.on_restore_failed) o.on_restore_failed(error);
             return ok;
         };
@@ -103,13 +120,47 @@ namespace bmmo::session {
                 return destroyed;
             };
         }
+        // Step RO1: an untracked fixed body born inside the window is
+        // destroyed at the restore only when these scripts make it again:
+        // the activations are re-issued in the replay (replay_activation;
+        // without it a script activated inside the window keeps its live
+        // state and is not executed - the v14 rule) and a selected script's
+        // owner is the body's entity or one of its parents (its module).  The
+        // CK-free half (a fixed birth with no lifetime at the anchor, no
+        // ball) is bind_session_world's.
+        if (world.remade_by_replay) {
+            const auto base = world.remade_by_replay;
+            const bool activations = o.replay_activation;
+            world.remade_by_replay = [base, activations, context, selection](const std::string& entity, uint32_t birth_tick,
+                                                                             uint32_t anchor) {
+                return activations && base(entity, birth_tick, anchor)
+                    && bmmo::game::script_replay::owned_by_selection(context, *selection, entity);
+            };
+        }
         const auto before = world.pre_step;
         world.pre_step = [b, o, before, context, selection, trafo](uint32_t tick) {
             if (before) before(tick);
             std::string error;
             b->set_event_log_muted(true, error);
-            bmmo::game::script_replay::execute_frame(context, *selection, o.delta_ms, o.scripts_replayed,
-                                                     trafo && !trafo->empty() ? &trafo->scripts : nullptr);
+            // Step RO1: the replayed scripts in the order the live frame of
+            // this tick ran them (a copy: scripts_replayed is the restore's).
+            const std::vector<CK_ID>& listed = o.scripts_replayed ? *o.scripts_replayed : selection->scripts;
+            const live_script_order::order* live = o.live_order ? o.live_order->at(tick) : nullptr;
+            if (live && !live->empty() && listed.size() > 1) {
+                std::vector<uint32_t> ids(listed.begin(), listed.end());
+                order_by_live_rank(ids, *live, [context](uint32_t id) {
+                    auto* script = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(id)));
+                    CKBeObject* owner = script ? script->GetOwner() : nullptr;
+                    return owner ? owner->GetPriority() : 0;
+                });
+                const std::vector<CK_ID> ordered(ids.begin(), ids.end());
+                if (o.live_orders_applied) ++*o.live_orders_applied;
+                bmmo::game::script_replay::execute_frame(context, *selection, o.delta_ms, &ordered,
+                                                         trafo && !trafo->empty() ? &trafo->scripts : nullptr);
+            } else {
+                bmmo::game::script_replay::execute_frame(context, *selection, o.delta_ms, o.scripts_replayed,
+                                                         trafo && !trafo->empty() ? &trafo->scripts : nullptr);
+            }
             b->set_event_log_muted(false, error);
         };
     }

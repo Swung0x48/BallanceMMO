@@ -159,10 +159,21 @@ namespace bmmo::game {
             uint32_t cells_written = 0;
             uint32_t joints_released = 0;   // handles nulled because the rollback destroyed their body (release_joints)
             uint32_t trafo_built = 0;       // trafo scripts the record did not list, put to their set's built state (v3)
+            uint32_t strings_resized = 0;   // string parameters written back at another length (step RO1, resize_strings)
         };
         static restore_counters& last_restore() {
             static restore_counters counters;
             return counters;
+        }
+        // Step RO1: whether a restore writes back a string parameter whose
+        // length changed since the record (restore_parameter).  Off by
+        // default - the legacy retail path keeps the old rule, the value left
+        // alone - and switched on around its restore by a binding that asks
+        // for it (session/rollback_binding_scripts.hpp resize_strings: the
+        // core hosts and the tools).
+        static bool& resize_strings() {
+            static bool on = false;
+            return on;
         }
 
         // The joint blocks of the selected scripts that hold a handle on
@@ -236,10 +247,17 @@ namespace bmmo::game {
             return bmmo::session::is_trafo_script_name(beh->GetName());   // session/resync_rules.hpp
         }
 
-        // The scripts that travel with the records, in the order the behaviour
-        // manager runs their owners: priority first (highest first), then by
-        // id, which is the same on every call.  Mechanism scripts do not read
-        // each other's state, so the order only has to be stable.  `trafo`
+        // The scripts that travel with the records, priority first (highest
+        // first), then by id, which is the same on every call.  This is NOT
+        // the order the live frame runs them in (step RO1): the behaviour
+        // manager runs its active objects in m_BeObjects order, priority
+        // sorted by an unstable sort over an array appended in hash order,
+        // and two scripts of one priority that both make bodies in a frame
+        // make them in its order - which IVP's lists and the OV tree follow.
+        // A replayed frame therefore runs them in the order the host recorded
+        // from its own live frame (live_frame_order, session/script_order.hpp
+        // order_by_live_rank); this order is the fallback for a script that
+        // frame did not run, and the record's layout.  `trafo`
         // (the session core's selection, step P): the trafo scripts too, so a
         // rollback destroys the explosion pieces born inside its window and
         // the replayed explosion makes them again, draws included; their
@@ -280,6 +298,59 @@ namespace bmmo::game {
             out.scripts.reserve(picked.size());
             for (const auto& [priority, id]: picked) out.scripts.push_back(id);
             return out;
+        }
+
+        // The order the live frame just run ran the selection's scripts in
+        // (step RO1, session/script_order.hpp): the behaviour manager's
+        // active objects in m_BeObjects order (what CKBehaviorManager::Execute
+        // walked, after the frame's ManageObjectsActivity; the next-frame
+        // changes wait for the next frame's), each object's scripts in its
+        // script array's order, the selected ones kept.  Read through the
+        // public member, not GetObject (GetObjectA under windows.h in the
+        // retail SDK, an export the header names by UNICODE).  Called after a
+        // live frame only: a replay never runs the behaviour manager.
+        static std::vector<uint32_t> live_frame_order(CKContext* context, const selection& sel) {
+            std::vector<uint32_t> out;
+            CKBehaviorManager* manager = context ? context->GetBehaviorManager() : nullptr;
+            if (!manager || sel.scripts.empty()) return out;
+            std::vector<CK_ID> selected(sel.scripts.begin(), sel.scripts.end());
+            std::sort(selected.begin(), selected.end());
+            const XObjectPointerArray& objects = manager->m_BeObjects;
+            for (int i = 0; i < objects.Size(); ++i) {
+                auto* owner = static_cast<CKBeObject*>(objects[i]);
+                if (!owner) continue;
+                const int count = owner->GetScriptCount();
+                for (int k = 0; k < count; ++k) {
+                    CKBehavior* script = owner->GetScript(k);
+                    if (!script) continue;
+                    const CK_ID id = script->GetID();
+                    if (std::binary_search(selected.begin(), selected.end(), id)) out.push_back(static_cast<uint32_t>(id));
+                }
+            }
+            return out;
+        }
+
+        // Step RO1: whether the 3D entity named `entity`, or a parent of it,
+        // owns a script of the selection - a body of a module whose scripts
+        // the replay runs (a module is one hierarchy under its _MF root,
+        // sector-placement-design.md 2.2).  The guard of the rollback's
+        // destroy of a window-born fixed body (session/rollback.hpp
+        // remade_by_replay): only such a body is made again by the replay.
+        // Every entity of that name is asked (copies share their source's
+        // name until the placement renames them).
+        static bool owned_by_selection(CKContext* context, const selection& sel, const std::string& entity) {
+            if (!context || entity.empty()) return false;
+            std::vector<CK_ID> owners;
+            for (CK_ID id: sel.scripts)
+                if (auto* script = CKBehavior::Cast(context->GetObject(id)))
+                    if (CKBeObject* owner = script->GetOwner()) owners.push_back(owner->GetID());
+            std::sort(owners.begin(), owners.end());
+            CKSTRING name = const_cast<CKSTRING>(entity.c_str());
+            for (CKObject* o = context->GetObjectByNameAndParentClass(name, CKCID_3DENTITY, nullptr); o;
+                 o = context->GetObjectByNameAndParentClass(name, CKCID_3DENTITY, o))
+                for (auto* at = static_cast<CK3dEntity*>(o); at; at = at->GetParent())
+                    if (std::binary_search(owners.begin(), owners.end(), at->GetID())) return true;
+            return false;
         }
 
         // The scripts among a selection's that only scripts outside the
@@ -1235,7 +1306,9 @@ namespace bmmo::game {
             uint32_t size = 0;
             if (!get_u32(in, pos, size) || pos + size > in.size()) return fail(error, "truncated parameter bytes");
             // A size the parameter does not have now is a graph the capture
-            // did not see: leave the value alone rather than write past it.
+            // did not see: leave the value alone rather than write past it -
+            // except a string, which changes length with what it holds (step
+            // RO1, resize_parameter below).
             //
             // Written through the buffer, never with SetValue: on an output
             // parameter SetValue ends in DataChanged(), which copies the value
@@ -1249,10 +1322,47 @@ namespace bmmo::game {
             // the Identity block's parked output, and never lifted the paper
             // ball again).  The live frame propagates only when the block
             // executes, and the replayed frames do that themselves.
-            if (parameter && !is_opaque(parameter) && parameter->GetDataSize() == static_cast<int>(size))
-                if (void* buffer = parameter->GetWriteDataPtr()) std::memcpy(buffer, in.data() + pos, size);
+            if (parameter && !is_opaque(parameter)) {
+                if (parameter->GetDataSize() == static_cast<int>(size)) {
+                    if (void* buffer = parameter->GetWriteDataPtr()) std::memcpy(buffer, in.data() + pos, size);
+                } else if (size > 0 && resize_strings() && parameter->GetGUID() == CKPGUID_STRING) {
+                    if (resize_parameter(parameter, in.data() + pos, static_cast<int>(size))) ++last_restore().strings_resized;
+                }
+            }
             pos += size;
             return true;
+        }
+
+        // Step RO1: a parameter whose size changed since the record (a
+        // string: the sector manager's Activate Sector pins and Groupname,
+        // Get Key Row's Group Name, which change length with the sector a
+        // pass activates) written back at the record's size, still without
+        // propagation.  Only SetValue resizes, and CKParameterOut's ends in
+        // DataChanged (every destination gets a copy - see above), so an
+        // output's destination list is swapped out around the call (an
+        // XSArray swap: no allocation, and the buffer is resized by CK's own
+        // SetValue in CK's own heap) and swapped back.  The base
+        // CKParameter::SetValue is not exported by the retail CK2.dll (only
+        // reachable through the vtable), so a qualified call would not link
+        // there.  A local or a plain parameter's SetValue does not propagate.
+        // Any other class is left alone, as before.
+        struct parameter_out_access : CKParameterOut {
+            static XSObjectPointerArray& destinations(CKParameterOut* out) {
+                return out->*(&parameter_out_access::m_Destinations);
+            }
+        };
+        static bool resize_parameter(CKParameter* parameter, const void* data, int size) {
+            const CK_CLASSID cid = parameter->GetClassID();
+            if (cid == CKCID_PARAMETEROUT) {
+                auto* out = static_cast<CKParameterOut*>(parameter);
+                XSObjectPointerArray held;
+                parameter_out_access::destinations(out).Swap(held);
+                const CKERROR e = out->SetValue(data, size);
+                parameter_out_access::destinations(out).Swap(held);
+                return e == CK_OK;
+            }
+            if (cid == CKCID_PARAMETERLOCAL || cid == CKCID_PARAMETER) return parameter->SetValue(data, size) == CK_OK;
+            return false;
         }
 
         static void capture_behavior(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {

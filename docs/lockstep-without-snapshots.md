@@ -1474,6 +1474,109 @@ initial conditions (the level file's poses, before the manager placed the
 module: a box 900 m off, the ball fell to its death), and writing the world
 matrix of a parented piece (a micrometre off once the parent is placed).
 
+### As built (step RO1, 2026-10-27): the live frame's script order, the fixed births, the strings
+
+Found by sector placement's V9 (sector-placement-design.md "As built (step
+SP7 = S7)"), root-caused in `.local-tools/work/SP7/r266/`, fixed at RO1 (the
+user's choice: record each host's own live order and replay in it).
+
+- **The order.** `script_replay::select` sorts the selection by
+  (-owner priority, CK id), and the comment said "the order only has to be
+  stable". It does not: the live frame runs the active objects in
+  `CKBehaviorManager::m_BeObjects` order (CK2 `CKBehaviorManager.cpp`:
+  `ManageObjectsActivity` appends the next-frame objects in the CK-id hash
+  table's order, then `SortObjects` = `XArray::Sort` = an unstable
+  `XDeterministicQSort` with `CKBeObject::BeObjectPrioritySort`, priority
+  only; `AddObject`, `RemoveAllObjects` and `SequenceDeleted` change it too),
+  each object's scripts in its script array's order. Two scripts of one
+  priority that both make bodies in one frame make them in that order, and
+  IVP's revive list (`revive_cores_PSI` walks from the end), physics_RT's
+  movable list (`CKIpionManager` adds on each revive), the OV tree and the
+  sim-unit numbering all follow it. V9's tick-266 split was exactly this:
+  `P_Modul_41`'s seven pieces from seven scripts, created 41004, 41001,
+  41006, 41003, 41005, 41002 live and 41006 ... 41001 in the replay - the
+  values equal, the structure ("ov_nodes 59 58") not. Not the engine: the
+  same creation order gives the same structure.
+  **Fix:** after every live frame the host records the order that frame ran
+  the selected scripts in (`script_replay::live_frame_order`: the
+  manager's `m_BeObjects` - the public member, read after the frame, so
+  the frame's own `ManageObjectsActivity` is in it and the next-frame
+  changes are not - and each owner's `GetScript(i)`, the selected ones
+  kept), under the tick a replay re-runs that frame as (the core's
+  post_step: `platform.record_script_order(frame_tick)`, beside
+  `record_pending_activation`; SimTool's straight pass: t+1; its
+  late-sector run: t). `session/script_order.hpp` `live_script_order`
+  stores it only when it changes (every frame compared, so each of the
+  manager's changes is caught), trims at 4096 ticks, drops the future on a
+  record at or before an earlier tick and is forgotten from a resync's
+  re-assign (`forget_activations_from`) and cleared at a session start.
+  `bind_script_replay` (option `live_order`) sorts each replayed frame's
+  list with `order_by_live_rank`: a script the live order names takes its
+  rank; one it does not name (the live frame did not run its owner) falls
+  back to (-priority, id) after the ranked ones of its priority. Hosts:
+  the headless client, the retail core host (file-scope `retail_host`, no
+  BallanceMMOClient member), SimTool's savestate-check and late-sector
+  check. The server world replays nothing. Host-local: nothing on the
+  wire, no record or journal change, no protocol change. The legacy retail
+  path passes no live order (unchanged).
+- **The fixed births.** A window-born FIXED body (the pass's
+  `P_Modul_01_Filler` / `_Rinne`: no record, no row, unknown to the
+  anchor's blob) was kept inert and rechecked in at its birth tick (the
+  deferral, `rollback.hpp`) - but as the live world's body, while the
+  replayed module script makes it anew ("objects 44 46" at the restore
+  identity). Now such a body is destroyed at the restore, before the blob
+  (which then meets the object set it recorded), and made again by the
+  replayed scripts, when a guard says they will: `rollback_world::
+  remade_by_replay` - bind_session_world's half (a fixed recipe in this
+  world's birth log at that tick, no lifetime at the anchor, no ball, own
+  body or mirror) and bind_script_replay's (the activations re-issued,
+  `replay_activation`, and a selected script owned by the entity or a
+  hierarchy parent of it: its module). The engine asks the guard only when
+  the script restore succeeded (a failed one leaves the making script past
+  its Physicalize: nothing would make the body again) and never under a
+  travelling blob (a resync: the server's blob at S may know a fixed body
+  this world made after S; a destroyed one would make it refuse the blob and
+  lose A3's exact resync) - both keep the deferral (review fix-up, tested in
+  rollback_engine_test). Every other untracked window birth
+  keeps the deferral (it made the overlap tree identical, rollback-core-unification-plan.md,
+  the deferral of fixed parts). After its birth tick's step the engine checks it is back
+  (`fixed_birth_remade`, logged when not; the caller counts - no engine
+  counter, the engine's layout is the legacy state's until R7).
+- **The strings.** `restore_parameter` left a parameter whose size changed
+  since the record (the sector manager's `Activate Sector` pins and
+  Groupname, `Get Key Row`'s Group Name change length with the sector).
+  Now a STRING parameter is written back at the record's length through
+  `SetValue` - for a `CKParameterOut`, with its destination list swapped
+  out around the call (an `XSArray` swap: no allocation; CK resizes the
+  buffer in its own heap), so nothing propagates (never `CKParameterOut::
+  SetValue` with destinations: it writes stale values into linked locals,
+  the TurnON_Permission bug above); the base `CKParameter::SetValue` is not
+  exported by the retail CK2.dll (vtable only), so a qualified call would
+  not link. Switched on per binding (`resize_strings`, the static
+  `script_replay::resize_strings()` around the restore): the core hosts and
+  SimTool; the legacy path keeps the old rule.
+- **Measured.** V9 (L8, window 210..409, the pass at 260, 50 rounds): 50 of
+  50 fail on gap F's window-end line only (`P_Modul_18_Particle Script`
+  flags `0x400000` vs 0, the particle script's DEACTIVATENEXTFRAME cleared
+  by any replay), 0 premise failures, 0 recreate failures, 0 missing, 12
+  fixed births destroyed and back; the no-move control 50/50 PASS (before:
+  6 rounds split at 266, 6 on the parameter size). The wire check over
+  `core_ref_s6`: every send the same; `swing_snapoff` and `l8_cross`
+  journals identical; `resync_snapoff`'s four journals differ in body ORDER
+  only (every TICK hash identical, the checkpoints equal as sets): the
+  rSP6 replay (= the live run) changes the order of `P_Modul_03_Wall*` /
+  `PE_Balloon_Platte*` at 1778, after a rewind across their birth at 1770
+  re-created them in (-priority, id) order, and back and forth with later
+  rewinds; rRO1 keeps the live birth order from 1770 to the end. The solo
+  pair: identical to their live journals.
+- **What it does not cover** (the user's measurement step RO2): (A) an
+  activation whose first execution is inside a replay (a late one: the
+  live frame of that tick did not run it; the fallback order), and (B)
+  two hosts whose live frames ran one frame in different orders (the
+  server and a retail client; each replays its own order, exact for its
+  own history only). If either changes numbers, one canonical order on
+  every host replaces this.
+
 ## The one the ball still had: a contact that ended inside the window (bridge API v15)
 
 Every forced-rewind arm above, scripts or not, took the same single correction

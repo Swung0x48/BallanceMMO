@@ -645,6 +645,9 @@ namespace bmmo::session {
         // pass of ours never shows here - its flags were consumed by this
         // frame.  Recorded for the replay like a pass (plan doc 10).
         platform_.record_pending_activation(frame_tick + 1);
+        // Step RO1: the order this live frame ran the replay's scripts in,
+        // for the replays that re-run it (host-local).
+        if (platform_.record_script_order) platform_.record_script_order(frame_tick);
         const uint32_t tick = current_tick();
 
         if (platform_.discover_navigation(tick)) {

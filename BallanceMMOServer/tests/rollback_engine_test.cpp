@@ -3607,3 +3607,98 @@ TEST(RollbackEngine, AMechanismTheReplayMadeBeforeItsLiveBirthIsTheReplaysFromTh
         EXPECT_EQ(0u, engine.stats().births_missing);
     }
 }
+
+// Step RO1: an untracked FIXED body born inside the window (a module's fixed
+// part: no record, no row, the blob of the anchor does not know it) that the
+// replayed scripts make again (remade_by_replay) is destroyed at the restore,
+// before the savestate, and is back after its birth tick's step - or counted
+// missing when the replay did not make it; one the guard refuses keeps the
+// deferral (rechecked in at its birth tick), and so does one under a failed
+// script restore (the making script stays past its Physicalize) or a
+// travelling blob (a resync: the server's blob may know it).
+TEST(RollbackEngine, AnUntrackedFixedBirthTheReplayedScriptsMakeIsDestroyedAtTheRestoreNotDeferred) {
+    // 0: made again by the replay; 1: not made (missing); 2: the guard says no;
+    // 3: the script restore failed; 4: a resync with a travelling blob
+    for (const int arm: {0, 1, 2, 3, 4}) {
+        SCOPED_TRACE(arm);
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Plate"].position[0] = 40.0;
+        rollback_engine engine;
+        auto w = world.adapter();
+        rollback_tracked tracked;
+        tracked.mechanisms = {"Plate"};
+        w.capture_scripts = [](std::vector<uint8_t>& out) { out = {7}; return true; };
+        w.restore_scripts = [&](const std::vector<uint8_t>&, uint32_t) { world.calls.push_back("restore_scripts"); return arm != 3; };
+        w.birth_order = [](uint32_t tick) { return tick == 4 ? std::vector<std::string>{"Rail"} : std::vector<std::string>{}; };
+        w.birth_tick_of = [](const std::string& entity) { return entity == "Rail" ? 4u : 0u; };
+        w.recheck_body = [&](const std::string& entity) { world.calls.push_back("recheck " + entity); return true; };
+        w.remade_by_replay = [&](const std::string& entity, uint32_t birth, uint32_t anchor) {
+            world.calls.push_back("guard " + entity + "@" + std::to_string(birth) + "/" + std::to_string(anchor));
+            return arm != 2;
+        };
+        std::vector<std::string> outcomes;
+        w.fixed_birth_remade = [&](const std::string& entity, uint32_t tick, bool back) {
+            outcomes.push_back(entity + "@" + std::to_string(tick) + (back ? " back" : " missing"));
+        };
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return world.bodies.erase(entity) > 0;
+        };
+        // The blob does not know a body alive now that it did not record.
+        const auto inner = w.set_savestate;
+        w.set_savestate = [&world, inner](const std::vector<uint8_t>& blob, bmmo::session::savestate_outcome& outcome) {
+            const bool alive = world.bodies.contains("Rail");
+            const bool ok = inner(blob, outcome);
+            if (alive) outcome.unknown_bodies.push_back("Rail");
+            return ok;
+        };
+        w.set_travelling_savestate = [&world](const bmmo::session::travelling_blob&, bmmo::session::savestate_outcome& outcome) {
+            world.calls.push_back("set_travelling_savestate");
+            if (world.bodies.contains("Rail")) outcome.unknown_bodies.push_back("Rail");
+            return true;
+        };
+        fake_body rail;
+        rail.position[0] = 7.0;
+        w.pre_step = [&](uint32_t tick) { if (arm == 0 && tick == 4) world.bodies["Rail"] = rail; };   // the replayed Physicalize
+        for (uint32_t tick = 1; tick <= 6; ++tick) {
+            if (tick == 4) world.bodies["Rail"] = rail;   // the live Physicalize
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        world.calls.clear();
+        if (arm == 4) {
+            const std::vector<uint8_t> server_blob{1, 2, 3};
+            bmmo::session::resync_spec spec;
+            spec.blob.blob = &server_blob;
+            bmmo::session::resync_outcome out;
+            ASSERT_TRUE(engine.resync(w, 2, 6, spec, no_input, out, "test"));
+            EXPECT_EQ(world.count("set_travelling_savestate"), 1);
+            EXPECT_TRUE(out.blob_applied);
+        } else {
+            ASSERT_TRUE(engine.rewind_to(w, 2, 6, no_input, "test"));
+        }
+        if (arm >= 2) {
+            EXPECT_EQ(world.count("destroy Rail"), 0);
+            if (arm != 2) EXPECT_EQ(world.count("guard Rail"), 0) << "not asked: no destroy on this path";
+            EXPECT_EQ(world.count("recheck Rail"), 1) << "the deferral: rechecked in at its birth tick";
+            EXPECT_EQ(engine.stats().unknown_rechecks_deferred, 1u);
+            EXPECT_TRUE(outcomes.empty());
+            EXPECT_TRUE(world.bodies.contains("Rail"));
+            continue;
+        }
+        EXPECT_EQ(world.count("guard Rail@4/2"), 1);
+        ASSERT_EQ(world.count("destroy Rail@4"), 1);
+        EXPECT_LT(world.first("destroy Rail@4"), world.first("set_savestate")) << "before the blob: it meets its object set";
+        EXPECT_EQ(world.count("recheck Rail"), 0) << "not deferred";
+        EXPECT_EQ(engine.stats().unknown_rechecks_deferred, 0u);
+        if (arm == 0) {
+            EXPECT_EQ(outcomes, std::vector<std::string>({"Rail@4 back"}));
+            EXPECT_TRUE(world.bodies.contains("Rail"));
+        } else {
+            EXPECT_EQ(outcomes, std::vector<std::string>({"Rail@4 missing"}));
+            EXPECT_FALSE(world.bodies.contains("Rail"));
+            EXPECT_EQ(world.count("log birth: the fixed body Rail"), 1);
+        }
+    }
+}

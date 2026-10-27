@@ -193,6 +193,9 @@ namespace {
         bs::local_birth_log births;
         bmmo::game::manager_activations activations;
         uint64_t activations_replayed = 0;
+        // Step RO1: the order the live frames ran the replay's scripts in
+        // (session/script_order.hpp; host-local, recorded after each frame).
+        bs::live_script_order script_order;
         bmmo::game::script_replay::selection script_ids;
         // The selected scripts whose pending activations are recorded and
         // re-issued (the trafo scripts, step P, and the keep-local ones, A1;
@@ -463,6 +466,7 @@ namespace {
         host.births.clear();
         host.activations.clear();
         host.activations_replayed = 0;
+        host.script_order.clear();
         host.script_ids = {};
         host.script_activations.clear();
         host.explosion_pieces.clear();
@@ -1997,6 +2001,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     };
     p.forget_activations_from = [this](uint32_t tick) {
         const size_t activations = host.activations.forget_from(tick);
+        host.script_order.forget_from(tick);   // step RO1: the old numbering's live orders
         const size_t resets = bmmo::game::forget_reset_ticks_from(host.script_reset_ticks, tick);
         if (activations || resets)
             logger_->Info("Physics session: resync: %zu activation tick(s) and %zu script reset(s) of the old numbering "
@@ -2137,6 +2142,11 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.record_pending_activation = [this](uint32_t tick) {
         CKBehavior* manager = bmmo::game::find_root_script(m_bml->GetCKContext(), "Gameplay_SectorManager");
         host.activations.record_pending(m_bml->GetCKContext(), manager ? manager->GetID() : 0, host.script_activations, tick);
+    };
+    // Step RO1: the order this live frame ran the replay's scripts in.
+    p.record_script_order = [this](uint32_t tick) {
+        if (host.script_ids.empty()) return;
+        host.script_order.record(tick, bmmo::game::script_replay::live_frame_order(m_bml->GetCKContext(), host.script_ids));
     };
 
     // ---- mirrors: the game_objects spirit balls ----
@@ -2289,6 +2299,10 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             // Step T4: the sets' scripts, recorded (v3), restored and run
             // first in every replayed frame, as the trafo frame live.
             so.trafo = trafo_host.on ? &trafo_host.registry.part() : nullptr;
+            // Step RO1: the live frames' order, and a string parameter
+            // written back at its recorded length.
+            so.live_order = &host.script_order;
+            so.resize_strings = true;
             so.on_restore_failed = [this](const std::string& error) {
                 if (host.restore_logs++ < 8) logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());
             };

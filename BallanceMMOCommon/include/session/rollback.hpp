@@ -371,6 +371,25 @@ namespace bmmo::session {
         // detection, and is rechecked in at the start of its birth tick, in
         // birth_order, where the live creation inserted it.
         std::function<uint32_t(const std::string& entity)> birth_tick_of;
+        // Optional (step RO1): such an untracked body born inside the window
+        // at `birth_tick` (birth_order) is instead destroyed at the restore,
+        // before the savestate (the blob then meets the object set it
+        // recorded), and made again by the replayed scripts at its birth
+        // tick - when this says the replay will make it: a FIXED body of a
+        // module whose scripts the replay runs and re-activates, with no
+        // lifetime at `anchor` (bind_session_world and bind_script_replay
+        // compose the guard).  Only when the restore replays the scripts and
+        // takes the savestate path; the body goes through destroy_body.  Any
+        // other untracked window birth keeps the deferral above (measured:
+        // the deferral made the overlap tree identical, but kept the module's
+        // fixed parts as the anchor's live bodies - "objects 44 46" at the
+        // restore - where the replayed scripts make them anew).
+        std::function<bool(const std::string& entity, uint32_t birth_tick, uint32_t anchor)> remade_by_replay;
+        // Optional, with remade_by_replay: after the step of its birth tick,
+        // whether such a body is back (made again by the replayed scripts).
+        // The caller counts (no engine counter: the engine's layout is the
+        // legacy retail state's until R7).
+        std::function<void(const std::string& entity, uint32_t birth_tick, bool back)> fixed_birth_remade;
         // Step RR of the session-core design: a snapshot row the engine wrote
         // at tick t is the server's state of that body after t's step, and
         // every later replay that crosses t writes it again after stepping t
@@ -913,6 +932,9 @@ namespace bmmo::session {
             // Untracked bodies the blob does not know, rechecked into the tree
             // at their birth tick instead of now (rollback_world::birth_tick_of).
             std::map<uint32_t, std::vector<std::string>> deferred_rechecks;
+            // Step RO1: untracked fixed births destroyed at the restore for
+            // the replayed scripts to make again (remade_by_replay), by birth tick.
+            std::map<uint32_t, std::vector<std::string>> fixed_remakes;
             for (const auto& entity: restore_candidates(anchor, rows)) {
                 if (rs && rs->gone.count(entity)) continue;   // step T3: the reconcile took it out
                 const auto row = rows.find(entity);
@@ -1115,13 +1137,21 @@ namespace bmmo::session {
                 live_savestate = live->savestate;
                 have_live_savestate = true;
             }
+            // Step RO1: whether the scripts really came back to T (a failed
+            // restore leaves some at their live state, past the Physicalize
+            // that made a window-born fixed body: it must not be destroyed).
+            bool scripts_restored = false;
             if (scripts_replayed) {
                 if (const tick_state* live = find(current_tick); live && live->have_scripts) {
                     live_scripts = live->scripts;
                     have_live_scripts = true;
                 }
-                if (world.restore_scripts(at->scripts, anchor)) ++stats_.script_restores;
-                else ++stats_.script_restore_failures;
+                if (world.restore_scripts(at->scripts, anchor)) {
+                    ++stats_.script_restores;
+                    scripts_restored = true;
+                } else {
+                    ++stats_.script_restore_failures;
+                }
             }
             // The IVP savestate: the whole engine back to T in one write, after
             // the scripts (a force block restored above re-creates or deletes
@@ -1160,6 +1190,26 @@ namespace bmmo::session {
                                 item.repose_tick = 0;
                                 if (ro) ++ro->destroy_failed;
                             }
+                        }
+                    }
+                }
+                // Step RO1: the window's untracked FIXED births the replayed
+                // scripts make again (remade_by_replay), newest birth first,
+                // one per name: destroyed here too, not deferred below.  Only
+                // when the script restore succeeded (a failed one leaves the
+                // making script past its Physicalize: nothing would make the
+                // body again), and never under a travelling blob (a resync:
+                // the server's blob at S may know a fixed body this world made
+                // after S, and a destroyed one would make it refuse the blob -
+                // the deferral below keeps A3's exact resync there).
+                if (scripts_restored && !travelling && world.remade_by_replay && world.birth_order && world.destroy_body && world.get_body) {
+                    std::set<std::string> seen;
+                    for (uint32_t t = current_tick; static_cast<int32_t>(t - anchor) > 0; --t) {
+                        for (const std::string& name: world.birth_order(t)) {
+                            if (!seen.insert(name).second || plan.find(name) != plan.end()) continue;
+                            bmmo_physics_body_state live{};
+                            if (!world.get_body(name, live) || !world.remade_by_replay(name, t, anchor)) continue;
+                            if (world.destroy_body(name, t)) fixed_remakes[t].push_back(name);
                         }
                     }
                 }
@@ -1626,6 +1676,19 @@ namespace bmmo::session {
                 }
                 if (!world.step()) break;
                 ++stats_.resim_ticks;
+                // Step RO1: a fixed birth destroyed at the restore is back
+                // after its birth tick's step when the replayed scripts made
+                // it; one that is not stays out (logged, the caller counts).
+                if (const auto remade = fixed_remakes.find(t); remade != fixed_remakes.end()) {
+                    for (const std::string& name: remade->second) {
+                        bmmo_physics_body_state live{};
+                        const bool back = world.get_body(name, live);
+                        if (world.fixed_birth_remade) world.fixed_birth_remade(name, t, back);
+                        if (!back && world.log && recreate_logs_++ < 8)
+                            world.log("birth: the fixed body " + name + " was destroyed at the restore and is not back after its"
+                                      " birth tick " + std::to_string(t));
+                    }
+                }
                 // A body born inside the replayed window has been sitting at
                 // its birth pose since the restore; the ticks up to and
                 // including its birth tick may have dragged it (gravity, a

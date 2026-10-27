@@ -19,6 +19,7 @@
 
 #include <session/rollback_binding.hpp>
 #include <session/session_host_world.hpp>
+#include <session/script_order.hpp>
 
 namespace {
     using bmmo::session::bind_rollback_world;
@@ -847,4 +848,106 @@ TEST(ActivationSlots, PendingThenPassAndForgetKeepsPending) {
     EXPECT_EQ(slots.at(10000).size(), 1u);
     slots.clear();
     EXPECT_TRUE(slots.at(10000).empty());
+}
+
+// Step RO1 (session/script_order.hpp): a replayed frame runs the selected
+// scripts in the order the host's live frame of that tick ran them.  Ranked
+// scripts take their live rank (the live order is priority-sorted, so among
+// one priority the rank decides); a script the live frame did not run falls
+// back to the replay's own (-priority, id) order, after the ranked ones of
+// its priority; no live order leaves the list as it is.
+TEST(RollbackBinding, TheReplayedScriptsRunInTheLiveFramesOrderWithThePriorityFallback) {
+    const std::map<uint32_t, int> priority = {{10, 5}, {11, 0}, {12, 0}, {13, 0}, {14, 0}, {15, -3}};
+    const auto priority_of = [&priority](uint32_t id) { return priority.at(id); };
+    // select's order: (-priority, id).
+    std::vector<uint32_t> scripts = {10, 11, 12, 13, 14, 15};
+    // The live frame ran 14, 12, 11 among the priority-0 owners (an unstable
+    // sort over a hash-ordered append), 10 first, 15 last; 13 was not run.
+    const std::vector<uint32_t> live = {10, 14, 12, 11, 15};
+    bmmo::session::order_by_live_rank(scripts, live, priority_of);
+    EXPECT_EQ(scripts, std::vector<uint32_t>({10, 14, 12, 11, 13, 15}));
+    // Not run live and of a higher priority than every ranked one: first.
+    std::vector<uint32_t> late = {10, 11, 12};
+    bmmo::session::order_by_live_rank(late, std::vector<uint32_t>{12, 11}, priority_of);
+    EXPECT_EQ(late, std::vector<uint32_t>({10, 12, 11}));
+    // No live order: unchanged.
+    std::vector<uint32_t> none = {12, 11, 10};
+    bmmo::session::order_by_live_rank(none, std::vector<uint32_t>{}, priority_of);
+    EXPECT_EQ(none, std::vector<uint32_t>({12, 11, 10}));
+}
+
+// The live orders by tick: stored only on a change, each in force until the
+// next; a record at or before an earlier one drops that later future (a
+// resync's re-numbering, a tool re-running its straight pass); forget_from
+// drops the old numbering's entries.
+TEST(RollbackBinding, TheLiveScriptOrderIsKeptFromEachChangeOn) {
+    bmmo::session::live_script_order order;
+    EXPECT_EQ(order.at(100), nullptr);
+    EXPECT_TRUE(order.record(100, {1, 2, 3}));
+    EXPECT_FALSE(order.record(101, {1, 2, 3})) << "no change: not stored";
+    EXPECT_TRUE(order.record(105, {2, 1, 3}));
+    EXPECT_EQ(order.entries(), 2u);
+    EXPECT_EQ(order.at(99), nullptr);
+    ASSERT_NE(order.at(104), nullptr);
+    EXPECT_EQ(*order.at(104), std::vector<uint32_t>({1, 2, 3}));
+    EXPECT_EQ(*order.at(105), std::vector<uint32_t>({2, 1, 3}));
+    EXPECT_EQ(*order.at(500), std::vector<uint32_t>({2, 1, 3}));
+    // Re-recording 103: the entry of 105 is a future being lived again.
+    EXPECT_FALSE(order.record(103, {1, 2, 3}));
+    EXPECT_EQ(order.entries(), 1u);
+    EXPECT_EQ(*order.at(105), std::vector<uint32_t>({1, 2, 3}));
+    EXPECT_TRUE(order.record(110, {3, 2, 1}));
+    EXPECT_EQ(order.forget_from(106), 1u);
+    EXPECT_EQ(*order.at(200), std::vector<uint32_t>({1, 2, 3}));
+    // Trimmed past 4096 ticks, the entry in force at the edge kept.
+    EXPECT_TRUE(order.record(5000, {9}));
+    EXPECT_TRUE(order.record(9000, {8}));
+    EXPECT_EQ(order.entries(), 3u) << "the entry of 100 still covers ticks within 4096 of 9000";
+    EXPECT_TRUE(order.record(9200, {7}));
+    EXPECT_EQ(order.entries(), 3u) << "100 trimmed: 5000 covers the ticks from 5000 on";
+    EXPECT_EQ(*order.at(5000), std::vector<uint32_t>({9}));
+    EXPECT_EQ(order.at(100), nullptr) << "older than the kept range";
+}
+
+// Step RO1: bind_session_world's half of the guard on destroying an untracked
+// window birth at the restore for the replayed scripts to make again - a
+// FIXED birth of this world at that tick, with no lifetime at the anchor, no
+// ball, no own body, no mirror; none with --park-births.
+TEST(RollbackBinding, AFixedWindowBirthWithNoLifetimeAtTheAnchorIsOneTheReplayMayMakeAgain) {
+    session_backend backend;
+    bmmo::session::core_world_hooks hooks;
+    hooks.ball = [](const std::string& entity) { return entity == "Ball_Wood"; };
+    hooks.own_body = [](const std::string& entity) { return entity == "Own_Body"; };
+    hooks.mirror = [](const std::string& entity) { return entity == "Mirror_Box"; };
+    bmmo::session::local_birth_log births;
+    const auto fixed = [](const char* name) {
+        bmmo::session::local_birth b = birth_of(name, 1.0f);
+        b.recipe.fixed = true;
+        return b;
+    };
+    births.add(130, fixed("P_Modul_01_Filler"));
+    births.add(130, birth_of("P_Modul_01_Pusher", 2.0f));   // movable: the plan's
+    births.add(130, fixed("Ball_Wood"));
+    births.add(100, fixed("P_Rail"));
+    births.add(131, fixed("P_Rail"));                        // a second life of a body alive at the anchor
+    bmmo::session::session_world_options w;
+    w.births = &births;
+    std::vector<std::string> outcomes;
+    w.fixed_birth_remade = [&](const std::string& entity, uint32_t tick, bool back) {
+        outcomes.push_back(entity + "@" + std::to_string(tick) + (back ? " back" : " missing"));
+    };
+    rollback_world world = bmmo::session::bind_session_world(backend, hooks, w);
+    ASSERT_TRUE(world.remade_by_replay);
+    EXPECT_TRUE(world.remade_by_replay("P_Modul_01_Filler", 130, 120));
+    EXPECT_FALSE(world.remade_by_replay("P_Modul_01_Filler", 131, 120)) << "no birth at that tick";
+    EXPECT_FALSE(world.remade_by_replay("P_Modul_01_Filler", 130, 130)) << "alive at the anchor: the blob knows it";
+    EXPECT_FALSE(world.remade_by_replay("P_Modul_01_Pusher", 130, 120)) << "not fixed";
+    EXPECT_FALSE(world.remade_by_replay("Ball_Wood", 130, 120));
+    EXPECT_FALSE(world.remade_by_replay("P_Rail", 131, 120)) << "a lifetime at the anchor (from 100): deferred as before";
+    ASSERT_TRUE(world.fixed_birth_remade);
+    world.fixed_birth_remade("P_Modul_01_Filler", 130, true);
+    EXPECT_EQ(outcomes, std::vector<std::string>({"P_Modul_01_Filler@130 back"}));
+    bmmo::session::session_world_options parked = w;
+    parked.park_births = true;
+    EXPECT_FALSE(bmmo::session::bind_session_world(backend, hooks, parked).remade_by_replay);
 }

@@ -365,6 +365,11 @@ namespace bmmo::session {
         // other way destroyed (a script outside the selection, the host) would
         // survive the replay that never destroys it.
         std::function<bool(const std::string& entity)> revivable;
+        // Step RO1: after the birth tick's step of an untracked fixed birth
+        // the restore destroyed for the replayed scripts to make again
+        // (rollback_world::remade_by_replay), whether it is back - the host's
+        // counters.  Unset: not counted.
+        std::function<void(const std::string& entity, uint32_t birth_tick, bool back)> fixed_birth_remade;
         // The mechanism scripts' part of the binding (CK:
         // bind_script_replay), last.
         std::function<void(rollback_world& world)> bind_scripts;
@@ -512,6 +517,27 @@ namespace bmmo::session {
                             + error + " (" + std::to_string(*failed_revives) + " so far)");
                     return ok;
                 };
+        }
+        // Step RO1: the CK-free half of the guard on destroying an untracked
+        // window birth at the restore for the replayed scripts to make again
+        // (rollback_world::remade_by_replay; bind_script_replay adds the
+        // script half - the activations re-issued, a selected script owning
+        // the body's module): a FIXED body this world made at `birth_tick`
+        // (its birth log's recipe), no ball, no own body, no mirror, and no
+        // lifetime at the anchor (one the blob would know: it stays on the
+        // deferral, as does every other untracked birth).
+        if (!o.park_births && births) {
+            const auto own_body = hooks.own_body;
+            const auto mirror = hooks.mirror;
+            const auto ball = hooks.ball;
+            world.remade_by_replay = [own_body, mirror, ball, births](const std::string& entity, uint32_t birth_tick,
+                                                                      uint32_t anchor) {
+                if ((ball && ball(entity)) || (own_body && own_body(entity)) || (mirror && mirror(entity))) return false;
+                const local_birth* birth = births->find(entity, birth_tick);
+                if (!birth || !birth->recipe.fixed) return false;
+                return births->lifetime_at(entity, anchor) == nullptr;
+            };
+            world.fixed_birth_remade = o.fixed_birth_remade;
         }
         if (o.bind_scripts) o.bind_scripts(world);
         return world;
