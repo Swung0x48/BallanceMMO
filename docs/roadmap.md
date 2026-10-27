@@ -308,7 +308,20 @@ x64 teardown) are item 2.
    generation (it also covers TR3's R4: H5 131:47's P_Modul_01_Pusher
    0.0866 m, the beam's record retired by the trafo's new life). G0 is
    built (EG0): L3 needs the dead own entity's CK matrix per tick while the
-   ball has no body (design §9.7, decided at G8).
+   ball has no body (design §9.7, decided at G8). P the parented entity's
+   local matrix (found at RO2, lockstep-without-snapshots.md "As built
+   (step RO2)"): `restorer::physics_rt` (`physics_savestate_restore.cpp`)
+   writes each body's recorded world matrix with `SetWorldMatrix`, and for
+   a parented body CK re-derives the local matrix with rounding even when
+   the world is bit-identical (`P_Modul_25_Bridge001` local y
+   `-0x1.f55394p-3 -> -0x1.f554p-3`); a replayed pass that then moves the
+   parent leaves the sleeping child's CK matrix ulps from a world that did
+   not roll back (7.2e-07 m L8, 6.1e-05 m L11; the IVP core equal; a wake
+   overwrites it). Options: skip the write when the live world is already
+   bit-identical (measured: the three bridges then bit-equal; a restore
+   path change, so the exact checks rerun), or record the local matrix of
+   a parented body and restore it with `SetLocalMatrix` (a blob format
+   change).
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03
@@ -461,6 +474,31 @@ x64 teardown) are item 2.
      keeps the deferral under a travelling blob and after a failed script
      restore; gate round: 534 tests, both builds, the wire check and V9
      unchanged).
+   - RO2 (the user's measurement of RO1's two uncovered cases, quick tier,
+     2026-10-27; lockstep-without-snapshots.md "As built (step RO2)"):
+     (A) a late activation (the pass first executed inside a replay, the
+     fallback order): no body value change over 300 settling ticks on L8
+     K=2/3/4, L11 K=2/3 and the arena K=4; the structure differs for good
+     (the overlap tree, unit numbering, movable / hull / collision order;
+     gone with the control's live order injected); contact through the
+     late pieces untested (deferred (b)); (B) the server and the four
+     headless clients of `core_ref_s6/l8_cross` run every common script in
+     one relative order (0 of 17 change ticks differ). RO1's host-local
+     order stays. Found (pre-existing, rRO1 alike, not the order,
+     root-caused at the review fix-up): a sleeping parented body's CK
+     matrix after a replay that moves its parent, the IVP core identical -
+     `P_Modul_25_Bridge001` 7.2e-07 m (L8 K=3), `P_Modul_25_Bridge` /
+     `P_Modul_37_Bridge` 6.1e-05 m (L11 K=3); the restore's
+     `SetWorldMatrix` re-derives the local matrix with rounding (item 4's
+     P). Ran: x64 build, 534 tests, GCC 29 ok,
+     the wire check `rRO1 -> rRO2` (ALL SAME, 12 journals IDENTICAL), the
+     trace-on `l8_cross` replays IDENTICAL to the live journals, the Arch
+     server build with `physics_world.cpp`'s trace (review fix-up,
+     ARCH-BUILD-OK). Deferred: (a) the retail half of (B) (the real
+     CK2.dll's live order against the server's in a two-copy session
+     crossing a pass); (b) (A) with a ball moving through the late pass's
+     pieces after the replay (the structure that differs decides the
+     collision order then).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

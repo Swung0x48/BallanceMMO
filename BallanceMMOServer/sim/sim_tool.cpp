@@ -7488,6 +7488,25 @@ namespace {
                 for (uint32_t x = t_stamp; x != t + 1; ++x)
                     if (const auto* e = activations.slots().find(x); e && e->have_pending && e->have_pass) ++coincident;
                 rd_active = !ordinary;
+                // Step RO2's experiment switch (inert when absent): the
+                // control's live orders (BMMO_RO2_ORDER_IN, the file the
+                // control wrote with BMMO_RO2_ORDER_OUT) of the window's ticks
+                // replace this run's, so the replay runs the late pass in the
+                // order the on-time world ran it live.
+                if (const char* order_in = std::getenv("BMMO_RO2_ORDER_IN"); order_in && *order_in)
+                    if (FILE* f = std::fopen(order_in, "rb")) {
+                        uint32_t at = 0, n = 0, injected = 0;
+                        while (std::fread(&at, 4, 1, f) == 1 && std::fread(&n, 4, 1, f) == 1) {
+                            std::vector<uint32_t> ids(n);
+                            if (n && std::fread(ids.data(), 4, n, f) != n) break;
+                            if (at + 1u >= anchor && at <= now) {
+                                late_live_order.record(at, std::move(ids));
+                                ++injected;
+                            }
+                        }
+                        std::fclose(f);
+                        std::printf("RO2: %u live orders of the control injected (%u..%u)\n", injected, anchor - 1u, now);
+                    }
                 const bool rolled = engine.rewind_to(binding, anchor, now, no_input, ordinary ? "ordinary" : "late sector");
                 rd_active = false;
                 const auto u = ordinary ? world->capture_step_state().sectors.state() : rd.u().state();
@@ -7593,7 +7612,22 @@ namespace {
                 }
             active_before = world->active_sectors();
             activations.record_pending(context, manager_id, script_activations, t + 1);
-            late_live_order.record(t, bmmo::game::script_replay::live_frame_order(context, sel));   // step RO1
+            {
+                std::vector<uint32_t> live = bmmo::game::script_replay::live_frame_order(context, sel);
+                // Step RO2's experiment switch (inert when absent): the
+                // control writes every live frame's order to the file
+                // BMMO_RO2_ORDER_OUT names (tick, count, ids), for an arm
+                // that replays the late pass in the control's live order.
+                if (const char* order_out = std::getenv("BMMO_RO2_ORDER_OUT"); order_out && *order_out && !arm)
+                    if (FILE* f = std::fopen(order_out, t == root ? "wb" : "ab")) {
+                        const uint32_t n = static_cast<uint32_t>(live.size());
+                        std::fwrite(&t, 4, 1, f);
+                        std::fwrite(&n, 4, 1, f);
+                        if (n) std::fwrite(live.data(), 4, n, f);
+                        std::fclose(f);
+                    }
+                late_live_order.record(t, std::move(live));   // step RO1
+            }
             bmmo::session::rollback_tracked tracked;
             tracked.mechanisms = mechanisms();
             tracked.generations = generations;

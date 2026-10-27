@@ -30,6 +30,7 @@
 #include "inbound_capture.hpp"
 #include "process_qos.hpp"
 #include "trafo_hooks.hpp"
+#include "live_order_trace.hpp"
 
 #include "CKAll.h"
 #include "CKIpionManager.h"
@@ -1451,7 +1452,23 @@ namespace {
             // (host-local, session/script_order.hpp).
             p.record_script_order = [this](uint32_t tick) {
                 if (scripts_.empty()) return;
-                script_order_.record(tick, bmmo::game::script_replay::live_frame_order(engine_->context(), scripts_));
+                auto live = bmmo::game::script_replay::live_frame_order(engine_->context(), scripts_);
+                // Step RO2's measurement trace (live_order_trace.hpp; inert
+                // when BMMO_TRACE_LIVE_ORDER is absent): the order and the
+                // movable list by name, on a change - the server world's
+                // physics_world::tick logs the same two lines.
+                std::string names;
+                if (bmmo::sim::live_order_trace_on()) names = bmmo::sim::live_order_names(engine_->context(), live);
+                if (script_order_.record(tick, std::move(live)) && !names.empty())
+                    logf("live-order t=%u %s", tick, names.c_str());
+                if (bmmo::sim::live_order_trace_on()) {
+                    static std::string movable_was;
+                    std::string movable = bmmo::sim::movable_order_names(bmmo::physics::describe_movable_objects(engine_->physics()));
+                    if (movable != movable_was) {
+                        logf("movable-order t=%u %s", tick, movable.c_str());
+                        movable_was = std::move(movable);
+                    }
+                }
             };
             p.discover_navigation = [this](uint32_t tick) {
                 if (navigation_known_) return false;

@@ -10,6 +10,7 @@
 #include <session/spawn_impulse.hpp>
 
 #include "trafo_hooks.hpp"
+#include "live_order_trace.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include <cstring>
 #include <sstream>
 #include <string_view>
+#include <unordered_map>
 
 #include <CKTimeManager.h>
 
@@ -1032,6 +1034,23 @@ namespace bmmo::sim {
                 callback_pending_ = true;
             }
         if (!engine_->tick(error)) return false;
+        if (live_order_trace_on()) {
+            // Step RO2's measurement trace (live_order_trace.hpp; inert when
+            // BMMO_TRACE_LIVE_ORDER is absent): this live frame's script
+            // order and the movable list, logged on a change.
+            static std::unordered_map<const void*, std::pair<std::vector<uint32_t>, std::string>> last;
+            auto& [order_was, movable_was] = last[this];
+            std::vector<uint32_t> order = bmmo::game::script_replay::live_frame_order(context, script_selection_);
+            if (order != order_was) {
+                log("live-order t=" + std::to_string(tick_) + " " + live_order_names(context, order));
+                order_was = std::move(order);
+            }
+            std::string movable = movable_order_names(bmmo::physics::describe_movable_objects(physics()));
+            if (movable != movable_was) {
+                log("movable-order t=" + std::to_string(tick_) + " " + movable);
+                movable_was = std::move(movable);
+            }
+        }
         if (options_.park_retail_ball && retail_parked_) park_retail_ball();
         if (options_.trafo_inputs) after_trafo_tick();
         if (options_.mirror_clone_to_retail) {

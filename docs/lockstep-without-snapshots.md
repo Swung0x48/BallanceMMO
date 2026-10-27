@@ -1577,6 +1577,111 @@ user's choice: record each host's own live order and replay in it).
   own history only). If either changes numbers, one canonical order on
   every host replaces this.
 
+### As built (step RO2, 2026-10-27): the two cases measured - no value change over 300 settling ticks, the structure differs, contact untested
+
+The user's measurement step ("record this host's live order, then measure
+the cross-host effect"; switch to one canonical order only if a case
+changes numbers). "Changes numbers" = a body value differs where the only
+difference between the two worlds is the order. Tools (inert when absent,
+no world change: the trace-on replays of `core_ref_s6/l8_cross` are
+IDENTICAL to the live journals, the wire check `rRO1 -> rRO2` ALL SAME):
+`BMMO_TRACE_LIVE_ORDER=1` (`BallanceMMOServer/sim/live_order_trace.hpp`)
+logs each live frame's selected-script order (`owner/script#id@priority`)
+and the movable list's names on a change, from `physics_world::tick` (the
+server world, SimTool) and the headless client's `record_script_order`;
+SimTool's `--late-sector-check` takes `BMMO_RO2_ORDER_OUT` / `_IN` (the
+control writes its live orders, the late arm replays the window in them).
+Scripts and outputs: `.local-tools/work/RO2/` (`run_ab.sh`,
+`keep_all.sh`, `bodycmp.py` = every body's `object` and `core` record of
+`--savestate-describe` per boundary by name, the unit number left out;
+`ordercmp.py`; `fallback_vs_live.py`).
+
+- **(A) A late activation** (`--late-sector-check K 60 A`, 301 boundaries
+  A..A+300; the late arm's replay is the pass's first execution, so its
+  scripts fall back to (-priority, id); `fallback_vs_live.py`: the live
+  order at the pass differs from the fallback in every case, 14-24
+  scripts of priority 0). L8 K=2 (`P_Modul_41`, A 69 and 100), L8 K=3,
+  K=4, L11 K=2, K=3, the arena K=4:
+  - **Values: no order effect.** L8 K=2 (both A), L8 K=4, L11 K=2, the
+    arena K=4: every body bit-identical at 301/301 boundaries (positions,
+    velocities, rotations, the whole IVP core). L8 K=3 and L11 K=3 differ
+    on one record only, the CK ENTITY matrix of `P_Modul_25_Bridge001`
+    (7.153e-07 m) and `P_Modul_25_Bridge` / `P_Modul_37_Bridge`
+    (6.104e-05 m = 1 ulp at x 864 m), constant over the span, the IVP core
+    identical - and exactly the same with the control's live order
+    injected (`BMMO_RO2_ORDER_IN`) and on `build-agent-rRO1`: not the
+    order. **Root cause (the review fix-up, a temporary diagnostic build,
+    not committed):** the restore's physics_RT step
+    (`physics_savestate_restore.cpp`, `restorer::physics_rt`) writes every
+    body's recorded world matrix with `SetWorldMatrix`. For a PARENTED body
+    CK then re-derives the local matrix from the world and the parent's
+    world, and that re-derivation rounds even when the world written is
+    bit-identical to the live one: `P_Modul_25_Bridge001` (parent
+    `P_Modul_25_MF001`) at the arm's restore, world identical, local y
+    `-0x1.f55394p-3 -> -0x1.f554p-3`. The pass then moves the parent (the
+    module frame to sector 3's placeholder); the sleeping child's world is
+    re-derived from the rounded local (physics_RT does not write a sleeping
+    body back): y 3 float ulps off (7.153e-07 m). The control never rewinds
+    before the pass, so its local is the level file's. With the restore
+    skipping a write whose world is already bit-identical (the diagnostic's
+    `skip` mode), the arm's matrices equal the control's: L8 K=3
+    `Bridge001` and L11 K=3 `P_Modul_25_Bridge` / `P_Modul_37_Bridge`
+    (parents `P_Modul_25_MF` / `P_Modul_37_MF`) all bit-equal at the
+    boundary. Every rewind re-derives the locals of every restored
+    parented body (L11 K=3: also `P_Modul_01_Filler`, `_Pusher`, `_Rinne`
+    and their `001`s), so this is not specific to a late pass: any rollback
+    whose replay moves a parent of a restored sleeping child leaves that
+    child's CK matrix ulps away from a world that did not roll back (the
+    server); the IVP body is untouched and a wake overwrites the matrix.
+    Queued as its own item (roadmap §4 item 4, "P: the parented entity's
+    local matrix"). (The `--late-reference` arm's 580 m (L8) / 464 m and
+    764 m (L11) on the same bodies are that arm's construction, not this
+    gap: its ordinary rewind abandons the pass log, so the pass is not
+    re-executed and the module's CK entity keeps its pre-pass sector-1
+    pose, which is where its IVP body sits with the placement off.)
+  - **Structure: the order changes it.** L8 K=2: the movable list
+    (live 41004, 41001, 41005, 41002, 41, 41006, 41003; replay 41006 ...
+    41), the collision and hull entry order at 18 boundaries, the overlap
+    tree (`ov_nodes` 57 vs 56) and the unit numbering at all 301; L8 K=3:
+    movable / collision / hull / OV at 301, `world` at 147; L11 K=3: OV at
+    301; every case: the unit numbering at 301. With the control's live
+    order injected every structural difference is gone (L8 K=2, L8 K=3,
+    L11 K=3: movable, world, OV, hull, collision, units identical at
+    301/301) - the order is the whole cause.
+  - **Not measured:** a ball or another body moving through the pass's
+    pieces after the late replay. No case has one; the structure that
+    differs (the overlap tree, the hull and mindist order) is what decides
+    the collision order then, and the pile measurements above (the plate
+    pile, "mindist hull entries") saw such differences drift values. So the
+    verdict "no numbers" holds for settling pieces over 300 ticks only.
+- **(B) Cross-host** (`core_ref_s6/l8_cross`: the server journal replayed
+  by SimTool, 2993 ticks matched, 0 checkpoint mismatches; the four client
+  captures replayed): the live order changed at 17 ticks over the
+  session (the pass +2 at 309 seen at 314/316/321, +3 at 709 at 714).
+  Every client against the server: 12 ticks identical, 5 with the same
+  relative order of every script both ran (only membership differs: the
+  modules a proximity wake started on one side only, `P_Modul_01`,
+  `P_Modul_30_MF_R15` / `_R48`, `P_Modul_37`, `P_Modul_25_MF001` - the G-c
+  wakes), 0 ticks where a script pair ran in a different order. The movable
+  list keeps the same relative order until 554; at 563 / 581 / 590 it
+  differs in c0, c2, c3 (not c1) after the leader-only wakes of 554 (the
+  revive order follows the wake order: G-c, not the script order). So the
+  server and the headless clients run one frame in one order; there is
+  nothing for (B) to change on the headless side. The retail half (the
+  real CK2.dll's `m_BeObjects` against the server's) is not measured here
+  (deferred, roadmap item 7's RO2 entry).
+- **Judgement:** no value change by the order over 300 settling ticks;
+  the structure differs; contact through the late pieces is untested.
+  Under the row's rule ("a body value differs where the only difference is
+  the order") neither case changes numbers, so RO1's host-local order
+  stays. But case (A) leaves the late world's structure (overlap tree,
+  unit numbering, movable / hull / collision order) different from an
+  on-time world's for good - the class of difference that produced the
+  tick-266 value split RO1 fixed - and the path where it would turn into
+  values (a body moving through those pieces) was not run (deferred (b)).
+  One canonical order on every host would remove the structural
+  difference, at the price of the vanilla frame order (the user's call).
+
 ## The one the ball still had: a contact that ended inside the window (bridge API v15)
 
 Every forced-rewind arm above, scripts or not, took the same single correction
