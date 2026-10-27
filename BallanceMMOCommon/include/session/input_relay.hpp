@@ -350,6 +350,22 @@ namespace bmmo::session {
         return &std::prev(later)->second;
     }
 
+    // Step RC1 (docs/rewind-cost-design.md §2): the frame the shared core's
+    // replays drive a mirror with at `tick` (recorded_input_at, every rewind
+    // kind).  relay_frame_or_earlier's frame (the relayed one, or a hole's
+    // nearest earlier); for the tail past the newest relayed frame, that
+    // newest frame - the frame the live predictor drives the tail with
+    // (session_client_core::live_drive: remote.input), so the replay
+    // re-predicts the tail with what it knows now and its re-captured record
+    // holds it: a later arrival equal to it is no news.  Null before the
+    // first relayed frame (the birth state or no input, as before) and for
+    // an empty ring.  The legacy retail path keeps relay_frame_or_earlier.
+    inline const input_frame* relay_frame_or_newest(const std::map<uint32_t, input_frame>& ring, uint32_t tick) {
+        if (const input_frame* frame = relay_frame_or_earlier(ring, tick)) return frame;
+        if (ring.empty() || tick < ring.rbegin()->first) return nullptr;
+        return &ring.rbegin()->second;
+    }
+
     // Which (player, tick) frames this client has already taken, for the
     // once-only rules (the journal's relayed-input record, the correction
     // note) and the duplicate count.  Bounded per player; a frame arriving

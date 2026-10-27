@@ -466,7 +466,8 @@ namespace bmmo::session {
     // The input a navigated ball had at `tick`, for a re-simulation.  The
     // own ball: only an exact hit.  A remote: the relayed frame, or for a
     // hole between relayed frames the nearest earlier one (at most a
-    // window old, where the recorded prediction is a round trip old).
+    // window old, where the recorded prediction is a round trip old), and
+    // past the newest relayed frame that frame (hold-last, step RC1).
     // The own ball is told by the name its replica last had
     // (own_replica_name), whether or not the replica still exists.
     bool session_client_core::recorded_input_at(const std::string& entity, uint32_t tick,
@@ -484,10 +485,13 @@ namespace bmmo::session {
             return true;
         }
         // A remote: the relayed frame, or for a hole the window did not
-        // cover the nearest earlier one (session/input_relay.hpp); none for
-        // the tail the relay has not reached, where the recorded prediction
-        // stands.
-        const auto* frame = bmmo::session::relay_frame_or_earlier(*inputs, tick);
+        // cover the nearest earlier one (session/input_relay.hpp); for the
+        // tail the relay has not reached, its newest frame - the live
+        // predictor's (live_drive), step RC1 - so a replay re-predicts the
+        // tail instead of keeping the prediction recorded before the change
+        // arrived; none before the first relayed frame, where the recorded
+        // prediction stands.
+        const auto* frame = bmmo::session::relay_frame_or_newest(*inputs, tick);
         if (!frame) return false;
         out = *frame;
         return true;

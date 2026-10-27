@@ -116,6 +116,9 @@ namespace bmmo::session {
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
         }
+        bool recorded_input_at(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
+            return c.recorded_input_at(entity, tick, out);
+        }
     };
 }
 
@@ -3981,6 +3984,77 @@ namespace {
             EXPECT_EQ(state_of(core).input_rewinds_, on ? 1u : 0u);
             EXPECT_EQ(state_of(core).subst_rewinds_, on ? 1u : 0u);
         }
+    }
+
+    // Step RC1 (docs/rewind-cost-design.md §2): the replay re-predicts a
+    // remote's tail with its newest relayed frame, the live predictor's.  The
+    // live run predicted keys 0 for player 4 at 118-125; the relay brings keys
+    // 7 at 121: a correction, and the replay from 120 re-records 122-125 with
+    // keys 7 (hold-last), so the next arrival repeating it (122) is no news
+    // and asks for no rewind, while a different one (123, keys 3) does.  The
+    // live predictor and the replay are one rule: past the newest relayed
+    // frame recorded_input_at returns live_drive's frame; a hole keeps the
+    // nearest earlier frame; before the first relayed frame there is none.
+    TEST(SessionClientCoreFrame, TheReplayHoldsTheNewestRelayedFrameSoARepeatIsNoNews) {
+        flow_fake fake;
+        session_client_core core(frame_platform(fake, false), session_capabilities{});
+        run_to_tick_125(core, fake);
+        core.config.input_rewind = true;
+        state_of(core).held_floor_ = 117;
+        auto& four = state_of(core).remotes_[4];
+        four.entity = "Ball_Wood_BMMO_4";
+        four.physicalized = true;
+        four.navigation = true;
+        for (uint32_t tick = 118; tick <= 125; ++tick) {
+            bmmo::session::rollback_tracked tracked;
+            tracked.remote_entities = {"Ball_Wood_BMMO_4"};
+            state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, tracked,
+                                            {{"Ball_Wood_BMMO_4", keys_frame(0)}});
+        }
+        bmmo::session::input_frame out{};
+        EXPECT_FALSE(steps{core}.recorded_input_at("Ball_Wood_BMMO_4", 125, out)) << "no relayed frame yet";
+        const auto relay = [&core](uint32_t tick, uint8_t keys) {
+            bmmo::session_remote_input_msg msg = relay_message(tick, 120);
+            bmmo::session_remote_input_msg::entry entry;
+            entry.player = 4;
+            entry.frames = {keys_frame(keys)};
+            msg.entries = {entry};
+            core.on_session_remote_input(msg);
+        };
+        relay(121, 7);
+        EXPECT_TRUE(state_of(core).input_rewind_pending_) << "keys 7 against the predicted 0";
+        EXPECT_EQ(state_of(core).input_rewind_tick_, 121u);
+        // One rule: the tail is the live predictor's frame.
+        for (uint32_t tick = 122; tick <= 126; ++tick) {
+            ASSERT_TRUE(steps{core}.recorded_input_at("Ball_Wood_BMMO_4", tick, out)) << tick;
+            const auto live = steps::live_drive(four, tick);
+            EXPECT_EQ(out.keys, live.keys) << tick;
+            EXPECT_EQ(out.flags, live.flags) << tick;
+            EXPECT_EQ(out.keys, 7) << tick;
+        }
+        EXPECT_FALSE(steps{core}.recorded_input_at("Ball_Wood_BMMO_4", 120, out)) << "before the first relayed frame";
+        const size_t from = fake.calls.size();
+        steps{core}.replay_corrected_inputs();
+        int stepped = 0;
+        for (const auto& call: since(fake.calls, from)) stepped += call == "step";
+        EXPECT_EQ(stepped, 5) << "one replay from 120 to 125";
+        EXPECT_FALSE(state_of(core).input_rewind_pending_);
+        for (uint32_t tick = 121; tick <= 125; ++tick) {
+            bmmo::session::input_frame recorded{};
+            ASSERT_TRUE(state_of(core).rollback_.recorded_input("Ball_Wood_BMMO_4", tick, recorded)) << tick;
+            EXPECT_EQ(recorded.keys, 7) << "re-captured with the newest relayed frame, tick " << tick;
+        }
+        relay(122, 7);
+        EXPECT_FALSE(state_of(core).input_rewind_pending_) << "a repeat of the hold-last frame is no correction";
+        relay(124, 3);
+        EXPECT_TRUE(state_of(core).input_rewind_pending_) << "a different frame is";
+        EXPECT_EQ(state_of(core).input_rewind_tick_, 124u);
+        // 123 is now a hole between 122 and 124: the nearest earlier frame.
+        ASSERT_TRUE(steps{core}.recorded_input_at("Ball_Wood_BMMO_4", 123, out));
+        EXPECT_EQ(out.keys, 7);
+        ASSERT_TRUE(steps{core}.recorded_input_at("Ball_Wood_BMMO_4", 125, out));
+        EXPECT_EQ(out.keys, 3);
+        EXPECT_EQ(out.keys, steps::live_drive(four, 125).keys);
     }
 
     // The pacer's half (design 1.3 "pacing"; E9): the rebase threshold is

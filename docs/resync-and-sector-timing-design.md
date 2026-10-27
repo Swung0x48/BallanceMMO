@@ -2790,7 +2790,7 @@ state: the pre-existing owner-only gap (audit #2), not a new one.
   excluded, `P_Modul_08_Schaukel` 6.72 at 2810 inside 2683-2813 (control
   3.99 at 2736 inside its 2665-2757); 0.000 from the first live tick. This
   is late-player open question 8 - a raise past the reach before plan
-  step 12 (the per-client reach, roadmap §4 item 11) - and, like A5u's
+  step 12 (the per-client reach, roadmap §4 item 12) - and, like A5u's
   relay_late there, p's own cost; the others' worlds are untouched (c0, c2,
   c3 at or below control). B2 makes it reachable at a smaller step than
   before (the old margin cap, 13 here, held the lag at about 43).

@@ -104,6 +104,10 @@ left. Each design named here has its own document with its step table.
    Per-player piece sets; explosion, paper wind and reset in every world;
    a 20 s piece life; the explosion stamped at the dephysic (vanilla timing);
    out-of-reach trafos rejected and logged.
+   T3 (implemented on the parked branch `wip/trafo-t3-merged`, its H1 (c)
+   at 150 ms failing on starvation, T3's own rewind cost) waited for item
+   10's step RC1 by the user's decision of 2026-10-25 (RC1 committed
+   2026-10-27) and is re-gated under its original H1 (c) at TR3b.
 6. Sector placement (`sector-placement-design.md`): S1-S11. One object per
    placement at the anchor; the late joiner's lost sector-1 walk (S4, which
    may land early). Also found at S2, **the x64 teardown over-read** (not
@@ -172,20 +176,58 @@ left. Each design named here has its own document with its step table.
    1098-1106 never reached its old epoch. Not known: whether the server
    sent them; establish that, then decide whether a client journal should
    carry them (a replay is the server's world only from S either way).
-10. **Stage close-out:** four clients, 150 ms, 10 % loss, snapshots off: the
+10. The rewind-cost optimization (`rewind-cost-design.md`; user's decision,
+    2026-10-25): **RC1 committed with hold-last** (the commit after 49e2cc8
+    that adds this note, `rollback: ...`; the user's ruling of 2026-10-27,
+    `rewind-cost-design.md` §11: "先接受那个吧", "Commit RC1 with hold-last,
+    then fix RL1 right after, then continue the chain under the 15-minute
+    rule.") - the replay re-predicts a remote's tail past
+    its newest relayed frame with that frame (hold-last, the live
+    predictor's rule), so a relayed frame repeating it is no correction; it
+    comes before trafo T3 by the user's decision of 2026-10-25. Measured
+    (snapshots off, same batch, "As built (step RC1)"): input rewinds -83..-87 %
+    on swing and H1 at 150 ms (option off), -67..-77 % on the cliff, -44 % at
+    50 ms; no schedule rebase or rebase resync in any arm (the old build
+    rebased and resynced on every client of five arms); CPU parity -36 %. The
+    drift check's FAIL at the build (unpinned) was settled by the pinned
+    method (Measurement RC1d: 2.6x / 3.4x fewer input rewinds than the old
+    stale tail at 20 / 42 ticks; the drift split by lag) and by the user's own
+    play (Measurement RC1e: hold-last, R6 and R7 within about 2 % in drift,
+    R6 +6-11 % input rewinds pinned, +24 % modelled). RC6 (the R6 / R7 tail
+    refinement) is not adopted; it stays a possible later refinement if
+    human rapid-trigger play shows periods. Remaining: RC2 an incremental capture
+    for sleeping bodies (ceiling 22-24 %), RC3 no body-set full snapshot while
+    snapshots are off (9-11 %, its own drift check), RC4 the dormant-script
+    encoding (5 %), RC5 an incremental restore (3-4 %); the close-out is the
+    trafo design's H4 / H6 with snapshots on (decision (b), 2026-10-25),
+    against T3's snapshots-off CPU numbers.
+11. **Stage close-out:** four clients, 150 ms, 10 % loss, snapshots off: the
     spawn pile and every mechanism bit-identical to the server at every
     checkpoint. On pass: snapshots off in the deployed configuration and in
     the retail default; only the one state transfer remains.
 
+    **Deferred to the final verification** (checks a quick-tier step did
+    not run; each step appends its own, the close-out runs them all):
+    - RC1 (committed 2026-10-27, quick tier; the committed tree is the
+      measured build: wire check ALL SAME, solo IDENTICAL): (a) the live
+      four-client snapshots-off A/B of the committed build (§7 check 5 of
+      `rewind-cost-design.md`; run at the build, not re-run at the commit:
+      nothing changed); (b) its CPU parity (§7 check 7; -36 % at the build,
+      not re-run: FULL only); (c) the repeated drift sessions RC1c named and
+      did not run, O2 / N2 at dwell 30 on cliff and resync_at150; (d) a
+      retail two-copy run of the committed x86 build with core on (built,
+      CLIENT-BUILD-OK; the user's round 1 ran the same tree's hold-last
+      build, `TRIAL1/holdlast`).
+
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 
-11. Late-player design revision 3, R0-R5 (arrival ring, baseline, quorum
+12. Late-player design revision 3, R0-R5 (arrival ring, baseline, quorum
     patience, the lead decision), plus plan steps 12 (per-client reach),
     21 (events on the input datagram), 22 (own death move).
 
 **Stage C - close the core (goal 1).**
 
-12. R6 retail own-body control (bridge and script work; after plan step 21's
+13. R6 retail own-body control (bridge and script work; after plan step 21's
     measurement), R7 delete the legacy path; three launches without a hang.
     R6 also removes the retail beam's own residual (measured at EG0,
     rollback-engine-gaps-design As built EG0): the owner writes its body in
@@ -197,7 +239,7 @@ left. Each design named here has its own document with its step table.
 
 **Stage D - the original levels.**
 
-13. Levels 8 and 11, sector 1: solo savestate check and four clients,
+14. Levels 8 and 11, sector 1: solo savestate check and four clients,
     snapshots off. The pooled-modules diagnosis's open points (retail CK2
     `Reset`, P_Modul_01's Rinne/Filler) are checked here.
 

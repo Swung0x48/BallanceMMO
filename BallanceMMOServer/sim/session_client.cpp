@@ -77,6 +77,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
@@ -311,6 +312,26 @@ namespace {
         // with the record's keys.
         bool keep_lane = false;
         double keep_lane_z = 0.0;
+        // --keep-lane-dwell N (step RC1c, a measurement aid; rewind-cost
+        // design, "Measurement RC1c"): the steer's key, once pressed, is held
+        // at least N frames, and once released is not pressed again for N
+        // frames - every state of the steer (no key, LEFT, RIGHT) lasts N
+        // frames or more, like a player's holds; the deadband and damping
+        // are unchanged.  0 or absent: today's steer, byte for byte.
+        int keep_lane_dwell = 0;
+        // --brake-tap N:P (step RC1d, a measurement aid; rewind-cost design,
+        // "Measurement RC1d"): while the drive record holds UP, press DOWN
+        // instead of UP for N frames in every P frames of UP - a hard stop
+        // tapped while driving.  0 or absent: the record's keys, byte for byte.
+        int brake_tap_n = 0;
+        int brake_tap_p = 0;
+        // --keep-lane-tap N:M (step RC1d, a measurement aid; rewind-cost
+        // design, "Measurement RC1d"): while the steer wants a key, press it
+        // N frames, then release it M frames, repeating - a rapid-trigger
+        // pattern (the dwell is a minimum hold, this a maximum).  0 or
+        // absent: the steer's key, byte for byte.
+        int keep_lane_tap_n = 0;
+        int keep_lane_tap_m = 0;
         // --capture-inbound FILE / --replay-inbound FILE (shared-core design
         // 5.2 (5), inbound_capture.hpp): record every message handled, every
         // connection state change and every wall-clock read of the session
@@ -331,6 +352,7 @@ namespace {
     // The steer: push while |error + damping * rate| exceeds the deadband.
     constexpr double kLaneDamping = 0.8;    // seconds of lateral rate weighed against the error
     constexpr double kLaneDeadband = 0.3;   // metres
+    constexpr int kLaneSteerOff = -2;       // keep_lane_key: the steer does not act this frame
 
     void usage() {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N]\n"
@@ -339,7 +361,9 @@ namespace {
                   "       [--resync-at TICK | --resync-at s<SECTOR>+<TICKS>] [--record-by-tick]\n"
                   "       [--hold-event TYPE:N:MS|TYPE:N:drop]   (the N-th own event of TYPE leaves MS ms late, or never)\n"
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
-                  "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z]\n"
+                  "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z] [--keep-lane-dwell N]\n"
+                  "       [--brake-tap N:P]   (while the record holds UP: DOWN instead for N frames in every P)\n"
+                  "       [--keep-lane-tap N:M]   (the steer's key pressed N frames, released M, repeating)\n"
                   "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR] [--park-births] [--insert-births]\n"
                   "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)\n"
                   "       [--capture-inbound FILE | --replay-inbound FILE]   (record the inbound messages and clock reads; "
@@ -405,6 +429,23 @@ namespace {
             else if (arg == "--expect") { if (!(v = next())) return false; out.expect = std::atoi(v); }
             else if (arg == "--seconds") { if (!(v = next())) return false; out.seconds = std::atof(v); }
             else if (arg == "--keep-lane") { if (!(v = next())) return false; out.keep_lane = true; out.keep_lane_z = std::atof(v); }
+            else if (arg == "--keep-lane-dwell") { if (!(v = next())) return false; out.keep_lane_dwell = std::max(0, std::atoi(v)); }
+            else if (arg == "--brake-tap") {
+                if (!(v = next())) return false;
+                const char* colon = std::strchr(v, ':');
+                if (!colon) return false;
+                out.brake_tap_n = std::max(0, std::atoi(v));
+                out.brake_tap_p = std::max(0, std::atoi(colon + 1));
+                if (out.brake_tap_n > 0 && out.brake_tap_p <= out.brake_tap_n) return false;
+            }
+            else if (arg == "--keep-lane-tap") {
+                if (!(v = next())) return false;
+                const char* colon = std::strchr(v, ':');
+                if (!colon) return false;
+                out.keep_lane_tap_n = std::max(0, std::atoi(v));
+                out.keep_lane_tap_m = std::max(0, std::atoi(colon + 1));
+                if (out.keep_lane_tap_n > 0 && out.keep_lane_tap_m <= 0) return false;
+            }
             else if (arg == "--trace") out.trace = true;
             else if (arg == "--trace-restore") out.trace_restore = true;
             else if (arg == "--trace-body") { if (!(v = next())) return false; out.trace_body = v; }
@@ -2023,16 +2064,25 @@ namespace {
         // way - so a camera the record turned still steers towards the lane.
         const unsigned char* keep_lane(const unsigned char* keys) {
             std::memcpy(lane_keys_, keys, sizeof(lane_keys_));
+            const int key = keep_lane_dwell(keep_lane_key(keys));
+            if (key >= 0) lane_keys_[key] = 1;
+            if (args_.keep_lane_tap_n > 0 && !keep_lane_tap(key)) lane_keys_[key] = keys[key];   // --keep-lane-tap (step RC1d)
+            return lane_keys_;
+        }
+
+        // The steer's key of this frame: the leaf to press, -1 inside the
+        // deadband, kLaneSteerOff when the steer does not act at all.
+        int keep_lane_key(const unsigned char* keys) {
             const bool driving = keys[kKeyUp] || keys[kKeyDown];
             const float (*cam)[3] = core_.previous_cam();   // nullptr until a camera was seen
             if (!driving || !core_.own_physicalized() || core_.own_body_entity().empty() || !navigation_known_ || !cam)
-                return lane_keys_;
+                return kLaneSteerOff;
             bmmo_physics_body_state body{};
             std::string error;
-            if (!bmmo::physics::get_body_state(engine_->physics(), core_.own_body_entity().c_str(), body, error)) return lane_keys_;
+            if (!bmmo::physics::get_body_state(engine_->physics(), core_.own_body_entity().c_str(), body, error)) return kLaneSteerOff;
             const double error_z = body.position[2] - args_.keep_lane_z;
             const double a = error_z + kLaneDamping * static_cast<double>(body.linear[2]);
-            if (std::fabs(a) < kLaneDeadband) return lane_keys_;
+            if (std::fabs(a) < kLaneDeadband) return -1;
             const double push = a < 0.0 ? 1.0 : -1.0;   // the z direction the ball needs
             int best_key = -1;
             double best = 0.0;
@@ -2042,14 +2092,81 @@ namespace {
                                + leaf.direction.z * cam[2][2];
                 if (z * push > best) { best = z * push; best_key = leaf.key; }
             }
-            if (best_key >= 0) {
-                lane_keys_[best_key] = 1;
-                if (args_.trace && lane_steers_++ < 4)
-                    logf("keep-lane: ball z=%.2f (lane %.2f) rate %.2f -> key %d", body.position[2], args_.keep_lane_z,
-                         static_cast<double>(body.linear[2]), best_key);
-            }
-            return lane_keys_;
+            if (best_key >= 0 && args_.trace && lane_steers_++ < 4)
+                logf("keep-lane: ball z=%.2f (lane %.2f) rate %.2f -> key %d", body.position[2], args_.keep_lane_z,
+                     static_cast<double>(body.linear[2]), best_key);
+            return best_key;
         }
+
+        // ---- --keep-lane-dwell (step RC1c, arguments::keep_lane_dwell) ----
+        // A minimum dwell on both edges of the steer: the steer's state (no
+        // key, or one key) changes only after it has lasted N frames, so a
+        // pressed key stays down N frames or more and a release stays up N
+        // frames or more (a direct LEFT -> RIGHT switch is a change of state
+        // like any other).  Where the steer does not act (no drive keys, no
+        // own body, no camera) the key is released and the next press is
+        // free.  N = 0: the wanted key itself, today's steer.  N counts
+        // frame() calls (one per tick in every run so far: the server's
+        // journals show holds of exactly N); without --keep-lane the steer
+        // is never called and the dwell is inert.
+        int keep_lane_dwell(int wanted) {
+            const int n = args_.keep_lane_dwell;
+            if (wanted == kLaneSteerOff) {
+                lane_dwell_key_ = -1;
+                lane_dwell_frames_ = n;
+                return -1;
+            }
+            if (n <= 0) return wanted;
+            if (wanted != lane_dwell_key_ && lane_dwell_frames_ >= n) {
+                lane_dwell_key_ = wanted;
+                lane_dwell_frames_ = 0;
+            }
+            if (lane_dwell_frames_ < n) ++lane_dwell_frames_;
+            return lane_dwell_key_;
+        }
+        // ---- end --keep-lane-dwell ----
+
+        // ---- --brake-tap (step RC1d, arguments::brake_tap_n / brake_tap_p) ----
+        // A hard stop tapped while driving: the frames in which the drive
+        // record holds UP are counted (frame() calls, 1-based), and the last N
+        // of every P of them press DOWN instead of UP (UP released).  Applied
+        // before the steer, which sees the tap as driving.  Absent (N = 0):
+        // never called, the record's keys unchanged.
+        const unsigned char* brake_tap(const unsigned char* keys) {
+            if (!keys[kKeyUp]) return keys;
+            ++brake_up_frames_;
+            const int64_t p = args_.brake_tap_p, n = args_.brake_tap_n;
+            if ((brake_up_frames_ - 1) % p < p - n) return keys;
+            std::memcpy(brake_keys_, keys, sizeof(brake_keys_));
+            brake_keys_[kKeyUp] = 0;
+            brake_keys_[kKeyDown] = 1;
+            return brake_keys_;
+        }
+        // ---- end --brake-tap ----
+
+        // ---- --keep-lane-tap (step RC1d, arguments::keep_lane_tap_n / _m) ----
+        // A rapid-trigger pattern on the steer's key: while the steer (after
+        // the dwell, if any) wants the same key, it is pressed N frames, then
+        // released M frames, repeating; a different wanted key, or none,
+        // restarts the pattern, so the next press is immediate.  Counts
+        // frame() calls, like the dwell.  Absent (N = 0): never called.
+        // Returns whether the wanted key stays pressed this frame (true for
+        // no key); keep_lane() then restores the record key value if not.
+        bool keep_lane_tap(int wanted) {
+            if (wanted < 0) {
+                lane_tap_key_ = -1;
+                lane_tap_phase_ = 0;
+                return true;
+            }
+            if (wanted != lane_tap_key_) {
+                lane_tap_key_ = wanted;
+                lane_tap_phase_ = 0;
+            }
+            const bool press = lane_tap_phase_ < args_.keep_lane_tap_n;
+            lane_tap_phase_ = (lane_tap_phase_ + 1) % (args_.keep_lane_tap_n + args_.keep_lane_tap_m);
+            return press;
+        }
+        // ---- end --keep-lane-tap ----
 
         void frame() {
             std::string error;
@@ -2065,6 +2182,7 @@ namespace {
             const unsigned char* keyboard = nullptr;
             if (!record_.frames.empty() && f >= 0 && static_cast<size_t>(f) < record_.frames.size()) {
                 keyboard = record_.frames[static_cast<size_t>(f)].keys.data();
+                if (args_.brake_tap_n > 0) keyboard = brake_tap(keyboard);
                 if (args_.keep_lane) keyboard = keep_lane(keyboard);
                 engine_->set_keyboard_state(keyboard);
             } else {
@@ -3032,6 +3150,12 @@ namespace {
         int rebases_ = 0;
         unsigned char lane_keys_[256] = {};                  // --keep-lane: this frame's keys with the steer added
         int lane_steers_ = 0;
+        int lane_dwell_key_ = -1;                            // --keep-lane-dwell: the steer's held key, -1 none
+        int lane_dwell_frames_ = std::numeric_limits<int>::max();   // frames in that state (saturates at N)
+        unsigned char brake_keys_[256] = {};                 // --brake-tap: this frame's keys with the tap
+        int64_t brake_up_frames_ = 0;                        // --brake-tap: frames whose record held UP
+        int lane_tap_key_ = -1;                              // --keep-lane-tap: the key being tapped, -1 none
+        int lane_tap_phase_ = 0;                             // --keep-lane-tap: frames into its N + M cycle
         bmmo::game::navigation_graph navigation_;
         bool navigation_known_ = false;
         std::vector<ball_row> ball_rows_;

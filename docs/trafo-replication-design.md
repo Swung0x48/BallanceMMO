@@ -4,7 +4,10 @@ Status: design (track 2 of the post-audit designs), revision 2 after two
 reviews (§10); step T1 built (host support, bridge v21, SimTool; no wire:
 §8, "As built (step T1)"); step T2 built (wire and server, protocol 11 /
 journal v5, the world option off by default: §8, "As built (step TR2 =
-T2)"), T3-T5 not. It implements the user's decision of 2026-10-23
+T2)"), T3-T5 not (T3 implemented on the parked branch
+`wip/trafo-t3-merged`; it waits for the rewind-cost step RC1,
+`rewind-cost-design.md`, by the user's decision of 2026-10-25, §11, and is
+then re-gated under its original H1 (c) at TR3b). It implements the user's decision of 2026-10-23
 on audit item #2 (and #11): option (b), the trafo becomes a replicated input
 and its explosion, wind and reset run in every world for every player's trafo,
 identically.
@@ -1990,3 +1993,11 @@ frame number), and one was resolved by the alternative its reviewer offered
 - **9.7, join order.** Option (a): a member-added message with the
   `player_entry` before the joiner's first relayed event (scheduled with the
   other gaps, outside this track).
+- **2026-10-25, the rewind cost before T3** (verbatim): "先把"重放沿用远端旧预测尾巴"这个缺陷修掉（hold-last
+  重预测，客户端本地，带自己的精确性和漂移检查），然后 T3 按原门槛 H1 (c) 重新过，过了就提交，再继续
+  T4、T5、S5-S11。" The replay's stale remote tail (CPUPROF's first
+  candidate) is fixed first as step RC1 of `rewind-cost-design.md` (committed
+  with hold-last by the user's ruling of 2026-10-27: "As built (step
+  RC1)" there); T3 is then re-gated under its original H1 (c)
+  - starved within the control band at 150 ms, snapshots off - at TR3b, which
+  re-captures `core_ref_t3`.

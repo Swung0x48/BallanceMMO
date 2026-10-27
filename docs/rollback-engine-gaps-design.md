@@ -1671,7 +1671,7 @@ dead own entity) and §9.7.
   stamp is the r2 arms' in y. Not run: the pre-chain mod with
   `r0_keys.bmrc` (that mod was not kept).
 - **Where it is queued.** R6 part three (own body control: the beam made
-  as `unmake_own` + `make_own`, a fresh body), roadmap §4 item 12, where
+  as `unmake_own` + `make_own`, a fresh body), roadmap §4 item 13, where
   this measurement is now recorded. A narrower option, untested: write the
   beam stamp with a recheck (`set_body_state_ex(..., recheck)`), so IVP
   re-evaluates the moved body's collision state. G1's B-R1 compares the own

@@ -220,6 +220,27 @@ TEST(RelayFrameOrEarlier, HolesTakeTheEarlierFrameTheTailTakesNothing) {
     EXPECT_EQ(bmmo::session::relay_frame_or_earlier({}, 1), nullptr);
 }
 
+// Step RC1: the core's replay rule - relay_frame_or_earlier's frame, and for
+// the tail past the newest relayed frame that newest frame (hold-last, the
+// live predictor's); still nothing before the first relayed frame.
+TEST(RelayFrameOrNewest, TheTailTakesTheNewestFrameHolesAndTheStartAsBefore) {
+    std::map<uint32_t, input_frame> ring;
+    ring.emplace(10, frame(1));
+    ring.emplace(11, frame(2));
+    ring.emplace(14, frame(5));
+    EXPECT_EQ(bmmo::session::relay_frame_or_newest(ring, 11)->keys, 2);
+    EXPECT_EQ(bmmo::session::relay_frame_or_newest(ring, 12)->keys, 2);   // a hole: 11's frame
+    EXPECT_EQ(bmmo::session::relay_frame_or_newest(ring, 13)->keys, 2);
+    EXPECT_EQ(bmmo::session::relay_frame_or_newest(ring, 14)->keys, 5);
+    ASSERT_NE(bmmo::session::relay_frame_or_newest(ring, 15), nullptr);   // the tail: 14's frame
+    EXPECT_EQ(bmmo::session::relay_frame_or_newest(ring, 15)->keys, 5);
+    EXPECT_EQ(bmmo::session::relay_frame_or_newest(ring, 40)->keys, 5);
+    EXPECT_EQ(bmmo::session::relay_frame_or_newest(ring, 9), nullptr);    // before anything
+    EXPECT_EQ(bmmo::session::relay_frame_or_newest({}, 1), nullptr);
+    // The legacy rule is unchanged.
+    EXPECT_EQ(bmmo::session::relay_frame_or_earlier(ring, 15), nullptr);
+}
+
 TEST(PendingRelay, ParksFramesAndMovesThemIntoTheMirrorsRing) {
     pending_relay pending(8);
     pending.store(7, 50, frame(1));

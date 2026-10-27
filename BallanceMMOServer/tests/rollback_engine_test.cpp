@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <session/correction.hpp>
+#include <session/input_relay.hpp>
 #include <session/rollback.hpp>
 #include <session/timeline.hpp>
 
@@ -762,6 +763,108 @@ TEST(RollbackEngine, MissingRelayKeepsRecordedRemotePrediction) {
     EXPECT_TRUE(engine.on_snapshot(w, snapshot, 4, entity_of, no_input));
     EXPECT_NEAR(world.bodies["Remote"].linear[0], 2.0f, 1e-6f);
     EXPECT_NEAR(world.bodies["Remote"].position[0], 1.0 + 3.0 * kDt, 1e-9);
+}
+
+// Step RC1 (docs/rewind-cost-design.md §2): the replay's feed over the core's
+// rule (recorded_input_at = relay_frame_or_newest over the mirror's ring).
+// The live run predicted keys 9 for every tick; the relay has 3 (keys 2), 5
+// (keys 4) and 6 (keys 8).  A rewind anchored at 1 feeds tick 2 - before the
+// first relayed frame - the recorded prediction (the old behaviour), 3 its
+// frame, the hole 4 the nearest earlier (keys 2), 5 and 6 their frames, and
+// the tail 7..10 the newest relayed frame (hold-last), not the stale
+// prediction; the re-captured records hold what was fed, so a later arrival
+// equal to the newest frame finds it recorded (no news).
+TEST(RollbackEngine, TheTailPastARemotesNewestRelayedFrameIsFedThatFrameAndRecordedSo) {
+    fake_world world;
+    world.bodies["Remote"];
+    rollback_engine engine;
+    auto w = world.adapter();
+    rollback_tracked tracked;
+    tracked.remote_entities = {"Remote"};
+    input_frame predicted{};
+    predicted.keys = 9;
+    for (uint32_t tick = 1; tick <= 10; ++tick) {
+        world.pending_keys["Remote"] = predicted.keys;
+        w.step();
+        engine.record(w, tick, tracked, {{"Remote", predicted}});
+    }
+    std::map<uint32_t, input_frame> ring;
+    const auto relayed = [&ring](uint32_t tick, uint8_t keys) {
+        input_frame f{};
+        f.keys = keys;
+        f.flags = bmmo::session::INPUT_FLAG_PHYSICALIZED | bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+        ring[tick] = f;
+    };
+    relayed(3, 2);
+    relayed(5, 4);
+    relayed(6, 8);
+    const auto input_at = [&ring](const std::string& entity, uint32_t tick, input_frame& out) {
+        if (entity != "Remote") return false;
+        const input_frame* frame = bmmo::session::relay_frame_or_newest(ring, tick);
+        if (!frame) return false;
+        out = *frame;
+        return true;
+    };
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 1, 10, input_at, "Remote input corrected at tick 2"));
+    const std::map<uint32_t, uint8_t> fed = {{2, 9}, {3, 2}, {4, 2}, {5, 4}, {6, 8}, {7, 8}, {8, 8}, {9, 8}, {10, 8}};
+    for (const auto& [tick, keys]: fed) {
+        input_frame recorded{};
+        ASSERT_TRUE(engine.recorded_input("Remote", tick, recorded)) << "tick " << tick;
+        EXPECT_EQ(recorded.keys, keys) << "tick " << tick;
+    }
+    EXPECT_EQ(world.count("nav_input Remote keys=8"), 5) << "6 and the tail 7..10";
+    EXPECT_EQ(world.count("nav_input Remote keys=9"), 1) << "only tick 2, before the first relayed frame";
+    // The next frame arrives and repeats the newest: the record already has it.
+    input_frame recorded{};
+    ASSERT_TRUE(engine.recorded_input("Remote", 7, recorded));
+    EXPECT_EQ(recorded.keys, ring.at(6).keys);
+    EXPECT_EQ(recorded.flags, ring.at(6).flags);
+
+    // A remote born inside the replay (not named by the records): fed from its
+    // stamp, the tail past its newest relayed frame with that frame.
+    rollback_tracked none;
+    none.own_entity = "Own";
+    fake_world born_world;
+    born_world.bodies["Own"];
+    rollback_engine born_engine;
+    auto bw = born_world.adapter();
+    for (uint32_t tick = 1; tick <= 10; ++tick) {
+        bw.step();
+        born_engine.record(bw, tick, none, {{"Own", input_frame{}}});
+    }
+    constexpr uint32_t kBorn = 4;
+    bool born = false;
+    bw.pre_step = [&](uint32_t tick) {
+        if (tick == kBorn && !born) {
+            born = true;
+            born_world.bodies["Newborn"];
+        }
+    };
+    bw.replay_remotes = [&](uint32_t tick, std::map<std::string, uint32_t>& out) {
+        if (born && tick >= kBorn) out["Newborn"] = 1;
+    };
+    std::map<uint32_t, input_frame> newborn_ring;
+    input_frame first{};
+    first.keys = 3;
+    newborn_ring[kBorn] = first;
+    input_frame newest{};
+    newest.keys = 5;
+    newborn_ring[kBorn + 1] = newest;
+    const auto newborn_at = [&newborn_ring](const std::string& entity, uint32_t tick, input_frame& out) {
+        if (entity != "Newborn") return false;
+        const input_frame* frame = bmmo::session::relay_frame_or_newest(newborn_ring, tick);
+        if (!frame) return false;
+        out = *frame;
+        return true;
+    };
+    ASSERT_TRUE(born_engine.rewind_to(bw, kBorn - 1, 10, newborn_at, "ball of 2 born at tick 4"));
+    ASSERT_TRUE(born_engine.recorded_input("Newborn", kBorn, recorded));
+    EXPECT_EQ(recorded.keys, 3u);
+    for (uint32_t tick = kBorn + 1; tick <= 10; ++tick) {
+        ASSERT_TRUE(born_engine.recorded_input("Newborn", tick, recorded)) << "tick " << tick;
+        EXPECT_EQ(recorded.keys, 5u) << "tick " << tick;
+    }
 }
 
 // What the session journal records: one correction per decision, the mismatch
