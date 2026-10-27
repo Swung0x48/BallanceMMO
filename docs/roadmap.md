@@ -181,11 +181,17 @@ x64 teardown) are item 2.
      the queued G-c wake (item 5). But the trigger itself was not reproduced
      without the copy: with the placement off, client 1's ball at the same
      pose at the same check tick (`maps/arena-test/sp6_ctl/l8_pose_off`,
-     `l8_pose2_off`) wakes only `P_Modul_01_Pusher`, not the bridge. Find
-     which block wakes `P_Modul_29_Platte04` at 554 (the bridge's 80 m probe,
-     or the copy's `P_Modul_30_MF_R15` script reaching an original body) and
-     whether the copy behaves as a retail module would there; a copy waking
-     an original body would be a placement fidelity bug (S2/S3 code).
+     `l8_pose2_off`) wakes only `P_Modul_01_Pusher`, not the bridge.
+     **Root-caused (G-c, not a placement bug; 2026-10-27,
+     `.local-tools/work/SP6/bridge/`, recorded at step RO1):** the trigger
+     needs the original `P_Modul_29` at its s2 site - the module's own 80 m
+     XZ proximity probe (`TT Scaleable Proximity` #46782 -> `Physics WakeUp`
+     #47032 -> `Platte04`) fires when a ball comes within 80 m of the
+     original `P_Modul_29_MF`; with the placement off the union's s4 pass
+     moves the pooled module's frames to s4 while its bodies sleep at s2, so
+     the off controls never tested the s2 probe. The placement-on worlds are
+     the retail-faithful ones; the cross-world split is the queued G-c wake
+     (item 5). Nothing left here.
    - **One placement host helper** (SP6 review nit): the option-off policy
      and the hot-source hooks are written out in the server's
      `physics_world::place_sectors` and the headless host's `place_sectors`;
@@ -419,6 +425,42 @@ x64 teardown) are item 2.
      headless host's option-off release branch (a level still holding
      copies with the option off) and the scene refusal (an anchor outside
      the level scene) never ran live: no run reaches them (S10 territory).
+   - SP7 (sector placement S7, SimTool only, quick tier, 2026-10-27; ran:
+     x64 build, 530 tests, GCC 29 ok, V7 L8/L11 four arms, V8, V9 three
+     arms plus two option-off/no-pass controls, the forced-rollback replays
+     of `core_ref_s6/l8_cross` and one control of `sp6_ctl/l8_cross_off`;
+     V9 passed except gap F once step RO1 fixed the replay order, the fixed
+     births and the strings; the forced-rollback arm fails on gap L, see the
+     design's As built (step SP7)): (a) V11 for V7's hashes (x86 `build/sim-x86-a3` and the
+     Arch SimTool: the step's code was not built there); (b) V9 on L11 and a
+     window without the retail-ball park once Q is built; (c) the forced
+     rollbacks at 150 ms (§7.4 recipes are 0 ms here); (d) the Arch build
+     of `physics_world.cpp` (compiled into the Linux server through
+     `BallanceMMOSim`; `linux_test_syntax.sh` does not compile it).
+   - RO1 (the replay order, the window-born fixed bodies, the size-changed
+     strings; shared rollback code, quick tier, 2026-10-27; ran: x64 and x86
+     builds, 534 tests, GCC 29 ok, the wire check rSP6 -> rRO1 on
+     `core_ref_s6` (sends ALL SAME; journals identical except
+     `resync_snapoff`'s four, order-only from tick 1778), solo1/solo2
+     IDENTICAL to their live journals, V9 move (50/50 gap F only) and
+     no-move (PASS 50/50)): (a) a retail two-copy session crossing a sector
+     pass with a rollback over it, core on (the retail host records its
+     live order through the SDK's public `m_BeObjects`; built,
+     CLIENT-BUILD-OK, not run); (b) V9 on L11; (c) the V9
+     `--free-ids-before-load 20000` arm (crashes at teardown: item 6's
+     mechanism, root-caused at SP7's fix-up); (d) RO2, the user's
+     measurement step: (A) an activation whose first execution is inside a
+     replay and (B) the server and a retail client running one frame live
+     in different orders - whether either changes numbers (switch to one
+     canonical order on every host only if one does); (e) a core-off retail
+     run (the legacy path gets none of RO1: its binding passes no live
+     order and leaves `resize_strings` off, but the shared headers it
+     compiles changed); (f) a GCC/Linux compile of `script_replay.hpp`'s
+     CK-side code (`linux_test_syntax.sh` does not cover it); (g) a resync
+     capture with a fixed body born inside its window (the review fix-up
+     keeps the deferral under a travelling blob and after a failed script
+     restore; gate round: 534 tests, both builds, the wire check and V9
+     unchanged).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

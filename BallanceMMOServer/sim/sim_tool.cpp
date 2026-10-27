@@ -306,6 +306,11 @@ namespace {
         unsigned long long savestate_seed = 1;
         int savestate_every = 1;
         int savestate_lead = 1;
+        // --savestate-inert-from-birth (step S7, a DIAGNOSTIC, never a PASS): a
+        // round anchored before a FIXED window birth, which the restore keeps as
+        // an inert unknown body until its birth tick (rollback.hpp), is compared
+        // from that birth's record on only.
+        bool savestate_inert_from_birth = false;
         bool savestate_frames = false;
         bool legacy_restore = false;
         std::string savestate_trace;
@@ -362,6 +367,17 @@ namespace {
         std::vector<drop_again> drops_again;
         std::string placement_trace;
         bool placement_trace_ball = false;
+        // The id layout (design 7.2 V7/V9, step S7), in every session world
+        // this tool makes: --perturb-ids N creates N CK objects after the
+        // level load and destroys them before the anchor (ids are not
+        // reused: the copies land above a gap of N); --free-ids-before-load
+        // N creates N before the level request and destroys them with
+        // CK_DESTROY_FREEID one by one in ascending id order, so the load and
+        // then the copies take ids from the free list top-down (the copies
+        // below their originals, F13).  Either prints one copy/original id
+        // pair; -1 / 0: not given.
+        int perturb_ids = -1;
+        int free_ids_before_load = 0;
         // Step EG0 (rollback-engine-gaps-design.md §8 G0), diagnostics only,
         // off by default: --list-callback-blocks (a level run, at --dump-at
         // or the end): every block of the ten prototypes that queue into the
@@ -724,6 +740,16 @@ namespace {
             else if (arg == "--drop-height") { if (!(v = next())) return false; out.drop_height = static_cast<float>(std::atof(v)); }
             else if (arg == "--drop-sector") { if (!(v = next())) return false; out.drop_sector = std::atoi(v); }
             else if (arg == "--drop-second-sector") { if (!(v = next())) return false; out.drop_second_sector = std::atoi(v); }
+            else if (arg == "--perturb-ids") {   // step S7
+                if (!(v = next())) return false;
+                out.perturb_ids = std::atoi(v);
+                if (out.perturb_ids < 0) return false;
+            }
+            else if (arg == "--free-ids-before-load") {   // step S7
+                if (!(v = next())) return false;
+                out.free_ids_before_load = std::atoi(v);
+                if (out.free_ids_before_load < 1) return false;
+            }
             else if (arg == "--drop-settle") { if (!(v = next())) return false; out.drop_settle = std::atoi(v); }
             else if (arg == "--drop-prop") { if (!(v = next())) return false; out.drop_prop = v; }
             else if (arg == "--drop-player-at") {
@@ -833,6 +859,7 @@ namespace {
             else if (arg == "--seed") { if (!(v = next())) return false; out.savestate_seed = std::strtoull(v, nullptr, 0); }
             else if (arg == "--savestate-every") { if (!(v = next())) return false; out.savestate_every = std::atoi(v); }
             else if (arg == "--savestate-lead") { if (!(v = next())) return false; out.savestate_lead = std::atoi(v); }
+            else if (arg == "--savestate-inert-from-birth") out.savestate_inert_from_birth = true;
             else if (arg == "--frames") out.savestate_frames = true;
             else if (arg == "--legacy-restore") out.legacy_restore = true;
             else if (arg == "--savestate-trace") { if (!(v = next())) return false; out.savestate_trace = v; }
@@ -1826,6 +1853,45 @@ namespace {
     // can fail prints its own message and returns the exit code (0 = done),
     // so each mode keeps the codes and the output it always had.
 
+    // Step S7 (design 7.2 V7/V9): `n` plain CK objects (no name, no scene,
+    // no tick runs while they exist), and their destruction - with
+    // `free_ids`, one call per object in ascending id order, so the free
+    // list (CKObjectManager: pushed at UnRegisterObject, popped from the
+    // back) hands them out again top-down; a batch would push them in its
+    // dependency map's hash order.
+    std::vector<CK_ID> make_dummy_objects(CKContext* context, int n) {
+        std::vector<CK_ID> ids;
+        ids.reserve(static_cast<size_t>(std::max(0, n)));
+        for (int i = 0; i < n; ++i)
+            if (CKObject* o = context->CreateObject(CKCID_OBJECT, nullptr, CK_OBJECTCREATION_NONAMECHECK))
+                ids.push_back(o->GetID());
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    }
+    void destroy_dummy_objects(CKContext* context, std::vector<CK_ID>& ids, bool free_ids) {
+        CKDependencies none;
+        if (!free_ids) {
+            if (!ids.empty()) context->DestroyObjects(ids.data(), static_cast<int>(ids.size()), 0, &none);
+            return;
+        }
+        for (CK_ID& id: ids) context->DestroyObjects(&id, 1, CK_DESTROY_FREEID, &none);
+    }
+    // The first copy's root and its original's ids, and how many copies
+    // are below their originals (the id layout the arm asked for).
+    void print_copy_ids(const bmmo::sim::physics_world& world) {
+        const auto& copies = world.placement().copies();
+        size_t below = 0;
+        for (const auto& c: copies) below += c.root < c.source_id ? 1u : 0u;
+        if (copies.empty()) {
+            std::printf("ids: no copies (placement off or nothing to copy)\n");
+            return;
+        }
+        const auto& c = copies.front();
+        std::printf("ids: copy %s id=%u, original %s id=%u (%s); %zu of %zu copies below their originals\n",
+                    c.name.c_str(), static_cast<unsigned>(c.root), c.source.c_str(), static_cast<unsigned>(c.source_id),
+                    c.root < c.source_id ? "below" : "above", below, copies.size());
+    }
+
     std::unique_ptr<bmmo::sim::physics_world> create_session_world(const arguments& args, float spawn_impulse) {
         bmmo::sim::world_options options;
         options.game_root = args.root;
@@ -1838,9 +1904,31 @@ namespace {
         options.placement_fail_at = args.placement_fail_at;
         options.trafo_inputs = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;   // step K0
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
+        // Step S7: the id layout (--free-ids-before-load, --perturb-ids).
+        if (args.free_ids_before_load > 0) {
+            const int n = args.free_ids_before_load;
+            options.before_level_load = [n](CKContext* context) {
+                std::vector<CK_ID> ids = make_dummy_objects(context, n);
+                destroy_dummy_objects(context, ids, true);
+                std::printf("ids: %zu dummies created before the level load and freed (CK_DESTROY_FREEID, ascending), "
+                            "ids %u..%u\n", ids.size(), ids.empty() ? 0u : static_cast<unsigned>(ids.front()),
+                            ids.empty() ? 0u : static_cast<unsigned>(ids.back()));
+            };
+        }
+        if (args.perturb_ids > 0) {
+            const int n = args.perturb_ids;
+            options.before_anchor = [n](CKContext* context) {
+                std::vector<CK_ID> ids = make_dummy_objects(context, n);
+                destroy_dummy_objects(context, ids, false);
+                std::printf("ids: %zu dummies created after the level load and destroyed before the anchor, ids %u..%u\n",
+                            ids.size(), ids.empty() ? 0u : static_cast<unsigned>(ids.front()),
+                            ids.empty() ? 0u : static_cast<unsigned>(ids.back()));
+            };
+        }
         std::string error;
         auto world = bmmo::sim::physics_world::create(options, error);
         if (!world) std::fprintf(stderr, "world create failed: %s\n", error.c_str());
+        if (world && (args.perturb_ids >= 0 || args.free_ids_before_load > 0)) print_copy_ids(*world);
         return world;
     }
 
@@ -2078,15 +2166,32 @@ namespace {
             && !args.placement_trace_ball)
             return 0;
         const char* why = nullptr;
+        // Step S7: --savestate-check takes --second-move (a pass inside the
+        // window, or before it) in its drop and sector scenes; the trace and
+        // the second drop stay the plain --drop scene's.
+        if (args.savestate_check) {
+            if (!args.drops_again.empty() || !args.placement_trace.empty() || args.placement_trace_ball)
+                why = "--drop-again and --placement-trace are for the --drop scene only (--savestate-check takes --second-move)";
+            else if (args.drop_entity.empty() && args.spawn_test > 0)
+                why = "--second-move needs --savestate-check's drop or sector scene, not --spawn-test";
+            else if (args.drop_second_sector <= 0)
+                why = "--second-move moves the second player: it needs --drop-second-sector";
+            else if (!args.replay_session.empty() || !args.late_run.empty() || args.late_sector_check || args.resync_check
+                     || args.portable_scripts_check || args.list_placement)
+                why = "are for the --drop scene and --savestate-check only";
+            if (!why) return 0;
+            std::fprintf(stderr, "--second-move / --drop-again / --placement-trace: %s\n", why);
+            return 2;
+        }
         if (args.drop_entity.empty()) why = "need --drop (--replay-session takes the trace at S8)";
         else if (!args.replay_session.empty() || !args.synth_trafo_session.empty() || !args.describe_script.empty()
                  || !args.nav_mode.empty() || !args.savestate_diff[0].empty() || !args.savestate_describe.empty())
             why = "are for the --drop scene only";
         else if (args.placement_trace_ball && args.placement_trace.empty())
             why = "--placement-trace-ball needs --placement-trace";
-        else if (args.savestate_check || !args.late_run.empty() || args.late_sector_check || args.resync_check
+        else if (!args.late_run.empty() || args.late_sector_check || args.resync_check
                  || args.portable_scripts_check || args.list_placement)
-            why = "are for the --drop scene only (--savestate-check takes a pass inside the window at S7)";
+            why = "are for the --drop scene only (and --second-move for --savestate-check, step S7)";
         else if (!args.second_moves.empty() && args.drop_second_sector <= 0)
             why = "--second-move moves the second player: it needs --drop-second-sector";
         for (const arguments::drop_again& d: args.drops_again)
@@ -2270,11 +2375,17 @@ namespace {
                 std::printf("tick=%d player 1 moved to sector %d\n", i, args.drop_move_sector);
             }
             if (trafo) trafo->apply_inputs(static_cast<uint32_t>(i));
+            // Step S7 (V8): every body's surface before world tick N (the
+            // --second-move unit).
+            if (args.dump_surfaces_at >= 0 && static_cast<long long>(world->tick_index()) == args.dump_surfaces_at)
+                dump_surfaces(world->engine());
             if (!scene_tick(args, *world, error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
             if (trafo) trafo->after_frame(i, {});
             if (args.report_every > 0 && i % args.report_every == 0) report_parts(i);
             placement_tick_report(args, *world, i, (args.report_every > 0 && i % args.report_every == 0) || i + 1 == args.ticks);
         }
+        if (args.dump_surfaces_at >= 0 && static_cast<long long>(world->tick_index()) == args.dump_surfaces_at)
+            dump_surfaces(world->engine());   // step S7: N = the world tick after the last
         double fell = 0.0;
         for (const auto& body: watched(*world)) {
             auto it = start.find(body.name);
@@ -2407,7 +2518,16 @@ namespace {
     //             inside it is out of scope (a restore anchored before its
     //             birth tears its collision state down with the rest - the
     //             rollback parks and re-poses such a body, this mode would only
-    //             report the difference), and so is --drop-move.
+    //             report the difference), and so is --drop-move.  The
+    //             exception (step S7): --second-move SECTOR TICK with TICK
+    //             inside the window (needs --frames and --drop-second-sector)
+    //             makes the union's pass there, its module bodies born in the
+    //             window; the binding is then the session world's, the pass
+    //             re-issued in the replay and the window's births destroyed at
+    //             the restore and made again by the replayed scripts (the
+    //             clients' recipe), and a round whose chained live world holds
+    //             another body set than the record of its end has that world
+    //             made again from T0 first (as the trafo rounds do always).
     //   straight  for t in [T0, T0+N), at the tick boundary: the blob B[t]
     //             (get_savestate: the whole world), its hash and size, the
     //             world hash H[t] (every field), the exact core dump E[t], the
@@ -2651,6 +2771,7 @@ namespace {
         std::vector<uint8_t> blob;       // kept ticks
         std::string exact;               // kept ticks: describe_cores_exact
         std::vector<uint8_t> scripts;    // kept ticks, --frames: script_replay::capture
+        std::vector<std::string> bodies; // a pass inside the window (step S7): the movable bodies, sorted
         bmmo::physics::world_hash hash;
         bmmo::sim::physics_world::step_state counters;
     };
@@ -2743,7 +2864,16 @@ namespace {
             if (args.drop_second_sector > 0) scene += "+" + std::to_string(args.drop_second_sector);
         }
         close_globals_trace();   // step K0
-        if (!settle_world(*world, args.savestate_lead)) return 1;
+        {
+            // The lead through scene_tick (step S7): a --second-move due in
+            // it is made like the scene's own.
+            std::string lead_error;
+            for (int i = 0; i < args.savestate_lead; ++i)
+                if (!scene_tick(args, *world, lead_error)) {
+                    std::fprintf(stderr, "tick failed: %s\n", lead_error.c_str());
+                    return 1;
+                }
+        }
         scene = "level" + std::to_string(world->level()) + ":" + scene;
         CKIpionManager* physics = world->physics();
         CKContext* context = world->engine().context();
@@ -2751,6 +2881,71 @@ namespace {
             std::fprintf(stderr, "savestate-check: no physics environment after the scene\n");
             return 1;
         }
+
+        // ---- the passes inside the window (sector placement design 7.2 V9,
+        // step S7): the --second-move ticks in [T0, T0+N) are reported before
+        // that world tick of the straight pass, as the scene reports the
+        // earlier ones.  The union's pass then runs inside the window, so the
+        // window has births (the sector's module bodies) and a rewind across
+        // it is the clients' recipe: the binding is the session world's
+        // (bind_session_world), the pass recorded in the tick's pass slot of
+        // host support's manager_activations and re-issued before the
+        // replayed tick (replay_activation, the manager in the selection,
+        // every selected script written back), a window-born body destroyed
+        // at the restore and put back where its Physicalize found it
+        // (put_back_birth), and made again by the replayed module script.
+        const uint32_t window_t0 = world->tick_index();
+        std::map<uint32_t, std::vector<int>> window_moves;   // world tick -> sectors player 2 reports before it
+        for (const arguments::second_move& m: args.second_moves) {
+            if (m.tick < static_cast<long long>(window_t0)) continue;   // made by the scene or the lead
+            if (m.tick >= static_cast<long long>(window_t0) + window) {
+                std::fprintf(stderr, "--second-move %d %lld is after the window (%u..%u)\n", m.sector, m.tick, window_t0,
+                             window_t0 + static_cast<uint32_t>(window) - 1u);
+                return 2;
+            }
+            window_moves[static_cast<uint32_t>(m.tick)].push_back(m.sector);
+        }
+        const bool passes = !window_moves.empty();
+        if (passes && (!frames || legacy || !args.trafo.players.empty())) {
+            std::fprintf(stderr, "savestate-check: a --second-move inside the window needs --frames (the pass runs the module"
+                                 " scripts), and is not built with --legacy-restore or trafo inputs\n");
+            return 2;
+        }
+        CKBehavior* sector_manager = passes ? bmmo::game::find_root_script(context, "Gameplay_SectorManager") : nullptr;
+        if (passes && !sector_manager) {
+            std::fprintf(stderr, "savestate-check: no Gameplay_SectorManager for the passes inside the window\n");
+            return 1;
+        }
+        const CK_ID manager_id = sector_manager ? sector_manager->GetID() : 0;
+        bmmo::game::manager_activations activations;
+        bmmo::session::local_birth_log pass_births;
+        // The same births in the order they were made (record tick, name):
+        // the live world's re-make takes out every one after T0, fixed bodies
+        // included, which the movable-body names do not list.
+        std::vector<std::pair<uint32_t, std::string>> pass_birth_order;
+        const auto has_body = [&](const std::string& name) {
+            auto* entity = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()),
+                                                                                   CKCID_3DENTITY, nullptr));
+            PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+            return object && object->m_RealObject;
+        };
+        std::map<std::string, uint32_t> pass_generations;
+        std::set<std::string> ball_names;
+        for (const auto& row: world->ball_rows()) ball_names.insert(row.name);
+        const auto is_ball = [ball_names](const std::string& name) {
+            return name.find("_BMMO_") != std::string::npos || ball_names.count(name) != 0;
+        };
+        const auto moves_before = [&](uint32_t t) {   // player 2's reports due before world tick t
+            const auto due = window_moves.find(t);
+            if (due == window_moves.end()) return;
+            for (int sector: due->second) report_sector(*world, 2, sector);
+        };
+        size_t pass_birth_count = 0, passes_made = 0;
+        int inert_rounds = 0;   // --savestate-inert-from-birth rounds compared from a fixed birth on
+        uint64_t pass_reissued = 0, pass_recreated = 0, pass_recreated_exact = 0, pass_recreate_failures = 0,
+                 pass_missing = 0;
+        int pass_remakes = 0, pass_rounds_crossing = 0;
+        std::set<uint32_t> pass_ticks;   // replayed-tick keys of the passes (t+1 of the straight step at t)
 
         // ---- the trafo sets (S6, trafo-replication design 7.2): built after
         // the scene, their inputs inside the window.  An input's TICK is a
@@ -2872,6 +3067,14 @@ namespace {
             return bmmo::physics::step_physics(physics, bmmo::sim::kFixedDeltaMs, step_error);
         };
         std::vector<CK_ID> scripts_replayed;
+        // Step RO1: the order the straight pass's frames ran the selected
+        // scripts in, under the tick a rewind replays each as (t+1), for the
+        // binding (the clients' recording); the re-made live worlds do not
+        // record (their rounds compare with the straight pass).  And the
+        // window's fixed births the restore destroyed for the replayed
+        // scripts to make again: back after their birth tick, or missing.
+        bmmo::session::live_script_order live_order;
+        uint64_t live_orders_applied = 0, fixed_births_back = 0, fixed_births_missing = 0;
         uint32_t probe_tick = 0;                            // a round's first replayed tick: the restored world
         std::vector<uint8_t> restored_blob;                 // ... captured there, before any step
         std::vector<std::vector<uint8_t>> replayed_blobs;   // the blob after each replayed step
@@ -2888,6 +3091,17 @@ namespace {
                 if (!bmmo::physics::get_savestate(physics, restored_blob, probe_error)) capture_error = probe_error;
             }
             if (trafo) trafo->apply_inputs(tick, true);
+            // Step S7: the server world's own pre-script work of a tick
+            // (physics_world::tick): the proximity union's probe frames go
+            // to the nearest player ball and the ball identity copies follow
+            // it.  The binding steps the selected scripts, never tick(), so
+            // without this a replayed proximity block measured the frame where
+            // the live world's last tick left it (its "Current Distance"
+            // differed in 47 of 50 rounds with no pass in the window).
+            if (frames) {
+                world->update_proximity_probes();
+                world->update_ball_identity_reads();
+            }
         };
         binding_options.on_savestate_restored = [&](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
             if (!ok) {
@@ -2909,8 +3123,38 @@ namespace {
         script_options.scripts_replayed = &scripts_replayed;
         script_options.delta_ms = bmmo::sim::kFixedDeltaMs;
         if (trafo) script_options.trafo = &trafo->registry().part();
+        script_options.replay_activation = passes;   // step S7: every selected script written back
+        script_options.live_order = &live_order;       // step RO1
+        script_options.live_orders_applied = &live_orders_applied;
+        script_options.resize_strings = true;
+        std::vector<CK_ID> script_activations;
+        if (passes) script_activations = bmmo::game::session_script_activations(context, scripts);
         bmmo::session::rollback_world binding;
-        if (trafo) {
+        if (passes) {
+            // Step S7: the session world's binding, as the headless client's
+            // (and the late-sector check's) - the activation re-issued before
+            // each replayed tick, the window's births destroyed at the restore.
+            bmmo::session::core_world_hooks core;
+            core.replay_mechanisms = [physics]() { return bmmo::physics::movable_body_names(physics); };
+            core.ball = is_ball;
+            bmmo::session::session_world_options so;
+            so.binding = binding_options;
+            so.before_replayed_tick = binding_options.before_replayed_tick;
+            so.replay_activation = [&](uint32_t tick) {
+                if (activations.replay(context, manager_id, tick, true)) ++pass_reissued;
+            };
+            so.births = &pass_births;
+            so.put_back = [context](const std::string& entity, const bmmo::session::local_birth& birth) {
+                bmmo::game::put_back_birth(context, entity, birth);
+            };
+            so.fixed_birth_remade = [&](const std::string&, uint32_t, bool back) {   // step RO1
+                ++(back ? fixed_births_back : fixed_births_missing);
+            };
+            so.bind_scripts = [&backend, &script_options](bmmo::session::rollback_world& w) {
+                bmmo::session::bind_script_replay(w, backend, script_options);
+            };
+            binding = bmmo::session::bind_session_world(backend, core, so);
+        } else if (trafo) {
             std::set<std::string> pieces;
             for (const auto& set: trafo->registry().sets())
                 for (const auto& ts: set.types)
@@ -2966,6 +3210,7 @@ namespace {
         const auto no_input = [](const std::string&, uint32_t, bmmo::session::input_frame&) { return false; };
 
         // ---- the straight pass
+        if (passes) bmmo::physics::drain_event_log(physics);   // step S7: the window's births only
         std::string error;
         std::vector<straight_tick> straight(static_cast<size_t>(window));
         std::vector<int> reset_ticks;   // --frames: window indices at which a selected script had a reset pending
@@ -3027,6 +3272,12 @@ namespace {
                 tracked.mechanisms = bmmo::physics::movable_body_names(physics);
                 tracked.generations = trafo_generations;
             }
+            if (passes) {   // step S7: the body set changes at the pass
+                tracked.mechanisms = bmmo::physics::movable_body_names(physics);
+                tracked.generations = pass_generations;
+                rec.bodies = tracked.mechanisms;
+                std::sort(rec.bodies.begin(), rec.bodies.end());
+            }
             engine.record(binding, t, tracked, no_inputs);
             if (!legacy) {
                 const std::vector<uint8_t>* recorded = engine.recorded_savestate(t);
@@ -3043,9 +3294,46 @@ namespace {
             trace.put(line);
             if (args.verbose || (args.report_every > 0 && i % args.report_every == 0)) std::printf("%s\n", line);
             if (trafo) trafo->apply_inputs(t + 1u, false);
+            std::set<int> active_before;
+            if (passes) {
+                active_before = world->active_sectors();
+                if (const auto due = window_moves.find(t); due != window_moves.end())
+                    for (int sector: due->second) std::printf("savestate-check: tick=%u player 2 moved to sector %d\n", t, sector);
+                moves_before(t);
+            }
             if (!step(error)) {
                 std::fprintf(stderr, "savestate-check: the straight pass's step at tick %u failed: %s\n", t, error.c_str());
                 return 1;
+            }
+            if (frames) live_order.record(t + 1u, bmmo::game::script_replay::live_frame_order(context, scripts));   // step RO1
+            if (passes) {
+                // Step S7: the step's births (keyed by the record that first
+                // carries them, t+1, the tick a rewind replays this step as),
+                // its lifetime changes, the union's pass in the pass slot of
+                // that replayed tick and the frame's pending activations for
+                // the next one (the late-sector check's recording, shifted to
+                // this mode's record convention).
+                bmmo::session::parse_event_log(bmmo::physics::drain_event_log(physics),
+                                               [&](const std::string& kind, const std::string& text) {
+                    if (kind == "recipe") {
+                        bmmo::session::local_birth birth;
+                        if (bmmo::session::parse_recipe_event(text, birth) && !is_ball(birth.name)) {
+                            pass_birth_order.emplace_back(t + 1u, birth.name);
+                            pass_births.add(t + 1u, std::move(birth));
+                            ++pass_birth_count;
+                        }
+                    } else if ((kind == "created" || kind == "deleted") && !text.empty()) {
+                        ++pass_generations[text];
+                    }
+                });
+                for (int s: world->active_sectors())
+                    if (!active_before.count(s)) {
+                        activations.set_pass(t + 1u, s);
+                        pass_ticks.insert(t + 1u);
+                        ++passes_made;
+                        std::printf("savestate-check: sector +%d in the step at tick %u (replayed as %u)\n", s, t, t + 1u);
+                    }
+                activations.record_pending(context, manager_id, script_activations, t + 2u);
             }
             if (trafo) {
                 // The step's births (the recipes), keyed by the record that
@@ -3151,11 +3439,84 @@ namespace {
                         premise = "the re-made live world at " + std::to_string(t0 + static_cast<uint32_t>(e)) + " is not the straight pass's";
                 }
             }
+            // Step S7: a pass inside the window changes the body set, and the
+            // rewind's body plan reads it from the engine's records - the live
+            // world has to hold the bodies the record of e names.  A world
+            // chained from the previous round's end on the other side of a
+            // birth does not, so it is made again as the trafo rounds' is, but
+            // only then: every window-born body taken out (its script's joint
+            // handles released, the event log muted) and put back where its
+            // Physicalize found it, the record of t0 restored, the straight
+            // pass's whole world ticks re-run to e with the moves.
+            if (passes) {
+                std::vector<std::string> now = bmmo::physics::movable_body_names(physics);
+                std::sort(now.begin(), now.end());
+                const straight_tick& end_rec = straight[static_cast<size_t>(e)];
+                // Every body first born after T0 (fixed ones included: the
+                // movable names do not list them), with its earliest birth.
+                const uint32_t end_tick = t0 + static_cast<uint32_t>(e);
+                std::map<std::string, uint32_t> first_birth;
+                for (const auto& [tick, name]: pass_birth_order) first_birth.emplace(name, tick);
+                bool fixed_differ = false;
+                for (const auto& [name, tick]: first_birth)
+                    if (tick > t0 && has_body(name) != (tick <= end_tick)) fixed_differ = true;
+                if (now != end_rec.bodies || fixed_differ) {
+                    ++pass_remakes;
+                    std::string remake_error, mute_error;
+                    // Newest first, each name once, put back at its earliest
+                    // birth (the destroy recipe of the record-capture mode).
+                    std::set<std::string> done;
+                    for (auto it = pass_birth_order.rbegin(); it != pass_birth_order.rend(); ++it) {
+                        const std::string& name = it->second;
+                        const uint32_t born = first_birth[name];
+                        if (born <= t0 || !done.insert(name).second || !has_body(name)) continue;
+                        const auto held = bmmo::game::script_replay::joints_on(context, scripts, name);
+                        backend.set_event_log_muted(true, mute_error);
+                        if (backend.unphysicalize(name.c_str(), remake_error)) {
+                            if (!held.empty()) bmmo::game::script_replay::release_joints(held);
+                            if (const bmmo::session::local_birth* birth = pass_births.find(name, born))
+                                bmmo::game::put_back_birth(context, name, *birth);
+                        } else if (premise.empty()) {
+                            premise = "taking " + name + " out for the round's live world failed: " + remake_error;
+                        }
+                        backend.set_event_log_muted(false, mute_error);
+                    }
+                    world->restore_step_state(straight[0].counters);
+                    engine = pristine;
+                    engine.forget_after(t0);
+                    if (!engine.rewind_to(binding, t0, t0, no_input, "savestate-check: the round's live world")
+                            && premise.empty())
+                        premise = "the restore of t0 for the round's live world was refused";
+                    for (int i = 0; i < e; ++i) {
+                        moves_before(t0 + static_cast<uint32_t>(i));
+                        if (!step(remake_error)) {
+                            std::fprintf(stderr, "savestate-check: re-stepping round %zu's live world failed: %s\n", r,
+                                         remake_error.c_str());
+                            return 1;
+                        }
+                    }
+                    bmmo::physics::drain_event_log(physics);
+                    std::vector<uint8_t> live;
+                    std::vector<std::string> remade = bmmo::physics::movable_body_names(physics);
+                    std::sort(remade.begin(), remade.end());
+                    if (!bmmo::physics::get_savestate(physics, live, remake_error) || !end_rec.kept || live != end_rec.blob
+                            || remade != end_rec.bodies
+                            || std::any_of(first_birth.begin(), first_birth.end(), [&](const auto& b) {
+                                   return b.second > t0 && has_body(b.first) != (b.second <= end_tick);
+                               })) {
+                        std::printf("  round %zu: the re-made live world at %u is not the straight pass's%s\n", r,
+                                    t0 + static_cast<uint32_t>(e), end_rec.kept ? "" : " (not kept)");
+                        if (premise.empty())
+                            premise = "the re-made live world at " + std::to_string(t0 + static_cast<uint32_t>(e))
+                                    + " is not the straight pass's";
+                    }
+                }
+            }
             // The world's own per-tick bookkeeping (tick index, RNG cursors,
             // the sector union) at the anchor; the engine knows the physics.
             world->restore_step_state(anchor.counters);
             engine = pristine;
-            if (trafo) engine.forget_after(t0 + static_cast<uint32_t>(e));
+            if (trafo || passes) engine.forget_after(t0 + static_cast<uint32_t>(e));
             probe_tick = t0 + static_cast<uint32_t>(a) + 1u;
             restored_blob.clear();
             replayed_blobs.clear();
@@ -3188,7 +3549,21 @@ namespace {
                 std::string probe_error;
                 if (!bmmo::physics::get_savestate(physics, restored_blob, probe_error)) failure = "capture error: " + probe_error;
             }
-            if (failure.empty() && restored_blob != anchor.blob) {
+            // --savestate-inert-from-birth (a diagnostic): the latest FIXED
+            // body first born inside (anchor, e]; until its record the
+            // restored world holds it inert and is not the anchor's.
+            uint32_t inert_until = 0;
+            if (passes && args.savestate_inert_from_birth) {
+                const std::vector<std::string>& movable_at_e = straight[static_cast<size_t>(e)].bodies;
+                std::map<std::string, uint32_t> first;
+                for (const auto& [tick, name]: pass_birth_order) first.emplace(name, tick);
+                for (const auto& [name, tick]: first)
+                    if (tick > t0 + static_cast<uint32_t>(a) && tick <= t0 + static_cast<uint32_t>(e)
+                            && !std::binary_search(movable_at_e.begin(), movable_at_e.end(), name))
+                        inert_until = std::max(inert_until, tick);
+                if (inert_until) ++inert_rounds;
+            }
+            if (failure.empty() && restored_blob != anchor.blob && !inert_until) {
                 failure = "restore identity: " + blob_difference(anchor.blob, restored_blob);
                 expected_blob = &anchor.blob;
                 current = restored_blob;
@@ -3199,6 +3574,7 @@ namespace {
             // off (--legacy-restore) the step wrapper's capture.
             for (int k = 1; failure.empty() && k <= d; ++k) {
                 const int i = a + k;
+                if (t0 + static_cast<uint32_t>(i) < inert_until) continue;
                 fail_index = i;
                 const straight_tick& expected = straight[static_cast<size_t>(i)];
                 const std::vector<uint8_t>* recorded = legacy ? nullptr : engine.recorded_savestate(t0 + static_cast<uint32_t>(i));
@@ -3263,7 +3639,15 @@ namespace {
                 trafo_recreated_exact += engine.stats().births_recreated_exact - pristine.stats().births_recreated_exact;
                 trafo_missing += engine.stats().births_missing - pristine.stats().births_missing;
             }
-            if (failure.empty() && !premise.empty()) failure = "premise: " + premise;
+            if (passes) {   // step S7
+                for (uint32_t x: pass_ticks)
+                    if (x > t0 + static_cast<uint32_t>(a) && x <= t0 + static_cast<uint32_t>(e)) { ++pass_rounds_crossing; break; }
+                pass_recreated += engine.stats().births_recreated - pristine.stats().births_recreated;
+                pass_recreated_exact += engine.stats().births_recreated_exact - pristine.stats().births_recreated_exact;
+                pass_recreate_failures += engine.stats().birth_recreate_failures - pristine.stats().birth_recreate_failures;
+                pass_missing += engine.stats().births_missing - pristine.stats().births_missing;
+            }
+            if (!premise.empty()) failure = failure.empty() ? "premise: " + premise : failure + " [premise: " + premise + "]";
             char line[1024];
             if (!failure.empty()) {
                 ++failed;
@@ -3313,10 +3697,34 @@ namespace {
                         trafo_death_ticks.size(), static_cast<unsigned long long>(trafo_recreated),
                         static_cast<unsigned long long>(trafo_recreated_exact), static_cast<unsigned long long>(trafo_missing));
         }
-        const bool pass = failed == 0 && run == static_cast<int>(schedule.size()) && (!trafo || trafo->failures() == 0);
-        std::printf("%s rounds=%d failed=%d\n", pass ? "PASS" : "FAIL", run, failed);
+        if (passes) {   // step S7
+            std::printf("savestate-check: passes inside the window %zu (rounds crossing one %d), window births logged %zu,"
+                        " activations re-issued %llu; bodies destroyed at a restore and made again by the replay %llu, %llu"
+                        " of them exactly at their birth record, recreate failures %llu, missing %llu; live worlds re-made"
+                        " %d\n", passes_made, pass_rounds_crossing, pass_birth_count,
+                        static_cast<unsigned long long>(pass_reissued), static_cast<unsigned long long>(pass_recreated),
+                        static_cast<unsigned long long>(pass_recreated_exact),
+                        static_cast<unsigned long long>(pass_recreate_failures), static_cast<unsigned long long>(pass_missing),
+                        pass_remakes);
+            std::printf("savestate-check: fixed window births destroyed at a restore for the replayed scripts (step RO1): back"
+                        " after their birth tick %llu, missing %llu\n", static_cast<unsigned long long>(fixed_births_back),
+                        static_cast<unsigned long long>(fixed_births_missing));
+            if (passes_made == 0) std::printf("savestate-check: no --second-move inside the window made a pass\n");
+            if (args.savestate_inert_from_birth)
+                std::printf("savestate-check: --savestate-inert-from-birth: %d rounds compared from a fixed window birth's"
+                            " record on (a diagnostic: no verdict)\n", inert_rounds);
+        }
+        const bool pass = failed == 0 && run == static_cast<int>(schedule.size()) && (!trafo || trafo->failures() == 0)
+                       && (!passes || (passes_made > 0 && pass_recreate_failures == 0 && pass_missing == 0
+                                       && fixed_births_missing == 0));
+        if (frames)
+            std::printf("savestate-check: live script order (step RO1): %zu change(s) recorded, %llu replayed frame(s) ran"
+                        " in it\n", static_cast<size_t>(live_order.changes()),
+                        static_cast<unsigned long long>(live_orders_applied));
+        std::printf("%s rounds=%d failed=%d\n", args.savestate_inert_from_birth ? "DIAGNOSTIC" : pass ? "PASS" : "FAIL", run,
+                    failed);
         std::fflush(stdout);
-        return pass ? 0 : 3;
+        return pass && !args.savestate_inert_from_birth ? 0 : 3;
     }
 
     // Replays a client recording through the physics-session machinery
@@ -7001,6 +7409,7 @@ namespace {
             bmmo::game::put_back_birth(context, entity, birth);
         };
         std::vector<CK_ID> scripts_replayed;
+        bmmo::session::live_script_order late_live_order;   // step RO1: the live frames' script order, by tick
         w.bind_scripts = [&](bmmo::session::rollback_world& bound) {
             bmmo::session::script_binding_options so;
             so.context = context;
@@ -7009,6 +7418,8 @@ namespace {
             so.scripts_replayed = &scripts_replayed;
             so.delta_ms = bmmo::sim::kFixedDeltaMs;
             so.replay_activation = true;
+            so.live_order = &late_live_order;   // step RO1
+            so.resize_strings = true;
             bmmo::session::bind_script_replay(bound, backend, so);
         };
         bmmo::session::rollback_world binding = bmmo::session::bind_session_world(backend, core_hooks, w);
@@ -7182,6 +7593,7 @@ namespace {
                 }
             active_before = world->active_sectors();
             activations.record_pending(context, manager_id, script_activations, t + 1);
+            late_live_order.record(t, bmmo::game::script_replay::live_frame_order(context, sel));   // step RO1
             bmmo::session::rollback_tracked tracked;
             tracked.mechanisms = mechanisms();
             tracked.generations = generations;
@@ -7547,7 +7959,7 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool --root <game dir> --level N --savestate-check [--spawn-test N | --drop <entity> <ball type>\n"
             "           [--drop-at X Y Z] [--drop-prop ENTITY] ... | --drop-sector N] [--ticks N] [--rounds R] [--max-depth D]\n"
             "           [--seed S] [--savestate-every K] [--savestate-lead L] [--frames] [--legacy-restore]\n"
-            "           [--savestate-trace PATH] [--stop-on-divergence] [--verbose]\n"
+            "           [--savestate-trace PATH] [--stop-on-divergence] [--verbose] [--savestate-inert-from-birth]\n"
             "           (IVP savestate robustness check: chained seeded rollbacks must reproduce the straight run's\n"
             "            savestate blobs byte for byte; exit 0 PASS, 3 FAIL, 2 vacuous scene)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --portable-scripts-check [--drop-settle N] [--verbose]\n"
@@ -7567,6 +7979,11 @@ int main(int argc, char** argv) {
             "            scripts/placement_check.py: the second player's passes and the ball's second drops before\n"
             "            those world ticks; the --drop-sector rows' hierarchies, and player 1's ball, after every\n"
             "            world tick)\n"
+            "       --savestate-check --frames ... --drop-second-sector N --second-move SECTOR TICK...  (step S7: a pass\n"
+            "            inside the window, its births destroyed at a restore and made again by the replay)\n"
+            "       any session world: [--perturb-ids N] [--free-ids-before-load N]  (step S7: N CK objects made and\n"
+            "            destroyed before the anchor / freed before the level load; prints a copy/original id pair)\n"
+            "       --drop ... [--dump-surfaces-at N]  (every body's surface before world tick N, V8)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --resync-check S B [--resync-arms ERSA]\n"
             "           [--resync-stamp SECTOR TICK ...] [--resync-sector K] [--resync-shift N] [--resync-perturb M]\n"
             "           [--resync-perturb-ticks N] [--resync-after N] [--resync-drop TICK --drop <entity> <ball type>\n"

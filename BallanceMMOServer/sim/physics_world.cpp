@@ -158,6 +158,7 @@ namespace bmmo::sim {
             capture_trafo_reference();
         }
         bmmo::physics::drain_event_log(engine_->physics());  // install the listener
+        if (options_.before_level_load) options_.before_level_load(engine_->context());   // SimTool only (step S7)
         engine_->request_level(options_.level);
         int waited = 0;
         while (!gameplay_ingame_active(engine_->context())) {
@@ -189,6 +190,7 @@ namespace bmmo::sim {
     bool physics_world::anchor(std::string& error) {
         CKContext* context = engine_->context();
         CKIpionManager* manager = engine_->physics();
+        if (options_.before_anchor) options_.before_anchor(context);   // SimTool only (step S7)
         if (!bmmo::physics::reset_session_clock(manager, options_.seed, error)) return false;
         // Design 9.26: the mechanisms start from the level file's Sequencer
         // counters on every side (the boot's own first play advanced them).

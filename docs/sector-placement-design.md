@@ -1676,11 +1676,17 @@ current deployed lead and input delay:
       with the ball resting by the bridge's end (`l8_near_off`); a ball
       dropped onto a plate (`l8_bridge_off`) breaks it in every world alike
       (a contact, not a probe). So the bridge's cross-world cause is the same
-      G-c wake, but its trigger needs the copy and is not explained: queued
-      as "SP6 bridge trigger" (roadmap §4 item 1) - the bridge's own probe,
-      or the copy's `P_Modul_30_MF_R15` script reaching an original body
-      (which would be a placement fidelity bug in the S2/S3 code the server
-      has run since S3, not in this step's host code).
+      G-c wake, and its trigger needs the original `P_Modul_29` at its s2
+      site, not the copy (root-caused after the chain, step RO1's docs;
+      `.local-tools/work/SP6/bridge/`): the module's own 80 m XZ proximity
+      probe (`TT Scaleable Proximity` #46782 -> `Physics WakeUp` #47032 ->
+      `Platte04`) fires when a ball comes within 80 m of the ORIGINAL
+      `P_Modul_29_MF` at s2. With the placement off, the union's s4 pass
+      moves the pooled module's frames to s4 while its bodies sleep at s2,
+      so `l8_near_off` / `l8_bridge_off` had the probe's anchor at s4 and
+      never tested it; the placement-on worlds are the retail-faithful ones
+      and the cross-world split is G-c. Not a placement fidelity bug (the
+      roadmap §4 item 1 entry "SP6 bridge trigger" is closed as G-c).
   - **The arena regression** (one run, snapshots off, 150 ms, 4 clients,
     captured: `core_ref_s6/resync_snapoff`): signature `ecfbfd9b63a330b5`
     (placement off, 0 copies; S5's) and `level walk seen at tick 30` on the
@@ -1715,6 +1721,223 @@ current deployed lead and input delay:
 - **Deferred** (roadmap §4 item 7's list): L8 late; the rest of
   `core_ref_rc1`'s and `core_ref_t3`'s arms re-captured at protocol 12; the
   two branches above that no run reaches.
+
+**As built (step SP7 = S7, 2026-10-27; V9 passed at step RO1 except gap F
+- see the results).**
+
+- **Where.** SimTool only (`sim_tool.cpp`) and two unset hooks in
+  `physics_world` (`world_options::before_level_load`, called right before
+  the level request, and `before_anchor`, at the start of `anchor()`, before
+  the restores and the placement; every world but SimTool's leaves them
+  empty). Nothing under `BallanceMMOCommon`, the headless client, the
+  server's behaviour or the retail mod changed; no protocol, journal, record
+  or engine change.
+- **`--perturb-ids N`** makes N plain `CKCID_OBJECT`s in `before_anchor` and
+  destroys them in one call (ids are not reused: the copies land N above).
+  **`--free-ids-before-load N`** makes N in `before_level_load` and destroys
+  them with `CK_DESTROY_FREEID` **one call per object in ascending id
+  order** (adaptation: a batch would push the free list in
+  `FinishDestroyObjects`' dependency-map hash order, CKContext.cpp:1628-1641;
+  the free list pops from the back, CKObjectManager.cpp:342-363). Both print
+  the first copy's and its original's ids and how many copies are below
+  their originals (`ids: copy P_Modul_30_MF_R15 id=51469, original
+  P_Modul_30_MF id=59895 (below); 19 of 39 copies below their originals` on
+  L8 with 20000; 20 of 53 on L11 - the level load takes the top of the free
+  list, so not every copy is below).
+- **`--dump-surfaces-at N`** now works in the drop scene too (before world
+  tick N, the `--second-move` unit).
+- **`--savestate-check` takes `--second-move`** (needs `--frames` and
+  `--drop-second-sector`; not with `--legacy-restore` or trafo inputs): a
+  move before T0 is made by the scene or the lead (the lead now runs through
+  `scene_tick`), one inside [T0, T0+N) before that straight tick, one after
+  the window is refused. With a pass in the window the binding is
+  `bind_session_world` (the clients' recipe, as the late-sector check's):
+  the pass recorded with `manager_activations::set_pass(t+1)` and the frame's
+  pending activations with `record_pending(t+2)` (this mode's record of t
+  is BEFORE step t, so the step at t is replayed as t+1), re-issued by
+  `replay_activation`, every selected script written back
+  (`replay_activation = true`), the window's births logged at t+1 from the
+  event log (balls excluded) and destroyed / put back / made again by the
+  replayed scripts, `tracked.mechanisms` re-read every tick. A chained
+  round whose live world holds another body set than the record of its end
+  (the movable names, or a body first born after T0 - fixed ones included -
+  present or absent against its first birth tick) has that world re-made
+  from T0: every body first born after T0 that has a body taken out newest
+  first, its joint handles released, put back at its EARLIEST birth after
+  T0; T0 restored; the straight ticks re-run with the moves; the result
+  checked against the record of the round's end (body set and blob). PASS
+  additionally needs a pass made, 0 recreate failures and 0 missing births.
+  A failed premise is printed on the FAIL line (`[premise: ...]`) even when
+  the round failed for another reason first.
+- **Fix-up round (review of 2026-10-27).** The first build's re-make took
+  out only the movable names absent at T0, so the pass's two FIXED bodies
+  (`P_Modul_01_Filler`, `P_Modul_01_Rinne`) stayed, were seen as unknown
+  bodies by the T0 restore and rechecked into collision detection at once:
+  the re-made world failed in all 10 re-makes (hidden, the premise was
+  printed only for an otherwise clean round). Fixed as above (10 re-makes,
+  0 premise failures). Also: the replay's per-tick host hook now runs the
+  server world's own pre-script work of a tick (`update_proximity_probes`,
+  `update_ball_identity_reads`; `physics_world::tick` does it before the
+  behaviour pass, the binding never calls `tick`): see V9.
+- **`--savestate-inert-from-birth`** (a diagnostic, prints `DIAGNOSTIC`
+  and exits 3, never a PASS): a round anchored before a FIXED window birth
+  skips the restore identity and the replayed blobs before that birth's
+  record and compares from it on - it measures whether the clients' recipe
+  (rollback.hpp:1230-1248: the fixed birth kept inert, rechecked at its
+  birth tick) is exact after the birth.
+- **V7: PASS.** L8 (passes 2-5 at world ticks 40/60/80/100) and L11 (2-6 at
+  40-120), 500 ticks, `--placement on`: `--perturb-ids 37`, `1000` and
+  `--free-ids-before-load 20000` each give the 501 `tickhash` lines of
+  `--perturb-ids 0` byte for byte (signatures `91a138e4fd6e7254` /
+  `5d22d3b5a61c38cb` in every arm). Q5's across-worlds half: neutral.
+- **V8: PASS.** L8, passes 2,3,4,5 vs 5,4,3,2, surfaces dumped before world
+  tick 400: 132 bodies (47 copy bodies) in both, every body's surface
+  identical (hash `08870ad9084b5e14` both). Q6: nothing to do.
+- **Finding: an x64 teardown crash with copies below their originals -
+  roadmap §4 item 6, root-caused.** Every L8 drop scene with `--placement on
+  --free-ids-before-load 20000` that ran sector 1 crashes after its last
+  tick, in the context reset (`headless_engine::~headless_engine` ->
+  `CKContext::Reset` -> `CKObjectManager::OnCKReset` -> `DestroyObjects` ->
+  `ExtraCallBack` -> `DestroyExtra` -> `ShowParticles`, reading
+  `0x00007FF600000008`). It does not happen with the placement off and
+  20000, with the placement on and 3000 (copies above), or with 0 ticks (no
+  Extra initialized); L11 with 20000 does not crash. Cause (fix-up round,
+  a diagnostic build listing the dynamic root scripts left after
+  `release()`): 137 remain in both the crashing arm and `--perturb-ids 0`,
+  among them the BUILDER's copies `P_Extra_Point_MF001..003` (not the
+  placement's, which `release` orders), whose MF scripts have ids 51597 /
+  52468 / 53339 with `--perturb-ids 0` and 56050 / 55179 / 54308 (falling)
+  with 20000 freed ids. The context reset destroys them through
+  `FinishDestroyObjects`' dependency-map iteration (CKContext.cpp:1628-1641,
+  an id-hash order), so their particle blocks' DETACH can come before their
+  Extra block's - the S2 mechanism (the x64 `SetLocalParameterObject`
+  over-read, roadmap §4 item 6) on the builder's unordered copies, which the
+  item already names. Confirmed: destroying those three MF scripts first in
+  the world's destructor (S2's order, one call) makes the same run exit 0
+  with an identical tick-hash stream (experiment only, not in the tree;
+  `.local-tools/work/SP7/experiments/`). Retail x86 cannot meet it; V7's
+  hashes are unaffected (the crash is after the last tick). The fix belongs
+  to item 6 (order the builder's copies' teardown as `release` does, or the
+  engine change it names).
+- **V9: PASS except gap F after step RO1** (final numbers at the end of
+  this item; below, the SP7 rounds as they were found: two causes fixed in
+  the fix-up round, four remained) (L8 drop
+  scene on the s1 see-saw, `--second-move 2` inside the window, 50 rounds,
+  depth 48; `.local-tools/work/SP7/v9r.sh`, outputs `v9r/`).
+  - window 31..230 (the default lead), move at 80: round 0 refused at the
+    restore, "the PreSimulate queue differs" (live: `Physics WakeUp in
+    Gameplay_Ingame`, four `PhysicsCollDetection in Sound_Manager`;
+    recorded: none). The same command WITHOUT the move fails identically:
+    the retail ball is parked at world tick 204 (`retail ball parked (body
+    removed)`), its blocks retry from the PreSimulate queue, and the queue
+    is never rewound - gap Q (rollback-engine-gaps-design §1.1),
+    pre-existing.
+  - window 210..409 (`--savestate-lead 180`), no move (control): **PASS,
+    50 of 50** after the fix-up (47 of 50 failed before on `P_Modul_18_MF
+    Script / TT Scaleable Proximity` "Current Distance": the block's
+    ObjectA is the server world's rewired probe frame `BMMO_Prox_n`
+    (physics_world.cpp:414-444), put on the nearest ball by
+    `update_proximity_probes` in `physics_world::tick` before the scripts;
+    the replay steps the scripts without `tick`, so a replayed proximity
+    measured the frame where the live world's last tick left it - a
+    harness gap of SimTool's server-world stand-in, fixed in the binding's
+    per-tick hook; no client world rewires probes).
+  - window 210..409, move at 260 (pass replayed as 261): 50 of 50 fail.
+    10 live worlds re-made, 0 premise failures; 126 bodies destroyed at a
+    restore and made again by the replay, 126 exactly at their birth
+    record, 0 recreate failures, 0 missing.
+    - 38 rounds: `P_Modul_18_Particle Script` flags `0x400000` vs 0 only
+      (2 logical, 0 float) - gap F, queued.
+    - 6 rounds anchored before the pass: restore identity "world - objects
+      44 46": the pass's two FIXED bodies are not in the engine's plan (it
+      tracks movable bodies, `tracked.mechanisms`), so the restore keeps
+      them inert with a recheck at their birth tick (rollback.hpp:1230-1248)
+      - by design, not the anchor's world. With
+      `--savestate-inert-from-birth` the same 6 rounds replay 261..265 byte
+      for byte and diverge at **266: "world - ov_nodes 59 58"**, the blob
+      describe showing the physics_RT movable list in another order
+      (straight `P_Modul_41004, 41001, 41006, 41003, 41005, 41002, 41`,
+      replay `41006, 41005, 41004, 41003, 41002, 41001, 41`). The deferral
+      is NOT the cause: destroying the fixed births at the restore instead
+      (they are then made again by the replayed scripts; experiment only)
+      makes the restore identity pass and diverges identically at 266; and
+      the placement is NOT the cause: `--placement off` diverges identically
+      at 266 (59 vs 58). So a rollback anchored before a sector pass is not
+      exact 5 ticks after the replayed pass, independent of this step: some
+      order state of the pass's bodies (the order the `P_Modul_41` pieces
+      enter the movable list when they start moving) is not carried by the
+      blob and not reproduced by the replayed activation. Root cause NOT
+      established: the next measurement is the IVP / physics_RT order of
+      the `P_Modul_41` pieces at their creation in the live frame vs the
+      replayed one. It belongs to the sector-activation replay
+      (world-agreement / rollback-engine track), not to the placement.
+    - 6 rounds that end before the pass, on a re-made live world:
+      `Gameplay_SectorManager / Activate Sector: parameter size` (1
+      logical). Cause: `restore_parameter` (script_replay.hpp:1252) leaves
+      a parameter whose size changed since the record untouched, and the
+      sector manager's string locals (`Activate Sector` Pin 1 / Pin 2 /
+      Groupname) and `Get Key Row`'s output Group Name change length with
+      the sector a pass activates. Confirmed with an experiment build that
+      writes a size-changed parameter with the base
+      `CKParameter::SetValue` (resizes, no `DataChanged`): those 6 rounds
+      then fail only on gap F. A shared record-restore change (headless,
+      server-free, retail), not made here; in a client the replayed pass
+      rewrites these values before they are read, so the effect is on the
+      re-recorded script records of the ticks before the pass.
+  - **Root-caused and fixed at step RO1** (2026-10-27,
+    `.local-tools/work/SP7/r266/`; lockstep-without-snapshots.md "As built
+    (step RO1)"): the tick-266 split is the replay's script ORDER - the live
+    frame runs the active objects in `CKBehaviorManager::m_BeObjects` order
+    (a hash-ordered append, then an unstable priority-only sort), the
+    replay ran `script_replay::select`'s (-priority, CK id) order, and
+    `P_Modul_41`'s seven pieces come from seven scripts, so they were
+    created (and IVP revived them, and physics_RT listed them) in another
+    order; values were equal. The "objects 44 46" restore identity is the
+    deferral of the pass's two fixed bodies; the "parameter size" rounds are
+    `restore_parameter` leaving a size-changed string. RO1: the host records
+    its own live frame's script order and the replay runs in it; a
+    window-born fixed body a selected script makes again is destroyed at
+    the restore (with a guard) and made again by the replay; a size-changed
+    string is written back without propagation.
+  - **Final (step RO1's build `build-agent-rRO1`,
+    `.local-tools/work/RO1/v9.sh`, outputs `.local-tools/work/RO1/v9/`):**
+    window 210..409, move at 260: **50 of 50 rounds fail on gap F's
+    window-end line only** (`P_Modul_18_Particle Script` flags `4194304` vs
+    0; 44 "2 logical", 5 "2 logical" crossing a script reset, 1 "1
+    logical" crossing a script reset; every FAIL at its round's last tick),
+    0 premise failures, 10 live worlds re-made, 126 bodies destroyed at a
+    restore and made again by the replay (126 exactly at their birth
+    record), 0 recreate failures, 0 missing; 12 fixed window births
+    destroyed at a restore and back after their birth tick, 0 missing;
+    the live script order: 3 changes recorded, 1147 replayed frames ran in
+    it. The six rounds anchored before the pass (0, 9, 15, 16, 48, 49) and
+    the six "parameter size" rounds now fail on gap F only. No-move control:
+    **PASS 50 of 50**. Not re-run (the change cannot reach them): V7, V8
+    (straight runs, no rollback), the §7.4 forced rollbacks (the headless
+    client's journals over `core_ref_s6` are identical or order-only
+    different, see RO1's wire check), the `--free-ids-before-load 20000`
+    arm (its teardown crash is roadmap §4 item 6; deferred).
+  - the same with `--free-ids-before-load 20000`: the same kinds and counts,
+    then the teardown crash above (exit 139).
+- **§7.4 forced rollbacks: FAIL on a queued gap; the pass windows exact.**
+  `core_ref_s6/l8_cross`'s four captures replayed by rSP7 with
+  `--force-rollback 10:24` (`.local-tools/work/SP7/fr.sh`; the headless
+  client is unchanged since rSP6, whose plain replays are identical to the
+  live journals): every journal is identical to the control through the
+  rewinds at 310-400 whose windows hold the s2 and s4 passes (309, 316),
+  and first differs at the first rewind whose window holds a remote ball's
+  death (c0's beam unphysicalizes its ball at 401: c1-c3 differ from 411;
+  c0 from 511, after c1/c3's beams at 501). `worst_bodies.py` c1: the three
+  other balls 0.36-0.38 m at 412, then the Pusher (G-c). The placement-off
+  capture `sp6_ctl/l8_cross_off` with the same cadence shows the same three
+  balls 0.36-0.38 m at 412 (and a checkpoint difference already at 322,
+  where the option-on run is exact): gap L (a life ending inside the window
+  is absent from the whole replay, rollback-engine-gaps-design §1.2),
+  pre-existing. `birth_recreate_failures` is 5 on every client (3 in the
+  live control): all are the own ball `Ball_Wood@212`, which destroy_body
+  leaves on its parking path by design (session_host_world.hpp, the
+  `own_body`/`ball` branch); module births 105 recreated, 105 exact, 0
+  failed.
 
 ### 7.5 Retail runs (core host)
 

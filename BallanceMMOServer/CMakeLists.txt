@@ -156,6 +156,11 @@ if (BMMO_BUILD_SIM)
     # whose message types carry GameNetworkingSockets' typedefs: headers only,
     # the tool links no transport.
     target_include_directories(BallanceMMOSimTool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets/include)
+    if (MSVC)
+        # The one translation unit holds every mode of the tool: past MSVC's
+        # default section limit since step RO1 (C1128).
+        target_compile_options(BallanceMMOSimTool PRIVATE /bigobj)
+    endif ()
     if (WIN32)
         target_link_libraries(BallanceMMOSimTool PRIVATE dbghelp)
     elseif (ANDROID)

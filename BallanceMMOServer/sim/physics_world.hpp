@@ -101,6 +101,15 @@ namespace bmmo::sim {
         // (--placement-fail-at, design 7.2 V12), -1 = none.
         bool placement_clones = false;
         int placement_fail_at = -1;
+        // SimTool's id-layout test hooks (sector placement design 7.2 V7/V9,
+        // step S7: --free-ids-before-load, --perturb-ids), unset in every
+        // other world: before_level_load runs after the boot, right before
+        // the level request; before_anchor at the start of anchor(), after
+        // the load and before the restores and the placement.  Each may
+        // create and destroy CK objects (ids only: no tick runs, no scene,
+        // no physics).
+        std::function<void(CKContext*)> before_level_load;
+        std::function<void(CKContext*)> before_anchor;
         std::function<void(const std::string&)> log;
     };
 
