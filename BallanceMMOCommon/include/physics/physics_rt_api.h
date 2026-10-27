@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 21u  /* v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
+#define BMMO_PHYSICS_API_VERSION 22u  /* v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -619,6 +619,23 @@ typedef struct bmmo_physics_api_v2 {
     void (*trafo_set_seed)(void* ipion_manager, uint32_t frame_id, int32_t seed);
     int32_t (*trafo_set_unmake)(void* ipion_manager, uint32_t frame_id, char* error, uint32_t error_size);
     int32_t (*trafo_set_filter)(void* ipion_manager, int32_t enable, char* error, uint32_t error_size);
+
+    /* ---- v22: the savestate's controller alias (trafo-replication design
+     * 2.11, step T4; physics_savestate.hpp set_controller_alias, step T3's
+     * fix-up) ----
+     * The name a savestate capture records a controller under, and the
+     * restore matches live controllers by: `alias` is asked with each
+     * controller's own name ("rt:force/<block id>", engine change #18) and
+     * either writes the name every world gives that controller into `out`
+     * (at most out_size bytes, the terminator included) and returns 1, or
+     * returns 0 to keep the name.  `user` is handed back to it.  Per physics
+     * manager; a NULL `alias` removes it.  The retail host's way to what the
+     * headless hosts install with set_controller_alias directly: a resync's
+     * or a join's blob is the server's, whose block ids are not this
+     * world's. */
+    void (*set_controller_alias)(void* ipion_manager,
+                                 int32_t (*alias)(void* user, const char* name, char* out, uint32_t out_size),
+                                 void* user);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

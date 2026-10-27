@@ -52,6 +52,7 @@
 #include <thread>
 
 #include <game/session_host_support.hpp>
+#include <game/trafo_sets.hpp>
 #include <session/bridge_recipe.hpp>
 #include <session/client_core.hpp>
 #include <session/spawn_impulse.hpp>
@@ -607,6 +608,151 @@ namespace {
         return std::chrono::duration<double>(clock_type::now() - t).count();
     }
 
+    // ------------------------------------------------- the trafo (step T4)
+    // Trafo-replication design 2.3-2.5, 2.11, 2.14: the retail platform's half
+    // of the trafo as an input, over game/trafo_sets.hpp and the bridge
+    // through physics_view (bridge API v21, the controller alias v22), as the
+    // headless host has it over sim/trafo_hooks.hpp.  One file-scope static
+    // (design 2.11 "retail state"; BallanceMMOClient takes no member).
+    struct trafo_host_state {
+        // This world's piece sets (the trafo list with them), the bridge's
+        // side and the hold of the originals; `on` from the anchor of a
+        // session whose core runs the trafo as an input to its end.
+        bmmo::game::trafo_registry registry;
+        bmmo::game::trafo_set_hooks hooks;
+        bmmo::game::trafo_hold hold;
+        bool on = false;
+        // The level reference (design 2.4 step 6, T1's "As built"): the 8
+        // original scripts' values as Balls.nmo has them, captured when its
+        // scripts first exist (OnLoadObject), before any original explosion
+        // of the process can have changed them; the registry takes a copy at
+        // every trafo anchor.
+        bmmo::game::trafo_reference loaded_reference;
+        std::string loaded_where;
+        // OnPhysicalize's birth tick while a replayed tick or a reconcile's
+        // remake runs (0: the live frame's, current + 1): the headless host
+        // logs a replayed tick's births under that tick, from the event log
+        // it mutes around the replay (session_client.cpp), and a remake's at
+        // the resync's tick.  `if_absent`: only a birth the log does not have
+        // at that tick (a replay that agrees with the live frames adds
+        // nothing).
+        uint32_t birth_tick = 0;
+        bool if_absent = false;
+        uint32_t replay_birth_logs = 0;
+    };
+    trafo_host_state trafo_host;
+
+    // The savestate's controller alias over the registry (bridge v22, the
+    // headless hosts' set_controller_alias lambda): a set's force controller
+    // "rt:force/<block id>" is "trafo:<player>/<k>" in every world.
+    int32_t trafo_controller_alias_cb(void* user, const char* name, char* out, uint32_t out_size) {
+        const auto* registry = static_cast<const bmmo::game::trafo_registry*>(user);
+        std::string alias;
+        if (!registry || !out || !bmmo::game::trafo_controller_alias(*registry, name, alias) || alias.size() + 1 > out_size)
+            return 0;
+        std::memcpy(out, alias.c_str(), alias.size() + 1);
+        return 1;
+    }
+
+    // The bridge as the retail host reaches it (the headless make_trafo_hooks
+    // with physics_view).  restore_originals is left empty: the anchor runs
+    // the quiesce right before the session clock reset, whose
+    // restore_explosion_pieces is that restore (physics_state.cpp
+    // reset_session_clock), and nothing else calls it.
+    bmmo::game::trafo_set_hooks make_retail_trafo_hooks(const bmmo::physics::physics_view& view, logger_wrapper* logger) {
+        bmmo::game::trafo_set_hooks hooks;
+        const bmmo::physics::physics_view* v = &view;
+        hooks.has_body = [v](const std::string& name) { return v->has_body(name.c_str()); };
+        hooks.unphysicalize = [v](const std::string& name, std::string& error) { return v->unphysicalize(name.c_str(), error); };
+        hooks.register_set = [v](uint32_t player, const uint32_t frames[3], const std::vector<uint32_t>& explosions,
+                                 bmmo_physics_trafo_set_report& out, std::string& error) {
+            return v->trafo_set_register(player, frames, explosions.data(), static_cast<int>(explosions.size()), out, error);
+        };
+        hooks.unregister_set = [v](uint32_t player, std::string& error) { return v->trafo_set_unregister(player, error); };
+        hooks.seed = [v](uint32_t frame, int32_t seed) { v->trafo_set_seed(frame, seed); };
+        hooks.unmake = [v](uint32_t frame, std::string& error) { return v->trafo_set_unmake(frame, error); };
+        hooks.forces.capture_force = [v](CKBehavior* block, bmmo::game::force_block_state& out) {
+            bmmo_physics_force_block state{};
+            std::string error;
+            if (!v->force_block_get(static_cast<uint32_t>(block->GetID()), state, error)) return false;
+            out.exists = state.exists != 0;
+            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
+            return true;
+        };
+        hooks.forces.restore_force = [v](CKBehavior* block, const bmmo::game::force_block_state& in) {
+            bmmo_physics_force_block state{};
+            state.exists = in.exists ? 1 : 0;
+            for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
+            std::string error;
+            return v->force_block_set(static_cast<uint32_t>(block->GetID()), state, error);
+        };
+        hooks.log = [logger](const std::string& line) { logger->Info("Physics session: trafo: %s", line.c_str()); };
+        return hooks;
+    }
+
+    // The anchor's trafo work (design 2.3 "When the hold is armed"; the
+    // headless anchor_trafo), with a core that runs the trafo as an input,
+    // before the session clock reset: the hooks and the controller alias,
+    // the level reference into the registry, the originals quiesced (in a
+    // retail world a single-player trafo before the session leaves bodies,
+    // a wind or a pending reset: counted, not a bug here), the hold armed and
+    // the piece x local-body filter on.
+    void trafo_anchor(const bmmo::physics::physics_view& view, CKContext* context, logger_wrapper* logger,
+                      const bs::session_client_core& core) {
+        if (!core.trafo_active() || trafo_host.on) return;
+        trafo_host.hooks = make_retail_trafo_hooks(view, logger);
+        std::string error;
+        if (!view.set_controller_alias(&trafo_controller_alias_cb, &trafo_host.registry, error))
+            logger->Warn("Physics session: trafo: the controller alias: %s", error.c_str());
+        if (trafo_host.loaded_reference.empty()) {
+            // Balls.nmo's scripts were not seen loading (or were running
+            // then): captured now, which an original explosion of this
+            // process may have changed already (logged).
+            bmmo::game::trafo_reference reference;
+            if (bmmo::game::capture_trafo_reference(context, reference, error)) {
+                trafo_host.loaded_reference = std::move(reference);
+                trafo_host.loaded_where = "the anchor (fallback: none at the Balls.nmo load)";
+            } else {
+                logger->Warn("Physics session: trafo: no level reference of the trafo scripts at the anchor either: %s - no "
+                             "set can be built", error.c_str());
+            }
+        }
+        trafo_host.registry.set_reference(trafo_host.loaded_reference);
+        if (!trafo_host.loaded_reference.empty()) {
+            size_t blocks = 0;
+            for (const auto& [name, b]: trafo_host.loaded_reference.scripts) blocks += b.size();
+            logger->Info("Physics session: trafo: level reference from %s: %zu scripts, %zu blocks",
+                         trafo_host.loaded_where.c_str(), trafo_host.loaded_reference.scripts.size(), blocks);
+        }
+        const auto quiesce = bmmo::game::quiesce_originals(context, trafo_host.hooks);
+        logger->Info("Physics session: %s (the originals' restore follows in the session clock reset)", quiesce.text().c_str());
+        trafo_host.hold.arm(context, 1000.0f / 66.0f);
+        if (!view.trafo_set_filter(true, error)) logger->Warn("Physics session: trafo: the piece filter rule: %s", error.c_str());
+        trafo_host.on = true;
+        logger->Info("Physics session: trafo: inputs on: the originals held (option E %s, the Delayer %u frames), the piece x "
+                     "local-body filter on", core.sector_lead_ticks() <= bs::kTrafoOptionEMaxLead ? "on" : "off (lead > 66)",
+                     trafo_host.hold.delayer_frames());
+    }
+
+    // The session's end (design 2.4; the headless end_trafo_sets): every live
+    // piece unphysicalized, the winds' controllers deleted, the sets
+    // unregistered and destroyed, the alias and the filter rule off, the hold
+    // disarmed.  Idempotent.
+    void trafo_teardown(const bmmo::physics::physics_view& view, CKContext* context, logger_wrapper* logger) {
+        trafo_host.replay_birth_logs = 0;   // each session's own log budget (a second session in one process, R3)
+        if (!trafo_host.on) return;
+        const int bodies = bmmo::game::teardown_trafo_sets(context, trafo_host.registry, trafo_host.hooks);
+        std::string error;
+        view.set_controller_alias(nullptr, nullptr, error);
+        view.trafo_set_filter(false, error);
+        trafo_host.hold.disarm();
+        trafo_host.registry.clear();
+        trafo_host.on = false;
+        trafo_host.birth_tick = 0;
+        trafo_host.if_absent = false;
+        logger->Info("Physics session: trafo: the session's sets torn down (%d piece bodies removed)", bodies);
+    }
+
     // ------------------------------------------------- diagnostics (step EG0)
     // Environment switches, all off by default; none changes what the session
     // does, only what it logs (rollback-engine-gaps-design.md, As built EG0):
@@ -682,6 +828,24 @@ bmmo::game::proximity_countdown_state& bmmo::session::retail::level_proximities(
     return level_proximity_state;
 }
 
+// Step T4 (trafo-replication design 2.4 step 6, T1's level reference):
+// OnLoadObject of 3D Entities\Balls.nmo - the 8 original trafo scripts exist
+// now, as the file has them, before any of them ran.  Read-only (the values
+// are copied, nothing is written into the scripts), whatever the switch says;
+// a session anchor with the trafo as an input hands it to its registry.
+std::string bmmo::session::retail::trafo_scripts_loaded(CKContext* context) {
+    bmmo::game::trafo_reference reference;
+    std::string error;
+    if (!bmmo::game::capture_trafo_reference(context, reference, error))
+        return "trafo level reference not captured at the Balls.nmo load: " + error;
+    size_t blocks = 0;
+    for (const auto& [name, b]: reference.scripts) blocks += b.size();
+    trafo_host.loaded_reference = std::move(reference);
+    trafo_host.loaded_where = "the Balls.nmo load";
+    return std::format("trafo level reference captured at the Balls.nmo load: {} scripts, {} blocks",
+                       trafo_host.loaded_reference.scripts.size(), blocks);
+}
+
 // ---------------------------------------------------------------- network thread
 
 // Design 3.2 "Receive": every Session* message of a session whose SessionStart
@@ -753,6 +917,15 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     caps.nonblocking_hold = false;   // the anchor hold blocks inside OnProcess
     caps.whole_frame = false;
     caps.own_lifecycle = bs::own_lifecycle_source::host_hooks;   // OnPhysicalize / OnUnphysicalize
+    // Step T4: the per-player trafo piece sets (trafo-replication design
+    // 2.11, 2.14): SessionReady declares CAP_TRAFO_INPUTS whatever the world
+    // option (T3's rule).  The script replay it needs is bound only when the
+    // anchor's script selection is not empty (w.bind_scripts); on a level with
+    // the trafo the manager is always selected, and an empty selection with
+    // the inputs on is logged at the anchor.
+    caps.trafo_inputs = true;
+    // A previous session's sets, should its end have been skipped.
+    trafo_teardown(physics_view_, m_bml->GetCKContext(), logger_);
     try {
         host.core.reset();
         host.core = std::make_unique<bs::session_client_core>(core_host_platform(), caps);
@@ -1167,6 +1340,10 @@ void BallanceMMOClient::core_host_anchor() {
     }
     if (fixed_tick_.enabled()) fixed_tick_.disable(m_bml);
     fixed_tick_.enable(m_bml);
+    // Step T4: with the trafo as an input, the originals quiesced and held
+    // (trafo_anchor), right before the session clock reset, whose
+    // restore_explosion_pieces is the quiesce's last step.
+    trafo_anchor(physics_view_, m_bml->GetCKContext(), logger_, core);
     if (!physics_view_.reset_session_clock(core.seed(), error)) {
         core_host_end_local("session clock reset failed: " + error);
         return;
@@ -1219,8 +1396,14 @@ void BallanceMMOClient::core_host_anchor() {
     read_ball_forces(m_bml);
     // The script replay (game/script_replay.hpp): the mechanism scripts a
     // replayed tick re-runs, and the force blocks they drive.
-    // The session core's selection (step P: the trafo scripts too).
-    host.script_ids = bmmo::game::session_script_selection(m_bml->GetCKContext());
+    // The session core's selection (step P: the trafo scripts too).  Step T4:
+    // with the trafo as an input the originals never run and are not
+    // selected; the sets' scripts travel beside the selection as the trafo
+    // part (trafo-replication design 4.3).
+    host.script_ids = bmmo::game::session_script_selection(m_bml->GetCKContext(), trafo_host.on);
+    if (trafo_host.on && host.script_ids.empty())
+        logger_->Warn("Physics session: trafo: inputs on but the script selection is empty - no script replay, "
+                      "a replayed tick's births are logged at the live tick + 1");
     host.script_activations = bmmo::game::session_script_activations(m_bml->GetCKContext(), host.script_ids);
     host.explosion_pieces = bmmo::game::explosion_pieces(m_bml->GetCKContext());
     host.script_hooks.capture_force = [this](CKBehavior* block, bmmo::game::force_block_state& out) {
@@ -1428,6 +1611,9 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                   static_cast<unsigned long long>(host.nav_source_differs),
                   static_cast<unsigned long long>(host.mute_source_differs));
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
+    // Step T4: the sets go with the session (hooks.ended did it when the core
+    // still ran; a core that ended first - a SessionEnd - did too).
+    trafo_teardown(physics_view_, m_bml->GetCKContext(), logger_);
     if (host.own_replica.active && physics_view_.available())
         physics_view_.navigation_destroy(host.own_replica.entity.c_str(), error);
     if (host.body_guard && physics_view_.available()) {
@@ -1807,7 +1993,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.localize_scripts = [this](const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor,
                                 std::vector<uint8_t>& out, std::string& error, bs::resync_script_report& report) {
         return bmmo::game::localize_session_scripts(m_bml->GetCKContext(), host.script_ids, portable, anchor, out, error,
-                                                    report);
+                                                    report, trafo_host.on ? &trafo_host.registry.part() : nullptr);
     };
     p.forget_activations_from = [this](uint32_t tick) {
         const size_t activations = host.activations.forget_from(tick);
@@ -1831,7 +2017,121 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         CKDeletePointer(bytes);
         return true;
     };
-    p.local_only_body = [](const std::string& entity) { return host.explosion_pieces.count(entity) != 0; };
+    // Step T4 (as T3's headless host): with the trafo as an input every world
+    // has every set's pieces (and no original has a body): none is this
+    // world's alone.  Without it, step P's owner-only pieces.
+    p.local_only_body = [](const std::string& entity) { return !trafo_host.on && host.explosion_pieces.count(entity) != 0; };
+
+    // ---- the trafo as an input (trafo-replication design 2.3-2.5, 2.11,
+    // 4.7; step T4): the headless host's operations over the file-scope
+    // trafo_host and physics_view ----
+    p.poll_trafo = [this](uint32_t tick, bool option_e) {
+        bs::trafo_poll out;
+        if (!trafo_host.on) return out;
+        CKContext* context = m_bml->GetCKContext();
+        for (const auto& r: trafo_host.hold.poll(context, tick, option_e)) {
+            bs::trafo_report x;
+            x.flags = r.flags;
+            x.type = r.type;
+            for (int k = 0; k < 3; ++k) x.position[k] = r.position[k];
+            x.predicted_tick = r.predicted_tick;
+            x.source = r.source;
+            out.reports.push_back(std::move(x));
+        }
+        const auto effect = trafo_host.hold.effect_check(context, trafo_host.hooks);
+        out.leaks = effect.leaks();
+        out.first_leak = effect.first;
+        return out;
+    };
+    p.make_trafo_set = [this](uint32_t player, std::string& error) {
+        if (!trafo_host.on) {
+            error = "the trafo is not an input in this world";
+            return false;
+        }
+        CKContext* context = m_bml->GetCKContext();
+        const auto r = bmmo::game::ensure_trafo_set(context, trafo_host.registry, player, trafo_host.hooks);
+        if (!r.ok) {
+            for (const auto& line: r.lines) logger_->Warn("Physics session: trafo build %u: %s", player, line.c_str());
+            error = r.error;
+            return false;
+        }
+        if (r.how == bmmo::game::trafo_ensure::reselected)
+            for (const auto& line: r.lines) logger_->Info("Physics session: trafo: set %u %s", player, line.c_str());
+        if (r.how == bmmo::game::trafo_ensure::built) {
+            // Design 9.1's settlement on the retail CK2.dll: the builder's
+            // lines (I0-I7) and the digests, comparable with the headless.
+            for (const auto& line: r.lines) logger_->Info("Physics session: trafo build %u: %s", player, line.c_str());
+            if (const auto* set = trafo_host.registry.find(player))
+                logger_->Info("Physics session: trafo: set %u built: %zu objects, %zu scripts, digest %s, value digest %s", player,
+                              set->objects.size(), set->scripts.size(), set->digest.c_str(), set->value_digest.c_str());
+        }
+        bmmo::game::add_trafo_set_pieces(context, trafo_host.registry, host.explosion_pieces);
+        return true;
+    };
+    p.run_trafo = [this](const bs::trafo_input& in, std::string& error) {
+        return bmmo::game::run_trafo(m_bml->GetCKContext(), trafo_host.registry, trafo_host.hooks, in.player, in.flags, in.type,
+                                     in.position, in.seed, error);
+    };
+    p.trafo_final = [](uint32_t player, uint8_t type, uint32_t tick) {
+        bmmo::game::trafo_set_final(trafo_host.registry, player, type, tick);
+    };
+    p.trafo_frame = [this](uint32_t) {
+        if (trafo_host.on) bmmo::game::trafo_frame(m_bml->GetCKContext(), trafo_host.registry, 1000.0f / 66.0f);
+    };
+    p.trafo_type_set = [this](uint32_t player, uint8_t type) {
+        bs::trafo_type_view view;
+        const bmmo::game::trafo_set* set = trafo_host.registry.find(player);
+        if (!set || type >= bs::kTrafoTypes) return view;
+        view.exists = true;
+        CKContext* context = m_bml->GetCKContext();
+        for (CK_ID id: set->types[type].pieces) {
+            CKObject* o = context->GetObject(id);
+            if (!o || !o->GetName()) continue;
+            view.pieces.emplace_back(o->GetName());
+            if (trafo_host.hooks.has_body && trafo_host.hooks.has_body(o->GetName())) ++view.bodies;
+        }
+        return view;
+    };
+    p.trafo_reconcile = [this](const bs::trafo_reconcile_spec& spec) {
+        bs::trafo_reconcile_result r;
+        CKContext* context = m_bml->GetCKContext();
+        if (spec.action == bs::trafo_reconcile_action::unmake) {
+            r.ok = bmmo::game::unmake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.type,
+                                               r.bodies_removed, r.error);
+            return r;
+        }
+        // The remake, inside the core's mute: the pieces' Physicalize
+        // reaches OnPhysicalize, which logs their births at the resync's
+        // tick (the headless host takes them from the muted event log).
+        trafo_host.birth_tick = spec.birth_tick;
+        trafo_host.if_absent = false;
+        r.ok = bmmo::game::remake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.type, spec.position,
+                                           spec.seed, 1000.0f / 66.0f, r.error);
+        trafo_host.birth_tick = 0;
+        return r;
+    };
+    p.retire_trafo_sets = [this](uint32_t now, uint32_t history) {
+        std::vector<uint32_t> deselected;
+        if (!trafo_host.on) return deselected;
+        CKContext* context = m_bml->GetCKContext();
+        std::set<uint32_t> before;
+        for (const auto& set: trafo_host.registry.sets())
+            if (set.selected) before.insert(set.player);
+        const size_t sets_before = trafo_host.registry.sets().size();
+        for (const auto& line: bmmo::game::retire_trafo_sets(context, trafo_host.registry, trafo_host.hooks, now, history, false))
+            logger_->Info("Physics session: trafo: %s", line.c_str());
+        // A destroyed set's pieces are no explosion pieces any more: the
+        // originals and the sets still held.
+        if (trafo_host.registry.sets().size() != sets_before) {
+            host.explosion_pieces = bmmo::game::explosion_pieces(context);
+            bmmo::game::add_trafo_set_pieces(context, trafo_host.registry, host.explosion_pieces);
+        }
+        for (uint32_t player: before) {
+            const auto* set = trafo_host.registry.find(player);
+            if (!set || !set->selected) deselected.push_back(player);
+        }
+        return deselected;
+    };
     // The manager's and the trafo scripts' (step P: host support's
     // record_pending, the selection's `activations`).
     p.record_pending_activation = [this](uint32_t tick) {
@@ -1986,6 +2286,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             so.delta_ms = 1000.0f / 66.0f;
             so.diff_detail = host.core && host.core->config.trace;
             so.replay_activation = true;
+            // Step T4: the sets' scripts, recorded (v3), restored and run
+            // first in every replayed frame, as the trafo frame live.
+            so.trafo = trafo_host.on ? &trafo_host.registry.part() : nullptr;
             so.on_restore_failed = [this](const std::string& error) {
                 if (host.restore_logs++ < 8) logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());
             };
@@ -1999,6 +2302,27 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                 logger_->Info("Physics session: %s", diag_entity_line(m_bml->GetCKContext(), "replay", tick).c_str());
             };
         bs::rollback_world world = bs::bind_session_world(physics_view_, hooks, w);
+        // Step T4: the births a replayed tick made, in the birth log under
+        // that tick (the headless host's rule, there from the muted event
+        // log): a replay across an explosion physicalizes the set's pieces
+        // again, and OnPhysicalize would log them at the live tick + 1, where
+        // a later rewind would take them for bodies born after its anchor.
+        // With the trafo as an input only (the mechanism births of a session
+        // without it keep the R-steps' feed unchanged).
+        if (world.pre_step) {
+            const auto inner = world.pre_step;
+            world.pre_step = [inner](uint32_t tick) {
+                if (!trafo_host.on) {
+                    inner(tick);
+                    return;
+                }
+                trafo_host.birth_tick = tick;
+                trafo_host.if_absent = true;
+                inner(tick);
+                trafo_host.birth_tick = 0;
+                trafo_host.if_absent = false;
+            };
+        }
         // Step EG0 diagnostics: every destroy_body the binding refuses (for a
         // birth item - a ball - the engine counts it as
         // birth_recreate_failures; the savestate-failure path's
@@ -2071,6 +2395,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // hooks.ended).
     p.hooks.ended = [this]() {
         std::string error;
+        trafo_teardown(physics_view_, m_bml->GetCKContext(), logger_);   // step T4
         if (!host.body_guard) return;
         physics_view_.set_body_guard(false, nullptr, error);
         host.body_guard = false;
@@ -2374,6 +2699,10 @@ bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixe
     for (int i = 0; i < concaveCnt && concaveMesh; ++i)
         r.concave_meshes.push_back(concaveMesh[i] && concaveMesh[i]->GetName() ? concaveMesh[i]->GetName() : "");
     const std::string name = target->GetName() ? target->GetName() : "";
+    // Step T4: inside a replayed tick or a reconcile's remake (the trafo as
+    // an input), a level object's birth goes under that tick - a replayed
+    // one only when the log lacks it there (trafo_host.birth_tick).
+    uint32_t birth_at = tick;
     const auto record_birth = [&] {
         bs::local_birth birth;
         birth.name = name;
@@ -2388,11 +2717,19 @@ bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixe
             }
         birth.has_parent = target->GetParent() != nullptr;
         birth.has_local = true;
-        host.births.put(tick, std::move(birth));
+        host.births.put(birth_at, std::move(birth));
     };
     CK3dObject* ball = get_current_ball();
     if (!ball || target != static_cast<CK3dEntity*>(ball)) {
         // A level object's retail Physicalize during the session.
+        if (trafo_host.birth_tick) {
+            birth_at = trafo_host.birth_tick;
+            if (trafo_host.if_absent) {
+                if (core.is_ball(name) || host.births.find(name, birth_at)) return true;
+                if (trafo_host.replay_birth_logs++ < 8)
+                    logger_->Info("Physics session: birth log: %s made by the replayed tick %u", name.c_str(), birth_at);
+            }
+        }
         record_birth();
         if (core.config.trace)
             logger_->Info("Physics session: retail physicalize of %s at tick %u (%d convex, %d balls, %d concave)",

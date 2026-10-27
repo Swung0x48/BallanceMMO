@@ -160,6 +160,24 @@ namespace bmmo::physics {
         bool set_clock_guard(bool enable, float time_factor, uint32_t behavior_id, uint32_t pause_behavior_id,
                              std::string& error) const;
 
+        // ---- bridge API v21: the trafo sets (trafo-replication design 2.4,
+        // 2.6, 2.10; game/trafo_sets.hpp trafo_set_hooks, the retail host's
+        // half since step T4) ----
+        // Whether the entity has a physics body now.
+        bool has_body(const char* entity_name) const;
+        bool trafo_set_register(uint32_t player, const uint32_t frames[3], const uint32_t* explosions, int explosion_count,
+                                bmmo_physics_trafo_set_report& out, std::string& error) const;
+        bool trafo_set_unregister(uint32_t player, std::string& error) const;
+        void trafo_set_seed(uint32_t frame_id, int32_t seed) const;
+        // The bodies removed, -1 with a message.
+        int trafo_set_unmake(uint32_t frame_id, std::string& error) const;
+        bool trafo_set_filter(bool enable, std::string& error) const;
+        // ---- bridge API v22 (step T4): the savestate's controller alias
+        // (physics_savestate.hpp set_controller_alias); a null `alias`
+        // removes it.
+        bool set_controller_alias(int32_t (*alias)(void* user, const char* name, char* out, uint32_t out_size), void* user,
+                                  std::string& error) const;
+
         // Identification of the loaded physics module (filled even when the
         // bridge is missing, so the retail DLL can be reported).
         const std::string& dll_sha256() const { return dll_sha256_; }

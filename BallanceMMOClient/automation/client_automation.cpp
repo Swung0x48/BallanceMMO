@@ -418,6 +418,53 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
             world[2][0], world[2][1], world[2][2], world[3][0], world[3][1], world[3][2],
             local[3][0], local[3][1], local[3][2]);
     }
+    if (verb == "drawn") {
+        // drawn <substring>: whether the 3D entities whose name contains it
+        // are drawn now (step T4's check of the copied trafo pieces,
+        // Ball_*_piece*_Trafo<p>): shown (CKSHOW) with no ancestor hiding its
+        // hierarchy, its root in the render context (CKRenderContext renders
+        // root objects with their children), a current mesh, and its first
+        // material's alpha.  Read-only.  "ok n=.. drawn=.. visible=.. root_in_rc=..
+        // in_scene=.. mesh=.. in_frustum=.. | name:flags ..." (flags: v visible,
+        // h an ancestor hides, r root in the render context, s in the current
+        // scene, m mesh, f in the view frustum, a=<alpha>).
+        if (rest.empty()) return "error usage: drawn <name substring>";
+        auto* context = m_bml->GetCKContext();
+        CKRenderContext* rc = m_bml->GetRenderContext();
+        CKScene* scene = context->GetCurrentScene();
+        // Every 3D entity, the derived classes included (the pieces are 3D
+        // objects, which a by-class-id list of 3D entities leaves out).
+        const XObjectPointerArray& entities = context->GetObjectListByType(CKCID_3DENTITY, TRUE);
+        int n = 0, drawn = 0, visible = 0, root_in_rc = 0, in_scene = 0, meshed = 0, in_frustum = 0;
+        std::string detail;
+        for (int i = 0; i < entities.Size(); ++i) {
+            auto* entity = CK3dEntity::Cast(entities[i]);
+            if (!entity || !entity->GetName() || std::string_view(entity->GetName()).find(rest) == std::string_view::npos)
+                continue;
+            ++n;
+            const bool v = entity->IsVisible() != FALSE;
+            bool hidden_above = false;
+            CK3dEntity* root = entity;
+            for (CK3dEntity* p = entity->GetParent(); p; p = p->GetParent()) {
+                if (!p->IsVisible() && (p->GetObjectFlags() & CK_OBJECT_HIERACHICALHIDE)) hidden_above = true;
+                root = p;
+            }
+            const bool r = rc && root->IsInRenderContext(rc);
+            const bool s = scene && entity->IsInScene(scene);
+            CKMesh* mesh = entity->GetCurrentMesh();
+            float alpha = -1.0f;
+            if (mesh && mesh->GetMaterialCount() > 0)
+                if (CKMaterial* material = mesh->GetMaterial(0)) alpha = material->GetDiffuse().a;
+            const bool f = rc && entity->IsInViewFrustrum(rc);
+            const bool d = v && !hidden_above && r && mesh && alpha != 0.0f;
+            visible += v; root_in_rc += r; in_scene += s; meshed += mesh != nullptr; in_frustum += f; drawn += d;
+            if (n <= 40)
+                detail += std::format(" {}:{}{}{}{}{}{}a={:.3f}", entity->GetName(), v ? "v" : "-", hidden_above ? "h" : "-",
+                                      r ? "r" : "-", s ? "s" : "-", mesh ? "m" : "-", f ? "f" : "-", alpha);
+        }
+        return std::format("ok n={} drawn={} visible={} root_in_rc={} in_scene={} mesh={} in_frustum={} |{}", n, drawn, visible,
+                           root_in_rc, in_scene, meshed, in_frustum, detail);
+    }
     if (verb == "message") {
         auto* messages = m_bml->GetMessageManager();
         if (!messages || rest.empty()) return "error no message manager or name";

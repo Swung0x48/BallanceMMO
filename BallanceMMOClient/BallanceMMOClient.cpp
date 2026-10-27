@@ -311,6 +311,9 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
         objects_.destroy_all_objects();
         objects_.init_template_balls();
         //objects_.init_players();
+        // Step T4: the trafo scripts' level reference, as the file has them
+        // (read-only; used by a core session with the trafo as an input).
+        logger_->Info("%s", bmmo::session::retail::trafo_scripts_loaded(m_bml->GetCKContext()).c_str());
     }
     else if (strcmp(filename, "3D Entities\\Gameplay.nmo") == 0) {
         current_level_array_ = CKOBJID(m_bml->GetArrayByName("CurrentLevel"));

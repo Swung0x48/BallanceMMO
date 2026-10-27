@@ -8,6 +8,10 @@
 // engine at startup when its layout moves, so the host's state is file-scope
 // statics in core_host.cpp.
 
+#include <string>
+
+class CKContext;
+
 namespace bmmo::game {
     class proximity_countdown_state;   // game/script_state.hpp
 }
@@ -22,5 +26,9 @@ namespace bmmo::session {
         // Step Q: the level's proximity countdowns as loaded (a file-scope
         // static of core_host.cpp; both paths' anchors restore them).
         bmmo::game::proximity_countdown_state& level_proximities();
+        // Step T4: OnLoadObject of 3D Entities\Balls.nmo - the trafo
+        // scripts' level reference captured (read-only), for the sets a
+        // session with the trafo as an input builds; the line to log.
+        std::string trafo_scripts_loaded(CKContext* context);
     }
 }

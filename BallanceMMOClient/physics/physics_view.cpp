@@ -842,4 +842,90 @@ namespace bmmo::physics {
         }
         return true;
     }
+
+    // ---- bridge API v21 / v22: the trafo sets (step T4) ----
+
+    bool physics_view::has_body(const char* entity_name) const {
+        if (!available() || !entity_name || !entity_name[0]) return false;
+        bmmo_physics_body_state state{};
+        std::string error;
+        return get_body_state(entity_name, state, error);
+    }
+
+    bool physics_view::trafo_set_register(uint32_t player, const uint32_t frames[3], const uint32_t* explosions,
+                                          int explosion_count, bmmo_physics_trafo_set_report& out, std::string& error) const {
+        error.clear();
+        out = bmmo_physics_trafo_set_report{};
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->trafo_set_register) {
+            error = "the physics_RT bridge lacks trafo_set_register";
+            return false;
+        }
+        char text[512] = {};
+        if (!api_->trafo_set_register(manager_, player, frames, explosions, explosion_count, &out, text, sizeof(text))) {
+            error = text[0] ? text : "trafo_set_register failed";
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::trafo_set_unregister(uint32_t player, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->trafo_set_unregister) {
+            error = "the physics_RT bridge lacks trafo_set_unregister";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->trafo_set_unregister(manager_, player, text, sizeof(text))) {
+            error = text[0] ? text : "trafo_set_unregister failed";
+            return false;
+        }
+        return true;
+    }
+
+    void physics_view::trafo_set_seed(uint32_t frame_id, int32_t seed) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->trafo_set_seed) return;
+        api_->trafo_set_seed(manager_, frame_id, seed);
+    }
+
+    int physics_view::trafo_set_unmake(uint32_t frame_id, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return -1; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->trafo_set_unmake) {
+            error = "the physics_RT bridge lacks trafo_set_unmake";
+            return -1;
+        }
+        char text[256] = {};
+        const int removed = api_->trafo_set_unmake(manager_, frame_id, text, sizeof(text));
+        if (removed < 0) error = text[0] ? text : "trafo_set_unmake failed";
+        return removed;
+    }
+
+    bool physics_view::trafo_set_filter(bool enable, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->trafo_set_filter) {
+            error = "the physics_RT bridge lacks trafo_set_filter";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->trafo_set_filter(manager_, enable ? 1 : 0, text, sizeof(text))) {
+            error = text[0] ? text : "trafo_set_filter failed";
+            return false;
+        }
+        return true;
+    }
+
+    bool physics_view::set_controller_alias(int32_t (*alias)(void* user, const char* name, char* out, uint32_t out_size),
+                                            void* user, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_controller_alias) {
+            error = "the physics_RT bridge lacks set_controller_alias";
+            return false;
+        }
+        api_->set_controller_alias(manager_, alias, user);
+        return true;
+    }
 }

@@ -469,8 +469,22 @@ namespace bmmo::game {
         // collision sound's targets), keep the hierarchy among the copies,
         // and pull nothing in: no BeObject's scripts (All_Balls' others), no
         // texture, no membership of the originals' other groups.
+        //
+        // The defaults are read and copied element by element into `deps`'s
+        // own buffer, not taken with CKCopyDefaultClassDependencies: that
+        // assigns the array inside CK2.dll, which on the retail game is
+        // another C runtime than the mod's, and the buffer it allocates
+        // there was freed by the mod's `delete[]` when `deps` went out of
+        // scope (step T4: the mod's first build crashed at the builder's
+        // return, its set registered).  The same values either way.
         inline void copy_dependencies(CKDependencies& deps) {
-            CKCopyDefaultClassDependencies(deps, CK_DEPENDENCIES_COPY);
+            const CKDependencies* defaults = CKGetDefaultClassDependencies(CK_DEPENDENCIES_COPY);
+            deps.Resize(defaults ? defaults->Size() : static_cast<int>(CKCID_MAXCLASSID));
+            deps.Fill(0);
+            if (defaults) {
+                for (int i = 0; i < defaults->Size(); ++i) deps[i] = (*defaults)[i];
+                deps.m_Flags = defaults->m_Flags;
+            }
             deps.ModifyOptions(CKCID_OBJECT, 0, CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME);
             deps.ModifyOptions(CKCID_BEOBJECT, 0, CK_DEPENDENCIES_COPY_BEOBJECT_SCRIPTS | CK_DEPENDENCIES_COPY_BEOBJECT_GROUPS);
             deps.ModifyOptions(CKCID_MESH, CK_DEPENDENCIES_COPY_MESH_MATERIAL, 0);

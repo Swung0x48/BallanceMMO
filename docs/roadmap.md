@@ -125,6 +125,35 @@ left. Each design named here has its own document with its step table.
    150/150 bit-equal on all four (trafo design §8, "As built (step
    TR3b)"). T3's remaining CPU (t_rep 2.6-2.9x the control, t_max 43-46
    ms against 12-14) is item 10's.
+   **T4 built** (step TR4, 2026-10-27, quick tier; trafo design §8, "As
+   built (step TR4 = T4)"): the retail host (core on) builds every
+   member's set, runs the inputs, the hold, the quiesce and the teardown,
+   installs the controller alias (bridge API v22); one two-copy L11
+   session: pieces 32/32 bit-equal across the two clients, the other
+   player's copies drawn; `physics.trafo_inputs` stays off (adaptation M2,
+   until item 10's close-out). Queued from it, each root-caused there:
+   (a) **retail rotation reports under the game's 24-bit x87**: IVP's
+   `calc_at_quaternion` slerp of a body turning > 2.6 degrees per tick is
+   ~1e-7 off unit length on the game thread (Direct3D's precision), so such
+   rows' rotation differs from the server's by <= 3e-8 (state exact;
+   `fpu53 on` makes all 5056 piece rows bit-equal) - fix the report (a
+   53-bit control word around the bridge's body reads) or accept it as a
+   row tolerance; (b) **the reference-map digest across CK2
+   implementations** (R2's criterion) differs on one name: the
+   reimplementation's `CKParameterOperation::Update` renames every
+   operation output `Pout 0`, the game keeps the file's `Out` - describe an
+   operation output by place in the map, or keep the name in the
+   reimplementation; the user's call.  Severity: diagnostic only - both
+   digests are only logged (`trafo_sets.hpp` build step; SimTool's
+   `trafo_tool` compares the value digest, which is equal), nothing on the
+   wire carries them, and the portable script record keys scripts by owner
+   and name, never by an operation output's name, so localization is
+   unaffected.  The cheap option: `trafo_reference_map`'s `where()` names a
+   source parameter outside the blocks by its operation's place (root
+   script + operation index + `:out`) instead of its name - it changes only
+   logged digests (every recorded one once), never a simulation result; (c) the retail birth log in a
+   session without trafo inputs still logs a replayed tick's births at the
+   live tick + 1 (T4 fixed it with the inputs on only).
 6. Sector placement (`sector-placement-design.md`): S1-S11. One object per
    placement at the anchor; the late joiner's lost sector-1 walk (S4, which
    may land early). Also found at S2, **the x64 teardown over-read** (not
@@ -273,6 +302,19 @@ left. Each design named here has its own document with its step table.
       savestate index rewrite, and the replay-mismatch counter of
       `rollback.hpp` now counted only while logged, the first 8; neither
       changes a simulation result, and the core-off BAR rests on this run).
+    - TR4 (trafo T4, the retail host, quick tier, 2026-10-27; ran: x64 and
+      x86 builds, 522 tests, GCC 29 ok, the wire check rTR3b -> rTR4 ALL
+      SAME twice, ONE two-copy retail session on L11 with core on and
+      `trafo_inputs` on, snapshots off): (a) R1, the solo forced arms
+      (`r2_run.py` R2 scenario, 50:12, 97:24, 131:47, 13:24) and the
+      two-trafo `r2t_run.py`; (b) R2 with the R2 config (lifecycle rewind and
+      own echoes off) and R2b with `net lag 150` (late Trafo events inside
+      input rewinds); (c) R3, a second session in one game process after a
+      single-player paper trafo (sets rebuilt, no `_Trafo` object left,
+      the quiesce's 18/18); (d) R4, core off against `p3_off_P`; (e) R5, the
+      wire on trafo-free captures with the retail build; (f) an out-of-reach
+      trafo rejected and logged; (g) the H arms' A/B; (h) CPU parity;
+      (i) three launches without a hang.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

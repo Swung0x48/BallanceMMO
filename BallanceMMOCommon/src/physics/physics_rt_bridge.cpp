@@ -741,6 +741,25 @@ namespace {
         return 1;
     }
 
+    // v22: the savestate's controller alias through a C callback (the retail
+    // host's trafo registry answers it; physics_savestate.hpp).
+    void api_set_controller_alias(void* manager, int32_t (*alias)(void* user, const char* name, char* out, uint32_t out_size),
+                                  void* user) {
+        if (!manager) return;
+        auto* physics = static_cast<CKIpionManager*>(manager);
+        if (!alias) {
+            bmmo::physics::set_controller_alias(physics, {});
+            return;
+        }
+        bmmo::physics::set_controller_alias(physics, [alias, user](const char* name, std::string& out) {
+            char text[128] = {};
+            if (!alias(user, name, text, sizeof(text))) return false;
+            text[sizeof(text) - 1] = 0;
+            out = text;
+            return true;
+        });
+    }
+
     int32_t api_set_event_log_muted(void* manager, int32_t muted, char* error, uint32_t error_size) {
         (void)manager; (void)error; (void)error_size;
         bmmo::physics::set_event_log_muted(muted != 0);
@@ -804,6 +823,7 @@ namespace {
         api_trafo_set_seed,
         api_trafo_set_unmake,
         api_trafo_set_filter,
+        api_set_controller_alias,
     };
 }
 

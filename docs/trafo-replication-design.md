@@ -15,7 +15,10 @@ optimization's close-out). T3 waited for the rewind-cost step RC1
 decision of 2026-10-25 and was re-gated at TR3b on top of RC1 and RL1
 under its original H1 (c): one H1 pair at 150 ms, snapshots off (the
 user's one-pair rule of 2026-10-27, §11), starved 0 / 0 / 0 / 0 against
-the same-batch control's 0 / 0 / 0 / 0. T4-T5 not. It implements the user's decision of 2026-10-23
+the same-batch control's 0 / 0 / 0 / 0. Step T4 built (the retail host,
+quick tier, not committed at the time of writing: §8, "As built (step
+TR4 = T4)"; `physics.trafo_inputs` still off by default, adaptation M2).
+T5 not. It implements the user's decision of 2026-10-23
 on audit item #2 (and #11): option (b), the trafo becomes a replicated input
 and its explosion, wind and reset run in every world for every player's trafo,
 identically.
@@ -2670,6 +2673,165 @@ the one-pair rule of 2026-10-27).
     simulation result; with core off the mod declares nothing new, and the
     core-off BAR rests on that deferred run).
 - **Not done:** T4, T5; the rewind-cost optimization's RC2-RC5.
+
+**As built (step TR4 = T4, 2026-10-27; HEAD 3394ffd + the working tree,
+quick tier).**  The retail host runs the trafo as an input with
+`session core on`; with `session core off` the legacy path is untouched
+(PSC declares nothing new and gets no feature).
+
+- **Where.**  `BallanceMMOClient/session/core_host.cpp`: one file-scope
+  static `trafo_host` (registry, hooks, hold, `on`, the level reference
+  captured at load, the birth-tick override; no `BallanceMMOClient`
+  member); `make_retail_trafo_hooks` (the headless `make_trafo_hooks` over
+  `physics_view`); `trafo_anchor` (hooks, controller alias, the level
+  reference into the registry, `quiesce_originals`, the hold armed with
+  1000/66 ms, the piece filter on) called in `core_host_anchor` right before
+  the session clock reset; `trafo_teardown` (sets, alias, filter, hold) from
+  `hooks.ended`, `core_host_end_local` and the next SessionStart; the
+  platform operations `poll_trafo`, `make_trafo_set`, `run_trafo`,
+  `trafo_final`, `trafo_frame`, `trafo_type_set`, `trafo_reconcile`,
+  `retire_trafo_sets` (the headless host's, line for line);
+  `caps.trafo_inputs = true`; the selection without the originals, the
+  binding's and `localize_scripts`' trafo part, `local_only_body` off with
+  the inputs, the sets' pieces in `explosion_pieces` (revivable, no
+  BodyRevived).  The hold "in post_step" is the core's `poll_own_trafo`
+  (CF), which calls `poll_trafo`.  `retail::trafo_scripts_loaded`
+  (`core_host.hpp`) captures the level reference at `OnLoadObject` of
+  `3D Entities\Balls.nmo` (`BallanceMMOClient.cpp`), read-only, whatever
+  the switch.  `physics_view`: `has_body`, `trafo_set_register /
+  unregister / seed / unmake / filter` (bridge v21) and
+  `set_controller_alias` (v22).  Bridge **API v22**
+  (`physics_rt_api.h`, `physics_rt_bridge.cpp`): `set_controller_alias`
+  through a C callback (`alias(user, name, out, size)`), which installs
+  `physics_savestate.hpp`'s `set_controller_alias` for the manager; the
+  retail registry answers it with `trafo_controller_alias`.  No engine
+  change, no protocol change.  Automation verb `drawn <substring>`
+  (`client_automation.cpp`, read-only).
+- **Adaptations** (no principle touched):
+  - **M2 (the orchestrator's):** `physics.trafo_inputs` stays **off** by
+    default after T4, until the rewind-cost close-out (H4 / H6 with
+    snapshots on) passes: decision (b) of 2026-10-25 put that check there,
+    and deployments run snapshots on.  T2's and T3's "T4 turns the default
+    on" is adapted; the runs below set it per run (`arch_server_lp.sh`'s
+    eighth argument).
+  - **The originals' restore** (`trafo_set_hooks::restore_originals`) is
+    empty in retail: the mod has no bridge call for
+    `restore_explosion_pieces` alone, and the quiesce runs right before
+    `reset_session_clock`, which ends with it - the same state as the
+    headless order (quiesce with the restore after the clock reset; the
+    restore is idempotent and nothing steps between).
+  - **The level reference at the Balls.nmo load** (T1: "the retail host when
+    Balls.nmo's scripts first exist"): `OnLoadObject` of that file, kept in
+    `trafo_host` across sessions and handed to every anchor's registry;
+    captured at the anchor only when the load was not seen (logged as a
+    fallback: an original explosion before it may have changed values).
+  - **Retail births inside a replayed tick** (found here; the headless host
+    has the rule since S-steps): `OnPhysicalize` logged every birth at the
+    live tick + 1, also when a replay across an explosion physicalized a set's
+    pieces again, where a later rewind would take them for bodies born after
+    its anchor.  With the trafo as an input, a replayed tick's births go
+    under that tick when the log lacks them (`world.pre_step` wrapped), and a
+    reconcile's remake under the resync's tick.  Without the inputs the
+    R-steps' feed is unchanged (the same gap for mechanism births in a
+    session without the option is queued, roadmap §4 item 5).
+  - **Found and fixed: the builder crashed the retail mod at its return**
+    (`trafo_sets.hpp` `copy_dependencies`).  `CKCopyDefaultClassDependencies`
+    assigns the dependencies array inside CK2.dll, which in the game is
+    another C runtime than the mod's; the mod's `delete[]` freed that
+    buffer when the builder returned.  Symptom (first session `tr4_r1`): the
+    first set registered, then `core.anchor` aborted silently after the
+    journal opened (no "anchored (hash ...)" line, BML swallowed the fault),
+    the other sets were made on first sight or never (client 2: "no trafo
+    set for player <own>"); a diagnostic build placed it between
+    `make_trafo_set`'s entry and `ensure_trafo_set`'s return, with the set in
+    the registry.  Fix: the defaults read through
+    `CKGetDefaultClassDependencies` and copied element by element into the
+    mod's own buffer.  The same values: the headless build on L11 (SimTool
+    `--trafo-sets 2 --describe-trafo`) gives the same digests
+    (`90f856e0c8c20dd4/493`, `bf8575545ab7fbe0/597`) and 0 extras.
+- **Checks** (quick tier; x64 `build-agent-rTR4`; the Arch server
+  unchanged, TR3b's `bmmo-3daa19affd58-dirty` = HEAD's server code; runs
+  under `scripts/retail/tr4_*`, helpers `.local-tools/work/TR4/`
+  `tr4_retail.py`, `tr4_judge.py`, `field_diff.py`):
+  - 522 tests pass; GCC 29 ok; x64 BUILD-OK, x86 CLIENT-BUILD-OK; map.hpp
+    untouched.
+  - The headless BAR: `wire_check.sh rTR3b rTR4 rTR4w` **ALL SAME** (36/36
+    sends SAME, 36/36 journals IDENTICAL), once before and once after the
+    `copy_dependencies` fix.
+  - **One two-copy retail session** (`tr4_final`; Level 11, core on, the
+    Arch server with `trafo_inputs` on, snapshots off; r3_retail.py's spawn
+    recipe: both replay `r0_keys.bmrc`, client 1 beamed onto sector 1's
+    `P_Trafo_Stone` at 300, client 2 at 340): both clients build both sets
+    at the anchor (124 objects, 8 scripts each); each transforms once (wood
+    -> stone), the explosion stamped at the Delayer's prediction (option E):
+    458 and 498, applied there on both clients and on the server, the
+    owner's at vanilla timing; resyncs 0, starved 0, rollback mism 0,
+    `trafo_missed` 0, `trafo_original_leaks` 0, run_failures 0.
+    - **Pieces across the two clients: 32/32 bit-equal** at every common
+      checkpoint (5056 rows, ticks 458-812; position, rotation, both
+      velocities).
+    - **Drawn** (`drawn Ball_Wood_piece`, at about 520 and 760): at 520
+      every piece of both sets is shown (`v`), its root in the render
+      context, with its mesh and alpha 1, on both clients - the other
+      player's copies included - and the originals hidden; at 760 the first
+      set is hidden after its reset and the second fading (alpha 0.242 /
+      0.205).  The screenshots (`shot_c2_520.png` of `tr4_d2`) show the
+      wood pieces around the trafo.  The copies need nothing more than the
+      scene: adding to the current scene puts the frame (a root) into the
+      render context, which draws its children.
+    - **Against the server's journal: positions and both velocities
+      bit-equal on every row; 126 rows' rotation differs by <= 3.1e-8
+      (12/32 pieces with no differing row), only at ticks 460-554.**  Root
+      cause: the report, not the state.  The row's rotation is IVP's
+      `calc_at_quaternion` (`physics_state.cpp` `fill_body_state`), whose
+      `set_interpolate_smoothly` takes the slerp branch (acos, sin, sqrt)
+      when the core turns more than 2.6 degrees per PSI - the pieces right
+      after the explosion; the retail game thread runs the x87 at 24-bit
+      precision (Direct3D; the anchor line's `fpu=000a001f`), so that slerp
+      comes out about 1e-7 off unit length (0.99999992 against
+      1.0000000000000062).  The simulation never reads it (positions and
+      velocities stay bit-equal through 350 ticks of collisions).  Proof:
+      the same session with the automation's `fpu53 on` on both clients
+      (`tr4_d3`): **32/32 pieces bit-equal to the server on both clients,
+      5056/5056 rows**.  Not T4's code (the report path and the FPU mode
+      predate it); queued (roadmap §4 item 5).
+    - **The reference-map digest differs from the headless one**:
+      `d6e21ba72b993c66/493` on the retail CK2.dll, `90f856e0c8c20dd4/493`
+      headless (the value digest `bf8575545ab7fbe0/597` is equal).  3 of 493
+      lines: each explosion's `Physicalize:in11` reads the "Get Current"
+      operation's output, named `Out` in retail and `Pout 0` headless; the
+      same parameter by place.  Root cause: the reimplementation's
+      `CKParameterOperation::Update` (Ballanced CK2
+      `CKParameterOperation.cpp:105-107`) renames every operation output
+      `Pout 0`, the game's CK2.dll keeps the file's name - the originals
+      already differ (a diagnostic build's dump of the originals' map in
+      `tr4_d5`).  Design 9.1 / R2's "reference-map digest of the retail logs
+      equals the headless digest" therefore fails on a parameter name,
+      pre-existing and outside T4's code; options: the map describes an
+      operation output by its operation and index instead of its name
+      (changes every recorded digest), or the reimplementation keeps the
+      file's name (an engine-side change of the CK2 reimplementation).
+      Severity: diagnostic only - the reference-map digest has no consumer
+      beyond the build's log line (SimTool's trafo tool compares the value
+      digest, which is equal; nothing on the wire), and the portable script
+      record keys scripts by owner and name, so localization is unaffected.
+      The cheap form of the first option: `where()` in
+      `trafo_reference_map` describes an outside source parameter by its
+      operation's place (root script + operation index + `:out`).
+      Queued (roadmap §4 item 5); the user's call.
+  - The verification ran over its 15 minutes (about 27 minutes of wall
+    clock): about 15 of them went to finding the builder crash's root cause
+    (four diagnostic sessions `tr4_d1`-`tr4_d5` and their builds), the rest
+    to the gate itself.
+- **Deferred to the final verification** (roadmap §4 item 11): R1-R5 beyond
+  the one session (R1's solo forced arms, R2 with the R2 config and R2b at
+  150 ms, R3's second session in one process, R4 core off, R5 the wire on
+  trafo-free captures with the retail build), an out-of-reach trafo
+  rejected and logged, the H arms' A/B, CPU parity, three launches without a
+  hang.
+- **Not done:** T5 (records: `docs/engine-changes.md`'s bridge note for v22
+  is T5's, together with v21's); the default of `physics.trafo_inputs`
+  (M2).
 
 ## 9. Open questions
 
