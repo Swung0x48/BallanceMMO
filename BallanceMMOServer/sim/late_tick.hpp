@@ -149,4 +149,39 @@ namespace bmmo::sim {
     inline uint32_t resync_lead_ticks(uint32_t input_delay, uint32_t rtt_ms) {
         return session_start_tick_base(input_delay, rtt_ms);
     }
+
+    // Step RL1: the base of every re-anchor (a resync, a resync at L_eff, a
+    // late join) is taken from the session's FIXED deadline schedule, not
+    // from the server's current tick.  The deadlines are set once, at the
+    // start (tick_scheduler::start; deadline(t) = start + (t - first + D)
+    // periods), and the server steps at its members' arrivals capped at the
+    // deadline, so the current tick C sits anywhere between D ticks behind
+    // the schedule (a server waiting on a member's deadlines - every
+    // stall-triggered resync) and a few ticks ahead of it (an arrival-paced
+    // server).  A base of C + lead gave the member's frames lead + e(C)
+    // ticks before their deadlines (e = deadline(C) - step(C)): about 6
+    // instead of the start's 22 after a stall, and the server, waiting on
+    // those late frames, relayed every member about 15 ticks later for the
+    // rest of the session (found by the user's trial; result1/2.md).
+    //
+    // `scheduled` is tick_scheduler::tick_at(now, lead): the tick the
+    // schedule names for this instant plus `lead`, so deadline(base) - now
+    // is lead + D periods, the start's budget (the start base was handed out
+    // start_base periods before its first deadline-less step, design 9.26),
+    // whatever the server's pace.  `lead` now means exactly that: the
+    // start's budget less the input delay.  The floor keeps the base out of
+    // the runner's past: current_tick is the tick it steps next, so a base
+    // of current_tick + kReanchorBaseMarginTicks leaves base - 1 (the tick
+    // whose state A3 answers with) at least one tick ahead of the runner
+    // when the network thread read it; a runner that bursts further before
+    // the command reaches it is the base-missed path (re-answered).  The
+    // floor binds only when the server runs more than lead - 2 ticks ahead
+    // of its schedule, which needs a path shorter than 2 ticks; it then
+    // gives the member more budget than the start, never less.
+    constexpr uint32_t kReanchorBaseMarginTicks = 2;
+
+    inline uint32_t reanchor_base_tick(uint32_t scheduled, uint32_t current_tick) {
+        const uint32_t floor = current_tick + kReanchorBaseMarginTicks;
+        return static_cast<int32_t>(scheduled - floor) >= 0 ? scheduled : floor;
+    }
 }

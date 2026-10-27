@@ -20,6 +20,7 @@
 #include "../sim/late_tick.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -1114,4 +1115,89 @@ TEST(LateTickLead, ThePerPlayerPathNeedsTheFlagAndCapLead) {
     EXPECT_FALSE(uses_player_lead(true, 0));
     EXPECT_FALSE(uses_player_lead(true, ~CAP_LEAD));
     EXPECT_TRUE(uses_player_lead(true, CAP_LEAD));
+}
+
+// Step RL1: the base of a re-anchor (resync, resync at L_eff, late join) is
+// counted on the session's fixed deadline schedule (tick_scheduler::tick_at),
+// floored at the runner's next tick + 2 (late_tick.hpp reanchor_base_tick).
+// Whatever the server's pace at the moment of the resync, the member's base
+// gets the start's budget: deadline(base) - now = lead + input delay periods.
+namespace {
+    // deadline(base) - now in ticks.
+    double reanchor_budget_ticks(const tick_scheduler& sched, uint32_t base, tick_scheduler::clock::time_point now) {
+        return std::chrono::duration<double>(sched.deadline(base) - now).count() * 66.0;
+    }
+    // The runner's next tick when it steps `e` ticks before the deadlines
+    // (e = deadline(C) - step(C); e = 0: it waits on a member's deadlines).
+    uint32_t runner_tick_at(const tick_scheduler& sched, tick_scheduler::clock::time_point now, uint32_t delay, int e) {
+        return static_cast<uint32_t>(static_cast<int64_t>(sched.tick_at(now, 0)) - static_cast<int64_t>(delay) + e);
+    }
+}
+
+TEST(ReanchorBase, AServerWaitingOnTheMemberGivesTheStartsBudget) {
+    using namespace std::chrono;
+    using bmmo::sim::reanchor_base_tick;
+    constexpr uint32_t D = 17, lead = 27, first = 27;
+    tick_scheduler sched;
+    const auto t0 = tick_scheduler::clock::time_point(seconds(100));
+    // design 9.26: the first step is due start_base periods after the start
+    sched.start(t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(lead / 66.0)), first, D);
+    // the start's budget: deadline(start base) - t0 = lead + D periods
+    EXPECT_NEAR(reanchor_budget_ticks(sched, first, t0), lead + D, 1e-3);
+    const auto now = t0 + seconds(23) + microseconds(4321);
+    // e(C) = 0: the server steps at the deadlines, D ticks behind the schedule
+    const uint32_t C = runner_tick_at(sched, now, D, 0);
+    const uint32_t base = reanchor_base_tick(sched.tick_at(now, lead), C);
+    const double budget = reanchor_budget_ticks(sched, base, now);
+    EXPECT_GT(budget, lead + D - 1.0);
+    EXPECT_LE(budget, lead + D + 1e-6);
+    EXPECT_EQ(base, C + lead + D);
+    // the rule it replaces (C + lead) left the frames about D ticks short
+    EXPECT_LT(reanchor_budget_ticks(sched, C + lead, now), lead + 1.0);
+}
+
+TEST(ReanchorBase, AnEarlyServerGivesTheSameBudget) {
+    using namespace std::chrono;
+    using bmmo::sim::reanchor_base_tick;
+    constexpr uint32_t D = 17, lead = 27, first = 27;
+    tick_scheduler sched;
+    const auto t0 = tick_scheduler::clock::time_point(seconds(100));
+    sched.start(t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(lead / 66.0)), first, D);
+    const auto now = t0 + seconds(13) + microseconds(777);
+    // arrival-paced, e = 22: the server steps about 5 ticks ahead of the schedule
+    const uint32_t C = runner_tick_at(sched, now, D, 22);
+    const uint32_t base = reanchor_base_tick(sched.tick_at(now, lead), C);
+    const double budget = reanchor_budget_ticks(sched, base, now);
+    EXPECT_GT(budget, lead + D - 1.0);
+    EXPECT_LE(budget, lead + D + 1e-6);
+    EXPECT_EQ(base + 5, C + lead);   // 5 ticks nearer the server than C + lead
+}
+
+TEST(ReanchorBase, NeverInTheRunnersPast) {
+    using namespace std::chrono;
+    using bmmo::sim::kReanchorBaseMarginTicks;
+    using bmmo::sim::reanchor_base_tick;
+    for (const uint32_t D: {6u, 17u, 21u})
+        for (const uint32_t lead: {1u, 9u, 27u}) {
+            tick_scheduler sched;
+            const auto t0 = tick_scheduler::clock::time_point(seconds(100));
+            sched.start(t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(lead / 66.0)), lead, D);
+            for (int e = -40; e <= 80; ++e)
+                for (const auto now: {t0, t0 + milliseconds(100), t0 + seconds(7) + microseconds(123)}) {
+                    const uint32_t C = runner_tick_at(sched, now, D, e);
+                    const uint32_t base = reanchor_base_tick(sched.tick_at(now, lead), C);
+                    ASSERT_GE(static_cast<int32_t>(base - C), static_cast<int32_t>(kReanchorBaseMarginTicks))
+                        << "D " << D << " lead " << lead << " e " << e;
+                    // the floor only ever adds budget
+                    ASSERT_GT(reanchor_budget_ticks(sched, base, now), lead + D - 1.0)
+                        << "D " << D << " lead " << lead << " e " << e;
+                }
+        }
+    // a server far ahead of its schedule (no path, LAN): the floor binds
+    tick_scheduler sched;
+    const auto t0 = tick_scheduler::clock::time_point(seconds(100));
+    sched.start(t0, 9, 6);
+    const auto now = t0 + seconds(5);
+    const uint32_t C = sched.tick_at(now, 0) + 9;
+    EXPECT_EQ(reanchor_base_tick(sched.tick_at(now, 9), C), C + kReanchorBaseMarginTicks);
 }

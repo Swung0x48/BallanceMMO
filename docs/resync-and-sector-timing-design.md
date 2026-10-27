@@ -2932,6 +2932,22 @@ state: the pre-existing owner-only gap (audit #2), not a new one.
     never reached its old epoch; whether the server sent them is queued
     with the two above.)
 
+**As built (step RL1, 2026-10-27): the resync's base on the fixed deadline
+schedule.** Found by the user's in-game trial (relay lag 21 -> 36-37 on the
+other client after a stall-triggered resync): the base was the runner's
+current tick + `resync_lead_ticks`, while the deadlines are fixed at the
+start, so a resync handled while the server waited on that member gave its
+frames about 6 ticks of deadline budget instead of 22 and the server then
+relayed every member about 15 ticks later for the rest of the session. The
+base of a resync, a resync at `L_eff` and a late join is now
+`max(tick_scheduler::tick_at(now, lead), current_tick + 2)`
+(`session_runner::reanchor_tick`, `sim/late_tick.hpp` `reanchor_base_tick`):
+deadline(base) - now = lead + D, the start's budget. Server only, no
+protocol change; A3's state at S is unchanged, only S moves. resync_snapoff:
+the other clients' lag 36-37 -> 20-21, the server's S1 q50 for c2 6.05 ->
+22.15; resync_at150: c0 26.77 -> 22.3. The full record is the late-player
+design §2.8, "As built (step RL1)".
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

@@ -1071,6 +1071,61 @@ revision 3 it had only 14 to give back.
 
   The baseline is measured only at a member's first assignment. A resync's
   anchoring error (A0j: up to 2.1 ticks) stays inside M.
+- *As built (step RL1, 2026-10-27): the re-anchor's lead is counted on the
+  fixed deadline schedule, not over the server's current tick.* The rule
+  above rests on a premise that is false as built: that a lead over
+  `current_tick` puts p's frames where they fell. The deadlines are fixed
+  at the start (`tick_scheduler::start`, session_runner.cpp; deadline(t) =
+  start + (t - first + D) periods) and nothing re-anchors them, while the
+  server steps at the latest member's arrival capped at the deadline, so
+  the current tick C sits anywhere from D ticks behind the schedule (the
+  server waiting on a member's deadlines) to a few ticks ahead of it. A base
+  of C + lead gave p's frames `lead + e(C) - path` ticks before their
+  deadlines (e = deadline(C) - step(C)) instead of the start's
+  `start_base + D - path`. A stall-triggered resync is handled while the
+  server waits on that very member (e about 0), so p's frames came about
+  D ticks short (about 6 instead of 22), the server stepped at p's arrivals
+  from then on and relayed every member's frames about 15 ticks later for
+  the rest of the session (the user's trial: relay lag 21 -> 36-37 on the
+  other client; headless `core_ref_rc1/resync_snapoff`: c0, c1 and c3 see
+  every remote 20 -> 36-37 after c2's pause-triggered resync at 1545, the
+  server's S1 q50 for c2 22.23 -> 6.05). A resync without a stall landed
+  about 5 ticks early instead (`resync_at150` c0, e = 21.7: q50 26.77, its
+  own relay lag 25). And the code does not keep the baseline: every
+  assignment re-measures the reference (`lateness.meter.reset`,
+  session_runner.cpp `player_ready`), so the 6 became p's new baseline and
+  nothing re-paced it.
+  Fix (F1 of `.local-tools/work/TRIAL1/analysis/resync_lag/result1.md`):
+  every re-anchor - the resync off the per-player path
+  (`resync_tick_base`), the resync at `L_eff`, and the late join - takes
+  `base = max(tick_at(now, lead), current_tick + 2)`
+  (`session_runner::reanchor_tick`, `sim/late_tick.hpp`
+  `reanchor_base_tick`; `tick_scheduler::tick_at` on a copy of the session's
+  scheduler as started, kept in the runner's cross-thread view). `lead` now
+  means the start's budget less the input delay: deadline(base) - now =
+  lead + D periods whatever the server's pace, as the start base's
+  deadline is start_base + D periods after the all-ready moment (design
+  9.26). The floor keeps base - 1, the tick whose state the exact resync
+  answers with, ahead of the runner's next tick; a runner that bursts past
+  it before the command arrives is the base-missed path, as before. It
+  binds only when the server runs more than lead - 2 ticks ahead of its
+  schedule (a path under 2 ticks) and then gives more budget, never less.
+  Before the session ticks the base is C + lead, the old rule. A3's exact
+  resync is unchanged: the state at S is the same, only the choice of S
+  moves. No protocol change (the base travels in the existing assignment).
+  Measured (snapshots off, 150 ms each way, D = 17, 4 clients, the
+  `core_ref_rc1` recipes, maps/arena-test/rl1/): resync_snapoff - base
+  1545 + 43 = 1588 (was + 27), its deadline 660 ms after the server's step
+  of 1545 (was 417); the other clients' relay lag of every remote 20-21
+  throughout (was 36-37 after the resync); the server's earliness
+  20.6-21.4 after it (was 5.2-5.6); c2's S1 q50 22.14-22.16 (was
+  6.04-6.08); c2's own lag 20-21. resync_at150 (e = 21.9 at the resync) -
+  base 860 + 22 = 882 (was + 27), c0's S1 q50 22.30-22.37 (was
+  26.55-26.77), its relay lag 21 (was 25). Both servers' journals replay
+  exactly. Not run: the late-join arm, lead_adjust / patience on with a
+  stall, and the LAN case (D at its floor of 6, where the old shortfall
+  was about 6 ticks), deferred to the stage close-out
+  (`docs/roadmap.md` §4).
 - The lower's gate is `lead_offset > 0`, which a resync keeps.
 - A SessionLead whose `epoch` is older than the client's base is dropped.
 - A client rebase (more than `33 + |slew|` behind) still asks for a resync.
@@ -2263,7 +2318,7 @@ last sector is entered.
 | R1 S8: A10's "slack about 2" is false; the trigger `q50 < 0` and the target `q10 = 3` disagree | changed: the absolute miss is slack < 3, and the raise is `ceil(q50(n))`, so the trigger and the target are one quantity. In the replay it gives 19.8-20.0 where the q10 target read 1-12. A10's criteria are rewritten |
 | R1 S9, R2 5: masking hides the host-clock case; no solo or 2- or 3-member arms | changed: H9 labels and judges instead of masking; H11 injects the skew (A9h8, A9h20); shared absolute majorities wait 660 ticks, so lp11_a9c's 515-tick fault raises nobody; arms A11, A11u, A5u2, A5u3 and A5s2 |
 | R1 N1: waiver hysteresis | refuted: in the replay, ending at M - 1 or M - 2 does not reduce the episodes (13/13/12 on lp11_a0_off, 22/24/26 on a0j) and adds the member's own cuts (61 → 65 → 67, 95 → 108 → 117) |
-| R2 2: a resync re-measures the baseline and resets `o` | changed: a resync keeps the baseline and the offset, and the baseline moves only by a lead the re-anchor did not restore (§2.8); the lower is gated on `lead_offset`; the A5d variant with C8 `--resync-at` |
+| R2 2: a resync re-measures the baseline and resets `o` | changed: a resync keeps the baseline and the offset, and the baseline moves only by a lead the re-anchor did not restore (§2.8); the lower is gated on `lead_offset`; the A5d variant with C8 `--resync-at`. (Corrected at step RL1, 2026-10-27: a lead over the current tick does not restore where p's frames fell - the server's pace moves C against the fixed deadlines - and the code re-measures the reference at every assignment; the re-anchor now takes its lead on the fixed schedule, `tick_at(now, lead)`, so p's frames get the start's budget again: resync_snapoff 6.05 -> 22.15, resync_at150 26.77 -> 22.3; §2.8, "As built (step RL1)".) |
 | R2 3: arrivals are backdated, and the step test sees frames later | changed: the ring keeps `seen`; patience runs on `seen`; R1 measures the would-cut live; the S1 line prints `seen - at` and the wake-up's lateness |
 | R2 4: path samples with an on-time filter, pooled, shifted on the ack, absent at the start | changed: per pair, from every datagram, a minimum over 660 ticks, cleared on an ack, deferring with no samples (§2.9, R5) |
 | R2 6: R2 deleted the reference while step 9's patience still read it | changed: R2 is observe-only beside revision 2's meter; R3 removes patience's use of the reference; R4 deletes it. Each step builds on its own |

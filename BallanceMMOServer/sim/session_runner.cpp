@@ -1,4 +1,5 @@
 #include "session_runner.hpp"
+#include "late_tick.hpp"
 
 #include "CKAll.h"
 
@@ -121,6 +122,15 @@ namespace bmmo::sim {
         // the tick the server reaches now, plus a second so the joiner's
         // first inputs arrive in time
         return it->second.first_tick + static_cast<uint32_t>(elapsed * 66 / 1000000) + 66;
+    }
+
+    uint32_t session_runner::reanchor_tick(uint32_t session, uint32_t lead) const {
+        std::lock_guard lk(view_mutex_);
+        auto it = views_.find(session);
+        if (it == views_.end()) return lead;
+        const auto& v = it->second;
+        if (!v.schedule.started()) return v.next_tick + lead;
+        return bmmo::sim::reanchor_base_tick(v.schedule.tick_at(clock::now(), lead), v.next_tick);
     }
 
     size_t session_runner::session_count() const {
@@ -452,6 +462,7 @@ namespace bmmo::sim {
                     auto& v = views_[session];
                     v.start = clock::now();
                     v.first_tick = s.world->tick_index();
+                    v.schedule = s.scheduler;
                 }
                 publish_state(s);
                 log_patience_on(s);
@@ -525,6 +536,7 @@ namespace bmmo::sim {
                     auto& v = views_[session];
                     v.start = clock::now();
                     v.first_tick = s.world->tick_index();
+                    v.schedule = s.scheduler;
                 }
                 publish_state(s);
                 log("[session " + std::to_string(session) + "] all " + std::to_string(s.players.size())

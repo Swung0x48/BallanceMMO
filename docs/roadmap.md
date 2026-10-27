@@ -93,6 +93,13 @@ left. Each design named here has its own document with its step table.
    T0, B1 late or moved Sector stamps rewind, A1 portable script record, A2
    offline resync fidelity, A3 the exact resync on the wire, **A4 full-tier
    close-out**, A5 late joiner through the same path, B2, T1.
+   **RL1 done** (2026-10-27, found by the user's trial; late-player design
+   §2.8, "As built (step RL1)"): every re-anchor's base (resync, resync at
+   `L_eff`, late join) is taken from the session's fixed deadline schedule,
+   `max(tick_at(now, lead), current_tick + 2)`, instead of the current tick,
+   so a resync made while the server waits on that member no longer leaves
+   every other client about 15 ticks behind (resync_snapoff: 36-37 -> 20-21;
+   resync_at150: c0 26.77 -> 22.3). Server only, no protocol change.
 4. Retail completes goal 3: R3 lifecycle rewind, R4 part one (built), R5 the slew
    (built; its A5u analogue ends in one resync of the raised client, the CPU
    cliff of item 8 meeting the fixed reach of plan step 12, reproduced
@@ -218,6 +225,15 @@ left. Each design named here has its own document with its step table.
       retail two-copy run of the committed x86 build with core on (built,
       CLIENT-BUILD-OK; the user's round 1 ran the same tree's hold-last
       build, `TRIAL1/holdlast`).
+    - RL1 (quick tier, 2026-10-27; ran: the base-rule unit tests, x64
+      build, tests, GCC, the wire check rRC1 -> rRL1 ALL SAME, one live
+      resync_snapoff and one resync_at150 against the rebuilt Arch server,
+      both server journals exact): (a) the late-join arm (the joiner's base
+      moved onto the schedule too); (b) lead_adjust / patience on with a
+      stall-triggered resync (the `L_eff` path); (c) the LAN case (D at its
+      floor of 6, where the floor `current_tick + 2` may bind); (d) a
+      retail two-copy run with a stall-triggered resync (the trial's case;
+      server-only change, the x86 build is unchanged).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

@@ -1409,11 +1409,16 @@ public:
     // trip - up to the caps in sim/late_tick.hpp - and, since plan step 20,
     // clamped inside the rollback window exactly as the start base is
     // (resync_lead_ticks), so a resynced member's relay lag comes back to
-    // about where the start put it instead of 4 ticks past it.
+    // about where the start put it instead of 4 ticks past it.  Since step
+    // RL1 the lead is counted on the session's fixed deadline schedule, not
+    // over the runner's current tick (session_runner::reanchor_tick): a
+    // resync made while the server waits on that member's deadlines used to
+    // leave every other member about 15 ticks of relay lag behind for the
+    // rest of the session.
     uint32_t resync_tick_base(const physics_session_state& s, HSteamNetConnection c) const {
         const auto it = clients_.find(c);
         const uint32_t rtt_ms = it == clients_.end() ? 0u : it->second.ping_peak_ms;
-        return runner_->current_tick(s.id) + bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms);
+        return runner_->reanchor_tick(s.id, bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms));
     }
 
     // The lead a late joiner is anchored at.  On the per-player path
@@ -1738,7 +1743,9 @@ public:
         // the late join's lead for a joiner.  A resync keeps both and moves
         // only the base.  A repeated SessionReady keeps the first.
         const uint32_t join_lead = s.late.count(c) ? late_join_lead(s, c, msg.caps) : 0;
-        const uint32_t assigned = s.late.count(c) ? runner_->current_tick(s.id) + join_lead : s.start_tick_base;
+        // A joiner's lead is counted on the fixed deadline schedule (step
+        // RL1, session_runner::reanchor_tick), as a resync's is.
+        const uint32_t assigned = s.late.count(c) ? runner_->reanchor_tick(s.id, join_lead) : s.start_tick_base;
         if (!s.leads.count(c)) {
             auto& lead = s.leads[c];
             lead.caps = msg.caps;
@@ -1813,8 +1820,8 @@ public:
         uint32_t assigned = resync_tick_base(s, c);
         if (const auto lead = s.leads.find(c);
                 lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps))
-            assigned = runner_->current_tick(s.id)
-                     + bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset);
+            assigned = runner_->reanchor_tick(s.id,
+                    bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset));
         // The newest tick whose held frames were counted: the old epoch's
         // held_total stops here, and the ticks after it up to the base are
         // applied held under no numbering the client has (its notices never

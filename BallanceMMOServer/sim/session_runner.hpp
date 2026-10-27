@@ -297,6 +297,13 @@ namespace bmmo::sim {
         // (0 when unknown) and whether it is ticking.
         uint32_t current_tick(uint32_t session) const;
         bool running(uint32_t session) const;
+        // Step RL1: the base of a re-anchor (a resync, a late join) taken
+        // from the session's fixed deadline schedule - tick_scheduler::tick_at
+        // (now, lead), so deadline(base) - now is lead + input_delay periods
+        // whatever the server's pace - floored at current_tick + 2 so it is
+        // never in the runner's past (sim/late_tick.hpp reanchor_base_tick).
+        // Before the session ticks: current_tick + lead, the rule it replaced.
+        uint32_t reanchor_tick(uint32_t session, uint32_t lead) const;
         // Tick to assign to a late joiner anchoring now.
         uint32_t late_join_tick(uint32_t session) const;
         size_t session_count() const;
@@ -501,8 +508,10 @@ namespace bmmo::sim {
 
         // cross-thread view
         mutable std::mutex view_mutex_;
+        // `schedule`: a copy of the session's tick_scheduler as started (its
+        // start and first tick never move; reanchor_tick reads tick_at only).
         struct view { uint32_t next_tick = 0; bool running = false; std::chrono::steady_clock::time_point start{}; uint32_t first_tick = 0;
-                      std::string journal; };
+                      std::string journal; bmmo::session::tick_scheduler schedule; };
         std::map<uint32_t, view> views_;
     };
 }
