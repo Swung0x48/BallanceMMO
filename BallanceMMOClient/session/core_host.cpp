@@ -51,6 +51,10 @@
 #include <string>
 #include <thread>
 
+#if defined(_MSC_VER) && defined(_M_IX86)
+#include <float.h>
+#endif
+
 #include <game/session_host_support.hpp>
 #include <game/trafo_sets.hpp>
 #include <session/bridge_recipe.hpp>
@@ -66,6 +70,38 @@
 namespace {
     namespace bs = bmmo::session;
     using clock_type = std::chrono::steady_clock;
+
+    // ------------------------------------------------------------ report precision
+    // Step TR4c (trafo design, As built (step TR4 = T4) residual (a)): the
+    // retail game thread runs the x87 at 24-bit precision (Direct3D), and
+    // the bridge's body read reports a rotation through IVP's
+    // calc_at_quaternion, whose slerp branch (a core turning > 2.6 degrees
+    // per PSI) then comes out ~1e-7 off unit length - the journal's rows
+    // differ from the server's although the state is exact.  The x87 is
+    // switched to 53 bits around the read that feeds the journal's
+    // checkpoint rows only (platform.list_bodies: its one caller is
+    // client_journal::local_checkpoint) and the caller's control word is
+    // restored on scope exit.  Not around platform.body_state: the core's
+    // corrections, resync and rollback capture read it, and those feed the
+    // simulation.  The x64 and Linux hosts run SSE2 doubles (53-bit) already.
+    struct report_precision_53 {
+#if defined(_MSC_VER) && defined(_M_IX86)
+        unsigned int saved = 0;
+        bool ok = false;
+        report_precision_53() {
+            unsigned int unused = 0;
+            ok = _controlfp_s(&saved, 0, 0) == 0 && _controlfp_s(&unused, _PC_53, _MCW_PC) == 0;
+        }
+        ~report_precision_53() {
+            unsigned int unused = 0;
+            if (ok) _controlfp_s(&unused, saved & _MCW_PC, _MCW_PC);
+        }
+#else
+        report_precision_53() = default;
+#endif
+        report_precision_53(const report_precision_53&) = delete;
+        report_precision_53& operator=(const report_precision_53&) = delete;
+    };
 
     // ------------------------------------------------------------ the switch
     // Written on the game thread (the verb), read by the network thread
@@ -1740,7 +1776,12 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         std::string error;
         return physics_view_.get_body_state(entity.c_str(), out, error);
     };
-    p.list_bodies = [this]() { return physics_view_.list_bodies(); };
+    // The journal checkpoint's rows (its one caller): read at 53-bit x87
+    // precision (step TR4c, report_precision_53 above).
+    p.list_bodies = [this]() {
+        report_precision_53 precision;
+        return physics_view_.list_bodies();
+    };
     p.sector_manager_active = [this]() { return physics_session_sector_manager_active(); };
     // The cell is read only while the checkpoint hold is in force: otherwise
     // the checkpoint hook has reported the crossing after the fact already

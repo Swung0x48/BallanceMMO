@@ -278,7 +278,13 @@ x64 teardown) are item 2.
      describe an operation output by its operation's place, or keep the name
      in the reimplementation - the user's call; (c) the retail birth log in
      a session without trafo inputs logs a replayed tick's births at the
-     live tick + 1 (T4 fixed it with the inputs on only).
+     live tick + 1 (T4 fixed it with the inputs on only).  **(a) and (b)
+     done at TR4c** (trafo design, As built (step TR4c)): the journal
+     checkpoint's `list_bodies` read at 53-bit x87 in the retail core host
+     (pieces 32/32, 5056/5056 rows bit-equal to the server including
+     rotation on both clients), the map's operation outputs by place
+     (Level 11 digest `017f037d7cfbc089/493` in retail and headless; every
+     earlier digest changed).  (c) stays open.
    - **RL1b** (`.local-tools/work/CHAIN3/queue.md`, the redone review of
      RL1, no blocker): the As-built note's re-step depths (12 -> 28 on
      resync_snapoff, 34 -> 29 at 150 ms, and why), the held window, the late

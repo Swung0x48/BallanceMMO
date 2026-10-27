@@ -2900,6 +2900,75 @@ run.
 - **Checks:** none run (docs only, review only, the row's gate).
   Deferred: nothing beyond TR3b's and TR4's lists.
 
+**As built (step TR4c, 2026-10-27; HEAD 2ff5c6b + the working tree).**  T4's
+residuals (a) and (b), the user's choices of 2026-10-27 ("读取时临时切到 53
+位", "按操作位置描述输出").  No protocol, journal or bridge change; no engine
+change; the legacy retail path untouched.
+
+- **(a) The rotation report at 53 bits** (`BallanceMMOClient/session/
+  core_host.cpp`, `report_precision_53` and `p.list_bodies`).  The callers
+  of the bridge's body reads were established first: the core's
+  `platform.body_state` (one entity) is read by the corrections and the
+  remote/own comparisons (`client_core_frame.cpp` 685/695/758/939,
+  `client_core_messages.cpp` 80/257), the lifecycle (`client_core_lifecycle.
+  cpp` 1048/1447/1549), the resync (`client_core_resync.cpp` 192/239/270)
+  and the rollback binding's capture (`rollback_binding.hpp` 94) - those
+  feed the simulation (a beam, a restore, a decision), so that read is
+  **not** wrapped and keeps the game's precision.  `platform.list_bodies`
+  has exactly one caller, `client_journal::local_checkpoint`
+  (`client_journal.cpp` 205), the journal's checkpoint rows: report only.
+  The retail lambda of that one platform function now sets the x87
+  precision control to 53 bits (`_controlfp_s(_PC_53, _MCW_PC)`) for the
+  read and restores the caller's precision bits on scope exit (an RAII
+  guard, so also on an early return or an exception); x86 MSVC only -
+  `core_host.cpp` is the retail (x86) host and is never compiled for x64
+  or Linux, whose body reads (`session_client.cpp` 1254, `physics_world.
+  cpp` 1478) already compute in SSE2 doubles at 53 bits and are unchanged.
+  Adaptation: the guard sits in the core
+  host's platform lambda, not in `physics_view::list_bodies` or the bridge,
+  because the legacy path (PSC's checkpoint, the automation's `journal
+  mark`) reads through the same `physics_view` and gets nothing new; the
+  host's `movable_bodies` (names and the movable flag only) is not wrapped.
+  The read itself (`fill_body_state`: IVP's const `calc_at_quaternion`)
+  writes nothing, so the simulation sees the same state either way.
+- **(b) An operation output by its place** (`BallanceMMOCommon/include/game/
+  trafo_sets.hpp`, `trafo_reference_map`'s `operation_place` and `where`):
+  a source parameter outside the map's block places that is a parameter
+  operation's output is described as `outside:<root script>:op<k>:out`, k
+  the operation's index among every parameter operation of its root script
+  (in `walk` order, each behaviour's own order); any other outside source
+  keeps its name, and an operation that cannot be found falls back to the
+  name.  **Every earlier reference-map digest changes**: Level 11 is now
+  `017f037d7cfbc089/493` (was `90f856e0c8c20dd4/493` headless,
+  `d6e21ba72b993c66/493` retail); the value digest `bf8575545ab7fbe0/597`
+  is unchanged.  The digest has no consumer beyond the builder's log line
+  (`set.digest`, nothing on the wire or in a journal).  Measured: 6 lines
+  per set changed, not the 3 the T4 note named - each explosion's
+  `Physicalize:in10` and `in11` both read an operation's output, both named
+  `Pout 0` by the reimplementation (so the old headless lines could not
+  even tell them apart; now `op0:out` / `op1:out`, Stone's in the other
+  order); in retail one of the two was `Out`.  No unit test: the map needs
+  a loaded CK context (no fixture in the test target); SimTool's
+  `--describe-trafo` dump is the check.
+- **Checks (quick tier, about 14 minutes of wall clock):** x64 BUILD-OK, x86
+  CLIENT-BUILD-OK, the Arch server rebuilt (`ballanced-3e4289e95f25+bmmo-
+  2ff5c6b11cc8-dirty`); 538/538 tests; GCC 29/29 ok; wire check rRL1b ->
+  rTR4c against `core_ref_s6`: ALL SAME (12 captures' sends, 12 journals
+  IDENTICAL - the digest is only in logs); SimTool L11 `--trafo-sets 2
+  --describe-trafo` on rRL1b and rTR4c: only the 6 lines per set above
+  differ.  One two-copy retail session (TR4's `tr4_retail.py` recipe,
+  `scripts/retail/tr4c_gate`: core on, Level 11, Arch server with
+  `trafo_inputs` on and snapshots off, each client transforming once in
+  sector 1, the game's x87 left at `fpu=000a001f`, no `fpu53`): **pieces
+  32/32 bit-equal to the server's journal on both clients including
+  rotation, 5056/5056 rows each (ticks 458-812), client 1 = client 2
+  32/32** (TR4: 126 rows' rotation differed); the retail reference-map
+  digest `017f037d7cfbc089/493` on both clients, equal to the headless
+  one; the copies drawn (`drawn _Trafo` n=126 drawn=34 at 520, 18 at 760,
+  as at TR4).
+- **Not done:** T4's (c) (the retail birth log of a replayed tick without
+  the trafo inputs) stays queued.
+
 ## 9. Open questions
 
 **9.1 CK copy semantics on the retail CK2.dll.** The open points are:
