@@ -102,7 +102,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | first_tick | u32（接收者锚点 tick 的编号；实际编号随 `SessionAssign` 到达，两端客户端都不读这里，服务端写 0） |
 | seed | i32 |
 | spawn_impulse | f32（每次出生 Physicalize 的踢出速度 m/s，0 = 无；写在 seed 之后） |
-| world_options | u32（协议 11：会话的世界选项 `session::WORLD_*`，写在 protocol 之后、players 之前，整个会话固定、迟到加入者相同；bit 1 `WORLD_TRAFO_INPUTS` = 变球作为输入，由服务端配置 `physics.trafo_inputs` 决定，默认关；协议 12 起 bit 0 `WORLD_PLACEMENT_CLONES` = 小节摆放：PH 表中每一行都在锚点得到自己的对象（docs/sector-placement-design.md），由服务端配置 `physics.placement_clones` 决定，默认关，直到零售核心宿主能建副本（步骤 S10）） |
+| world_options | u32（协议 11：会话的世界选项 `session::WORLD_*`，写在 protocol 之后、players 之前，整个会话固定、迟到加入者相同；bit 1 `WORLD_TRAFO_INPUTS` = 变球作为输入，由服务端配置 `physics.trafo_inputs` 决定，默认关；协议 12 起 bit 0 `WORLD_PLACEMENT_CLONES` = 小节摆放：PH 表中每一行都在锚点得到自己的对象（docs/sector-placement-design.md），由服务端配置 `physics.placement_clones` 决定；步骤 S5 到 S10 默认关（零售核心宿主还不能建副本），S10 起默认开） |
 | players | u8 count，每项：id u32、join_order u8、ball_type u8、spawn_position f32×3、spawn_rotation f32×4（实体世界矩阵位姿，CK 侧为单精度；这是原版复活点本身，每个成员都相同——设计 9.10 去掉了出生环偏移） |
 
 `session_ready_msg`（client → server，reliable）：session u32、first_tick u32、anchor_hash u64（锚点世界的可动 core 位姿哈希，即 `world_hash::pose`，每个 core 各自哈希后无序求和，与刚体列表顺序无关；不含物理时间因子等时钟派生量，因为客户端重开关卡会比新加载早一帧设置时间因子）、anchor_surfaces u64（碰撞表面签名）、physics_sha256 string ≤ 64、build_id string ≤ 64；protocol u32（客户端的 `session::PHYSICS_PROTOCOL_VERSION`，当前为 12）紧跟 first_tick 之后，是必填字段，缺了整条消息不解析；caps u32（协议 8 起，放在 build_id 之后，`session::CAP_*`：bit0 `CAP_LEAD` = 客户端会执行 `SessionLead` 并回 `SessionLeadAck`；bit 3 `CAP_PLACEMENT` 见协议 12；协议 12 起 caps 之后还有 anchor_placement u64）——protocol < 8 的消息不带它，照样解析（caps 0），好让服务端说出版本不符。服务端先比 protocol：不等于自己的就 `SessionEnd` 并写明两边版本——新旧构建不得同场。再把哈希与自己锚点的值比较（迟到加入者除外）；不一致则 `SessionEnd` 并给出原因。同时比 `build_id` 的引擎半部（`ballanced-<rev>`）：不同则同样结束会话，任一边为 `unknown` 时不比。`session_start_msg` 在 spawn_impulse 之后同样带服务端的 protocol u32（必填）：客户端不等则拒绝开始会话并提示更新，解析不出来（旧服务端）也提示。
@@ -121,6 +121,8 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 | Trafo = 5 | 协议 11：ball_type u8（碎片类型 0 木 1 石 2 纸，即变球前的球型）、flags u8（`TRAFO_RESET` bit0、`TRAFO_SERVER` bit1、`TRAFO_FINAL` bit2，后两位只由服务端设置）、position f32×3（爆炸的参照系平移；重置为 0） |
 
 **协议 12（小节摆放设计 2.4、5，步骤 S5）：摆放签名。** `session_ready_msg` 在 caps 之后加 anchor_placement u64（协议 ≥ 12 才读；更旧的消息照样解析为 0）：客户端世界在锚点的 PH 表摆放签名（`game/sector_placement.hpp` signature，摆放开或关都算）。宿主能算签名时 caps 带 `CAP_PLACEMENT`（bit 3），服务端在引擎比较之后把它与自己世界的签名比较——迟到加入者也比（签名与时间无关）——不一致即结束会话（"placement mismatch for X (client …, server …)"）。不带该 cap 的成员发 0、不比较；会话的 world_options 有 `WORLD_PLACEMENT_CLONES` 时该成员被移出会话（不移出房间），与缺 `CAP_TRAFO_INPUTS` 相同。journal 升到 v6：HEADER 末尾（world_options 之后）加 anchor_placement u64（服务端总是写；客户端写它在 SessionReady 里发的值；更旧的文件读作 0 = 未知、不比较），客户端 HEADER 从此也写 world_options；SimTool `--replay-session` 按 HEADER 的 world_options 建世界，签名非 0 且与重放世界不同则拒绝重放。
+
+协议 12 的各端（步骤 S6、S10 之后）：服务端世界、无头客户端与零售 Mod 的核心宿主（session core on）都在锚点建副本（选项开时）并声明 `CAP_PLACEMENT`、上报签名；是否建副本由客户端内核决定（能力 + 会话的 `WORLD_PLACEMENT_CLONES`），宿主不自己读位。选项关而关卡里还留着副本时，宿主先释放，释放不掉就不锚定、在本地结束会话；建副本失败（全有或全无）同样在发 SessionReady 之前本地结束。旧的零售路径（session core off）不声明该能力：会话带 `WORLD_PLACEMENT_CLONES` 时，它照常先发一条 caps 为 0 的 SessionReady，再在开始倒计时之前本地结束会话（"the placement needs the session core (session core on)"），服务端因此在同一秒就把它移出会话，其他成员不必等 8 s 的起始屏障。各关卡的签名、副本数与实测见 `docs/sector-placement-design.md` §12。
 
 **协议 11（变球复制设计 2.2、2.14，步骤 T2）：变球是锁步输入。** 世界选项 `WORLD_TRAFO_INPUTS` 打开时，每个成员在每个世界里都有自己的一套碎片（`BMMO_TrafoOwner_<id>` 拥有的 8 个脚本），变球的爆炸与重置作为 `Trafo` 事件经服务端按 (玩家, 碎片类型) 的台账（`session/trafo_input.hpp` `trafo_acceptance`）接受：同一类型的爆炸与重置不在同一 tick，下一次爆炸至少在上次重置后 140 tick；仍有碎片的类型再次爆炸时服务端先插入自己的重置；比最新爆炸的 origin 更旧的重置被取代（只回 SUPERSEDED 给发送者）；爆炸后 1320 tick（20 s）内没有重置的，服务端在下一个 tick + sector_lead 够到期限时排入自己的重置（`TRAFO_SERVER`）；离开者每种类型都得到一个 `TRAFO_RESET|TRAFO_SERVER|TRAFO_FINAL`。校验只用静态关卡数据：爆炸位置距关卡 PH 表中每个 `P_Trafo_*` 行（以及当前的 `P_Trafo_*` 实体）都超过 `kTrafoReach`（4.5 m）即拒绝——不应用、只给发送者回 REJECTED、日志按“可能作弊或数据损坏”记下玩家、tick、位置、最近的变球器及距离、球型与会话。`SessionReady` 的 caps 必须带 `CAP_TRAFO_INPUTS`（bit 2），否则该成员被移出会话（不移出房间）。`SessionResyncState` 末尾带台账列表 `trafo_ledger`：服务端世界在 S 时持有的每一套碎片的三种类型各一项（从未爆炸过的成员的套、离开者在最终重置之后到退役之前的套都在内）（u16 个数，每项 player u32、type u8、位 u8（有爆炸/有碎片/有重置/已最终重置）、explode_applied u32、position f32×3、reset_applied u32、final_applied u32）。加入者与重同步成员随状态还会重收应用 tick ≥ 基准的 `Trafo` 事件（台账只覆盖 ≤ S）。超过速率上限的 `Trafo` 事件也回 REJECTED；重置的 position 在接收时清零后再转发。服务端 journal 升到 v5：HEADER 末尾加 world_options u32，`Trafo` 事件用现有的 ball_type/flags/position 字段。
 
@@ -172,6 +174,8 @@ physics:
   maximum_physics_rooms: 1            # M3 只验证过单房间
   debug_trace: false                  # 每 tick 诊断日志（rng/清醒刚体变化、输入沿、精确核心转储）；客户端用自动化命令 session trace on 配对
   event_rate_limit: 20                # 每玩家每秒上报事件数上限，超出部分丢弃；0 = 不限
+  trafo_inputs: false                 # 协议 11：世界选项 WORLD_TRAFO_INPUTS（变球作为输入）；会话拒绝没有 CAP_TRAFO_INPUTS 的成员
+  placement_clones: true              # 协议 12：世界选项 WORLD_PLACEMENT_CLONES（小节摆放）；会话拒绝没有 CAP_PLACEMENT 的成员；写过的 config.yml 保留原值，要开需手改
   allowed_mods:                       # 物理会话 Mod 白名单（id: 版本）；为空则不检查
     BallanceMMOClient: "3.6.8-beta18"
 ```

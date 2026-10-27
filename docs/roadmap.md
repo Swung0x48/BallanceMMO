@@ -1,6 +1,7 @@
 # Roadmap: one engine, one world from inputs, run-ahead with rollback
 
-Status as of 2026-10-27 (HEAD 3940bf3 = trafo T4, plus step TR5's records).
+Status as of 2026-10-27 (HEAD fa8218d = sector placement S10, plus step
+SP11's records: the sector placement is built and in §3).
 The user's three goals, the principles that follow from them, what is
 built (§3, with each step's commit), and the order of what is left (§4,
 the orchestrator's queue of 2026-10-27). Each design named here has its own
@@ -148,14 +149,24 @@ broken: server and clients are rebuilt together.
 | Sector placement S2: apply, signature, release; the world option (off) | 5b536b2 | built (its x64 teardown over-read: §4 item 2) |
 | Sector placement S3: the invariant check I1 (`--second-move`, `--placement-trace`, `placement_check.py`) | 81c6803 | built |
 | Sector placement S9: a level that ran a session is reloaded at the next countdown (retail) | 5cd1c11 | built |
-| Sector placement S5: protocol 12 / journal v6 - the world option bit, `CAP_PLACEMENT`, the signature compare (late joiners too), config default off (M3), SimTool replay honouring the header, the plan bound 63 | (this step) | built |
+| Sector placement S5: protocol 12 / journal v6 - the world option bit, `CAP_PLACEMENT`, the signature compare (late joiners too), config default off (M3), SimTool replay honouring the header, the plan bound 63 | bc88b8e | 530 tests; a v5 journal replays 4112/4112; "mismatch" live |
+| Sector placement S6: the headless host (anchor call, signature, release, option-off policy), the scene refusal, `--sector-at`, repeatable `--beam`; `core_ref_s6` re-captured | 0d1178b | L8 cross at 0 ms: five sides 39 copies, signature `91a138e4fd6e7254`, one walk and sector ticks, 45/45 |
+| Replay order RO1 (from SP7): the script replay runs in the live frame's order, window-born fixed bodies made again by the replay, size-changed strings restored | 97bddbb | L8 tick-266 split closed; V9 50/50 rounds fail only on gap F |
+| Sector placement S7: V7/V8/V9 in SimTool (id layout, surfaces, a pass inside a savestate window) | 3242755 | V7, V8 PASS; V9 PASS except gap F (after RO1) |
+| Replay order RO2: the user's measurement of RO1's uncovered cases | 3ba04cb | no value change over 300 settling ticks; one relative order on every host; found item 4's P |
+| Resync lag RL1b: the re-anchor rule before the schedule start, the 3-tick legacy floor, one start helper | 2ff5c6b | 538 tests; one live resync_snapoff, journal 3508/3508 |
+| Trafo T4 residuals (step TR4c): the retail checkpoint read at 53-bit x87; the reference map's operation outputs by place | 6e14a9a, f379504 | pieces 32/32, 5056/5056 rows bit-equal to the server incl. rotation; L11 digest `017f037d7cfbc089/493` in retail and headless |
+| Sector placement S8: the networked invariant in `--replay-session`; measured | d0c7b28 | invariant PASS on L8 (35916 lines) and L11 (46314), the option-off control fails; L11 cross at 150 ms, five sides 53 copies `5d22d3b5a61c38cb`, 54/54 |
+| Host unification HU1: the placement's host logic and three other host copies as shared helpers (the rule "host logic is written once", §2) | 48d1c32 | byte-identical: wire check ALL SAME, server journals 2993/2993 and 4153/4153 |
+| Sector placement S10: the retail core host, `CKContext::CopyObjects`, the legacy path's local end, `physics.placement_clones` on by default | fa8218d | two-copy L11 run, two sessions with the reload: the server's hashes and signature, 53 copies, every placement body exact by name |
+| **Sector placement S1-S11, the track** (`sector-placement-design.md` §12 is the consolidated record): one object per PH row at the anchor in every world, the level-walk gate, the retail level reload; S11 the records | cd501af, 5b536b2, 81c6803, 72108fd, 5cd1c11, bc88b8e, 0d1178b, 3242755, d0c7b28, 48d1c32, fa8218d; S11 the `docs:` commit after fa8218d | built; the user's rule "entering the next sector changes nothing in the previous one" holds on L8 and L11 by the invariant check, offline and networked |
 | Rollback engine gaps G0 (EG0): diagnostics - the counted birth failures, the 1378 difference, the outside producers | 0b73af2 | built |
 | Record-format gaps K0: SimTool `--array-reads`, `--globals-trace`, `--world-options` | 49e2cc8 | built |
 | Rewind cost RC1: the replay re-predicts a remote's tail past its newest relayed frame with that frame (hold-last) | 5f967b4 | input rewinds -83..-87 % (swing, H1 at 150 ms), -67..-77 % (cliff), -44 % at 50 ms; no rebase in any arm; CPU parity -36 % |
 | Resync lag RL1: a re-anchor's base on the fixed deadline schedule (server only) | 3daa19a | the other clients' relay lag after a resync 36-37 -> 20-21 ticks (resync_snapoff); resync_at150 c0 26.77 -> 22.3 |
 | Trafo T3 (step TR3b): the core and the headless host, merged onto RC1 and RL1 | 3394ffd | H1 at 150 ms, snapshots off: pieces 150/150 bit-equal on four clients, starved 0/0/0/0 against the control's 0/0/0/0 |
 | Trafo T4 (step TR4): the retail host (core on), bridge v22 | 3940bf3 | one two-copy L11 session: pieces 32/32 bit-equal across the clients (5056 rows), drawn on both |
-| Trafo T5 (step TR5): the records | the `docs:` commit after 3940bf3 | `engine-changes.md` bridge note v21/v22, core design "As built (step T)", 9.29 |
+| Trafo T5 (step TR5): the records | 168e53e | `engine-changes.md` bridge note v21/v22, core design "As built (step T)", 9.29 |
 
 ## 4. What is left, in order
 
@@ -170,53 +181,27 @@ rewind-cost optimization, 11 the stage close-out, 12 late-player revision
 3, rollback engine gaps 4, world agreement 5, record-format gaps 6, the
 stage close-out 7, late-player revision 3 8, R6 / R7 9, levels 8 and 11 10;
 the old items' open findings (N2, F, the CPU cliff, the T1 findings, the
-x64 teardown) are item 2.
+x64 teardown) are item 2. From SP11 on, the sector placement is in §3 and
+item 1 keeps only what is left of it (host unification's queue); the
+numbers 1-10 are unchanged.
 
 **Stage A - everything that affects physics is an input (goal 2).**
 
-1. **Sector placement S6-S11** (`sector-placement-design.md` §8): one object
-   per placement at the anchor; S5 the wire is built (protocol 12 / journal
-   v6; As built (step S5) in the design's §5), S6 the headless host (it
-   declares `CAP_PLACEMENT` with the real signature, replaces the test switch
-   `--placement-signature`, and re-captures the reference set at protocol 12),
-   S7 the savestate check with a pass in the window, S8 the measurement
-   (done: As built (step SP8)), S10
-   the retail host (the track's close-out, a 15-minute step; done: As built
-   (step SP10), the config default `physics.placement_clones` is on since),
-   S11 the records. **Adaptation M3** (the orchestrator's): the placement's config
-   default stays false until S10 (as T2 kept `trafo_inputs` off until its
-   hosts ran it), otherwise every retail session on L1-L13 ends with
-   "placement mismatch" until S10. S2's open points go with it: the plan's
-   name bound of 63 (S5) and a scene that is only logged, not refused
-   (S6 / S10).
-   Queued by SP6 (each its own item, before or with S8):
-   - **SP6 bridge trigger.** In `core_ref_s6/l8_cross` the ORIGINAL s2 rope
-     bridge (`P_Modul_29_Platte*`) is script-woken at tick 554 in the
-     server's world and in client 1's (whose ball rests on the copy
-     `P_Modul_30_Wippe_R15`), at 614 in client 2's (its ball reaches the
-     same copy at 561), never in clients 0 and 3: the cross-world cause is
-     the queued G-c wake (item 5). But the trigger itself was not reproduced
-     without the copy: with the placement off, client 1's ball at the same
-     pose at the same check tick (`maps/arena-test/sp6_ctl/l8_pose_off`,
-     `l8_pose2_off`) wakes only `P_Modul_01_Pusher`, not the bridge.
-     **Root-caused (G-c, not a placement bug; 2026-10-27,
-     `.local-tools/work/SP6/bridge/`, recorded at step RO1):** the trigger
-     needs the original `P_Modul_29` at its s2 site - the module's own 80 m
-     XZ proximity probe (`TT Scaleable Proximity` #46782 -> `Physics WakeUp`
-     #47032 -> `Platte04`) fires when a ball comes within 80 m of the
-     original `P_Modul_29_MF`; with the placement off the union's s4 pass
-     moves the pooled module's frames to s4 while its bodies sleep at s2, so
-     the off controls never tested the s2 probe. The placement-on worlds are
-     the retail-faithful ones; the cross-world split is the queued G-c wake
-     (item 5). Nothing left here.
-   - **One placement host helper** (SP6 review nit) - **done at HU1**:
-     `game/sector_placement.hpp` holds `place_at_anchor` (the apply with
-     its hooks, the option-off policy, the signature and its log lines),
-     `prepare_unplaced` and `placement_hooks_for(backend, bodies,
-     fail_at_row)`; the server's `physics_world::place_sectors` and the
-     headless host's `place_sectors` are one call each, SimTool's
-     `tool_placement_hooks` too; the retail core host instantiates it
-     against `physics_view` (compile-only) and calls it at S10.
+1. **Sector placement: built (S1-S11, moved to §3 at SP11); what is left
+   of it here is host unification's queue.** The track's record is
+   `sector-placement-design.md` §12 (commits, the code as built, the
+   signatures, §9's answers, the open points). Its open points are queued
+   elsewhere: the x64 teardown over-read (item 2), the residuals its
+   crosses showed (G-c, item 5; gap L, item 4; gap F, item 2), Level 1
+   (K3, item 6), and the checks the quick tier deferred, among them SP8 (g)
+   c2's ball death at 736 (item 7's list, SP5-SP10 and HU1). Closed on the
+   way: **adaptation M3** (the config default off from S5 to S10, on
+   since); S2's open points (the plan bound 63 at S5, the scene refused in
+   `apply` at S6); **the SP6 bridge trigger** (the original s2
+   `P_Modul_29` woken in the leaders' worlds only: G-c - the module's own
+   80 m proximity probe, `.local-tools/work/SP6/bridge/`, recorded at RO1;
+   the placement-on worlds are the retail-faithful ones); **one placement
+   host helper** (done at HU1, the release helper at SP10).
    - **Host unification (step HU1, 2026-10-27; the rule in §2).** The
      inventory of host-side logic written out in two or three of
      `physics_world.cpp` (PW), `session_client.cpp` (SC), `core_host.cpp`
@@ -539,7 +524,9 @@ x64 teardown) are item 2.
      window without the retail-ball park once Q is built; (c) the forced
      rollbacks at 150 ms (§7.4 recipes are 0 ms here); (d) the Arch build
      of `physics_world.cpp` (compiled into the Linux server through
-     `BallanceMMOSim`; `linux_test_syntax.sh` does not compile it).
+     `BallanceMMOSim`; `linux_test_syntax.sh` does not compile it) - ran
+     since (noted at SP11): the Arch server builds of RL1b, TR4c and SP10
+     (each ARCH-BUILD-OK, all after 3242755) compile it with S7's hooks.
    - RO1 (the replay order, the window-born fixed bodies, the size-changed
      strings; shared rollback code, quick tier, 2026-10-27; ran: x64 and x86
      builds, 534 tests, GCC 29 ok, the wire check rSP6 -> rRO1 on
@@ -589,6 +576,15 @@ x64 teardown) are item 2.
      crossing a pass); (b) (A) with a ball moving through the late pass's
      pieces after the replay (the structure that differs decides the
      collision order then).
+   - TR4c (trafo T4's residuals (a) and (b), quick tier, 2026-10-27; ran:
+     x64, x86 and Arch builds, 538 tests, GCC 29 ok, the wire check rRL1b
+     -> rTR4c on `core_ref_s6` ALL SAME, SimTool L11 `--describe-trafo` on
+     both builds (only the 6 lines per set expected), ONE two-copy retail L11
+     session, core on, `trafo_inputs` on, snapshots off: pieces 32/32 and
+     5056/5056 rows bit-equal to the server incl. rotation; trafo design As
+     built (step TR4c)): nothing deferred of its own (recorded at SP11; the
+     legacy path is untouched, so no core-off run is owed beyond TR4's (d));
+     T4's (c) stays item 2.
    - SP8 (sector placement S8, measurement, quick tier, 2026-10-27; a
      SimTool-only tool change: `--replay-session` with `--placement-trace`,
      `--placement-trace-player` and `--drop-sectors-above`; ran: x64 build,
@@ -660,6 +656,12 @@ x64 teardown) are item 2.
      review's nit on step 8: an object-valued attribute of a hierarchy
      member naming an object outside the hierarchy (expected none; the
      remap covers H only since SP10), counted in the listing.
+   - SP11 (sector placement S11, the records, docs only, 2026-10-27; its
+     row's gate is a review; `sector-placement-design.md` §12, the
+     lockstep doc's "What the union broke on the original levels, and the
+     placement", the core design's host support table and "As built (step
+     S)", the protocol doc, `collision-overhaul-design.md` 9.30, this
+     roadmap): nothing deferred.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

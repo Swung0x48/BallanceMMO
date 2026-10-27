@@ -1,6 +1,11 @@
 # Sector placement: one object per PH row
 
-Status: design (track 1 of the pooled-module fix); S4 built (inside resync A5), S1, S2, S3, S9 and S5 built (as-built notes in 2.2, 2.3, 2.5, 2.6, 7.3 and 5); protocol 10 / journal v4 went to resync A3 and 11 / v5 to trafo T2, so S5 took protocol 12 / journal v6 (§5, §7.1 and §8 corrected); revision 2
+Status: **built** (track 1 of the pooled-module fix): S1-S10 and the
+records (S11), HEAD fa8218d; **§12 is the consolidated as-built record**
+(commits, what the code does where it differs from §2-§5, the numbers,
+§9's answers, what is open). The step notes: S1 and S2 in 2.2 / 2.3, S9 in
+2.5, S4 (inside resync A5) in 2.6, S5 in 5, S3 in 7.3, S6, S7, HU1 and S8 in
+7.4, S10 in 7.6. Protocol 10 / journal v4 went to resync A3 and 11 / v5 to trafo T2, so S5 took protocol 12 / journal v6 (§5, §7.1 and §8 corrected); revision 2
 after two reviews (answers in §10). Base: HEAD 4882ec2 (R2) plus the
 uncommitted step P in the working tree; line numbers are the working tree's on
 2026-10-23 and drift with step P, so each one is given with the function or
@@ -1210,7 +1215,7 @@ any shared surface's hull differs between rows; §9 Q6 has the options.
 |---|---|
 | `PHYSICS_PROTOCOL_VERSION` (entity/session.hpp) | 11 -> 12 (written 9 -> 10 before resync A3 took 10 and trafo T2 took 11, which also brought `world_options` into SessionStart), comment: "12: the world option WORLD_PLACEMENT_CLONES; SessionReady carries the placement signature (docs/sector-placement-design.md)". Forward compatibility deliberately broken. |
 | `entity/session.hpp` | `constexpr uint32_t WORLD_PLACEMENT_CLONES = 1u << 0;` |
-| `session_start_msg` | `uint32_t world_options` after `protocol` (exists since protocol 11, trafo T2); the server sets bit 0 from config `physics_placement_clones` (default **false** until S10: adaptation M3, see As built (step S5) below). It is the switch for the negative control (§7.6) and for replaying old journals; it is never a per-client choice. |
+| `session_start_msg` | `uint32_t world_options` after `protocol` (exists since protocol 11, trafo T2); the server sets bit 0 from config `physics.placement_clones` (default **false** from S5 to S10: adaptation M3, see As built (step S5) below; **true** since S10, As built (step SP10)). It is the switch for the negative control (§7.6) and for replaying old journals; it is never a per-client choice. |
 | `session_ready_msg` | `uint64_t anchor_placement` appended after `caps`, read when `protocol >= 12`; filled by a host that declares `CAP_PLACEMENT` (placement on or off, §2.4), 0 otherwise (As built (step S5)). |
 | `world_ready_info`, `on_world_ready` (SRN hpp:119-131, SV:966-980) | `anchor_placement` from `physics_world`, stored in the session. |
 | server `handle_session_ready` (SV:1537-1577) | after the engine check, before the anchor-hash compare: `anchor_placement != s.anchor_placement` ends the session with "placement mismatch for X (client %016llx, server %016llx)", **for late joiners too** (unlike the anchor hashes, the signature does not depend on time), the way the protocol and engine mismatches already do for any client. |
@@ -2366,6 +2371,10 @@ networked run that can build copies (S6, S8, S10); S9 precedes S10.
 
 ## 9. Open questions
 
+The answers as built are §12.4. Open: Q4 (§7.5 run 4) and Q7's headless
+and retail x86 halves (§7.6), both in the final verification; Q2's
+builder-copy leak check (§7.5 run 3) did not run either.
+
 | # | question | how to settle |
 |---|---|---|
 | Q1 | The builder's dependency flags: are attributes (BeObject bit 2) and groups (bit 4) copied, and which classes are copied? F1/F2 settle names, scripts, children and meshes; the flag word is only a pointer in the dumps. The design does not depend on the answer (steps 5 and 8-9 set names, attributes and groups explicitly and in a fixed order). | S1's `--list-placement` prints `GetClassDependencies` per class and the chosen block; the retail log of S10 prints the same and the censuses; §7.5 run 1 requires them equal. |
@@ -2417,3 +2426,172 @@ Refuted (with the reason):
 - **Q3, after the session.** Leave the level as it is; the next session
   reloads it anyway (§2.5). No reload at session end.
 - Chinese terminology: "sector" is 小节 (not 扇区).
+
+## 12. As built: the track in one place (step S11, 2026-10-27)
+
+The track is built: S1-S10 and this record. This section gathers what the
+step notes above (As built S1 and S2 in §2.2/§2.3, S9 in §2.5, S4 in §2.6,
+S5 in §5, S3 in §7.3, S6, S7, HU1, S8 in §7.4, S10 in §7.6) found and
+measured, so a reader does not have to walk them; the notes stay the
+detailed record, and where this summary and a note differ, the note is
+right. Where the body of §1-§7 says something the code does not do, the
+list in 12.2 says what the code does.
+
+### 12.1 Steps and commits
+
+| step | commit | what landed | its gate, as measured |
+|---|---|---|---|
+| S1 | cd501af | `session/placement_plan.hpp` (CK-free plan), the read-only half of §2.3 in `game/sector_placement.hpp`, SimTool `--list-placement` | V1's block choice and plan on all 14 levels exactly §1.4's table; Q1 settled (BEOBJECT 0x7: scripts, attributes and groups are copied); 505/505 tests |
+| S2 | 5b536b2 | `sector_placement` (`apply` all or nothing, `signature`, `holds_copies`, `release`), the `physics_world` option (off), SimTool `--placement`, `--placement-fail-at` | V1 complete (every level's copies as §1.4's table: L8 39, L11 53, L12 62, the arena 0), V2-V5, V11 (x64 = x86 = Linux listings), V12 (refused at row 50: 7464 objects destroyed, 0 left); a teardown crash root-caused and fixed (`release` orders scripts root first) |
+| S3 | 81c6803 | the invariant check I1: `--second-move`, `--placement-trace`, `scripts/placement_check.py` | I1 placement on: 8/8 arms PASS, traces byte-identical; V10 placement off: 8/8 FAIL, each after its first later pass |
+| S4 | 72108fd (inside resync A5) | the union's level-walk gate (`gated_sector_union`), its log line and tests | V6 (L8: walk at 3, `+2` at 9, 65 objects = 43 + 22); arena `level walk seen at tick 30` on every side; `lp1_join` 52/52 |
+| S9 | 5cd1c11 | retail level lifetime: a level that ran a session is reloaded at the next countdown | gap measured (61 bodies vs 48, `cores=2`, "world mismatch"); with the reload every anchor `a8c7f832281a39c5 / a34811ce6a4225ed cores=0`, SessionStart -> anchor 3.75 s |
+| S5 | bc88b8e | protocol 12 / journal v6: `WORLD_PLACEMENT_CLONES`, `CAP_PLACEMENT`, `anchor_placement`, the server's compare, SimTool replay by the header, the plan bound 63 | 530/530 tests; a v5 journal replays 4112/4112; "mismatch" live (late joiner); a tampered v6 header refused |
+| S6 | 0d1178b | the headless host (anchor call, signature, release, option-off policy), the scene refusal in `apply`, `--sector-at`, repeatable `--beam`; `core_ref_s6` re-captured | L8 cross at 0 ms: five sides `39 copies`, `91a138e4fd6e7254`, walk 11, `+2` 309 / `+4` 316 / `+3` 709, 45/45; non-leader residuals = G-c; arena regression: only SessionReady and the journal header differ |
+| S7 | 3242755 (with RO1 97bddbb) | SimTool V7/V8/V9: id-layout hooks, a pass inside a `--savestate-check` window | V7 PASS (ids perturbed both ways, 501 tick hashes identical), V8 PASS (132 bodies, every surface equal); V9 PASS except gap F once RO1 replays in the live order (50/50 rounds fail only on F's window-end line, no-move control 50/50 PASS) |
+| RO2 | 3ba04cb | the measurement of RO1's two uncovered cases (docs, a trace) | no value change over 300 settling ticks; the server and the four clients run one relative order (0 of 17 change ticks differ) |
+| S8 | d0c7b28 | `--replay-session` with `--placement-trace`, `--placement-trace-player`, `--drop-sectors-above`; the measurement | networked invariant PASS on L8 (35916 lines) and L11 (46314 lines), the option-off control differs from 313; L11 cross at 150 ms: five sides `53 copies`, `5d22d3b5a61c38cb`, walk 30, `+2` 335 / `+3` 735, 54/54; SimTool x64 <= 0.11 ms per tick, anchor +1.0-2.2 s |
+| HU1 | 48d1c32 | the placement's host logic (and three other host copies) as shared helpers, the user's rule "host-side logic is written once" (`docs/roadmap.md` §2) | byte-identical refactor: wire check ALL SAME, server journals 2993/2993 and 4153/4153 with identical stdout |
+| S10 | fa8218d | the retail core host (anchor call, registry, release points), the copy through `CKContext::CopyObjects`, the legacy path's local end, `physics.placement_clones` on by default | one two-copy L11 run, two sessions with the reload: both clients the server's hashes and `5d22d3b5a61c38cb`, 53 copies, every placement body exact by name (14 bodies over 299-300 ticks, 0 differences); a mixed core-on / core-off room refuses the legacy member at once |
+| S11 | the `docs:` commit after fa8218d | this section, the other documents' records | review |
+
+### 12.2 What the code does (the design as built)
+
+1. **The plan** (`session/placement_plan.hpp`, S1/S5). As §2.2, with
+   `name` filled for every kind (keep: the source, copy: the new root,
+   share: the holder's object, none: empty); every `plan_placements`
+   call takes `game::kPlacementMaxName` = 63 (the bridge's body name
+   holds 63 characters), so a 64-character copy root is refused by the
+   plan; a copy name equal to another copy's or to any object a row names
+   is an error; the signature's encoding is fixed (S1's note).
+2. **The CK step** (`game/sector_placement.hpp`, S2/S6/S10). Runs after the
+   Sequencer **and** the proximity restores, before the anchor hash, the
+   script selection, `explosion_pieces` and the server's rewiring, in every
+   world. Step 4 copies with `CKContext::CopyObjects` over the hierarchy H,
+   root first (S10: a `CKDependenciesContext` kept in the mod's stack was
+   filled by CK2.dll's heap and freed by the mod's CRT, an access violation
+   on retail; Ballanced never meets it), and the returned array maps each
+   member of H to its copy for steps 5 and 8. "What a copy made" is every
+   object created during it. Destroys notify (no `CK_DESTROY_NONOTIFY`).
+   Steps 8-9 act on the hierarchy's entities (scripts are not BeObjects).
+   After step 10 the table is re-read and must re-plan to 0 copies and 0
+   rewrites. `apply` refuses outside the level scene (S6). `release`
+   destroys a copy's hierarchy scripts root first, then the rest (S2's
+   teardown crash).
+3. **The decision and the wire** (S5/S6). The core decides:
+   `session_client_core::placement_active()` = the host's `placement`
+   capability and the session's `WORLD_PLACEMENT_CLONES`. A host with the
+   capability sends `CAP_PLACEMENT` and its signature (`anchor_placement`)
+   option on or off; the server compares it right after the engine check,
+   late joiners included, and refuses a member without the capability from
+   a session with the option (out of the session, not the room). Protocol
+   12, journal v6 (the header's trailing `anchor_placement`; client headers
+   carry `world_options` too). SimTool `--replay-session` builds by the
+   header and refuses a differing non-zero signature; `--replay` (record
+   mode) applies the placement by default.
+4. **Host logic, written once** (HU1/S10; the user's rule of 2026-10-27,
+   `docs/roadmap.md` §2). `place_at_anchor` (the apply with its hooks, or
+   the option-off policy, then the signature and its log line),
+   `prepare_unplaced` (option off: `holds_copies` -> `release` -> refuse if
+   it still holds), `placement_hooks_for(backend, bodies, fail_at_row)` and
+   `release_placement`, all in `game/sector_placement.hpp`. Callers: the
+   server's `physics_world::place_sectors` and destructor, the headless
+   host's `place_sectors` / `release_placement`, SimTool's
+   `tool_placement_hooks`, the retail core host's `core_host_anchor` and
+   `core_host_release_placement`. Each host keeps only its backend, its log
+   prefix and its release points. Adaptation at HU1: the server's world now
+   runs the option-off policy too (a fresh world never holds copies).
+5. **The release points.** Server: the world's destructor (before the
+   engine). Headless: `boot_engine` before the engine reset, `begin_session`
+   and the destructor. Retail: a file-scope `placement_host` registry (no
+   `BallanceMMOClient` member), released at `OnPostExitLevel` and at
+   `OnLoadObject(isMap)`; Q2 below makes the exit's release a guard.
+6. **The level-walk gate** (§2.6, S4). `gated_sector_union` (derived, so
+   `sector_union`'s layout is unchanged) in the server's world, both
+   core hosts and the re-derivation; the timeout opens at tick 64; the
+   resync bytes (protocol 10's) carry no gate. **The legacy retail path keeps
+   the gate-free union** (no layout change, no feature) until R7.
+7. **The retail level lifetime** (§2.5, S9). A file-scope `level_lifetime`;
+   a set `ran_union` (also set as soon as `place_at_anchor` made copies,
+   S10's fix-up) reloads the session's level at the start of the countdown
+   by what the pause menu's "Exit Level" sends plus the menu driver's level
+   start (Event_handler's `Load Level` does nothing from inside a level);
+   "Go!" waits for the load and the Sequencer capture window; the reload
+   gives up after 10 s (the server's start barrier is 8 s). No reload at
+   session end (§11).
+8. **The legacy retail path** ends a session with `WORLD_PLACEMENT_CLONES`
+   locally at SessionStart, after sending its usual SessionReady with
+   `caps` 0, so the server refuses it at once instead of the room waiting 8 s
+   for the barrier (S10's review).
+9. **The config.** `physics.placement_clones` defaulted to false from S5
+   to S10 (adaptation M3: no retail host could build copies) and is true
+   since S10. A config file that names the key keeps its value; every
+   `config.yml` a server wrote since S5 names it (its `save()` writes the
+   whole file), so a deployed server turns the placement on by editing it.
+
+### 12.3 The numbers that identify a correct placement
+
+| level | rows | copies | signature, placement on | signature, off |
+|---|---|---|---|---|
+| L8 | 86 | 39 (1 shared: r52 = r41) | `91a138e4fd6e7254` | `629f6128b4fc8389` |
+| L11 | 105 | 53 | `5d22d3b5a61c38cb` | `4f444149dc156465` |
+| arena | 25 | 0 | (nothing to copy: the table is the unplaced one; not run live with the option on) | `ecfbfd9b63a330b5` |
+
+Every world computes the same values: SimTool x64 / x86 / Linux (V11),
+the server and four headless clients (S6 L8, S8 L11), and the retail core
+host on two game copies (S10 L11). The other levels' copy counts are §1.4's
+table (V1). Cost: the plan and apply take +1.0 (L8) to +2.2 s (L12, 62
+copies) at the x64 anchor and 1.43-1.45 s for L11's 53 copies on retail
+x86, where SessionStart -> anchor became 5.2 s with the reload (S9's 3.75 s;
+the start barrier is 8 s); with every sector active and the bodies at rest
+a SimTool tick costs at most 0.11 ms (on and off within the scatter).
+
+### 12.4 §9's questions, settled
+
+| # | answer | where |
+|---|---|---|
+| Q1 | The builder's words: OBJECT 0x3, SCENEOBJECT 0x1, BEOBJECT 0x7, 3DENTITY 0x2, MESH 0x2, the rest 0, on all 14 levels in Ballanced and in the retail CK2 (which differs only in a default word the builder does not use, BEOBJECT `default=0x3`, and two class spellings; logged, not hashed). | S1, S10 |
+| Q2 | The game's level exit destroys the placement's copies (and the sources) before `OnPostExitLevel` runs: "0 of 53 copies destroyed", all gone already; `release` is a guard there. The builder-copy leak check (§7.5 run 3) did not run. | S10 |
+| Q3 | Decided (§11): no reload at session end; S9 reloads at the next session's countdown. | §11, S9 |
+| Q4 | Open: §7.5 run 4 (a trafo copy, L8 row 19, `trafo_inputs` on) is deferred to the final verification. | roadmap §4 item 7, SP10 (a) |
+| Q5 | Across worlds neutral (V7); within a world the replay ran in (priority, id) order, not the live order, which split L8's tick 266 - fixed at RO1 (the replay runs in the order the host's own live frame ran), measured at RO2 (a late activation changes no value over 300 ticks; hosts agree on the relative order). | S7, RO1, RO2 |
+| Q6 | Nothing to do: V8, every surface equal whichever pass physicalizes first. | S7 |
+| Q7 | SimTool x64 fits (<= 0.11 ms per tick); the headless on-vs-off cost lines and retail x86 are deferred. | S8; roadmap SP8 (d)/(e), SP10 (b) |
+| Q8 | The retail `Copy` (through `CopyObjects` since S10) gives every copy line, census, group, attribute and the signature equal to the server's; the `scripts` verb lists the copies' scripts (119 on L11) alike on both clients. | S10 |
+| Q9 | Yes for L8 (arm L8-d, byte-identical on and off); L3 r8/r16 not run. | S3 |
+
+### 12.5 What is open (each queued)
+
+- **The x64 teardown over-read** (Ballanced `SetLocalParameterObject`):
+  the placement's copies are ordered by `release`, the builder's
+  `*_MF001` copies are not; an x64 world torn down after an Extra block ran
+  can crash, e.g. with copies below their originals (S7's
+  `--free-ids-before-load 20000` arm). Roadmap §4 item 2.
+- **c2's ball death at 736 in `sp8/l11_cross`**, the tick after its own
+  `sector +3`: not root-caused; one hypothesis would break §1's rule (an s3
+  depth volume, including a copy's `DepthTest` group membership). Roadmap
+  §4 item 7, SP8 (g), with (c).
+- **The residuals the crosses showed are not the placement's**: G-c
+  leader-only wakes (P_Modul_01 Pusher 0.0952 m, P_Modul_34 0.45-0.66 m,
+  item 5), remote-ball contact at 150 ms on copies and originals alike, gap
+  L in the forced rollbacks (item 4), gap F in V9 (item 2).
+- **Level 1**: its physics is frozen in the session world (the tutorial's
+  time factor 0, S3) and a retail reload of L1 starts the tutorial (S9);
+  both wait for K3 (the tutorial switched off, roadmap §4 item 6).
+- **The `_R<digits>` check**: `holds_copies` also counts a PH row whose
+  object name ends in `_R` and digits, so a third-party map with such an
+  original name is refused with the option off (HU1's shared limitation);
+  no stock level or the arena has one.
+- **Step 8's remap covers H only** since S10: an object-valued attribute of
+  a hierarchy member naming an object outside H is not remapped and not
+  covered by any byte-identity check (expected none; roadmap SP10 (g)).
+- **Never exercised live**: the option-off release branch on any host (no
+  run had a level holding copies with the option off) and the scene
+  refusal. Roadmap SP6 (c), HU1 (c), SP10 (a).
+- **The checks the quick tier deferred**: roadmap §4 item 7, the entries
+  SP5-SP10 and HU1 (among them §7.5 runs 1 on L8 and 3-6, §7.4 L8 late and
+  L8 cross at 150 ms, the L11 cross's option-off control, §7.6 headless and
+  retail x86, the headless A/B arms with the new default).
+- **Host unification's queue** (HU1's inventory: the trafo set hooks, the
+  retail level-file counters glue, the anchor sequence itself, N2 on every
+  world, the 30-unmatched-snapshots rule): roadmap §4 item 1.

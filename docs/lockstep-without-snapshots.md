@@ -1174,6 +1174,59 @@ server), and the real client and a bot log the pusher's mismatch with the same
 could not produce. The clients had put bodies to sleep that the server kept
 awake, deterministically, after the same early rollbacks - the next section.
 
+### What the union broke on the original levels, and the placement (2026-10-27, protocol 12)
+
+Everything above ran on the arena, which pools nothing. Every original
+level (L1-L13) does: the level builder makes only as many copies of a
+module type as the busiest sector needs and deals them to the PH rows in a
+loop, so a later sector's row names an object an earlier sector already
+placed. The retail game tears the earlier sector down before the later
+one's pass moves the object; the union never tears down, so the later
+pass moved a live module - L8's sector-1 see-saw sagged 1.158 m when
+sector 2 started, L8's sector-2 rope bridge (`P_Modul_29`) flung its
+planks up to 2050 m at sector 4, L1's sector-1 wood trafo moved 557.6 m to
+sector 4's pose. Every world did the same at the same tick, so no
+correction or mismatch counter saw it: a gameplay bug against the user's
+rule that a player entering the next sector changes nothing in the
+previous one (`docs/sector-placement-design.md` §1).
+
+The fix is the **sector placement** (that design; built S1-S10, commits
+cd501af ... fa8218d, consolidated record in its §12): at the anchor every
+world gives every PH row whose object an earlier row places at another
+matrix its own copy (`<object>_R<row>`; rows at a bit-identical pose keep
+sharing), with the same names, groups and attribute order everywhere, and
+reports a signature of the placed table that the server compares in
+SessionReady (`WORLD_PLACEMENT_CLONES`, `CAP_PLACEMENT`, protocol 12 /
+journal v6; config `physics.placement_clones`, on by default since S10).
+The union's rules above are unchanged; two things were added to it:
+
+* **The level-walk gate** (S4): no union pass starts before the level's own
+  sector-1 walk has been seen (an inactive-to-active edge of the sector
+  manager after the anchor, or a 64-tick timeout). Without it a late
+  joiner's owed pass started at relative tick 2, in the frame the level's
+  own activation arrived, and sector 1 was never walked in that world
+  (`lp1_join` client 3: 52/45 mechanisms; 52/52 with the gate). Every side
+  logs `level walk seen at tick N` (the arena: 30 on every side). The
+  legacy retail path keeps the gate-free union until R7.
+* **A retail level is fresh at every anchor** (S9): the retail client
+  anchors on an in-level restart, and a union leaves sectors physicalized
+  that the restart does not reset (a second session anchored on 61 bodies
+  against the server's 48: "world mismatch"). A level that ran a session
+  is reloaded at the next countdown; every anchor since is the server's.
+
+Measured: the invariant check of the drop scenes (8 arms) passes with the
+placement and fails without it at each arm's first later pass; replaying
+a networked session's server journal with the sector events above 1
+dropped leaves sector 1's trace byte-identical on L8 (35916 lines) and
+L11 (46314 lines), while the option-off control differs from the first
+later pass; the server and four headless clients (L8 at 0 ms, L11 at
+150 ms) log the same signature, `level walk seen` and `sector +N` ticks;
+two retail clients (L11, S10) anchor on the server's hashes and placement
+signature and their placement bodies are exact by name against the
+server's journal (their walk tick is not yet compared: roadmap SP10 (a)). The residuals those runs showed are
+the known ones (G-c leader-only wakes, remote-ball contact at 150 ms on
+copies and originals alike), none specific to a copy.
+
 ## The replay's sleep decisions, restored (bridge API v13)
 
 The restore was bit-exact for pose, velocity, queue and quaternions, and still
@@ -2871,4 +2924,7 @@ server's sector union equalled each client's own set. A multi-sector room had a
 second, independent problem - the server ran the union of the players' sectors
 while each client ran only its own, so the clients were not simulating the same
 world at all - which "The sector union, as built" settles: every side runs the
-union now, and nothing is deactivated anywhere.
+union now, and nothing is deactivated anywhere. On the original levels, whose
+modules are pooled across sectors, the union alone moved earlier sectors'
+modules; the sector placement settles that (the same section, "What the union
+broke on the original levels, and the placement").

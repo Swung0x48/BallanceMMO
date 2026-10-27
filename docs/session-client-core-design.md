@@ -19,7 +19,10 @@ echoes; with it R2 (b)'s mirror p99 is below every O run). R4 is built
 ("As built (step R4)": the retail own corrections; the starvation detector
 deleted). R5 is built ("As built (step R5)": the retail slew; its row's run
 has one resync at the run's end, pre-existing and root-caused there). R6-R7
-are not built.
+are not built. The sector placement runs in the core and all three hosts
+(the server's world, headless, retail core) since its S10 ("As built (step
+S)" in §6.2; host support in §2.4), its host logic written once since HU1
+(§2.4, "As built (step HU1)").
 
 The base is HEAD 760edb2 plus the uncommitted step 20 of
 `docs/late-player-design.md` (barrier removal). Line numbers refer to that
@@ -657,6 +660,26 @@ too, the server calls it rather than keeping its own copy.
   the helpers and calls `place_at_anchor` at its anchor. The rest of the
   inventory (unified, already one copy, queued with the reason) is
   `docs/roadmap.md` §4 item 1, "Host unification (step HU1)".
+
+**Host support today (recorded at the sector placement's S11, after S10,
+fa8218d).** Beside `session_host_support.hpp`'s helpers listed above, the
+shared platform code every host calls, by header (backend = `physics_direct`
+by value on the server and headless, `const physics_view*` on retail):
+
+| header | helpers | callers |
+|---|---|---|
+| `game/host_backend.hpp` | `force_hooks_for`, `body_names_of`, `backend_of` | `force_hooks_for`: server world, headless, retail core (S10: both former force-hook copies), SimTool, `sim/trafo_hooks.hpp`; the other two through `game/sector_placement.hpp` |
+| `game/sector_placement.hpp` | `place_at_anchor`, `prepare_unplaced`, `placement_hooks_for`, `release_placement` (S10); the `sector_placement` registry type | server world (`place_sectors`, destructor), headless (`place_sectors`, `release_placement`), retail core (`core_host_anchor`, `core_host_release_placement`), SimTool (through `physics_world`, and `tool_placement_hooks`) |
+| `game/sector_activation.hpp` | `run_sector_pass` (the union pass's writes) | server world, headless, retail core (S10; it keeps its own `sector_cell_is_own_` bookkeeping) |
+| `game/script_state.hpp` | `capture_level_file_counters`, `restore_level_file_counters` | server world, headless (retail: queued to R7, HU1 item (b)) |
+| `game/trafo_sets.hpp`, `session/trafo_input.hpp` | the trafo builder, sets, ledger ("As built (step T)") | server world, headless, retail core, SimTool |
+| `session/script_order.hpp` + `script_replay::live_frame_order` | RO1's live script order | server world, headless, retail core, SimTool |
+
+What each host still writes itself, and why, is the HU1 inventory's queue
+(`docs/roadmap.md` §4 item 1): the trafo set hooks (`has_body` and
+`restore_originals` differ by backend), the retail level-file counters glue
+(shared with the legacy path until R7), and the anchor sequence itself (a
+different order per host; one recipe changes what a world does: Stage C).
 
 ## 3. What stays in each host
 
@@ -6418,6 +6441,47 @@ T2)"):
   24-bit x87 (32/32 with `fpu53 on`). `physics.trafo_inputs` stays off by
   default until the rewind-cost close-out (adaptation M2); the deferred
   checks are `docs/roadmap.md` §4's list.
+
+**As built (step S): the sector placement in the core and the hosts.**
+The sector placement's steps S5, S6, HU1 and S10
+(`docs/sector-placement-design.md`; S5 bc88b8e, S6 0d1178b, HU1 48d1c32,
+S10 fa8218d; the whole track's record is that design's §12; written at its
+S11). Where it adds to §1.2, §2.2-§2.4, §3.1 and §3.2:
+
+- **Capability and decision (§2.3).** `session_capabilities::placement`;
+  with it the core sends `CAP_PLACEMENT` and `anchor_report::placement` (the
+  host's signature of the PH table, option on or off) in SessionReady's
+  `anchor_placement` and in the client journal header (v6), and without it 0
+  and no cap. Whether this session builds copies is the core's decision,
+  `placement_active()` = the capability and the session's
+  `world_options() & WORLD_PLACEMENT_CLONES`; no host reads the bits. A
+  member without the capability in a session with the option is refused by
+  the server (out of the session, not the room) - the legacy path, which
+  declares nothing new.
+- **The anchor (§3.1, §3.2).** Each host calls `place_at_anchor` once, after
+  the Sequencer and proximity restores and before the anchor hash, the
+  script selection and `explosion_pieces`; a refusal ends the session
+  locally before SessionReady, the path of a failed hash. Option off, the
+  helper's `prepare_unplaced` releases copies a level still holds or
+  refuses the anchor.
+- **Headless host (§3.1).** The registry is a member (`placement_`),
+  released before the engine reset, at `begin_session` and in the
+  destructor; `--placement-signature HEX` is the "mismatch" test switch;
+  `--sector-at SECTOR:TICK` and a repeatable `--beam` drive the crossings.
+- **Retail host (§3.2).** A file-scope `placement_host` registry (no
+  `BallanceMMOClient` member), released at `OnPostExitLevel` and
+  `OnLoadObject(isMap)`; the file-scope `level_lifetime` reloads a level
+  that ran a session (or holds copies) at the next countdown (S9, 5cd1c11);
+  the `session placement` and `session reload` verbs. The legacy path ends
+  a session with the option locally at SessionStart, after sending its
+  usual SessionReady with `caps` 0 so the server refuses it at once.
+- **Measured.** Headless: L8 cross at 0 ms and L11 cross at 150 ms, the
+  server and four clients on one signature (`91a138e4fd6e7254` /
+  `5d22d3b5a61c38cb`), level walk and sector ticks. Retail (one two-copy L11
+  run, core on, two sessions with the reload between them): the server's
+  hashes and signature, 53 copies, every placement body exact by name.
+  `physics.placement_clones` is on by default since S10; the deferred checks
+  are `docs/roadmap.md` §4's list.
 
 ## 7. Open questions
 
