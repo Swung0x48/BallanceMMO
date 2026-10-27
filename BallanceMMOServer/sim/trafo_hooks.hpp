@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include <game/host_backend.hpp>
 #include <game/trafo_sets.hpp>
 #include <physics/physics_direct.hpp>
 #include <physics/physics_state.hpp>
@@ -45,21 +46,7 @@ namespace bmmo::sim {
         };
         hooks.seed = [physics](uint32_t frame, int32_t seed) { bmmo::physics::trafo_set_seed(physics, frame, seed); };
         hooks.unmake = [physics](uint32_t frame, std::string& error) { return bmmo::physics::trafo_set_unmake(physics, frame, error); };
-        hooks.forces.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
-            bmmo_physics_force_block state{};
-            std::string error;
-            if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, error)) return false;
-            out.exists = state.exists != 0;
-            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-            return true;
-        };
-        hooks.forces.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
-            bmmo_physics_force_block state{};
-            state.exists = in.exists ? 1 : 0;
-            for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
-            std::string error;
-            return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, error);
-        };
+        hooks.forces = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics));   // step HU1: one copy (game/host_backend.hpp)
         if (log) hooks.log = std::move(log);
         else hooks.log = [](const std::string& line) { std::printf("%s\n", line.c_str()); };
         return hooks;

@@ -1939,6 +1939,55 @@ current deployed lead and input delay:
   `own_body`/`ball` branch); module births 105 recreated, 105 exact, 0
   failed.
 
+**As built (step HU1, 2026-10-27; host unification, the user's rule of
+2026-10-27, `docs/roadmap.md` §2).** The placement's host logic of §2.4 is
+one helper in `game/sector_placement.hpp`, written so the retail core host
+can call it at S10 without a third copy:
+
+- `place_at_anchor(placement, context, backend, active, fail_at_row, log,
+  signature, error)`: with `active` the apply with `placement_hooks_for`'s
+  hooks (all or nothing; the describe lines logged; a refusal is
+  `error = "sector placement refused: ..."`), otherwise
+  `prepare_unplaced`; then the signature and its line ("placement
+  signature %016llx (placement on|off, N copies)", plus the unreadable
+  table's reason). False: the host must not anchor.
+- `prepare_unplaced(placement, context, log, error)`: the option-off policy
+  ("Option off" above): `holds_copies` -> `release` -> refuse if it still
+  holds.
+- `placement_hooks_for(backend, bodies, fail_at_row)`: the physics half of
+  step 3 over a host's backend (`physics_direct` by value, `physics_view` by
+  pointer; `game/host_backend.hpp`): the anchor's body names (`list_bodies`)
+  and the force blocks' controllers.
+
+The roadmap named the shape `placement_hooks_for(manager)` /
+`prepare_unplaced(context, why)`; it takes the backend instead of the
+manager (the retail host has no `CKIpionManager`) and the placement object
+and a log (the release and its lines are the policy's). The server's world
+(`physics_world::place_sectors`), the headless host (`session_client.cpp`
+`place_sectors`) and SimTool (`tool_placement_hooks`) call it; the log text
+of each host is unchanged (the server prefixes `world: `). **Adaptation:**
+the server's world had no option-off branch (the headless host had); it now
+runs the same policy, as §2.4 says every host does. A fresh world's registry
+is empty and no original PH row names an `_R<n>` object, so it changes
+nothing: SimTool `--list-placement` on L1-L13 (the world unplaced) reached
+every anchor without a "holds copies" line, and the server journals of
+`core_ref_s6/l8_cross` and `resync_snapoff` replay matched with stdout
+byte-identical to rSP8's (2993/2993 and 4153/4153; the reference README's
+2241 and 3562 are the harness's replays taken while the server was still
+recording - the stored `l8_cross/server.bmjr`, sha256 as recorded, replays
+2993/2993 on rSP6, rRO1, rRO2 and rSP8 alike). **Shared limitation:**
+`holds_copies` also counts a PH row whose object name ends in `_R<digits>`
+(`has_row_suffix`, the stale-level check a retail level needs); a
+third-party map with such an original name is refused at the anchor with
+the option off - the headless host did so before HU1, the server's world
+does too now. No stock level (L1-L13) or the arena has one; if a map ever
+does, the suffix check belongs only on a host whose level can be stale
+(retail, S10) and a fresh world uses the registry alone. The retail core host instantiates the three
+templates with `const physics_view*` (compile-only); S10 calls
+`place_at_anchor` at its anchor and adds the release points (one `release`
+helper for the three hosts then: the server's destructor and the headless
+host's `release_placement` differ only in when they log).
+
 **As built (step SP8 = S8, 2026-10-27; measurement, quick tier).**
 
 - **Tool change (SimTool only, S3's deferred item):** `--replay-session`

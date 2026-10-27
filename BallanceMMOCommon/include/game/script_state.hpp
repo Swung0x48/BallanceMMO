@@ -25,6 +25,7 @@
 // starts its mechanisms the way a first play of the level does, on every side.
 
 #include <cstring>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -341,4 +342,33 @@ namespace bmmo::game {
 
         std::vector<entry> entries_;
     };
+
+    // The level file's counters, the host glue written once (step HU1):
+    // recorded on every tick while a level loads, restored at the anchor
+    // (design 9.26 for the Sequencers, step Q for the proximity countdowns).
+    // `log` gets each line without the host's own prefix.
+    inline void capture_level_file_counters(CKContext* context, sequencer_state& sequencers,
+                                            proximity_countdown_state& proximities,
+                                            const std::function<void(const std::string& line)>& log) {
+        if (const int recorded = sequencers.capture_new(context); recorded > 0 && log)
+            log(std::to_string(recorded) + " mechanism Sequencer counter(s) recorded from the level file ("
+                + sequencers.describe() + ")");
+        if (const int recorded = proximities.capture_new(context); recorded > 0 && log)
+            log(std::to_string(recorded) + " proximity countdown(s) recorded from the level file (" + proximities.describe()
+                + ")");
+    }
+
+    inline void restore_level_file_counters(CKContext* context, const sequencer_state& sequencers,
+                                            const proximity_countdown_state& proximities,
+                                            const std::function<void(const std::string& line)>& log) {
+        const int sequencers_restored = sequencers.restore(context);
+        if (log)
+            log(std::to_string(sequencers_restored) + " of " + std::to_string(sequencers.size())
+                + " mechanism Sequencer counter(s) restored to the level file's (" + sequencers.describe() + ")");
+        int differed = 0;
+        const int proximities_restored = proximities.restore(context, &differed);
+        if (log)
+            log(std::to_string(proximities_restored) + " of " + std::to_string(proximities.size())
+                + " proximity countdown(s) restored to the level file's (" + std::to_string(differed) + " differed)");
+    }
 }

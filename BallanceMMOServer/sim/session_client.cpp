@@ -1905,18 +1905,15 @@ namespace {
                 return;
             }
             // Design 9.26: the mechanism Sequencer counters as the level file
-            // has them, recorded on first sight while the level loads.
-            if (const int recorded = level_sequencers_.capture_new(engine_->context()); recorded > 0)
-                logf("%d mechanism Sequencer counter(s) recorded from the level file (%s)", recorded,
-                     level_sequencers_.describe().c_str());
+            // has them, recorded on first sight while the level loads; step Q:
+            // the proximity countdowns, recorded the same way (one copy for
+            // every host, step HU1).
+            bmmo::game::capture_level_file_counters(engine_->context(), level_sequencers_, level_proximities_,
+                                                    [](const std::string& line) { logf("%s", line.c_str()); });
             // Step T3 (trafo-replication design 2.4 step 6): the 8 original
             // trafo scripts' values as Balls.nmo has them, before any
             // original explosion, for every copy this session builds.
             capture_trafo_reference("the load");
-            // Step Q: the proximity countdowns, recorded the same way.
-            if (const int proximities = level_proximities_.capture_new(engine_->context()); proximities > 0)
-                logf("%d proximity countdown(s) recorded from the level file (%s)", proximities,
-                     level_proximities_.describe().c_str());
             if (++load_waited_ > args_.anchor_timeout) {
                 logf("Gameplay_Ingame never activated");
                 ended_ = true;
@@ -1929,21 +1926,11 @@ namespace {
             std::string error;
             CKIpionManager* physics = engine_->physics();
             if (!bmmo::physics::reset_session_clock(physics, core_.seed(), error)) { logf("clock reset: %s", error.c_str()); ended_ = true; return; }
-            {
-                // Design 9.26: the mechanisms start from the level file's
-                // Sequencer counters on every side.
-                const int restored = level_sequencers_.restore(engine_->context());
-                logf("%d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)", restored,
-                     level_sequencers_.size(), level_sequencers_.describe().c_str());
-            }
-            {
-                // Step Q: the proximity blocks' countdown phase is the level
-                // file's on every side.
-                int differed = 0;
-                const int restored = level_proximities_.restore(engine_->context(), &differed);
-                logf("%d of %zu proximity countdown(s) restored to the level file's (%d differed)", restored,
-                     level_proximities_.size(), differed);
-            }
+            // Design 9.26 / step Q: the mechanisms' Sequencer counters and the
+            // proximity blocks' countdown phase are the level file's on every
+            // side (one copy for every host, step HU1).
+            bmmo::game::restore_level_file_counters(engine_->context(), level_sequencers_, level_proximities_,
+                                                    [](const std::string& line) { logf("%s", line.c_str()); });
             // Step S6 (sector placement design 2.4): after the restores (a
             // copy inherits its source's level-file counters), before the
             // hash, the selection and every pass; a refusal ends the session
@@ -1982,24 +1969,9 @@ namespace {
             script_activations_ = bmmo::game::session_script_activations(engine_->context(), scripts_);
             // The trafo explosion pieces (step P): never a BodyRevived.
             explosion_pieces_ = bmmo::game::explosion_pieces(engine_->context());
-            {
-                CKIpionManager* physics = engine_->physics();
-                script_hooks_.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
-                    bmmo_physics_force_block state{};
-                    std::string error;
-                    if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, error)) return false;
-                    out.exists = state.exists != 0;
-                    for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-                    return true;
-                };
-                script_hooks_.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
-                    bmmo_physics_force_block state{};
-                    state.exists = in.exists ? 1 : 0;
-                    for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
-                    std::string error;
-                    return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, error);
-                };
-            }
+            // The force hooks over this engine (game/host_backend.hpp, step HU1:
+            // one copy for every host).
+            script_hooks_ = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(engine_->physics()));
             anchor_trafo();
             if (!scripts_.empty()) {
                 const auto st = bmmo::game::script_replay::describe(engine_->context(), scripts_);
@@ -2070,61 +2042,19 @@ namespace {
 
         // The sector placement of this world (docs/sector-placement-design.md
         // 2.3, 2.4; step S6): the core decides (placement_active: the world
-        // option and the capability), the CK work is game/sector_placement.hpp,
-        // and the physics half of its hot-source check is this host's, as the
-        // server's physics_world::place_sectors has it.  Option off: a level
-        // that still holds copies (a missed release) is released first and
-        // the anchor refused if that did not clear it.  The signature of the
-        // table as it then stands is computed either way.
+        // option and the capability); the host logic - the apply with its
+        // hot-source hooks, the option-off release policy and the signature -
+        // is game/sector_placement.hpp's place_at_anchor, the one copy the
+        // server's physics_world::place_sectors calls too (step HU1).  False:
+        // the anchor is refused (logged).
         bool place_sectors(uint64_t& signature) {
-            CKContext* context = engine_->context();
-            CKIpionManager* manager = engine_->physics();
-            const auto log_lines = [](const std::string& text) {
-                std::istringstream lines(text);
-                for (std::string line; std::getline(lines, line);) logf("placement: %s", line.c_str());
-            };
-            if (core_.placement_active()) {
-                std::set<std::string> bodies;
-                {
-                    std::vector<bmmo_physics_body_state> list(
-                        static_cast<size_t>(std::max(0, bmmo::physics::list_bodies(manager, nullptr, 0))));
-                    const int count = bmmo::physics::list_bodies(manager, list.data(), static_cast<int>(list.size()));
-                    for (int i = 0; i < count && i < static_cast<int>(list.size()); ++i) bodies.insert(list[static_cast<size_t>(i)].name);
-                }
-                bmmo::game::placement_hooks hooks;
-                hooks.has_body = [&bodies](CK3dEntity* entity) {
-                    return entity && entity->GetName() && bodies.count(entity->GetName()) != 0;
-                };
-                hooks.force_exists = [manager](CKBehavior* block) {
-                    bmmo_physics_force_block state{};
-                    std::string ignored;
-                    return bmmo::physics::force_block_get(manager, static_cast<uint32_t>(block->GetID()), state, ignored)
-                        && state.exists != 0;
-                };
-                const std::string refused = placement_.apply(context, hooks);
-                log_lines(placement_.describe());
-                if (!refused.empty()) {
-                    logf("sector placement refused: %s", refused.c_str());
-                    return false;
-                }
-            } else {
-                std::string why;
-                if (placement_.holds_copies(context, &why)) {
-                    logf("placement: the world option is off and the level holds copies (%s): releasing them", why.c_str());
-                    placement_.release(context);
-                    log_lines(placement_.describe());
-                    if (placement_.holds_copies(context, &why)) {
-                        logf("the level still holds placement copies (%s)", why.c_str());
-                        return false;
-                    }
-                }
-            }
-            std::string signature_error;
-            signature = placement_.signature(context, &signature_error);
-            logf("placement signature %016llx (placement %s, %zu copies)%s%s", static_cast<unsigned long long>(signature),
-                 core_.placement_active() ? "on" : "off", placement_.copies().size(),
-                 signature_error.empty() ? "" : " - the PH table is unreadable: ", signature_error.c_str());
-            return true;
+            std::string error;
+            if (bmmo::game::place_at_anchor(placement_, engine_->context(), bmmo::physics::physics_direct(engine_->physics()),
+                                            core_.placement_active(), -1,
+                                            [](const std::string& line) { logf("%s", line.c_str()); }, signature, error))
+                return true;
+            logf("%s", error.c_str());
+            return false;
         }
 
         // The copies this process made, released before the engine that
@@ -2154,10 +2084,7 @@ namespace {
                 logf("--start-sector %d: IngameParameter or Gameplay_SectorManager is missing", sector);
                 return;
             }
-            int none = 0;
-            parameters->SetElementValue(0, 2, &none, sizeof(none));
-            parameters->SetElementValue(0, 1, &sector, sizeof(sector));
-            if (CKScene* scene = engine_->context()->GetCurrentScene()) scene->Activate(manager, TRUE);
+            bmmo::game::run_sector_pass(engine_->context(), parameters, manager, sector);   // step HU1: one copy
         }
 
         // The own sector poll's platform half (platform poll_sector, E8): a

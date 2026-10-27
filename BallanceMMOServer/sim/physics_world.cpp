@@ -5,6 +5,7 @@
 #include "PhysicsCallback.h"
 
 #include <game/session_host_support.hpp>
+#include <physics/physics_direct.hpp>
 #include <physics/physics_savestate.hpp>
 #include <physics/physics_state.hpp>
 #include <session/spawn_impulse.hpp>
@@ -173,15 +174,10 @@ namespace bmmo::sim {
                 return false;
             }
             // Design 9.26: each mechanism Sequencer is recorded on the tick it
-            // appears, before its script ran - the counter the level file has.
-            const int recorded = level_sequencers_.capture_new(engine_->context());
-            if (recorded > 0)
-                log("world: " + std::to_string(recorded) + " mechanism Sequencer counter(s) recorded from the level file ("
-                    + level_sequencers_.describe() + ")");
-            // Step Q: the proximity countdowns, recorded the same way.
-            if (const int proximities = level_proximities_.capture_new(engine_->context()); proximities > 0)
-                log("world: " + std::to_string(proximities) + " proximity countdown(s) recorded from the level file ("
-                    + level_proximities_.describe() + ")");
+            // appears, before its script ran - the counter the level file has;
+            // step Q: the proximity countdowns, recorded the same way.
+            bmmo::game::capture_level_file_counters(engine_->context(), level_sequencers_, level_proximities_,
+                                                    [this](const std::string& line) { log("world: " + line); });
             if (!engine_->tick(error)) return false;
         }
         log("world: anchor reached after " + std::to_string(waited) + " ticks (engine tick "
@@ -196,20 +192,11 @@ namespace bmmo::sim {
         if (!bmmo::physics::reset_session_clock(manager, options_.seed, error)) return false;
         // Design 9.26: the mechanisms start from the level file's Sequencer
         // counters on every side (the boot's own first play advanced them).
-        {
-            const int restored = level_sequencers_.restore(context);
-            log("world: " + std::to_string(restored) + " of " + std::to_string(level_sequencers_.size())
-                + " mechanism Sequencer counter(s) restored to the level file's (" + level_sequencers_.describe() + ")");
-        }
         // Step Q: the proximity blocks' countdown phase is the level file's on
         // every side (the load ticks before the anchor run some of them: 13 of
-        // the arena's 24 differ here).
-        {
-            int differed = 0;
-            const int restored = level_proximities_.restore(context, &differed);
-            log("world: " + std::to_string(restored) + " of " + std::to_string(level_proximities_.size())
-                + " proximity countdown(s) restored to the level file's (" + std::to_string(differed) + " differed)");
-        }
+        // the arena's 24 differ here).  One copy for every host (step HU1).
+        bmmo::game::restore_level_file_counters(context, level_sequencers_, level_proximities_,
+                                                [this](const std::string& line) { log("world: " + line); });
         if (!place_sectors(error)) return false;   // sector placement (step S2): after the restores, before the hash
         bmmo::physics::world_hash hash;
         if (!bmmo::physics::capture_world_hash(manager, hash, error)) return false;
@@ -294,15 +281,7 @@ namespace bmmo::sim {
         // portable record.  Selecting reads the graphs; it changes nothing.
         if (options_.trafo_inputs && !anchor_trafo(error)) return false;
         script_selection_ = bmmo::game::session_script_selection(context, options_.trafo_inputs);
-        script_hooks_ = {};
-        script_hooks_.capture_force = [manager](CKBehavior* block, bmmo::game::force_block_state& out) {
-            bmmo_physics_force_block state{};
-            std::string e;
-            if (!bmmo::physics::force_block_get(manager, static_cast<uint32_t>(block->GetID()), state, e)) return false;
-            out.exists = state.exists != 0;
-            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-            return true;
-        };
+        script_hooks_ = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(manager));   // step HU1: one copy (game/host_backend.hpp)
         // The level's own checkpoint activation, held (game/sector_activation.hpp):
         // update_sectors() is the only path that runs Gameplay_SectorManager in
         // this world.  The rewired proximity probes let any player's clone fire
@@ -874,10 +853,7 @@ namespace bmmo::sim {
             log(std::string("world: level walk ") + (sectors_.walk_open().timed_out ? "timeout" : "seen") + " at tick "
                 + std::to_string(sectors_.walk_open().tick));
         if (!pass) return;
-        int none = 0, activate = pass.sector;
-        parameters->SetElementValue(0, 2, &none, sizeof(none));
-        parameters->SetElementValue(0, 1, &activate, sizeof(activate));
-        if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager_script, TRUE);
+        bmmo::game::run_sector_pass(context, parameters, manager_script, pass.sector);   // step HU1: one copy
         body_set_changed_ = true;
         std::string text = "world: sector +" + std::to_string(pass.sector) + " at tick " + std::to_string(tick_)
             + " (player " + std::to_string(pass.player) + ", stamped " + std::to_string(pass.stamped_tick) + "), running:";
@@ -1563,48 +1539,21 @@ namespace bmmo::sim {
     // scripts are the world's like any other): with placement_clones every
     // PH row gets its own object (game/sector_placement.hpp apply, all or
     // nothing - a refusal fails the anchor); the signature of the table as
-    // it then stands is computed either way.  The destructor releases the
+    // it then stands is computed either way.  Option off: a level that still
+    // holds copies is released first and the anchor refused if that did not
+    // clear it (design 2.4 "Option off"; the server's world runs it since
+    // step HU1 - a fresh world's registry is empty and its PH table names no
+    // _R<n> object, so nothing changes here).  The destructor releases the
     // copies before the engine goes: the context reset destroys dynamic
     // objects in their creation order, which inside a copy is CK's hash
     // order, and a P_Extra copy whose Extra block ran must be torn down root
     // first (sector_placement::release).
     bool physics_world::place_sectors(std::string& error) {
-        CKContext* context = engine_->context();
-        CKIpionManager* manager = engine_->physics();
-        if (options_.placement_clones) {
-            std::set<std::string> bodies;
-            {
-                std::vector<bmmo_physics_body_state> list(
-                    static_cast<size_t>(std::max(0, bmmo::physics::list_bodies(manager, nullptr, 0))));
-                const int count = bmmo::physics::list_bodies(manager, list.data(), static_cast<int>(list.size()));
-                for (int i = 0; i < count && i < static_cast<int>(list.size()); ++i) bodies.insert(list[static_cast<size_t>(i)].name);
-            }
-            bmmo::game::placement_hooks hooks;
-            hooks.has_body = [&bodies](CK3dEntity* entity) {
-                return entity && entity->GetName() && bodies.count(entity->GetName()) != 0;
-            };
-            hooks.force_exists = [manager](CKBehavior* block) {
-                bmmo_physics_force_block state{};
-                std::string ignored;
-                return bmmo::physics::force_block_get(manager, static_cast<uint32_t>(block->GetID()), state, ignored)
-                    && state.exists != 0;
-            };
-            hooks.fail_at_row = options_.placement_fail_at;
-            const std::string refused = placement_.apply(context, hooks);
-            std::istringstream lines(placement_.describe());
-            for (std::string line; std::getline(lines, line);) log("world: placement: " + line);
-            if (!refused.empty()) {
-                error = "sector placement refused: " + refused;
-                return false;
-            }
-        }
-        std::string signature_error;
-        anchor_placement_ = placement_.signature(context, &signature_error);
-        char text[200];
-        std::snprintf(text, sizeof(text), "world: placement signature %016llx (placement %s, %zu copies)%s",
-                      static_cast<unsigned long long>(anchor_placement_), options_.placement_clones ? "on" : "off",
-                      placement_.copies().size(), signature_error.empty() ? "" : " - the PH table is unreadable: ");
-        log(text + signature_error);
-        return true;
+        // The placement's host logic is game/sector_placement.hpp's
+        // place_at_anchor (step HU1, one copy for every host); this world
+        // supplies its backend, the test hook and its log prefix.
+        return bmmo::game::place_at_anchor(placement_, engine_->context(), bmmo::physics::physics_direct(engine_->physics()),
+                                           options_.placement_clones, options_.placement_fail_at,
+                                           [this](const std::string& line) { log("world: " + line); }, anchor_placement_, error);
     }
 }

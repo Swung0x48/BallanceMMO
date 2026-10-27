@@ -620,6 +620,44 @@ names.
 The headless-only diagnostics (`describe_*`, `diff_savestate`) stay in the
 headless host.
 
+**The rule (the user, 2026-10-27, step HU1): host logic is written once.**
+"对，插这一步，统一这些逻辑" (yes, insert this step, unify this logic),
+answering whether to insert a step before SP10 that unifies the per-host
+glue still written two or three times. Host-side logic is written ONCE, in a
+shared helper under `BallanceMMOCommon/include/game/` or `session/` that the
+server's world (`physics_world`), the headless host and the retail core host
+all call; a host keeps only its platform operations (what only that
+platform can do). No new per-host copy. The server's world is a third
+caller of host support since this step: where a helper is the world's logic
+too, the server calls it rather than keeping its own copy.
+
+**As built (step HU1, 2026-10-27).**
+
+- **`game/host_backend.hpp`** (new, included by `session_host_support.hpp`
+  and `sector_placement.hpp`): `force_hooks_for(backend)` (the script
+  replay's `capture_force` / `restore_force`) and `body_names_of(backend)`.
+  The backend is passed by value (`physics_direct`, a handle on the
+  manager) or by pointer (`&physics_view_`: the retail view is not copied,
+  a copy would not follow a re-initialize); `backend_of` takes either.
+- **The placement** (`game/sector_placement.hpp`): `place_at_anchor`,
+  `prepare_unplaced`, `placement_hooks_for` - the server's world, the
+  headless host and SimTool call them; their log lines come without the
+  host's prefix (the server adds `world: `), so the text is what each host
+  printed before. Adaptation: the server's world now also runs the
+  option-off policy (sector placement design §2.4 "every host"), which it
+  had left out; a fresh world never holds copies (L1-L13 checked).
+- **Also unified**: the level file's counters (`game/script_state.hpp`
+  `capture_level_file_counters` / `restore_level_file_counters`) and the
+  union pass's writes (`game/sector_activation.hpp` `run_sector_pass`) in
+  the server's world and the headless host.
+- **Retail**: `core_host.cpp` instantiates `force_hooks_for`,
+  `placement_hooks_for` and `place_at_anchor` with `const physics_view*`
+  (compile-only; nothing calls them, retail behaviour unchanged); S10
+  switches the core host's two force-hook copies and its `run_sector` to
+  the helpers and calls `place_at_anchor` at its anchor. The rest of the
+  inventory (unified, already one copy, queued with the reason) is
+  `docs/roadmap.md` §4 item 1, "Host unification (step HU1)".
+
 ## 3. What stays in each host
 
 ### 3.1 Headless host (SC shrinks to this)

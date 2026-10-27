@@ -44,6 +44,21 @@ of what the code does.
   record, the union), apply it as that tick and re-step to their own tick.
   This is not a per-tick correction and stays after snapshots are off.
 - The retail legacy session path gets nothing new and is deleted at R7.
+- **Host logic is written once** (the user, 2026-10-27, asked why Stage C -
+  one core - does not come first, told that the core is already shared and
+  that what is still written two or three times is the per-host glue, e.g.
+  the placement's host logic in the server's `physics_world` and the
+  headless host with a third copy planned at SP10, and asked whether to
+  insert a step before SP10: "对，插这一步，统一这些逻辑" - yes, insert this
+  step, unify this logic). The rule for this and every later step: host-side
+  logic is written ONCE, in a shared helper (`BallanceMMOCommon/include/game/`
+  or `session/`: `game/host_backend.hpp`, `game/session_host_support.hpp` or
+  the track's own header) that the server's world, the headless host and the
+  retail core host all call; a host keeps only its platform operations (what
+  only that platform can do: its physics backend, its log, its CK object
+  lookups). No new per-host copy. Built at step HU1 (§4 item 1, "Host
+  unification (step HU1)", with the inventory of what was unified and what
+  is queued); `docs/session-client-core-design.md` §2.4 records it.
 
 **Verification (the user's rules of 2026-10-27, verbatim).**
 
@@ -193,12 +208,69 @@ x64 teardown) are item 2.
      the off controls never tested the s2 probe. The placement-on worlds are
      the retail-faithful ones; the cross-world split is the queued G-c wake
      (item 5). Nothing left here.
-   - **One placement host helper** (SP6 review nit): the option-off policy
-     and the hot-source hooks are written out in the server's
-     `physics_world::place_sectors` and the headless host's `place_sectors`;
-     S10 (the retail host) lifts them into `game/sector_placement.hpp`
-     (`placement_hooks_for(manager)`, `prepare_unplaced(context, why)`)
-     rather than writing a third copy.
+   - **One placement host helper** (SP6 review nit) - **done at HU1**:
+     `game/sector_placement.hpp` holds `place_at_anchor` (the apply with
+     its hooks, the option-off policy, the signature and its log lines),
+     `prepare_unplaced` and `placement_hooks_for(backend, bodies,
+     fail_at_row)`; the server's `physics_world::place_sectors` and the
+     headless host's `place_sectors` are one call each, SimTool's
+     `tool_placement_hooks` too; the retail core host instantiates it
+     against `physics_view` (compile-only) and calls it at S10.
+   - **Host unification (step HU1, 2026-10-27; the rule in §2).** The
+     inventory of host-side logic written out in two or three of
+     `physics_world.cpp` (PW), `session_client.cpp` (SC), `core_host.cpp`
+     (CH) and SimTool, at d0c7b28:
+     - *Unified at HU1* (behaviour-neutral: the wire check `rSP8 -> rHU1`
+       on `core_ref_s6` ALL SAME, sends and journals; the server journals
+       of `l8_cross` and `resync_snapoff` replayed matched with stdout
+       byte-identical to rSP8's):
+       (1) the placement's host logic (above);
+       (2) the script replay's force hooks, `game/host_backend.hpp`
+       `force_hooks_for(backend)`: PW's anchor (capture only before; the
+       restore half is now set and never called: the server only captures),
+       SC's anchor, `sim/trafo_hooks.hpp` (the headless trafo sets'
+       `forces`) and five SimTool modes;
+       (3) the level file's counters, `game/script_state.hpp`
+       `capture_level_file_counters` / `restore_level_file_counters`: PW's
+       load loop and anchor, SC's `load_step` and anchor (SC's proximity
+       capture now runs before `capture_trafo_reference` instead of after
+       it; both only read);
+       (4) the sector union pass's writes, `game/sector_activation.hpp`
+       `run_sector_pass`: PW `update_sectors`, SC `start_sector`.
+     - *Already one copy* (nothing to unify): RO1's live script order
+       (`session/script_order.hpp` + `script_replay::live_frame_order`; each
+       host's call is one line beside its own trace), the script selection,
+       activations and explosion pieces (`game/session_host_support.hpp`),
+       the checkpoint hold (`hold_checkpoint_activation`), the headless
+       hosts' trafo hooks (`sim/trafo_hooks.hpp`).
+     - *Queued, retail* (helper ready and compiled against `physics_view`;
+       the switch changes retail code, so it goes with a retail run - S10's,
+       which has one): CH's two force-hook copies
+       (`make_retail_trafo_hooks`'s `forces`, the anchor's
+       `host.script_hooks`) onto `force_hooks_for(&physics_view_)`; CH's
+       `run_sector` onto `run_sector_pass` (it keeps its own
+       `sector_cell_is_own_` bookkeeping).
+     - *Queued, not behaviour-neutral or not one logic yet*: (a) the trafo
+       set hooks, `sim/trafo_hooks.hpp` against CH's
+       `make_retail_trafo_hooks`: `has_body` differs (the engine's
+       `GetPhysicsObject` lookup against the bridge's `has_body`) and CH
+       leaves `restore_originals` empty by design - one
+       `trafo_hooks_for(backend)` needs `physics_direct` and
+       `physics_view` to agree on those methods and a retail trafo run
+       (with S10 or R6); (b) the retail level-file counters glue
+       (`BallanceMMOClient::capture_level_sequencers` /
+       `proximity_countdowns_restore`): shared with the legacy path, which
+       gets nothing new, and it logs a census the headless hosts do not -
+       onto the helper at R7 when the legacy path goes; (c) the placement's
+       release: PW's destructor releases silently and always, SC's
+       `release_placement` only when copies exist and logs them, CH has none
+       yet - S10 adds the retail release points (level exit, map load) and
+       one `release` helper for the three; (d) the anchor sequence itself
+       (clock reset, counters, placement, hash, collision filter, rewiring
+       or N1-N4, selection) is written per host in a different order per
+       host - one recipe would change what a world does: Stage C (R6 / R7);
+       (e) N2 on every world and (f) the core's 30-unmatched-snapshots rule
+       (item 2): each changes what a world does and needs its own check.
 2. **The items found unqueued** (the trial findings' critic,
    `.local-tools/work/TRIAL1/analysis/final/part4.md`, and the steps'
    findings), before the stage close-out, ordered by dependency:
@@ -544,6 +616,22 @@ x64 teardown) are item 2.
      the fall through the copy `P_Modul_37_Bridge_R30` from 581), by
      the server journal replayed with and without the s3 Sector event
      (design As built (step SP8)); with (c).
+   - HU1 (host unification, a refactor, quick tier, 2026-10-27; ran: x64,
+     x86 (`core_host.cpp` with the explicit instantiations) and Arch server
+     builds, 538 tests, GCC 29 ok, the wire check `rSP8 -> rHU1` on
+     `core_ref_s6` ALL SAME (12 send traces SAME, 12 journals IDENTICAL),
+     the server journals of `l8_cross` (2993/2993) and `resync_snapoff`
+     (4153/4153) replayed matched with stdout byte-identical to rSP8's, the
+     server world's new option-off check on L1-L13 (`--list-placement`,
+     every anchor reached, no level holds copies); no live run - a
+     byte-identical refactor): (a) a retail two-copy run of the HU1 x86
+     build, core off and on (no retail behaviour changed: the new
+     `core_host.cpp` lines are explicit instantiations nothing calls, but
+     the shared headers it compiles changed); (b) the solo snapshots-off
+     exactness replay (no rollback or session code changed); (c) a live
+     server session whose world holds copies with the option off (no run
+     reaches `prepare_unplaced`'s release branch on the server: a fresh
+     world never holds copies).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

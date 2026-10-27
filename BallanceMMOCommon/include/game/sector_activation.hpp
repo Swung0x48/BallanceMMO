@@ -36,6 +36,18 @@
 #include "menu_driver.hpp"
 
 namespace bmmo::game {
+    // One pass of the sector union, the writes every world makes (the
+    // server's update_sectors, the headless host's and the retail core
+    // host's platform run_sector; written once at step HU1): deactivate
+    // nothing (IngameParameter[0][2] = 0), activate `sector` ([0][1]) and run
+    // Gameplay_SectorManager from its start.
+    inline void run_sector_pass(CKContext* context, CKDataArray* parameters, CKBehavior* manager, int sector) {
+        int none = 0;
+        parameters->SetElementValue(0, 2, &none, sizeof(none));
+        parameters->SetElementValue(0, 1, &sector, sizeof(sector));
+        if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, TRUE);
+    }
+
     // Depth first: the first behaviour named `name` in `parent`'s tree, the
     // parent itself excluded.
     inline CKBehavior* find_behavior_in_tree(CKBehavior* parent, const char* name) {

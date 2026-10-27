@@ -55,6 +55,7 @@
 #include <float.h>
 #endif
 
+#include <game/sector_placement.hpp>
 #include <game/session_host_support.hpp>
 #include <game/trafo_sets.hpp>
 #include <session/bridge_recipe.hpp>
@@ -66,6 +67,24 @@
 
 #include "core_host.hpp"
 #include "session_journal_client.hpp"
+
+// Step HU1 (host logic written once, docs/roadmap.md section 2): the shared
+// placement helper (game/sector_placement.hpp place_at_anchor,
+// placement_hooks_for) and the shared force hooks (game/host_backend.hpp
+// force_hooks_for) compile against this host's backend here.  Explicit
+// instantiations only - nothing calls them yet, retail behaviour is
+// unchanged: S10 makes this host's anchor call place_at_anchor, and the two
+// force-hook copies below (make_retail_trafo_hooks, the script hooks at the
+// anchor) move onto force_hooks_for with a retail run (roadmap section 4
+// item 1, "Host unification").
+template bmmo::game::script_replay_hooks
+bmmo::game::force_hooks_for<const bmmo::physics::physics_view*>(const bmmo::physics::physics_view*);
+template bmmo::game::placement_hooks
+bmmo::game::placement_hooks_for<const bmmo::physics::physics_view*>(const bmmo::physics::physics_view* const&,
+                                                                     std::set<std::string>&, int);
+template bool bmmo::game::place_at_anchor<const bmmo::physics::physics_view*>(
+    bmmo::game::sector_placement&, CKContext*, const bmmo::physics::physics_view* const&, bool, int,
+    const bmmo::game::placement_log&, uint64_t&, std::string&);
 
 namespace {
     namespace bs = bmmo::session;

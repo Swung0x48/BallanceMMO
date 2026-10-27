@@ -25,6 +25,7 @@
 #include <physics/physics_rt_api.h>
 #include <session/placement_plan.hpp>
 
+#include "host_backend.hpp"
 #include "menu_driver.hpp"
 #include "script_replay.hpp"
 
@@ -835,5 +836,93 @@ namespace bmmo::game {
                       static_cast<unsigned long long>(signature(context)));
         line(text);
         return {};
+    }
+
+    // ---- The placement's host logic, written once (step HU1; the user's
+    // decision of 2026-10-27, docs/roadmap.md section 2).  The server's world
+    // (physics_world::place_sectors), the headless host (session_client
+    // place_sectors) and, from S10, the retail core host call these; a host
+    // supplies only its platform: the physics backend (host_backend.hpp), the
+    // test hook's row and where its log lines go.  `log` gets each line
+    // without the host's own prefix.
+    using placement_log = std::function<void(const std::string& line)>;
+
+    namespace placement_detail {
+        inline void log_lines(const placement_log& log, const std::string& text) {
+            if (!log) return;
+            size_t at = 0;
+            while (at < text.size()) {
+                const size_t end = text.find('\n', at);
+                log("placement: " + text.substr(at, end == std::string::npos ? std::string::npos : end - at));
+                if (end == std::string::npos) break;
+                at = end + 1;
+            }
+        }
+    }
+
+    // The physics half of step 3 (no hot source) over a host's backend: the
+    // anchor's body names (read once, into `bodies`, which must outlive the
+    // hooks) and the force blocks' controllers.
+    template <class Backend>
+    placement_hooks placement_hooks_for(const Backend& backend, std::set<std::string>& bodies, int fail_at_row = -1) {
+        bodies = body_names_of(backend);
+        placement_hooks hooks;
+        hooks.has_body = [&bodies](CK3dEntity* entity) {
+            return entity && entity->GetName() && bodies.count(entity->GetName()) != 0;
+        };
+        hooks.force_exists = [backend](CKBehavior* block) {
+            bmmo_physics_force_block state{};
+            std::string ignored;
+            return host_backend_detail::backend_of(backend).force_block_get(static_cast<uint32_t>(block->GetID()), state, ignored)
+                && state.exists != 0;
+        };
+        hooks.fail_at_row = fail_at_row;
+        return hooks;
+    }
+
+    // The option-off policy (design 2.4 "Option off"): a level that still
+    // holds copies (a missed release, a retail level not reloaded) is
+    // released first; false (with `error`) when that did not clear it - the
+    // host must not anchor.
+    inline bool prepare_unplaced(sector_placement& placement, CKContext* context, const placement_log& log, std::string& error) {
+        std::string why;
+        if (!placement.holds_copies(context, &why)) return true;
+        if (log) log("placement: the world option is off and the level holds copies (" + why + "): releasing them");
+        placement.release(context);
+        placement_detail::log_lines(log, placement.describe());
+        if (placement.holds_copies(context, &why)) {
+            error = "the level still holds placement copies (" + why + ")";
+            return false;
+        }
+        return true;
+    }
+
+    // The anchor's placement step (design 2.3, 2.4): with the placement
+    // active (the session's world option; on a client the core's
+    // placement_active) every PH row gets its own object, all or nothing;
+    // otherwise the option-off policy.  The signature of the table as it then
+    // stands is computed either way.  False (with `error`): the host must not
+    // anchor.
+    template <class Backend>
+    bool place_at_anchor(sector_placement& placement, CKContext* context, const Backend& backend, bool active,
+                         int fail_at_row, const placement_log& log, uint64_t& signature, std::string& error) {
+        if (active) {
+            std::set<std::string> bodies;
+            const std::string refused = placement.apply(context, placement_hooks_for(backend, bodies, fail_at_row));
+            placement_detail::log_lines(log, placement.describe());
+            if (!refused.empty()) {
+                error = "sector placement refused: " + refused;
+                return false;
+            }
+        } else if (!prepare_unplaced(placement, context, log, error)) {
+            return false;
+        }
+        std::string signature_error;
+        signature = placement.signature(context, &signature_error);
+        char text[200];
+        std::snprintf(text, sizeof(text), "placement signature %016llx (placement %s, %zu copies)",
+                      static_cast<unsigned long long>(signature), active ? "on" : "off", placement.copies().size());
+        if (log) log(std::string(text) + (signature_error.empty() ? "" : " - the PH table is unreadable: " + signature_error));
+        return true;
     }
 }

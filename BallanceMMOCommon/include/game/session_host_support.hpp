@@ -46,6 +46,7 @@
 
 #include "CKAll.h"
 
+#include "host_backend.hpp"
 #include "navigation_graph.hpp"
 #include "script_replay.hpp"
 

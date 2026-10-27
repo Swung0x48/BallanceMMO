@@ -479,22 +479,10 @@ namespace {
     }
 
     // The placement's physics hooks over this tool's engine (design 2.3
-    // step 3), as physics_world gives them: the anchor's body names and the
-    // force blocks' controllers.  `bodies` must outlive the hooks.
+    // step 3): game/sector_placement.hpp's placement_hooks_for, the one copy
+    // every host uses (step HU1).  `bodies` must outlive the hooks.
     bmmo::game::placement_hooks tool_placement_hooks(CKIpionManager* manager, int fail_at, std::set<std::string>& bodies) {
-        bodies.clear();
-        std::vector<bmmo::physics::body_state> list(static_cast<size_t>(std::max(0, bmmo::physics::list_bodies(manager, nullptr, 0))));
-        const int count = bmmo::physics::list_bodies(manager, list.data(), static_cast<int>(list.size()));
-        for (int i = 0; i < count && i < static_cast<int>(list.size()); ++i) bodies.insert(list[static_cast<size_t>(i)].name);
-        bmmo::game::placement_hooks hooks;
-        hooks.has_body = [&bodies](CK3dEntity* entity) { return entity && entity->GetName() && bodies.count(entity->GetName()) != 0; };
-        hooks.force_exists = [manager](CKBehavior* block) {
-            bmmo_physics_force_block state{};
-            std::string ignored;
-            return bmmo::physics::force_block_get(manager, static_cast<uint32_t>(block->GetID()), state, ignored) && state.exists != 0;
-        };
-        hooks.fail_at_row = fail_at;
-        return hooks;
+        return bmmo::game::placement_hooks_for(bmmo::physics::physics_direct(manager), bodies, fail_at);
     }
 
     // --replay --placement on: the placement applied at the record's first
@@ -3045,22 +3033,7 @@ namespace {
         bmmo::game::script_replay_hooks hooks;
         if (frames) {
             scripts = bmmo::game::script_replay::select(context);
-            hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
-                bmmo_physics_force_block state{};
-                std::string error;
-                if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, error))
-                    return false;
-                out.exists = state.exists != 0;
-                for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-                return true;
-            };
-            hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
-                bmmo_physics_force_block state{};
-                state.exists = in.exists ? 1 : 0;
-                for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
-                std::string error;
-                return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, error);
-            };
+            hooks = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics));   // step HU1: one copy (game/host_backend.hpp)
             const auto st = bmmo::game::script_replay::describe(context, scripts);
             std::printf("savestate-check: script replay: %d scripts (%d active), %d blocks, %d parameters, "
                         "%d force blocks, %d opaque\n", st.scripts, st.active, st.blocks, st.parameters,
@@ -4438,21 +4411,7 @@ namespace {
             CKContext* context = world.engine().context();
             CKIpionManager* physics = world.physics();
             sel = bmmo::game::session_script_selection(context);
-            hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
-                bmmo_physics_force_block state{};
-                std::string e;
-                if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, e)) return false;
-                out.exists = state.exists != 0;
-                for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-                return true;
-            };
-            hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
-                bmmo_physics_force_block state{};
-                state.exists = in.exists ? 1 : 0;
-                for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
-                std::string e;
-                return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, e);
-            };
+            hooks = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics));   // step HU1: one copy (game/host_backend.hpp)
             backend = std::make_unique<bmmo::physics::physics_direct>(physics);
             bmmo::session::rollback_binding_options options;
             options.delta_ms = bmmo::sim::kFixedDeltaMs;
@@ -5582,21 +5541,7 @@ namespace {
         const script_replay::selection sel = bmmo::game::session_script_selection(context);
         const std::vector<CK_ID> activations = bmmo::game::session_script_activations(context, sel);
         bmmo::game::script_replay_hooks hooks;
-        hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
-            bmmo_physics_force_block state{};
-            std::string e;
-            if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, e)) return false;
-            out.exists = state.exists != 0;
-            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-            return true;
-        };
-        hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
-            bmmo_physics_force_block state{};
-            state.exists = in.exists ? 1 : 0;
-            for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
-            std::string e;
-            return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, e);
-        };
+        hooks = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics));   // step HU1: one copy (game/host_backend.hpp)
         const auto owner_of = [](CKBehavior* beh) {
             CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
             return std::string(owner && owner->GetName() ? owner->GetName() : "");
@@ -6280,21 +6225,7 @@ namespace {
         }
         const script_replay::selection sel = bmmo::game::session_script_selection(context);
         bmmo::game::script_replay_hooks hooks;
-        hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
-            bmmo_physics_force_block state{};
-            std::string e;
-            if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, e)) return false;
-            out.exists = state.exists != 0;
-            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-            return true;
-        };
-        hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
-            bmmo_physics_force_block state{};
-            state.exists = in.exists ? 1 : 0;
-            for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
-            std::string e;
-            return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, e);
-        };
+        hooks = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics));   // step HU1: one copy (game/host_backend.hpp)
         const script_replay::keep_local_fn keep_rule = [](const std::string& owner, const std::string& script) {
             return bmmo::session::keep_local_script(owner, script);
         };
@@ -7417,21 +7348,7 @@ namespace {
         const script_replay::selection sel = bmmo::game::session_script_selection(context);
         const std::vector<CK_ID> script_activations = bmmo::game::session_script_activations(context, sel);
         bmmo::game::script_replay_hooks hooks;
-        hooks.capture_force = [physics](CKBehavior* block, bmmo::game::force_block_state& out) {
-            bmmo_physics_force_block state{};
-            std::string e;
-            if (!bmmo::physics::force_block_get(physics, static_cast<uint32_t>(block->GetID()), state, e)) return false;
-            out.exists = state.exists != 0;
-            for (int i = 0; i < 3; ++i) { out.position[i] = state.position[i]; out.force[i] = state.force[i]; }
-            return true;
-        };
-        hooks.restore_force = [physics](CKBehavior* block, const bmmo::game::force_block_state& in) {
-            bmmo_physics_force_block state{};
-            state.exists = in.exists ? 1 : 0;
-            for (int i = 0; i < 3; ++i) { state.position[i] = in.position[i]; state.force[i] = in.force[i]; }
-            std::string e;
-            return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, e);
-        };
+        hooks = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics));   // step HU1: one copy (game/host_backend.hpp)
         CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
         const CK_ID manager_id = manager ? manager->GetID() : 0;
         if (!manager) {
