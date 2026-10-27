@@ -1,8 +1,12 @@
 #pragma once
 
-// The lead a late joiner (or a resync) is anchored at, in ticks ahead of the
-// server's current tick: the session's input delay, plus the round trip the
-// reliable SessionAssign spends in flight, plus a margin.  Both latency terms
+// The lead a late joiner (or a resync) is anchored at: the session's input
+// delay, plus the round trip the reliable SessionAssign spends in flight, plus
+// a margin.  Since step RL1 the lead is counted on the session's fixed deadline
+// schedule (reanchor_base_tick below, session_runner::reanchor_tick), not over
+// the server's current tick; the base it gives is floored at current_tick + 2
+// (+ 3 for a member without CAP_RESYNC_STATE).  The clamps below size the lead against
+// the deadline budget it buys, lead + input_delay periods.  Both latency terms
 // are capped, because the client's rollback lag grows with them
 // (lag ~= 1.5 * rtt_ticks + (lead - rtt_ticks), against rollback.hpp
 // max_resim_ticks): past the client's resim window every snapshot is too_far,
@@ -34,6 +38,7 @@
 // path's lead would.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 
 #include <session/lead.hpp>
@@ -164,24 +169,70 @@ namespace bmmo::sim {
     // those late frames, relayed every member about 15 ticks later for the
     // rest of the session (found by the user's trial; result1/2.md).
     //
-    // `scheduled` is tick_scheduler::tick_at(now, lead): the tick the
-    // schedule names for this instant plus `lead`, so deadline(base) - now
-    // is lead + D periods, the start's budget (the start base was handed out
-    // start_base periods before its first deadline-less step, design 9.26),
-    // whatever the server's pace.  `lead` now means exactly that: the
-    // start's budget less the input delay.  The floor keeps the base out of
-    // the runner's past: current_tick is the tick it steps next, so a base
-    // of current_tick + kReanchorBaseMarginTicks leaves base - 1 (the tick
-    // whose state A3 answers with) at least one tick ahead of the runner
-    // when the network thread read it; a runner that bursts further before
-    // the command reaches it is the base-missed path (re-answered).  The
-    // floor binds only when the server runs more than lead - 2 ticks ahead
-    // of its schedule, which needs a path shorter than 2 ticks; it then
-    // gives the member more budget than the start, never less.
-    constexpr uint32_t kReanchorBaseMarginTicks = 2;
+    // `scheduled` is schedule_tick_at(now - start, first, lead) below (from
+    // the schedule's start on, tick_scheduler::tick_at(now, lead)): the tick
+    // the schedule names for this instant plus `lead`, so deadline(base) -
+    // now is lead + D periods (in ((lead + D - 1), lead + D] of them), the
+    // start's budget (the start base was handed out start_base periods
+    // before its first deadline-less step, design 9.26), whatever the
+    // server's pace.  `lead` now means exactly that: the start's budget less
+    // the input delay.  The floor keeps the base out of the runner's past:
+    // current_tick is the tick it steps next, so a base of current_tick +
+    // kReanchorBaseMarginTicks leaves base - 1 (the tick whose state A3
+    // answers with) at least one tick ahead of the runner when the network
+    // thread read it; a runner that bursts further before the command
+    // reaches it is the base-missed path (on_resync_base_missed: re-answered
+    // with a new base).  That path exists only for a member that applies
+    // the resync state (CAP_RESYNC_STATE, the session core): one without it
+    // (the legacy retail path) gets a full snapshot and nothing re-answers
+    // a base the runner stepped first, its first frames are counted stale
+    // and held.  So its floor keeps at least the margin a lead had before
+    // RL1: the smallest lead late_tick_lead_ticks gives (input delay 1 + 2
+    // = 3; a pre-RL1 legacy resync usually got more, C + resync_lead_ticks).
+    // The floor binds only when the server runs more than lead - margin
+    // ticks ahead of its schedule, which needs a path shorter than the
+    // margin; it then gives the member more budget than the start, never
+    // less.
+    constexpr uint32_t kReanchorBaseMarginTicks = 2;         // CAP_RESYNC_STATE
+    constexpr uint32_t kReanchorBaseLegacyMarginTicks = 3;   // without it (step RL1b)
 
-    inline uint32_t reanchor_base_tick(uint32_t scheduled, uint32_t current_tick) {
-        const uint32_t floor = current_tick + kReanchorBaseMarginTicks;
+    inline uint32_t reanchor_margin_ticks(bool resync_state) {
+        return resync_state ? kReanchorBaseMarginTicks : kReanchorBaseLegacyMarginTicks;
+    }
+
+    inline uint32_t reanchor_base_tick(uint32_t scheduled, uint32_t current_tick,
+                                       uint32_t margin = kReanchorBaseMarginTicks) {
+        const uint32_t floor = current_tick + margin;
         return static_cast<int32_t>(scheduled - floor) >= 0 ? scheduled : floor;
+    }
+
+    // The tick the fixed deadline schedule names `elapsed_us` microseconds
+    // after its start (the start is the first tick's deadline less the input
+    // delay, tick_scheduler::start), plus `margin`; floored, and SIGNED (step
+    // RL1b): before the start - the first start_base periods after the last
+    // SessionReady, design 9.26 - it lies below the first tick, so a
+    // re-anchor there gets lead + D periods like any other.
+    // tick_scheduler::tick_at clamps every instant before the start to
+    // first + margin, which gave such a re-anchor up to start_base periods
+    // more (start_base 27: a joiner 100 ms after the all-ready moment got
+    // about 20 ticks more than the start members, and its frames landed
+    // that much early until a resync).
+    // From the start on it equals tick_at.
+    inline uint32_t schedule_tick_at(int64_t elapsed_us, uint32_t first_tick, uint32_t margin) {
+        const int64_t scaled = elapsed_us * 66;
+        int64_t ticks = scaled / 1000000;
+        if (scaled % 1000000 < 0) --ticks;   // floor below zero too
+        return first_tick + static_cast<uint32_t>(ticks) + margin;
+    }
+
+    // session_runner::reanchor_tick's whole rule, for a session whose
+    // scheduler started at `schedule_start` from `first_tick`: the base of a
+    // re-anchor at `now` with `lead`, the runner's next tick `current_tick`,
+    // and the member's floor margin (reanchor_margin_ticks).
+    inline uint32_t reanchor_tick_on_schedule(std::chrono::steady_clock::time_point schedule_start, uint32_t first_tick,
+                                              std::chrono::steady_clock::time_point now, uint32_t lead,
+                                              uint32_t current_tick, uint32_t margin) {
+        const int64_t elapsed_us = std::chrono::floor<std::chrono::microseconds>(now - schedule_start).count();
+        return reanchor_base_tick(schedule_tick_at(elapsed_us, first_tick, lead), current_tick, margin);
     }
 }

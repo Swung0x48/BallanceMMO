@@ -124,13 +124,37 @@ namespace bmmo::sim {
         return it->second.first_tick + static_cast<uint32_t>(elapsed * 66 / 1000000) + 66;
     }
 
-    uint32_t session_runner::reanchor_tick(uint32_t session, uint32_t lead) const {
+    uint32_t session_runner::reanchor_tick(uint32_t session, uint32_t lead, bool resync_state) const {
         std::lock_guard lk(view_mutex_);
         auto it = views_.find(session);
         if (it == views_.end()) return lead;
         const auto& v = it->second;
-        if (!v.schedule.started()) return v.next_tick + lead;
-        return bmmo::sim::reanchor_base_tick(v.schedule.tick_at(clock::now(), lead), v.next_tick);
+        if (!v.scheduled) return v.next_tick + lead;
+        return bmmo::sim::reanchor_tick_on_schedule(v.schedule_start, v.first_tick, clock::now(), lead, v.next_tick,
+                                                    bmmo::sim::reanchor_margin_ticks(resync_state));
+    }
+
+    // Both start paths (the last unready member left, the last member became
+    // ready) start the deadline schedule here, so the cross-thread view's
+    // copy of it (reanchor_tick) cannot be left out of either (step RL1b).
+    void session_runner::start_ticking(session_state& s) {
+        // Design 9.26: the first step (tick start_base) is due start_base
+        // periods from now - where a world counting from 0 reached it - so
+        // the members keep the wall-clock lead the base gives them.
+        const auto now = clock::now();
+        const auto schedule_start = now + std::chrono::duration_cast<clock::duration>(
+                std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0));
+        s.scheduler.start(schedule_start, s.world->tick_index(), s.input_delay);
+        s.running = true;
+        {
+            std::lock_guard lk(view_mutex_);
+            auto& v = views_[s.id];
+            v.start = now;
+            v.first_tick = s.world->tick_index();
+            v.schedule_start = schedule_start;
+            v.scheduled = true;
+        }
+        publish_state(s);
     }
 
     size_t session_runner::session_count() const {
@@ -455,21 +479,7 @@ namespace bmmo::sim {
             // A session waiting for readiness may now be complete.
             if (!s.running && !s.failed && s.world && !s.players.empty()
                     && std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
-                // Design 9.26: the first step (tick start_base) is due start_base
-                // periods from now - where a world counting from 0 reached it - so
-                // the members keep the wall-clock lead the base gives them.
-                s.scheduler.start(clock::now() + std::chrono::duration_cast<clock::duration>(
-                        std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0)),
-                        s.world->tick_index(), s.input_delay);
-                s.running = true;
-                {
-                    std::lock_guard lk(view_mutex_);
-                    auto& v = views_[session];
-                    v.start = clock::now();
-                    v.first_tick = s.world->tick_index();
-                    v.schedule = s.scheduler;
-                }
-                publish_state(s);
+                start_ticking(s);
                 log_patience_on(s);
             }
         });
@@ -529,21 +539,7 @@ namespace bmmo::sim {
             }
             if (s.running) return;
             if (std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
-                // Design 9.26: the first step (tick start_base) is due start_base
-                // periods from now - where a world counting from 0 reached it - so
-                // the members keep the wall-clock lead the base gives them.
-                s.scheduler.start(clock::now() + std::chrono::duration_cast<clock::duration>(
-                        std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0)),
-                        s.world->tick_index(), s.input_delay);
-                s.running = true;
-                {
-                    std::lock_guard lk(view_mutex_);
-                    auto& v = views_[session];
-                    v.start = clock::now();
-                    v.first_tick = s.world->tick_index();
-                    v.schedule = s.scheduler;
-                }
-                publish_state(s);
+                start_ticking(s);
                 log("[session " + std::to_string(session) + "] all " + std::to_string(s.players.size())
                     + " players ready, ticking from " + std::to_string(s.world->tick_index()));
                 log_patience_on(s);

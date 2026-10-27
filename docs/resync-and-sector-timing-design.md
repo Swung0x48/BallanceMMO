@@ -2948,6 +2948,19 @@ the other clients' lag 36-37 -> 20-21, the server's S1 q50 for c2 6.05 ->
 22.15; resync_at150: c0 26.77 -> 22.3. The full record is the late-player
 design §2.8, "As built (step RL1)".
 
+**As built (step RL1b, 2026-10-27): RL1's review follow-ups.** The exact
+resync's client re-step depth moved resync_snapoff 12 -> 28 ticks and
+resync_at150 34 -> 29: the 12 was the defect's shrunk budget, 28-29 is what a
+member at the start's budget re-steps, inside the reach guard as before. The
+held window [C, base) is lead + D - e(C), unbounded by a server backlog (the
+member's on-time frames below the base are discarded). Code: the schedule's
+tick is signed before the schedule's start (a re-anchor in the first
+start_base periods gets the start's budget, not up to start_base periods
+more), a member without CAP_RESYNC_STATE (no base-missed re-answer) keeps a
+floor of current_tick + 3, and both start paths store the schedule through
+one helper. Server only, no protocol change. The record is the late-player
+design §2.8, "As built (step RL1b)".
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

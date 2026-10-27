@@ -1299,8 +1299,11 @@ public:
     }
 
     // The runner had stepped the base's tick before the request reached it:
-    // the member is answered again from the runner's current tick (a new base
-    // and a new assignment with the flag; the client takes the newer one).
+    // the member is answered again with a new base, counted on the session's
+    // fixed deadline schedule (session_runner::reanchor_tick), floored at the
+    // runner's current tick + 2, and a new assignment with the flag; the
+    // client takes the newer one.  Only a member that applies the resync
+    // state (CAP_RESYNC_STATE) is ever answered here.
     void on_resync_base_missed(uint32_t session, uint32_t player, uint32_t base) {
         std::lock_guard lk(state_mutex_);
         auto it = physics_sessions_.find(session);
@@ -1427,11 +1430,13 @@ public:
     // over the runner's current tick (session_runner::reanchor_tick): a
     // resync made while the server waits on that member's deadlines used to
     // leave every other member about 15 ticks of relay lag behind for the
-    // rest of the session.
-    uint32_t resync_tick_base(const physics_session_state& s, HSteamNetConnection c) const {
+    // rest of the session.  `resync_state`: the member applies the resync
+    // state (CAP_RESYNC_STATE); one that does not keeps a floor of 3 ticks
+    // over the runner (step RL1b), it has no base-missed re-answer.
+    uint32_t resync_tick_base(const physics_session_state& s, HSteamNetConnection c, bool resync_state) const {
         const auto it = clients_.find(c);
         const uint32_t rtt_ms = it == clients_.end() ? 0u : it->second.ping_peak_ms;
-        return runner_->reanchor_tick(s.id, bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms));
+        return runner_->reanchor_tick(s.id, bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms), resync_state);
     }
 
     // The lead a late joiner is anchored at.  On the per-player path
@@ -1770,21 +1775,26 @@ public:
             return;
         }
         s.ready.insert(c);
-        // Late joiners are numbered from the server's current tick; members
-        // present at the start from the session's start base (protocol 2.2,
-        // session_assign_msg).  Both are input_delay plus a round-trip
-        // allowance ahead of where the client would be if it were told the
-        // server's tick itself, so its frames arrive before the deadline for
-        // the tick they name and every snapshot refers to a tick it has
-        // already recorded.
+        // Late joiners are numbered on the session's fixed deadline schedule
+        // (step RL1, session_runner::reanchor_tick: the tick the schedule
+        // names now plus the joiner's lead, floored at the runner's current
+        // tick + 2); members present at the start from the session's start
+        // base (protocol 2.2, session_assign_msg).  Both give the client
+        // input_delay plus a round-trip allowance of deadline budget, so its
+        // frames arrive before the deadline for the tick they name and every
+        // snapshot refers to a tick it has already recorded.
         // The lead of this first assignment, and what the client can apply
         // (late-player design 2.2, 2.5): the start base for a start member,
         // the late join's lead for a joiner.  A resync keeps both and moves
-        // only the base.  A repeated SessionReady keeps the first.
+        // only the base.  A repeated SessionReady keeps the first.  Off the
+        // per-player path the joiner's lead is late_tick_lead_ticks, which
+        // is not clamped to 44 - input_delay like the start base: up to
+        // about 4 ticks more budget than the start members (D 17 at a 180 ms
+        // peak: 31 against 27), as before RL1 (late-player design 2.8, "As
+        // built (step RL1b)").
         const uint32_t join_lead = s.late.count(c) ? late_join_lead(s, c, msg.caps) : 0;
-        // A joiner's lead is counted on the fixed deadline schedule (step
-        // RL1, session_runner::reanchor_tick), as a resync's is.
-        const uint32_t assigned = s.late.count(c) ? runner_->reanchor_tick(s.id, join_lead) : s.start_tick_base;
+        const bool join_state = (msg.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
+        const uint32_t assigned = s.late.count(c) ? runner_->reanchor_tick(s.id, join_lead, join_state) : s.start_tick_base;
         if (!s.leads.count(c)) {
             auto& lead = s.leads[c];
             lead.caps = msg.caps;
@@ -1802,7 +1812,7 @@ public:
         // runner steps that tick.  One without it (the legacy retail path)
         // gets the full snapshot broadcast, as before.
         const bool late = s.late.count(c) != 0;
-        const bool state = late && (msg.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
+        const bool state = late && join_state;
         runner_->player_ready(msg.session, c, assigned);
         if (late) send_session_assign(s, c, assigned, state ? bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS : 0);
         else assign_start_members(s);
@@ -1827,8 +1837,10 @@ public:
     }
 
     // Resync (design 9.2): the client's tick numbering broke (pause, long
-    // stall, repeated hard corrections).  Same path as a late join: current
-    // tick as the new base, everyone's ball, the sector history - and, since
+    // stall, repeated hard corrections).  Same path as a late join: a new
+    // base counted on the session's fixed deadline schedule (step RL1,
+    // session_runner::reanchor_tick; floored at the runner's current tick +
+    // 2), everyone's ball, the sector history - and, since
     // protocol 10 (resync design 2.3, step A3), the server's state of tick
     // base - 1 to that member alone (SessionResyncState), announced by the
     // assignment's ASSIGN_FLAG_STATE_FOLLOWS, instead of a full snapshot
@@ -1856,21 +1868,22 @@ public:
         // ticks between the server's tick and that base are not waited for
         // (input_buffer::reanchored): the stall that used to cost every
         // member 22 ticks of relay lag here is gone.
-        uint32_t assigned = resync_tick_base(s, c);
-        if (const auto lead = s.leads.find(c);
-                lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps))
+        // A member that applies the resync state (CAP_RESYNC_STATE, the
+        // session core) gets it; one that does not (the legacy retail path)
+        // the pre-protocol-10 answer: no flag, a full snapshot to everyone,
+        // and a base floored 3 ticks over the runner instead of 2 (it has no
+        // base-missed re-answer; step RL1b).
+        const auto lead = s.leads.find(c);
+        const bool state = lead != s.leads.end() && (lead->second.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
+        uint32_t assigned = resync_tick_base(s, c, state);
+        if (lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps))
             assigned = runner_->reanchor_tick(s.id,
-                    bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset));
+                    bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset), state);
         // The newest tick whose held frames were counted: the old epoch's
         // held_total stops here, and the ticks after it up to the base are
         // applied held under no numbering the client has (its notices never
         // carry them).  Logged for the harness's per-epoch count.
         const uint32_t counted_through = s.relay.newest_tick();
-        // A member that applies the resync state (CAP_RESYNC_STATE, the
-        // session core) gets it; one that does not (the legacy retail path)
-        // the pre-protocol-10 answer: no flag, a full snapshot to everyone.
-        const auto lead = s.leads.find(c);
-        const bool state = lead != s.leads.end() && (lead->second.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
         s.late.insert(c);
         s.ready.insert(c);
         runner_->player_ready(s.id, c, assigned);

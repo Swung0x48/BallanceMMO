@@ -287,7 +287,11 @@ x64 teardown) are item 2.
      members without `CAP_RESYNC_STATE`, stale comments (late_tick.hpp:3-4,
      server.cpp:1289, :1734, :1791-1792); a runner-level test that both
      start paths store the schedule. One small step once nothing else is
-     working in `server.cpp`.
+     working in `server.cpp`. Built at step RL1b (late-player design §2.8,
+     "As built (step RL1b)"): the docs, the signed schedule tick, the
+     3-tick legacy floor, the stale comments, one start helper; no
+     world-less runner fixture exists, so the runner-level test is a test
+     of the pure rule the runner calls (`ReanchorOnSchedule`).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift
@@ -363,7 +367,15 @@ x64 teardown) are item 2.
      stall-triggered resync (the `L_eff` path); (c) the LAN case (D at its
      floor of 6, where the floor `current_tick + 2` may bind); (d) a
      retail two-copy run with a stall-triggered resync (the trial's case;
-     server-only change, the x86 build is unchanged).
+     server-only change, the x86 build is unchanged). Added at RL1b: (a)
+     also reads the joiner's relay lag off the per-player path (up to about
+     4 above the start members', `late_tick_lead_ticks` is not clamped);
+     (b) also measures the resynced member's own correction in a non-stall
+     resync while the server waits or lags (the held window lead + D - e);
+     (c) also a legacy (core off) member's floor + 3; (d) logs the re-step
+     depth and its apply time; and (e) a late joiner in the first
+     start_base periods after the all-ready moment (the signed schedule
+     tick).
    - TR3b (trafo T3 merged on RC1 + RL1, quick tier, 2026-10-27; ran: x64,
      x86, Arch builds, 522 tests, GCC 29 ok, the wire check rRL1 -> rTR3b
      on `core_ref_rc1` (36/36 journals IDENTICAL, one SessionReady send per

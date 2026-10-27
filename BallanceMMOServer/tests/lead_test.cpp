@@ -1201,3 +1201,100 @@ TEST(ReanchorBase, NeverInTheRunnersPast) {
     const uint32_t C = sched.tick_at(now, 0) + 9;
     EXPECT_EQ(reanchor_base_tick(sched.tick_at(now, 9), C), C + kReanchorBaseMarginTicks);
 }
+
+// Step RL1b: session_runner::reanchor_tick is reanchor_tick_on_schedule over
+// the schedule the start stored (start_ticking, the one place both start
+// paths go through).  From the schedule's start on it is exactly the RL1 rule,
+// reanchor_base_tick(tick_at(now, lead), next_tick); before it - the first
+// start_base periods after the last SessionReady - the schedule's tick is
+// signed instead of clamped to first + lead, so a re-anchor there gets the
+// start's budget too.  (No world-less session_runner fixture exists - a start
+// needs a booted world - so the runner's own call is not exercised here.)
+TEST(ReanchorOnSchedule, IsTheRl1RuleFromTheScheduleStartOn) {
+    using namespace std::chrono;
+    using bmmo::sim::reanchor_base_tick;
+    using bmmo::sim::reanchor_margin_ticks;
+    using bmmo::sim::reanchor_tick_on_schedule;
+    const auto t0 = tick_scheduler::clock::time_point(seconds(100));
+    for (const uint32_t D: {6u, 17u})
+        for (const uint32_t lead: {3u, 27u})
+            for (const bool state: {true, false}) {
+                tick_scheduler sched;
+                const auto start = t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(27 / 66.0));
+                sched.start(start, 27, D);
+                for (int64_t us = 0; us < 5000000; us += 7919)
+                    for (const auto extra: {nanoseconds(0), nanoseconds(1), nanoseconds(999)})
+                        for (int e = -30; e <= 30; e += 6) {
+                            const auto now = start + microseconds(us) + extra;
+                            const uint32_t C = static_cast<uint32_t>(
+                                    static_cast<int64_t>(sched.tick_at(now, 0)) - static_cast<int64_t>(D) + e);
+                            ASSERT_EQ(reanchor_tick_on_schedule(start, 27, now, lead, C, reanchor_margin_ticks(state)),
+                                      reanchor_base_tick(sched.tick_at(now, lead), C, reanchor_margin_ticks(state)))
+                                << "D " << D << " lead " << lead << " us " << us << " e " << e;
+                        }
+            }
+}
+
+TEST(ReanchorOnSchedule, BeforeTheScheduleStartTheBudgetIsStillTheStarts) {
+    using namespace std::chrono;
+    using bmmo::sim::kReanchorBaseMarginTicks;
+    using bmmo::sim::reanchor_tick_on_schedule;
+    constexpr uint32_t D = 17, start_base = 27, first = 27;
+    const auto t0 = tick_scheduler::clock::time_point(seconds(100));   // the last SessionReady
+    tick_scheduler sched;
+    const auto start = t0 + duration_cast<tick_scheduler::clock::duration>(duration<double>(start_base / 66.0));
+    sched.start(start, first, D);
+    for (const uint32_t lead: {9u, 27u, 31u})
+        for (auto now = t0; now < start; now += microseconds(997)) {
+            // nothing stepped yet: the runner's next tick is the first
+            const uint32_t base = reanchor_tick_on_schedule(start, first, now, lead, first, kReanchorBaseMarginTicks);
+            const double budget = reanchor_budget_ticks(sched, base, now);
+            if (base == first + kReanchorBaseMarginTicks) {
+                ASSERT_GT(budget, lead + D - 1.001) << "lead " << lead;   // the floor only adds
+            } else {
+                ASSERT_GT(budget, lead + D - 1.001) << "lead " << lead;
+                ASSERT_LE(budget, lead + D + 1e-6) << "lead " << lead;
+            }
+        }
+    // a joiner 100 ms after the all-ready moment: RL1's tick_at clamp gave it
+    // about 20 ticks more than the start members, the signed tick does not
+    const auto now = t0 + milliseconds(100);
+    EXPECT_GT(reanchor_budget_ticks(sched, sched.tick_at(now, 31), now), 31 + D + 19.0);
+    const double budget = reanchor_budget_ticks(sched, reanchor_tick_on_schedule(start, first, now, 31, first, 2), now);
+    EXPECT_GT(budget, 31 + D - 1.001);
+    EXPECT_LE(budget, 31 + D + 1e-6);
+}
+
+TEST(ReanchorOnSchedule, TheScheduleTickIsFlooredAndSigned) {
+    using bmmo::sim::schedule_tick_at;
+    EXPECT_EQ(schedule_tick_at(0, 100, 0), 100u);
+    EXPECT_EQ(schedule_tick_at(15151, 100, 0), 100u);    // 0.99997 ticks
+    EXPECT_EQ(schedule_tick_at(15152, 100, 0), 101u);
+    EXPECT_EQ(schedule_tick_at(-1, 100, 0), 99u);
+    EXPECT_EQ(schedule_tick_at(-15151, 100, 0), 99u);
+    EXPECT_EQ(schedule_tick_at(-15152, 100, 0), 98u);
+    EXPECT_EQ(schedule_tick_at(-15152, 100, 27), 125u);
+    // wraps like every tick: the schedule may start at a tick near 0
+    EXPECT_EQ(schedule_tick_at(-1000000, 3, 0), static_cast<uint32_t>(3 - 66));
+}
+
+// Step RL1b: a member without CAP_RESYNC_STATE (the legacy retail path) has
+// no base-missed re-answer, so its floor keeps the 3-tick margin every lead
+// had before RL1; the state path keeps 2.
+TEST(ReanchorOnSchedule, AMemberWithoutTheResyncStateKeepsAThreeTickFloor) {
+    using namespace std::chrono;
+    using bmmo::sim::reanchor_margin_ticks;
+    using bmmo::sim::reanchor_tick_on_schedule;
+    EXPECT_EQ(reanchor_margin_ticks(true), 2u);
+    EXPECT_EQ(reanchor_margin_ticks(false), 3u);
+    tick_scheduler sched;
+    const auto t0 = tick_scheduler::clock::time_point(seconds(100));
+    sched.start(t0, 9, 6);
+    const auto now = t0 + seconds(5);
+    const uint32_t C = sched.tick_at(now, 0) + 9;   // far ahead of the schedule (LAN)
+    EXPECT_EQ(reanchor_tick_on_schedule(t0, 9, now, 9, C, reanchor_margin_ticks(true)), C + 2);
+    EXPECT_EQ(reanchor_tick_on_schedule(t0, 9, now, 9, C, reanchor_margin_ticks(false)), C + 3);
+    // on schedule the floor does not bind and both get the same base
+    const uint32_t on = sched.tick_at(now, 0) - 6;
+    EXPECT_EQ(reanchor_tick_on_schedule(t0, 9, now, 9, on, 2), reanchor_tick_on_schedule(t0, 9, now, 9, on, 3));
+}

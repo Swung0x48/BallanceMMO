@@ -302,12 +302,16 @@ namespace bmmo::sim {
         uint32_t current_tick(uint32_t session) const;
         bool running(uint32_t session) const;
         // Step RL1: the base of a re-anchor (a resync, a late join) taken
-        // from the session's fixed deadline schedule - tick_scheduler::tick_at
-        // (now, lead), so deadline(base) - now is lead + input_delay periods
-        // whatever the server's pace - floored at current_tick + 2 so it is
-        // never in the runner's past (sim/late_tick.hpp reanchor_base_tick).
-        // Before the session ticks: current_tick + lead, the rule it replaced.
-        uint32_t reanchor_tick(uint32_t session, uint32_t lead) const;
+        // from the session's fixed deadline schedule - the tick it names for
+        // now, plus lead (sim/late_tick.hpp reanchor_tick_on_schedule; signed
+        // before the schedule's start, step RL1b), so deadline(base) - now is
+        // lead + input_delay periods whatever the server's pace - floored at
+        // current_tick + 2 (+ 3 when `resync_state` is false: a member
+        // without CAP_RESYNC_STATE has no base-missed re-answer) so it is
+        // never in the runner's past.  A session not yet started (no
+        // schedule; unreachable from the server, which re-anchors only a
+        // running session): current_tick + lead, the rule it replaced.
+        uint32_t reanchor_tick(uint32_t session, uint32_t lead, bool resync_state) const;
         // Tick to assign to a late joiner anchoring now.
         uint32_t late_join_tick(uint32_t session) const;
         size_t session_count() const;
@@ -503,6 +507,9 @@ namespace bmmo::sim {
         void emit_resync_states(session_state& s, uint32_t tick, bool recording);
         void log(const std::string& text);
         void publish_state(const session_state& s);
+        // Starts the session's deadline schedule and publishes it to the
+        // cross-thread view (step RL1b: one place for both start paths).
+        void start_ticking(session_state& s);
 
         runner_config config_;
         session_callbacks callbacks_;
@@ -515,10 +522,12 @@ namespace bmmo::sim {
 
         // cross-thread view
         mutable std::mutex view_mutex_;
-        // `schedule`: a copy of the session's tick_scheduler as started (its
-        // start and first tick never move; reanchor_tick reads tick_at only).
+        // `schedule_start`: the session's tick_scheduler start (the first
+        // tick's deadline less the input delay), with `first_tick` the whole
+        // schedule reanchor_tick needs; both never move once `scheduled`
+        // (start_ticking, the one place a schedule starts).
         struct view { uint32_t next_tick = 0; bool running = false; std::chrono::steady_clock::time_point start{}; uint32_t first_tick = 0;
-                      std::string journal; bmmo::session::tick_scheduler schedule; };
+                      std::string journal; std::chrono::steady_clock::time_point schedule_start{}; bool scheduled = false; };
         std::map<uint32_t, view> views_;
     };
 }

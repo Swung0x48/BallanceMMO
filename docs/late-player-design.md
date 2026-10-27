@@ -1107,10 +1107,13 @@ revision 3 it had only 14 to give back.
   deadline is start_base + D periods after the all-ready moment (design
   9.26). The floor keeps base - 1, the tick whose state the exact resync
   answers with, ahead of the runner's next tick; a runner that bursts past
-  it before the command arrives is the base-missed path, as before. It
+  it before the command arrives is the base-missed path, as before (for a
+  member with CAP_RESYNC_STATE only; see RL1b below). It
   binds only when the server runs more than lead - 2 ticks ahead of its
   schedule (a path under 2 ticks) and then gives more budget, never less.
-  Before the session ticks the base is C + lead, the old rule. A3's exact
+  Before the session ticks the base is C + lead, the old rule (corrected at
+  RL1b: that branch is unreachable, and the real pre-start window was
+  clamped). A3's exact
   resync is unchanged: the state at S is the same, only the choice of S
   moves. No protocol change (the base travels in the existing assignment).
   Measured (snapshots off, 150 ms each way, D = 17, 4 clients, the
@@ -1126,6 +1129,81 @@ revision 3 it had only 14 to give back.
   stall, and the LAN case (D at its floor of 6, where the old shortfall
   was about 6 ticks), deferred to the stage close-out
   (`docs/roadmap.md` §4).
+- *As built (step RL1b, 2026-10-27): the follow-ups of RL1's review
+  (`.local-tools/work/RL1/review_retry/`, no blocker).* What RL1's rule
+  costs and where it does not hold, and three small code changes:
+  - **The exact resync's re-step depth.** The client re-steps from base - 1
+    to its own tick when the state arrives, which is how far ahead of the
+    server's stepping the resynced member runs: resync_snapoff 12 -> 28
+    ticks (`maps/arena-test/rl1/resync_snapoff` c2, 1587 -> 1615, against
+    `core_ref_rc1`'s 1571 -> 1583), resync_at150 34 -> 29 (881 -> 910,
+    against 886 -> 920). The 12 was the defect's shrunk budget (the member
+    6 ticks ahead of its deadlines instead of 22), not a baseline; 28-29 is
+    what a member at the start's budget re-steps, and the pre-RL1 at150
+    already re-stepped 34. The client's reach guard
+    (client_core_resync.cpp, the re-step refused past `resync_reach()`, and
+    `poll_resync_hold`) bounds it as before; the lead fed to the rule is
+    still clamped to 44 - D. Deferred check (d), the retail two-copy stall
+    resync, logs the re-step depth and its apply time as an observation.
+  - **The held window is lead + D - e(C), unbounded by a backlog.**
+    `input_buffer::reset(base)` discards the member's frames below the base,
+    and the ticks [C, base) are applied held. With the base on the schedule
+    that window is lead + D - e(C) ticks (e = deadline(C) - step(C)): lead +
+    D when the server steps at that member's deadlines (e near 0, the stall
+    case: 1545 -> 1588 in resync_snapoff), a little under lead when it is
+    arrival-paced (e near D + the path's slack), lead + D + B when it is B
+    ticks behind its deadlines (a backlog: the trial's earliness of -23 at
+    20580; or a resync while it waits on a different member). The old rule's
+    window was lead. Frames below the base of a member
+    whose numbering was intact were on time and are now discarded, and A3
+    snaps its own ball onto the held trajectory. This is the price of the
+    session's phase; capping the base would bring RL1's defect back.
+    Deferred check (b) also measures the resynced member's own correction
+    in a non-stall resync while the server waits or lags.
+  - **The late joiner off the per-player path** is anchored at
+    `late_tick_lead_ticks`, which is not clamped to 44 - D like the start
+    base (`session_start_tick_base`): at D 17 and a peak round trip of
+    180 ms or more it is 31 against the start members' 27, so the joiner's
+    frames land up to about 4 ticks early and its relay lag sits about 4
+    above the others' until a resync. Not a regression (the old rule gave
+    31 + e(C), about +9 when arrival-paced); "every re-anchor gets the
+    start's budget" holds for the resyncs, not for that arm. Left as is;
+    deferred check (a) measures it.
+  - **The base-missed fallback is the state path's only.**
+    `on_resync_base_missed` re-answers a member whose base the runner
+    stepped first only when it applies the resync state (CAP_RESYNC_STATE,
+    the session core). A legacy member gets a full snapshot and nothing
+    re-assigns it; its first frames would be counted stale and held. Code:
+    its floor is current_tick + 3 (`kReanchorBaseLegacyMarginTicks`, the
+    smallest lead `late_tick_lead_ticks` ever gave, so at least the margin
+    it had before RL1, where a legacy resync usually got more,
+    C + resync_lead_ticks), the state path's stays + 2 (`reanchor_margin_ticks`;
+    `reanchor_tick` and `resync_tick_base` take the member's flag, the late
+    join the joiner's caps).
+  - **Before the schedule's start.** `tick_scheduler::tick_at` clamps every
+    instant before the start (the first start_base periods after the last
+    SessionReady, design 9.26) to first + lead, so a re-anchor there got up
+    to start_base periods more (a joiner 100 ms after the all-ready moment
+    about 20 ticks more at start_base 27). Code: the schedule's tick is
+    taken SIGNED and floored (`sim/late_tick.hpp` `schedule_tick_at`,
+    `reanchor_tick_on_schedule`; equal to `tick_at` from the start on), so
+    deadline(base) - now is lead + D periods there too. The branch "before
+    the session ticks: C + lead" stays only for a session with no schedule,
+    which the server never re-anchors (resync and late join both need
+    `running`). `timeline.hpp` is not changed (shared): the runner's view
+    keeps the schedule's start and first tick instead of a scheduler copy.
+  - **One start site.** Both start paths (the last unready member left,
+    the last member became ready) go through `session_runner::start_ticking`,
+    which starts the scheduler and stores the schedule in the view, so
+    neither can drop it. No world-less `session_runner` fixture exists (a
+    start needs a booted world), so the runner's own call is not
+    unit-tested; `tests/lead_test.cpp` `ReanchorOnSchedule` tests the rule
+    the runner calls - equal to `reanchor_base_tick(tick_at(now, lead),
+    next_tick)` from the start on, the start's budget before it, the
+    signed floor, the 3-tick legacy floor.
+  - Stale comments (late_tick.hpp's header, server.cpp's late-join,
+    resync and base-missed comments) now say the base is counted on the
+    schedule, floored at the current tick + 2.
 - The lower's gate is `lead_offset > 0`, which a resync keeps.
 - A SessionLead whose `epoch` is older than the client's base is dropped.
 - A client rebase (more than `33 + |slew|` behind) still asks for a resync.
