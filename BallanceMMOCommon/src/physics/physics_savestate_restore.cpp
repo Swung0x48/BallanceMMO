@@ -1622,9 +1622,10 @@ namespace bmmo::physics::savestate {
             for (int i = 0; i < n; ++i) live.push_back(vec.element_at(i));
             std::vector<uint8_t> used(static_cast<size_t>(n), 0);
             std::vector<E*> target;
-            auto name_of_controller = [](IVP_Controller* c) {
-                const char* name = c ? c->get_controller_name() : nullptr;
-                return std::string(name ? name : "");
+            // Under the name the blob records it by (set_controller_alias).
+            const controller_alias* alias = controller_alias_for(physics_);
+            auto name_of_controller = [alias](IVP_Controller* c) {
+                return recorded_controller_name(alias, c ? c->get_controller_name() : nullptr);
             };
             for (const controller_ref& ref : refs) {
                 int found = -1;

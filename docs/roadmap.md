@@ -107,14 +107,24 @@ left. Each design named here has its own document with its step table.
    (`session-client-core-design.md` §6.2).
 5. The trafo as a replicated input (`trafo-replication-design.md`): T1-T5
    (T1 built: host support, bridge v21, SimTool S0-S13; S8 found no
-   PreSimulate entry, so 9.2 needs nothing: "As built (step T1)").
+   PreSimulate entry, so 9.2 needs nothing: "As built (step T1)"; T2 built:
+   the wire and the server, protocol 11 / journal v5; **T3 built**: the
+   core and the headless host, judged with snapshots off, its snapshots-on
+   CPU gate moved to item 10; committed at step TR3b, the commit after
+   RL1 3daa19a that adds this note; the server's
+   `physics.trafo_inputs` stays off, past T4 until item 10's close-out).
    Per-player piece sets; explosion, paper wind and reset in every world;
    a 20 s piece life; the explosion stamped at the dephysic (vanilla timing);
    out-of-reach trafos rejected and logged.
-   T3 (implemented on the parked branch `wip/trafo-t3-merged`, its H1 (c)
-   at 150 ms failing on starvation, T3's own rewind cost) waited for item
-   10's step RC1 by the user's decision of 2026-10-25 (RC1 committed
-   2026-10-27) and is re-gated under its original H1 (c) at TR3b.
+   T3 (its H1 (c) at 150 ms failing on starvation at its merge round)
+   waited for item 10's step RC1 by the user's decision of 2026-10-25 and
+   was re-gated on top of RC1 and RL1 under its original H1 (c) at TR3b
+   with one H1 pair (the user's one-pair rule of 2026-10-27): starved
+   0 / 0 / 0 / 0 against the same-batch control's 0 / 0 / 0 / 0, input
+   rewinds 25-35 per client (128-181 before RC1; control 21-30), pieces
+   150/150 bit-equal on all four (trafo design §8, "As built (step
+   TR3b)"). T3's remaining CPU (t_rep 2.6-2.9x the control, t_max 43-46
+   ms against 12-14) is item 10's.
 6. Sector placement (`sector-placement-design.md`): S1-S11. One object per
    placement at the anchor; the late joiner's lost sector-1 walk (S4, which
    may land early). Also found at S2, **the x64 teardown over-read** (not
@@ -158,7 +168,14 @@ left. Each design named here has its own document with its step table.
    resyncs - on all four clients with the flags off, on the raised one with
    them on (`resync-and-sector-timing-design.md`, As built (step B2)).
    Root cause the per-frame cost first (one rewind per frame for the
-   frame's lifecycle set, or the rewinds' own cost).
+   frame's lifecycle set, or the rewinds' own cost). Profiled at CPUPROF
+   (item 10): the per-frame rewinds are input corrections, not lifecycle
+   ones, one per frame, 37-40 deep, and one mechanism - the replay keeps a
+   remote's stale tail past its newest relayed frame (item 10, candidate
+   1, removed by RC1's hold-last since), so each key change of the late player and each respawned ball's
+   birth costs one rewind per arriving frame for the relay lag; B2's build
+   paid 1.31 ms per replayed tick, today 0.41 ms, and the recipe no longer
+   rebases.
 9. Record-format gaps (`record-format-gaps-design.md`): time factor and
    gravity per tick, Level 1 switches the tutorial off (main-branch exit,
    10-frame delay, every world), the array-read census (K0's tools built;
@@ -207,7 +224,12 @@ left. Each design named here has its own document with its step table.
     snapshots are off (9-11 %, its own drift check), RC4 the dormant-script
     encoding (5 %), RC5 an incremental restore (3-4 %); the close-out is the
     trafo design's H4 / H6 with snapshots on (decision (b), 2026-10-25),
-    against T3's snapshots-off CPU numbers.
+    against T3's snapshots-off CPU numbers (step TR3b, H1 at 150 ms with
+    RC1 in: t_rep 0.99-1.15 s, t_max 43-46 ms, starved 0, against the
+    option-off control's 0.34-0.41 s, 12-14 ms, 0; trafo design §8, "As
+    built (step TR3b)"). The CPUPROF profile and its ranked candidates:
+    `rewind-cost-design.md` §1 and trafo design §8, "The rewind-cost
+    profile".
 11. **Stage close-out:** four clients, 150 ms, 10 % loss, snapshots off: the
     spawn pile and every mechanism bit-identical to the server at every
     checkpoint. On pass: snapshots off in the deployed configuration and in
@@ -234,6 +256,23 @@ left. Each design named here has its own document with its step table.
       floor of 6, where the floor `current_tick + 2` may bind); (d) a
       retail two-copy run with a stall-triggered resync (the trial's case;
       server-only change, the x86 build is unchanged).
+    - TR3b (trafo T3 merged on RC1 + RL1, quick tier, 2026-10-27; ran: x64,
+      x86, Arch builds, 522 tests, GCC 29 ok, the wire check rRL1 -> rTR3b
+      on `core_ref_rc1` (36/36 journals IDENTICAL, one SessionReady send per
+      client), solo IDENTICAL, ONE H1 pair at 150 ms snapshots off (option on
+      and its same-batch option-off control; the user's one-pair rule):
+      (a) the second H1 pair at 150 ms; (b) H1 at 0 ms, for H1 (d) (late
+      Trafo events 0); (c) H3b (missed trafo inputs and their resyncs);
+      (d) H5 (`savestate_check.py` on the pieces); (e) H7 (the late
+      joiner's reconcile); (f) the re-capture of `core_ref_t3` with the
+      final binaries (the pre-RC1 set is not replayable by the merged
+      build: its journals differ from tick 253, hold-last); (g) a retail
+      two-copy run of the merged x86 build, core off and on (built,
+      CLIENT-BUILD-OK; no BallanceMMOClient source changed, but the
+      shared engine and savestate changes reach both retail modes - the
+      savestate index rewrite, and the replay-mismatch counter of
+      `rollback.hpp` now counted only while logged, the first 8; neither
+      changes a simulation result, and the core-off BAR rests on this run).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -138,4 +139,18 @@ namespace bmmo::physics {
 
     // FNV-1a over the blob bytes.
     uint64_t hash_savestate(const uint8_t* data, size_t size);
+
+    // A controller name the blob records and matches under another (step
+    // TR3).  A force controller is named after the block that made it,
+    // "rt:force/<block id>" (engine change #18), and a block's CK_ID is
+    // this world's: a trafo set's copies are built at another moment in
+    // every world, so the server's travelling blob (a resync's, a join's)
+    // named controllers no client has, and the client's paper wind kept
+    // its own state under the server's rows (TR3's H7: 6.6e-7 m).  A host
+    // that knows a name every world gives a controller installs this: the
+    // capture records that name, and the restore matches every live
+    // controller under it.  It returns false to keep the name.  Per physics
+    // manager; an empty function removes it.  Not thread-safe against a
+    // capture or a restore of the same manager.
+    void set_controller_alias(CKIpionManager* physics, std::function<bool(const char* name, std::string& alias)> alias);
 }

@@ -393,6 +393,16 @@ namespace bmmo::game {
                             std::vector<uint8_t>& out, const trafo_part* trafo = nullptr) {
             out.clear();
             if (!context) return false;
+            // Sized like this thread's previous record (a tick's scripts are
+            // the last tick's): the bytes are appended without the vector
+            // moving them as it grows (step TR3: every member's trafo set
+            // makes the record some 64 KB).
+            thread_local size_t last_size = 0;
+            out.reserve(last_size + last_size / 8 + 64);
+            struct remember {
+                std::vector<uint8_t>& bytes;
+                ~remember() { last_size = bytes.size(); }
+            } remember_size{out};
             const bool v3 = trafo && !trafo->empty();
             put_u32(out, kMagic);
             put_u32(out, v3 ? kVersionTrafo : kVersion);

@@ -155,7 +155,13 @@ namespace bmmo::session {
             };
             const scope_guard keep_cells = platform_.keep_live_cells(*this);
             const uint64_t frozen_before = s.rollback_.stats().frozen;
-            const bool rolled = s.rollback_.on_snapshot(world(), snapshot, current_tick(), entity_of, input_at);
+            // Step T3: the trafo pieces are inputs' bodies here, exact by
+            // the replay; a row of one is a restore source only when it
+            // breaches (rollback_world::row_on_breach_only).
+            rollback_world snapshot_world = world();
+            if (s.trafo_active_)
+                snapshot_world.row_on_breach_only = [this](const std::string& entity) { return s.trafo_pieces_.count(entity) != 0; };
+            const bool rolled = s.rollback_.on_snapshot(snapshot_world, snapshot, current_tick(), entity_of, input_at);
             // A frozen clock set the bodies and dropped the history with no
             // replay (rollback.hpp): the world stays on the snapshot while
             // the tick counter runs on, and only a re-anchor brings the two
@@ -329,6 +335,10 @@ namespace bmmo::session {
         if (msg.session != s.session_) return;
         note_held_section(msg);
         for (const auto& entry: msg.entries) {
+            // Step T3 (trafo-replication design 2.4): a member first seen in
+            // the relay gets its piece set now, outside any replay.
+            if (s.trafo_active_ && s.phase_ == client_core_state::phase::running && entry.player != s.own_id_)
+                ensure_trafo_set(entry.player, "its first relayed input");
             auto it = s.remotes_.find(entry.player);
             // The journal's PLAYER record goes in at the oldest tick this
             // entry covers, so no INPUT record of the player can precede

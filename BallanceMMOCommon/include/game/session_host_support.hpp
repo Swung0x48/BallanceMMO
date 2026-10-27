@@ -200,6 +200,16 @@ namespace bmmo::game {
     // parent and put there for that tick's scripts; it goes back - parent and
     // local matrix as they were - at the next replayed tick's re-issue or when
     // the rewinds end (end_override, from live_cells_guard).
+    //
+    // Step T3 (trafo-replication design 4.3): with the trafo as an input
+    // (WORLD_TRAFO_INPUTS) the originals are not selected
+    // (session_script_selection), so session_script_activations names no
+    // trafo script and neither the activations nor the referential override
+    // above ever act: the sets' scripts are activated by the trafo inputs,
+    // which the core re-applies in every replayed tick, and each explosion
+    // is placed by its type set's own referential.  They stay for a session
+    // without the option (the step P path: the legacy retail mod, a core host
+    // without the capability), until R7.
     struct script_activation {
         CK_ID script = 0;
         bool reset = false;
@@ -371,16 +381,20 @@ namespace bmmo::game {
     // one implementation for both hosts: the server's portable record as a
     // local v2 record of `sel`, the core's keep-local rule taking those
     // scripts from `anchor` (the synthetic anchor's own record).
+    // `trafo` (step T3): the world's trafo part (a session with the trafo as
+    // an input), whose scripts the server's portable record (version 2)
+    // carries by name; null without one.
     inline bool localize_session_scripts(CKContext* context, const script_replay::selection& sel,
                                          const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor,
                                          std::vector<uint8_t>& out, std::string& error,
-                                         bmmo::session::resync_script_report& report) {
+                                         bmmo::session::resync_script_report& report,
+                                         const script_replay::trafo_part* trafo = nullptr) {
         script_replay::portable_report r;
         r.lists = true;
         const script_replay::keep_local_fn keep = [](const std::string& owner, const std::string& script) {
             return bmmo::session::keep_local_script(owner, script);
         };
-        const bool ok = script_replay::localize(context, sel, portable, anchor, keep, out, &error, &r);
+        const bool ok = script_replay::localize(context, sel, portable, anchor, keep, out, &error, &r, trafo);
         report.scripts = r.scripts;
         report.kept_local = r.kept_local;
         report.objects_kept = r.objects_kept;
@@ -527,7 +541,10 @@ namespace bmmo::game {
     // mechanism born inside its window.  What they are told apart for: no
     // other world has them (the server and the other clients run no
     // explosion of this client's trafo), so their Physicalize's wake-up is
-    // not a BodyRevived (reportable_wakeup).
+    // not a BodyRevived (reportable_wakeup).  With the trafo as an input
+    // (step T3) every world runs every set's scripts: the hosts add every
+    // set's pieces (game/trafo_sets.hpp add_trafo_set_pieces), which are no
+    // BodyRevived because every world makes them.
     inline std::set<std::string> explosion_pieces(CKContext* context) {
         std::set<std::string> names;
         if (!context) return names;

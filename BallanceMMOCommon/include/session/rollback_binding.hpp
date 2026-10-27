@@ -81,6 +81,14 @@ namespace bmmo::session {
         const auto failed = [o](const std::string& error) {
             if (o.on_write_failed) o.on_write_failed(error);
         };
+        // The record's capture reads every tracked body three times by name
+        // (pose, leapfrog extras, contacts): a backend that can serve those
+        // lookups from one pass over the world for the capture's duration
+        // says so (the headless one; step TR3: with every member's trafo
+        // pieces tracked, the per-lookup scans were a third of a capture).
+        if constexpr (requires(Backend& x) { x.lookup_scope(true); }) {
+            world.capture_scope = [b](bool on) { b->lookup_scope(on); };
+        }
         world.get_body = [b](const std::string& entity, bmmo_physics_body_state& out) {
             std::string error;
             return b->get_body_state(entity.c_str(), out, error);

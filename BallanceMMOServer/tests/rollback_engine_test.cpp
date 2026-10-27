@@ -1150,6 +1150,41 @@ TEST(RollbackEngine, AmendRecordReplacesTheTickStateWithoutTouchingInputs) {
 // history still holds the pre-correction state, so the server row that the
 // correction was fixing looks like a fresh divergence and the rollback undoes
 // it - which is the loop the amend closes.
+// Step T3's fix-up: a live record captured once, at its amend (record's
+// capture_now false) - the same record as a capture at the record followed by
+// the amend's re-capture; a deferred record no amend captured is counted.
+TEST(RollbackEngine, ADeferredRecordIsCapturedByItsAmend) {
+    for (const bool deferred: {false, true}) {
+        SCOPED_TRACE(deferred ? "deferred" : "captured at the record");
+        fake_world world;
+        world.bodies["Own"];
+        world.bodies["Sack"].position[0] = 20.0;
+        rollback_engine engine;
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.mechanisms = {"Sack"};
+        engine.record(world.adapter(), 1, tracked, {}, !deferred);
+        world.bodies["Sack"].position[0] = 21.0;   // a correction between the record and its amend
+        ASSERT_TRUE(engine.amend_record(world.adapter(), 1));
+        engine.record(world.adapter(), 2, tracked, {}, !deferred);
+        ASSERT_TRUE(engine.amend_record(world.adapter(), 2));
+        EXPECT_EQ(engine.stats().captures_never_made, 0u);
+        world.bodies["Sack"].position[0] = 30.0;
+        // a rewind to tick 1 restores the amended pose (the sack stands still
+        // through the replayed tick 2)
+        EXPECT_TRUE(engine.rewind_to(world.adapter(), 1, 2, no_input, "test"));
+        EXPECT_DOUBLE_EQ(world.bodies["Sack"].position[0], 21.0);
+    }
+    fake_world world;
+    world.bodies["Own"];
+    rollback_engine engine;
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    engine.record(world.adapter(), 1, tracked, {}, false);
+    engine.record(world.adapter(), 2, tracked, {});   // no amend of tick 1 in between: the caller's bug
+    EXPECT_EQ(engine.stats().captures_never_made, 1u);
+}
+
 TEST(RollbackEngine, CorrectionOfTheCurrentTickSurvivesARollbackOnlyWhenAmended) {
     for (const bool amend: {false, true}) {
         SCOPED_TRACE(amend ? "amended" : "not amended");
@@ -1776,6 +1811,46 @@ TEST(RollbackEngine, SubTolerancePartnerOfABreachingBodyIsRestoredFromItsOwnRow)
     // from the row, not from the record: the 20 mm are still there after the
     // two replayed steps (the record would have left it at sack_at_2 + 2 steps)
     EXPECT_NEAR(world.bodies["Sack"].position[0], sack_at_2 + 0.02 + 2.0 * 0.5 * kDt, 1e-9);
+}
+
+// Step T3's fix-up: a body every world simulates from the same inputs (a
+// trafo piece, rollback_world::row_on_breach_only) is restored from its awake
+// row only when the row breaches; inside the tolerance its own record is the
+// exact state, where an ordinary awake mechanism takes the row (above).
+TEST(RollbackEngine, AnInputDrivenBodyTakesItsAwakeRowOnlyOnABreach) {
+    for (const bool breaching: {false, true}) {
+        SCOPED_TRACE(breaching ? "breaching" : "inside tolerance");
+        fake_world world;
+        world.bodies["Own"];
+        world.bodies["Piece"].position[0] = 20.0;
+        world.bodies["Piece"].linear[0] = 0.5f;
+        rollback_engine engine;
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.mechanisms = {"Piece"};
+        record_ticks(world, engine, tracked, 1, 4);
+        world.calls.clear();
+        world.steps = 0;
+        const double piece_at_2 = 20.0 + 2.0 * 0.5 * kDt;
+
+        fake_body server_own;
+        server_own.position[0] = 0.5;   // the own ball breaches: a rollback runs
+        const double off = breaching ? 0.4 : 0.02;
+        const auto snapshot = snapshot_of(2, {ball_body(1, server_own), mechanism_row("Piece", piece_at_2 + off, 0.5f, true)});
+        auto adapter = world.adapter();
+        adapter.row_on_breach_only = [](const std::string& entity) { return entity == "Piece"; };
+        EXPECT_TRUE(engine.on_snapshot(adapter, snapshot, 4, entity_of_named, no_input));
+        EXPECT_EQ(engine.stats().rollbacks, 1u);
+        if (breaching) {
+            // from the row, as any breaching row
+            EXPECT_EQ(world.count("set_body Piece wake recheck"), 1);
+            EXPECT_NEAR(world.bodies["Piece"].position[0], piece_at_2 + off + 2.0 * 0.5 * kDt, 1e-9);
+        } else {
+            // from its own record: the 20 mm are not taken, the record's pose
+            // plus the two replayed steps
+            EXPECT_NEAR(world.bodies["Piece"].position[0], piece_at_2 + 2.0 * 0.5 * kDt, 1e-9);
+        }
+    }
 }
 
 // 9.25 rule 2: a sleeping row inside the tolerance is no news.  Copying it

@@ -90,6 +90,7 @@
 #include "own_correction.hpp"
 #include "rollback.hpp"
 #include "sector_union.hpp"
+#include "trafo_input.hpp"
 #include "../entity/session.hpp"
 #include "../message/session_assign_msg.hpp"
 #include "../message/session_end_msg.hpp"
@@ -672,6 +673,43 @@ namespace bmmo::session {
         // (The snapshots' acked_input_tick for the retail starvation
         // detector went with the detector at R4: the relay header's `acked`
         // is read in note_held_section, with snapshots off too.)
+
+        // ---- step T3: the trafo as an input (trafo-replication design) ----
+        // SessionStart's world options, and whether this session runs the
+        // trafo as an input here (WORLD_TRAFO_INPUTS and the host's
+        // trafo_inputs capability).
+        uint32_t world_options_ = 0;
+        bool trafo_active_ = false;
+        // Every applied or pending trafo input by applied tick, own, remote
+        // and server-stamped (design 2.5): the live tick's applied before the
+        // union pass, a replayed tick's re-applied in the replay.
+        bmmo::session::trafo_input_log trafo_log_;
+        // The players this world holds a selected set for (first sight,
+        // design 2.4): a player without one gets make_trafo_set.
+        std::set<uint32_t> trafo_sets_;
+        // Their pieces' entities and players (the host's trafo_type_set at
+        // the make): a snapshot row of one restores it only on a breach
+        // (rollback_world::row_on_breach_only).
+        std::map<std::string, uint32_t> trafo_pieces_;
+        // The hold's reports made before the assignment: stamped on the
+        // first assigned frame (design 2.3, hold_pending_trafo).
+        std::vector<trafo_report> trafo_pending_;
+        // This frame's pending input rewind carries a trafo input (its
+        // refusal is a resync: a snapshot cannot make or reset pieces).
+        bool input_rewind_trafo_ = false;
+        // Counters (the status line's trafo: section): own inputs stamped,
+        // remote and server-stamped inputs received, inputs applied live and
+        // in replays, late inputs rewound, missed ones (a resync), late ones
+        // the pending resync's state covers, the effect checks' leaks, own
+        // echoes moved and dropped (REJECTED, SUPERSEDED), sets made and
+        // failed, inputs that found no set, the reconcile's unmakes and
+        // remakes, sets retired.
+        uint64_t trafo_sent_ = 0, trafo_received_ = 0, trafo_applied_ = 0, trafo_replayed_ = 0;
+        uint64_t trafo_late_ = 0, trafo_missed_ = 0, trafo_covered_ = 0, trafo_leaks_ = 0;
+        uint64_t trafo_echo_moved_ = 0, trafo_echo_dropped_ = 0;
+        uint64_t trafo_sets_made_ = 0, trafo_set_failures_ = 0, trafo_run_failures_ = 0;
+        uint64_t trafo_unmade_ = 0, trafo_remade_ = 0, trafo_retired_ = 0;
+        uint32_t trafo_leak_logs_ = 0;
     };
 
     // Design 1.2 "Configuration": what the host decides for the session, filled
@@ -1071,6 +1109,13 @@ namespace bmmo::session {
         // re-reports and the resync requests sent.
         uint64_t own_body_backstops() const { return s.own_backstops_; }
         uint64_t resyncs_sent() const { return s.resyncs_sent_; }
+        // Step T3: this session runs the trafo as an input (the host's sets,
+        // the hold, the quiesce at its anchor); the counters the gates read.
+        bool trafo_active() const { return s.trafo_active_; }
+        uint64_t trafo_missed() const { return s.trafo_missed_; }
+        uint64_t trafo_sent() const { return s.trafo_sent_; }
+        uint64_t trafo_original_leaks() const { return s.trafo_leaks_; }
+        const bmmo::session::trafo_input_log& trafo_log() const { return s.trafo_log_; }
 
         // ---- reports (E10, client_core_report.cpp; design 1.3) ----
         // The status line (the headless 5 s report and the session's end;
@@ -1342,6 +1387,38 @@ namespace bmmo::session {
         // The mechanisms a record tracks (step P): the platform's movable
         // bodies but the balls (is_ball), in the platform's order.
         std::vector<std::string> movable_mechanisms() const;
+
+        // The trafo as an input (step T3, client_core_trafo.cpp;
+        // trafo-replication design 2.3-2.9, 4.6-4.8).
+        // A set for `player` on first sight (make_trafo_set), outside any
+        // replay; true when the world holds one.
+        bool ensure_trafo_set(uint32_t player, const char* why);
+        // The hold's report of an own activation, stamped for `due` (sent,
+        // logged as an own input); before the assignment it waits.
+        void hold_trafo(const trafo_report& report, uint32_t due, const char* why);
+        // pre_step step 1: the reports that waited for the assignment,
+        // stamped for `tick` + the lead.
+        void hold_pending_trafo(uint32_t tick);
+        // post_step: the hold and the effect checks after the live frame.
+        void poll_own_trafo(uint32_t tick);
+        // A remote or server-stamped Trafo event on arrival: logged at its
+        // applied tick, rewound for when late.
+        void on_trafo_event(const bmmo::session_event_msg& msg);
+        // The inputs logged for `tick`, applied (live: pre_step; replayed:
+        // before_replayed_tick).
+        void apply_trafo_inputs(uint32_t tick, bool replayed);
+        // A trafo input applied at `tick` <= the current tick: the pending
+        // input rewind from it, or a resync past the reach (design 4.7).
+        void trafo_rewind(uint32_t tick, uint32_t player, const char* why);
+        // An own Trafo event's echo (design 4.6).
+        void process_trafo_echo(const bmmo::session_event_msg& msg, bool stale);
+        // The reconcile (design 4.7), at a resync's apply before its
+        // restore: every type set made to hold what the server's ledger has
+        // at S; `gone` gets the pieces the server has no body for.
+        void reconcile_trafo(const bmmo::session_resync_state_msg& st, uint32_t anchor, std::set<std::string>& gone,
+                             std::vector<journal_trafo_entry>& journal);
+        // post_step: retirement and the log's pruning.
+        void retire_trafo(uint32_t tick);
 
         // The event log muted for a scope, nesting (platform mute_event_log;
         // the flag in force is client_core_state::event_log_muted_).  Private

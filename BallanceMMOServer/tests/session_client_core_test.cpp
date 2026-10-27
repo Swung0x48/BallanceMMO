@@ -112,6 +112,11 @@ namespace bmmo::session {
         BMMO_CORE_STEP(drain_pending_deaths)
         BMMO_CORE_STEP(settle_held_tick)
         BMMO_CORE_STEP(check_own_body)
+        BMMO_CORE_STEP(poll_own_trafo)
+        BMMO_CORE_STEP(hold_pending_trafo)
+        BMMO_CORE_STEP(apply_trafo_inputs)
+        BMMO_CORE_STEP(retire_trafo)
+        BMMO_CORE_STEP(reconcile_trafo)
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -5441,6 +5446,572 @@ namespace {
         EXPECT_NE(std::find(calls.begin(), calls.end(),
                             "log:0:lifecycle event of 4 stamped tick 135 precedes the resync's anchor 139: the server's state covers it"),
                   calls.end());
+    }
+
+
+    // ------------------------------------------------- the trafo as an input
+    // Step T3 (docs/trafo-replication-design.md 7.1 "Core with the fake
+    // platform"): the capability and its operations, sets at the anchor and on
+    // first sight (never inside a replay), the hold's stamps and its deferral
+    // before the assignment, the inputs applied live and in a replay, a late
+    // input joining the input rewind (the retail switches included), an input
+    // past the history asking for a resync, the own echoes, and the
+    // reconcile's decision table with every platform call.
+
+    struct trafo_fake {
+        std::vector<std::string>* calls = nullptr;
+        bmmo::session::trafo_poll next_poll;                       // what poll_trafo answers (once)
+        std::map<std::pair<uint32_t, uint8_t>, int> bodies;        // (player, type) -> bodies trafo_type_set reports
+        bool reconcile_ok = true;
+        std::vector<uint32_t> retire_answer;                       // what retire_trafo_sets answers (once)
+
+        void install(session_platform& p) {
+            p.poll_trafo = [this](uint32_t tick, bool option_e) {
+                calls->push_back("poll_trafo:" + std::to_string(tick) + (option_e ? ":e" : ""));
+                bmmo::session::trafo_poll out;
+                std::swap(out, next_poll);
+                return out;
+            };
+            p.make_trafo_set = [this](uint32_t player, std::string&) {
+                calls->push_back("make_trafo_set:" + std::to_string(player));
+                return true;
+            };
+            p.run_trafo = [this](const bmmo::session::trafo_input& in, std::string&) {
+                calls->push_back("run_trafo:" + std::to_string(in.player) + ":" + std::to_string(in.type) + ":"
+                                 + std::to_string(in.flags) + ":" + std::to_string(in.applied) + ":" + std::to_string(in.seed));
+                return true;
+            };
+            p.trafo_final = [this](uint32_t player, uint8_t type, uint32_t tick) {
+                calls->push_back("trafo_final:" + std::to_string(player) + ":" + std::to_string(type) + ":" + std::to_string(tick));
+            };
+            p.trafo_frame = [this](uint32_t tick) { calls->push_back("trafo_frame:" + std::to_string(tick)); };
+            p.trafo_type_set = [this](uint32_t player, uint8_t type) {
+                calls->push_back("trafo_type_set:" + std::to_string(player) + ":" + std::to_string(type));
+                bmmo::session::trafo_type_view view;
+                view.exists = true;
+                for (int k = 1; k <= 3; ++k)
+                    view.pieces.push_back("piece" + std::to_string(k) + "_" + std::to_string(type) + "_" + std::to_string(player));
+                const auto it = bodies.find({player, type});
+                view.bodies = it == bodies.end() ? 0 : it->second;
+                return view;
+            };
+            p.trafo_reconcile = [this](const bmmo::session::trafo_reconcile_spec& spec) {
+                const bool remake = spec.action == bmmo::session::trafo_reconcile_action::remake;
+                calls->push_back(std::string("trafo_reconcile:") + (remake ? "remake" : "unmake") + ":" + std::to_string(spec.player)
+                                 + ":" + std::to_string(spec.type) + (remake ? ":" + std::to_string(spec.seed) + ":"
+                                                                                 + std::to_string(spec.birth_tick) : std::string()));
+                bmmo::session::trafo_reconcile_result r;
+                r.ok = reconcile_ok;
+                if (!reconcile_ok) r.error = "refused";
+                return r;
+            };
+            p.retire_trafo_sets = [this](uint32_t now, uint32_t history) {
+                calls->push_back("retire_trafo_sets:" + std::to_string(now) + ":" + std::to_string(history));
+                std::vector<uint32_t> out;
+                std::swap(out, retire_answer);
+                return out;
+            };
+        }
+    };
+
+    session_capabilities trafo_caps() {
+        session_capabilities caps;
+        caps.trafo_inputs = true;
+        return caps;
+    }
+
+    // run_to_anchor with the world option on: own 3, member 4.
+    void trafo_anchor(session_client_core& core, flow_fake& fake, bool option = true) {
+        state_of(core).own_id_ = 3;
+        auto start = start_message(9, 3);
+        start.world_options = option ? bmmo::session::WORLD_TRAFO_INPUTS : 0u;
+        ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
+        core.level_requested();
+        bmmo::session::anchor_report report;
+        report.build_id = "build-x";
+        report.own_name = "Me";
+        core.anchor(report);
+    }
+
+    // The anchor, then assigned at base 120 and stepped to 125.
+    void trafo_tick_125(session_client_core& core, flow_fake& fake) {
+        trafo_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        state_of(core).frames_since_anchor_ = 6;
+        state_of(core).held_floor_ = 125;
+        ASSERT_EQ(core.current_tick(), 125u);
+    }
+
+    bmmo::session_event_msg trafo_message(uint32_t player, uint8_t type, uint8_t flags, uint32_t tick, uint32_t origin) {
+        auto msg = event_message(player, bmmo::session::event_type::Trafo, tick, origin);
+        msg.ball_type = type;
+        msg.flags = flags;
+        if (!bmmo::session::trafo_is_reset(flags)) {
+            msg.position[0] = 1.5f;
+            msg.position[1] = 2.5f;
+            msg.position[2] = -3.5f;
+        }
+        return msg;
+    }
+
+    std::vector<std::string> only(const std::vector<std::string>& calls, const std::string& prefix) {
+        std::vector<std::string> out;
+        for (const auto& c: calls)
+            if (c.rfind(prefix, 0) == 0) out.push_back(c);
+        return out;
+    }
+
+    TEST(SessionClientCoreTrafo, TheCapabilityNeedsItsOperationsAndIsDeclared) {
+        for (int missing = 0; missing < 8; ++missing) {
+            flow_fake fake;
+            trafo_fake t;
+            t.calls = &fake.calls;
+            session_platform p = fake.make_flow();
+            t.install(p);
+            if (missing == 0) p.poll_trafo = nullptr;
+            if (missing == 1) p.make_trafo_set = nullptr;
+            if (missing == 2) p.run_trafo = nullptr;
+            if (missing == 3) p.trafo_final = nullptr;
+            if (missing == 4) p.trafo_frame = nullptr;
+            if (missing == 5) p.trafo_type_set = nullptr;
+            if (missing == 6) p.trafo_reconcile = nullptr;
+            if (missing == 7) p.retire_trafo_sets = nullptr;
+            EXPECT_THROW({ session_client_core c(p, trafo_caps()); }, std::invalid_argument) << missing;
+            EXPECT_NO_THROW({ session_client_core c(p, session_capabilities{}); }) << "not needed without the capability";
+        }
+        flow_fake fake;
+        trafo_fake t;
+        t.calls = &fake.calls;
+        session_platform p = fake.make_flow();
+        t.install(p);
+        session_client_core core(std::move(p), trafo_caps());
+        trafo_anchor(core, fake);
+        const auto ready = decode<bmmo::session_ready_msg>(fake.sent.at(0).first);
+        EXPECT_NE(ready.caps & bmmo::session::CAP_TRAFO_INPUTS, 0u);
+        EXPECT_TRUE(core.trafo_active());
+        // Without the world option the capability is declared and nothing runs.
+        flow_fake off;
+        trafo_fake t2;
+        t2.calls = &off.calls;
+        session_platform p2 = off.make_flow();
+        t2.install(p2);
+        session_client_core other(std::move(p2), trafo_caps());
+        trafo_anchor(other, off, false);
+        EXPECT_FALSE(other.trafo_active());
+        EXPECT_TRUE(only(off.calls, "make_trafo_set").empty());
+        EXPECT_NE(decode<bmmo::session_ready_msg>(off.sent.at(0).first).caps & bmmo::session::CAP_TRAFO_INPUTS, 0u);
+    }
+
+    TEST(SessionClientCoreTrafo, SetsAtTheAnchorAndOnFirstSightNeverInAReplay) {
+        flow_fake fake;
+        trafo_fake t;
+        t.calls = &fake.calls;
+        session_platform p = fake.make_flow();
+        t.install(p);
+        session_client_core core(std::move(p), trafo_caps());
+        trafo_anchor(core, fake);
+        EXPECT_EQ(only(fake.calls, "make_trafo_set"), (std::vector<std::string>{"make_trafo_set:3", "make_trafo_set:4"}))
+            << "every member and the own player, by id";
+        core.on_session_assign(assign_message(9, 120));
+        state_of(core).frames_since_anchor_ = 6;
+        size_t from = fake.calls.size();
+        core.on_session_event(event_message(7, bmmo::session::event_type::Sector, 130, 130));
+        core.on_session_event(event_message(7, bmmo::session::event_type::Physicalize, 131, 131));
+        EXPECT_EQ(only(since(fake.calls, from), "make_trafo_set"), std::vector<std::string>{"make_trafo_set:7"})
+            << "once, at the player's first message";
+        bmmo::session_remote_input_msg relay;
+        relay.session = 9;
+        relay.tick = 124;
+        relay.epoch = 120;
+        bmmo::session_remote_input_msg::entry entry;
+        entry.player = 8;
+        entry.frames.resize(1);
+        relay.entries.push_back(entry);
+        from = fake.calls.size();
+        core.on_session_remote_input(relay);
+        EXPECT_EQ(only(since(fake.calls, from), "make_trafo_set"), std::vector<std::string>{"make_trafo_set:8"});
+        // A replayed tick applies inputs and never builds a set.
+        state_of(core).trafo_log_.add(bmmo::session::trafo_input{9, 0, 0, 122, 122, {}, 5, false});
+        from = fake.calls.size();
+        steps{core}.world_hooks().before_replayed_tick(122);
+        const auto calls = since(fake.calls, from);
+        EXPECT_TRUE(only(calls, "make_trafo_set").empty());
+        EXPECT_EQ(only(calls, "run_trafo"), std::vector<std::string>{"run_trafo:9:0:0:122:5"});
+    }
+
+    TEST(SessionClientCoreTrafo, TheHoldStampsAndWaitsForTheAssignment) {
+        flow_fake fake;
+        trafo_fake t;
+        t.calls = &fake.calls;
+        session_platform p = fake.make_flow();
+        t.install(p);
+        session_client_core core(std::move(p), trafo_caps());
+        trafo_anchor(core, fake);
+        auto& s = state_of(core);
+        // Before the assignment: the report waits, nothing is sent.
+        bmmo::session::trafo_report wood;
+        wood.flags = bmmo::session::TRAFO_EXPLODE;
+        wood.type = 0;
+        wood.position[0] = 10.0f;
+        wood.source = "activation";
+        t.next_poll.reports.push_back(wood);
+        size_t sent = fake.sent.size();
+        steps{core}.poll_own_trafo(0);
+        EXPECT_EQ(fake.sent.size(), sent);
+        EXPECT_EQ(s.trafo_pending_.size(), 1u);
+        EXPECT_EQ(s.trafo_log_.size(), 0u);
+        // The first assigned frame (tick 120): stamped 120 + lead (7).
+        core.on_session_assign(assign_message(9, 120));
+        steps{core}.hold_pending_trafo(120);
+        ASSERT_EQ(fake.sent.size(), sent + 1);
+        auto event = decode<bmmo::session_event_msg>(fake.sent.back().first);
+        EXPECT_EQ(event.type, bmmo::session::event_type::Trafo);
+        EXPECT_EQ(event.tick, 127u);
+        EXPECT_EQ(event.ball_type, 0);
+        EXPECT_EQ(event.flags, 0);
+        EXPECT_EQ(event.position[0], 10.0f);
+        ASSERT_EQ(s.trafo_log_.at(127).size(), 1u);
+        EXPECT_TRUE(s.trafo_log_.at(127)[0].own);
+        EXPECT_EQ(s.trafo_log_.at(127)[0].seed, bmmo::session::trafo_seed(11u, 3u, 127u, 0));
+        EXPECT_TRUE(s.trafo_pending_.empty());
+        // Assigned: tick + 1 + lead; a reset carries no position.
+        s.frames_since_anchor_ = 6;   // current tick 125
+        bmmo::session::trafo_report reset;
+        reset.flags = bmmo::session::TRAFO_RESET;
+        reset.type = 2;
+        reset.position[0] = 99.0f;
+        t.next_poll.reports.push_back(reset);
+        steps{core}.poll_own_trafo(125);
+        event = decode<bmmo::session_event_msg>(fake.sent.back().first);
+        EXPECT_EQ(event.tick, 133u);
+        EXPECT_EQ(event.flags, bmmo::session::TRAFO_RESET);
+        EXPECT_EQ(event.position[0], 0.0f);
+        EXPECT_EQ(s.trafo_log_.at(133).at(0).seed, 0);
+        // Option E (lead 7 <= 66, asked with ":e"): the Delayer's prediction
+        // is the stamp when it is far enough ahead, never earlier than the hold's.
+        bmmo::session::trafo_report predicted = wood;
+        predicted.predicted_tick = 192;
+        predicted.type = 1;
+        t.next_poll.reports.push_back(predicted);
+        bmmo::session::trafo_report early = wood;
+        early.predicted_tick = 128;
+        early.type = 2;
+        t.next_poll.reports.push_back(early);
+        const size_t from = fake.calls.size();
+        steps{core}.poll_own_trafo(125);
+        EXPECT_EQ(only(since(fake.calls, from), "poll_trafo"), std::vector<std::string>{"poll_trafo:125:e"});
+        EXPECT_EQ(s.trafo_log_.at(192).size(), 1u);
+        EXPECT_EQ(s.trafo_log_.at(133).size(), 2u) << "the early prediction is stamped tick + 1 + lead";
+        // The effect checks' leaks are counted.
+        t.next_poll.leaks = 2;
+        t.next_poll.first_leak = "body Ball_Wood_piece01";
+        steps{core}.poll_own_trafo(126);
+        EXPECT_EQ(core.trafo_original_leaks(), 2u);
+    }
+
+    // A world the engine can rewind: no tracked body, every step taken, and
+    // the core's before_replayed_tick called before each replayed step.
+    session_platform trafo_rewind_platform(flow_fake& fake, trafo_fake& t) {
+        session_platform p = fake.make_flow();
+        t.calls = &fake.calls;
+        t.install(p);
+        p.bind_world = [&fake](const bmmo::session::core_world_hooks& hooks) {
+            fake.calls.push_back("bind_world");
+            bmmo::session::rollback_world world;
+            world.get_body = [](const std::string&, bmmo_physics_body_state&) { return false; };
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.pre_step = hooks.before_replayed_tick;
+            world.step = [&fake]() {
+                fake.calls.push_back("step");
+                return true;
+            };
+            return world;
+        };
+        return p;
+    }
+
+    void trafo_record_ticks(session_client_core& core, uint32_t from, uint32_t to) {
+        for (uint32_t tick = from; tick <= to; ++tick)
+            state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick,
+                                            bmmo::session::rollback_tracked{}, {});
+    }
+
+    TEST(SessionClientCoreTrafo, InputsAppliedLiveAndInTheReplayOfALateOne) {
+        for (const bool retail: {false, true}) {
+            flow_fake fake;
+            trafo_fake t;
+            session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+            trafo_tick_125(core, fake);
+            core.config.rollback = true;
+            if (retail) {   // the retail host's switches before R3: the trafo rewind does not need them
+                core.config.lifecycle_rewind = false;
+                core.config.own_echoes = false;
+            }
+            trafo_record_ticks(core, 110, 125);
+            // A remote explosion on time: logged, applied at its tick live.
+            core.on_session_event(trafo_message(4, 1, 0, 126, 124));
+            EXPECT_FALSE(state_of(core).input_rewind_pending_);
+            size_t from = fake.calls.size();
+            steps{core}.apply_trafo_inputs(126, false);
+            EXPECT_EQ(only(since(fake.calls, from), "run_trafo"),
+                      std::vector<std::string>{"run_trafo:4:1:0:126:" + std::to_string(bmmo::session::trafo_seed(11u, 4u, 126u, 1))});
+            // A late one (a server-stamped final reset of player 4, applied
+            // at 122): never applied live, the input rewind from it.
+            core.on_session_event(trafo_message(4, 2, bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER
+                                                          | bmmo::session::TRAFO_FINAL, 122, 122));
+            auto& s = state_of(core);
+            ASSERT_TRUE(s.input_rewind_pending_);
+            EXPECT_EQ(s.input_rewind_tick_, 122u);
+            EXPECT_TRUE(s.input_rewind_trafo_);
+            EXPECT_EQ(s.trafo_late_, 1u);
+            from = fake.calls.size();
+            steps{core}.replay_corrected_inputs();
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(only(calls, "run_trafo"), std::vector<std::string>{"run_trafo:4:2:7:122:0"})
+                << "re-applied once, in the replayed tick 122";
+            EXPECT_EQ(only(calls, "trafo_final"), std::vector<std::string>{"trafo_final:4:2:122"});
+            EXPECT_EQ(only(calls, "step").size(), 4u) << "121 -> 125";
+            EXPECT_EQ(s.input_rewinds_, 1u);
+            EXPECT_FALSE(s.input_rewind_pending_);
+            EXPECT_EQ(s.trafo_missed_, 0u);
+        }
+    }
+
+    TEST(SessionClientCoreTrafo, AnInputPastTheHistoryAsksForAResync) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        core.config.rollback = true;
+        trafo_record_ticks(core, 122, 125);
+        const size_t from = fake.calls.size();
+        core.on_session_event(trafo_message(4, 0, 0, 121, 121));   // its anchor (120) is not recorded
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(state_of(core).trafo_missed_, 1u);
+        EXPECT_FALSE(state_of(core).input_rewind_pending_);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "log:0:resync requested (a trafo input could not be replayed) at tick 125"),
+                  calls.end());
+        // Without the input rewind (rollback off): counted, no resync.
+        flow_fake off;
+        trafo_fake t2;
+        session_client_core other(trafo_rewind_platform(off, t2), trafo_caps());
+        trafo_tick_125(other, off);
+        other.config.rollback = false;
+        other.on_session_event(trafo_message(4, 0, 0, 124, 124));
+        EXPECT_EQ(state_of(other).trafo_missed_, 1u);
+        EXPECT_EQ(state_of(other).resyncs_sent_, 0u);
+    }
+
+    TEST(SessionClientCoreTrafo, OwnEchoesMoveOrDropTheInputAndRewind) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        core.config.rollback = true;
+        trafo_record_ticks(core, 110, 125);
+        auto& s = state_of(core);
+        const auto own = [&](uint8_t type, uint8_t flags, uint32_t stamp) {
+            bmmo::session::trafo_input in;
+            in.player = 3;
+            in.type = type;
+            in.flags = flags;
+            in.origin = in.applied = stamp;
+            in.own = true;
+            s.trafo_log_.add(in);
+        };
+        own(0, 0, 123);
+        own(1, 0, 130);
+        own(2, bmmo::session::TRAFO_RESET, 121);
+        own(1, bmmo::session::TRAFO_RESET, 124);
+        // Acked: nothing.
+        auto acked = trafo_message(3, 0, 0, 123, 123);
+        core.on_session_event(std::move(acked));
+        steps{core}.process_own_echoes();
+        EXPECT_FALSE(s.input_rewind_pending_);
+        EXPECT_EQ(s.own_echo_acked_, 1u);
+        // MOVED 123 -> 125: re-keyed with the applied tick's seed, rewound from 123.
+        auto moved = trafo_message(3, 0, 0, 125, 123);
+        moved.state = bmmo::session::EVENT_STATE_MOVED;
+        core.on_session_event(std::move(moved));
+        steps{core}.process_own_echoes();
+        EXPECT_TRUE(s.trafo_log_.at(123).empty());
+        ASSERT_EQ(s.trafo_log_.at(125).size(), 1u);
+        EXPECT_EQ(s.trafo_log_.at(125)[0].seed, bmmo::session::trafo_seed(11u, 3u, 125u, 0));
+        EXPECT_TRUE(s.input_rewind_pending_);
+        EXPECT_EQ(s.input_rewind_tick_, 123u);
+        steps{core}.replay_corrected_inputs();
+        // MOVED ahead of both ticks (130 -> 140): re-keyed, no rewind.
+        auto ahead = trafo_message(3, 1, 0, 140, 130);
+        ahead.state = bmmo::session::EVENT_STATE_MOVED;
+        core.on_session_event(std::move(ahead));
+        steps{core}.process_own_echoes();
+        EXPECT_EQ(s.trafo_log_.at(140).size(), 1u);
+        EXPECT_FALSE(s.input_rewind_pending_);
+        // REJECTED: dropped, rewound from its origin.
+        auto rejected = trafo_message(3, 2, bmmo::session::TRAFO_RESET, 121, 121);
+        rejected.state = bmmo::session::EVENT_STATE_REJECTED;
+        core.on_session_event(std::move(rejected));
+        steps{core}.process_own_echoes();
+        EXPECT_TRUE(s.trafo_log_.at(121).empty());
+        EXPECT_TRUE(s.input_rewind_pending_);
+        EXPECT_EQ(s.input_rewind_tick_, 121u);
+        steps{core}.replay_corrected_inputs();
+        // SUPERSEDED: dropped too.
+        auto superseded = trafo_message(3, 1, bmmo::session::TRAFO_RESET, 124, 124);
+        superseded.state = bmmo::session::EVENT_STATE_SUPERSEDED;
+        core.on_session_event(std::move(superseded));
+        steps{core}.process_own_echoes();
+        EXPECT_TRUE(s.trafo_log_.at(124).empty());
+        EXPECT_EQ(s.trafo_echo_moved_, 2u);
+        EXPECT_EQ(s.trafo_echo_dropped_, 2u);
+        // A server-stamped reset of our own set is an input, not an echo.
+        core.on_session_event(trafo_message(3, 0, bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER, 150, 150));
+        EXPECT_EQ(s.trafo_log_.at(150).size(), 1u);
+        EXPECT_TRUE(s.own_echoes_.empty());
+    }
+
+    TEST(SessionClientCoreTrafo, TheReconcilesDecisionTable) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        auto& s = state_of(core);
+        // This world: player 3 wood live from 110 (equal at the server),
+        // player 3 stone live from 112 (the server has none: extra here),
+        // player 4 wood from 100 (the server's is from 115: different), and
+        // player 4 paper has nothing here (the server's has bodies: missing).
+        const auto explosion = [&](uint32_t player, uint8_t type, uint32_t tick) {
+            bmmo::session::trafo_input in;
+            in.player = player;
+            in.type = type;
+            in.origin = in.applied = tick;
+            s.trafo_log_.add(in);
+        };
+        explosion(3, 0, 110);
+        explosion(3, 1, 112);
+        explosion(4, 0, 100);
+        t.bodies[{3, 0}] = 3;
+        t.bodies[{3, 1}] = 3;
+        t.bodies[{4, 0}] = 3;
+        bmmo::session_resync_state_msg st;
+        const auto entry = [&](uint32_t player, uint8_t type, bool bodies, uint32_t applied, bool final = false) {
+            bmmo::session::trafo_ledger_entry e;
+            e.player = player;
+            e.type = type;
+            e.has_explosion = applied != 0;
+            e.explode_applied = applied;
+            e.position[0] = 7.0f;
+            e.has_bodies = bodies;
+            e.final = final;
+            e.final_applied = final ? 118 : 0;
+            st.trafo_ledger.push_back(e);
+        };
+        entry(3, 0, true, 110);
+        entry(3, 1, false, 0);
+        entry(3, 2, false, 0);
+        entry(4, 0, true, 115);
+        entry(4, 1, false, 0, true);
+        entry(4, 2, true, 117);
+        entry(5, 0, false, 0);   // a set this world has not seen: built
+        std::set<std::string> gone;
+        std::vector<bmmo::session::journal_trafo_entry> journal;
+        const size_t from = fake.calls.size();
+        steps{core}.reconcile_trafo(st, 119u, gone, journal);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(only(calls, "make_trafo_set"), std::vector<std::string>{"make_trafo_set:5"});
+        EXPECT_EQ(only(calls, "trafo_final"), std::vector<std::string>{"trafo_final:4:1:118"});
+        const std::vector<std::string> expected = {
+            "trafo_reconcile:unmake:3:1",
+            "trafo_reconcile:unmake:4:0",
+            "trafo_reconcile:remake:4:0:" + std::to_string(bmmo::session::trafo_seed(11u, 4u, 115u, 0)) + ":119",
+            "trafo_reconcile:remake:4:2:" + std::to_string(bmmo::session::trafo_seed(11u, 4u, 117u, 2)) + ":119"};
+        EXPECT_EQ(only(calls, "trafo_reconcile"), expected);
+        EXPECT_EQ(only(calls, "mute_event_log"), (std::vector<std::string>{"mute_event_log:on", "mute_event_log:off"}));
+        // Every piece of a type set the server has no bodies for is kept out.
+        EXPECT_EQ(gone.count("piece1_1_3"), 1u);
+        EXPECT_EQ(gone.count("piece2_1_4"), 1u);
+        EXPECT_EQ(gone.count("piece1_0_5"), 1u);
+        EXPECT_EQ(gone.count("piece1_0_3"), 0u) << "kept: the server has it";
+        EXPECT_EQ(gone.count("piece1_2_4"), 0u) << "remade";
+        EXPECT_EQ(s.trafo_unmade_, 2u);
+        EXPECT_EQ(s.trafo_remade_, 2u);
+        // The log learned the server's explosions.
+        ASSERT_NE(s.trafo_log_.newest_explosion(4, 0, 119), nullptr);
+        EXPECT_EQ(s.trafo_log_.newest_explosion(4, 0, 119)->applied, 115u);
+        ASSERT_NE(s.trafo_log_.newest_explosion(4, 2, 119), nullptr);
+        EXPECT_EQ(s.trafo_log_.newest_explosion(4, 2, 119)->applied, 117u);
+        // The journal's section: one entry per type set, in key order.
+        ASSERT_EQ(journal.size(), 9u) << "players 3, 4, 5 x three types";
+        const auto find = [&](uint32_t player, uint8_t type) {
+            for (const auto& j: journal) if (j.player == player && j.type == type) return j;
+            return bmmo::session::journal_trafo_entry{};
+        };
+        EXPECT_EQ(find(3, 0).action, bmmo::session::JOURNAL_TRAFO_KEPT);
+        EXPECT_EQ(find(3, 1).action, bmmo::session::JOURNAL_TRAFO_UNMADE);
+        EXPECT_EQ(find(4, 0).action, bmmo::session::JOURNAL_TRAFO_UNMADE | bmmo::session::JOURNAL_TRAFO_REMADE);
+        EXPECT_EQ(find(4, 2).action, bmmo::session::JOURNAL_TRAFO_REMADE);
+        EXPECT_EQ(find(4, 1).bits & 8, 8) << "final";
+    }
+
+    TEST(SessionClientCoreTrafo, RetirementForgetsTheSetAndPrunesTheLog) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        auto& s = state_of(core);
+        bmmo::session::trafo_input old;
+        old.player = 4;
+        old.origin = old.applied = 10;
+        s.trafo_log_.add(old);
+        old.origin = old.applied = 20;
+        s.trafo_log_.add(old);
+        // The sets' pieces are known from the make on (a snapshot row of
+        // one restores it only on a breach): 3 per type set here.
+        EXPECT_EQ(s.trafo_pieces_.count("piece2_1_4"), 1u);
+        EXPECT_EQ(s.trafo_pieces_.count("piece1_0_3"), 1u);
+        const size_t pieces = s.trafo_pieces_.size();
+        t.retire_answer = {4};
+        steps{core}.retire_trafo(300);
+        EXPECT_EQ(only(fake.calls, "retire_trafo_sets"), std::vector<std::string>{"retire_trafo_sets:300:96"});
+        EXPECT_EQ(s.trafo_sets_.count(4), 0u);
+        EXPECT_EQ(s.trafo_pieces_.count("piece2_1_4"), 0u) << "the retired set's pieces are forgotten";
+        EXPECT_EQ(s.trafo_pieces_.count("piece1_0_3"), 1u) << "the others' stay";
+        EXPECT_EQ(s.trafo_pieces_.size(), pieces - 9u);
+        EXPECT_EQ(s.trafo_log_.size(), 1u) << "the newest explosion stays";
+        // The next sight of player 4 builds (or reselects) its set again.
+        const size_t from = fake.calls.size();
+        core.on_session_event(event_message(4, bmmo::session::event_type::Sector, 301, 301));
+        EXPECT_EQ(only(since(fake.calls, from), "make_trafo_set"), std::vector<std::string>{"make_trafo_set:4"});
+    }
+
+    // A frame runs the trafo inputs before the union's pass and the trafo
+    // frame after it, the hold and the retirement after the record.
+    TEST(SessionClientCoreTrafo, TheFrameOrder) {
+        flow_fake fake;
+        trafo_fake t;
+        session_platform p = fake.make_flow();
+        t.calls = &fake.calls;
+        t.install(p);
+        session_client_core core(std::move(p), trafo_caps());
+        trafo_tick_125(core, fake);
+        state_of(core).trafo_log_.add(bmmo::session::trafo_input{4, 1, 0, 126, 126, {}, 9, false});
+        const size_t from = fake.calls.size();
+        core.pre_step();
+        EXPECT_TRUE(core.post_step(true));
+        const auto calls = since(fake.calls, from);
+        const auto at = [&](const std::string& prefix) {
+            for (size_t i = 0; i < calls.size(); ++i)
+                if (calls[i].rfind(prefix, 0) == 0) return static_cast<long>(i);
+            return -1L;
+        };
+        ASSERT_GE(at("run_trafo:4:1:0:126:9"), 0);
+        ASSERT_GE(at("sector_manager_active"), 0);
+        ASSERT_GE(at("trafo_frame:126"), 0);
+        EXPECT_LT(at("run_trafo:4:1:0:126:9"), at("sector_manager_active")) << "inputs before the union's pass";
+        EXPECT_LT(at("sector_manager_active"), at("trafo_frame:126")) << "the trafo frame after it";
+        ASSERT_GE(at("poll_sector:126"), 0);
+        EXPECT_LT(at("poll_sector:126"), at("poll_trafo:126"));
+        EXPECT_LT(at("poll_trafo:126"), at("retire_trafo_sets:126"));
     }
 
 }

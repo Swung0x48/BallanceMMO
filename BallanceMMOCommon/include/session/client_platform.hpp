@@ -33,6 +33,7 @@
 
 #include "clock_site.hpp"
 #include "rollback.hpp"
+#include "trafo_input.hpp"
 #include "../entity/session.hpp"
 #include "../physics/physics_rt_api.h"
 #include "../physics/world_hash.hpp"
@@ -314,6 +315,56 @@ namespace bmmo::session {
         int phase = 0;
     };
 
+    // ---- the trafo as an input (trafo-replication design 2.3-2.5, 4.7; step T3)
+    // One activation of an original trafo script the host's hold cancelled
+    // after a live frame (game/trafo_sets.hpp trafo_hold_report, CK-free
+    // here): the kind (TRAFO_EXPLODE / TRAFO_RESET), the piece type, an
+    // explosion's referential and, under option E, the explosion's frame the
+    // Trafo Manager's Delayer predicts (0: the cancelled activation itself).
+    struct trafo_report {
+        uint8_t flags = 0;
+        uint8_t type = 0;
+        float position[3] = {};
+        uint32_t predicted_tick = 0;
+        std::string source;
+    };
+    // What poll_trafo found after a live frame: the reports, in order, and
+    // the effect checks (design 2.3: original pieces with a body plus
+    // original scripts active; `first_leak` names the first).
+    struct trafo_poll {
+        std::vector<trafo_report> reports;
+        int leaks = 0;
+        std::string first_leak;
+    };
+    // One member's type set as the host's world holds it now (the
+    // reconcile, design 4.7): whether the set exists, how many of its
+    // pieces have a body, and the pieces' entities.
+    struct trafo_type_view {
+        bool exists = false;
+        int bodies = 0;
+        std::vector<std::string> pieces;
+    };
+    // The reconcile's two halves for one type set (design 4.7; game/
+    // trafo_sets.hpp unmake_type_set / remake_type_set), called by the core
+    // outside any replay, inside its mute of the event log: unmake puts the
+    // type set back to its built state (bodies, wind, scripts); remake runs
+    // the explosion of (position, seed) once, and the host's birth log takes
+    // the pieces' births at `birth_tick` (the resync's S).
+    enum class trafo_reconcile_action : uint8_t { unmake, remake };
+    struct trafo_reconcile_spec {
+        trafo_reconcile_action action = trafo_reconcile_action::unmake;
+        uint32_t player = 0;
+        uint8_t type = 0;
+        float position[3] = {};
+        int32_t seed = 0;
+        uint32_t birth_tick = 0;
+    };
+    struct trafo_reconcile_result {
+        bool ok = false;
+        std::string error;
+        int bodies_removed = 0;
+    };
+
     // The host's work around a scope of the core (keep_live_cells): what it
     // did on entry is the host's; `on_exit` runs when the scope ends, once.
     class scope_guard {
@@ -573,6 +624,39 @@ namespace bmmo::session {
         // directory and file name, after pruning old files.
         std::function<std::filesystem::path(const journal_header& header)> journal_path;
 
+        // ---- the trafo as an input (trafo-replication design 2.3-2.5, 2.11,
+        // 4.7; step T3), required with session_capabilities::trafo_inputs ----
+        // After the live frame of `tick` (post_step, beside the own sector
+        // poll): the originals' activations the frame's scripts asked for,
+        // cancelled and reported (the hold, game/trafo_sets.hpp trafo_hold),
+        // and the effect checks.  `option_e`: the session's lead allows the
+        // Delayer's prediction (decision 9.5).
+        std::function<trafo_poll(uint32_t tick, bool option_e)> poll_trafo;
+        // `player`'s piece set, by the rule every world runs (game/
+        // trafo_sets.hpp ensure_trafo_set): kept when selected, a retired one
+        // selected again, otherwise built.  Never inside a replay.  False and
+        // `error`: no set (the builder failed closed).
+        std::function<bool(uint32_t player, std::string& error)> make_trafo_set;
+        // One input applied (game/trafo_sets.hpp run_trafo): an explosion's
+        // referential and seed, the explosion's or the reset's next-frame
+        // flags.  Live and in every replayed tick.
+        std::function<bool(const trafo_input& input, std::string& error)> run_trafo;
+        // A TRAFO_FINAL reset of (player, type) applied at `tick`
+        // (trafo_set_final): the set's retirement counts from it.
+        std::function<void(uint32_t player, uint8_t type, uint32_t tick)> trafo_final;
+        // The trafo frame of `tick` (game/trafo_sets.hpp trafo_frame): every
+        // selected set's scripts, by player id, with the fixed delta - after
+        // the tick's inputs and the union's pass, before the step.  A
+        // replayed tick runs the same list inside the script replay's frame.
+        std::function<void(uint32_t tick)> trafo_frame;
+        // The reconcile's view and halves (design 4.7, above).
+        std::function<trafo_type_view(uint32_t player, uint8_t type)> trafo_type_set;
+        std::function<trafo_reconcile_result(const trafo_reconcile_spec& spec)> trafo_reconcile;
+        // Retirement after the live frame of `now` (design 2.4): the players
+        // whose sets this call deselected (the next sight of one gets a set
+        // by make_trafo_set again).  `history`: the rollback history.
+        std::function<std::vector<uint32_t>(uint32_t now, uint32_t history)> retire_trafo_sets;
+
         // ---- reports (E10), optional ----
         // The host's counters for the text the core reports (host_counters):
         // read at step 31's window: line and at end's status line.  Empty:
@@ -597,6 +681,15 @@ namespace bmmo::session {
         bool nonblocking_hold = false;   // the anchor hold returns to the host loop
         bool whole_frame = false;        // a replayed tick may run a whole engine frame (bind_world fills whole_frame)
         own_lifecycle_source own_lifecycle = own_lifecycle_source::event_log;   // or host_hooks
+        // Step T3 (trafo-replication design 2.14): the host builds the
+        // per-player piece sets and runs the trafo as an input (poll_trafo,
+        // make_trafo_set, run_trafo, trafo_final, trafo_frame,
+        // trafo_type_set, trafo_reconcile, retire_trafo_sets filled):
+        // SessionReady declares CAP_TRAFO_INPUTS, and a session whose
+        // SessionStart has WORLD_TRAFO_INPUTS runs it.  Without it the server
+        // refuses this client in such a session, and a session without the
+        // option is the step P path (owner-only pieces).
+        bool trafo_inputs = false;
     };
 
     // (legacy_calls, design 6.1 "Linking while the core is incomplete", was
@@ -663,6 +756,16 @@ namespace bmmo::session {
         if (caps.own_body_control) {
             if (!platform.make_own) return "make_own";
             if (!platform.unmake_own) return "unmake_own";
+        }
+        if (caps.trafo_inputs) {   // step T3
+            if (!platform.poll_trafo) return "poll_trafo";
+            if (!platform.make_trafo_set) return "make_trafo_set";
+            if (!platform.run_trafo) return "run_trafo";
+            if (!platform.trafo_final) return "trafo_final";
+            if (!platform.trafo_frame) return "trafo_frame";
+            if (!platform.trafo_type_set) return "trafo_type_set";
+            if (!platform.trafo_reconcile) return "trafo_reconcile";
+            if (!platform.retire_trafo_sets) return "retire_trafo_sets";
         }
         // A host that journals (session/client_journal.hpp) stamps the header,
         // and writes bodies into LOCAL checkpoints (body_state, which body

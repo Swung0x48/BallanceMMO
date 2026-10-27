@@ -167,6 +167,25 @@ namespace bmmo::session {
         }
         double mech_max = 0.0;
         for (const auto& [name, c]: s.mechanism_correctors_) mech_max = std::max(mech_max, c.stats().max_error);
+        // Step T3: the trafo inputs' section, only in a session that runs
+        // them (every other status line is the text it was): the sets held,
+        // own inputs stamped, inputs received, applied live and in replays,
+        // late ones rewound, missed ones (a resync), late ones a resync state
+        // covered, the effect checks' leaks, own echoes moved and dropped,
+        // sets made / failed, inputs that did not run, the reconcile's
+        // unmakes and remakes, sets retired, inputs in the log.
+        const std::string trafo = !s.trafo_active_ ? std::string() : textf(
+            " trafo: sets=%zu sent=%llu recv=%llu applied=%llu replayed=%llu late=%llu trafo_missed=%llu covered=%llu "
+            "trafo_original_leaks=%llu echo=%llu/%llu made=%llu/%llu run_failures=%llu reconcile=%llu/%llu retired=%llu log=%zu",
+            s.trafo_sets_.size(), static_cast<unsigned long long>(s.trafo_sent_),
+            static_cast<unsigned long long>(s.trafo_received_), static_cast<unsigned long long>(s.trafo_applied_),
+            static_cast<unsigned long long>(s.trafo_replayed_), static_cast<unsigned long long>(s.trafo_late_),
+            static_cast<unsigned long long>(s.trafo_missed_), static_cast<unsigned long long>(s.trafo_covered_),
+            static_cast<unsigned long long>(s.trafo_leaks_), static_cast<unsigned long long>(s.trafo_echo_moved_),
+            static_cast<unsigned long long>(s.trafo_echo_dropped_), static_cast<unsigned long long>(s.trafo_sets_made_),
+            static_cast<unsigned long long>(s.trafo_set_failures_), static_cast<unsigned long long>(s.trafo_run_failures_),
+            static_cast<unsigned long long>(s.trafo_unmade_), static_cast<unsigned long long>(s.trafo_remade_),
+            static_cast<unsigned long long>(s.trafo_retired_), s.trafo_log_.size());
         return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu remake=%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
@@ -176,7 +195,7 @@ namespace bmmo::session {
                      "resync: restepped=%llu/%llu depth=%llu states=%llu stale=%llu refused=%llu deferred=%llu/%llu "
                      "snaps_dropped=%llu scripts_refused=%llu blobs_refused=%llu destroyed=%llu unexplained=%llu "
                      "unattributed=%llu unmapped=%llu unportable=%llu holds=%llu/%llu hold_max=%.0f window_rew=%llu subsumed=%llu amended=%llu resent=%llu join_wakes_withheld=%llu "
-                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f",
+                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f%s",
                      static_cast<int>(s.phase_), s.session_, current_tick(), s.assigned_ ? 1 : 0, s.held_ ? 1 : 0,
                      static_cast<long long>(s.frames_since_anchor_),
                      static_cast<unsigned long long>(s.inputs_sent_), static_cast<unsigned long long>(s.events_sent_),
@@ -327,7 +346,8 @@ namespace bmmo::session {
                      static_cast<unsigned long long>(s.input_reports_), static_cast<unsigned long long>(s.input_starved_),
                      s.input_reports_ ? 100.0 * static_cast<double>(s.input_starved_) / static_cast<double>(s.input_reports_) : 0.0,
                      s.worst_starved_,
-                     s.lead_count_ ? static_cast<double>(s.lead_sum_) / static_cast<double>(s.lead_count_) : 0.0);
+                     s.lead_count_ ? static_cast<double>(s.lead_sum_) / static_cast<double>(s.lead_count_) : 0.0,
+                     trafo.c_str());
     }
 
 }

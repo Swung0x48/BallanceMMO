@@ -29,6 +29,7 @@
 #include "headless_engine.hpp"
 #include "inbound_capture.hpp"
 #include "process_qos.hpp"
+#include "trafo_hooks.hpp"
 
 #include "CKAll.h"
 #include "CKIpionManager.h"
@@ -41,6 +42,7 @@
 #include <game/navigation_graph.hpp>
 #include <game/script_state.hpp>
 #include <game/session_host_support.hpp>
+#include <game/trafo_sets.hpp>
 #include <message/message_all.hpp>
 #include <physics/ball_navigation.hpp>
 #include <physics/physics_savestate.hpp>
@@ -300,6 +302,11 @@ namespace {
         bool beam = false;
         double beam_position[3] = {};
         uint32_t beam_tick = 0;
+        // --beam2 X Y Z TICK (step T3 harness): a second beam, e.g. a paper
+        // ball onto a wood trafo for a paper explosion.
+        bool beam2 = false;
+        double beam2_position[3] = {};
+        uint32_t beam2_tick = 0;
         // --keep-lane Z: a closed-loop steer that holds the own ball on the
         // lane z = Z while the record drives (UP or DOWN held): LEFT or RIGHT
         // from the ball's sideways error and rate, a PD rule with a deadband,
@@ -344,6 +351,26 @@ namespace {
         // nothing reaches the wire: the replay's check of the sends.  Off by
         // default.
         std::string trace_sends;
+        // Step T3 test switches (trafo-replication design 7.3).
+        // --no-trafo-cap (H10): the host does not declare the trafo_inputs
+        // capability (SessionReady without CAP_TRAFO_INPUTS; a session with
+        // the world option refuses it).
+        bool no_trafo_cap = false;
+        // --ignore-snapshots: every SessionSnapshot dropped unread (snapshots
+        // truly off: the server still sends a full one on every body-set
+        // change of a snapshots-off session).
+        bool ignore_snapshots = false;
+        // --trafo-no-resets (H11): the hold's own reset reports are dropped
+        // at the host (the activation is cancelled, no input is made) - the
+        // owner never resets its pieces, so the server's deadline must.
+        bool trafo_no_resets = false;
+        // --leave-at TICK, --leave-after-unphys D, --leave-after-trafo D
+        // (H8): the client ends its session (and disconnects) at TICK, D
+        // ticks after its own ball's first Unphysicalize at or after the
+        // --beam tick, or D ticks after it stamped its first own trafo input.
+        uint32_t leave_at = 0;
+        int64_t leave_after_unphys = -1;
+        int64_t leave_after_trafo = -1;
     };
 
     // The record's keys (scripts/arena_map_test.py write_drive_record) are
@@ -361,14 +388,15 @@ namespace {
                   "       [--resync-at TICK | --resync-at s<SECTOR>+<TICKS>] [--record-by-tick]\n"
                   "       [--hold-event TYPE:N:MS|TYPE:N:drop]   (the N-th own event of TYPE leaves MS ms late, or never)\n"
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
-                  "       [--start-sector N] [--beam X Y Z TICK] [--keep-lane Z] [--keep-lane-dwell N]\n"
+                  "       [--start-sector N] [--beam X Y Z TICK] [--beam2 X Y Z TICK] [--keep-lane Z] [--keep-lane-dwell N]\n"
                   "       [--brake-tap N:P]   (while the record holds UP: DOWN instead for N frames in every P)\n"
                   "       [--keep-lane-tap N:M]   (the steer's key pressed N frames, released M, repeating)\n"
                   "       [--trace-body NAME --trace-ticks A B] [--trace-clock A B] [--trace-restore] [--dump-savestate A B DIR] [--compare-scripts DIR] [--park-births] [--insert-births]\n"
                   "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)\n"
                   "       [--capture-inbound FILE | --replay-inbound FILE]   (record the inbound messages and clock reads; "
                   "replay them, unpaced, sending nothing)\n"
-                  "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)");
+                  "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
+                  "       [--ignore-snapshots] [--no-trafo-cap] [--trafo-no-resets] [--leave-at TICK | --leave-after-unphys D | --leave-after-trafo D]");
     }
 
     // The event type names (--hold-event, the own-echo lines) are the core's
@@ -384,7 +412,7 @@ namespace {
         std::string type = spec.substr(0, a);
         for (char& c: type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         out.hold_event_type = -1;
-        for (int t = 0; t <= 4; ++t)
+        for (int t = 0; t <= 5; ++t)   // 5: trafo (step T3)
             if (type == event_type_name(t) || type == std::to_string(t)) out.hold_event_type = t;
         if (out.hold_event_type < 0) return false;
         out.hold_event_nth = static_cast<uint32_t>(std::max(1, std::atoi(spec.substr(a + 1, b - a - 1).c_str())));
@@ -531,6 +559,21 @@ namespace {
             else if (arg == "--replay-inbound") { if (!(v = next())) return false; out.replay_inbound = v; }
             else if (arg == "--trace-sends") { if (!(v = next())) return false; out.trace_sends = v; }
             else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
+            else if (arg == "--no-trafo-cap") out.no_trafo_cap = true;
+            else if (arg == "--ignore-snapshots") out.ignore_snapshots = true;
+            else if (arg == "--trafo-no-resets") out.trafo_no_resets = true;
+            else if (arg == "--leave-at") { if (!(v = next())) return false; out.leave_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+            else if (arg == "--leave-after-unphys") { if (!(v = next())) return false; out.leave_after_unphys = std::atoll(v); }
+            else if (arg == "--leave-after-trafo") { if (!(v = next())) return false; out.leave_after_trafo = std::atoll(v); }
+            else if (arg == "--beam2") {
+                for (int k = 0; k < 3; ++k) {
+                    if (!(v = next())) return false;
+                    out.beam2_position[k] = std::atof(v);
+                }
+                if (!(v = next())) return false;
+                out.beam2_tick = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+                out.beam2 = true;
+            }
             else if (arg == "--beam") {
                 for (int k = 0; k < 3; ++k) {
                     if (!(v = next())) return false;
@@ -888,6 +931,13 @@ namespace {
             case bmmo::SessionSnapshot: {
                 bmmo::session_snapshot_msg msg;
                 if (!fill(msg)) return;
+                // --ignore-snapshots (a test switch, step T3): every snapshot
+                // dropped before the core, the server's body-set full ones
+                // of a snapshots-off session included - snapshots truly off.
+                if (args_.ignore_snapshots) {
+                    if (snapshots_ignored_++ == 0) logf("--ignore-snapshots: the server's snapshots are dropped (the first at tick %u)", msg.tick);
+                    break;
+                }
                 core_.on_session_snapshot(msg);
                 break;
             }
@@ -936,6 +986,191 @@ namespace {
         // (shared-core design step E1); the state is private since E11, and
         // this client reads what it needs through the core's accessors.
         using phase = bmmo::session::client_core_state::phase;
+
+        // --------------------------------------------- the trafo (step T3)
+        // Trafo-replication design 2.3-2.5, 2.11: the headless platform's
+        // half of the trafo as an input, over game/trafo_sets.hpp and the
+        // bridge (sim/trafo_hooks.hpp, as the server's world reaches it).
+
+        // The level reference (design 2.4 step 6), once per session, before
+        // any original explosion: while the level loads, at the anchor at
+        // the latest.
+        void capture_trafo_reference(const char* where) {
+            if (!core_.trafo_active() || !trafo_registry_.reference().empty()) return;
+            bmmo::game::trafo_reference reference;
+            std::string error;
+            if (!bmmo::game::capture_trafo_reference(engine_->context(), reference, error)) {
+                if (std::strcmp(where, "the anchor") == 0 || trafo_reference_logs_++ == 0)
+                    logf("trafo: the level reference is not captured at %s yet: %s", where, error.c_str());
+                return;
+            }
+            size_t blocks = 0;
+            for (const auto& [name, b]: reference.scripts) blocks += b.size();
+            trafo_registry_.set_reference(std::move(reference));
+            logf("trafo: level reference captured at %s: 8 scripts, %zu blocks", where, blocks);
+        }
+
+        // The anchor's trafo work, before the core builds the sets (design
+        // 2.3 "When the hold is armed"): the originals quiesced (a non-zero
+        // count is a bug in a headless world), the hold armed, the piece x
+        // local-body filter rule on (design 2.10).
+        void anchor_trafo() {
+            if (!core_.trafo_active()) return;
+            CKIpionManager* physics = engine_->physics();
+            trafo_hooks_ = bmmo::sim::make_trafo_hooks(physics, [](const std::string& line) { logf("trafo: %s", line.c_str()); });
+            // The sets' force controllers by the names every world gives
+            // them (physics_savestate.hpp set_controller_alias): a resync's
+            // or a join's blob is the server's.
+            bmmo::physics::set_controller_alias(physics, [this](const char* name, std::string& alias) {
+                return bmmo::game::trafo_controller_alias(trafo_registry_, name, alias);
+            });
+            capture_trafo_reference("the anchor");
+            const auto quiesce = bmmo::game::quiesce_originals(engine_->context(), trafo_hooks_);
+            logf("%s%s", quiesce.text().c_str(),
+                 quiesce.bodies || quiesce.controllers || quiesce.scripts ? " - NOT EXPECTED in a headless world (a bug)" : "");
+            trafo_hold_.arm(engine_->context(), 1000.0f / 66.0f);
+            std::string error;
+            if (!bmmo::physics::trafo_set_filter(physics, true, error)) logf("trafo: the piece filter rule: %s", error.c_str());
+            trafo_on_ = true;
+            logf("trafo: inputs on: the originals held (option E %s, the Delayer %u frames), the piece x local-body filter on",
+                 core_.sector_lead_ticks() <= bmmo::session::kTrafoOptionEMaxLead ? "on" : "off (lead > 66)",
+                 trafo_hold_.delayer_frames());
+        }
+
+        // The session's end (design 2.4): every live piece unphysicalized,
+        // the winds' controllers deleted, the sets unregistered and
+        // destroyed; the hold disarmed.
+        void end_trafo_sets() {
+            if (!trafo_on_) return;
+            const int bodies = bmmo::game::teardown_trafo_sets(engine_->context(), trafo_registry_, trafo_hooks_);
+            bmmo::physics::set_controller_alias(engine_->physics(), {});
+            trafo_hold_.disarm();
+            trafo_on_ = false;
+            logf("trafo: the session's sets torn down (%d piece bodies removed)", bodies);
+        }
+
+        // Every set's pieces among the explosion pieces (design 4.3:
+        // reportable_wakeup, revivable).
+        void note_trafo_pieces(uint32_t) {
+            bmmo::game::add_trafo_set_pieces(engine_->context(), trafo_registry_, explosion_pieces_);
+        }
+
+        void add_trafo_operations(bmmo::session::session_platform& p) {
+            p.poll_trafo = [this](uint32_t tick, bool option_e) {
+                bmmo::session::trafo_poll out;
+                if (!trafo_on_) return out;
+                CKContext* context = engine_->context();
+                for (const auto& r: trafo_hold_.poll(context, tick, option_e)) {
+                    if (args_.trafo_no_resets && bmmo::session::trafo_is_reset(r.flags)) {
+                        logf("--trafo-no-resets: the own %s reset cancelled at tick %u is not made an input",
+                             bmmo::session::trafo_type_name(r.type), tick);
+                        continue;
+                    }
+                    bmmo::session::trafo_report x;
+                    x.flags = r.flags;
+                    x.type = r.type;
+                    for (int k = 0; k < 3; ++k) x.position[k] = r.position[k];
+                    x.predicted_tick = r.predicted_tick;
+                    x.source = r.source;
+                    out.reports.push_back(std::move(x));
+                }
+                const auto effect = trafo_hold_.effect_check(context, trafo_hooks_);
+                out.leaks = effect.leaks();
+                out.first_leak = effect.first;
+                return out;
+            };
+            p.make_trafo_set = [this](uint32_t player, std::string& error) {
+                if (!trafo_on_) {
+                    error = "the trafo is not an input in this world";
+                    return false;
+                }
+                const auto r = bmmo::game::ensure_trafo_set(engine_->context(), trafo_registry_, player, trafo_hooks_);
+                if (!r.ok) {
+                    for (const auto& line: r.lines) logf("trafo build %u: %s", player, line.c_str());
+                    error = r.error;
+                    return false;
+                }
+                if (r.how == bmmo::game::trafo_ensure::reselected)
+                    for (const auto& line: r.lines) logf("trafo: set %u %s", player, line.c_str());
+                if (r.how == bmmo::game::trafo_ensure::built)
+                    if (const auto* set = trafo_registry_.find(player))
+                        logf("trafo: set %u built: %zu objects, %zu scripts, digest %s, value digest %s", player,
+                             set->objects.size(), set->scripts.size(), set->digest.c_str(), set->value_digest.c_str());
+                note_trafo_pieces(player);
+                return true;
+            };
+            p.run_trafo = [this](const bmmo::session::trafo_input& in, std::string& error) {
+                return bmmo::game::run_trafo(engine_->context(), trafo_registry_, trafo_hooks_, in.player, in.flags, in.type,
+                                             in.position, in.seed, error);
+            };
+            p.trafo_final = [this](uint32_t player, uint8_t type, uint32_t tick) {
+                bmmo::game::trafo_set_final(trafo_registry_, player, type, tick);
+            };
+            p.trafo_frame = [this](uint32_t) {
+                if (trafo_on_) bmmo::game::trafo_frame(engine_->context(), trafo_registry_, 1000.0f / 66.0f);
+            };
+            p.trafo_type_set = [this](uint32_t player, uint8_t type) {
+                bmmo::session::trafo_type_view view;
+                const bmmo::game::trafo_set* set = trafo_registry_.find(player);
+                if (!set || type >= bmmo::session::kTrafoTypes) return view;
+                view.exists = true;
+                for (CK_ID id: set->types[type].pieces) {
+                    CKObject* o = engine_->context()->GetObject(id);
+                    if (!o || !o->GetName()) continue;
+                    view.pieces.emplace_back(o->GetName());
+                    if (trafo_hooks_.has_body && trafo_hooks_.has_body(o->GetName())) ++view.bodies;
+                }
+                return view;
+            };
+            p.trafo_reconcile = [this](const bmmo::session::trafo_reconcile_spec& spec) {
+                bmmo::session::trafo_reconcile_result r;
+                CKContext* context = engine_->context();
+                if (spec.action == bmmo::session::trafo_reconcile_action::unmake) {
+                    r.ok = bmmo::game::unmake_type_set(context, trafo_registry_, trafo_hooks_, spec.player, spec.type,
+                                                       r.bodies_removed, r.error);
+                    return r;
+                }
+                // The remake, inside the core's mute of the event log: the
+                // pieces' births go into this world's birth log at S (the
+                // revive of a later rewind remakes them from these recipes,
+                // the event's draws), as a replayed tick's births do.
+                bmmo::physics::set_event_log_keep_muted_recipes(true);
+                r.ok = bmmo::game::remake_type_set(context, trafo_registry_, trafo_hooks_, spec.player, spec.type, spec.position,
+                                                   spec.seed, 1000.0f / 66.0f, r.error);
+                bmmo::physics::set_event_log_keep_muted_recipes(false);
+                const std::string recipes = bmmo::physics::drain_muted_recipes();
+                bmmo::session::parse_event_log(recipes, [&](const std::string& kind, const std::string& text) {
+                    bmmo::session::local_birth birth;
+                    if (kind != "recipe" || !bmmo::session::parse_recipe_event(text, birth)) return;
+                    if (core_.is_ball(birth.name)) return;
+                    local_births_.add(spec.birth_tick, std::move(birth));
+                });
+                return r;
+            };
+            p.retire_trafo_sets = [this](uint32_t now, uint32_t history) {
+                std::vector<uint32_t> deselected;
+                if (!trafo_on_) return deselected;
+                std::set<uint32_t> before;
+                for (const auto& set: trafo_registry_.sets())
+                    if (set.selected) before.insert(set.player);
+                const size_t sets_before = trafo_registry_.sets().size();
+                for (const auto& line: bmmo::game::retire_trafo_sets(engine_->context(), trafo_registry_, trafo_hooks_, now,
+                                                                     history, false))
+                    logf("trafo: %s", line.c_str());
+                // A destroyed set's pieces are no explosion pieces any more
+                // (revivable, reportable_wakeup): the originals and the sets
+                // still held (review 2 of T3).
+                if (trafo_registry_.sets().size() != sets_before) {
+                    explosion_pieces_ = bmmo::game::explosion_pieces(engine_->context());
+                    bmmo::game::add_trafo_set_pieces(engine_->context(), trafo_registry_, explosion_pieces_);
+                }
+                for (uint32_t player: before) {
+                    const auto* set = trafo_registry_.find(player);
+                    if (!set || !set->selected) deselected.push_back(player);
+                }
+                return deselected;
+            };
+        }
 
         // ------------------------------------------- the core's platform
         // The headless platform (shared-core design 2.2): the operations the
@@ -1070,7 +1305,8 @@ namespace {
             p.localize_scripts = [this](const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor,
                                         std::vector<uint8_t>& out, std::string& error,
                                         bmmo::session::resync_script_report& report) {
-                return bmmo::game::localize_session_scripts(engine_->context(), scripts_, portable, anchor, out, error, report);
+                return bmmo::game::localize_session_scripts(engine_->context(), scripts_, portable, anchor, out, error, report,
+                                                            trafo_on_ ? &trafo_registry_.part() : nullptr);
             };
             p.forget_activations_from = [this](uint32_t tick) {
                 const size_t activations = manager_activations_.forget_from(tick);
@@ -1097,7 +1333,11 @@ namespace {
                 CKDeletePointer(bytes);
                 return true;
             };
-            p.local_only_body = [this](const std::string& entity) { return explosion_pieces_.count(entity) != 0; };
+            // Step T3: with the trafo as an input every world has every
+            // set's pieces (and no original has a body): none is this
+            // world's alone.  Without it, step P's owner-only pieces.
+            p.local_only_body = [this](const std::string& entity) { return !trafo_on_ && explosion_pieces_.count(entity) != 0; };
+            add_trafo_operations(p);
             // The host hooks (E3): the pacer's origin restarts with the
             // numbering, --hold-event, and its discards at the session's end.
             p.hooks.numbering_restarted = [this](bmmo::session::clock_site site) { origin_ = wall_now(site); };
@@ -1212,7 +1452,11 @@ namespace {
                 std::string hash_error;
                 return bmmo::physics::capture_world_hash(engine_->physics(), hash, hash_error);
             };
-            p.hooks.after_record = [this](uint32_t tick) { dump_savestate(tick); };
+            // Only when a dump or a comparison reads the record before its
+            // amend: without the hook the core captures each live record once,
+            // at the amend.
+            if (!args_.dump_savestate_dir.empty() || !args_.compare_scripts_dir.empty())
+                p.hooks.after_record = [this](uint32_t tick) { dump_savestate(tick); };
             p.hooks.after_amend = [this](uint32_t tick) { frame_traces(tick); };
             // E10: the reports.  The core writes the window: line (step 31,
             // after the traces) and the status line at the session's end; this
@@ -1227,7 +1471,10 @@ namespace {
             // the own body guard lifted at the session's end, after the
             // journal closed, and the movable objects' description for the
             // --trace line after a snapshot rollback.
-            p.hooks.ended = [this]() { own_body_guard_off(); };
+            p.hooks.ended = [this]() {
+                own_body_guard_off();
+                end_trafo_sets();   // step T3
+            };
             p.hooks.describe_movables = [this]() { return bmmo::physics::describe_movable_objects(engine_->physics()); };
             return p;
         }
@@ -1244,6 +1491,12 @@ namespace {
             caps.nonblocking_hold = true;
             caps.whole_frame = args_.replay_scripts;
             caps.own_lifecycle = bmmo::session::own_lifecycle_source::event_log;
+            // Step T3: the per-player trafo piece sets (--no-trafo-cap: H10).
+            // Only with the script replay: the sets' scripts are restored and
+            // run inside a replay by its binding (bind_script_replay's trafo
+            // part), which --no-script-replay does not install - a replay
+            // would set the inputs' flags and run nothing (review 2 of T3).
+            caps.trafo_inputs = !args_.no_trafo_cap && args_.script_replay;
             return caps;
         }
         // The core's configuration from the arguments (design 1.2).
@@ -1516,6 +1769,7 @@ namespace {
             manager_activations_.clear();
             activations_replayed_ = 0;
             beam_done_ = false;
+            beam2_done_ = false;
             own_group_set_ = false;
             own_capture_.valid = false;
             scripts_.clear();
@@ -1528,6 +1782,14 @@ namespace {
             // carried would have this anchor's apply refuse.
             checkpoint_phase_.restore(engine_->context());
             sector_manager_id_ = 0;
+            // Step T3: the previous session's sets went at its end; the
+            // registry and its level reference start over (a reboot below
+            // replaces every object they name).
+            end_trafo_sets();
+            trafo_registry_.clear();
+            trafo_registry_.set_reference(bmmo::game::trafo_reference{});
+            leave_unphys_tick_ = 0;
+            leave_trafo_tick_ = 0;
             if (bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
                 // Restart (host started the room again): reboot to the menu.
                 // (The mirrors and the relay's bookkeeping were cleared here
@@ -1561,6 +1823,10 @@ namespace {
             if (const int recorded = level_sequencers_.capture_new(engine_->context()); recorded > 0)
                 logf("%d mechanism Sequencer counter(s) recorded from the level file (%s)", recorded,
                      level_sequencers_.describe().c_str());
+            // Step T3 (trafo-replication design 2.4 step 6): the 8 original
+            // trafo scripts' values as Balls.nmo has them, before any
+            // original explosion, for every copy this session builds.
+            capture_trafo_reference("the load");
             // Step Q: the proximity countdowns, recorded the same way.
             if (const int proximities = level_proximities_.capture_new(engine_->context()); proximities > 0)
                 logf("%d proximity countdown(s) recorded from the level file (%s)", proximities,
@@ -1616,7 +1882,10 @@ namespace {
             // that carry the force blocks' controllers through the bridge.
             // The session core's selection (step P): the trafo scripts with
             // the mechanism scripts and the sector manager.
-            scripts_ = args_.script_replay ? bmmo::game::session_script_selection(engine_->context())
+            // Step T3: with the trafo as an input the originals never run
+            // and are not selected; the sets' scripts travel beside the
+            // selection as the trafo part (trafo-replication design 4.3).
+            scripts_ = args_.script_replay ? bmmo::game::session_script_selection(engine_->context(), core_.trafo_active())
                                            : bmmo::game::script_replay::selection{};
             script_activations_ = bmmo::game::session_script_activations(engine_->context(), scripts_);
             // The trafo explosion pieces (step P): never a BodyRevived.
@@ -1639,6 +1908,7 @@ namespace {
                     return bmmo::physics::force_block_set(physics, static_cast<uint32_t>(block->GetID()), state, error);
                 };
             }
+            anchor_trafo();
             if (!scripts_.empty()) {
                 const auto st = bmmo::game::script_replay::describe(engine_->context(), scripts_);
                 logf("script replay: %d scripts (%d active) + %d satellite blocks, %d blocks, %d parameters, %d force blocks, %d opaque: %s",
@@ -2197,6 +2467,9 @@ namespace {
             if (args_.beam && !beam_done_ && core_.next_tick() >= args_.beam_tick) {
                 beam_done_ = true;
                 core_.request_beam(args_.beam_position);
+            } else if (args_.beam2 && !beam2_done_ && core_.next_tick() >= args_.beam2_tick) {
+                beam2_done_ = true;
+                core_.request_beam(args_.beam2_position);
             }
             // The flow before the step (shared-core design 1.3 pre_step:
             // the sector stamp, the events and echoes, the rewinds, the held
@@ -2206,6 +2479,26 @@ namespace {
             const bool ticked = engine_->tick(error);
             live_tick_serial_ = 0;
             if (!core_.post_step(ticked)) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
+            // Step T3 (H8): the leave switches.
+            if (core_.assigned()) {
+                const uint32_t now = current_tick();
+                if (args_.leave_after_unphys >= 0 && !leave_unphys_tick_ && args_.beam && now >= args_.beam_tick
+                        && was_physicalized_ && !core_.own_physicalized())
+                    leave_unphys_tick_ = now + static_cast<uint32_t>(args_.leave_after_unphys);
+                was_physicalized_ = core_.own_physicalized();
+                if (args_.leave_after_trafo >= 0 && !leave_trafo_tick_ && core_.trafo_sent() > 0)
+                    leave_trafo_tick_ = now + static_cast<uint32_t>(args_.leave_after_trafo);
+                const char* why = nullptr;
+                if (args_.leave_at && now >= args_.leave_at) why = "--leave-at";
+                else if (leave_unphys_tick_ && now >= leave_unphys_tick_) why = "--leave-after-unphys";
+                else if (leave_trafo_tick_ && now >= leave_trafo_tick_) why = "--leave-after-trafo";
+                if (why) {
+                    logf("%s: leaving the session at tick %u (own ball %s)", why, now,
+                         core_.own_physicalized() ? "physicalized" : "without a body");
+                    ended_ = true;
+                    return;
+                }
+            }
             // --resync-at (step A3): a resync asked for while this client
             // keeps stepping, once.
             if (!resync_at_done_ && core_.assigned()) {
@@ -2941,6 +3234,9 @@ namespace {
                 so.delta_ms = 1000.0f / 66.0f;
                 so.diff_detail = args_.trace;
                 so.replay_activation = !args_.park_births;
+                // Step T3: the sets' scripts, recorded (v3), restored and run
+                // first in every replayed frame, as the trafo frame live.
+                so.trafo = trafo_on_ ? &trafo_registry_.part() : nullptr;
                 so.on_restore_failed = [this](const std::string& error) {
                     if (script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
                 };
@@ -3077,7 +3373,20 @@ namespace {
         CK_ID sector_manager_id_ = 0;
         bmmo::game::script_replay::selection scripts_;       // the script replay's scripts and satellites (game/script_replay.hpp)
         std::vector<CK_ID> script_activations_;              // the selected scripts whose activations are recorded (steps P, A1)
-        std::set<std::string> explosion_pieces_;             // the trafo explosion pieces' entities (step P; session_host_support.hpp)
+        std::set<std::string> explosion_pieces_;             // the trafo explosion pieces' entities (step P; session_host_support.hpp; T3: every set's too)
+        // Step T3 (trafo-replication design 2.4, 2.11): this world's piece
+        // sets, the bridge's hooks for them, the hold of the originals, and
+        // whether this session runs the trafo as an input here (from the
+        // anchor's quiesce to the session's end).
+        bmmo::game::trafo_registry trafo_registry_;
+        bmmo::game::trafo_set_hooks trafo_hooks_;
+        bmmo::game::trafo_hold trafo_hold_;
+        bool trafo_on_ = false;
+        uint32_t trafo_reference_logs_ = 0;
+        // The H8 leave switches' state.
+        uint32_t leave_unphys_tick_ = 0, leave_trafo_tick_ = 0;
+        bool was_physicalized_ = false;
+        uint64_t snapshots_ignored_ = 0;   // --ignore-snapshots
         std::vector<CK_ID> scripts_replayed_;                // the scripts the last restore wrote: active at its anchor
         bmmo::game::script_replay_hooks script_hooks_;
         bmmo::game::checkpoint_phase_split checkpoint_phase_;  // the chain's own phase cell (game/checkpoint_phase.hpp)
@@ -3163,6 +3472,7 @@ namespace {
         const unsigned char* frame_keyboard_ = nullptr;
         int trace_frames_ = 0;
         bool beam_done_ = false;
+        bool beam2_done_ = false;   // --beam2
         // (kOwnEchoDeadlineTicks, kOwnEchoUplinkSettleTicks and
         // kOwnRecordKeepTicks moved into the core state at E7.)
         // The entity mirror_entity named last, which make_mirror poses and

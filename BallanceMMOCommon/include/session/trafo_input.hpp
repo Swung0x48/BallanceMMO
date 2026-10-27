@@ -58,6 +58,12 @@ namespace bmmo::session {
     constexpr uint32_t kTrafoResetRestoreIC = 133;       // R + 133: Restore IC
     // 20 s at 66 ticks/s: the piece life (decision 9.6).
     constexpr uint32_t kTrafoLife = 1320;
+    // Decision 9.5, option E (step T3): the owner stamps its explosion at the
+    // frame the Trafo Manager's 1000 ms Delayer predicts, 67 frames after it
+    // starts, when the session's lead lets every world have it in time:
+    // stamp >= poll tick + 1 + lead, i.e. lead <= 66.  A session whose lead
+    // exceeds it stamps the cancelled activation (tick + 1 + lead).
+    constexpr uint32_t kTrafoOptionEMaxLead = 66;
 
     inline bool trafo_is_reset(uint8_t flags) { return (flags & TRAFO_RESET) != 0; }
 

@@ -387,23 +387,45 @@ namespace bmmo::physics::savestate {
     // Bytes.  Little-endian, fixed-width scalars, length-prefixed strings
     // and vectors; the reader refuses a wrong magic/version/size.
     // ------------------------------------------------------------------
+    // The bytes go into a buffer sized up front (`reserve`: the caller's
+    // guess, the previous blob's size) through a write position, not
+    // through a vector insert per field: a record of a world with every
+    // member's trafo pieces is some 200 KB of 1-8 byte fields, and the
+    // insert was a third of a capture (step TR3).  The bytes are the same;
+    // `finish` trims the buffer to them.
     class writer {
     public:
-        std::vector<uint8_t> bytes;
-        void u8(uint8_t v) { bytes.push_back(v); }
-        void i8(int8_t v) { bytes.push_back(static_cast<uint8_t>(v)); }
-        void u16(uint16_t v) { raw(&v, 2); }
-        void i16(int16_t v) { raw(&v, 2); }
-        void u32(uint32_t v) { raw(&v, 4); }
-        void i32(int32_t v) { raw(&v, 4); }
-        void u64(uint64_t v) { raw(&v, 8); }
-        void f32(float v) { raw(&v, 4); }
-        void f64(double v) { raw(&v, 8); }
+        std::vector<uint8_t> bytes;   // the written bytes once finish() ran
+        explicit writer(size_t reserve = 0) { bytes.resize(reserve < 4096 ? 4096 : reserve); }
+        void u8(uint8_t v) { put(v); }
+        void i8(int8_t v) { put(v); }
+        void u16(uint16_t v) { put(v); }
+        void i16(int16_t v) { put(v); }
+        void u32(uint32_t v) { put(v); }
+        void i32(int32_t v) { put(v); }
+        void u64(uint64_t v) { put(v); }
+        void f32(float v) { put(v); }
+        void f64(double v) { put(v); }
         void str(const std::string& s) { u32(static_cast<uint32_t>(s.size())); raw(s.data(), s.size()); }
         void raw(const void* p, size_t n) {
-            const uint8_t* b = static_cast<const uint8_t*>(p);
-            bytes.insert(bytes.end(), b, b + n);
+            if (n > bytes.size() - used_) grow(n);
+            if (n) std::memcpy(bytes.data() + used_, p, n);
+            used_ += n;
         }
+        size_t size() const { return used_; }
+        void finish() { bytes.resize(used_); }
+
+    private:
+        template <class T> void put(T v) {
+            if (sizeof(T) > bytes.size() - used_) grow(sizeof(T));
+            std::memcpy(bytes.data() + used_, &v, sizeof(T));
+            used_ += sizeof(T);
+        }
+        void grow(size_t n) {
+            const size_t want = used_ + n;
+            bytes.resize(want > 2 * bytes.size() ? want : 2 * bytes.size());
+        }
+        size_t used_ = 0;
     };
 
     class reader {
@@ -486,16 +508,70 @@ namespace bmmo::physics::savestate {
         const IVP_Compact_Edge* ball_edge = nullptr;   // the balls' shared dummy edge (balls only)
     };
 
+    // A pointer -> index table (the live index and the capture's): open
+    // addressing in one vector, so an entry costs no allocation of its own
+    // (the std::map nodes these were were a quarter of a capture once every
+    // member's trafo pieces were in the world, step TR3).  Never iterated,
+    // so no order of it reaches a record.  Null is never a key: find(nullptr)
+    // is -1, as a map that never held it answers.
+    class ptr_index {
+    public:
+        void reserve(size_t n) {
+            size_t want = 16;
+            while (want < 2 * n + 2) want <<= 1;
+            if (want > slots_.size()) rehash(want);
+        }
+        // false (and nothing changed) when `key` is present already.
+        bool emplace(const void* key, int32_t value) {
+            if (!key) return false;
+            if (2 * (size_ + 1) > slots_.size()) rehash(slots_.empty() ? 16 : 2 * slots_.size());
+            const size_t mask = slots_.size() - 1;
+            for (size_t i = hash(key) & mask;; i = (i + 1) & mask) {
+                if (!slots_[i].first) {
+                    slots_[i] = {key, value};
+                    ++size_;
+                    return true;
+                }
+                if (slots_[i].first == key) return false;
+            }
+        }
+        int32_t find(const void* key) const {
+            if (!key || slots_.empty()) return -1;
+            const size_t mask = slots_.size() - 1;
+            for (size_t i = hash(key) & mask;; i = (i + 1) & mask) {
+                if (!slots_[i].first) return -1;
+                if (slots_[i].first == key) return slots_[i].second;
+            }
+        }
+        size_t size() const { return size_; }
+
+    private:
+        static size_t hash(const void* key) {
+            uint64_t x = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(key));
+            x ^= x >> 29;
+            x *= 0xbf58476d1ce4e5b9ull;
+            x ^= x >> 32;
+            return static_cast<size_t>(x);
+        }
+        void rehash(size_t n) {
+            std::vector<std::pair<const void*, int32_t>> old;
+            old.swap(slots_);
+            slots_.assign(n, {nullptr, -1});
+            size_ = 0;
+            for (const auto& e: old)
+                if (e.first) emplace(e.first, e.second);
+        }
+        std::vector<std::pair<const void*, int32_t>> slots_;
+        size_t size_ = 0;
+    };
+
     struct live_world {
         CKIpionManager* physics = nullptr;
         IVP_Environment* env = nullptr;
         std::vector<live_object> objects;                 // sorted by name, then by entity id
-        std::map<const IVP_Real_Object*, int32_t> by_object;
-        std::multimap<std::string, int32_t> by_name;
-        int32_t index_of(const IVP_Real_Object* o) const {
-            auto it = by_object.find(o);
-            return it == by_object.end() ? -1 : it->second;
-        }
+        ptr_index by_object;
+        std::multimap<std::string, int32_t> by_name;      // empty when indexed without names (the capture)
+        int32_t index_of(const IVP_Real_Object* o) const { return by_object.find(o); }
         // The live object a record names.  Names are not unique on a Ballance
         // map (two instances of one element type give two bodies of one name:
         // Level 8 has two P_Modul_30_Wippe), so a name shared by several
@@ -529,7 +605,7 @@ namespace bmmo::physics::savestate {
     // Index every physicalized object.  Fails on a missing environment and on
     // an object with a phantom controller (the savestate fails closed on
     // phantoms).  Same-named bodies are allowed and ordered by entity id.
-    bool index_live_world(CKIpionManager* physics, live_world& out, std::string& error);
+    bool index_live_world(CKIpionManager* physics, live_world& out, std::string& error, bool names = true);
 
     // Name an edge, or resolve one.  resolve returns nullptr when the offset
     // is outside the object's surface or the object has the wrong type.
@@ -539,6 +615,20 @@ namespace bmmo::physics::savestate {
 
     // A readable name for messages.
     std::string describe_edge(const world_record& world, const edge_ref& ref);
+
+    // The controller alias set_controller_alias installed for `physics`, or
+    // null.
+    using controller_alias = std::function<bool(const char* name, std::string& alias)>;
+    const controller_alias* controller_alias_for(const CKIpionManager* physics);
+    // A controller's name as the blob records it: its own, or the alias.
+    inline std::string recorded_controller_name(const controller_alias* alias, const char* name) {
+        std::string out = name ? name : "";
+        if (alias && *alias && name) {
+            std::string aliased;
+            if ((*alias)(name, aliased)) out = std::move(aliased);
+        }
+        return out;
+    }
 
     // physics_savestate_capture.cpp
     bool capture_world(CKIpionManager* physics, world_record& out, std::string& error, savestate_report* report);

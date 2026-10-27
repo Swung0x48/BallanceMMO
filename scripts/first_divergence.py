@@ -35,6 +35,7 @@ ownerless pieces keyed by name); a ball keyed by its owner is never excluded.
 import argparse
 import glob
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -65,7 +66,13 @@ def excluded(key, exclude):
     return key[0] == 'body' and any(str(key[1]).startswith(p) for p in exclude)
 
 
-def worlds(journal, want_local, prefix='', ownerless_by_name=False, exclude=()):
+# A trafo piece set's copy names the player whose set it is (step T3:
+# Ball_Wood_piece05_Trafo<player>), and a player id is per session: two solo
+# sessions' pieces are the same bodies under one name once the id is taken out.
+TRAFO_PLAYER = re.compile(r'_Trafo\d+$')
+
+
+def worlds(journal, want_local, prefix='', ownerless_by_name=False, exclude=(), trafo_by_type=False):
     """tick -> {key: position}, from the checkpoints of the kind asked for.
 
     `prefix` keeps only map bodies whose name starts with it (and drops the
@@ -80,6 +87,10 @@ def worlds(journal, want_local, prefix='', ownerless_by_name=False, exclude=()):
     body as a ball, the trafo explosion pieces (Ball_*_piece*) among them,
     and a legacy retail journal records even its balls with owner 0; their
     names are what identifies them within one client's runs.
+
+    `trafo_by_type` (step T3) keys a trafo set's piece without its player id
+    (`_Trafo#`): for comparing two SOLO sessions, whose one player has another
+    id in each.
     """
     out = {}
     for cp in journal.checkpoints():
@@ -100,6 +111,8 @@ def worlds(journal, want_local, prefix='', ownerless_by_name=False, exclude=()):
                     key = ('body', b['name'])
                 else:
                     continue   # a client that did not know the owner: not comparable
+            if trafo_by_type and key[0] == 'body':
+                key = ('body', TRAFO_PLAYER.sub('_Trafo#', str(key[1])))
             if exclude and excluded(key, exclude):
                 continue
             row[key] = b['position']

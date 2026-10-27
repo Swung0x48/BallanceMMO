@@ -379,6 +379,9 @@ namespace bmmo::sim {
             // from `lateness`, whose presence patience reads as "assigned".
             std::map<uint32_t, bmmo::session::lead_player> leads;
             uint64_t early_steps = 0;   // ticks stepped before the deadline with a member unsettled
+            // Wall time of each step() since the last "step time" line (step
+            // T3's H6: the server's tick cost against its 15.15 ms budget).
+            std::vector<uint32_t> step_us;
             // The last such ticks, for the late-event attribution above.
             std::deque<uint32_t> early_ticks;
             std::map<uint32_t, uint32_t> acked;

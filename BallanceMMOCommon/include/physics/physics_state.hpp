@@ -157,6 +157,17 @@ namespace bmmo::physics {
     // One body, by CK3dEntity name.
     bool get_body_state(CKIpionManager* physics, const char* entity_name, body_state& out,
                         std::string& error);
+    // A lookup scope (step TR3, the rollback record's capture): between
+    // begin and the matching end on this thread, every by-name entity lookup
+    // of the functions here (get_body_state, get_core_extra, get_contacts,
+    // ...) on `physics` is served from one pass over the context's 3D
+    // entities, made at the scope's first lookup - the first entity of each
+    // name in the order GetObjectByNameAndParentClass scans, so a lookup
+    // finds what the scan would.  Only for a stretch that creates, destroys
+    // and renames no object (a capture reads only); scopes nest.  Without a
+    // scope every lookup scans the context as before.
+    void entity_lookup_scope_begin(CKIpionManager* physics);
+    void entity_lookup_scope_end(CKIpionManager* physics);
     // Beam the body and overwrite its core speeds (pending async pushes are
     // dropped).  Any array may be null to leave that part untouched.  `wake`
     // wakes the body; otherwise a simulated body is frozen.  The CK entity's

@@ -35,9 +35,14 @@ namespace bmmo::session {
         // server's order), before the host re-issues the tick's activations.
         // Step A3: the deaths a resync re-applies come after the births (the
         // remote lifecycle's order), before the union.
+        // Step T3 (trafo-replication design 2.5, 4.2): the tick's trafo
+        // inputs from the log before the union, as the live tick applies
+        // them before its union pass (pre_step); the trafo frame runs first
+        // in the replayed frame (script_replay::execute_frame's trafo list).
         world_hooks_.before_replayed_tick = [this](uint32_t tick) {
             drain_pending_births(tick);
             drain_pending_deaths(tick);
+            apply_trafo_inputs(tick, true);
             rederive_union_tick(tick);
         };
         // Step B1: a window-born body of a live pass the re-derivation moved
@@ -262,6 +267,24 @@ namespace bmmo::session {
         s.snapshots_without_own_ = 0;
         s.own_backstops_ = 0;
         s.last_backstop_ = {};
+        // Step T3: the trafo as an input runs in this session when the
+        // server's world option says so and this host can (design 2.14).
+        s.world_options_ = msg.world_options;
+        s.trafo_active_ = caps_.trafo_inputs && (msg.world_options & WORLD_TRAFO_INPUTS) != 0;
+        s.trafo_log_.clear();
+        s.trafo_sets_.clear();
+        s.trafo_pieces_.clear();
+        s.trafo_pending_.clear();
+        s.input_rewind_trafo_ = false;
+        s.trafo_sent_ = s.trafo_received_ = s.trafo_applied_ = s.trafo_replayed_ = 0;
+        s.trafo_late_ = s.trafo_missed_ = s.trafo_covered_ = s.trafo_leaks_ = 0;
+        s.trafo_echo_moved_ = s.trafo_echo_dropped_ = 0;
+        s.trafo_sets_made_ = s.trafo_set_failures_ = s.trafo_run_failures_ = 0;
+        s.trafo_unmade_ = s.trafo_remade_ = s.trafo_retired_ = 0;
+        s.trafo_leak_logs_ = 0;
+        if (msg.world_options & WORLD_TRAFO_INPUTS)
+            logf("session %u: the trafo is an input (world option trafo inputs)%s", s.session_,
+                 s.trafo_active_ ? "" : ", which this host cannot run (no trafo_inputs capability)");
         frame_ = frame_scratch{};
         return begin_result{};
     }
@@ -319,7 +342,11 @@ namespace bmmo::session {
         // rollback off gets the legacy answer, a full snapshot, which the
         // server sends only to a member without the cap.
         const bool resync_state = config.rollback;
-        ready.caps = (caps_.slew ? bmmo::session::CAP_LEAD : 0u) | (resync_state ? bmmo::session::CAP_RESYNC_STATE : 0u);
+        // Protocol 11 (trafo-replication design 2.14, step T3): a host that
+        // builds the piece sets and runs the trafo inputs says so; a session
+        // with the world option refuses a member without it.
+        ready.caps = (caps_.slew ? bmmo::session::CAP_LEAD : 0u) | (resync_state ? bmmo::session::CAP_RESYNC_STATE : 0u)
+                   | (caps_.trafo_inputs ? bmmo::session::CAP_TRAFO_INPUTS : 0u);
         ready.serialize();
         platform_.send(ready.raw.str(), send_mode::reliable);
         logf("anchored after %d load ticks: pose %016llx surfaces %016llx cores=%d factor=%.6f", report.load_ticks,
@@ -328,6 +355,15 @@ namespace bmmo::session {
         // The box starts where the session does: at the anchor the server
         // has to agree with, before the tick base is known.
         journal_.open(report.hash, report.build_id, report.own_name);
+        // Step T3 (design 2.4): every member's piece set and the own one, by
+        // player id, after the host's quiesce (its anchor work): the server
+        // built the same at add_player.
+        if (s.trafo_active_) {
+            std::set<uint32_t> members;
+            for (const auto& p: s.players_) members.insert(p.id);
+            members.insert(s.own_id_);
+            for (uint32_t player: members) ensure_trafo_set(player, "the anchor");
+        }
     }
 
     // Design 9.25 phase alignment: the world stands at the anchor until

@@ -36,6 +36,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 int ivp_srand_read();
@@ -887,8 +889,76 @@ namespace bmmo::physics {
             return std::string(text, end ? static_cast<size_t>(end - text) : size);
         }
 
+        // entity_lookup_scope_begin/_end: per thread, so a scope never
+        // serves another thread's lookups.  The table is open addressing
+        // over views of the entities' own names (no allocation per entity),
+        // built once a scope has looked up kScanLookups names by scanning: a
+        // capture of a few bodies scans, one of every member's trafo pieces
+        // pays one pass over the entities.
+        struct entity_lookup_scope {
+            static constexpr int kScanLookups = 12;
+            CKIpionManager* physics = nullptr;
+            int depth = 0;
+            int lookups = 0;
+            bool built = false;
+            std::vector<std::pair<std::string_view, CK3dEntity*>> slots;   // empty view: a free slot
+            static size_t hash(std::string_view s) {
+                uint64_t h = 1469598103934665603ull;
+                for (const char ch: s) {
+                    h ^= static_cast<unsigned char>(ch);
+                    h *= 1099511628211ull;
+                }
+                return static_cast<size_t>(h ^ (h >> 29));
+            }
+            // The first entity of a name stays (the scan's answer).
+            void add(std::string_view name, CK3dEntity* entity) {
+                const size_t mask = slots.size() - 1;
+                for (size_t i = hash(name) & mask;; i = (i + 1) & mask) {
+                    if (slots[i].first.empty()) {
+                        slots[i] = {name, entity};
+                        return;
+                    }
+                    if (slots[i].first == name) return;
+                }
+            }
+            CK3dEntity* find(std::string_view name) const {
+                const size_t mask = slots.size() - 1;
+                for (size_t i = hash(name) & mask;; i = (i + 1) & mask) {
+                    if (slots[i].first.empty()) return nullptr;
+                    if (slots[i].first == name) return slots[i].second;
+                }
+            }
+        };
+        entity_lookup_scope& lookup_scope() {
+            thread_local entity_lookup_scope scope;
+            return scope;
+        }
+
         CK3dEntity* find_entity(CKIpionManager* physics, const std::string& name) {
             if (!physics || !physics->m_Context || name.empty()) return nullptr;
+            entity_lookup_scope& scope = lookup_scope();
+            if (scope.depth > 0 && scope.physics == physics && ++scope.lookups > entity_lookup_scope::kScanLookups) {
+                if (!scope.built) {
+                    // The scan's order: every class derived from 3D entity
+                    // in class-id order, each class list in its order
+                    // (GetObjectListByType(derived) walks exactly that); the
+                    // first entity of a name wins, as the scan returns it.
+                    // An empty name never matches a lookup (find_entity
+                    // refuses one), so it is not entered.
+                    const XObjectPointerArray& all = physics->m_Context->GetObjectListByType(CKCID_3DENTITY, TRUE);
+                    size_t size = 16;
+                    while (size < 2 * static_cast<size_t>(all.Size()) + 2) size <<= 1;
+                    scope.slots.assign(size, {std::string_view(), nullptr});
+                    for (int i = 0; i < all.Size(); ++i) {
+                        CKObject* object = all[i];
+                        const char* object_name = object ? object->GetName() : nullptr;
+                        if (!object_name || !*object_name) continue;
+                        scope.add(std::string_view(object_name), static_cast<CK3dEntity*>(object));
+                    }
+                    scope.built = true;
+                }
+                return scope.find(std::string_view(name));
+            }
             // ParentClass: balls are CK3dObjects, frames plain CK3dEntities.
             return CK3dEntity::Cast(physics->m_Context->GetObjectByNameAndParentClass(
                 const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
@@ -1011,6 +1081,25 @@ namespace bmmo::physics {
             ++total;
         }
         return total;
+    }
+
+    void entity_lookup_scope_begin(CKIpionManager* physics) {
+        entity_lookup_scope& scope = lookup_scope();
+        if (scope.depth++ == 0) {
+            scope.physics = physics;
+            scope.lookups = 0;
+            scope.built = false;
+        }
+    }
+
+    void entity_lookup_scope_end(CKIpionManager* physics) {
+        entity_lookup_scope& scope = lookup_scope();
+        (void)physics;
+        if (scope.depth > 0 && --scope.depth == 0) {
+            scope.physics = nullptr;
+            scope.lookups = 0;
+            scope.built = false;
+        }
     }
 
     bool get_body_state(CKIpionManager* physics, const char* entity_name, body_state& out,

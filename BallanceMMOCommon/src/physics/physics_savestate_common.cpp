@@ -32,7 +32,7 @@ namespace bmmo::physics::savestate {
     // The live world
     // ------------------------------------------------------------------
 
-    bool index_live_world(CKIpionManager* physics, live_world& out, std::string& error) {
+    bool index_live_world(CKIpionManager* physics, live_world& out, std::string& error, bool names) {
         out = live_world{};
         error.clear();
         if (!physics) {
@@ -86,7 +86,9 @@ namespace bmmo::physics::savestate {
             out.objects.push_back(std::move(lo));
             return true;
         };
-        std::set<const IVP_Real_Object*> tabled;
+        ptr_index tabled;
+        tabled.reserve(static_cast<size_t>(physics->m_PhysicsObjects.Size()) + 8);
+        out.objects.reserve(static_cast<size_t>(physics->m_PhysicsObjects.Size()) + 8);
         for (auto it = physics->m_PhysicsObjects.Begin(); it != physics->m_PhysicsObjects.End(); ++it) {
             IVP_Real_Object* real = (*it).m_RealObject;
             if (!real) continue;
@@ -95,7 +97,7 @@ namespace bmmo::physics::savestate {
             CK3dEntity* entity = context ? CK3dEntity::Cast(context->GetObject(it.GetKey()))
                                          : static_cast<CK3dEntity*>(real->client_data);
             if (!add_object(real, entity)) return false;
-            tabled.insert(real);
+            tabled.emplace(real, 0);
         }
         // Objects IVP owns outside the manager's table: the environment's own
         // static object (every environment creates one - a ball with a core
@@ -113,9 +115,9 @@ namespace bmmo::physics::savestate {
                         continue;
                     }
                     IVP_Real_Object* real = o->to_real();
-                    if (!real || tabled.count(real)) continue;
+                    if (!real || tabled.find(real) >= 0) continue;
                     if (!add_object(real, nullptr)) return false;
-                    tabled.insert(real);
+                    tabled.emplace(real, 0);
                 }
             }
         }
@@ -125,17 +127,18 @@ namespace bmmo::physics::savestate {
         std::sort(out.objects.begin(), out.objects.end(), [](const live_object& a, const live_object& b) {
             return a.name != b.name ? a.name < b.name : a.entity_id < b.entity_id;
         });
+        out.by_object.reserve(out.objects.size());
         for (size_t i = 0; i < out.objects.size(); ++i) {
             const live_object& lo = out.objects[i];
             if (i > 0 && out.objects[i - 1].name == lo.name && out.objects[i - 1].entity_id == lo.entity_id) {
                 error = "two bodies named '" + lo.name + "' share entity id " + std::to_string(lo.entity_id);
                 return false;
             }
-            if (!out.by_object.emplace(lo.object, static_cast<int32_t>(i)).second) {
+            if (!out.by_object.emplace(lo.object, static_cast<int32_t>(i))) {
                 error = "object '" + lo.name + "' is listed twice in the physics table";
                 return false;
             }
-            out.by_name.emplace(lo.name, static_cast<int32_t>(i));
+            if (names) out.by_name.emplace(lo.name, static_cast<int32_t>(i));
         }
         return true;
     }
@@ -243,30 +246,33 @@ namespace bmmo::physics::savestate {
 
         // Every overload lives in this namespace, next to out_io/in_io, so
         // the dependent calls inside the templates find them all by ADL.
+        // Declared inline: the x64 build is RelWithDebInfo (/Ob1), which
+        // inlines only what says so, and a blob with every member's trafo
+        // pieces is tens of thousands of these calls (step TR3).
         template <class IO, class T>
-        typename std::enable_if<std::is_arithmetic<T>::value>::type io(IO& s, T& x) { s.v(x); }
+        inline typename std::enable_if<std::is_arithmetic<T>::value>::type io(IO& s, T& x) { s.v(x); }
         template <class IO>
-        void io(IO& s, std::string& x) { s.v(x); }
+        inline void io(IO& s, std::string& x) { s.v(x); }
         template <class IO, class T, size_t N>
-        void io(IO& s, T (&a)[N]) {
+        inline void io(IO& s, T (&a)[N]) {
             for (size_t i = 0; i < N; ++i) io(s, a[i]);
         }
         template <class IO, class T>
-        void io(IO& s, std::vector<T>& v) {
+        inline void io(IO& s, std::vector<T>& v) {
             const uint32_t n = s.count(v.size());
             if constexpr (IO::reading) v.assign(n, T());
             for (size_t i = 0; i < v.size(); ++i) io(s, v[i]);
         }
 
         template <class IO>
-        void io(IO& s, edge_ref& e) {
+        inline void io(IO& s, edge_ref& e) {
             io(s, e.object);
             io(s, e.offset);
             io(s, e.status);
         }
 
         template <class IO>
-        void io(IO& s, controller_ref& c) {
+        inline void io(IO& s, controller_ref& c) {
             io(s, c.kind);
             io(s, c.system);
             io(s, c.part);
@@ -275,7 +281,7 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, core_record& c) {
+        inline void io(IO& s, core_record& c) {
             io(s, c.movement_state);
             io(s, c.temporarily_unmovable);
             io(s, c.pinned);
@@ -305,7 +311,7 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, hull_entry& h) {
+        inline void io(IO& s, hull_entry& h) {
             io(s, h.kind);
             io(s, h.collision);
             io(s, h.side);
@@ -313,7 +319,7 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, object_record& o) {
+        inline void io(IO& s, object_record& o) {
             io(s, o.name);
             io(s, o.entity_id);
             io(s, o.type);
@@ -343,7 +349,7 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, collision_record& c) {
+        inline void io(IO& s, collision_record& c) {
             io(s, c.kind);
             io(s, c.parent);
             io(s, c.objects);
@@ -371,7 +377,7 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, contact_record& c) {
+        inline void io(IO& s, contact_record& c) {
             io(s, c.synapse);
             io(s, c.system);
             io(s, c.gap);
@@ -392,7 +398,7 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, pair_record& p) {
+        inline void io(IO& s, pair_record& p) {
             io(s, p.objects);
             io(s, p.next_ease);
             io(s, p.last_impact_time);
@@ -401,13 +407,13 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, friction_info_record& f) {
+        inline void io(IO& s, friction_info_record& f) {
             io(s, f.object);
             io(s, f.springs);
         }
 
         template <class IO>
-        void io(IO& s, friction_system_record& f) {
+        inline void io(IO& s, friction_system_record& f) {
             io(s, f.cores);
             io(s, f.movable_cores);
             io(s, f.dists);
@@ -421,7 +427,7 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, unit_record& u) {
+        inline void io(IO& s, unit_record& u) {
             io(s, u.cores);
             io(s, u.movement_type);
             io(s, u.union_find_needed);
@@ -433,13 +439,13 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, event_record& e) {
+        inline void io(IO& s, event_record& e) {
             io(s, e.collision);
             io(s, e.value);
         }
 
         template <class IO>
-        void io(IO& s, ov_node_record& n) {
+        inline void io(IO& s, ov_node_record& n) {
             io(s, n.x);
             io(s, n.y);
             io(s, n.z);
@@ -451,7 +457,7 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, cache_slot_record& c) {
+        inline void io(IO& s, cache_slot_record& c) {
             io(s, c.object);
             io(s, c.fresh);
             io(s, c.q);
@@ -460,14 +466,14 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
-        void io(IO& s, callback_record& c) {
+        inline void io(IO& s, callback_record& c) {
             io(s, c.slot);
             io(s, c.behavior);
             io(s, c.type);
         }
 
         template <class IO>
-        void io(IO& s, world_record& w) {
+        inline void io(IO& s, world_record& w) {
             io(s, w.environment_id);
             io(s, w.current_time);
             io(s, w.time_of_last_psi);
@@ -1164,7 +1170,28 @@ namespace bmmo::physics::savestate {
     }
 }
 
+namespace bmmo::physics::savestate {
+    namespace {
+        std::map<const CKIpionManager*, controller_alias>& controller_aliases() {
+            static std::map<const CKIpionManager*, controller_alias> aliases;
+            return aliases;
+        }
+    }
+
+    const controller_alias* controller_alias_for(const CKIpionManager* physics) {
+        const auto& aliases = controller_aliases();
+        if (aliases.empty()) return nullptr;
+        const auto it = aliases.find(physics);
+        return it == aliases.end() ? nullptr : &it->second;
+    }
+}
+
 namespace bmmo::physics {
+
+    void set_controller_alias(CKIpionManager* physics, std::function<bool(const char* name, std::string& alias)> alias) {
+        if (alias) savestate::controller_aliases()[physics] = std::move(alias);
+        else savestate::controller_aliases().erase(physics);
+    }
 
     bool get_savestate(CKIpionManager* physics, std::vector<uint8_t>& out, std::string& error, savestate_report* report) {
         error.clear();
@@ -1174,8 +1201,13 @@ namespace bmmo::physics {
             if (error.empty()) error = "savestate capture failed";
             return false;
         }
-        savestate::writer w;
+        // Sized by the last blob of this thread: the next one is about as
+        // large (and grows by doubling when not).
+        thread_local size_t last_size = 0;
+        savestate::writer w(last_size + last_size / 8);
         savestate::write_world(w, world);
+        w.finish();
+        last_size = w.size();
         out.swap(w.bytes);
         return true;
     }

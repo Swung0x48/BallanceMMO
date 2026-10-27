@@ -4,10 +4,18 @@ Status: design (track 2 of the post-audit designs), revision 2 after two
 reviews (§10); step T1 built (host support, bridge v21, SimTool; no wire:
 §8, "As built (step T1)"); step T2 built (wire and server, protocol 11 /
 journal v5, the world option off by default: §8, "As built (step TR2 =
-T2)"), T3-T5 not (T3 implemented on the parked branch
-`wip/trafo-t3-merged`; it waits for the rewind-cost step RC1,
-`rewind-cost-design.md`, by the user's decision of 2026-10-25, §11, and is
-then re-gated under its original H1 (c) at TR3b). It implements the user's decision of 2026-10-23
+T2)"); step T3 built and committed (core and headless host: §8, "As
+built (step TR3 = T3)", its fix-up round, its merge round and "As built
+(step TR3b)"; judged with snapshots off by the user's decision of
+2026-10-25, §11: H4 and H6, the CPU gate with snapshots at interval 2,
+moved to the rewind-cost optimization, `docs/roadmap.md` §4 item 10; the
+server's `physics.trafo_inputs` stays off, past T4 until that
+optimization's close-out). T3 waited for the rewind-cost step RC1
+(`rewind-cost-design.md`, the hold-last re-prediction) by the user's
+decision of 2026-10-25 and was re-gated at TR3b on top of RC1 and RL1
+under its original H1 (c): one H1 pair at 150 ms, snapshots off (the
+user's one-pair rule of 2026-10-27, §11), starved 0 / 0 / 0 / 0 against
+the same-batch control's 0 / 0 / 0 / 0. T4-T5 not. It implements the user's decision of 2026-10-23
 on audit item #2 (and #11): option (b), the trafo becomes a replicated input
 and its explosion, wind and reset run in every world for every player's trafo,
 identically.
@@ -795,7 +803,10 @@ take today's path.
   leavers are retired (2.4), so the count is bounded by the members present
   plus those retired within the last ~2 × 96 ticks.
 - **Gate.** The deployed snapshot interval 2 is at the CPU edge, so CPU is a gate
-  (§7.3 H6), not a remark.
+  (§7.3 H6), not a remark.  Since the user's decision of 2026-10-25 (§11)
+  that gate (H4, H6) belongs to its own step, the rewind-cost optimization
+  (`docs/roadmap.md` §4 item 10), with T3's snapshots-off CPU numbers as
+  its baseline; T3 is judged with snapshots off.
 - **If capture dominates.** Open question 9.4 has a compact encoding for
   dormant scripts.
 
@@ -1229,9 +1240,9 @@ style).
 | H2 staggered | 4 clients onto P_Trafo_Wood / Paper / Stone at ticks 650/900/1150/1400 (a per-client `--beam-ticks` option), so explosions overlap resets and one same-type repeat happens within 20 s | as H1 |
 | H3 loss | H1 at `--latency-ms 150` and 10 % loss | (a) from the first checkpoint after each arrival; every late Trafo event made inside a rewind (log `inrew` naming trafo), 0 applied at the live tick |
 | H3b blackout past the history | H2 with client 2 `BMMO_FAKE_LAG_MS` downlink blackout of 300 ticks starting 20 ticks before another player's paper explosion, and one before a reset | client 2 logs `trafo_missed` > 0 followed by a resync; after the resync's re-step every piece row of client 2 is bit-equal to the server's at every checkpoint, or, where not, the residual is reported per body against the rows-only class (4.7) with its numbers; the missed reset's pieces and wind are gone at the server's tick |
-| H4 snapshots on | H1 with snapshots 2/66 | 0 snapshot corrections naming a piece; mism counts at or below P's band (`p3_h4_new*`) |
+| H4 snapshots on | H1 with snapshots 2/66 | 0 snapshot corrections naming a piece; mism counts at or below P's band (`p3_h4_new*`). **Moved (user, 2026-10-25, §11): the gate of the rewind-cost optimization (`docs/roadmap.md` §4 item 10), not of T3** |
 | H5 forced rollbacks | `savestate_check.py --journals` pairs 13:24, 50:12, 97:24, 131:47 over a trafo run (snapshots off) | every body exact, all players' pieces included (step P's open (2) extended to every set); no "PreSimulate queue differs" |
-| H6 CPU | H1 at 150 ms, interval 2, against the same batch without trafos (`--beam-bays` to non-trafo bays) | server tick p99 within the budget (15.15 ms) and within the control's run-to-run band + 10 %; client `t_rest/t_rep/t_cap` within the band + 10 %; starved within the band |
+| H6 CPU | H1 at 150 ms, interval 2, against the same batch without trafos (`--beam-bays` to non-trafo bays) | server tick p99 within the budget (15.15 ms) and within the control's run-to-run band + 10 %; client `t_rest/t_rep/t_cap` within the band + 10 %; starved within the band. **Moved (user, 2026-10-25, §11): the gate of the rewind-cost optimization (`docs/roadmap.md` §4 item 10), not of T3; T3 records the same figures with snapshots off as that step's baseline** |
 | H7 late join | the `lp1_join` recipe with client 3 joining 5 s after two members' paper trafos | the join's reconcile remakes both paper type sets; after the join's re-step client 3's pieces equal the server's rows at every checkpoint (or the rows-only residual, reported as in H3b); wind controllers present (savestate describe) |
 | H8 leaver | (a) a client with live paper pieces leaves; (b) a client leaves between its dephysic and its new ball's Physicalize (no ball; `--leave-at` at dephysic + 50); (c) a client leaves right after an explosion stamped ahead | every remaining world and the server remove that set's bodies at the final reset's R+132; no piece row of that player afterwards; the set is retired in every world (deselect logged, destroy logged `history_ticks` later); H8 (c): the explosion runs everywhere before its final reset |
 | H9 hash | 1 client, trafo, snapshots off, no rollbacks (`--no-rollback` control) | client TICK hash equal to the server's on every tick 600-1500 (today 808-1041 differ) |
@@ -1268,7 +1279,7 @@ style).
 | **T0** prerequisites | step P closed (its open headless trafo arm exact); F3 landed (resync and join re-step with the portable script record); F4 recommended (late Sector rewind); the protocol number agreed with F3 and option B. R3 is **not** a prerequisite: the trafo inputs ride the input-rewind path (4.6) | step P's own gate; F3's gate |
 | **T1** host support + bridge, no wire | `game/trafo_sets.hpp` (quiesce, builder, invariants I0-I7, hold and effect checks, `run_trafo`, trafo list, unmake/remake, retirement); `session/trafo_input.hpp` (seed, ledger, input log); bridge v20 (registry, per-set restore, seed, exemption rebuild, filter rule); SimTool modes; record v3 in SRP | 7.1 (ledger, seed, log, record v3), S0-S9, S11-S13; S8's outcome decides 9.2 before T3 starts |
 | **T2** wire and server | event type, payload, flags, key, rank, caps, world option, acceptance through the ledger, validation, deadline, leaver resets, journal v4; PW sets at `add_player`, anchor quiesce, `apply_event` Trafo, trafo frame in `tick`, server hold, the ledger in the resync and join state; the sets' scripts in the portable script record (its version bump with this protocol: T1 kept it at 1) | 7.1 (messages, acceptance, validation), S10 on synthetic journals, `kTrafoReach` set from the trafo positions of the existing R2 and `p3_h4` logs (9.3) |
-| **T3** core + headless host | `hold_trafo` and its pre-assignment deferral, the input log, live and replayed application, the trafo rewind and the missed-input resync, MOVED/REJECTED/SUPERSEDED echoes, `make_trafo_set` on first sight, reconcile, retirement, journal records; SC platform ops; remove step P's trafo `activations` and referential override; `explosion_pieces` over every set | 7.1 (core), H1-H11 |
+| **T3** core + headless host | `hold_trafo` and its pre-assignment deferral, the input log, live and replayed application, the trafo rewind and the missed-input resync, MOVED/REJECTED/SUPERSEDED echoes, `make_trafo_set` on first sight, reconcile, retirement, journal records; SC platform ops; remove step P's trafo `activations` and referential override; `explosion_pieces` over every set | 7.1 (core), H1-H3, H3b, H5, H7-H11, judged with snapshots off (user, 2026-10-25, §11); H4 and H6 moved to the rewind-cost optimization (`docs/roadmap.md` §4 item 10), T3 records its snapshots-off CPU numbers as that step's baseline; re-gated at TR3b after the rewind-cost step RC1 with one H1 pair at 150 ms (the one-pair rule, §11), the rest of the row deferred to the final verification |
 | **T4** retail host | CH platform ops through `game/trafo_sets.hpp` and `physics_view` hooks, the `trafo_host` file-scope static, the quiesce at `core_host_anchor`, the hold in `post_step`, session-end teardown | R1-R5 |
 | **T5** records | `docs/engine-changes.md` bridge note (v20, no engine change); session-client-core design "As built (step T)"; collision-overhaul-design 9.x entry; this document's status | review only |
 
@@ -1826,6 +1837,840 @@ session runs as before.
     behind the option or keyed to the Trafo type; the SessionStart seed is
     the same 1).
 
+**As built (step TR3 = T3, 2026-10-25; HEAD 074f6d5 + the working tree, not
+committed: the CPU gate below stops the step).**  The core and the headless
+host run the trafo as an input; the retail host (T4) does not declare the
+capability yet, so a retail core-on client is refused by a server with the
+option and runs the step P path without it.
+
+- **Where.**  `session/client_platform.hpp`: the capability
+  `session_capabilities::trafo_inputs` and its operations `poll_trafo` (the
+  hold's reports and the effect checks), `make_trafo_set` (`ensure_trafo_set`),
+  `run_trafo`, `trafo_final`, `trafo_frame`, `trafo_type_set` and
+  `trafo_reconcile` (the reconcile's view and halves), `retire_trafo_sets`
+  (returns the deselected players); `missing_platform_operation` requires
+  them with the capability.  `session/client_core.hpp` state (`trafo_log_`,
+  `trafo_sets_`, `trafo_pending_`, `input_rewind_trafo_`, the counters) and
+  `src/session/client_core_trafo.cpp` (new): `ensure_trafo_set` (first
+  sight), `hold_trafo` / `hold_pending_trafo` / `poll_own_trafo` (stamp
+  `tick + 1 + lead`, under option E the Delayer's prediction when it is not
+  earlier than that, before the assignment on the first assigned frame at
+  `tick + lead`), `on_trafo_event` (remote and server-stamped inputs logged
+  at their applied tick, late ones rewound), `trafo_rewind` (the frame's
+  input rewind; past the history or the reach `trafo_missed` and a resync;
+  before a pending exact resync's anchor or the numbering's base: the
+  state's), `apply_trafo_inputs` (live in `pre_step` after the held
+  lifecycle and before the union pass, the trafo frame after the pass; in
+  every replayed tick from `before_replayed_tick`; a `TRAFO_FINAL` input
+  marks its type set final), `process_trafo_echo` (MOVED re-keyed with the
+  applied tick's seed and rewound from the earlier tick; REJECTED /
+  SUPERSEDED dropped and rewound from the origin; a server-stamped reset of
+  the own set is an input, not an echo), `reconcile_trafo`, `retire_trafo`
+  (retirement and the log's pruning after the live frame).  SessionReady
+  declares `CAP_TRAFO_INPUTS` with the capability; `begin` turns the inputs on
+  for `WORLD_TRAFO_INPUTS` and the capability; `anchor` builds every member's
+  set and the own one.  The status line gains a `trafo:` section in such a
+  session only (`trafo_missed=`, `trafo_original_leaks=`, ...).  The
+  journal's RESYNC record gains a trailing trafo section (the ledger entry and
+  the reconcile's action per type set, `JOURNAL_TRAFO_*`), written only with
+  the inputs on; `journal.hpp` and `scripts/journal_trace.py` read it.
+  `session/rollback.hpp`: `resync_spec::gone`.  `game/trafo_sets.hpp`:
+  `add_trafo_set_pieces`; `trafo_set_inert` (below).
+  `game/session_host_support.hpp`: `localize_session_scripts` passes the
+  trafo part.  Headless host (`sim/session_client.cpp`): the registry, the
+  hooks (`sim/trafo_hooks.hpp`), the hold and the operations; the level
+  reference captured while the level loads; the anchor's quiesce, hold and
+  piece filter; the selection without the originals and the binding's trafo
+  part with the option; teardown at the session's end.
+- **Adaptations** (no principle touched):
+  - **The reconcile runs before the resync's restore, on the live world**
+    (design 4.7 runs it inside the resync after the anchor's restore).  The
+    row mapping needs every body the server's rows name, so the core builds
+    the ledger's sets first, leaves the ledger's piece rows out of the wait,
+    makes every type set what the ledger says (unmake when this world has
+    bodies the server does not, or another generation; remake with the
+    ledger's position and seed, muted, the births logged at S by the host),
+    then maps the piece rows by name; `resync_spec::gone` carries every piece
+    of a type set the server has no bodies for, so the restore plans nothing
+    for it and does not revive it.  "This world's generation" is its newest
+    explosion applied by now and whether every piece has its body.
+  - **Step P's trafo activations and referential override stay for a session
+    without the option** (the legacy retail path, a core host without the
+    capability, the default config until T4): with the option the originals
+    are not selected, so neither ever acts (comment in
+    `session_host_support.hpp`).  `explosion_pieces` over every set is the
+    host's `add_trafo_set_pieces` (for T4 too).
+  - **`trafo_set_inert` does not count the collision sound**: after a stone
+    and then a paper explosion of one set, `Ball_CollSound_Pieces`'s paper
+    branch Wave Player stays active for good in a null-sound world (server,
+    headless; SimTool L2 stone 300, paper 650, finals 1326: active at 1750),
+    so such a leaver's set never retired (found by H8 (a)); a real sound
+    manager (retail) ends the sound, so the decision also depended on the
+    world's sound device.  The server was rebuilt with it.
+  - `CAP_TRAFO_INPUTS` is declared whenever the host can, whatever the
+    world option.  A failed set build is logged and counted (`made=x/y`), not
+    fatal for the client.
+  - H5 is judged per arm against that session's own server journal (each
+    solo session's player has another id, so its seeds and its pieces differ
+    from the control's); the non-piece bodies against the control as before.
+  - Harness switches (headless): `--no-trafo-cap` (H10), `--trafo-no-resets`
+    (H11), `--leave-at`, `--leave-after-unphys D`, `--leave-after-trafo D`
+    (H8), `--beam2` (a paper ball onto a wood trafo), `--ignore-snapshots`
+    (snapshots truly off, below), `--hold-event trafo:...`.  Tools:
+    `worst_bodies.py --trafo-by-type`, `first_divergence.worlds(trafo_by_type)`,
+    `savestate_check.py` keys pieces by type, `arch_server_lp.sh` eighth
+    argument `trafo_inputs`.  The headless clients announce slot 13's
+    original hash, so the Arch server for headless runs is built without the
+    slot-13 hack (the hack is for retail runs).
+- **Checks** (x64 `build-agent-rTR3`, Arch server rebuilt from the tree; runs
+  `maps/arena-test/tr3_*`, helpers `.local-tools/work/tr3/`):
+  - 7.1: **503 tests pass** (494 + 9: the capability and its operations, sets
+    at the anchor and on first sight never in a replay, the hold's stamps and
+    deferral with option E, live and replayed application of a late input
+    with the retail switches, an input past the history asks for a resync,
+    MOVED / REJECTED / SUPERSEDED / acked echoes and a server-stamped own
+    reset, the reconcile's table (equal, extra, different, missing, a
+    never-seen player, a final), retirement and the frame order).  GCC 28 ok.
+    x64 BUILD-OK, x86 CLIENT-BUILD-OK (client objects deleted first),
+    ARCH-BUILD-OK; map.hpp untouched.
+  - The option off (the BAR): solo snapshots-off `e0_solo.sh rTR3` IDENTICAL
+    to `rTR2` (2330 TICK hash + pose common, 0 differ; LOCAL 1165/1165),
+    server 2413/2413.  `core_ref_r3` (protocol 10) is refused by both builds;
+    `core_ref_t3` re-captured with the option on: 24/24 sends SAME, 24/24
+    journals IDENTICAL, BYTE-IDENTICAL-EXCEPT-BUILD-ID 24 pairs (its README).
+  - **H1, 0 ms** (`tr3_H1_0`): verdict PASS, resyncs and rebases 0, late 0,
+    `trafo_missed` 0, leaks 0, every client holds all four sets' bodies (body
+    sets equal at every checkpoint).  Pieces 72-111 of 150 bit-equal; the
+    others drift after snapshot rollbacks (R2): c0 and c1 both roll back at
+    1910/1911 (a mirror 1.95 m off) and Paper piece13 is off from 1926 on all
+    four clients alike, up to 24 m under the wind.  **With
+    `--ignore-snapshots`** (`tr3_h1_0i`): **150/150 pieces bit-equal on all
+    four for the whole run**.
+  - **H1, 150 ms** (`tr3_H1_150`): **FAIL (R1)**: every client rebases once
+    (1223-1252) and resyncs; starved 356-451.  After each apply the pieces are
+    bit-equal (`tr3_h1_150i`, snapshots ignored: 168/168 on all four from the
+    apply on; the drift is inside the window before the apply).
+  - H2 (`tr3_H2`, beams 650/900/1150/1400 onto wood / paper / stone / wood):
+    PASS, 0 resyncs; pieces 78-81 of 83 bit-equal, Stone piece03 0.035 m from
+    1270 on all four after the snapshot rollback at 1151 (R2).  No same-player
+    same-type repeat within 20 s happened.
+  - H3 (`tr3_H3`, 10 % loss): rebase and resync on all four (R1); late 0,
+    missed 0.
+  - H3b (`tr3_H3b`): client 2 `trafo_missed` 2 (the explosion at 1059 arrived
+    at 1121, the reset at 2006 at 2281), two resyncs; the reconcile remade
+    (S 1148, Stone of 3952298754) and unmade (S 2303, 17 bodies the server no
+    longer had); after each re-step 50/50 and 33/33 pieces bit-equal; the
+    missed reset's pieces stood in the window (2138, 2280] and were gone
+    after the apply; the other clients 50/50 bit-equal throughout.
+  - H4 (`tr3_H4`, snapshots 2/66, 150 ms): rebases 2-4, resyncs 1-4,
+    unmatched 74-632 (R1); piece corrections 1, 1, 0, 0; mism 17-67.
+  - H5 (`tr3_h5`): control plus 13:24 (103 forced), 50:12 (28), 97:24 (14),
+    131:47 (10): **every piece 33/33 bit-equal to its session's server
+    journal in all five, no "PreSimulate queue differs"**; the non-pieces
+    equal the control but P_Modul_01_Pusher 0.0866 m from 656 in 131:47 (R4).
+  - H6 (`tr3_H1_150` against `tr3_H6_ctl`, the same recipe and binary with
+    the option off): t_cap 3.43-3.62 s vs 1.30-1.37 s, t_rep 5.5-7.6 s vs
+    2.3-3.5 s, t_max 98-132 vs 43-64 ms, starved 356-451 vs 0-3 (R1).  The
+    server's tick p99 was not measured (no per-tick timing line in this
+    configuration).
+  - H7 (`tr3_H7`, two paper trafos at 1159 / 1221, client 3 joins at 1550):
+    the join's reconcile remade 6 type sets (both paper ones, wind included);
+    after the join's re-step 102/102 pieces within **6.6e-7 m** (222 non-zero
+    body-ticks; R3); the members' own resyncs (R1) left their pieces exactly
+    equal.
+  - H8 (`tr3_H8b`): (a) a leaver with live stone and paper sets (left 1300,
+    finals 1834), (b) one without a ball (left 757, finals 1288), (c) one that
+    left at 853 after stamping its explosion for 919 (finals 1400): every set
+    deselected at the same tick on the server and the client (1421, 1533,
+    1967), destroyed at once on the server and 96 ticks later on the client
+    (1517, 1629, 2063); the last piece rows are R+131 (1532, 1966); (c)'s
+    explosion ran everywhere at 919.  (Before the inertness change (a)'s set
+    never retired.)
+  - H9 (`tr3_H9`, solo, `--no-rollback`): TICK records 600-1500 equal on 899
+    of 901 ticks; 651-652 differ by 1e-13 m on the own ball (the beam's
+    in-place write, not the trafo); the trafo's window (808-1500) is equal.
+  - H10 (`tr3_H10`): the member without `CAP_TRAFO_INPUTS` is refused ("no
+    CAP_TRAFO_INPUTS (caps 00000003) in a session with trafo inputs"),
+    SessionEnd with the reason; the option-off path is the solo check above.
+  - H11 (`tr3_H11`, `--trafo-no-resets`): the server's deadline resets at
+    2129, 2479, 2845 (explosion + 1320), queued at that tick - lead and
+    applied in both worlds, the owner's included; pieces gone at R+132 (2261,
+    2611) everywhere; 51/51 pieces bit-equal on both clients, the paper wind
+    included.
+- **Residuals** (each root-caused; R1 is this step's, so the step stops):
+  - **R1, CPU.**  Every world now simulates and records every set's pieces.
+    A record's cost grows with them: the IVP savestate blob (solo, 33 pieces:
+    80 -> 125 KB, 0.25 -> 0.55 ms per capture), the per-body getters (three
+    CK by-name lookups per body per capture: about 45 % of a capture at T3's
+    body counts in the 4-client run), and the 32 trafo scripts in every
+    record even when dormant (+10-15 % on the reference arms with no
+    explosion).  Every live tick captures twice (record and amend), every
+    replayed tick once.  After four stone trafos within ~1 s (68 awake
+    pieces) the 150 ms arms rewind every frame for ~1 s (input corrections
+    of the new balls, each ~17 ticks deep); at ~2.5 ms per replayed tick the
+    frame loop falls 33 ticks behind and the schedule rebases (the CPU cliff
+    of roadmap 4 item 8, which the option-off control does not reach).
+    Options: (a) cut the capture cost - the dormant-script encoding of 9.4,
+    one live capture per tick instead of record + amend, a name -> object
+    cache for the getters; (b) an incremental savestate (sleeping bodies'
+    state reused); (c) the CPU-cliff item first; (d) judge the 150 ms arms
+    with fewer simultaneous trafos.
+  - **R2, the snapshots-off configuration still snapshots.**
+    `snapshot_cadence::decide` sends a full snapshot on every body-set change
+    whatever the interval, and every explosion and De Physicalize is one in
+    every world now.  A pre-existing ball mismatch (the fan blowing only the
+    owner's paper ball, record-format design A4; mirrors at 150 ms) then
+    triggers a snapshot rollback that writes every row, the pieces' included,
+    losing what a row cannot carry; the pieces drift from there (the first
+    divergence of each client follows its first such rollback: c1 at 832 ->
+    836, c0 / c2 / c3 at 1203 -> 1208-1212 in a 0 ms run).  With the
+    snapshots dropped every piece stays bit-equal (H1 above).  Options: no
+    body-set full snapshot while snapshots are off; or a snapshot rollback
+    that writes only the mismatched rows (snapshot-path work, which the
+    roadmap defers to the stage close-out).
+  - **R3, a joiner's remade paper pieces, 6.6e-7 m.**  The travelling
+    savestate names force controllers `rt:force/<block id>` (engine change
+    #18), and block ids differ per world: the joiner's restore reports "no
+    live controller 'rt:force/54491'" and "live controller 'rt:force/52773'
+    is not in the savestate" for every remade wind controller, so the server's
+    controller state and order are not restored on the fresh cores.  Options:
+    a world-independent controller key (the portable record's block identity)
+    in the travelling restore.
+  - **R4 (pre-existing).**  H5 131:47's P_Modul_01_Pusher 0.0866 m from 656,
+    reproduced on rTR2 with the option off (`tr3_h5c`): the trafo's
+    Unphysicalize at 653 starts a new own life two ticks after the beam at
+    651, the beam's record is retired ("own beam stamped 651 retired ...
+    generation 1 -> 2"), so a 47-deep rewind replays without the beam and
+    the ball passes P_Modul_01's proximity.  Rollback-engine gaps (item 8).
+  - **R5 (pre-existing).**  The balls diverge from the server in these
+    recipes (the fan, mirrors at 150 ms), identically on rTR2.
+- **Not done:** T4 (retail), T5; the config default stays off.
+
+**As built (step TR3, fix-up round, 2026-10-25; still HEAD 074f6d5 + the
+working tree, not committed).**  The reviews' findings, each confirmed in
+the code; the implement round's verdicts above stand corrected here (H1 at
+0 ms and H2 failed their criterion (a): pieces 72-111 of 150 and 78-81 of 83
+bit-equal is not "every piece").
+
+- **CPU (R1).**  Profiled with an in-process sampler (the host has no admin
+  rights for ETW) and phase timers, H1 at 150 ms, client 0: a replayed tick
+  cost ~2.5 ms, of it ~0.06 ms the physics step and ~0.02 ms the scripts;
+  the rest was the record's capture (bodies 1.0 ms: three by-name scans of
+  every CK 3D entity per tracked body; blob 1.5 ms: capture 0.9 + the byte
+  writer 0.55; scripts 0.23) and the replay's blob diff (rendering two
+  ~170 KB blobs as text on every replay that corrected an input: a twelfth
+  of the frame time, for log lines past their cap).  Changes, none of which
+  changes a byte of any record or blob:
+  - `physics_state.hpp` `entity_lookup_scope_begin/_end` and
+    `rollback_world::capture_scope` (bound by `rollback_binding.hpp` for a
+    backend with `lookup_scope`, the headless `physics_direct`): inside a
+    record's capture the by-name lookups after the first 12 are served from
+    one pass over the 3D entities (open addressing over the entities' own
+    names; the first entity of a name in `GetObjectByNameAndParentClass`'s
+    scan order).  Checked live against the scan: 1.1-1.5 M lookups per
+    client, 0 different.  Retail (physics_view) does not bind it.
+  - The savestate capture (`physics_savestate_capture.cpp`,
+    `_common.cpp`, `_internal.hpp`): pointer tables (`ptr_index`, open
+    addressing) for the context's and the live index's `std::map`s, a
+    friction-handle table for `describe_controller` (it scanned every
+    system per controller), records moved instead of copied, error-context
+    strings built only on a failure, the index without its name multimap
+    for a capture, reserves sized by the thread's previous capture, the
+    byte writer through a write position (no vector insert per field) and
+    its `io` overloads declared inline (/Ob1).  Checked live by capturing
+    every blob twice, with the new code and with the original kept
+    alongside: 6000-8000 blobs per client on all four, 0 byte different.
+  - `script_replay::capture` reserves its record (the previous one's size).
+  - The replay's blob diff (`rollback_world::diff_savestate`, headless
+    diagnostic) runs only while its 8 log lines last
+    (`savestate_replay_mismatches` is read by nothing; now counted while
+    logged).
+  - One capture per live tick (`rollback_engine::record(..., capture_now)`):
+    the core's post_step records without capturing and its amend, which
+    re-captured the whole record anyway and before which nothing reads it,
+    captures once.  A host that reads the record in between (`after_record`,
+    the headless client's `--dump-savestate` / `--compare-scripts`, now
+    installed only with those switches) keeps the capture at the record.
+    `stats().captures_never_made` counts a deferred record no amend
+    captured (0 in every run).
+  - Per capture at the explosions' peak (~120 tracked bodies): 2.7 ms ->
+    0.9 ms (bodies 0.2, scripts 0.21, blob 0.5).
+- **Snapshots off still snapshotting (R2): fixed for the pieces.**
+  `rollback_world::row_on_breach_only`: the core marks every set's pieces
+  (`trafo_pieces_`, from `trafo_type_set` at the make, dropped at
+  retirement); such a body's snapshot row is compared like any row but is
+  a restore source only when it breaches (an awake row inside the
+  tolerance used to be written, and a row - pose and velocities, none of
+  the collision state - is what made exact pieces drift).  A breaching
+  piece is still restored from its row.  Rollback test
+  `AnInputDrivenBodyTakesItsAwakeRowOnlyOnABreach`.
+- **Retirement inside the rollback window (review 1 #3).**
+  `retire_trafo_sets` deselects a set only after it has been inert at every
+  check for `history` ticks (`trafo_set::inert` / `inert_since`; reset when
+  it is live again, and at a reselect), on the server and in every client
+  alike: a rewind can no longer anchor where a deselected set was live.  H8's
+  deselects move from R+133 to R+229 (1517, 1630, 2065).  This changes the
+  server's retirement (and the collision-sound rule of the implement round
+  already did), so server journals of T2 and of the implement round do not
+  replay on this server.
+- **The paper wind across worlds (R3).**  `physics_savestate.hpp`
+  `set_controller_alias`: per physics manager, a name the capture records a
+  controller under and the restore matches live controllers by.  The
+  registry keeps every set's force blocks in script and walk order
+  (`trafo_set::force_blocks`), and `trafo_controller_alias` maps
+  `rt:force/<block id>` to `trafo:<player>/<k>`, which every world gives
+  the same block.  The server's world (with the option) and the headless
+  client (at its trafo anchor; removed at the teardown) install it; T4 must
+  install it in the retail host.  Not an engine change (physics_RT still
+  names the controller after the block).
+- `caps.trafo_inputs` needs the script replay (`--no-script-replay` never
+  bound the sets' scripts into the replay); the replayed tick applies the
+  trafo inputs before the union's re-derivation, as the live tick does;
+  a destroyed set's pieces leave the headless client's `explosion_pieces_`.
+  The RESYNC record's trailing trafo section is read by "4 or more bytes
+  left": it has to stay that record's last field (5).
+- **Server step time.**  `session_runner` logs `step time over ticks a..b:
+  p50 / p99 / max` every 660 ticks (H6's server criterion; the TICK records'
+  wall-clock gaps measure the scheduler, not the step).
+- **Checks** (x64 `build-agent-rTR3f`, Arch server rebuilt from the tree;
+  runs `maps/arena-test/tr3g_*`, helpers `.local-tools/work/tr3fix/`;
+  pieces judged bit for bit - position, rotation, both velocities - against
+  the server journal's rows from the arrival of the event that made their
+  state, `pieces.py`):
+  - 7.1: 505 tests pass (503 + the two above).  GCC 28 ok.  x64 BUILD-OK,
+    x86 CLIENT-BUILD-OK (client objects deleted first), ARCH-BUILD-OK.
+  - The BAR, option off: the six arms captured with `build-agent-rTR2`
+    and the option off (`maps/arena-test/core_ref_t3off`), replayed with
+    rTR2 and with the fix build: 24/24 journals IDENTICAL, every send equal
+    but the SessionReady (59 bytes: the build id and the new
+    `CAP_TRAFO_INPUTS` bit, T3's declaration); solo snapshots-off: 2333
+    TICK hash + pose common with rTR2's, 0 differ (one earlier solo run
+    rebased at 2182 with no rewind in flight, a host stall, and is not
+    counted).
+  - H1, 0 ms: PASS, 0 resyncs / rebases, late 0, missed 0, leaks 0;
+    **pieces 132/132 bit-equal on all four**.
+  - H1, 150 ms: PASS, 0 resyncs / rebases, starved 0 / 16 / 15 / 0, t_max
+    42-55 ms; **pieces 150/150 bit-equal on all four**.  (Merge round
+    correction: (c) "starved within the control band" was not met - the
+    control starves 0; see the merge round below.)
+  - H2: PASS, pieces 83/83 on all four.  H3 (10 % loss): PASS, 0 resyncs /
+    rebases, pieces 132/132; no late Trafo event.  H3b: client 2 missed the
+    explosion at 1059 (arrived 1121) and the reset at 2006 (arrived 2281),
+    two resyncs (remade, unmade); after each re-step (1186-2280,
+    2342-end) its pieces 50/50 bit-equal; the others 50/50 throughout.
+  - H5 (control + 13:24, 50:12, 97:24, 131:47): every piece 33/33
+    bit-equal to its own session's server journal in all five, no
+    "PreSimulate queue differs"; the non-pieces equal the control but
+    P_Modul_01_Pusher 0.0866 m from 656 in 131:47 (R4, pre-existing).
+  - H7: the joiner's reconcile remade 6 type sets; from the re-step on
+    **102/102 pieces bit-equal on all four** (the 6.6e-7 m is gone), no
+    controller left unmatched.
+  - H8 (150 ms): the three leavers' sets deselected at the same tick on the
+    server and the client (1517, 1630, 2065), destroyed 96 ticks later on
+    the client; the last piece rows R+131 (1532, 1966).
+  - H9: TICK 600-1500 equal but 651-652 (the own ball 9.65e-14 m off after
+    the beam at 650); the same two ticks differ, with the same server
+    hashes, on rTR2 with the option off - pre-existing, the beam's.
+  - H11: deadlines at explosion + 1320 (2129, 2479, 2845), owner included;
+    pieces 51/51.
+  - **H4 (snapshots 2/66, 150 ms): FAIL.**  Two runs: resyncs on 3 and 4
+    clients, starved 68-167 and 154-942, t_max 62-80 ms, t_rest 0.56-1.6 s,
+    t_rep 3.3-5.7 s; pieces of the clients that did not resync bit-equal,
+    the resynced ones' from their apply.  The same recipe with the option
+    off, same binaries: PASS, starved 0, t_max 15-23 ms, t_rep 1.4-2.5 s.
+  - **H6: FAIL.**  The row's control (the H1 batch onto bay 3, no trafo at
+    all; snapshots at interval 2): t_cap 0.89-0.92 s, t_rep 0.5-1.4 s,
+    t_max 13 ms, starved 0, server step p99 2.3-3.8 ms.  The trafo arm (H4):
+    t_cap 1.46-1.56 s, t_rep 3.3-5.7 s, t_max 62-80 ms, server step p99
+    2.8-9.1 ms.  The server stays inside its budget (p99 <= 9.1 ms of 15.15)
+    but not within the control's band + 10 %, and no client figure is.
+- **Root cause of H4 / H6.**  Every world records, restores and replays
+  every member's pieces: a replayed tick costs 0.8-1.0 ms with four sets'
+  pieces against 0.35 ms without (the blob 85 -> ~170-200 KB, ~120 more
+  tracked bodies, their collisions in the restore), and with snapshots at
+  interval 2 a mismatch of a predicted remote ball rolls the whole world back
+  every few ticks; the peak rewind is 3-4 times the option-off one, and the
+  frame loop falls behind the schedule during the four explosions.  The
+  remaining capture (0.9 ms) and restore are the budget; the server's own
+  cost is T2's.  Options: (a) a cheaper record for bodies that did not move
+  (an incremental savestate: sleeping pieces' records reused) and the
+  dormant-script encoding of 9.4; (b) judge H4 / H6 with snapshots off, the
+  roadmap's primary configuration (H1 at 150 ms passes there - merge round
+  correction: its (c) starvation does not), with the
+  snapshot fallback's cost tracked by the snapshot-removal item - a change
+  of the gate, the user's to make; (c) a snapshot rollback that does not
+  re-step the trafo pieces when only a predicted ball breached (the pieces
+  are exact by their inputs) - an engine rule change with its own checks.
+
+**As built (step TR3, merge round, 2026-10-25; HEAD 49e2cc8 + the working
+tree).**  The user chose option (b) above (§11.1): T3 is judged with
+snapshots off, H4 / H6 move to the rewind-cost optimization
+(`docs/roadmap.md` §4 item 10).  The parked work (02bbcf6, branch
+`wip/trafo-t3`, the implement and fix-up rounds above on 074f6d5) was
+brought onto HEAD 49e2cc8 (S1, S2, S3, S9, EG0, K0 had landed since).
+
+- **The merge.**  `git cherry-pick -n 02bbcf6`: no conflict, the same 37
+  files and +2915/-175 as the parked commit.  The one file both sides
+  changed is `sim/physics_world.cpp`: S2's placement release and T3's
+  controller alias in the destructor, T3's alias install after
+  `load_composition` - separate hunks, both kept.  No code was changed
+  after the merge.
+- **A build-tree pitfall, not a code change.**  The x64 tree's
+  `BallanceMMOSessionClient.dir/.../session/client_journal.cpp.obj` had an
+  empty ninja dependency list (`ninja -t deps`: `#deps 0`, an object left by
+  an interrupted build), so T3's change of `client_core_state`
+  (`client_core.hpp`) did not rebuild it: the headless client wrote no
+  journal (the stale object read the platform at the old offsets) and every
+  capture replay stopped at the anchor ("expected a clock read at
+  run_report, the capture has one at journal_utc").  The object was deleted
+  and rebuilt; the x86 tree's `physics_rt_bridge.cpp.obj` and
+  `ball_navigation.cpp.obj` (physics_RT) had empty lists too and were
+  rebuilt.  `ninja -t deps | grep "#deps 0"` finds such objects.
+- **`physics.trafo_inputs` stays off** (`config_manager.hpp:89`, the server's
+  default).  2.14 and §5 refuse a member without `CAP_TRAFO_INPUTS` in a
+  session with the option, and the retail core host declares it only from
+  T4 (PSC never): with the option on now, every retail client would be
+  refused.  T4 turns the default on (T2's note); its R4 (core off) keeps the
+  option off as 7.4 says.
+- **Checks** (x64 `build-agent-rTR3`, x86 rebuilt, the Arch server rebuilt
+  from the merged tree, id `ballanced-3e4289e95f25+bmmo-49e2cc8e0253-dirty`;
+  runs `maps/arena-test/tr3m_*`, helpers `.local-tools/work/tr3/`
+  `live.sh`, `g.sh`, `h5.sh`, `ref_batch.sh`; pieces judged by
+  `tr3fix/pieces.py` as in the fix-up round):
+  - 7.1: **516 tests pass** (505 of the fix-up round + the 11 of S1-S3,
+    EG0, K0).  GCC 29 ok.  x64 BUILD-OK, x86 CLIENT-BUILD-OK (client objects
+    deleted first), ARCH-BUILD-OK; map.hpp untouched.
+  - The BAR, option off: `REF=core_ref_t3off wire_check.sh rK0 rTR3`: 24/24
+    journals IDENTICAL; every send equal but one per client, SessionReady
+    (59 bytes: the build id and the `CAP_TRAFO_INPUTS` bit).  Solo
+    snapshots-off against rTR2's `core_ref_t3off/solo/old1`: IDENTICAL (2394
+    TICK hash + pose common, 0 differ; LOCAL 1197/1197).
+  - **H1, 150 ms** (`tr3m_H1_150`, `tr3m_H1_150_b`): 0 resyncs, rebases,
+    far, unmatched, late; `trafo_missed` 0, leaks 0, 4 sets everywhere;
+    **pieces 150/150 and 168/168 bit-equal on all four**.  Starved 21 / 26 /
+    18 / 0 and 0 / 1 / 10 / 0: the first run's harness verdict fails on
+    client 1 (26 of 2211 ticks, its limit 1 %), the second passes.  Cause,
+    the same in both and in the fix-up round's run (15 / 16 / 15 / 0, the
+    same window): all four players' wood trafos fall within 1167-1216, each
+    new paper ball's frames correct the others' prediction every frame for
+    about a second (client 1: input rewinds of 14-30 ticks at 1202-1255) and
+    the body-set full snapshots add 4 snapshot rollbacks (R2), so the frame
+    loop falls behind and the server substitutes 18-26 own frames per client
+    in 1260-1380.  That is R1's CPU cost with snapshots off.  **H1 (c),
+    "starved within the control band", is therefore NOT met in any run**
+    (the fix-up round's 15 / 16 / 15 / 0 was scored a pass, wrongly): the
+    control starves 0 - the H6 control recipe (`tr3m_H6_ctl0`, below) and
+    the same H1 recipe with the option OFF on the same binaries and server
+    (`tr3m_H1_150_off`, gate round: verdict PASS, starved 0 / 0 / 0 / 0,
+    resyncs, rebases, far, unmatched 0, t_rep 1.13-1.63 s, t_max 17-19 ms,
+    t_cap 0.70-0.73 s, server step p99 2.2-3.6 ms).  The host was idle in
+    all of them (cpu_sampler: max total 10-11 %).  So the starvation is
+    T3's own (every world replaying every member's pieces), not
+    pre-existing, and decision (b) - which moved H4 / H6, the snapshots-on
+    arms, on the premise that every snapshots-off arm passed - does not
+    cover it.  **Open, the user's ruling** (T3 is not committed until it is
+    made): (i) extend (b) to H1 (c) at 150 ms, which then becomes a close
+    criterion of the rewind-cost optimization (roadmap §4 item 10);
+    (ii) keep it as T3's gate and do (part of) the rewind-cost work before
+    T3 closes; (iii) another control for H1 - not available: the
+    option-off arm of the same recipe starves 0 as well.
+  - H3b (`tr3m_H3b`): client 2 `trafo_missed` 2 (the explosion at 1059
+    arrived at 1122, the reset at 2006 at 2283), two resyncs: S 1149 -> 1187
+    (remade Stone of 1389791795), S 2306 -> 2342 (unmade the 17 bodies the
+    server no longer had); after each re-step (rows from 1188 and from 2343;
+    the rows at 1187 and 2342 are the live frame's before the apply) its
+    pieces 50/50 bit-equal; the others 50/50 throughout; the missed reset's
+    pieces stood until the apply and were gone after it.
+  - H5 (`tr3m_h5`, two invocations of `savestate_check.py --journals`, each
+    with its control; server option on, snapshots off): control and 13:24
+    (108 forced), 50:12 (26), 97:24 (14), 131:47 (10): **every piece 33/33
+    bit-equal to its own session's server journal**, 0 "PreSimulate queue
+    differs"; the non-pieces equal the control but P_Modul_01_Pusher 0.0866
+    m from 656 in 131:47 (R4, pre-existing, as before).
+  - H7 (`tr3m_H7`): the joiner's reconcile remade 6 type sets (S 1690 ->
+    1727); **102/102 pieces bit-equal on all four** from the re-step on; no
+    controller left unmatched (restore warnings 1, as in the fix-up round).
+  - Not rerun (no merged file on their path: of HEAD's changes since
+    074f6d5 only the server world's sector placement code reaches a live
+    run - its signature at the anchor and its release, the placement itself
+    off by default - and the headless client is T3's code alone):
+    H1 at 0 ms, H2, H3, H8, H9, H10, H11; their fix-up round results stand.
+    No retail run (quick tier): the shared savestate changes (the controller
+    alias hook, `ptr_index`, `index_live_world(..., names)`) are compiled
+    into the x86 mod, so the core-off BAR rests on the parked rounds'
+    evidence; the alias is empty unless installed and only the headless
+    world installs it.
+  - **The CPU baseline for the rewind-cost optimization** (snapshots off,
+    150 ms, 4 clients, totals per client over the 40 s run): H1 (two runs)
+    t_cap 1.45-1.70 s, t_rep 2.7-3.9 s, t_rest 0.39-0.55 s, t_max 44-62
+    ms, starved 0-26; the server's step p99 per 660 ticks 3.4-4.9 ms (max
+    17.9 ms).  The H6 control recipe with snapshots off (`tr3m_H6_ctl0`,
+    the same batch onto bay 3, no trafo, the option on): t_cap 0.95-0.99 s,
+    t_rep 0.38-1.37 s, t_rest 0.02-0.10 s, t_max 13-16 ms, starved 0; server
+    step p99 3.0-4.9 ms.  The server's step is within the control's band;
+    the clients' rewind cost is 2-4 times it.
+  - **`core_ref_t3` re-captured** with these binaries and the option on: the
+    six arms of `core_ref_r3`, H1 at 150 ms as a seventh (`h1_150/`) and the
+    solo pair; 28/28 sends SAME and journals IDENTICAL against the live runs,
+    `BYTE-IDENTICAL-EXCEPT-BUILD-ID: 28 pairs`, every server journal replays
+    matched with 0 checkpoint mismatches, solo old1 / old2 IDENTICAL (its
+    README).  `wire_check.sh` replays the seven arms by default
+    (`REF=core_ref_t3off` keeps six).
+- **Not done:** T4 (retail; it also installs the controller alias and
+  turns `physics.trafo_inputs` on), T5; the rewind-cost optimization.
+
+**The rewind-cost profile (2026-10-25, step CPUPROF; HEAD 49e2cc8 + the TR3
+working tree, nothing changed in it).**  Where a frame's time goes when a
+client falls behind, measured, for the rewind-cost optimization (roadmap §4
+item 10) and item 8's CPU cliff.  A measurement only: no behaviour, record,
+wire or engine change.
+
+- **Method.**  A temporary diagnostic build (`build-agent-rCPUPROFd`, kept
+  as the evidence this block cites; the sources restored afterwards, `git diff --quiet` holds; the patch is
+  `.local-tools/work/CPUPROF/patch_diag.py` + `edit3.py`, the timers
+  `cpuprof_diag.hpp`), off unless `BMMO_CPUPROF` names a directory, then one
+  line per frame, per rewind and per input correction.  Steady-clock timers
+  around: `restore_and_replay` (the restore up to `replay_begins`, the
+  replay after it: every input rewind, lifecycle rewind, snapshot rollback
+  and resync goes through it; whether it ran inside `frame()` or in message
+  handling), and around the headless world's hooks, outermost
+  (`session_client.cpp`'s world builder): `step` (the IVP step of a replayed
+  tick, `CKIpionManager::Simulate`), `pre_step` split into the core's
+  `before_replayed_tick` (the birth remakes, the trafo inputs, the
+  activation) and the scripts' frame (`execute_frame`), `recreate_body` /
+  `destroy_body`, `set_savestate` / `set_travelling_savestate` (the restore's
+  blob), `restore_scripts`, the record's capture (`capture_scope` brackets
+  `rollback_engine::capture`) split into its blob (`get_savestate`), its
+  script record (`capture_scripts`) and the per-body reads (the rest).  The
+  live tick's IVP is the physics manager's `CKBaseManager::m_ProcessingTime`
+  after the frame (CK2 `CKContext::ExecuteManagersPostProcess`,
+  CKContext.cpp:1227-1236, times `CKIpionManager::PostProcess`, which is
+  `Simulate`, CKIpionManager.cpp:306-308): no engine change.  Body counts
+  (movable bodies, awake / asleep, and the trafo pieces among them by their
+  `_Trafo` suffix) from `list_bodies` after each frame (10-13 us, reported
+  and left out of the attribution).  `note_input_correction` logs what each
+  disagreeing relayed frame disagreed on.  **Identity:** the diagnostic build
+  with the profile ON replays the 28 captures of `core_ref_t3` with every send
+  SAME and 28/28 journals IDENTICAL (`wire_check.sh - rCPUPROFd`: ALL SAME).
+  Tools: `.local-tools/work/CPUPROF/` `live.sh` (one arm under the cpu
+  sampler), `prof.py` (table / summary / rewinds / corr), `fit.py` (cost per
+  awake and sleeping body), `ceil.py` (the per-rewind candidates'
+  ceilings), `stale_tail.py` (the hold-last ceiling and the snapshot
+  rollbacks' share), `reasons.py` (rewinds by cause); the tables and
+  summaries in its `out/`.  **Bases:** every ceiling is given as a share of
+  the window's frames with a rewind ("behind frames"), the share of the
+  whole window's busy time in brackets.
+- **Runs** (snapshots off, `arch_server_lp.sh ... 100000 100000 4.2 false
+  false`, the merged tree's Arch server, one run per arm, host idle: cpu
+  sampler max total 10.2 / 9.0 / 16.5 %):
+  - `cpuprof_h1on`: H1 at 150 ms (§7.3; four wood trafos at 1167-1216), the
+    option on: verdict PASS, 0 resyncs / rebases, **starved 17 / 8 / 0 / 0**
+    (TR3's merge round: 21 / 26 / 18 / 0 and 0 / 1 / 10 / 0), t_max 42-56 ms.
+  - `cpuprof_h1off`: the same recipe and binaries, the option off: PASS,
+    starved 0 / 0 / 0 / 0, t_max 15-17 ms.
+  - `cpuprof_cliff`: B2's cliff recipe (A5u at 150 ms, `--sectors 4
+    --keep-lane --event 2:1500:step=300:dir=up`, flags off, the option off):
+    the three respawns came at 2596 / 2606 / 2614 as in B2, but **the cliff
+    did not reproduce as a rebase**: 0 rebases, 0 resyncs, starved 0 / 0 /
+    733 / 0 (client 2's 733 is the recipe's own +300 ms uplink); the
+    mechanism did, at the same ticks: every client's worst lag of the run
+    follows from them (6.6-10.3 ticks behind, reached at 2684-2710, just
+    past the profiled window 2580-2680; the rebase is at 33 behind).  So
+    B2's run
+    (`maps/arena-test/b2_a5u_ctl`) is used for the cliff itself; its
+    captures are protocol 10 and a protocol-11 build refuses them, so it
+    cannot be re-profiled, only read (its status lines and log).
+- **The per-frame table** (full: `CPUPROF/out/table_h1on_c0.txt`,
+  `table_h1on_c1.txt`, `table_h1off_c0.txt`, `table_cliff_c0.txt`; per
+  client and window: `summary_*.txt`).  H1 on, client 0 (starved 17), ms;
+  frame = the frame's busy time including rewinds run between frames;
+  capture = bodies / blob / script record; restore = its blob / scripts;
+  bodies = movable awake / asleep (pieces awake / asleep):
+
+  | tick | behind | frame | rew | depth | ticks | IVP live / replay | capture | restore | scripts' frame | other | bodies | blob KB |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | 1211 | 1.0 | 29.4 | 1 | 21 | 21 | 0.22 / 3.42 | 15.43 (3.40/8.50/3.52) | 3.53 (2.55/0.18) | 3.24 | 3.17 | 51/70 (49/67) | 255 |
+  | 1220 | 1.7 | 70.4 | 2 | 25 | 50 | 0.25 / 10.20 | 36.82 (8.07/20.81/7.94) | 9.42 (6.99/0.24) | 6.88 | 6.29 | 67/70 (65/67) | 289 |
+  | 1223 | 12.0 | 66.6 | 2 | 20 | 39 | 0.34 / 10.02 | 33.44 (7.44/18.93/7.07) | 9.89 (7.40/0.23) | 6.67 | 5.61 | 68/70 (65/67) | 294 |
+  | 1227 | 15.6 | 2.1 | 0 | 0 | 0 | 0.28 / 0 | 0.85 (0.18/0.50/0.17) | 0 | 0 | 0.83 | 68/70 (65/67) | 296 |
+  | 1245 | 2.9 | 85.5 | 2 | 28 | 56 | 0.34 / 15.75 | 48.17 (10.31/28.67/9.19) | 12.98 (10.30/0.25) | 0.89 | 7.26 | 64/74 (61/71) | 304 |
+  | 1260 | 6.1 | 58.1 | 1 | 34 | 34 | 0.35 / 10.92 | 34.64 (7.55/20.38/6.72) | 6.23 (5.27/0.12) | 0.56 | 5.24 | 58/81 (54/78) | 308 |
+  | 1265 | 16.3 | 38.0 | 1 | 24 | 24 | 0.24 / 6.58 | 21.52 (4.70/12.83/3.99) | 5.81 (5.07/0.11) | 0.33 | 3.39 | 56/83 (52/80) | 309 |
+  | 1277 | 26.1 | 28.0 | 1 | 17 | 17 | 0.23 / 4.10 | 15.29 (3.50/9.10/2.69) | 5.35 (4.77/0.09) | 0.23 | 2.70 | 50/89 (46/86) | 303 |
+  | 1278 | 26.9 | 2.1 | 0 | 0 | 0 | 0.22 / 0 | 0.93 (0.19/0.60/0.14) | 0 | 0 | 0.88 | 50/89 (46/86) | 302 |
+
+  The episode: client 0's 32 frames with a rewind fall in 1211-1277, 41.1
+  ms each on average (36.7-42.6 ms on the four clients; the worst 85.5 ms, two
+  rewinds, one of them a snapshot rollback run between frames), 1.1-1.2
+  rewinds and 23-28 replayed ticks per such frame; the loop ran those 67
+  ticks at 20.6 ms per tick and ended 26.9 ticks behind its schedule; a frame
+  without a rewind costs 2.0 ms and the loop wins back about 0.87 tick per
+  such frame.  Starvation follows the lag: 26.9 / 23.7 / 18.6 / 14.5 ticks
+  behind at most on clients 0 / 1 / 2 / 3 against starved 17 / 8 / 0 / 0.
+  With the option off the same frames cost 11.6-13.5 ms (max 24-27 ms) and
+  no client is more than 2.1 ticks behind.
+- **Where the time goes** (window 1150-1400, the frames with a rewind, the
+  four clients):
+
+  | | H1, option on | H1, option off (Q4) | cliff (2580-2680) |
+  |---|---|---|---|
+  | mean frame with a rewind | 36.7-42.6 ms | 11.6-13.5 ms | 18.1-18.7 ms |
+  | rewinds per such frame / replayed ticks | 1.09-1.22 / 23-28 | 1.05-1.11 / 23-25 | 1.00-1.06 / 37.5-40.2 |
+  | share of all rewinds in it | 93.6-94.8 % | 93.1-93.6 % | 94.7 % (c0) |
+  | per replayed tick | 1.23-1.27 ms | 0.41-0.47 ms | 0.41-0.43 ms |
+  | - IVP step | 0.23-0.26 | 0.02-0.07 | 0.04 |
+  | - capture: bodies / blob / script record | 0.17-0.18 / 0.44-0.49 / 0.16 | 0.05-0.06 / 0.15-0.19 / 0.08 | 0.08 / 0.17-0.18 / 0.08 |
+  | - scripts' frame / remakes / bookkeeping | 0.07-0.13 / 0.002-0.004 / 0.11 | 0.01-0.06 / 0.001-0.003 / 0.04 | 0.003 / 0.001 / 0.05 |
+  | per rewind: restore (its blob) | 4.7-5.4 ms (3.6-4.5) | 0.86-1.24 ms (0.50-0.96) | 1.06-1.16 ms (0.63-0.73) |
+  | capture / IVP / restore / scripts' frame / other, % of the frames | 52-55 / 15-17 / 13-15 / 3-5 / 9 | 60-64 / 6-13 / 8-10 / 1-9 / 10 | 71 / 8 / 7 / 1 / 13 |
+  | movable bodies awake / asleep | 1-69 / 70-133 (pieces up to 65 / 131) | 0-20 / 20-35 | 23-26 / 30 |
+  | blob / script record | 157-311 KB / 62 KB | 97-143 KB / 34 KB | 124-134 KB / 33 KB |
+
+  "Other" is the replay's bookkeeping (the inputs fed, the births' checks,
+  the records: 0.11 ms per replayed tick with the pieces, 0.04 without), the
+  restore's body plan and rechecks (0.77-0.87 ms per rewind with the
+  pieces, 0.21-0.25 without), the live pre /
+  post step outside them (0.93 ms per frame with the pieces, 0.32-0.36
+  without).  The live tick itself is small: IVP 0.16 ms, scripts 0.13 ms, its
+  capture 0.93-0.97 ms (0.43-0.46 ms without the pieces).  Per capture (fit
+  over every frame without a rewind, R² 0.82-0.91): **400 us + 3.3-4.5 us
+  per awake + 4.5-4.7 us per sleeping movable body** (blob 106 us + 3.5-4.1
+  / 3.2; per-body reads 35 us + 1.0-1.2 / 1.3-1.4; the script record a
+  constant 250 us, 150 us with the option off); the blob 75 KB + 2.1 KB per
+  awake + 1.25 KB per sleeping body (R² 1.00); the IVP step 13 us + 4.1-4.6
+  us per awake body and 0.1 us per sleeping one; the restore's blob 38-44
+  us per awake and 13-19 us per sleeping body.  **A sleeping body costs the
+  capture as much as an awake one and the step nothing.**
+- **(1) The share of the piece bodies, and the ceilings** (ceil.py; option
+  on, the frames with a rewind, the four clients; per-body costs from each
+  run's own fits):
+  - IVP step of the awake pieces: **15.6-17.8 %** of those frames (12.7-13.4
+    % of the window; the replayed tick's step 0.23-0.26 ms against
+    0.02-0.07 ms without the pieces).  It cannot be removed without changing
+    what is simulated; nor can the replayed trafo scripts' frame (3-5 %).
+  - The capture's part for sleeping bodies - the ceiling of **an incremental
+    capture that reuses sleeping bodies' state: 22.2-24.3 %** (21.5-23.4 %
+    of the window; of it the sleeping pieces 21.3-23.4 %; 19-22 % with the
+    option off, 27 % in the cliff).  The awake bodies' part and the fixed
+    part (blob 106 us, per-body 35 us, script record 250 us per capture)
+    stay.
+  - **The dormant-script encoding of 9.4: at most 5.2-5.3 %** (4.8 % of the
+    window): the script record's on-minus-off difference, 107 us per
+    live and 80 us per replayed capture for the 32 trafo scripts (62 KB
+    against 34 KB), taken whole as if all of them were dormant.
+  - The restore's blob for sleeping bodies: at most 2.8-4.2 % (1.8-3.1 %).
+  - Together the incremental capture and 9.4 remove at most 27-30 % of a
+    behind frame: 37-43 ms become 26-31 ms, still twice the 15.15 ms budget
+    at this rewind rate.  These three cut the cost of each rewind; the
+    hold-last re-prediction of (2) cuts the number of rewinds, so the two
+    kinds compose multiplicatively on the rewinds' time, not additively.
+  - The body-set full snapshot rollbacks (R2): 8.7-10.7 % (6.5-7.9 %), 3-4
+    per client (`stale_tail.py`).
+- **(2) Why the rewinds come every frame and are 14-30 deep.**  Every
+  input rewind of the window (49-58 % of its busy time; the rest are 3
+  lifecycle (birth) rewinds and 3-4 body-set full snapshot rollbacks per
+  client, `reasons.py`) is caused by a relayed frame of a ball born in it;
+  the depth is the **relay lag**, not a prediction horizon:
+  - Of the 22-33 input rewinds per client (option on; 40-56 with the option
+    off), the triggering corrections (308 on the four clients) are all of a
+    newborn ball (0-39 ticks after its birth): 151 "flags only, 1 -> 5"
+    (predicted PHYSICALIZED, relayed PHYSICALIZED | NAV_ACTIVE, the keys
+    equal), 125 "no input recorded for the ball at that tick", 32 "flags 0
+    -> 5"; **not one disagreed on the keys**.  Option off: 282 corrections,
+    258 "flags 1 -> 5", 22 "no input recorded", 2 "flags 0 -> 5".
+  - In 100 % of them the corrected tick is the newest relayed tick of that
+    ball, and the rewind goes to it - 1: the depth is the age of the newest
+    frame on arrival, the relay lag (mean 19.7-24.2 ticks on, 20.9-21.2 off:
+    150 ms each way is 20 ticks).  The rewind depth (the lag + 1) stretches
+    to 26-34 when the senders themselves are behind (client 0, 1244-1260:
+    their frames leave late; up to 37-38 on clients 3 and 2) and shrinks to
+    10-15 when the receiver is (client 0, 1223-1225, 7-14 ticks behind).
+  - Why one per frame for about the relay lag in frames: a replay never
+    re-predicts a remote's tail.  Past a remote's newest relayed frame
+    `relay_frame_or_earlier` (session/input_relay.hpp:349) returns nothing
+    and `recorded_input_at` (client_core_frame.cpp:495-502: "none for the
+    tail the relay has not reached, where the recorded prediction stands")
+    keeps the prediction recorded live, which was made before the change
+    arrived.  This holds for **any** change of **any** remote's input, not
+    only a birth: after a change at tick X every later tick up to the
+    receiver's present still carries the old value, so each frame the
+    relay brings in after X disagrees with that stale tail and asks for its
+    own rewind, as deep as the relay lag, until the relay reaches ticks
+    predicted live from the new value - about lag-in-frames rewinds per
+    change, one per frame.  In H1 the changes are births: the ticks
+    recorded between a ball's birth and its first relayed frame carry the
+    birth's state (flags 1, navigation not active) or no input at all (a
+    mirror rewound into existence, the "news" case of
+    note_input_correction); about 20 rewinds per newborn ball, three
+    newborn balls per client (the other players' paper balls) in 1190-1225
+    make the ~1 s.  In the cliff (3) the same mechanism also runs on the
+    late player's key changes.
+  - **Ceiling of a hold-last re-prediction** (`stale_tail.py`: the replay
+    re-predicts a remote's tail with its newest relayed frame; a frame's
+    input rewinds are counted avoidable only when every correction noted in
+    it repeats that entity's previous relayed value, the entity's first
+    correction in the window counts as needed, the remaining rewinds keep
+    their full depth): option on, 85-87 % of the input rewinds avoidable
+    (only 4-5 corrections per client are new values against 62-79
+    repeats), **63.9-66.3 % of the behind frames (43.0-49.3 % of the
+    window)**; option off 92-95 % of the input rewinds, 76.4-78.9 %
+    (51.8-61.4 %).  A prediction change - client-local, the server
+    unaffected - with its own checks (the exactness set and a live drift
+    check).
+  - The rewind pattern is the same with the option off (H1 off: 1.05-1.11
+    rewinds per such frame, 22 deep); what differs is the price of a rewind,
+    31-37 ms against 10-12 ms (per replayed tick 2.7-3.0 times, the restore
+    4.3-5.4 times).  With the option on the client coalesces more arrivals
+    into one rewind while it is behind, so it runs fewer (22-33 against
+    40-56).
+  - The body-set full snapshots of a snapshots-off session (R2 above) add
+    3-4 snapshot rollbacks per client (8.7-10.7 % of the behind frames,
+    6.5-7.9 % of the window with the pieces; 4.5-5.6 % and 3.3-4.1 %
+    without), 4 of client 0's 37 rewinds ran in message handling between
+    frames.  They are today a correction a snapshots-off client receives,
+    so dropping them is not a pure cost cut: it needs its own drift check.
+- **(3) The cliff: depth times the per-tick cost, one rewind per frame.**
+  At 2580-2680 the clients rewind in 42-70 of 101 frames, 1.00-1.06 rewinds
+  per such frame, 37.5-40.2 ticks deep (correction lag 35-37: the late
+  player's +300 ms uplink); 78-87 % of the time is input rewinds,
+  lifecycle rewinds 1.6-3.8 %, snapshot rollbacks 2.8-4.4 %.  The input
+  rewinds are one mechanism, the stale tail of (2): the late player's key
+  changes (keys differ, 39-76 corrections; e.g. client 0, the late player's
+  `Ball_Stone_BMMO_1651351904`: relayed keys 9 against predicted 1 or 5 on
+  every tick 2545-2561, then relayed 1 against predicted 9 on every tick
+  2587-2600, each corrected tick the newest relayed one) and the three respawned balls' births (no input
+  recorded 44-68, flags 0 -> 5 10-17); each change costs one rewind per
+  arriving frame for the relay lag.  That is why they come every frame:
+  the hold-last ceiling (`stale_tail.py`, 2580-2680) is 68-75 % of the
+  input rewinds avoidable (16-23 new values against 98-119 repeats per
+  client), **57.1-66.2 % of the behind frames (52.1-64.1 % of the
+  window)**; what stays is about one rewind per real key change or birth
+  (12-20 per client in 101 frames).  A
+  38-tick rewind costs 1.1 ms restore + 38 x 0.41 ms = 16.3-17.9 ms here, so
+  one per frame is 1.2 times the budget: the clients drift 6-10 ticks behind
+  and recover.  In B2's build a replayed tick cost **1.31-1.32 ms**
+  (`b2_a5u_ctl`: t_rep 12.8-14.9 s over 9740-11268 replayed ticks; this run
+  7.9-8.9 s over 19904-22387, 0.40 ms: TR3's capture work, fix-up round),
+  so the same rewind cost about 50 ms, 3.3 frames' budget per frame, and the
+  loop fell the 33 ticks to the rebase (2661-2665) in about 15 such frames.
+  Correction of B2's wording ("38-39-tick lifecycle rewinds"): B2's own log
+  (`b2_a5u_ctl` client 0, 2614-2660) shows the per-frame rewinds were input
+  corrections 26-41 deep (the late player's ball and the respawned
+  1029157707's), with two lifecycle rewinds and two snapshot rollbacks
+  among them - the same picture as here.
+- **(4) The baseline, the option off**: the second column of the table:
+  per replayed tick 0.41-0.47 ms (IVP 0.02-0.07, capture 0.28-0.33, the
+  scripts' frame 0.01-0.06), restore 0.86-1.24 ms per rewind, frames with a
+  rewind 11.6-13.5 ms (capture 60-64 %, IVP 6-13 %, restore 8-10 %), at most
+  2.1 ticks behind, starved 0.
+- **Adaptations.**  Timers in a temporary build rather than off-by-default
+  ones in the tree (the tree held TR3 uncommitted); a frame's time is its
+  busy time, `frame()` plus the rewinds and captures run between frames in
+  message handling (4 of client 0's 37 rewinds in H1 on); the live IVP is
+  CK's own per-manager timer, the replayed one the step hook's; the cliff
+  was read from B2's run, not re-profiled (no rebase in this run; B2's
+  captures are protocol 10).  Review fix-up: the stale tail was first
+  scoped to newborn balls and its ceiling stated on the window base
+  without a script; it is a property of every remote's tail (above), its
+  ceiling is computed by `stale_tail.py`, and every ceiling now carries
+  both bases.
+- **Ranked candidates with their measured ceilings**: roadmap §4 item 10
+  (at the time; since RC1 they are `rewind-cost-design.md` §1, the
+  roadmap item keeping RC1's record).
+
+**As built (step TR3b, 2026-10-27; HEAD 3daa19a = RC1 5f967b4 + RL1 +
+the working tree).**  T3 merged again, this time on top of the rewind-cost
+step RC1 (the hold-last re-prediction) and the resync-lag step RL1, and
+re-gated under its original H1 (c) (§11: the decision of 2026-10-25 and
+the one-pair rule of 2026-10-27).
+
+- **The merge.**  `git cherry-pick -n 64c5fa8` (the merge round's tree,
+  branch `wip/trafo-t3-merged`; neither wip branch was checked out, reset
+  or rebased).  Code: one conflict, the headless client's usage text
+  (`session_client.cpp`: RC1c / RC1d's `--keep-lane-dwell`, `--brake-tap`,
+  `--keep-lane-tap` against T3's `--beam2`; all four kept).  Auto-merged in
+  separate hunks and read: `client_core_frame.cpp` (RC1's
+  `recorded_input_at` -> `relay_frame_or_newest` beside T3's
+  `hold_pending_trafo`, `apply_trafo_inputs`, the trafo frame, the record's
+  deferred capture and the missed-trafo resync), the option parsing and
+  frame loop of `session_client.cpp`, the unit tests
+  (`session_client_core_test.cpp`, `rollback_engine_test.cpp`: RC1's
+  hold-last tests and T3's trafo tests side by side), `session_runner`
+  (RL1's re-anchor base vs T3's step timer).  Docs: this document's
+  status and §11, roadmap §4 item 10 (RC1's committed text kept; the
+  CPUPROF ranking it replaced is `rewind-cost-design.md` §1 and the
+  profile block above).  38 files against the merge commit's 40: its
+  one-line edits of `resync-and-sector-timing-design.md` and
+  `rollback-engine-gaps-design.md` were RC1's identical ones, already in
+  HEAD.  No code was changed after the merge.
+- **Build tree.**  The x86 `BallanceMMOClient` objects were deleted before
+  the build (T3 changes `client_core.hpp`'s layout); `ninja -t deps` shows
+  no empty dependency list on a session object in either tree.
+- **Checks** (quick tier, 15 minutes: about 10 of them used; x64
+  `build-agent-rTR3b`, the Arch server rebuilt from this tree, id
+  `ballanced-3e4289e95f25+bmmo-3daa19affd58-dirty`; helpers
+  `.local-tools/work/TR3b/` `g.sh`, `live.sh` = `tr3/`'s with the labels
+  `tr3b_*`):
+  - 7.1: **522 tests pass** (rRL1's 511 + T3's 11).  GCC 29 ok.  x64
+    BUILD-OK, x86 CLIENT-BUILD-OK, ARCH-BUILD-OK; `map.hpp` untouched.
+  - The BAR, option off: `REF=core_ref_rc1 wire_check.sh rRL1 rTR3b
+    rTR3bw`: **36/36 journals IDENTICAL** (nine arms incl. h1_150 and
+    cliff); every send equal but one per client, SessionReady (#5 / #6,
+    59 bytes: the build id and the `CAP_TRAFO_INPUTS` bit); the script's
+    last line says DIFFERENCES for that send alone, as at the merge round.
+    Solo snapshots-off (`tr3b_solo/solo/tr3b`) against `core_ref_rc1`'s
+    solo1 and solo2: **IDENTICAL** both.
+  - **H1 at 150 ms, snapshots off, one pair in one batch** (§11's
+    one-pair rule; cpu_sampler max total 10.0 / 11.5 %):
+
+    | per client 0 / 1 / 2 / 3 | `tr3b_H1_150` (option on) | `tr3b_H1_150_off` (control) | merge round, option on (`tr3m_H1_150`, `_b`) |
+    |---|---|---|---|
+    | verdict | PASS | PASS | FAIL, PASS |
+    | starved | **0 / 0 / 0 / 0** | 0 / 0 / 0 / 0 | 21 / 26 / 18 / 0, 0 / 1 / 10 / 0 |
+    | resyncs, rebases, far, unmatched | 0 | 0 | 0 |
+    | input rewinds (`inrew`) | 25 / 29 / 35 / 30 | 21 / 28 / 30 / 29 | 128-181 |
+    | replayed ticks | 1255 / 1279 / 1449 / 1321 | 984 / 1116 / 1176 / 1171 | 3385-4813 |
+    | relay lag max / p99 (ticks) | 29/26, 29/26, 42/27, 42/42 | 24/21, 24/21, 42/22, 42/41 | 41-42 / 35-41 |
+    | t_cap / t_rep / t_rest (s) | 1.69-1.77 / 0.99-1.15 / 0.13-0.15 | 0.88-0.92 / 0.34-0.41 / 0.03-0.04 | 1.45-1.70 / 2.7-3.9 / 0.39-0.55 |
+    | t_max (ms) | 43-46 | 12-14 | 44-62 |
+    | server step p99 per 660 ticks (ms) | 5.8, 4.5, 3.4, 5.2 (max 14.9) | 3.4, 3.6, 3.2, 7.5 (max 17.0) | 3.4-4.9 (max 17.9) |
+
+    H1 (a): **pieces 150/150 bit-equal on all four** (`tr3fix/pieces.py`);
+    (b) 4 sets on every client; **(c) met**: unmatched, far, resyncs,
+    rebases 0, starved 0 against the control's 0; (e) `trafo_missed` 0,
+    `trafo_original_leaks` 0, run_failures 0; the server journal replays
+    matched (2234 ticks, 1117 checkpoints, 0 mismatches).  (d) is H1 at
+    0 ms: not run (deferred).  The cause of the merge round's starvation
+    was the stale tail RC1 removed: the input rewinds fell from 128-181 to
+    25-35 per client, now the option-off control's count; what remains of
+    T3's cost is the cost of each rewind (t_rep 2.6-2.9x the control,
+    t_max about 3x), the rewind-cost optimization's work (roadmap §4 item
+    10: RC2-RC5, closing on H4 / H6 with snapshots on).
+  - **`core_ref_t3` is not replayable by this build** (checked on its
+    h1_150 arm, `REF=core_ref_t3 LABELS=h1_150 wire_check.sh rTR3 rTR3b`):
+    the journals differ from tick 253 on (the hold-last tail records the
+    remote rows differently, as RC1's own note says of the pre-RC1 sets)
+    and client 2's replay leaves the capture at pass 2954 (it asks for a
+    resync the captured run never asked for: a different prediction rule
+    replaying another rule's inbound stream).  The set stays usable for the
+    pre-RC1 T3 build `rTR3` only; its re-capture with the final binaries is
+    deferred (it does not fit the 15 minutes: seven live arms and the solo
+    pair).  `wire_check.sh`'s default stays `core_ref_rc1`.
+  - **`physics.trafo_inputs` stays off** (`config_manager.hpp:89`, the
+    server's default), past T4 until the rewind-cost close-out passes
+    (the orchestrator's adaptation M2): with it on, every retail client
+    without `CAP_TRAFO_INPUTS` is refused (2.14).
+  - Deferred to the final verification (roadmap §4 item 11): the second
+    H1 pair, H1 at 0 ms for (d), H3b, H5, H7, the re-capture of
+    `core_ref_t3`; the retail two-copy run of the merged x86 build, core
+    off and on (none at TR3b: no BallanceMMOClient source changed, but the
+    shared engine and savestate changes reach both retail modes - the
+    savestate index rewrite, and `rollback.hpp`'s replay-mismatch counter
+    now counted only while logged, the first 8; neither changes a
+    simulation result; with core off the mod declares nothing new, and the
+    core-off BAR rests on that deferred run).
+- **Not done:** T4, T5; the rewind-cost optimization's RC2-RC5.
+
 ## 9. Open questions
 
 **9.1 CK copy semantics on the retail CK2.dll.** The open points are:
@@ -1999,5 +2844,37 @@ frame number), and one was resolved by the alternative its reviewer offered
   candidate) is fixed first as step RC1 of `rewind-cost-design.md` (committed
   with hold-last by the user's ruling of 2026-10-27: "As built (step
   RC1)" there); T3 is then re-gated under its original H1 (c)
-  - starved within the control band at 150 ms, snapshots off - at TR3b, which
-  re-captures `core_ref_t3`.
+  - starved within the control band at 150 ms, snapshots off - at TR3b
+  (done: §8, "As built (step TR3b)"; passed, committed). This settles
+  the ruling §11.1 below left open: H1 (c) stays T3's gate and is judged
+  after RC1.
+- **2026-10-27, the one-pair rule** (verbatim, asked how a step whose row
+  needs more live runs than the 15-minute verification holds is gated):
+  "15 分钟内只做最关键的一对" - ONE H1 run at 150 ms with the option on and ONE
+  same-batch control of the same recipe with the option off, snapshots
+  off, judged by H1 (a)-(e) of §7.3 as written. The rest of T3's row (the
+  second H1 pair, H1 at 0 ms for (d), H3b, H5, H7) and the re-capture of
+  `core_ref_t3` go to the final verification (`docs/roadmap.md` §4 item
+  11, "Deferred to the final verification").
+
+## 11.1 Decisions (user, 2026-10-25)
+
+- **T3's gate, option (b)** of the fix-up round's root cause of H4 / H6
+  (§8, "As built (step TR3, fix-up round)"), in the user's words "好的，就b":
+  T3 is judged with **snapshots off**, the roadmap's primary configuration.
+  The proposal stated that every snapshots-off arm passed there; that was
+  not so for H1 at 150 ms, whose (c) "starved within the control band"
+  fails in every run (starved up to 26 own frames per client, control 0;
+  §8, "As built (step TR3, merge round)").  Whether H1 (c) moves too is
+  the user's open ruling; (b) as given covers H4 and H6 only.  The CPU with snapshots on - H4 and H6 as §7.3 states them - becomes its
+  own step, **the rewind-cost optimization** (`docs/roadmap.md` §4 item 10,
+  before the stage A close-out): an incremental savestate record that
+  reuses sleeping bodies' state, the compact encoding of dormant scripts
+  (9.4), and whatever else the profile shows.  It closes on H4 / H6 as
+  §7.3 states them, against T3's snapshots-off CPU numbers (the merge
+  round's H1 at 150 ms, §8) as its baseline.  §7.3's H4 / H6 rows and §8's
+  T3 row say so.  The snapshot fallback itself stays (the user's decision
+  of 2026-10-24) and nothing is added that makes a client depend on it.
+- **H1 (c), the ruling left open above** (made 2026-10-25, §11: "然后 T3 按原门槛
+  H1 (c) 重新过"): it stays T3's gate, judged once RC1 has fixed the stale
+  tail; it passed at TR3b (§8, "As built (step TR3b)").

@@ -67,6 +67,7 @@ namespace bmmo::session {
         std::set<std::string> corrected;
         corrected.swap(s.input_rewind_entities_);
         const bool has_remote = !corrected.empty() || !own;
+        const bool trafo = s.input_rewind_trafo_;   // step T3: a trafo input among them
         drop_pending_rewind();
         const uint32_t now = current_tick();
         if (static_cast<int32_t>(anchor - now) > 0) return;
@@ -106,6 +107,14 @@ namespace bmmo::session {
         // nothing else would ever repair it.  Not while a resync waits
         // for its snapshot: that snapshot is the repair.
         if (has_own && !s.resync_pending_) request_resync("a substituted own frame could not be replayed", true);
+        // Step T3 (trafo-replication design 4.7): a trafo input applied
+        // nowhere - no snapshot can make, reset or blow pieces.
+        if (trafo) {
+            ++s.trafo_missed_;
+            logf("trafo: the input rewind from tick %u was refused at local tick %u: resync (trafo_missed %llu)", anchor, now,
+                 static_cast<unsigned long long>(s.trafo_missed_));
+            if (!s.resync_pending_) request_resync("a trafo input could not be replayed", true);
+        }
     }
 
     // Rewind for no reason at all (the headless --force-rollback, at the
@@ -512,6 +521,9 @@ namespace bmmo::session {
         // (tick base and lead known), stamp it `lead` ticks ahead like any
         // other sector this client enters.
         hold_pending_sector(frame_tick);
+        // Step T3: the hold's own trafo reports that waited for the
+        // assignment, likewise.
+        hold_pending_trafo(frame_tick);
         // This tick's events first - a relayed Sector event stamped for it
         // among them - then the union's pass, then the step: the order the
         // server's session_runner::step keeps.
@@ -555,11 +567,19 @@ namespace bmmo::session {
         // before the union's pass and the step, where the server applies
         // them, in its order.
         apply_held_lifecycle(frame_tick);
+        // Step T3 (trafo-replication design 2.5): the tick's trafo inputs,
+        // before the union's pass, as the server applies its due events
+        // before update_sectors().
+        apply_trafo_inputs(frame_tick, false);
         // The sector union (session/sector_union.hpp), the rule the server's
         // update_sectors() runs: one count of the pacer per step, before
         // it, from the manager's state after the previous step, and one
         // pass per idle manager for the lowest sector owed.
         sector_union_pass(frame_tick);
+        // Step T3: the trafo frame - every selected set's scripts by player
+        // id - after the pass and before the behaviour pass and the step,
+        // where the server's tick() runs it.
+        if (s.trafo_active_) platform_.trafo_frame(frame_tick);
         // A rewind above replayed up to the previous tick and left every
         // mirror's navigation input at the frame it last fed there; this
         // tick's step is driven by the frame recorded as applied for it
@@ -805,7 +825,12 @@ namespace bmmo::session {
             tracked.mechanisms = movable_mechanisms();
             tracked.generations = s.generations_;
             platform_.note_script_resets(tick);
-            s.rollback_.record(world(), tick, tracked, applied);
+            // Captured once, by the amend at the end of this post_step (step
+            // T3's fix-up: the amend re-captured the whole record anyway, and
+            // nothing in between reads its world) - unless the host reads the
+            // record before the amend (after_record: the headless client's
+            // --dump-savestate / --compare-scripts).
+            s.rollback_.record(world(), tick, tracked, applied, static_cast<bool>(platform_.hooks.after_record));
             // Step B1: the union after this tick's tick(), beside its record.
             while (!s.union_records_.empty() && static_cast<int32_t>(s.union_records_.rbegin()->first - tick) >= 0)
                 s.union_records_.erase(std::prev(s.union_records_.end()));
@@ -844,6 +869,11 @@ namespace bmmo::session {
         // Sector: the own sector poll (a crossing stamped ahead with the
         // checkpoint chain held, else reported after the fact).
         poll_own_sector(tick);
+        // Step T3 (trafo-replication design 2.3, 2.4): the hold of the own
+        // trafo activations beside it, then retirement and the log's
+        // pruning - after the live frame, outside any replay.
+        poll_own_trafo(tick);
+        retire_trafo(tick);
 
         // Continue running blends.
         if (config.correct) {

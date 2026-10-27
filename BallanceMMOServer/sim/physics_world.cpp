@@ -105,6 +105,7 @@ namespace bmmo::sim {
         if (engine_) placement_.release(engine_->context());   // sector placement: see place_sectors()
         // Players first: their navigation controllers live in the environment.
         players_.clear();
+        if (engine_) bmmo::physics::set_controller_alias(engine_->physics(), {});
         engine_.reset();
     }
 
@@ -129,6 +130,13 @@ namespace bmmo::sim {
         engine_ = headless_engine::create(eo, error);
         if (!engine_) return false;
         if (!engine_->load_composition(error)) return false;
+        // The sets' force controllers in the savestate by the names every
+        // world gives them (step T3's fix-up): the resync and join states'
+        // blobs travel to clients that built their sets at other moments.
+        if (options_.trafo_inputs)
+            bmmo::physics::set_controller_alias(engine_->physics(), [this](const char* name, std::string& alias) {
+                return bmmo::game::trafo_controller_alias(trafo_registry_, name, alias);
+            });
         // Trafo-replication design 2.4 step 6 (T1's level reference): the 8
         // original trafo scripts' values as Balls.nmo has them, captured on
         // the first tick they exist - before any original explosion - and

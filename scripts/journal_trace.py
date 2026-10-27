@@ -858,6 +858,15 @@ class JournalReader(object):
             size = cursor.u32()
             start = cursor._take(size)
             record[name] = bytes(cursor.data[start:start + size])
+        # Step T3 (trafo-replication design 4.7): the trafo reconcile section,
+        # trailing, written only by a session that runs the trafo as an input.
+        if cursor.remaining() >= 4:
+            entries = []
+            for _ in range(cursor.u32()):
+                entries.append({"player": cursor.u32(), "type": cursor.u8(), "bits": cursor.u8(),
+                                "explode_applied": cursor.u32(), "position": [cursor.f32() for _ in range(3)],
+                                "reset_applied": cursor.u32(), "final_applied": cursor.u32(), "action": cursor.u8()})
+            record["trafo"] = entries
         return record
 
     @staticmethod

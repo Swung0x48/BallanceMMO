@@ -1485,7 +1485,22 @@ namespace bmmo::sim {
                             if (entry.cut.size() > 256) entry.cut.pop_front();
                         }
                     }
-                    step(s);
+                    {
+                        const auto started = clock::now();
+                        step(s);
+                        s.step_us.push_back(static_cast<uint32_t>(
+                            std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count()));
+                        // Every 10 s of ticks: the step's cost, the budget
+                        // being one tick (15.15 ms) per tick.
+                        if (s.step_us.size() >= 660) {
+                            std::vector<uint32_t> v;
+                            v.swap(s.step_us);
+                            std::sort(v.begin(), v.end());
+                            log("[session " + std::to_string(s.id) + "] step time over ticks " + std::to_string(tick + 1 - v.size())
+                                + ".." + std::to_string(tick) + ": p50 " + std::to_string(v[v.size() / 2]) + " us, p99 "
+                                + std::to_string(v[v.size() * 99 / 100]) + " us, max " + std::to_string(v.back()) + " us");
+                        }
+                    }
                     if (s.running) {
                         observe_lateness(s, tick);
                         if (config_.patience) report_patience(s, tick);

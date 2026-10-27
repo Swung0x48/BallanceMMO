@@ -524,6 +524,26 @@ namespace bmmo::session {
     // file could not be opened or the size cap was reached, so a caller never
     // has to check: capture code must never be able to break a session.
     // tag 8 RESYNC (version 4): the state a client applied as tick S, and how.
+    // Step T3 (trafo-replication design 4.7, 5): one type set of a
+    // resync's trafo reconcile - the server's ledger entry and what the
+    // client did with it.  The section trails the RESYNC record (written
+    // only by a session that runs the trafo as an input, so every other
+    // record is the version-4 bytes; a reader of an older build stops
+    // before it).
+    constexpr uint8_t JOURNAL_TRAFO_KEPT = 0;
+    constexpr uint8_t JOURNAL_TRAFO_UNMADE = 1;
+    constexpr uint8_t JOURNAL_TRAFO_REMADE = 2;
+    constexpr uint8_t JOURNAL_TRAFO_FAILED = 4;
+    struct journal_trafo_entry {
+        uint32_t player = 0;
+        uint8_t type = 0;
+        uint8_t bits = 0;            // 1 has_explosion, 2 has_bodies, 4 has_reset, 8 final, 16 not in the ledger
+        uint32_t explode_applied = 0;
+        float position[3] = {};
+        uint32_t reset_applied = 0;
+        uint32_t final_applied = 0;
+        uint8_t action = 0;          // JOURNAL_TRAFO_* (UNMADE | REMADE: both)
+    };
     struct journal_resync {
         uint32_t tick = 0;          // S
         uint32_t base = 0;
@@ -531,6 +551,8 @@ namespace bmmo::session {
         uint32_t applied_at = 0;    // the client's tick when it was applied (B)
         uint8_t outcome = 0;        // JOURNAL_RESYNC_*
         std::string union_state, scripts, savestate;   // the state's bytes, as received
+        bool has_trafo = false;     // step T3: the trailing reconcile section
+        std::vector<journal_trafo_entry> trafo;
     };
 
     class journal_writer {
@@ -701,6 +723,19 @@ namespace bmmo::session {
             for (const std::string* bytes: {&r.union_state, &r.scripts, &r.savestate}) {
                 journal_detail::write_u32(payload, static_cast<uint32_t>(bytes->size()));
                 payload += *bytes;
+            }
+            if (r.has_trafo) {
+                journal_detail::write_u32(payload, static_cast<uint32_t>(r.trafo.size()));
+                for (const auto& e: r.trafo) {
+                    journal_detail::write_u32(payload, e.player);
+                    journal_detail::write_u8(payload, e.type);
+                    journal_detail::write_u8(payload, e.bits);
+                    journal_detail::write_u32(payload, e.explode_applied);
+                    for (float v: e.position) journal_detail::write_f32(payload, v);
+                    journal_detail::write_u32(payload, e.reset_applied);
+                    journal_detail::write_u32(payload, e.final_applied);
+                    journal_detail::write_u8(payload, e.action);
+                }
             }
             record(journal_tag::resync, payload);
         }
@@ -1067,6 +1102,24 @@ namespace bmmo::session {
                         if (!in.ok || !in.bytes(*bytes, size)) {
                             in.ok = false;
                             break;
+                        }
+                    }
+                    if (!in.ok) break;
+                    // Step T3: the trailing trafo reconcile section.
+                    if (in.size - in.pos >= 4) {
+                        const uint32_t count = in.u32();
+                        r.has_trafo = true;
+                        for (uint32_t k = 0; in.ok && k < count && k < 4096; ++k) {
+                            journal_trafo_entry e;
+                            e.player = in.u32();
+                            e.type = in.u8();
+                            e.bits = in.u8();
+                            e.explode_applied = in.u32();
+                            for (float& v: e.position) v = in.f32();
+                            e.reset_applied = in.u32();
+                            e.final_applied = in.u32();
+                            e.action = in.u8();
+                            if (in.ok) r.trafo.push_back(e);
                         }
                     }
                     if (!in.ok) break;

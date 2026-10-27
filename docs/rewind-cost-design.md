@@ -12,8 +12,9 @@ decision of 2026-10-25 (§11).
 
 Base: HEAD 49e2cc8. Line numbers are HEAD's plus RC1's own edits. The profile
 this design rests on is step CPUPROF's ("The rewind-cost profile
-(2026-10-25)", in `trafo-replication-design.md` §8 on the parked branch
-`wip/trafo-t3-merged`, and roadmap §4 item 10 "Profiled" there); its helpers
+(2026-10-25)", in `trafo-replication-design.md` §8, on the main line since
+step TR3b merged T3; its roadmap ranking, item 10 "Profiled" on the parked
+branch `wip/trafo-t3-merged`, is §1 here); its helpers
 and outputs are `.local-tools/work/CPUPROF/` (`prof.py`, `ceil.py`,
 `stale_tail.py`, `reasons.py`, `out/`) and its runs `maps/arena-test/cpuprof_*`.
 

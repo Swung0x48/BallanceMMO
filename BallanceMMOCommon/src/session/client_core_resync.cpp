@@ -170,6 +170,16 @@ namespace bmmo::session {
             request_resync("the resync state's anchor left the history", true);
             return true;
         }
+        // 1b. Step T3 (trafo-replication design 4.7): a set for every player
+        // the server's ledger names, and the rows of the pieces it has bodies
+        // for at S - the reconcile below makes them when this world lacks
+        // them, so they wait for nothing.
+        std::set<std::string> trafo_rows;
+        if (s.trafo_active_)
+            for (const auto& e: st.trafo_ledger) {
+                if (e.type >= kTrafoTypes || !ensure_trafo_set(e.player, "the resync ledger") || !e.has_bodies) continue;
+                for (auto& piece: platform_.trafo_type_set(e.player, e.type).pieces) trafo_rows.insert(std::move(piece));
+            }
         // 2. The rows onto this world's bodies.  The registry starts over
         // from the state's dictionary (the re-assign cleared it).
         for (const auto& body: st.rows)
@@ -219,6 +229,7 @@ namespace bmmo::session {
                 continue;
             }
             if (keep_local_body(body.name)) continue;
+            if (trafo_rows.count(body.name)) continue;   // step T3: after the reconcile
             std::string entity = s.mechanism_tracking_.entity_of(body.owner);
             // The registry's identity guard refuses a pick whose pose is far
             // from the row's (a twin of another sector); the resync takes the
@@ -246,6 +257,20 @@ namespace bmmo::session {
         }
         if (s.resync_wait_frames_)
             logf("resync: the state of tick %u waited %u frame(s) for its bodies", anchor, s.resync_wait_frames_);
+        // 2b. Step T3: the trafo reconcile (design 4.7), outside the replay
+        // and before the restore, then the pieces' rows onto the bodies it
+        // left (the names are equal in every world).
+        std::set<std::string> trafo_gone;
+        std::vector<journal_trafo_entry> trafo_journal;
+        if (s.trafo_active_) {
+            reconcile_trafo(st, anchor, trafo_gone, trafo_journal);
+            for (const auto& body: st.rows) {
+                if (body.kind != body_kind::Mechanism || !trafo_rows.count(body.name)) continue;
+                bmmo_physics_body_state probe{};
+                if (platform_.body_state(body.name, probe)) rows[body.name] = &body;
+                else ++unmapped;
+            }
+        }
         s.resync_rows_unmapped_ += unmapped;
         // 3. The scripts: the server's record, localized, the keep-local ones
         // from the anchor's own (2.4).  Refused: the anchor's own scripts,
@@ -302,6 +327,7 @@ namespace bmmo::session {
         resync_spec spec;
         spec.scripts = std::move(localized);
         spec.rows = rows;
+        spec.gone = trafo_gone;   // step T3
         spec.blob.blob = &st.savestate;
         {
             std::map<uint32_t, std::string> local;
@@ -330,7 +356,7 @@ namespace bmmo::session {
         std::string unexplained_names;
         if (const rollback_tracked* tracked = s.rollback_.recorded_tracked(anchor)) {
             for (const std::string& name: tracked->mechanisms) {
-                if (rows.count(name)) continue;
+                if (rows.count(name) || trafo_gone.count(name)) continue;
                 const bool only_here = platform_.local_only_body && platform_.local_only_body(name);
                 const uint32_t birth = platform_.birth_tick_of ? platform_.birth_tick_of(name) : 0;
                 int sector = 0;
@@ -512,6 +538,8 @@ namespace bmmo::session {
             r.union_state.assign(st.union_state.begin(), st.union_state.end());
             r.scripts.assign(st.scripts.begin(), st.scripts.end());
             r.savestate.assign(st.savestate.begin(), st.savestate.end());
+            r.has_trafo = s.trafo_active_;   // step T3: the reconcile's actions
+            r.trafo = std::move(trafo_journal);
             journal_.writer().resync(r);
             journal_.note("resync: re-stepped from the server's tick " + std::to_string(anchor) + " to "
                           + std::to_string(now) + " (" + std::to_string(depth) + " ticks, delta "

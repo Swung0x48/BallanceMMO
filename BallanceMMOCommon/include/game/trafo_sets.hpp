@@ -39,6 +39,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -115,10 +116,19 @@ namespace bmmo::game {
         trafo_type_set types[bmmo::session::kTrafoTypes];
         CK_ID wind = 0, collsound = 0;
         std::vector<CK_ID> scripts;    // the 8, in All_Balls' order
+        // Every force block of the scripts, in their order and walk order:
+        // the k-th names its controller "trafo:<player>/<k>" in a savestate
+        // (trafo_controller_alias), the same in every world.
+        std::vector<CK_ID> force_blocks;
         std::vector<CK_ID> objects;    // every object the builder made: what destroy removes
         std::map<CK_ID, std::vector<uint8_t>> built;   // each script's block bytes right after the build
         bool selected = true;
         uint32_t final_tick = 0;       // the newest TRAFO_FINAL reset's applied tick
+        // Retirement (retire_trafo_sets): the set has been inert at every
+        // retirement check since `inert_since` (each live tick's, after the
+        // frame); reset when a check finds it live again.
+        bool inert = false;
+        uint32_t inert_since = 0;
         bool deselected = false;
         uint32_t deselected_at = 0;
         std::string digest;            // the reference map's digest (names, not ids)
@@ -179,6 +189,10 @@ namespace bmmo::game {
         void rebuild_part() {
             std::sort(sets_.begin(), sets_.end(), [](const trafo_set& a, const trafo_set& b) { return a.player < b.player; });
             part_ = {};
+            force_names_.clear();
+            for (const auto& s: sets_)
+                for (size_t k = 0; k < s.force_blocks.size(); ++k)
+                    force_names_[s.force_blocks[k]] = "trafo:" + std::to_string(s.player) + "/" + std::to_string(k);
             for (const auto& s: sets_) {
                 if (!s.selected) continue;
                 for (CK_ID id: s.scripts) {
@@ -200,6 +214,13 @@ namespace bmmo::game {
         void clear() {
             sets_.clear();
             part_ = {};
+            force_names_.clear();
+        }
+        // The world-independent name of a force block of a set, or null
+        // (trafo_controller_alias).
+        const std::string* force_name(CK_ID block) const {
+            const auto it = force_names_.find(block);
+            return it == force_names_.end() ? nullptr : &it->second;
         }
         // The level reference every build writes into its copies (one per
         // level: a new level's load replaces it, before any set is built).
@@ -210,7 +231,25 @@ namespace bmmo::game {
         std::vector<trafo_set> sets_;
         script_replay::trafo_part part_;
         trafo_reference reference_;
+        std::map<CK_ID, std::string> force_names_;   // every set's force blocks, selected or not
     };
+
+    // The savestate's controller alias over a registry (physics_savestate.hpp
+    // set_controller_alias; step T3's fix-up): a set's force controller,
+    // "rt:force/<block id>" in this world, is "trafo:<player>/<k>" in every
+    // world - the k-th force block of that player's copies.  Every other
+    // name is kept.
+    inline bool trafo_controller_alias(const trafo_registry& registry, const char* name, std::string& alias) {
+        static constexpr char kPrefix[] = "rt:force/";
+        if (!name || std::strncmp(name, kPrefix, sizeof(kPrefix) - 1) != 0) return false;
+        char* end = nullptr;
+        const unsigned long id = std::strtoul(name + sizeof(kPrefix) - 1, &end, 10);
+        if (!end || *end) return false;
+        const std::string* found = registry.force_name(static_cast<CK_ID>(id));
+        if (!found) return false;
+        alias = *found;
+        return true;
+    }
 
     namespace trafo_detail {
         inline const CKGUID& activate_script_guid() {
@@ -1041,6 +1080,11 @@ namespace bmmo::game {
 
         // Step 6's built script state, after everything above.
         for (CK_ID id: set.scripts) script_replay::capture_script_block(CKBehavior::Cast(context->GetObject(id)), hooks.forces, set.built[id]);
+        // The force blocks, for the savestate's world-independent names.
+        for (CK_ID id: set.scripts)
+            trafo_detail::walk(CKBehavior::Cast(context->GetObject(id)), [&](CKBehavior* beh) {
+                if (script_replay::is_force_block(beh)) set.force_blocks.push_back(beh->GetID());
+            });
         set.objects.assign(mine.begin(), mine.end());
         set.objects.push_back(set.owner);
         for (const auto& ts: set.types) set.objects.push_back(ts.ref);
@@ -1522,7 +1566,17 @@ namespace bmmo::game {
     // ---- when sets go (design 2.4)
 
     // Whether a set is inert: no body, no active script, no next-frame flags,
-    // no controller.
+    // no controller.  As built at T3: the collision sound
+    // (Ball_CollSound_Pieces) does not count as an active script.  It is
+    // physics-inert (T1's S1), and whether it ever stops is the sound
+    // manager's: after a stone explosion and then a paper one its paper
+    // branch's Wave Player stays active for good in a world whose sound
+    // manager is the null one (the server's, the headless client's; SimTool
+    // L2: stone 300, paper 650, finals 1326 - still active at 1750), where a
+    // real one (retail) would end the sound.  Counted, a set with that
+    // history never retired, and the decision would hang on a sound device
+    // that differs between worlds.  Its listeners and controllers are
+    // checked like every script's (its own blocks have no controller).
     inline bool trafo_set_inert(CKContext* context, const trafo_set& set, const trafo_set_hooks& hooks) {
         for (const auto& ts: set.types)
             for (CK_ID id: ts.pieces)
@@ -1530,7 +1584,9 @@ namespace bmmo::game {
         for (CK_ID id: set.scripts) {
             CKBehavior* s = CKBehavior::Cast(context->GetObject(id));
             if (!s) continue;
-            if (s->IsActive() || (s->GetFlags() & (CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_RESETNEXTFRAME))) return false;
+            if (id != set.collsound
+                    && (s->IsActive() || (s->GetFlags() & (CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_RESETNEXTFRAME))))
+                return false;
             bool controller = false;
             trafo_detail::walk(s, [&](CKBehavior* beh) {
                 if (script_replay::is_force_block(beh) && trafo_detail::pointer_local(beh)) controller = true;
@@ -1557,12 +1613,25 @@ namespace bmmo::game {
     }
 
     // Retirement, two stages: a set whose three types have their final
-    // reset, that is inert and whose newest final reset is older than
-    // `history` ticks is deselected (out of the trafo list, the filter
-    // registry and the exemption list); a deselected set is destroyed
-    // `history` ticks later (`destroy_at_deselect`: at once - the server,
-    // which has no rollback).  Outside a replay.  Returns what it did, one
-    // line each.
+    // reset, whose newest final reset is older than `history` ticks and
+    // that has been inert for `history` ticks is deselected (out of the
+    // trafo list, the filter registry and the exemption list); a
+    // deselected set is destroyed `history` ticks later
+    // (`destroy_at_deselect`: at once - the server, which has no rollback).
+    // Outside a replay, once per live tick.  Returns what it did, one line
+    // each.
+    //
+    // Inert for the whole history (fix-up of step T3, review 1): the
+    // pieces keep their bodies until the final reset's R+132 and its
+    // scripts run until then, past R + `history` (96); a set deselected
+    // the first tick it is inert could be rewound to an anchor where it was
+    // not - its pieces revived by the restore, its scripts neither restored
+    // nor run by the replay (a deselected set is out of the trafo list), so
+    // the De Physicalize at R+132 never ran again and the pieces stayed,
+    // outside the filter registry, until the destroy deleted them under
+    // live bodies.  Every anchor a rewind can reach is within `history`
+    // ticks of now, so a set inert since now - `history` is inert at all
+    // of them.
     inline std::vector<std::string> retire_trafo_sets(CKContext* context, trafo_registry& registry, const trafo_set_hooks& hooks,
                                                       uint32_t now, uint32_t history, bool destroy_at_deselect) {
         std::vector<std::string> lines;
@@ -1570,8 +1639,16 @@ namespace bmmo::game {
         for (trafo_set& set: registry.sets()) {
             if (!set.selected) continue;
             if (!(set.types[0].final && set.types[1].final && set.types[2].final)) continue;
+            if (!trafo_set_inert(context, set, hooks)) {
+                set.inert = false;
+                continue;
+            }
+            if (!set.inert) {
+                set.inert = true;
+                set.inert_since = now;
+            }
             if (static_cast<int32_t>(now - (set.final_tick + history)) < 0) continue;
-            if (!trafo_set_inert(context, set, hooks)) continue;
+            if (static_cast<int32_t>(now - (set.inert_since + history)) < 0) continue;
             std::string error;
             if (hooks.unregister_set) hooks.unregister_set(set.player, error);
             set.selected = false;
@@ -1605,6 +1682,7 @@ namespace bmmo::game {
         if (hooks.register_set && !hooks.register_set(player, frames, explosions, report, error)) return false;
         set->selected = true;
         set->deselected = false;
+        set->inert = false;
         for (auto& ts: set->types) ts.final = false;
         registry.rebuild_part();
         return true;
@@ -1684,6 +1762,18 @@ namespace bmmo::game {
         r.error = std::move(built.error);
         r.lines = std::move(built.lines);
         return r;
+    }
+
+    // Every set's piece entities added to `names` (step T3: design 4.3,
+    // `explosion_pieces` over every set - with the trafo as an input the
+    // pieces of every set are no BodyRevived and are revivable at a restore,
+    // like the originals were under step P).
+    inline void add_trafo_set_pieces(CKContext* context, const trafo_registry& registry, std::set<std::string>& names) {
+        if (!context) return;
+        for (const trafo_set& set: registry.sets())
+            for (const auto& ts: set.types)
+                for (CK_ID id: ts.pieces)
+                    if (CKObject* o = context->GetObject(id); o && o->GetName()) names.insert(o->GetName());
     }
 
     // Session end: every live piece unphysicalized, the winds' controllers

@@ -33,6 +33,12 @@ namespace bmmo::physics {
         bool get_body_state(const char* entity, bmmo_physics_body_state& out, std::string& error) const {
             return bmmo::physics::get_body_state(manager, entity, out, error);
         }
+        // The record capture's lookup scope (physics_state.hpp
+        // entity_lookup_scope_begin; rollback_world::capture_scope).
+        void lookup_scope(bool on) const {
+            if (on) bmmo::physics::entity_lookup_scope_begin(manager);
+            else bmmo::physics::entity_lookup_scope_end(manager);
+        }
         bool set_body_state(const char* entity, const double position[3], const double rotation[4], const float linear[3],
                             const float angular[3], wake_mode mode, bool recheck, std::string& error) const {
             return bmmo::physics::set_body_state(manager, entity, position, rotation, linear, angular, mode, recheck, error);

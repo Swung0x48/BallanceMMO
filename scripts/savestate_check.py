@@ -338,8 +338,9 @@ def exact_difference(control, arm):
         return None
     # Every body, an ownerless "Ball_" one (a trafo explosion piece in a
     # journal from before step P) by its name, as worst_bodies.py compares.
-    a = fd.worlds(jt.read_journal(str(control)), want_local=True, ownerless_by_name=True)
-    b = fd.worlds(jt.read_journal(str(arm)), want_local=True, ownerless_by_name=True)
+    # Step T3: the trafo pieces by type (each solo session's player id differs).
+    a = fd.worlds(jt.read_journal(str(control)), want_local=True, ownerless_by_name=True, trafo_by_type=True)
+    b = fd.worlds(jt.read_journal(str(arm)), want_local=True, ownerless_by_name=True, trafo_by_type=True)
     worst, name, at, compared = 0.0, '-', -1, 0
     missing, extra, first_missing = 0, 0, None
     for tick in sorted(set(a) & set(b)):
@@ -373,7 +374,8 @@ def exact_difference(control, arm):
 
 
 def worst_bodies(control, arm):
-    proc = subprocess.run([sys.executable, str(REPO / 'scripts' / 'worst_bodies.py'), str(control), str(arm)],
+    proc = subprocess.run([sys.executable, str(REPO / 'scripts' / 'worst_bodies.py'), str(control), str(arm),
+                           '--trafo-by-type'],
                           capture_output=True, text=True, errors='replace', timeout=1200, creationflags=FLAGS)
     rows = []
     for line in proc.stdout.splitlines()[1:]:

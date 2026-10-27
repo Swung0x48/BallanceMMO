@@ -39,14 +39,16 @@ ap.add_argument('--from', dest='tick_from', type=int, default=0)
 ap.add_argument('--until', dest='tick_until', type=int, default=1 << 31)
 ap.add_argument('--balls-by-owner-only', dest='by_name', action='store_false',
                 help='skip a kind-0 body with no owner (the rule before step P)')
+ap.add_argument('--trafo-by-type', action='store_true',
+                help='key a trafo set piece without its player id (two solo sessions: step T3)')
 ap.add_argument('--exclude', action='append', default=[], metavar='PREFIX',
                 help='drop the bodies whose name starts with PREFIX (repeatable), e.g. PE_Balloon')
 args = ap.parse_args()
 
 control = fd.worlds(jt.read_journal(args.control), want_local=True, ownerless_by_name=args.by_name,
-                    exclude=args.exclude)
+                    exclude=args.exclude, trafo_by_type=args.trafo_by_type)
 arm = fd.worlds(jt.read_journal(args.arm), want_local=True, ownerless_by_name=args.by_name,
-                exclude=args.exclude)
+                exclude=args.exclude, trafo_by_type=args.trafo_by_type)
 
 
 def pair_balls(row_a, row_b):

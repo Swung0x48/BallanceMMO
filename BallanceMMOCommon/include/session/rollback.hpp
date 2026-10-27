@@ -111,6 +111,12 @@ namespace bmmo::session {
         std::map<std::string, bmmo_physics_nav_state> navs;
         std::map<std::string, const body_state*> rows;
         std::map<std::string, uint32_t> destroy;
+        // Step T3 (trafo-replication design 4.7, the reconcile): bodies the
+        // server's state has none of at S that the client took out before
+        // the restore (a trafo type set the server's ledger has no bodies
+        // for): no plan item, no revive - the anchor's record of them is the
+        // world this resync replaces.
+        std::set<std::string> gone;
     };
     // What the restore of a resync did (the core's log line and counters).
     struct resync_outcome {
@@ -126,6 +132,22 @@ namespace bmmo::session {
 
     struct rollback_world {
         std::function<bool(const std::string& entity, bmmo_physics_body_state& out)> get_body;
+        // Optional (step TR3): a body every world simulates from the same
+        // inputs - a member's trafo piece, made, blown and reset by the
+        // inputs the server's ledger fixed.  Its snapshot row is compared
+        // like any other, but restores it only when it breaches its
+        // tolerance: within it the body's own record (the blob) is its
+        // exact state, and writing the row - a pose and velocities, none of
+        // the collision state - is what made exact pieces drift from the
+        // server after every snapshot rollback (TR3's H1 with snapshots off:
+        // the full snapshot of each body-set change rewrote every awake
+        // piece).  A breaching piece is restored from its row as before.
+        std::function<bool(const std::string& entity)> row_on_breach_only;
+        // Optional: called with true before a record's capture and with false
+        // after it.  The capture only reads, so a backend may serve its
+        // by-name lookups from one pass over the world in between
+        // (rollback_binding.hpp; physics_state.hpp entity_lookup_scope_begin).
+        std::function<void(bool on)> capture_scope;
         // mode: keep = leave the sleep state alone; wake/freeze as above.
         // recheck: the write moves the body into a possibly touching pose, so
         // rebuild its contact pairs (the plain beam keeps the old ones).
@@ -468,7 +490,7 @@ namespace bmmo::session {
         uint64_t script_restores = 0;
         uint64_t script_restore_failures = 0;
         uint64_t script_mismatches = 0;        // logical: flags, IOs, controllers, counters
-        uint64_t savestate_replay_mismatches = 0;   // the last replayed tick's blob != the live record's (diagnostic)
+        uint64_t savestate_replay_mismatches = 0;   // the last replayed tick's blob != the live record's (diagnostic; counted while logged, the first 8)
         uint64_t unknown_rechecks_deferred = 0;     // untracked window-born bodies rechecked into the tree at their birth tick, not at the restore
         uint64_t births_inserted = 0;               // window-born bodies put where their Physicalize made them before their birth tick's step
         uint64_t births_inserted_exact = 0;         // ...and found at exactly their birth record after that step
@@ -501,6 +523,7 @@ namespace bmmo::session {
         // What a client's frame budget pays for the rollback - a frame is 15 ms.
         uint64_t restore_us = 0, replay_us = 0, rewind_us_max = 0, capture_us = 0, capture_us_max = 0;
         uint64_t unmatched = 0;        // snapshot tick not in the history
+        uint64_t captures_never_made = 0;   // a deferred record (capture_now false) no amend_record captured
         uint64_t too_far = 0;          // a snapshot or a rewind deeper than max_resim_ticks: refused, nothing written
         uint64_t resyncs = 0;          // resync re-steps (resync(): the server's state of S restored, S+1..now replayed)
         uint64_t frozen = 0;           // local physics clock stopped: bodies snapped, no re-simulation
@@ -530,6 +553,7 @@ namespace bmmo::session {
         void invalidate_history() {
             history_.clear();
             moved_births_.clear();
+            awaiting_capture_ = false;
         }
 
         void clear() {
@@ -550,13 +574,33 @@ namespace bmmo::session {
         // rules below judge every name on its own (row, record of the same
         // lifetime, birth record, or nothing at all), so a window may span
         // several live sets.
+        //
+        // `capture_now` false (step T3's fix-up): the tick's world is captured
+        // by the amend_record the caller makes for this tick before anything
+        // reads the record or steps the world - the session core's live
+        // frame, which always amends its record after the frame's corrections
+        // and before the next tick, and whose amend overwrote this capture
+        // whole.  Until then the record has the tick, the tracked set and the
+        // inputs, and no world: a record of a later tick, or a resync, while
+        // one is still waiting is a caller's bug, counted and logged
+        // (stats().captures_never_made).
         void record(const rollback_world& world, uint32_t tick, const rollback_tracked& tracked,
-                    const std::map<std::string, input_frame>& inputs_applied) {
+                    const std::map<std::string, input_frame>& inputs_applied, bool capture_now = true) {
+            if (awaiting_capture_) {
+                ++stats_.captures_never_made;
+                if (world.log && never_made_logs_++ < 4)
+                    world.log("record of tick " + std::to_string(awaiting_tick_) + " was never captured (no amend before tick "
+                              + std::to_string(tick) + ")");
+                awaiting_capture_ = false;
+            }
             tick_state state;
             state.tick = tick;
             state.tracked = tracked;
             state.inputs = inputs_applied;
-            {
+            if (!capture_now) {
+                awaiting_capture_ = true;
+                awaiting_tick_ = tick;
+            } else {
                 const auto started = std::chrono::steady_clock::now();
                 capture(world, state);
                 const uint64_t took = static_cast<uint64_t>(
@@ -600,6 +644,18 @@ namespace bmmo::session {
         bool amend_record(const rollback_world& world, uint32_t tick) {
             tick_state* at = find(tick);
             if (!at) return false;
+            if (awaiting_capture_ && awaiting_tick_ == tick) {
+                // The record's one capture (record's capture_now false),
+                // timed as the record's.
+                awaiting_capture_ = false;
+                const auto started = std::chrono::steady_clock::now();
+                capture(world, *at);
+                const uint64_t took = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
+                stats_.capture_us += took;
+                stats_.capture_us_max = std::max(stats_.capture_us_max, took);
+                return true;
+            }
             capture(world, *at);
             return true;
         }
@@ -725,7 +781,10 @@ namespace bmmo::session {
                 // on every snapshot - so the row is not a restore source and
                 // the body rewinds with the group from its own record instead.
                 // Only a breaching sleeping row restores and freezes.
-                ref.authoritative = ref.breached || ref.simulated;
+                // An input-driven body (row_on_breach_only, a trafo piece)
+                // is restored from its row only on a breach, awake or not.
+                ref.authoritative = ref.breached
+                                 || (ref.simulated && !(world.row_on_breach_only && world.row_on_breach_only(entity)));
                 if (ref.breached) {
                     mismatch = true;
                     if (detailed_logs_ < 40) {
@@ -855,6 +914,7 @@ namespace bmmo::session {
             // at their birth tick instead of now (rollback_world::birth_tick_of).
             std::map<uint32_t, std::vector<std::string>> deferred_rechecks;
             for (const auto& entity: restore_candidates(anchor, rows)) {
+                if (rs && rs->gone.count(entity)) continue;   // step T3: the reconcile took it out
                 const auto row = rows.find(entity);
                 const bmmo_physics_body_state* recorded = record_at(entity);
                 // A resync (resync design 4.1): a body the reconcile destroys
@@ -1025,6 +1085,7 @@ namespace bmmo::session {
                 std::string first_reborn;
                 for (const auto& entity: at->tracked.mechanisms) {
                     if (at->bodies.find(entity) == at->bodies.end()) continue;
+                    if (rs && rs->gone.count(entity)) continue;   // step T3: the reconcile took it out
                     if (const auto p = plan.find(entity); p != plan.end()) {
                         if (p->second.repose_tick != 0 && !reborn++) first_reborn = entity;
                         continue;
@@ -1049,7 +1110,8 @@ namespace bmmo::session {
             // overwrites it: what the re-executed scripts must arrive at.
             std::vector<uint8_t> live_scripts, live_savestate;
             bool have_live_scripts = false, have_live_savestate = false;
-            if (const tick_state* live = find(current_tick); live && live->have_savestate && world.diff_savestate) {
+            if (const tick_state* live = find(current_tick);
+                    live && live->have_savestate && world.diff_savestate && world.log && savestate_replay_logs_ < 8) {
                 live_savestate = live->savestate;
                 have_live_savestate = true;
             }
@@ -1729,8 +1791,13 @@ namespace bmmo::session {
                 // Not where a body was born or restored from a row inside the
                 // window (the live record then describes a world this replay
                 // was told to differ from).
-                if (t == current_tick && have_live_savestate && state.have_savestate && state.savestate != live_savestate
-                        && rows.empty()) {
+                // Only while it can still be logged: the diff renders both
+                // blobs as text, and a replay that corrects an input differs
+                // from the live record by design - with every member's trafo
+                // pieces in the blob that rendering was a twelfth of a 150 ms
+                // client's frame time (step TR3), for lines past the cap.
+                if (t == current_tick && have_live_savestate && state.have_savestate && world.log
+                        && savestate_replay_logs_ < 8 && state.savestate != live_savestate && rows.empty()) {
                     // A parked birth makes the live record describe a world
                     // this replay was told to differ from; a re-created one
                     // that landed on its record does not.
@@ -1743,9 +1810,9 @@ namespace bmmo::session {
                         const std::string where = world.diff_savestate(live_savestate, state.savestate);
                         if (!where.empty()) {
                             ++stats_.savestate_replay_mismatches;
-                            if (world.log && savestate_replay_logs_++ < 8)
-                                world.log("savestate replay: the world re-simulated to tick " + std::to_string(t)
-                                          + " differs from the live record: " + where);
+                            ++savestate_replay_logs_;
+                            world.log("savestate replay: the world re-simulated to tick " + std::to_string(t)
+                                      + " differs from the live record: " + where);
                         }
                     }
                 }
@@ -2290,6 +2357,11 @@ namespace bmmo::session {
         }
 
         void capture(const rollback_world& world, tick_state& state) {
+            struct scope {
+                const rollback_world& w;
+                explicit scope(const rollback_world& world) : w(world) { if (w.capture_scope) w.capture_scope(true); }
+                ~scope() { if (w.capture_scope) w.capture_scope(false); }
+            } lookups(world);
             auto grab = [&](const std::string& entity) {
                 if (entity.empty()) return;
                 bmmo_physics_body_state body{};
@@ -2365,6 +2437,11 @@ namespace bmmo::session {
         };
         std::vector<moved_birth> moved_births_;
         rollback_stats stats_;
+        // A live record whose capture waits for its amend (record's
+        // capture_now false).
+        bool awaiting_capture_ = false;
+        uint32_t awaiting_tick_ = 0;
+        uint32_t never_made_logs_ = 0;
         uint32_t detailed_logs_ = 0;   // mismatch detail lines logged (capped)
         uint32_t resim_traces_ = 0;    // re-simulation trace lines logged (capped)
         bool verbose_ = false;

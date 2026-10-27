@@ -58,6 +58,21 @@ namespace bmmo::session {
             ++s.event_dups_;
             return;
         }
+        // Step T3 (trafo-replication design 2.4): a member first seen in a
+        // message gets its piece set now, outside any replay.
+        if (s.trafo_active_ && msg.player != 0 && msg.player != s.own_id_) ensure_trafo_set(msg.player, "its first event");
+        // A Trafo event (protocol 11) is an input of the trafo log, not a
+        // body change of the drain: our own (not server-stamped) is an echo
+        // for the frame; another member's, and a server-stamped reset of
+        // our own set, are logged at their applied tick now (design 4.6).
+        if (msg.type == bmmo::session::event_type::Trafo) {
+            if (msg.player == s.own_id_ && s.own_id_ != 0 && !(msg.flags & bmmo::session::TRAFO_SERVER)) {
+                s.own_echoes_.push_back(std::move(msg));
+                return;
+            }
+            on_trafo_event(msg);
+            return;
+        }
         // Protocol 9: the server relays every event to every member,
         // its owner included.  Our own is an echo: applied at its
         // origin it is a plain ack; MOVED, SUPERSEDED or REJECTED it
@@ -1202,6 +1217,12 @@ namespace bmmo::session {
     // is not kept, and the echo is counted, journaled and logged as kept
     // where we stamped it.
     void session_client_core::process_own_echo(const bmmo::session_event_msg& msg, bool stale) {
+        // Step T3: a Trafo input's echo goes the input rewind's way (design
+        // 4.6), never the own lives'.
+        if (msg.type == bmmo::session::event_type::Trafo) {
+            process_trafo_echo(msg, stale);
+            return;
+        }
         const bool acting = acting_on_echoes();
         const bool rejected = (msg.state & bmmo::session::EVENT_STATE_REJECTED) != 0;
         const bool superseded = !rejected && (msg.state & bmmo::session::EVENT_STATE_SUPERSEDED) != 0;

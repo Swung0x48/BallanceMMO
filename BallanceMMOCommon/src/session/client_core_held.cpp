@@ -519,6 +519,7 @@ namespace bmmo::session {
     }
 
     void session_client_core::drop_pending_rewind() {
+        s.input_rewind_trafo_ = false;
         s.input_rewind_pending_ = false;
         s.input_rewind_own_ = false;
         s.input_rewind_has_own_ = false;

@@ -42,13 +42,16 @@ namespace bmmo::physics::savestate {
             IVP_Environment* env = nullptr;
             IVP_Time_Manager* tm = nullptr;
             IVP_Time_CODE time_code = 0;
-            std::map<const IVP_Collision*, int32_t> collisions;          // every checker
-            std::map<const IVP_Time_Event*, int32_t> mindist_events;     // mindists only, as their time events
-            std::map<const IVP_Contact_Point*, int32_t> contacts;
+            // Pointer -> record index (ptr_index: no allocation per entry).
+            ptr_index collisions;          // every checker
+            ptr_index mindist_events;      // mindists only, as their time events
+            ptr_index contacts;
             std::vector<IVP_Friction_System*> systems;
-            std::map<const IVP_Friction_System*, int32_t> system_index;
-            std::map<const IVP_Simulation_Unit*, int32_t> units;
-            std::map<const IVP_OV_Node*, int32_t> ov_nodes;
+            ptr_index system_index;
+            ptr_index handles;             // each system's three controllers -> (system << 2) | part (describe_controller)
+            ptr_index units;
+            ptr_index ov_nodes;
+            const controller_alias* alias = nullptr;   // set_controller_alias's, for this manager
             std::string error;
 
             bool fail(const std::string& e) {
@@ -60,14 +63,8 @@ namespace bmmo::physics::savestate {
                 if (i >= 0) return live.objects[static_cast<size_t>(i)].name;
                 return o && o->get_name() ? std::string("<unindexed ") + o->get_name() + ">" : std::string("<unindexed>");
             }
-            int32_t collision_index(const IVP_Collision* c) const {
-                auto it = collisions.find(c);
-                return it == collisions.end() ? -1 : it->second;
-            }
-            int32_t contact_index(const IVP_Contact_Point* cp) const {
-                auto it = contacts.find(cp);
-                return it == contacts.end() ? -1 : it->second;
-            }
+            int32_t collision_index(const IVP_Collision* c) const { return collisions.find(c); }
+            int32_t contact_index(const IVP_Contact_Point* cp) const { return contacts.find(cp); }
         };
 
         template <class Point>
@@ -193,7 +190,7 @@ namespace bmmo::physics::savestate {
                 return c.fail("collision #" + std::to_string(index) + " between " + c.name_of(objects[0]) + " and "
                               + c.name_of(objects[1]) + " is of an unknown kind");
             }
-            c.world->collisions[static_cast<size_t>(index)] = rec;
+            c.world->collisions[static_cast<size_t>(index)] = std::move(rec);
             if (children) {
                 for (int i = 0; i < children->len(); ++i) {
                     IVP_Collision* child = children->element_at(i);
@@ -209,15 +206,16 @@ namespace bmmo::physics::savestate {
             return true;
         }
 
-        // (collision << 1) | side of a hull/exact/invalid synapse.
-        bool encode_synapse(capture_context& c, IVP_Synapse_Real* syn, const std::string& where, int32_t& out) {
+        // (collision << 1) | side of a hull/exact/invalid synapse.  The place
+        // is `what` + `name`, put together only for a failure's message.
+        bool encode_synapse(capture_context& c, IVP_Synapse_Real* syn, const char* what, const std::string& name, int32_t& out) {
             IVP_Mindist* md = syn->get_mindist();
             const int32_t index = c.collision_index(md);
-            if (index < 0) return c.fail(where + ": a synapse of a mindist outside the checker trees");
+            if (index < 0) return c.fail(what + name + ": a synapse of a mindist outside the checker trees");
             int side = -1;
             if (syn == md->get_synapse(0)) side = 0;
             else if (syn == md->get_synapse(1)) side = 1;
-            if (side < 0) return c.fail(where + ": a synapse that is neither side of its mindist");
+            if (side < 0) return c.fail(what + name + ": a synapse that is neither side of its mindist");
             out = (index << 1) | side;
             return true;
         }
@@ -228,23 +226,19 @@ namespace bmmo::physics::savestate {
         bool describe_controller(capture_context& c, IVP_Controller* ctrl, controller_ref& out) {
             out = controller_ref{};
             if (!ctrl) return c.fail("null controller");
-            for (size_t s = 0; s < c.systems.size(); ++s) {
-                IVP_Friction_System* fs = c.systems[s];
-                int part = -1;
-                if (ctrl == static_cast<IVP_Controller*>(&IVP_BMMO_State::fs_static_handle(*fs))) part = 0;
-                else if (ctrl == static_cast<IVP_Controller*>(fs)) part = 1;
-                else if (ctrl == static_cast<IVP_Controller*>(&IVP_BMMO_State::fs_energy_handle(*fs))) part = 2;
-                if (part >= 0) {
-                    out.kind = 0;
-                    out.system = static_cast<int32_t>(s);
-                    out.part = static_cast<uint8_t>(part);
-                    return true;
-                }
+            // One of a friction system's three controllers: the table
+            // index_handles built in system order and part order, so it
+            // answers what a scan of the systems did (the first system, the
+            // first part).
+            if (const int32_t handle = c.handles.find(ctrl); handle >= 0) {
+                out.kind = 0;
+                out.system = handle >> 2;
+                out.part = static_cast<uint8_t>(handle & 3);
+                return true;
             }
             out.kind = 1;
             out.priority = static_cast<int32_t>(ctrl->get_controller_priority());
-            const char* name = ctrl->get_controller_name();
-            out.name = name ? name : "";
+            out.name = recorded_controller_name(c.alias, ctrl->get_controller_name());
             return true;
         }
 
@@ -285,40 +279,54 @@ namespace bmmo::physics::savestate {
             return true;
         }
 
+        // Every system's three controllers, for describe_controller: in
+        // system order, then static handle, the system, the energy handle -
+        // the order its scan used to try them in (emplace keeps the first).
+        void index_handles(capture_context& c) {
+            c.handles.reserve(3 * c.systems.size());
+            for (size_t s = 0; s < c.systems.size(); ++s) {
+                IVP_Friction_System* fs = c.systems[s];
+                const int32_t base = static_cast<int32_t>(s) << 2;
+                c.handles.emplace(static_cast<IVP_Controller*>(&IVP_BMMO_State::fs_static_handle(*fs)), base | 0);
+                c.handles.emplace(static_cast<IVP_Controller*>(fs), base | 1);
+                c.handles.emplace(static_cast<IVP_Controller*>(&IVP_BMMO_State::fs_energy_handle(*fs)), base | 2);
+            }
+        }
+
         bool capture_system(capture_context& c, int32_t s) {
             IVP_Friction_System* fs = c.systems[static_cast<size_t>(s)];
             friction_system_record rec;
-            const std::string at = "friction system #" + std::to_string(s);
+            const auto at = [s]() { return "friction system #" + std::to_string(s); };
 
             for (int i = 0; i < fs->cores_of_friction_system.len(); ++i) {
                 const int32_t o = c.live.index_of_core(fs->cores_of_friction_system.element_at(i));
-                if (o < 0) return c.fail(at + " holds a core outside the physics table");
+                if (o < 0) return c.fail(at() + " holds a core outside the physics table");
                 rec.cores.push_back(o);
             }
             for (int i = 0; i < fs->moveable_cores_of_friction_system.len(); ++i) {
                 const int32_t o = c.live.index_of_core(fs->moveable_cores_of_friction_system.element_at(i));
-                if (o < 0) return c.fail(at + " holds a movable core outside the physics table");
+                if (o < 0) return c.fail(at() + " holds a movable core outside the physics table");
                 rec.movable_cores.push_back(o);
             }
             int guard = 0;
             for (IVP_Contact_Point* cp = fs->get_first_friction_dist(); cp; cp = fs->get_next_friction_dist(cp)) {
-                if (++guard > kListGuard) return c.fail(at + ": the contact list does not end");
-                if (c.contact_index(cp) >= 0) return c.fail(at + " lists a contact point twice or shares it");
-                if (IVP_BMMO_State::cp_system(*cp) != fs) return c.fail(at + " lists a contact point of another system");
+                if (++guard > kListGuard) return c.fail(at() + ": the contact list does not end");
+                if (c.contact_index(cp) >= 0) return c.fail(at() + " lists a contact point twice or shares it");
+                if (IVP_BMMO_State::cp_system(*cp) != fs) return c.fail(at() + " lists a contact point of another system");
                 const int32_t ci = static_cast<int32_t>(c.world->contacts.size());
                 c.contacts.emplace(cp, ci);
                 contact_record contact;
                 if (!fill_contact(c, cp, s, ci, contact)) return false;
-                c.world->contacts.push_back(contact);
+                c.world->contacts.push_back(std::move(contact));
                 rec.dists.push_back(ci);
             }
             for (int i = 0; i < fs->fr_pairs_of_objs.len(); ++i) {
                 IVP_Friction_Core_Pair* pair = fs->fr_pairs_of_objs.element_at(i);
-                if (!pair) return c.fail(at + " has a null pair");
+                if (!pair) return c.fail(at() + " has a null pair");
                 pair_record pr;
                 for (int k = 0; k < 2; ++k) {
                     pr.objects[k] = c.live.index_of_core(pair->objs[k]);
-                    if (pr.objects[k] < 0) return c.fail(at + " has a pair with a core outside the physics table");
+                    if (pr.objects[k] < 0) return c.fail(at() + " has a pair with a core outside the physics table");
                 }
                 pr.next_ease = static_cast<int32_t>(pair->next_ease_nr_psi);
                 pr.last_impact_time = pair->last_impact_time_pair.get_seconds();
@@ -326,23 +334,23 @@ namespace bmmo::physics::savestate {
                 IVP_U_Vector<IVP_Contact_Point>& dists = IVP_BMMO_State::pair_dists(*pair);
                 for (int k = 0; k < dists.len(); ++k) {
                     const int32_t ci = c.contact_index(dists.element_at(k));
-                    if (ci < 0) return c.fail(at + " has a pair holding a contact point the system does not list");
+                    if (ci < 0) return c.fail(at() + " has a pair holding a contact point the system does not list");
                     pr.dists.push_back(ci);
                 }
-                rec.pairs.push_back(pr);
+                rec.pairs.push_back(std::move(pr));
             }
             for (int i = 0; i < fs->cores_of_friction_system.len(); ++i) {
                 IVP_Core* core = fs->cores_of_friction_system.element_at(i);
                 IVP_Friction_Info_For_Core* info = core->get_friction_info(fs);
-                if (!info) return c.fail(at + ": core of " + c.name_of(core->objects.element_at(0)) + " has no friction info");
+                if (!info) return c.fail(at() + ": core of " + c.name_of(core->objects.element_at(0)) + " has no friction info");
                 friction_info_record ir;
                 ir.object = c.live.index_of_core(core);
                 for (int k = 0; k < info->friction_springs.len(); ++k) {
                     const int32_t ci = c.contact_index(info->friction_springs.element_at(k));
-                    if (ci < 0) return c.fail(at + ": a friction info holds a contact point the system does not list");
+                    if (ci < 0) return c.fail(at() + ": a friction info holds a contact point the system does not list");
                     ir.springs.push_back(ci);
                 }
-                rec.infos.push_back(ir);
+                rec.infos.push_back(std::move(ir));
             }
             rec.obj_number = IVP_BMMO_State::fs_obj_number(*fs);
             rec.dist_number = IVP_BMMO_State::fs_dist_number(*fs);
@@ -356,7 +364,7 @@ namespace bmmo::physics::savestate {
             // Declared, never initialized, never read anywhere in IVP: heap
             // memory on a fresh system, so it is normalized to 0.
             rec.simulated = 0;
-            c.world->systems.push_back(rec);
+            c.world->systems.push_back(std::move(rec));
             return true;
         }
 
@@ -364,14 +372,14 @@ namespace bmmo::physics::savestate {
         // Simulation units
         // ------------------------------------------------------------------
         bool add_unit(capture_context& c, IVP_Simulation_Unit* unit, bool still) {
-            if (c.units.count(unit)) return c.fail("a simulation unit is linked twice");
+            if (c.units.find(unit) >= 0) return c.fail("a simulation unit is linked twice");
             const int32_t index = static_cast<int32_t>(c.world->units.size());
             c.units.emplace(unit, index);
-            const std::string at = "unit #" + std::to_string(index);
+            const auto at = [index]() { return "unit #" + std::to_string(index); };
             unit_record rec;
             for (int i = 0; i < unit->sim_unit_cores.len(); ++i) {
                 const int32_t o = c.live.index_of_core(unit->sim_unit_cores.element_at(i));
-                if (o < 0) return c.fail(at + " holds a core outside the physics table");
+                if (o < 0) return c.fail(at() + " holds a core outside the physics table");
                 rec.cores.push_back(o);
             }
             rec.movement_type = static_cast<uint8_t>(static_cast<int>(unit->get_unit_movement_type()));
@@ -384,12 +392,12 @@ namespace bmmo::physics::savestate {
             rec.in_still_slot = still ? 1 : 0;
             for (int i = 0; i < unit->controller_cores.len(); ++i) {
                 IVP_Sim_Unit_Controller_Core_List* entry = unit->controller_cores.element_at(i);
-                if (!entry) return c.fail(at + " has a null controller entry");
+                if (!entry) return c.fail(at() + " has a null controller entry");
                 controller_ref ref;
                 if (!describe_controller(c, entry->l_controller, ref)) return false;
-                rec.controllers.push_back(ref);
+                rec.controllers.push_back(std::move(ref));
             }
-            c.world->units.push_back(rec);
+            c.world->units.push_back(std::move(rec));
             return true;
         }
 
@@ -417,14 +425,15 @@ namespace bmmo::physics::savestate {
             IVP_Core* core = lo.core;
             rec.movement_state = static_cast<uint8_t>(static_cast<int>(core->movement_state));
             if (core->sim_unit_of_core) {
-                auto it = c.units.find(core->sim_unit_of_core);
-                if (it == c.units.end()) return c.fail("the core of " + lo.name + " is in a unit the manager does not list");
-                rec.unit = it->second;
+                const int32_t unit = c.units.find(core->sim_unit_of_core);
+                if (unit < 0) return c.fail("the core of " + lo.name + " is in a unit the manager does not list");
+                rec.unit = unit;
             }
+            rec.controllers.reserve(static_cast<size_t>(core->controllers_of_core.len()));
             for (int i = 0; i < core->controllers_of_core.len(); ++i) {
                 controller_ref ref;
                 if (!describe_controller(c, core->controllers_of_core.element_at(i), ref)) return false;
-                rec.controllers.push_back(ref);
+                rec.controllers.push_back(std::move(ref));
             }
             if (core->physical_unmoveable) return true;   // a static core: movement_state, unit, controllers only
 
@@ -470,27 +479,27 @@ namespace bmmo::physics::savestate {
             rec.hull_value_next_psi = g.hull_value_next_psi;
             rec.time_of_next_reset = static_cast<int32_t>(g.time_of_next_reset);
 
-            const std::string at = "hull of " + lo.name;
+            const auto at = [&lo]() { return "hull of " + lo.name; };
             IVP_U_Min_List& list = IVP_BMMO_State::hull_list(*hm);
             IVP_U_Min_List_Enumerator enumerator(&list);
             int guard = 0;
             while (IVP_U_Min_List_Element* header = enumerator.get_next_element_header()) {
-                if (++guard > kListGuard) return c.fail(at + ": the list does not end");
+                if (++guard > kListGuard) return c.fail(at() + ": the list does not end");
                 auto* listener = static_cast<IVP_Listener_Hull*>(header->element);
-                if (!listener) return c.fail(at + ": a null listener");
+                if (!listener) return c.fail(at() + ": a null listener");
                 hull_entry entry;
                 entry.value = header->value;
                 switch (listener->get_type()) {
                 case IVP_HULL_ELEM_OO_CONNECTOR: {
                     auto* elem = static_cast<IVP_OV_Element*>(listener);
-                    if (elem != object->get_ov_element()) return c.fail(at + " holds another object's overlap element");
+                    if (elem != object->get_ov_element()) return c.fail(at() + " holds another object's overlap element");
                     entry.kind = 0;
                     break;
                 }
                 case IVP_HULL_ELEM_POLYGON: {
                     auto* syn = static_cast<IVP_Synapse_Real*>(listener);
                     int32_t encoded = -1;
-                    if (!encode_synapse(c, syn, at, encoded)) return false;
+                    if (!encode_synapse(c, syn, "hull of ", lo.name, encoded)) return false;
                     entry.kind = 1;
                     entry.collision = encoded >> 1;
                     entry.side = static_cast<uint8_t>(encoded & 1);
@@ -500,18 +509,18 @@ namespace bmmo::physics::savestate {
                     auto* syn = static_cast<IVP_Synapse_OO*>(listener);
                     IVP_OO_Watcher* watcher = IVP_BMMO_State::watcher_of(*syn);
                     const int32_t ci = watcher ? c.collision_index(watcher) : -1;
-                    if (ci < 0) return c.fail(at + ": a watcher synapse of a watcher outside the checker trees");
+                    if (ci < 0) return c.fail(at() + ": a watcher synapse of a watcher outside the checker trees");
                     int side = -1;
                     if (syn == &IVP_BMMO_State::watcher_synapse(*watcher, 0)) side = 0;
                     else if (syn == &IVP_BMMO_State::watcher_synapse(*watcher, 1)) side = 1;
-                    if (side < 0) return c.fail(at + ": a watcher synapse that is neither side of its watcher");
+                    if (side < 0) return c.fail(at() + ": a watcher synapse that is neither side of its watcher");
                     entry.kind = 1;
                     entry.collision = ci;
                     entry.side = static_cast<uint8_t>(side);
                     break;
                 }
                 default:
-                    return c.fail(at + ": a hull listener of kind " + std::to_string(static_cast<int>(listener->get_type()))
+                    return c.fail(at() + ": a hull listener of kind " + std::to_string(static_cast<int>(listener->get_type()))
                                   + " (anchor or unknown)");
                 }
                 rec.hull.push_back(entry);
@@ -526,14 +535,14 @@ namespace bmmo::physics::savestate {
             for (IVP_Synapse_Real* syn = object->get_first_exact_synapse(); syn; syn = syn->get_next()) {
                 if (++guard > kListGuard) return c.fail("exact synapses of " + lo.name + ": the list does not end");
                 int32_t encoded = -1;
-                if (!encode_synapse(c, syn, "exact synapses of " + lo.name, encoded)) return false;
+                if (!encode_synapse(c, syn, "exact synapses of ", lo.name, encoded)) return false;
                 rec.exact_synapses.push_back(encoded);
             }
             guard = 0;
             for (IVP_Synapse_Real* syn = IVP_BMMO_State::invalid_synapses(*object); syn; syn = syn->get_next()) {
                 if (++guard > kListGuard) return c.fail("invalid synapses of " + lo.name + ": the list does not end");
                 int32_t encoded = -1;
-                if (!encode_synapse(c, syn, "invalid synapses of " + lo.name, encoded)) return false;
+                if (!encode_synapse(c, syn, "invalid synapses of ", lo.name, encoded)) return false;
                 rec.invalid_synapses.push_back(encoded);
             }
             guard = 0;
@@ -558,7 +567,7 @@ namespace bmmo::physics::savestate {
             index_out = -1;
             if (!node) return c.fail("null overlap node");
             if (depth > kDepthGuard) return c.fail("overlap tree too deep");
-            if (c.ov_nodes.count(node)) return c.fail("an overlap node is reached twice");
+            if (c.ov_nodes.find(node) >= 0) return c.fail("an overlap node is reached twice");
             const int32_t index = static_cast<int32_t>(c.world->ov_nodes.size());
             c.ov_nodes.emplace(node, index);
             ov_node_record rec;
@@ -574,7 +583,7 @@ namespace bmmo::physics::savestate {
                 if (o < 0) return c.fail("overlap node #" + std::to_string(index) + " holds an element of an object outside the physics table");
                 rec.elements.push_back(o);
             }
-            c.world->ov_nodes.push_back(rec);
+            c.world->ov_nodes.push_back(std::move(rec));
             for (int i = 0; i < node->children.len(); ++i) {
                 int32_t child = -1;
                 if (!add_ov_node(c, node->children.element_at(i), index, depth + 1, child)) return false;
@@ -590,7 +599,8 @@ namespace bmmo::physics::savestate {
         out = world_record{};
         capture_context c;
         c.world = &out;
-        if (!index_live_world(physics, c.live, error)) {
+        c.alias = controller_alias_for(physics);
+        if (!index_live_world(physics, c.live, error, false)) {
             out = world_record{};
             return false;
         }
@@ -604,6 +614,21 @@ namespace bmmo::physics::savestate {
         }
         c.time_code = env->get_current_time_code();
         const size_t n = c.live.objects.size();
+        // Sized like this thread's previous capture (a tick's world is about
+        // the last one's): the tables never rehash and the record's lists
+        // never move their entries more than once.
+        thread_local size_t last_collisions = 0, last_contacts = 0, last_units = 0, last_nodes = 0, last_systems = 0;
+        c.collisions.reserve(last_collisions + 16);
+        c.mindist_events.reserve(last_collisions + 16);
+        c.contacts.reserve(last_contacts + 16);
+        c.units.reserve(last_units + 16);
+        c.ov_nodes.reserve(last_nodes + 16);
+        c.system_index.reserve(last_systems + 16);
+        out.collisions.reserve(last_collisions + 16);
+        out.contacts.reserve(last_contacts + 16);
+        out.units.reserve(last_units + 16);
+        out.ov_nodes.reserve(last_nodes + 16);
+        out.systems.reserve(last_systems + 16);
 
         auto failed = [&]() {
             error = c.error.empty() ? std::string("savestate capture failed") : c.error;
@@ -653,10 +678,11 @@ namespace bmmo::physics::savestate {
             if (core->physical_unmoveable) continue;
             IVP_Friction_Info_For_Core* info = core->moveable_core_has_friction_info();
             IVP_Friction_System* fs = info ? info->l_friction_system : nullptr;
-            if (!fs || c.system_index.count(fs)) continue;
+            if (!fs || c.system_index.find(fs) >= 0) continue;
             c.system_index.emplace(fs, static_cast<int32_t>(c.systems.size()));
             c.systems.push_back(fs);
         }
+        index_handles(c);
         for (size_t s = 0; s < c.systems.size(); ++s)
             if (!capture_system(c, static_cast<int32_t>(s))) return failed();
 
@@ -665,12 +691,13 @@ namespace bmmo::physics::savestate {
 
         // Per object: core, hull manager, overlap element, intrusive lists.
         size_t hull_entries = 0;
-        std::set<const IVP_Core*> movable_cores;
+        ptr_index movable_cores;
+        movable_cores.reserve(n);
         for (size_t i = 0; i < n; ++i) {
             const live_object& lo = c.live.objects[i];
             object_record& rec = out.objects[i];
             if (!capture_core(c, lo, rec.core)) return failed();
-            if (!lo.core->physical_unmoveable) movable_cores.insert(lo.core);
+            if (!lo.core->physical_unmoveable) movable_cores.emplace(lo.core, 0);
             if (!capture_hull(c, static_cast<int32_t>(i), rec)) return failed();
             hull_entries += rec.hull.size();
             if (IVP_OV_Element* elem = lo.object->get_ov_element()) {
@@ -717,9 +744,9 @@ namespace bmmo::physics::savestate {
                 if (event && event == static_cast<IVP_Time_Event*>(c.tm->psi_event)) {
                     ev.collision = -1;
                 } else {
-                    auto it = c.mindist_events.find(event);
-                    if (it == c.mindist_events.end()) { c.fail("unknown time event"); return failed(); }
-                    ev.collision = it->second;
+                    const int32_t collision = c.mindist_events.find(event);
+                    if (collision < 0) { c.fail("unknown time event"); return failed(); }
+                    ev.collision = collision;
                 }
                 out.events.push_back(ev);
             }
@@ -735,12 +762,12 @@ namespace bmmo::physics::savestate {
             for (size_t i = 0; i < n; ++i) {
                 IVP_OV_Element* elem = c.live.objects[i].object->get_ov_element();
                 if (!elem || !elem->node) continue;
-                auto it = c.ov_nodes.find(elem->node);
-                if (it == c.ov_nodes.end()) {
+                const int32_t node = c.ov_nodes.find(elem->node);
+                if (node < 0) {
                     c.fail(c.live.objects[i].name + "'s overlap element sits in a node outside the tree");
                     return failed();
                 }
-                out.objects[i].ov_node = it->second;
+                out.objects[i].ov_node = node;
             }
         }
 
@@ -812,6 +839,11 @@ namespace bmmo::physics::savestate {
             }
         }
 
+        last_collisions = out.collisions.size();
+        last_contacts = out.contacts.size();
+        last_units = out.units.size();
+        last_nodes = out.ov_nodes.size();
+        last_systems = out.systems.size();
         if (report) {
             report->objects = static_cast<uint32_t>(out.objects.size());
             report->cores = static_cast<uint32_t>(movable_cores.size());
