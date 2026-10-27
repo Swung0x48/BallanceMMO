@@ -367,6 +367,14 @@ namespace {
         std::vector<drop_again> drops_again;
         std::string placement_trace;
         bool placement_trace_ball = false;
+        // The networked invariant (design 7.4 "L8 invariant (networked)",
+        // step SP8), in a --replay-session: --placement-trace PATH traces the
+        // --drop-sector rows (default 1) after every replayed tick;
+        // --placement-trace-player ID adds that player's ball line (implies
+        // --placement-trace-ball); --drop-sectors-above N skips every Sector
+        // event of a sector above N (the replay's second arm).  0 / -1: not given.
+        uint32_t placement_trace_player = 0;
+        int drop_sectors_above = -1;
         // The id layout (design 7.2 V7/V9, step S7), in every session world
         // this tool makes: --perturb-ids N creates N CK objects after the
         // level load and destroys them before the anchor (ids are not
@@ -440,6 +448,18 @@ namespace {
             if (ec) return false;
         }
         else if (arg == "--placement-trace-ball") out.placement_trace_ball = true;
+        else if (arg == "--placement-trace-player") {   // step SP8, --replay-session only
+            if (!(v = next())) return false;
+            const long long id = std::atoll(v);
+            if (id <= 0 || id > 0xffffffffLL) return false;
+            out.placement_trace_player = static_cast<uint32_t>(id);
+            out.placement_trace_ball = true;
+        }
+        else if (arg == "--drop-sectors-above") {   // step SP8, --replay-session only
+            if (!(v = next())) return false;
+            out.drop_sectors_above = std::atoi(v);
+            if (out.drop_sectors_above < 0) return false;
+        }
         else if (arg == "--second-move") {
             arguments::second_move m;
             if (!(v = next())) return false; m.sector = std::atoi(v);
@@ -596,7 +616,7 @@ namespace {
         // Every --placement* option goes to parse_placement_arg, which rejects one it does not know:
         // a new one (S3's --placement-trace) is added there.
         else if (arg.rfind("--placement", 0) == 0 || arg == "--tick-hashes" || arg == "--watch-entity"
-                 || arg == "--second-move" || arg == "--drop-again")
+                 || arg == "--second-move" || arg == "--drop-again" || arg == "--drop-sectors-above")
             return parse_placement_arg(arg, next, out);
         else if (arg == "--beam-again") {
             arguments::beam_write b;
@@ -2162,6 +2182,43 @@ namespace {
 
     // The S3 switches belong to the drop scene alone; 0 = fine.
     int check_scene_switches(const arguments& args) {
+        // Step SP8: the networked invariant's switches belong to --replay-session.
+        if ((args.placement_trace_player != 0 || args.drop_sectors_above >= 0) && args.replay_session.empty()) {
+            std::fprintf(stderr, "--placement-trace-player / --drop-sectors-above: need --replay-session\n");
+            return 2;
+        }
+        // run_replay_session is dispatched before every other mode and reads
+        // none of them, so a second mode next to the invariant's switches would
+        // be ignored without a word: refuse the combination instead.
+        if (!args.replay_session.empty()
+            && (args.placement_trace_player != 0 || args.drop_sectors_above >= 0 || !args.placement_trace.empty()
+                || args.placement_trace_ball)
+            && (!args.drop_entity.empty() || args.savestate_check || !args.late_run.empty() || args.late_sector_check
+                || args.resync_check || args.portable_scripts_check || args.list_placement || args.array_reads
+                || args.spawn_test > 0 || !args.nav_mode.empty() || !args.synth_trafo_session.empty()
+                || !args.describe_script.empty() || !args.savestate_diff[0].empty()
+                || !args.savestate_describe.empty())) {
+            std::fprintf(stderr, "--placement-trace / --placement-trace-player / --drop-sectors-above with "
+                                 "--replay-session: the replay is the only mode (no --drop, --savestate-check, "
+                                 "--late-run, --late-sector-check, --resync-check, --portable-scripts-check, "
+                                 "--list-placement, --array-reads, --spawn-test, --nav, --synth-trafo-session, "
+                                 "--describe-script, --savestate-diff/-describe)\n");
+            return 2;
+        }
+        if (!args.replay_session.empty() && args.drop_entity.empty() && !args.savestate_check) {
+            const char* why = nullptr;
+            if (!args.second_moves.empty() || !args.drops_again.empty())
+                why = "--second-move and --drop-again are for the --drop scene (and --savestate-check)";
+            else if (args.placement_trace_ball && args.placement_trace.empty())
+                why = "--placement-trace-ball needs --placement-trace";
+            else if (args.placement_trace_ball && args.placement_trace_player == 0)
+                why = "in a --replay-session the ball line needs --placement-trace-player ID";
+            else if (args.list_journal && (!args.placement_trace.empty() || args.drop_sectors_above >= 0))
+                why = "--list replays nothing";
+            if (!why) return 0;
+            std::fprintf(stderr, "--placement-trace / --drop-sectors-above: %s\n", why);
+            return 2;
+        }
         if (args.second_moves.empty() && args.drops_again.empty() && args.placement_trace.empty()
             && !args.placement_trace_ball)
             return 0;
@@ -2183,7 +2240,7 @@ namespace {
             std::fprintf(stderr, "--second-move / --drop-again / --placement-trace: %s\n", why);
             return 2;
         }
-        if (args.drop_entity.empty()) why = "need --drop (--replay-session takes the trace at S8)";
+        if (args.drop_entity.empty()) why = "need --drop or --replay-session (--placement-trace only)";
         else if (!args.replay_session.empty() || !args.synth_trafo_session.empty() || !args.describe_script.empty()
                  || !args.nav_mode.empty() || !args.savestate_diff[0].empty() || !args.savestate_describe.empty())
             why = "are for the --drop scene only";
@@ -4777,6 +4834,19 @@ namespace {
                 static_cast<unsigned long long>(world->anchor_surfaces()),
                 static_cast<unsigned long long>(header.anchor_surfaces));
 
+        // Step SP8, the networked invariant (design 7.4): the watched sector's
+        // rows traced after every replayed tick, in the drop scene's format.
+        if (!args.placement_trace.empty()) {
+            if (const int rc = open_scene_trace(args, *world)) return rc;
+            std::printf("placement trace: sector %d rows to %s%s\n", args.drop_sector, args.placement_trace.c_str(),
+                        args.placement_trace_player ? (" (and p" + std::to_string(args.placement_trace_player)
+                                                       + "'s ball)").c_str() : "");
+        }
+        size_t sectors_dropped = 0;
+        if (args.drop_sectors_above >= 0)
+            std::printf("--drop-sectors-above %d: every Sector event of a higher sector is skipped\n",
+                        args.drop_sectors_above);
+
         // --write-journal: this replay's own box, so the same journal replayed
         // on two platforms can be diffed with scripts/journal_trace.py --diff.
         bmmo::session::journal_writer out;
@@ -5007,6 +5077,16 @@ namespace {
                         static_cast<unsigned>(e.type), e.id);
                     continue;
                 }
+                if (args.drop_sectors_above >= 0 && e.type == bmmo::session::event_type::Sector
+                        && static_cast<int>(e.sector) > args.drop_sectors_above) {
+                    // Skipped before ensure_player: a player whose first event
+                    // is a dropped Sector event is created at its next event
+                    // in this arm (none in the L8/L11 server journals).
+                    ++sectors_dropped;
+                    std::printf("tick %u: Sector %d event from p%u dropped (--drop-sectors-above %d)\n", e.tick,
+                                static_cast<int>(e.sector), e.id, args.drop_sectors_above);
+                    continue;
+                }
                 if (out.is_open()) out.event(e);
                 ensure_player(e.id, group.tick);
                 const bmmo::sim::lifecycle_event event = to_lifecycle_event(e);
@@ -5042,6 +5122,14 @@ namespace {
             }
             ++simulated;
             last_written_tick = group.tick;
+            // Step SP8: the stepped world, before a RESYNC record below replaces
+            // it - a client journal's resync tick traces the replay's own state,
+            // not the server's.  The invariant replays server journals, which
+            // carry no RESYNC records, so both arms trace the same thing.
+            if (const auto& trace = scene_trace()) {
+                if (args.placement_trace_player) trace->set_ball(world->player_ball_entity(args.placement_trace_player));
+                trace->write(group.tick);
+            }
             // A client's RESYNC record of this tick (step T1): the server's
             // state of S replaces the world the replay stepped to S, and the
             // replay goes on from it.  The record's checkpoint (flag RESYNC)
@@ -5302,6 +5390,9 @@ namespace {
             simulated, matched, first_divergence, checkpoints, checkpoint_mismatches);
         if (stopped_at_jump)
             std::printf("note: the replay stopped at a tick jump; the summary covers only the ticks before it\n");
+        if (args.drop_sectors_above >= 0)   // step SP8
+            std::printf("--drop-sectors-above %d: %zu Sector events dropped\n", args.drop_sectors_above, sectors_dropped);
+        close_scene_trace(*world);   // step SP8: nothing without --placement-trace
         // Only a journal with RESYNC records gets this line: the summary line
         // above is what tools compare across SimTool builds.
         if (resync_records != 0)
@@ -7977,6 +8068,9 @@ int main(int argc, char** argv) {
             "           [--from A --to B] [--dump-entity NAME] [--stop-on-divergence] [--journal-trace]\n"
             "           [--write-journal <out.bmjr>] [--report-every N] [--continue-after-jump]\n"
             "           [--ignore-resync]\n"
+            "           [--placement-trace PATH [--drop-sector N] [--placement-trace-player ID]] [--drop-sectors-above N]\n"
+            "           (step SP8, the networked invariant: sector N's rows (default 1) traced after every replayed\n"
+            "            tick, with player ID's ball line; Sector events of sectors above N skipped)\n"
             "           (session black box: replays a room's journal and compares every tick and checkpoint;\n"
             "            a client journal's RESYNC record puts the server's state of its tick into the replay;\n"
             "            --list prints the file without booting the engine)\n"

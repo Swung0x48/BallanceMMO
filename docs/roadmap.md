@@ -164,7 +164,8 @@ x64 teardown) are item 2.
    v6; As built (step S5) in the design's §5), S6 the headless host (it
    declares `CAP_PLACEMENT` with the real signature, replaces the test switch
    `--placement-signature`, and re-captures the reference set at protocol 12),
-   S7 the savestate check with a pass in the window, S8 the measurement, S10
+   S7 the savestate check with a pass in the window, S8 the measurement
+   (done: As built (step SP8)), S10
    the retail host (the track's close-out, a 15-minute step), S11 the
    records. **Adaptation M3** (the orchestrator's): the placement's config
    default stays false until S10 (as T2 kept `trafo_inputs` off until its
@@ -517,6 +518,32 @@ x64 teardown) are item 2.
      crossing a pass); (b) (A) with a ball moving through the late pass's
      pieces after the replay (the structure that differs decides the
      collision order then).
+   - SP8 (sector placement S8, measurement, quick tier, 2026-10-27; a
+     SimTool-only tool change: `--replay-session` with `--placement-trace`,
+     `--placement-trace-player` and `--drop-sectors-above`; ran: x64 build,
+     538 tests, the networked invariant on `core_ref_s6/l8_cross` and on
+     the new `sp8/l11_cross` (both PASS, traces byte-identical; the
+     placement-off `sp6_ctl/l8_cross_off` fails from 313 as it must), ONE
+     live L11 cross at 150 ms snapshots off (signatures, walk and sector
+     ticks equal on all five sides, 54/54, journal matched; residuals = G-c
+     and remote-ball contact on copies and originals alike), §7.6 SimTool
+     x64 on/off on L8-L12; design As built (step SP8)): (a) §7.4 L8 cross
+     at 150 ms and its networked invariant; (b) the L11 cross's
+     placement-off control at 150 ms, for the per-body "no worse than the
+     control" judgment; (c) the L11 cross at 0 ms with a ball on the s3
+     sack copy `P_Modul_26_*_R35` (c2's ball died before its s3 beam); (d)
+     §7.6 headless on vs off (L8 and an L9/L10/L12 cross, `t_rest` /
+     `t_rep` / `t_cap`, rebases, resyncs, the p99 frame); (e) §7.6 SimTool
+     x86 (`build/sim-x86-a3` predates S3's switches: reconfigure) and
+     retail x86 (S10, with the anchor cost: +1.0-2.2 s per anchor on x64
+     SimTool); (f) the GCC check of `sim_tool.cpp` (not in
+     `linux_test_syntax.sh`'s list); (g) c2's ball death at 736 in
+     `sp8/l11_cross`, the tick after its own `sector +3` at 735, not
+     root-caused: which entity deleted the ball (a `DepthTest` volume
+     of s3 or of a copy = the next sector changing the previous one, or
+     the fall through the copy `P_Modul_37_Bridge_R30` from 581), by
+     the server journal replayed with and without the s3 Sector event
+     (design As built (step SP8)); with (c).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

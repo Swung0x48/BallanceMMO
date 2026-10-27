@@ -1939,6 +1939,160 @@ current deployed lead and input delay:
   `own_body`/`ball` branch); module births 105 recreated, 105 exact, 0
   failed.
 
+**As built (step SP8 = S8, 2026-10-27; measurement, quick tier).**
+
+- **Tool change (SimTool only, S3's deferred item):** `--replay-session`
+  now takes `--placement-trace PATH` (the §7.3 trace of the `--drop-sector`
+  rows, default sector 1, after every replayed tick),
+  `--placement-trace-player ID` (that player's ball line; implies
+  `--placement-trace-ball`, which in a replay needs it) and
+  `--drop-sectors-above N` (every Sector event of a sector above N skipped
+  and counted). `check_scene_switches` refuses the two new switches without
+  `--replay-session`, `--second-move` / `--drop-again` in a replay,
+  `--list` with a trace, and (review fix-up) any other mode next to the
+  trace or the drop switches in a replay (`--drop`, `--savestate-check`,
+  `--late-run`, `--resync-check`, `--array-reads`, `--spawn-test`, ...:
+  `run_replay_session` is dispatched first and reads none of them, so
+  the other mode was ignored without a word). The trace line is written
+  before a client journal's RESYNC record replaces the stepped world
+  (server journals carry none, so both arms trace the same thing), and a
+  dropped Sector event skips `ensure_player` (no player's first event is
+  one in the two journals). Nothing else in `sim_tool.cpp` changed; nothing
+  under `BallanceMMOCommon`, the headless client, the server or the retail
+  mod; no protocol, journal or engine change. Scripts:
+  `.local-tools/work/SP8/inv.sh` (the two replays in parallel and the trace
+  comparison), `trace_cmp.py`, `body_residuals.py` (per-body max residual
+  of each client's LOCAL rows against the server's), `cpu.sh`.
+- **The networked invariant (§7.4 "L8 invariant (networked)"): PASS on L8
+  and L11; the negative control fails.** Each server journal replayed twice
+  by `build-agent-rSP8`, as recorded and with `--drop-sectors-above 1`,
+  watched sector 1 with the ball of the client that stays there:
+  - `core_ref_s6/l8_cross/server.bmjr` (placement on; c0 = p15089151 on the
+    s1 see-saw): as recorded 2993/2993 ticks matched, 0 checkpoint
+    mismatches; dropped arm 4 Sector events skipped, the replay leaves the
+    recording at tick 313; the s1 traces (11 hierarchies + the ball, ticks
+    8..3000, 35916 lines) **byte-identical**.
+  - `sp8/l11_cross/server.bmjr` (the L11 cross below; c0 = p1630220977 on
+    the s1 `P_Modul_25` bridge): as recorded 2573/2573 matched; dropped arm
+    5 Sector events skipped, leaves the recording at 501 (the beams into
+    the absent s2); the s1 traces (17 hierarchies + the ball, ticks
+    27..2599, 46314 lines; at the end 15 movable bodies of which 4
+    simulated, 7 joints, 4 force blocks) **byte-identical**.
+  - Negative control `sp6_ctl/l8_cross_off/server.bmjr` (placement off,
+    the same recipe): as recorded 3077/3077 matched; the traces **differ**
+    from tick 313 (the s2/s4 passes at 309) on row 0 `P_Modul_30_MF` (the s1
+    Wippe's frame moved), the s1 trafos, extras and `P_Modul_18`, from 713
+    (the s3 pass at 709) on `P_Trafo_Paper_MF001` and `P_Modul_25_MF001`,
+    and on the ball from 420: the networked trace sees the coupling V10
+    saw in the drop scene, so the placement-on PASS is not a blind check.
+- **L11 cross at 150 ms (§7.4; one live run, snapshots off, the server's
+  `placement_clones` on; the Arch server of TR4c's tree
+  `ballanced-3e4289e95f25+bmmo-2ff5c6b11cc8-dirty`, no server code changed
+  since; `maps/arena-test/sp8/l11_cross/`, captures included).** Recipe:
+  `BIN=build-agent-rSP8/BallanceMMOServer STORE_SET=sp8 SP6/s6_run.sh
+  l11_cross snapoff 4 40 11 true -- --latency-ms 150 --sectors 1` with c0
+  `--beam 115.885 -22.41 -75.984 400` (the s1 bridge row 14), c1
+  `--sector-at 2:300 --beam 429.639 -42.793 -83.437 500` (the copy
+  `P_Modul_37_MF_R30`), c2 `--sector-at 2:300 --sector-at 3:700 --beam
+  431.639 -42.793 -83.437 560 --beam 644.713 -48.792 -196.227 760` (then
+  the s3 sack copy row 35), c3 `--sector-at 2:300 --sector-at 3:700 --beam
+  419.878 -42.793 -60.102 500 --beam 570.742 -51.488 -163.8 780` (the
+  copies R21, then R56).
+  - Server and all four clients: `placement: 53 copies, 0 shared`,
+    signature `5d22d3b5a61c38cb` (V7's L11 value), `level walk seen at
+    tick 30`, `sector +2 at tick 335`, `sector +3 at tick 735`;
+    `mechanisms=54/54`, rebases 0, resyncs 0, far 0, starved 0, rb
+    20/19/15/18; the harness's server-journal replay 1994/1994 matched
+    (2573/2573 over the whole file above). 14 copy bodies in every client's
+    LOCAL rows (`P_Ball_Stone_MF00x_R39..42`, `P_Modul_19_Flaps_R43`,
+    `P_Modul_25_Bridge_R21/R56`, `P_Modul_25_Bridge001_R23`,
+    `P_Modul_26_Rope001_R35`, `P_Modul_26_Sack001_R35`,
+    `P_Modul_34_Kiste001_R55`, `P_Modul_34_Schiebestein001_R55`,
+    `P_Modul_37_Bridge_R30/R48`).
+  - Per-body residuals against the server (`body_residuals.py`, LOCAL vs
+    full checkpoints, 54 bodies): the s3 sack copy `_R35` is exact on every
+    client, but it was never touched (c2's ball left the R30 copy at 594,
+    fell and was reported dead at 736, so its beam at 760 logged "no own
+    body to beam"; the 0 ms criterion "the sack copy exact" with a ball on
+    it is not shown by this run). Over 1 mm: `P_Modul_34_Schiebestein001`
+    0.658 m / `P_Modul_34_Kiste001` 0.451 m (the ORIGINAL, from 520) on c0,
+    c2, c3 and 0.3 mm on c1, whose ball is the one near it: the queued G-c
+    leader-only wake's `P_Modul_34` signature; `P_Modul_01_Pusher` /
+    `Pusher001` 0.0952 m from 454 on c1-c3, exact on c0, whose ball is on
+    the s1 bridge: G-c's Pusher signature (L8's 0.0952 m); the s1 originals
+    `P_Modul_25_Bridge001` 0.023 m and `P_Modul_37_Bridge` 0.018 m from
+    478/492 on c1-c3 (c0's ball, a remote ball for them, on the s1 bridge),
+    and the copies `P_Modul_37_Bridge_R30` 0.036 m on c0, c2, c3 (6.7 mm on
+    c1, the ball's owner) and `P_Modul_25_Bridge001_R23` 0.022 m on c0, c2
+    (the c2 ball rolling on from R30): a remote ball's contact with a
+    mechanism at 150 ms, on copies and originals alike. Under 1 mm:
+    `P_Modul_25_Bridge`, `_R21`, `_R56` 0.19 mm (the size and the bodies of
+    RO2's queued class, a sleeping parented bridge's CK matrix re-derived at
+    a restore; not re-derived here). No residual is specific to a copy:
+    every copy residual has its original's counterpart or the G-c
+    signature. Whether the residuals are "no worse than the same arm's
+    control per body" needs the placement-off control run (deferred, see
+    below).
+  - c2's ball death at 736, the tick after its own `sector +3` at 735: it
+    had been falling with no contact since 594; the death is a client-
+    reported event every world applied alike (the server journal replays
+    matched). Not a cross-world difference, but NOT root-caused, and it
+    may be the placement's own: two hypotheses, neither checked in this
+    tier. (i) Entering the next sector changes what kills a ball: the
+    placement copies carry the originals' groups including `DepthTest`
+    (`client2.log:60-63`, the s3/s6 `P_Ball_Stone_MF*_R39..R100`), so a
+    ball falling through no active s2 depth volume could die only once
+    s3's became active at 735 - which would break §1's "a player
+    entering the next sector changes nothing in the previous one".
+    (ii) The fall itself: from 567 c2's ball had a friction contact on
+    the copy `P_Modul_37_Bridge_R30` with gap 0 and a remote ball
+    (`Ball_Wood_BMMO_848630496`) pressing on it from 567; the R30 mindist
+    lengths were negative throughout (-0.579 m at 561, -0.289 at 581,
+    -0.220 at 583 after the 582 rollback to 561, -0.099 at 590; whether a
+    negative length means penetration was not checked), the friction
+    contact on R30 was gone at 581 save one at 589, and the ball had no
+    contact and no mindist left at 594 (`client2.log:686-712`): the ball
+    sank through the bridge copy's plank, which a remote ball's push or
+    the copy's collision could explain. To verify: replay
+    `sp8/l11_cross/server.bmjr` with the ball line of c2 (ticks
+    560-736) and log which script/entity deletes the ball at 736 (the
+    original's or a copy's depth volume, s2's or s3's, or the level's
+    height check); then the same with the s3 Sector event dropped
+    (`--drop-sectors-above 2`): if the ball then dies at another tick
+    or not at all, (i) holds. Queued with deferred item (c) (roadmap
+    §4 item 7, SP8 (g)).
+- **§7.6 CPU, SimTool x64 half** (`cpu.sh 3000`, the drop scene with the
+  parked second player passing into every sector 2..N at world ticks 40,
+  60, ...; wall time of a 3000-tick run minus a 0-tick run, two
+  repetitions, run alone; `.local-tools/work/SP8/cpu/times.txt`): per tick
+  on / off in ms: L8 0.084 / 0.037 and 0.083 / 0.048; L9 0.079 / 0.050 and
+  0.055 / 0.040; L10 0.051 / 0.067 and 0.107 / 0.008 (an off 0-tick
+  outlier); L11 0.066 / 0.052 and 0.073 / 0.043; L12 (8 sectors) 0.040 /
+  0.064 and 0.066 / 0.044. Every sector active with the bodies at rest
+  costs at most 0.11 ms per tick, the on-off difference within the
+  repetition scatter (about 0.03 ms): far inside the 15.15 ms tick. The
+  0-tick runs show the one-off ANCHOR cost of the placement (plan, apply,
+  log; not split): on minus off L8 +1.09 / +1.02 s, L9 +1.35 / +1.39, L10
+  +1.42 / +1.21, L11 +1.48 / +1.45, L12 (62 copies) +2.22 / +2.11 s on
+  x64; in the live L11 run the server logged the anchor at 09:48:06 and
+  the placement at 09:48:07, and every client made SessionReady (no
+  start-barrier miss). The retail x86 anchor time is §7.5 run 2's (S10).
+- **Headless half (from the one live run, placement on only):** the
+  clients' 5 s status at the end: t_rest 16-24, t_rep 246-331, t_max
+  24-29, t_cap 1253-1306, resim 311-417 over about 1950 frames, rebases 0,
+  resyncs 0. The on-vs-off comparison §7.6 asks for is deferred.
+- **Checks (quick tier, about 11 minutes of command wall time):** x64
+  BUILD-OK (`build-agent-rSP8`), 538/538 tests; no x86 or Arch build (no
+  code they compile changed); the GCC syntax check not run: its file list
+  does not include `sim_tool.cpp`, the only changed source; no wire check
+  (no shared or headless code changed).
+- **Deferred** (roadmap §4 item 7's list): §7.4 L8 cross at 150 ms (a
+  second live run) and its networked invariant; the L11 cross's placement-
+  off control at 150 ms (the per-body "no worse than control" judgment);
+  the L11 cross at 0 ms with a ball on the s3 sack copy; §7.6 headless on vs
+  off (L8 and an L9/L10/L12 cross); §7.6 SimTool x86 (`build/sim-x86-a3`
+  predates S3's drop-scene switches); §7.6 retail x86 (S10).
+
 ### 7.5 Retail runs (core host)
 
 1. Two retail clients and the local server on L8, crossing s1 -> s2 -> s3
