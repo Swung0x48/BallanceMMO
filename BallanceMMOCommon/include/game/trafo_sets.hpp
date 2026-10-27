@@ -1137,12 +1137,33 @@ namespace bmmo::game {
                     }
             });
         }
+        // An operation's output by its place (step TR4c): the operation's
+        // index among every parameter operation of its root script, in walk
+        // order and each behaviour's own order, then ":out".  Not by name:
+        // the CK2 reimplementation's CKParameterOperation::Update renames
+        // every operation output "Pout 0" while the game's CK2.dll keeps the
+        // file's name ("Out"), so a name made the digest differ across hosts.
+        const auto operation_place = [&](CKParameter* p, CKBehavior* root) -> std::string {
+            if (!root || !CKIsChildClassOf(p, CKCID_PARAMETEROUT)) return {};
+            CKObject* owner = p->GetOwner();
+            if (!owner || !CKIsChildClassOf(owner, CKCID_PARAMETEROPERATION)) return {};
+            auto* operation = static_cast<CKParameterOperation*>(owner);
+            if (operation->GetOutParameter() != p) return {};
+            int index = 0, found = -1;
+            walk(root, [&](CKBehavior* beh) {
+                const int count = beh->GetParameterOperationCount();
+                for (int i = 0; i < count; ++i, ++index)
+                    if (found < 0 && beh->GetParameterOperation(i) == operation) found = index;
+            });
+            return found < 0 ? std::string() : "op" + std::to_string(found) + ":out";
+        };
         const auto where = [&](CKParameter* p) -> std::string {
             if (!p) return "-";
             const auto it = place_of.find(p->GetID());
             if (it != place_of.end()) return it->second;
             CKBehavior* root = root_of(p);
-            return "outside:" + normalized(name_of(root), player) + ":" + name_of(p);
+            const std::string by_place = operation_place(p, root);
+            return "outside:" + normalized(name_of(root), player) + ":" + (by_place.empty() ? name_of(p) : by_place);
         };
         const auto object_of = [&](CKParameter* p) -> CKObject* {
             if (!p || !p->GetParameterClassID() || p->GetDataSize() != static_cast<int>(sizeof(CK_ID))) return nullptr;
