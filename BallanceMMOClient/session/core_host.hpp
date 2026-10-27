@@ -20,8 +20,9 @@ namespace bmmo::session {
     struct session_platform;   // session/client_platform.hpp
 
     namespace retail {
-        // 'session core on|off' (the transition switch of design 6.2): off by
-        // default, and nothing in the legacy session path reads it.
+        // 'session core on|off' (the transition switch of design 6.2): on by
+        // default since 2026-10-27, and nothing in the legacy session path
+        // reads it.
         bool core_enabled();
         // Step Q: the level's proximity countdowns as loaded (a file-scope
         // static of core_host.cpp; both paths' anchors restore them).

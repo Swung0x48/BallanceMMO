@@ -122,8 +122,11 @@ namespace {
     // (core_host_offer): atomic.  `core_latched` is the switch as a session's
     // SessionStart found it, read once there (on the network thread, where
     // the arrival order is made): that session's messages go to the mailbox
-    // up to its SessionEnd, and the verb refuses a change meanwhile.
-    std::atomic<bool> core_on{false};
+    // up to its SessionEnd, and the verb refuses a change meanwhile.  On by
+    // default (the user, 2026-10-27, once the server's placement defaulted on
+    // at S10 and refuses a member without the core: "core在正式客户端开启吧");
+    // 'session core off' still selects the legacy path for the next session.
+    std::atomic<bool> core_on{true};
     std::atomic<bool> core_latched{false};
 
     // ------------------------------------------------------------ the mailbox

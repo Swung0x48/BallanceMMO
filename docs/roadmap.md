@@ -45,6 +45,11 @@ of what the code does.
   record, the union), apply it as that tick and re-step to their own tick.
   This is not a per-tick correction and stays after snapshots are off.
 - The retail legacy session path gets nothing new and is deleted at R7.
+- **The retail session core is on by default** (the user, 2026-10-27, told
+  that S10 turned the server's placement on by default and that a member
+  without the core is then refused from the session: "最终应该是要开启的？
+  那就全部开启", then "core在正式客户端开启吧"). `session core off` still
+  selects the legacy path for the next session until R7 deletes it.
 - **Host logic is written once** (the user, 2026-10-27, asked why Stage C -
   one core - does not come first, told that the core is already shared and
   that what is still written two or three times is the per-host glue, e.g.
@@ -159,6 +164,7 @@ broken: server and clients are rebuilt together.
 | Sector placement S8: the networked invariant in `--replay-session`; measured | d0c7b28 | invariant PASS on L8 (35916 lines) and L11 (46314), the option-off control fails; L11 cross at 150 ms, five sides 53 copies `5d22d3b5a61c38cb`, 54/54 |
 | Host unification HU1: the placement's host logic and three other host copies as shared helpers (the rule "host logic is written once", §2) | 48d1c32 | byte-identical: wire check ALL SAME, server journals 2993/2993 and 4153/4153 |
 | Sector placement S10: the retail core host, `CKContext::CopyObjects`, the legacy path's local end, `physics.placement_clones` on by default | fa8218d | two-copy L11 run, two sessions with the reload: the server's hashes and signature, 53 copies, every placement body exact by name |
+| Core default CD1 (the user's decision, §2): the retail session core on by default | the `retail:` commit after 832f1a9 | two-copy L11 run, neither client sending `session core`: both core=on, both assigned in 10.6 s, 53 copies and signature `5d22d3b5a61c38cb` on both and the server, sector +2 at 103, 23/23 mechanisms, no rebase or resync |
 | **Sector placement S1-S11, the track** (`sector-placement-design.md` §12 is the consolidated record): one object per PH row at the anchor in every world, the level-walk gate, the retail level reload; S11 the records | cd501af, 5b536b2, 81c6803, 72108fd, 5cd1c11, bc88b8e, 0d1178b, 3242755, d0c7b28, 48d1c32, fa8218d; S11 the `docs:` commit after fa8218d | built; the user's rule "entering the next sector changes nothing in the previous one" holds on L8 and L11 by the invariant check, offline and networked |
 | Rollback engine gaps G0 (EG0): diagnostics - the counted birth failures, the 1378 difference, the outside producers | 0b73af2 | built |
 | Record-format gaps K0: SimTool `--array-reads`, `--globals-trace`, `--world-options` | 49e2cc8 | built |

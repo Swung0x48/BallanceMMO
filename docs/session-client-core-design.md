@@ -4115,8 +4115,11 @@ snapshots off is `… 100000 100000 4.2`.
 **The transition switch.**
 
 - From R1 to R6 the old retail session code stays behind `session core off`
-  (a file-scope flag, default off until R7). The same binary can then run
-  legacy against core in one batch.
+  (a file-scope flag). The same binary can then run legacy against core in
+  one batch. The flag was off by default until 2026-10-27; it is **on by
+  default** since then (step CD1, the user: "core在正式客户端开启吧", once
+  sector placement S10 turned the server's `physics.placement_clones` on by
+  default and the server refuses a member without the core).
 - No new feature is added to the legacy path.
 - R7 deletes it.
 
