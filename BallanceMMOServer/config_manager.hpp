@@ -91,11 +91,12 @@ public:
     // world option WORLD_PLACEMENT_CLONES - every PH row whose object another
     // row already places at another matrix gets its own copy at the anchor,
     // in every world.  A member whose SessionReady does not declare
-    // CAP_PLACEMENT is refused by such a session.  Off by default until the
-    // retail core host builds the copies (step S10 turns it on; the design's
-    // "default true from S5" would end every retail session on L1-L13 with a
-    // placement mismatch until then); off, the server builds no copy.
-    bool physics_placement_clones = false;
+    // CAP_PLACEMENT is refused by such a session.  On by default since step
+    // S10 (the retail core host builds the copies and declares the
+    // capability; it was off from S5 to S10, adaptation M3, while no retail
+    // host could); off, the server builds no copy (the negative control,
+    // design 7.6).  The legacy retail path ends such a session locally.
+    bool physics_placement_clones = true;
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

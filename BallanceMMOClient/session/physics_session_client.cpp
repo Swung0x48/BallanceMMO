@@ -325,6 +325,26 @@ void BallanceMMOClient::physics_session_begin(const bmmo::session_start_msg& msg
         return;
     }
     if (s.phase != phase_type::idle) physics_session_end_local("replaced by a new session");
+    // Sector placement design 2.4 (step S10): the copies are the session
+    // core's; this path builds none and gets nothing new (it is deleted at
+    // R7), so a session with the world option ends here, before the restart.
+    // Its usual SessionReady goes out at once, without the restart: no
+    // capabilities (no CAP_PLACEMENT), so the server refuses this member at
+    // once - out of the session, not out of the room - instead of the others
+    // waiting for the start barrier to drop a member that went silent.
+    if (msg.world_options & bmmo::session::WORLD_PLACEMENT_CLONES) {
+        bmmo::session_ready_msg ready;
+        ready.session = msg.session;
+        ready.first_tick = 0;
+        ready.build_id = physics_view_.build_id();
+        ready.caps = 0;
+        ready.serialize();
+        send(ready.raw.str().data(), ready.size(), k_nSteamNetworkingSend_Reliable);
+        logger_->Error("Physics session %u ended: the placement needs the session core (session core on)", msg.session);
+        SendIngameMessage(std::format("Physics session {} over (the placement needs the session core: session core on).",
+                                      msg.session), bmmo::ansi::BrightYellow);
+        return;
+    }
     s.reset_runtime();
     // The black box is armed once per session, so switching it off in the BML
     // menu takes effect from the next one (and never mid-recording).

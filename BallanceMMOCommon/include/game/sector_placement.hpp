@@ -639,28 +639,42 @@ namespace bmmo::game {
             const std::vector<CK3dEntity*> h = hierarchy_of(root);
             const std::string suffix = session::placement_suffix(a.row);
 
-            // Step 4: the copy, as CKContext::CopyObject makes it, with the
-            // builder's dependencies and no ACTIVATE.
+            // Step 4: the copy, as CKContext::CopyObject makes it (the
+            // builder's dependencies, creation mode DYNAMIC, no ACTIVATE),
+            // made by CK itself: CKContext::CopyObjects with the hierarchy H
+            // as the sources (CK2/CKContext.cpp:110-125) - the root first,
+            // whose preparation adds every child (CHILDREN), so the children
+            // listed after it add nothing and the copy is the root's - which
+            // returns the copy of each source in the order given.  As built
+            // (step S10): the dependencies context lives and dies inside CK.
+            // One held by this module (design 2.3 step 4's "a context we
+            // keep", and FillRemappedDependencies' returned array) had its
+            // XArray / XHashTable buffers allocated by CK2.dll's heap and
+            // freed by this module's inline destructors on the retail client
+            // (the Virtools SDK's containers are inline templates, VX_MALLOC
+            // off): an access violation in the second copy of the first
+            // retail anchor.
             const std::set<CK_ID> before = all_object_ids(context);
-            CKDependenciesContext dc(context);
-            dc.SetCreationMode(CK_OBJECTCREATION_DYNAMIC);
-            dc.SetOperationMode(CK_DEPENDENCIES_COPY);
-            if (deps) dc.StartDependencies(deps);
-            CK_ID source_id = root->GetID();
-            dc.AddObjects(&source_id, 1);
-            dc.Copy(nullptr);
-            const auto refuse = [&](const std::string& why) {
-                if (deps) dc.StopDependencies();
-                return undo(at + why);
-            };
+            std::vector<CK3dEntity*> hc;
+            {
+                XObjectArray sources;
+                for (CK3dEntity* o: h) sources.PushBack(o->GetID());
+                const XObjectArray& copied = context->CopyObjects(sources, deps, CK_OBJECTCREATION_DYNAMIC, nullptr);
+                for (int i = 0; i < copied.Size(); ++i) hc.push_back(CK3dEntity::Cast(context->GetObject(copied[i])));
+            }
+            const auto refuse = [&](const std::string& why) { return undo(at + why); };
 
             // Step 5: check, then rename every copied entity.
-            std::vector<CK3dEntity*> hc;
-            for (CK3dEntity* o: h) {
-                auto* c = CK3dEntity::Cast(dc.Remap(o));
+            if (hc.size() != h.size())
+                return refuse("the copy returned " + std::to_string(hc.size()) + " objects for " + std::to_string(h.size())
+                              + " sources");
+            std::map<CKObject*, CKObject*> remap;
+            for (size_t i = 0; i < h.size(); ++i) {
+                CK3dEntity* o = h[i];
+                CK3dEntity* c = hc[i];
                 if (!c || c == o) return refuse("the copy has no copy of " + name_of(o));
                 if (c->GetClassID() != o->GetClassID()) return refuse("the copy of " + name_of(o) + " has another class");
-                hc.push_back(c);
+                remap[o] = c;
             }
             std::vector<CK_ID> made;
             for (CK_ID id: all_object_ids(context))
@@ -673,7 +687,6 @@ namespace bmmo::game {
                         return refuse("the copy made the 3D entity " + name_of(o) + ", which is not a copy of the hierarchy");
                 }
             }
-            const XObjectArray remapped = dc.FillRemappedDependencies();
             if (hooks.fail_at_row == a.row) return refuse("test hook: step 5 refuses at this row (--placement-fail-at)");
             // The limit: kPlacementMaxName (the wire's and the bridge's).
             constexpr size_t kMaxEntityName = kPlacementMaxName;
@@ -741,7 +754,8 @@ namespace bmmo::game {
                             CK_ID value = 0;
                             to->GetValue(&value);
                             CKObject* target = context->GetObject(value);
-                            CKObject* mapped = target ? dc.Remap(target) : nullptr;
+                            const auto it = target ? remap.find(target) : remap.end();
+                            CKObject* mapped = it == remap.end() ? nullptr : it->second;
                             if (mapped && mapped != target) {
                                 CK_ID id = mapped->GetID();
                                 to->SetValue(&id);
@@ -777,8 +791,6 @@ namespace bmmo::game {
                     group_names += (group_names.empty() ? "" : ",") + name_of(group);
                 }
             }
-            if (deps) dc.StopDependencies();
-
             // Step 10: the row names its copy.
             written.push_back({a.row, root->GetID(), name_of(root)});
             ph->SetElementObject(a.row, 3, hc[0]);
@@ -806,7 +818,7 @@ namespace bmmo::game {
             r.fingerprint = describe_prints(prints_of(context, hc[0]));
             line("copy row " + std::to_string(a.row) + " s" + std::to_string(a.sector) + " " + a.source + " -> " + a.name
                  + ": " + std::to_string(hc.size()) + " entities, " + std::to_string(scripts) + " scripts, "
-                 + std::to_string(r.objects.size()) + " objects (remapped " + std::to_string(remapped.Size()) + "), census "
+                 + std::to_string(r.objects.size()) + " objects, census "
                  + r.census + ", groups " + (r.groups.empty() ? "-" : r.groups) + ", attributes "
                  + (r.attributes.empty() ? "-" : r.attributes) + (skipped ? ", " + std::to_string(skipped)
                  + " DONOTCOPY attribute(s) not set" : ""));
@@ -924,5 +936,25 @@ namespace bmmo::game {
                       static_cast<unsigned long long>(signature), active ? "on" : "off", placement.copies().size());
         if (log) log(std::string(text) + (signature_error.empty() ? "" : " - the PH table is unreadable: " + signature_error));
         return true;
+    }
+
+    // The release of the copies a host's placement made (design 2.3 step 11's
+    // registry, 2.5 "Level exit"; written once at step S10 for the three
+    // hosts): nothing when it made none; otherwise every recorded row put back
+    // and every recorded copy that still exists under its name destroyed, root
+    // first (sector_placement::release), then "placement: N copies released
+    // (why)" and the release's lines - with `log` empty (the server's world,
+    // whose destructor releases silently) nothing is logged.  The headless
+    // client releases before its engine reboots or goes, the server's world
+    // in its destructor, the retail core host at the level's exit and at the
+    // next map load.  Returns how many copies it destroyed.
+    inline int release_placement(sector_placement& placement, CKContext* context, const char* why, const placement_log& log) {
+        if (!context || placement.copies().empty()) return 0;
+        const int destroyed = placement.release(context);
+        if (log) {
+            log("placement: " + std::to_string(destroyed) + " copies released (" + (why ? why : "") + ")");
+            placement_detail::log_lines(log, placement.describe());
+        }
+        return destroyed;
     }
 }

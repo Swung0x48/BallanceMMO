@@ -2061,12 +2061,13 @@ namespace {
         // holds them goes (sector placement design 2.3, As built (step S2):
         // the context reset destroys a copy's objects in CK's hash order, so
         // a P_Extra copy must be torn down root first).
+        // The release is game/sector_placement.hpp's release_placement (step
+        // S10, one helper for the server's world, this host and the retail
+        // core host).
         void release_placement(const char* why) {
-            if (!engine_ || placement_.copies().empty()) return;
-            const int destroyed = placement_.release(engine_->context());
-            logf("placement: %d copies released (%s)", destroyed, why);
-            std::istringstream lines(placement_.describe());
-            for (std::string line; std::getline(lines, line);) logf("placement: %s", line.c_str());
+            if (!engine_) return;
+            bmmo::game::release_placement(placement_, engine_->context(), why,
+                                          [](const std::string& line) { logf("%s", line.c_str()); });
         }
 
         // hold_sector, request_sector and the sector lead moved into the

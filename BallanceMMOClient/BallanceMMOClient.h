@@ -802,6 +802,7 @@ private:
 	bool core_host_reload_ready();   // the reload's level is loaded, past the capture window and in play
 	void core_host_map_loaded();   // OnLoadObject(isMap): a fresh level (the flag cleared)
 	bool core_host_reload_exit();   // OnPostExitLevel: the exit is the reload's own (the session goes on)
+	void core_host_release_placement(const char* why);   // step SP10: the copies released (level exit, map load)
 	CKDataArray* current_level_array() {
 		return current_level_array_ ? static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_)) : nullptr;
 	}

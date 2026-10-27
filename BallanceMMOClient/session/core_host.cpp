@@ -55,6 +55,8 @@
 #include <float.h>
 #endif
 
+#include <game/host_backend.hpp>
+#include <game/sector_activation.hpp>
 #include <game/sector_placement.hpp>
 #include <game/session_host_support.hpp>
 #include <game/trafo_sets.hpp>
@@ -68,23 +70,12 @@
 #include "core_host.hpp"
 #include "session_journal_client.hpp"
 
-// Step HU1 (host logic written once, docs/roadmap.md section 2): the shared
-// placement helper (game/sector_placement.hpp place_at_anchor,
-// placement_hooks_for) and the shared force hooks (game/host_backend.hpp
-// force_hooks_for) compile against this host's backend here.  Explicit
-// instantiations only - nothing calls them yet, retail behaviour is
-// unchanged: S10 makes this host's anchor call place_at_anchor, and the two
-// force-hook copies below (make_retail_trafo_hooks, the script hooks at the
-// anchor) move onto force_hooks_for with a retail run (roadmap section 4
-// item 1, "Host unification").
-template bmmo::game::script_replay_hooks
-bmmo::game::force_hooks_for<const bmmo::physics::physics_view*>(const bmmo::physics::physics_view*);
-template bmmo::game::placement_hooks
-bmmo::game::placement_hooks_for<const bmmo::physics::physics_view*>(const bmmo::physics::physics_view* const&,
-                                                                     std::set<std::string>&, int);
-template bool bmmo::game::place_at_anchor<const bmmo::physics::physics_view*>(
-    bmmo::game::sector_placement&, CKContext*, const bmmo::physics::physics_view* const&, bool, int,
-    const bmmo::game::placement_log&, uint64_t&, std::string&);
+// Host logic written once (step HU1, docs/roadmap.md section 2): this host
+// calls the shared placement helper (game/sector_placement.hpp
+// place_at_anchor, release_placement; step S10), the shared force hooks
+// (game/host_backend.hpp force_hooks_for) and the union pass's writes
+// (game/sector_activation.hpp run_sector_pass) with its own platform - the
+// bridge (physics_view), the logger, the file-scope registry.
 
 namespace {
     namespace bs = bmmo::session;
@@ -103,6 +94,9 @@ namespace {
     // restored on scope exit.  Not around platform.body_state: the core's
     // corrections, resync and rollback capture read it, and those feed the
     // simulation.  The x64 and Linux hosts run SSE2 doubles (53-bit) already.
+    // How many reads ran switched, and how many could not switch (the
+    // session end's log line, step SP10: TR4c confirmed in a retail run).
+    uint64_t report_precision_reads = 0, report_precision_failed = 0;
     struct report_precision_53 {
 #if defined(_MSC_VER) && defined(_M_IX86)
         unsigned int saved = 0;
@@ -110,6 +104,7 @@ namespace {
         report_precision_53() {
             unsigned int unused = 0;
             ok = _controlfp_s(&saved, 0, 0) == 0 && _controlfp_s(&unused, _PC_53, _MCW_PC) == 0;
+            ++(ok ? report_precision_reads : report_precision_failed);
         }
         ~report_precision_53() {
             unsigned int unused = 0;
@@ -663,6 +658,24 @@ namespace {
     // SessionEnd does not come.
     constexpr std::chrono::seconds kReloadTimeout{10};
 
+    // ------------------------------------------------------------ the sector placement
+    // Step SP10 (sector-placement design 2.3-2.5): this process's placement -
+    // the registry of the copies its anchors made (game/sector_placement.hpp),
+    // which outlives the session (the PH rows name the copies until the level
+    // goes) and is released at the level's exit (OnPostExitLevel) and at the
+    // next map load (OnLoadObject(isMap)), whichever comes first.  The host
+    // logic is the shared helper's (place_at_anchor, release_placement); this
+    // host supplies the bridge, the logger and the registry.  File-scope
+    // (BallanceMMOClient takes no member).
+    struct placement_host_state {
+        bmmo::game::sector_placement placement;
+        bool active = false;          // the last anchor's: the core's placement_active()
+        uint64_t signature = 0;       // the last anchor's signature (SessionReady's anchor_placement)
+        size_t made = 0;              // copies the last anchor made
+        uint64_t anchors = 0, refused = 0, releases = 0, released = 0;
+    };
+    placement_host_state placement_host;
+
     double seconds_since(clock_type::time_point t) {
         return std::chrono::duration<double>(clock_type::now() - t).count();
     }
@@ -730,21 +743,7 @@ namespace {
         hooks.unregister_set = [v](uint32_t player, std::string& error) { return v->trafo_set_unregister(player, error); };
         hooks.seed = [v](uint32_t frame, int32_t seed) { v->trafo_set_seed(frame, seed); };
         hooks.unmake = [v](uint32_t frame, std::string& error) { return v->trafo_set_unmake(frame, error); };
-        hooks.forces.capture_force = [v](CKBehavior* block, bmmo::game::force_block_state& out) {
-            bmmo_physics_force_block state{};
-            std::string error;
-            if (!v->force_block_get(static_cast<uint32_t>(block->GetID()), state, error)) return false;
-            out.exists = state.exists != 0;
-            for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-            return true;
-        };
-        hooks.forces.restore_force = [v](CKBehavior* block, const bmmo::game::force_block_state& in) {
-            bmmo_physics_force_block state{};
-            state.exists = in.exists ? 1 : 0;
-            for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
-            std::string error;
-            return v->force_block_set(static_cast<uint32_t>(block->GetID()), state, error);
-        };
+        hooks.forces = bmmo::game::force_hooks_for(v);   // game/host_backend.hpp (step SP10)
         hooks.log = [logger](const std::string& line) { logger->Info("Physics session: trafo: %s", line.c_str()); };
         return hooks;
     }
@@ -983,6 +982,11 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // the trafo the manager is always selected, and an empty selection with
     // the inputs on is logged at the anchor.
     caps.trafo_inputs = true;
+    // Step SP10 (sector placement design 2.4): this host computes the
+    // placement signature at every anchor and builds the copies when the
+    // session's world option says so (the core's placement_active):
+    // SessionReady declares CAP_PLACEMENT with the signature.
+    caps.placement = true;
     // A previous session's sets, should its end have been skipped.
     trafo_teardown(physics_view_, m_bml->GetCKContext(), logger_);
     try {
@@ -1152,12 +1156,32 @@ bool BallanceMMOClient::core_host_reload_ready() {
 
 // Step SP9: OnLoadObject(isMap) - a fresh level: no session ran on it.
 void BallanceMMOClient::core_host_map_loaded() {
+    // Step SP10: copies a missed exit left are recorded leftovers of the
+    // previous level: released before any anchor of this one.
+    core_host_release_placement("a map load");
     level_life.ran_union = false;
     if (!level_life.reloading) return;
     level_life.loaded = true;
     level_life.loaded_at = clock_type::now();
     logger_->Info("Physics session %u: the reload's map load %.3f s after the exit", host.session,
                   seconds_since(level_life.started));
+}
+
+// Step SP10 (sector placement design 2.5 "Level exit", "Orphans"): the copies
+// this process's anchors made go with the level - at its exit
+// (OnPostExitLevel, after Event_handler's Exit Level dephysicalized the
+// scene; the reload's own exit too) and, should that have been missed, at the
+// next map load.  Each recorded row back on its source, each recorded copy
+// that still exists under its recorded name destroyed root first; one that
+// is gone already is logged as such (which settles design 9 Q2 for the
+// copies).  The shared helper (release_placement) does it; nothing when the
+// registry is empty.
+void BallanceMMOClient::core_host_release_placement(const char* why) {
+    if (placement_host.placement.copies().empty()) return;
+    ++placement_host.releases;
+    placement_host.released += static_cast<uint64_t>(bmmo::game::release_placement(
+        placement_host.placement, m_bml->GetCKContext(), why,
+        [this](const std::string& line) { logger_->Info("Physics session: %s", line.c_str()); }));
 }
 
 // Step SP9: OnPostExitLevel - the reload's own exit does not end the session
@@ -1442,6 +1466,32 @@ void BallanceMMOClient::core_host_anchor() {
                       restored, level_sequencers_.size(), level_sequencers_.describe().c_str());
     }
     proximity_countdowns_restore();
+    // Step SP10 (sector placement design 2.3, 2.4): after the Sequencer and
+    // proximity restores (a copy inherits its source's level-file counters),
+    // before the hash, the selection and every pass.  The core decides
+    // (placement_active: the world option and the capability); the apply
+    // with its hot-source hooks, the option-off release policy and the
+    // signature are the shared helper's (place_at_anchor, one copy for every
+    // host); a refusal ends the session here, as a failed hash does.
+    {
+        const bmmo::physics::physics_view* view = &physics_view_;
+        placement_host.active = core.placement_active();
+        ++placement_host.anchors;
+        if (!bmmo::game::place_at_anchor(placement_host.placement, m_bml->GetCKContext(), view, placement_host.active, -1,
+                                         [this](const std::string& line) { logger_->Info("Physics session: %s", line.c_str()); },
+                                         placement_host.signature, error)) {
+            ++placement_host.refused;
+            core_host_end_local(error);
+            return;
+        }
+        placement_host.made = placement_host.placement.copies().size();
+        // Copies in the level make it a level that ran a session even when
+        // a later anchor step fails (the hash below): the next countdown
+        // must reload it, or its apply refuses the copies left here
+        // ("already holds N placement copies") on every session until the
+        // player leaves the level (SP10 review).
+        if (placement_host.made > 0) level_life.ran_union = true;
+    }
     bmmo::physics::world_hash hash;
     if (!physics_view_.capture(hash, error)) {
         core_host_end_local("world hash failed: " + error);
@@ -1465,21 +1515,9 @@ void BallanceMMOClient::core_host_anchor() {
                       "a replayed tick's births are logged at the live tick + 1");
     host.script_activations = bmmo::game::session_script_activations(m_bml->GetCKContext(), host.script_ids);
     host.explosion_pieces = bmmo::game::explosion_pieces(m_bml->GetCKContext());
-    host.script_hooks.capture_force = [this](CKBehavior* block, bmmo::game::force_block_state& out) {
-        bmmo_physics_force_block state{};
-        std::string e;
-        if (!physics_view_.force_block_get(static_cast<uint32_t>(block->GetID()), state, e)) return false;
-        out.exists = state.exists != 0;
-        for (int k = 0; k < 3; ++k) { out.position[k] = state.position[k]; out.force[k] = state.force[k]; }
-        return true;
-    };
-    host.script_hooks.restore_force = [this](CKBehavior* block, const bmmo::game::force_block_state& in) {
-        bmmo_physics_force_block state{};
-        state.exists = in.exists ? 1 : 0;
-        for (int k = 0; k < 3; ++k) { state.position[k] = in.position[k]; state.force[k] = in.force[k]; }
-        std::string e;
-        return physics_view_.force_block_set(static_cast<uint32_t>(block->GetID()), state, e);
-    };
+    // The force hooks over the bridge (game/host_backend.hpp, one copy for
+    // every host; step SP10 moved this host onto it).
+    host.script_hooks = bmmo::game::force_hooks_for(static_cast<const bmmo::physics::physics_view*>(&physics_view_));
     {
         const auto st = bmmo::game::script_replay::describe(m_bml->GetCKContext(), host.script_ids);
         logger_->Info("Physics session: script replay: %d scripts (%d active) + %d satellite blocks, %d blocks, %d parameters, "
@@ -1491,6 +1529,7 @@ void BallanceMMOClient::core_host_anchor() {
     report.physics_sha256 = physics_view_.dll_sha256();
     report.build_id = physics_view_.build_id();
     report.own_name = get_display_nickname();
+    report.placement = placement_host.signature;   // step SP10 (caps.placement)
     if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) parameters->GetElementValue(0, 1, &report.sector_cell);
     host.phase = retail_host::phase_type::running;
     host.last_rebases = fixed_tick_.rebases();
@@ -1669,6 +1708,13 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                   "hook's, %llu whose mute in force differs from the pause state decided in the frame",
                   static_cast<unsigned long long>(host.nav_source_differs),
                   static_cast<unsigned long long>(host.mute_source_differs));
+    // Step SP10: RO1's live script order and TR4c's 53-bit checkpoint reads
+    // ran in this session (counts; nothing else is decided from them).
+    logger_->Info("Physics session: live script orders (RO1): %zu kept; journal checkpoint body reads at 53-bit "
+                  "precision (TR4c): %llu, %llu could not switch; placement (S10): %s, %zu copies, signature %016llx",
+                  host.script_order.entries(), static_cast<unsigned long long>(report_precision_reads),
+                  static_cast<unsigned long long>(report_precision_failed), placement_host.active ? "on" : "off",
+                  placement_host.made, static_cast<unsigned long long>(placement_host.signature));
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     // Step T4: the sets go with the session (hooks.ended did it when the core
     // still ran; a core that ended first - a SessionEnd - did too).
@@ -2024,12 +2070,11 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                            "Gameplay_SectorManager is missing", sector);
             return;
         }
-        int none = 0;
-        parameters->SetElementValue(0, 2, &none, sizeof(none));
-        parameters->SetElementValue(0, 1, &sector, sizeof(sector));
         // A peer's sector in the cell is not this ball's (update_current_sector).
         if (sector != current_sector_) sector_cell_is_own_ = false;
-        if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, TRUE);
+        // The pass's writes (game/sector_activation.hpp, one copy for every
+        // host; step SP10 moved this host onto it).
+        bmmo::game::run_sector_pass(context, parameters, manager, sector);
     };
     p.record_activation = [this](uint32_t tick, bool reset) {
         host.activations.record(m_bml->GetCKContext(), tick, reset);
@@ -2536,6 +2581,14 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            level_life.go_waiting ? 1 : 0, level_life.reloads, level_life.clean_restarts,
                            level_life.abandoned);
     }
+    if (what == "placement") {
+        // Step SP10: this process's sector placement (status only).
+        if (!value.empty() && value != "status") return "error usage: session placement [status]";
+        return std::format("ok placement active={} copies={} signature={:016x} anchors={} refused={} releases={} "
+                           "released={}", placement_host.active ? 1 : 0, placement_host.placement.copies().size(),
+                           placement_host.signature, placement_host.anchors, placement_host.refused,
+                           placement_host.releases, placement_host.released);
+    }
     if (what == "force-rollback") {
         const size_t colon = value.find(':');
         const long every = std::strtol(value.c_str(), nullptr, 10);
@@ -2568,7 +2621,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            host.drop_births_armed, host.births_dropped);
     }
     return "error usage: session core on|off|status | session force-rollback <every>:<depth> | session stall <ms> | "
-           "session drop-birth";
+           "session drop-birth | session placement";
 }
 
 // net lag <ms> [up|down] [at <tick>] | net blackout <ms> [up|down] [at <tick>]

@@ -267,7 +267,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // The shared core's transition switch and forced rollbacks
         // (session/core_host.cpp, design 6.2).
         if (rest.rfind("core", 0) == 0 || rest.rfind("force-rollback", 0) == 0
-                || rest.rfind("stall", 0) == 0 || rest.rfind("drop-birth", 0) == 0 || rest.rfind("reload", 0) == 0)
+                || rest.rfind("stall", 0) == 0 || rest.rfind("drop-birth", 0) == 0 || rest.rfind("reload", 0) == 0
+                || rest.rfind("placement", 0) == 0)
             return core_host_session_verb(rest);
         if (rest == "trace on") { physics_session_.trace = true; physics_session_.rollback.set_verbose(true); return "ok session trace on"; }
         if (rest == "trace off") { physics_session_.trace = false; physics_session_.rollback.set_verbose(false); return "ok session trace off"; }

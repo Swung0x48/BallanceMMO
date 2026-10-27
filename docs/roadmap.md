@@ -181,8 +181,9 @@ x64 teardown) are item 2.
    `--placement-signature`, and re-captures the reference set at protocol 12),
    S7 the savestate check with a pass in the window, S8 the measurement
    (done: As built (step SP8)), S10
-   the retail host (the track's close-out, a 15-minute step), S11 the
-   records. **Adaptation M3** (the orchestrator's): the placement's config
+   the retail host (the track's close-out, a 15-minute step; done: As built
+   (step SP10), the config default `physics.placement_clones` is on since),
+   S11 the records. **Adaptation M3** (the orchestrator's): the placement's config
    default stays false until S10 (as T2 kept `trafo_inputs` off until its
    hosts ran it), otherwise every retail session on L1-L13 ends with
    "placement mismatch" until S10. S2's open points go with it: the plan's
@@ -243,13 +244,11 @@ x64 teardown) are item 2.
        activations and explosion pieces (`game/session_host_support.hpp`),
        the checkpoint hold (`hold_checkpoint_activation`), the headless
        hosts' trafo hooks (`sim/trafo_hooks.hpp`).
-     - *Queued, retail* (helper ready and compiled against `physics_view`;
-       the switch changes retail code, so it goes with a retail run - S10's,
-       which has one): CH's two force-hook copies
+     - *Queued, retail* - **done at SP10**: CH's two force-hook copies
        (`make_retail_trafo_hooks`'s `forces`, the anchor's
-       `host.script_hooks`) onto `force_hooks_for(&physics_view_)`; CH's
-       `run_sector` onto `run_sector_pass` (it keeps its own
-       `sector_cell_is_own_` bookkeeping).
+       `host.script_hooks`) are `force_hooks_for(&physics_view_)`; CH's
+       `run_sector` calls `run_sector_pass` (it keeps its own
+       `sector_cell_is_own_` bookkeeping, set before the call).
      - *Queued, not behaviour-neutral or not one logic yet*: (a) the trafo
        set hooks, `sim/trafo_hooks.hpp` against CH's
        `make_retail_trafo_hooks`: `has_body` differs (the engine's
@@ -262,10 +261,10 @@ x64 teardown) are item 2.
        `proximity_countdowns_restore`): shared with the legacy path, which
        gets nothing new, and it logs a census the headless hosts do not -
        onto the helper at R7 when the legacy path goes; (c) the placement's
-       release: PW's destructor releases silently and always, SC's
-       `release_placement` only when copies exist and logs them, CH has none
-       yet - S10 adds the retail release points (level exit, map load) and
-       one `release` helper for the three; (d) the anchor sequence itself
+       release - **done at SP10**: `game/sector_placement.hpp`
+       `release_placement(placement, context, why, log)`, called by PW's
+       destructor (no log), SC's `release_placement` and CH's
+       `core_host_release_placement` (level exit, map load); (d) the anchor sequence itself
        (clock reset, counters, placement, hash, collision filter, rewiring
        or N1-N4, selection) is written per host in a different order per
        host - one recipe would change what a world does: Stage C (R6 / R7);
@@ -632,6 +631,35 @@ x64 teardown) are item 2.
      server session whose world holds copies with the option off (no run
      reaches `prepare_unplaced`'s release branch on the server: a fresh
      world never holds copies).
+   - SP10 (sector placement S10, the retail core host, quick tier,
+     2026-10-27; ran: x64, x86 and Arch builds, 538 tests, GCC 29 ok, the
+     wire check `rHU1 -> rSP10` on `core_ref_s6` ALL SAME (12 send traces
+     SAME, 12 journals IDENTICAL, `l8_cross` with the placement on),
+     SimTool `--list-placement --placement on` on L8 and L11 identical to
+     rHU1's but for the dropped "(remapped N)", ONE two-copy retail run on
+     L11 with core on and the placement on, snapshots off, two sessions
+     with the reload between them (`scripts/retail/sp10_run2`), design As
+     built (step SP10)): (a) §7.5 runs 1 (on L8, with `level walk seen` and
+     the `scripts` check of `P_Modul_30_MF Script@P_Modul_30_MF_R15`), 3
+     (exit to the menu and a menu load, the release at the map load, and
+     the builder copies' names after a leak check), 4 (a trafo copy:
+     L8 row 19's paper trafo, with `trafo_inputs` on), 5 (a late retail
+     joiner, `sector manager` trace) and 6 (the legacy path, `session core
+     off`, with the placement on: the local end and the server's
+     immediate "no CAP_PLACEMENT" refusal of that member, the others
+     starting without the 8 s barrier; and off: run 1 as today), and the
+     retail option-off release path (`prepare_unplaced` releasing copies a
+     level still holds: a session with the option off on a level that ran
+     one with it on, `session reload off`), never exercised on retail;
+     (b) §7.6 retail x86 (run 1 on L9 or L12 at `net lag 150`, the
+     cost lines; the anchor's apply took 1.43-1.45 s on retail x86 for
+     L11's 53 copies); (c) the headless A/B arms with the default now on;
+     (d) CPU parity; (e) three launches without a hang; (f) a retail
+     session core off with the placement off (the legacy BAR: its only
+     change is the local end on the option, which does not fire); (g) the
+     review's nit on step 8: an object-valued attribute of a hierarchy
+     member naming an object outside the hierarchy (expected none; the
+     remap covers H only since SP10), counted in the listing.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

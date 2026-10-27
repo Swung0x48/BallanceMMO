@@ -112,7 +112,7 @@ namespace bmmo::session {
     // S5): every PH row whose object another row already places at another
     // matrix gets its own copy at the anchor (game/sector_placement.hpp), so
     // a player entering the next sector changes nothing in the previous one;
-    // the server's config physics.placement_clones (default off until the
+    // the server's config physics.placement_clones (default on since the
     // retail core host builds the copies, step S10).  WORLD_TRAFO_INPUTS
     // (trafo-replication design 2.14): every member has its own trafo piece
     // set in every world, the trafo's explosion and reset are Trafo events,

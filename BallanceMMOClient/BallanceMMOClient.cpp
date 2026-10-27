@@ -395,6 +395,7 @@ void BallanceMMOClient::OnPostExitLevel() {
     // Step SP9: a core session's own reload (its countdown on a level that ran
     // a session) leaves the level and goes on; any other exit ends a session.
     if (!core_host_reload_exit()) physics_session_end_local("left the level");
+    core_host_release_placement("the level exit");   // step SP10: the sector placement's copies go with the level
     // The guard's callback hangs on a level script, so the teardown destroys it
     // with the script; disabling it here hands the time factor back anyway.
     std::string error;

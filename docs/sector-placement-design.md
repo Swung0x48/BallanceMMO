@@ -2186,6 +2186,161 @@ host's `release_placement` differ only in when they log).
   frame within the 15.15 ms tick on the slowest harness machine and on the
   retail x86 client. If it fails, the options are §9 Q7.
 
+**As built (step SP10 = S10, 2026-10-27; the retail core host, quick tier).**
+
+- **Where.** Retail: `BallanceMMOClient/session/core_host.cpp` (the file-scope
+  `placement_host` registry, `caps.placement`, the anchor call, the release
+  points, the `session placement` verb, the session end's RO1/TR4c/S10 count
+  line, the force hooks and the union pass on the shared helpers),
+  `BallanceMMOClient.cpp` (one hook line in `OnPostExitLevel`),
+  `BallanceMMOClient.h` (one non-virtual method, no data member),
+  `automation/client_automation.cpp` (the verb routed),
+  `session/physics_session_client.cpp` (the legacy local end). Shared:
+  `game/sector_placement.hpp` (`release_placement`, and the copy of step 4,
+  below), `entity/session.hpp` (a comment). Server: `physics_world.cpp` (the
+  destructor calls `release_placement`), `config_manager.hpp` (the default,
+  M3 below); the headless host's `release_placement` calls the helper. No
+  protocol, journal, record or engine change.
+- **The anchor** (§2.4's row): `core_host_anchor` calls the shared
+  `place_at_anchor` with the bridge (`const physics_view*`), the core's
+  `placement_active()` and the logger, after the Sequencer and proximity
+  restores and before the hash, the script selection and
+  `explosion_pieces` (as S2's call-site adaptation has it for every host); a
+  refusal ends the session locally before SessionReady; the signature is
+  `anchor_report::placement` with `caps.placement` declared, option on or
+  off. The option-off release policy is the helper's (`prepare_unplaced`).
+  No third copy of the policy.
+- **The registry and the release.** A file-scope `placement_host` (the
+  `BallanceMMOClient` class takes no member) outlives the session; the
+  shared `release_placement` (one helper for the three hosts, HU1's queued
+  item (c)) runs at `OnPostExitLevel` (after the session end or the
+  reload's own exit) and at `OnLoadObject(isMap)` (leftovers of a missed
+  exit), nothing when the registry is empty.
+- **The legacy path** ends a session whose `world_options` has
+  `WORLD_PLACEMENT_CLONES` locally at its SessionStart, before the restart
+  ("the placement needs the session core (session core on)"); nothing else
+  changes there.
+- **Root cause found and fixed: the retail copy crashed (step 4).** Symptom
+  (first run, `scripts/retail/sp10_run1`): the anchor ran on 8 consecutive
+  frames, the first 7 leaving no line at all, the 8th refused "row 39: the
+  source's P_Ball_Stone_MF001 has a physics body" (by then the restart's
+  sector-1 pass had run), and the server ended the session ("nobody
+  reported ready"). A diagnostic build (`sp10_diag1`; an SEH guard around
+  the call, removed again) showed an access violation (c0000005) after row
+  21's copy had completed, in row 23's. Cause: step 4 kept a
+  `CKDependenciesContext` on this module's stack, as §2.3 says ("a context
+  we keep"). In the Virtools SDK its members (`XHashID`, `XObjectArray`,
+  `XBitArray`, ...) are inline templates allocating with `new[]`
+  (VX_MALLOC off) and the class declares no destructor, so CK2.dll's
+  `AddObjects` / `Copy` fill them from CK2.dll's heap and this module's
+  inline destructor frees them with its own CRT (the same for
+  `FillRemappedDependencies`' returned array); Ballanced is one module and
+  never meets it. Fix (shared, one implementation): step 4 calls
+  `CKContext::CopyObjects` with the hierarchy H (root first) as the sources,
+  so the context lives and dies inside CK, and the returned array gives the
+  copy of each member of H in that order (Ballanced CK2/CKContext.cpp:110-125:
+  `GetObjects(i)` after `Copy`'s `m_Objects.Remap`); the root's preparation
+  adds every child (CHILDREN), the listed children are already present
+  (`CKERR_ALREADYPRESENT`), so the dependency map, the creation order and
+  the copy are the root's, as before. That array replaces `dc.Remap` in steps
+  5 and 8; the per-copy log line loses "(remapped N)" (S2's `made` count
+  stays, and was equal to it on every copy). A first attempt with
+  `CKContext::CopyObject` and a structural pairing of the two hierarchies
+  failed: a copy's children are not in the source's order ("the copy of
+  P_Modul_25_HingeFrame has another class", SimTool L11). Byte-identical on
+  Ballanced: SimTool `--list-placement --placement on` on L8 and L11 (every
+  census, fingerprint, signature, the release check PASS) equal to rHU1's
+  but for "(remapped N)"; the wire check below, `l8_cross` with the
+  placement on included.
+- **Q1, the retail half (S1's deferred item).** The retail CK2 prints the
+  same builder words as Ballanced (OBJECT 0x3, SCENEOBJECT 0x1, BEOBJECT
+  0x7, 3DENTITY 0x2, MESH 0x2, the rest 0) and the same `m_Flags=0
+  (CUSTOM) size=54`; it differs in one default word, BEOBJECT
+  `default=0x3` (Ballanced 0x1), which the builder's custom words do not
+  use, and in two class names of the "every nonzero builder word" line
+  (`2D Entity` / `2dEntity`, `Grid Layer` / `Layer`). Logged, not hashed
+  (§10 R1 #3). Q8 (the retail `Copy` against Ballanced's): every copy line
+  of both anchors (census, groups, attributes) and the signature equal the
+  server's; the `scripts` verb lists the copies' scripts (119 on L11, e.g.
+  `P_Modul_25 script@P_Modul_25_MF_R21*`), the same set and active marks on
+  both clients.
+- **Q2, settled for the copies:** at `OnPostExitLevel` (the reload's exit)
+  every recorded copy root and every recorded source was gone already
+  ("release: P_Modul_25_MF_R21 (row 21) is gone already" ... "0 of 53 PH
+  row(s) put back, 0 of 53 copies destroyed"): the game's level exit
+  destroys the level with its dynamic copies before the hook runs. The
+  release is a guard there; run 3's builder-copy leak check is not run.
+- **M3: the server's `physics.placement_clones` defaults to true** from
+  this step, as the design intends (§5); the retail run passed with the
+  option on. A config that names it keeps its value (the harness configs
+  do; so does every config.yml a server wrote since S5, whose `save()`
+  writes the whole file back: a deployed server, okbc.st included, turns it
+  on by editing its config). A legacy retail member (session core off) ends
+  locally at SessionStart, before the restart, and first sends its usual
+  SessionReady with no capabilities, so the server refuses it at once (no
+  CAP_PLACEMENT; out of the session, not out of the room) instead of the
+  other members waiting `kStartBarrierTimeout` (8 s) for the barrier to drop
+  a member that went silent (SP10 review; the implement round had the local
+  end without the send, which cost every session in a mixed room 8 s).
+- **Review fix-ups.** (1) The legacy SessionReady above. (2) A level with
+  copies counts as a level that ran a session (`level_ran_union`) as soon
+  as `place_at_anchor` made copies, not only after the whole anchor: an
+  anchor that made the copies and then failed (the world hash) used to
+  leave them in a level the next countdown restarted without a reload,
+  whose apply then refused ("this process already holds N placement
+  copies") on every session until the player left the level. (3) Step 8's
+  remap now covers the hierarchy H only (the `CopyObjects` array), as §2.3
+  states it ("names a member of the hierarchy"); the old `dc.Remap` also
+  followed any other object the copy duplicated, e.g. a mesh or material if
+  the builder words (3DENTITY 0x2, MESH 0x2) copy one. Neither the listing
+  nor the wire check sees an attribute's value (`entity_print` holds
+  names), so an object-valued attribute naming such a non-member is not
+  covered by the byte-identity above; the final verification's L8 run 1
+  (§7.5) is where a difference would show as a body difference. Gate
+  round (retail code only: the x86 build, CLIENT-BUILD-OK, and one retail
+  run, `scripts/retail/sp10_gate1`, 55 s): L11, the placement on,
+  snapshots off, client 1 `session core on`, client 2 `session core off`:
+  the server sent SessionStart and refused client 2 in the same second
+  ("refused: no CAP_PLACEMENT (caps 00000000)"), client 2 logged "ended:
+  the placement needs the session core", client 1 was ready 5 s later
+  (countdown + anchor, 53 copies, signature `5d22d3b5a61c38cb`), no "did
+  not report ready", the session ran to tick 322 with a `sector 2`
+  crossing; the session-end line "RO1: 6 kept ... TR4c: 160, 0 could not
+  switch; placement (S10): on, 53 copies". The fix-up (2) path (a hash
+  failure after the copies) was not provoked.
+- **Checks (quick tier; about 13 minutes of wall clock with the
+  root-cause rounds; tools in `.local-tools/work/SP10/`: `sp10_retail.py`,
+  `sp10_judge.py`).** x64 BUILD-OK, x86 CLIENT-BUILD-OK (no layout change),
+  Arch ARCH-BUILD-OK (`ballanced-3e4289e95f25+bmmo-48d1c3293644-dirty`),
+  538/538 tests, GCC 29 ok. The headless BAR: `wire_check.sh rHU1 rSP10`
+  on `core_ref_s6` ALL SAME (12 send traces SAME, 12 journals IDENTICAL),
+  before and after the step-4 fix. **One two-copy retail run**
+  (`scripts/retail/sp10_run2`; §7.5 runs 1 and 2 on L11 instead of L8: the
+  Arch server with `placement_clones` on, `trafo_inputs` off, snapshots
+  off; session 1 on the menu-loaded level, client 1 `sector 2` then
+  `sector 3`; session 2 by the host's restart, client 1 `sector 2`): both
+  sessions anchor on both clients with the server's hashes
+  (`a8c7f832281a39c5 / a34811ce6a4225ed`) and placement signature
+  `5d22d3b5a61c38cb` (S2's V2 value; all three journal headers carry it with
+  `world_options=1`), 53 copies; session 2 reloads (map load 1.58-1.59 s,
+  ready 2.20-2.21 s after the exit), SessionStart -> anchor 5.2 s (S9:
+  3.75 s; the retail apply of 53 copies takes 1.43-1.45 s), inside the 8 s
+  barrier; no mismatch. **Every placement body exact by name**: session 1,
+  14 bodies (`P_Modul_25_Bridge_R21`, `_Bridge001_R23`,
+  `P_Modul_37_Bridge_R30` from tick 126; `P_Ball_Stone_MF001..004_R39..42`,
+  `P_Modul_19_Flaps_R43`, `P_Modul_26_Rope001_R35` / `Sack001_R35`,
+  `P_Modul_34_Kiste001_R55`, ... from 328), client 1 vs client 2 over 300
+  shared ticks and each against the server over 299: 0 body-set
+  differences, 0 value differences (position, rotation, linear, angular);
+  session 2, 3 bodies over 180 / 179 ticks, the same. The anchor's
+  placement lines equal the server's but for the two Q1 lines above. RO1
+  and TR4c run: "live script orders (RO1): 7 kept; journal checkpoint body
+  reads at 53-bit precision (TR4c): 303, 0 could not switch" (session 2:
+  6, 486-487, 0).
+- **Deferred** (roadmap §4 item 7's list): §7.5 run 1 on L8 and runs 3-6;
+  §7.6 retail x86 CPU; the headless A/B arms with the new default; CPU
+  parity; three launches without a hang; a core-off retail session.
+
 ## 8. Steps
 
 Each step: implement; review (an adversarial reviewer reads the diff against

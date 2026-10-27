@@ -105,7 +105,8 @@ namespace bmmo::sim {
     }
 
     physics_world::~physics_world() {
-        if (engine_) placement_.release(engine_->context());   // sector placement: see place_sectors()
+        // Sector placement: see place_sectors(); the one release helper (step S10), silent here.
+        if (engine_) bmmo::game::release_placement(placement_, engine_->context(), "the world is destroyed", {});
         // Players first: their navigation controllers live in the environment.
         players_.clear();
         if (engine_) bmmo::physics::set_controller_alias(engine_->physics(), {});
