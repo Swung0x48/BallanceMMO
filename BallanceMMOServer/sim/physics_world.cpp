@@ -292,9 +292,11 @@ namespace bmmo::sim {
         // deactivated the sector it left, whoever was still in it.  Measured: a
         // retail crossing put the server's sector-2 bodies 14 ticks ahead of
         // the client's and took sector 1's away at the crossing.
+        bool held = false;
         {
             std::string hold_error;
-            if (bmmo::game::hold_checkpoint_activation(engine_->context(), hold_error))
+            held = bmmo::game::hold_checkpoint_activation(engine_->context(), hold_error) != nullptr;
+            if (held)
                 log("world: the level's checkpoint sector activation is held; update_sectors() alone runs the sector manager");
             else
                 log("world: the level's checkpoint sector activation was NOT held (" + hold_error
@@ -326,6 +328,23 @@ namespace bmmo::sim {
             else
                 log("world: the checkpoint chain's phase cell was NOT split (" + trouble
                     + "): a clone's crossing 3 ticks after a sector pass can cancel that pass's module Physicalize");
+        }
+        // Step B2SX (game/sector_cell_split.hpp): the held chain's [0][1]
+        // write goes to a private cell, so a clone's crossing of sector K in
+        // the frame of an update_sectors pass of J cannot make the manager
+        // activate K here.  Once, like the phase split (nothing hands it back);
+        // only where the hold is in force (otherwise the chain runs the
+        // manager, which reads the chain's cell).  Off only for SimTool's A/B.
+        if (options_.split_sector_cell && held) {
+            const std::string trouble = sector_cell_.apply(engine_->context());
+            if (trouble.empty())
+                log("world: the checkpoint chain's sector cell is split: " + sector_cell_.describe());
+            else
+                log("world: the checkpoint chain's sector cell was NOT split (" + trouble
+                    + "): a clone's crossing in the frame of a sector pass can make the manager activate the crossed sector");
+        } else {
+            log(std::string("world: the checkpoint chain's sector cell is NOT split (")
+                + (held ? "--n2-cell off" : "the activation is not held") + ")");
         }
         {
             // Hex, like every other place these two are printed (the client's

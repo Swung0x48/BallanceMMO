@@ -3089,6 +3089,65 @@ N2 on every world, T1's findings.**
   BodyRevived is gone and so is the finding; (iii) SimTool takes those
   ticks from the server journal when given both files (tool only).
 
+## As built (step B2SX, 2026-10-27): the [0][1] cell, and T1 (a) recorded
+
+- **The [0][1] cell (N2's finding), the user's option (a).** The cause
+  (B2SW): an own crossing of sector K's checkpoint (a clone's, on the
+  server) in the frame of a union pass of another sector J - the pass writes
+  IngameParameter[0][1] = J, the chain's Set Cell writes K before the sector
+  manager's Start reads it, and the manager activates K. The fix:
+  `game/sector_cell_split.hpp` (next to N2's `sector_deactivate_pin.hpp`)
+  gives Gameplay_Events / activate Sektor's [0][1] Set Cell a private copy of
+  IngameParameter (`_BMMO_SectorCell`, named by the session's parameter
+  `BMMO_SectorCell` on the block's Target), as the phase cell's split did;
+  the manager then reads only run_sector_pass's [0][1]. The own sector poll
+  reads the copy: `sector_poll::cell_private` (client_platform.hpp), and the
+  core compares a private cell with its last poll (`chain_cell_`, from the
+  anchor's cell), never with a pass's sector (client_core_frame.cpp
+  `poll_own_sector`) - a pass no longer writes the cell the poll watches.
+  On every world, once at its anchor and only where the hold is in force
+  (without it the chain runs the manager, which needs its own [0][1]): the
+  server's world (`physics_world`, `world_options::split_sector_cell`, off
+  only for SimTool's `--n2-cell off`), the headless client (kept in its
+  frame guard, handed back when the next session begins), the retail mod
+  with the session core on (`core_host.cpp`, a file-scope split: kept in
+  `script_guards`, handed back at session end; the legacy path, core off,
+  keeps the shared cell it polls). **Evidence**: the B2SW scene (SimTool
+  `--level 13 --drop P_Ball_Wood_MF 0 --drop-at 220 3.65 15 --drop-sector 1
+  --drop-move 3 T --ticks 120 --cells-trace`): T 79, 80, 81 make sector 3's
+  bodies (63 at the end), and the chain's copy turns 2 at the crossing tick
+  80 (the poll's cell) while [0][1] keeps the pass's 3; `--n2-cell off` at
+  T 80 still makes sector 2's 14 (71). The core:
+  `SessionClientCoreSectors.PrivateChainCellIsComparedWithThePollsNotThe
+  Passes` - the own crossing of 2 in the frame of the pass of 3 is stamped
+  at its own poll and its pass runs at its stamp; a pass changes nothing
+  for the poll; an own crossing into a sector a peer started is seen
+  without a moved resetpoint (a shared cell missed it: the pass had
+  written the same sector). Wire check `rB2SW -> rB2SX` over `core_ref_s7`:
+  sends 12/12 SAME; journals: resync_snapoff 4/4 identical, swing_snapoff
+  and l8_cross 8/8 identical order-free only - the split's two CK objects,
+  made at the headless anchor after N2's, shift the CK ids of every body
+  made after them (list_bodies' order). The captures' own sectors are
+  scripted (`--sector-at`), so the wire check does not cross a checkpoint
+  through the poll; the gate round's one live headless session did
+  (`maps/arena-test/b2sx_stallg`, level 13, 2 clients, 150 ms, snapshots
+  off, client 0 `--beam 220 7.65 15 400`): both clients logged the split,
+  client 0's poll saw its own crossing of checkpoint 2 and stamped it ("sector
+  2 stamped for tick 473 (checkpoint, lead 35, input_delay 17)"), and both
+  worlds ran the pass at 473 ("sector +2 at tick 473 ... stamped 473");
+  server journal replay 2763/2763. The retail two-copy run is deferred to
+  the final verification (the 15-minute budget).
+- **T1 (a), the user's option (ii)** (2026-10-27): not built; it waits for
+  the user's answer to world agreement's Q9. The cause stays as recorded at
+  T1: `server.cpp`'s relay skips the owner for BodyRevived ("relayed to
+  the others and never echoed", `on_event`'s `m != owner || msg.type !=
+  BodyRevived`), so a moved BodyRevived is in its owner's journal only at
+  its stamp and a SimTool replay of that journal wakes the body early
+  (`resync_at150_down` c0: P_Modul_34_Schiebestein 0.637 mm, 16-tick
+  windows). If world agreement's G5 lands, BodyRevived is retired and the
+  finding with it; otherwise the echo (option (i)) or SimTool reading the
+  server journal (option (iii)) is the user's to choose then.
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

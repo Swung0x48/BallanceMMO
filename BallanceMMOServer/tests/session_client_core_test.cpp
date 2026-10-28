@@ -3812,6 +3812,70 @@ namespace {
         EXPECT_EQ(state_of(core).sector_cell_, 0);
     }
 
+    // Step B2SX (game/sector_cell_split.hpp): a host whose checkpoint chain
+    // writes a private [0][1] (sector_poll::cell_private) - no pass writes
+    // that cell, so the poll compares it with what the polls saw, never with
+    // a pass's sector: the own crossing of 2 in the frame of the pass of 3
+    // (the [0][1] cell's race) is reported at its own poll, a pass changes
+    // nothing for the poll, and an own crossing into a sector a peer started
+    // is seen without a moved resetpoint.
+    TEST(SessionClientCoreSectors, PrivateChainCellIsComparedWithThePollsNotThePasses) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        open_gate(core);
+        const auto private_poll = [](int cell) {
+            bmmo::session::sector_poll poll = cell_poll(cell, true);
+            poll.cell_private = true;
+            return poll;
+        };
+        EXPECT_EQ(state_of(core).chain_cell_, 0);
+        core.request_sector(3, "sector verb");   // stamped 128
+        for (uint32_t tick = 120; tick <= 128; ++tick) steps{core}.sector_union_pass(tick);
+        EXPECT_EQ(state_of(core).sector_cell_, 3);
+        EXPECT_EQ(state_of(core).chain_cell_, 0) << "a pass never writes the chain's cell";
+        // The pass's frame, the chain's cell untouched: nothing.
+        fake.poll = private_poll(0);
+        size_t from = fake.calls.size();
+        steps{core}.poll_own_sector(128);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"poll_sector:128"});
+        // The own crossing of 2 in the frame of that pass: the chain wrote its
+        // own cell, the manager read the pass's 3; the crossing is ours.
+        fake.poll = private_poll(2);
+        from = fake.calls.size();
+        steps{core}.poll_own_sector(129);
+        {
+            const std::vector<std::string> expected = {
+                "poll_sector:129", "send:1",
+                "log:0:sector 2 stamped for tick 137 (checkpoint, lead 7, input_delay 4), event sent ahead"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(state_of(core).chain_cell_, 2);
+        EXPECT_EQ(state_of(core).sector_cell_, 3);
+        // A peer's pass of 5, and our 2's own pass at its stamp: the poll
+        // still sees 2, which it has seen.
+        core.on_session_event(sector_message(4, 5, 130, 130));
+        steps{core}.drain_due_events(130);
+        for (uint32_t tick = 130; tick <= 140; ++tick) steps{core}.sector_union_pass(tick);
+        EXPECT_EQ(state_of(core).sectors_.active(), std::set<int>({1, 2, 3, 5}));
+        EXPECT_EQ(state_of(core).chain_cell_, 2);
+        from = fake.calls.size();
+        steps{core}.poll_own_sector(140);
+        EXPECT_EQ(since(fake.calls, from), std::vector<std::string>{"poll_sector:140"});
+        // Our own crossing into 5: the chain writes 5 over its 2 - seen.
+        fake.poll = private_poll(5);
+        from = fake.calls.size();
+        steps{core}.poll_own_sector(141);
+        {
+            const std::vector<std::string> expected = {
+                "poll_sector:141", "send:1",
+                "log:0:sector 5 stamped for tick 149 (checkpoint, lead 7, input_delay 4), event sent ahead"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(state_of(core).sectors_requested_, std::set<int>({1, 2, 3, 5}));
+    }
+
     // The phase check of the own poll (game/checkpoint_phase.hpp): a pass at
     // M has its modules branch on CurrentLevel[0][4] in frame M+5; a 0 there
     // is a pass whose bodies this world never made - counted and logged,

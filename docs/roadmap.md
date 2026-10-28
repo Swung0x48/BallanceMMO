@@ -401,7 +401,8 @@ numbers 1-10 are unchanged.
        a pass of another sector activates the chain's sector instead (every
        world, the retail mod included; options: a private cell for the
        chain's [0][1] with the own poll reading it, as the phase cell's
-       split, or another source for the own sector poll - the user's).
+       split, or another source for the own sector poll - the user's;
+       built at B2SX, below).
      - *F*: fixed - the replay processes next-frame flags only where the
        live frame did (the recorded live order); V9 0 FAIL lines,
        `--late-sector-check` exit 0. *The CPU cliff*: closed - the recipe
@@ -410,7 +411,8 @@ numbers 1-10 are unchanged.
        1560/1560 ticks identical before S, 0 before); (c) established, by
        design (the resync's held window sends no notices); **(a) the
        user's choice** (an echo now, a protocol change G5 would retire, or
-       wait for world agreement's Q9).
+       wait for world agreement's Q9; the user chose the wait at B2SX,
+       below).
      - *Trafo T4 (c)*: the retail birth log's replayed-tick rule in every
        session (trafo design).
      - *The trial's server stall*: established - the journal's flush to
@@ -444,7 +446,17 @@ numbers 1-10 are unchanged.
        (b); `input_buffer::take`'s cutoff, the queue drained before every
        step): no substitution after a 560 or 660 ms stall (B2SW: 8 per
        member) (late-player design, "As built (step B2SX)").
-     - Deferred to the final verification: a retail
+     - *The [0][1] cell*: **fixed** on every world - the checkpoint
+       chain's [0][1] Set Cell writes a private copy, which the own sector
+       poll reads (`game/sector_cell_split.hpp`, option (a)); the B2SW
+       scene makes sector 3's bodies at T 79-81 (resync design, "As built
+       (step B2SX)").
+     - *T1 (a)*: **waits for world agreement's Q9** (the user's option
+       (ii)); the cause, the server's relay skipping the owner for
+       BodyRevived, is recorded in the resync design's B2SX note.
+     - Deferred to the final verification: a retail two-copy run with the
+       private [0][1] cell (core on), over the 15-minute budget (the
+       headless own crossing is verified live, `b2sx_stallg`); a retail
        follow check of Q5's re-armed link (the "fires once" result is
        Ballanced CK2's, the retail Virtools `CK2.dll` was not checked).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):

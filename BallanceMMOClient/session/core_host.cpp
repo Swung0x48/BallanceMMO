@@ -57,6 +57,7 @@
 
 #include <game/host_backend.hpp>
 #include <game/sector_activation.hpp>
+#include <game/sector_cell_split.hpp>
 #include <game/sector_placement.hpp>
 #include <game/session_host_support.hpp>
 #include <game/trafo_sets.hpp>
@@ -69,6 +70,14 @@
 
 #include "core_host.hpp"
 #include "session_journal_client.hpp"
+
+namespace {
+    // Step B2SX (game/sector_cell_split.hpp): the checkpoint chain's own
+    // IngameParameter[0][1] while the session core runs (the legacy path
+    // keeps the cell it polls).  File scope: BallanceMMOClient keeps its
+    // layout.
+    bmmo::game::sector_cell_split core_chain_cell;
+}
 
 // Host logic written once (step HU1, docs/roadmap.md section 2): this host
 // calls the shared placement helper (game/sector_placement.hpp
@@ -1458,6 +1467,20 @@ void BallanceMMOClient::core_host_anchor() {
                       death_reset_count_, sector_deactivate_count_);
     sector_activate_resolve();
     checkpoint_phase_resolve();
+    // Step B2SX: the held chain's [0][1] write to a private cell, which the
+    // core's own sector poll reads (platform poll_sector); the manager reads
+    // only the union's passes.  Only where the hold is in force.
+    core_chain_cell.restore(m_bml->GetCKContext());
+    if (sector_activate_.block && !sector_activate_failed_) {
+        const std::string trouble = core_chain_cell.apply(m_bml->GetCKContext());
+        if (trouble.empty())
+            logger_->Info("Physics session: the checkpoint chain's sector cell is split: %s",
+                          core_chain_cell.describe().c_str());
+        else
+            logger_->Error("Physics session: the checkpoint chain's sector cell was NOT split (%s): an own crossing in "
+                           "the frame of a pass of another sector makes the manager activate the crossed one here",
+                           trouble.c_str());
+    }
     {
         const int restored = level_sequencers_.restore(m_bml->GetCKContext());
         logger_->Info("Physics session: %d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)",
@@ -1686,6 +1709,9 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     sector_deactivate_restore();
     sector_activate_restore();
     checkpoint_phase_restore();
+    if (!core_chain_cell.restore(m_bml->GetCKContext()))   // step B2SX
+        logger_->Warn("Physics session: the checkpoint chain's sector cell could not be handed back to IngameParameter; "
+                      "the session's copy is left in place");
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
     const uint32_t session = host.session;
     logger_->Info("Physics session: record sources (R2): %llu frame(s) whose NAV_ACTIVE (the leaves) differs from the BML "
@@ -1839,7 +1865,14 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.poll_sector = [this](uint32_t) {
         bs::sector_poll poll;
         if (sector_activate_.block && !sector_activate_failed_) {
-            if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) {
+            if (core_chain_cell.applied()) {
+                // Step B2SX: the chain's own copy, which no pass writes.
+                int cell = 0;
+                poll.cell_read = core_chain_cell.read(m_bml->GetCKContext(), cell);
+                poll.cell = cell;
+                poll.cell_private = true;
+                poll.checkpoint_held = poll.cell_read;
+            } else if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) {
                 int cell = 0;
                 poll.cell_read = parameters->GetElementValue(0, 1, &cell) != 0;
                 poll.cell = cell;
@@ -2034,6 +2067,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         if (const int again = checkpoint_phase_keep())
             logger_->Info("Physics session: the checkpoint chain's phase cell: %d target(s) handed back to "
                           "CurrentLevel were moved to the copy again", again);
+        if (core_chain_cell.keep(m_bml->GetCKContext()))   // step B2SX
+            logger_->Info("Physics session: the checkpoint chain's sector cell: its Set Cell handed back to "
+                          "IngameParameter was moved to the copy again");
     };
 
     // ---- writing the world ----

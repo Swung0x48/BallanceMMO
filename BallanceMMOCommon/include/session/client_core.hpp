@@ -261,6 +261,7 @@ namespace bmmo::session {
         uint8_t sector_lead_ = 0;            // SessionStart::sector_lead
         std::set<int> sectors_requested_;    // every sector THIS client reported (1 from the anchor)
         int sector_cell_ = 0;                // IngameParameter[0][1] as last seen or written here
+        int chain_cell_ = 0;                 // the checkpoint chain's private [0][1] as last polled (step B2SX)
         // The last two union passes (tick, sector; tick 0 = none) and the
         // passes whose modules found the phase cell 0 in their first frame
         // (poll_own_sector: the checkpoint chain's race, or any writer like it).

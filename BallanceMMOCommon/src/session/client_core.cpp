@@ -262,6 +262,7 @@ namespace bmmo::session {
         s.sectors_.reset();
         s.sectors_requested_.clear();
         s.sector_cell_ = 0;
+        s.chain_cell_ = 0;
         for (auto& pass: s.recent_passes_) pass = {};
         s.phase_misses_ = 0;
         // Step B1: the union's rollback state and its counters.
@@ -335,6 +336,7 @@ namespace bmmo::session {
         // before its anchor work; nothing in that work reads them).
         s.sectors_requested_ = {1};
         s.sector_cell_ = report.sector_cell;
+        s.chain_cell_ = report.sector_cell;   // step B2SX: a private copy starts from the anchor's cell
         s.frames_since_anchor_ = 0;
         s.phase_ = client_core_state::phase::running;
         if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::anchor_origin);

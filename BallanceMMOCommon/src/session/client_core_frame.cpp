@@ -452,9 +452,13 @@ namespace bmmo::session {
                      "so they took their teardown branch here: this world lacks that pass's bodies (%llu so far)",
                      sector, m, tick, static_cast<unsigned long long>(s.phase_misses_));
             }
-        if (poll.cell_read && (poll.cell != s.sector_cell_ || poll.resetpoint_moved)) {
+        // Step B2SX: a private cell (game/sector_cell_split.hpp) is the
+        // chain's alone - no pass writes it, so it is compared with the last
+        // poll, never with a pass's sector.
+        int& seen = poll.cell_private ? s.chain_cell_ : s.sector_cell_;
+        if (poll.cell_read && (poll.cell != seen || poll.resetpoint_moved)) {
             const int sector = poll.cell;
-            s.sector_cell_ = sector;
+            seen = sector;
             if (sector > 0 && !s.sectors_requested_.count(sector)) {
                 if (poll.checkpoint_held) {
                     hold_sector(sector, tick + 1 + sector_lead_ticks(), "checkpoint");

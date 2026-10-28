@@ -189,6 +189,7 @@ namespace {
         // of the seeded schedule - anchor tick T, depth D, then F live frames
         // past the round's end compared with the straight pass (the follow).
         std::vector<std::array<int, 3>> savestate_explicit;
+        bool n2_cell = true;           // --n2-cell on|off (step B2SX): the checkpoint chain's private [0][1] cell
         bool cells_trace = false;      // --cells-trace (step B2SW): IngameParameter[0][1]/[0][2], the union, the bodies
         float drop_at[3] = {};         // --drop-at X Y Z: drop there instead (PH matrix of a module)
         bool have_drop_at = false;
@@ -782,6 +783,12 @@ namespace {
                 const std::string mode = v;
                 if (mode != "on" && mode != "off") return false;
                 out.n2_pin = mode == "on";
+            }
+            else if (arg == "--n2-cell") {   // step B2SX
+                if (!(v = next())) return false;
+                const std::string mode = v;
+                if (mode != "on" && mode != "off") return false;
+                out.n2_cell = mode == "on";
             }
             else if (arg == "--cells-trace") out.cells_trace = true;
             else if (arg == "--session-recipe") out.session_recipe = true;
@@ -1943,6 +1950,7 @@ namespace {
         options.placement_fail_at = args.placement_fail_at;
         options.trafo_inputs = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;   // step K0
         options.pin_checkpoint_deactivation = args.n2_pin;   // step B2SW: --n2-pin off is the A/B
+        options.split_sector_cell = args.n2_cell;            // step B2SX: --n2-cell off is the A/B
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         // Step S7: the id layout (--free-ids-before-load, --perturb-ids).
         if (args.free_ids_before_load > 0) {
@@ -2460,9 +2468,13 @@ namespace {
             std::string union_text;
             for (int s: world->active_sectors()) union_text += (union_text.empty() ? "" : ",") + std::to_string(s);
             const int bodies = bmmo::physics::list_bodies(world->physics(), nullptr, 0);
-            char text[160];
-            std::snprintf(text, sizeof(text), "cells [0][1]=%d [0][2]=%d union={%s} bodies=%d", activate, deactivate,
-                          union_text.c_str(), bodies);
+            // Step B2SX: the checkpoint chain's private [0][1] (the own sector
+            // poll's cell), when this world split it.
+            int chain = -1;
+            const bool split = world->chain_sector_cell(chain);
+            char text[192];
+            std::snprintf(text, sizeof(text), "cells [0][1]=%d [0][2]=%d chain[0][1]=%s union={%s} bodies=%d", activate,
+                          deactivate, split ? std::to_string(chain).c_str() : "-", union_text.c_str(), bodies);
             if (cells_last == text) return;
             cells_last = text;
             std::printf("tick=%d %s\n", tick, text);
@@ -8288,6 +8300,8 @@ int main(int argc, char** argv) {
             "            IngameParameter[0][1]/[0][2], the union and the physicalized bodies on every change)\n"
             "       any session world: [--n2-pin on|off]  (step B2SW: the checkpoint and level-reset chains'\n"
             "            IngameParameter[0][2] Set Cell pinned to 0 at the anchor, default on; off is the A/B)\n"
+            "           [--n2-cell on|off]  (step B2SX: the checkpoint chain's IngameParameter[0][1] Set Cell writes a\n"
+            "            private copy of the cell, default on; off is the A/B)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S]\n"
             "           [--spawn-ball T] [--ticks K] [--report-every R] (spawn-impulse determinism check)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK\n"

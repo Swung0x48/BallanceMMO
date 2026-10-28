@@ -37,6 +37,7 @@
 #include <game/script_replay.hpp>
 #include <game/script_state.hpp>
 #include <game/checkpoint_phase.hpp>
+#include <game/sector_cell_split.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_placement.hpp>
 #include <game/trafo_sets.hpp>
@@ -106,6 +107,12 @@ namespace bmmo::sim {
         // anchor.  Every world pins; false only for SimTool's A/B
         // (--n2-pin off).
         bool pin_checkpoint_deactivation = true;
+        // Step B2SX (game/sector_cell_split.hpp): the checkpoint chain's
+        // IngameParameter[0][1] Set Cell writes a private copy, so a clone's
+        // crossing in the frame of an update_sectors pass of another sector
+        // cannot make the manager activate the crossed one.  Every world
+        // splits; false only for SimTool's A/B (--n2-cell off).
+        bool split_sector_cell = true;
         // SimTool's id-layout test hooks (sector placement design 7.2 V7/V9,
         // step S7: --free-ids-before-load, --perturb-ids), unset in every
         // other world: before_level_load runs after the boot, right before
@@ -283,6 +290,9 @@ namespace bmmo::sim {
         // entered (session/sector_union.hpp), each started by update_sectors()
         // before the step of the tick the shared rule picks.
         const std::set<int>& active_sectors() const { return sectors_.active(); }
+        // Step B2SX: the checkpoint chain's private [0][1] (false when this
+        // world did not split it); SimTool's --cells-trace.
+        bool chain_sector_cell(int& cell) const { return sector_cell_.read(engine_ ? engine_->context() : nullptr, cell); }
         const bmmo::session::gated_sector_union& sectors() const { return sectors_; }
         void update_sectors();
 
@@ -420,6 +430,7 @@ namespace bmmo::sim {
         CK_ID ingame_parameter_ = 0;
         bmmo::session::gated_sector_union sectors_;   // the rule every side runs (session/sector_union.hpp)
         bmmo::game::checkpoint_phase_split checkpoint_phase_;   // the chain's own phase cell (game/checkpoint_phase.hpp)
+        bmmo::game::sector_cell_split sector_cell_;   // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;
         struct proximity_probe { CK_ID block = 0; CK_ID frame = 0; CK_ID parameter = 0; };

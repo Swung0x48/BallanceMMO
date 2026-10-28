@@ -41,6 +41,7 @@
 #include <game/checkpoint_phase.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_deactivate_pin.hpp>
+#include <game/sector_cell_split.hpp>
 #include <game/sector_placement.hpp>
 #include <game/navigation_graph.hpp>
 #include <game/script_state.hpp>
@@ -1427,6 +1428,9 @@ namespace {
                 // N2 kept, as the retail mod keeps it (step B2SW).
                 if (const int again = bmmo::game::repin_checkpoint_deactivation(engine_->context(), deactivate_pins_))
                     logf("the chains' sector deactivation: %d input(s) handed back were re-pinned to 0", again);
+                // The chain's own [0][1] kept (step B2SX).
+                if (chain_cell_split_.keep(engine_->context()))
+                    logf("the checkpoint chain's sector cell: its Set Cell handed back to IngameParameter was moved to the copy again");
             };
             p.hooks.after_rewinds = [this](uint32_t) { maybe_force_rollback(); };
             p.drive = [this](const std::string& entity, const bmmo::session::input_frame& frame, std::string& error) {
@@ -1884,6 +1888,9 @@ namespace {
             // retail source.
             if (const int left = bmmo::game::unpin_checkpoint_deactivation(engine_->context(), deactivate_pins_))
                 logf("the chains' sector deactivation: %d input(s) could not be handed back and stay on their constant", left);
+            // The chain's own [0][1] the same way (step B2SX).
+            if (!chain_cell_split_.restore(engine_->context()))
+                logf("the checkpoint chain's sector cell could not be handed back to IngameParameter; the copy stays");
             sector_manager_id_ = 0;
             // Step T3: the previous session's sets went at its end; the
             // registry and its level reference start over (a reboot below
@@ -2041,6 +2048,18 @@ namespace {
                     logf("the checkpoint chain's phase cell was NOT split (%s): a crossing 3 ticks after a sector pass "
                          "can cancel that pass's module Physicalize on this client", trouble.c_str());
             }
+            if (checkpoint_held_) {
+                // Step B2SX (game/sector_cell_split.hpp): the held chain's
+                // [0][1] write goes to a private cell, which the own sector
+                // poll reads; the manager reads only the union's passes, so an
+                // own crossing of K in the frame of a pass of J activates J.
+                const std::string trouble = chain_cell_split_.apply(engine_->context());
+                if (trouble.empty())
+                    logf("the checkpoint chain's sector cell is split: %s", chain_cell_split_.describe().c_str());
+                else
+                    logf("the checkpoint chain's sector cell was NOT split (%s): an own crossing in the frame of a pass of "
+                         "another sector makes the manager activate the crossed one here", trouble.c_str());
+            }
             if (args_.start_sector > 0) {
                 // Before the assignment: pending until the first assigned
                 // frame (session_client_core::request_sector, E8).
@@ -2135,7 +2154,13 @@ namespace {
                      reset.x, reset.y, reset.z, tick, at.x, at.y, at.z);
             }
             poll.resetpoint_moved = resetpoint_moved;
-            if (CKDataArray* parameters = engine_->data_array("IngameParameter")) {
+            if (chain_cell_split_.applied()) {
+                // Step B2SX: the chain's own copy, which no pass writes.
+                int sector = 0;
+                poll.cell_read = chain_cell_split_.read(engine_->context(), sector);
+                poll.cell = sector;
+                poll.cell_private = true;
+            } else if (CKDataArray* parameters = engine_->data_array("IngameParameter")) {
                 int sector = 0;
                 poll.cell_read = parameters->GetElementValue(0, 1, &sector) != 0;
                 poll.cell = sector;
@@ -3575,6 +3600,7 @@ namespace {
         bmmo::game::checkpoint_phase_split checkpoint_phase_;  // the chain's own phase cell (game/checkpoint_phase.hpp)
         bmmo::game::sector_reset_guard reset_guard_;         // the retail sector resets, neutralized (game/sector_reset_guard.hpp)
         std::vector<bmmo::game::deactivate_pin> deactivate_pins_;   // N2's pins (game/sector_deactivate_pin.hpp)
+        bmmo::game::sector_cell_split chain_cell_split_;     // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)
         uint32_t script_restore_logs_ = 0;
         uint32_t script_reset_logs_ = 0;
         std::map<CK_ID, uint32_t> script_reset_ticks_;        // the tick each script was last told to reset

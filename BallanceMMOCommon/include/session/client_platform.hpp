@@ -306,9 +306,14 @@ namespace bmmo::session {
     // modules of a union pass branch on in their first frame (`phase_read`
     // false when the host does not read it): the core's check that nothing
     // else wrote it under a pass (game/checkpoint_phase.hpp).
+    // `cell_private` (step B2SX): `cell` is the checkpoint chain's own copy
+    // of IngameParameter[0][1] (game/sector_cell_split.hpp), which only the
+    // chain writes - a union pass never does, so the core compares it with
+    // what its polls saw, not with the passes' writes.
     struct sector_poll {
         bool cell_read = false;
         int cell = 0;
+        bool cell_private = false;
         bool resetpoint_moved = false;
         bool checkpoint_held = false;
         bool phase_read = false;
