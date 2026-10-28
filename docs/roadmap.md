@@ -508,7 +508,17 @@ numbers 1-10 are unchanged.
    the trafo frame, the trafo inputs and the restores keep (a capture
    writes the byte exactly when the bytes equal the built ones; the two
    sets' part of a capture 37 -> 2.5 us in SimTool; no protocol change).
-   See `rewind-cost-design.md` "As built (step B6RC)". The close-out is the trafo design's H4 / H6
+   See `rewind-cost-design.md` "As built (step B6RC)". **RC5 is not built**:
+   stopped at B6RC for a choice - the restore tears down and rebuilds the
+   whole world's collision state (the shared overlap tree, the hull
+   min-lists in recorded order, world-wide numbers), so skipping a sleeping
+   body is a selective teardown and knowing it unchanged needs an IVP wake
+   counter or RC2's per-object blob (options (a) a selective teardown + the
+   per-object blob, (b) only the non-collision writes of restore steps 3 /
+   11 / 14, (c) leave it); the user left it to the orchestrator on
+   2026-10-28 ("4. 你决定", quoted below), who chose (c), like RC2
+   (`rewind-cost-design.md` "As built (step B6RC)", item RC5, and §11).
+   The close-out is the trafo design's H4 / H6
    **with snapshots off** - the user, 2026-10-28, asked whether the
    close-out should follow RC3's snapshot-free default, verbatim: "改成关快照"
    (switch it to snapshots off); this replaces decision (b) of 2026-10-25

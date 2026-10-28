@@ -6,7 +6,8 @@ committed with hold-last by the user's ruling of 2026-10-27 (§11; "As built
 build, was settled by the pinned method of Measurement RC1d and the user's own
 play, Measurement RC1e). RC6, the tail prediction refinement (R6 / R7), is not
 adopted (§8). RC2 is not built (the user's choice), RC3 is built (B5RX),
-RC4 is built (B6RC); RC5 waits for the user (B6RC); the close-out ran
+RC4 is built (B6RC); RC5 is not built (the user left it to the
+orchestrator on 2026-10-28, who chose option (c), §11); the close-out ran
 with snapshots off at step RCX (the user's decision of 2026-10-28, §11),
 stopped for the user (H4 passes, H6 does not, "As built (step RCX)"), and
 is passed by the user's ruling on H6 of 2026-10-28: H6 is judged by its
@@ -185,6 +186,12 @@ re-predicted ticks and after them (§7, check 4); the server is not touched.
   the trafo frame, the inputs and the restores keep.
 - **RC5, an incremental restore** (2.8-4.2 %): skip writing a sleeping body
   whose blob entry equals the world's.
+  **Not built** (stopped at step B6RC for a choice, "As built (step B6RC)",
+  item RC5; the user left it to the orchestrator on 2026-10-28, who chose
+  option (c), §11): the restore tears the whole world's collision state
+  down and rebuilds it from world-wide numbers, so skipping a sleeping body
+  is a selective teardown, and knowing it unchanged needs a wake counter
+  (IVP) or a per-object blob (a protocol change) - RC2's cause.
 
 ## 4. Rollback interplay
 
@@ -237,7 +244,7 @@ names no server file); the own ball's feed; the legacy retail path
 | RC2 | incremental capture for sleeping bodies - **not built, the user's choice 2026-10-28** (the blob has no per-body bytes and IVP no sleep generation; options (a) / (b) kept for later: "As built (step B5RX)", item RC2S) | the savestate exactness set, the wire check (ALL SAME: no behaviour change), CPU parity, H1 at 150 ms |
 | RC3 | no body-set full snapshot while snapshots are off - **built at B5RX, the default on every host** (the user's correction of 2026-10-28; the drifts it exposes go to step SFD) | its own drift check, the snapshots-off arms |
 | RC4 | the dormant-script encoding (trafo design 9.4) - **built at B6RC** | script replay exactness, the wire check |
-| RC5 | incremental restore | the savestate checks, the wire check |
+| RC5 | incremental restore - **not built: stopped at B6RC, left to the orchestrator by the user (2026-10-28), who chose option (c), like RC2** (the restore's whole-world teardown and world-wide numbers: a selective teardown, a wake counter or a per-object blob; "As built (step B6RC)", item RC5) | the savestate checks, the wire check |
 | RC6 | **not adopted at RC1** (the user's ruling of 2026-10-27, quoted in §11); R6 and R7 measured (RC1d, RC1e) and kept as a possible later refinement if human rapid-trigger play shows periods. (History: proposed by Measurement RC1d; ruled 2026-10-27 "R6 直接并入 RC1", then the R7 variant measured, Measurement RC1e: R7 not selected, the choice between R6, R7 and hold-last went back to the user, who chose hold-last.) What the refinement would be, as specified when it was proposed: the tail prediction refinement: hold-last replaced past a remote's newest relayed frame by **R6** (per-key pattern-repeat: each key bit's own period repeated, the other keys of the newest frame by R4's history-adaptive hold, k = 5; §9.2; R5, the whole-frame pattern-repeat, is the measured fallback choice), one function in IR next to `relay_frame_or_newest` (IR:353-367) called from both sites (`recorded_input_at`'s tail branch, CF:494; `live_drive`, CL:467-470); its history window fixed relative to the newest frame (the 128 ticks before it - not the ring's cap `kRelayRing`, IR:47, so a later change of the cap cannot change a prediction), no allocation on the path (the measured build's per-key `std::vector` goes), and the periods found once per arrival, not per tail tick | unit tests of the function (a 1:1 and a 1:3 lateral alternation, an UP/DOWN 1:1 and 2:1 alternation, a 1-tick DOWN every 10 ticks repeated, a direct LEFT -> RIGHT switch, a hold with and without complete holds, a 6-tick brake, flags as hold-last, holes, the start and a birth unchanged) and a session test pinning the two sites on the tail; the wire check against `core_ref_rc1` (every first difference attributed to a tail tick the rule fed differently); solo IDENTICAL; **the paired drift check with the own keys pinned** (`.local-tools/work/RC1d/gaps/pinned_replay.py`, every rule's replay of the same captures; R1 replays byte-identical on every cell) on the RC1d cells with these **required cells at both lags (resync_at150 and resync_at150_down)**: the native steer d0; the 1-tick lateral taps t1x1 (rapid-trigger 1:1 alternation) and t1x3; the brake cells d0_brake and t1x1_brake (a 6-tick DOWN in every 90 UP ticks) and d0_ud1x9 (a 1-tick DOWN in every 10: the 1-tick brake tap); the UP/DOWN fast switches d0_ud1x2 (UP UP DOWN) and d0_ud1x1 (UP/DOWN 1:1); the holds d5 / d10 / d15 and d10_brake (direct LEFT -> RIGHT switches: 405 in d10, Measurement RC1d). Criteria: (1) pooled mean no worse than hold-last's on every required cell and no client more than 5 % worse; (2) on the hold and brake cells (d0, d5, d10, d15, d0_brake, d10_brake) input rewinds per real change no more than hold-last's + 0.1, on the tap and UP/DOWN cells no more input rewinds than hold-last; (3) replayed ticks reported per required cell next to hold-last's. **As measured, R6 (and R5) fail (2) on resync_at150_down d0: 0.96 against 0.80 per change, replayed ticks +21 % (42893 -> 51716), all of it on the mirrors of the lowered player (Measurement RC1d (e)); every other required cell passes (largest excess +0.06).** RC6 is therefore not passable as measured unless the user accepts that cell or RC6 removes the excess. [Checked after the fix-up round, 2026-10-27, `gaps/record_model.py`: a physics-free model of the engine's records (a tick keeps the prediction made when it was last simulated, live or in the last rewind) reproduces the cell's rewinds on the lowered player's mirror (client 1: R1 232, R4 / R5 / R6 299; measured 231 / 296). The excess is all lateral: corrections where the rule had released a lateral key the player still held go 187 -> 266, the opposite kind 157 -> 136, UP / DOWN corrections 20 in every rule. So the excess is R4's fallback releasing a lateral key early at max(5, H - r) on the native steer's irregular long holds, and holding the forward / backward keys (named here before this check) would not remove it; a fix has to change the lateral release, not measured.] The live A/B (snapshots off) on the required cells, t1x1, d0_ud1x2 and d0_ud1x9 at least three sessions per rule at each lag (one session is not evidence of starvation either way); CPU parity, against the replayed ticks of (3) | quick tier |
 | close-out | H4 and H6 of the trafo design §7.3, **with snapshots off** (the user, 2026-10-28: "改成关快照"; replaces decision (b) of 2026-10-25, which ran them with snapshots on; §11), against T3's snapshots-off CPU numbers as the baseline. **Run at step RCX: H4 passes, H6 fails, stopped for the user ("As built (step RCX)"); passed by the user's ruling of 2026-10-28 (option (a): H6 judged by its absolute limits, starved within the band and the server's p99 within the budget; H6's numbers stay recorded in RCX's note), `physics.trafo_inputs` on by default since B9DX (§11)** | quick tier (a stage-internal close-out, the user's 15-minute rule; the second pair and the retail run are deferred to the stage close-out) |
 
@@ -397,6 +404,16 @@ names no server file); the own ball's feed; the legacy retail path
     accepted: a session with the trafo inputs costs every client about
     twice the rewind CPU (RCX's table); the x86 retail frame time of a trafo
     run stays deferred to the stage close-out.
+  - RC5 (B6RC's stop), answer 4: "你决定" (you decide) - the orchestrator
+    chose option (c): RC5 is not built, like RC2. The reason: the restore
+    tears down and rebuilds the whole world's collision state from
+    world-wide numbers (the shared overlap tree, the hull min-lists in
+    recorded order, the event queue), so (a) needs RC2's per-object blob
+    (a protocol bump) and a selective teardown - the track's largest
+    exactness risk for at most 2.8-4.2 % - and (b) saves a small, unprofiled
+    part of that ceiling at the risk of the `SetWorldMatrix` ulp; neither
+    moves factor (1) of RCX's cause (trafos existing at all). Recorded at
+    step B9DX (item RC5C).
 
 ## As built (step RC1)
 
@@ -1850,6 +1867,51 @@ Reruns: x64 BUILD-OK, x86 CLIENT-BUILD-OK, GCC 29/29, tests 555/555,
 `--trafo-record-check` (1)-(7) PASS, `wire_check.sh rSFD rB6RC rB6RCw2`
 over `core_ref_s8` ALL SAME. The retail host does not print the counters
 (no retail file changed).
+
+**Item RC5 - the incremental restore (not built: stopped for a choice;
+written into this note at step B9DX from B6RC's patch
+`.local-tools/work/B6RC/rc5_stop_docs.patch`).** The premise check asked
+for after B5RC's RC2 stop:
+- *The restore cannot skip one body.* `physics_savestate_restore.cpp`'s
+  step 2 (`restorer::teardown`, :720-) deletes every friction system and
+  contact, every collision root of every live object, removes every
+  overlap element from the tree ("the tree ends empty") and clears the
+  revive list; steps 4-10 rebuild the units, the checkers (step 5), the
+  overlap tree from the recorded nodes (step 6, `restorer::ov_tree`,
+  :1171-: one tree every body shares), the mindist lists, the hull
+  min-lists in reverse recorded order (step 8, :1342-: ties go newest
+  first, so every entry's place is the record's) and the event queue. A
+  sleeping body's collision state lives in those shared structures (its
+  checkers pair it with awake bodies, its hull list holds other bodies'
+  synapses, its overlap node is a node of the one tree), so "skip writing a
+  sleeping body" means keeping its part alive through the teardown and
+  rebuilding the rest around it in the recorded order: a selective
+  teardown.
+- *Knowing that a body's entry equals the world's* needs what RC2 lacked:
+  IVP keeps no wake or write counter (adding one is an IVP change for a
+  cost cut), and the blob's references are world-wide numbers assigned at
+  capture (checkers, contacts, units, overlap nodes), so a comparison is a
+  capture of the live world in the same numbering - the cost being saved.
+- What is NOT collision state, and could be skipped without any of that:
+  the core and object field writes (steps 3 / 11) and the entity's
+  `SetWorldMatrix` (step 14, :1779-1790) of a body whose recorded fields
+  equal the live ones. Not measured; cheap writes next to the 13-19 us a
+  sleeping body costs a restore (CPUPROF), and skipping `SetWorldMatrix`
+  can change the entity's local matrix by an ulp (CK recomputes it from the
+  parent), so it would need its own exactness check.
+
+Options: (a) a selective teardown keyed by an exact per-object equality -
+needs RC2's option (a), the per-object blob with name-keyed references (a
+protocol bump), and a rebuild of the shared lists (hull min-lists, overlap
+tree, event queue) around the kept entries in the recorded order; the
+largest exactness risk of the track; (b) only the non-collision writes of
+an unchanged sleeping body (steps 3 / 11 / 14): no format, protocol or
+engine change, a small part of the 2.8-4.2 % ceiling, to be profiled first
+and checked for the `SetWorldMatrix` ulp; (c) leave RC5 unbuilt, as RC2
+(option (c) of B5RC's stop). Recommended at B6RC: (c), or (b) only after a
+profile of the restore's steps shows steps 3 / 11 / 14 are a real share.
+**Decided 2026-10-28:** the user left the choice to the orchestrator
+("4. 你决定", §11), who chose (c). Nothing of RC5 is in the tree.
 
 ## As built (step RCX)
 
