@@ -17,6 +17,30 @@ it builds, the headless server's and the client plugin's alike
 physics_RT and CK2 changes are not behind it; they live in the plugin and the
 engine, not in IVP.
 
+**Where each change lives.** `submodule/Ballanced` (`Swung0x48/Ballanced`, a
+fork of `doyaGu/Ballanced`, branch `bmmo-collision-overhaul`) holds the engine
+as nested repositories. Every one BallanceMMO changed is a fork under
+`Swung0x48` with a branch `bmmo-collision-overhaul`, and its parent's
+`.gitmodules` points at the fork, so a recursive clone (what CI does) fetches
+the changes. Push from the inside out: ivp, then BuildingBlocks, VxMath, Player
+and CK2, then Ballanced, then BallanceMMO. What each carries beyond its
+upstream:
+
+| Under `submodule/Ballanced` | Fork (upstream) | BallanceMMO's commits |
+|---|---|---|
+| `Source/BuildingBlocks/physics_RT/ivp` | `Swung0x48/source-physics` (before it, `doyaGu/ivp`) | #1 `68bb6cb`, #3 `d8513b1`, #5 `618ca67`, #7 `94fecee`, #12 `c563ad7`, #16 `b22a980`, the `IVP_PORTABLE_BMMO` macro `5d6b57a`, #17 `22b594a` |
+| `Source/BuildingBlocks` (physics_RT) | `Swung0x48/CKBuildingBlocks` (`doyaGu/CKBuildingBlocks`, from `e5d441f` on its `sdl`) | #6 `a9c4b3b`, #8 `1bc05ef`, #9 `673d89b`, #10 `325321c`, #13 `926dc2f`, #14 `0bb5e8c`, #15 `f628978`, #18 `7999d04`, #19 `7daf5eb`; the force block's exported helpers (bridge API v14, not numbered) `19b7758`; the rest are the ivp pointer and its URL |
+| `Source/VxMath` | `Swung0x48/VxMath` (`doyaGu/VxMath`) | #2 `a67bd5d`, #11 `576f3a9` |
+| `Source/Player` | `Swung0x48/BallancePlayer` (`doyaGu/BallancePlayer`) | #4 `2870c91` |
+| `Source/CK2` | `Swung0x48/CK2` (`doyaGu/CK2`, from `d80b8de` on its `sdl`) | #21 `a821135`, the only one |
+| Ballanced itself | `Swung0x48/Ballanced` (`doyaGu/Ballanced`, from `013afc7` on its `sdl`) | no source file: the four submodule pointers above and their `.gitmodules` URLs (CK2's since `9c52cd1`) |
+
+qhull (`Source/BuildingBlocks/3DTrans/qhull`, #2's other half), RenderEngine,
+Plugins and the Managers are upstream and unmodified: #2 reaches qhull through
+a shim BallanceMMO force-includes. The CK2 fork also has a `collision` branch
+(`ab220be`, `69c6bc5`, `3491bbf`, 2026-08-31, pinned by Ballanced's own
+`collision` branch): another line of work, not used by BallanceMMO.
+
 ## 1. Platform-independent vector-FPU block size (physics_RT / IVP)
 
 File: `Source/BuildingBlocks/physics_RT/ivp/ivp_physics/ivp_great_matrix.hxx`
@@ -756,6 +780,12 @@ scene, placement on) crashed after its last tick on rR12 (exit 139, the S2
 stack); with the change it exits on its verdict, and the tick-hash streams of
 the teardown sweep are unchanged (see the sector-placement design, "As built
 (step B2SW)").
+
+The first BallanceMMO change in CK2: the commit is `a821135` on
+`Swung0x48/CK2`'s `bmmo-collision-overhaul` (a fork of `doyaGu/CK2`, on top
+of `d80b8de` from upstream's `sdl`), and Ballanced's `.gitmodules` points CK2
+at the fork since `9c52cd1`, as it does VxMath, Player and BuildingBlocks (see
+"Where each change lives" at the top).
 
 ---
 
