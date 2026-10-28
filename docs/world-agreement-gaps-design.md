@@ -13,6 +13,16 @@ It also fixes what designing and reviewing them turned up (§1.1.4, §1.2.3),
 per principle (d). Revision 2 answers two reviews; §10 lists every finding and
 what became of it.
 
+**Revision 3 (step WAD, 2026-10-28)** applies the user's answers of
+2026-10-28 (§11.1): Q7 = (b), so one mechanism responds to every player
+through per-player copies of the sub-graphs that act on one ball (new §2.10,
+rule P5, step Q7 in §8); Q8 is superseded, because the server refuses every
+client without the session core (B9DX), so every "RL ends locally" part is
+dropped; Q9 puts G-c (G0-G6) before the member lives (M0, M1), and step Q7
+comes after M1 (§8 Order). §10.1 lists what changed. Revision 3 cites the
+code at HEAD 473f6e8 where it adds a reference; the older references keep
+their 2026-10-23 line numbers.
+
 Status: design, not built. Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
@@ -48,7 +58,9 @@ Path key:
 | RSD / TRD / SPD | the resync, trafo-replication and sector-placement designs in `docs/` |
 
 Hosts: **H** headless (SC), **RC** retail core host (CH), **RL** retail legacy
-path, **SV** the server world.
+path, **SV** the server world. Since step B9DX the server refuses a physics
+session to RL (answer 7, §11.1). Nothing in this design reaches RL any more;
+it is named only where revision 2 did.
 
 ## 1. Problem and rule
 
@@ -151,8 +163,11 @@ on every block.
     - The 80 m probe #47020 (setting 4, axes 5, ObjectB #47688) wakes the
       plates.
     - The 4 m probe #47265 (setting 4: output 0 = Enter; axes 7; ObjectB
-      #47687). Enter → `Get Cell` #46995 → `Test "Ball_Stone"` → breaks the ten
-      hinges.
+      #47687). Enter → `Get Cell` #46995 → `Test "Ball_Stone"` → breaks the
+      bridge. *(Revision 3, read at WAD: the Test's True output goes to
+      `10 Hinges` input 2, which shuts down one hinge, #47108, and to the
+      probe's own Off and the break sound. Input 1 of `10 Hinges`, the reset,
+      shuts down all ten.)*
 - In both scripts the identity read is fed **directly** by one probe's output
   (#46002 → #45965, #47265 → #46995). That probe is the read's *gating probe*
   (§2.2).
@@ -162,6 +177,26 @@ on every block.
 - The `Gameplay_Tutorial` blocks (12, L1 only active) watch the ball entity
   itself (ObjectA = id 42240, the `Ball_Wood` that `PE_Balloon_Init` local 12
   names). They are not rewired anywhere (§9 Q5).
+- *Revision 3, the consumer census (step WAD).* `consumers.py` follows every
+  output of every mechanism-class proximity block through the behaviour links
+  of L1-L13 (SimTool `--describe-script` of each distinct mechanism script,
+  placement off; output in `.local-tools/work/WAD/consumers.txt`). Each block
+  drives one of four things:
+  - a wake: `Physics WakeUp`, and on P_Modul03 also `Add To Group` /
+    `Group Iterator`. These are P_Modul_01, 03, 19, 25, 30, 34 and 37, and
+    the 80 m probe of P_Modul_29;
+  - a script activation: P_Modul_18's 80 m probe drives `Activate Script` /
+    `Deactivate Script`;
+  - sound: P_Modul_18's 25 m probe drives `Wave Player` and
+    `TT ProximityVolumeControl`;
+  - an identity read: P_Modul_18's 7 m probe and P_Modul_29's 4 m probe,
+    and no others.
+
+  The two identity-read probes match K0's array-read census exactly
+  (`.local-tools/work/k0/census/l*_client.txt`: the only readers of
+  `CurrentLevel[0][1]` in the client scope). There are 71 reads on L1-L13:
+  58 fans and 13 bridges, as the last column of the table above. They are
+  the only mechanism sub-graphs that act on *one* ball (§2.10).
 
 #### 1.1.3 Symptom (measured)
 
@@ -293,6 +328,13 @@ P_Modul_03 1964 are woken on the server and asleep in c1's world.
   (c).
 - **P4 (no side channel).** No world changes a body because another world's
   script woke it. BodyRevived is retired (G-c3).
+- **P5 (one mechanism responds to every player; revision 3, the user's
+  answer 6).** In every world, a mechanism sub-graph that acts on the ball
+  whose identity it reads exists once per player slot. Slot k serves the
+  ball of the life that holds join order k (§2.10): the fan's force and the
+  bridge's stone test. Every other mechanism block stays single and measures
+  P1's frame. P1's frame fires for every ball, because the nearest ball
+  under the block's own metric is in range whenever any ball is.
 
 ### 1.2 Member lives: the join order of a late joiner, leaves and rejoins
 
@@ -411,6 +453,7 @@ one session (J-f); they never overlap.
 | F | BodyRevived retired under the world option | CF, SV |
 | G | member lives on the server: always-queued ball leaves, deferred rejoin, `SessionMember`, life numbers on events, join-order reservation, late-join send point and base | new `message/session_member_msg.hpp`, EM, ES, LC, SRN, SRH, SV |
 | H | the core's member lives: `players_` as lives, parking, journal | CL, CM, CC, CJ, ST |
+| I | per-player mechanism units (revision 3): the CK-free unit rule; the copy step; slot binding; the session's slot count K and the join-order cap | new `session/mechanism_units.hpp`, `game/proximity_union.hpp`, PW, SRN, SV, CF, CC, ES, `session_start_msg.hpp`, journal, ST (§2.10) |
 
 ### 2.2 The sensor rules (part A, CK-free)
 
@@ -508,6 +551,15 @@ ball keeps the 4 m probe in range does not break it. These are the same in every
 world, which is what P1 asks. Whether multi-ball play should get per-player
 copies of these sub-graphs is a gameplay question for the user (§9 Q7); it is
 not a world-agreement gap.
+
+*Revision 3.* The user chose per-player copies (§9 Q7 (b), §11.1). Under
+`WORLD_PLAYER_MECHANISMS` (§2.10, step Q7) the fan pushes every ball in its
+box, each with its own slot's force. Any stone ball whose own sensor enters
+breaks the bridge. The single-ball rules above are what a world does under
+G3's bit alone, in the builds between steps G3 and Q7, and in their
+journals. Under the Q7 bit, every identity read belongs to a per-player unit
+and takes its slot's ball (§2.10). The gating probe's choice, the union
+cells and the union latch then have no read left to serve.
 
 ### 2.3 Host support (part B, `game/proximity_union.hpp`)
 
@@ -608,7 +660,8 @@ column. The stale other columns are therefore irrelevant.
 3. Per frame: §2.2's probe rule, `SetPosition` with the ball's position (an
    exact copy).
 4. Per identity copy: the gating probe's choice (`SetElementObject(0, column,
-   entity)`), or the hold, or `BMMO_NoBall`.
+   entity)`), or the hold, or `BMMO_NoBall` (a slot copy of §2.10: never
+   the hold).
 5. Per body-kind Get Cell: the latch rule (§2.2), counted in `relatched`.
 
 **Signature.** It is a 64-bit FNV over, in walk order per owner:
@@ -643,7 +696,7 @@ does for the placement registry (the BML constraint, core design §3.2).
 | SV | `physics_world::anchor` replaces PW:239-240 (`rewire_proximity_probes`, `rewire_ball_identity_reads`) with `rewire(all)`; after SPD's placement (SPD §2.4) | **moved** out of `physics_world::tick` (PW:929-930) into a new `physics_world::place_probes()` that `session_runner::step` calls first, before the leavers loop (SRN:779-784) and the events (SRN:820-910). Candidates: `players_` with `physicalized && ball`, id order | world teardown |
 | H | SC `anchor()`, right after the selection (SC:1475-1479); after SPD's apply | core pre_step step 7b and `rollback_world::place_probes` → platform `place_probes` | session end |
 | RC | `core_host_anchor`, right after the selection (CH:883-885); after SPD's apply | as H | `core_host_end_local` (CH:1051) and level exit |
-| RL | none: a SessionStart with `WORLD_PROXIMITY_UNION` ends the legacy session locally with "the proximity union needs the session core (session core on)", as SPD does for its option | | |
+| RL | none. Revision 2 ended the legacy session locally on the bit. Since B9DX the server refuses a physics session to a client without the session core (answer 7), so RL never sees the bit and MC is not changed | | |
 | SimTool | every `physics_world` mode through SV's path; `--replay-session` calls `place_probes()` at the top of each tick, before that tick's PLAYER and EVENT records, when the header's world option has the bit, and the old per-tick update otherwise | | |
 
 The server and SimTool place at the same point: the live server has no removal
@@ -934,11 +987,11 @@ arrival order or by tick.
 
 **Own entry.** A `SessionMember` naming the own id is ignored and logged.
 
-**Legacy path (RL).** It cannot keep J1 (it has no core). At protocol ≥ P_M it
-ends the session locally on the first `SessionMember(added)` that names another
-player: "a member joined late; join orders need the session core (session core
-on)". Without late joiners nothing changes. §9 Q8 asks the user whether that is
-the wanted trade until R7 deletes the path.
+**Legacy path (RL).** Nothing (revision 3, answer 7). Since B9DX the server
+refuses a physics session to a client without the session core, so no
+legacy client ever receives a `SessionMember`. Revision 2 had the legacy
+path end its session locally on a late member, and §9 Q8 asked the user
+about it. Both are dropped, and MC is not changed.
 
 **SimTool.** `--replay-session` of a client journal now finds PLAYER(+) at J, at
 or before every record of that life, so `ensure_player` (ST:2861-2881) is not
@@ -960,6 +1013,251 @@ tick). `ensure_player` stays for old journals.
 | audit #7 / F6, #8 / F7 | A replay that lacks a body its window had (#7), or an own record with a wrong generation (#8), gives a wrong candidate set at the replayed tick, because candidates are the replayed world's bodies. F6 and F7 land first (§8). |
 | RC `lifecycle_rewind = false` (CH:597) | A late mirror birth or death is applied at the live tick, not at its stamp. RC's candidate set then lags the server's by that lateness. R3-R5 (the user's order: before G-c) remove it. |
 | late-player plan step 22 (own MOVED death) | An own Unphysicalize the server applied later than stamped leaves the server's clone alive for those ticks (CL:1062-1069 keeps it where stamped). Candidate sets then differ because the bodies differ; P1 inherits that gap and adds none. It is step 22's to fix. |
+| SPD, revision 3 | The copy step (§2.10) runs after `apply`, so a placed fan (`_R<row>`) gets its own slot copies. Its owner name keeps them unique. Under the Q7 bit the placed fan's force blocks (slot 0 included) are aliased like every unit's (§4.3). **Open, queued (roadmap §4 item 5, "WAD-A"):** without the Q7 bit, a placed copy's force controller is `rt:force/<copy's block id>` (sector-placement-design.md §4, "Savestate"), and so is an original's; whether those ids agree between the server and a resyncing or late-joining client (headless, and retail CK2 against Ballanced) has not been measured. The placement copies are made at each world's anchor before anything else of the level scene (`sector_placement.hpp:563`), which makes agreement between two Ballanced worlds likely but not shown, and the retail mod's own objects make it doubtful there. No run of the step logs shows a fan force held at an import. WAD-A measures it (a resync and a late join with a fan force held, placement on; headless and retail) and, if unmatched, brings the alias of §4.3 forward to every mechanism force block. |
+| gap Q (`rollback-engine-gaps-design.md`, engine change #20, record v4/v5) | A slot copy's `SetPhysicsForce` is a block of a recorded script. Its queued Create is in the queue section by behaviour id, like the original's. Its controller is named `rt:force/<its own block id>` (engine change #18), so two slots' forces on one ball, or one slot's forces from two fans, stay apart in a blob of this process. A slot copy's block id is NOT the same in every world (each world copies at its own anchor), so a blob that crosses worlds (a resync's or a late join's, the server's) would name controllers no live one matches - trafo T3's failure (engine-changes.md, "The savestate's controller alias"). Every unit force block is therefore aliased `unit:<owner>/<n>/S<k>` through the one `set_controller_alias` of the physics manager (§4.3). |
+| M1, revision 3 | Slot binding reads the life that holds a join order (§2.10). Every world knows that only under J1, so step Q7 comes after M1 (§8 Order). |
+
+### 2.10 Per-player mechanism units (part I, revision 3, the user's answer 6)
+
+The rule is P5 (§1.1.5). The user's words: "6. b，应该都复制一份逻辑，同一个
+机关应该可以响应所有玩家" (b: copy the logic for every player; one mechanism
+must respond to every player).
+
+**What is per player (the census, §1.1.2).**
+- Only the sub-graphs behind the 71 identity reads on L1-L13 act on one
+  ball: 58 fans (P_Modul_18) and 13 bridges (P_Modul_29).
+- Every other mechanism proximity block drives a wake, a script activation
+  or a sound. Under P1 these already respond to every player, so they are
+  not copied:
+  - the fan's 80 m probe activates the force sub-graph while any ball is
+    within 80 m;
+  - the bridge's 80 m probe wakes the plates for the first ball.
+- With the placement on, a placed copy of a fan or bridge (`_R<row>`) is
+  one more unit. WG0's census (`--probe-census`) counts both.
+
+**The unit (part I, CK-free, `session/mechanism_units.hpp`).** The rule runs
+on an abstract graph: blocks with their prototype GUID, behaviour links with
+their delays, parameter sources (pOut → pIn, through graph locals), and each
+block's parent graph. For each identity read R and its gating probe P (§2.3):
+
+- **D**, the identity consumers: the blocks with an input parameter whose
+  source chain starts at R's output.
+  - Fan: `Box Box Intersection` Entity 0, and `SetPhysicsForce`'s target.
+  - Bridge: `Test`.
+- **C**, the control path: the blocks on a behaviour-link path from P to a
+  block of D.
+  - Fan: the two `Binary Switch` and the two `Identity` blocks.
+  - Bridge: none.
+- **The unit**: U = {P, R} ∪ D ∪ C.
+- **The state**: S, the graph locals that a block of U writes (a pOut
+  destination) and a block of U reads.
+  - Fan: locals 20-21 of `Physics Force`, `TurnON_Permission` and
+    `TurnOFF_Permission`. The `Identity` blocks write them, and the switches
+    read them as their conditions.
+  - Bridge: none.
+- **Graph or block set.**
+  - If U and S are every block and every written local of U's parent graph,
+    and that graph is a sub-behaviour graph, the unit is that whole graph.
+    Fan: `Physics Force`, #46064 on L11, eight blocks and 22 locals.
+  - Otherwise the unit is U's blocks. Bridge: #47265, #46995 and #47620 in
+    the root graph.
+- **Shapes.** WAD found exactly these two shapes. The rule reports a unit's
+  shape, and the rewire refuses any other with the script and the blocks
+  named. A third shape on a custom map is then a design question, never a
+  guess. WG0's census asserts the two shapes and the parameter chains above
+  on every unit, because WAD read them from behaviour links and L11's
+  values.
+
+**Links and sources of slot k's copy** (k ≥ 1; slot 0 is the original):
+
+- **A behaviour link inside U** becomes the same link between slot k's
+  copies.
+- **A link from outside into U** is added from the same source to slot k's
+  copy (fan-out).
+  - Fan: `Activate Script` → `Physics Force.in0`, and the two
+    `Deactivate Script` blocks → `in1` (probe Off) and `in2` (Shutdown).
+  - Bridge: `Physics WakeUp.out` → probe In, and `Binary Switch.False` →
+    probe Off (the reset).
+- **A link from U to outside** is added from slot k's copy to the same
+  target (fan-in).
+  - Bridge: Test True → `Wave Player`, and → `10 Hinges.in2`.
+  - CK keeps one activation flag per input. Two copies that activate one
+    input in the same frame activate it once.
+- **Delays.** Every added link takes the original's initial delay.
+- **Parameter sources.**
+  - A source in U or S becomes slot k's counterpart.
+  - Any other source stays the original's and is shared: constants, the
+    ObjectBs, the `Kollisionsquader`, the force vectors.
+  - A graph unit copies its locals with it, so a shared constant local is
+    duplicated by value and never written.
+- **Probe Off on the bridge.** Test True → probe Off is inside U. A break
+  therefore switches off the sensor of the slot that broke the bridge, as
+  retail does for its one ball. The other slots' sensors stay on. A later
+  stone ball fires `10 Hinges.in2` again. That is a Shutdown of a hinge with
+  no constraint, which `PhysicsHinge` passes through without deleting
+  anything (PhysicsHinge.cpp:183-194 at HEAD; #47108's Out2 is not linked),
+  and a second play of the break sound, which is presentation only.
+
+**The slot count K and the join-order cap.**
+
+- K = `mechanism_slots`, fixed when the session starts and sent in
+  SessionStart. Its value is the server's `maximum_members` (the room
+  capacity; `config_manager.hpp:48`, default 8) clamped to
+  [1, `MAX_PLAYERS_PER_SESSION`] (64).
+- Slot 0 is the original blocks; slots 1..K-1 are copies.
+- Why the room capacity: every player a room can hold gets a slot (answer
+  6). 64 would cost about eight times the record of the default (below). A
+  constant in the code would leave players of a larger room unserved.
+- **The cap.** The server assigns join orders below K only
+  (`assign_join_order`, SV:829 at HEAD).
+  - A joiner that finds every order below K held or retiring (J2) waits in
+    `waiting_orders`. `on_player_removed` releases an order, assigns it to
+    the first waiting joiner and posts that joiner's add. That joiner's base
+    is clamped to `leaving_horizon` anyway (J4).
+  - A joiner that finds every order below K held by a live life is refused
+    the physics session with "physics session full (K mechanism slots)" and
+    stays in the room. This happens whenever the room capacity is above K:
+    a `maximum_members` above 64 from the start (the room cap is clamped to
+    `MAX_MEMBERS_PER_MESSAGE` = 256, SV:287 and SV:2326-2328, `room.hpp:19`,
+    while K is clamped to 64, so with 100 the 65th physics joiner is
+    refused without any reload), or a capacity raised by a configuration
+    reload after the session started (K stays fixed for the session).
+
+**Binding (in `place`, every world, every live and every replayed tick).**
+Slot k's candidate at tick t is the ball of the life in this world's lives
+(`players_`, §2.8) whose join order is k and whose [J, R) holds t. It must
+have a body at the place point and not be held out by a replay (§2.2's
+candidate rule). Otherwise slot k has no candidate.
+
+- **Frame.** Slot k's copy of a unit probe measures its own frame. The frame
+  goes to the candidate's position, or holds when there is none. Its initial
+  position is `ResetPoints` row 0, as in §2.2.
+- **Identity cell.** Each read has one private one-row copy per slot (§2.3).
+  - By-name kind: the retail entity of the candidate's ball type, or
+    `BMMO_NoBall` when slot k has no candidate (no hold, unlike §2.2's
+    union read).
+  - The initial by-name value is `BMMO_NoBall`, so `Test "Ball_Stone"` of a
+    slot that never had a ball is false. The union read of §2.2 starts on the
+    level's start ball instead.
+  - Why no hold: a held `Ball_Stone` would outlive its ball. Stone ball k
+    breaks the bridge, so slot k's Test True turns slot k's probe Off; its
+    client leaves (or the ball dies) before the ball has left the 4 m range,
+    and the held frame stays inside it. A later bridge reset (`Binary
+    Switch.False` -> probe Off, then `WakeUp.out` -> probe In, both fanned
+    out to every slot) re-arms slot k's probe, the probe fires Enter on the
+    held frame, and a held `Ball_Stone` would make Test true and break the
+    bridge with no stone ball present. With `BMMO_NoBall` that Test is
+    false. The single-ball hold of §2.2 has no such case: there the cell
+    always follows some live ball.
+  - Body kind: the candidate's ball entity, or `BMMO_NoBall`.
+- **Latch, body kind.** If slot k's Get Cell output does not name slot k's
+  candidate, it is set to the cell. This is §2.2's rule with "a candidate of
+  t" narrowed to slot k's candidate.
+- **No gating-probe choice.** A slot's probe and cell follow the same ball
+  by construction.
+- **Unbound slots never act.** Both identity kinds read `BMMO_NoBall` in
+  an unbound slot (from the tick it unbinds: death, leave, or before its
+  first body), which is what makes this hold.
+  - An unbound fan copy's box test reads `BMMO_NoBall` and is false, so it
+    only reaches the Shutdown of a force it does not hold.
+  - An unbound bridge copy's Test reads `BMMO_NoBall` and is false, whatever
+    its probe does: an Enter of the held frame after a reset re-arm (above)
+    breaks nothing. Only a bound stone ball's own Enter makes it true.
+  - This holds even where a level's reset point or a held frame lies inside
+    a unit probe's range. The held frame is not moved to a park point on
+    unbind: that move would make the copy's probe fire an Exit the original
+    script never sees, and the `BMMO_NoBall` cell already makes every
+    consequent Test and box test false.
+- **The core** passes each candidate with its life's join order
+  (`probe_candidate` gains `slot`, read from `players_`). The server reads
+  the clone's slot (PW:769-779 at HEAD, the join order).
+- **Each candidate's place.** A ball can be the candidate of its slot and,
+  for the probes that are not copied, the nearest ball of P1 at the same
+  time. Both are written in one `place` call.
+
+**Lives, trafos and deaths.**
+- A life is bound at every tick it has a body, from its first Physicalize
+  on.
+- A death leaves the slot without a candidate: the frame holds, the
+  by-name cell reads `BMMO_NoBall` from the next tick, and the latch moves
+  to `BMMO_NoBall` at the next tick.
+- A trafo keeps the slot. Body kind: the latch moves to the new ball entity
+  at the next tick. By-name kind: the cell names the new type from the next
+  tick, and a new Enter reads it.
+- A leave closes the life at R.
+- A rejoin is a new life (J-f). It takes the slot of its new order, which
+  may differ from the old one.
+- The state of a slot's copies carries over from one life of an order to
+  the next: the held frame and the Proximity state. Every world has the
+  same history of that slot, so it carries over the same way everywhere. A
+  late joiner imports it with the portable record (RSD A5).
+
+**The copy step (CK host support, `game/proximity_union.hpp`, at the
+anchor).** It runs after SPD's `apply` and the script selection, and before
+`rewire`. `rewire` then gives every slot its own frame and identity copy.
+
+1. **Find the units.** Extract the abstract graph of every selected
+   mechanism root script that has an identity read. Run the unit rule, and
+   record every block's pre-copy walk position (the names below use it).
+2. **Refuse a hot source**, as SPD step 3 does: a force controller, a joint
+   handle or a queued PreSimulate entry on a unit block. At an anchor
+   nothing is physicalized.
+3. **Copy.** For k = 1..K-1, unit by unit in walk order:
+   - copy the unit's behaviours (a graph unit: the graph; a block unit: its
+     blocks) with `CKContext::CopyObjects` and a dependencies context that
+     copies behaviours with their parameters, IO and sub-behaviours, and no
+     other object;
+   - add each copy to U's parent graph after its existing sub-behaviours
+     (`AddSubBehavior`), in slot order, then unit order;
+   - set the links and sources by the rules above.
+   - Whether retail CK2 copies behaviours the way Ballanced does is §9 Q10.
+     If it does not, the step falls back to a copy built by hand.
+4. **Activation.** A copy takes the original's activation and runtime
+   flags. At the anchor every unit is inactive until its script's own
+   inputs reach it.
+5. **All or nothing.** On a refusal, the copies and the links added so far
+   are destroyed, and the world is as before the call. The anchor then
+   fails, as a signature mismatch does.
+6. **Release** at session end and world teardown, in this order:
+   `proximity_union::release` (sources back, frames and identity copies
+   destroyed), then the slot copies with their links, then SPD's release.
+
+**Names.**
+- Frames are `BMMO_Prox_<owner>_<n>_S<k>`, and identity copies
+  `CurrentLevel#BMMOId_<owner>_<n>_S<k>`, for k = 0..K-1. Here n is the
+  original block's *pre-copy* walk position.
+- Probes that are not in a unit keep §2.3's `BMMO_Prox_<owner>_<n>`.
+- Appending copies after a graph's sub-behaviours can shift the walk
+  positions of later blocks. That is why n is taken before the copy.
+- The portable record keys blocks by the post-copy walk. That walk is the
+  same in every world: the same K and the same copies appended in the same
+  order.
+
+**The record and the replay.**
+- The copies are sub-behaviours of selected root scripts. The v2 walk
+  (`capture_behavior`) therefore records them like any block: activation,
+  locals, outputs, the force and joint state, and delayed links.
+- Gap Q's queue section records their queued Creates.
+- The portable record (resync, late join) carries them by walk position.
+- A replay restores them and re-runs them with their scripts. `place`
+  re-derives every slot's frame, cell and latch at every replayed tick from
+  that tick's bodies and the lives (§2.5).
+- The hold section (§4.2) gets K frames per unit probe. A slot's by-name
+  cell has no hold (it is `BMMO_NoBall` or the candidate's type, a function
+  of the tick), so it needs no entry; the union read's by-name hold keeps
+  its one entry.
+- **Size, estimated** from the v2 layout (about 26 bytes per behaviour plus
+  5 bytes + the data per local and output):
+  - a fan copy is about 0.65 KB, a bridge copy about 0.17 KB;
+  - at K = 8, placement off: L11 (5 fans, 1 bridge) gains about 24 KB on
+    its about 40 KB record, and L12 (11 fans) about 50 KB;
+  - the capture time grows with it;
+  - check C1 measures both (§7.6, §9 Q11).
+
+**The world option.** `WORLD_PLAYER_MECHANISMS` turns all of this on (§5).
+With the bit clear, a world rewires as G3 does, with union reads, the
+single-ball rules of §2.2 and no copies. That keeps the journals of builds
+between G3 and Q7 replayable.
 
 ## 3. Determinism
 
@@ -1013,6 +1311,32 @@ tick). `ensure_player` stays for old journals.
 9. **Member lives.** Every lookup is by (player, life), and a life's entry is the
    server's. The relayed `life` and the member messages are the server's
    numbers, so the mapping cannot differ between worlds.
+10. **Per-player units (revision 3).**
+    - **Same K.** It comes from SessionStart, which is the same for every
+      member of a session, late joiners included. The server journal's
+      header carries it (§5).
+    - **Same units.** The CK-free rule runs on the same scripts after the
+      same placement. The signature covers the unit shapes, K and every
+      copy's structure (§5).
+    - **Same copies.** The copy order is fixed: units in walk order, slots
+      in order, each copy appended after its graph's sub-behaviours. CK ids
+      differ between worlds (each world copies at its own anchor, after a
+      different history of created objects; a late joiner anchors long
+      after the server), so nothing that crosses worlds may carry one:
+      frames, cells and copies are found by name or by walk position. A
+      force controller's own name `rt:force/<block id>` (engine change #18)
+      does carry one, and a savestate blob crosses worlds at every resync
+      and late join (the server's blob). Every unit force block's controller
+      is therefore captured and matched under the world-independent alias
+      `unit:<owner>/<n>/S<k>` (§4.3), as trafo T3 had to do for the trafo
+      sets.
+    - **Same binding.** Slot k is the life with join order k. J1 (M1)
+      guarantees that every world knows every life's join order before any
+      of that life's events is applied. That is why Q7 comes after M1.
+    - **Same candidate.** It is P1's body rule, per slot.
+    - **Same execution order.** Copies in one graph run in CK's graph order,
+      the order the original scripts already rely on in every world. The
+      queue section's Create order is compared across worlds (V7, R2).
 
 ## 4. Rollback interplay
 
@@ -1050,11 +1374,68 @@ u16 identities; per by-name copy: u32 object id of the held retail entity
 - At L12's 43 frames and 0 by-name copies the section is 2 + 43×12 + 2 = 520
   bytes per record.
 
+*Revision 3.* The record versions 2-5 are taken (TRD's v3, gap Q's v4 and
+v5, `game/script_replay.hpp:103-131` at HEAD), split by two sections that
+combine (`has_trafo`, `has_queue`). A third section would double the version
+list again, so G3 takes **one** new version, the next free one (6 at HEAD),
+whose layout replaces the version-encoded combination with a flags word:
+
+```
+u32 version = 6
+u32 sections;   bit 0 trafo list, bit 1 queue section, bit 2 hold section
+<the v2 body>   byte for byte as in v2-v5
+[trafo list]    if bit 0, as v3
+[queue section] if bit 1, as v4
+[hold section]  if bit 2, as above
+```
+
+- A writer emits v6 only when it writes the hold section, so every record
+  without one stays v2-v5 byte for byte (the wire check's captures and the
+  legacy readers are unchanged).
+- `known_version` accepts 6; `has_trafo` / `has_queue` / `has_hold` read the
+  word for v6 and the version for v2-v5. A v6 word with an unknown bit is
+  refused.
+- Q7's K frames per unit probe go into the same hold section with no new
+  version: under the Q7 bit the section simply lists more frames, and
+  `describe` names their slots.
+
 ### 4.3 Savestate
 
 Frames, identity copies and `BMMO_NoBall` have no body. The blob neither contains
 them nor refuses on them. The PreSimulate queue entries that the fan creates
 against mirrors are F5's business (§2.9). No engine change, no IVP change.
+
+*Revision 3.* A slot copy's force controller lives on its candidate's ball
+core like the original's. It is named `rt:force/<block id>` (engine change
+#18), so a blob of one process keeps two forces on one core apart. The block
+id is not the same in every world (§3 item 10), so a blob that crosses
+worlds needs an alias, exactly as the trafo sets did at T3 (engine-changes.md,
+"The savestate's controller alias"; T3 measured a joiner's pieces 6.6e-7 m
+off and "no live controller 'rt:force/54491'" without it):
+
+- **The alias.** `mechanism_units` keeps, from the copy step on, a map from
+  each unit force block's id in this world (slot 0's original and every
+  copy) to `unit:<owner>/<n>/S<k>`: the owner script's name, the original
+  block's pre-copy walk position n and the slot (the names of §2.10, the
+  same in every world). Slot 0 is aliased too, so the rule does not rely on
+  the originals' ids agreeing across worlds.
+- **One alias function per physics manager.** `set_controller_alias` takes
+  one function (physics_savestate.hpp; the retail host through plugin API
+  v22, `api_set_controller_alias`, which exists since T4). The host installs
+  a chain: `trafo_controller_alias`, then the unit alias, then the own name.
+  The two never claim the same name: a trafo set's blocks are not in a
+  selected mechanism script. The server's world, the headless client and the
+  core host (`trafo_controller_alias_cb` in `core_host.cpp` gains the second
+  lookup) install it at the anchor under the Q7 bit and remove it at
+  teardown.
+- **No blob format change.** The alias is the name the capture records and
+  the restore matches by; the blob already carries controller names as
+  strings.
+- **Checked by** J6 and H3c (§7.3): "no live controller" must not be
+  logged at any import, and the joiner's slot force state is bit-equal to the
+  server's.
+
+Nothing else changes.
 
 ### 4.4 Window edges
 
@@ -1072,6 +1453,16 @@ against mirrors are F5's business (§2.9). No engine change, no IVP change.
   state (§2.8). Parking guarantees that no replayed event of a life predates
   that life's entry.
 
+### 4.5 Per-player units (revision 3)
+
+- The slot copies are blocks of recorded scripts, so their state rolls back
+  with the record (§2.10). No new section.
+- The binding is re-derived at every replayed tick from that tick's bodies
+  and the lives. Lives change only outside replays (§4.4), so a replay
+  across a life's J or R binds the slot as the live ticks did.
+- A slot's first Physicalize inside a window is a held birth. The slot is
+  unbound until the birth's re-pose, which is the live rule (§4.4).
+
 ## 5. Wire, protocol and journal
 
 Protocol numbers follow RSD §11 Q5's rule (the next free number at landing).
@@ -1083,23 +1474,37 @@ The three earlier designs claim 10. This design takes two:
 
 So no build ever reports a number whose fields it does not send.
 
+*Revision 3.*
+- Protocol 13 is the current number (`entity/session.hpp:82` at HEAD), and
+  `world_options` uses bits 0 and 1. Q9's order is G3 first, so **P_G is the
+  next free number when G3 lands**: 14 at the earliest, unless gap Q's Q5
+  takes 14 first. **P_M** is the next free number after that.
+- **P_Q** is the next free number when step Q7 lands (§2.10). Q7 adds
+  `mechanism_slots` to SessionStart, a world option bit and K in the server
+  journal's header.
+- Under the Q7 bit, the signature `anchor_probes` also covers the units, K
+  and every copy's structure. Q7 changes what the signature covers, not the
+  message.
+
 | item | change |
 |---|---|
 | `PHYSICS_PROTOCOL_VERSION` (ES:51) | P_M: "SessionMember (member lives: added/removed with player_entry and life); player_entry.life; session_event_msg.life; ball leaves always queued". P_G: "WORLD_PROXIMITY_UNION: clients rewire mechanism proximity blocks and identity reads, every world places them before the leavers and the events by the block's metric with a hold; BodyRevived retired; SessionReady carries the probe signature" |
-| `entity/session.hpp` | `player_entry.life` (P_M); `WORLD_PROXIMITY_UNION`, the next free `world_options` bit after SPD's `WORLD_PLACEMENT_CLONES` (bit 0) and TRD's `WORLD_TRAFO_INPUTS`: bit 2 (P_G) |
+| `entity/session.hpp` | `player_entry.life` (P_M); `WORLD_PROXIMITY_UNION`, the next free `world_options` bit after SPD's `WORLD_PLACEMENT_CLONES` (bit 0) and TRD's `WORLD_TRAFO_INPUTS`: bit 2 (P_G); `WORLD_PLAYER_MECHANISMS`, the next free bit after it (P_Q, §2.10) |
+| `session_start_msg` (P_Q) | `uint8_t mechanism_slots` (K, §2.10) after `world_options`; the reader refuses 0 and anything above `MAX_PLAYERS_PER_SESSION` when the bit is set |
+| server join orders (P_Q) | below K only; `waiting_orders`; "physics session full (K mechanism slots)" (§2.10) |
 | opcode | `SessionMember`, appended (message.hpp:85-100 order rule) |
 | `session_member_msg` | §2.7; ReliableNoNagle plus `event_repeats`; about 47 bytes |
 | `session_event_msg` | `uint16_t life` after `state` (P_M); 0 from clients |
 | `session_ready_msg` | `uint64_t anchor_probes` appended after SPD's `anchor_placement`, read when protocol ≥ P_G, always filled (P_G) |
 | server `handle_session_ready` | compares `anchor_probes` with the server's mechanism-class signature after the placement compare (SPD §5), late joiners included: "probe mismatch for X (client %016llx, server %016llx)"; late base clamp (§2.7) |
-| server config | `physics_proximity_union`, default on from step G3; the negative control and old-journal replays use off |
+| server config | `physics_proximity_union`, default on from step G3; the negative control and old-journal replays use off. `physics_player_mechanisms`, default on from step Q7, with the same use of off; K comes from `maximum_members` (§2.10) |
 | BodyRevived | not sent, and ignored with a NOTE, under the bit (§2.6) |
 | client journal | no layout change: PLAYER(+) at J and PLAYER(-) at R from member messages (§2.8), NOTEs. `announce_player` no longer writes join=255 |
-| server journal | no layout change: a ball leave is now EVENT Unphysicalize at `next` and PLAYER(-) at `next + 1`, the queued shape SimTool already reads; a rejoin is PLAYER(-) then PLAYER(+) at R. The header's `world_options` (SPD's v4 field) carries the bit. **If G2 lands before `world_options` exists in the header, G2 adds it and takes the next journal version (v5)**; otherwise no bump |
+| server journal | no layout change: a ball leave is now EVENT Unphysicalize at `next` and PLAYER(-) at `next + 1`, the queued shape SimTool already reads; a rejoin is PLAYER(-) then PLAYER(+) at R. The header's `world_options` carries the bit; *revision 3:* the field is in the header since journal v5 (T2), so G2 needs no bump. **Q7 adds K to the header and takes the next free journal version** (v7 is the current one, `journal.hpp:106` at HEAD) |
 | script record | the next SR `kVersion` after TRD's (§4.2); RSD's portable version the next after RSD's and TRD's, with the section and kind 4 |
-| SimTool `--replay-session` | honours the bit (placement point, metric, hold, latch, BodyRevived not applied); PLAYER before inputs and events within a tick (§2.8) |
-| legacy path (MC:2438 dispatch) | ends locally on `SessionMember(added)` of another player (P_M) and on the bit (P_G) (§2.4, §2.8) |
-| `docs/rooms-and-sessions-protocol.md` | SessionMember, lives, the bit, `anchor_probes` |
+| SimTool `--replay-session` | honours the bit (placement point, metric, hold, latch, BodyRevived not applied); PLAYER before inputs and events within a tick (§2.8); under the Q7 bit, builds K slot copies from the header's K and binds them per tick |
+| legacy path (MC dispatch) | *revision 3:* nothing. The server refuses a client without the session core (B9DX, answer 7), so neither P_M nor P_G nor P_Q reaches it (§2.4, §2.8) |
+| `docs/rooms-and-sessions-protocol.md` | SessionMember, lives, the bits, `anchor_probes`, `mechanism_slots` and the join-order cap |
 
 ## 6. What must not change
 
@@ -1134,6 +1539,21 @@ So no build ever reports a number whose fields it does not send.
   match pre-change journals bit for bit: the birth tick of a ball now holds the
   frames where the server used to see the newborn, on the server too. They are
   promised to agree with the server under the bit.
+- **Revision 3, per-player units.**
+  - The wake, activation and sound blocks are not copied: they keep P1's
+    frame.
+  - The original blocks of a unit are slot 0. They keep their sources and
+    their links, plus the links the copy step adds, and they lose nothing.
+  - With one player, every copy is unbound and never acts (§2.10). The
+    mechanism then behaves as under G3 alone, so a solo session still
+    agrees with the server.
+  - Spawn kicks, groups and ranks keep the join order. The cap below K
+    changes which order a joiner gets only when every order below K is
+    held or retiring, and then the joiner waits instead of taking an order
+    of K or more.
+  - No IVP change and no engine change: the copies are CK behaviours made
+    through the public SDK, and their force controllers are the existing
+    block's.
 
 ## 7. Verification
 
@@ -1152,6 +1572,8 @@ to its root cause and reported as symptom, cause and options (principle d).
 | U5 | core lives: (a) member then events: group `P#k`, kick index from k, rank k; (b) an event's unreliable repeat before the member message: parked, then applied at its stamp via the late path, the same world as (a); (c) as (b) with the stamp outside the history: `request_resync`, no mirror made; (d) copies of added and removed: no change; (e) conflicting join order for one life: session ends locally with the reason; (f) **leave with a ball, nothing queued**: Unphysicalize at u applied, removed at R = u+1, no event dropped, PLAYER(-) at R; (g) order reuse: life of k removed, another id added with k: ranks, group and kick from k; (h) **rejoin on the same id**, k' = k and k' ≠ k, removed(p,1,R) and added(p,2,R) in one mailbox drain and in reverse arrival order: old-life events with their old order, new-life events with the new one, no session end; (i) a replay across R uses the closed life's entry and relay frames; (j) the "mirror of a life outside `players_`" and `member_life_outside` counters | (a)-(i) as stated; (j) 0 in every case |
 | U6 | server (fake runner and world): `assign_join_order` skips retiring orders; a ball leave with nothing queued yields EVENT at `next`, `leaving` with `remove_at = next + 1`, `place_probes` at `next` includes the clone and at `next + 1` does not; a rejoin while leaving is added at R after `finish_leave`, with no event erased; `on_player_added` fires before the joiner's first `on_event_accepted` and the late joiner's SessionStart is sent from it; `on_player_removed` carries `finish_leave`'s tick and the removed life's order and releases it; the late base ≥ `leaving_horizon`; `SessionMember` goes into `event_repeats`; `probe_set_drift` 0 | exact |
 | U7 | journal: a client journal with PLAYER(+) at J earlier than the write position and frame records after it: SimTool's reader adds with the recorded order and never calls `ensure_player`; PLAYER(-), PLAYER(+) at one tick in file order | the replayed world's slot = k |
+| U8 | revision 3, the unit rule (`mechanism_units.hpp`) on abstract-graph fixtures transcribed from L11's descriptions (`.local-tools/work/WAD/cons/l11_P_Modul_18_MF_Script.txt`, `..._29_...`): the fan gives the graph unit `Physics Force` with S = locals 20-21; the bridge gives the block unit {probe, Get Cell, Test} with S empty; the links come out as inside / fan-out / fan-in exactly as §2.10 lists them, with their delays; the parameter sources come out as slot-local or shared; a third shape (a consumer outside the parent graph, or a written local outside U) is refused with the blocks named | exact |
+| U9 | revision 3, slot binding over a scripted life sequence (fake platform): lives of orders 0..K-1 with births, deaths, a trafo, a leave and a rejoin with another order; held births in a replay; an unbind (death, leave) while the slot's frame is inside a unit probe's range, then that probe re-armed (Off, In). Server: `assign_join_order` below K; a joiner waits while every order below K is held or retiring, and gets the first released one; with K live lives it is refused with the reason; `maximum_members` = 100 from the start gives K = 64 and refuses the 65th physics joiner with no reload | each slot's candidate per tick equals the life implied by the lives list and the bodies; the latch moves at the stated ticks; an unbound slot's by-name cell and latch read `BMMO_NoBall` from the tick after the unbind, and the re-armed probe's Enter reaches no Test true; the waits and the refusal as stated |
 
 ### 7.2 SimTool (offline, `--root C:/Users/geekerwan/Desktop/Ballance-Agent`)
 
@@ -1162,6 +1584,9 @@ to its root cause and reported as symptom, cause and options (principle d).
 | V3 | `--replay-session maps/arena-test/lp1_join/server.bmjr` (bit clear) | `matched=3528`, `checkpoint_mismatches=0` |
 | V4 | `--savestate-check` with two players and a probe in range, chained rollbacks across a no-candidate interval (both dead) | blobs and script records byte-identical to the straight run; `skipped` 0 |
 | V5 | release: rewire, release, rewire on the same level | the second census and signature equal the first; no `BMMO_Prox_*` left after release |
+| V6 | revision 3: `--probe-census --player-mechanisms K` (K = 2 and 8) on L1-L13 and the arena, placement off and on | units per level equal §1.1.2's identity column (58 fans, 13 bridges on L1-L13; placed units added with the placement on), every unit of one of the two shapes; each copy's structure equals its original's (prototype, IO counts, links and delays by the rule, local values, activation); copy walk order and names unique; release (after V5's) leaves the pre-copy graph (block count, links, sources) and the pre-copy signature; the same listing from the x64, x86 (`build/sim-x86-a3`) and Linux SimTool apart from block ids |
+| V7 | revision 3: two-clone drops under the Q7 bit: (a) two balls in one fan's box (arena and L11); (b) a wood ball resting inside P_Modul_29's 4 m range, then a stone ball entering | (a) both balls pushed at every tick both are in the box: two controllers `rt:force/<id>` of two slots' blocks, one per ball; the queue section's Create order printed; (b) the bridge breaks at the stone ball's Enter under the Q7 bit, and not under G3's bit alone (the single-ball rule, §2.2) |
+| V4b | revision 3: V4 with two balls in one fan box and slot forces on both, chained rollbacks across one ball's death | blobs and script records byte-identical to the straight run |
 
 ### 7.3 Headless harness (arena, 4 clients, Arch server, `scripts/arena_map_test.py`)
 
@@ -1169,9 +1594,10 @@ to its root cause and reported as symptom, cause and options (principle d).
 |---|---|---|---|
 | H1 | Pusher arrival: client 1 drives to P_Modul_01 first, the others stay behind (beam/hold keys); `--snapshot-interval` normal and snapshots off; 0 ms and `--latency-ms 150` | the Pusher's row equals the server's at every checkpoint in [wake-10, wake+200] in every client journal (`body_series.py`); one wake tick in all five worlds | today's lp1_join numbers: 0.0897 m for 10-16 ticks |
 | H2 | fan: a remote ball through the arena's P_Modul_18 box | the remote's mirror and the fan's force state bit-equal to the server's clone through the passage, all clients | mirror off on the non-owners |
-| H2b | fan, two balls: A enters and stays, B enters while A is in range, then A leaves the box | in every world the same Get Cell output (by player) and the same force state at every tick; the log names which ball was pushed when (documents §2.2's semantics) | |
+| H2b | fan, two balls: A enters and stays, B enters while A is in range, then A leaves the box | in every world the same Get Cell output (by player) and the same force state at every tick; the log names which ball was pushed when (documents §2.2's semantics). *Revision 3, under the Q7 bit:* A and B are both pushed while both are in the box, each by its own slot, and every slot's Get Cell output and force state are equal in every world at every tick | |
 | H2c | fan, leave while latched: A's client leaves while A is latched and B is in range; then the same with A dying in the death zone (§9 Q6) | latch moves at the same tick in every world (`relatched` equal); force state equal; the server never reads a destroyed clone | |
 | H3 | rope bridge: a remote stone ball onto P_Modul_29 | the plates' rows bit-equal, one break tick everywhere | no break on the non-owners |
+| H3b | revision 3: a remote wood ball parked inside the bridge's 4 m range, then another client's stone ball enters; then the stone ball's client leaves while its ball is still inside the 4 m range, and the bridge is reset with a wood ball present | one break tick in all five worlds, at the stone ball's own Enter; the plates' rows bit-equal; no second break after the reset (the left slot's cell reads `BMMO_NoBall`) | G3's bit alone: no break |
 | H4 | forced rollbacks (`--force-rollback`) with anchors before, at and after a mirror-triggered wake | journals equal to the unforced same-batch arm; `skipped` 0 after F6 | |
 | H5 | the joiner (lp1_join recipe) with G-c on top of RSD A5 | the joiner's imported frames and Proximity state make its P_Modul_01/03/29 rows equal to the server's after its base | |
 | H6 | BodyRevived retired: 4 clients, 3 minutes, the arena's Schaukel and Sack sectors; same batch with server-side application on | the server journal has no BodyRevived EVENT; the mechanism rows including the sleep flag agree server vs every client; the control's disagreement is recorded as G-c3's measured cost | |
@@ -1183,13 +1609,15 @@ to its root cause and reported as symptom, cause and options (principle d).
 | J3 | the member message delayed: server test flag `--hold-member-ms 300` (reliable and repeats) | `events_parked` > 0 on every existing member; the joiner's mirror as in J1; journals exact against J1's arm | |
 | J4 | a join inside a leaver's `leaving` interval (`--leave` with a queued event, join 1 tick later); a leave with a ball and nothing queued while the leaver is nearest to a P_Modul_01 probe that checks at `next` | no "falling back to slot"; the joiner's order differs from the leaver's until R; joiner base ≥ R; the probe's wake tick equal in all worlds | |
 | J5 | rejoin on the same connection: client 2 leaves the room with a ball and rejoins within 2 ticks (`--rejoin N:T`), then plays 300 ticks | server: rejoin added at R, no event erased; every client: two lives of the id, old events with the old order, new with the new; the rejoiner's mirror equals the server's clone at every checkpoint | |
+| J6 | revision 3: J1's late joiner, and J5's rejoin, through the arena fan under the Q7 bit, with another slot's fan force held on a ball at the join | the joiner's slot is its join order in all five worlds (anchor log); no "no live controller" is logged at the joiner's import of the server's blob, and the held force's controller is matched by its alias; its slot's force state is equal everywhere while it is in the box; the rejoin's old slot unbinds at R and its new one binds from its first body | |
+| H3c | revision 3: two balls in the arena fan's box with both slot forces held, then one client's resync (`--resync-at TICK` on that client, step A3) imports the server's blob and portable record | no "no live controller" logged at the import; the client's two slot force controllers (`unit:<owner>/<n>/S<k>`) matched by alias; both balls bit-equal to the server's clones from the import on | without the alias: "no live controller 'rt:force/<id>'" at the import (T3's signature) |
 
 ### 7.4 Retail runs (core host, against the step's server)
 
 | id | run | pass |
 |---|---|---|
 | R1 | arena: two retail clients + two headless; a headless ball wakes P_Modul_01 first | the retail journals' Pusher rows equal the server's (as H1); `anchor_probes` equal in SessionReady |
-| R2 | L11, two retail clients: one crosses the P_Modul_01 / P_Modul_37 sensors alone; then the P_Modul_18 fan with two balls | as R1 on L11's rows; the fan as H2b |
+| R2 | L11, two retail clients: one crosses the P_Modul_01 / P_Modul_37 sensors alone; then the P_Modul_18 fan with two balls | as R1 on L11's rows; the fan as H2b (*revision 3:* under the Q7 bit both balls are pushed in both retail worlds and on the server; the retail anchor log's copies and `anchor_probes` equal the server's; the queue section's Create order equal to the server's) |
 | R3 | a retail late joiner and a retail existing member (lp1_join recipe with retail client 0) | J1's criteria on the retail logs |
 | R4 | session end, vanilla restart of the same level without reload | V5 on retail: the Pusher wakes for the own ball in vanilla play (release restored the sources) |
 
@@ -1200,6 +1628,16 @@ to its root cause and reported as symptom, cause and options (principle d).
 - H6: P4.
 - U4-U7, J1-J5, R3: J1-J4.
 - V3, H8: nothing old moved.
+- U8, U9, V6, V7, V4b, H2b, H3b, H3c, J6, R2 (revision 3): P5 and its
+  determinism and rollback state; H3c and J6 the controller alias across
+  worlds.
+- C1: P5's cost.
+
+### 7.6 Cost (revision 3)
+
+| id | check | pass |
+|---|---|---|
+| C1 | the script record's bytes and the capture time (`t_cap`) at K = 8 against the bit-clear control, with the same keys: the arena 4-client run and one L11 run. The anchor logs `player mechanisms: K slots, U units, C copies, +B record bytes` | recorded against §2.10's estimate, and judged by the stage close-out's CPU checks. A breach is reported with its numbers and goes to §9 Q11; it is never waived |
 
 ## 8. Steps
 
@@ -1208,14 +1646,15 @@ Each step is implement → review (code-review, high) → gate on its checks.
 | # | step | files | closes on |
 |---|---|---|---|
 | M0 | tools: harness `--leave N:T` and `--rejoin N:T`, server `--hold-member-ms` (test builds), `body_series.py` into `scripts/` | scripts, SV | the selftest; the tools reproduce today's lp1_join numbers |
-| M1 | member lives and J2 (protocol P_M) | `session_member_msg.hpp`, message.hpp, ES (protocol, `player_entry.life`), EM (`life`), LC, SRN/SRH (lives, always-queued leave, deferred rejoin, callbacks, `leaving_horizon`), SV (`retiring_orders`, `started`, send points, late SessionStart, late base, repeats), CL/CM/CC (`member_life`, `on_session_member`, parking, lookups by life), CJ, ST, SC/CH (decode, mailbox), MC (legacy end) | U4-U7; J1-J5; R3. Independent of G-c: may land as soon as the user orders it |
+| M1 | member lives and J2 (protocol P_M) | `session_member_msg.hpp`, message.hpp, ES (protocol, `player_entry.life`), EM (`life`), LC, SRN/SRH (lives, always-queued leave, deferred rejoin, callbacks, `leaving_horizon`), SV (`retiring_orders`, `started`, send points, late SessionStart, late base, repeats), CL/CM/CC (`member_life`, `on_session_member`, parking, lookups by life), CJ, ST, SC/CH (decode, mailbox) (*revision 3:* MC's legacy end dropped, answer 7) | U4-U7; J1-J5; R3. Comes after G-c (Q9, §9) |
 | G0 | `--probe-census` | ST | V1 (bit off) |
 | G1 | parts A+B; the server on `proximity_union` with the bit clear (today's path, moved) | `proximity_rules.hpp`, `proximity_union.hpp`, PW | U1; V1; V3; the arena regression identical to the pre-step build |
 | G2 | the server under the bit: `place_probes()` before the leavers and the events, the metric, gating choice, latch, hold, signature | PW, SRN, ST (`--replay-session` honours the bit), ES (bit), server config | V2, V4 (server-world parts); V3 still matched with the bit clear |
 | G3 | clients: core step 7b, RB hook, `core_world_hooks.place_probes` bound in HW, platform op, record version, H host anchor/release; SessionReady `anchor_probes`; protocol P_G | CF, CC, RB, HW, CP, RBS, SR, SC, SV (compare) | U2, U3; V4; H1-H5, H2b, H2c, H7, H8 |
-| G4 | RC host; RL ends locally | CH, MC | R1, R2, R4 |
+| G4 | RC host (*revision 3:* RL's local end dropped, answer 7) | CH | R1, R2, R4 |
 | G5 | BodyRevived retired (same release as G3, P_G) | CF, SV | H6 |
 | G6 | docs: this file's as-built notes; the SR:29-37 comment; RSD §2.4 amendment; protocol doc; `collision-overhaul-design.md` 9.x entry | docs, SR | review |
+| Q7 | revision 3: per-player mechanism units (§2.10, P5; protocol P_Q): the unit rule, the copy step and release, slot binding and names, K in SessionStart and in the server journal's header, the join-order cap and `waiting_orders`, the bit and the config, `--player-mechanisms` in SimTool, the RC and H anchor calls | new `session/mechanism_units.hpp`; `game/proximity_union.hpp`; PW, SRN/SRH, SV, ES, `session_start_msg.hpp`, `journal.hpp`, CF/CC (`probe_candidate.slot` from the lives), SR/RBS (the hold section's K frames), SC, CH, ST, server config; docs (this file's as-built note, the protocol doc) | U8, U9; V6, V7, V4b; H2b, H2c, H3b, H3c, J6; R2; C1 |
 
 **Order.** G1-G5 come after F5, F6 and F7 and after R3-R5
 (`lifecycle_rewind` on RC), as the user's order already has it (audit §5:
@@ -1224,6 +1663,22 @@ Each step is implement → review (code-review, high) → gate on its checks.
 portable section, or it adds the section to A1's format when A1 lands. G3's
 record version is taken after TRD's T1 (§4.2). M1 needs nothing but its
 protocol number; if it lands before G3, G3 builds on its lives.
+
+*Revision 3, the order (Q9 answered, §11.1).* The order is G0, G1, G2,
+G3 with G5, G4, G6, then M0 and M1, then **Q7**.
+- Q7 binds slot k to the life that holds join order k. Before M1, an
+  existing member does not know a late joiner's join order (the placeholder
+  63 of §1.2.1, `join=255` in its journal), and nothing tells it about a
+  leave (J-c). Such a member would bind the joiner to no slot, or to the
+  wrong one.
+- Q7 also needs G4's RC host for its retail anchor call, and M1's
+  `assign_join_order` and `waiting_orders` path for the cap.
+- So Q7 cannot follow G3 directly, as the chain's plan has it (step WGQ7
+  "right after WG3"). It must follow WM1. Nothing in Q7 has to come
+  earlier.
+- Between G3 and Q7 every world runs the single-ball rules of §2.2. They are
+  deterministic: the fan pushes the latched ball, and the bridge tests the
+  ball whose Enter fired.
 
 ## 9. Open questions
 
@@ -1306,10 +1761,10 @@ directly and drive `Set Physics Globals` (audit #14).** (measurement)
 - **Answered (2026-10-28, the user, verbatim): "6. b，应该都复制一份逻辑，同一个
   机关应该可以响应所有玩家"** - option (b): every player gets a copy of the
   mechanism logic, one mechanism responds to every player (it confirms §11's
-  Q7 of 2026-10-24). The design revision (b) needs - the per-player copies
-  of the force and break sub-graphs, the graph-copy step, the record's
-  extra script state, the H2b / V2 criteria - is step WAD's, not written
-  here.
+  Q7 of 2026-10-24). *Built into the design at revision 3 (step WAD):*
+  §2.10 (the units, the copy step, slot binding, K, the record), P5, §3
+  item 10, §4.5, §5's P_Q rows, §7's U8, U9, V6, V7, V4b, H2b, H3b, J6,
+  R2 and C1, and §8's step Q7.
 
 **Q8. The legacy path and late joiners (needs the user).**
 
@@ -1324,8 +1779,9 @@ directly and drive `Set Physics Globals` (audit #14).** (measurement)
   兼容非session core的客户端"):** the server refuses every client without
   the session core (step B9DX), so no legacy client is ever in a session
   and "RL ends locally" (on a late member at P_M, on the bit at P_G) is
-  moot; M1 and G4 add nothing to the legacy path (MC's "legacy end" in
-  M1's and G4's rows, and RL's row of §2.4, are dropped at WAD's revision).
+  moot; M1 and G4 add nothing to the legacy path. *Done at revision 3:*
+  MC is out of M1's and G4's rows, and §2.4's RL row, §2.8's legacy
+  paragraph and §5's legacy row say "nothing".
 
 **Q9. Landing order of the protocol numbers (needs the user).** P_M and P_G
 follow RSD §11 Q5's rule; if the user wants M1 before the three designs that
@@ -1341,6 +1797,42 @@ claim 10, M1 takes 10 and those take the following numbers.
   simpler one). P_G takes the next free protocol number when G3 lands (14
   at the earliest; Q5 of the rollback gaps also claims 14 - whichever lands
   first takes it) and P_M the next after it.
+- *Revision 3:* step Q7 (Q7 (b)) comes after M1 and takes the next free
+  number after P_M (P_Q). It needs J1 (§8 Order).
+
+**Q10. Does a behaviour copy come out the same in retail CK2 and in
+Ballanced?** (measurement)
+
+- §2.10's copy step copies behaviours with `CKContext::CopyObjects`. Copying
+  a behaviour copies its IO, its parameters and its sub-behaviours. Two
+  details are not established for either implementation:
+  - what happens to a copied input parameter whose source lies outside the
+    copied set (kept or cleared), which the step overwrites anyway;
+  - whether the Proximity block's settings-built outputs (`Use Outputs`)
+    come out equal.
+- Settle: V6 lists every copy's structure on the x64, x86 and Linux
+  SimTool. R2's retail anchor log prints the same listing, and the
+  signature (§5) compares it with the server's.
+- If retail's copies differ, build each copy by hand from its prototype:
+  `CreateObject(CKCID_BEHAVIOR)`, `InitFromGuid`, the settings with the
+  block's settings callback, then the values, links and sources of §2.10.
+  Compare again.
+
+**Q11. Is the record and capture cost of K slots within budget?**
+(measurement)
+
+- §2.10 estimates +24 KB on L11 and +50 KB on L12 at K = 8, against
+  records of about 40 KB. C1 measures the bytes and `t_cap`.
+- If the stage close-out's CPU checks fail on it, the numbers are reported
+  with one option that is designed but not built:
+  - **dormant slots.** When a slot unbinds, its copies are reset to their
+    anchor state in every world. While it is unbound, the fan-out links to
+    it are gated by its binding, so its copies never run and stay in that
+    state. The record writes them as one byte, the way the trafo record
+    writes `kTrafoDormant`. This changes §2.10's carry-over between two
+    lives of one order into a reset.
+  - Its trade-offs (a binding gate in the graph and a reset on binding)
+    are then the user's to weigh against the cost.
 
 ## 10. Review (revision 2)
 
@@ -1367,6 +1859,61 @@ reason is given.
 | (own work) J-h, the late base | found while revising | clamp to `leaving_horizon`; Q3 closed |
 | (own work) add failure | found while revising | `on_player_add_failed` → SessionEnd (§2.7) |
 
+### 10.1 Revision 3 (step WAD, 2026-10-28): what changed, and the adaptations
+
+| answer | change |
+|---|---|
+| 6, Q7 = (b) | **P5** (§1.1.5) and **§2.10**: per-player units of the sub-graphs behind the 71 identity reads (58 fans, 13 bridges on L1-L13; WAD's consumer census, §1.1.2). The CK-free unit rule has two admitted shapes; the copy step at the anchor; K = the room capacity, sent in SessionStart; slot k bound to the life with join order k; the frames, cells and latches per slot; the join-order cap. §2.1 part I; §2.2's several-balls paragraph; §2.9 (SPD, gap Q, M1); §3 item 10; §4.2, §4.3, §4.5; §5's P_Q rows; §6; §7's U8, U9, V6, V7, V4b, H2b, H3b, H3c, J6, R2, C1; §8 step Q7; §9 Q10, Q11 |
+| 7, Q8 superseded | §2.4's RL row, §2.8's legacy paragraph, §5's legacy row and M1's and G4's MC parts now say "nothing": the server refuses every client without the session core (B9DX) |
+| 5, Q9 | §8 Order: G0-G6, then M0 and M1, then Q7. P_G is the next free protocol number at G3, P_M the one after, then P_Q (§5) |
+
+Adaptations and findings recorded at this revision:
+- **Step Q7 must follow M1, not G3.** The chain planned WGQ7 right after
+  WG3. Slot binding needs every world to know every life's join order (J1).
+  Before M1 a late joiner's order is unknown to the existing members, so Q7
+  goes after WM1 (§8 Order). This is a dependency, not a trade-off. The
+  orchestrator re-orders the chain.
+- **The bridge break is one hinge.** The Test's True output shuts down one
+  hinge, #47108 on L11, through `10 Hinges` input 2. Revision 2 said "the
+  ten hinges", which is the reset's input 1 (§1.1.2). A second Shutdown on
+  that hinge does nothing, and the copies rely on that (§2.10).
+- **The journal header has `world_options` since v5**, so G2 needs no
+  journal bump. Q7 takes one for K (§5).
+- **The record versions 2-5 are taken** (TRD v3; gap Q v4 and v5), so G3's
+  hold section takes the next free version (§4.2). Review finding 4: that
+  is one version (6 at HEAD) with a section flags word, not one version per
+  combination; records without the hold section stay v2-v5.
+- **Review of the revision (gate round, 2026-10-28).** Four findings, all
+  confirmed against the code and fixed in the text:
+  1. *A slot copy's force controller name crosses worlds.* §3 item 10 and
+     §4.3 said `rt:force/<block id>` is compared inside its own process
+     only; a resync's or late join's blob is the server's, and each world
+     copies at its own anchor, so the ids differ (trafo T3's failure,
+     engine-changes.md). Fixed: every unit force block, slot 0 included, is
+     captured and matched under `unit:<owner>/<n>/S<k>` through the one
+     `set_controller_alias` chain (after `trafo_controller_alias`; the retail
+     host through plugin API v22, which exists since T4). Checked by J6's
+     new criterion and the new harness row H3c. The same exposure for the
+     originals and SPD's placed copies without the Q7 bit is not measured:
+     queued as WAD-A (§2.9's SPD row, roadmap §4 item 5).
+  2. *Unbound slots could act.* The by-name cell of an unbound slot held
+     its last entity, so a held `Ball_Stone` plus a bridge reset re-arming
+     the slot's probe with the held frame inside 4 m broke the bridge with
+     no stone ball present (the same in every world, so no divergence, but
+     against "unbound slots never act"). Fixed: an unbound slot's by-name
+     cell reads `BMMO_NoBall`, like the body kind; it then needs no hold
+     entry. The frame is not parked on unbind (that would fire an Exit the
+     original never sees). U9 and H3b gain the re-arm case.
+  3. *The refusal is reachable without a reload.* The room cap is clamped to
+     256 (SV:287, SV:2326-2328), K to 64. §2.10 and U9 now say so.
+  4. *The record version combination was open.* §4.2 names it (above).
+- **Census evidence:** `.local-tools/work/WAD/consumers.py` and
+  `consumers.txt` (SimTool `--describe-script` of every distinct mechanism
+  script on L1-L13, placement off), with the descriptions under `cons/`.
+  Revision 2's scratch census (the scratchpad path at the top) is no
+  longer on disk. K0's `.local-tools/work/k0/census` holds the
+  identity-read lists.
+
 ## 11. Decisions (user, 2026-10-24)
 
 - **Q7.** Several balls on one fan or cork bridge: every player gets their
@@ -1385,8 +1932,8 @@ message is quoted in `docs/roadmap.md` §4 item 3); three are this design's:
 
 - **Q7 = (b)**, verbatim: "6. b，应该都复制一份逻辑，同一个机关应该可以响应所有玩家"
   (b: every world copies the logic per player; one mechanism must respond to
-  every player). It confirms §11's Q7 above; the design text (§2.2, §8) is
-  revised to it at step WAD.
+  every player). It confirms §11's Q7 above. *Done at step WAD (revision
+  3):* §2.10, P5 and step Q7 (§10.1).
 - **Q8 is superseded** by answer 7, verbatim: "7. 直接拒绝，不要继续兼容非session
   core的客户端" (refuse it outright, no more compatibility with clients
   without the session core): built at step B9DX, the server refuses every

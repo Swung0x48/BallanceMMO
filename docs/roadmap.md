@@ -661,6 +661,24 @@ numbers 1-10 are unchanged.
    every snapshots-off check meets while M1 matters only with late joiners,
    leaves and rejoins; P_G takes the next free protocol number at G3, P_M
    the one after.
+   **Step WAD revised the design for these answers (revision 3, design
+   §10.1).** Q7 (b) is §2.10: per-player copies of the fan's force graph
+   and the bridge's stone test, the only mechanism sub-graphs that act on one
+   ball (71 identity reads on L1-L13). Slot k serves the life with join
+   order k, and K is the room capacity, sent in SessionStart (protocol P_Q).
+   The legacy parts are dropped (answer 7). The design's step Q7 needs
+   every world to know every life's join order (J1), so it comes after M1,
+   not right after G3: the order is G0-G6, M0, M1, Q7.
+   **WAD-A (queued by WAD's review, a measurement):** a force controller is
+   named `rt:force/<block id>` (engine change #18), and a block id agrees
+   across worlds only if both worlds created the same objects in the same
+   order; T3 found the trafo sets' ids differ and aliased them. Q7 aliases
+   every unit force block (design §4.3), but before Q7 the original fans and
+   the placed fan copies (placement on since SP10) cross worlds unaliased at
+   every resync and late join. Measure it (a resync and a late join with a
+   fan force held: headless and retail, placement on; pass = no "no live
+   controller" at the import); if unmatched, the §4.3 alias moves forward to
+   every mechanism force block.
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick; **K3 = the Level 1 tutorial
    switched off** right after K1 (decision (c): every world activates the
