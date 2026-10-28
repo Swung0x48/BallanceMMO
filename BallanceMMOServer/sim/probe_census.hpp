@@ -7,13 +7,15 @@
 // per class, under the names it would give, and checks V1's facts.
 //
 // The world is the server's (physics_world), which has already rewired its
-// own blocks at the anchor (PW rewire_proximity_probes /
-// rewire_ball_identity_reads).  So the structural test (§2.3 "Which blocks")
-// reads a block's ObjectA source as either Ball_Pos_Frame (not rewired) or a
-// server frame "BMMO_Prox_*" (rewired by the server), and an identity read's
-// target as either CurrentLevel or a server copy "CurrentLevel_BMMO_Ball_*"
-// (the copy holds the same columns).  That the server rewired exactly the
-// structural set is itself a check (`server`).
+// own blocks at the anchor (since step G1 through game/proximity_union.hpp,
+// every block, the world option's bit clear).  So the structural test (§2.3
+// "Which blocks") reads a block's ObjectA source as either Ball_Pos_Frame
+// (not rewired) or a server frame "BMMO_Prox_*" (rewired by the server), and
+// an identity read's target as either CurrentLevel or a server copy
+// "CurrentLevel#BMMOId_*" (the copy holds the same columns).  That the server
+// rewired exactly the structural set, under the names this census computes,
+// is itself a check (`server rewire`, `server names`), and so is the union's
+// own signature against the census's (`union signature`, step G1).
 //
 // Per block of the structural set (prototype TT Scaleable Proximity, ObjectA
 // = Ball_Pos_Frame), in (owner, script, walk) order:
@@ -87,6 +89,7 @@ namespace bmmo::sim {
             int walk = 0;
             bool mechanism = false;
             bool server_rewired = false;   // ObjectA is a server frame, not Ball_Pos_Frame
+            std::string server_name;       // that frame's name (step G1: the union's §2.3 name)
             float distance = 0.0f, exact_min = 0.0f, exact_max = 0.0f;
             int barycenter = -1, axes = -1, use_outputs = -1, squared = -1;
         };
@@ -101,7 +104,7 @@ namespace bmmo::sim {
             int walk = 0;
             bool by_name = false;
             bool in_all = false, in_mechanism = false;
-            bool server_copy = false;   // its target is a server copy
+            bool server_copy = false;   // its target is a server copy (its name in `source`)
             std::vector<size_t> gating_all, gating_mechanism;   // indices into probes
             // The unit (mechanism class only, with exactly one gating probe).
             std::vector<member> consumers, control;
@@ -125,6 +128,9 @@ namespace bmmo::sim {
             float reset[3] = {0, 0, 0};
             bool have_reset = false;
             uint64_t signature_mechanism = 0, signature_all = 0;
+            // The world's proximity union (step G1): its own signatures, set by the caller.
+            bool have_union = false;
+            uint64_t union_mechanism = 0, union_all = 0;
             std::vector<std::string> errors;   // a refusal of the census itself (missing objects)
         };
 
@@ -195,6 +201,8 @@ namespace bmmo::sim {
                 if (!structural(context, block, ball_pos_frame, rewired)) continue;
                 CKBehavior* root = root_of(block);
                 probe p;
+                if (rewired)
+                    if (CKObject* a = input_object(context, block, 1)) p.server_name = a->GetName() ? a->GetName() : "";
                 p.id = block->GetID();
                 p.root = root->GetID();
                 p.owner = owner_name(root);
@@ -236,7 +244,7 @@ namespace bmmo::sim {
                 if (!array || !array->GetName()) continue;
                 const std::string array_name = array->GetName();
                 const bool original = current_level && array->GetID() == current_level->GetID();
-                const bool server_copy = starts(array_name, "CurrentLevel_BMMO_Ball_");
+                const bool server_copy = starts(array_name, "CurrentLevel#BMMOId_");
                 if (!original && !server_copy) continue;
                 CKParameterIn* column_in = block->GetInputParameterCount() > 1 ? block->GetInputParameter(1) : nullptr;
                 CKParameter* column_source = column_in ? column_in->GetRealSource() : nullptr;
@@ -457,6 +465,21 @@ namespace bmmo::sim {
                                        && r.identities_on_original == 0,
                   "left " + std::to_string(r.unrewired) + ", world " + std::to_string(r.server_probe_count)
                       + ", reads left " + std::to_string(r.identities_on_original));
+            {
+                // Step G1: the server's objects carry the names this census computes.
+                std::string wrong;
+                for (const probe& p: r.probes)
+                    if (p.server_rewired && p.server_name != p.frame) wrong += (wrong.empty() ? "" : ", ") + p.server_name + " != " + p.frame;
+                for (const identity& i: r.identities)
+                    if (i.server_copy && i.source != i.copy) wrong += (wrong.empty() ? "" : ", ") + i.source + " != " + i.copy;
+                check("server names", wrong.empty(), wrong);
+            }
+            if (r.have_union) {
+                char text[96];
+                std::snprintf(text, sizeof(text), "union mechanism %016llx all %016llx",
+                              static_cast<unsigned long long>(r.union_mechanism), static_cast<unsigned long long>(r.union_all));
+                check("union signature", r.union_mechanism == r.signature_mechanism && r.union_all == r.signature_all, text);
+            }
             std::string bad;
             for (const probe& p: r.probes)
                 if (p.mechanism && (p.barycenter != 0 || (p.axes != 5 && p.axes != 7) || p.squared != 1))

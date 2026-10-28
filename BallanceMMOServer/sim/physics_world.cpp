@@ -54,27 +54,6 @@ namespace bmmo::sim {
             return matrix;
         }
 
-        // Whether the script only wants a value computed from the ball rather
-        // than the ball itself.  The rope bridge's name test is a parameter
-        // *operation* ("Get Name") feeding a Test block, while a mechanism
-        // that works on the ball (the fan's SetPhysicsForce, its box test)
-        // hands it to a behaviour.  Parameter links live on the reading side
-        // (CKParameterIn::m_OutSource), so the consumers are found by looking
-        // for readers, not through the producer's destination list.
-        std::string operation_on(CKContext* context, CKParameter* value) {
-            if (!context || !value) return {};
-            const int count = context->GetObjectsCountByClassID(CKCID_PARAMETEROPERATION);
-            CK_ID* ids = context->GetObjectsListByClassID(CKCID_PARAMETEROPERATION);
-            for (int i = 0; i < count; ++i) {
-                auto* operation = CKParameterOperation::Cast(context->GetObject(ids[i]));
-                if (!operation) continue;
-                for (CKParameterIn* in: {operation->GetInParameter1(), operation->GetInParameter2()})
-                    if (in && in->GetDirectSource() == value)
-                        return operation->GetName() ? operation->GetName() : "?";
-            }
-            return {};
-        }
-
         // Per-tick hook in the physics manager's PreSimulate pass: the retail
         // callback container executes a new callback immediately and keeps it
         // queued while Execute returns 0, so the first call only arms it and
@@ -106,6 +85,9 @@ namespace bmmo::sim {
     }
 
     physics_world::~physics_world() {
+        // The proximity union's frames and copies (step G1), before the
+        // placement's release takes the copied blocks it may have rewired.
+        if (engine_) proximity_.release(engine_->context());
         // Sector placement: see place_sectors(); the one release helper (step S10), silent here.
         if (engine_) bmmo::game::release_placement(placement_, engine_->context(), "the world is destroyed", {});
         // Players first: their navigation controllers live in the environment.
@@ -277,14 +259,29 @@ namespace bmmo::sim {
         if (!ensure_collision_filter(error)) return false;
         install_airship_zone();
         install_spawn_ghost();
-        rewire_proximity_probes();
-        rewire_ball_identity_reads();
+        // The proximity union (step G1, game/proximity_union.hpp) with the
+        // world option's bit clear: every block, the server's path.  Before
+        // the selection, as the rewire always ran (the CK objects it creates
+        // keep their place in the creation order); classified after it.
+        proximity_.rewire(context, bmmo::game::probe_class::all, {}, proximity_options());
+        for (const std::string& line: proximity_.lines()) log("world: " + line);
         // Step A3 (resync design 2.3): the selection the clients make at
         // their anchor (trafo scripts included, so the three have the same
         // keys) and the force hook over this world, for the resync state's
         // portable record.  Selecting reads the graphs; it changes nothing.
         if (options_.trafo_inputs && !anchor_trafo(error)) return false;
         script_selection_ = bmmo::game::session_script_selection(context, options_.trafo_inputs);
+        proximity_.classify(script_selection_);
+        {
+            char text[160];
+            std::snprintf(text, sizeof(text), "world: proximity union: %zu blocks (mechanism %zu), %zu identity reads "
+                          "(mechanism %zu), signature mechanism %016llx all %016llx, bit clear",
+                          proximity_.probe_count(), proximity_.mechanism_probe_count(), proximity_.identity_count(),
+                          proximity_.mechanism_identity_count(),
+                          static_cast<unsigned long long>(proximity_.signature(bmmo::game::probe_class::mechanism)),
+                          static_cast<unsigned long long>(proximity_.signature(bmmo::game::probe_class::all)));
+            log(text);
+        }
         script_hooks_ = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(manager));   // step HU1: one copy (game/host_backend.hpp)
         // The level's own checkpoint activation, held (game/sector_activation.hpp):
         // update_sectors() is the only path that runs Gameplay_SectorManager in
@@ -467,213 +464,43 @@ namespace bmmo::sim {
         return true;
     }
 
-    void physics_world::rewire_proximity_probes() {
-        CKContext* context = engine_->context();
-        if (CKObject* frame = context->GetObjectByNameAndParentClass(const_cast<CKSTRING>("Ball_Pos_Frame"), CKCID_3DENTITY, nullptr))
-            ball_pos_frame_ = frame->GetID();
-        if (!ball_pos_frame_) {
-            log("world: Ball_Pos_Frame not found; proximity union disabled");
-            return;
+    // The union's options with the world option's bit clear (step G1): the
+    // server's path, with the reset point and the ball names the signature
+    // and the union rules take.
+    bmmo::game::proximity_union::rewire_options physics_world::proximity_options() const {
+        bmmo::game::proximity_union::rewire_options o;
+        if (!resetpoints_.empty()) {
+            o.reset[0] = resetpoints_.front().x;
+            o.reset[1] = resetpoints_.front().y;
+            o.reset[2] = resetpoints_.front().z;
         }
-        const VxMatrix origin = CK3dEntity::Cast(context->GetObject(ball_pos_frame_))->GetWorldMatrix();
-        const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
-        CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
-        for (int i = 0; i < count; ++i) {
-            CKBehavior* block = CKBehavior::Cast(context->GetObject(ids[i]));
-            if (!block || std::string_view(bmmo::game::behavior_prototype_name(block)) != "TT Scaleable Proximity") continue;
-            CKParameterIn* in = block->GetInputParameter(1);   // ObjectA
-            CKParameter* source = in ? in->GetRealSource() : nullptr;
-            CKObject* object = source ? source->GetValueObject() : nullptr;
-            if (!object || object->GetID() != ball_pos_frame_) continue;
-            const std::string name = "BMMO_Prox_" + std::to_string(probes_.size());
-            auto* frame = CK3dEntity::Cast(context->CreateObject(CKCID_3DENTITY, const_cast<CKSTRING>(name.c_str())));
-            if (!frame) continue;
-            frame->SetWorldMatrix(origin);
-            CKParameterLocal* parameter = context->CreateCKParameterLocal(const_cast<CKSTRING>(name.c_str()), CKPGUID_3DENTITY, TRUE);
-            if (!parameter) continue;
-            CK_ID frame_id = frame->GetID();
-            parameter->SetValue(&frame_id, sizeof(frame_id));
-            if (in->SetDirectSource(parameter) != CK_OK) continue;
-            probes_.push_back({block->GetID(), frame_id, parameter->GetID()});
-        }
-        log("world: " + std::to_string(probes_.size()) + " proximity blocks rewired to per-player frames");
+        for (const ball_row& row: ball_rows_) o.ball_names.push_back(row.name);
+        return o;
     }
 
-    // Before the scripts of a tick run: each probe frame goes to the player
-    // ball nearest to the block's ObjectB (the mechanism), so the retail
-    // "any ball in range" test fires for whichever player gets there.
-    void physics_world::update_proximity_probes() {
-        if (probes_.empty()) return;
-        CKContext* context = engine_->context();
-        std::vector<CK3dEntity*> balls;
+    // Before the scripts of a tick run: the union's bit-clear path (what
+    // update_proximity_probes / update_ball_identity_reads did, moved into
+    // game/proximity_union.hpp at step G1): the physicalized player clones in
+    // id order, each with the retail entity of its ball type; with none, the
+    // frames go to Ball_Pos_Frame and the copies name the parked retail ball.
+    void physics_world::place_proximity_legacy() {
+        if (!proximity_.probe_count() && !proximity_.identity_count()) return;
+        std::vector<bmmo::game::proximity_union::legacy_ball> balls;
         for (const auto& [id, p]: players_)
-            if (p.physicalized && p.ball) balls.push_back(p.ball);
-        VxVector fallback(0.0f, 0.0f, 0.0f);
-        if (auto* bpf = CK3dEntity::Cast(context->GetObject(ball_pos_frame_))) bpf->GetPosition(&fallback);
-        for (const auto& probe: probes_) {
-            auto* block = CKBehavior::Cast(context->GetObject(probe.block));
-            auto* frame = CK3dEntity::Cast(context->GetObject(probe.frame));
-            if (!block || !frame) continue;
-            VxVector target = fallback;
-            if (!balls.empty()) {
-                VxVector reference = fallback;
-                if (auto* object_b = CK3dEntity::Cast(block->GetInputParameterObject(2))) object_b->GetPosition(&reference);
-                float best = 0.0f;
-                bool have = false;
-                for (CK3dEntity* ball: balls) {
-                    VxVector position;
-                    ball->GetPosition(&position);
-                    const float distance = (position - reference).SquareMagnitude();
-                    if (!have || distance < best) { best = distance; target = position; have = true; }
-                }
-            }
-            frame->SetPosition(&target);
-        }
+            if (p.physicalized && p.ball) balls.push_back({p.ball, retail_ball_entity(p.ball_type)});
+        proximity_.place_legacy(engine_->context(), balls, retail_ball());
     }
 
-    // Ball identity union (design 8.3).  A mechanism that gates on the ball
-    // type reads the active ball out of the level array and compares its name:
-    // the rope bridge P_Modul_29 does
-    //     TT Scaleable Proximity -> Get Cell(CurrentLevel[0,ActiveBall])
-    //         -> Get Name -> Test(Equal, "Ball_Stone") -> shut the 10 hinges
-    // On the server that cell names the parked retail ball, which starts as
-    // Ball_Wood and never trafos (the retail Trafo Manager sees a ball that
-    // does not move), so the gate stayed shut however many stone balls rolled
-    // over the bridge.  Every such read inside a script whose proximity blocks
-    // were rewired gets a private copy of the array; update_ball_identity_reads
-    // writes the retail entity of the nearest player's ball type into it, so
-    // the retail "the ball on this mechanism decides" semantics hold for
-    // whichever player is there -- the same player the probe frames follow.
-    void physics_world::rewire_ball_identity_reads() {
-        CKContext* context = engine_->context();
-        auto* current_level = CKDataArray::Cast(context->GetObject(current_level_));
-        if (!current_level) return;
-        int ball_column = -1;
-        for (int c = 0; c < current_level->GetColumnCount(); ++c) {
-            CKSTRING column = current_level->GetColumnName(c);
-            if (column && std::string_view(column) == "ActiveBall") { ball_column = c; break; }
-        }
-        if (ball_column < 0) {
-            log("world: CurrentLevel has no ActiveBall column; ball identity union disabled");
-            return;
-        }
-        // The mechanisms (proximity ObjectB) each rewired script watches.
-        std::unordered_map<CK_ID, std::vector<CK_ID>> mechanisms;
-        for (const auto& probe: probes_) {
-            auto* block = CKBehavior::Cast(context->GetObject(probe.block));
-            if (!block) continue;
-            auto* object_b = CK3dEntity::Cast(block->GetInputParameterObject(2));
-            if (!object_b) continue;
-            CKBehavior* root = block;
-            while (root->GetParent()) root = root->GetParent();
-            mechanisms[root->GetID()].push_back(object_b->GetID());
-        }
-        std::map<std::string, int> rewired, untouched;   // for one summary line
-        const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
-        CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
-        for (int i = 0; i < count; ++i) {
-            CKBehavior* block = CKBehavior::Cast(context->GetObject(ids[i]));
-            if (!block || std::string_view(bmmo::game::behavior_prototype_name(block)) != "Get Cell") continue;
-            CKParameterIn* target = block->GetTargetParameter();
-            CKParameter* array_source = target ? target->GetRealSource() : nullptr;
-            CKObject* array = array_source ? array_source->GetValueObject() : nullptr;
-            if (!array || array->GetID() != current_level_) continue;
-            CKParameterIn* column_in = block->GetInputParameterCount() > 1 ? block->GetInputParameter(1) : nullptr;
-            CKParameter* column_source = column_in ? column_in->GetRealSource() : nullptr;
-            int column = -1;
-            if (column_source) column_source->GetValue(&column);
-            if (column != ball_column) continue;
-            CKBehavior* root = block;
-            while (root->GetParent()) root = root->GetParent();
-            const std::string script = root->GetName() ? root->GetName() : "?";
-            auto watched = mechanisms.find(root->GetID());
-            if (watched == mechanisms.end()) {
-                // Retail gameplay logic (Ball_Shadow, Sound_Manager, the
-                // Gameplay scripts): it acts on the parked retail ball and has
-                // to keep doing so.
-                ++untouched[script];
-                continue;
-            }
-            // What the block's consumers want out of the cell decides which
-            // object goes in it: a name test ("Ball_Stone") wants the retail
-            // entity, anything else (P_Modul_18's fan pushes the ball with
-            // SetPhysicsForce and tests its box) wants the body that is
-            // actually there, i.e. the player's clone.
-            const std::string operation = operation_on(context, block->GetOutputParameter(0));
-            const bool by_name = !operation.empty();
-            const std::string name = "BMMO_Ball_" + std::to_string(identities_.size());
-            CKDependencies dependencies;
-            dependencies.Resize(CKCID_MAXCLASSID);
-            dependencies.Fill(0);
-            dependencies.m_Flags = CK_DEPENDENCIES_CUSTOM;
-            dependencies[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
-            // The rows come along, the objects they name are shared.
-            dependencies[CKCID_DATAARRAY] = CK_DEPENDENCIES_COPY_DATAARRAY_DATA;
-            const std::string suffix = "_" + name;
-            auto* copy = CKDataArray::Cast(context->CopyObject(current_level, &dependencies,
-                                                               const_cast<CKSTRING>(suffix.c_str())));
-            if (!copy) {
-                log("world: CopyObject failed for CurrentLevel; ball identity union disabled for " + script);
-                continue;
-            }
-            if (copy->GetRowCount() == 0) copy->AddRow();
-            CKParameterLocal* parameter = context->CreateCKParameterLocal(const_cast<CKSTRING>(name.c_str()),
-                                                                          CKPGUID_DATAARRAY, TRUE);
-            if (!parameter) continue;
-            CK_ID array_id = copy->GetID();
-            parameter->SetValue(&array_id, sizeof(array_id));
-            if (target->SetDirectSource(parameter) != CK_OK) continue;
-            identities_.push_back({block->GetID(), array_id, parameter->GetID(), ball_column, by_name,
-                                   watched->second});
-            ++rewired[script + (by_name ? " (" + operation + ")" : " (body)")];
-        }
-        const auto describe = [](const std::map<std::string, int>& counts) {
-            std::string text;
-            for (const auto& [script, count]: counts)
-                text += (text.empty() ? "" : ", ") + script + " x" + std::to_string(count);
-            return text.empty() ? std::string("none") : text;
-        };
-        log("world: " + std::to_string(identities_.size()) + " ball identity reads rewired to per-player copies ("
-            + describe(rewired) + "); left on the retail array: " + describe(untouched));
+    int physics_world::release_proximity() {
+        return proximity_.release(engine_->context());
     }
 
-    // Before the scripts of a tick run: the ActiveBall cell of every private
-    // copy names the ball of the player nearest to one of that script's
-    // mechanisms -- the retail entity of that player's ball type where the
-    // script tests the name ("Ball_Stone"), the player's clone where it works
-    // on the ball itself (the fan's SetPhysicsForce and box test), so both the
-    // name and the body are the ones actually on the mechanism.  With no
-    // player around it keeps naming the parked retail ball, which is what the
-    // retail script would have read.
-    void physics_world::update_ball_identity_reads() {
-        if (identities_.empty()) return;
-        CKContext* context = engine_->context();
-        for (const auto& identity: identities_) {
-            auto* array = CKDataArray::Cast(context->GetObject(identity.array));
-            if (!array) continue;
-            CKObject* active = retail_ball();
-            float best = 0.0f;
-            bool have = false;
-            for (const auto& [id, p]: players_) {
-                if (!p.physicalized || !p.ball) continue;
-                CK3dEntity* entity = identity.by_name ? retail_ball_entity(p.ball_type) : p.ball;
-                if (!entity) continue;
-                VxVector position;
-                p.ball->GetPosition(&position);
-                for (CK_ID reference: identity.references) {
-                    auto* mechanism = CK3dEntity::Cast(context->GetObject(reference));
-                    if (!mechanism) continue;
-                    VxVector origin;
-                    mechanism->GetPosition(&origin);
-                    const float distance = (position - origin).SquareMagnitude();
-                    if (have && distance >= best) continue;
-                    best = distance;
-                    have = true;
-                    active = entity;
-                }
-            }
-            array->SetElementObject(0, identity.column, active);
-        }
+    std::string physics_world::rewire_proximity(bool union_rules, bmmo::game::probe_class which) {
+        auto options = proximity_options();
+        options.union_rules = union_rules;
+        const std::string error = proximity_.rewire(engine_->context(), which, script_selection_, options);
+        for (const std::string& line: proximity_.lines()) log("world: " + line);
+        return error;
     }
 
     bool physics_world::attach_player_to_retail_ball(uint32_t id, std::string& error) {
@@ -1077,8 +904,7 @@ namespace bmmo::sim {
                 log("world: navigation keys known at tick " + std::to_string(tick_) + ": " + keys);
             }
         }
-        update_proximity_probes();
-        update_ball_identity_reads();
+        place_proximity_legacy();
         update_sectors();
         // The trafo frame (design 2.5): after the tick's inputs and the
         // union's pass, before the behaviour pass and the step - every

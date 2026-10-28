@@ -433,6 +433,12 @@ namespace {
         // gating probes, units and the signature; read-only, a mode of its
         // own (--level N [--placement on] [--world-options B]).
         bool probe_census = false;
+        // Step WG1 (§7.2 V5): --release-check with --probe-census: after the
+        // census, the world's proximity union is released, rewired (the
+        // anchor's bit-clear rewire), released, rewired under the union rules
+        // for the mechanism class (the clients' rewire, §2.3) and released
+        // again; each state is checked against the first census.
+        bool probe_release_check = false;
         // Step K0 (record-format-gaps-design.md §8, read-only tools):
         // --array-reads [--client-scope] [--array-reads-all]: the array-read
         // census of --level's session world at its anchor (design 2.2, S2;
@@ -936,7 +942,8 @@ namespace {
             else if (arg == "--ball-off-wake-only") out.ball_off_wake_only = true;      // step EG0
             else if (arg == "--ball-off-drop-all") out.ball_off_drop_all = true;        // step EG0
             else if (arg == "--queue-roundtrip") out.queue_roundtrip = true;            // step B7EG
-            else if (arg == "--probe-census") out.probe_census = true;                  // step WG0
+            else if (arg == "--probe-census" || arg == "--release-check")               // steps WG0, WG1 (one branch: C1061)
+                (arg == "--probe-census" ? out.probe_census : out.probe_release_check) = true;
             else if (!parse_trafo_arg(arg, next, out) && !parse_record_format_arg(arg, next, out)) return false;
         }
         // --list of a journal and the savestate file verbs are pure file
@@ -3358,10 +3365,7 @@ namespace {
             // without this a replayed proximity block measured the frame where
             // the live world's last tick left it (its "Current Distance"
             // differed in 47 of 50 rounds with no pass in the window).
-            if (frames) {
-                world->update_proximity_probes();
-                world->update_ball_identity_reads();
-            }
+            if (frames) world->place_proximity_legacy();   // step G1: game/proximity_union.hpp's bit-clear path
         };
         binding_options.on_savestate_restored = [&](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
             if (!ok) {
@@ -8340,6 +8344,8 @@ namespace {
                                        || args.portable_scripts_check || args.list_placement || args.resync_check
                                        || args.late_sector_check || !args.late_run.empty()))
             why = "--probe-census is a mode of its own (--level N [--world-options B] [--placement on])";   // step WG0
+        else if (args.probe_release_check && !args.probe_census)
+            why = "--release-check goes with --probe-census";   // step WG1
         else if (args.globals_trace && (file_mode || !scene || args.late_sector_check || !args.late_run.empty()
                                         || args.resync_check || args.portable_scripts_check || args.list_placement))
             why = "--globals-trace is for the drop scene (--drop) and the sector scene (--savestate-check without "
@@ -8397,17 +8403,118 @@ namespace {
     // selection is the one every world makes (session_script_selection,
     // with the world's trafo bit).  Exit 0 PASS, 3 FAIL, 1 when the world
     // fails.
+    int probe_release_check(bmmo::sim::physics_world& world, const bmmo::game::script_replay::selection& sel,
+                            const bmmo::sim::probe_census::result& first);   // step WG1, below
+
     int run_probe_census(const arguments& args) {
         auto world = create_session_world(args, 0.0f);
         if (!world) return 1;
         CKContext* context = world->engine().context();
         const bool trafo = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
         const auto sel = bmmo::game::session_script_selection(context, trafo);
-        const auto census = bmmo::sim::probe_census::run(context, sel, world->placement(), world->resetpoints(),
-                                                         world->proximity_probe_count());
-        const int code = bmmo::sim::probe_census::print(census, world->level(), args.placement);
+        auto census = bmmo::sim::probe_census::run(context, sel, world->placement(), world->resetpoints(),
+                                                   world->proximity_probe_count());
+        // Step WG1: the world's union (game/proximity_union.hpp) gives the census's signatures.
+        census.have_union = true;
+        census.union_mechanism = world->proximity().signature(bmmo::game::probe_class::mechanism);
+        census.union_all = world->proximity().signature(bmmo::game::probe_class::all);
+        int code = bmmo::sim::probe_census::print(census, world->level(), args.placement);
+        if (args.probe_release_check) {
+            const int v5 = probe_release_check(*world, sel, census);
+            if (code == 0) code = v5;
+        }
         std::fflush(stdout);   // before the world goes: the engine's shutdown may not return through main
         return code;
+    }
+
+    // --probe-census --release-check (§7.2 V5, step WG1).  0 PASS, 3 FAIL.
+    int probe_release_check(bmmo::sim::physics_world& world, const bmmo::game::script_replay::selection& sel,
+                            const bmmo::sim::probe_census::result& first) {
+        CKContext* context = world.engine().context();
+        bool pass = true;
+        const auto check = [&pass](const char* name, bool ok, const std::string& detail) {
+            std::printf("check %-22s %s%s%s\n", name, ok ? "PASS" : "FAIL", detail.empty() ? "" : "  ", detail.c_str());
+            pass = pass && ok;
+        };
+        const auto census = [&]() {
+            return bmmo::sim::probe_census::run(context, sel, world.placement(), world.resetpoints(),
+                                                world.proximity_probe_count());
+        };
+        // Objects of the union still in the world (frames, copies, their locals, BMMO_NoBall).
+        const auto leftovers = [context]() {
+            size_t n = 0;
+            for (CK_CLASSID cid: {CKCID_3DENTITY, CKCID_DATAARRAY, CKCID_PARAMETERLOCAL}) {
+                const int count = context->GetObjectsCountByClassID(cid);
+                CK_ID* ids = context->GetObjectsListByClassID(cid);
+                for (int i = 0; i < count; ++i) {
+                    CKObject* o = context->GetObject(ids[i]);
+                    const char* name = o ? o->GetName() : nullptr;
+                    if (!name) continue;
+                    const std::string_view v(name);
+                    if (v.rfind("BMMO_Prox_", 0) == 0 || v.rfind("CurrentLevel#BMMOId_", 0) == 0 || v == "BMMO_NoBall") ++n;
+                }
+            }
+            return n;
+        };
+        const auto hex = [](uint64_t v) {
+            char text[20];
+            std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(v));
+            return std::string(text);
+        };
+        size_t mech = 0, mech_ids = 0;
+        for (const auto& p: first.probes) mech += p.mechanism ? 1u : 0u;
+        for (const auto& i: first.identities) mech_ids += i.in_mechanism ? 1u : 0u;
+        const size_t all = first.probes.size(), ids = first.identities.size();
+        const auto released = [&](const char* label, int restored, size_t expected) {
+            const auto r = census();
+            const size_t left = leftovers();
+            check(label, static_cast<size_t>(restored) == expected && r.unrewired == r.probes.size()
+                             && r.probes.size() == all && r.identities_on_original == r.identities.size()
+                             && r.identities.size() == ids && left == 0 && world.proximity_probe_count() == 0
+                             && r.signature_mechanism == first.signature_mechanism && r.signature_all == first.signature_all,
+                  "restored " + std::to_string(restored) + " of " + std::to_string(expected) + ", on Ball_Pos_Frame "
+                      + std::to_string(r.unrewired) + "/" + std::to_string(r.probes.size()) + ", reads on CurrentLevel "
+                      + std::to_string(r.identities_on_original) + "/" + std::to_string(r.identities.size())
+                      + ", union objects left " + std::to_string(left));
+        };
+        std::printf("release check: the anchor's union %zu blocks, %zu identity reads; mechanism %zu, %zu\n", all, ids,
+                    mech, mech_ids);
+        released("release 1", world.release_proximity(), all + ids);
+        // The anchor's rewire again (bit clear, every block).
+        std::string error = world.rewire_proximity(false, bmmo::game::probe_class::all);
+        {
+            const auto r = census();
+            check("rewire bit clear", error.empty() && r.unrewired == 0 && r.probes.size() == all
+                                          && r.identities_on_original == 0 && r.identities.size() == ids
+                                          && world.proximity_probe_count() == all
+                                          && r.signature_mechanism == first.signature_mechanism
+                                          && r.signature_all == first.signature_all
+                                          && world.proximity().signature(bmmo::game::probe_class::mechanism) == first.signature_mechanism
+                                          && world.proximity().signature(bmmo::game::probe_class::all) == first.signature_all,
+                  error.empty() ? "signature mechanism " + hex(world.proximity().signature(bmmo::game::probe_class::mechanism))
+                                      + " all " + hex(world.proximity().signature(bmmo::game::probe_class::all))
+                                : error);
+        }
+        released("release 2", world.release_proximity(), all + ids);
+        // The clients' rewire: the mechanism class under the union rules (§2.3).
+        error = world.rewire_proximity(true, bmmo::game::probe_class::mechanism);
+        {
+            const auto r = census();
+            const bool no_ball = world.proximity().no_ball() && context->GetObject(world.proximity().no_ball());
+            check("rewire union rules", error.empty() && world.proximity_probe_count() == mech
+                                            && world.proximity().identity_count() == mech_ids
+                                            && r.unrewired == all - mech && no_ball
+                                            && world.proximity().signature(bmmo::game::probe_class::mechanism) == first.signature_mechanism,
+                  error.empty() ? "blocks " + std::to_string(world.proximity_probe_count()) + ", reads "
+                                      + std::to_string(world.proximity().identity_count()) + ", left on Ball_Pos_Frame "
+                                      + std::to_string(r.unrewired) + ", signature mechanism "
+                                      + hex(world.proximity().signature(bmmo::game::probe_class::mechanism))
+                                      + (no_ball ? ", BMMO_NoBall" : ", no BMMO_NoBall")
+                                : error);
+        }
+        released("release 3", world.release_proximity(), mech + mech_ids);
+        std::printf("RELEASE-CHECK: %s\n", pass ? "PASS" : "FAIL");
+        return pass ? 0 : 3;
     }
 
 }

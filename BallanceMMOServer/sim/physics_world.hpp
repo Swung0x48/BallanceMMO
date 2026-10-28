@@ -34,6 +34,7 @@
 
 #include <entity/session.hpp>
 #include <game/navigation_graph.hpp>
+#include <game/proximity_union.hpp>
 #include <game/script_replay.hpp>
 #include <game/script_state.hpp>
 #include <game/checkpoint_phase.hpp>
@@ -314,21 +315,25 @@ namespace bmmo::sim {
         // environment RNG).  Runs in the PreSimulate pass of the tick the retail
         // script physicalizes it and is re-checked after every tick.
         bool park_retail_ball();
-        // Proximity union (design 8.3): every "TT Scaleable Proximity" whose
-        // ObjectA is Ball_Pos_Frame is rewired to a private frame that is moved,
-        // every tick, to the player ball nearest that block's ObjectB.
-        void rewire_proximity_probes();
-        void update_proximity_probes();
-        size_t proximity_probe_count() const { return probes_.size(); }
-        // Ball identity union (design 8.3): a mechanism that gates on the
-        // active ball (the rope bridge P_Modul_29 tears only for "Ball_Stone")
-        // reads CurrentLevel[0,ActiveBall], which on the server names the
-        // parked retail ball and never changes.  Every such read inside a
-        // script whose proximity blocks were rewired is retargeted at a
-        // private copy of the array whose ActiveBall cell follows the player
-        // the probe frames follow.
-        void rewire_ball_identity_reads();
-        void update_ball_identity_reads();
+        // Proximity union (design 8.3; world-agreement-gaps-design.md §2.3,
+        // step G1: game/proximity_union.hpp): every "TT Scaleable Proximity"
+        // whose ObjectA is Ball_Pos_Frame is rewired to a private frame, and
+        // every CurrentLevel[0,ActiveBall] read inside such a script to a
+        // private copy of the array.  The world option's bit is clear, so the
+        // union keeps the server's path (place_legacy): every tick each frame
+        // goes to the player ball nearest that block's ObjectB, and each copy
+        // names the player nearest to one of its script's mechanisms (the
+        // retail entity of its ball type where the script tests the name -
+        // the rope bridge P_Modul_29 tears only for "Ball_Stone" - its clone
+        // otherwise).
+        void place_proximity_legacy();
+        size_t proximity_probe_count() const { return proximity_.probe_count(); }
+        const bmmo::game::proximity_union& proximity() const { return proximity_; }
+        // SimTool's --probe-census --release-check (§7.2 V5): release the
+        // union, and rewire it again (`union_rules`: §2.3 under the bit, with
+        // `which`; otherwise the anchor's bit-clear rewire of every block).
+        int release_proximity();
+        std::string rewire_proximity(bool union_rules, bmmo::game::probe_class which);
         CK3dEntity* retail_ball() const;
         // Runs in the physics manager's PreSimulate pass of every tick: after
         // the scripts of that tick, before its PSIs.  Parks the retail ball
@@ -456,25 +461,9 @@ namespace bmmo::sim {
         bmmo::game::sector_cell_split sector_cell_;   // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;
-        struct proximity_probe { CK_ID block = 0; CK_ID frame = 0; CK_ID parameter = 0; };
-        std::vector<proximity_probe> probes_;
-        // A "Get Cell" that reads the active ball of a mechanism script: the
-        // block, the private CurrentLevel copy it reads instead, the local
-        // parameter that feeds it, the ActiveBall column, whether the script
-        // only tests the ball's name (then it gets the retail entity of the
-        // player's ball type, otherwise the player's clone) and the mechanisms
-        // (proximity ObjectB) the script watches.
-        struct identity_probe {
-            CK_ID block = 0;
-            CK_ID array = 0;
-            CK_ID parameter = 0;
-            int column = 1;
-            bool by_name = false;
-            std::vector<CK_ID> references;
-        };
-        std::vector<identity_probe> identities_;
+        bmmo::game::proximity_union proximity_;   // step G1 (game/proximity_union.hpp)
+        bmmo::game::proximity_union::rewire_options proximity_options() const;
         CK_ID current_level_ = 0;
-        CK_ID ball_pos_frame_ = 0;
         // The session's script selection (game/session_host_support.hpp
         // session_script_selection: the selection both clients make at their
         // anchor, so the three have the same keys) and the force hook over

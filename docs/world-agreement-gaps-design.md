@@ -24,7 +24,9 @@ code at HEAD 473f6e8 where it adds a reference; the older references keep
 their 2026-10-23 line numbers.
 
 Status: design; step G0 built (WG0, 2026-10-28: SimTool `--probe-census`,
-§12 "As built (step WG0)"), G1-G6, M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
+§12 "As built (step WG0)"), step G1 built (WG1, 2026-10-28: parts A and B,
+the server on them with the bit clear, §12 "As built (step WG1)"), G2-G6,
+M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
 `session_host_support.hpp`, `session_host_world.hpp`, `session_client.cpp` and
@@ -1582,7 +1584,7 @@ to its root cause and reported as symptom, cause and options (principle d).
 |---|---|---|
 | V1 | `--probe-census` (new; read-only): rewire per class on L1-L12 and the arena; prints per block the frame name, ObjectB, Distance, axes, `Use Outputs`, Barycenter, and per identity read its kind and gating probe, and the signature | mechanism counts equal §1.1.2's table (3, 32, 15, 12, 14, 29, 25, 14, 27, 32, 32, 43, 12); `all` counts equal the server's today (18 ... 24); identity counts equal; **on all 290 blocks**: Barycenter 0, axes 5 or 7, squared 1; every identity read has exactly one gating probe; names unique; with SPD `--placement on`, counts grow by exactly the copied rows' blocks |
 | V2 | `--drop` two-player variant (`--drop-player-at` for a second clone): one ball at XZ 40 m / 60 m below a 50 m XZ probe, the other at XZ 55 m level; and P_Modul_29 with a stone ball 3 m from #47687 and a wood ball nearer in 3D to #47688 | the block fires under the bit, not with it off; the bridge breaks under the bit, not with it off (G-c5) |
-| V3 | `--replay-session maps/arena-test/lp1_join/server.bmjr` (bit clear) | `matched=3528`, `checkpoint_mismatches=0` |
+| V3 | `--replay-session` (bit clear) of the current reference set's server journals (`maps/arena-test/core_ref_s9/*/server.bmjr` as of WG1), with the step's SimTool and with the previous step's. *Revised at WG1:* the row named `lp1_join/server.bmjr` with `matched=3528`; that journal replays 205 of 4135 ticks on every current build (the world changed under it after it was recorded) | every journal `matched` = its ticks, `checkpoint_mismatches=0`; the two SimTools' outputs identical |
 | V4 | `--savestate-check` with two players and a probe in range, chained rollbacks across a no-candidate interval (both dead) | blobs and script records byte-identical to the straight run; `skipped` 0 |
 | V5 | release: rewire, release, rewire on the same level | the second census and signature equal the first; no `BMMO_Prox_*` left after release |
 | V6 | revision 3: `--probe-census --player-mechanisms K` (K = 2 and 8) on L1-L13 and the arena, placement off and on | units per level equal §1.1.2's identity column (58 fans, 13 bridges on L1-L13; placed units added with the placement on), every unit of one of the two shapes; each copy's structure equals its original's (prototype, IO counts, links and delays by the rule, local values, activation); copy walk order and names unique; release (after V5's) leaves the pre-copy graph (block count, links, sources) and the pre-copy signature; the same listing from the x64, x86 (`build/sim-x86-a3`) and Linux SimTool apart from block ids |
@@ -2071,3 +2073,152 @@ Q7); the release round trip is V5 (G1). `probe_census.hpp` has been compiled
 by MSVC x64 only: the GCC syntax check (`linux_test_syntax.sh`) covers the
 test target and the session core, not SimTool, so the first GCC compile of
 the census is the Linux SimTool build of V6.
+
+### As built (step WG1, 2026-10-28): G1, parts A and B, the server moved onto them
+
+**What exists.**
+- *Part A*, `BallanceMMOCommon/include/session/proximity_rules.hpp` (new,
+  CK-free): `probe_ball`, `probe_candidate` (the CK-free type §2.5 moves out
+  of CP's way; `bmmo::game::probe_candidate` is an alias of it),
+  `probe_metric(a, b, axes)` (SPX's order: z, y, x, each `d*d` added onto 0,
+  `d = b - a`) and `probe_nearest(balls, reference, axes)` (strict `<`, so
+  the first, i.e. the lowest player id, on a tie; -1 when empty; the ball is
+  ObjectA's posA, the reference ObjectB's posB, as the block has them).
+- *Part B*, `BallanceMMOCommon/include/game/proximity_union.hpp` (new,
+  public CK2 API only): the class `proximity_union` with §2.3's `rewire`,
+  `place`, `capture` / `restore` (§4.2's hold section), `signature`,
+  `release`, `describe`, `skipped`, `relatched`, and `has_body` (the host's
+  body test for place's consistency check); `proximity_operation_on` is
+  PW's `operation_on`, moved unchanged.
+- *The server* (PW): the anchor calls `proximity_.rewire(all, {},
+  options)` where `rewire_proximity_probes` / `rewire_ball_identity_reads`
+  ran, and `classify(script_selection_)` once the selection exists; the
+  tick calls `place_proximity_legacy()` where the two updates ran; the world's
+  destructor releases the union before the placement's release. The anchor
+  logs one more line, `world: proximity union: N blocks (mechanism M), K
+  identity reads (mechanism J), signature mechanism S all A, bit clear`.
+- *SimTool*: `--probe-census` now also checks `server names` (the server's
+  frames and copies carry the census's §2.3 names) and `union signature` (the
+  world's `proximity_union::signature()` equals the census's, mechanism and
+  all); `--probe-census --release-check` is V5 (below). The S7 savestate
+  scene's per-tick hook calls `place_proximity_legacy()`. `array_census.hpp`
+  reads the new copy names as server copies.
+- *U1*: `BallanceMMOServer/tests/proximity_rules_test.cpp` (3 tests, in
+  `BallanceMMOMessageTests`).
+
+**Adaptations (the code is what it is).**
+- *Two paths in one class.* "The server on `proximity_union` with the bit
+  clear (today's path, moved)": `place_legacy` is the server's code moved
+  unchanged (3D `SquareMagnitude`, the nearest clone, the `Ball_Pos_Frame`
+  fallback, the identity by the nearest player to ANY ObjectB of the script,
+  the parked retail ball as its fallback), and `rewire_options::union_rules`
+  false keeps the server's rewire: frames start at `Ball_Pos_Frame`'s world
+  matrix, no `BMMO_NoBall`, a read is rewired whatever its gating probes, a
+  failed creation skips that block. `place` and `union_rules` true are §2.2 /
+  §2.3 under the bit, for G2 (the server) and G3 (the clients); in G1 only
+  V5 exercises the union-rules rewire, and `place`, `capture` and `restore`
+  are compiled but run by no check yet (G2's V2 and V4 are their checks).
+- *The creation order is kept, the names change.* The rewire walks the
+  behaviour list as the server did, frames (entity, then its parameter local)
+  and then the copies (CopyObject, AddRow, parameter local), with the same
+  CK calls in the same order (`GetValueObject` and `GetValue` with their
+  default update where the server used them; every new read is
+  `update = FALSE`), so every later CK object gets the id it had before G1.
+  The objects take §2.3's names (`BMMO_Prox_<owner>_<n>`,
+  `CurrentLevel#BMMOId_<owner>_<n>`; the parameter locals carry the same
+  names); nothing reads them but the logs and SimTool's censuses.
+- *The server rewires before its selection exists.* §2.3's `rewire(ctx,
+  which, sel)` takes the selection; the server's anchor makes the selection
+  after the rewire (and after `anchor_trafo`), so it passes an empty one
+  for class `all` and calls the new `classify(sel)` afterwards. Moving the
+  rewire after the selection would move the CK objects it creates.
+- *Release at world teardown.* §2.4's SV release runs in `~physics_world`,
+  before `release_placement` (whose copies' blocks the union may have
+  rewired; `release` looks every block up by id and skips one that is gone).
+- *The union rules refuse, the bit-clear path does not.* With `union_rules`
+  a missing `Ball_Pos_Frame` / `CurrentLevel` / ActiveBall column, a block
+  with Barycenter 1, a read with no or two gating probes, or a failed
+  creation releases everything done and returns the reason (all or nothing).
+- *V3's journal no longer replays on the pre-step build.*
+  `maps/arena-test/lp1_join/server.bmjr` (an old protocol's journal)
+  replays `matched=205` of 4135, `first_divergence=232`,
+  `checkpoint_mismatches=1965` with the pre-step SimTool (build-agent-rWG0)
+  already: the world has changed under it since it was recorded (V3's old
+  `matched=3528` is not reachable by any current build; §7.2's V3 row is
+  rewritten to the recipe below). V3's intent ("with
+  the bit clear PW keeps today's path, old journals replay unchanged") is
+  judged as the pre-step and the step's SimTool giving the same replay
+  (identical summaries and stdout, the anchor's new log line and wall-clock
+  fields aside), and by the current reference set's server journals, which
+  both replay in full (below).
+
+**Results** (x64 MSVC; `.local-tools/work/WG1`).
+- U1: `BallanceMMOMessageTests` 590/590 (3 new). The pinned constants are
+  the same from `u1_gen.cpp` built by GCC 16.2.1 (WSL Arch, -O2) and by MSVC
+  x86 (PE machine 0x14c, /O2 /fp:precise): `u1_gcc.txt` = `u1_x86.txt`.
+- V1 + V5 (`v1v5_all.py`, L1-L13, placement off and on, 26 runs): every run
+  `PROBE-CENSUS: PASS` (`server names` and `union signature` included) and
+  `RELEASE-CHECK: PASS`; every signature equals WG0's table (mechanism and
+  all); every census line equals WG0's run (`.local-tools/work/WG0/v1c`) but
+  the server copies' names. V5: the release puts back every input (arena:
+  26 of 26 = 24 blocks + 2 reads), leaves no `BMMO_Prox_*`,
+  `CurrentLevel#BMMOId_*` or `BMMO_NoBall` object, and the census then finds
+  every block on `Ball_Pos_Frame` and every read on `CurrentLevel` with the
+  same signatures; the bit-clear rewire again gives the first census's
+  signatures; the union-rules rewire of the mechanism class (the clients'
+  rewire) takes exactly the census's mechanism blocks and reads (arena 12 and
+  2), makes `BMMO_NoBall` and gives the mechanism signature; its release
+  leaves nothing (arena 14 of 14).
+- The arena regression: the server journals of `core_ref_s9`
+  (resync_snapoff 4122, swing_snapoff 3888, l8_cross 3166 with the
+  placement, solo1 2911, solo2 2895 ticks) replay `matched` = ticks,
+  `checkpoint_mismatches=0`, with the step's SimTool and with the pre-step
+  one, the two outputs identical (`server_replays.sh`); the wire check
+  rWG0 vs rWG1 over `core_ref_s9`: 12/12 sends SAME, 12/12 journals
+  IDENTICAL, `WIRE-CHECK: ALL SAME`.
+- Live smoke (Arch server rebuilt from this tree, 4 headless clients, the
+  harness's default four sector sessions of 60 s, snapshots off, placement
+  on): the four server journals replay 4518/4590/4251/4612 matched, and the
+  pre-step SimTool replays the same four journals in full too (the server's
+  world under the step is the pre-step code path's for the same inputs).
+  Sector 1 PASS; sectors 2-4 FAIL on resyncs and input starvation (sector 4:
+  clients 0 and 1 rebased at 886 and ran ~22 ticks late for the rest of the
+  session, starvation 2755/3581). UNATTRIBUTED: its signature is input
+  relay (sector 2: 7-11 resyncs and rebases per client, relayed frames past
+  the 48-tick rollback reach, relay lag max 60-61, starvation 431-606), and
+  no pre-step control at the same settings was run (the 15-minute budget);
+  the earlier four-sector smokes `el6_smoke` / `el6_smoke2` (0 resyncs, 0
+  starvation) ran a 150 ms proxy and are no control either. What is
+  established: the server's world under the step is the pre-step code's for
+  the same inputs (the replays above), the headless clients are unchanged
+  (the wire check), and no path of the diff reaches input timing (the
+  per-tick cost fell: one `retail_ball_entity` lookup per player instead of
+  per read and player; the release runs only at world teardown, between
+  sessions). Queued for FULL: a pre-step four-sector control at the same
+  settings (`build-agent-rWG0` clients, the pre-step Arch server).
+
+**Left for later steps** (the review's notes, none reached by G1's bit-clear
+path).
+- *G3, re-anchor without release.* `rewire()` starts with `clear()`, which
+  forgets the objects of a previous rewire without releasing them; a host
+  that re-anchors on the same level without `release()` would find no
+  `Ball_Pos_Frame` source, rewire 0 blocks and leak the old frames (visible
+  only as a signature mismatch). G3 makes `rewire()` release a non-empty
+  union first (`if (!probes_.empty() || !identities_.empty())
+  release(context);`), with V5's rewire-release-rewire as its check.
+- *G2, the latch and a null output.* Under the bit `place()` re-points a Get
+  Cell output that is still null (a block that has never run) to
+  `BMMO_NoBall` or the chosen ball, and `relatched` counts it; §2.2 speaks of
+  an output that "names an entity that is not" a candidate's. G2 either
+  skips a null output or records this reading in its as-built note.
+- *G3, the hold section order.* The capture orders the hold section (owner,
+  script, walk); §4.2 says walk order per owner, selection order. Equal in
+  every world, but G3 records it as an adaptation when it puts the section
+  in the savestate.
+- *G3, the retail SDK.* `proximity_union.hpp` uses the public CK2 API only
+  (§2.3) but has been compiled against the x64 server SDK and GCC only; the
+  first x86 translation unit including it (G3's, or a compile-only TU in
+  `build/sim-x86-a3`) is its check.
+- `game/checkpoint_phase.hpp:35` still names
+  `physics_world::rewire_ball_identity_reads` in a comment (a retail-compiled
+  header; G6's documentation pass).

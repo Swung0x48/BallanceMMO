@@ -28,7 +28,8 @@
 //               census sees blocks only: a native writer (a CK manager, host
 //               C++) would not show; step K2 confirms the class;
 //   private     the array is a session-private copy (a name with "BMMO_":
-//               the server's ball identity copies "CurrentLevel_BMMO_Ball_N",
+//               the server's ball identity copies "CurrentLevel#BMMOId_*"
+//               (step G1; "CurrentLevel_BMMO_Ball_N" before),
 //               the checkpoint phase copy);
 //   recorded    (array, row 0, column) is one of the record's three cells
 //               (game/script_replay.hpp cell_of: CurrentLevel[0][4],
@@ -44,7 +45,7 @@
 //   unrecorded  anything else.
 //
 // Scope.  The server's world rewires its ball identity reads to private
-// copies at the anchor (physics_world::rewire_ball_identity_reads); a client
+// copies at the anchor (game/proximity_union.hpp since step G1); a client
 // world (the headless client, the retail core host) does not while the
 // world-agreement design's bit is clear.  `client_scope` classifies a read of
 // a server ball identity copy as a read of the array it was copied from, i.e.
@@ -397,14 +398,16 @@ namespace bmmo::sim {
         }
 
         static kind classify(entry& e, bool client_scope) {
-            static const char* const kBallCopy = "_BMMO_Ball_";
-            const size_t copy = e.array.find(kBallCopy);
+            // The server's ball identity copies: "CurrentLevel#BMMOId_<owner>_<n>"
+            // since step G1 (game/proximity_union.hpp), "CurrentLevel_BMMO_Ball_N" before.
+            size_t copy = e.array.find("#BMMOId_");
+            if (copy == std::string::npos) copy = e.array.find("_BMMO_Ball_");
             if (client_scope && copy != std::string::npos) {
                 // A client world (the world-agreement bit clear) has no such
                 // copy: its block reads the array the server copied.
                 e.note = "(server reads " + e.array + ")";
                 e.array.resize(copy);
-            } else if (e.array.find("BMMO_") != std::string::npos) {
+            } else if (e.array.find("BMMO_") != std::string::npos || e.array.find("#BMMOId_") != std::string::npos) {
                 return kind::private_copy;
             }
             for (int c = 0; c < bmmo::game::script_replay::kCellCount; ++c) {
