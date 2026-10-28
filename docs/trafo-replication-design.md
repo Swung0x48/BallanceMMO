@@ -16,8 +16,9 @@ decision of 2026-10-25 and was re-gated at TR3b on top of RC1 and RL1
 under its original H1 (c): one H1 pair at 150 ms, snapshots off (the
 user's one-pair rule of 2026-10-27, §11), starved 0 / 0 / 0 / 0 against
 the same-batch control's 0 / 0 / 0 / 0. Step T4 built (the retail host,
-quick tier: §8, "As built (step TR4 = T4)"; `physics.trafo_inputs` still
-off by default, adaptation M2). Step T5 done (the records: §8, "As built
+quick tier: §8, "As built (step TR4 = T4)"; `physics.trafo_inputs` off by
+default until step B9DX, adaptation M2, closed by the user's ruling of
+2026-10-28: on by default since B9DX, §11.2). Step T5 done (the records: §8, "As built
 (step TR5 = T5)"). Commits: T1 2e6f026, T2 074f6d5, T3 3394ffd (step
 TR3b), T4 3940bf3 (step TR4). **The track is built; what it leaves open**
 (the default of `physics.trafo_inputs`, the deferred checks, three retail
@@ -2717,7 +2718,10 @@ quick tier).**  The retail host runs the trafo as an input with
     snapshots on) passes: decision (b) of 2026-10-25 put that check there,
     and deployments run snapshots on.  T2's and T3's "T4 turns the default
     on" is adapted; the runs below set it per run (`arch_server_lp.sh`'s
-    eighth argument).
+    eighth argument).  **Closed at step B9DX** (§11.2): the close-out ran
+    with snapshots off at RCX (H4 passed, H6 failed its literal band) and
+    the user ruled on 2026-10-28, "打开" (turn it on): H6 is judged by its
+    absolute limits and the default is on (`config_manager.hpp:91`).
   - **The originals' restore** (`trafo_set_hooks::restore_originals`) is
     empty in retail: the mod has no bridge call for
     `restore_explosion_pieces` alone, and the quiesce runs right before
@@ -2876,7 +2880,8 @@ run.
 - **Left open by the track** (each queued in `docs/roadmap.md` §4):
   - `physics.trafo_inputs` stays **off** by default (adaptation M2) until
     the rewind-cost close-out (H4 / H6 with snapshots on, decision (b) of
-    2026-10-25) passes; T3's remaining cost is per rewind: t_rep 0.99-1.15 s
+    2026-10-25) passes [**closed at B9DX**: run with snapshots off at RCX,
+    passed by the user's ruling of 2026-10-28, on by default, §11.2]; T3's remaining cost is per rewind: t_rep 0.99-1.15 s
     against the control's 0.34-0.41 s, t_max 43-46 ms against 12-14 ms
     (TR3b's pair).
   - The checks deferred to the final verification: TR3b's (a)-(g) and
@@ -3201,3 +3206,17 @@ frame number), and one was resolved by the alternative its reviewer offered
 - **H1 (c), the ruling left open above** (made 2026-10-25, §11: "然后 T3 按原门槛
   H1 (c) 重新过"): it stays T3's gate, judged once RC1 has fixed the stale
   tail; it passed at TR3b (§8, "As built (step TR3b)").
+
+## 11.2 Decisions (user, 2026-10-28)
+
+- **The default of `physics.trafo_inputs` (adaptation M2).** Asked after
+  the rewind-cost close-out (`rewind-cost-design.md` "As built (step RCX)":
+  with snapshots off H4 passed, H6 failed its "control's band + 10 %" on
+  every client figure, mostly through trafos existing at all), the user
+  answered, verbatim: "1. 打开" (turn it on) - option (a), H6 judged by its
+  absolute limits (starved within the band, the server's step p99 within
+  the 15.15 ms budget; both met). Built at step B9DX (item TIO):
+  `BallanceMMOServer/config_manager.hpp:91` defaults to `true`; M2 is
+  closed. A member without `CAP_TRAFO_INPUTS` is refused by such a session
+  (2.14); since the same step every client without the session core is
+  refused anyway (the core design's "As built (step B9DX)").

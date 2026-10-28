@@ -515,7 +515,7 @@ numbers 1-10 are unchanged.
    (H4 / H6 with snapshots on) - against T3's snapshots-off numbers (TR3b's
    H1 at 150 ms: t_rep 0.99-1.15 s, t_max 43-46 ms, starved 0, against the
    option-off control's 0.34-0.41 s, 12-14 ms, 0). **On its pass
-   `physics.trafo_inputs` turns on by default** (adaptation M2: it stays off
+   `physics.trafo_inputs` turns on by default** (adaptation M2: it stayed off
    until then). **Step RCX ran it and stopped for the user**
    (`rewind-cost-design.md` "As built (step RCX)"): H4 with snapshots off
    (= H1 at 150 ms) passes - pieces 150/150 bit-equal on all four, 0
@@ -527,7 +527,21 @@ numbers 1-10 are unchanged.
    existing at all, not the option (TR3b's option-off arm, same trafos,
    is already 1.6-3x the no-trafo control), so the option-off default
    fails the literal H6 too; `physics.trafo_inputs` stays off until the
-   user rules.
+   user rules. **The user ruled on 2026-10-28** - the answers to the
+   orchestrator's seven open decisions after RCX, verbatim: '1. 打开 2. 应该尽可能遵循原版脚本 3. 每个世界应该都有自己独立的飞船副本，且不纳入同步，每个客户端看到的飞船不同。4. 你决定 5. 你决定 6. b，应该都复制一份逻辑，同一个机关应该可以响应所有玩家 7. 直接拒绝，不要继续兼容非session core的客户端。 另外改动你可以提交，以后也可以自己提交'
+   (1: RCX; 2: SFD (A), the own ball's IVP bookkeeping; 3: SFD (B), the
+   airship; 4: RC5; 5: world agreement's Q9; 6: its Q7; 7: its Q8 and the
+   legacy path; the last sentence lets the orchestrator commit and push).
+   Answer 1 is option (a): H6 is judged by its absolute limits (starved
+   within the band, the server's p99 within the budget, both met), so **the
+   close-out is passed by the user's ruling** (H6's numbers stay recorded in
+   RCX's note) and **`physics.trafo_inputs` is on by default since step
+   B9DX** (item TIO; adaptation M2 closed). The x86 retail frame time of a
+   trafo run stays deferred to the stage close-out (item 7). The default
+   reaches only a `config.yml` without the key: the server writes every
+   missing default into its config at load, so an existing config (the
+   deployed okbc.st server's included) keeps `trafo_inputs: false` and
+   needs it set to `true` by hand at the next deployment (RCX's note).
    RC6 (the R6 / R7 tail refinement) is not adopted; it stays a possible
    later refinement if human rapid-trigger play shows periods (its open
    points: RC1c's dwell captures not re-measured, the R4 fallback's

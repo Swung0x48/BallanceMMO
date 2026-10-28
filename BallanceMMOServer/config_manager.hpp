@@ -83,10 +83,12 @@ public:
     // world option WORLD_TRAFO_INPUTS - every member's trafo explosion and
     // reset are Trafo events, every world runs every member's piece set.  A
     // member whose SessionReady does not declare CAP_TRAFO_INPUTS is refused
-    // by such a session.  Off by default until both session-core hosts run
-    // the trafo inputs (steps T3, T4); off, the server does what it did
-    // before the option existed.
-    bool physics_trafo_inputs = false;
+    // by such a session.  On by default since step B9DX (the user,
+    // 2026-10-28, answering RCX's stop: turn it on; H6 judged by its
+    // absolute limits, rewind-cost-design.md "As built (step RCX)"); it was
+    // off from T2 to B9DX (adaptation M2).  Off, the server does what it did
+    // before the option existed (owner-only pieces).
+    bool physics_trafo_inputs = true;
     // Sector placement design 2.4, 5 (protocol 12, step S5): the session's
     // world option WORLD_PLACEMENT_CLONES - every PH row whose object another
     // row already places at another matrix gets its own copy at the anchor,
