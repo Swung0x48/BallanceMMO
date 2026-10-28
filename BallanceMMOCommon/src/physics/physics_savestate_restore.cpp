@@ -1785,6 +1785,22 @@ namespace bmmo::physics::savestate {
                 // The capture memcpy's the VxMatrix (16 floats, row by row).
                 VxMatrix m = lo->entity->GetWorldMatrix();
                 static_assert(sizeof(VxMatrix) == sizeof(r.entity_matrix), "VxMatrix is 16 floats");
+                // Gap P (rollback engine gaps, roadmap 4.4, step B8EG item
+                // EGP, option i): a world already bit-identical to the record
+                // is not written.  For a parented body SetWorldMatrix
+                // re-derives the local matrix from the world and the parent's
+                // world, with rounding even when the world written is the one
+                // it has (P_Modul_25_Bridge001: local y -0x1.f55394p-3 ->
+                // -0x1.f554p-3); a replay that then moves the parent left the
+                // sleeping child's CK matrix ulps from a world that never
+                // rolled back (lockstep-without-snapshots.md, As built RO2).
+                // The write would also re-derive the worlds of the entity's
+                // children from their locals (KeepChildren false) and mark
+                // the entity moved for CK; skipped, the entity and its
+                // children stay as the live world has them, and the live
+                // frame never made that write either.  Measured on RO2's cases (L8 K=3, L11 K=3): every body
+                // bit-identical to the control at 301/301 boundaries.
+                if (std::memcmp(&m, r.entity_matrix, sizeof(r.entity_matrix)) == 0) continue;
                 std::memcpy(&m, r.entity_matrix, sizeof(r.entity_matrix));
                 // As CKIpionManager writes bodies back after a step.
                 lo->entity->SetWorldMatrix(m);

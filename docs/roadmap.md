@@ -588,13 +588,16 @@ numbers 1-10 are unchanged.
    path change, so the exact checks rerun), or record the local matrix of
    a parented body and restore it with `SetLocalMatrix` (a blob format
    change).
-   **Step B8EG built B (G1)** (design "As built (step B8EG)"): B - the
+   **Step B8EG built B (G1) and P** (design "As built (step B8EG)"): B - the
    navigated beam keeps the generation, ball birth items are counted
    `births_parked_balls` (`parked=`) apart from real failures; one retail
    arm (13:24): `birth_recreate_failures` 11 -> 0, no script difference in a
    beam window. TR3's R4 is not B's: it is headless (own body control) and
-   is the replay-tick life test of G8 (L3), where it now waits.
-   Deferred to item 7: B-R1's control
+   is the replay-tick life test of G8 (L3), where it now waits. P - both
+   options measured on RO2's L8 K=3 / L11 K=3: (i) 301/301 bit-identical on
+   both, (ii) leaves `P_Modul_30_Wippe`'s world 7.45e-09 m off on L8 (the
+   world re-derived from the restored local rounds), so (i) is built (the
+   restore skips a bit-identical world). Deferred to item 7: B-R1's control
    comparison of the beam windows and its parked count (the control run
    stalled 580 ms and resynced at 456).
    Step B7EG built Q's G2-G4 (engine change #20, bridge v23, record v4/v5,

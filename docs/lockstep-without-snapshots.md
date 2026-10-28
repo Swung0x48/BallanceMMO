@@ -1687,7 +1687,9 @@ Scripts and outputs: `.local-tools/work/RO2/` (`run_ab.sh`,
     child's CK matrix ulps away from a world that did not roll back (the
     server); the IVP body is untouched and a wake overwrites the matrix.
     Queued as its own item (roadmap §4 item 4, "P: the parented entity's
-    local matrix"). (The `--late-reference` arm's 580 m (L8) / 464 m and
+    local matrix"); fixed at step B8EG by the first option, the restore
+    skipping a bit-identical world (rollback-engine-gaps-design.md, As
+    built (step B8EG)). (The `--late-reference` arm's 580 m (L8) / 464 m and
     764 m (L11) on the same bodies are that arm's construction, not this
     gap: its ordinary rewind abandons the pass log, so the pass is not
     re-executed and the module's CK entity keeps its pre-pass sector-1

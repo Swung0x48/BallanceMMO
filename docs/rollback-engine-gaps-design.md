@@ -1945,9 +1945,9 @@ Every game started (RTSS healthy).
   61-71 ms, B2's build rebased), the server journal 3542/3542, verdict PASS.
   Closed.
 
-## As built (step B8EG, 2026-10-28): gap B (G1)
+## As built (step B8EG, 2026-10-28): gap B (G1) and gap P
 
-Item EGB of roadmap §4 item 4, built on HEAD 622d3f2; the quick-tier gate's
+Two items of roadmap §4 item 4, built on HEAD 622d3f2; the quick-tier gate's
 numbers below.
 
 **Item EGB: gap B, step G1 (§2.4), as designed.**
@@ -2023,3 +2023,43 @@ numbers below.
   test, step G8 (L3). The retail arm shows the same signature: "own beam
   stamped 650 retired at tick 650 (replay): Ball_Stone has had another life
   since (generation 1 -> 2)" (the stone dies at 652). R4 moves to G8.
+
+**Item EGP: gap P, option (i) built** (roadmap §4 item 4; found at RO2,
+`lockstep-without-snapshots.md` "As built (step RO2)").
+
+- Both options measured on RO2's cases with a switchable measurement build
+  (`work/B8EG/egp_measurement.patch`, not committed: `BMMO_EGP_RECORD_LOCAL=1`
+  records a parented body's local matrix in the blob behind a flag bit,
+  `BMMO_EGP_RESTORE=skip|local` picks the option; `work/B8EG/egp_runs.sh`:
+  `--late-sector-check K 60 69 --late-keep --late-after 300`, every boundary
+  described and compared with RO2's `bodycmp.py`, control vs late arm of the
+  same cell, locals recorded in every cell):
+
+  | cell | as built | (i) skip | (ii) SetLocalMatrix |
+  |---|---|---|---|
+  | L8 K=3 | 0/301 bit-identical: `P_Modul_25_Bridge001` 7.153e-07 m | 301/301 | 0/301: `P_Modul_30_Wippe` 7.451e-09 m |
+  | L11 K=3 | 0/301: `P_Modul_25_Bridge`, `P_Modul_37_Bridge` 6.104e-05 m; the locals of `P_Modul_01_Filler/_Pusher/_Rinne` (+`001`) and `P_Modul_25_Bridge001` | 301/301 | 301/301 |
+
+  (ii) puts every local back bit-exact but re-derives the world as parent
+  world x local, which rounds differently from a world that was written
+  directly: `P_Modul_30_Wippe`'s local equals the control's while its world
+  differs in one element (`0x1.4f7a36p-23` vs `...38p-23`) and in z
+  (`-0x1.e87c32p-4` vs `...30p-4`) at all 301 boundaries. Only (i) works, so
+  (i) is built (the roadmap's rule: one working option is built, two go to
+  the user). The structure differences (movable order, OV tree, units) are
+  RO2's order effects, identical in every column.
+- **Built:** `restorer::physics_rt` (`physics_savestate_restore.cpp`) skips
+  `SetWorldMatrix` when the entity's live world matrix is bit-identical to
+  the recorded one. No format, protocol or engine change. The final binary
+  (rB8EGb, no switch) on the same two cells (`work/B8EG/egp_final.sh`): L8
+  K=3 and L11 K=3 301/301 bit-identical.
+- **Not covered by (i):** a parented body whose world differs from the
+  record at the restore (it moved since the anchor) is still written, and
+  its local re-derived against the parent's world as it is then; no
+  measured case has one.
+- Exact checks (the restore path changed): the wire check of core_ref_s8
+  (rRTX's traces -> rB8EGb) 12/12 sends SAME, 12/12 journals IDENTICAL, ALL
+  SAME; solo1 / solo2 against the live traces: sends SAME (2616, 2427),
+  journals IDENTICAL (the tool's DIFFERENCES line is its missing
+  client1-3 files of a one-client arm). The retail arm above ran it (205
+  restores in Player.exe, `sv=205/0/0`).
