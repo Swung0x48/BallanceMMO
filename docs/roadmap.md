@@ -400,6 +400,11 @@ numbers 1-10 are unchanged.
        live frame did (the recorded live order); V9 0 FAIL lines,
        `--late-sector-check` exit 0. *The CPU cliff*: closed - the recipe
        (with `--drive`) rebases nowhere, t_max 29-30 ms.
+     - *Resync T1's findings*: (b) fixed in `run_replay_session` (A/B:
+       1560/1560 ticks identical before S, 0 before); (c) established, by
+       design (the resync's held window sends no notices); **(a) the
+       user's choice** (an echo now, a protocol change G5 would retire, or
+       wait for world agreement's Q9).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

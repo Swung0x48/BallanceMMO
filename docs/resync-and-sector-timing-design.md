@@ -3052,6 +3052,43 @@ N2 on every world, T1's findings.**
   headless anchor, shift the CK ids of everything made after it (with the
   first build's one pin only swing_snapoff differed). The five server
   journals of `core_ref_s7` replay matched (4111, 3914, 3019, 2813, 2855).
+- **T1's findings.** (a) Not built: it is the user's choice (below). (b)
+  **Built**: `run_replay_session` applies a group before the world's first
+  simulated one (a client journal's anchor era: PLAYER records and notes at
+  tick 0) without stepping the world (`--legacy-first-step` is the old
+  replay, for the A/B; one `note:` line counts such groups; the `summary:`
+  line is unchanged). A/B on `core_ref_s7/resync_snapoff` client 2
+  (S 1587): `replay_tick_compare.py` against the server journal, before S
+  1560/1560 ticks identical in hash and pose (old: 0/1560, first difference
+  27, the IVP clock one step ahead), after S identical in both (1978). The
+  RESYNC record's before-restore blob comparison now differs only in three
+  ball clones' CK entity ids (one lower than the server's: the skipped empty
+  step had made one CK object the server makes elsewhere; ids are not
+  physics); it used to differ in the clock. (c) **Established: the server
+  sends no notice for those frames, by design.** `core_ref_r3/
+  resync_at150_down` server.log: "Arena0 resynced at tick 1125 (... held
+  counted through tick 1097)" - the resync's held window [C, base) (RL1b:
+  lead + D - e(C)) substitutes 1098..1124 without notices, and the state at
+  S = 1124 is the server's world after them; the notices before it
+  (1054..1097, epoch 885) all went out. So a client journal has no
+  SUBSTITUTED record for them and its replay feeds the client's FRESH
+  frames there; the RESYNC record at 1124 puts it right. Nothing to fix in
+  the session; a replay that wants those ticks exact needs the server
+  journal (T1's option (b) for the BodyRevived case).
+- **T1 (a) is the user's choice** (reported, not built). Symptom: an own
+  BodyRevived the server applies late (16-26 ticks at 150 ms) is in the
+  owner's journal only at its stamp, so a SimTool replay of that journal
+  wakes the body early (resync_at150_down c0: 16-tick windows of differing
+  hashes, P_Modul_34_Schiebestein 0.637 mm). Cause: the server never echoes
+  a BodyRevived to its owner (server.cpp's echo covers the lifecycle types
+  only). Options: (i) build the echo now (the server sends the owner its
+  moved BodyRevived, the core journals it without acting; a protocol change
+  - an existing message to a new recipient - that the step does not name,
+  and dead code once world agreement's G5 retires BodyRevived under its
+  world bit); (ii) wait for the user's world-agreement Q9: if G5 lands,
+  BodyRevived is gone and so is the finding; (iii) SimTool takes those
+  ticks from the server journal when given both files (tool only).
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

@@ -132,6 +132,7 @@ namespace {
         bool stop_on_divergence = false;
         bool continue_after_jump = false;
         bool ignore_resync = false;
+        bool legacy_first_step = false;   // --legacy-first-step (step B2SW, T1 b): step the groups before the first simulated one
         bool journal_trace = false;
         std::string write_journal;
         int level = 0;
@@ -684,6 +685,7 @@ namespace {
             else if (arg == "--stop-on-divergence") out.stop_on_divergence = true;
             else if (arg == "--continue-after-jump") out.continue_after_jump = true;
             else if (arg == "--ignore-resync") out.ignore_resync = true;
+            else if (arg == "--legacy-first-step") out.legacy_first_step = true;
             else if (arg == "--journal-trace") out.journal_trace = true;
             else if (arg == "--write-journal") { if (!(v = next())) return false; out.write_journal = v; }
             else if (arg == "--level") { if (!(v = next())) return false; out.level = std::atoi(v); }
@@ -4971,6 +4973,7 @@ namespace {
             return -1;
         };
         std::map<uint32_t, bmmo::session::journal_event> last_births;
+        size_t pre_first_groups = 0;   // step B2SW (T1 b): groups before the first simulated one, not stepped
         replay_resync_tools resync_tools;
         size_t resyncs_restored = 0, resyncs_refused = 0, resyncs_incomplete = 0, resyncs_timed_out = 0,
                resyncs_no_state = 0, resync_before_identical = 0, resync_before_differ = 0, checkpoints_after_resync = 0,
@@ -5031,6 +5034,20 @@ namespace {
                     replay_players.erase(p.id);
                 }
                 if (out.is_open()) out.player(p.tick, p.id, p.join_order, p.added, p.name);
+            }
+            // Resync finding T1 (b) (step B2SW): a group before the world's
+            // first simulated one carries only notes and PLAYER records - a
+            // client journal's anchor era, numbered from 0 - and is not a
+            // tick the recording side stepped.  Stepping it ran the world one
+            // empty tick ahead (numbered as the first simulated one), so no
+            // TICK hash of a client journal's replay equalled the server's
+            // before its first resync restore.  Its records are applied; the
+            // world does not step for it.  (--legacy-first-step: the old
+            // replay, for the A/B.)
+            if (!args.legacy_first_step && group.tick < replay_first_tick && !group.has_tick && group.inputs.empty()
+                    && group.events.empty()) {
+                ++pre_first_groups;
+                continue;
             }
             // The world ticks once per group, so a hole in the numbering leaves
             // it behind for the rest of the file.  A client's numbering restarts
@@ -5411,6 +5428,8 @@ namespace {
         }
         std::printf("summary: ticks=%zu matched=%zu first_divergence=%lld checkpoints=%zu checkpoint_mismatches=%zu\n",
             simulated, matched, first_divergence, checkpoints, checkpoint_mismatches);
+        if (pre_first_groups)   // step B2SW (T1 b)
+            std::printf("note: %zu group(s) before the first simulated tick applied without a step\n", pre_first_groups);
         if (stopped_at_jump)
             std::printf("note: the replay stopped at a tick jump; the summary covers only the ticks before it\n");
         if (args.drop_sectors_above >= 0)   // step SP8
