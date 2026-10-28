@@ -6,8 +6,9 @@ committed with hold-last by the user's ruling of 2026-10-27 (§11; "As built
 build, was settled by the pinned method of Measurement RC1d and the user's own
 play, Measurement RC1e). RC6, the tail prediction refinement (R6 / R7), is not
 adopted (§8). RC2 is not built (the user's choice), RC3 is built (B5RX),
-RC4 is built (B6RC); RC5 and the close-out
-are not built. This document is roadmap §4 item 10 (the rewind-cost
+RC4 is built (B6RC); RC5 waits for the user (B6RC); the close-out ran
+with snapshots off at step RCX (the user's decision of 2026-10-28, §11) and
+stopped for the user: H4 passes, H6 does not ("As built (step RCX)"). This document is roadmap §4 item 10 (the rewind-cost
 optimization); its first step was pulled ahead of trafo T3 by the user's
 decision of 2026-10-25 (§11).
 
@@ -235,7 +236,7 @@ names no server file); the own ball's feed; the legacy retail path
 | RC4 | the dormant-script encoding (trafo design 9.4) - **built at B6RC** | script replay exactness, the wire check |
 | RC5 | incremental restore | the savestate checks, the wire check |
 | RC6 | **not adopted at RC1** (the user's ruling of 2026-10-27, quoted in §11); R6 and R7 measured (RC1d, RC1e) and kept as a possible later refinement if human rapid-trigger play shows periods. (History: proposed by Measurement RC1d; ruled 2026-10-27 "R6 直接并入 RC1", then the R7 variant measured, Measurement RC1e: R7 not selected, the choice between R6, R7 and hold-last went back to the user, who chose hold-last.) What the refinement would be, as specified when it was proposed: the tail prediction refinement: hold-last replaced past a remote's newest relayed frame by **R6** (per-key pattern-repeat: each key bit's own period repeated, the other keys of the newest frame by R4's history-adaptive hold, k = 5; §9.2; R5, the whole-frame pattern-repeat, is the measured fallback choice), one function in IR next to `relay_frame_or_newest` (IR:353-367) called from both sites (`recorded_input_at`'s tail branch, CF:494; `live_drive`, CL:467-470); its history window fixed relative to the newest frame (the 128 ticks before it - not the ring's cap `kRelayRing`, IR:47, so a later change of the cap cannot change a prediction), no allocation on the path (the measured build's per-key `std::vector` goes), and the periods found once per arrival, not per tail tick | unit tests of the function (a 1:1 and a 1:3 lateral alternation, an UP/DOWN 1:1 and 2:1 alternation, a 1-tick DOWN every 10 ticks repeated, a direct LEFT -> RIGHT switch, a hold with and without complete holds, a 6-tick brake, flags as hold-last, holes, the start and a birth unchanged) and a session test pinning the two sites on the tail; the wire check against `core_ref_rc1` (every first difference attributed to a tail tick the rule fed differently); solo IDENTICAL; **the paired drift check with the own keys pinned** (`.local-tools/work/RC1d/gaps/pinned_replay.py`, every rule's replay of the same captures; R1 replays byte-identical on every cell) on the RC1d cells with these **required cells at both lags (resync_at150 and resync_at150_down)**: the native steer d0; the 1-tick lateral taps t1x1 (rapid-trigger 1:1 alternation) and t1x3; the brake cells d0_brake and t1x1_brake (a 6-tick DOWN in every 90 UP ticks) and d0_ud1x9 (a 1-tick DOWN in every 10: the 1-tick brake tap); the UP/DOWN fast switches d0_ud1x2 (UP UP DOWN) and d0_ud1x1 (UP/DOWN 1:1); the holds d5 / d10 / d15 and d10_brake (direct LEFT -> RIGHT switches: 405 in d10, Measurement RC1d). Criteria: (1) pooled mean no worse than hold-last's on every required cell and no client more than 5 % worse; (2) on the hold and brake cells (d0, d5, d10, d15, d0_brake, d10_brake) input rewinds per real change no more than hold-last's + 0.1, on the tap and UP/DOWN cells no more input rewinds than hold-last; (3) replayed ticks reported per required cell next to hold-last's. **As measured, R6 (and R5) fail (2) on resync_at150_down d0: 0.96 against 0.80 per change, replayed ticks +21 % (42893 -> 51716), all of it on the mirrors of the lowered player (Measurement RC1d (e)); every other required cell passes (largest excess +0.06).** RC6 is therefore not passable as measured unless the user accepts that cell or RC6 removes the excess. [Checked after the fix-up round, 2026-10-27, `gaps/record_model.py`: a physics-free model of the engine's records (a tick keeps the prediction made when it was last simulated, live or in the last rewind) reproduces the cell's rewinds on the lowered player's mirror (client 1: R1 232, R4 / R5 / R6 299; measured 231 / 296). The excess is all lateral: corrections where the rule had released a lateral key the player still held go 187 -> 266, the opposite kind 157 -> 136, UP / DOWN corrections 20 in every rule. So the excess is R4's fallback releasing a lateral key early at max(5, H - r) on the native steer's irregular long holds, and holding the forward / backward keys (named here before this check) would not remove it; a fix has to change the lateral release, not measured.] The live A/B (snapshots off) on the required cells, t1x1, d0_ud1x2 and d0_ud1x9 at least three sessions per rule at each lag (one session is not evidence of starvation either way); CPU parity, against the replayed ticks of (3) | quick tier |
-| close-out | H4 and H6 of the trafo design §7.3, **with snapshots on** (decision (b) of 2026-10-25), against T3's snapshots-off CPU numbers as the baseline | full tier |
+| close-out | H4 and H6 of the trafo design §7.3, **with snapshots off** (the user, 2026-10-28: "改成关快照"; replaces decision (b) of 2026-10-25, which ran them with snapshots on; §11), against T3's snapshots-off CPU numbers as the baseline. **Run at step RCX: H4 passes, H6 fails, stopped for the user ("As built (step RCX)")** | quick tier (a stage-internal close-out, the user's 15-minute rule; the second pair and the retail run are deferred to the stage close-out) |
 
 ## 9. Open questions
 
@@ -375,6 +376,13 @@ names no server file); the own ball's feed; the legacy retail path
   recommendation for RC3 (option (c), the switch default on): "不对，RC3要保留快照？
   现在应该尽可能假设快照不存在来做" - RC3 is option (a), snapshot-free by
   default. Landed at step B5RX.
+- **2026-10-28 (user), verbatim, the close-out's condition:** asked whether
+  the close-out should follow RC3's snapshot-free default, the user
+  answered "改成关快照" (switch it to snapshots off). This REPLACES decision
+  (b) of 2026-10-25 above as far as the close-out goes: H4 / H6 of the trafo
+  design §7.3 are run with snapshots off (the same condition as their
+  baseline, T3's snapshots-off numbers), with RC3's default (no
+  `--body-set-corrections`). Run at step RCX ("As built (step RCX)").
 
 ## As built (step RC1)
 
@@ -1828,3 +1836,150 @@ Reruns: x64 BUILD-OK, x86 CLIENT-BUILD-OK, GCC 29/29, tests 555/555,
 `--trafo-record-check` (1)-(7) PASS, `wire_check.sh rSFD rB6RC rB6RCw2`
 over `core_ref_s8` ALL SAME. The retail host does not print the counters
 (no retail file changed).
+
+## As built (step RCX)
+
+Step RCX is the rewind-cost close-out, run **with snapshots off** by the
+user's decision of 2026-10-28 ("改成关快照", §11; it replaces decision (b) of
+2026-10-25). Base 120ee8d (protocol 13, journal v7). Nothing in the code
+changed: `physics.trafo_inputs` (`BallanceMMOServer/config_manager.hpp:89`)
+stays `false`, because H6 did not pass and the step stopped for the user.
+No CK2, IVP or physics_RT change and no engine change.
+
+**The two arms.** The runs are `.local-tools/work/RCX/g.sh`: TR3b's `g.sh`
+and `live.sh` merged, with no `rm` and with new labels. Both arms ran on the
+same binaries: x64 `build-agent-rB6RC` (byte-equal to HEAD's build), and an
+Arch server rebuilt from the clean HEAD tree, id
+`ballanced-9c52cd160b73+bmmo-120ee8dd4ace`. Both used 4 clients, 40 s,
+150 ms, snapshots off (100000/100000), checkpoints every 2 ticks, the
+server's `trafo_inputs` on, RC3's default (no `--body-set-corrections`).
+Placement was on in both arms: it has been the server's default since SP10
+(*adaptation*: TR3b's baseline predates the placement). The host was idle in
+both runs (cpu_sampler max total 10.8 % and 11.6 %).
+- `rcx_H1_150` is H4 with snapshots off, which is H1 at 150 ms. It is also
+  H6's trafo arm.
+- `rcx_H6_ctl0` is H6's control: the same batch onto bay 3, with no trafo.
+
+| per client 0 / 1 / 2 / 3 | `rcx_H1_150` (trafo) | `rcx_H6_ctl0` (control) |
+|---|---|---|
+| starved | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| resyncs, rebases, far, unmatched, mism | 0 | 0 |
+| rewinds `rb` (= input `inrew` + lifecycle `life`) | 47 / 59 / 59 / 56 (26+21, 36+23, 36+23, 33+23) | 14 / 27 / 29 / 27 (5+9, 18+9, 20+9, 18+9) |
+| replayed ticks `resim` | 1032 / 1305 / 1290 / 1247 | 296 / 578 / 641 / 598 |
+| t_rep (s) | 0.683 / 0.929 / 0.915 / 0.891 | 0.125 / 0.197 / 0.216 / 0.206 |
+| t_cap (s) | 1.575 / 1.559 / 1.577 / 1.605 | 0.762 / 0.758 / 0.765 / 0.797 |
+| t_rest (s) | 0.095 / 0.133 / 0.123 / 0.115 | 0.008 / 0.016 / 0.017 / 0.016 |
+| t_max (ms) | 43 / 43 / 43 / 45 | 13 / 13 / 14 / 14 |
+| t_rep per replayed tick (ms) | 0.66 / 0.71 / 0.71 / 0.71 | 0.42 / 0.34 / 0.34 / 0.34 |
+| t_cap per live frame (ms) | 0.73 / 0.72 / 0.72 / 0.72 | 0.35 / 0.35 / 0.35 / 0.36 |
+| t_rest per rewind (ms) | 2.0 / 2.3 / 2.1 / 2.1 | 0.57 / 0.59 / 0.59 / 0.59 |
+| server step p99 per 660 ticks (ms) | 0.71, **3.11**, 1.05, 1.33 (max 4.6) | 0.70, 0.69, 0.65, 0.96 (max 5.0) |
+| server journal replay | 2793/2793 matched, 0 checkpoint mismatches | 2810/2810, 0 |
+
+Both harness verdicts read "FAIL - no ball-to-ball interaction observed".
+That is the queued harness artifact (REF8: `scripts/arena_map_test.py`
+:1941-1942 can only see that interaction through body-set corrections). It is
+the only failing line in either run.
+
+**H4 (snapshots off) = H1 at 150 ms: PASS.**
+- (a) `tr3fix/pieces.py`: pieces 150/150 bit-equal on all four clients.
+- (b) 4 sets on every client.
+- (c) Resyncs, rebases, far and unmatched are 0. Starved is 0, against the
+  control's 0.
+- (e) `trafo_missed` 0, `trafo_original_leaks` 0, run_failures 0.
+- With snapshots off, H4's own clause ("0 snapshot corrections naming a
+  piece; mism at or below P's band") holds trivially: corrections 0, mism 0.
+- (d) needs H1 at 0 ms, which was not run (deferred).
+
+Against TR3b's trafo arm (pre-RC3 / RC4, no placement), the same recipe cost
+less: t_rep 0.99-1.15 -> 0.68-0.93 s, t_cap 1.69-1.77 -> 1.56-1.61 s, t_rest
+0.13-0.15 -> 0.10-0.13 s. t_max did not move (43-46 -> 43-45 ms).
+
+**H6 (snapshots off): FAIL.**
+- What passes:
+  - Starved is within the band (0 against 0).
+  - The server's step p99 stays far inside the 15.15 ms budget.
+- What fails:
+  - Every client figure is outside "the control's band + 10 %": t_rep is
+    3.2-5.5x the control's, t_cap 2.0-2.1x, t_rest 7-12x, t_max 3.1-3.5x.
+  - So is the server's step p99 in ticks 687-1346, the explosions' window:
+    3.11 ms against the control's 0.69 ms.
+
+**Cause.** The extra cost has two factors, and they multiply. This is T3's
+known cost (trafo design §8, "As built (step TR3, fix-up round)", the root
+cause of H4 / H6; CPUPROF's profile), now measured on the current build:
+1. *Twice the replayed ticks* (1032-1305 against 296-641).
+   - Every remote trafo is a dephysicalize and physicalize of a ball, and it
+     arrives a trip late. Lifecycle rewinds are 21-23 per client against 9.
+   - Input rewinds are 26-36 against 5-20. These come from the drive after
+     the ball changes; they are not attributed further.
+2. *Twice the cost of each replayed tick and each capture* (0.66-0.71
+   against 0.34-0.42 ms; 0.72 against 0.35 ms).
+   - Every world records, restores and replays every member's pieces:
+     109-207 births tracked against 8-12.
+   - The restore per rewind is 3.5x the control's (2.0-2.3 against 0.6 ms).
+
+Factor (2) is what RC2 / RC5 target. Factor (1) is the cost of trafos
+existing at all, not of `physics.trafo_inputs`: TR3b's option-off arm (the
+same trafos, pieces owner-only; trafo design "As built (step TR3b)", the H1
+table) replayed 984-1176 ticks at t_rep 0.34-0.41 s and t_cap 0.88-0.92 s,
+already 1.6-3x this step's no-trafo control, and TR3's H6 found the same
+pattern (trafo design "As built (step TR3, fix-up round)", clients at 2-4x
+the bay-3 control). So H6 as written (against a batch without trafos) is
+failed by the option-off default (d) too, and no implementation of the
+option can pass it; only the option-off control of (b) isolates what the
+option adds. No per-body optimisation changes factor (1). At the control's cost per tick, the
+trafo arm's replayed ticks alone would cost 0.35-0.45 s of t_rep against the
+control's 0.13-0.22 s, which is still 2-3x and outside the band. So "within
+the control's band + 10 %" against a batch without trafos cannot be met by
+RC2-RC5, even at their ceilings. The server's step p99 in the explosions'
+window is the server's own simulation of the four sets (T2's cost), which
+the clients' optimisations do not touch.
+
+**Stop (the user's choice).** The options and their trade-offs:
+- (a) **Judge H6 by its absolute limits and turn the option on.** The limits
+  are starved within the band and the server's p99 within the budget, both
+  met here.
+  - Trade-off: a session with trafo inputs costs every client about twice
+    the rewind CPU.
+  - Its worst frame is 43-45 ms (three ticks) on the x64 headless client
+    when explosions arrive. The x86 retail client has not been measured.
+  - A retail client with `session core off` would be refused (it does not
+    declare `CAP_TRAFO_INPUTS`), the way SP10's placement default refuses
+    it.
+- (b) **Re-state H6's control as the same recipe with the option off**
+  (TR3b's control: the same trafos, pieces owner-only). This isolates the
+  pieces' cost, factor (2).
+  - TR3b's option-off control replayed 984-1176 ticks at about 0.35 ms each,
+    so this arm would still be about 2x per tick. It fails the + 10 % band
+    unless (c) is built too.
+  - It needs a control run (the step's two live runs are spent).
+- (c) **Build the remaining per-body cuts first** (RC2 (b): the per-body
+  read cache, at most 1.3-1.4 us per sleeping body; RC5 (b): skip an
+  unchanged sleeping body's non-collision writes, behind a restore profile).
+  - Both were left unbuilt by the user's choice or recommendation (B5RX,
+    B6RC).
+  - They cut only part of factor (2) and none of factor (1).
+- (d) **Leave `physics.trafo_inputs` off** (today's default). Pieces stay
+  owner-only and the other worlds do not hold them, which is the pre-T3
+  behaviour.
+  - Trade-off: it does not satisfy H6's literal criterion either (factor
+    (1) above: TR3b's option-off arm is 1.6-3x the no-trafo control), so
+    choosing (d) is not "keeping H6 met"; (a) and (d) both depart from the
+    literal row, and only (b) measures what the option itself costs.
+
+Recommendation: (a), with the x86 frame time of a retail trafo run checked
+at the stage close-out. Not built; the default is unchanged.
+
+Checks (quick tier, 02:35-02:41, about 6 minutes):
+- The Arch server rebuild (1 min).
+- The two live runs (about 1 min each).
+- `pieces.py` (under 1 min).
+- No build, test, GCC or wire check: no code changed, and docs only.
+
+Deferred to the stage close-out:
+- H1 at 0 ms, for H1 (d).
+- A second pair, for the run-to-run band.
+- The option-off same-recipe control, if (b) is chosen.
+- A retail run with trafo inputs on (x86 frame time).
+- CPU parity.

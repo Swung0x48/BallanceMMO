@@ -509,11 +509,25 @@ numbers 1-10 are unchanged.
    writes the byte exactly when the bytes equal the built ones; the two
    sets' part of a capture 37 -> 2.5 us in SimTool; no protocol change).
    See `rewind-cost-design.md` "As built (step B6RC)". The close-out is the trafo design's H4 / H6
-   **with snapshots on** (decision (b), 2026-10-25) against T3's
-   snapshots-off numbers (TR3b's H1 at 150 ms: t_rep 0.99-1.15 s, t_max
-   43-46 ms, starved 0, against the option-off control's 0.34-0.41 s, 12-14
-   ms, 0). **On its pass `physics.trafo_inputs` turns on by default**
-   (adaptation M2: it stays off until then; deployments run snapshots on).
+   **with snapshots off** - the user, 2026-10-28, asked whether the
+   close-out should follow RC3's snapshot-free default, verbatim: "改成关快照"
+   (switch it to snapshots off); this replaces decision (b) of 2026-10-25
+   (H4 / H6 with snapshots on) - against T3's snapshots-off numbers (TR3b's
+   H1 at 150 ms: t_rep 0.99-1.15 s, t_max 43-46 ms, starved 0, against the
+   option-off control's 0.34-0.41 s, 12-14 ms, 0). **On its pass
+   `physics.trafo_inputs` turns on by default** (adaptation M2: it stays off
+   until then). **Step RCX ran it and stopped for the user**
+   (`rewind-cost-design.md` "As built (step RCX)"): H4 with snapshots off
+   (= H1 at 150 ms) passes - pieces 150/150 bit-equal on all four, 0
+   resyncs / rebases / far / unmatched, starved 0; H6 fails its "control's
+   band + 10 %" on every client figure (t_rep 0.68-0.93 s against 0.13-0.22
+   s, t_cap 1.56-1.61 against 0.76-0.80 s, t_max 43-45 against 13-14 ms) and
+   on the server's step p99 (3.1 ms against 0.70 ms in the explosions'
+   window, within the 15.15 ms budget); most of the excess is trafos
+   existing at all, not the option (TR3b's option-off arm, same trafos,
+   is already 1.6-3x the no-trafo control), so the option-off default
+   fails the literal H6 too; `physics.trafo_inputs` stays off until the
+   user rules.
    RC6 (the R6 / R7 tail refinement) is not adopted; it stays a possible
    later refinement if human rapid-trigger play shows periods (its open
    points: RC1c's dwell captures not re-measured, the R4 fallback's
