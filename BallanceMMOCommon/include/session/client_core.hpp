@@ -428,6 +428,7 @@ namespace bmmo::session {
         uint32_t last_snapshot_tick_ = 0;
         uint64_t inputs_sent_ = 0, events_sent_ = 0, events_received_ = 0;
         uint64_t snapshots_received_ = 0, snapshots_applied_ = 0, snapshots_stale_ = 0;
+        uint64_t snapshots_uncorrected_ = 0;   // step RC3: full snapshots of a snapshots-off session taken for their names only
         uint64_t remote_writes_ = 0, mechanism_blends_ = 0, mechanism_hard_ = 0;
         uint64_t remote_inputs_received_ = 0;
         // The relayed frames, reassembled (session/input_relay.hpp): first
@@ -819,6 +820,24 @@ namespace bmmo::session {
         // session (headless --reach: the open question 1 measurement, an A/B
         // arm).  Both hosts leave it 0.
         uint32_t reach_ticks = 0;
+        // Step RC3 (rewind-cost design 3, roadmap 4.3): while the session's
+        // snapshots are off (snapshots_run() false), the full snapshot the
+        // server still broadcasts at a body-set change is no correction -
+        // its names and rows go to the mechanism registry, its rows to the
+        // journal, and the rollback engine never compares or restores from
+        // it.  true = the pre-RC3 behaviour, the snapshot compared and a
+        // breach rewound.  The default is false on every host (step B5RX,
+        // the user, 2026-10-28: work as far as possible as if snapshots
+        // did not exist): a snapshots-off session with rollback on (both
+        // hosts' default) is snapshot-free, and the
+        // drifts these snapshots used to correct (B5RC: a Ball_Stone mirror
+        // 0.1 -> 21 m on resync_snapoff c1, the P_Modul_29 plates 0.03 ->
+        // 1.4-1.8 m on l8_cross) are gaps to fix, not to hide.  true is the
+        // measured control arm (headless --body-set-corrections).  Only the
+        // rollback path reads it: with rollback off (headless --no-rollback,
+        // retail 'session rollback off', diagnostic modes) the blend ladder
+        // still sets the balls from every snapshot, as before.
+        bool body_set_corrections = false;
     };
 
     // (legacy_calls, the transitional back-calls of design 6.1 "Linking while
@@ -1296,6 +1315,17 @@ namespace bmmo::session {
         // relay's and our own substituted frames').
         void replay_corrected_inputs();
         void retry_owed_resync();
+        // Every rewind the core asks of the engine outside a snapshot
+        // (inputs, lifecycle events, sector stamps, the forced one):
+        // rollback_engine::rewind_to, then the frozen clock's re-anchor
+        // (design 4.1, 7 Q1).  A frozen rewind sets the bodies and drops the
+        // history with no replay and still returns true; with the
+        // session's snapshots off (step RC3, B5RX) on_snapshot's check no
+        // longer runs, so this is where the re-anchor is asked for.
+        bool rewind_world(uint32_t anchor, uint32_t now,
+                          const std::function<bool(const std::string& entity, uint32_t tick,
+                                                   bmmo::session::input_frame& out)>& input_at,
+                          const std::string& reason, uint32_t reach = 0);
 
         // Part two's forced own frames (E5; design 1.3 steps 11 and 21).
         // The forced frame of `tick` (a SessionLead's (c, E)), taken: the

@@ -1058,6 +1058,10 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     config.own_echoes = true;   // R3
     config.own_corrections = true;   // R4
     config.own_body_backstop = true;
+    // RC3 (step B5RX, the user: work as if snapshots did not exist): with
+    // the session's snapshots off, a body-set change's full snapshot is no
+    // correction, only names and rows.
+    config.body_set_corrections = false;
     // R1's policy (the legacy frame's order) only stood in for the input
     // rewind: with it a key edge relayed between the frames replays from its
     // tick, so the drive of T + 1 is chosen at post_step(T) as on the

@@ -292,6 +292,12 @@ namespace {
         // the per-client reach from the relay lag (0, the default): the
         // arms of open question 1's measurement.
         uint32_t reach_ticks = 0;
+        // --body-set-corrections (the control arm of step RC3): a session
+        // with its snapshots off compares and rewinds on the full snapshot
+        // of each body-set change, as before RC3.  The default (false,
+        // step B5RX, the user's "work as if snapshots did not exist") takes
+        // it for its names and rows only (core_config::body_set_corrections).
+        bool body_set_corrections = false;
         int hold_event_type = -1;
         uint32_t hold_event_nth = 0;
         int hold_event_ms = 0;
@@ -420,6 +426,7 @@ namespace {
                   "       [--hold-event TYPE:N:MS|TYPE:N:drop]   (the N-th own event of TYPE leaves MS ms late, or never)\n"
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
                   "       [--reach N]   (the rollback's reach pinned at N ticks, 48..120; default: per client, from the relay lag)\n"
+                  "       [--body-set-corrections]   (snapshots off: a body-set change's full snapshot still corrects, as before RC3; the control arm)\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--beam2 X Y Z TICK] [--keep-lane Z] [--keep-lane-dwell N]\n"
                   "       [--brake-tap N:P]   (while the record holds UP: DOWN instead for N frames in every P)\n"
                   "       [--keep-lane-tap N:M]   (the steer's key pressed N frames, released M, repeating)\n"
@@ -606,6 +613,7 @@ namespace {
             else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
             else if (arg == "--no-trafo-cap") out.no_trafo_cap = true;
             else if (arg == "--ignore-snapshots") out.ignore_snapshots = true;
+            else if (arg == "--body-set-corrections") out.body_set_corrections = true;
             else if (arg == "--trafo-no-resets") out.trafo_no_resets = true;
             else if (arg == "--leave-at") { if (!(v = next())) return false; out.leave_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--leave-after-unphys") { if (!(v = next())) return false; out.leave_after_unphys = std::atoll(v); }
@@ -1625,6 +1633,7 @@ namespace {
             c.own_corrections = args_.rollback;
             c.window_shift = args_.window_shift;
             c.reach_ticks = args_.reach_ticks;
+            c.body_set_corrections = args_.body_set_corrections;
             return c;
         }
 

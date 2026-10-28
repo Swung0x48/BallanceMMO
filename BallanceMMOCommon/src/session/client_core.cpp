@@ -638,6 +638,27 @@ namespace bmmo::session {
         if (msg.session == s.session_) end(msg.reason.empty() ? "session ended" : msg.reason);
     }
 
+    // ------------------------------------------------- the core's rewinds
+    // A frozen local clock (the retail scripts' pause, the Level 1
+    // tutorial): the engine sets the bodies and drops the history with no
+    // replay and returns true, and the world stays on the anchor while the
+    // tick counter runs on; only a re-anchor brings the two back together
+    // (design 4.1, 7 Q1).  on_snapshot asks for it after its own rewind;
+    // with the session's snapshots off no snapshot rewinds any more (step
+    // RC3), so every other rewind asks here.  Owed: a request the limiter
+    // holds back is asked again (retry_owed_resync), since the history is
+    // gone and nothing else would ask.  Never true on the headless client
+    // (its clock never stops), so no capture's reads change.
+    bool session_client_core::rewind_world(uint32_t anchor, uint32_t now,
+                                           const std::function<bool(const std::string& entity, uint32_t tick,
+                                                                    bmmo::session::input_frame& out)>& input_at,
+                                           const std::string& reason, uint32_t reach) {
+        const uint64_t frozen_before = s.rollback_.stats().frozen;
+        const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason, reach);
+        if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen", true);
+        return rolled;
+    }
+
     // ------------------------------------------------- resync request
     // `owed`: the own correction needs this resync (late-player design
     // 1.3's late gate) - one the 2 s limiter holds back is asked again

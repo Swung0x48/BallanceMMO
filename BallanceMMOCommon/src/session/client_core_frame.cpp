@@ -79,7 +79,7 @@ namespace bmmo::session {
                                        : entity + " input corrected at tick " + std::to_string(anchor);
         if (has_own) s.own_replay_pacer_.ran();
         const uint32_t standard = s.rollback_.thresholds().max_resim_ticks;
-        if (s.rollback_.rewind_to(world(), anchor - 1, now, input_at, reason, reach > standard ? reach : 0)) {
+        if (rewind_world(anchor - 1, now, input_at, reason, reach > standard ? reach : 0)) {
             if (reach > standard && now - (anchor - 1) > standard) ++s.resync_window_rewinds_;
             if (has_own) {
                 ++s.subst_rewinds_;
@@ -140,7 +140,7 @@ namespace bmmo::session {
         // timing of resync design 9 Q2); a depth within max_resim_ticks is
         // the rewind it always was.
         const uint32_t reach = depth > s.rollback_.thresholds().max_resim_ticks ? depth : 0;
-        if (s.rollback_.rewind_to(world(), anchor, now, input_at, "forced", reach)) {
+        if (rewind_world(anchor, now, input_at, "forced", reach)) {
             ++s.forced_rollbacks_;
             s.forced_rollback_depth_ += now - anchor;
             drop_carried_own_replay(anchor, false);
@@ -329,7 +329,7 @@ namespace bmmo::session {
             {
                 const scope_guard keep_cells = platform_.keep_live_cells(*this);
                 rd.active = true;
-                const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason);
+                const bool rolled = rewind_world(anchor, now, input_at, reason);
                 rd.active = false;
                 // Re-derived through the live tick (a frozen world rewinds
                 // nothing and drops the history instead).

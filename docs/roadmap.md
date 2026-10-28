@@ -473,7 +473,23 @@ numbers 1-10 are unchanged.
    references (at most 3.2 of 4.6 us per sleeping body, a protocol bump)
    and (b) a cache of the rollback engine's per-body reads (at most
    1.3-1.4 us, no format change) - `rewind-cost-design.md` "As built (step
-   B5RX)". The close-out is the trafo design's H4 / H6
+   B5RX)". **RC3 is built and on by default (step B5RX)**: a snapshots-off
+   session takes a body-set full snapshot for its names and rows only (no
+   compare, no rewind; headless `--body-set-corrections` is the control
+   arm). The user, 2026-10-28, verbatim: "不对，RC3要保留快照？现在应该尽可能假设
+   快照不存在来做" - this supersedes, for this work, the 2026-10-24 rule that
+   the snapshot fallback stays until the known drift sources are fixed: the
+   drifts those snapshots hid (B5RC: a Ball_Stone mirror 0.109 -> 21.3 m and
+   an extra resync on resync_snapoff c1, remote-ball p99 5.0 -> 17.2 m on
+   swing_snapoff c3, the P_Modul_29 plates 0.03 -> 1.4-1.8 m mean, worst 3.6
+   m, on l8_cross) are gaps for step SFD to root-cause and fix. Two
+   consequences (B5RX's review): the frozen-clock re-anchor now follows
+   every core rewind (`rewind_world`), not only a snapshot's; and the
+   snapshots-off multi-client arms of `core_ref_s7` replay to their end
+   only in the control arm (`EXTRA=--body-set-corrections wire_check.sh`,
+   which now fails a short replay) until a set is re-captured under the
+   RC3 default (`core_ref_s8`, queued for the next step with live runs to
+   spare). The close-out is the trafo design's H4 / H6
    **with snapshots on** (decision (b), 2026-10-25) against T3's
    snapshots-off numbers (TR3b's H1 at 150 ms: t_rep 0.99-1.15 s, t_max
    43-46 ms, starved 0, against the option-off control's 0.34-0.41 s, 12-14

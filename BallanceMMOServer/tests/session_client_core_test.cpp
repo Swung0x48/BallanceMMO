@@ -2595,6 +2595,74 @@ namespace {
         }
     }
 
+    // Step RC3 (rewind-cost design 3): with the session's snapshots off
+    // (SessionStart's interval byte 255), the full snapshot of a body-set
+    // change is no correction - nothing compared, nothing restored, its
+    // mechanism names kept for the registry, the first few logged - while
+    // the same snapshot with snapshots on, or with the pre-RC3 switch
+    // (--body-set-corrections, the control arm), rewinds as before.  The
+    // default is RC3's (step B5RX: work as if snapshots did not exist).
+    TEST(SessionClientCoreSnapshot, ASnapshotsOffSessionTakesABodySetSnapshotForItsNamesOnly) {
+        EXPECT_FALSE(bmmo::session::core_config{}.body_set_corrections) << "snapshot-free by default";
+        struct arm {
+            uint8_t interval;
+            bool corrections;
+            bool rolls;
+        };
+        for (const arm a: {arm{255, false, false}, arm{255, true, true}, arm{2, false, true}}) {
+            SCOPED_TRACE("interval " + std::to_string(a.interval) + (a.corrections ? ", --body-set-corrections" : ""));
+            flow_fake fake;
+            fake.driven = "Ball_Wood";
+            auto platform = fake.make_flow();
+            auto own = std::make_shared<bmmo_physics_body_state>();
+            own->movable = true;
+            own->simulated = true;
+            own->rotation[3] = 1.0;
+            platform.bind_world = [&fake, own](const bmmo::session::core_world_hooks&) {
+                fake.calls.push_back("bind_world");
+                bmmo::session::rollback_world world;
+                world.get_body = [own](const std::string& entity, bmmo_physics_body_state& out) {
+                    if (entity != "Ball_Wood") return false;
+                    out = *own;
+                    return true;
+                };
+                world.set_body = [own](const std::string& entity, const bmmo_physics_body_state& state,
+                                       bmmo::session::wake_mode, bool) {
+                    if (entity != "Ball_Wood") return false;
+                    *own = state;
+                    return true;
+                };
+                world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+                world.step = []() { return true; };
+                return world;
+            };
+            session_client_core core(std::move(platform), session_capabilities{});
+            run_to_tick_125(core, fake);
+            core.config.rollback = true;
+            core.config.body_set_corrections = a.corrections;
+            state_of(core).snapshot_interval_ = a.interval;
+            state_of(core).own_physicalized_ = true;
+            bmmo::session::rollback_tracked tracked;
+            tracked.own_entity = "Ball_Wood";
+            for (uint32_t tick = 118; tick <= 125; ++tick)
+                state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, tracked, {});
+            const size_t from = fake.calls.size();
+            // The server had the own ball 5 m away at tick 122: a breach.
+            core.on_session_snapshot(snapshot_message(9, 122, true, {ball_row(3, 5.0, true)}));
+            EXPECT_EQ(state_of(core).snapshots_applied_, 1u);
+            EXPECT_EQ(state_of(core).last_snapshot_tick_, 122u);
+            EXPECT_EQ(state_of(core).snapshot_rollbacks_, a.rolls ? 1u : 0u);
+            EXPECT_EQ(state_of(core).rollback_.stats().snapshots, a.rolls ? 1u : 0u) << "compared at all";
+            EXPECT_EQ(state_of(core).snapshots_uncorrected_, a.rolls ? 0u : 1u);
+            const auto calls = since(fake.calls, from);
+            const bool logged = std::find(calls.begin(), calls.end(),
+                                          "log:0:snapshot of tick 122 (full, 1 rows) taken for its names only: the session's "
+                                          "snapshots are off (step RC3)") != calls.end();
+            EXPECT_EQ(logged, !a.rolls);
+            EXPECT_EQ(std::find(calls.begin(), calls.end(), "keep_live_cells:exit:rolled back") != calls.end(), a.rolls);
+        }
+    }
+
     // A navigation the host cannot give yet leaves the mirror undriven
     // without a word; a failed attach is logged.
     TEST(SessionClientCoreLifecycle, MirrorNavigationAnswers) {
@@ -5039,6 +5107,36 @@ namespace {
         EXPECT_TRUE(state_of(core).sector_late_.empty());
     }
 
+    // Step B5RX (the review of RC3): a frozen clock's re-anchor no longer
+    // waits for a snapshot.  Every rewind the core asks outside one (inputs,
+    // lifecycle events, sector stamps, the forced one) goes through
+    // rewind_world, which asks for the resync when the engine found the
+    // clock stopped; with the clock running it asks for nothing.
+    TEST(SessionClientCoreSectorRewind, AFrozenRewindOutsideASnapshotAsksForAResync) {
+        for (const bool stopped: {true, false}) {
+            SCOPED_TRACE(stopped ? "clock frozen" : "clock running");
+            flow_fake fake;
+            auto frozen = std::make_shared<bool>(false);
+            session_client_core core(b1_platform(fake, frozen), session_capabilities{});
+            b1_session(core, fake, 125);
+            core.config.body_set_corrections = false;   // RC3's default: no snapshot would ask
+            *frozen = stopped;
+            const uint64_t resyncs_before = core.resyncs_sent();
+            const size_t from = fake.calls.size();
+            {
+                const auto forced = core.force_rewind(3);
+                EXPECT_TRUE(forced.rolled) << "a frozen rewind still returns true (rollback.hpp)";
+            }
+            const auto calls = since(fake.calls, from);
+            const bool asked = std::find(calls.begin(), calls.end(),
+                                         "log:0:resync requested (local physics clock frozen) at tick 125") != calls.end();
+            EXPECT_EQ(core.rollback_stats().frozen, stopped ? 1u : 0u);
+            EXPECT_EQ(core.resyncs_sent() - resyncs_before, stopped ? 1u : 0u);
+            EXPECT_EQ(asked, stopped);
+            EXPECT_EQ(state_of(core).resync_in_flight_, stopped);
+        }
+    }
+
     // The rewind refused (a frozen world replays nothing): every stamp of
     // the set live, as before B1, and one resync.  Beyond the reach: the
     // same at the drain; while a resync is pending, nothing is requested.
@@ -5053,12 +5151,17 @@ namespace {
             size_t from = fake.calls.size();
             steps{core}.drain_due_events(126);
             steps{core}.rewind_for_sectors();
+            // Step B5RX: the frozen rewind itself asks for the re-anchor
+            // (session_client_core::rewind_world); the refusal's request
+            // that follows finds it in flight.
             const std::vector<std::string> expected = {
-                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay", "now:rewind_end", "keep_live_cells:exit",
+                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay", "now:rewind_end",
+                "now:resync_limiter", "send:0",
+                "log:0:resync requested (local physics clock frozen) at tick 125",
+                "keep_live_cells:exit",
                 "log:0:remote player 4 entered sector 3, stamped for tick 122 (LATE: the server started it already)",
                 "log:0:late sector stamp for tick 122 is outside the rollback history at local tick 125: stamped live, resync",
-                "now:resync_limiter", "send:0",
-                "log:0:resync requested (a late Sector event beyond the reach) at tick 125"};
+                "now:resync_limiter"};
             EXPECT_EQ(since(fake.calls, from), expected);
             EXPECT_EQ(state_of(core).sector_rewinds_missed_, 1u);
             EXPECT_EQ(state_of(core).sectors_.stamps_pending(), 1u);

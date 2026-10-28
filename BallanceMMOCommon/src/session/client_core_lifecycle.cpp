@@ -219,7 +219,7 @@ namespace bmmo::session {
         const std::string reason = "ball of " + std::to_string(player) + " born at tick "
                                  + std::to_string(event_tick);
         const scope_guard keep_cells = platform_.keep_live_cells(*this);
-        if (s.rollback_.rewind_to(world(), event_tick - 1, now, input_at, reason)) {
+        if (rewind_world(event_tick - 1, now, input_at, reason)) {
             ++s.life_rewinds_;
             s.life_rewind_depth_ += now - (event_tick - 1);
             drop_carried_own_replay(event_tick - 1, false);
@@ -1564,7 +1564,7 @@ namespace bmmo::session {
             return recorded_input_at(entity, tick, out);
         };
         const scope_guard keep_cells = platform_.keep_live_cells(*this);
-        if (!s.rollback_.rewind_to(world(), anchor, now, input_at, reason)) {
+        if (!rewind_world(anchor, now, input_at, reason)) {
             // The body set put back the way the server has it, then the
             // resync (a refusal leaves the world at the live tick).
             resync_own_life(life, made, applied, "the rewind to " + std::to_string(anchor) + " was refused");

@@ -134,6 +134,18 @@ namespace bmmo::session {
                     if (snapshot.full && !body.name.empty()) s.mechanism_tracking_.note_name(body.owner, body.name);
                     s.mechanism_tracking_.note_row(snapshot.tick, body);
                 }
+            // Step RC3 (rewind-cost design 3): with the session's snapshots
+            // off, the full snapshot of a body-set change is no correction.
+            // Its names and rows are the registry's (above) and the journal's
+            // (the RECEIVED checkpoint); the world is what the inputs made of
+            // it, and a drift it would have rewound is the drift the
+            // snapshots-off judgement is there to show.
+            if (!snapshots_run() && !config.body_set_corrections) {
+                if (s.snapshots_uncorrected_++ < 4)
+                    logf("snapshot of tick %u (%s, %zu rows) taken for its names only: the session's snapshots are off "
+                         "(step RC3)", snapshot.tick, snapshot.full ? "full" : "delta", snapshot.bodies.size());
+                return;
+            }
             auto entity_of = [&](const bmmo::session::body_state& body) -> std::string {
                 if (body.kind == bmmo::session::body_kind::Ball) {
                     if (body.owner == s.own_id_) return s.own_physicalized_ ? platform_.own_driven_entity() : std::string();

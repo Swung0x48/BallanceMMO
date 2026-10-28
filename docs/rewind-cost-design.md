@@ -168,6 +168,11 @@ re-predicted ticks and after them (§7, check 4); the server is not touched.
   the lifecycle full snapshots a snapshots-off session still receives. They
   are today a correction the client applies, so dropping them is not a pure
   cost cut: it needs its own drift check (the same as RC1's, §7).
+  **Built at step B5RX, snapshot-free by default** (the user, 2026-10-28:
+  "不对，RC3要保留快照？现在应该尽可能假设快照不存在来做"): a snapshots-off
+  session takes the body-set full snapshot for its names and rows only; the
+  drifts it used to correct are gaps for step SFD ("As built (step B5RX)",
+  item RC3A).
 - **RC4, the dormant-script encoding** (trafo design 9.4; at most 5.2-5.3 %):
   the 32 trafo scripts' state, written compactly while they are dormant.
 - **RC5, an incremental restore** (2.8-4.2 %): skip writing a sleeping body
@@ -222,7 +227,7 @@ names no server file); the own ball's feed; the legacy retail path
 |---|---|---|
 | RC1 | the hold-last re-prediction (§2) | §7; quick tier |
 | RC2 | incremental capture for sleeping bodies - **not built, the user's choice 2026-10-28** (the blob has no per-body bytes and IVP no sleep generation; options (a) / (b) kept for later: "As built (step B5RX)", item RC2S) | the savestate exactness set, the wire check (ALL SAME: no behaviour change), CPU parity, H1 at 150 ms |
-| RC3 | no body-set full snapshot while snapshots are off | its own drift check, the snapshots-off arms |
+| RC3 | no body-set full snapshot while snapshots are off - **built at B5RX, the default on every host** (the user's correction of 2026-10-28; the drifts it exposes go to step SFD) | its own drift check, the snapshots-off arms |
 | RC4 | the dormant-script encoding (trafo design 9.4) | script replay exactness, the wire check |
 | RC5 | incremental restore | the savestate checks, the wire check |
 | RC6 | **not adopted at RC1** (the user's ruling of 2026-10-27, quoted in §11); R6 and R7 measured (RC1d, RC1e) and kept as a possible later refinement if human rapid-trigger play shows periods. (History: proposed by Measurement RC1d; ruled 2026-10-27 "R6 直接并入 RC1", then the R7 variant measured, Measurement RC1e: R7 not selected, the choice between R6, R7 and hold-last went back to the user, who chose hold-last.) What the refinement would be, as specified when it was proposed: the tail prediction refinement: hold-last replaced past a remote's newest relayed frame by **R6** (per-key pattern-repeat: each key bit's own period repeated, the other keys of the newest frame by R4's history-adaptive hold, k = 5; §9.2; R5, the whole-frame pattern-repeat, is the measured fallback choice), one function in IR next to `relay_frame_or_newest` (IR:353-367) called from both sites (`recorded_input_at`'s tail branch, CF:494; `live_drive`, CL:467-470); its history window fixed relative to the newest frame (the 128 ticks before it - not the ring's cap `kRelayRing`, IR:47, so a later change of the cap cannot change a prediction), no allocation on the path (the measured build's per-key `std::vector` goes), and the periods found once per arrival, not per tail tick | unit tests of the function (a 1:1 and a 1:3 lateral alternation, an UP/DOWN 1:1 and 2:1 alternation, a 1-tick DOWN every 10 ticks repeated, a direct LEFT -> RIGHT switch, a hold with and without complete holds, a 6-tick brake, flags as hold-last, holes, the start and a birth unchanged) and a session test pinning the two sites on the tail; the wire check against `core_ref_rc1` (every first difference attributed to a tail tick the rule fed differently); solo IDENTICAL; **the paired drift check with the own keys pinned** (`.local-tools/work/RC1d/gaps/pinned_replay.py`, every rule's replay of the same captures; R1 replays byte-identical on every cell) on the RC1d cells with these **required cells at both lags (resync_at150 and resync_at150_down)**: the native steer d0; the 1-tick lateral taps t1x1 (rapid-trigger 1:1 alternation) and t1x3; the brake cells d0_brake and t1x1_brake (a 6-tick DOWN in every 90 UP ticks) and d0_ud1x9 (a 1-tick DOWN in every 10: the 1-tick brake tap); the UP/DOWN fast switches d0_ud1x2 (UP UP DOWN) and d0_ud1x1 (UP/DOWN 1:1); the holds d5 / d10 / d15 and d10_brake (direct LEFT -> RIGHT switches: 405 in d10, Measurement RC1d). Criteria: (1) pooled mean no worse than hold-last's on every required cell and no client more than 5 % worse; (2) on the hold and brake cells (d0, d5, d10, d15, d0_brake, d10_brake) input rewinds per real change no more than hold-last's + 0.1, on the tap and UP/DOWN cells no more input rewinds than hold-last; (3) replayed ticks reported per required cell next to hold-last's. **As measured, R6 (and R5) fail (2) on resync_at150_down d0: 0.96 against 0.80 per change, replayed ticks +21 % (42893 -> 51716), all of it on the mirrors of the lowered player (Measurement RC1d (e)); every other required cell passes (largest excess +0.06).** RC6 is therefore not passable as measured unless the user accepts that cell or RC6 removes the excess. [Checked after the fix-up round, 2026-10-27, `gaps/record_model.py`: a physics-free model of the engine's records (a tick keeps the prediction made when it was last simulated, live or in the last rewind) reproduces the cell's rewinds on the lowered player's mirror (client 1: R1 232, R4 / R5 / R6 299; measured 231 / 296). The excess is all lateral: corrections where the rule had released a lateral key the player still held go 187 -> 266, the opposite kind 157 -> 136, UP / DOWN corrections 20 in every rule. So the excess is R4's fallback releasing a lateral key early at max(5, H - r) on the native steer's irregular long holds, and holding the forward / backward keys (named here before this check) would not remove it; a fix has to change the lateral release, not measured.] The live A/B (snapshots off) on the required cells, t1x1, d0_ud1x2 and d0_ud1x9 at least three sessions per rule at each lag (one session is not evidence of starvation either way); CPU parity, against the replayed ticks of (3) | quick tier |
@@ -306,6 +311,12 @@ names no server file); the own ball's feed; the legacy retail path
 3. Whether RC3's snapshots are still needed once RC1 and the world-agreement
    gaps are in (the snapshot fallback stays until the known drift sources are
    fixed: the user's decision of 2026-10-24).
+   [Answered by the user, 2026-10-28, verbatim: "不对，RC3要保留快照？现在应该
+   尽可能假设快照不存在来做" (no - RC3 keeps the snapshots? From now on work as
+   far as possible as if snapshots did not exist). This supersedes, for this
+   work, the 2026-10-24 rule: RC3 is on by default (step B5RX), and the drifts
+   the body-set snapshots hid are gaps to root-cause and fix (step SFD), not
+   reasons to keep the snapshots.]
 
 ## 11. Decisions
 
@@ -352,6 +363,14 @@ names no server file); the own ball's feed; the legacy retail path
   the user's round had no period at all (R6 found none, even up to p = 40).
   -> RC1 is committed with hold-last; RC6 (R6 / R7) is not adopted (§8);
   RL1 (the lone-resync lag, `TRIAL1` round 1) follows RC1 directly.
+
+- **2026-10-28 (user), verbatim, B5RC's three stops:** "按推荐继续" (go on as
+  recommended): RC2 option (c), not built now; R12B not built, the
+  headless-only savestate diff's time left out of the rewind cost meter
+  (late-player design §2.5, "As built (step B5RX)"); and, correcting the
+  recommendation for RC3 (option (c), the switch default on): "不对，RC3要保留快照？
+  现在应该尽可能假设快照不存在来做" - RC3 is option (a), snapshot-free by
+  default. Landed at step B5RX.
 
 ## As built (step RC1)
 
@@ -1404,3 +1423,105 @@ engine write (restore, set_body, recreate, destroy, rows) invalidating it -
 at most 1.3-1.4 us, no format change; a script that moves a sleeping body
 outside the engine's writes (a teleport through physics_RT) is the
 exactness risk to rule out first. Docs only: no code.
+
+**Item RC3A - RC3 snapshot-free by default (option (a), the user's
+correction).** The user, 2026-10-28, verbatim: "不对，RC3要保留快照？现在应该
+尽可能假设快照不存在来做" (no - RC3 keeps the snapshots? From now on work as far
+as possible as if snapshots did not exist). It replaces the recommended
+option (c) (the switch landed default on) and supersedes, for this work, the
+2026-10-24 rule that the snapshot fallback stays until the known drift
+sources are fixed.
+- *As built* (B5RC's code, `refs/b5rc/rc3-code-v2`, with the default
+  flipped): `client_core_messages.cpp` `apply_snapshot` - with the
+  session's snapshots off (`snapshots_run()` false: SessionStart's interval
+  byte 255) and `core_config::body_set_corrections` false, a full snapshot's
+  names and rows go to the mechanism registry and the journal (the RECEIVED
+  checkpoint) and the function returns before the rollback engine compares
+  it: no compare, no rewind, the first four logged ("taken for its names
+  only ... (step RC3)"), counted in `snapshots_uncorrected_`.
+  `core_config::body_set_corrections` (`client_core.hpp`) defaults to
+  **false**; the headless client's default is false and
+  `--body-set-corrections` is the measured control arm (the pre-RC3
+  behaviour; B5RC's `--no-body-set-corrections` spelling is gone); the
+  retail mod sets it false explicitly in `core_host.cpp`'s config block
+  ("every field set here"). The server, the legacy retail path (`session
+  core off`) and a snapshots-on session are unchanged. Unit test
+  `SessionClientCoreSnapshot.ASnapshotsOffSessionTakesABodySetSnapshotForItsNamesOnly`
+  (the default false; interval 255 without corrections: no compare, no
+  rewind, logged; 255 with the control switch and interval 2: rewinds as
+  before).
+- *The drifts this exposes* (handed to step SFD; B5RC's paired replays of
+  `core_ref_s7`, control = the body-set corrections, RC3 = without them;
+  identical up to the control's first snapshot correction; reproduced at
+  B5RX with the B5RX build, `rB5RX_ctl` against `rB5RX_rc3f`: the same
+  remote-ball and mechanism statistics; the per-plate means are B5RC's
+  `rc3_where.py`): `resync_snapoff` c1 a Ball_Stone mirror (of 4278410334) 0.109 m
+  at 1768 -> 21.3 m, remote balls mean 0.22 -> 0.95 m, p99 3.0 -> 14.8 m,
+  and the client asks for a resync the live client never did (the replay
+  stops there at 2974 of 3635 steps: "expected a clock read at
+  resync_limiter"); `swing_snapoff` c3 remote-ball p99 5.0 -> 17.2 m (the
+  control's 3.29 m correction of Ball_Stone_BMMO_3493379180 at 3163), c1
+  p99 3.4 -> 4.5 m; `l8_cross` c0 / c2 / c3 the P_Modul_29 plates 0.03 ->
+  1.4-1.8 m mean, worst 1.6 -> 3.6 m (P_Modul_29_Platte05 at 574; the
+  control's 0.62 m correction of P_Modul_29_Platte02 at 561), mechanisms
+  mean 0.005 -> 0.25 m on c0 / c3; c1 identical. Up to 17 % fewer replayed
+  ticks (swing c0 1124 -> 996). Run outputs:
+  `maps/arena-test/core_ref_s7/*/replay/rB5RC_{ctl,rc3}` (B5RC) and
+  `rB5RX_ctl`, `rB5RX_rc3f` (B5RX; `rc3_drift.py` in `work/B5RC/`).
+- *The wire check* (`wire_check.sh rB2SX rB5RX rB5RXw`, strict, over
+  `core_ref_s7`; every arm there is snapshots off - the set has no
+  snapshots-on arm, so the "snapshots-on arms ALL SAME" clause has nothing
+  to run on; the unit test covers interval 2): DIFFERENCES, as expected,
+  each attributed - the clients with no body-set correction are SAME /
+  IDENTICAL (resync c0, c2; swing c2; l8 c1), and every other client's
+  first journal difference is the old build's first body-set snapshot
+  CORRECTION record, before which every common TICK hash is equal: resync
+  c1 tick 1768 (Ball_Stone_BMMO_4278410335 0.109 m, 1763 common ticks),
+  resync c3 2438 (Ball_Stone 4.12 m, 2434), swing c0 3163 (the snapshot of
+  3163 compared and refused as past the reach at 3230 - the old build
+  journals that correction, RC3 does not compare it; 3243 common), swing c1
+  3163 (Ball_Stone_BMMO_3493379180 0.86 m, 3182), swing c3 3163 (the same
+  body 3.29 m, 3180), l8 c0 / c2 / c3 561 (P_Modul_29_Platte02 0.62 m, 555).
+  The strict replay then stops at the old build's snapshot rewind ("expected
+  a clock read at run_limit, the capture has one at rewind_start"): the
+  sends differ only from the first send after that rewind's live tick (c1
+  1790 = 1768 + 21 + 1, c3 2461, swing c0 3270 after its 3227 balloon
+  rewind, c1 3209, c3 3207, l8 563). The full-length RC3 sessions are the
+  free-clock replays above.
+- Solo, snapshots off (no remote, no body-set correction): `solo1` / `solo2`
+  replayed strictly by rB5RX against their live journals: sends SAME,
+  journals IDENTICAL (`rB5RX_solo`).
+- *Two consequences found by the review (gate round)*. (1) The frozen-clock
+  re-anchor (design 4.1, the core design's 7 Q1): only `on_snapshot` asked
+  for it, and with no snapshot rewinding in a snapshots-off session nothing
+  did - an input, lifecycle, sector or forced rewind on a stopped clock
+  (`rollback.hpp` `restore_and_replay`, the `if (frozen)` branch: the bodies
+  set, the history dropped, `true` returned) left the world on its anchor
+  while the ticks ran on. Every core rewind outside a snapshot now goes
+  through `session_client_core::rewind_world` (`client_core.cpp`), which
+  calls `rewind_to` and asks for the resync (owed, so the 2 s limiter
+  cannot lose it) when `stats().frozen` grew; the five call sites in
+  `client_core_frame.cpp` and `client_core_lifecycle.cpp` use it. The
+  headless clock never stops, so no capture's reads change. Unit test
+  `SessionClientCoreSectorRewind.AFrozenRewindOutsideASnapshotAsksForAResync`
+  (a forced rewind, frozen: one request; running: none); the B1 test of a
+  refused sector rewind now sees the frozen request first and its own
+  request finding it in flight. (2) The wire check's coverage: under the RC3
+  default the strict replay of a snapshots-off multi-client capture of
+  `core_ref_s7` stops at the old build's first body-set rewind (l8_cross
+  c0 / c2 / c3 at 703 of about 2340 steps), and two builds that stop at the
+  same record compare equal while most of the session went unchecked.
+  `wire_check.sh` now fails a replay that does not reach its capture's end
+  marker with rc 0 ("COVERAGE-SHORT", counted as DIFFERENCES), and takes
+  `OLD_EXTRA` / `NEW_EXTRA` / `EXTRA` client arguments (`e0_replay.py
+  --extra`). Until a reference set is re-captured under the RC3 default
+  (queued: `core_ref_s8`, the same arms, at the next step with live runs
+  to spare), the set's determinism gate is the control arm:
+  `EXTRA=--body-set-corrections wire_check.sh OLD NEW TAG` (with a pre-RC3
+  OLD: `OLD_EXTRA= NEW_EXTRA=--body-set-corrections`), which replays every
+  capture to its end. Also: a free-clock replay no longer warns "arguments
+  differ" (`--replay-free-cost-clock` is left out of the comparison), and
+  `body_set_corrections` is read on the rollback path only - with rollback
+  off (headless `--no-rollback`, retail `session rollback off`) the blend
+  ladder still sets the balls from every snapshot, as before (said in its
+  comment).
