@@ -2961,6 +2961,28 @@ floor of current_tick + 3, and both start paths store the schedule through
 one helper. Server only, no protocol change. The record is the late-player
 design §2.8, "As built (step RL1b)".
 
+**As built (step B2SW, 2026-10-27): the sweep of roadmap §4 item 2 - T2, G1,
+N2 on every world, T1's findings.**
+
+- **T2 (the trafo scripts out of `keep_local`): covered by T3, closed without
+  code.** Measured first, as the row asks (`maps/arena-test/b2sw_A`, headless,
+  4 clients, 150 ms, snapshots off, the server's `trafo_inputs` and
+  placement on, build `rB2SWb`): client 0 transforms at 650 (stone, 50
+  pieces) and is forced to resync at 1000 (`--resync-at`, S 1021, re-step to
+  1049, inside the pieces' life); client 2 takes TR3b's deferred H3b (two
+  downlink blackouts, `trafo_missed` 5, two resyncs at S 1145 and 2304).
+  `tr3/svc.py --pieces-only` against the server journal: client 0 from 1050
+  on 50/50 pieces bit-equal, 0 missing / 0 extra ticks; client 2 between its
+  resyncs (1180-2137) 50/50 and after the second (2339 on) 33/33 bit-equal,
+  its extra ticks only inside the second window before the apply (the missed
+  reset's pieces, TR3's H3b signature); clients 1 and 3 50/50; the server
+  journal replays 3270/3270. Why: with the option on the originals are never
+  selected (trafo design 4.3), so `keep_local_script`'s trafo-name rule has
+  nothing left to keep - the sets' copies (`_Trafo<player>`) are localized
+  from the server's portable record like every other script - and with the
+  option off the server runs no trafo, so keeping the originals local is the
+  only right answer. `resync_rules.hpp` is unchanged (its comment's "until
+  step T2" now means "while the trafo inputs are off").
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

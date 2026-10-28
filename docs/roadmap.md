@@ -369,6 +369,13 @@ numbers 1-10 are unchanged.
      3-tick legacy floor, the stale comments, one start helper; no
      world-less runner fixture exists, so the runner-level test is a test
      of the pure rule the runner calls (`ReanchorOnSchedule`).
+   - **Swept at B2SW (2026-10-27; the user: "感觉这些零散发现全都可以一起一次扫掉")**,
+     one batch, each item's record in its design's "As built (step B2SW)":
+     - *Resync T2*: closed without code - a forced resync of the
+       trafoing client inside its pieces' life and TR3b's H3b both leave
+       the pieces bit-equal to the server's after the apply (50/50, 50/50,
+       33/33); with the option on the originals are never selected, with it
+       off the server has no trafo (resync design).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift
