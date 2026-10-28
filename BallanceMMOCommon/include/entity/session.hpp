@@ -79,7 +79,13 @@ namespace bmmo::session {
     //      recipient's wait at the server (session/lateness.hpp
     //      server_wait_meter), which a session-core client adds to its
     //      rollback reach's margin of 8.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 13;   // 4: SessionStart carries spawn_spacing
+    //  14  the airship zone (step BALA, the user's airship rule of
+    //      2026-10-28): every world runs the zone's pair rule and freezes a
+    //      ghost in it (physics_state.hpp airship_zone_set), and a member
+    //      whose own ball is in the zone sends SessionGhostPose, which the
+    //      server relays to the others for display (message/
+    //      session_ghost_pose_msg.hpp).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 14;
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its

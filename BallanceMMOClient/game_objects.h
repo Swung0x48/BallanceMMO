@@ -321,6 +321,17 @@ public:
 		set_ball_solid(id, it->second, physicalized);
 	}
 
+	// Step BALA (the airship rule): a physicalized ball whose owner left the
+	// sync in the airship zone is a ghost here - translucent, and still left
+	// where the session puts it (update() does not move a physicalized
+	// ball); off, it looks as its physicalized state says again.
+	void set_ghost(HSteamNetConnection id, bool ghost) {
+		std::lock_guard lk(mutex_);
+		auto it = objects_.find(id);
+		if (it == objects_.end()) return;
+		set_ball_solid(id, it->second, ghost ? false : it->second.physicalized);
+	}
+
 	void remove(HSteamNetConnection id) {
 		std::lock_guard lk(mutex_);
 		objects_.erase(id);

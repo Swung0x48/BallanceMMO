@@ -563,6 +563,11 @@ numbers 1-10 are unchanged.
    retail keeps parking until R6, measured there, queued in the core design's
    R6 row); s7's 1238 seam crossing is unchanged to the
    bit and traced to G-c (item 5).
+   Answer 3 (the airship, refined to "own ball only" with a ghost at the
+   relayed pose) is built at step BALA (`rewind-cost-design.md` "As built
+   (step BALA)"; protocol 14, bridge API 24): a positional airship zone in
+   every world, another player's ball frozen there as a ghost and never
+   touching any airship, the owner's pose relayed for display.
    Answer 1 is option (a): H6 is judged by its absolute limits (starved
    within the band, the server's p99 within the budget, both met), so **the
    close-out is passed by the user's ruling** (H6's numbers stay recorded in

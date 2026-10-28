@@ -2279,3 +2279,168 @@ this commit; only a fresh config gets the new default (SP10's
 `~/bmmo/config.yml`) needs `trafo_inputs: true` (and
 `placement_clones: true`) set by hand at its next deployment. A one-time
 config migration would be a design choice and is not made here.
+
+## As built (step BALA)
+
+The airship rule: SFD's stop (B) answered by the user on 2026-10-28 (answer 3,
+verbatim: "每个世界应该都有自己独立的飞船副本，且不纳入同步，每个客户端看到的飞船不同。"),
+refined the same day to option (A) "Own ball only" and to the ghost: "用转发位置的吧
+... 然后进入飞船区域的时候，反物理化，显示半透明球，并同步位置等。" (the own ball as
+usual, the others see it semi-transparent at its relayed pose). Base f145a9a,
+protocol 13 -> **14**, journal v7 unchanged (the zone ticks are NOTE records),
+bridge API 23 -> **24**. No IVP or physics_RT source changed; no engine change.
+
+**The zone and the pair rule are the physics layer's** (`physics_state.cpp`
+"bridge API v24: the airship zone", one implementation for the server, the
+headless host and the retail plugin): `airship_zone_set(physics, enable,
+own_group)` finds the walkable parts (`PE_Balloon_Platform*`,
+`PE_Balloon_Platte*`) and installs a collision filter and an
+`IVP_Listener_PSI` in the environment. The box is each part's mesh box
+(`GetBoundingBox(TRUE)`) through its world matrix, taken at the first PSI
+after the platform has its body - the level-end script places the airship
+after the level loads (adaptation 1) - rounded outward to the 1/8 m grid,
+plus 3.0 m sideways, 4.5 m below (the planks' 3.2 m sag) and 5.0 m above.
+Arena: (905.250 -6.375 3.250) .. (941.625 7.250 26.750) in every world, the
+server included (taken by tick 67 in swing, 1718/1771 in the drive arms: the
+sector union physicalizes it). The rule, for a player ball (group `P#...`):
+another player's ball never collides with an airship body (`keep_local_body`);
+such a ball whose core is in the box collides with nothing, and at the start
+of every PSI (after IVP's revives, before the controllers) it is rechecked
+(every pair dropped) and frozen - a ghost, sorted by group so two in one PSI
+freeze in one order; the own ball, from its first PSI in the box until its
+body is gone, collides only with the static level and its own airship (the
+review round's latch, below). **The ghost is positional, not stateful** (adaptation 2: the
+design said "unphysicalized"; the ghost keeps its body, frozen and
+collision-free): a rollback's restore and replay re-derive it with no state of
+their own, a resync's blob carries it, and a navigation wake (the Physics
+WakeUp of a key edge) is frozen again before it moves. The server's airship
+collides with no ball (no own group) and stays simulated.
+
+**The core** (`client_core_frame.cpp` `airship_frame`, after each live frame):
+installs the zone at the anchor with `own_group_`, notes the box once taken,
+the own ball's first latched tick (`own_airship_tick_`, cleared by a death
+or a rewind that took the latch back) and each mirror's
+(`remote_ball::airship_tick`) in the log and the journal; from the own zone
+tick no held notice, forced frame or resync amendment touches the own record
+or journal (`settle_held_tick`, `take_held_ahead`, `correct_own_tick`,
+`take_forced_own`, `amend_for_resync`), no snapshot row is applied to a ball
+out of the sync (`apply_snapshot`'s `entity_of`), and a resync keeps it
+(below); while latched the own pose goes
+out every 2 ticks as `SessionGhostPose` (44 bytes, unreliable;
+`message/session_ghost_pose_msg.hpp`), which the server stamps with the
+sender and relays to the other members only (`server.cpp`
+`handle_session_ghost_pose`) and never applies; a receiver keeps the last 16
+poses and shows a ghost (`session_platform::show_ghost`, retail only:
+`game_objects::set_ghost` translucent, the CK matrix set) at the pose 4 owner
+ticks behind the newest, linear position and normalized-lerp rotation. The
+server journals `airship: pN in the airship zone at tick T` per clone
+(`session_runner.cpp`). Test knob: headless `--accept-protocol N` replays a
+capture of protocol N (the wire check of this step; adaptation 3: the five
+protocol-13 arms of `core_ref_s8` were not re-captured).
+
+**Checks (quick tier).** 585 tests pass (new `GhostPoseWire`); GCC 29/29 ok;
+x64 BUILD-OK, x86 CLIENT-BUILD-OK, ARCH-BUILD-OK. Wire check `rN02R -> rBALA`
+(`NEW_EXTRA=--accept-protocol 13`) over `core_ref_s8`: l8_cross 4/4 sends
+SAME but SessionReady's protocol, journals IDENTICAL (its airship never gets a
+body in 40 s); swing c0 likewise, c1/c2/c3 SAME but SessionReady and 34/35/34
+ghost poses from the own zone tick; resync c2 SAME but SessionReady and 72
+poses, c0/c1/c3 differ from tick 2385/2299/2285 (after their zone ticks
+2217/2234/2225; the own ball out of the sync dies elsewhere, its respawn gets
+no echo from the captured server, and the replay stops COVERAGE-SHORT at
+"expected a clock read at resync_limiter"). Every journal's TICK hashes agree
+up to the first zone freeze of its world (swing 2930/2923, resync 2200/2217).
+Swing against the server (SimTool replays of `server.bmjr`, old and new): the
+old server's copy of c2's ball leaves c1's at 3104 (0.03 -> 0.62 m by 3116,
+the airship leak) and c1's ball is 5.3-6.3 m off in c3's world; with BALA
+every ball but each client's own out-of-sync one is bit-equal to the server
+at 3100-3116 on c1 and c3 (3/3); the mechanisms are G-c as before
+(P_Modul_34 1.7 mm on c1, P_Modul_03 1.21 m on c3). One live run (4 headless
+clients, arena, 60 s, 150 ms, drive + keep-lane, snapshots off, the Arch
+server rebuilt; `maps/arena-test/BALA_live/airship`): PASS, server replay
+4111/4111, starved/resyncs/far 0; zone entries server/owner 2067/2067,
+2157/2157, 2173/2173 with owner and server bit-equal up to the entry, and
+2165/2164 for c3; 222-235 relayed poses received by each client from the
+three others, none of its own.
+
+**Measured: the zone decided differently between worlds** - c3's own ball in
+the live run entered at 2164, the server's copy at 2165; in the swing replays
+c2's world ghosted c1's ball at 2922 (the others 2939) and the others c2's at
+2930 (c2's own 2938). In each case the copies already differed by 0.07-9 m
+before the zone (c3 from tick 234, c2's world from the start: the coincident
+spawn pile, step SPGH's), not at the boundary; no case where bit-equal copies
+decided differently was found. An owner-stamped event would make the tick one
+in every world whatever the copies (the user's choice, not built).
+
+**Review round (the gate's fix-up).** (1) Every own-correction path is gated
+at the own zone tick, not only `amend_for_resync`: `settle_held_tick` (no
+store, no SUBSTITUTED journal record, no amend, no past-the-reach resync
+request), `take_held_ahead`, `correct_own_tick` and `take_forced_own` (a
+SessionLead's forced frame is the server's input for a frozen ghost; the own
+ball plays this client's keys), counted in `own_corrections_out_of_sync_`.
+(2) A resync whose S is at or after the own zone tick keeps the own ball:
+no row, no navigation, and the travelling blob excludes it by its exact name
+(`savestate_travel::excluded_prefixes` takes an entry `=<name>` as one exact
+name, `physics_savestate_restore.cpp map_objects`), so the restore takes it
+from the anchor's own record like a keep-local body (rechecked into the
+tree) and the re-step drives it from its records (`resyncs_own_kept_`). An S
+before the zone tick still takes the server's row (the ball was in the sync
+there). (3) The own side is one way for the life: the physics layer keeps a
+latch per own life as IVP clock intervals `[entered, gone)` - opened at the
+first PSI the own core is in the box (later lives a rollback took back are
+forgotten first), closed at the first PSI with no own body - and the pair
+rule restricts the own ball while latched, inside the box or not; at the PSI
+the latch opened the own ball's pairs are rechecked (`recheck_collision_filter`),
+so a contact it had with a mirror or a mechanism is dropped at the PSI the
+other worlds freeze its copy, and a replay that reaches that PSI (same clock:
+the savestate restores it) rechecks there again; a restore before it reads
+the latch closed. The pose goes out while latched (the whole life, so the
+others' ghost never stops at a last pose when the owner backs out of the 3 m
+margin); `airship_zone_contains` answers 1 for a latched own ball, and the
+core clears `own_airship_tick_` when the latch is gone (death, or a rewind
+to before the entry the replay did not repeat). Not covered: a resync's
+travelling blob sets the server's clock, so a latch whose interval the new
+clock does not cover is re-taken at the next PSI in the box (a ball that
+backed out is then unrestricted until it re-enters). (4) Documented, not
+changed (review finding 5): retail `show_ghost` sets the CK world matrix of a
+frozen, physicalized mirror to the relayed pose, so on retail a reader of the
+CK matrix (TT proximity scripts, the per-player mechanism units of world
+agreement Q7(b)) sees the owner's display pose there while IVP, the headless
+client and the server keep the frozen entry pose; per-player units must
+ignore ghosts (or read the IVP core) when they are built. (5) Nits: the
+server's box line is logged again for a new level; the stale protocol
+comment went.
+
+**Gate round checks** (about 9 minutes): x64 BUILD-OK (header deps valid),
+x86 CLIENT-BUILD-OK (all 10 includers of `client_core.hpp` rebuilt), GCC
+29/29 ok, 585 tests pass, the Arch server rebuilt (ARCH-BUILD-OK, with the
+slot-13 hack for the retail run). Wire check `rBALA -> rBALA2`
+(`EXTRA=--accept-protocol 13`, both binaries): every journal IDENTICAL (12/12),
+l8_cross and swing c0 sends SAME; in swing c1-c3 and resync c0-c3 every send
+but the 44-byte ghost poses SAME, and the poses start at the same tick and
+continue past the old binary's last one (swing c1 34 -> 114 poses, 2939..3165;
+resync c2 72 -> 233): the latch keeps the pose going after the ball leaves the
+box. The captures reach no resync with the own ball in the zone (the resync
+arms stop COVERAGE-SHORT before it), so (2) is untested by replay. One
+two-copy retail run (`scripts/retail/BALA_retail2`, arena in slot 13,
+snapshots off, trafo_inputs and placement_clones on; a first launch was
+refused at room start because the Arch server had been built without the
+slot-13 hack, no session ran): client 1 activated sector 4, beamed onto
+`PE_Balloon_Platform` (930, 0, 15) at tick 435, its own ball latched at 436
+and rests on its own airship platform at (929.30, 2.02, 14.98) - it
+collides with it; the server ghosted its clone at 436; client 2 ghosted the
+mirror (logged at 439, its first live frame after the beam's lifecycle
+rewind) and received 501 relayed poses, shown on 999 frames; 502 sent by
+client 1, none received by it. **The level end did not run** (no "Sending
+level finish message"): the ball rests 2.02 m above the platform pivot and
+the platform does not sink; the player's own sector stayed 1 (the 'sector 4'
+verb activates the sector through the union, not the player's checkpoint
+chain), and whether PE_Levelende's proximity is armed only by the last
+sector's checkpoint was not established in the budget. The ghost's
+translucency was not seen (client 2's camera follows its own ball, 950 m
+away).
+
+**Not done / deferred.** The finisher's level end on retail (a run that
+reaches the last sector by the checkpoint chain); the translucent ghost on
+screen; remote input corrections of a ghost still rewind (harmless: the
+replay re-freezes it); a protocol-14 reference set (`core_ref_s9`, five live
+arms).

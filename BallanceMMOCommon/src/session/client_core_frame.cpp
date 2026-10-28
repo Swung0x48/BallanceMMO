@@ -20,7 +20,9 @@
 #include "session/client_core.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <set>
@@ -918,6 +920,8 @@ namespace bmmo::session {
         // A requested beam (the headless --beam, the retail verb), stamped
         // tick + 1.
         apply_requested_beam(tick);
+        // Step BALA: the airship zone's ghosts and the own pose.
+        airship_frame(tick);
         // The record for this tick was captured before the corrections
         // above, so a rollback to it would restore the divergent pose and
         // lose the correction on the first re-simulated tick.  Re-capture
@@ -978,6 +982,148 @@ namespace bmmo::session {
         const int moved = s.lead_slew_.advance(wall, behind_ticks);
         if (s.lead_slew_.done()) finish_lead_slew("slew complete");
         return moved;
+    }
+
+
+    // ---------------------------------------------------- the airship zone
+    // Step BALA (the user's airship rule of 2026-10-28; rewind-cost
+    // design "As built (step BALA)").  The zone itself is the physics
+    // layer's (physics_state.hpp airship_zone_set): every world freezes a
+    // copy of another player's ball that enters it, positionally, live and
+    // in every replay alike.  What is left here is bookkeeping and display:
+    //   * the own ball: the first tick of this life it is in the zone is
+    //     where it leaves the sync (journaled; own corrections and snapshot
+    //     rows of later ticks are not applied to it), and while it is in the
+    //     zone its pose goes out every kGhostPoseInterval ticks;
+    //   * a mirror: the first tick its body is in the zone is where it
+    //     became a ghost here (journaled); while it is one the host shows it
+    //     semi-transparent at its owner's relayed pose, interpolated
+    //     kGhostDelay ticks behind the newest.
+    namespace {
+        constexpr uint32_t kGhostPoseInterval = 2;   // 33 poses a second
+        constexpr uint32_t kGhostDelay = 4;          // display this many owner ticks behind the newest pose
+        constexpr size_t kGhostPosesKept = 16;
+    }
+
+    void session_client_core::airship_frame(uint32_t tick) {
+        if (!s.airship_active_ || !platform_.airship_zone_contains) return;
+        if (!s.airship_box_logged_ && platform_.airship_zone_box) {
+            double box[6] = {};
+            if (platform_.airship_zone_box(box) == 1) {
+                s.airship_box_logged_ = true;
+                char text[200];
+                std::snprintf(text, sizeof(text), "airship zone (%.3f %.3f %.3f) .. (%.3f %.3f %.3f) taken by tick %u", box[0],
+                              box[1], box[2], box[3], box[4], box[5], tick);
+                logf("%s", text);
+                journal_.note(text);
+            }
+        }
+        // The own ball.  The physics layer's latch is one way for the life
+        // (inside the box or not since its first PSI there), so the pose goes
+        // out until the ball dies.  Not latched any more while this side still
+        // counts it out of the sync: a rewind to before the entry replayed it
+        // away (the replay may re-enter at another tick - the next frame that
+        // finds the latch takes its own tick then).
+        const int own_zone = s.own_physicalized_ && !s.own_body_entity_.empty()
+                                 ? platform_.airship_zone_contains(s.own_body_entity_) : -1;
+        if (own_zone != 1) {
+            if (s.own_airship_tick_ != 0 && own_zone == 0)
+                logf("airship: the own ball %s is not latched in the airship zone at tick %u any more (a rewind to before "
+                     "its entry at %u): back in the sync", s.own_body_entity_.c_str(), tick, s.own_airship_tick_);
+            s.own_airship_tick_ = 0;   // dead, or rewound to before the entry: in the sync
+        } else {
+            if (s.own_airship_tick_ == 0) {
+                s.own_airship_tick_ = tick;
+                logf("airship: the own ball %s is in the airship zone at tick %u: out of the sync from here",
+                     s.own_body_entity_.c_str(), tick);
+                journal_.note("airship: own ball in the airship zone at tick " + std::to_string(tick)
+                              + ", out of the sync from here");
+            }
+            if (s.assigned_ && (tick - s.own_airship_tick_) % kGhostPoseInterval == 0) {
+                bmmo_physics_body_state own{};
+                if (platform_.body_state(s.own_body_entity_, own)) {
+                    bmmo::session_ghost_pose_msg pose;
+                    pose.session = s.session_;
+                    pose.tick = tick;
+                    for (int k = 0; k < 3; ++k) pose.position[k] = static_cast<float>(own.position[k]);
+                    for (int k = 0; k < 4; ++k) pose.rotation[k] = static_cast<float>(own.rotation[k]);
+                    pose.serialize();
+                    platform_.send(pose.raw.str(), send_mode::unreliable_no_delay);
+                    ++s.ghost_poses_sent_;
+                }
+            }
+        }
+        // The mirrors.
+        for (auto& [id, remote]: s.remotes_) {
+            const int in_zone = remote.physicalized ? platform_.airship_zone_contains(remote.entity) : -1;
+            if (in_zone != 1) {
+                if (remote.airship_tick != 0)
+                    logf("airship: player %u's ghost %s is out of the zone at tick %u", id, remote.entity.c_str(), tick);
+                remote.airship_tick = 0;
+                remote.ghost_poses.clear();
+                if (remote.ghost_shown && platform_.show_ghost) platform_.show_ghost(remote.entity, false, nullptr);
+                remote.ghost_shown = false;
+                continue;
+            }
+            if (remote.airship_tick == 0) {
+                remote.airship_tick = tick;
+                logf("airship: player %u's ball %s is in the airship zone at tick %u: a ghost from here", id,
+                     remote.entity.c_str(), tick);
+                journal_.note("airship: p" + std::to_string(id) + " in the airship zone at tick " + std::to_string(tick)
+                              + ", a ghost from here");
+            }
+            if (!platform_.show_ghost) continue;
+            if (remote.ghost_poses.empty()) {
+                if (!remote.ghost_shown) platform_.show_ghost(remote.entity, true, nullptr);
+                remote.ghost_shown = true;
+                continue;
+            }
+            const uint32_t newest = remote.ghost_poses.rbegin()->first;
+            const uint32_t target = newest > kGhostDelay ? newest - kGhostDelay : 0;
+            auto hi = remote.ghost_poses.lower_bound(target);
+            client_core_state::remote_ball::ghost_pose pose = hi->second;
+            if (hi->first != target && hi != remote.ghost_poses.begin()) {
+                const auto lo = std::prev(hi);
+                const float t = static_cast<float>(target - lo->first) / static_cast<float>(hi->first - lo->first);
+                float dot = 0.0f;
+                for (int k = 0; k < 4; ++k) dot += lo->second.rotation[k] * hi->second.rotation[k];
+                const float sign = dot < 0.0f ? -1.0f : 1.0f;
+                float norm = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    pose.position[k] = lo->second.position[k] + (hi->second.position[k] - lo->second.position[k]) * t;
+                for (int k = 0; k < 4; ++k) {
+                    pose.rotation[k] = lo->second.rotation[k] * (1.0f - t) + sign * hi->second.rotation[k] * t;
+                    norm += pose.rotation[k] * pose.rotation[k];
+                }
+                norm = std::sqrt(norm);
+                if (norm > 0.0f)
+                    for (float& q: pose.rotation) q /= norm;
+            }
+            const double q[4] = {pose.rotation[0], pose.rotation[1], pose.rotation[2], pose.rotation[3]};
+            float rows[9];
+            quaternion_rows(q, rows);
+            float matrix[16] = {};
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k) matrix[r * 4 + k] = rows[r * 3 + k];
+            for (int k = 0; k < 3; ++k) matrix[12 + k] = pose.position[k];
+            matrix[15] = 1.0f;
+            platform_.show_ghost(remote.entity, true, matrix);
+            remote.ghost_shown = true;
+            ++s.ghost_poses_shown_;
+        }
+    }
+
+    void session_client_core::on_session_ghost_pose(const bmmo::session_ghost_pose_msg& msg) {
+        if (msg.session != s.session_ || s.phase_ != client_core_state::phase::running) return;
+        if (msg.player == s.own_id_) return;
+        auto it = s.remotes_.find(msg.player);
+        if (it == s.remotes_.end()) return;
+        ++s.ghost_poses_received_;
+        auto& poses = it->second.ghost_poses;
+        client_core_state::remote_ball::ghost_pose& pose = poses[msg.tick];
+        std::copy(std::begin(msg.position), std::end(msg.position), pose.position);
+        std::copy(std::begin(msg.rotation), std::end(msg.rotation), pose.rotation);
+        while (poses.size() > kGhostPosesKept) poses.erase(poses.begin());
     }
 
 }

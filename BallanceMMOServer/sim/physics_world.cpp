@@ -275,6 +275,7 @@ namespace bmmo::sim {
         }
         sectors_.reset();
         if (!ensure_collision_filter(error)) return false;
+        install_airship_zone();
         rewire_proximity_probes();
         rewire_ball_identity_reads();
         // Step A3 (resync design 2.3): the selection the clients make at
@@ -379,6 +380,25 @@ namespace bmmo::sim {
         if (!bmmo::physics::install_player_collision_filter(manager, kPlayerGroupPrefix, error)) return false;
         filter_environment_ = environment;
         return true;
+    }
+
+    // Step BALA: the airship zone (physics_state.hpp airship_zone_set) with
+    // no own ball - the server's airship collides with no ball, and every
+    // clone that enters the zone is frozen there as a ghost.  The server
+    // never applies a relayed ghost pose: it only forwards it.
+    void physics_world::install_airship_zone() {
+        airship_box_logged_ = false;   // a new level: its box is logged when taken
+        bmmo::physics::airship_zone_box box;
+        std::string error;
+        if (!bmmo::physics::airship_zone_set(physics(), true, "", box, error)) {
+            log("world: airship zone: " + error);
+            return;
+        }
+        if (!box.active) {
+            log("world: airship zone: the level has no airship");
+            return;
+        }
+        log("world: airship zone on (the box is taken once the platform has its body)");
     }
 
     bool physics_world::park_retail_ball() {
@@ -1072,6 +1092,30 @@ namespace bmmo::sim {
             if (CK3dEntity* retail = retail_ball())
                 for (const auto& [id, p]: players_)
                     if (p.physicalized && p.ball) { retail->SetWorldMatrix(p.ball->GetWorldMatrix()); break; }
+        }
+        // Step BALA: a clone found in the airship zone after this step is a
+        // ghost from here (the PSI hook froze it); noted once per life.
+        if (!airship_box_logged_) {
+            bmmo::physics::airship_zone_box box;
+            bmmo::physics::airship_zone_get(manager, box);
+            if (box.ready) {
+                airship_box_logged_ = true;
+                char text[200];
+                std::snprintf(text, sizeof(text), "world: airship zone (%.3f %.3f %.3f) .. (%.3f %.3f %.3f) taken by tick %u",
+                              box.min[0], box.min[1], box.min[2], box.max[0], box.max[1], box.max[2], tick_);
+                log(text);
+            }
+        }
+        for (auto& [id, p]: players_) {
+            const int in_zone = p.physicalized && p.ball ? bmmo::physics::airship_zone_contains(manager, p.ball->GetName()) : -1;
+            if (in_zone == 1 && p.airship_tick == 0) {
+                p.airship_tick = tick_;
+                airship_entries_.emplace_back(id, tick_);
+                log("world: airship: player " + std::to_string(id) + "'s ball " + p.ball->GetName()
+                    + " is in the airship zone at tick " + std::to_string(tick_) + " (a ghost from here)");
+            } else if (in_zone != 1) {
+                p.airship_tick = 0;
+            }
         }
         ++tick_;
         rng_cursor_ = ivp_srand_read();

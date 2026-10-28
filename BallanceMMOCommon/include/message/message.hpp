@@ -98,6 +98,7 @@ namespace bmmo {
         SessionLead,
         SessionLeadAck,
         SessionResyncState,
+        SessionGhostPose,     // protocol 14 (step BALA)
     };
 
     template<typename T, opcode C = None>

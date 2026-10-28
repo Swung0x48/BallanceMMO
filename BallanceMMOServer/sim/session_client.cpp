@@ -304,6 +304,12 @@ namespace {
         // step B5RX, the user's "work as if snapshots did not exist") takes
         // it for its names and rows only (core_config::body_set_corrections).
         bool body_set_corrections = false;
+        // --accept-protocol N (step BALA, test only): a SessionStart of
+        // protocol N is taken as well as this build's - the wire check's
+        // replay of a reference set captured before a protocol bump that
+        // changed nothing its inbound messages carry (core_config::
+        // accept_protocol).  0: none.
+        uint32_t accept_protocol = 0;
         int hold_event_type = -1;
         uint32_t hold_event_nth = 0;
         int hold_event_ms = 0;
@@ -443,6 +449,7 @@ namespace {
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
                   "       [--reach N]   (the rollback's reach pinned at N ticks, 48..120; default: per client, from the relay lag)\n"
                   "       [--body-set-corrections]   (snapshots off: a body-set change's full snapshot still corrects, as before RC3; the control arm)\n"
+                  "       [--accept-protocol N]      (test only: also take a SessionStart of physics protocol N - a reference capture's replay)\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--beam2 X Y Z TICK] [--keep-lane Z] [--keep-lane-dwell N]\n"
                   "       [--brake-tap N:P]   (while the record holds UP: DOWN instead for N frames in every P)\n"
                   "       [--keep-lane-tap N:M]   (the steer's key pressed N frames, released M, repeating)\n"
@@ -634,6 +641,7 @@ namespace {
             else if (arg == "--no-trafo-cap") out.no_trafo_cap = true;
             else if (arg == "--ignore-snapshots") out.ignore_snapshots = true;
             else if (arg == "--body-set-corrections") out.body_set_corrections = true;
+            else if (arg == "--accept-protocol") { if (!(v = next())) return false; out.accept_protocol = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--trafo-no-resets") out.trafo_no_resets = true;
             else if (arg == "--leave-at") { if (!(v = next())) return false; out.leave_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--leave-after-unphys") { if (!(v = next())) return false; out.leave_after_unphys = std::atoll(v); }
@@ -1070,6 +1078,12 @@ namespace {
                 core_.on_session_resync_state(std::move(msg));
                 break;
             }
+            case bmmo::SessionGhostPose: {
+                bmmo::session_ghost_pose_msg msg;
+                if (!fill(msg)) return;
+                core_.on_session_ghost_pose(msg);
+                break;
+            }
             case bmmo::SessionEvent: {
                 bmmo::session_event_msg msg;
                 if (!fill(msg)) return;
@@ -1407,6 +1421,31 @@ namespace {
                     for (int k = 0; k < 4; ++k) matrix[r * 4 + k] = world[r][k];
                 return true;
             };
+            // Step BALA: the airship zone over this world (physics_state.hpp);
+            // no ghost display (show_ghost stays empty: a headless world draws
+            // nothing, and a mirror's CK matrix stays where its body is).
+            p.airship_zone = [this](bool enable, const std::string& own_group, double box[6], std::string& error) {
+                bmmo::physics::airship_zone_box zone;
+                if (!bmmo::physics::airship_zone_set(engine_->physics(), enable, own_group.c_str(), zone, error)) return -1;
+                for (int k = 0; k < 3; ++k) {
+                    box[k] = zone.min[k];
+                    box[3 + k] = zone.max[k];
+                }
+                return zone.active ? 1 : 0;
+            };
+            p.airship_zone_contains = [this](const std::string& name) {
+                return bmmo::physics::airship_zone_contains(engine_->physics(), name.c_str());
+            };
+            p.airship_zone_box = [this](double box[6]) {
+                bmmo::physics::airship_zone_box zone;
+                bmmo::physics::airship_zone_get(engine_->physics(), zone);
+                if (!zone.active) return -1;
+                for (int k = 0; k < 3; ++k) {
+                    box[k] = zone.min[k];
+                    box[3 + k] = zone.max[k];
+                }
+                return zone.ready ? 1 : 0;
+            };
             p.set_entity_matrix = [this](const std::string& name, const float matrix[16]) {
                 auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
                         const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
@@ -1711,6 +1750,7 @@ namespace {
             c.window_shift = args_.window_shift;
             c.reach_ticks = args_.reach_ticks;
             c.body_set_corrections = args_.body_set_corrections;
+            c.accept_protocol = args_.accept_protocol;
             return c;
         }
 

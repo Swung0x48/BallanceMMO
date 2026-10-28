@@ -233,6 +233,16 @@ namespace bmmo::session {
             return platform_.body_state(entity, out);
         });
         const std::string own_entity = s.own_physicalized_ ? platform_.own_driven_entity() : std::string();
+        // Step BALA (the airship rule: no correction, compare, resync or
+        // rollback acts on a ball that left the sync): the own ball in its
+        // airship zone at S is the server's frozen ghost there, not ours.  It
+        // keeps this world's own state - no row, no navigation, out of the
+        // server's blob by its exact name, so the restore takes it from the
+        // anchor's own record like a keep-local body - and the re-step drives
+        // it from its records (never amended from the zone tick on).  An
+        // entry after S is re-stepped from the server's state of S, where the
+        // ball was still in the sync.
+        const bool own_kept = !own_entity.empty() && own_out_of_sync_at(anchor);
         // The deaths after S this world applied already (2.6.3: a mirror
         // row at S whose Unphysicalize came after S): made from the row,
         // killed again at its tick in the replay.
@@ -253,6 +263,7 @@ namespace bmmo::session {
         for (const auto& body: st.rows) {
             if (body.kind == body_kind::Ball) {
                 if (body.owner == s.own_id_) {
+                    if (own_kept) continue;
                     if (!own_entity.empty()) rows[own_entity] = &body;
                     else ++unmapped;   // the own lifecycle is ours: the anchor's own ball stands
                     continue;
@@ -375,23 +386,30 @@ namespace bmmo::session {
         spec.rows = rows;
         spec.gone = trafo_gone;   // step T3
         spec.blob.blob = &st.savestate;
+        spec.blob.excluded_prefixes = keep_local_body_prefixes();
         {
             std::map<uint32_t, std::string> local;
             std::string local_own = s.rollback_.recorded_own_entity(anchor);
             if (local_own.empty()) local_own = own_entity;
             if (local_own.empty()) local_own = platform_.own_ball().entity;
             local[s.own_id_] = local_own;
+            if (own_kept && local_own != own_entity) spec.blob.excluded_prefixes.push_back("=" + local_own);
             for (const auto& [player, remote]: s.remotes_)
                 if (remote.physicalized) local[player] = remote.entity;
             spec.blob.renames = resync_renames(st.clones, local);
         }
-        spec.blob.excluded_prefixes = keep_local_body_prefixes();
+        if (own_kept) {
+            spec.blob.excluded_prefixes.push_back("=" + own_entity);
+            ++s.resyncs_own_kept_;
+            logf("resync: the own ball %s left the sync in its airship zone at tick %u (S %u): kept as this world has it",
+                 own_entity.c_str(), s.own_airship_tick_, anchor);
+        }
         // The server's navigation of every ball at S onto this world's
         // entity of that player (the own replica, a driven mirror).
         uint32_t navs = 0;
         for (const auto& [player, nav]: st.navs) {
             std::string entity;
-            if (player == s.own_id_) entity = s.own_physicalized_ ? platform_.own_driven_entity() : std::string();
+            if (player == s.own_id_) entity = s.own_physicalized_ && !own_kept ? platform_.own_driven_entity() : std::string();
             else if (const auto it = s.remotes_.find(player); it != s.remotes_.end() && it->second.navigation)
                 entity = it->second.entity;
             if (entity.empty()) continue;
@@ -554,7 +572,7 @@ namespace bmmo::session {
         s.resync_restep_depth_ += depth;
         bool own_row = false;
         for (const auto& body: st.rows)
-            if (body.kind == body_kind::Ball && body.owner == s.own_id_ && !own_entity.empty()) own_row = true;
+            if (body.kind == body_kind::Ball && body.owner == s.own_id_ && !own_entity.empty() && !own_kept) own_row = true;
         drop_carried_own_replay(anchor, own_row);
         // Every correction noted before the apply - a relayed frame or an
         // own amendment stored while the resync was pending - is in the

@@ -372,6 +372,7 @@ namespace {
         case bmmo::SessionEnd: return "SessionEnd";
         case bmmo::SessionLead: return "SessionLead";
         case bmmo::SessionResyncState: return "SessionResyncState";
+        case bmmo::SessionGhostPose: return "SessionGhostPose";
         default: return "?";
         }
     }
@@ -396,6 +397,7 @@ namespace {
         case bmmo::SessionLead: { bmmo::session_lead_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionEnd: { bmmo::session_end_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionResyncState: { bmmo::session_resync_state_msg m{}; return decode_bytes(bytes, m); }
+        case bmmo::SessionGhostPose: { bmmo::session_ghost_pose_msg m{}; return decode_bytes(bytes, m); }
         default: return false;
         }
     }
@@ -957,6 +959,7 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
     case bmmo::SessionEvent:
     case bmmo::SessionLead:
     case bmmo::SessionResyncState:   // step A3 (protocol 10): the core path alone; the legacy one ignores it
+    case bmmo::SessionGhostPose:     // step BALA (protocol 14): the core path alone
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         return true;
     default:
@@ -1808,6 +1811,11 @@ void BallanceMMOClient::core_host_dispatch(int code, const std::string& bytes) {
         if (decode(msg)) core.on_session_resync_state(std::move(msg));
         break;
     }
+    case bmmo::SessionGhostPose: {
+        bmmo::session_ghost_pose_msg msg{};
+        if (decode(msg)) core.on_session_ghost_pose(msg);
+        break;
+    }
     case bmmo::SessionEnd: {
         bmmo::session_end_msg msg{};
         if (decode(msg)) core.on_session_end(msg);
@@ -2437,6 +2445,32 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         for (int r = 0; r < 4; ++r)
             for (int k = 0; k < 4; ++k) matrix[r * 4 + k] = world[r][k];
         return true;
+    };
+    // Step BALA: the airship zone over this world (physics_state.hpp, bridge
+    // v24) and the ghosts' display: a spirit ball whose owner left the sync
+    // in its zone is translucent and follows the owner's relayed pose.
+    p.airship_zone = [this](bool enable, const std::string& own_group, double box[6], std::string& error) {
+        bmmo::physics::airship_zone_box zone;
+        if (!physics_view_.airship_zone_set(enable, own_group.c_str(), zone, error)) return -1;
+        for (int k = 0; k < 3; ++k) {
+            box[k] = zone.min[k];
+            box[3 + k] = zone.max[k];
+        }
+        return zone.active ? 1 : 0;
+    };
+    p.airship_zone_contains = [this](const std::string& name) { return physics_view_.airship_zone_contains(name.c_str()); };
+    p.airship_zone_box = [this](double box[6]) { return physics_view_.airship_zone_get(box); };
+    p.show_ghost = [this](const std::string& name, bool ghost, const float* matrix) {
+        if (const auto it = host.mirror_player.find(name); it != host.mirror_player.end())
+            objects_.set_ghost(it->second, ghost);
+        if (!matrix) return;
+        auto* entity = CK3dEntity::Cast(m_bml->GetCKContext()->GetObjectByNameAndParentClass(
+                const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+        if (!entity) return;
+        VxMatrix world;
+        for (int r = 0; r < 4; ++r)
+            for (int k = 0; k < 4; ++k) world[r][k] = matrix[r * 4 + k];
+        entity->SetWorldMatrix(world);
     };
     p.set_entity_matrix = [this](const std::string& name, const float matrix[16]) {
         auto* entity = CK3dEntity::Cast(m_bml->GetCKContext()->GetObjectByNameAndParentClass(

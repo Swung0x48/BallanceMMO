@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 23u  /* v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
+#define BMMO_PHYSICS_API_VERSION 24u  /* v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -673,6 +673,23 @@ typedef struct bmmo_physics_api_v2 {
     int32_t (*callbacks_unhold)(void* ipion_manager, char* error, uint32_t error_size);
     int32_t (*callback_scope_set)(void* ipion_manager, int32_t mode, const uint32_t* scope, int32_t n, char* error,
                                   uint32_t error_size);
+
+    /* ---- v24: the airship zone (step BALA; physics_state.hpp
+     * airship_zone_set / airship_zone_contains) ----
+     * set: the zone on (box from the level's walkable airship parts, the
+     * own ball's nocoll group `own_group`) or off; writes the box into
+     * box_out[6] (min xyz, max xyz; zeros until it is taken) and returns 1
+     * when it is active, 0 when the level has no airship or it was switched
+     * off, -1 with a message.
+     * contains: 1 when the entity's body is a player ball inside the zone,
+     * 0 when not, -1 when it has no body. */
+    int32_t (*airship_zone_set)(void* ipion_manager, int32_t enable, const char* own_group, double* box_out,
+                                char* error, uint32_t error_size);
+    int32_t (*airship_zone_contains)(void* ipion_manager, const char* entity_name);
+    /* get: the zone as it stands - 1 with the box in box_out[6] once it is
+     * taken (the platform has its body), 0 while it is not yet, -1 when the
+     * zone is off. */
+    int32_t (*airship_zone_get)(void* ipion_manager, double* box_out);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

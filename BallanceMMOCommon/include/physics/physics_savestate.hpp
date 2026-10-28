@@ -57,7 +57,9 @@ namespace bmmo::physics {
     //  - an object whose (renamed) name starts with one of `excluded_prefixes`
     //    is left out on both sides: its records are skipped and the live body
     //    stays unknown to the blob (the keep-local bodies, I3: the level-end
-    //    balloon is each player's own), counted as `excluded`;
+    //    balloon is each player's own), counted as `excluded`; an entry that
+    //    starts with '=' names one object exactly instead (step BALA: a
+    //    resync keeps the own ball that left the sync in its airship zone);
     //  - the PreSimulate queue is not compared: its entries name the blocks
     //    by the capturing process's CK ids, and the queue a restore keeps is
     //    the live world's own anyway (it is never rebuilt).  A difference in

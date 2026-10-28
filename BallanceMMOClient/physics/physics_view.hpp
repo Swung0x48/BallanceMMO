@@ -180,6 +180,13 @@ namespace bmmo::physics {
         // The bodies removed, -1 with a message.
         int trafo_set_unmake(uint32_t frame_id, std::string& error) const;
         bool trafo_set_filter(bool enable, std::string& error) const;
+        // ---- bridge API v24 (step BALA): the airship zone
+        // (physics_state.hpp airship_zone_set / airship_zone_contains).
+        bool airship_zone_set(bool enable, const char* own_group, bmmo::physics::airship_zone_box& out,
+                              std::string& error) const;
+        int airship_zone_contains(const char* entity_name) const;
+        // 1 with the box (min xyz, max xyz) once taken, 0 not yet, -1 off.
+        int airship_zone_get(double box[6]) const;
         // ---- bridge API v22 (step T4): the savestate's controller alias
         // (physics_savestate.hpp set_controller_alias); a null `alias`
         // removes it.

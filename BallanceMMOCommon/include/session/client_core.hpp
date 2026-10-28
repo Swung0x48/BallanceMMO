@@ -95,6 +95,7 @@
 #include "../message/session_assign_msg.hpp"
 #include "../message/session_end_msg.hpp"
 #include "../message/session_event_msg.hpp"
+#include "../message/session_ghost_pose_msg.hpp"
 #include "../message/session_input_msg.hpp"
 #include "../message/session_lead_msg.hpp"
 #include "../message/session_remote_input_msg.hpp"
@@ -211,6 +212,16 @@ namespace bmmo::session {
             std::map<uint32_t, bmmo::session::input_frame> inputs;   // relayed frames by tick
             bmmo::session::body_corrector corrector;
             uint64_t blends = 0, hard_sets = 0;
+            // Step BALA (the airship rule): the tick this world first found
+            // the mirror's body in the airship zone - a ghost from there,
+            // frozen by the zone's PSI hook, out of the sync - 0 while it is
+            // not.  Positional: a rewind before it and a death clear it.
+            uint32_t airship_tick = 0;
+            // The owner's relayed poses (SessionGhostPose), by its tick, the
+            // last few: what the ghost is shown at.
+            struct ghost_pose { float position[3] = {}; float rotation[4] = {0, 0, 0, 1}; };
+            std::map<uint32_t, ghost_pose> ghost_poses;
+            bool ghost_shown = false;
         };
 
         // The own ball's body changes the history has to keep (late-player
@@ -348,6 +359,17 @@ namespace bmmo::session {
         // (step P).  Reset by begin.
         std::set<std::string> own_ball_entities_;
         std::string own_group_;
+        // Step BALA: the airship zone of this world (installed at the
+        // anchor), the first live tick the physics layer's latch held the
+        // own ball in this life (0: not; cleared at its death and when a
+        // rewind took the latch back), and the ghost poses sent and received.
+        bool airship_active_ = false;
+        bool airship_box_logged_ = false;
+        uint32_t own_airship_tick_ = 0;
+        uint64_t ghost_poses_sent_ = 0, ghost_poses_received_ = 0, ghost_poses_shown_ = 0;
+        uint64_t own_corrections_out_of_sync_ = 0;   // held notices / forced frames of a tick the own ball had left the sync at
+        uint64_t resyncs_own_kept_ = 0;              // resyncs that kept the out-of-sync own ball local
+        uint64_t airship_rows_skipped_ = 0;          // snapshot ball rows of a ball in its zone, not applied
         bool own_physicalized_ = false;
         bool assigned_ = false;
         uint32_t last_assign_first_tick_ = 0;  // the assignment applied last: its redundant copies are ignored
@@ -856,6 +878,11 @@ namespace bmmo::session {
         int level = 1;
         // The rollback engine's switches, applied by begin (E3).  The defaults
         // are the headless client's argument defaults.
+        // Test only (headless --accept-protocol N, step BALA): a SessionStart
+        // of protocol N is taken as well as this build's - the replay of a
+        // reference capture recorded before a protocol bump that changed
+        // nothing the capture's inbound messages carry.  0: none.
+        uint32_t accept_protocol = 0;
         bool verbose = false;               // set_verbose (headless --trace)
         bool restore_recheck = true;        // set_recheck_on_restore
         bool two_pass_recheck = false;      // set_two_pass_recheck
@@ -1116,6 +1143,9 @@ namespace bmmo::session {
         // its first arrival, an echo of our own event is queued for the
         // frame's echoes, another member's for its due tick.
         void on_session_event(bmmo::session_event_msg&& msg);
+        // SessionGhostPose (protocol 14, step BALA): another member's ball
+        // in its airship zone, for the display of its ghost here.
+        void on_session_ghost_pose(const bmmo::session_ghost_pose_msg& msg);
         // SessionResyncState (step A3, resync design 2.6.4): the server's
         // state of tick base - 1 for the pending exact resync; applied as
         // that tick and re-stepped to the live one now, or - its bodies not
@@ -1434,6 +1464,14 @@ namespace bmmo::session {
         // post_step step 29: the requested beam, made after the step of
         // `tick` and stamped tick + 1.
         void apply_requested_beam(uint32_t tick);
+        // Step BALA: after each live frame - the own ball's and every
+        // mirror's place in the airship zone, the own pose sent while in it,
+        // the ghosts shown at their owners' relayed poses.
+        void airship_frame(uint32_t tick);
+        // Whether `tick` is at or after the tick the own ball left the sync.
+        bool own_out_of_sync_at(uint32_t tick) const {
+            return s.own_airship_tick_ != 0 && static_cast<int32_t>(tick - s.own_airship_tick_) >= 0;
+        }
         // A restore's destroy_body (core_world_hooks::destroy_own_birth): a
         // moved own birth whose body the replay makes again at its applied
         // tick is taken out here.  True when `entity` at `birth_tick` is one

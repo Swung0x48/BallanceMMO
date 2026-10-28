@@ -133,6 +133,12 @@ namespace bmmo::session {
     // for its live frame, late, or recv (note_held_section's rules; a
     // SessionLead's simulated range takes the same path).
     void session_client_core::settle_held_tick(uint32_t tick, const bmmo::session::input_frame& frame) {
+        // Step BALA: from the tick the own ball entered its airship zone it
+        // has left the sync - the server's copy is a frozen ghost that reads
+        // no input - so no notice of such a tick is stored, amended, replayed
+        // or resynced for: the record and the journal keep what this client
+        // played (a replay of its journal rides the airship as it did live).
+        if (own_out_of_sync_at(tick)) { ++s.own_corrections_out_of_sync_; return; }
         if (held_tick_is_base(tick)) {
             ++s.subst_base_;
             // Step A3: a tick of a pending exact resync's epoch has a record
@@ -382,6 +388,8 @@ namespace bmmo::session {
         const bmmo::session::input_frame frame = it->second.first;
         const bool correct = it->second.second;
         s.held_ahead_.erase(it);
+        // Step BALA: the own ball left the sync before this tick was played.
+        if (own_out_of_sync_at(tick)) { ++s.own_corrections_out_of_sync_; return; }
         store_held_frame(tick, frame);
         // Step A3: a pending exact resync re-steps this record from S.
         if (correct && resync_amends(tick)) {
@@ -411,6 +419,10 @@ namespace bmmo::session {
     // re-step is the replay).  The own_corrections switch holds here too.
     void session_client_core::amend_for_resync(uint32_t tick, const bmmo::session::input_frame& frame) {
         if (!config.own_corrections) return;
+        // Step BALA: from the tick the own ball entered its airship zone it
+        // has left the sync - the server's copy is a frozen ghost that reads
+        // no input - so the record keeps what this client played.
+        if (own_out_of_sync_at(tick)) { ++s.own_corrections_out_of_sync_; return; }
         const std::string entity = s.rollback_.recorded_own_entity(tick);
         if (entity.empty()) return;
         bmmo::session::input_frame played{};
@@ -433,6 +445,8 @@ namespace bmmo::session {
         // The own_corrections switch (design 1.2; E9): off, the record of
         // the tick keeps what we played and no own replay is asked for.
         if (!config.own_corrections) return;
+        // Step BALA (as amend_for_resync): no own correction from the zone tick.
+        if (own_out_of_sync_at(tick)) { ++s.own_corrections_out_of_sync_; return; }
         const std::string entity = s.rollback_.recorded_own_entity(tick);
         if (entity.empty()) { ++s.subst_bodiless_; return; }
         bmmo::session::input_frame played{};
@@ -577,6 +591,10 @@ namespace bmmo::session {
         if (it == s.forced_own_.end()) return false;
         out = it->second;
         s.forced_own_.erase(it);
+        // Step BALA: a forced frame is the server's input for its copy of the
+        // own ball, a frozen ghost from the zone tick on: the own ball plays
+        // this client's keys there.
+        if (own_out_of_sync_at(tick)) { ++s.own_corrections_out_of_sync_; return false; }
         return true;
     }
 

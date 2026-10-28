@@ -1188,6 +1188,12 @@ namespace bmmo::sim {
             if (callbacks_.on_failed) callbacks_.on_failed(s.id, error);
             return;
         }
+        // Step BALA: the balls that entered the airship zone in this step
+        // (ghosts from here, out of the sync) - in the journal.
+        for (const auto& [player, zone_tick]: s.world->take_airship_entries())
+            if (recording)
+                s.journal.note(tick, "airship: p" + std::to_string(player) + " in the airship zone at tick "
+                                     + std::to_string(zone_tick) + ", a ghost from here");
         if (recording) {
             bmmo::physics::world_hash hash;
             std::string hash_error;

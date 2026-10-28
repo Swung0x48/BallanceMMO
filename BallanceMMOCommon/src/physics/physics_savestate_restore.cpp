@@ -529,8 +529,15 @@ namespace bmmo::physics::savestate {
                             break;
                         }
                     bool excluded = false;
-                    for (const std::string& prefix: travel_->excluded_prefixes)
-                        if (!prefix.empty() && name.compare(0, prefix.size(), prefix) == 0) excluded = true;
+                    for (const std::string& prefix: travel_->excluded_prefixes) {
+                        if (prefix.empty()) continue;
+                        // '=': one name exactly (savestate_travel).
+                        if (prefix[0] == '=') {
+                            if (name.compare(0, std::string::npos, prefix, 1, std::string::npos) == 0) excluded = true;
+                        } else if (name.compare(0, prefix.size(), prefix) == 0) {
+                            excluded = true;
+                        }
+                    }
                     if (excluded) {
                         ++excluded_;
                         continue;   // its records are skipped below (an object is missing)

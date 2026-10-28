@@ -338,6 +338,51 @@ namespace bmmo::physics {
     // Diagnostics: the registry as one line.
     std::string describe_trafo_sets(CKIpionManager* physics);
 
+    // ---- bridge API v24: the airship zone (step BALA; the user's rule of
+    // 2026-10-28, docs/rewind-cost-design.md "As built (step BALA)") ----
+    //
+    // The level end's airship (PE_Balloon*, PE_Box_slide: the resync's
+    // keep-local bodies) is every world's own copy, outside the sync.  The
+    // zone is a static box: the walkable airship parts (PE_Balloon_Platform*,
+    // PE_Balloon_Platte*), each part's mesh box through its world matrix,
+    // taken at the first PSI after the platform has its body - the airship's
+    // starting pose, where the level-end script placed it - widened to the
+    // 1/8 m grid outward and then by the margins (physics_state.cpp).  Until
+    // then no ball is in the zone.  With the zone on:
+    //   * a player ball (nocoll group "P#...") that is not this world's own
+    //     ball (`own_group`, "" on the server) never collides with an
+    //     airship body;
+    //   * such a ball whose core is inside the box collides with nothing,
+    //     and at the start of every PSI it is taken out of the simulation
+    //     (its pairs rechecked away, then frozen): a ghost, still there,
+    //     which no synced body depends on.  Positional, so a rollback's
+    //     restore and replay re-derive it with no state of their own;
+    //   * the own ball, from the first PSI its core is inside the box until
+    //     its body is gone (one way, like the ghost's freeze: the life's
+    //     latch), collides with the static level and its own airship only
+    //     (no other ball, no movable mechanism); at that first PSI its pairs
+    //     are rechecked, so a contact it had is dropped where the other
+    //     worlds freeze its copy.  The latch is kept as IVP clock intervals
+    //     ([entered, gone)), which a rollback's restore puts back with the
+    //     clock: a replay re-enters at the same PSI and rechecks again there.
+    // `out` says whether it is on (the level has an airship) and the box
+    // when it is already taken.  enable = false switches it off.
+    struct airship_zone_box {
+        bool active = false;   // switched on, the level has an airship
+        bool ready = false;    // the box is taken (the platform has its body)
+        double min[3] = {}, max[3] = {};
+        uint64_t frozen = 0;   // ghosts the PSI hook took out of the simulation so far
+    };
+    bool airship_zone_set(CKIpionManager* physics, bool enable, const char* own_group, airship_zone_box& out,
+                          std::string& error);
+    // The zone as it stands (`ready` once the box is taken).
+    bool airship_zone_get(CKIpionManager* physics, airship_zone_box& out);
+    // 1 when `entity`'s body is a player ball inside the zone (a ghost when
+    // it is not the own ball; the own ball: latched this life, inside the
+    // box or not), 0 when it is not (or the zone is off), -1 when it has no
+    // body.
+    int airship_zone_contains(CKIpionManager* physics, const char* entity_name);
+
     // ---- bridge API v8: session clock guard ----
 
     // Keeps the retail pause menu (which stops Gameplay_Ingame and writes the

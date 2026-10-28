@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <typeinfo>
 #include <cfloat>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -2821,6 +2822,356 @@ namespace bmmo::physics {
                  + std::to_string(set.frames[1]) + "/" + std::to_string(set.frames[2]) + ", "
                  + std::to_string(set.entities.size()) + " entities";
         return out;
+    }
+
+    // ---- bridge API v24: the airship zone (step BALA) ----
+
+    namespace {
+        // The player balls' nocoll group prefix every host installs
+        // (install_player_collision_filter "P#").
+        constexpr const char* kAirshipPlayerPrefix = "P#";
+        // The margins around the walkable parts' box (the user's rule of
+        // 2026-10-28: the planks sag 3.2 m and the platform sinks 1.7 m under
+        // the own ball; a ball's centre is about its radius above what it
+        // rolls on, and must be inside the box before the ball can touch the
+        // airship at its starting pose).  Binary fractions: the box is the
+        // same double in every world once its faces are on the 1/8 m grid.
+        constexpr double kAirshipMarginSide = 3.0;
+        constexpr double kAirshipMarginBelow = 4.5;
+        constexpr double kAirshipMarginAbove = 5.0;
+        constexpr double kAirshipGrid = 8.0;   // faces on multiples of 1/8 m, rounded outward
+
+        class airship_zone_filter;
+        class airship_zone_listener;
+        struct airship_zone_state {
+            bool enabled = false;
+            // The walkable parts (PE_Balloon_Platform*, PE_Balloon_Platte*)
+            // found when the zone was switched on; the box is taken once the
+            // platform has its body - the level-end script places the airship
+            // and physicalizes it after the level loads, so the parts are at
+            // the origin of the level file until then.  Until `ready` no ball
+            // is in the zone.
+            std::vector<CK_ID> parts;
+            CK_ID platform = 0;
+            bool ready = false;
+            double min[3] = {}, max[3] = {};
+            char own_group[IVP_NO_COLL_GROUP_STRING_LEN] = {};
+            // The own ball's latch (one way for the life): the IVP clock of
+            // the first PSI its core was in the box, and of the first PSI it
+            // had no body after that (open while alive).  Clock values, so a
+            // rollback's restore - which puts the clock back - reads the
+            // latch as it stood at its anchor, and a replay re-enters at the
+            // same PSI (same clock) and rechecks there as the live run did.
+            struct own_life {
+                double entered = 0.0;
+                double gone = 0.0;
+                bool open = true;
+            };
+            std::vector<own_life> own_lives;
+            uint64_t own_rechecks = 0;
+            uint64_t frozen = 0;
+            airship_zone_filter* filter = nullptr;       // installed in `environment`
+            airship_zone_listener* listener = nullptr;
+            IVP_Environment* environment = nullptr;
+        };
+        // Never destroyed: an IVP environment (and its filter) may outlive
+        // static storage at process exit.
+        std::map<CKIpionManager*, airship_zone_state>& airship_states() {
+            static auto* states = new std::map<CKIpionManager*, airship_zone_state>();
+            return *states;
+        }
+        airship_zone_state* find_airship_state(CKIpionManager* physics) {
+            auto& states = airship_states();
+            const auto it = states.find(physics);
+            return it == states.end() ? nullptr : &it->second;
+        }
+        bool airship_is_player(const IVP_Real_Object* object) {
+            const char* ident = object ? object->nocoll_group_ident : nullptr;
+            return ident && std::strncmp(ident, kAirshipPlayerPrefix, std::strlen(kAirshipPlayerPrefix)) == 0;
+        }
+        bool airship_is_own(const airship_zone_state& state, const IVP_Real_Object* object) {
+            return state.own_group[0]
+                && std::strncmp(object->nocoll_group_ident, state.own_group, IVP_NO_COLL_GROUP_STRING_LEN) == 0;
+        }
+        bool airship_in_box(const airship_zone_state& state, IVP_Real_Object* object) {
+            IVP_Core* core = object ? object->get_core() : nullptr;
+            if (!core || !state.ready) return false;
+            const IVP_U_Point* p = core->get_position_PSI();
+            for (int k = 0; k < 3; ++k)
+                if (!(p->k[k] >= state.min[k] && p->k[k] <= state.max[k])) return false;
+            return true;
+        }
+        double airship_now(const IVP_Environment* environment) {
+            return environment ? const_cast<IVP_Environment*>(environment)->get_current_time().get_seconds() : 0.0;
+        }
+        // The own life latched at `now`, or null.
+        const airship_zone_state::own_life* airship_own_life(const airship_zone_state& state, double now) {
+            for (const auto& life: state.own_lives)
+                if (life.entered <= now && (life.open || now < life.gone)) return &life;
+            return nullptr;
+        }
+        bool airship_body(const IVP_Real_Object* object) {
+            const char* name = object ? object->get_name() : nullptr;
+            return name && bmmo::session::keep_local_body(name);
+        }
+        bool airship_take_box(CKIpionManager* physics, airship_zone_state& state);
+
+        // The pair rule (asked when a pair first becomes a collision
+        // candidate, and again by a recheck).
+        bool airship_pair_allowed(const airship_zone_state& state, IVP_Real_Object* a, IVP_Real_Object* b, double now) {
+            IVP_Real_Object* pair[2] = {a, b};
+            for (int side = 0; side < 2; ++side) {
+                IVP_Real_Object* ball = pair[side];
+                IVP_Real_Object* other = pair[1 - side];
+                if (!airship_is_player(ball) || !other) continue;
+                const bool own = airship_is_own(state, ball);
+                const bool other_airship = airship_body(other);
+                if (!own && other_airship) return false;
+                if (own ? airship_own_life(state, now) != nullptr || airship_in_box(state, ball) : airship_in_box(state, ball)) {
+                    if (!own) return false;
+                    IVP_Core* core = other->get_core();
+                    if (!other_airship && core && !core->physical_unmoveable) return false;
+                }
+            }
+            return true;
+        }
+
+        class airship_zone_filter : public IVP_Collision_Filter {
+        public:
+            CKIpionManager* physics = nullptr;
+            IVP_Environment* environment = nullptr;
+            IVP_BOOL check_objects_for_collision_detection(IVP_Real_Object* object0, IVP_Real_Object* object1) override {
+                const airship_zone_state* state = find_airship_state(physics);
+                if (!state || !state->enabled) return IVP_TRUE;
+                return airship_pair_allowed(*state, object0, object1, airship_now(environment)) ? IVP_TRUE : IVP_FALSE;
+            }
+            void environment_will_be_deleted(IVP_Environment*) override {
+                if (airship_zone_state* state = find_airship_state(physics))
+                    if (state->filter == this) state->filter = nullptr;
+                delete this;
+            }
+        };
+
+        // At the start of every PSI (after IVP revived the cores woken since
+        // the last one, before the controllers and the integration): every
+        // simulated player ball that is not the own one and whose core is in
+        // the box is taken out of the simulation - its pairs rechecked
+        // (the filter now refuses every partner), then frozen.  A ghost woken
+        // since (the navigation's Physics WakeUp on a key edge) is frozen
+        // again before it moves.  The candidates are sorted by their group
+        // ("P#<join order>", the same in every world) so two entering in one
+        // PSI are frozen in one order everywhere.
+        class airship_zone_listener : public IVP_Listener_PSI {
+        public:
+            CKIpionManager* physics = nullptr;
+            IVP_Environment* environment = nullptr;
+            void event_PSI(IVP_Event_PSI*) override {
+                airship_zone_state* state = find_airship_state(physics);
+                if (!state || !state->enabled || !physics) return;
+                if (!state->ready && !airship_take_box(physics, *state)) return;
+                std::vector<IVP_Real_Object*> ghosts;
+                IVP_Real_Object* own = nullptr;
+                IVP_U_Vector<IVP_Real_Object>& movables = physics->m_MovableObjects;
+                for (int i = 0; i < movables.len(); ++i) {
+                    IVP_Real_Object* object = movables.element_at(i);
+                    if (!object || !airship_is_player(object)) continue;
+                    if (airship_is_own(*state, object)) {
+                        if (!own) own = object;
+                        continue;
+                    }
+                    IVP_Core* core = object->get_core();
+                    if (!core || !IVP_MTIS_SIMULATED(core->movement_state)) continue;
+                    if (airship_in_box(*state, object)) ghosts.push_back(object);
+                }
+                // The own ball first (one ball, before the ghosts: one order
+                // in every replay).  Its latch opens at the first PSI its core
+                // is in the box - a later one of a life a rollback took back
+                // is forgotten first - and at the PSI it opened its pairs are
+                // rechecked (live, and again when a replay reaches that PSI):
+                // a contact it had with another ball or a mechanism is
+                // dropped where every other world freezes its copy.  No body
+                // (a death): the life's latch closes at this PSI.
+                if (state->own_group[0]) {
+                    const double now = airship_now(environment);
+                    if (own && airship_in_box(*state, own)) {
+                        if (!airship_own_life(*state, now)) {
+                            auto& lives = state->own_lives;
+                            lives.erase(std::remove_if(lives.begin(), lives.end(),
+                                                       [now](const airship_zone_state::own_life& l) { return l.entered > now; }),
+                                        lives.end());
+                            lives.push_back(airship_zone_state::own_life{now, 0.0, true});
+                            while (lives.size() > 16) lives.erase(lives.begin());
+                        }
+                        const auto* life = airship_own_life(*state, now);
+                        if (life && life->entered == now) {
+                            own->recheck_collision_filter();
+                            ++state->own_rechecks;
+                        }
+                    } else if (!own) {
+                        for (auto& life: state->own_lives)
+                            if (life.entered <= now && (life.open || now < life.gone)) {
+                                life.open = false;
+                                life.gone = now;
+                            }
+                    }
+                }
+                if (ghosts.empty()) return;
+                std::sort(ghosts.begin(), ghosts.end(), [](const IVP_Real_Object* x, const IVP_Real_Object* y) {
+                    return std::strncmp(x->nocoll_group_ident, y->nocoll_group_ident, IVP_NO_COLL_GROUP_STRING_LEN) < 0;
+                });
+                for (IVP_Real_Object* object: ghosts) {
+                    object->recheck_collision_filter();
+                    object->disable_simulation();
+                    ++state->frozen;
+                }
+            }
+            void environment_will_be_deleted(IVP_Environment*) override {
+                if (airship_zone_state* state = find_airship_state(physics))
+                    if (state->listener == this) state->listener = nullptr;
+                delete this;
+            }
+        };
+
+        // The walkable parts of the level's airship, by name.
+        void airship_find_parts(CKContext* context, airship_zone_state& state) {
+            state.parts.clear();
+            state.platform = 0;
+            if (!context) return;
+            const CK_CLASSID classes[2] = {CKCID_3DOBJECT, CKCID_3DENTITY};
+            for (CK_CLASSID cid: classes) {
+                const int count = context->GetObjectsCountByClassID(cid);
+                CK_ID* ids = context->GetObjectsListByClassID(cid);
+                for (int i = 0; i < count; ++i) {
+                    auto* entity = CK3dEntity::Cast(context->GetObject(ids[i]));
+                    const char* name = entity ? entity->GetName() : nullptr;
+                    if (!name) continue;
+                    const std::string_view n(name);
+                    const bool platform = n.substr(0, 19) == "PE_Balloon_Platform";
+                    if (!platform && n.substr(0, 17) != "PE_Balloon_Platte") continue;
+                    if (std::find(state.parts.begin(), state.parts.end(), entity->GetID()) != state.parts.end()) continue;
+                    state.parts.push_back(entity->GetID());
+                    if (platform && !state.platform) state.platform = entity->GetID();
+                }
+            }
+        }
+
+        // The box, once the platform has its body: every part's local
+        // (mesh) box through its world matrix as the placing script left it -
+        // the airship's starting pose - grown to the 1/8 m grid outward and
+        // by the margins.  The corners are this code's arithmetic on the
+        // mesh's extremes and the matrix, so every world that placed the
+        // airship alike gets the same box (the grid absorbs an ulp).
+        bool airship_take_box(CKIpionManager* physics, airship_zone_state& state) {
+            CKContext* context = physics ? physics->m_Context : nullptr;
+            auto* platform = context ? CK3dEntity::Cast(context->GetObject(state.platform)) : nullptr;
+            PhysicsObject* body = platform ? physics->GetPhysicsObject(platform) : nullptr;
+            if (!body || !body->m_RealObject) return false;
+            double lo[3] = {}, hi[3] = {};
+            bool any = false;
+            for (CK_ID id: state.parts) {
+                auto* entity = CK3dEntity::Cast(context->GetObject(id));
+                if (!entity) continue;
+                const VxBbox& local = entity->GetBoundingBox(TRUE);
+                const VxMatrix& world = entity->GetWorldMatrix();
+                for (int corner = 0; corner < 8; ++corner) {
+                    const double c[3] = {(corner & 1) ? local.Max.x : local.Min.x, (corner & 2) ? local.Max.y : local.Min.y,
+                                         (corner & 4) ? local.Max.z : local.Min.z};
+                    for (int k = 0; k < 3; ++k) {
+                        const double v = c[0] * world[0][k] + c[1] * world[1][k] + c[2] * world[2][k] + world[3][k];
+                        if (!any || v < lo[k]) lo[k] = v;
+                        if (!any || v > hi[k]) hi[k] = v;
+                    }
+                    any = true;
+                }
+            }
+            if (!any) return false;
+            for (int k = 0; k < 3; ++k) {
+                const double below = k == 1 ? kAirshipMarginBelow : kAirshipMarginSide;
+                const double above = k == 1 ? kAirshipMarginAbove : kAirshipMarginSide;
+                state.min[k] = std::floor(lo[k] * kAirshipGrid) / kAirshipGrid - below;
+                state.max[k] = std::ceil(hi[k] * kAirshipGrid) / kAirshipGrid + above;
+            }
+            state.ready = true;
+            return true;
+        }
+    }
+
+    bool airship_zone_set(CKIpionManager* physics, bool enable, const char* own_group, airship_zone_box& out,
+                          std::string& error) {
+        error.clear();
+        out = airship_zone_box{};
+        if (!physics) {
+            error = "no physics manager";
+            return false;
+        }
+        airship_zone_state& state = airship_states()[physics];
+        state.enabled = false;
+        if (!enable) return true;
+        IVP_Environment* environment = physics->GetEnvironment();
+        if (!environment) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        airship_find_parts(physics->m_Context, state);
+        state.ready = false;
+        if (!state.platform) return true;   // no airship: the zone stays off
+        std::snprintf(state.own_group, sizeof(state.own_group), "%s", own_group ? own_group : "");
+        state.own_lives.clear();
+        if (state.environment != environment) {
+            // A new environment (a level loaded since): the old one's filter
+            // and listener went with it (environment_will_be_deleted).
+            state.filter = nullptr;
+            state.listener = nullptr;
+            state.environment = environment;
+        }
+        if (!state.filter) {
+            auto* meta = static_cast<IVP_Meta_Collision_Filter*>(environment->get_collision_filter());
+            if (!meta) {
+                error = "the environment has no collision filter";
+                return false;
+            }
+            auto* filter = new airship_zone_filter();
+            filter->physics = physics;
+            filter->environment = environment;
+            meta->add_collision_filter(filter);
+            state.filter = filter;
+        }
+        if (!state.listener) {
+            auto* listener = new airship_zone_listener();
+            listener->physics = physics;
+            listener->environment = environment;
+            environment->add_listener_PSI(listener);
+            state.listener = listener;
+        }
+        state.enabled = true;
+        airship_take_box(physics, state);   // already placed (a world anchored after the level end's set-up)
+        return airship_zone_get(physics, out);
+    }
+
+    bool airship_zone_get(CKIpionManager* physics, airship_zone_box& out) {
+        out = airship_zone_box{};
+        const airship_zone_state* state = physics ? find_airship_state(physics) : nullptr;
+        if (!state || !state->enabled) return true;
+        out.active = true;
+        out.ready = state->ready;
+        out.frozen = state->frozen;
+        for (int k = 0; k < 3; ++k) {
+            out.min[k] = state->min[k];
+            out.max[k] = state->max[k];
+        }
+        return true;
+    }
+
+    int airship_zone_contains(CKIpionManager* physics, const char* entity_name) {
+        const airship_zone_state* state = physics ? find_airship_state(physics) : nullptr;
+        CK3dEntity* entity = physics ? find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE)) : nullptr;
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        if (!object || !object->m_RealObject) return -1;
+        if (!state || !state->enabled) return 0;
+        IVP_Real_Object* real = object->m_RealObject;
+        if (!airship_is_player(real)) return 0;
+        if (airship_in_box(*state, real)) return 1;
+        return airship_is_own(*state, real) && airship_own_life(*state, airship_now(physics->GetEnvironment())) ? 1 : 0;
     }
 
     // ---- bridge API v8: session clock guard ----

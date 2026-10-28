@@ -660,6 +660,22 @@ namespace bmmo::session {
         std::function<bool(const std::string& entity, float matrix[16])> entity_matrix;
         std::function<bool(const std::string& entity, const float matrix[16])> set_entity_matrix;
 
+        // ---- the airship zone (step BALA; physics_state.hpp airship_zone_set) ----
+        // On (at the anchor, with the own ball's nocoll group) or off (at the
+        // end): the zone's pair rule and PSI hook in this world; `box` gets
+        // min xyz, max xyz; returns 1 active, 0 no airship / off, -1 error.
+        // Optional: a host without it runs no zone (and is not protocol 14's).
+        std::function<int(bool enable, const std::string& own_group, double box[6], std::string& error)> airship_zone;
+        // 1: the entity's body is a player ball inside the zone; 0: not; -1: no body.
+        std::function<int(const std::string& entity)> airship_zone_contains;
+        // The zone as it stands: 1 with the box once it is taken (the
+        // platform has its body), 0 not yet, -1 off.
+        std::function<int(double box[6])> airship_zone_box;
+        // Optional, display only: a mirror shown as a ghost (semi-transparent)
+        // or as itself again; `matrix` (row-major, VxMatrix order) when the
+        // ghost is to be moved to its owner's relayed pose, else null.
+        std::function<void(const std::string& entity, bool ghost, const float* matrix)> show_ghost;
+
         // ---- rollback (design 2.2; E4) ----
         // The rollback engine's view of the host's world, bound anew on every
         // use, never cached (the options take the own key count by value).

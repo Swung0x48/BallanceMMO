@@ -1561,6 +1561,22 @@ public:
                bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset));
     }
 
+    // Protocol 14 (step BALA): a member's own ball is in its airship zone and
+    // has left the sync; its pose goes to every other member of the session,
+    // unreliable, for their display of its ghost.  The server's world never
+    // reads it (its copy of that ball is frozen there as a ghost).
+    void handle_session_ghost_pose(HSteamNetConnection c, bmmo::session_ghost_pose_msg& msg) {
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != msg.session) return;
+        auto it = physics_sessions_.find(msg.session);
+        if (it == physics_sessions_.end()) return;
+        msg.player = static_cast<uint32_t>(c);
+        msg.clear();
+        msg.serialize();
+        for (HSteamNetConnection member: it->second.members)
+            if (member != c) send(member, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+    }
+
     // A SessionAssign is what starts a member's frames: one that arrives late
     // starts them that late for good (every frame stale at the server, every
     // relayed frame in the member's future).  Measured at 10 % loss: the
@@ -3629,6 +3645,11 @@ protected:
             case bmmo::SessionLeadAck: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::session_lead_ack_msg>(networking_msg);
                 handle_session_lead_ack(networking_msg->m_conn, msg);
+                break;
+            }
+            case bmmo::SessionGhostPose: {
+                auto msg = bmmo::message_utils::deserialize<bmmo::session_ghost_pose_msg>(networking_msg);
+                handle_session_ghost_pose(networking_msg->m_conn, msg);
                 break;
             }
 #endif

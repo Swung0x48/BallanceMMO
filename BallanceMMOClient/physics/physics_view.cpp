@@ -994,6 +994,40 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool physics_view::airship_zone_set(bool enable, const char* own_group, bmmo::physics::airship_zone_box& out,
+                                        std::string& error) const {
+        error.clear();
+        out = bmmo::physics::airship_zone_box{};
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->airship_zone_set) {
+            error = "the physics_RT bridge lacks airship_zone_set";
+            return false;
+        }
+        char text[256] = {};
+        double box[6] = {};
+        const int32_t r = api_->airship_zone_set(manager_, enable ? 1 : 0, own_group ? own_group : "", box, text, sizeof(text));
+        if (r < 0) {
+            error = text[0] ? text : "airship_zone_set failed";
+            return false;
+        }
+        out.active = r == 1;
+        for (int k = 0; k < 3; ++k) {
+            out.min[k] = box[k];
+            out.max[k] = box[3 + k];
+        }
+        return true;
+    }
+
+    int physics_view::airship_zone_get(double box[6]) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->airship_zone_get) return -1;
+        return api_->airship_zone_get(manager_, box);
+    }
+
+    int physics_view::airship_zone_contains(const char* entity_name) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->airship_zone_contains) return 0;
+        return api_->airship_zone_contains(manager_, entity_name);
+    }
+
     bool physics_view::set_controller_alias(int32_t (*alias)(void* user, const char* name, char* out, uint32_t out_size),
                                             void* user, std::string& error) const {
         error.clear();

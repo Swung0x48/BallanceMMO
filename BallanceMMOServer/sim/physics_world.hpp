@@ -253,6 +253,13 @@ namespace bmmo::sim {
         // journal must not move the snapshot cadence or the mechanism
         // numbering by looking at the world (design 9.15).
         void snapshot_for_journal(std::vector<bmmo::session::body_state>& out);
+        // Step BALA: the players whose ball entered the airship zone since
+        // the last call, with the tick (the session journal notes them).
+        std::vector<std::pair<uint32_t, uint32_t>> take_airship_entries() {
+            std::vector<std::pair<uint32_t, uint32_t>> out;
+            out.swap(airship_entries_);
+            return out;
+        }
         // Whether the set of movable mechanism bodies changed since the last
         // snapshot() call (a full snapshot is then due).
         bool body_set_changed() const { return body_set_changed_; }
@@ -385,6 +392,11 @@ namespace bmmo::sim {
         void after_trafo_tick();
         void capture_trafo_ledger(std::vector<bmmo::session::trafo_ledger_entry>& out) const;
         bool ensure_collision_filter(std::string& error);
+        // Step BALA: the airship zone over this world (no own ball: every
+        // player ball is a clone), installed once the level is loaded.
+        void install_airship_zone();
+        std::vector<std::pair<uint32_t, uint32_t>> airship_entries_;   // (player, tick) not yet taken
+        bool airship_box_logged_ = false;
 
         struct player {
             uint32_t id = 0;
@@ -400,6 +412,10 @@ namespace bmmo::sim {
             uint8_t ball_type = 0;
             int sector = 1;
             bool finished = false;
+            // Step BALA: the tick its ball was first found in the airship
+            // zone in this life (a ghost from there: frozen, out of the
+            // sync); 0 while it is not.
+            uint32_t airship_tick = 0;
         };
         CK3dEntity* clone_ball(player& p, uint8_t ball_type, std::string& error);
         std::string ball_name(uint8_t ball_type) const;

@@ -1240,7 +1240,7 @@ TEST(TrafoWire, TheProtocolIs11AndTheBitsAreDistinct) {
 // ---------------------------------------------------------------------
 
 TEST(PlacementWire, TheProtocolIs12AndTheBitsAreDistinct) {
-    EXPECT_EQ(13u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "13 since step R12 (the relay header's wait)";
+    EXPECT_LE(13u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "13 since step R12 (the relay header's wait)";
     EXPECT_EQ(1u << 0, bmmo::session::WORLD_PLACEMENT_CLONES) << "the design's bit 0";
     EXPECT_EQ(0u, bmmo::session::WORLD_PLACEMENT_CLONES & bmmo::session::WORLD_TRAFO_INPUTS);
     EXPECT_NE(0u, bmmo::session::CAP_PLACEMENT);
@@ -1480,4 +1480,28 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
     bmmo::session_resync_state_msg bitted;
     bitted.raw.write(bad_bits.data(), static_cast<std::streamsize>(bad_bits.size()));
     EXPECT_FALSE(bitted.deserialize());
+}
+
+// ---------------------------------------------------------------------
+// Protocol 14 (step BALA): the airship ghost's relayed pose.
+// ---------------------------------------------------------------------
+
+TEST(GhostPoseWire, TheProtocolIs14AndThePoseRoundTrips) {
+    EXPECT_EQ(14u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "14 since step BALA (the airship ghost's pose)";
+    bmmo::session_ghost_pose_msg msg{};
+    msg.session = 7;
+    msg.player = 1234;
+    msg.tick = 3111;
+    msg.position[0] = 930.5f; msg.position[1] = 1.25f; msg.position[2] = -15.0f;
+    msg.rotation[0] = 0.0f; msg.rotation[1] = 0.6f; msg.rotation[2] = 0.0f; msg.rotation[3] = 0.8f;
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(bmmo::SessionGhostPose, parsed.code);
+    EXPECT_EQ(7u, parsed.session);
+    EXPECT_EQ(1234u, parsed.player);
+    EXPECT_EQ(3111u, parsed.tick);
+    EXPECT_EQ(930.5f, parsed.position[0]);
+    EXPECT_EQ(-15.0f, parsed.position[2]);
+    EXPECT_EQ(0.8f, parsed.rotation[3]);
+    msg.clear();
+    expect_rejects_every_truncation(msg);
 }

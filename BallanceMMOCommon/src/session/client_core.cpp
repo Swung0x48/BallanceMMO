@@ -183,7 +183,8 @@ namespace bmmo::session {
         // A server of another protocol (entity/session.hpp) computes and
         // compares other things: refuse, loudly, rather than play a session
         // that cannot agree.
-        if (msg.protocol != bmmo::session::PHYSICS_PROTOCOL_VERSION) {
+        if (msg.protocol != bmmo::session::PHYSICS_PROTOCOL_VERSION
+                && !(cfg.accept_protocol != 0 && msg.protocol == cfg.accept_protocol)) {
             logf("session %u refused: the server runs physics protocol %u, this client runs %u", msg.session,
                  msg.protocol, bmmo::session::PHYSICS_PROTOCOL_VERSION);
             return begin_result{true};
@@ -433,6 +434,21 @@ namespace bmmo::session {
         // The box starts where the session does: at the anchor the server
         // has to agree with, before the tick base is known.
         journal_.open(report.hash, report.build_id, report.own_name, placement);
+        // Step BALA (the airship rule of 2026-10-28): the zone over this
+        // world, from the level's airship as the anchor finds it - its
+        // starting pose - with the own ball's group.
+        s.own_airship_tick_ = 0;
+        s.airship_active_ = false;
+        if (platform_.airship_zone) {
+            double box[6] = {};
+            std::string error;
+            const int r = platform_.airship_zone(true, s.own_group_, box, error);
+            s.airship_active_ = r == 1;
+            s.airship_box_logged_ = false;
+            if (r < 0) logf("airship zone: %s", error.c_str());
+            else if (r == 0) logf("airship zone: the level has no airship");
+            else logf("airship zone on, own group %s (the box is taken once the platform has its body)", s.own_group_.c_str());
+        }
         // Step T3 (design 2.4): every member's piece set and the own one, by
         // player id, after the host's quiesce (its anchor work): the server
         // built the same at add_player.
@@ -492,10 +508,26 @@ namespace bmmo::session {
         // until E6; not muted).
         if (platform_.hooks.ended) platform_.hooks.ended();
         for (auto& [id, remote]: s.remotes_) {
+            if (remote.ghost_shown && platform_.show_ghost) platform_.show_ghost(remote.entity, false, nullptr);
             if (remote.navigation) platform_.detach_mirror_navigation(remote.entity);
             if (remote.physicalized) platform_.unmake_mirror(remote.entity);
         }
         s.remotes_.clear();
+        // Step BALA: the zone off with the session.
+        if (s.airship_active_)
+            logf("airship: ghost poses sent %llu received %llu shown %llu; own corrections not applied %llu; ball rows not applied %llu; resyncs that kept the own ball %llu",
+                 static_cast<unsigned long long>(s.ghost_poses_sent_), static_cast<unsigned long long>(s.ghost_poses_received_),
+                 static_cast<unsigned long long>(s.ghost_poses_shown_),
+                 static_cast<unsigned long long>(s.own_corrections_out_of_sync_),
+                 static_cast<unsigned long long>(s.airship_rows_skipped_),
+                 static_cast<unsigned long long>(s.resyncs_own_kept_));
+        if (s.airship_active_ && platform_.airship_zone) {
+            double box[6] = {};
+            std::string error;
+            platform_.airship_zone(false, std::string(), box, error);
+        }
+        s.airship_active_ = false;
+        s.own_airship_tick_ = 0;
         s.relay_seen_.clear();
         s.held_seen_.clear();
         s.held_stale_seen_.clear();

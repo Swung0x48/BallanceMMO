@@ -148,9 +148,19 @@ namespace bmmo::session {
             }
             auto entity_of = [&](const bmmo::session::body_state& body) -> std::string {
                 if (body.kind == bmmo::session::body_kind::Ball) {
-                    if (body.owner == s.own_id_) return s.own_physicalized_ ? platform_.own_driven_entity() : std::string();
+                    // Step BALA: a ball that has left the sync in its airship
+                    // zone takes no row (the own ball from its zone tick; a
+                    // mirror while it is a ghost here).
+                    if (body.owner == s.own_id_) {
+                        if (own_out_of_sync_at(snapshot.tick)) { ++s.airship_rows_skipped_; return {}; }
+                        return s.own_physicalized_ ? platform_.own_driven_entity() : std::string();
+                    }
                     auto it = s.remotes_.find(body.owner);
                     if (it == s.remotes_.end() || !it->second.physicalized || !it->second.navigation) return {};
+                    if (it->second.airship_tick != 0 && static_cast<int32_t>(snapshot.tick - it->second.airship_tick) >= 0) {
+                        ++s.airship_rows_skipped_;
+                        return {};
+                    }
                     return it->second.entity;
                 }
                 // Design 9.25: the resolved local body, "" when this client

@@ -741,6 +741,39 @@ namespace {
         return 1;
     }
 
+    // v24: the airship zone (step BALA).
+    int32_t api_airship_zone_set(void* manager, int32_t enable, const char* own_group, double* box_out, char* error,
+                                 uint32_t error_size) {
+        std::string text;
+        bmmo::physics::airship_zone_box box;
+        if (!bmmo::physics::airship_zone_set(static_cast<CKIpionManager*>(manager), enable != 0, own_group, box, text)) {
+            set_error(error, error_size, text);
+            return -1;
+        }
+        if (box_out)
+            for (int k = 0; k < 3; ++k) {
+                box_out[k] = box.min[k];
+                box_out[3 + k] = box.max[k];
+            }
+        return box.active ? 1 : 0;
+    }
+
+    int32_t api_airship_zone_contains(void* manager, const char* entity_name) {
+        return bmmo::physics::airship_zone_contains(static_cast<CKIpionManager*>(manager), entity_name);
+    }
+
+    int32_t api_airship_zone_get(void* manager, double* box_out) {
+        bmmo::physics::airship_zone_box box;
+        bmmo::physics::airship_zone_get(static_cast<CKIpionManager*>(manager), box);
+        if (!box.active) return -1;
+        if (box_out)
+            for (int k = 0; k < 3; ++k) {
+                box_out[k] = box.min[k];
+                box_out[3 + k] = box.max[k];
+            }
+        return box.ready ? 1 : 0;
+    }
+
     // v22: the savestate's controller alias through a C callback (the retail
     // host's trafo registry answers it; physics_savestate.hpp).
     void api_set_controller_alias(void* manager, int32_t (*alias)(void* user, const char* name, char* out, uint32_t out_size),
@@ -895,6 +928,9 @@ namespace {
         api_callbacks_hold,
         api_callbacks_unhold,
         api_callback_scope_set,
+        api_airship_zone_set,
+        api_airship_zone_contains,
+        api_airship_zone_get,
     };
 }
 
