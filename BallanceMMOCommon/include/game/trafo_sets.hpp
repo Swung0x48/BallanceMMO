@@ -185,7 +185,15 @@ namespace bmmo::game {
             return nullptr;
         }
         const script_replay::trafo_part& part() const { return part_; }
-        // The selected sets' scripts in player-id order, their built states.
+        // The selected sets' scripts in player-id order; the built states of
+        // every set still held, selected or not.  A deselected set stays
+        // `history` ticks (retire_trafo_sets) because a rewind can still
+        // reach records that list its scripts, and record v3 writes a script
+        // at its built state as one byte (RC4, kTrafoDormant) that only the
+        // built bytes can restore (step B6RC's fix-up, review 1).  `built` is
+        // only ever looked up by id, so the extra entries change nothing
+        // else: what the trafo frame runs and the capture writes is
+        // `scripts`.
         void rebuild_part() {
             std::sort(sets_.begin(), sets_.end(), [](const trafo_set& a, const trafo_set& b) { return a.player < b.player; });
             part_ = {};
@@ -194,9 +202,8 @@ namespace bmmo::game {
                 for (size_t k = 0; k < s.force_blocks.size(); ++k)
                     force_names_[s.force_blocks[k]] = "trafo:" + std::to_string(s.player) + "/" + std::to_string(k);
             for (const auto& s: sets_) {
-                if (!s.selected) continue;
                 for (CK_ID id: s.scripts) {
-                    part_.scripts.push_back(id);
+                    if (s.selected) part_.scripts.push_back(id);
                     const auto b = s.built.find(id);
                     if (b != s.built.end()) part_.built[id] = b->second;
                 }
@@ -1287,6 +1294,7 @@ namespace bmmo::game {
             return false;
         }
         script->ModifyFlags(CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_RESETNEXTFRAME, CKBEHAVIOR_DEACTIVATENEXTFRAME);
+        registry.part().touch(script->GetID());   // RC4: no longer known to be built
         return true;
     }
 
@@ -1296,7 +1304,7 @@ namespace bmmo::game {
     // tick, after the tick's inputs and the sector union's pass, before the
     // behaviour pass and the step.  Returns the scripts executed.
     inline int trafo_frame(CKContext* context, const trafo_registry& registry, float delta_ms) {
-        return script_replay::execute_scripts(context, registry.part().scripts, delta_ms);
+        return script_replay::execute_trafo(context, registry.part(), delta_ms);   // the RC4 ledger kept
     }
 
     // The effect checks (design 2.3): no body named after an original piece
@@ -1595,6 +1603,7 @@ namespace bmmo::game {
         if (!run_trafo(context, registry, hooks, player, bmmo::session::TRAFO_EXPLODE, type, position, seed, error)) return false;
         const trafo_set* set = registry.find(player);
         script_replay::execute_scripts(context, {set->types[type].explosion}, delta_ms);
+        registry.part().touch(set->types[type].explosion);   // RC4
         return true;
     }
 

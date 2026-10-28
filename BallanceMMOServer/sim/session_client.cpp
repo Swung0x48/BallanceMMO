@@ -3626,6 +3626,19 @@ namespace {
         }
         void report() {
             log_line(core_.status_text(counters()));
+            // RC4 (step B6RC's fix-up, review 2): what the dormant-script
+            // encoding did in this process - trafo scripts written as one byte
+            // from the ledger, walked and found built, walked and written as
+            // a block, ledger entries the root guard refused, dormant entries
+            // restored - so a session's evidence shows the path ran.  Only in
+            // a session that runs the trafo inputs.
+            if (trafo_on_) {
+                const auto& d = bmmo::game::script_replay::dormancy();
+                logf("trafo_dormancy: from_ledger=%llu healed=%llu walked=%llu guard_trips=%llu restored_built=%llu",
+                     static_cast<unsigned long long>(d.from_ledger), static_cast<unsigned long long>(d.healed),
+                     static_cast<unsigned long long>(d.walked), static_cast<unsigned long long>(d.guard_trips),
+                     static_cast<unsigned long long>(d.restored_built));
+            }
             if (frame_time_count_)
                 logf("frame_time: frames=%llu p50=%.1f p99=%.1f p999=%.1f max=%.1f ms",
                      static_cast<unsigned long long>(frame_time_count_), frame_time_quantile(0.5),

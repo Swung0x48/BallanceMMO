@@ -87,6 +87,10 @@ namespace bmmo::game {
         // keyed by id - written only when a trafo part is selected, so every
         // record without trafo sets stays v2:
         //   u32 trafo_count, per script: u32 id, u8 present, block (as v2)
+        // present: 0 no such script, 1 a block follows, 2 (kTrafoDormant,
+        // step B6RC / RC4) the script holds its set's built state and no
+        // block follows.  The record is this process's own (the wire and the
+        // journals carry the portable record), so the value needs no version.
         // A selected trafo script the record does not list (its set was made
         // after the record) is restored to its set's built state; a recorded
         // one that no longer exists fails the restore
@@ -126,7 +130,56 @@ namespace bmmo::game {
             std::vector<CK_ID> scripts;
             std::map<CK_ID, std::vector<uint8_t>> built;
             bool empty() const { return scripts.empty(); }
+
+            // RC4, the dormant-script encoding (rewind-cost design RC4, trafo
+            // design 9.4): per script of `scripts`, whether it is KNOWN to
+            // hold its built state.  A cache over the world, never state:
+            // only a capture that found the script's bytes equal to its built
+            // bytes, or a restore that wrote them, sets an entry; everything
+            // that can change the script - the trafo frame's execution and
+            // next-frame flags (execute_trafo), a trafo input's flags
+            // (run_trafo), a remake's execution, a restore of other bytes -
+            // clears it, and an entry nobody set is unknown (the script is
+            // walked).  Rebuilding the part (a set added, removed or
+            // reselected) starts it empty.  A wrong "unknown" costs a walk; a
+            // wrong "known" would restore the built state over a changed
+            // script, so the capture also checks the root's activation words
+            // against the built bytes (dormant_guard_trips counts the misses).
+            mutable std::vector<uint8_t> dormant;
+            size_t index_of(CK_ID id) const {
+                for (size_t i = 0; i < scripts.size(); ++i)
+                    if (scripts[i] == id) return i;
+                return scripts.size();
+            }
+            bool is_dormant(size_t i) const { return i < dormant.size() && dormant[i] != 0; }
+            void set_dormant(size_t i, bool known) const {
+                if (dormant.size() != scripts.size()) dormant.assign(scripts.size(), 0);
+                if (i < dormant.size()) dormant[i] = known ? 1 : 0;
+            }
+            void touch(CK_ID id) const { set_dormant(index_of(id), false); }
+            void forget_all() const { dormant.clear(); }
         };
+        // Record v3's per-script byte for a trafo script in its set's built
+        // state (RC4): no block follows, and the restore writes the built
+        // bytes.  A capture writes it exactly when the script's bytes equal
+        // the built ones (known from the ledger or found by the walk), so two
+        // records of equal states are equal byte for byte.
+        static constexpr uint8_t kTrafoDormant = 2;
+        // What the dormant encoding did since the last reset (RC4): scripts
+        // written as one byte from the ledger, walked and found built (the
+        // ledger healed), walked and written as a block, and ledger entries
+        // the root check refused (an unhooked writer: a bug to find).  One
+        // process-wide set of plain counters, diagnostic only: captures and
+        // restores run on the game thread (a tool that ran worlds on several
+        // threads would race on them; nothing decides on them).  The headless
+        // client prints them in its trafo_dormancy: line.
+        struct dormancy_counters {
+            uint64_t from_ledger = 0, healed = 0, walked = 0, guard_trips = 0, restored_built = 0;
+        };
+        static dormancy_counters& dormancy() {
+            static dormancy_counters counters;
+            return counters;
+        }
         static bool is_force_block(CKBehavior* beh) {
             return beh && beh->IsUsingFunction() && beh->GetPrototypeGuid() == force_block_guid();
         }
@@ -611,14 +664,62 @@ namespace bmmo::game {
             }
             if (v3) {
                 put_u32(out, static_cast<uint32_t>(trafo->scripts.size()));
-                for (CK_ID id: trafo->scripts) {
+                for (size_t i = 0; i < trafo->scripts.size(); ++i) {
+                    const CK_ID id = trafo->scripts[i];
                     auto* beh = CKBehavior::Cast(context->GetObject(id));
                     put_u32(out, static_cast<uint32_t>(id));
-                    put_u8(out, beh ? 1 : 0);
-                    if (beh) capture_behavior(beh, hooks, out);
+                    if (!beh) {
+                        put_u8(out, 0);
+                        trafo->set_dormant(i, false);
+                        continue;
+                    }
+                    // RC4: a script known to hold its built state is one byte,
+                    // its walk (parameters, force blocks, children) skipped.
+                    const auto built = trafo->built.find(id);
+                    const bool has_built = built != trafo->built.end();
+                    if (has_built && trafo->is_dormant(i)) {
+                        if (root_activation_is(beh, built->second)) {
+                            put_u8(out, kTrafoDormant);
+                            ++dormancy().from_ledger;
+                            continue;
+                        }
+                        ++dormancy().guard_trips;
+                        trafo->set_dormant(i, false);
+                    }
+                    put_u8(out, 1);
+                    const size_t at = out.size();
+                    capture_behavior(beh, hooks, out);
+                    const bool as_built = has_built && out.size() - at == built->second.size()
+                                       && std::equal(built->second.begin(), built->second.end(), out.begin() + static_cast<std::ptrdiff_t>(at));
+                    trafo->set_dormant(i, as_built);
+                    if (as_built) {
+                        out.resize(at - 1);
+                        put_u8(out, kTrafoDormant);
+                        ++dormancy().healed;
+                    } else {
+                        ++dormancy().walked;
+                    }
                 }
             }
             return true;
+        }
+
+        // RC4's guard: the root's runtime flags and active inputs and outputs
+        // (put_activation) equal the first words of its built block (id,
+        // flags, in mask, out mask).
+        static bool root_activation_is(CKBehavior* beh, const std::vector<uint8_t>& built) {
+            size_t pos = 0;
+            uint32_t id = 0, flags = 0, in_mask = 0, out_mask = 0;
+            if (!get_u32(built, pos, id) || !get_u32(built, pos, flags) || !get_u32(built, pos, in_mask) || !get_u32(built, pos, out_mask))
+                return false;
+            if (id != static_cast<uint32_t>(beh->GetID()) || (static_cast<uint32_t>(beh->GetFlags()) & kRuntimeFlags) != flags) return false;
+            const int inputs = beh->GetInputCount(), outputs = beh->GetOutputCount();
+            uint32_t ins = 0, outs = 0;
+            for (int i = 0; i < inputs && i < 32; ++i)
+                if (beh->IsInputActive(i)) ins |= 1u << i;
+            for (int i = 0; i < outputs && i < 32; ++i)
+                if (beh->IsOutputActive(i)) outs |= 1u << i;
+            return ins == in_mask && outs == out_mask;
         }
 
         // Whether a record skips a parameter's bytes (is_opaque below): a
@@ -751,7 +852,24 @@ namespace bmmo::game {
                     if (!present) continue;
                     auto* beh = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(id)));
                     if (!beh) return fail(error, "a recorded trafo script is gone");
+                    const std::vector<uint8_t>* built = nullptr;
+                    if (trafo)
+                        if (const auto b = trafo->built.find(static_cast<CK_ID>(id)); b != trafo->built.end()) built = &b->second;
+                    if (present == kTrafoDormant) {
+                        // RC4: the set's built state, as the capture found it.
+                        if (!built) return fail(error, "a dormant trafo script without a built state");
+                        if (!restore_script_block(beh, hooks, *built, error)) return false;
+                        trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)), true);
+                        ++dormancy().restored_built;
+                        continue;
+                    }
+                    if (present != 1) return fail(error, "trafo script presence");
+                    const size_t at = pos;
                     if (!restore_behavior(beh, hooks, in, pos, error, true)) return false;
+                    if (trafo)
+                        trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)),
+                                           built && pos - at == built->size()
+                                               && std::equal(built->begin(), built->end(), in.begin() + static_cast<std::ptrdiff_t>(at)));
                 }
             }
             if (pos != in.size()) return fail(error, "trailing bytes");
@@ -766,6 +884,7 @@ namespace bmmo::game {
                     auto* beh = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(id)));
                     if (built == trafo->built.end() || !beh) return fail(error, "a trafo script without a built state");
                     if (!restore_script_block(beh, hooks, built->second, error)) return false;
+                    trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)), true);
                     ++last_restore().trafo_built;
                 }
             }
@@ -790,11 +909,11 @@ namespace bmmo::game {
         // live order, session/script_order.hpp); null: judged by the
         // behaviour manager's list as it is now.
         static int execute_frame(CKContext* context, const selection& sel, float delta_ms,
-                                 const std::vector<CK_ID>* replayed = nullptr, const std::vector<CK_ID>* trafo = nullptr,
+                                 const std::vector<CK_ID>* replayed = nullptr, const trafo_part* trafo = nullptr,
                                  const std::vector<uint32_t>* live_members = nullptr) {
             if (!context) return 0;
             int executed = 0;
-            if (trafo) executed += execute_scripts(context, *trafo, delta_ms);
+            if (trafo) executed += execute_trafo(context, *trafo, delta_ms);
             // The satellites next, as the live frame runs Gameplay_Ingame
             // before the modules' scripts.  A block is executed the way its
             // graph's iterator executes it, and only while the graph keeps it
@@ -819,14 +938,20 @@ namespace bmmo::game {
         // every owner the replay itself has put into the list for the next
         // frame (a replayed activation, a restore's re-registration); without
         // a recorded order, the list as it is now (owner_in_frame).
+        // `ledger` (RC4, execute_trafo only: `scripts` is ledger->scripts):
+        // every script whose flags the frame processed or that it executed
+        // leaves the dormant ledger.
         static int execute_scripts(CKContext* context, const std::vector<CK_ID>& scripts, float delta_ms,
-                                   bool live_flags = false, const std::vector<uint32_t>* live_members = nullptr) {
+                                   bool live_flags = false, const std::vector<uint32_t>* live_members = nullptr,
+                                   const trafo_part* ledger = nullptr) {
             if (!context) return 0;
             int executed = 0;
-            for (CK_ID id: scripts) {
+            for (size_t i = 0; i < scripts.size(); ++i) {
+                const CK_ID id = scripts[i];
                 auto* beh = CKBehavior::Cast(context->GetObject(id));
                 if (!beh) continue;
                 const CKDWORD flags = beh->GetFlags();
+                if (ledger && (flags & kFrameFlags)) ledger->set_dormant(i, false);
                 if (flags & (CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_DEACTIVATENEXTFRAME)) {
                     if (live_flags) {
                         const bool member = live_members
@@ -842,12 +967,32 @@ namespace bmmo::game {
                     beh->ModifyFlags(0, CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_DEACTIVATENEXTFRAME | CKBEHAVIOR_RESETNEXTFRAME);
                 }
             }
-            for (CK_ID id: scripts) {
-                auto* beh = CKBehavior::Cast(context->GetObject(id));
+            for (size_t i = 0; i < scripts.size(); ++i) {
+                auto* beh = CKBehavior::Cast(context->GetObject(scripts[i]));
                 if (!beh || !beh->IsActive()) continue;
+                if (ledger) ledger->set_dormant(i, false);
                 beh->Execute(delta_ms);
                 ++executed;
             }
+            return executed;
+        }
+
+        // The flags that make a frame touch a root script: active, or a
+        // next-frame change pending.
+        static constexpr CKDWORD kFrameFlags = CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_DEACTIVATENEXTFRAME
+                                             | CKBEHAVIOR_RESETNEXTFRAME;
+
+        // The trafo frame's scripts (execute_scripts over the part's list)
+        // with the dormant ledger kept (RC4): a script the frame processed or
+        // executed leaves it, and so does one that ends the frame active or
+        // with a next-frame change (another script of the list activated it).
+        static int execute_trafo(CKContext* context, const trafo_part& part, float delta_ms) {
+            if (!context) return 0;
+            const int executed = execute_scripts(context, part.scripts, delta_ms, false, nullptr, &part);
+            for (size_t i = 0; i < part.scripts.size(); ++i)
+                if (part.is_dormant(i))
+                    if (auto* beh = CKBehavior::Cast(context->GetObject(part.scripts[i])); beh && (beh->GetFlags() & kFrameFlags))
+                        part.set_dormant(i, false);
             return executed;
         }
 
@@ -940,14 +1085,26 @@ namespace bmmo::game {
                 for (uint32_t i = 0; i < ca; ++i) {
                     uint32_t ia = 0, ib = 0;
                     uint8_t qa = 0, qb = 0;
-                    if (!get_u32(a, pa, ia) || !get_u32(b, pb, ib) || !get_u8(a, pa, qa) || !get_u8(b, pb, qb) || ia != ib || qa != qb) {
+                    if (!get_u32(a, pa, ia) || !get_u32(b, pb, ib) || !get_u8(a, pa, qa) || !get_u8(b, pb, qb) || ia != ib
+                            || (qa == 0) != (qb == 0)) {
                         d.logical = true; ++d.logical_count;
                         if (d.where.empty()) d.where = "trafo list";
                         return d;
                     }
-                    if (!qa) continue;
                     auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(ia))) : nullptr;
                     const std::string script_name = beh && beh->GetName() ? beh->GetName() : std::to_string(ia);
+                    if (qa != qb) {
+                        // RC4: one record has the script at its built state,
+                        // the other a block (which is not the built state).
+                        d.logical = true; ++d.logical_count;
+                        const std::string what = "trafo " + script_name + ": " + (qa == kTrafoDormant ? "built" : "running")
+                                               + " vs " + (qb == kTrafoDormant ? "built" : "running");
+                        if (d.where.empty()) d.where = what;
+                        d.note(what);
+                        if ((qa == 1 && !skip_v2_block(a, pa)) || (qb == 1 && !skip_v2_block(b, pb))) return d;
+                        continue;
+                    }
+                    if (!qa || qa == kTrafoDormant) continue;
                     if (!diff_behavior(beh, script_name, a, pa, b, pb, d, masks)) return d;
                 }
             }
@@ -1274,10 +1431,20 @@ namespace bmmo::game {
                     ++r.scripts;
                     size_t at = e->at;
                     const std::string place = owner + "/" + name;
+                    const size_t block_at = out.size();
                     if (!localize_behavior(context, beh, portable, at, out, error, r, name, place)) {
                         out.clear();
                         if (error) *error = place + ": " + *error;
                         return false;
+                    }
+                    // RC4: a block equal to the set's built state is written
+                    // as the capture writes it (one byte), so the localized
+                    // record of a state is the record a capture of it gives.
+                    const auto built = trafo->built.find(id);
+                    if (built != trafo->built.end() && out.size() - block_at == built->second.size()
+                            && std::equal(built->second.begin(), built->second.end(), out.begin() + static_cast<std::ptrdiff_t>(block_at))) {
+                        out.resize(block_at - 1);
+                        put_u8(out, kTrafoDormant);
                     }
                 }
                 for (const entry& e: trafo_entries)

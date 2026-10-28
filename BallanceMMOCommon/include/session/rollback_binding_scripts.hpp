@@ -167,10 +167,10 @@ namespace bmmo::session {
                 const std::vector<CK_ID> ordered(ids.begin(), ids.end());
                 if (o.live_orders_applied) ++*o.live_orders_applied;
                 bmmo::game::script_replay::execute_frame(context, *selection, o.delta_ms, &ordered,
-                                                         trafo && !trafo->empty() ? &trafo->scripts : nullptr, live);
+                                                         trafo && !trafo->empty() ? trafo : nullptr, live);
             } else {
                 bmmo::game::script_replay::execute_frame(context, *selection, o.delta_ms, o.scripts_replayed,
-                                                         trafo && !trafo->empty() ? &trafo->scripts : nullptr, live);
+                                                         trafo && !trafo->empty() ? trafo : nullptr, live);
             }
             membership = false;
             b->set_event_log_muted(false, error);

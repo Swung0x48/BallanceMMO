@@ -14,6 +14,7 @@
 // tick's inputs (run_trafo), the trafo frame, the engine's frame (behaviour
 // pass, step); after it the hold and the effect checks.
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -742,6 +743,98 @@ namespace bmmo::sim {
                       "(5b) empty trafo part: portable v2 " + std::to_string(p0.size()) + " bytes: " + (v2_empty ? "yes" : "NO " + f1)
                           + "; localized with no set: " + (empty_back ? "yes" : "NO " + f2) + "; refused by a world with sets: "
                           + (strict ? f3 : std::string("NO")));
+            }
+            // (6) step B6RC, RC4 (the dormant-script encoding): every set is
+            // at its built state here (no frame has run).  A capture with an
+            // empty ledger walks every script and writes each as one byte
+            // (healing the ledger); the next one, from the ledger, is the
+            // same record byte for byte; a root flag written outside every
+            // hooked path is caught by the guard and the script walked; the
+            // compact record restored puts it back built.  Then the cost of
+            // a capture, walked against from the ledger.
+            {
+                const auto& part = registry_.part();
+                const size_t n = part.scripts.size();
+                auto& dc = script_replay::dormancy();
+                dc = {};
+                part.forget_all();
+                std::vector<uint8_t> walked, ledger, guarded, again;
+                script_replay::capture(context_, sel, forces, walked, &part);
+                const auto healed = dc.healed;
+                script_replay::capture(context_, sel, forces, ledger, &part);
+                const auto from_ledger = dc.from_ledger;
+                const bool same = walked == ledger && healed == n && from_ledger == n;
+                const bool compact = ledger.size() == v2.size() + 4 + 5 * n;
+                size_t full = v2.size() + 4;   // the record before RC4: every block written
+                for (CK_ID id: part.scripts) full += 5 + part.built.at(id).size();
+                bool guard = false, back = false;
+                std::string error;
+                if (n > 0) {
+                    CKBehavior* s0 = CKBehavior::Cast(context_->GetObject(part.scripts.front()));
+                    s0->ModifyFlags(CKBEHAVIOR_ACTIVATENEXTFRAME, 0);
+                    script_replay::capture(context_, sel, forces, guarded, &part);
+                    guard = dc.guard_trips == 1 && guarded.size() == ledger.size() + part.built.at(part.scripts.front()).size()
+                         && !part.is_dormant(0);
+                    const bool restored = script_replay::restore(context_, sel, forces, ledger, &error, nullptr, nullptr, true, &part);
+                    std::vector<uint8_t> now;
+                    script_replay::capture_script_block(s0, forces, now);
+                    script_replay::capture(context_, sel, forces, again, &part);
+                    back = restored && dc.restored_built == n && now == part.built.at(part.scripts.front()) && again == ledger
+                        && part.is_dormant(0);
+                }
+                check(same && compact && guard && back,
+                      "(6) RC4 dormant encoding: " + std::to_string(n) + " trafo scripts; walked record " + std::to_string(walked.size())
+                          + " bytes == ledger record: " + (same ? "yes" : "NO") + " (healed " + std::to_string(healed) + ", from the ledger "
+                          + std::to_string(from_ledger) + "); one byte per script (v2 + 4 + 5n = " + std::to_string(v2.size() + 4 + 5 * n)
+                          + "): " + (compact ? "yes" : "NO") + "; an outside root flag caught by the guard: " + (guard ? "yes" : "NO")
+                          + " (" + std::to_string(guarded.size()) + " bytes); the compact record restored to built: "
+                          + (back ? "yes" : "NO " + error));
+                // (7) step B6RC's fix-up (review 1): a rewind across a set's
+                // retirement.  The record above lists every set's scripts as
+                // dormant; the first set deselected (retire_trafo_sets), and
+                // then every set, it still restores - its built states stay
+                // in the part while the set is held.
+                {
+                    auto& sets = registry_.sets();
+                    std::string e1, e2;
+                    const auto before = dc.restored_built;
+                    sets.front().selected = false;
+                    registry_.rebuild_part();
+                    const bool one = script_replay::restore(context_, sel, forces, ledger, &e1, nullptr, nullptr, true, &part);
+                    const auto after_one = dc.restored_built;
+                    for (auto& s: sets) s.selected = false;
+                    registry_.rebuild_part();
+                    const bool all = script_replay::restore(context_, sel, forces, ledger, &e2, nullptr, nullptr, true, &part);
+                    const auto after_all = dc.restored_built;
+                    for (auto& s: sets) s.selected = true;
+                    registry_.rebuild_part();
+                    check(one && all && after_one - before == n && after_all - after_one == n,
+                          "(7) RC4 across a retirement: the dormant record restored with the first set deselected: "
+                              + (one ? "yes" : "NO " + e1) + "; with every set deselected: " + (all ? "yes" : "NO " + e2)
+                              + "; dormant scripts restored " + std::to_string(after_one - before) + " + "
+                              + std::to_string(after_all - after_one) + " of " + std::to_string(n) + " each");
+                }
+                // The cost (this engine's CK, not retail's): 200 captures each.
+                const int k = 200;
+                std::vector<uint8_t> scratch;
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < k; ++i) {
+                    part.forget_all();
+                    script_replay::capture(context_, sel, forces, scratch, &part);
+                }
+                const auto t1 = std::chrono::steady_clock::now();
+                for (int i = 0; i < k; ++i) script_replay::capture(context_, sel, forces, scratch, &part);
+                const auto t2 = std::chrono::steady_clock::now();
+                std::vector<uint8_t> plain;
+                for (int i = 0; i < k; ++i) script_replay::capture(context_, sel, forces, plain);
+                const auto t3 = std::chrono::steady_clock::now();
+                const auto us = [k](std::chrono::steady_clock::duration d) {
+                    return std::chrono::duration<double, std::micro>(d).count() / k;
+                };
+                std::printf("record-check (6) cost: a capture %.1f us walked (%zu bytes before RC4), %.1f us from the ledger "
+                            "(%zu bytes), %.1f us without the trafo part (v2, %zu bytes)\n",
+                            us(t1 - t0), full, us(t2 - t1), ledger.size(), us(t3 - t2),
+                            plain.size());
             }
             if (registry_.sets().size() < 2) {
                 check(false, "(2)-(4) need two sets (--trafo-sets 2 or more)");

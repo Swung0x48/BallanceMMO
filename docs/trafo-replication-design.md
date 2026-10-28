@@ -3043,6 +3043,13 @@ depends on copy details. A failing invariant names the object.
 - If the capture exceeds the band, record v3 encodes a script that is inactive
   and unchanged since its set was built as one byte, and the restore writes its
   built state.
+- *As built (step B6RC, the rewind-cost optimization's RC4)*: the byte is
+  `present` = 2 (`script_replay::kTrafoDormant`), written exactly when the
+  script's bytes equal its built bytes; "unchanged" is known without the walk
+  from a ledger in the trafo part (`trafo_part::dormant`) that the trafo frame,
+  the trafo inputs, a remake and the restores keep, with the root's activation
+  words checked against the built block as a guard. Record v3 is local, so no
+  version or protocol change (`rewind-cost-design.md` "As built (step B6RC)").
 
 **9.5 The explosion's lead delay** (35 ticks = 0.53 s at input delay 17).
 

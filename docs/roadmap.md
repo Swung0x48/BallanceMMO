@@ -503,7 +503,12 @@ numbers 1-10 are unchanged.
    only in the control arm (`EXTRA=--body-set-corrections wire_check.sh`,
    which now fails a short replay) until a set is re-captured under the
    RC3 default (`core_ref_s8`, queued for the next step with live runs to
-   spare). The close-out is the trafo design's H4 / H6
+   spare). **RC4 is built (step B6RC)**: a trafo script at its set's built
+   state is one byte of record v3, known without the walk from a ledger
+   the trafo frame, the trafo inputs and the restores keep (a capture
+   writes the byte exactly when the bytes equal the built ones; the two
+   sets' part of a capture 37 -> 2.5 us in SimTool; no protocol change).
+   See `rewind-cost-design.md` "As built (step B6RC)". The close-out is the trafo design's H4 / H6
    **with snapshots on** (decision (b), 2026-10-25) against T3's
    snapshots-off numbers (TR3b's H1 at 150 ms: t_rep 0.99-1.15 s, t_max
    43-46 ms, starved 0, against the option-off control's 0.34-0.41 s, 12-14

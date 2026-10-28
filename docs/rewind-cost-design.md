@@ -5,8 +5,9 @@ committed with hold-last by the user's ruling of 2026-10-27 (§11; "As built
 (step RC1)" at the end: its drift check, a FAIL under the step's rule at the
 build, was settled by the pinned method of Measurement RC1d and the user's own
 play, Measurement RC1e). RC6, the tail prediction refinement (R6 / R7), is not
-adopted (§8). RC2-RC5 and the close-out are
-not built. This document is roadmap §4 item 10 (the rewind-cost
+adopted (§8). RC2 is not built (the user's choice), RC3 is built (B5RX),
+RC4 is built (B6RC); RC5 and the close-out
+are not built. This document is roadmap §4 item 10 (the rewind-cost
 optimization); its first step was pulled ahead of trafo T3 by the user's
 decision of 2026-10-25 (§11).
 
@@ -175,6 +176,9 @@ re-predicted ticks and after them (§7, check 4); the server is not touched.
   item RC3A).
 - **RC4, the dormant-script encoding** (trafo design 9.4; at most 5.2-5.3 %):
   the 32 trafo scripts' state, written compactly while they are dormant.
+  **Built at step B6RC** ("As built (step B6RC)", item RC4): a trafo script
+  at its set's built state is one byte of record v3, known from a ledger
+  the trafo frame, the inputs and the restores keep.
 - **RC5, an incremental restore** (2.8-4.2 %): skip writing a sleeping body
   whose blob entry equals the world's.
 
@@ -228,7 +232,7 @@ names no server file); the own ball's feed; the legacy retail path
 | RC1 | the hold-last re-prediction (§2) | §7; quick tier |
 | RC2 | incremental capture for sleeping bodies - **not built, the user's choice 2026-10-28** (the blob has no per-body bytes and IVP no sleep generation; options (a) / (b) kept for later: "As built (step B5RX)", item RC2S) | the savestate exactness set, the wire check (ALL SAME: no behaviour change), CPU parity, H1 at 150 ms |
 | RC3 | no body-set full snapshot while snapshots are off - **built at B5RX, the default on every host** (the user's correction of 2026-10-28; the drifts it exposes go to step SFD) | its own drift check, the snapshots-off arms |
-| RC4 | the dormant-script encoding (trafo design 9.4) | script replay exactness, the wire check |
+| RC4 | the dormant-script encoding (trafo design 9.4) - **built at B6RC** | script replay exactness, the wire check |
 | RC5 | incremental restore | the savestate checks, the wire check |
 | RC6 | **not adopted at RC1** (the user's ruling of 2026-10-27, quoted in §11); R6 and R7 measured (RC1d, RC1e) and kept as a possible later refinement if human rapid-trigger play shows periods. (History: proposed by Measurement RC1d; ruled 2026-10-27 "R6 直接并入 RC1", then the R7 variant measured, Measurement RC1e: R7 not selected, the choice between R6, R7 and hold-last went back to the user, who chose hold-last.) What the refinement would be, as specified when it was proposed: the tail prediction refinement: hold-last replaced past a remote's newest relayed frame by **R6** (per-key pattern-repeat: each key bit's own period repeated, the other keys of the newest frame by R4's history-adaptive hold, k = 5; §9.2; R5, the whole-frame pattern-repeat, is the measured fallback choice), one function in IR next to `relay_frame_or_newest` (IR:353-367) called from both sites (`recorded_input_at`'s tail branch, CF:494; `live_drive`, CL:467-470); its history window fixed relative to the newest frame (the 128 ticks before it - not the ring's cap `kRelayRing`, IR:47, so a later change of the cap cannot change a prediction), no allocation on the path (the measured build's per-key `std::vector` goes), and the periods found once per arrival, not per tail tick | unit tests of the function (a 1:1 and a 1:3 lateral alternation, an UP/DOWN 1:1 and 2:1 alternation, a 1-tick DOWN every 10 ticks repeated, a direct LEFT -> RIGHT switch, a hold with and without complete holds, a 6-tick brake, flags as hold-last, holes, the start and a birth unchanged) and a session test pinning the two sites on the tail; the wire check against `core_ref_rc1` (every first difference attributed to a tail tick the rule fed differently); solo IDENTICAL; **the paired drift check with the own keys pinned** (`.local-tools/work/RC1d/gaps/pinned_replay.py`, every rule's replay of the same captures; R1 replays byte-identical on every cell) on the RC1d cells with these **required cells at both lags (resync_at150 and resync_at150_down)**: the native steer d0; the 1-tick lateral taps t1x1 (rapid-trigger 1:1 alternation) and t1x3; the brake cells d0_brake and t1x1_brake (a 6-tick DOWN in every 90 UP ticks) and d0_ud1x9 (a 1-tick DOWN in every 10: the 1-tick brake tap); the UP/DOWN fast switches d0_ud1x2 (UP UP DOWN) and d0_ud1x1 (UP/DOWN 1:1); the holds d5 / d10 / d15 and d10_brake (direct LEFT -> RIGHT switches: 405 in d10, Measurement RC1d). Criteria: (1) pooled mean no worse than hold-last's on every required cell and no client more than 5 % worse; (2) on the hold and brake cells (d0, d5, d10, d15, d0_brake, d10_brake) input rewinds per real change no more than hold-last's + 0.1, on the tap and UP/DOWN cells no more input rewinds than hold-last; (3) replayed ticks reported per required cell next to hold-last's. **As measured, R6 (and R5) fail (2) on resync_at150_down d0: 0.96 against 0.80 per change, replayed ticks +21 % (42893 -> 51716), all of it on the mirrors of the lowered player (Measurement RC1d (e)); every other required cell passes (largest excess +0.06).** RC6 is therefore not passable as measured unless the user accepts that cell or RC6 removes the excess. [Checked after the fix-up round, 2026-10-27, `gaps/record_model.py`: a physics-free model of the engine's records (a tick keeps the prediction made when it was last simulated, live or in the last rewind) reproduces the cell's rewinds on the lowered player's mirror (client 1: R1 232, R4 / R5 / R6 299; measured 231 / 296). The excess is all lateral: corrections where the rule had released a lateral key the player still held go 187 -> 266, the opposite kind 157 -> 136, UP / DOWN corrections 20 in every rule. So the excess is R4's fallback releasing a lateral key early at max(5, H - r) on the native steer's irregular long holds, and holding the forward / backward keys (named here before this check) would not remove it; a fix has to change the lateral release, not measured.] The live A/B (snapshots off) on the required cells, t1x1, d0_ud1x2 and d0_ud1x9 at least three sessions per rule at each lag (one session is not evidence of starvation either way); CPU parity, against the replayed ticks of (3) | quick tier |
 | close-out | H4 and H6 of the trafo design §7.3, **with snapshots on** (decision (b) of 2026-10-25), against T3's snapshots-off CPU numbers as the baseline | full tier |
@@ -1706,3 +1710,121 @@ resync. (B) The balloon leak: (i) accept it (only a ball that touches the
 airship), (ii) bring the balloon back into the agreement work (changes the
 user's decision "除了气球应该别的都是需要修的"), (iii) keep the airship out
 of the balls' collisions in every world (changes the level's behaviour).
+
+## As built (step B6RC)
+
+Step B6RC is the batch of RC4 and RC5. Base d97920e (protocol 13, journal
+v7; no protocol or journal change). No CK2, IVP or physics_RT change and no
+engine change.
+
+**Item RC4 - the dormant-script encoding (built).** Trafo design 9.4: "record
+v3 encodes a script that is inactive and unchanged since its set was built
+as one byte, and the restore writes its built state." What the design left
+open is how a capture knows "unchanged" without the walk it is meant to
+save; as built:
+- *The byte.* Record v3's per-trafo-script `u8 present` takes a third value,
+  `kTrafoDormant` = 2 (`game/script_replay.hpp`): the script holds its set's
+  built state (`trafo_part::built`) and no block follows. A capture writes
+  it **exactly when the script's bytes equal the built bytes**, so the
+  encoding is canonical: two records of equal states are equal byte for
+  byte, which the rollback's live-against-replayed script compare
+  (`rollback.hpp`, `state.scripts != live_scripts`) relies on. The record is
+  the process's own (the wire and the journals carry the portable record,
+  which is unchanged), so the value needs no record version and no protocol.
+- *Knowing it without the walk: the ledger.* `trafo_part::dormant`, one
+  entry per script of the trafo list, mutable (a cache over the world, never
+  state; `rebuild_part` starts it empty). It is SET only by a capture that
+  walked a script and found its bytes equal to the built ones (the ledger
+  heals), and by a restore that wrote the built bytes (a dormant entry, a
+  script the record does not list, or a recorded block equal to the built
+  one); it is CLEARED by everything that can change a script:
+  `execute_trafo` (the trafo frame, live and in the replay: a script whose
+  root has `CKBEHAVIOR_ACTIVE` or a next-frame flag when the frame reaches
+  it, one it executes - also one another script of the list activates
+  inside the frame - and one that ends the frame active or pending),
+  `run_trafo` (the input's next-frame flags), `remake_type_set` (the
+  explosion executed once), a restore that writes other bytes, a missing
+  script. An entry nobody set is unknown: the script is walked, as before.
+- *The guard.* A capture that finds a ledger entry set still compares the
+  root's runtime flags and active inputs / outputs with the built block's
+  first words (`root_activation_is`) and walks the script when they differ
+  (`dormancy().guard_trips`: a writer outside the hooked paths). The sets'
+  built state is never active or pending (`build_trafo_set`'s I7), so a
+  running script never passes it.
+- *Localize* (the resync's portable record made local) writes a localized
+  block equal to the built one as the byte too, so a localized record of a
+  state is the record a capture of it gives (T2's check (5), "v2 localized
+  == v3", holds).
+- *Diff* names a dormant-against-block difference ("trafo <script>: built
+  vs running") and walks on.
+- `execute_frame`'s trafo argument is now the part (`const trafo_part*`,
+  `rollback_binding_scripts.hpp`); `trafo_frame` calls `execute_trafo`.
+- The restore still writes every listed script (a dormant one from its
+  built bytes): the saving is the capture's walk, where design 9.4 and
+  CPUPROF put the cost (107 us per live and 80 us per replayed capture for
+  the 32 scripts).
+
+Checks (quick tier, 02:11-02:17, about 6 minutes of wall clock): x64
+BUILD-OK, x86 CLIENT-BUILD-OK (header deps recorded in both trees), GCC
+syntax 29/29 ok, `BallanceMMOMessageTests` 555/555. SimTool
+`--trafo-record-check` (level 2, two sets; `.local-tools/work/B6RC/rc/`):
+T1 / T2's checks (1)-(5b) PASS with the byte in the records, and the new
+check (6) PASS - an empty ledger's capture walks the 16 scripts and writes
+16 bytes (healed 16), the next capture from the ledger is the same record
+byte for byte (44052 bytes = v2 + 4 + 5 x 16), a root flag set outside
+every hooked path is caught by the guard (one trip, that script walked),
+and the compact record restored puts it back built. Its cost line
+(Ballanced CK2, 200 captures each): a capture 130.1 us walked (62096 bytes
+before RC4), 95.6 us from the ledger (44052 bytes), 93.1 us with no trafo
+part - the two sets' part 37 us -> 2.5 us. The wire check `wire_check.sh
+rSFD rB6RC rB6RCw` over `core_ref_s8` (trafo inputs off there: v2 records
+only, RC4 not reached): ALL SAME, 12/12 sends SAME, 12/12 journals
+IDENTICAL. The one live run, trafo inputs ON
+(`.local-tools/work/B6RC/b6_run.sh`: H1 at 150 ms, four clients, 40 s,
+snapshots off, placement off, `maps/arena-test/b6rc/h1_150`): server
+journal 2782/2782 matched, starved 0, far 0, trafo_missed 0 on all; the
+harness's only FAIL is RC3's "no ball-to-ball interaction observed" (the
+harness artifact of `core_ref_s8`'s README). Its captures replayed by the
+pre-RC4 build and this one (`REF=b6rc wire_check.sh rSFD rB6RC rB6RCi`):
+ALL SAME, 4/4 sends SAME, 4/4 journals IDENTICAL, every replay to its end;
+against the live traces (`- rB6RC rB6RCj`): ALL SAME; the script counters
+`scr=` (restores / failures / mismatches / float / skips) are equal old and
+new on every client (c0 52/0/12/13/3, c1 58/0/11/16/2, c2 60/0/11/10/0,
+c3 48/0/19/5/0).
+
+*Review fix-up.* (1) A rewind across a set's retirement failed the
+restore: `rebuild_part` copied the built states of the selected sets only,
+so once `retire_trafo_sets` deselected a set (it stays `history` ticks
+because rewinds can still reach records that list it), a record taken
+before that held its dormant scripts as the byte and the restore found no
+built bytes for them ("a dormant trafo script without a built state";
+before RC4 the block was in the record). `rebuild_part` now keeps every
+held set's built states, selected or not; `scripts` (what the frame runs
+and the capture writes) stays selected-only, and `built` is only looked up
+by id. SimTool check (7) restores the all-dormant record with the first
+set deselected and then with every set deselected: both restore, 16 + 16
+dormant scripts written. (2) The evidence that the path runs in a session:
+the headless client prints `trafo_dormancy: from_ledger= healed= walked=
+guard_trips= restored_built=` after its status line in a session with the
+trafo inputs. The h1_150 captures replayed by this build (`REF=b6rc
+wire_check.sh rSFD rB6RC rB6RCi2`, ALL SAME, 4/4 journals IDENTICAL):
+from_ledger 82293 / 85396 / 86738 / 81171, healed 32 each, walked 22731 /
+25036 / 25774 / 23821, guard_trips 0, restored_built 1366 / 1483 / 1537 /
+1272 on c0-c3 - the ledger serves about 78 % of the trafo scripts'
+captures, the guard never refused one, and the identical journals and
+`scr=` counters show the byte changes no result. (3) The counters are
+plain process-wide statics, diagnostic only (game thread). (4) The build
+note above was wrong for the x86 and x64 trees: when the two builds run
+in parallel from one Bash command, neither ninja recognises cl's
+`/showIncludes` lines (the logs carry 2969 and 12367 unconsumed
+"注意: 包含文件:" lines; the same builds run one at a time carry 0), so the
+objects they compile get `#deps 0` - the B5RX trap by another road, the
+mechanism (a console both cmd.exe share) not isolated. Those objects (x86: `core_host`, `physics_session_client`,
+`BallanceMMOClient`, `room_client`, `client_automation`; x64:
+`session_client`, `sim_tool`, `physics_world`, `session_runner`,
+`server`) were compiled from the current headers, then touched and rebuilt
+one build at a time, and every C++ object of both trees now has its deps.
+Reruns: x64 BUILD-OK, x86 CLIENT-BUILD-OK, GCC 29/29, tests 555/555,
+`--trafo-record-check` (1)-(7) PASS, `wire_check.sh rSFD rB6RC rB6RCw2`
+over `core_ref_s8` ALL SAME. The retail host does not print the counters
+(no retail file changed).
