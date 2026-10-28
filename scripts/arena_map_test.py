@@ -568,6 +568,10 @@ def run_case(args, sector, case_dir):
     proxy_stats = {}
     server = None
     case_started = time.time()
+    # Step B2SX: the journals already there, by name and mtime, so a case
+    # never takes an earlier one (a mirrored journal lands seconds late).
+    journals_before = ({q.name: q.stat().st_mtime for q in journals.glob('*.bmjr')}
+                       if journals.exists() else {})
     links = client_links(args)
     # --external-server points the clients at a server someone else is running
     # (the Arch WSL one, say).  Its journal still has to land somewhere this
@@ -791,13 +795,28 @@ def run_case(args, sector, case_dir):
     # read its late events and barrier lines.
     if args.server_log and pathlib.Path(args.server_log).exists():
         shutil.copy(args.server_log, case_dir / 'server.log')
+    if args.external_server:
+        # Step B2SX: the local test server writes its journal into WSL's ext4
+        # and a mirror copies it here once the server has closed it, at the
+        # session's end (.local-tools/arch_journal_mirror.sh): give it a few
+        # seconds to land before deciding the case has none.  Only a journal
+        # that was not there at the case's start (or has changed since) is
+        # this case's: an earlier case's, a few seconds old, would otherwise
+        # end the wait before this one's has landed.
+        def own_journals():
+            if not journals.exists():
+                return []
+            return [q for q in journals.glob('*.bmjr') if journals_before.get(q.name) != q.stat().st_mtime]
+        wait_until = time.time() + 20
+        while time.time() < wait_until and not own_journals():
+            time.sleep(0.25)
     journal_paths = sorted(journals.glob('*.bmjr')) if journals.exists() else []
     if args.external_server:
         # The external server's directory may hold earlier sessions' journals:
         # only the ones this case wrote are its own.
         # None of them is: no replay and no event report, said aloud, rather
         # than an older session's journal replayed and reported as this one.
-        fresh = [q for q in journal_paths if q.stat().st_mtime >= case_started - 5]
+        fresh = sorted(own_journals())
         if not fresh:
             print(f'  note: the external server wrote no journal for this case in {journals} '
                   f'({len(journal_paths)} older ones ignored): no replay, no event report', flush=True)

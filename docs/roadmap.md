@@ -417,7 +417,7 @@ numbers 1-10 are unchanged.
        `/mnt/d` through WSL's 9P (writes up to 523 ms measured, ext4 0.7 ms)
        holds a step, and the catch-up loop then substitutes up to 10 queued
        frames per member; **the fix is the user's choice** (late-player
-       design, "As built (step B2SW)"). The harness's server stall
+       design, "As built (step B2SW)"; fixed at B2SX, below). The harness's server stall
        (`BMMO_SESSION_STALL`) is built; a 56-deep notice was taken by a
        56-tick rewind live, no resync.
      - Deferred to the final verification: a same-recipe retail run of the
@@ -436,6 +436,14 @@ numbers 1-10 are unchanged.
        re-arms while the live world has the link in flight fires it once,
        at 6 (record-format design, "As built (step B2SX)"). What remains of
        the start window: A18 (C3, item 6), gap Q (item 4).
+     - *The trial's server stall*: **fixed** - the local test server's
+       journal on WSL's ext4, copied back as each session's journal closes
+       (`.local-tools/arch_server_lp.sh`, `arch_journal_mirror.sh`,
+       `arch_stop.sh`; option (a), config only), and the catch-up judges
+       each frame by its arrival against its own tick's deadline (option
+       (b); `input_buffer::take`'s cutoff, the queue drained before every
+       step): no substitution after a 560 or 660 ms stall (B2SW: 8 per
+       member) (late-player design, "As built (step B2SX)").
      - Deferred to the final verification: a retail
        follow check of Q5's re-armed link (the "fires once" result is
        Ballanced CK2's, the retail Virtools `CK2.dll` was not checked).

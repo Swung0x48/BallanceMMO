@@ -2757,3 +2757,82 @@ server-side stall for the harness.**
   arrival against its tick's deadline (exact to the deadline rule; the input
   buffer would carry arrival times), (iii) leave it (the per-client reach of
   R12 covers stalls up to about cap - h - 1 ticks).
+
+## As built (step B2SX, 2026-10-27): the trial's server stall fixed
+
+The user's choices (2026-10-27): (A)(i) the local server's journal off the
+9P file system, config only, and (B)(ii) the catch-up drains the queue and
+judges every frame by its arrival against its own tick's deadline.
+
+- **(A)(i), the local test server** (scripts under `.local-tools`, which git
+  excludes): `arch_server_lp.sh` points `physics.journal_dir` at WSL's ext4,
+  `/home/swung/bmmo-journals/<label>`, while the server reads its
+  configuration (config.yml then gets its `/mnt/d` value back, so every
+  other starter is unchanged) and starts `arch_journal_mirror.sh SRC DST
+  PID`, which every 0.25 s copies each journal the server no longer has open
+  (`/proc/PID/fd`: a session's journal closes at its end) into
+  `maps/arena-test/<label>/journals` (a `.part` name, then renamed; `cp -p`
+  keeps the server's mtime); `arch_stop.sh`, and the next `arch_server_lp.sh`
+  start, copy what is left (a killed server never closed a running
+  session's journal). **Adapted**: the user's text said "copied back when
+  the server stops"; the harnesses read a session's journal right after
+  the session while the server keeps running (`arena_map_test.py`'s replay
+  check, the `live.sh` scripts, `ab_template.sh`), so the copy is made as
+  soon as the server closes the journal, and `scripts/arena_map_test.py`
+  waits up to 20 s for an external server's journal that was not there (or
+  has changed) since the case started - by name and mtime, so an earlier
+  case's journal, seconds old, never stands in for this one's. No server
+  option was needed (`journal_dir` is one). The deployed server is
+  unchanged (its journal is on its Linux file system).
+- **(B)(ii)** `input_buffer` (`session/timeline.hpp`) keeps each stored
+  frame's arrival (`submit(first_tick, frames, arrival)`; the server's
+  stamp is GameNetworkingSockets' receive time, `server.cpp`
+  `handle_session_input`, as before), and `take(tick, fresh, source,
+  cutoff)`: a catch-up step - one that runs more than a tick past its
+  deadline - passes the tick's deadline as the cutoff, every other step
+  `time_point::max()`. Against a cutoff, a frame that arrived by it is used
+  however late the step runs; one that arrived after it is late exactly as
+  at the deadline - counted stale, not applied at its tick, and the
+  substitute only from the first later take whose cutoff is past its
+  arrival (`late_by_arrival()` counts them). A straggler for a tick already
+  taken waits in the same list for the next take, so a frame for 1300 that
+  arrives during the stall is not the substitute of the catch-up ticks
+  whose deadlines it missed; nothing reads the substitute between a submit
+  and the next take (the lead decision runs after the step's takes).
+  `session_runner::run` drains
+  the command queue before every step, so the frames received while a step
+  (or a stall) held the thread are in their buffers when their tick is
+  taken; the sessions are walked by id (a drained command may end one). One
+  copy of the rule, unit-tested (`InputBuffer.ArrivalJudgedAgainstEach
+  TicksDeadlineAfterAStall`, `...LateFrameBecomesTheSubstituteOnceIt
+  ArrivedAndUnstampedFramesAreOnTime`). A frame stored without an arrival
+  is on time (every other caller). Outside a stall nothing changes: an
+  ordinary step wakes a millisecond or two past its deadline and still
+  takes a frame that came in that gap fresh, as before. (The implement
+  round applied the deadline to every step, which made those frames late;
+  the review found that a change the user had not chosen, so the cutoff is
+  now the catch-up's alone.) With patience on (off everywhere deployed) a stalled tick is judged by
+  its deadline, not by the earlier step patience would have made.
+- **Live** (the one run, `maps/arena-test/b2sx_stall`, B2SW's stall4
+  recipe: 2 clients, 150 ms, snapshots off, client 0 `--brake-tap 3:7`,
+  stalls 560 ms at 1300 and 660 ms at 1700, level 13; `rB2SX` and the Arch
+  server built from this tree): no substitution after either stall (B2SW's
+  `b2sw_stall4`, same recipe: 1302..1309 and 1702..1709, n = 8 on both
+  clients); starved 0 / 0 (16 / 16), rebases 0 / 0, resyncs 0 / 0, resim
+  65 / 65 (187 / 9648). The server journal was written on ext4, copied back
+  at the session's end and replayed by the harness 2778/2778 (the run's
+  other three cases 2817, 2794, 2809, all matched). Step gaps
+  (`B2SW/step_gaps.py`) over 100 ms: the two stalls (576, 661 ms) and the
+  session end's deadline wait (336 ms; stall4 311 ms), nothing else. One
+  35 s run shows the path; the trial's 9P stalls were 2 in 36122 steps, so
+  their absence over a trial is not measured here. **The gate round**
+  (the cutoff for catch-up steps only, the stragglers deferred; the same
+  recipe, `maps/arena-test/b2sx_stallg`): the server journal of the stalled
+  case has no substituted input in 1295-1330 or 1695-1730 (the before run,
+  B2SW's stall4: 1302-1309 and 1702-1709 for both players), starved 0 / 0,
+  rebases 0 / 0, resyncs 0 / 0, replays 2763/2763 (the other cases 2773,
+  2765, 2763); step gaps over 100 ms: the two stalls (577, 678 ms) and the
+  session end's wait (321 ms). The same round found the mirror recopying
+  every journal every 0.25 s for as long as the server lived (`/mnt/d`
+  keeps an mtime to the second, so `-nt` against a copy never turned
+  false); it now compares whole seconds and the size.

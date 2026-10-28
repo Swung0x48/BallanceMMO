@@ -640,7 +640,9 @@ namespace bmmo::sim {
             // The lookahead the buffer judges this datagram by is the one
             // before it is stored.
             const uint32_t cursor = buffer->second.next_tick();
-            buffer->second.submit(first_tick, frames);
+            // Step B2SX: the arrival goes with the frames, so the step judges
+            // each by its own tick's deadline (input_buffer::take's cutoff).
+            buffer->second.submit(first_tick, frames, arrival);
             // One lateness sample per datagram, from its newest frame
             // (design 2.1).  Only once the scheduler has deadlines, and never
             // for a frame the buffer drops as garbage: a far-future tick
@@ -1024,6 +1026,19 @@ namespace bmmo::sim {
             ++l;
             if (due) finish_leave(s, player, tick);
         }
+        // Step B2SX (the trial's server stall, the user's option (b)): a step
+        // that runs more than a tick past its deadline is a catch-up (a
+        // stalled runner stepping overdue ticks); it takes a frame only if
+        // the frame arrived by this tick's deadline, and one that arrived
+        // after it is late, as it would have been without the stall.  Any
+        // other step takes what has arrived, as before: the runner wakes a
+        // millisecond or two past a deadline, and a frame that came in that
+        // gap is applied at its tick exactly as it always was.
+        auto cutoff = clock::time_point::max();
+        if (s.scheduler.started() && tick >= s.scheduler.first_tick()) {
+            const auto deadline = s.scheduler.deadline(tick);
+            if (clock::now() - deadline > bmmo::session::kTickDuration) cutoff = deadline;
+        }
         std::vector<bmmo::session::applied_input> applied;
         applied.reserve(s.inputs.size());
         size_t member_index = 0;
@@ -1045,7 +1060,7 @@ namespace bmmo::sim {
             uint32_t source = bmmo::session::INPUT_SOURCE_DEFAULT;
             // Before take() moves the cursor past it.
             const bool settled = buffer.settled(tick);
-            const auto& frame = buffer.take(tick, fresh, source);
+            const auto& frame = buffer.take(tick, fresh, source, cutoff);
             if (fresh) s.acked[player] = tick;
             // The streak waiver (design 2.6) starts at a substitution of a
             // frame the step had to do without.  A tick below a re-anchored
@@ -1484,16 +1499,47 @@ namespace bmmo::sim {
 
             auto sleep_for = std::chrono::milliseconds(20);
             const auto now = clock::now();
-            for (auto& [id, sp]: sessions_) {
-                auto& s = *sp;
-                if (!s.running || s.failed || !s.world) continue;
+            // Step B2SX (the trial's server stall, the user's option (b)):
+            // before each step the queue is drained, so the frames the
+            // network thread received while a step (or a stall) held this
+            // thread are in their buffers when their tick is taken, and the
+            // take judges each by its arrival against its own tick's deadline
+            // (input_buffer::take's cutoff).  A drained command may end a
+            // session, so the sessions are walked by id and looked up again.
+            const auto drain = [this, &lk]() {
+                lk.lock();
+                while (!commands_.empty()) {
+                    auto command = std::move(commands_.front());
+                    commands_.pop_front();
+                    lk.unlock();
+                    command();
+                    lk.lock();
+                }
+                lk.unlock();
+            };
+            std::vector<uint32_t> ids;
+            ids.reserve(sessions_.size());
+            for (const auto& entry: sessions_) ids.push_back(entry.first);
+            for (const uint32_t id: ids) {
+                const auto found = sessions_.find(id);
+                if (found == sessions_.end() || !found->second) continue;
+                session_state* sp = found->second.get();
+                if (!sp->running || sp->failed || !sp->world) continue;
                 uint32_t simulated = 0;
                 // When the tick waits for a player's patience (design 2.6),
                 // how long until it ends: a blacked-out player posts nothing,
                 // so nothing else would wake the runner there.
                 bool patience_wait = false;
                 std::chrono::milliseconds patience_sleep{0};
+                bool gone = false;
                 while (simulated < config_.max_catch_up_ticks) {
+                    drain();
+                    if (const auto again = sessions_.find(id); again == sessions_.end() || again->second.get() != sp) {
+                        gone = true;
+                        break;
+                    }
+                    auto& s = *sp;
+                    if (!s.running || s.failed || !s.world) break;
                     const uint32_t tick = s.world->tick_index();
                     // With patience off this is the rule the runner always had:
                     // every buffer has its frame, or the deadline passed.
@@ -1577,6 +1623,8 @@ namespace bmmo::sim {
                     ++simulated;
                     if (!s.running) break;
                 }
+                if (gone) continue;
+                auto& s = *sp;
                 publish_state(s);
                 if (s.running) {
                     auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(s.scheduler.until_due(clock::now()));

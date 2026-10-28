@@ -10,9 +10,12 @@
 //                    every player's input has arrived, or the wall clock is
 //                    past start + (tick + input_delay) tick lengths.
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <map>
+#include <vector>
 
 #include "../entity/session.hpp"
 
@@ -96,28 +99,38 @@ namespace bmmo::session {
         // updated would drive the ball for seconds with the last frame from
         // before the shift - every correction the late client gets would then
         // be the whole lateness instead of the delay.
+        using arrival_clock = std::chrono::steady_clock;
+        // A frame stored without an arrival time is on time at every cutoff
+        // (take without a cutoff, the tests, every caller before step B2SX).
+        static constexpr arrival_clock::time_point kOnTime = arrival_clock::time_point::min();
+
         template <class Frames>
         int submit(uint32_t first_tick, const Frames& frames) {
+            return submit(first_tick, frames, kOnTime);
+        }
+        // Step B2SX (the trial's server stall): `arrival` is when the
+        // datagram arrived (the server stamps it where its network thread
+        // receives it); a take with a cutoff judges each stored frame by it.
+        template <class Frames>
+        int submit(uint32_t first_tick, const Frames& frames, arrival_clock::time_point arrival) {
             int stored = 0;
             uint32_t tick = first_tick;
             for (const auto& frame: frames) {
                 ++received_;
                 if (tick >= next_tick_ && tick < next_tick_ + kMaxLookahead) {
-                    stored += frames_.emplace(tick, frame).second ? 1 : 0;
+                    if (frames_.emplace(tick, frame).second) {
+                        ++stored;
+                        if (arrival != kOnTime) arrivals_[tick] = arrival;
+                    }
                 } else if (tick < next_tick_) {
                     ++stale_;   // simulated, or re-anchored past, before this frame arrived
-                    // Only for a tick the world has reached: one between the
-                    // world's tick and a re-anchor's base (reset) precedes the
-                    // client's numbering and is no substitute for anything.
-                    // Nor below a lead reset's E (reset_hold): the
-                    // substitute of that range was frozen and sent to the
-                    // player as final, so a straggler for it changes nothing.
-                    if (have_taken_ && tick <= taken_ && tick >= hold_until_
-                            && (!have_sub_ || tick > sub_tick_)) {
-                        last_ = frame;
-                        sub_tick_ = tick;
-                        have_sub_ = true;
-                    }
+                    // Step B2SX: a stamped straggler waits for the next take,
+                    // whose cutoff says whether it had arrived by then (a
+                    // catch-up step judges it by that tick's deadline, an
+                    // ordinary one takes it as before).  Nothing reads the
+                    // substitute between a submit and the next take.
+                    if (arrival != kOnTime) late_.push_back(late_frame{arrival, tick, frame});
+                    else stale_arrival(tick, frame);
                 }
                 ++tick;
             }
@@ -129,6 +142,10 @@ namespace bmmo::session {
         uint64_t received() const { return received_; }
         uint64_t stored() const { return stored_; }
         uint64_t stale() const { return stale_; }
+        // Step B2SX: frames that were here when their tick was taken but had
+        // arrived after its cutoff (counted in stale() too): late, as they
+        // would have been had the step run at its deadline.
+        uint64_t late_by_arrival() const { return late_by_arrival_; }
 
         bool has(uint32_t tick) const { return frames_.count(tick) != 0; }
         // Nothing more will come for `tick` that the step could use: its frame
@@ -180,6 +197,43 @@ namespace bmmo::session {
         // cursor held ahead by reset() stays ahead: take() cannot pull it back
         // to a tick the buffer was re-anchored past.
         const input_frame& take(uint32_t tick, bool& fresh, uint32_t& source) {
+            release_late(arrival_clock::time_point::max());
+            return take_now(tick, fresh, source);
+        }
+        const input_frame& take(uint32_t tick, bool& fresh) {
+            uint32_t source = 0;
+            return take(tick, fresh, source);
+        }
+
+        // Step B2SX (the trial's server stall; the user's option (b)): the
+        // take of a step that judges every frame by its arrival, `cutoff`
+        // being the tick's deadline (the server passes it for a catch-up
+        // step only, time_point::max() otherwise).  A frame that arrived
+        // after it is late exactly as if the step had run at the deadline and
+        // the frame had come after: not applied at its tick (counted stale),
+        // and the substitute it would then have become only once a later
+        // take's cutoff is past its arrival.  The late frames - of earlier
+        // takes, and stragglers for ticks already taken - that arrived by
+        // this cutoff become what a stale arrival makes them first, in
+        // arrival order.  So a step that runs late (a stalled server
+        // catching up) uses what had arrived by each tick's deadline, no more
+        // and no less; a frame stored without an arrival is on time.
+        const input_frame& take(uint32_t tick, bool& fresh, uint32_t& source, arrival_clock::time_point cutoff) {
+            release_late(cutoff);
+            if (auto it = frames_.find(tick); it != frames_.end())
+                if (auto at = arrivals_.find(tick); at != arrivals_.end() && at->second > cutoff) {
+                    late_.push_back(late_frame{at->second, tick, it->second});
+                    ++stale_;
+                    --stored_;
+                    ++late_by_arrival_;
+                    frames_.erase(it);
+                    arrivals_.erase(at);
+                }
+            return take_now(tick, fresh, source);
+        }
+
+    private:
+        const input_frame& take_now(uint32_t tick, bool& fresh, uint32_t& source) {
             auto it = frames_.find(tick);
             fresh = it != frames_.end();
             if (fresh) {
@@ -190,6 +244,7 @@ namespace bmmo::session {
                 any_ = true;
             }
             frames_.erase(frames_.begin(), frames_.upper_bound(tick));
+            arrivals_.erase(arrivals_.begin(), arrivals_.upper_bound(tick));
             if (tick >= next_tick_)
                 next_tick_ = tick + 1;
             if (!have_taken_ || tick > taken_) taken_ = tick;
@@ -197,11 +252,8 @@ namespace bmmo::session {
             source = have_sub_ ? sub_tick_ : INPUT_SOURCE_DEFAULT;
             return last_;
         }
-        const input_frame& take(uint32_t tick, bool& fresh) {
-            uint32_t source = 0;
-            return take(tick, fresh, source);
-        }
 
+    public:
         // The substitute (the frame a missing tick gets) and its tick.
         const input_frame& last() const { return last_; }
         uint32_t substitute_tick() const { return have_sub_ ? sub_tick_ : INPUT_SOURCE_DEFAULT; }
@@ -245,6 +297,7 @@ namespace bmmo::session {
             const auto keep = frames_.lower_bound(first_tick);
             for (auto it = frames_.begin(); it != keep; ++it) ++stale_;
             frames_.erase(frames_.begin(), keep);
+            arrivals_.erase(arrivals_.begin(), arrivals_.lower_bound(first_tick));
             next_tick_ = first_tick;
         }
 
@@ -267,6 +320,7 @@ namespace bmmo::session {
             for (auto it = frames_.begin(); it != keep; ++it) ++dropped;
             stale_ += static_cast<uint64_t>(dropped);
             frames_.erase(frames_.begin(), keep);
+            arrivals_.erase(arrivals_.begin(), arrivals_.lower_bound(effective));
             hold_from_ = next_tick_;
             hold_until_ = effective;
             next_tick_ = effective;
@@ -274,7 +328,43 @@ namespace bmmo::session {
         }
 
     private:
+        // A frame that arrived behind the cursor: it becomes the substitute
+        // when it is the newest such tick the world has reached.  Only for a
+        // tick the world has reached: one between the world's tick and a
+        // re-anchor's base (reset) precedes the client's numbering and is no
+        // substitute for anything.  Nor below a lead reset's E (reset_hold):
+        // the substitute of that range was frozen and sent to the player as
+        // final, so a straggler for it changes nothing.
+        void stale_arrival(uint32_t tick, const input_frame& frame) {
+            if (have_taken_ && tick <= taken_ && tick >= hold_until_ && (!have_sub_ || tick > sub_tick_)) {
+                last_ = frame;
+                sub_tick_ = tick;
+                have_sub_ = true;
+            }
+        }
+        // Step B2SX: the late frames that had arrived by `cutoff`, as stale
+        // arrivals in arrival order; the others wait for a later cutoff.
+        void release_late(arrival_clock::time_point cutoff) {
+            if (late_.empty()) return;
+            std::stable_sort(late_.begin(), late_.end(),
+                             [](const late_frame& a, const late_frame& b) { return a.arrival < b.arrival; });
+            size_t n = 0;
+            while (n < late_.size() && late_[n].arrival <= cutoff) {
+                stale_arrival(late_[n].tick, late_[n].frame);
+                ++n;
+            }
+            late_.erase(late_.begin(), late_.begin() + static_cast<std::ptrdiff_t>(n));
+        }
+        struct late_frame {
+            arrival_clock::time_point arrival;
+            uint32_t tick = 0;
+            input_frame frame{};
+        };
+
         std::map<uint32_t, input_frame> frames_;
+        std::map<uint32_t, arrival_clock::time_point> arrivals_;   // step B2SX: the stored frames' arrivals
+        std::vector<late_frame> late_;                            // step B2SX: taken late, not yet a substitute
+        uint64_t late_by_arrival_ = 0;
         input_frame last_{};          // the substitute
         uint32_t last_tick_ = 0;      // the last tick taken fresh
         uint32_t sub_tick_ = 0;       // the substitute's tick, when have_sub_

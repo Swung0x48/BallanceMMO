@@ -50,6 +50,108 @@ TEST(InputBuffer, TakesFreshFramesAndFallsBackToLast) {
     EXPECT_EQ(buffer.next_tick(), 4u);
 }
 
+// Step B2SX (the trial's server stall, the user's option (b)): a runner that
+// steps ticks late (a stall, then the catch-up) judges every frame by its
+// arrival against its own tick's deadline - the cutoff of take().  The frames
+// the network thread received in time are used although the step runs after
+// their deadline; a frame that arrived after its deadline is late exactly as
+// at the deadline: substituted, then the substitute only for a tick whose
+// deadline is past its arrival.
+TEST(InputBuffer, ArrivalJudgedAgainstEachTicksDeadlineAfterAStall) {
+    using clock = input_buffer::arrival_clock;
+    const clock::time_point t0{};
+    const auto deadline = [t0](uint32_t tick) { return t0 + std::chrono::milliseconds(10 * (tick - 100)); };
+    input_buffer buffer;
+    buffer.reset(100);
+    bool fresh = false;
+    uint32_t source = 0;
+    buffer.submit(100, std::vector<input_frame>{frame_with_keys(1)}, deadline(100) - 3ms);
+    EXPECT_EQ(buffer.take(100, fresh, source, deadline(100)).keys, 1);
+    EXPECT_TRUE(fresh);
+    // The stall: ticks 101..104 are stepped long after their deadlines.
+    // 101 and 103 arrived in time, 102 just after its deadline (before 103's),
+    // 104 after 105's deadline; nothing came for 105.
+    buffer.submit(101, std::vector<input_frame>{frame_with_keys(2)}, deadline(101) - 1ms);
+    buffer.submit(102, std::vector<input_frame>{frame_with_keys(3)}, deadline(102) + 4ms);
+    buffer.submit(103, std::vector<input_frame>{frame_with_keys(4)}, deadline(103));
+    buffer.submit(104, std::vector<input_frame>{frame_with_keys(5)}, deadline(105) + 2ms);
+    EXPECT_EQ(buffer.take(101, fresh, source, deadline(101)).keys, 2);
+    EXPECT_TRUE(fresh);
+    // 102 is late: the substitute is 101's frame, as at its deadline.
+    EXPECT_EQ(buffer.take(102, fresh, source, deadline(102)).keys, 2);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 101u);
+    EXPECT_EQ(buffer.late_by_arrival(), 1u);
+    // An arrival exactly at the deadline is in time.
+    EXPECT_EQ(buffer.take(103, fresh, source, deadline(103)).keys, 4);
+    EXPECT_TRUE(fresh);
+    // 104 arrived after 105's deadline: late at 104 (103's frame), and not yet
+    // the substitute at 105 - 102's had arrived by then, but 103's is newer.
+    EXPECT_EQ(buffer.take(104, fresh, source, deadline(104)).keys, 4);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 103u);
+    EXPECT_EQ(buffer.take(105, fresh, source, deadline(105)).keys, 4);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 103u);
+    // By 106's deadline it had arrived: the newest frame, the substitute.
+    EXPECT_EQ(buffer.take(106, fresh, source, deadline(106)).keys, 5);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 104u);
+    EXPECT_EQ(buffer.late_by_arrival(), 2u);
+    EXPECT_EQ(buffer.stale(), 2u);
+    // A straggler for a tick already taken, drained during a catch-up: 107
+    // had no frame; its frame arrived after 109's deadline (in the stall) and
+    // is submitted before 108 is stepped.  It is the substitute only from
+    // 110, the first tick whose deadline it beat - not at once.
+    EXPECT_EQ(buffer.take(107, fresh, source, deadline(107)).keys, 5);
+    EXPECT_FALSE(fresh);
+    buffer.submit(107, std::vector<input_frame>{frame_with_keys(8)}, deadline(109) + 1ms);
+    EXPECT_EQ(buffer.stale(), 3u);
+    EXPECT_EQ(buffer.take(108, fresh, source, deadline(108)).keys, 5);
+    EXPECT_EQ(source, 104u);
+    EXPECT_EQ(buffer.take(109, fresh, source, deadline(109)).keys, 5);
+    EXPECT_EQ(source, 104u);
+    EXPECT_EQ(buffer.take(110, fresh, source, deadline(110)).keys, 8);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 107u);
+    // An ordinary step (no cutoff, time_point::max()) takes what has arrived,
+    // however long after the deadline, and a straggler is the substitute at
+    // the next take, as before step B2SX.
+    buffer.submit(111, std::vector<input_frame>{frame_with_keys(9)}, deadline(111) + 2ms);
+    EXPECT_EQ(buffer.take(111, fresh, source, clock::time_point::max()).keys, 9);
+    EXPECT_TRUE(fresh);
+    EXPECT_EQ(buffer.take(112, fresh, source, clock::time_point::max()).keys, 9);
+    buffer.submit(112, std::vector<input_frame>{frame_with_keys(10)}, deadline(140));
+    EXPECT_EQ(buffer.take(113, fresh, source, clock::time_point::max()).keys, 10);
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 112u);
+    EXPECT_EQ(buffer.late_by_arrival(), 2u);
+    EXPECT_EQ(buffer.stale(), 4u);
+}
+
+// A late frame that arrived by a later tick's deadline is that tick's
+// substitute when the tick has no frame of its own; frames stored without an
+// arrival (every caller before step B2SX) are always on time.
+TEST(InputBuffer, LateFrameBecomesTheSubstituteOnceItArrivedAndUnstampedFramesAreOnTime) {
+    using clock = input_buffer::arrival_clock;
+    const clock::time_point t0{};
+    input_buffer buffer;
+    buffer.reset(10);
+    bool fresh = false;
+    uint32_t source = 0;
+    buffer.submit(10, std::vector<input_frame>{frame_with_keys(1)}, t0);
+    buffer.submit(11, std::vector<input_frame>{frame_with_keys(2)}, t0 + 25ms);
+    EXPECT_EQ(buffer.take(10, fresh, source, t0 + 10ms).keys, 1);
+    EXPECT_EQ(buffer.take(11, fresh, source, t0 + 20ms).keys, 1);   // late
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(buffer.take(12, fresh, source, t0 + 30ms).keys, 2);   // 11's, arrived by 12's deadline
+    EXPECT_FALSE(fresh);
+    EXPECT_EQ(source, 11u);
+    buffer.submit(13, std::vector<input_frame>{frame_with_keys(7)});
+    EXPECT_EQ(buffer.take(13, fresh, source, t0).keys, 7);
+    EXPECT_TRUE(fresh);
+}
+
 TEST(InputBuffer, RedundantResendsAreDeduplicatedAndOldTicksIgnored) {
     input_buffer buffer;
     buffer.reset(10);
