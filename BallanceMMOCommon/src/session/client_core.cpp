@@ -39,9 +39,10 @@ namespace bmmo::session {
         // inputs from the log before the union, as the live tick applies
         // them before its union pass (pre_step); the trafo frame runs first
         // in the replayed frame (script_replay::execute_frame's trafo list).
+        // Step EL7 (gap L, L2): the births and the deaths in one drain, in
+        // the server's order (drain_pending_lives).
         world_hooks_.before_replayed_tick = [this](uint32_t tick) {
-            drain_pending_births(tick);
-            drain_pending_deaths(tick);
+            drain_pending_lives(tick);
             apply_trafo_inputs(tick, true);
             rederive_union_tick(tick);
         };
@@ -91,9 +92,15 @@ namespace bmmo::session {
             return remake_mirror_birth(entity, birth_tick);
         };
         world_hooks_.own_body = [this](const std::string& entity) { return entity == s.own_body_entity_; };
+        // Step EL7: every mirror entity this session made, not only the
+        // current ones - the reconcile of an ended life points the remote
+        // back at the A-life, and the later life it took out is made again
+        // from the inputs at its birth tick (rollback_world::
+        // birth_from_inputs).  An old life's entity has no body outside such
+        // a replay, so the binding's other tests answer as before for it.
         world_hooks_.mirror = [this](const std::string& entity) {
             for (const auto& [id, remote]: s.remotes_) if (remote.entity == entity) return true;
-            return false;
+            return s.mirror_entities_.count(entity) != 0;
         };
         world_hooks_.ball = [this](const std::string& entity) { return is_ball(entity); };
         // Rollback-engine gaps design 2.4 (step B8EG, item EGB):
@@ -106,6 +113,13 @@ namespace bmmo::session {
         // identity - the mirror the player's ball is driven as by then (the
         // replay_remotes rule), or the resolved mechanism.  The own ball is
         // the engine's (the replayed record names it).
+        // Gap L, L2 (rollback-engine gaps design 2.3.3, step EL7): the
+        // core's half of rollback_world::restore_lives - the mirrors (the
+        // own ball's half is L3, step G8).
+        world_hooks_.restore_lives = [this](uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended, bool,
+                                            std::map<std::string, life_outcome>& out) {
+            reconcile_remote_lives(anchor, now, ended, out);
+        };
         world_hooks_.row_entity = [this](bmmo::session::body_kind kind, uint32_t owner, uint32_t tick) -> std::string {
             if (kind != bmmo::session::body_kind::Ball) return s.mechanism_tracking_.entity_of(owner);
             if (owner == s.own_id_) return {};
@@ -263,6 +277,7 @@ namespace bmmo::session {
         s.own_physicalized_ = false;
         s.own_body_entity_.clear();
         s.own_ball_entities_.clear();
+        s.mirror_entities_.clear();
         s.start_sector_pending_ = false;
         s.start_sectors_.clear();
         s.sectors_.reset();
@@ -662,6 +677,8 @@ namespace bmmo::session {
         const uint64_t frozen_before = s.rollback_.stats().frozen;
         const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason, reach);
         if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen", true);
+        // Step EL7: what the reconcile queued and no replay applied.
+        settle_unreplayed_lives(now);
         return rolled;
     }
 

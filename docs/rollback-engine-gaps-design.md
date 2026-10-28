@@ -2209,3 +2209,172 @@ mechanism half; the ball halves (L2, L3) are G7 / G8.
 - **Not run, deferred:** L-H0 as a same-batch live control (the wire
   check is its deterministic form); a retail session (no retail code
   changed, one comment).
+
+## As built (step EL7, 2026-10-28): gap L, step G7 (L2)
+
+Step G7 of §8 on HEAD 9ea33b6: the mirrors' half of L (2.3.3). The own
+ball's half (L3) is G8; the mechanisms' generalization (L4) is G9.
+
+- **The life log** (`client_core_state::life_entry`, `log_life` in
+  `client_core_resync.cpp`): each entry keeps the stamp (`applied`), the
+  origin, the player and type, `made_at`, the Physicalize as it came
+  (`birth`), the `entity` and `generation` the event gave
+  (`note_life_made`, from `physicalize_remote` and the live death) and,
+  **adapted**, `skipped` (`note_life_skipped`: an overtaken birth dropped,
+  a superseded death, a death of no mirror or of one with no body - events
+  that changed no body are never queued again). Made in `apply_event`
+  before the event's own rewind, as before. The trim keeps the last
+  `history_ticks + 128` ticks and, of the older entries, each player's
+  newest Physicalize and (review finding 2) each player's newest entry of
+  any kind, so a death after that birth still makes the reconcile's
+  consistency test refuse the life (an exact resync makes a mirror from
+  its row with no log entry; a trimmed death would let the stale birth
+  stand in for it) (L-U10).
+- **The reconcile** (`session_client_core::reconcile_remote_lives`,
+  `client_core_lifecycle.cpp`; `core_world_hooks::restore_lives` set in the
+  core's constructor): per ended mirror life, the A-life is the newest
+  logged Physicalize of that entity stamped <= A, checked against the log
+  (no event of the player in (birth, A]); then steps 1-3 of 2.3.3 (the
+  player's body now taken out muted, the A-life made by `make_mirror` with
+  its logged entity, recipe and ball type at the A record's pose -
+  `quaternion_rows` of its quaternion - no kick, navigated, the remote set
+  back to it; every window event queued at its stamp, births with their
+  logged entity) and the generations of 2.3.2 (A's value, erased when A had
+  none). **Adapted:**
+  - *Who is reconciled.* First the players whose mirror life alive at A
+    ends in the window (the engine's ended lives). Then (review finding 1)
+    every other player whose logged window events LB cannot replay: a life
+    born and ended inside the window (no record at A, no body now - no
+    restore item names it, so before the fix the replay ran without it and
+    no counter showed it), two births in the window, or the body now made
+    after a stamp inside the window (the RC stamp rule: replayed at the
+    stamp). For those the reconcile takes the body now out, puts the
+    generations of the window's entities back to A's and queues every
+    window event (steps 1 and 3, no revive); counted `mlives=.../window`.
+    The engine (`revive_ended_lives`) therefore asks the halves at every
+    restore a replay follows, with no ended life too (EL6 asked only with
+    one; the host's mechanism half does nothing then). A player whose only
+    window event is the birth of its body now, made at its stamp, keeps
+    LB's path (`destroy_body`, made again at its stamp: the declared
+    behaviour change of 2.3.3 is LB's for it); one whose window begins with
+    a death keeps nothing to replay - the engine did not hand that life over
+    because no record of the window shows its end yet (a late death's own
+    rewind, A = D - 1, and the late birth's of the same beam pair: the
+    first version counted these as failures, 9/18/4 per client in the
+    capture replays, before the gate round skipped them). So a birth made
+    late keeps parking only when it is stamped at or before A (the
+    documented class, `late_births_kept`, now counted once per (player,
+    stamp) and only for stamps at or before the restore's anchor - review
+    finding 4). `make_remote_birth` keeps queueing its own late birth (the
+    reconcile de-duplicates by player and stamp) and keeps its live
+    fallback for a refused or cut-short rewind.
+  - *Remade at which birth.* A name is answered `remade_at` its LAST window
+    birth (RC: one name per player, several lives in the window): the life
+    its restore item - the first record at the name's current generation -
+    is about. A body made live after its stamp has that item at the tick it
+    was made (L > E): the engine moves such an item to the answered stamp
+    (`move_to_stamp`, review finding 3) and recreates it; before, it found
+    no item at E, logged "kept on the birth item", counted the life
+    unrevivable and re-posed the body at L while the core made it at E.
+  - *The end.* `revived_until` is the stamp of the player's first window
+    event, not the engine's `end_tick`: records re-captured by a death's own
+    rewind keep the old generation without a body, so the record-based end
+    can be later (swing_snapoff: the beams at 701, the engine's end 721 in
+    EL6's lines).
+  - *Another name.* On H the later life is another clone, which was no life
+    at A; the reconcile answers `remade_at` for it, and the engine
+    (`revive_ended_lives`, `rollback.hpp`) now recreates the birth item of
+    any answered name that ended no life here whose item is a birth at that
+    tick or later (moved to it; the destroy loop leaves it alone;
+    `birth_from_inputs`). The core's `mirror` hook knows
+    every mirror entity this session made (`mirror_entities_`), so that
+    test answers for the clone the remote no longer points at; an old
+    clone has no body outside such a replay, so `keeps_parked`,
+    `destroy_body` and `revive_body` answer for it as before.
+  - *A failed revive* puts the A-life's generation one past A's (its end
+    bumps nothing without a body) and still queues the window events.
+  - *The parked arm* (`core_config::remote_births_parked`, headless
+    `--remote-births-parked`, L-H6's control): LB's remake is off, and the
+    reconcile revives no player that has a body now (counted failed).
+  - *The resync.* While an exact resync's restore runs
+    (`resync_restoring_`) the reconcile does nothing: the resync's own
+    reconcile (resync design 2.6.3, its deaths after S) handles its
+    mirrors. RSD 2.6.3's "one implementation" is **not built**; the
+    resync's mirror made from its row still mints a new clone on H, as
+    before.
+- **`drain_pending_lives`** (was `drain_pending_births`): the births and
+  deaths due at the tick in one list, sorted by `lifecycle_apply_before`
+  (join, origin, rank: a beam pair's death first), our own lives at our
+  rank. Before, a resync's deaths came after every birth of the tick. A
+  reconciled birth whose make fails is queued again. `pending_death` gained
+  `origin` (the resync fills it from the log) and `reconciled`.
+- **`settle_unreplayed_lives`** (after `rewind_to` in `rewind_world`, and
+  after `on_snapshot`): the reconciled events no replay applied are applied
+  live in stamp order (L-U8's fallback).
+- **`physicalize_remote`** makes `event.entity` when it is set (no
+  `mirror_entity` inside a replay). **SC's exact-name `make_mirror`** was
+  already there (step LB): the headless client changes only by the new
+  switch.
+- **`recorded_input_at`**: a name that is no remote's current entity is
+  mapped to its player by the life log (`mirror_player_of`) and reads that
+  player's ring.
+- **Counters:** the status line's
+  `mlives=revived/failed/settled/kept/window` after `remake=`.
+- **Layout:** `client_core_state` grew (the log entry's fields, the
+  counters, `mirror_entities_`, `resync_restoring_`); the x86 build
+  recompiled all 21 includers (`BallanceMMOClient.cpp`, PSC, `core_host`,
+  `client_automation`, `room_client` among them; deps valid), EL6's
+  precedent.
+- **Checks (quick tier, about 12 minutes):** x64 build (deps valid) and x86
+  build (CLIENT-BUILD-OK); GCC 29/29 ok; unit tests 573 pass (566 + 7):
+  L-U3 `SessionClientCoreLives.AMirrorDeadInTheWindowIsRevivedUnderItsOwnName`,
+  L-U4 `...ARetailBeamPairInTheWindowIsRevivedThenRemade` (with the parked
+  arm), L-U5 `...TheRetailStampRuleReplaysAtTheStamp`, L-U8
+  `...WindowEventsNoReplayMadeAreMadeLiveOnce`, L-U9
+  `...ALifeInsideTheWindowIsMadeAndRemoved`, L-U10
+  `...TheTrimKeepsEachPlayersNewestOldBirth`, and the engine's
+  `RollbackEngine.ALaterLifeUnderAnotherNameIsRemadeNotDestroyed`. Wire
+  check rEL6 -> rEL7 over core_ref_s8 plus solo1 / solo2: 14/14 sends
+  SAME, 14/14 journals IDENTICAL (the verdict line reads DIFFERENCES only
+  because the tool looks for clients 1-3 of the one-client solo arms). The
+  replays do revive mirrors (swing_snapoff c0-c3 `mlives` 4 / 6 / 7 / 4
+  revived, 0 failed), all anchored at 700 with the beam pairs at 701: the
+  revived body goes before the first replayed step, so the journals stay
+  identical. What is left unrevivable is the own `Ball_Stone` (G8's), in
+  swing_snapoff (0 / 2 / 2 / 0) and resync_snapoff (3 / 2 / 2 / 2).
+- **Live (two runs; the Arch server is EL6's build - no server source, and
+  no file any server object depends on, changed in this step):**
+  `el7_smoke` (4 clients, 60 s, 150 ms, 10 % loss, sector 4 beams at 700,
+  snapshots off): every client exit 0, `sv=N/0/0`, mism 0, `mlives` 4 / 6 /
+  6 / 6 revived, 0 failed, 0 settled, all at A = 700. `el7_forced` (the same
+  with `--force-rollback 13:40` on every client, for windows anchored
+  before a remote death - L-H1's case): 283-301 rollbacks each,
+  `sv=N/0/0`, mirrors revived 11 / 10 / 13 / 9, 0 failed, 0 settled, across
+  the beams (A = 688, D = 701) and death-zone deaths (A = 831 ... 3223,
+  D = 844 / 866 / 914 / 946 / 3157 / 3169 / 3227); unrevivable only the own
+  `Ball_Stone`; on every client the clone names equal the lives (9 / 9 / 9 /
+  10 distinct (player, stamp) births and as many clones: no clone minted by
+  a rewind).
+- **Not run, deferred (FULL):** L-H1's and L-H2's comparisons against the
+  server with a same-batch control (`first_divergence.py` over the death
+  windows), L-H6 (remade vs `--remote-births-parked`, same batch), L-R2
+  (two retail clients on Level 11, a beam pair inside a forced window; no
+  retail code changed, the reconcile reaches retail through the shared
+  core). A capture replay cannot add forced rewinds (the capture's clock
+  reads: "expected a clock read at rewind_start"), so the A < D-1 case has
+  no deterministic offline check beyond the unit tests.
+- **Gate round (the review's findings 1-4, about 6 minutes):** x64 and x86
+  builds (the 14 x86 includers of the changed headers recompiled, deps
+  valid), GCC 29/29 ok, unit tests 576 pass (573 + 3: L-U9 without an
+  A-life `SessionClientCoreLives.ALifeInsideTheWindowWithNoLifeAtTheAnchorIsMadeAndRemoved`,
+  `...WindowLivesWithABodyNowAreTakenOutAndReplayedAtTheirStamps` (RC
+  naming: the last window birth answered, a body made after its stamp
+  remade at it, LB's case left alone), `RollbackEngine.AWindowBirthMadeAfterItsStampIsRemadeAtTheStamp`;
+  L-U5 counts a kept birth once, L-U10 keeps player 5's death, EL6's
+  engine test now expects the halves asked with nothing ended). Wire
+  check rEL6 -> rEL7h over core_ref_s8 plus solo1 / solo2: 14/14 sends
+  SAME, 14/14 journals IDENTICAL; `mlives` as in the implement round
+  (swing_snapoff 4 / 6 / 7 / 4 revived, 0 failed, 0 window: no capture
+  holds a life born and ended inside one window). No live run (the step's
+  two were spent in the implement round): the window path has the unit
+  tests as its only check until FULL.

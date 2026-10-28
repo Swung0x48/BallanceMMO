@@ -490,6 +490,13 @@ namespace bmmo::session {
         else
             for (const auto& [id, remote]: s.remotes_)
                 if (remote.entity == entity) inputs = &remote.inputs;
+        // Gap L, L2 (step EL7): a life whose name is not the player's
+        // current one (H names one clone per life) reads that player's
+        // ring, found by the life log; frames of an earlier lifetime stay
+        // in the ring.
+        if (!inputs && !entity.empty() && entity != platform_.own_replica_name())
+            if (const uint32_t player = mirror_player_of(entity); player != 0)
+                if (const auto it = s.remotes_.find(player); it != s.remotes_.end()) inputs = &it->second.inputs;
         if (!inputs) return false;
         if (inputs == &s.own_inputs_) {
             auto it = inputs->find(tick);

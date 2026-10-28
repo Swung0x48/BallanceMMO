@@ -4,7 +4,7 @@
 // the due tick (drain_due_events) and the held body changes
 // (apply_held_lifecycle), apply_event, make_remote_birth,
 // rewind_for_lifecycle, the births deferred into a replay
-// (drain_pending_births), live_drive, and the core half of the mirrors'
+// (drain_pending_lives since step EL7), live_drive, and the core half of the mirrors'
 // birth and death (physicalize_remote, unphysicalize_remote,
 // attach_remote_navigation), verbatim but for the platform calls
 // (mirror_entity, make_mirror, unmake_mirror, detach_mirror_navigation,
@@ -19,6 +19,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -304,6 +306,7 @@ namespace bmmo::session {
                                 && static_cast<int32_t>(death->second.origin - event.origin_tick) > 0;
             if (overtaken && static_cast<int32_t>(event.tick - death->second.applied) >= 0) {
                 ++s.births_overtaken_;
+                note_life_skipped(event.player, event.type, event.tick, event.origin_tick);
                 logf("remote physicalize of %u stamped %u (applied %u) is older than its death stamped %u, applied"
                      " at %u already: no ball", event.player, event.origin_tick, event.tick,
                      death->second.origin, death->second.applied);
@@ -384,6 +387,7 @@ namespace bmmo::session {
                             event.origin_tick, last != s.remote_last_physicalize_.end(),
                             last == s.remote_last_physicalize_.end() ? 0 : last->second)) {
                 ++s.events_superseded_;
+                note_life_skipped(event.player, event.type, event.tick, event.origin_tick);
                 return;
             }
             // Newest by origin, with its applied tick: an older birth
@@ -392,7 +396,19 @@ namespace bmmo::session {
                         event.player, applied_death{event.origin_tick, event.tick});
                     !fresh && static_cast<int32_t>(event.origin_tick - death->second.origin) > 0)
                 death->second = applied_death{event.origin_tick, event.tick};
-            if (!unphysicalize_remote(event.player, event.tick)) return;
+            {
+                const auto remote = s.remotes_.find(event.player);
+                const std::string entity = remote == s.remotes_.end() ? std::string() : remote->second.entity;
+                const bool had_body = remote != s.remotes_.end() && remote->second.physicalized;
+                if (!unphysicalize_remote(event.player, event.tick)) {
+                    note_life_skipped(event.player, event.type, event.tick, event.origin_tick);
+                    return;
+                }
+                // Gap L, L2 (step EL7): what the death removed, for the
+                // reconcile (a death of a mirror with no body changed none).
+                if (!had_body) note_life_skipped(event.player, event.type, event.tick, event.origin_tick);
+                else note_life_made(event.player, event.type, event.tick, event.origin_tick, entity, live_first_tick(event.tick));
+            }
             rewind_for_lifecycle(event);
             break;
         }
@@ -401,9 +417,10 @@ namespace bmmo::session {
         }
     }
 
-    // ---------------------------------------------------- pending births
-    // Births deferred into a replay (apply_event): made at their tick,
-    // before its step.
+    // ---------------------------------------------------- pending lives
+    // Births (and, since step EL7, deaths) deferred into a replay
+    // (apply_event, the reconcile of an ended life, a resync's deaths):
+    // applied at their tick, before its step.
     // The event log is muted around them: physicalize_remote bumps the
     // mirror's generation itself, and the replay labels the records it
     // re-captures from the birth tick on with that generation
@@ -411,42 +428,69 @@ namespace bmmo::session {
     // frame would drain afterwards bumped it a second time, so the live
     // records after the replay named another lifetime than the replayed
     // ones and none of those could restore the body.
-    // In the server's order (session_runner::step): join order, and our
-    // own changes due at this tick (a beam's stamp, a moved birth's
-    // applied tick: apply_own_lives) at ours - two bodies made in one tick
-    // are made in that order and the order changes the world.  A beam's
-    // stamp is applied here only once its live frame has run: before that
-    // no replay reaches it.
-    void session_client_core::drain_pending_births(uint32_t tick) {
-        if (s.pending_births_.empty() && !own_lives_due(tick)) return;
-        std::vector<pending_birth> due;
+    // In the server's order (session_runner::step, drain_due_events): join
+    // order, then origin, then lifecycle_event_rank (a beam pair's
+    // Unphysicalize before its Physicalize), and our own changes due at
+    // this tick (a beam's stamp, a moved birth's applied tick:
+    // apply_own_lives) at ours - two bodies made in one tick are made in
+    // that order and the order changes the world.  A beam's stamp is
+    // applied here only once its live frame has run: before that no replay
+    // reaches it.  (Before step EL7 the deaths, then only a resync's, came
+    // after every birth of the tick.)
+    void session_client_core::drain_pending_lives(uint32_t tick) {
+        if (s.pending_births_.empty() && s.pending_deaths_.empty() && !own_lives_due(tick)) return;
+        struct due_life {
+            uint32_t player = 0, origin = 0;
+            bmmo::session::event_type type = bmmo::session::event_type::Physicalize;
+            pending_birth birth;
+        };
+        std::vector<due_life> due;
         for (auto it = s.pending_births_.begin(); it != s.pending_births_.end();)
             if (it->tick == tick) {
-                due.push_back(*it);
+                due_life life;
+                life.player = it->player;
+                life.origin = it->origin;
+                life.birth = *it;
+                due.push_back(std::move(life));
                 it = s.pending_births_.erase(it);
             } else ++it;
-        std::stable_sort(due.begin(), due.end(), [this](const pending_birth& a, const pending_birth& b) {
-            return bmmo::session::lifecycle_apply_before(join_rank(a.player), a.origin,
-                                                         bmmo::session::event_type::Physicalize,
-                                                         join_rank(b.player), b.origin,
-                                                         bmmo::session::event_type::Physicalize);
+        for (auto it = s.pending_deaths_.begin(); it != s.pending_deaths_.end();)
+            if (it->tick == tick) {
+                due_life life;
+                life.player = it->player;
+                life.origin = it->origin;
+                life.type = bmmo::session::event_type::Unphysicalize;
+                due.push_back(std::move(life));
+                it = s.pending_deaths_.erase(it);
+            } else ++it;
+        std::stable_sort(due.begin(), due.end(), [this](const due_life& a, const due_life& b) {
+            return bmmo::session::lifecycle_apply_before(join_rank(a.player), a.origin, a.type,
+                                                         join_rank(b.player), b.origin, b.type);
         });
         bool own = own_lives_due(tick);
         const uint32_t own_rank = join_rank(s.own_id_);
-        for (const auto& birth: due) {
-            if (own && join_rank(birth.player) > own_rank) {
+        for (const auto& life: due) {
+            if (own && join_rank(life.player) > own_rank) {
                 apply_own_lives(tick, "replay", false);
                 own = false;
             }
+            if (life.type == bmmo::session::event_type::Unphysicalize) {
+                const event_log_mute mute(*this);
+                unphysicalize_remote(life.player, tick);
+                continue;
+            }
+            const pending_birth& birth = life.birth;
             bool made = false;
             {
                 const event_log_mute mute(*this);
                 made = physicalize_remote(birth, tick);
             }
-            // A remake that failed (step LB): its body was taken out at the
-            // restore, so it is queued again for make_unmade_remakes, which
-            // tries once more, live, after the frame's rewinds.
-            if (!made && birth.remake) s.pending_births_.push_back(birth);
+            // A remake that failed (step LB), or a window birth the
+            // reconcile queued (step EL7): its body was taken out at the
+            // restore, so it is queued again - make_unmade_remakes, or
+            // settle_unreplayed_lives after the rewind, tries once more,
+            // live.
+            if (!made && (birth.remake || birth.reconciled)) s.pending_births_.push_back(birth);
             s.mechanism_tracking_.mark_dirty();
         }
         if (own) apply_own_lives(tick, "replay", false);
@@ -506,6 +550,10 @@ namespace bmmo::session {
                 const auto found = s.remotes_.find(event.player);
                 if (found != s.remotes_.end()) entity = found->second.entity;
                 if (entity.empty()) { logf("remote physicalize: no mirror of %u to make again", event.player); return false; }
+            } else if (!event.entity.empty()) {
+                // Gap L, L2 (step EL7): the entity the live event made (the
+                // life log's), never a new one minted inside a replay.
+                entity = event.entity;
             } else {
                 entity = platform_.mirror_entity(event.player, event.ball_type, error);
                 if (entity.empty()) { logf("remote physicalize: %s", error.c_str()); return false; }
@@ -539,6 +587,7 @@ namespace bmmo::session {
                 logf("remote physicalize %s: %s", entity.c_str(), made.error.c_str());
                 return false;
             }
+            s.mirror_entities_.insert(entity);
             if (remake) {
                 ++s.mirror_remakes_;
                 remote.physicalized = true;
@@ -548,6 +597,9 @@ namespace bmmo::session {
             // The mirror's body is new: a new lifetime, so no record of the
             // previous one can restore it (design 9.25).
             ++s.generations_[entity];
+            // Gap L, L2 (step EL7): the life log entry of this birth names
+            // the entity it made, its generation and where.
+            note_life_made(event.player, bmmo::session::event_type::Physicalize, event.tick, event.origin, entity, first_tick);
             remote.entity = entity;
             remote.ball_type = event.ball_type;
             remote.physicalized = true;
@@ -621,7 +673,7 @@ namespace bmmo::session {
 
     // Step LB: a mirror born inside a rewind's window, taken out at the
     // restore (the binding's destroy_body) and made again at its birth tick
-    // by drain_pending_births, in join order with the other births of that
+    // by drain_pending_lives, in join order with the other births of that
     // tick and our own changes - what the first replay, or the live frame,
     // did.  Parked instead (the path before LB), it was held out of
     // collision detection through its birth tick's step and re-posed after
@@ -641,6 +693,20 @@ namespace bmmo::session {
     bool session_client_core::remake_mirror_birth(const std::string& entity, uint32_t birth_tick) {
         for (auto& [player, remote]: s.remotes_) {
             if (remote.entity != entity) continue;
+            // L-H6's control arm: every window birth parked.
+            if (config.remote_births_parked) return false;
+            // Gap L, L2 (rollback-engine gaps design 2.3.3, step EL7): a body
+            // made live after its stamp keeps the parking path.  Counted
+            // (late_births_kept) only for the RC stamp rule's documented
+            // class - stamped at or before the anchor (lifecycle_rewind
+            // off, or a refused rewind's fallback) - and once per birth: one
+            // stamped inside the window is made again at its stamp by the
+            // reconcile (its window lives) and never reaches this test.
+            if (remote.physicalized && remote.born_tick == birth_tick && !remote.birth_known && remote.birth.tick != 0
+                    && static_cast<int32_t>(remote.birth.tick - birth_tick) < 0
+                    && static_cast<int32_t>(remote.birth.tick - s.lives_anchor_) <= 0
+                    && s.late_births_counted_.emplace(player, remote.birth.tick).second)
+                ++s.late_births_kept_;
             if (!remakes_birth(remote) || remote.born_tick != birth_tick) return false;
             for (const auto& queued: s.pending_births_)
                 if (queued.player == player && queued.tick == birth_tick) return false;   // made there already
@@ -682,6 +748,382 @@ namespace bmmo::session {
             }
             s.mechanism_tracking_.mark_dirty();
             it = s.pending_births_.begin();
+        }
+    }
+
+
+    // ==================================================== gap L, L2 (EL7)
+    // Rollback-engine gaps design 2.3.3: the mirror lives that end inside a
+    // rewind's window.
+
+    // The life log entry of a remote event just applied here (the newest
+    // matching one): the entity it made or removed, the generation it gave
+    // it and the tick it was made at.
+    void session_client_core::note_life_made(uint32_t player, bmmo::session::event_type type, uint32_t stamp,
+                                             uint32_t origin, const std::string& entity, uint32_t made_at) {
+        for (auto it = s.life_log_.rbegin(); it != s.life_log_.rend(); ++it) {
+            if (it->player != player || it->type != type || it->applied != stamp || it->origin != origin) continue;
+            it->entity = entity;
+            const auto generation = s.generations_.find(entity);
+            it->generation = generation == s.generations_.end() ? 0u : generation->second;
+            it->made_at = made_at;
+            it->skipped = false;
+            if (type == bmmo::session::event_type::Physicalize) it->birth.entity = entity;
+            return;
+        }
+    }
+
+    void session_client_core::note_life_skipped(uint32_t player, bmmo::session::event_type type, uint32_t stamp,
+                                                uint32_t origin) {
+        for (auto it = s.life_log_.rbegin(); it != s.life_log_.rend(); ++it)
+            if (it->player == player && it->type == type && it->applied == stamp && it->origin == origin) {
+                if (it->entity.empty()) it->skipped = true;
+                return;
+            }
+    }
+
+    // The player whose mirror `entity` is now, or was (its newest logged
+    // Physicalize): recorded_input_at reads that player's ring for a life
+    // whose name is not the current one (H names one clone per life).
+    uint32_t session_client_core::mirror_player_of(const std::string& entity) const {
+        if (entity.empty()) return 0;
+        for (const auto& [id, remote]: s.remotes_)
+            if (remote.entity == entity) return id;
+        for (auto it = s.life_log_.rbegin(); it != s.life_log_.rend(); ++it)
+            if (it->type == bmmo::session::event_type::Physicalize && it->entity == entity) return it->player;
+        return 0;
+    }
+
+    // The core's half of rollback_world::restore_lives for the mirrors
+    // (2.3.3 "The reconcile").  The engine asks it at every restore a
+    // replay follows, with the lives alive at `anchor` (A) that end inside
+    // (A, now] (possibly none).
+    //
+    // First, per player whose mirror life alive at A ends in the window:
+    //   the A-life is the player's newest logged Physicalize of that entity
+    //   stamped <= A with no event of the player stamped in (birth, A];
+    //   the window events are the player's logged events stamped in
+    //   (A, now] that changed a body, in the server's order;
+    //   1. the player's body now (a later life: the A-life ended) is taken
+    //      out, muted, its navigation detached;
+    //   2. the A-life is made again from its Physicalize at the A record's
+    //      pose, no kick (the engine then writes its A record, or the blob
+    //      covers it), navigated, and the remote is that life again;
+    //      reported revived until its first window event;
+    //   3. every window event is queued at its stamp (births with the
+    //      entity the live event made); each born entity is reported
+    //      remade at its last window birth (the life its birth item, if
+    //      any, is about).
+    // The generations of the A-life and of every entity the window made
+    // are put back to A's (absent there: erased), so the replayed events
+    // bump them to the live values; a life whose revive failed is put one
+    // past A's (its end bumps nothing without a body).  A player with no
+    // log entry, an inconsistent log, no window event, or (the parked arm)
+    // a body now is left unanswered: the engine counts it unrevivable.
+    //
+    // Then (review finding 1), per other player with logged events in the
+    // window that step LB's remake and a late birth's own queue cannot
+    // replay - a life that began AND ended inside the window (no record at
+    // A, no body now: no restore item names it), two births in it (a trafo
+    // of a window life), or the body now made after a stamp inside the
+    // window (the RC stamp rule: replayed at the stamp) - steps 1 and 3
+    // with no revive: the body now (born in the window) taken out, every
+    // window event queued, the generations of their entities put back to
+    // A's.  Counted (mlives=.../window).  A player whose only window event
+    // is the birth of its body now, made at its stamp, stays on LB's path;
+    // one whose birth is not made yet (its own rewind) on make_remote_birth's.
+    void session_client_core::reconcile_remote_lives(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended,
+                                                     std::map<std::string, life_outcome>& out) {
+        using bmmo::session::event_type;
+        using entry_t = client_core_state::life_entry;
+        s.lives_anchor_ = anchor;
+        // An exact resync's apply reconciles its mirrors itself (resync
+        // design 2.6.3); the one implementation RSD 2.6.3 asks for is not
+        // built yet.
+        if (s.resync_restoring_) return;
+        const rollback_tracked* at_tracked = s.rollback_.recorded_tracked(anchor);
+        const auto stamp_in = [](uint32_t stamp, uint32_t after, uint32_t upto) {
+            return static_cast<int32_t>(stamp - after) > 0 && static_cast<int32_t>(stamp - upto) <= 0;
+        };
+        const auto generation_at_anchor = [&](const std::string& entity, uint32_t& out_generation) {
+            if (!at_tracked) return false;
+            const auto it = at_tracked->generations.find(entity);
+            if (it == at_tracked->generations.end()) return false;
+            out_generation = it->second;
+            return true;
+        };
+        const auto put_back_generation = [&](const std::string& entity) {
+            uint32_t generation = 0;
+            if (generation_at_anchor(entity, generation)) s.generations_[entity] = generation;
+            else s.generations_.erase(entity);
+        };
+        const auto fail = [this](const std::string& name, const std::string& why) {
+            ++s.mirror_revive_failures_;
+            if (s.mirror_revive_failures_ <= 8)
+                logf("lives: mirror %s not revived: %s (%llu so far)", name.c_str(), why.c_str(),
+                     static_cast<unsigned long long>(s.mirror_revive_failures_));
+        };
+        const auto in_server_order = [](std::vector<const entry_t*>& window) {
+            std::stable_sort(window.begin(), window.end(), [](const entry_t* a, const entry_t* b) {
+                if (a->applied != b->applied) return static_cast<int32_t>(a->applied - b->applied) < 0;
+                return bmmo::session::lifecycle_apply_before(0, a->origin, a->type, 0, b->origin, b->type);
+            });
+        };
+        // 1. The player's body now out, muted, its navigation detached.
+        const auto take_out = [this](remote_ball& remote) {
+            if (remote.navigation) platform_.detach_mirror_navigation(remote.entity);
+            remote.navigation = false;
+            if (remote.physicalized) {
+                unphysicalize_mirror(remote.entity);
+                remote.physicalized = false;
+            }
+        };
+        // 3. The window's events at their stamps.
+        const auto queue_window = [&](uint32_t player, const std::vector<const entry_t*>& window) {
+            for (const auto* entry: window) {
+                if (entry->type == event_type::Unphysicalize) {
+                    bool queued = false;
+                    for (const auto& d: s.pending_deaths_) queued = queued || (d.player == player && d.tick == entry->applied);
+                    if (!queued) {
+                        client_core_state::pending_death death;
+                        death.player = player;
+                        death.tick = entry->applied;
+                        death.origin = entry->origin;
+                        death.reconciled = true;
+                        s.pending_deaths_.push_back(death);
+                    }
+                    continue;
+                }
+                if (entry->type != event_type::Physicalize) continue;
+                bool queued = false;
+                for (auto& b: s.pending_births_)
+                    if (b.player == player && b.tick == entry->applied && !b.remake) {
+                        if (b.entity.empty()) b.entity = entry->entity;
+                        queued = true;
+                    }
+                if (!queued) {
+                    pending_birth birth = entry->birth;
+                    birth.entity = entry->entity;
+                    birth.remake = false;
+                    birth.reconciled = true;
+                    s.pending_births_.push_back(birth);
+                }
+                // The window is in stamp order: the last birth of a name
+                // wins - the life its restore item (its first record at its
+                // current generation) is about.
+                if (!entry->entity.empty()) out[entry->entity].remade_at = entry->applied;
+            }
+        };
+        std::set<uint32_t> done, asked;
+        for (const ended_life& life: ended) {
+            if (life.kind != life_kind::mirror || out.count(life.name)) continue;
+            // The A-life's birth: the newest logged Physicalize of the
+            // entity stamped at or before A.
+            const entry_t* born = nullptr;
+            for (const auto& entry: s.life_log_) {
+                if (entry.type != event_type::Physicalize || entry.skipped || entry.entity != life.name) continue;
+                if (static_cast<int32_t>(entry.applied - anchor) > 0) continue;
+                if (!born || static_cast<int32_t>(entry.applied - born->applied) >= 0) born = &entry;
+            }
+            if (!born) {
+                if (const uint32_t owner = mirror_player_of(life.name)) asked.insert(owner);
+                fail(life.name, "no logged birth at or before tick " + std::to_string(anchor));
+                continue;
+            }
+            const uint32_t player = born->player;
+            asked.insert(player);
+            if (done.count(player)) continue;
+            const auto remote_it = s.remotes_.find(player);
+            if (remote_it == s.remotes_.end()) {
+                fail(life.name, "no remote " + std::to_string(player));
+                continue;
+            }
+            bool consistent = true;
+            std::vector<const entry_t*> window;
+            for (const auto& entry: s.life_log_) {
+                if (entry.player != player || entry.skipped || &entry == born) continue;
+                if (stamp_in(entry.applied, born->applied, anchor)) consistent = false;
+                else if (stamp_in(entry.applied, anchor, now)) window.push_back(&entry);
+            }
+            if (!consistent) {
+                fail(life.name, "the log has an event of player " + std::to_string(player) + " between its birth at "
+                                    + std::to_string(born->applied) + " and tick " + std::to_string(anchor));
+                continue;
+            }
+            if (window.empty()) {
+                fail(life.name, "no logged event of player " + std::to_string(player) + " in (" + std::to_string(anchor)
+                                    + ", " + std::to_string(now) + "]");
+                continue;
+            }
+            in_server_order(window);
+            auto& remote = remote_it->second;
+            if (config.remote_births_parked && remote.physicalized) {
+                fail(life.name, "its later life " + remote.entity + " stays parked (remote_births_parked)");
+                continue;
+            }
+            done.insert(player);
+            const uint32_t until = window.front()->applied;
+            // 1. The later life out.
+            take_out(remote);
+            // The generations the window's events will bump again.
+            std::set<std::string> entities{life.name};
+            for (const auto* entry: window)
+                if (entry->type == event_type::Physicalize && !entry->entity.empty()) entities.insert(entry->entity);
+            for (const auto& entity: entities) put_back_generation(entity);
+            // 2. The A-life again.
+            bmmo_physics_body_state state{};
+            mirror_made made;
+            std::string why;
+            if (!s.rollback_.recorded_body_state(life.name, anchor, state)) {
+                why = "no body in the record of tick " + std::to_string(anchor);
+            } else {
+                mirror_spec spec;
+                spec.player = player;
+                spec.ball_type = born->birth.ball_type;
+                spec.entity = life.name;
+                for (int k = 0; k < 3; ++k) spec.position[k] = static_cast<float>(state.position[k]);
+                quaternion_rows(state.rotation, spec.rotation);
+                spec.recipe = to_bridge_recipe(born->birth.recipe);
+                int join_order = 63;
+                for (const auto& p: s.players_) if (p.id == player) join_order = p.join_order;
+                spec.group = "P#" + std::to_string(join_order);
+                {
+                    const event_log_mute mute(*this);
+                    made = platform_.make_mirror(spec);
+                }
+                if (!made.made) why = "make_mirror: " + made.error;
+            }
+            if (made.made) {
+                ++s.mirror_revives_;
+                s.mirror_entities_.insert(life.name);
+                remote.entity = life.name;
+                remote.ball_type = born->birth.ball_type;
+                remote.physicalized = true;
+                remote.born_tick = born->made_at ? born->made_at : born->applied;
+                remote.driven_from = static_cast<int32_t>(remote.born_tick - anchor) <= 0 ? remote.born_tick : anchor;
+                remote.birth = born->birth;
+                remote.birth.remake = false;
+                remote.birth.reconciled = false;
+                remote.birth_known = remote.born_tick == born->applied;
+                remote.corrector.clear();
+                attach_remote_navigation(player, remote, true);
+                out[life.name].revived_until = until;
+                logf("lives: mirror %s of %u (alive at tick %u) revived until tick %u; %zu window event(s) queued",
+                     life.name.c_str(), player, anchor, until, window.size());
+            } else {
+                // Its end bumps nothing without a body: the live value.
+                uint32_t generation = 0;
+                generation_at_anchor(life.name, generation);
+                s.generations_[life.name] = generation + 1;
+                fail(life.name, why);
+            }
+            s.mechanism_tracking_.mark_dirty();
+            queue_window(player, window);
+        }
+        // The window lives of the players no ended A-life brought here (in
+        // player order: s.remotes_ is ordered).
+        for (auto& [player, remote]: s.remotes_) {
+            if (asked.count(player)) continue;
+            std::vector<const entry_t*> window;
+            for (const auto& entry: s.life_log_)
+                if (entry.player == player && !entry.skipped && stamp_in(entry.applied, anchor, now)) window.push_back(&entry);
+            if (window.empty()) continue;
+            in_server_order(window);
+            // A window that begins with a death took a life the anchor had:
+            // one the engine did not hand over as ended, because no record
+            // of the window shows its end yet - a late death's own rewind
+            // (A = D - 1: the body went before the restore, the replay runs
+            // without it from D on, as live) and the late birth's of the
+            // same beam pair.  Nothing to replay here.
+            {
+                const auto first = std::find_if(window.begin(), window.end(),
+                                                [](const entry_t* e) { return !e->entity.empty(); });
+                if (first == window.end() || (*first)->type != event_type::Physicalize) continue;
+            }
+            // What the window did that LB's remake cannot replay: a life it
+            // removed, a second birth, or the body now made after its stamp
+            // (an event not applied yet - its own rewind - names no entity).
+            bool removed = false;
+            size_t births = 0;
+            const entry_t* current = nullptr;
+            for (const auto* entry: window) {
+                if (entry->entity.empty()) continue;
+                if (entry->type == event_type::Unphysicalize) {
+                    removed = true;
+                } else if (entry->type == event_type::Physicalize) {
+                    ++births;
+                    if (remote.physicalized && entry->entity == remote.entity) current = entry;
+                }
+            }
+            const bool made_late = current && current->made_at != 0 && current->made_at != current->applied;
+            if (!removed && births < 2 && !made_late) continue;
+            const std::string name = remote.physicalized ? remote.entity : window.front()->entity;
+            if (remote.physicalized && !current) {
+                fail(name, "player " + std::to_string(player) + "'s body now was not born in (" + std::to_string(anchor) + ", "
+                               + std::to_string(now) + "] although its log has events there");
+                continue;
+            }
+            if (config.remote_births_parked && remote.physicalized) {
+                fail(name, "its life " + remote.entity + " stays parked (remote_births_parked)");
+                continue;
+            }
+            ++s.window_lives_;
+            // 1. The body now (born in the window) out.
+            take_out(remote);
+            // The generations the window's events will bump again.
+            std::set<std::string> entities;
+            for (const auto* entry: window)
+                if (!entry->entity.empty()) entities.insert(entry->entity);
+            for (const auto& entity: entities) put_back_generation(entity);
+            s.mechanism_tracking_.mark_dirty();
+            // 3. Every window event at its stamp.
+            queue_window(player, window);
+            logf("lives: the window lives of %u in (%u, %u] replayed: %zu event(s) queued%s", player, anchor, now,
+                 window.size(), made_late ? ", its body now made after its stamp" : "");
+        }
+    }
+
+    // The reconcile's queued events that no replay applied (it stopped
+    // before their tick, or a make failed there): applied now, live, in the
+    // server's order, so the world has the body set it had before the
+    // rewind.  Counted (mlives=.../settled).
+    void session_client_core::settle_unreplayed_lives(uint32_t now) {
+        struct left {
+            uint32_t tick = 0, player = 0, origin = 0;
+            bmmo::session::event_type type = bmmo::session::event_type::Physicalize;
+            pending_birth birth;
+        };
+        std::vector<left> due;
+        for (auto it = s.pending_births_.begin(); it != s.pending_births_.end();)
+            if (it->reconciled && static_cast<int32_t>(it->tick - now) <= 0) {
+                due.push_back({it->tick, it->player, it->origin, bmmo::session::event_type::Physicalize, *it});
+                it = s.pending_births_.erase(it);
+            } else ++it;
+        for (auto it = s.pending_deaths_.begin(); it != s.pending_deaths_.end();)
+            if (it->reconciled && static_cast<int32_t>(it->tick - now) <= 0) {
+                due.push_back({it->tick, it->player, it->origin, bmmo::session::event_type::Unphysicalize, {}});
+                it = s.pending_deaths_.erase(it);
+            } else ++it;
+        if (due.empty()) return;
+        std::stable_sort(due.begin(), due.end(), [this](const left& a, const left& b) {
+            if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
+            return bmmo::session::lifecycle_apply_before(join_rank(a.player), a.origin, a.type, join_rank(b.player), b.origin,
+                                                         b.type);
+        });
+        for (const auto& l: due) {
+            ++s.lives_settled_live_;
+            logf("lives: the %s of %u stamped %u was not replayed: applied live", l.type == bmmo::session::event_type::Physicalize
+                 ? "birth" : "death", l.player, l.tick);
+            const event_log_mute mute(*this);
+            if (l.type == bmmo::session::event_type::Unphysicalize) {
+                unphysicalize_remote(l.player, l.tick);
+            } else {
+                pending_birth birth = l.birth;
+                birth.reconciled = false;
+                if (!physicalize_remote(birth, live_first_tick(birth.tick)))
+                    logf("lives: the birth of %u stamped %u could not be made live either", l.player, l.tick);
+            }
+            s.mechanism_tracking_.mark_dirty();
         }
     }
 
@@ -1002,7 +1444,7 @@ namespace bmmo::session {
     //     or process_own_echoes before the first rewind).
     //
     // `live`: the frame of `tick` itself (live_own_lives), each change
-    // once; otherwise a replay (drain_pending_births), where a beam's
+    // once; otherwise a replay (drain_pending_lives), where a beam's
     // stamp is redone only once its live frame has run - before that no
     // replay reaches it.  A lifetime that ended since is never made again
     // (own_life_current) and retires.
@@ -1509,7 +1951,7 @@ namespace bmmo::session {
     //   3. the records lose the body (rollback_engine::move_birth): from T
     //      to T'-1 there was none, from T' on the replay re-captures it;
     //   4. the rewind to T-1 replays with that body set, and the body is
-    //      made at T' by drain_pending_births, at our join rank - or by
+    //      made at T' by drain_pending_lives, at our join rank - or by
     //      the live frame of T' when the client has not reached it yet.
     //
     // A lifetime that ended since (a death or a trafo after the birth)

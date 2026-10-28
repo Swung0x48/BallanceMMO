@@ -48,6 +48,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <tuple>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -82,7 +83,9 @@ namespace bmmo::session {
         template <class... A> decltype(auto) name(A&&... a) { return c.name(std::forward<A>(a)...); }
         BMMO_CORE_STEP(drain_due_events)
         BMMO_CORE_STEP(apply_held_lifecycle)
-        BMMO_CORE_STEP(drain_pending_births)
+        BMMO_CORE_STEP(drain_pending_lives)
+        BMMO_CORE_STEP(settle_unreplayed_lives)
+        BMMO_CORE_STEP(log_life)
         BMMO_CORE_STEP(remake_mirror_birth)
         BMMO_CORE_STEP(make_unmade_remakes)
         BMMO_CORE_STEP(attach_remote_navigation)
@@ -2321,7 +2324,7 @@ namespace {
         };
         state_of(core).pending_births_ = {birth(6, 124, 124), birth(5, 125, 125), birth(4, 124, 123)};
         size_t from = fake.calls.size();
-        steps{core}.drain_pending_births(124);
+        steps{core}.drain_pending_lives(124);
         {
             const std::vector<std::string> expected = {
                 "mute_event_log:on",
@@ -2348,7 +2351,7 @@ namespace {
         // No birth due and no own life: nothing at all past the check.
         from = fake.calls.size();
         state_of(core).pending_births_.clear();
-        steps{core}.drain_pending_births(130);
+        steps{core}.drain_pending_lives(130);
         EXPECT_TRUE(since(fake.calls, from).empty());
     }
 
@@ -2370,7 +2373,7 @@ namespace {
         birth.player = 4; birth.tick = 124; birth.origin = 124;
         birth.position[0] = 705.0f;
         state_of(core).pending_births_ = {birth};
-        steps{core}.drain_pending_births(124);
+        steps{core}.drain_pending_lives(124);
         auto& four = state_of(core).remotes_.at(4);
         ASSERT_TRUE(four.physicalized);
         ASSERT_TRUE(four.navigation);
@@ -2398,7 +2401,7 @@ namespace {
         EXPECT_FALSE(remake("Ball_0_BMMO_4", 124)) << "taken out already";
 
         from = fake.calls.size();
-        steps{core}.drain_pending_births(124);
+        steps{core}.drain_pending_lives(124);
         {
             const std::vector<std::string> expected = {
                 "mute_event_log:on", "make_mirror:Ball_0_BMMO_4:P#0", "attach_mirror_navigation:4:Ball_0_BMMO_4",
@@ -2434,7 +2437,7 @@ namespace {
         // left bodiless and never remade again.
         EXPECT_TRUE(remake("Ball_0_BMMO_4", 124));
         fake.make_mirror_ok = false;
-        steps{core}.drain_pending_births(124);
+        steps{core}.drain_pending_lives(124);
         ASSERT_EQ(state_of(core).pending_births_.size(), 1u) << "queued again";
         EXPECT_TRUE(state_of(core).pending_births_[0].remake);
         EXPECT_FALSE(four.physicalized);
@@ -2469,6 +2472,540 @@ namespace {
         EXPECT_FALSE(five.birth_known);
         EXPECT_FALSE(remake(five.entity, five.born_tick));
         EXPECT_TRUE(five.physicalized);
+    }
+
+    // ------------------------------------------------- gap L, L2 (step EL7)
+    // Rollback-engine gaps design 2.3.3, 7.1 L-U3..5, L-U8..10: the mirror
+    // lives that end inside a rewind's window - the life log, the
+    // reconcile (the core's half of restore_lives), the queued window events
+    // drained in the server's order, the generations, recorded_input_at of
+    // an old name, the late births kept, the settle of what no replay made,
+    // and the trim.
+
+    // A history whose records carry the given body poses per tick and the
+    // given tracked sets (no physics behind it).
+    struct life_history {
+        std::map<uint32_t, std::map<std::string, double>> bodies;   // tick -> entity -> x
+        std::map<uint32_t, bmmo::session::rollback_tracked> tracked;
+        void record(session_client_core& core) {
+            for (const auto& [tick, set]: tracked) {
+                bmmo::session::rollback_world world;
+                const auto here = bodies[tick];
+                world.get_body = [here](const std::string& entity, bmmo_physics_body_state& out) {
+                    const auto it = here.find(entity);
+                    if (it == here.end()) return false;
+                    out = bmmo_physics_body_state{};
+                    out.movable = out.simulated = true;
+                    out.position[0] = it->second;
+                    out.rotation[3] = 1.0;
+                    return true;
+                };
+                world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+                state_of(core).rollback_.record(world, tick, set, {});
+            }
+        }
+        void span(uint32_t from, uint32_t to, const std::vector<std::pair<std::string, double>>& alive,
+                  const std::map<std::string, uint32_t>& generations) {
+            for (uint32_t t = from; t <= to; ++t) {
+                auto& tr = tracked[t];
+                tr.generations = generations;
+                for (const auto& [entity, x]: alive) {
+                    tr.remote_entities.push_back(entity);
+                    bodies[t][entity] = x;
+                }
+            }
+        }
+    };
+
+    client_core_state::life_entry life_entry_of(uint32_t player, bmmo::session::event_type type, uint32_t stamp,
+                                                const std::string& entity, uint32_t generation, uint8_t ball_type = 0) {
+        client_core_state::life_entry e;
+        e.applied = e.made_at = e.origin = stamp;
+        e.player = player;
+        e.type = type;
+        e.entity = entity;
+        e.generation = generation;
+        if (type == bmmo::session::event_type::Physicalize) {
+            e.birth.player = player;
+            e.birth.tick = e.birth.origin = stamp;
+            e.birth.ball_type = ball_type;
+            e.birth.recipe.mass = 2.5f;
+            e.birth.entity = entity;
+        }
+        return e;
+    }
+
+    // The live end state of a player whose mirror `entity` is current
+    // (made at its stamp `born`, navigated).
+    void live_mirror(session_client_core& core, uint32_t player, const std::string& entity, uint32_t born, bool body) {
+        auto& r = state_of(core).remotes_[player];
+        r.entity = entity;
+        r.physicalized = body;
+        r.navigation = body;
+        r.born_tick = r.driven_from = born;
+        r.birth.player = player;
+        r.birth.tick = r.birth.origin = born;
+        r.birth_known = true;
+        state_of(core).mirror_entities_.insert(entity);
+    }
+
+    size_t count_prefix(const std::vector<std::string>& calls, const std::string& prefix) {
+        return static_cast<size_t>(std::count_if(calls.begin(), calls.end(),
+                                                 [&prefix](const std::string& c) { return c.rfind(prefix, 0) == 0; }));
+    }
+
+    // L-U3, H naming (one clone per life; the fake's mirror_entity mints a
+    // new name on every call, make_mirror takes any exact name): the mirror
+    // alive at A = 110 (Ball_0_BMMO_4#1, born 100) dies at D = 115 and the
+    // player's next life (#2) is born at E = 118; now 125.  The reconcile
+    // takes #2 out, makes #1 again at the A record's pose with no kick,
+    // queues the death at 115 and the birth at 118 with #2's name; the
+    // replayed records over (A, D) carry #1's old generation, the drains
+    // make no mirror entity, and the final generations equal the live ones.
+    // recorded_input_at of the old name reads the player's ring.
+    TEST(SessionClientCoreLives, AMirrorDeadInTheWindowIsRevivedUnderItsOwnName) {
+        flow_fake fake;
+        session_platform platform = fake.make_flow();
+        int minted = 2;
+        platform.mirror_entity = [&fake, &minted](uint32_t player, uint8_t, std::string&) {
+            fake.calls.push_back("mirror_entity:" + std::to_string(player));
+            return "Ball_0_BMMO_4#" + std::to_string(++minted);
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        auto& s = state_of(core);
+        const std::string one = "Ball_0_BMMO_4#1", two = "Ball_0_BMMO_4#2";
+        s.life_log_ = {life_entry_of(4, bmmo::session::event_type::Physicalize, 100, one, 1),
+                       life_entry_of(4, bmmo::session::event_type::Unphysicalize, 115, one, 2),
+                       life_entry_of(4, bmmo::session::event_type::Physicalize, 118, two, 1)};
+        live_mirror(core, 4, two, 118, true);
+        s.mirror_entities_.insert(one);
+        s.generations_ = {{one, 2}, {two, 1}};
+        bmmo::session::input_frame frame{};
+        frame.keys = 5;
+        s.remotes_.at(4).inputs[112] = frame;
+        life_history h;
+        h.span(110, 114, {{one, 7.0}}, {{one, 1}});
+        h.span(115, 117, {}, {{one, 2}});
+        h.span(118, 125, {{two, 9.0}}, {{one, 2}, {two, 1}});
+        h.record(core);
+
+        const auto& lives = steps{core}.world_hooks().restore_lives;
+        ASSERT_TRUE(lives) << "the core's half is set (G7)";
+        std::map<std::string, bmmo::session::life_outcome> out;
+        size_t from = fake.calls.size();
+        lives(110, 125, {{one, 1, 115, 0, bmmo::session::life_kind::mirror}}, true, out);
+        {
+            const auto calls = since(fake.calls, from);
+            const std::vector<std::string> head = {
+                "detach_mirror_navigation:" + two, "mute_event_log:on", "unmake_mirror:" + two, "mute_event_log:off",
+                "mute_event_log:on", "make_mirror:" + one + ":P#0", "mute_event_log:off",
+                "attach_mirror_navigation:4:" + one};
+            ASSERT_GE(calls.size(), head.size());
+            EXPECT_EQ(std::vector<std::string>(calls.begin(), calls.begin() + static_cast<std::ptrdiff_t>(head.size())), head);
+            EXPECT_EQ(count_prefix(calls, "mirror_entity:"), 0u);
+        }
+        ASSERT_EQ(fake.specs.size(), 1u);
+        EXPECT_EQ(fake.specs[0].position[0], 7.0f) << "the A record's pose";
+        EXPECT_FALSE(fake.specs[0].kick) << "no kick at a revive";
+        EXPECT_EQ(fake.specs[0].recipe.mass, 2.5f) << "its Physicalize's recipe";
+        EXPECT_EQ(out[one].revived_until, 115u);
+        EXPECT_EQ(out[one].remade_at, 0u);
+        EXPECT_EQ(out[two].remade_at, 118u);
+        EXPECT_EQ(s.mirror_revives_, 1u);
+        EXPECT_EQ(s.remotes_.at(4).entity, one);
+        EXPECT_TRUE(s.remotes_.at(4).physicalized);
+        EXPECT_TRUE(s.remotes_.at(4).navigation);
+        EXPECT_EQ(s.generations_.at(one), 1u) << "A's";
+        EXPECT_EQ(s.generations_.count(two), 0u) << "absent at A";
+        ASSERT_EQ(s.pending_deaths_.size(), 1u);
+        EXPECT_EQ(s.pending_deaths_[0].tick, 115u);
+        EXPECT_TRUE(s.pending_deaths_[0].reconciled);
+        ASSERT_EQ(s.pending_births_.size(), 1u);
+        EXPECT_EQ(s.pending_births_[0].tick, 118u);
+        EXPECT_EQ(s.pending_births_[0].entity, two);
+        // The replay: (A, D) drives #1 under its old generation.
+        std::map<std::string, uint32_t> driven;
+        steps{core}.world_hooks().replay_remotes(111, driven);
+        EXPECT_EQ(driven, (std::map<std::string, uint32_t>{{one, 1u}}));
+        EXPECT_TRUE(steps{core}.world_hooks().mirror(two)) << "an old life's entity is a mirror's (birth_from_inputs)";
+        from = fake.calls.size();
+        for (uint32_t t = 111; t <= 125; ++t) steps{core}.drain_pending_lives(t);
+        {
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "mirror_entity:"), 0u) << "no entity minted inside a replay";
+            EXPECT_EQ(count_prefix(calls, "unmake_mirror:" + one), 1u);
+            EXPECT_EQ(count_prefix(calls, "make_mirror:" + two), 1u);
+        }
+        EXPECT_EQ(s.generations_.at(one), 2u) << "the live value";
+        EXPECT_EQ(s.generations_.at(two), 1u) << "the live value";
+        EXPECT_EQ(s.remotes_.at(4).entity, two);
+        EXPECT_TRUE(s.pending_births_.empty());
+        EXPECT_TRUE(s.pending_deaths_.empty());
+        // The old name's frames: the player's ring.
+        bmmo::session::input_frame got{};
+        EXPECT_TRUE(steps{core}.recorded_input_at(one, 112, got));
+        EXPECT_EQ(got.keys, 5u);
+        EXPECT_FALSE(steps{core}.recorded_input_at("Ball_0_BMMO_9#1", 112, got));
+    }
+
+    // L-U4, RC naming (one name per player and type): a beam pair of player
+    // 4 at stamp 115 (Unphysicalize + Physicalize of the same spirit ball)
+    // inside the window of A = 110.  The live body (the new life) is taken
+    // out, the old life revived until 115, and at 115 the death comes before
+    // the birth (the server's order); the name carries both halves and its
+    // final generation equals the live one.
+    TEST(SessionClientCoreLives, ARetailBeamPairInTheWindowIsRevivedThenRemade) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        auto& s = state_of(core);
+        const std::string ball = "Ball_0_BMMO_4";
+        s.life_log_ = {life_entry_of(4, bmmo::session::event_type::Physicalize, 100, ball, 1),
+                       life_entry_of(4, bmmo::session::event_type::Unphysicalize, 115, ball, 2),
+                       life_entry_of(4, bmmo::session::event_type::Physicalize, 115, ball, 3)};
+        live_mirror(core, 4, ball, 115, true);
+        s.generations_ = {{ball, 3}};
+        life_history h;
+        h.span(110, 114, {{ball, 7.0}}, {{ball, 1}});
+        h.span(115, 125, {{ball, 9.0}}, {{ball, 3}});
+        h.record(core);
+        std::map<std::string, bmmo::session::life_outcome> out;
+        steps{core}.world_hooks().restore_lives(110, 125, {{ball, 1, 115, 115, bmmo::session::life_kind::mirror}}, true,
+                                                out);
+        EXPECT_EQ(out[ball].revived_until, 115u);
+        EXPECT_EQ(out[ball].remade_at, 115u);
+        EXPECT_EQ(s.generations_.at(ball), 1u);
+        const size_t from = fake.calls.size();
+        steps{core}.drain_pending_lives(115);
+        {
+            const auto calls = since(fake.calls, from);
+            const auto death = std::find(calls.begin(), calls.end(), "unmake_mirror:" + ball);
+            const auto birth = std::find(calls.begin(), calls.end(), "make_mirror:" + ball + ":P#0");
+            ASSERT_NE(death, calls.end());
+            ASSERT_NE(birth, calls.end());
+            EXPECT_LT(death, birth) << "the beam pair's death first";
+            EXPECT_EQ(count_prefix(calls, "mirror_entity:"), 0u);
+        }
+        EXPECT_EQ(s.generations_.at(ball), 3u) << "the live value";
+        EXPECT_TRUE(s.remotes_.at(4).physicalized);
+
+        // The parked arm (L-H6's control): a later life in the world stays,
+        // so nothing is revived (left to the engine's unrevivable count).
+        core.config.remote_births_parked = true;
+        out.clear();
+        s.pending_births_.clear();
+        s.pending_deaths_.clear();
+        const size_t from2 = fake.calls.size();
+        steps{core}.world_hooks().restore_lives(110, 125, {{ball, 1, 115, 115, bmmo::session::life_kind::mirror}}, true,
+                                                out);
+        EXPECT_TRUE(out.empty());
+        EXPECT_EQ(count_prefix(since(fake.calls, from2), "unmake_mirror:"), 0u);
+        EXPECT_EQ(s.mirror_revive_failures_, 1u);
+        EXPECT_FALSE(steps{core}.remake_mirror_birth(ball, 115)) << "no LB remake in the parked arm";
+    }
+
+    // L-U5, the RC stamp rule (lifecycle_rewind off): a death this world
+    // applied live at 120 (> its stamp 115) is replayed at its stamp; a
+    // birth stamped at or before A but made live after it keeps the parking
+    // path, counted late_births_kept.
+    TEST(SessionClientCoreLives, TheRetailStampRuleReplaysAtTheStamp) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = false;
+        auto& s = state_of(core);
+        const std::string ball = "Ball_0_BMMO_4";
+        auto death = life_entry_of(4, bmmo::session::event_type::Unphysicalize, 115, ball, 2);
+        death.made_at = 120;
+        s.life_log_ = {life_entry_of(4, bmmo::session::event_type::Physicalize, 100, ball, 1), death};
+        live_mirror(core, 4, ball, 100, false);
+        s.generations_ = {{ball, 2}};
+        life_history h;
+        h.span(110, 119, {{ball, 7.0}}, {{ball, 1}});
+        h.span(120, 125, {}, {{ball, 2}});
+        h.record(core);
+        std::map<std::string, bmmo::session::life_outcome> out;
+        steps{core}.world_hooks().restore_lives(110, 125, {{ball, 1, 120, 0, bmmo::session::life_kind::mirror}}, true, out);
+        EXPECT_EQ(out[ball].revived_until, 115u) << "the stamp, not the tick it was applied at";
+        ASSERT_EQ(s.pending_deaths_.size(), 1u);
+        EXPECT_EQ(s.pending_deaths_[0].tick, 115u);
+
+        // Player 5: stamped 105, made live at 121.
+        auto& five = s.remotes_[5];
+        five.entity = "Ball_0_BMMO_5";
+        five.physicalized = five.navigation = true;
+        five.born_tick = five.driven_from = 121;
+        five.birth.tick = 105;
+        five.birth_known = false;
+        EXPECT_FALSE(steps{core}.remake_mirror_birth("Ball_0_BMMO_5", 121));
+        EXPECT_EQ(s.late_births_kept_, 1u);
+        EXPECT_FALSE(steps{core}.remake_mirror_birth("Ball_0_BMMO_5", 121));
+        EXPECT_EQ(s.late_births_kept_, 1u) << "once per birth (review finding 4)";
+    }
+
+    // L-U8: a late birth at its own rewind is made at E from the queue; the
+    // reconcile's queued events no replay made are made live once after the
+    // rewind (settle_unreplayed_lives), a failed make in the replay queued
+    // again for that; the pending births of other paths are not touched.
+    TEST(SessionClientCoreLives, WindowEventsNoReplayMadeAreMadeLiveOnce) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        auto& s = state_of(core);
+        client_core_state::pending_birth birth;
+        birth.player = 5;
+        birth.tick = birth.origin = 120;
+        birth.entity = "Ball_0_BMMO_5";
+        birth.reconciled = true;
+        client_core_state::pending_birth other = birth;
+        other.player = 6;
+        other.entity.clear();
+        other.reconciled = false;   // a late birth's own (make_remote_birth)
+        s.pending_births_ = {birth, other};
+        client_core_state::pending_death death;
+        death.player = 4;
+        death.tick = 119;
+        death.reconciled = true;
+        live_mirror(core, 4, "Ball_0_BMMO_4", 100, true);
+        s.pending_deaths_ = {death};
+        // A failed make inside the replay: queued again.
+        fake.make_mirror_ok = false;
+        steps{core}.drain_pending_lives(120);
+        fake.make_mirror_ok = true;
+        ASSERT_EQ(s.pending_births_.size(), 1u) << "the reconciled one queued again, the other one dropped as before";
+        EXPECT_TRUE(s.pending_births_[0].reconciled);
+        size_t from = fake.calls.size();
+        steps{core}.settle_unreplayed_lives(125);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(count_prefix(calls, "unmake_mirror:Ball_0_BMMO_4"), 1u);
+        EXPECT_EQ(count_prefix(calls, "make_mirror:Ball_0_BMMO_5"), 1u);
+        EXPECT_EQ(count_prefix(calls, "mirror_entity:"), 0u);
+        EXPECT_LT(std::find(calls.begin(), calls.end(), "unmake_mirror:Ball_0_BMMO_4"),
+                  std::find(calls.begin(), calls.end(), "make_mirror:Ball_0_BMMO_5:P#1")) << "stamp order";
+        EXPECT_EQ(s.lives_settled_live_, 2u);
+        EXPECT_TRUE(s.pending_births_.empty());
+        EXPECT_TRUE(s.pending_deaths_.empty());
+        EXPECT_TRUE(s.remotes_.at(5).physicalized);
+        EXPECT_EQ(s.remotes_.at(5).born_tick, 126u) << "made live";
+        from = fake.calls.size();
+        steps{core}.settle_unreplayed_lives(125);
+        EXPECT_TRUE(since(fake.calls, from).empty()) << "once";
+    }
+
+    // L-U9: a mirror life born at E = 114 and dead at D' = 117, both inside
+    // the window of A = 110, after the A-life's death at 112: no body now.
+    // Made at 114, removed at 117; the A-life revived until 112.
+    TEST(SessionClientCoreLives, ALifeInsideTheWindowIsMadeAndRemoved) {
+        flow_fake fake;
+        session_platform platform = fake.make_flow();
+        platform.mirror_entity = [&fake](uint32_t player, uint8_t, std::string&) {
+            fake.calls.push_back("mirror_entity:" + std::to_string(player));
+            return std::string("Ball_0_BMMO_4#9");
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        auto& s = state_of(core);
+        const std::string one = "Ball_0_BMMO_4#1", two = "Ball_0_BMMO_4#2";
+        s.life_log_ = {life_entry_of(4, bmmo::session::event_type::Physicalize, 100, one, 1),
+                       life_entry_of(4, bmmo::session::event_type::Unphysicalize, 112, one, 2),
+                       life_entry_of(4, bmmo::session::event_type::Physicalize, 114, two, 1),
+                       life_entry_of(4, bmmo::session::event_type::Unphysicalize, 117, two, 2)};
+        live_mirror(core, 4, two, 114, false);
+        s.mirror_entities_.insert(one);
+        s.generations_ = {{one, 2}, {two, 2}};
+        life_history h;
+        h.span(110, 111, {{one, 7.0}}, {{one, 1}});
+        h.span(112, 113, {}, {{one, 2}});
+        h.span(114, 116, {{two, 3.0}}, {{one, 2}, {two, 1}});
+        h.span(117, 125, {}, {{one, 2}, {two, 2}});
+        h.record(core);
+        std::map<std::string, bmmo::session::life_outcome> out;
+        steps{core}.world_hooks().restore_lives(110, 125, {{one, 1, 112, 0, bmmo::session::life_kind::mirror}}, true, out);
+        EXPECT_EQ(out[one].revived_until, 112u);
+        EXPECT_EQ(out[two].remade_at, 114u);
+        const size_t from = fake.calls.size();
+        for (uint32_t t = 111; t <= 125; ++t) steps{core}.drain_pending_lives(t);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(count_prefix(calls, "unmake_mirror:" + one), 1u);
+        EXPECT_EQ(count_prefix(calls, "make_mirror:" + two), 1u);
+        EXPECT_EQ(count_prefix(calls, "unmake_mirror:" + two), 1u);
+        EXPECT_EQ(count_prefix(calls, "mirror_entity:"), 0u);
+        EXPECT_EQ(s.generations_.at(one), 2u);
+        EXPECT_EQ(s.generations_.at(two), 2u);
+        EXPECT_FALSE(s.remotes_.at(4).physicalized);
+        EXPECT_EQ(s.remotes_.at(4).entity, two);
+    }
+
+    // L-U9 with no A-life (review finding 1): player 4's mirror died at 105,
+    // so nothing of it is alive at A = 110 and no life ends there; its next
+    // life (#2) is born at E = 114 and dies at D' = 117, both inside the
+    // window; no body now.  The engine asks with no ended life; the
+    // reconcile queues the birth (with #2's name) and the death at their
+    // stamps, so the replay makes #2 at 114 and removes it at 117, and the
+    // generations end at the live values.
+    TEST(SessionClientCoreLives, ALifeInsideTheWindowWithNoLifeAtTheAnchorIsMadeAndRemoved) {
+        flow_fake fake;
+        session_platform platform = fake.make_flow();
+        platform.mirror_entity = [&fake](uint32_t player, uint8_t, std::string&) {
+            fake.calls.push_back("mirror_entity:" + std::to_string(player));
+            return std::string("Ball_0_BMMO_4#9");
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        auto& s = state_of(core);
+        const std::string one = "Ball_0_BMMO_4#1", two = "Ball_0_BMMO_4#2";
+        s.life_log_ = {life_entry_of(4, bmmo::session::event_type::Physicalize, 100, one, 1),
+                       life_entry_of(4, bmmo::session::event_type::Unphysicalize, 105, one, 2),
+                       life_entry_of(4, bmmo::session::event_type::Physicalize, 114, two, 1),
+                       life_entry_of(4, bmmo::session::event_type::Unphysicalize, 117, two, 2)};
+        live_mirror(core, 4, two, 114, false);
+        s.mirror_entities_.insert(one);
+        s.generations_ = {{one, 2}, {two, 2}};
+        life_history h;
+        h.span(110, 113, {}, {{one, 2}});
+        h.span(114, 116, {{two, 3.0}}, {{one, 2}, {two, 1}});
+        h.span(117, 125, {}, {{one, 2}, {two, 2}});
+        h.record(core);
+        std::map<std::string, bmmo::session::life_outcome> out;
+        steps{core}.world_hooks().restore_lives(110, 125, {}, true, out);
+        EXPECT_EQ(out.count(one), 0u) << "no life of #1 in the window";
+        ASSERT_EQ(out.count(two), 1u);
+        EXPECT_EQ(out[two].remade_at, 114u);
+        EXPECT_EQ(out[two].revived_until, 0u);
+        EXPECT_EQ(s.window_lives_, 1u);
+        EXPECT_EQ(s.mirror_revive_failures_, 0u);
+        EXPECT_EQ(s.generations_.count(two), 0u) << "absent at A";
+        EXPECT_EQ(s.generations_.at(one), 2u);
+        const size_t from = fake.calls.size();
+        for (uint32_t t = 111; t <= 125; ++t) steps{core}.drain_pending_lives(t);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(count_prefix(calls, "make_mirror:" + two), 1u);
+        EXPECT_EQ(count_prefix(calls, "unmake_mirror:" + two), 1u);
+        EXPECT_LT(std::find(calls.begin(), calls.end(), "make_mirror:" + two + ":P#0"),
+                  std::find(calls.begin(), calls.end(), "unmake_mirror:" + two));
+        EXPECT_EQ(count_prefix(calls, "mirror_entity:"), 0u);
+        EXPECT_EQ(s.generations_.at(two), 2u) << "the live value";
+        EXPECT_FALSE(s.remotes_.at(4).physicalized);
+        EXPECT_TRUE(s.pending_births_.empty());
+        EXPECT_TRUE(s.pending_deaths_.empty());
+    }
+
+    // The same on RC naming, with a body now (review findings 1 and 3):
+    // player 4 (dead at A = 110) lives [114, 117) and again from 120 under
+    // the one name; the body now is taken out and the name answered remade
+    // at its LAST window birth (120, the life its restore item is about).
+    // Player 5's body was made live at 121 for a birth stamped 115 (a
+    // refused lifecycle rewind): replayed at its stamp (remade_at 115), not
+    // parked and not counted kept.  Player 6's only window event is the
+    // birth of its body now, made at its stamp: left to LB (no answer, the
+    // body stays for destroy_body).
+    TEST(SessionClientCoreLives, WindowLivesWithABodyNowAreTakenOutAndReplayedAtTheirStamps) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        auto& s = state_of(core);
+        const std::string ball = "Ball_0_BMMO_4", five = "Ball_0_BMMO_5", six = "Ball_0_BMMO_6";
+        auto late = life_entry_of(5, bmmo::session::event_type::Physicalize, 115, five, 1);
+        late.made_at = 121;
+        s.life_log_ = {life_entry_of(4, bmmo::session::event_type::Physicalize, 100, ball, 1),
+                       life_entry_of(4, bmmo::session::event_type::Unphysicalize, 105, ball, 2),
+                       life_entry_of(4, bmmo::session::event_type::Physicalize, 114, ball, 3),
+                       late,
+                       life_entry_of(4, bmmo::session::event_type::Unphysicalize, 117, ball, 4),
+                       life_entry_of(6, bmmo::session::event_type::Physicalize, 118, six, 1),
+                       life_entry_of(4, bmmo::session::event_type::Physicalize, 120, ball, 5)};
+        live_mirror(core, 4, ball, 120, true);
+        live_mirror(core, 5, five, 121, true);
+        s.remotes_.at(5).birth.tick = 115;
+        s.remotes_.at(5).birth_known = false;
+        live_mirror(core, 6, six, 118, true);
+        s.generations_ = {{ball, 5}, {five, 1}, {six, 1}};
+        life_history h;
+        h.span(110, 113, {}, {{ball, 2}});
+        h.span(114, 116, {{ball, 3.0}}, {{ball, 3}});
+        h.span(117, 117, {}, {{ball, 4}});
+        h.span(118, 119, {{six, 4.0}}, {{ball, 4}, {six, 1}});
+        h.span(120, 120, {{ball, 9.0}, {six, 4.0}}, {{ball, 5}, {six, 1}});
+        h.span(121, 125, {{ball, 9.0}, {six, 4.0}, {five, 6.0}}, {{ball, 5}, {six, 1}, {five, 1}});
+        h.record(core);
+        std::map<std::string, bmmo::session::life_outcome> out;
+        size_t from = fake.calls.size();
+        steps{core}.world_hooks().restore_lives(110, 125, {}, true, out);
+        {
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "unmake_mirror:" + ball), 1u);
+            EXPECT_EQ(count_prefix(calls, "unmake_mirror:" + five), 1u);
+            EXPECT_EQ(count_prefix(calls, "unmake_mirror:" + six), 0u) << "LB's";
+        }
+        EXPECT_EQ(out.count(six), 0u);
+        ASSERT_EQ(out.count(ball), 1u);
+        EXPECT_EQ(out[ball].remade_at, 120u) << "its last window birth";
+        EXPECT_EQ(out[five].remade_at, 115u) << "the stamp, not the tick it was made at";
+        EXPECT_EQ(s.window_lives_, 2u);
+        EXPECT_EQ(s.generations_.at(ball), 2u) << "A's";
+        EXPECT_EQ(s.generations_.count(five), 0u);
+        EXPECT_TRUE(s.remotes_.at(6).physicalized);
+        EXPECT_FALSE(steps{core}.remake_mirror_birth(five, 121)) << "taken out already";
+        EXPECT_EQ(s.late_births_kept_, 0u) << "stamped inside the window: not the documented class";
+        from = fake.calls.size();
+        for (uint32_t t = 111; t <= 125; ++t) steps{core}.drain_pending_lives(t);
+        {
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "make_mirror:" + ball), 2u);
+            EXPECT_EQ(count_prefix(calls, "unmake_mirror:" + ball), 1u);
+            EXPECT_EQ(count_prefix(calls, "make_mirror:" + five), 1u);
+            EXPECT_EQ(count_prefix(calls, "mirror_entity:"), 0u);
+        }
+        EXPECT_EQ(s.generations_.at(ball), 5u) << "the live value";
+        EXPECT_EQ(s.generations_.at(five), 1u) << "the live value";
+        EXPECT_TRUE(s.remotes_.at(4).physicalized);
+        EXPECT_TRUE(s.remotes_.at(5).physicalized);
+        EXPECT_EQ(s.remotes_.at(5).born_tick, 115u) << "made at its stamp";
+        EXPECT_TRUE(s.remotes_.at(5).birth_known);
+    }
+
+    // L-U10: the trim keeps the last history_ticks + 128 ticks and, of the
+    // older entries, each player's newest Physicalize - so a player whose
+    // A-life began before the horizon is still revived from it - and each
+    // player's newest older entry of any kind (review finding 2: player 5's
+    // death after its kept birth stays, so the reconcile's consistency test
+    // still refuses that life).
+    TEST(SessionClientCoreLives, TheTrimKeepsEachPlayersNewestOldBirth) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        auto& s = state_of(core);
+        const uint32_t keep = static_cast<uint32_t>(s.rollback_.thresholds().history_ticks) + 128u;
+        const uint32_t late = 1000;
+        const uint32_t old_tick = late - keep - 50;
+        s.life_log_.clear();
+        for (const auto& [player, type, tick]: std::vector<std::tuple<uint32_t, bmmo::session::event_type, uint32_t>>{
+                     {4, bmmo::session::event_type::Physicalize, old_tick - 20},
+                     {4, bmmo::session::event_type::Unphysicalize, old_tick - 10},
+                     {4, bmmo::session::event_type::Physicalize, old_tick},
+                     {5, bmmo::session::event_type::Physicalize, old_tick + 5},
+                     {5, bmmo::session::event_type::Unphysicalize, old_tick + 6}}) {
+            steps{core}.log_life(event_message(player, type, tick, tick));
+        }
+        steps{core}.log_life(event_message(6, bmmo::session::event_type::Physicalize, late, late));
+        std::vector<std::pair<uint32_t, uint32_t>> left;
+        for (const auto& e: s.life_log_) left.emplace_back(e.player, e.applied);
+        EXPECT_EQ(left, (std::vector<std::pair<uint32_t, uint32_t>>{{4, old_tick}, {5, old_tick + 5}, {5, old_tick + 6}, {6, late}}));
+        EXPECT_EQ(s.life_log_[0].birth.tick, old_tick) << "the Physicalize as it came";
     }
 
     // A late birth inside the history is deferred into the replay of its
@@ -2775,7 +3312,7 @@ namespace {
             };
             world.pre_step = [&fake, &core](uint32_t tick) {
                 fake.calls.push_back("pre_step:" + std::to_string(tick));
-                if (core) steps{*core}.drain_pending_births(tick);
+                if (core) steps{*core}.drain_pending_lives(tick);
             };
             return world;
         };

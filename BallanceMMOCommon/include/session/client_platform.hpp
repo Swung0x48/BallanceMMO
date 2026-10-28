@@ -146,7 +146,8 @@ namespace bmmo::session {
     // these where design 2.4 says.
     struct core_world_hooks {
         // Before each replayed tick, first: the births deferred into the
-        // replay, made at their tick (drain_pending_births).
+        // replay, made at their tick (drain_pending_lives; with the deaths
+        // the reconcile of an ended life queued, step EL7).
         std::function<void(uint32_t tick)> before_replayed_tick;
         // The mirrors a replayed tick drives, with their generation
         // (rollback_world::replay_remotes).
@@ -194,8 +195,10 @@ namespace bmmo::session {
         // Gap L (rollback-engine gaps design 2.3.1, step EL6): the core's
         // half of rollback_world::restore_lives - the balls (own and
         // mirrors, L2/L3) - asked first by bind_session_world, before the
-        // host's mechanism half.  Unset until G7 / G8 build it: an ended
-        // ball life is then answered by no half (unrevivable, counted).
+        // host's mechanism half.  Step EL7 (G7) sets it to the mirrors'
+        // reconcile (session_client_core::reconcile_remote_lives); the own
+        // ball's half is G8's: until then an ended own life is answered by
+        // no half (unrevivable, counted).
         std::function<void(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended, bool savestate,
                            std::map<std::string, life_outcome>& out)> restore_lives;
     };

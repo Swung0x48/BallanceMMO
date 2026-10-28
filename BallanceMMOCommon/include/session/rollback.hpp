@@ -400,6 +400,11 @@ namespace bmmo::session {
         // The engine plans a revived name from its A record and a remade one
         // from its birth record (the two-half plan item); a revived body
         // stays when the blob is refused, and the per-body path writes it.
+        // Since step EL7 it is called at every restore a replay follows,
+        // `ended` possibly empty (a life born and ended inside the window
+        // is known only to the core's life log), and a name answered
+        // remade_at a stamp before its birth item's tick moves the item
+        // there (a body made after its stamp, replayed at the stamp).
         std::function<void(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended, bool savestate,
                            std::map<std::string, life_outcome>& out)> restore_lives;
         // Optional, the default way for a body born inside the window when the
@@ -2764,7 +2769,11 @@ namespace bmmo::session {
             consider(at.tracked.own_entity, life_kind::own);
             for (const auto& name: at.tracked.remote_entities) consider(name, life_kind::mirror);
             for (const auto& name: at.tracked.mechanisms) consider(name, life_kind::mechanism);
-            if (ended.empty()) return;
+            // Asked with no ended life too (step EL7, review finding 1): a
+            // mirror life born and ended inside the window was no life at A
+            // and has no body now, so no record names it here - only the
+            // core's life log knows it (2.3.3: every player with a log
+            // entry in (A, now]).
             std::map<std::string, life_outcome> out;
             world.restore_lives(anchor, current_tick, ended, savestate, out);
             stats_.lives_ended += ended.size();
@@ -2777,6 +2786,8 @@ namespace bmmo::session {
                 if (got.remade_at) {
                     restore* item = nullptr;
                     if (const auto p = plan.find(life.name); p != plan.end() && p->second.repose_tick == got.remade_at) {
+                        item = &p->second;
+                    } else if (p != plan.end() && move_to_stamp(p->second, got.remade_at)) {
                         item = &p->second;
                     } else if (const tick_state* born = find_const(got.remade_at); born) {
                         if (const auto b = born->bodies.find(life.name); b != born->bodies.end()) {
@@ -2836,6 +2847,39 @@ namespace bmmo::session {
                               + (life.reborn_at ? "; its later life is born at " + std::to_string(life.reborn_at) : std::string())
                               + " (" + std::to_string(stats_.lives_unrevivable) + " so far)");
             }
+            // Gap L, L2 (step EL7): a later life a half took out and the
+            // replay makes again (remade_at) under a name that ended no life
+            // here - the headless host names one mirror clone per life, so
+            // the reconcile of the ended life takes the player's later
+            // clone out under its own name, and a player whose window lives
+            // the reconcile replays (no ended A-life) has its body now taken
+            // out under whatever name it has: its birth item is recreated,
+            // not destroyed by the loop below.
+            std::set<std::string> ended_names;
+            for (const ended_life& life: ended) ended_names.insert(life.name);
+            for (const auto& [name, got]: out) {
+                if (!got.remade_at || ended_names.count(name)) continue;
+                const auto p = plan.find(name);
+                if (p == plan.end() || p->second.recreate) continue;
+                if (p->second.repose_tick != got.remade_at && !move_to_stamp(p->second, got.remade_at)) continue;
+                p->second.recreate = true;
+                p->second.from_inputs = world.birth_from_inputs && world.birth_from_inputs(name);
+                ++stats_.lives_remade;
+            }
+        }
+
+        // Step EL7 (review finding 3): a birth item planned at the tick the
+        // body was made (its first record, L) for a life a half makes again
+        // at its stamp E < L (the RC stamp rule: a body made live after its
+        // stamp - a refused or too-deep lifecycle rewind's fallback - is
+        // replayed at the stamp).  The item moves to E; its birth half stays
+        // L's record, which a body made from the inputs is only compared
+        // with (births_recreated_exact or a logged difference).
+        static bool move_to_stamp(restore& item, uint32_t stamp) {
+            if (!item.repose_tick || item.recreate || item.revived_until) return false;
+            if (static_cast<int32_t>(stamp - item.repose_tick) >= 0) return false;
+            item.repose_tick = stamp;
+            return true;
         }
 
         // The oldest record that carries `entity` in its current lifetime: the

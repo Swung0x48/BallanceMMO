@@ -160,6 +160,16 @@ namespace bmmo::session {
             // nothing of the remote's live state touched but its body and
             // navigation.
             bool remake = false;
+            // Gap L, L2 (rollback-engine gaps design 2.3.3, step EL7): the
+            // mirror entity the live event made, filled from the life log -
+            // physicalize_remote then makes that entity and never mints a
+            // new one (mirror_entity).  Empty: a birth not made yet (its
+            // first make mints it, as before).
+            std::string entity;
+            // Queued by the reconcile of an ended life (reconcile_remote_
+            // lives): one that no replay made is made live after the rewind
+            // (settle_unreplayed_lives), as it was before the rewind.
+            bool reconciled = false;
             static pending_birth of(const bmmo::session_event_msg& event) {
                 pending_birth b;
                 b.player = event.player; b.tick = event.tick; b.origin = event.origin_tick;
@@ -252,7 +262,7 @@ namespace bmmo::session {
         uint8_t input_delay_ = 6;
         uint64_t life_rewinds_ = 0, life_rewinds_missed_ = 0;
         // Births stamped in the past, waiting to be made inside a replay at
-        // their tick (apply_event / drain_pending_births).
+        // their tick (apply_event / drain_pending_lives).
         std::vector<pending_birth> pending_births_;
         uint64_t input_rewinds_ = 0, input_rewinds_missed_ = 0;
         uint64_t forced_rollbacks_ = 0, forced_rollbacks_missed_ = 0;
@@ -577,6 +587,28 @@ namespace bmmo::session {
         // could make again (left bodiless).  The engine's births_recreated
         // counts the remakes too, among the mechanisms it re-creates.
         uint64_t mirror_remakes_ = 0, mirror_remakes_lost_ = 0;
+        // Gap L, L2 (step EL7): mirror lives alive at an anchor and ended
+        // inside the window that the reconcile made again (revived) or could
+        // not (revive_failed: no log entry, an inconsistent log, a refused
+        // make, the parked arm); window events no replay applied, made live
+        // after the rewind (settled); late births kept on the parking path
+        // (made live after their stamp: the RC stamp rule's documented
+        // class).
+        uint64_t mirror_revives_ = 0, mirror_revive_failures_ = 0, lives_settled_live_ = 0, late_births_kept_ = 0;
+        // Players whose window lives the reconcile replayed with no ended
+        // A-life (a life born and ended inside the window, two births in it,
+        // or a body made after a stamp inside it; review finding 1).
+        uint64_t window_lives_ = 0;
+        // The anchor of the restore being planned (set by the reconcile,
+        // which every restore with a replay asks): late_births_kept counts
+        // only births stamped at or before it, once per (player, stamp).
+        uint32_t lives_anchor_ = 0;
+        std::set<std::pair<uint32_t, uint32_t>> late_births_counted_;
+        // Every mirror entity this session made (step EL7): the binding's
+        // mirror test knows a life's entity after the remote moved on to
+        // another (a later life the reconcile takes out and the replay
+        // makes again from its inputs).
+        std::set<std::string> mirror_entities_;
         uint64_t births_overtaken_ = 0;   // older births dropped (same tick) or re-ordered (earlier) behind a death
         bool resync_pending_ = false;
         // ---- step A3: the exact resync (resync design 2.6) ----
@@ -585,6 +617,9 @@ namespace bmmo::session {
         // the history is anchored there (the synthetic anchor), and the
         // state is applied as that tick and re-stepped to the live one.
         bool resync_exact_ = false;
+        // Step EL7: an exact resync's restore is running (the ended-life
+        // reconcile leaves its mirrors to the resync's own, 2.6.3).
+        bool resync_restoring_ = false;
         uint32_t resync_base_ = 0;
         uint32_t resync_old_tick_ = 0;      // R: the old numbering's tick at the re-assign
         int64_t resync_delta_ = 0;          // delta = R - (base - 1)
@@ -613,15 +648,37 @@ namespace bmmo::session {
         // Every remote lifecycle event this world applied, by applied tick
         // (a shared tick), the last history_ticks + 128 ticks: the
         // reconcile's evidence for a mirror born or dead after S (2.6.3).
+        // Gap L, L2 (rollback-engine gaps design 2.3.3, step EL7): the
+        // evidence of the ended mirror lives' reconcile too.  `applied` is
+        // the event's stamp (its applied tick from the server); `made_at`
+        // the tick this world applied it (the stamp inside a replay or a
+        // lifecycle rewind, the live tick otherwise; 0 until applied);
+        // `birth` the Physicalize as it came (pose, recipe, ball type,
+        // flags, origin); `entity` the mirror entity the event made or
+        // removed and `generation` the one it gave that entity; `skipped`:
+        // the event changed no body here (an overtaken birth dropped, a
+        // superseded death, a death of no mirror).  Made before the event's
+        // own rewind; the trim keeps each player's newest Physicalize older
+        // than the horizon besides every newer entry (log_life).
         struct life_entry {
             uint32_t applied = 0, origin = 0, player = 0;
             bmmo::session::event_type type = bmmo::session::event_type::Physicalize;
+            uint32_t made_at = 0;
+            pending_birth birth;
+            std::string entity;
+            uint32_t generation = 0;
+            bool skipped = false;
         };
         std::deque<life_entry> life_log_;
-        // Deaths re-applied inside a resync's replay at their tick (a mirror
-        // made from its row at S whose Unphysicalize came after S).
+        // Deaths re-applied inside a replay at their tick: a resync's (a
+        // mirror made from its row at S whose Unphysicalize came after S)
+        // and, since step EL7, the window deaths the reconcile of an ended
+        // life queues (`reconciled`).  `origin` orders them among the
+        // tick's births (drain_pending_lives: the server's order).
         struct pending_death {
             uint32_t player = 0, tick = 0;
+            uint32_t origin = 0;
+            bool reconciled = false;
         };
         std::vector<pending_death> pending_deaths_;
         // The re-step window (S, applied_at] of the last exact resync applied
@@ -790,6 +847,13 @@ namespace bmmo::session {
         // since R3).  Needs `rollback` too; the headless client leaves it
         // on, so with it its behaviour is today's `rollback` alone.
         bool lifecycle_rewind = true;
+        // Gap L, L2 (rollback-engine gaps design 2.3.3, L-H6's control arm;
+        // step EL7): true = a mirror born inside a rewind's window keeps the
+        // parking path (no step LB remake, and the reconcile of an ended
+        // life does not take a later life out, so it revives only a player
+        // with no body now).  Default false; headless
+        // --remote-births-parked.
+        bool remote_births_parked = false;
         // Retail policy (design 4.1; R1), off by default (the headless
         // client never sets it).  `own_body_backstop`: 30 snapshots in a row
         // without a body of ours while our ball is physicalized re-report its
@@ -1226,8 +1290,32 @@ namespace bmmo::session {
         // union's pass, with our own changes due at the tick at our place.
         void apply_held_lifecycle(uint32_t frame_tick);
         // Before a replayed tick (the binding's before_replayed_tick): the
-        // births deferred into the replay, made at their tick.
-        void drain_pending_births(uint32_t tick);
+        // remote births and deaths deferred into the replay (the window
+        // events the reconcile queued, a late birth's, a resync's deaths),
+        // applied at their tick in the server's order with our own lives due
+        // at the tick at our place (step EL7: was drain_pending_births).
+        void drain_pending_lives(uint32_t tick);
+        // Gap L, L2 (rollback-engine gaps design 2.3.3, step EL7): the core's
+        // half of rollback_world::restore_lives for the mirrors - each mirror
+        // life alive at `anchor` that ends inside the window is made again
+        // from its life log entry at the anchor record's pose (no kick), the
+        // player's later lives in the window taken out, and every window
+        // event of that player queued at its stamp; answered per name.
+        // Then the other players whose window LB cannot replay (a life born
+        // and ended in it, two births, a body made after a stamp in it):
+        // the body now out, every window event queued (review finding 1).
+        void reconcile_remote_lives(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended,
+                                    std::map<std::string, life_outcome>& out);
+        // After a rewind: the reconcile's queued events no replay applied
+        // (the replay stopped short), made live in stamp order.
+        void settle_unreplayed_lives(uint32_t now);
+        // The life log entry of a remote event that was just applied here:
+        // the entity it made or removed, its generation, where it was made.
+        void note_life_made(uint32_t player, bmmo::session::event_type type, uint32_t stamp, uint32_t origin,
+                            const std::string& entity, uint32_t made_at);
+        void note_life_skipped(uint32_t player, bmmo::session::event_type type, uint32_t stamp, uint32_t origin);
+        // The player whose mirror `entity` is or was (the life log), 0 none.
+        uint32_t mirror_player_of(const std::string& entity) const;
         // A physicalized mirror without navigation is driven from now on, if
         // the host has the navigation (post_step step 16, and every birth).
         void attach_remote_navigation(uint32_t player, client_core_state::remote_ball& remote, bool quiet = false);
@@ -1235,7 +1323,7 @@ namespace bmmo::session {
         // remake_mirror_birth, step LB): the mirror born at `birth_tick` is
         // taken out (body and navigation) and its birth queued again, so the
         // replay makes it at that tick the way it was made first
-        // (drain_pending_births).  False, and nothing done, when `entity` is
+        // (drain_pending_lives).  False, and nothing done, when `entity` is
         // not a mirror whose birth at that tick is known, or without the
         // lifecycle rewind.
         bool remake_mirror_birth(const std::string& entity, uint32_t birth_tick);

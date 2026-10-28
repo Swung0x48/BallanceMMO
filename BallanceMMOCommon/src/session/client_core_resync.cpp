@@ -118,16 +118,57 @@ namespace bmmo::session {
         // each asking for a rewind past max_resim_ticks after it.
     }
 
+    // Gap L, L2 (rollback-engine gaps design 2.3.3, step EL7): the entry
+    // carries the event (a Physicalize's pose, recipe, ball type, flags and
+    // origin) and later the entity it made or removed (note_life_made); it
+    // is made before the event's own rewind.  The trim keeps every entry of
+    // the last history_ticks + 128 ticks and, of the older ones, each
+    // player's newest Physicalize: the A-life of any anchor in the history
+    // is the player's newest Physicalize stamped at or before it, and when
+    // that is older than the horizon no Physicalize of the player lies
+    // between it and the horizon, so it is the kept entry.  Each player's
+    // newest older entry of any kind stays too (review finding 2): a death
+    // after that birth, trimmed, would let the reconcile's consistency test
+    // pass and revive a life that is over (an exact resync makes a mirror
+    // from its row with no log entry, which a stale birth would then
+    // stand in for).
     void session_client_core::log_life(const bmmo::session_event_msg& event) {
         client_core_state::life_entry entry;
         entry.applied = event.tick;
         entry.origin = event.origin_tick;
         entry.player = event.player;
         entry.type = event.type;
+        if (event.type == bmmo::session::event_type::Physicalize) entry.birth = client_core_state::pending_birth::of(event);
         s.life_log_.push_back(std::move(entry));
         const uint32_t keep = static_cast<uint32_t>(s.rollback_.thresholds().history_ticks) + 128u;
-        while (!s.life_log_.empty() && static_cast<int32_t>(s.life_log_.front().applied + keep - event.tick) < 0)
-            s.life_log_.pop_front();
+        const auto old = [&](const client_core_state::life_entry& e) {
+            return static_cast<int32_t>(e.applied + keep - event.tick) < 0;
+        };
+        if (s.life_log_.empty() || !old(s.life_log_.front())) return;
+        // Of the old entries, each player's newest Physicalize stays, and
+        // its newest entry of any kind (a death after that birth).
+        std::map<uint32_t, size_t> newest_old_birth, newest_old_entry;
+        const auto newer = [&](std::map<uint32_t, size_t>& newest, const client_core_state::life_entry& e, size_t i) {
+            const auto [it, fresh] = newest.try_emplace(e.player, i);
+            if (!fresh && static_cast<int32_t>(e.applied - s.life_log_[it->second].applied) >= 0) it->second = i;
+        };
+        for (size_t i = 0; i < s.life_log_.size(); ++i) {
+            const auto& e = s.life_log_[i];
+            if (!old(e) || e.skipped) continue;
+            newer(newest_old_entry, e, i);
+            if (e.type == bmmo::session::event_type::Physicalize) newer(newest_old_birth, e, i);
+        }
+        const auto is_kept = [](const std::map<uint32_t, size_t>& newest, uint32_t player, size_t i) {
+            const auto it = newest.find(player);
+            return it != newest.end() && it->second == i;
+        };
+        std::deque<client_core_state::life_entry> kept;
+        for (size_t i = 0; i < s.life_log_.size(); ++i) {
+            auto& e = s.life_log_[i];
+            if (old(e) && !is_kept(newest_old_birth, e.player, i) && !is_kept(newest_old_entry, e.player, i)) continue;
+            kept.push_back(std::move(e));
+        }
+        s.life_log_.swap(kept);
     }
 
     void session_client_core::drain_pending_deaths(uint32_t tick) {
@@ -195,18 +236,19 @@ namespace bmmo::session {
         // The deaths after S this world applied already (2.6.3: a mirror
         // row at S whose Unphysicalize came after S): made from the row,
         // killed again at its tick in the replay.
-        const auto death_after = [&](uint32_t player, uint32_t& tick) {
+        const auto death_after = [&](uint32_t player, uint32_t& tick, uint32_t& origin) {
             for (auto it = s.life_log_.rbegin(); it != s.life_log_.rend(); ++it)
                 if (it->player == player && it->type == event_type::Unphysicalize
                         && static_cast<int32_t>(it->applied - anchor) > 0) {
                     tick = it->applied;
+                    origin = it->origin;
                     return true;
                 }
             return false;
         };
         std::map<std::string, const body_state*> rows;
         std::vector<std::string> waiting;
-        std::vector<std::pair<uint32_t, uint32_t>> deaths;   // player, tick: mirrors made from their row
+        std::vector<std::tuple<uint32_t, uint32_t, uint32_t>> deaths;   // player, tick, origin: mirrors made from their row
         uint32_t unmapped = 0;
         for (const auto& body: st.rows) {
             if (body.kind == body_kind::Ball) {
@@ -220,9 +262,9 @@ namespace bmmo::session {
                     rows[it->second.entity] = &body;
                     continue;
                 }
-                uint32_t died = 0;
-                if (it != s.remotes_.end() && it->second.birth_known && death_after(body.owner, died)) {
-                    deaths.emplace_back(body.owner, died);
+                uint32_t died = 0, died_origin = 0;
+                if (it != s.remotes_.end() && it->second.birth_known && death_after(body.owner, died, died_origin)) {
+                    deaths.emplace_back(body.owner, died, died_origin);
                     continue;
                 }
                 waiting.push_back("ball of " + std::to_string(body.owner));
@@ -304,7 +346,7 @@ namespace bmmo::session {
         // past `now` (Delta > 0: the old numbering ran further than the new
         // one has; pre_step drains it then).  Made before the renames and the
         // navigation below, which name every mirror the blob must find.
-        for (const auto& [player, died]: deaths) {
+        for (const auto& [player, died, died_origin]: deaths) {
             auto& remote = s.remotes_[player];
             bool made = false;
             {
@@ -315,7 +357,11 @@ namespace bmmo::session {
                 attach_remote_navigation(player, remote, true);
                 for (const auto& body: st.rows)
                     if (body.kind == body_kind::Ball && body.owner == player) rows[remote.entity] = &body;
-                s.pending_deaths_.push_back({player, died});
+                client_core_state::pending_death death;
+                death.player = player;
+                death.tick = died;
+                death.origin = died_origin;
+                s.pending_deaths_.push_back(death);
                 logf("resync: mirror of %u made from its row at S %u, its death at %u applied again %s", player, anchor,
                      died, static_cast<int32_t>(died - now) <= 0 ? "in the replay" : "live");
             } else {
@@ -447,8 +493,12 @@ namespace bmmo::session {
             const scope_guard keep_cells = platform_.keep_live_cells(*this);
             rd.active = true;
             s.last_rewind_rederived_ = true;
+            // Step EL7: the mirrors are this apply's own reconcile (2.6.3,
+            // the deaths after S above), not the ended-life reconcile's.
+            s.resync_restoring_ = true;
             ok = s.rollback_.resync(world(), anchor, now, spec, input_at, restored,
                                     "resync from the server's tick " + std::to_string(anchor));
+            s.resync_restoring_ = false;
             rd.active = false;
             if (!ok) s.last_rewind_rederived_ = false;
         }

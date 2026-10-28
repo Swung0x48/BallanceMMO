@@ -186,7 +186,7 @@ namespace bmmo::session {
             static_cast<unsigned long long>(s.trafo_set_failures_), static_cast<unsigned long long>(s.trafo_run_failures_),
             static_cast<unsigned long long>(s.trafo_unmade_), static_cast<unsigned long long>(s.trafo_remade_),
             static_cast<unsigned long long>(s.trafo_retired_), s.trafo_log_.size());
-        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu remake=%llu/%llu snapshots=%llu/%llu/%llu "
+        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                      "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu unmatched_run=%d/%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu parked=%llu missing=%llu lives=%llu/%llu/%llu/%llu/%llu/%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
@@ -220,6 +220,17 @@ namespace bmmo::session {
                      // birth tick inside a replay (or live after it), and those
                      // made again neither in the replay nor live (bodiless).
                      static_cast<unsigned long long>(s.mirror_remakes_), static_cast<unsigned long long>(s.mirror_remakes_lost_),
+                     // mlives=revived/failed/settled/kept/window (gap L, L2, step EL7):
+                     // mirror lives ended inside a window that the reconcile
+                     // made again, those it could not, the window events no
+                     // replay applied (made live after the rewind), and the
+                     // late births kept on the parking path (the RC stamp
+                     // rule's documented class: stamped at or before the
+                     // anchor, once per birth), and the players whose window
+                     // lives were replayed with no ended A-life (window).
+                     static_cast<unsigned long long>(s.mirror_revives_), static_cast<unsigned long long>(s.mirror_revive_failures_),
+                     static_cast<unsigned long long>(s.lives_settled_live_), static_cast<unsigned long long>(s.late_births_kept_),
+                     static_cast<unsigned long long>(s.window_lives_),
                      static_cast<unsigned long long>(s.snapshots_received_),
                      static_cast<unsigned long long>(s.snapshots_applied_), static_cast<unsigned long long>(s.snapshots_stale_),
                      static_cast<unsigned long long>(s.life_rewinds_), static_cast<unsigned long long>(s.life_rewinds_missed_),

@@ -1545,11 +1545,15 @@ TEST(RollbackEngine, EndedLivesAreFoundByTheirGenerationAndHandedOverBeforeTheSc
     EXPECT_EQ(engine.stats().lives_unrevivable, 1u) << "answered by no half";
     EXPECT_EQ(world.count("log lives: Gone (alive at tick 2, generation 1) ended at tick 5"), 1) << "logged by name";
 
-    // An anchor after the end: no ended life.  A frozen clock: no replay, no call.
+    // An anchor after the end: no ended life, but the halves are still asked
+    // (step EL7: a window life only the core's log knows).  A frozen clock:
+    // no replay, no call.
     handed.clear();
     world.calls.clear();
     ASSERT_TRUE(engine.rewind_to(w, 6, 8, no_input, "test"));
-    EXPECT_EQ(world.count("restore_lives"), 0) << "nothing ended inside (6, 8]";
+    EXPECT_EQ(world.count("restore_lives"), 1) << "asked with nothing ended inside (6, 8]";
+    EXPECT_TRUE(handed.empty());
+    EXPECT_EQ(engine.stats().lives_ended, 1u) << "unchanged";
     world.clock_running = false;
     world.calls.clear();
     ASSERT_TRUE(engine.rewind_to(w, 7, 8, no_input, "test"));
@@ -1638,6 +1642,145 @@ TEST(RollbackEngine, ARevivedLifeWithALaterBirthIsPlannedInTwoHalves) {
         // The A half: covered by the blob (no write), else written from the
         // A record once; the birth half is never written (it landed exactly).
         EXPECT_EQ(world.count("set_body Prop"), blob ? 0 : 1);
+    }
+}
+
+// Gap L, L2 (step EL7): the headless host names one mirror clone per life,
+// so the later life of an ended one has a name of its own that was no life at
+// A.  The half that revives the A-life takes it out and answers remade_at for
+// that name; the engine then recreates its birth item (the destroy loop
+// leaves it alone) and compares it with its birth record after the replay
+// made it again.
+TEST(RollbackEngine, ALaterLifeUnderAnotherNameIsRemadeNotDestroyed) {
+    for (const bool blob: {true, false}) {
+        SCOPED_TRACE(blob ? "blob path" : "per-body path");
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Old"].position[0] = 10.0;
+        world.bodies["Old"].linear[0] = 3.0f;
+        rollback_engine engine;
+        engine.set_exact_restore(blob);
+        auto w = world.adapter();
+        fake_body reborn;
+        reborn.position[0] = 30.0;
+        reborn.linear[0] = -1.0f;
+        std::map<uint32_t, bool> old_before_step, new_before_step;
+        bool replaying = false;
+        w.pre_step = [&](uint32_t tick) {
+            if (tick == 4) world.bodies.erase("Old");
+            if (tick == 6) world.bodies["New"] = reborn;
+            if (replaying) {
+                old_before_step[tick] = world.bodies.contains("Old");
+                new_before_step[tick] = world.bodies.contains("New");
+            }
+        };
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return world.bodies.erase(entity) > 0;
+        };
+        w.birth_from_inputs = [](const std::string& entity) { return entity == "New"; };
+        w.restore_lives = [&](uint32_t, uint32_t, const std::vector<bmmo::session::ended_life>& ended, bool,
+                              std::map<std::string, bmmo::session::life_outcome>& out) {
+            for (const auto& life: ended) {
+                ASSERT_EQ(life.name, "Old");
+                EXPECT_EQ(life.end_tick, 4u);
+                EXPECT_EQ(life.reborn_at, 0u) << "the later life has another name";
+                world.bodies.erase("New");                // the later life, taken out
+                world.bodies["Old"] = fake_body{};       // the A-life again
+                out["Old"].revived_until = life.end_tick;
+                out["New"].remade_at = 6;
+            }
+        };
+        std::map<uint32_t, fake_body> live_new;
+        for (uint32_t tick = 1; tick <= 8; ++tick) {
+            w.pre_step(tick);
+            w.step();
+            rollback_tracked tracked;
+            if (tick < 4) tracked.mechanisms = {"Old"};
+            if (tick >= 6) tracked.mechanisms = {"New"};
+            tracked.generations = {{"Old", tick < 4 ? 1u : 2u}};
+            if (tick >= 6) tracked.generations["New"] = 1;
+            engine.record(w, tick, tracked, {});
+            if (world.bodies.contains("New")) live_new[tick] = world.bodies["New"];
+        }
+        world.calls.clear();
+        replaying = true;
+        ASSERT_TRUE(engine.rewind_to(w, 2, 8, no_input, "test"));
+        EXPECT_EQ(engine.stats().lives_ended, 1u);
+        EXPECT_EQ(engine.stats().lives_revived_mech, 1u);
+        EXPECT_EQ(engine.stats().lives_remade, 1u) << "the other name's birth item";
+        EXPECT_EQ(engine.stats().lives_unrevivable, 0u);
+        EXPECT_EQ(world.count("destroy New"), 0) << "taken out by the half, not by the destroy loop";
+        EXPECT_EQ(engine.stats().birth_recreate_failures, 0u);
+        EXPECT_TRUE(old_before_step[3]);
+        EXPECT_FALSE(new_before_step[5]);
+        EXPECT_TRUE(new_before_step[6]);
+        EXPECT_EQ(engine.stats().births_recreated_exact, 1u) << "the later life on its birth record at 6";
+        EXPECT_EQ(world.bodies["New"].position[0], live_new[8].position[0]);
+    }
+}
+
+// Step EL7 (review findings 1 and 3): the halves are asked with no ended life
+// too (a window life only the core's log knows), and a birth item planned at
+// the tick its body was made (6) for a life a half makes again at its stamp
+// (5: a body made live after its stamp) moves to the stamp and is recreated,
+// not destroyed by the loop below and not counted unrevivable.
+TEST(RollbackEngine, AWindowBirthMadeAfterItsStampIsRemadeAtTheStamp) {
+    for (const bool blob: {true, false}) {
+        SCOPED_TRACE(blob ? "blob path" : "per-body path");
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Remote"].position[0] = 5.0;
+        world.navs["Remote"] = {};
+        rollback_engine engine;
+        engine.set_exact_restore(blob);
+        auto w = world.adapter();
+        fake_body born;
+        born.position[0] = 30.0;
+        std::map<uint32_t, bool> new_before_step;
+        bool replaying = false;
+        w.pre_step = [&](uint32_t tick) {
+            if (tick == (replaying ? 5u : 6u)) world.bodies["New"] = born;
+            if (replaying) new_before_step[tick] = world.bodies.contains("New");
+        };
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return world.bodies.erase(entity) > 0;
+        };
+        w.birth_from_inputs = [](const std::string& entity) { return entity == "New"; };
+        int asked = 0;
+        w.restore_lives = [&](uint32_t, uint32_t, const std::vector<bmmo::session::ended_life>& ended, bool,
+                              std::map<std::string, bmmo::session::life_outcome>& out) {
+            ++asked;
+            EXPECT_TRUE(ended.empty());
+            world.bodies.erase("New");   // the body now, taken out by the half
+            out["New"].remade_at = 5;
+        };
+        rollback_tracked base;
+        base.remote_entities = {"Remote"};
+        for (uint32_t tick = 1; tick <= 8; ++tick) {
+            w.pre_step(tick);
+            w.step();
+            rollback_tracked tracked = base;
+            if (tick >= 6) {
+                tracked.remote_entities.push_back("New");
+                tracked.generations = {{"New", 1u}};
+            }
+            engine.record(w, tick, tracked, {{"Remote", input_frame{}}});
+        }
+        world.calls.clear();
+        replaying = true;
+        ASSERT_TRUE(engine.rewind_to(w, 2, 8, no_input, "test"));
+        EXPECT_EQ(asked, 1) << "asked with no ended life";
+        EXPECT_EQ(engine.stats().lives_ended, 0u);
+        EXPECT_EQ(engine.stats().lives_remade, 1u);
+        EXPECT_EQ(engine.stats().lives_unrevivable, 0u);
+        EXPECT_EQ(world.count("destroy New"), 0) << "taken out by the half";
+        EXPECT_EQ(engine.stats().birth_recreate_failures, 0u);
+        EXPECT_EQ(engine.stats().births_missing, 0u) << "made at the stamp the item moved to";
+        EXPECT_FALSE(new_before_step[4]);
+        EXPECT_TRUE(new_before_step[5]);
+        EXPECT_TRUE(world.bodies.contains("New"));
     }
 }
 

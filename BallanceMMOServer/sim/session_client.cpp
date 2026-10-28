@@ -253,6 +253,9 @@ namespace {
         uint32_t script_diff_logs = 8;           // --script-diff-logs N: how many "scripts re-executed ... differ" lines to log
         // --trace-plan: log which branch every body of a restore took.
         bool trace_plan = false;
+        // --remote-births-parked (gap L, L-H6's control arm, step EL7): a
+        // mirror born inside a rewind's window keeps the parking path.
+        bool remote_births_parked = false;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
@@ -577,6 +580,7 @@ namespace {
             else if (arg == "--script-diff-logs") { if (!(v = next())) return false; out.script_diff_logs = static_cast<uint32_t>(std::atoi(v)); }
             else if (arg == "--savestate-strict") out.savestate_strict = true;
             else if (arg == "--trace-plan") out.trace_plan = true;
+            else if (arg == "--remote-births-parked") out.remote_births_parked = true;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
@@ -1646,6 +1650,7 @@ namespace {
             c.savestate = args_.savestate;
             c.script_diff_logs = args_.script_diff_logs;
             c.trace_plan = args_.trace_plan;
+            c.remote_births_parked = args_.remote_births_parked;
             c.rollback = args_.rollback;
             c.correct = args_.correct;
             c.trace = args_.trace;
@@ -3330,7 +3335,7 @@ namespace {
         // shared core at E7 (client_core_lifecycle.cpp).
 
         // join_rank, rewind_for_lifecycle, unphysicalize_remote,
-        // make_remote_birth, apply_event, drain_pending_births, the event log's
+        // make_remote_birth, apply_event, drain_pending_lives, the event log's
         // mute, live_first_tick, unphysicalize_mirror, live_drive,
         // physicalize_remote and attach_remote_navigation moved into the shared
         // core at E6 (client_core_lifecycle.cpp); the mirrors' platform half is
