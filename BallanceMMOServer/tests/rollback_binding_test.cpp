@@ -569,7 +569,8 @@ TEST(RollbackBinding, SessionWorldHandsAMirrorsBirthToTheCore) {
 // P) - destroyed muted, put back from its birth, unmuted, a failure reported.
 // revive_body (step P): a mechanism the window destroyed made again, muted,
 // from the birth of the lifetime it had at the anchor, never a ball, only
-// one the host calls revivable (none without the predicate).
+// one the host calls revivable (none without the predicate), read from the
+// finished world (gap L, L4: bind_script_replay widens it).
 // insert_birth only when asked, from the tick's own birth; the birth log
 // behind birth_tick_of and birth_order; --park-births installs no destroy
 // and no revive.  The host's savestate flags pass unchanged (step P: the
@@ -592,6 +593,7 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     hooks.ball = [](const std::string& entity) { return entity == "Ball_Wood"; };
     bmmo::session::local_birth_log births;
     births.add(119, birth_of("P_Gate", 6.0f));
+    births.add(119, birth_of("P_Selected", 7.0f));
     births.add(120, birth_of("P_Box", 1.0f));
     births.add(120, birth_of("P_Plank", 2.0f));
     births.add(122, birth_of("P_Box", 3.0f));
@@ -612,8 +614,18 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     w.on_destroy_failed = [&](const std::string& entity, const std::string& error) {
         order.push_back("destroy failed " + entity + ": " + error);
     };
+    std::vector<std::string> wrapped_destroys;
     w.bind_scripts = [&](rollback_world& world) {
         order.push_back("scripts bound");
+        // Gap L, L4 (step EL9): what bind_script_replay does - the revivable
+        // set widened by the selection's bodies, destroy_body wrapped.
+        const auto base = world.revivable;
+        world.revivable = [base](const std::string& entity) { return base(entity) || entity == "P_Selected"; };
+        const auto destroy = world.destroy_body;
+        world.destroy_body = [&wrapped_destroys, destroy](const std::string& entity, uint32_t birth_tick) {
+            wrapped_destroys.push_back(entity + " " + std::to_string(birth_tick));
+            return destroy(entity, birth_tick);
+        };
         const auto before = world.pre_step;
         world.pre_step = [&order, before](uint32_t tick) {
             before(tick);
@@ -680,9 +692,12 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     EXPECT_FALSE(world.revive_body("Own_Body", 130));
     EXPECT_FALSE(world.revive_body("Mirror_Box", 130));
     EXPECT_FALSE(world.revive_body("P_Gate", 130)) << "alive at 130, but not revivable";
+    EXPECT_TRUE(world.revive_body("P_Selected", 130)) << "revivable by the selection (bind_scripts widened it)";
     EXPECT_EQ(backend.calls, std::vector<std::string>({"mute", "physicalize P_Box", "unmute", "mute",
-                                                       "physicalize Ball_Stone_piece01", "unmute"}));
-    EXPECT_EQ(order, std::vector<std::string>({"put back P_Box 1", "put back Ball_Stone_piece01 4"}));
+                                                       "physicalize Ball_Stone_piece01", "unmute", "mute",
+                                                       "physicalize P_Selected", "unmute"}));
+    EXPECT_EQ(order, std::vector<std::string>({"put back P_Box 1", "put back Ball_Stone_piece01 4", "put back P_Selected 7"}));
+    order.clear();
     backend.calls.clear();
     backend.refuse_writes = true;
     EXPECT_FALSE(world.revive_body("P_Plank", 130)) << "the make refused";
@@ -690,41 +705,94 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     backend.refuse_writes = false;
 
     // restore_lives (gap L, L1; rollback-engine gaps design 2.3.1, step
-    // EL6): no core half here; the host's is step P's revive moved
-    // unchanged - only with the savestate, only a mechanism with no body now
-    // and no later life born inside the window, through revive_body (the
-    // revivable set, the A-life's birth), in the order given; the answer is
-    // revived until the life's end.
+    // EL6; L4, 2.3.5, step EL9): no core half here; the host's is step P's
+    // revive generalized - on the savestate and the per-body path alike, a
+    // mechanism with no body now through revive_body (the revivable set as
+    // bind_scripts widened it, the A-life's birth), in the order given,
+    // revived until the life's end; a name born again inside the window has
+    // its later life (a body now) destroyed first through the wrapped
+    // destroy_body, before every revive, and goes out revived until its end
+    // and remade at its rebirth; a later life is never taken out for a name
+    // that cannot be revived (not revivable, no A-life known).
     {
         using bmmo::session::ended_life;
         using bmmo::session::life_kind;
         ASSERT_TRUE(world.restore_lives);
-        backend.bodiless = {"Ball_Wood", "Ball_Stone_piece01", "P_Box", "P_Plank", "P_Gate"};
+        backend.bodiless = {"Ball_Wood", "Ball_Stone_piece01", "P_Box", "P_Selected"};
         const std::vector<ended_life> ended = {
             {"Ball_Wood", 1, 140, 0, life_kind::own},             // a ball: the core's half
             {"Ball_Stone_piece01", 1, 135, 0, life_kind::mechanism},
-            {"P_Plank", 1, 133, 138, life_kind::mechanism},       // born again at 138: the known gap until G9
+            {"P_Plank", 1, 133, 138, life_kind::mechanism},       // born again at 138, that life has a body now
             {"P_Box", 2, 131, 0, life_kind::mechanism},
-            {"P_Gate", 1, 132, 0, life_kind::mechanism},          // not revivable
+            {"P_Gate", 1, 132, 137, life_kind::mechanism},        // not revivable: its later life stays
+            {"P_Unborn", 1, 132, 136, life_kind::mechanism},      // no A-life known: its later life stays
+            {"P_Selected", 1, 134, 0, life_kind::mechanism},      // revivable by the selection
             {"P_Alive", 1, 134, 0, life_kind::mechanism}};        // a body now: nothing to make
-        std::map<std::string, bmmo::session::life_outcome> out;
-        backend.calls.clear();
-        order.clear();
-        world.restore_lives(130, 140, ended, false, out);
-        EXPECT_TRUE(out.empty()) << "the per-body path: step P's revive is savestate-only until G9";
-        EXPECT_TRUE(backend.calls.empty());
-        world.restore_lives(130, 140, ended, true, out);
-        ASSERT_EQ(out.size(), 2u);
-        EXPECT_EQ(out.at("Ball_Stone_piece01").revived_until, 135u);
-        EXPECT_EQ(out.at("P_Box").revived_until, 131u);
-        EXPECT_EQ(out.at("P_Box").remade_at, 0u);
-        std::vector<std::string> made;
-        for (const auto& call: backend.calls)
-            if (call.rfind("physicalize ", 0) == 0) made.push_back(call);
-        EXPECT_EQ(made, std::vector<std::string>({"physicalize Ball_Stone_piece01", "physicalize P_Box"}));
-        EXPECT_EQ(order, std::vector<std::string>({"put back Ball_Stone_piece01 4", "put back P_Box 3"}))
-            << "P_Box's life at 130 is the birth of 122";
-        backend.bodiless.clear();
+        for (const bool savestate: {false, true}) {
+            SCOPED_TRACE(savestate ? "savestate" : "per-body");
+            std::map<std::string, bmmo::session::life_outcome> out;
+            backend.calls.clear();
+            order.clear();
+            wrapped_destroys.clear();
+            world.restore_lives(130, 140, ended, savestate, out);
+            ASSERT_EQ(out.size(), 4u);
+            EXPECT_EQ(out.at("Ball_Stone_piece01").revived_until, 135u);
+            EXPECT_EQ(out.at("Ball_Stone_piece01").remade_at, 0u);
+            EXPECT_EQ(out.at("P_Plank").revived_until, 133u);
+            EXPECT_EQ(out.at("P_Plank").remade_at, 138u);
+            EXPECT_EQ(out.at("P_Box").revived_until, 131u);
+            EXPECT_EQ(out.at("P_Box").remade_at, 0u);
+            EXPECT_EQ(out.at("P_Selected").revived_until, 134u);
+            EXPECT_EQ(wrapped_destroys, std::vector<std::string>({"P_Plank 138"})) << "through the wrapped destroy_body";
+            std::vector<std::string> made;
+            for (const auto& call: backend.calls)
+                if (call.rfind("physicalize ", 0) == 0 || call.rfind("unphysicalize ", 0) == 0) made.push_back(call);
+            EXPECT_EQ(made, std::vector<std::string>({"unphysicalize P_Plank", "physicalize Ball_Stone_piece01",
+                                                      "physicalize P_Plank", "physicalize P_Box", "physicalize P_Selected"}))
+                << "the later life out before every revive";
+            EXPECT_EQ(order, std::vector<std::string>({"put back P_Plank 2", "put back Ball_Stone_piece01 4",
+                                                       "put back P_Plank 2", "put back P_Box 3", "put back P_Selected 7"}))
+                << "P_Box's life at 130 is the birth of 122";
+        }
+        // A later life that cannot be taken out: the name is not answered
+        // (the engine counts it unrevivable) and nothing is made for it.
+        {
+            std::map<std::string, bmmo::session::life_outcome> out;
+            backend.refuse_writes = true;
+            backend.calls.clear();
+            order.clear();
+            world.restore_lives(130, 140, {{"P_Plank", 1, 133, 138, life_kind::mechanism}}, true, out);
+            EXPECT_TRUE(out.empty());
+            EXPECT_EQ(backend.calls, std::vector<std::string>({"get_body P_Plank", "mute", "unphysicalize P_Plank", "unmute"}));
+            backend.refuse_writes = false;
+        }
+        // A ball or a mirror the revivable set names, with an A-life and a
+        // later life with a body now: revive_body would refuse it, so its
+        // later life is not taken out (no destroy, wrapped or not) and the
+        // name is not answered.
+        {
+            births.add(119, birth_of("Mirror_Box", 8.0f));
+            births.add(119, birth_of("Ball_Wood", 9.0f));
+            const auto bodiless = backend.bodiless;
+            backend.bodiless.clear();
+            std::map<std::string, bmmo::session::life_outcome> out;
+            backend.calls.clear();
+            wrapped_destroys.clear();
+            order.clear();
+            world.restore_lives(130, 140,
+                                {{"Mirror_Box", 1, 133, 138, life_kind::mechanism},
+                                 {"Ball_Wood", 1, 133, 138, life_kind::mechanism}},
+                                true, out);
+            EXPECT_TRUE(out.empty());
+            EXPECT_TRUE(wrapped_destroys.empty()) << "no later life taken out for a name revive_body refuses";
+            for (const auto& call: backend.calls) {
+                EXPECT_NE(call.rfind("unphysicalize ", 0), 0u) << call;
+                EXPECT_NE(call.rfind("physicalize ", 0), 0u) << call;
+            }
+            EXPECT_TRUE(order.empty());
+            backend.bodiless = bodiless;
+        }
+        backend.bodiless = {"Ball_Wood", "Ball_Stone_piece01", "P_Box", "P_Plank", "P_Gate"};
         order.clear();
 
         // The core's half first: a name it answered is not asked again.
@@ -742,7 +810,7 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
         backend.calls.clear();
         std::map<std::string, bmmo::session::life_outcome> answered;
         cored.restore_lives(130, 140, ended, true, answered);
-        EXPECT_EQ(asked, std::vector<std::string>({"130:140:6:blob"}));
+        EXPECT_EQ(asked, std::vector<std::string>({"130:140:8:blob"}));
         EXPECT_EQ(answered.at("Ball_Wood").revived_until, 140u);
         EXPECT_EQ(answered.at("P_Box").revived_until, 0u) << "answered by the core: the host's half leaves it";
         EXPECT_EQ(answered.at("P_Box").remade_at, 139u);

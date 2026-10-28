@@ -3515,8 +3515,10 @@ namespace {
             // parked through the gap instead.)  bind_session_world installs
             // them over this client's birth log.
             w.births = &local_births_;
-            // Step P: only the trafo explosion pieces are made again at a
-            // restore (the replayed reset takes them away again).
+            // Step P: the trafo explosion pieces are made again at a
+            // restore (the replayed reset takes them away again); T3: every
+            // set's too.  Gap L, L4 (step EL9): bind_script_replay adds every
+            // body of a selected module (rollback_world::revivable).
             w.revivable = [this](const std::string& entity) { return explosion_pieces_.count(entity) != 0; };
             w.park_births = args_.park_births;
             w.insert_births = args_.insert_births;

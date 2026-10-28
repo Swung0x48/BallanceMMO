@@ -2495,8 +2495,10 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         // rewinds' end re-issues with inside = false (keep_live_cells).
         w.replay_activation = [this](uint32_t tick) { core_host_replay_activation(tick, true); };
         w.births = &host.births;
-        // Step P: only the trafo explosion pieces are made again at a restore
-        // (the replayed reset takes them away again).
+        // Step P: the trafo explosion pieces are made again at a restore
+        // (the replayed reset takes them away again); T3: every set's too.
+        // Gap L, L4 (step EL9): bind_script_replay adds every body of a
+        // selected module (rollback_world::revivable).
         w.revivable = [](const std::string& entity) { return host.explosion_pieces.count(entity) != 0; };
         w.park_births = false;
         w.insert_births = false;

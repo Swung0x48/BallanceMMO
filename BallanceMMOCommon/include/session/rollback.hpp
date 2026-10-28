@@ -384,10 +384,16 @@ namespace bmmo::session {
         // logs what it made.
         // Since step EL6 (gap L, L1) the engine never calls this itself: it
         // is the host's primitive, which bind_session_world composes into
-        // the mechanism half of restore_lives below (only on the savestate
-        // path, not for a name with a later life born in the window - step
-        // P's rule, generalized at G9).
+        // the mechanism half of restore_lives below (since step EL9, L4: on
+        // both paths, and for a name with a later life born in the window
+        // after that life is destroyed).
         std::function<bool(const std::string& entity, uint32_t anchor)> revive_body;
+        // Optional (gap L, L4; rollback-engine gaps design 2.3.5, step EL9):
+        // the mechanisms revive_body may make again - a name the host's
+        // selection can kill: bind_session_world sets the host's part (the
+        // registry of every trafo set's pieces) and bind_script_replay adds
+        // every body of a selected module.  The engine never calls it.
+        std::function<bool(const std::string& entity)> revivable;
         // Optional (gap L, L1; rollback-engine gaps design 2.3.1, step EL6):
         // the lives that end inside the window, found by the engine from the
         // records' generations, handed to the world before the scripts'
@@ -396,7 +402,8 @@ namespace bmmo::session {
         // bind_session_world: the core's (the balls, L2/L3), then the host's
         // (the mechanisms, L4) - make what they can revive muted and answer
         // per name in `out` (life_outcome).  `savestate` says whether the
-        // blob will be tried (step P's revive is savestate-only until G9).
+        // blob will be tried (step P's revive was savestate-only until G9;
+        // since step EL9 the mechanism half revives on both paths).
         // The engine plans a revived name from its A record and a remade one
         // from its birth record (the two-half plan item); a revived body
         // stays when the blob is refused, and the per-body path writes it.

@@ -2563,3 +2563,135 @@ The mechanisms' generalization (L4) is G9.
   replays and pre-existing (rEL7 has it at the same ticks): the logical
   `IngameParameter` cell differences at the end of windows across an own
   death (`[0][2] 4 vs 0`, `[0][1] 1 vs 4`), L-H3's to judge.
+
+## As built (step EL9, 2026-10-28): gap L, step G9 (L4)
+
+Step G9 of §8 on HEAD ec456ba: the mechanisms' half of L (2.3.5), step
+P's revive generalized. With it the four steps of gap L (G6-G9) are built;
+G10 (records) is review only.
+
+- **The revivable set (2.3.5 "a name the host's selection can kill"),
+  adapted:** a new optional `rollback_world::revivable` (`rollback.hpp`;
+  the engine never calls it), composed like `remade_by_replay`:
+  `bind_session_world` sets the host's part from
+  `session_world_options::revivable` - the hosts' `explosion_pieces`,
+  which already hold every trafo set's pieces since T3
+  (`add_trafo_set_pieces`) - and `bind_script_replay`
+  (`rollback_binding_scripts.hpp`) widens it with every body of a module
+  a selected script owns (`script_replay::owned_by_selection`, RO1's
+  test). Only for a host that names a revivable set at all (the SimTool's
+  pass and late-sector bindings name none and are unchanged). The hosts'
+  options are unchanged (comments only, `session_client.cpp`,
+  `core_host.cpp`). TRD's retirement dropping a set at its deselect is
+  not built: a retired set's pieces have no record left (TRD 2.4), so no
+  window reaches them and their name in the set is inert.
+- **Late binding:** `revive_body` and the mechanism half read the
+  finished world's `revivable` and `destroy_body` (the script binding's
+  wrapper, which releases the joint handles held on the body) through a
+  shared `late_world_hooks` filled after `bind_scripts`
+  (`session_host_world.hpp`), since both are wrapped after the half is
+  composed. `revive_body` is still installed only when the host names a
+  revivable set; its other tests (no ball, no own body, no mirror, the
+  A-life's birth, muted) are unchanged.
+- **The mechanism half** (`bind_session_world`'s `restore_lives`): on the
+  savestate and the per-body path alike (the `!savestate` return is gone:
+  L-S2). A mechanism with no body now and no later life is revived as
+  before. A name born again inside the window (`reborn_at`): only when it
+  is revivable and its A-life's birth is known (so no later life is taken
+  out for nothing), its later life - when it has a body now - is
+  destroyed through the wrapped `destroy_body` at its birth tick, and the
+  name is answered `remade_at = reborn_at`; **adapted (order):** every
+  such destroy runs before any revive, so the revives meet the world the
+  single-life case meets (no later life), in A's tracked order. Then
+  `revive_body`; a revived name gets `revived_until = end`. A destroy
+  that fails leaves the name unanswered (unrevivable, the later life
+  stays; logged); a revive that fails after the destroy keeps
+  `remade_at` (the engine plans the remake, counts the A-life
+  unrevivable; logged). The engine side was G6's (a name answered both
+  becomes one item: `recreate`, `birth` from E's record, `state` from A,
+  `revived_until`). Step P's "born again ... the replay runs without
+  them" line is gone.
+- **Layout:** `rollback_world` is built per engine call (no BML member);
+  `rollback_stats` and `rollback_engine` unchanged.
+- **Checks (quick tier, ~10 min):** x64 BUILD-OK (deps valid), x86
+  CLIENT-BUILD-OK, GCC 29/29 ok, unit tests 580 pass
+  (`RollbackBinding.SessionWorldComposesTheCoresHooksInTheDesignsOrder`
+  extended: both paths, the later life destroyed first through the
+  wrapped `destroy_body`, revived and remade, a non-revivable or unborn
+  name's later life left alone, a refused destroy left unanswered, the
+  selection's widening read late). Wire check rEL8 -> rEL9 over
+  core_ref_s8: ALL SAME (12/12 sends SAME, 12/12 journals IDENTICAL).
+  **L-S1, adapted recipe** (`work/EL9/ls1.sh`, like EL6's L-S0: trafo
+  inputs, level 2, `--explode-player 1 wood 10 ... --reset-player 1 wood
+  20 --explode-player 1 wood 165 ... --rounds 160 --max-depth 48 --seed
+  7`; the reset De Physicalizes about 133 ticks after it and the ledger
+  wants 140 between a reset and the next explosion, TRD 2.9, so the
+  pieces die at 404 and are born again at 417): rEL8 FAIL at round 24
+  (anchor 401: "16 mechanism(s) ... born again inside the window",
+  "object 'Ball_Wood_piece01_Trafo1' is in the savestate but not in the
+  world"); rEL9 PASS 160/160, 25 rounds cross the death, 400 lives ended,
+  400 revived, 0 unrevivable; 12 of them also cross the rebirth (192
+  remade, all exact: 352 births exact, missing 0, no birth difference
+  logged). **L-S2** (`--legacy-restore`, the per-body negative control,
+  never byte-exact): rEL8 0 / 400 revived, rEL9 400 / 400; no "in the
+  savestate but not in the world"; the per-round object-count mismatches
+  of the death-crossing rounds (rEL8: 63 vs 47, the pieces missing) are
+  gone (rEL9 fails those rounds on collision counts only, as the
+  per-body path does everywhere). L-S0 (`work/EL9/ls0.sh`): rEL8 and
+  rEL9 PASS 80/80, 144 / 144 revived; legacy 0 -> 144 revived.
+- **L-H5** (`work/EL9/lh5.sh`, after TR3's h5.sh: one client, trafo
+  inputs on, placement on, snapshots off, beams onto P_Trafo_Wood /
+  P_Trafo_Paper at 650 / 850 / 1050 / 1250, so the wood set explodes at
+  1009 and again at 1409 after the reset of 1261; control plus
+  `--force-rollback 13:47`, 109 forced): every piece bit-equal to its own
+  session's server journal in both arms (`pieces.py`: 51/51 and 51/51),
+  no "PreSimulate queue differs"; the arm's restores of 1370 and 1383
+  cross the pieces' death and their rebirth at 1409 and revive them
+  (the same-name case live), and no replay difference is logged in
+  those windows. The arm's other replay differences (Ball_Stone
+  controllers at 637, P_Modul_18 Row Search and the pieces'
+  collision-sound script at 819-1053) are all in windows across an own
+  death, G8's area (L-S3 / L-H3 / L-H4).
+- **The own ball in L-H5, measured not this step's (review finding 1,
+  gate round; `work/EL9/gate/`):** every non-ball body is bit-equal to
+  its server at every tick 1400-1470 in both arms, and both arms' server
+  balls are identical (same inputs). The live own ball leaves its server
+  20 ticks after its birth at 1018 in every arm, the rewind-free control
+  included, with one signature (1038: 0.00643409, 1040: 0.047821, 1042:
+  0.214452 m); after the birth at 1418 the control leaves at 1444
+  (0.0225551 m) and the 13:47 arm shows the 1018 signature again from
+  1438. A rewind-free SimTool replay of each arm's client journal
+  (`--replay-session --write-journal`, `ballrep.py`) gives an own ball
+  bit-equal to the server's at every tick 1418-1470 in both arms, so the
+  inputs and the events reproduce the server and only the live client's
+  own ball differs: SFD's cause (A) (the own ball's IVP collision
+  bookkeeping from its birth, waiting for the user). The 13:47 arm's
+  first divergent record (1438) follows the restore anchored at 1383,
+  which revives, so a second live arm settled it: `lh5.sh b 13:20 rEL9`
+  (`maps/arena-test/el9_lh5_b`), whose only revive restore is anchored at
+  1384 and ends at 1404 and whose only window over the 1418 birth is
+  anchored at 1410 (no revive, no later life destroyed), shows the
+  identical signature from 1438 (0.00643409 / 0.047821 / 0.214452 /
+  0.347734 m), pieces 51/51 and 51/51, "PreSimulate queue differs" 0.
+  What exposes the signature at 1418 is a window over the own ball's
+  birth (the core's own-birth path), not the mechanism half. (The
+  savestate_check verdict compares the two sessions' clients with each
+  other and is MISMATCH in both runs, 52 of 55 bodies, worst a paper
+  piece from tick 1210, the same in the implement round; it is not the
+  L-H5 judgement, which is each arm against its own server.)
+- **Review fix-ups (gate round):** the same-name branch now also refuses
+  a ball, an own body or a mirror (`revive_body`'s refusals, in its
+  order) before the destroy, so no later life is taken out that
+  `revive_body` would not make again (latent: no such name reaches the
+  half today); unit test extended (a ball and a mirror the revivable set
+  names, with an A-life and a later life: no destroy, wrapped or not, no
+  answer). Accepted, not changed: the half reads `destroy_body` as
+  `bind_session_world` leaves it, before `core_host.cpp` wraps it with
+  the EG0 `diag_trace_plan` logger, so a destroy the half makes is not
+  in that (off-by-default) trace; the half logs a refusal itself.
+  Rerun: x64 BUILD-OK (deps valid), x86 CLIENT-BUILD-OK (core_host.cpp
+  recompiled), GCC 29/29 ok, unit tests 580 pass, wire check rEL8 ->
+  rEL9 ALL SAME (12/12 sends SAME, 12/12 journals IDENTICAL), L-S1 rEL9
+  PASS 160/160 (400 revived, 352 births exact, missing 0).
+- **Not run, deferred:** L-H6 (FULL), a retail session (the change
+  reaches retail through the shared binding; FULL).

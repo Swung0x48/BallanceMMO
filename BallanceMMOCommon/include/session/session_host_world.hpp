@@ -363,7 +363,12 @@ namespace bmmo::session {
         // explosion pieces, the bodies a replayed script - the pieces' reset -
         // takes away again inside the replay).  Unset: none.  A body some
         // other way destroyed (a script outside the selection, the host) would
-        // survive the replay that never destroys it.
+        // survive the replay that never destroys it.  Gap L, L4 (rollback-
+        // engine gaps design 2.3.5, step EL9): the host's part of "a name the
+        // host's selection can kill" - the registry of every trafo set's
+        // pieces (the hosts' explosion_pieces with add_trafo_set_pieces);
+        // bind_script_replay adds every body of a selected module
+        // (rollback_world::revivable).
         std::function<bool(const std::string& entity)> revivable;
         // Step RO1: after the birth tick's step of an untracked fixed birth
         // the restore destroyed for the replayed scripts to make again
@@ -446,6 +451,16 @@ namespace bmmo::session {
         // balls keep the parking path, and a moved own birth (late-player
         // design 3.3) is the core's.  The event log is muted: the destroy is
         // not a lifetime change of the body the records describe.
+        // Gap L, L4 (step EL9): what the mechanism half below needs of the
+        // finished world - the revivable set as bind_script_replay widens it
+        // and destroy_body as it wraps it (the joint handles held on the body
+        // released with it) - read when the half runs: both are set after
+        // bind_scripts, at the end of this function.
+        struct late_world_hooks {
+            std::function<bool(const std::string& entity)> revivable;
+            std::function<bool(const std::string& entity, uint32_t birth_tick)> destroy_body;
+        };
+        const auto late = std::make_shared<late_world_hooks>();
         if (!o.park_births) {
             const auto own_birth = hooks.destroy_own_birth;
             const auto remake_mirror = hooks.remake_mirror_birth;
@@ -507,14 +522,16 @@ namespace bmmo::session {
             // puts its whole state back.  The balls are not: their lifetimes
             // are the core's.
             // Counted and logged here (the first 8 of each), not by the engine
-            // (rollback_world::revive_body).
-            const auto revivable = o.revivable;
+            // (rollback_world::revive_body).  The set it may make is the
+            // world's revivable (gap L, L4: the host's option widened by
+            // bind_script_replay), read at the call.
+            world.revivable = o.revivable;
             const auto log = world.log;
             auto made = std::make_shared<uint64_t>(0), failed_revives = std::make_shared<uint64_t>(0);
-            if (revivable)
-                world.revive_body = [b, own_body, mirror, ball, births, put_back, revivable, log, made, failed_revives](
+            if (o.revivable)
+                world.revive_body = [b, own_body, mirror, ball, births, put_back, late, log, made, failed_revives](
                                             const std::string& entity, uint32_t anchor) {
-                    if (!revivable(entity)) return false;
+                    if (!late->revivable || !late->revivable(entity)) return false;
                     if ((ball && ball(entity)) || (own_body && own_body(entity)) || (mirror && mirror(entity))) return false;
                     const local_birth* birth = births ? births->lifetime_at(entity, anchor) : nullptr;
                     std::string error = "no birth known", mute_error;
@@ -537,41 +554,72 @@ namespace bmmo::session {
         }
         // Gap L, L1 (rollback-engine gaps design 2.3.1, step EL6): the
         // ended lives' two halves, the core's first (the balls, L2/L3),
-        // then the host's (the mechanisms, L4).  The host's half is step P's
-        // revive, moved here unchanged (2.3.1 step 6): only on the savestate
-        // path, only a mechanism of the anchor's tracked set with no body
-        // now and no later life born inside the window (that one is the
-        // known gap until G9: logged as step P logged it), made by
-        // revive_body (the revivable set, the birth of the A-life, muted) in
-        // the anchor's tracked order; its end is where the replayed script
-        // takes it away again.  A name a half answered already is not asked
-        // again.
+        // then the host's (the mechanisms, L4; rollback-engine gaps design
+        // 2.3.5, step EL9): step P's revive generalized - on the savestate
+        // and the per-body path alike, a mechanism of the anchor's tracked
+        // set the revivable set names (late->revivable: a name the host's
+        // selection can kill) whose A-life (births->lifetime_at) is known,
+        // made by revive_body (the A-life's birth, muted) in the anchor's
+        // tracked order; its end is where the replayed script takes it away
+        // again (revived_until).  A name born again inside the window (a
+        // second explosion of one type set, a reset and an explosion in one
+        // window) has its later life destroyed first, through the wrapped
+        // destroy_body (late->destroy_body: the joint handles held on it
+        // released with it), before any revive - so the world the revives
+        // meet holds no later life, as in the single-life case - and goes
+        // out as revived_until = its end and remade_at = its rebirth, which
+        // the replayed explosion makes again (the birth check compares it).
+        // A name a half answered already is not asked again.
         if (hooks.restore_lives || world.revive_body) {
             const auto core_lives = hooks.restore_lives;
             const auto revive = world.revive_body;
             const auto get_body = world.get_body;
             const auto log = world.log;
-            world.restore_lives = [core_lives, revive, get_body, log](uint32_t anchor, uint32_t now,
-                                                                      const std::vector<ended_life>& ended, bool savestate,
-                                                                      std::map<std::string, life_outcome>& out) {
+            const auto own_body = hooks.own_body;
+            const auto mirror = hooks.mirror;
+            const auto ball = hooks.ball;
+            auto logs = std::make_shared<uint32_t>(0);
+            world.restore_lives = [core_lives, revive, get_body, log, late, births, own_body, mirror, ball, logs](
+                                      uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended, bool savestate,
+                                      std::map<std::string, life_outcome>& out) {
                 if (core_lives) core_lives(anchor, now, ended, savestate, out);
-                if (!revive || !savestate) return;
-                size_t reborn = 0;
-                std::string first_reborn;
+                if (!revive) return;
+                std::vector<const ended_life*> lives;
                 for (const ended_life& life: ended) {
                     if (life.kind != life_kind::mechanism || out.count(life.name)) continue;
-                    if (life.reborn_at) {
-                        if (!reborn++) first_reborn = life.name;
+                    bmmo_physics_body_state live{};
+                    const bool body_now = get_body && get_body(life.name, live);
+                    if (!life.reborn_at) {
+                        if (!body_now) lives.push_back(&life);   // a body now and no later life: nothing to make
                         continue;
                     }
-                    bmmo_physics_body_state live{};
-                    if (get_body && get_body(life.name, live)) continue;
-                    if (revive(life.name, anchor)) out[life.name].revived_until = life.end_tick;
+                    // Same-name rebirth: the later life out first - only for
+                    // a name revive_body can make again (its revivable set,
+                    // no ball, own body or mirror - revive_body's refusals,
+                    // in its order - and the A-life's birth known), so no
+                    // later life is taken out for nothing.
+                    if (!late->revivable || !late->revivable(life.name)) continue;
+                    if ((ball && ball(life.name)) || (own_body && own_body(life.name)) || (mirror && mirror(life.name)))
+                        continue;
+                    if (!births || !births->lifetime_at(life.name, anchor)) continue;
+                    if (body_now) {
+                        if (!late->destroy_body || !late->destroy_body(life.name, life.reborn_at)) {
+                            if (log && (*logs)++ < 8)
+                                log("revive: " + life.name + " (alive at tick " + std::to_string(anchor)
+                                    + ") is born again at tick " + std::to_string(life.reborn_at)
+                                    + " and that later life could not be taken out at the restore: not revived");
+                            continue;
+                        }
+                    }
+                    out[life.name].remade_at = life.reborn_at;
+                    lives.push_back(&life);
                 }
-                if (reborn && log)
-                    log("revive: " + std::to_string(reborn) + " mechanism(s) alive at tick " + std::to_string(anchor)
-                        + " are born again inside the window (" + first_reborn
-                        + " first): not made at the restore, the replay runs without them until their death");
+                for (const ended_life* life: lives) {
+                    if (revive(life->name, anchor)) out[life->name].revived_until = life->end_tick;
+                    else if (life->reborn_at && log && (*logs)++ < 8)
+                        log("revive: " + life->name + " not made again at the restore of tick " + std::to_string(anchor)
+                            + ": its later life, taken out, is made again at tick " + std::to_string(life->reborn_at));
+                }
             };
         }
         // Step RO1: the CK-free half of the guard on destroying an untracked
@@ -596,6 +644,8 @@ namespace bmmo::session {
             world.fixed_birth_remade = o.fixed_birth_remade;
         }
         if (o.bind_scripts) o.bind_scripts(world);
+        late->revivable = world.revivable;
+        late->destroy_body = world.destroy_body;
         return world;
     }
 

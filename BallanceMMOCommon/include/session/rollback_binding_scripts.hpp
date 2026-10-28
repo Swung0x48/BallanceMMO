@@ -231,6 +231,18 @@ namespace bmmo::session {
                     && bmmo::game::script_replay::owned_by_selection(context, *selection, entity);
             };
         }
+        // Gap L, L4 (rollback-engine gaps design 2.3.5, step EL9): the
+        // revivable set is "a name the host's selection can kill" - the
+        // host's (the trafo sets' pieces) plus every body of a module a
+        // selected script owns (owned_by_selection), which the replayed
+        // script takes away again at the tick the live one did.  Only for a
+        // host that names a revivable set (one that revives at all).
+        if (world.revivable) {
+            const auto base = world.revivable;
+            world.revivable = [base, context, selection](const std::string& entity) {
+                return base(entity) || bmmo::game::script_replay::owned_by_selection(context, *selection, entity);
+            };
+        }
         const auto before = world.pre_step;
         world.pre_step = [b, o, before, context, selection, trafo](uint32_t tick) {
             if (before) before(tick);
