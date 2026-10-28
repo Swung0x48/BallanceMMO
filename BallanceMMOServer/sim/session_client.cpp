@@ -3517,6 +3517,8 @@ namespace {
                 so.resize_strings = true;
                 // Step B2SW (G1, F): the behaviour manager's list as live.
                 so.live_membership = true;
+                // Step B7EG (gap Q): the PreSimulate queue with the records.
+                so.callback_queue = true;
                 so.on_restore_failed = [this](const std::string& error) {
                     if (script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
                 };
@@ -3638,6 +3640,18 @@ namespace {
                      static_cast<unsigned long long>(d.from_ledger), static_cast<unsigned long long>(d.healed),
                      static_cast<unsigned long long>(d.walked), static_cast<unsigned long long>(d.guard_trips),
                      static_cast<unsigned long long>(d.restored_built));
+            }
+            // Gap Q (step B7EG): the PreSimulate queue's part of the records
+            // and of every replay, in this process.
+            {
+                const auto& q = bmmo::game::script_replay::queue_stats();
+                logf("cbq: captured=%llu rebuilt=%llu removed=%llu held=%llu holds=%llu unhold_clamped=%llu rebuild_fail=%llu "
+                     "hold_fail=%llu no_record=%llu",
+                     static_cast<unsigned long long>(q.captured), static_cast<unsigned long long>(q.rebuilt),
+                     static_cast<unsigned long long>(q.removed), static_cast<unsigned long long>(q.held),
+                     static_cast<unsigned long long>(q.holds), static_cast<unsigned long long>(q.unhold_clamped),
+                     static_cast<unsigned long long>(q.rebuild_fail), static_cast<unsigned long long>(q.hold_fail),
+                     static_cast<unsigned long long>(q.no_record));
             }
             if (frame_time_count_)
                 logf("frame_time: frames=%llu p50=%.1f p99=%.1f p999=%.1f max=%.1f ms",

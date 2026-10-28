@@ -78,6 +78,14 @@ namespace bmmo::physics {
         bool force_block_get(uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error) const;
         bool force_block_set(uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error) const;
         bool set_event_log_muted(bool muted, std::string& error) const;
+        // ---- bridge API v23: the PreSimulate queue (rollback-engine-gaps
+        // design 2.2.2, gap Q); the bridge's counts, -1 on an error ----
+        bool callbacks_get(std::vector<bmmo_physics_callback>& out, std::string& error) const;
+        int callbacks_rebuild(const std::vector<uint32_t>& scope, const std::vector<bmmo_physics_callback>& target,
+                              std::string& error) const;
+        int callbacks_hold(const std::vector<uint32_t>& executed, std::string& error) const;
+        int callbacks_unhold(std::string& error) const;
+        bool callback_scope_set(int mode, const std::vector<uint32_t>& scope, std::string& error) const;
         // v15: a body's friction contacts (bmmo_physics_contact); the counts
         // the bridge returns, -1 on an error.
         int contacts_get(const char* entity, bmmo_physics_contact* out, int max, std::string& error) const;

@@ -10,6 +10,8 @@
 #include "CKIpionManager.h"
 
 #include "physics_savestate_internal.hpp"
+#include <physics/physics_state.hpp>
+#include <physics/callback_queue_plan.hpp>
 
 #include "ivp_surface_manager.hxx"
 #include "ivp_surman_polygon.hxx"
@@ -20,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <set>
 #include <string>
 #include <type_traits>
@@ -1260,5 +1263,251 @@ namespace bmmo::physics {
             h *= 1099511628211ULL;
         }
         return h;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The PreSimulate queue (bridge API v23, rollback-engine-gaps design 2.2.2,
+// gap Q; engine change #20 in physics_RT/PhysicsCallback.cpp makes, detaches,
+// inserts and frees one entry).  The rollback's script record carries the
+// entries of the scripts it restores (game/script_replay.hpp, Q3), and every
+// entry of a script the replay does not execute is held out of the queue for
+// the whole replay and put back after it (session/rollback.hpp, Q4).
+// ---------------------------------------------------------------------------
+
+extern "C" void* BmmoPhysicsCallbackMake(CKIpionManager* man, CKBehavior* beh);
+extern "C" void* BmmoPhysicsCallbackDetach(CKIpionManager* man, int slot, int index);
+extern "C" int BmmoPhysicsCallbackInsert(CKIpionManager* man, int slot, int index, void* cb);
+extern "C" void BmmoPhysicsCallbackFree(void* cb);
+
+namespace bmmo::physics::savestate {
+    namespace {
+        struct held_callback {
+            PhysicsCallback* callback = nullptr;
+            int slot = 0;
+            queue_plan::place where;       // where it was (queue_plan::plan_hold)
+        };
+        struct queue_state {
+            bool scoped = false;
+            std::set<uint32_t> scope;
+            bool holding = false;
+            std::vector<held_callback> held;
+        };
+        std::map<const CKIpionManager*, queue_state>& queue_states() {
+            static std::map<const CKIpionManager*, queue_state> states;
+            return states;
+        }
+        uint32_t owner_script_of(CKBehavior* block) {
+            CKBehavior* owner = block ? block->GetOwnerScript() : nullptr;
+            return owner ? static_cast<uint32_t>(owner->GetID()) : 0;
+        }
+        CKBehavior* block_of(CKIpionManager* physics, uint32_t id) {
+            CKContext* context = physics ? physics->m_Context : nullptr;
+            return context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(id))) : nullptr;
+        }
+        std::string block_text(CKBehavior* block, uint32_t id) {
+            CKBehavior* owner = block ? block->GetOwnerScript() : nullptr;
+            return std::to_string(id) + " (" + (block && block->GetName() ? block->GetName() : "?") + " in "
+                 + (owner && owner->GetName() ? owner->GetName() : "?") + ")";
+        }
+    }
+
+    const std::set<uint32_t>* callback_scope_for(const CKIpionManager* physics) {
+        const auto& states = queue_states();
+        if (states.empty()) return nullptr;
+        const auto it = states.find(physics);
+        return it != states.end() && it->second.scoped ? &it->second.scope : nullptr;
+    }
+
+    uint32_t callback_owner_script(CKBehavior* block) { return owner_script_of(block); }
+}
+
+namespace bmmo::physics {
+
+    bool callbacks_get(CKIpionManager* physics, std::vector<bmmo_physics_callback>& out, std::string& error) {
+        error.clear();
+        out.clear();
+        if (!physics) {
+            error = "no physics manager";
+            return false;
+        }
+        PhysicsCallbackContainer* queue = physics->m_PreSimulateCallbacks;
+        if (!queue) return true;
+        for (int slot = 0; slot < 3; ++slot) {
+            for (int i = 0; i < queue->m_Callbacks[slot].len(); ++i) {
+                PhysicsCallback* cb = queue->m_Callbacks[slot].element_at(i);
+                if (!cb) continue;
+                bmmo_physics_callback e{};
+                e.behavior = static_cast<uint32_t>(cb->m_BehaviorID);
+                e.owner_script = savestate::owner_script_of(cb->GetBehavior());
+                e.slot = static_cast<uint8_t>(slot);
+                e.bmmo = savestate::is_bmmo_callback(cb) ? 1 : 0;
+                out.push_back(e);
+            }
+        }
+        return true;
+    }
+
+    int callbacks_rebuild(CKIpionManager* physics, const std::vector<uint32_t>& scope,
+                          const std::vector<bmmo_physics_callback>& target, std::string& error) {
+        error.clear();
+        PhysicsCallbackContainer* queue = physics ? physics->m_PreSimulateCallbacks : nullptr;
+        if (!queue) {
+            if (target.empty()) return 0;
+            error = "no PreSimulate queue";
+            return -1;
+        }
+        const std::set<uint32_t> in_scope(scope.begin(), scope.end());
+        // Every target first: a refusal changes nothing.
+        std::vector<std::pair<int, void*>> made;
+        made.reserve(target.size());
+        const auto undo = [&made]() {
+            for (auto& m: made) BmmoPhysicsCallbackFree(m.second);
+            made.clear();
+        };
+        for (const bmmo_physics_callback& t: target) {
+            CKBehavior* block = savestate::block_of(physics, t.behavior);
+            if (!block) {
+                undo();
+                error = "the queued block " + std::to_string(t.behavior) + " is gone";
+                return -1;
+            }
+            if (!in_scope.count(savestate::owner_script_of(block))) {
+                undo();
+                error = "the queued block " + savestate::block_text(block, t.behavior) + " is outside the rebuilt scripts";
+                return -1;
+            }
+            if (t.slot > 2) {
+                undo();
+                error = "the queued block " + savestate::block_text(block, t.behavior) + " names slot " + std::to_string(t.slot);
+                return -1;
+            }
+            void* cb = BmmoPhysicsCallbackMake(physics, block);
+            if (!cb) {
+                undo();
+                error = "no callback factory for the queued block " + savestate::block_text(block, t.behavior);
+                return -1;
+            }
+            made.emplace_back(static_cast<int>(t.slot), cb);
+        }
+        int removed = 0;
+        for (int slot = 0; slot < 3; ++slot) {
+            for (int i = queue->m_Callbacks[slot].len() - 1; i >= 0; --i) {
+                PhysicsCallback* cb = queue->m_Callbacks[slot].element_at(i);
+                if (!cb || savestate::is_bmmo_callback(cb)) continue;
+                if (!in_scope.count(savestate::owner_script_of(cb->GetBehavior()))) continue;
+                BmmoPhysicsCallbackFree(BmmoPhysicsCallbackDetach(physics, slot, i));
+                ++removed;
+            }
+        }
+        for (auto& m: made)
+            BmmoPhysicsCallbackInsert(physics, m.first, queue->m_Callbacks[m.first].len(), m.second);
+        made.clear();
+        return removed;
+    }
+
+    int callbacks_hold(CKIpionManager* physics, const std::vector<uint32_t>& executed, std::string& error) {
+        error.clear();
+        if (!physics) {
+            error = "no physics manager";
+            return -1;
+        }
+        PhysicsCallbackContainer* queue = physics->m_PreSimulateCallbacks;
+        auto& state = savestate::queue_states()[physics];
+        if (state.holding) {
+            error = "the PreSimulate queue already holds " + std::to_string(state.held.size()) + " entries";
+            return -1;
+        }
+        state.held.clear();
+        state.holding = true;
+        if (!queue) return 0;
+        const std::set<uint32_t> run(executed.begin(), executed.end());
+        for (int slot = 0; slot < 3; ++slot) {
+            IVP_U_Vector<PhysicsCallback>& cbs = queue->m_Callbacks[slot];
+            std::vector<queue_plan::entry> entries(static_cast<size_t>(cbs.len()));
+            for (int i = 0; i < cbs.len(); ++i) {
+                PhysicsCallback* cb = cbs.element_at(i);
+                entries[static_cast<size_t>(i)].block = cb ? static_cast<uint32_t>(cb->m_BehaviorID) : 0;
+                entries[static_cast<size_t>(i)].hold = cb && !savestate::is_bmmo_callback(cb)
+                                                    && !run.count(savestate::owner_script_of(cb->GetBehavior()));
+            }
+            const std::vector<queue_plan::place> places = queue_plan::plan_hold(entries);
+            for (const queue_plan::place& p: places) {
+                savestate::held_callback h;
+                h.callback = cbs.element_at(p.index);
+                h.slot = slot;
+                h.where = p;
+                state.held.push_back(h);
+            }
+            for (auto it = places.rbegin(); it != places.rend(); ++it) BmmoPhysicsCallbackDetach(physics, slot, it->index);
+        }
+        return static_cast<int>(state.held.size());
+    }
+
+    int callbacks_unhold(CKIpionManager* physics, std::string& error) {
+        error.clear();
+        auto& states = savestate::queue_states();
+        const auto found = states.find(physics);
+        if (found == states.end() || !found->second.holding) return 0;
+        auto& state = found->second;
+        PhysicsCallbackContainer* queue = physics ? physics->m_PreSimulateCallbacks : nullptr;
+        int clamped = 0;
+        int cursor[3] = {0, 0, 0};
+        std::vector<PhysicsCallback*> put_back[3];
+        // Oldest first within a slot: the hold walked slot ascending, index ascending.
+        for (const savestate::held_callback& h: state.held) {
+            if (!queue) {
+                BmmoPhysicsCallbackFree(h.callback);
+                continue;
+            }
+            // The slot as it is now, and which of its entries this unhold
+            // put back (queue_plan::unhold_position: right after the held
+            // entry it followed, at the head, or after the occurrence-th
+            // entry of the block it followed).
+            IVP_U_Vector<PhysicsCallback>& cbs = queue->m_Callbacks[h.slot];
+            std::vector<uint32_t> now(static_cast<size_t>(cbs.len()));
+            std::vector<bool> reinserted(static_cast<size_t>(cbs.len()), false);
+            for (int i = 0; i < cbs.len(); ++i) {
+                PhysicsCallback* cb = cbs.element_at(i);
+                now[static_cast<size_t>(i)] = cb ? static_cast<uint32_t>(cb->m_BehaviorID) : 0;
+                reinserted[static_cast<size_t>(i)] = std::find(put_back[h.slot].begin(), put_back[h.slot].end(), cb)
+                                                     != put_back[h.slot].end();
+            }
+            bool clamp = false;
+            const int at = queue_plan::unhold_position(now, reinserted, h.where, cursor[h.slot], clamp);
+            if (clamp) ++clamped;
+            BmmoPhysicsCallbackInsert(physics, h.slot, at, h.callback);
+            put_back[h.slot].push_back(h.callback);
+            cursor[h.slot] = at + 1;
+        }
+        state.held.clear();
+        state.holding = false;
+        if (!state.scoped) states.erase(found);
+        return clamped;
+    }
+
+    bool callback_scope_set(CKIpionManager* physics, int mode, const std::vector<uint32_t>& scope, std::string& error) {
+        error.clear();
+        if (!physics) {
+            error = "no physics manager";
+            return false;
+        }
+        auto& states = savestate::queue_states();
+        if (mode == 0) {
+            const auto found = states.find(physics);
+            if (found == states.end()) return true;
+            found->second.scoped = false;
+            found->second.scope.clear();
+            if (!found->second.holding) states.erase(found);
+            return true;
+        }
+        if (mode != 1) {
+            error = "callback scope mode " + std::to_string(mode);
+            return false;
+        }
+        auto& state = states[physics];
+        state.scoped = true;
+        state.scope = std::set<uint32_t>(scope.begin(), scope.end());
+        return true;
     }
 }

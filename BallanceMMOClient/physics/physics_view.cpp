@@ -482,6 +482,83 @@ namespace bmmo::physics {
         return true;
     }
 
+    // v23: the PreSimulate queue.
+    bool physics_view::callbacks_get(std::vector<bmmo_physics_callback>& out, std::string& error) const {
+        error.clear();
+        out.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->callbacks_get) {
+            error = "the physics_RT bridge lacks callbacks_get";
+            return false;
+        }
+        char text[256] = {};
+        out.resize(16);
+        int32_t total = api_->callbacks_get(manager_, out.data(), static_cast<int32_t>(out.size()), text, sizeof(text));
+        if (total > static_cast<int32_t>(out.size())) {
+            out.resize(static_cast<size_t>(total));
+            total = api_->callbacks_get(manager_, out.data(), static_cast<int32_t>(out.size()), text, sizeof(text));
+        }
+        if (total < 0) { out.clear(); error = text; return false; }
+        out.resize(std::min(static_cast<size_t>(total), out.size()));
+        return true;
+    }
+
+    int physics_view::callbacks_rebuild(const std::vector<uint32_t>& scope, const std::vector<bmmo_physics_callback>& target,
+                                        std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return -1; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->callbacks_rebuild) {
+            error = "the physics_RT bridge lacks callbacks_rebuild";
+            return -1;
+        }
+        char text[256] = {};
+        const int32_t r = api_->callbacks_rebuild(manager_, scope.data(), static_cast<int32_t>(scope.size()), target.data(),
+                                                  static_cast<int32_t>(target.size()), text, sizeof(text));
+        if (r < 0) error = text;
+        return r;
+    }
+
+    int physics_view::callbacks_hold(const std::vector<uint32_t>& executed, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return -1; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->callbacks_hold) {
+            error = "the physics_RT bridge lacks callbacks_hold";
+            return -1;
+        }
+        char text[256] = {};
+        const int32_t r = api_->callbacks_hold(manager_, executed.data(), static_cast<int32_t>(executed.size()), text, sizeof(text));
+        if (r < 0) error = text;
+        return r;
+    }
+
+    int physics_view::callbacks_unhold(std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return -1; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->callbacks_unhold) {
+            error = "the physics_RT bridge lacks callbacks_unhold";
+            return -1;
+        }
+        char text[256] = {};
+        const int32_t r = api_->callbacks_unhold(manager_, text, sizeof(text));
+        if (r < 0) error = text;
+        return r;
+    }
+
+    bool physics_view::callback_scope_set(int mode, const std::vector<uint32_t>& scope, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->callback_scope_set) {
+            error = "the physics_RT bridge lacks callback_scope_set";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->callback_scope_set(manager_, mode, scope.data(), static_cast<int32_t>(scope.size()), text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
     int physics_view::contacts_get(const char* entity, bmmo_physics_contact* out, int max, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return -1; }

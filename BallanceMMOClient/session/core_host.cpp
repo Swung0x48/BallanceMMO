@@ -2434,6 +2434,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             so.resize_strings = true;
             // Step B2SW (G1, F): the behaviour manager's list as live.
             so.live_membership = true;
+            // Step B7EG (gap Q): the PreSimulate queue with the records.
+            so.callback_queue = true;
             so.on_restore_failed = [this](const std::string& error) {
                 if (host.restore_logs++ < 8) logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());
             };
@@ -3115,11 +3117,16 @@ std::string BallanceMMOClient::core_host_status_text() {
     h.rebases = static_cast<int>(fixed_tick_.rebases());
     h.activations_replayed = host.activations_replayed;
     h.script_reset_skips = host.script_reset_skips;
+    // Gap Q (step B7EG): the PreSimulate queue's part of the records and
+    // of every replay: rebuilt/removed/held/unhold_clamped/rebuild_fail/
+    // hold_fail/no_record.
+    const auto& q = bmmo::game::script_replay::queue_stats();
     return std::format("session={} phase={} core=1 tick={} assigned={} held={} keys_known={} own_phys={} "
-                       "backstops={} refused={} unmatched_resyncs={} {}",
+                       "backstops={} refused={} unmatched_resyncs={} {} cbq={}/{}/{}/{}/{}/{}/{}",
                        core.session_id(), host_phase_name(host.phase), core.current_tick(), core.assigned() ? 1 : 0,
                        core.holding() ? 1 : 0, host.navigation_known ? 1 : 0, core.own_physicalized() ? 1 : 0,
-                       core.own_body_backstops(), host.refused, core.unmatched_resyncs(), core.status_text(h));
+                       core.own_body_backstops(), host.refused, core.unmatched_resyncs(), core.status_text(h),
+                       q.rebuilt, q.removed, q.held, q.unhold_clamped, q.rebuild_fail, q.hold_fail, q.no_record);
 }
 
 // The F3 panel's physics block for a core session.

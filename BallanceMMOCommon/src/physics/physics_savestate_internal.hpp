@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -491,6 +492,15 @@ namespace bmmo::physics::savestate {
             if (std::strstr(name, known)) return true;
         return false;
     }
+
+    // The entries the queue check (restorer::check_callbacks) compares
+    // (bmmo::physics::callback_scope_set, bridge API v23, gap Q): null = every
+    // non-BMMO entry (mode 0); otherwise those whose block's owner script is
+    // in the set (mode 1), and a recorded entry whose block is gone (it is
+    // compared: fail-closed).  physics_savestate_common.cpp.
+    const std::set<uint32_t>* callback_scope_for(const CKIpionManager* physics);
+    // The id of the root script a block belongs to, 0 for none.
+    uint32_t callback_owner_script(CKBehavior* block);
 
     // ------------------------------------------------------------------
     // The live world, indexed.  Built by both halves from the manager's

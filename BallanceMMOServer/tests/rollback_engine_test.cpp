@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include <physics/callback_queue_plan.hpp>
 #include <session/correction.hpp>
 #include <session/input_relay.hpp>
 #include <session/rollback.hpp>
@@ -3922,4 +3923,153 @@ TEST(RollbackEngine, AnUntrackedFixedBirthTheReplayedScriptsMakeIsDestroyedAtThe
             EXPECT_EQ(world.count("log birth: the fixed body Rail"), 1);
         }
     }
+}
+
+// Step B7EG (rollback-engine gaps design 2.2.4, gap Q4): the PreSimulate
+// entries of scripts the replay does not run are held from before anything
+// is restored - the scripts, the savestate - to the end of the replay, and
+// put back once on every exit: after the last replayed step, after a step
+// that fails; a frozen clock or a too-far window replays nothing and holds
+// nothing.
+TEST(RollbackEngine, OutsideCallbacksAreHeldForTheWholeReplayAndPutBackOnEveryExit) {
+    // 0: a full replay; 1: the second replayed step fails; 2: a frozen clock; 3: too far
+    for (const int arm: {0, 1, 2, 3}) {
+        SCOPED_TRACE(arm);
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Plate"].position[0] = 40.0;
+        rollback_engine engine;
+        auto w = world.adapter();
+        rollback_tracked tracked;
+        tracked.mechanisms = {"Plate"};
+        w.capture_scripts = [](std::vector<uint8_t>& out) { out = {7}; return true; };
+        w.restore_scripts = [&](const std::vector<uint8_t>&, uint32_t) { world.calls.push_back("restore_scripts"); return true; };
+        std::vector<bool> records;
+        w.hold_outside_callbacks = [&](uint32_t anchor, bool have_record) {
+            world.calls.push_back("hold " + std::to_string(anchor));
+            records.push_back(have_record);
+            return 2;
+        };
+        w.unhold_outside_callbacks = [&]() { world.calls.push_back("unhold"); };
+        for (uint32_t tick = 1; tick <= 6; ++tick) {
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        if (arm == 1) {
+            const auto inner = w.step;
+            auto steps = std::make_shared<int>(0);
+            w.step = [inner, steps]() { return ++*steps == 2 ? false : inner(); };
+        }
+        if (arm == 2) world.clock_running = false;
+        if (arm == 3) engine.thresholds().max_resim_ticks = 2;
+        world.calls.clear();
+        engine.rewind_to(w, 2, 6, no_input, "test");
+        if (arm >= 2) {
+            EXPECT_EQ(world.count("hold"), 0);
+            EXPECT_EQ(world.count("unhold"), 0);
+            continue;
+        }
+        ASSERT_EQ(world.count("hold 2"), 1);
+        ASSERT_EQ(world.count("unhold"), 1);
+        EXPECT_EQ(records, std::vector<bool>({true}));
+        EXPECT_LT(world.first("hold"), world.first("restore_scripts")) << "held before the scripts' restore";
+        EXPECT_LT(world.first("hold"), world.first("set_savestate")) << "held before the blob";
+        EXPECT_LT(world.first("hold"), world.first("step"));
+        size_t last_step = 0;
+        for (size_t i = 0; i < world.calls.size(); ++i)
+            if (world.calls[i] == "step") last_step = i;
+        EXPECT_GT(world.first("unhold"), last_step) << "back only after the last replayed step";
+    }
+}
+
+// Gap Q (rollback-engine-gaps design 7.1 Q-U3's placement half and Q-U4,
+// step B7EG): the hold and the put-back of the PreSimulate queue's outside
+// entries and the scoped check's filter, over block ids
+// (physics/callback_queue_plan.hpp, what physics_savestate_common.cpp and
+// physics_savestate_restore.cpp call).
+namespace {
+    namespace qp = bmmo::physics::queue_plan;
+
+    // A slot written as blocks; an outside (held) entry is a block >= 100.
+    std::vector<qp::entry> slot_of(const std::vector<uint32_t>& blocks) {
+        std::vector<qp::entry> out;
+        for (uint32_t b: blocks) out.push_back({b, b >= 100});
+        return out;
+    }
+
+    // Hold `live`, let the replay leave the selected entries as `after`, put
+    // the held ones back; returns the slot, the clamps in `clamped`.
+    std::vector<uint32_t> hold_and_put_back(const std::vector<uint32_t>& live, std::vector<uint32_t> after, int& clamped) {
+        const auto places = qp::plan_hold(slot_of(live));
+        std::vector<uint32_t> held;
+        for (const auto& p: places) held.push_back(live[static_cast<size_t>(p.index)]);
+        clamped = qp::unhold_slot(after, places, held);
+        return after;
+    }
+}
+
+TEST(CallbackQueuePlan, HoldTakesExactlyTheOutsideEntriesOldestFirst) {
+    const auto places = qp::plan_hold(slot_of({1, 101, 2, 102, 103, 1}));
+    ASSERT_EQ(places.size(), 3u);
+    EXPECT_EQ(places[0].index, 1);
+    EXPECT_EQ(places[0].predecessor, 1u);
+    EXPECT_EQ(places[0].occurrence, 1);
+    EXPECT_FALSE(places[0].after_held);
+    EXPECT_EQ(places[1].index, 3);
+    EXPECT_EQ(places[1].predecessor, 2u);
+    EXPECT_FALSE(places[1].after_held);
+    EXPECT_EQ(places[2].index, 4);
+    EXPECT_TRUE(places[2].after_held);
+    EXPECT_TRUE(qp::plan_hold(slot_of({1, 2, 3})).empty());
+}
+
+TEST(CallbackQueuePlan, PutBackRestoresThePreHoldOrderWhenTheSelectedEntriesEndEqual) {
+    const std::vector<std::vector<uint32_t>> cases = {
+        {1, 101, 2, 102},          // [s1, o1, s2, o2]
+        {101, 1, 102},             // an outside entry at the head
+        {1, 101, 102, 2},          // two held in a row
+        {1, 1, 101},               // after the second entry of one block
+        {1, 101, 1, 102},          // the same block on both sides
+        {101, 102},                // nothing selected
+        {1, 2, 3},                 // nothing held
+        {1, 101, 1, 1, 102, 2, 103},
+    };
+    for (const auto& live: cases) {
+        std::vector<uint32_t> selected;
+        for (uint32_t b: live)
+            if (b < 100) selected.push_back(b);
+        int clamped = -1;
+        EXPECT_EQ(hold_and_put_back(live, selected, clamped), live);
+        EXPECT_EQ(clamped, 0);
+    }
+}
+
+TEST(CallbackQueuePlan, AReplayThatEndsWithOtherSelectedEntriesIsClampedAndCounted) {
+    int clamped = 0;
+    // s1 gone: o1 has no predecessor; it stays before o2, both counted.
+    EXPECT_EQ(hold_and_put_back({1, 101, 2, 102}, {2}, clamped), (std::vector<uint32_t>{2, 101, 102}));
+    EXPECT_EQ(clamped, 2);
+    // The selected entries came back in another order: the held order is kept.
+    EXPECT_EQ(hold_and_put_back({1, 101, 2, 102}, {2, 1}, clamped), (std::vector<uint32_t>{2, 1, 101, 102}));
+    EXPECT_EQ(clamped, 1);
+    // One more selected entry than the live run had: nothing to clamp.
+    EXPECT_EQ(hold_and_put_back({1, 101, 2, 102}, {1, 2, 3}, clamped), (std::vector<uint32_t>{1, 101, 2, 102, 3}));
+    EXPECT_EQ(clamped, 0);
+    // One fewer entry of the predecessor's block: clamped at the old index.
+    EXPECT_EQ(hold_and_put_back({1, 1, 101}, {1}, clamped), (std::vector<uint32_t>{1, 101}));
+    EXPECT_EQ(clamped, 1);
+}
+
+TEST(CallbackQueuePlan, TheScopedCheckComparesOnlyTheScopesEntriesAndAGoneRecordedBlock) {
+    const std::set<uint32_t> scope = {7};
+    EXPECT_TRUE(qp::compared(nullptr, true, 9, true)) << "mode 0 compares every entry";
+    EXPECT_TRUE(qp::compared(nullptr, false, 0, true));
+    EXPECT_TRUE(qp::compared(&scope, true, 7, true));
+    EXPECT_TRUE(qp::compared(&scope, true, 7, false));
+    EXPECT_FALSE(qp::compared(&scope, true, 9, true)) << "an outside entry never refuses, live";
+    EXPECT_FALSE(qp::compared(&scope, true, 9, false)) << "an outside entry never refuses, recorded";
+    EXPECT_TRUE(qp::compared(&scope, false, 0, false)) << "a recorded entry whose block is gone is compared";
+    EXPECT_FALSE(qp::compared(&scope, false, 0, true));
+    const std::set<uint32_t> empty;
+    EXPECT_FALSE(qp::compared(&empty, true, 7, true)) << "an empty scope compares nothing that exists";
 }

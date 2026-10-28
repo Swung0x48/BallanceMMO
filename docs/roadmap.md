@@ -552,6 +552,13 @@ numbers 1-10 are unchanged.
    path change, so the exact checks rerun), or record the local matrix of
    a parented body and restore it with `SetLocalMatrix` (a blob format
    change).
+   Step B7EG built Q's G2-G4 (engine change #20, bridge v23, record v4/v5,
+   the hold; design "As built (step B7EG)"). Still queued here: **Q5** (the
+   server's selected entries in a resync's portable record; a protocol
+   change, 14 at the earliest - until then a resync holds the outside
+   entries but keeps the live selected ones), and **gap L as the design's
+   four steps G6, G7, G8, G9** (§8), each with its own checks (L-H1..L-H6
+   and L-R1/L-R2 are live runs beyond one batch's gate; G8 may stop on §9.3).
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03

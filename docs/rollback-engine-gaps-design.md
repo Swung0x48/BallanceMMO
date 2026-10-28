@@ -1698,6 +1698,125 @@ cross-referenced (one comment above `retail_recipe` in
 from its hunks). Files of T3's set touched by this step: `sim_tool.cpp`
 (its own region and call sites, as above) and that one comment.
 
+## As built (step B7EG, 2026-10-28): gap Q (G2-G4); Q5 and gap L not built
+
+- **G2, engine change #20 and bridge API v23** (`docs/engine-changes.md` #20
+  and its bridge note). The API number is v23, not the nominal v21 (v20-v22
+  are A3's and T1/T4's). `physics_savestate_common.cpp` holds the queue
+  functions and the manager-keyed held list and scope;
+  `physics_savestate_restore.cpp` `check_callbacks` filters both sides by the
+  scope. `bmmo_physics_callback` is `physics_rt_api.h`'s.
+- **G3, the record.** `script_replay` record **v4** (= v2 + the queue
+  section) and **v5** (= v3 + it), not one "v-Q" bumped over v3: the section
+  is written only when the binding passes the new `queue_hooks`
+  (`script_binding_options::callback_queue`, set by both core hosts, and only
+  with `replay_activation`), so the legacy retail path (no `callback_queue`)
+  keeps its v2 records byte for byte and gets nothing new (the chain's BAR:
+  the legacy path is not changed). **Adapted from §2.2.3/§2.2.6:** RL does
+  not get Q3/Q4 (§2.2.6's "RL: the same (PSC binds RBS)" and Q-R2 are
+  therefore void); the headless client with `--park-births` (the v14 rule,
+  `replay_activation` false) does not either. The restore rebuilds the
+  entries of every root script it wrote, of every selected script that
+  exists now but has no state in the record (`present = 0`: no recorded
+  entry, so its live entries are removed, as §2.2.3 says; fixed at the
+  step's review) and of every trafo script (written
+  or put to its built state); the capture keeps the entries whose block's
+  owner script is selected or a trafo script. A recorded block that is gone
+  fails the restore; so does a refused rebuild (`script_restore_failures`,
+  as §2.2.3 says). `diff` compares the section (a logical difference,
+  "PreSimulate queue a vs b"). `localize` still writes v2 / v3 (no section):
+  see Q5 below.
+- **G4, the hold.** `rollback_world::hold_outside_callbacks(anchor,
+  have_record)` / `unhold_outside_callbacks()`, filled by
+  `bind_script_replay`; `restore_and_replay` calls the hold right after
+  `replay_follows` is known and an RAII guard unholds on every exit
+  (`rollback.hpp`, `struct outside_callbacks`). **Adapted:** the hold also
+  sets the check's scope to the executed scripts (every selected and every
+  trafo script) and the unhold sets it back to mode 0, so the binding needs
+  no separate scope call per restore; a restore that never rebuilds (no
+  record at the anchor, a failed script restore) is then still compared on
+  the executed scripts' entries - fail-closed, the refusal of today - instead
+  of an empty scope (§2.2.3's `cbq no_record` is still counted).
+  `no_record` counts an anchor without a script record (`have_scripts`); a
+  script restore that fails is counted by `script_restore_failures` and
+  `rebuild_fail`, not by it.
+- **The put-back names the predecessor by block and occurrence** (adapted
+  from §2.2.4's "after the first entry of block b"): a held entry goes back
+  after the k-th entry of the block it followed, k counted over the entries
+  left in the queue at the hold. "The first entry" put an entry that
+  followed two entries of one block between them ([s1, s1, o1] came back as
+  [s1, o1, s1]: Process() order changed although the selected entries ended
+  equal); the unit test found it. The decisions are pure functions over
+  block ids in `physics/callback_queue_plan.hpp` (`plan_hold`,
+  `unhold_position`, `compared` - the scoped check's filter), called by
+  `callbacks_hold` / `callbacks_unhold` and `check_callbacks`. A clamp (the
+  predecessor missing, or found before an older held entry's place) keeps the
+  held entries' order and is counted.
+- **Diagnostic noise, not a refusal:** a blob captured inside a replay lacks
+  the held entries, so the live-vs-replay savestate diff at `current_tick`
+  (a log line, at most 8, `rollback.hpp` "savestate replay") reports a
+  queue difference whenever outside entries are held. A restore to such a
+  tick is not refused: its scoped check never compares an outside entry.
+- **Counters** (`script_replay::queue_stats()`): the headless client's
+  report prints `cbq: captured rebuilt removed held holds unhold_clamped
+  rebuild_fail hold_fail no_record`; the retail core host's status line ends
+  with `cbq=rebuilt/removed/held/unhold_clamped/rebuild_fail/hold_fail/no_record`.
+  `scope_refused` is not separate (a refused scoped check is the blob's
+  refusal, logged as before).
+- **Checks run** (quick tier): x64 and x86 builds, the unit tests (556, all pass;
+  the new `RollbackEngine.OutsideCallbacksAreHeldForTheWholeReplayAndPutBackOnEveryExit`
+  covers Q-U3's guard half: the hold before the scripts' restore and the
+  blob, the unhold after the last replayed step and after a failed step,
+  none for a frozen clock or a too-far window), the GCC syntax check, the
+  wire check rRCX -> rB7EG over core_ref_s8 (ALL SAME: 12/12 sends, 12/12
+  journals IDENTICAL; the solo1 / solo2 replays SAME and IDENTICAL; every
+  replay's `cbq:` line shows the hold ran on every rewind, e.g. holds=42-65
+  per swing_snapoff client, with no entry captured or held - post-N4
+  sessions queue none, design 1.1).
+- **Review round checks.** Unit tests 560 (all pass): the
+  `CallbackQueuePlan` suite covers Q-U3's placement half (the hold takes
+  exactly the outside entries; the put-back restores the pre-hold order for
+  [s1, o1, s2, o2], a held head, two held in a row, [s1, s1, o1],
+  [s1, o1, s1, o2] and a longer mix; a missing or reordered predecessor is
+  clamped and counted) and Q-U4's filter. **Real entries** (a first slice of
+  Q-S2): SimTool `--replay work/a4/r0_keys.bmrc --ball-off 1600 1900` with
+  the new `--queue-roundtrip` - after each of the 280 frames whose queue
+  holds Gameplay_Ingame's entries (3, then 6: WakeUp 26418 four times,
+  SetPhysicsForce 26414 and 26432) the bridge holds every entry (the queue
+  then holds none; a second hold is refused), puts them back (0 clamped,
+  the queue equal in order), rebuilds them from the queue as it was (6
+  removed, 6 re-made by the #20 factories, the queue equal) and refuses an
+  out-of-scope rebuild without a change: 0 failures, and the run's
+  `--write-record` equals the same run's without the switch in all 2400
+  frames (`EG0/bmrc_hash_cmp.py`: 0 differing; the same tool tells the
+  `--ball-off 600 700` arm apart from frame 600 on). The re-made entries ran
+  when the body came back (the queue empty after 1900). The window moved
+  from G0's 600-700: the arena's ball is Ball_Wood by 600 now and queues
+  nothing there. Wire check rRCX -> rB7EG over core_ref_s8 again ALL SAME,
+  solo1 / solo2 c0 SAME and IDENTICAL; GCC 29/29 ok; x64 and x86 builds.
+- **Retail: the crash is the machine's.** The control - HEAD 781f981's x86
+  build, the same two copies, the same driver (`CD1/cd1_gate.py`) - crashed
+  identically (`d3d8.dll+0x54acd`, a write to 0x11a80, both copies, during
+  `TT Change ScreenMode`) with the monitor still Off Line (availability 8).
+  The step's retail session and Q-R1 wait for the close-out on a machine
+  with a display.
+- **Not run, deferred:** Q-U1/Q-U2 as unit tests (the record needs CK; no
+  fake queue backend exists), Q-S1 and the rest of Q-S2 (SimTool's
+  `--queue-block` and `--hold-outside` scenes with a savestate restore),
+  Q-H1 (the A6 drop recipe), Q-H2 (the `drop-body` verb), Q-R1.
+- **Q5 not built, so Q is partial in a resync.** Q5 changes the resync
+  payload (the portable record's queue section) and needs a protocol number;
+  this step names none (the chain's rule). The protocol is 13 now
+  (`PHYSICS_PROTOCOL_VERSION`), so Q5 takes 14 at the earliest; it is queued
+  in roadmap §4 item 4. Until then a resync goes through
+  `restore_and_replay` like any restore: its outside entries are held for
+  the re-step and put back (Q4 applies), while the selected scripts come
+  from the localized record without a queue section, so their live entries
+  stay and run in the re-step (the behaviour before this step), and the
+  travelling blob does not compare the queue.
+- **Gap L (G6-G9) not built** in this step; queued as the four steps §8
+  names (G6, G7, G8, G9), each with its own checks.
+
 ## As built (step B2SW, 2026-10-27): gap F fixed; the CPU cliff's closing check
 
 - **F.** `script_replay::execute_frame` / `execute_scripts`, under

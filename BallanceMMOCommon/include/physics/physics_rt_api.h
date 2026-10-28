@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 22u  /* v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
+#define BMMO_PHYSICS_API_VERSION 23u  /* v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -150,6 +150,16 @@ typedef struct bmmo_physics_force_block {
     double position[3];   /* PhysicsControllerForce::m_Position (object space) */
     double force[3];      /* PhysicsControllerForce::m_Force */
 } bmmo_physics_force_block;
+
+/* One PreSimulate queue entry (v23, the rollback engine gaps design 2.2.2):
+ * the block that queued it, the root script that block belongs to, its slot
+ * and whether it is one of the bridge's own callbacks. */
+typedef struct bmmo_physics_callback {
+    uint32_t behavior;      /* the block that owns the entry */
+    uint32_t owner_script;  /* CKBehavior::GetOwnerScript()->GetID(), 0 when none */
+    uint8_t  slot;          /* 0..2 (always 2 today) */
+    uint8_t  bmmo;          /* 1: one of the bridge's own (is_bmmo_callback) */
+} bmmo_physics_callback;
 
 /* One friction contact point of a body (v15): the other object, and the
  * per-contact state IVP keeps on the point (ivp_friction.hxx,
@@ -636,6 +646,33 @@ typedef struct bmmo_physics_api_v2 {
     void (*set_controller_alias)(void* ipion_manager,
                                  int32_t (*alias)(void* user, const char* name, char* out, uint32_t out_size),
                                  void* user);
+
+    /* ---- v23: the PreSimulate queue (rollback-engine-gaps design 2.2.2,
+     * gap Q; engine change #20 makes, detaches, inserts and frees one
+     * entry inside physics_RT) ----
+     * get: every queued entry, slot ascending, index ascending (queue
+     * order); writes at most `max` and returns the full count, -1 with a
+     * message.  rebuild: every non-BMMO entry whose owner script is in
+     * `scope` removed and freed, then `target` (each owner in `scope`)
+     * appended in order, each made by the block's factory; atomic - a target
+     * the factory refuses frees what was made and changes nothing (-1, the
+     * block named); returns the entries removed.  hold: every non-BMMO entry
+     * whose owner script is NOT in `executed` detached into the bridge's held
+     * list with its place (slot, index, the block of the nearest older entry
+     * left); returns how many, -1 when entries are already held.  unhold: the
+     * held entries back, oldest first, each after the entry it followed when
+     * that block still has an entry in the slot, else at its old index
+     * clamped; returns how many went back by the clamp.  scope: which entries
+     * the savestate restore's queue check compares, live and recorded alike:
+     * mode 0 every non-BMMO entry (the default), mode 1 those whose owner
+     * script is in `scope` (may be empty). */
+    int32_t (*callbacks_get)(void* ipion_manager, bmmo_physics_callback* out, int32_t max, char* error, uint32_t error_size);
+    int32_t (*callbacks_rebuild)(void* ipion_manager, const uint32_t* scope, int32_t n, const bmmo_physics_callback* target,
+                                 int32_t count, char* error, uint32_t error_size);
+    int32_t (*callbacks_hold)(void* ipion_manager, const uint32_t* executed, int32_t n, char* error, uint32_t error_size);
+    int32_t (*callbacks_unhold)(void* ipion_manager, char* error, uint32_t error_size);
+    int32_t (*callback_scope_set)(void* ipion_manager, int32_t mode, const uint32_t* scope, int32_t n, char* error,
+                                  uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

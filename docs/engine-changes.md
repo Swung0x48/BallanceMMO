@@ -747,7 +747,63 @@ Nothing in the retail layout moves (the member is appended), no IVP file is
 touched, and a build without the bridge's listener only carries a pointer that
 is null between calls.
 
-## 20. (reserved: the PreSimulate queue's access, rollback-engine-gaps design gap Q)
+## 20. The PreSimulate queue's access (physics_RT)
+
+Files: `Source/BuildingBlocks/physics_RT/PhysicsCallback.cpp` (the dispatcher
+`BmmoPhysicsCallbackMake` and the one-entry access `BmmoPhysicsCallbackDetach`,
+`BmmoPhysicsCallbackInsert`, `BmmoPhysicsCallbackFree`, all `extern "C"`) and
+the ten queueing behaviours under `Source/BuildingBlocks/physics_RT/Behaviors/`
+(`PhysicsForce`, `PhysicsWakeUp`, `PhysicsCollisionDetection`,
+`PhysicsBallJoint`, `PhysicsHinge`, `SetPhysicsSlider`, `SetPhysicsSpring`,
+`PhysicsBuoyancy`, `PhysicsContinuousContact`, `DeleteCollisionSurfaces`):
+one free function `BmmoMakeCallback_<Block>` after each file's callback class,
+which constructs that class for a block - neither executed nor queued.
+
+`CKIpionManager::m_PreSimulateCallbacks` holds the entries the blocks of the
+level scripts queued because a body they need is missing (`Execute` returned
+0); `Process()` retries them before every step, newest first. Nothing restored
+that queue across a client's rollback: the script record put a block's state
+back but not its queued entry, so a replayed Create or WakeUp edge queued a
+copy next to the live one (k -> k+1 per rewind, a leaked force controller per
+extra copy once the body appears), and every blob captured inside that replay
+was refused by the savestate's queue check afterwards
+(`docs/rollback-engine-gaps-design.md` 1.1, gap Q). A retail entry carries no
+state of its own - every callback class holds the manager, the type and its
+block, and re-reads its inputs from the block when it runs - so an entry is
+(block, slot), and the rollback puts the anchor's entries back by making them
+again: the dispatcher keys the block's prototype GUID (the files' `SetGuid`
+lines) to its factory and returns NULL for any other prototype. Detach takes
+one entry out with `remove_at` (the rest keep their order), Insert puts one in
+at an index (appended, then moved down with `swap_elems`: `insert_after` cannot
+insert at 0), both recount `m_HasCallbacks` the way `ClearBehavior` does, and
+Free deletes one (virtual) - allocation and deletion stay inside physics_RT.
+
+Access only: no class layout changes, no existing path calls the new
+functions, and nothing in IVP is touched (so `IVP_PORTABLE_BMMO` does not
+apply). The bridge (`BallanceMMOCommon/src/physics/physics_savestate_common.cpp`,
+bridge API v23 below) calls them at a client's restore and after its replay
+only; the server never does. Step B7EG; the bridge notes below.
+
+## Bridge notes: the PreSimulate queue (bridge API v23, engine change #20)
+
+`bmmo::physics::callbacks_get / callbacks_rebuild / callbacks_hold /
+callbacks_unhold / callback_scope_set` (`physics_state.hpp`; the table entries
+of the same names in `physics_rt_api.h`, `physics_direct`, `physics_view`):
+read the queue (block, owner script, slot, BMMO flag); rebuild the non-BMMO
+entries of a set of scripts to a target list made by the factory (atomic: a
+target the factory refuses frees what was made and changes nothing); hold every
+non-BMMO entry of the scripts NOT in a set out of the queue with its place
+(slot, index, the block of the nearest older entry left, whether the entry
+before it was held too) and put them back after the replay, oldest first, each
+after the first entry of the block it followed from the previous reinsertion
+on (or right after the held entry it followed), else at its old index clamped
+(counted); and scope the savestate restore's queue check
+(`restorer::check_callbacks`) to the entries of a set of scripts (mode 1) or
+every non-BMMO entry (mode 0, the default and SimTool's). A recorded entry
+whose block is gone is compared (fail-closed); a live one is not (`Process()`
+drops it). The held list and the scope live in a manager-keyed map in the
+bridge, like the controller alias - no `BallanceMMOClient` member. The blob's
+capture and layout are unchanged.
 
 ## 21. A local parameter's object accessors on a 64-bit build (CK2)
 

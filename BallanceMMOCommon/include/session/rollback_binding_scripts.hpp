@@ -66,6 +66,15 @@ namespace bmmo::session {
         // where the live frame would (script_replay live_membership).  Off:
         // as before (the legacy path).
         bool live_membership = false;
+        // Step B7EG (rollback-engine gaps design 2.2.3-2.2.4, gap Q): the
+        // PreSimulate queue's entries of the selected and trafo scripts
+        // travel with the records (record v4 / v5) and come back with them,
+        // and every other script's entry is held out of the queue for the
+        // whole of a replay and put back after it (rollback_world's
+        // hold_outside_callbacks / unhold_outside_callbacks).  Only with
+        // replay_activation (every selected script written and executed).
+        // Off: as before (the legacy path).
+        bool callback_queue = false;
     };
 
     // Installs capture/restore/diff and runs the scripts' frame after the
@@ -78,10 +87,86 @@ namespace bmmo::session {
         const auto* selection = o.scripts;
         const auto* hooks = o.hooks;
         const auto* trafo = o.trafo;
-        world.capture_scripts = [context, selection, hooks, trafo](std::vector<uint8_t>& out) {
-            return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo);
+        // Gap Q (step B7EG): the queue hooks from the backend (bridge API
+        // v23), one implementation for every host that turns them on.
+        std::shared_ptr<bmmo::game::queue_hooks> queue;
+        if (o.callback_queue && o.replay_activation) {
+            using bmmo::game::queued_callback;
+            using bmmo::game::script_replay;
+            queue = std::make_shared<bmmo::game::queue_hooks>();
+            queue->capture = [b](std::vector<queued_callback>& out) {
+                std::vector<bmmo_physics_callback> all;
+                std::string error;
+                out.clear();
+                if (!b->callbacks_get(all, error)) return false;
+                out.reserve(all.size());
+                for (const bmmo_physics_callback& e: all) {
+                    queued_callback q;
+                    q.behavior = e.behavior;
+                    q.owner_script = e.owner_script;
+                    q.slot = e.slot;
+                    q.bmmo = e.bmmo != 0;
+                    out.push_back(q);
+                }
+                return true;
+            };
+            queue->restore = [b](const std::vector<CK_ID>& scope, const std::vector<queued_callback>& target, std::string& error) {
+                const std::vector<uint32_t> s(scope.begin(), scope.end());
+                std::vector<bmmo_physics_callback> t;
+                t.reserve(target.size());
+                for (const queued_callback& q: target) {
+                    bmmo_physics_callback e{};
+                    e.behavior = q.behavior;
+                    e.owner_script = q.owner_script;
+                    e.slot = q.slot;
+                    e.bmmo = q.bmmo ? 1 : 0;
+                    t.push_back(e);
+                }
+                return b->callbacks_rebuild(s, t, error);
+            };
+            // Q4: every entry of a script the replay does not execute is
+            // live state - held out of the queue from before the restore
+            // touches anything to the end of the replay, so no replayed
+            // Process() runs it and no restore refuses for it; the queue
+            // check (the blob's) then compares the executed scripts' entries
+            // only.  The executed scripts: every selected one and every
+            // trafo script (replay_activation).
+            const auto log = world.log;
+            auto hold_logs = std::make_shared<uint32_t>(0);
+            world.hold_outside_callbacks = [b, selection, trafo, log, hold_logs](uint32_t anchor, bool have_record) {
+                std::vector<uint32_t> executed(selection->scripts.begin(), selection->scripts.end());
+                if (trafo) executed.insert(executed.end(), trafo->scripts.begin(), trafo->scripts.end());
+                std::string error;
+                const int held = b->callbacks_hold(executed, error);
+                auto& stats = script_replay::queue_stats();
+                if (held < 0) {
+                    ++stats.hold_fail;
+                    if (log && (*hold_logs)++ < 8)
+                        log("PreSimulate queue: the hold at the restore to tick " + std::to_string(anchor) + " failed: " + error);
+                    return -1;
+                }
+                ++stats.holds;
+                stats.held += static_cast<uint64_t>(held);
+                if (!have_record) ++stats.no_record;
+                if (held > 0 && log && (*hold_logs)++ < 8)
+                    log("PreSimulate queue: " + std::to_string(held) + " entr" + (held == 1 ? "y" : "ies")
+                        + " of scripts the replay does not run held out of the replay from tick " + std::to_string(anchor));
+                b->callback_scope_set(1, executed, error);
+                return held;
+            };
+            world.unhold_outside_callbacks = [b]() {
+                std::string error;
+                const int clamped = b->callbacks_unhold(error);
+                if (clamped > 0) script_replay::queue_stats().unhold_clamped += static_cast<uint64_t>(clamped);
+                b->callback_scope_set(0, {}, error);
+            };
+        }
+        const bmmo::game::queue_hooks* queue_ptr = queue.get();
+        world.capture_scripts = [context, selection, hooks, trafo, queue, queue_ptr](std::vector<uint8_t>& out) {
+            return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo, queue_ptr);
         };
-        world.restore_scripts = [o, context, selection, hooks, trafo](const std::vector<uint8_t>& bytes, uint32_t anchor) {
+        world.restore_scripts = [o, context, selection, hooks, trafo, queue, queue_ptr](const std::vector<uint8_t>& bytes,
+                                                                                         uint32_t anchor) {
             std::vector<CK_ID> kept_live;
             if (o.reset_ticks)
                 for (const auto& [id, reset_tick]: *o.reset_ticks)
@@ -93,7 +178,7 @@ namespace bmmo::session {
             bool& membership = bmmo::game::script_replay::live_membership();
             membership = o.live_membership;
             const bool ok = bmmo::game::script_replay::restore(context, *selection, *hooks, bytes, &error, o.scripts_replayed,
-                                                               &kept_live, o.replay_activation, trafo);
+                                                               &kept_live, o.replay_activation, trafo, queue_ptr);
             resize = false;
             membership = false;
             if (!ok && o.on_restore_failed) o.on_restore_failed(error);

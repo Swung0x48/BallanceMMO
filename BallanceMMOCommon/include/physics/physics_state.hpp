@@ -6,6 +6,7 @@
 // sides run exactly this code.
 
 #include <string>
+#include <vector>
 
 #include <physics/deterministic_random.hpp>
 #include <physics/physics_rt_api.h>
@@ -53,6 +54,17 @@ namespace bmmo::physics {
     bool force_block_get(CKIpionManager* physics, uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error);
     bool force_block_set(CKIpionManager* physics, uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error);
     void set_event_log_muted(bool muted);
+    // v23, the PreSimulate queue (rollback-engine-gaps design 2.2.2, gap Q;
+    // engine change #20).  physics_savestate_common.cpp; see the table entries
+    // of the same names in physics_rt_api.h.  rebuild returns the entries
+    // removed (-1: refused, nothing changed), hold the entries held (-1:
+    // already holding), unhold the entries put back by the clamp.
+    bool callbacks_get(CKIpionManager* physics, std::vector<bmmo_physics_callback>& out, std::string& error);
+    int callbacks_rebuild(CKIpionManager* physics, const std::vector<uint32_t>& scope,
+                          const std::vector<bmmo_physics_callback>& target, std::string& error);
+    int callbacks_hold(CKIpionManager* physics, const std::vector<uint32_t>& executed, std::string& error);
+    int callbacks_unhold(CKIpionManager* physics, std::string& error);
+    bool callback_scope_set(CKIpionManager* physics, int mode, const std::vector<uint32_t>& scope, std::string& error);
     // While muted, keep the "recipe" entries of the bodies created (the
     // format drain_event_log has) in a buffer of their own, drained by
     // drain_muted_recipes: a client's record of the births a replayed frame

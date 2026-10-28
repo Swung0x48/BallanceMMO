@@ -145,6 +145,21 @@ namespace bmmo::physics {
         bool force_block_set(uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error) const {
             return bmmo::physics::force_block_set(manager, behavior_id, in, error);
         }
+        // v23, the PreSimulate queue (rollback-engine-gaps design 2.2.2, gap Q).
+        bool callbacks_get(std::vector<bmmo_physics_callback>& out, std::string& error) const {
+            return bmmo::physics::callbacks_get(manager, out, error);
+        }
+        int callbacks_rebuild(const std::vector<uint32_t>& scope, const std::vector<bmmo_physics_callback>& target,
+                              std::string& error) const {
+            return bmmo::physics::callbacks_rebuild(manager, scope, target, error);
+        }
+        int callbacks_hold(const std::vector<uint32_t>& executed, std::string& error) const {
+            return bmmo::physics::callbacks_hold(manager, executed, error);
+        }
+        int callbacks_unhold(std::string& error) const { return bmmo::physics::callbacks_unhold(manager, error); }
+        bool callback_scope_set(int mode, const std::vector<uint32_t>& scope, std::string& error) const {
+            return bmmo::physics::callback_scope_set(manager, mode, scope, error);
+        }
         bool set_body_matrix(const char* entity, const float matrix[16], bool simulated, std::string& error) const {
             return bmmo::physics::set_body_matrix(manager, entity, matrix, simulated, error);
         }

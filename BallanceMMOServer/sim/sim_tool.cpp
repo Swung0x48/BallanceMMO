@@ -416,6 +416,15 @@ namespace {
         // dropped there, WakeUps too (the fact's control arm: the same
         // inputs as --ball-off-wake-only, nothing pending at the re-make).
         bool ball_off_drop_all = false;
+        // Step B7EG (rollback-engine-gaps design 7.2 Q-S2's queue half, gap
+        // Q): --queue-roundtrip (a --replay run, with --ball-off to make the
+        // queue hold entries): after every frame whose PreSimulate queue has
+        // a retail entry, the bridge's hold of every retail entry (an empty
+        // executed set), its put-back, and the rebuild of the entries'
+        // scripts from the queue as it was; each must give the queue back
+        // unchanged (order included), and the run's --write-record must
+        // equal the same run's without the switch.
+        bool queue_roundtrip = false;
         // Step K0 (record-format-gaps-design.md §8, read-only tools):
         // --array-reads [--client-scope] [--array-reads-all]: the array-read
         // census of --level's session world at its anchor (design 2.2, S2;
@@ -918,6 +927,7 @@ namespace {
             }
             else if (arg == "--ball-off-wake-only") out.ball_off_wake_only = true;      // step EG0
             else if (arg == "--ball-off-drop-all") out.ball_off_drop_all = true;        // step EG0
+            else if (arg == "--queue-roundtrip") out.queue_roundtrip = true;            // step B7EG
             else if (!parse_trafo_arg(arg, next, out) && !parse_record_format_arg(arg, next, out)) return false;
         }
         // --list of a journal and the savestate file verbs are pure file
@@ -1487,6 +1497,67 @@ namespace {
         };
     }
 
+    namespace b7eg {
+        // --queue-roundtrip (see its argument).
+        struct queue_roundtrip {
+            uint64_t frames = 0, entries = 0, failures = 0;
+            static std::string text(const std::vector<bmmo_physics_callback>& q) {
+                std::string out;
+                for (const auto& e: q)
+                    out += " " + std::to_string(e.slot) + ":" + std::to_string(e.behavior) + (e.bmmo ? "b" : "")
+                         + "@" + std::to_string(e.owner_script);
+                return out.empty() ? std::string(" (none)") : out;
+            }
+            static bool same(const std::vector<bmmo_physics_callback>& a, const std::vector<bmmo_physics_callback>& b) {
+                if (a.size() != b.size()) return false;
+                for (size_t i = 0; i < a.size(); ++i)
+                    if (a[i].slot != b[i].slot || a[i].behavior != b[i].behavior || a[i].bmmo != b[i].bmmo
+                            || a[i].owner_script != b[i].owner_script)
+                        return false;
+                return true;
+            }
+            void fail(long long frame, const std::string& what) {
+                ++failures;
+                std::printf("queue-roundtrip FAIL frame=%lld: %s\n", frame, what.c_str());
+            }
+            void after_frame(const bmmo::sim::headless_engine& engine, long long frame) {
+                CKIpionManager* physics = engine.physics();
+                std::vector<bmmo_physics_callback> q0, q;
+                std::string error;
+                if (!bmmo::physics::callbacks_get(physics, q0, error)) return fail(frame, "get: " + error);
+                std::vector<bmmo_physics_callback> retail, kept;
+                for (const auto& e: q0) (e.bmmo ? kept : retail).push_back(e);
+                if (retail.empty()) return;
+                ++frames;
+                entries += retail.size();
+                // 1. hold every retail entry (nothing executed), put it back
+                const int held = bmmo::physics::callbacks_hold(physics, {}, error);
+                if (held != static_cast<int>(retail.size()))
+                    return fail(frame, "hold took " + std::to_string(held) + " of " + std::to_string(retail.size()) + " " + error);
+                if (!bmmo::physics::callbacks_get(physics, q, error) || !same(q, kept))
+                    fail(frame, "while held:" + text(q));
+                if (bmmo::physics::callbacks_hold(physics, {}, error) != -1) fail(frame, "a second hold was not refused");
+                const int clamped = bmmo::physics::callbacks_unhold(physics, error);
+                if (clamped != 0) fail(frame, "unhold clamped " + std::to_string(clamped));
+                if (!bmmo::physics::callbacks_get(physics, q, error) || !same(q, q0))
+                    return fail(frame, "after the put-back:" + text(q) + " expected" + text(q0));
+                // 2. rebuild the entries' scripts from the queue as it was
+                std::vector<uint32_t> scope;
+                for (const auto& e: retail) scope.push_back(e.owner_script);
+                const int removed = bmmo::physics::callbacks_rebuild(physics, scope, retail, error);
+                if (removed != static_cast<int>(retail.size()))
+                    return fail(frame, "rebuild removed " + std::to_string(removed) + " of " + std::to_string(retail.size()) + " " + error);
+                if (!bmmo::physics::callbacks_get(physics, q, error) || !same(q, q0))
+                    return fail(frame, "after the rebuild:" + text(q) + " expected" + text(q0));
+                // 3. a refused rebuild changes nothing (a block outside its scope)
+                if (bmmo::physics::callbacks_rebuild(physics, {}, retail, error) != -1) fail(frame, "an out-of-scope rebuild was not refused");
+                if (!bmmo::physics::callbacks_get(physics, q, error) || !same(q, q0))
+                    return fail(frame, "after a refused rebuild:" + text(q));
+                std::printf("queue-roundtrip frame=%lld entries=%zu ok:%s\n", frame, retail.size(), text(q0).c_str());
+            }
+        };
+    }
+
     int run_free(bmmo::sim::headless_engine& engine, const arguments& args) {
         std::string error;
         // The trafo sets (sim/trafo_tool.hpp): inputs and the trafo frame
@@ -1732,6 +1803,7 @@ namespace {
         }
         eg0::queue_tracer queue_trace;   // step EG0: --queue-trace
         eg0::ball_off ball_off;          // step EG0: --ball-off
+        b7eg::queue_roundtrip queue_roundtrip;   // step B7EG: --queue-roundtrip
         for (size_t frame = 0; frame < record.frames.size(); ++frame) {
             const auto& expected = record.frames[frame];
             if (args.ivp_trace_from >= 0) {
@@ -1814,6 +1886,7 @@ namespace {
             } else if (!engine.tick(error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
             dump_entities("after");
             if (args.queue_trace) queue_trace.after_frame(engine, frame_index);   // step EG0
+            if (args.queue_roundtrip) queue_roundtrip.after_frame(engine, frame_index);   // step B7EG
             if (args.bodies_from >= 0 && frame_index >= args.bodies_from && frame_index <= args.bodies_to) {
                 std::printf("bodies frame%lld: %s\nevents frame%lld: %s\n", frame_index,
                     bmmo::physics::describe_physics_objects(engine.physics()).c_str(), frame_index,
@@ -8387,7 +8460,7 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool --root <game dir> --level N --list-callback-blocks [--dump-at T]\n"
             "           (step EG0: every block of the ten PreSimulate-queueing prototypes, its root script, selected\n"
             "            or OUTSIDE the session selection, and its target's source; read-only)\n"
-            "       --replay ... [--queue-trace] [--ball-off FROM TO [--ball-off-wake-only | --ball-off-drop-all]]\n"
+            "       --replay ... [--queue-trace] [--ball-off FROM TO [--ball-off-wake-only | --ball-off-drop-all]] [--queue-roundtrip]\n"
             "           (step EG0: the PreSimulate queue and the current ball's body whenever they change; the ball's\n"
             "            body out before frame FROM and made again before TO with the retail recipe, and before the\n"
             "            re-make every queued entry but the WakeUps, or every entry, dropped - measurement switches\n"

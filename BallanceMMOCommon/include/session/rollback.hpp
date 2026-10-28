@@ -268,6 +268,14 @@ namespace bmmo::session {
         // `anchor` is the tick the bytes were captured at: the adapter keeps
         // live every script the game reset after it (script_replay::restore).
         std::function<bool(const std::vector<uint8_t>& bytes, uint32_t anchor)> restore_scripts;
+        // Gap Q4 (rollback-engine gaps design 2.2.4, step B7EG; filled by
+        // bind_script_replay): the PreSimulate entries of every script the
+        // replay does not execute held out of the queue - called once a
+        // replay is known to follow, before anything is restored; returns
+        // the entries held, -1 when nothing was held - and put back in their
+        // places after the replay (on every exit of the restore).
+        std::function<int(uint32_t anchor, bool have_record)> hold_outside_callbacks;
+        std::function<void()> unhold_outside_callbacks;
         // Optional: names how two script snapshots differ (the adapter has
         // the graph).  Returns "" when they are equal in every logical field
         // - a float parameter that follows the physics by an ulp is reported
@@ -1258,6 +1266,18 @@ namespace bmmo::session {
             // Whether a replay follows this restore (the clock, the scripts and
             // the savestate are put back only then).
             const bool replay_follows = !frozen && window <= reach;
+            // Gap Q4: no entry of a script the replay does not run takes
+            // part in it; back in place on every exit (after the replay
+            // loop, after a failed step).
+            struct outside_callbacks {
+                const rollback_world& world;
+                bool held = false;
+                ~outside_callbacks() {
+                    if (held) world.unhold_outside_callbacks();
+                }
+            } outside{world};
+            if (replay_follows && world.hold_outside_callbacks && world.unhold_outside_callbacks)
+                outside.held = world.hold_outside_callbacks(anchor, at->have_scripts) >= 0;
             // The savestate path (rollback_world::set_savestate): decided here,
             // before the clock, because the blob carries the clock and the
             // separate clock write is skipped when the blob is applied.

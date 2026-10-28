@@ -760,6 +760,72 @@ namespace {
         });
     }
 
+    // v23: the PreSimulate queue (rollback-engine-gaps design 2.2.2, gap Q).
+    int32_t api_callbacks_get(void* manager, bmmo_physics_callback* out, int32_t max, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return -1;
+        }
+        std::vector<bmmo_physics_callback> all;
+        std::string text;
+        if (!bmmo::physics::callbacks_get(static_cast<CKIpionManager*>(manager), all, text)) {
+            set_error(error, error_size, text);
+            return -1;
+        }
+        for (int32_t i = 0; out && i < max && i < static_cast<int32_t>(all.size()); ++i) out[i] = all[static_cast<size_t>(i)];
+        return static_cast<int32_t>(all.size());
+    }
+
+    int32_t api_callbacks_rebuild(void* manager, const uint32_t* scope, int32_t n, const bmmo_physics_callback* target,
+                                  int32_t count, char* error, uint32_t error_size) {
+        if (!manager || (n > 0 && !scope) || (count > 0 && !target)) {
+            set_error(error, error_size, "null argument");
+            return -1;
+        }
+        const std::vector<uint32_t> s(scope, scope + (n > 0 ? n : 0));
+        const std::vector<bmmo_physics_callback> t(target, target + (count > 0 ? count : 0));
+        std::string text;
+        const int removed = bmmo::physics::callbacks_rebuild(static_cast<CKIpionManager*>(manager), s, t, text);
+        if (removed < 0) set_error(error, error_size, text);
+        return removed;
+    }
+
+    int32_t api_callbacks_hold(void* manager, const uint32_t* executed, int32_t n, char* error, uint32_t error_size) {
+        if (!manager || (n > 0 && !executed)) {
+            set_error(error, error_size, "null argument");
+            return -1;
+        }
+        const std::vector<uint32_t> e(executed, executed + (n > 0 ? n : 0));
+        std::string text;
+        const int held = bmmo::physics::callbacks_hold(static_cast<CKIpionManager*>(manager), e, text);
+        if (held < 0) set_error(error, error_size, text);
+        return held;
+    }
+
+    int32_t api_callbacks_unhold(void* manager, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return -1;
+        }
+        std::string text;
+        return bmmo::physics::callbacks_unhold(static_cast<CKIpionManager*>(manager), text);
+    }
+
+    int32_t api_callback_scope_set(void* manager, int32_t mode, const uint32_t* scope, int32_t n, char* error,
+                                   uint32_t error_size) {
+        if (!manager || (n > 0 && !scope)) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        const std::vector<uint32_t> s(scope, scope + (n > 0 ? n : 0));
+        std::string text;
+        if (!bmmo::physics::callback_scope_set(static_cast<CKIpionManager*>(manager), mode, s, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     int32_t api_set_event_log_muted(void* manager, int32_t muted, char* error, uint32_t error_size) {
         (void)manager; (void)error; (void)error_size;
         bmmo::physics::set_event_log_muted(muted != 0);
@@ -824,6 +890,11 @@ namespace {
         api_trafo_set_unmake,
         api_trafo_set_filter,
         api_set_controller_alias,
+        api_callbacks_get,
+        api_callbacks_rebuild,
+        api_callbacks_hold,
+        api_callbacks_unhold,
+        api_callback_scope_set,
     };
 }
 

@@ -75,6 +75,25 @@ namespace bmmo::game {
         std::function<bool(CKBehavior* block, const force_block_state& state)> restore_force;
     };
 
+    // One PreSimulate queue entry (bridge API v23, rollback-engine-gaps
+    // design 2.2.3, gap Q): the block that queued it, its root script, its
+    // slot, and whether it is one of the bridge's own callbacks.  A queued
+    // retail entry has no state of its own beyond these (design 1.1).
+    struct queued_callback {
+        uint32_t behavior = 0;
+        uint32_t owner_script = 0;
+        uint8_t slot = 0;
+        bool bmmo = false;
+    };
+    // Supplied by the binding (session/rollback_binding_scripts.hpp) from
+    // the host's physics backend: the whole queue, and the rebuild of the
+    // entries of `scope`'s scripts to `target` (returns the entries removed,
+    // -1 with a message: refused, nothing changed).
+    struct queue_hooks {
+        std::function<bool(std::vector<queued_callback>& out)> capture;
+        std::function<int(const std::vector<CK_ID>& scope, const std::vector<queued_callback>& target, std::string& error)> restore;
+    };
+
     class script_replay {
     public:
         static constexpr uint32_t kMagic = 0x52534d42u;   // "BMSR"
@@ -96,6 +115,31 @@ namespace bmmo::game {
         // one that no longer exists fails the restore
         // (session/trafo_input.hpp plan_trafo_record_restore).
         static constexpr uint32_t kVersionTrafo = 3;
+        // v4 / v5 (rollback-engine-gaps design 2.2.3, gap Q, step B7EG): the
+        // v2 / v3 record byte for byte after the version word, then the
+        // PreSimulate queue's entries whose block belongs to a recorded
+        // script (the selection's or a trafo set's), in queue order:
+        //   u16 count, per entry: u32 behavior, u8 slot
+        // Written only when the binding passes the queue hooks (the core
+        // hosts); the legacy retail path's records stay v2 byte for byte.
+        // A restore rebuilds those scripts' entries to the record's (the
+        // block state and its queued entry come back together), so a
+        // replayed Create or WakeUp edge queues exactly what the live frame
+        // queued instead of a copy next to the live one.
+        static constexpr uint32_t kVersionQueue = 4;
+        static constexpr uint32_t kVersionTrafoQueue = 5;
+        static bool known_version(uint32_t v) { return v >= kVersion && v <= kVersionTrafoQueue; }
+        static bool has_trafo(uint32_t v) { return v == kVersionTrafo || v == kVersionTrafoQueue; }
+        static bool has_queue(uint32_t v) { return v == kVersionQueue || v == kVersionTrafoQueue; }
+        // The queue section's counters (the core report's cbq field).
+        struct queue_counters {
+            uint64_t captured = 0, rebuilt = 0, removed = 0, rebuild_fail = 0, held = 0, holds = 0, unhold_clamped = 0,
+                     no_record = 0, hold_fail = 0;
+        };
+        static queue_counters& queue_stats() {
+            static queue_counters counters;
+            return counters;
+        }
         // The flags a restore writes: the engine's per-frame activation
         // bookkeeping.  Everything else in the flag word describes the graph.
         static constexpr CKDWORD kRuntimeFlags = CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME
@@ -627,7 +671,7 @@ namespace bmmo::game {
         // deterministic world, so two captures of the same tick compare
         // byte for byte.
         static bool capture(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
-                            std::vector<uint8_t>& out, const trafo_part* trafo = nullptr) {
+                            std::vector<uint8_t>& out, const trafo_part* trafo = nullptr, const queue_hooks* queue = nullptr) {
             out.clear();
             if (!context) return false;
             // Sized like this thread's previous record (a tick's scripts are
@@ -641,8 +685,9 @@ namespace bmmo::game {
                 ~remember() { last_size = bytes.size(); }
             } remember_size{out};
             const bool v3 = trafo && !trafo->empty();
+            const bool with_queue = queue && queue->capture;
             put_u32(out, kMagic);
-            put_u32(out, v3 ? kVersionTrafo : kVersion);
+            put_u32(out, with_queue ? (v3 ? kVersionTrafoQueue : kVersionQueue) : (v3 ? kVersionTrafo : kVersion));
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 put_u32(out, static_cast<uint32_t>(list->size()));
                 for (CK_ID id: *list) {
@@ -700,6 +745,27 @@ namespace bmmo::game {
                         ++dormancy().walked;
                     }
                 }
+            }
+            if (with_queue) {
+                // v4 / v5: the queued entries of the recorded scripts (gap Q).
+                std::vector<queued_callback> all;
+                if (!queue->capture(all)) return false;
+                std::vector<const queued_callback*> kept;
+                if (!all.empty()) {
+                    std::vector<CK_ID> scripts(sel.scripts.begin(), sel.scripts.end());
+                    if (v3) scripts.insert(scripts.end(), trafo->scripts.begin(), trafo->scripts.end());
+                    std::sort(scripts.begin(), scripts.end());
+                    for (const queued_callback& e: all)
+                        if (!e.bmmo && e.owner_script
+                                && std::binary_search(scripts.begin(), scripts.end(), static_cast<CK_ID>(e.owner_script)))
+                            kept.push_back(&e);
+                }
+                put_u16(out, static_cast<uint16_t>(kept.size()));
+                for (const queued_callback* e: kept) {
+                    put_u32(out, e->behavior);
+                    put_u8(out, e->slot);
+                }
+                queue_stats().captured += kept.size();
             }
             return true;
         }
@@ -795,7 +861,7 @@ namespace bmmo::game {
         static bool restore(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
                             const std::vector<uint8_t>& in, std::string* error, std::vector<CK_ID>* replayed = nullptr,
                             const std::vector<CK_ID>* kept_live = nullptr, bool replay_activation = false,
-                            const trafo_part* trafo = nullptr) {
+                            const trafo_part* trafo = nullptr, const queue_hooks* queue = nullptr) {
             if (error) error->clear();
             if (replayed) replayed->clear();
             last_restore() = restore_counters{};
@@ -804,9 +870,13 @@ namespace bmmo::game {
             size_t pos = 0;
             uint32_t magic = 0, version = 0;
             if (!get_u32(in, pos, magic) || magic != kMagic) return fail(error, "not a script snapshot");
-            if (!get_u32(in, pos, version) || (version != kVersion && version != kVersionTrafo))
+            if (!get_u32(in, pos, version) || !known_version(version))
                 return fail(error, "snapshot version");
             std::vector<CKBehavior*> written;   // the root scripts written back (G1, live_membership)
+            // Gap Q (design 2.2.3): a selected script the record has no
+            // state for that exists now runs in the replay too; it has no
+            // recorded entry, so its live entries are removed.
+            std::vector<CK_ID> unrecorded;
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 const bool scripts = list == &sel.scripts;
                 uint32_t count = 0;
@@ -817,7 +887,10 @@ namespace bmmo::game {
                     if (!get_u32(in, pos, recorded) || recorded != static_cast<uint32_t>(id)) return fail(error, "script id");
                     if (!get_u8(in, pos, present)) return fail(error, "truncated");
                     auto* beh = CKBehavior::Cast(context->GetObject(id));
-                    if (!present) continue;            // the capture had no such script; nothing to write
+                    if (!present) {                    // the capture had no such script; nothing to write
+                        if (scripts && replay_activation && beh) unrecorded.push_back(id);
+                        continue;
+                    }
                     if (!beh) return fail(error, "a recorded script is gone");
                     // Peek at the root's recorded flags: id, then flags.
                     size_t peek = pos;
@@ -841,7 +914,7 @@ namespace bmmo::game {
             // written, active or not: the trafo frame runs them, and what
             // activates them is the trafo inputs the replay re-applies.
             std::vector<uint32_t> recorded;
-            if (version == kVersionTrafo) {
+            if (has_trafo(version)) {
                 uint32_t count = 0;
                 if (!get_u32(in, pos, count)) return fail(error, "truncated trafo scripts");
                 for (uint32_t i = 0; i < count; ++i) {
@@ -872,6 +945,15 @@ namespace bmmo::game {
                                                && std::equal(built->begin(), built->end(), in.begin() + static_cast<std::ptrdiff_t>(at)));
                 }
             }
+            // v4 / v5: the queued entries of the recorded scripts (gap Q).
+            std::vector<queued_callback> queued;
+            if (has_queue(version)) {
+                uint16_t count = 0;
+                if (!get_u16(in, pos, count)) return fail(error, "truncated queue");
+                queued.resize(count);
+                for (queued_callback& e: queued)
+                    if (!get_u32(in, pos, e.behavior) || !get_u8(in, pos, e.slot)) return fail(error, "truncated queue entry");
+            }
             if (pos != in.size()) return fail(error, "trailing bytes");
             if (trafo && !trafo->empty()) {
                 std::vector<uint32_t> selected;
@@ -887,6 +969,45 @@ namespace bmmo::game {
                     trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)), true);
                     ++last_restore().trafo_built;
                 }
+            }
+            // Gap Q (design 2.2.3): the PreSimulate entries of every script
+            // this restore wrote - the selected roots written back and every
+            // trafo script (written, or put to its built state) - are the
+            // record's, in its order; a written script the record lists no
+            // entry for has none, and neither has a selected script absent
+            // from the record.  After the blocks: a force block restored
+            // above with no controller and its entry queued comes back with
+            // no controller and one entry, which runs when its body appears.
+            if (has_queue(version) && queue && queue->restore) {
+                std::vector<CK_ID> scope;
+                for (CKBehavior* beh: written) scope.push_back(beh->GetID());
+                scope.insert(scope.end(), unrecorded.begin(), unrecorded.end());
+                if (trafo)
+                    for (CK_ID id: trafo->scripts)
+                        if (CKBehavior::Cast(context->GetObject(id))) scope.push_back(id);
+                std::sort(scope.begin(), scope.end());
+                scope.erase(std::unique(scope.begin(), scope.end()), scope.end());
+                std::vector<queued_callback> target;
+                for (queued_callback e: queued) {
+                    auto* block = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(e.behavior)));
+                    if (!block) {
+                        ++queue_stats().rebuild_fail;
+                        return fail(error, "a queued block of the record is gone");
+                    }
+                    CKBehavior* owner = block->GetOwnerScript();
+                    e.owner_script = owner ? static_cast<uint32_t>(owner->GetID()) : 0;
+                    if (!std::binary_search(scope.begin(), scope.end(), static_cast<CK_ID>(e.owner_script))) continue;
+                    target.push_back(e);
+                }
+                std::string why;
+                const int removed = queue->restore(scope, target, why);
+                if (removed < 0) {
+                    ++queue_stats().rebuild_fail;
+                    if (error) *error = "PreSimulate queue: " + why;
+                    return false;
+                }
+                queue_stats().removed += static_cast<uint64_t>(removed);
+                queue_stats().rebuilt += target.size();
             }
             // G1 (live_membership): what the restore made active runs in the
             // live frames after the replay too.
@@ -1040,7 +1161,7 @@ namespace bmmo::game {
                 d.logical = true; ++d.logical_count; d.where = "header";
                 return d;
             }
-            const bool v3 = va == kVersionTrafo;
+            const bool v3 = has_trafo(va);
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 uint32_t ca = 0, cb = 0;
                 if (!get_u32(a, pa, ca) || !get_u32(b, pb, cb) || ca != cb) {
@@ -1106,6 +1227,29 @@ namespace bmmo::game {
                     }
                     if (!qa || qa == kTrafoDormant) continue;
                     if (!diff_behavior(beh, script_name, a, pa, b, pb, d, masks)) return d;
+                }
+            }
+            if (has_queue(va)) {
+                // Gap Q: the recorded scripts' queued entries.
+                const auto read = [](const std::vector<uint8_t>& r, size_t& p, std::string& text) {
+                    uint16_t n = 0;
+                    if (!get_u16(r, p, n)) return false;
+                    for (uint16_t i = 0; i < n; ++i) {
+                        uint32_t behavior = 0;
+                        uint8_t slot = 0;
+                        if (!get_u32(r, p, behavior) || !get_u8(r, p, slot)) return false;
+                        text += (text.empty() ? "" : " ") + std::to_string(slot) + ":" + std::to_string(behavior);
+                    }
+                    return true;
+                };
+                std::string qa, qb;
+                if (!read(a, pa, qa) || !read(b, pb, qb)) return d;
+                if (qa != qb) {
+                    d.logical = true; ++d.logical_count;
+                    const std::string what = "PreSimulate queue " + (qa.empty() ? std::string("(none)") : qa) + " vs "
+                                           + (qb.empty() ? std::string("(none)") : qb);
+                    if (d.where.empty()) d.where = what;
+                    d.note(what);
                 }
             }
             complete = pa == a.size() && pb == b.size();
@@ -1205,7 +1349,7 @@ namespace bmmo::game {
             size_t a = 0;
             uint32_t magic = 0, version = 0, count = 0;
             if (!get_u32(record, a, magic) || magic != kMagic || !get_u32(record, a, version)
-                    || (version != kVersion && version != kVersionTrafo) || !get_u32(record, a, count))
+                    || !known_version(version) || !get_u32(record, a, count))
                 return false;
             for (uint32_t i = 0; i < count; ++i) {
                 record_index::script s;

@@ -27,6 +27,7 @@
 #include "physics_savestate_internal.hpp"
 
 #include <physics/physics_state.hpp>
+#include <physics/callback_queue_plan.hpp>
 
 #include "ivp_controller.hxx"
 #include "ivp_surface_manager.hxx"
@@ -1825,6 +1826,18 @@ namespace bmmo::physics::savestate {
                          + std::to_string(recorded) + " (BallanceMMO's included) in the capturing world; the live queue is kept");
                 return true;
             }
+            // Gap Q (bridge API v23, callback_scope_set): with a scope, only
+            // the entries of the scripts the rollback restored are compared -
+            // the entries of every other script are live state, held out of
+            // the replay (rollback-engine-gaps design 2.2.2-2.2.4).  A
+            // recorded entry whose block is gone is compared (fail-closed).
+            const std::set<uint32_t>* scope = callback_scope_for(physics_);
+            CKContext* scope_context = physics_->m_Context;
+            const auto in_scope = [scope, scope_context](uint32_t behavior, bool live_side) {
+                if (!scope) return true;
+                CKBehavior* block = scope_context ? CKBehavior::Cast(scope_context->GetObject(static_cast<CK_ID>(behavior))) : nullptr;
+                return queue_plan::compared(scope, block != nullptr, block ? callback_owner_script(block) : 0, live_side);
+            };
             std::vector<callback_record> live_queue;
             std::set<uint32_t> bmmo_behaviors;
             if (PhysicsCallbackContainer* queue = physics_->m_PreSimulateCallbacks) {
@@ -1836,6 +1849,7 @@ namespace bmmo::physics::savestate {
                             bmmo_behaviors.insert(static_cast<uint32_t>(cb->m_BehaviorID));
                             continue;
                         }
+                        if (!in_scope(static_cast<uint32_t>(cb->m_BehaviorID), true)) continue;
                         callback_record rec;
                         rec.slot = slot;
                         rec.behavior = static_cast<uint32_t>(cb->m_BehaviorID);
@@ -1847,6 +1861,7 @@ namespace bmmo::physics::savestate {
             std::vector<callback_record> recorded;
             for (const callback_record& cb : world_.callbacks) {
                 if (cb.behavior == 0 || bmmo_behaviors.count(cb.behavior)) continue;
+                if (!in_scope(cb.behavior, false)) continue;
                 recorded.push_back(cb);
             }
             bool same = live_queue.size() == recorded.size();
