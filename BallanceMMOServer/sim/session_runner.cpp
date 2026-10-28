@@ -263,6 +263,9 @@ namespace bmmo::sim {
             options.trafo_inputs = (world_option_bits & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
             // Protocol 12 (sector placement design 2.4, step S5).
             options.placement_clones = (world_option_bits & bmmo::session::WORLD_PLACEMENT_CLONES) != 0;
+            // Step G2 (world-agreement-gaps-design.md §2.4): the proximity
+            // union's rules; place_probes() runs first in every step.
+            options.proximity_union = (world_option_bits & bmmo::session::WORLD_PROXIMITY_UNION) != 0;
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };
@@ -355,6 +358,13 @@ namespace bmmo::sim {
                 auto& s = *it->second;
                 if (config_.patience && s.running && s.world)
                     report_patience(s, s.world->tick_index(), "session end");
+                if (s.union_on() && s.world) {   // step G2
+                    const auto& u = s.world->proximity();
+                    const std::string text = "proximity union: skipped " + std::to_string(u.skipped()) + ", relatched "
+                        + std::to_string(u.relatched()) + ", candidate set drift " + std::to_string(s.probe_set_drift);
+                    log("[session " + std::to_string(s.id) + "] " + text);
+                    s.journal.note(s.world->tick_index(), text);
+                }
                 s.journal.note(s.world ? s.world->tick_index() : 0,
                                "end: " + (reason.empty() ? std::string("session destroyed") : reason));
                 s.journal.close();
@@ -1018,6 +1028,26 @@ namespace bmmo::sim {
         // Everything the journal costs hangs off this: a capped or absent box
         // does not even capture a hash.
         const bool recording = s.journal.is_open() && !s.journal.capped();
+        // Step G2 (world-agreement-gaps-design.md §2.2, §2.4): under
+        // WORLD_PROXIMITY_UNION the union is placed first, from the balls
+        // with a body at the end of the previous step - before the leavers
+        // below and the tick's events, the point every world can place at.
+        // Nothing between two steps may change that set (the guard).
+        if (s.union_on()) {
+            std::vector<uint32_t> now;
+            for (const auto& c: s.world->probe_candidates()) now.push_back(c.player);
+            if (s.have_probe_set && now != s.probe_set) {
+                ++s.probe_set_drift;
+                std::string was, is;
+                for (uint32_t id: s.probe_set) was += (was.empty() ? "" : ",") + std::to_string(id);
+                for (uint32_t id: now) is += (is.empty() ? "" : ",") + std::to_string(id);
+                const std::string text = "proximity union: the candidate set changed between two steps ({" + was
+                    + "} after the last, {" + is + "} at " + std::to_string(tick) + ")";
+                if (s.probe_set_drift <= 20) log("[session " + std::to_string(s.id) + "] " + text);
+                if (recording) s.journal.note(tick, text);
+            }
+            s.world->place_probes();
+        }
         // Leavers whose queued events are all applied go before this step,
         // which is where the PLAYER record at this tick puts them in a replay.
         for (auto l = s.leaving.begin(); l != s.leaving.end();) {
@@ -1187,6 +1217,11 @@ namespace bmmo::sim {
                 s.journal.note(tick, "end: tick " + std::to_string(tick) + " failed: " + error);
             if (callbacks_.on_failed) callbacks_.on_failed(s.id, error);
             return;
+        }
+        if (s.union_on()) {   // step G2: the candidates of the next step, for its guard
+            s.probe_set.clear();
+            for (const auto& c: s.world->probe_candidates()) s.probe_set.push_back(c.player);
+            s.have_probe_set = true;
         }
         // Step BALA: the balls that entered the airship zone in this step
         // (ghosts from here, out of the sync) - in the journal.

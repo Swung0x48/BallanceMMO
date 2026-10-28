@@ -918,6 +918,15 @@ public:
             s.world_options |= bmmo::session::WORLD_PLACEMENT_CLONES;
             Printf("Room %u: every PH row gets its own object in this session (world option placement clones).", r.id);
         }
+        // Step G2 (world-agreement-gaps-design.md 2.4, 5): the proximity
+        // union's rule in the server's world.  No client runs it before step
+        // G3 (which compares SessionReady's anchor_probes), so the clients'
+        // worlds keep their own-ball sensors: a test switch until then.
+        if (config_.physics_proximity_union) {
+            s.world_options |= bmmo::session::WORLD_PROXIMITY_UNION;
+            Printf("Room %u: the server places its proximity probes by the union's rule in this session (world option "
+                   "proximity union; no client runs it before step G3).", r.id);
+        }
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
         std::vector<std::pair<uint32_t, uint8_t>> players;

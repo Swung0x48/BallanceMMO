@@ -259,12 +259,31 @@ namespace bmmo::sim {
         if (!ensure_collision_filter(error)) return false;
         install_airship_zone();
         install_spawn_ghost();
-        // The proximity union (step G1, game/proximity_union.hpp) with the
-        // world option's bit clear: every block, the server's path.  Before
-        // the selection, as the rewire always ran (the CK objects it creates
-        // keep their place in the creation order); classified after it.
-        proximity_.rewire(context, bmmo::game::probe_class::all, {}, proximity_options());
-        for (const std::string& line: proximity_.lines()) log("world: " + line);
+        // The proximity union (step G1, game/proximity_union.hpp): every
+        // block, class `all`.  Before the selection, as the rewire always ran
+        // (the CK objects it creates keep their place in the creation order);
+        // classified after it.  With the world option's bit clear the
+        // server's path; under WORLD_PROXIMITY_UNION (step G2) the union
+        // rules (§2.3), all or nothing: a world that cannot rewire cannot
+        // keep P1, so its anchor fails.
+        {
+            auto union_options = proximity_options();
+            union_options.union_rules = options_.proximity_union;
+            proximity_.has_body = [this](CK3dEntity* entity) {
+                CKIpionManager* manager = physics();
+                PhysicsObject* object = manager && entity ? manager->GetPhysicsObject(entity) : nullptr;
+                return object && object->m_RealObject;
+            };
+            const std::string union_error =
+                proximity_.rewire(context, bmmo::game::probe_class::all, {}, union_options);
+            for (const std::string& line: proximity_.lines()) log("world: " + line);
+            // Only under the bit: the bit-clear path never failed its anchor
+            // for the rewire (step G1), and keeps not failing it.
+            if (options_.proximity_union && !union_error.empty()) {
+                error = "proximity union (world option) refused: " + union_error;
+                return false;
+            }
+        }
         // Step A3 (resync design 2.3): the selection the clients make at
         // their anchor (trafo scripts included, so the three have the same
         // keys) and the force hook over this world, for the resync state's
@@ -273,13 +292,14 @@ namespace bmmo::sim {
         script_selection_ = bmmo::game::session_script_selection(context, options_.trafo_inputs);
         proximity_.classify(script_selection_);
         {
-            char text[160];
+            char text[192];
             std::snprintf(text, sizeof(text), "world: proximity union: %zu blocks (mechanism %zu), %zu identity reads "
-                          "(mechanism %zu), signature mechanism %016llx all %016llx, bit clear",
+                          "(mechanism %zu), signature mechanism %016llx all %016llx, bit %s",
                           proximity_.probe_count(), proximity_.mechanism_probe_count(), proximity_.identity_count(),
                           proximity_.mechanism_identity_count(),
                           static_cast<unsigned long long>(proximity_.signature(bmmo::game::probe_class::mechanism)),
-                          static_cast<unsigned long long>(proximity_.signature(bmmo::game::probe_class::all)));
+                          static_cast<unsigned long long>(proximity_.signature(bmmo::game::probe_class::all)),
+                          options_.proximity_union ? "set" : "clear");
             log(text);
         }
         script_hooks_ = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(manager));   // step HU1: one copy (game/host_backend.hpp)
@@ -489,6 +509,50 @@ namespace bmmo::sim {
         for (const auto& [id, p]: players_)
             if (p.physicalized && p.ball) balls.push_back({p.ball, retail_ball_entity(p.ball_type)});
         proximity_.place_legacy(engine_->context(), balls, retail_ball());
+    }
+
+    // Step G2 (§2.2): the candidates of the coming tick - every player
+    // whose clone has a body at the end of the previous one, in player id
+    // order (players_ is a std::map), with the clone's entity name.
+    std::vector<bmmo::session::probe_candidate> physics_world::probe_candidates() const {
+        std::vector<bmmo::session::probe_candidate> candidates;
+        for (const auto& [id, p]: players_)
+            if (p.physicalized && p.ball && p.ball->GetName()) candidates.push_back({id, p.ball->GetName()});
+        return candidates;
+    }
+
+    // Step G2 (§2.4): the union's place() from the candidates, before
+    // anything of the tick (the runner's leavers and events, the sector
+    // pass, the behaviour pass).  Once per tick: tick() places only when
+    // this did not run for its tick.
+    void physics_world::place_probes() {
+        if (!options_.proximity_union) return;
+        probes_placed_ = true;
+        probes_placed_tick_ = tick_;
+        if (!proximity_.probe_count() && !proximity_.identity_count()) return;
+        proximity_.place(engine_->context(), probe_candidates());
+    }
+
+    void physics_world::displace_probe_frames(float dx) {
+        if (!options_.proximity_union) return;
+        std::vector<uint8_t> hold;
+        proximity_.capture(hold);
+        if (hold.size() < 2) return;
+        // §4.2's layout: u16 frames, each f32 x, y, z (little endian).
+        const size_t frames = static_cast<size_t>(hold[0] | (hold[1] << 8));
+        for (size_t f = 0; f < frames && 2 + f * 12 + 4 <= hold.size(); ++f) {
+            uint8_t* x = hold.data() + 2 + f * 12;
+            uint32_t u = 0;
+            for (int s = 0; s < 4; ++s) u |= static_cast<uint32_t>(x[s]) << (8 * s);
+            float v;
+            std::memcpy(&v, &u, 4);
+            v += dx;
+            std::memcpy(&u, &v, 4);
+            for (int s = 0; s < 4; ++s) x[s] = static_cast<uint8_t>(u >> (8 * s));
+        }
+        std::string error;
+        if (!proximity_.restore(engine_->context(), hold.data(), hold.size(), error))
+            log("world: --probe-scramble: " + error);
     }
 
     int physics_world::release_proximity() {
@@ -904,7 +968,15 @@ namespace bmmo::sim {
                 log("world: navigation keys known at tick " + std::to_string(tick_) + ": " + keys);
             }
         }
-        place_proximity_legacy();
+        // The proximity union: under WORLD_PROXIMITY_UNION placed by the
+        // caller before the tick's events (place_probes, step G2) - here only
+        // when nobody did for this tick (SimTool's scenes); with the bit
+        // clear the server's path, here, after the events (step G1).
+        if (options_.proximity_union) {
+            if (!probes_placed_ || probes_placed_tick_ != tick_) place_probes();
+        } else {
+            place_proximity_legacy();
+        }
         update_sectors();
         // The trafo frame (design 2.5): after the tick's inputs and the
         // union's pass, before the behaviour pass and the step - every
@@ -1069,6 +1141,7 @@ namespace bmmo::sim {
         state.random_cursor = random_cursor_;
         state.callback_pending = callback_pending_;
         state.sectors = sectors_;
+        if (options_.proximity_union) proximity_.capture(state.proximity_hold);   // step G2
         return state;
     }
 
@@ -1078,6 +1151,17 @@ namespace bmmo::sim {
         random_cursor_ = state.random_cursor;
         callback_pending_ = state.callback_pending;
         sectors_ = state.sectors;
+        // Step G2: the restored tick has not been placed for (tick() places
+        // unless the caller does first).
+        probes_placed_ = false;
+        if (options_.proximity_union && !state.proximity_hold.empty()) {   // step G2
+            std::string hold_error;
+            if (!proximity_.restore(engine_->context(), state.proximity_hold.data(), state.proximity_hold.size(),
+                                    hold_error)) {
+                ++proximity_hold_failures_;
+                log("world: proximity hold not restored: " + hold_error);
+            }
+        }
     }
 
     void physics_world::pre_simulate() {

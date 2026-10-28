@@ -200,6 +200,26 @@ namespace {
         std::string drop_prop;
         float drop_player_at[3] = {};  // --drop-player-at X Y Z: the player's ball goes here instead
         bool have_drop_player_at = false;
+        // Step G2 (world-agreement-gaps-design.md §7.2 V2, V4): --drop-second-ball
+        // TYPE X Y Z: player 2 (added with join order 1 unless
+        // --drop-second-sector made it) physicalizes a ball of TYPE at X Y Z
+        // right after player 1's.  --probe-trace: every report line of the
+        // drop scene also prints the proximity union's frames and identity
+        // copies whose names contain the --drop name.
+        int drop_second_ball = -1;
+        float drop_second_at[3] = {};
+        bool probe_trace = false;
+        // --drop-kill TICK (step G2, V4's no-candidate interval): before world
+        // tick TICK every player's ball is unphysicalized (an Unphysicalize
+        // event each, players 1 and 2); with --savestate-check it must come
+        // before the window (the lead), which no replay re-applies.
+        long long drop_kill = -1;
+        // --probe-scramble before|after (step G2's review, V4's hold): each
+        // savestate round moves every proximity frame 1000 m along x just
+        // before ('before': the restore must put the hold back) or just
+        // after ('after': a mutation standing in for a lost hold restore,
+        // which the round must catch) the anchor's step state is restored.
+        int probe_scramble = 0;   // 0 off, 1 before, 2 after
         // --spawn-test N: spawn-impulse determinism check (design 9.10 / spec
         // A.9).  Boots a session world, physicalizes N players at the level's
         // resetpoint in the same tick and checks that the spawn kick moves
@@ -674,10 +694,38 @@ namespace {
             const std::string name = text.substr(start, stop == std::string::npos ? std::string::npos : stop - start);
             if (name == "PLACEMENT_CLONES") out |= bmmo::session::WORLD_PLACEMENT_CLONES;   // step S5's constant
             else if (name == "TRAFO_INPUTS") out |= bmmo::session::WORLD_TRAFO_INPUTS;
+            else if (name == "PROXIMITY_UNION") out |= bmmo::session::WORLD_PROXIMITY_UNION;   // step G2
             else return false;
             if (stop == std::string::npos) break;
             start = stop + 1;
         }
+        return true;
+    }
+
+    // Step G2's drop-scene switches (their own function: parse()'s else-if
+    // chain is at MSVC's nesting limit, C1061).
+    bool parse_union_arg(const std::string& arg, const std::function<const char*()>& next, arguments& out) {
+        const char* v = nullptr;
+        if (arg == "--drop-second-ball") {
+            if (!(v = next())) return false;
+            out.drop_second_ball = std::atoi(v);
+            if (out.drop_second_ball < 0) return false;
+            for (float& k: out.drop_second_at) { if (!(v = next())) return false; k = static_cast<float>(std::atof(v)); }
+        }
+        else if (arg == "--probe-trace") out.probe_trace = true;
+        else if (arg == "--drop-kill") {
+            if (!(v = next())) return false;
+            out.drop_kill = std::atoll(v);
+            if (out.drop_kill < 0) return false;
+        }
+        else if (arg == "--probe-scramble") {
+            if (!(v = next())) return false;
+            const std::string mode = v;
+            if (mode == "before") out.probe_scramble = 1;
+            else if (mode == "after") out.probe_scramble = 2;
+            else return false;
+        }
+        else return false;
         return true;
     }
 
@@ -944,7 +992,8 @@ namespace {
             else if (arg == "--queue-roundtrip") out.queue_roundtrip = true;            // step B7EG
             else if (arg == "--probe-census" || arg == "--release-check")               // steps WG0, WG1 (one branch: C1061)
                 (arg == "--probe-census" ? out.probe_census : out.probe_release_check) = true;
-            else if (!parse_trafo_arg(arg, next, out) && !parse_record_format_arg(arg, next, out)) return false;
+            else if (!parse_trafo_arg(arg, next, out) && !parse_record_format_arg(arg, next, out)
+                     && !parse_union_arg(arg, next, out)) return false;
         }
         // --list of a journal and the savestate file verbs are pure file
         // reading: no game data needed.
@@ -2038,6 +2087,7 @@ namespace {
         options.placement_clones = args.placement;            // step S2
         options.placement_fail_at = args.placement_fail_at;
         options.trafo_inputs = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;   // step K0
+        options.proximity_union = (args.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;   // step G2
         options.pin_checkpoint_deactivation = args.n2_pin;   // step B2SW: --n2-pin off is the A/B
         options.split_sector_cell = args.n2_cell;            // step B2SX: --n2-cell off is the A/B
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
@@ -2225,6 +2275,19 @@ namespace {
     // the trace's lines for it.
     bool scene_tick(const arguments& args, bmmo::sim::physics_world& world, std::string& error) {
         const uint32_t tick = world.tick_index();
+        if (args.drop_kill >= 0 && static_cast<long long>(tick) == args.drop_kill) {   // step G2
+            for (uint32_t id: {1u, 2u}) {
+                if (!world.player_physicalized(id)) continue;
+                bmmo::sim::lifecycle_event death;
+                death.type = bmmo::session::event_type::Unphysicalize;
+                death.tick = tick;
+                std::string kill_error;
+                if (!world.apply_event(id, death, kill_error))
+                    std::fprintf(stderr, "--drop-kill: player %u: %s\n", id, kill_error.c_str());
+                else
+                    std::printf("tick=%u player %u's ball unphysicalized (--drop-kill)\n", tick, id);
+            }
+        }
         for (const arguments::second_move& m: args.second_moves)
             if (m.tick == static_cast<long long>(tick)) {
                 report_sector(world, 2, m.sector);
@@ -2432,6 +2495,30 @@ namespace {
         std::printf("dropped ball type %d (%s) at (%.3f,%.3f,%.3f), watching %s\n", args.drop_ball,
             world.ball_rows()[args.drop_ball].name.c_str(), player_spawn.x, player_spawn.y, player_spawn.z,
             args.drop_entity.c_str());
+        if (args.drop_second_ball >= 0) {
+            // Step G2 (V2, V4): a second player's ball, a second candidate.
+            if (static_cast<size_t>(args.drop_second_ball) >= world.ball_rows().size()) {
+                std::fprintf(stderr, "--drop-second-ball %d is out of range (%zu ball types)\n", args.drop_second_ball,
+                             world.ball_rows().size());
+                return 2;
+            }
+            if (!world.has_player(2) && !world.add_player(2, 1, error)) {
+                std::fprintf(stderr, "add_player 2 failed: %s\n", error.c_str());
+                return 1;
+            }
+            bmmo::sim::lifecycle_event second;
+            second.type = bmmo::session::event_type::Physicalize;
+            second.ball_type = static_cast<uint8_t>(args.drop_second_ball);
+            for (int k = 0; k < 3; ++k) second.position[k] = args.drop_second_at[k];
+            second.recipe = world.retail_recipe(second.ball_type);
+            if (!world.apply_event(2, second, error)) {
+                std::fprintf(stderr, "physicalize player 2 failed: %s\n", error.c_str());
+                return 1;
+            }
+            std::printf("player 2 dropped ball type %d (%s) at (%.3f,%.3f,%.3f)\n", args.drop_second_ball,
+                        world.ball_rows()[args.drop_second_ball].name.c_str(), args.drop_second_at[0],
+                        args.drop_second_at[1], args.drop_second_at[2]);
+        }
         if (!args.drop_prop.empty()) {
             // The level's own ball, physicalized by the sector activation: beam
             // it to the drop spot the same way a player would have pushed it.
@@ -2490,6 +2577,46 @@ namespace {
         return 0;
     }
 
+    // Step G2 (--probe-trace): the union's frames (BMMO_Prox_*) and identity
+    // copies (CurrentLevel#BMMOId_*, their ActiveBall cell) whose names hold
+    // `filter`, as they are after the tick (placed before it: a frame shows
+    // where its ball was at the end of the previous tick, or the hold).
+    std::string probe_trace_lines(bmmo::sim::physics_world& world, const std::string& filter, int tick) {
+        CKContext* context = world.engine().context();
+        std::string text;
+        std::map<std::string, std::string> lines;   // by name: a stable order
+        const int count = context->GetObjectsCountByClassID(CKCID_3DENTITY);
+        CK_ID* ids = context->GetObjectsListByClassID(CKCID_3DENTITY);
+        for (int i = 0; i < count; ++i) {
+            auto* frame = CK3dEntity::Cast(context->GetObject(ids[i]));
+            const char* name = frame ? frame->GetName() : nullptr;
+            if (!name || std::strncmp(name, "BMMO_Prox_", 10) != 0 || !std::strstr(name, filter.c_str())) continue;
+            VxVector v;
+            frame->GetPosition(&v);
+            char line[256];
+            std::snprintf(line, sizeof(line), "  probe tick=%d %s (%.3f,%.3f,%.3f)\n", tick, name, v.x, v.y, v.z);
+            lines[name] = line;
+        }
+        const int arrays = context->GetObjectsCountByClassID(CKCID_DATAARRAY);
+        CK_ID* array_ids = context->GetObjectsListByClassID(CKCID_DATAARRAY);
+        for (int i = 0; i < arrays; ++i) {
+            auto* array = CKDataArray::Cast(context->GetObject(array_ids[i]));
+            const char* name = array ? array->GetName() : nullptr;
+            if (!name || std::strncmp(name, "CurrentLevel#BMMOId_", 20) != 0 || !std::strstr(name, filter.c_str())) continue;
+            int column = -1;
+            for (int c = 0; c < array->GetColumnCount(); ++c)
+                if (array->GetColumnName(c) && std::string_view(array->GetColumnName(c)) == "ActiveBall") column = c;
+            CKObject* cell = column >= 0 && array->GetRowCount() > 0 ? array->GetElementObject(0, column) : nullptr;
+            lines[name] = "  identity tick=" + std::to_string(tick) + " " + name + " = "
+                          + (cell && cell->GetName() ? cell->GetName() : "(none)") + "\n";
+        }
+        for (const auto& [name, line]: lines) text += line;
+        const auto& u = world.proximity();
+        text += "  union tick=" + std::to_string(tick) + " skipped=" + std::to_string(u.skipped()) + " relatched="
+                + std::to_string(u.relatched()) + (world.proximity_union_on() ? " (bit set)" : " (bit clear)") + "\n";
+        return text;
+    }
+
     // Server-side mechanism check (design 8.3): boots a physics-session world
     // the way a room does, puts its player (and optionally a second one) in a
     // sector so the union starts that sector's mechanisms, and drops the
@@ -2538,6 +2665,7 @@ namespace {
             }
             std::printf("tick=%d parts:%s\n  %s\n", tick, text.empty() ? " none physicalized" : text.c_str(),
                         root_scripts(world->engine()).c_str());
+            if (args.probe_trace) std::printf("%s", probe_trace_lines(*world, args.drop_entity, tick).c_str());
         };
         report_parts(-1);
         placement_tick_report(args, *world, -1, true);
@@ -3365,7 +3493,13 @@ namespace {
             // without this a replayed proximity block measured the frame where
             // the live world's last tick left it (its "Current Distance"
             // differed in 47 of 50 rounds with no pass in the window).
-            if (frames) world->place_proximity_legacy();   // step G1: game/proximity_union.hpp's bit-clear path
+            // Step G2: under WORLD_PROXIMITY_UNION the union's rule from the
+            // replayed tick's candidates (the restored balls), the hold put
+            // back with the step state (restore_step_state).
+            if (frames) {
+                if (world->proximity_union_on()) world->place_probes();
+                else world->place_proximity_legacy();   // step G1: game/proximity_union.hpp's bit-clear path
+            }
         };
         binding_options.on_savestate_restored = [&](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
             if (!ok) {
@@ -3798,7 +3932,12 @@ namespace {
             }
             // The world's own per-tick bookkeeping (tick index, RNG cursors,
             // the sector union) at the anchor; the engine knows the physics.
+            // Step G2's review: --probe-scramble moves the frames around the
+            // step state's restore (V4's hold, exercised).
+            if (args.probe_scramble == 1) world->displace_probe_frames(1000.0f);
+            const uint64_t hold_failures_before = world->proximity_hold_failures();
             world->restore_step_state(anchor.counters);
+            if (args.probe_scramble == 2) world->displace_probe_frames(1000.0f);
             engine = pristine;
             if (trafo || passes) engine.forget_after(t0 + static_cast<uint32_t>(e));
             probe_tick = t0 + static_cast<uint32_t>(a) + 1u;
@@ -3819,6 +3958,8 @@ namespace {
             } else if (!legacy && restore_refused) {
                 failure = "restore error: " + restore_error;
                 restore_broke = true;
+            } else if (world->proximity_hold_failures() != hold_failures_before) {
+                failure = "the proximity union's hold was not restored (physics_world::restore_step_state)";
             } else if (!legacy && engine.stats().savestates_restored != restored_before + 1u) {
                 failure = "the engine did not restore the anchor's blob (fell back to the per-body path)";
             } else if (engine.stats().resim_ticks != resim_before + static_cast<uint64_t>(d)) {
@@ -3917,6 +4058,8 @@ namespace {
                         if (difference.any) {
                             failure = "scripts: " + difference.where + " (" + std::to_string(difference.logical_count)
                                     + " logical, " + std::to_string(difference.float_count) + " float)";
+                            // Step G2: --verbose names every logical difference (up to a dozen).
+                            if (args.verbose && !difference.detail.empty()) failure += "; detail: " + difference.detail;
                         } else {
                             ++rearmed_ignored_rounds;
                             for (const auto& [block, bits]: masks)
@@ -3924,6 +4067,11 @@ namespace {
                         }
                     }
                 }
+                // Step G2's review: the proximity union's hold at e (the
+                // frames and the by-name cells) is the straight pass's.
+                if (failure.empty() && world->proximity_union_on()
+                        && world->capture_step_state().proximity_hold != expected.counters.proximity_hold)
+                    failure = "proximity hold: the frames or the by-name cells differ from the straight pass's";
             }
             // Step B2SX (Q5's untested case): a named round's follow - F live
             // frames past e, as the straight pass stepped them, each tick's
@@ -5149,9 +5297,20 @@ namespace {
         // Journal v6 (protocol 12, sector placement design 5, step S5): the
         // placement copies when the session's world option built them.
         options.placement_clones = (header.world_options & bmmo::session::WORLD_PLACEMENT_CLONES) != 0;
-        if (header.world_options != 0) std::printf("journal world options %08x%s%s\n", header.world_options,
+        // Step G2 (world-agreement-gaps-design.md §2.4): the proximity
+        // union's rule, placed at the top of each stepped tick, before its
+        // PLAYER and EVENT records - the server's point.
+        // Server journals only until G3: a client journal of a bit-on
+        // session carries the server's world options (client_journal.cpp),
+        // but no client runs the rule before G3, so its replay does not.
+        options.proximity_union = !client_journal
+            && (header.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;
+        if (client_journal && (header.world_options & bmmo::session::WORLD_PROXIMITY_UNION))
+            std::printf("journal world option PROXIMITY_UNION ignored: a client journal (no client runs the rule before G3)\n");
+        if (header.world_options != 0) std::printf("journal world options %08x%s%s%s\n", header.world_options,
                                                    options.trafo_inputs ? " (trafo inputs)" : "",
-                                                   options.placement_clones ? " (placement clones)" : "");
+                                                   options.placement_clones ? " (placement clones)" : "",
+                                                   options.proximity_union ? " (proximity union)" : "");
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         auto world = bmmo::sim::physics_world::create(options, error);
         if (!world) {
@@ -5343,6 +5502,13 @@ namespace {
                         dictionary[body.owner] = body.name;
             }
             if (group.tick > last_sim_tick) continue;   // the session's tail
+            // Step G2: under WORLD_PROXIMITY_UNION the union is placed before
+            // the tick's PLAYER and EVENT records, as the server's step does
+            // it before its leavers and its events; not for a group the world
+            // does not step (the anchor era below).
+            const bool anchor_era = !args.legacy_first_step && group.tick < replay_first_tick && !group.has_tick
+                && group.inputs.empty() && group.events.empty();
+            if (options.proximity_union && !anchor_era) world->place_probes();
             for (const auto& p: group.players) {
                 if (p.added) {
                     if (!world->add_player(p.id, p.join_order, error))
@@ -8354,9 +8520,29 @@ namespace {
             why = "--world-options sets a session world's bits (a --replay-session takes them from the journal "
                   "header)";
         else if (args.world_options_given
-                 && (args.world_options & ~(bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS)))
-            why = "--world-options: only bit 0 (PLACEMENT_CLONES) and bit 1 (TRAFO_INPUTS) exist; bit 2 is the "
-                  "world-agreement design's and bit 3 the record-format design's (step K3), neither built";
+                 && (args.world_options & ~(bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS
+                                            | bmmo::session::WORLD_PROXIMITY_UNION)))
+            why = "--world-options: only bit 0 (PLACEMENT_CLONES), bit 1 (TRAFO_INPUTS) and bit 2 (PROXIMITY_UNION) "
+                  "exist; bit 3 is the record-format design's (step K3), not built";
+        else if ((args.world_options & bmmo::session::WORLD_PROXIMITY_UNION)
+                 && (args.drop_entity.empty() || args.array_reads || args.probe_census || args.late_sector_check
+                     || !args.late_run.empty() || args.resync_check || args.portable_scripts_check
+                     || args.list_placement))
+            // Step G2: the drop scene (--drop) and its --savestate-check are
+            // the server world's checks under the bit (V2, V4); the censuses
+            // read the bit-clear rewire, and the other modes bind their own
+            // per-tick work without the union's place point.
+            why = "--world-options PROXIMITY_UNION: only with --drop (the drop scene, alone or with --savestate-check)";
+        else if ((args.drop_second_ball >= 0 || args.probe_trace || args.drop_kill >= 0) && args.drop_entity.empty())
+            why = "--drop-second-ball, --drop-kill and --probe-trace are for the drop scene (--drop)";
+        else if (args.drop_kill >= 0
+                 && (args.drop_kill < args.drop_settle
+                     || (args.savestate_check && args.drop_kill >= static_cast<long long>(args.drop_settle) + args.savestate_lead)))
+            why = "--drop-kill: after the drop (--drop-settle), and with --savestate-check before the window (the lead)";
+        else if (args.probe_scramble
+                 && (!args.savestate_check || args.drop_entity.empty()
+                     || !(args.world_options & bmmo::session::WORLD_PROXIMITY_UNION)))
+            why = "--probe-scramble: the drop scene's --savestate-check under --world-options PROXIMITY_UNION";
         else if ((args.world_options & bmmo::session::WORLD_TRAFO_INPUTS)
                  && !(args.array_reads || args.probe_census || (!args.drop_entity.empty() && !args.trafo.any() && args.late_run.empty()
                                           && !args.late_sector_check && !args.resync_check && !args.savestate_check
@@ -8561,6 +8747,9 @@ int main(int argc, char** argv) {
             "           [--drop-settle N] [--drop-move SECTOR TICK] [--drop-prop ENTITY]\n"
             "           [--drop-player-at X Y Z] [--cells-trace] (mechanism check in a session world; --cells-trace:\n"
             "            IngameParameter[0][1]/[0][2], the union and the physicalized bodies on every change)\n"
+            "           [--drop-second-ball TYPE X Y Z] [--drop-kill TICK] [--probe-trace] [--probe-scramble before|after] [--world-options PROXIMITY_UNION]\n"
+            "           (step G2: player 2's ball as a second candidate; the union's frames and identity cells\n"
+            "            on every report line; the server's world under the proximity union's rule)\n"
             "       any session world: [--n2-pin on|off]  (step B2SW: the checkpoint and level-reset chains'\n"
             "            IngameParameter[0][2] Set Cell pinned to 0 at the anchor, default on; off is the A/B)\n"
             "           [--n2-cell on|off]  (step B2SX: the checkpoint chain's IngameParameter[0][1] Set Cell writes a\n"

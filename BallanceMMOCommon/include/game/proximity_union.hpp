@@ -306,9 +306,18 @@ namespace bmmo::game {
                 auto* block = CKBehavior::Cast(context->GetObject(r.block));
                 CKParameterOut* out = block && block->GetOutputParameterCount() > 0 ? block->GetOutputParameter(0) : nullptr;
                 if (!out) continue;
-                CKObject* latched = out->GetValueObject(FALSE);
-                const bool on_candidate = latched && std::find(entities.begin(), entities.end(), latched) != entities.end();
-                if (on_candidate || latched == value) continue;
+                // The raw id, not the object: id 0 (the Get Cell has not run
+                // yet) names no entity and is left alone; an id whose object
+                // is gone (a leaver's destroyed clone) names no candidate
+                // and is moved, like any other (§2.2, H2c; step G2).
+                CK_ID latched_id = 0;
+                if (out->GetDataSize() != static_cast<int>(sizeof(CK_ID)) || out->GetValue(&latched_id, FALSE) != CK_OK
+                    || latched_id == 0)
+                    continue;
+                CKObject* latched = context->GetObject(latched_id);
+                const bool on_candidate =
+                    latched && std::find(entities.begin(), entities.end(), latched) != entities.end();
+                if (on_candidate || (latched && latched == value)) continue;
                 block->SetOutputParameterObject(0, value);
                 ++relatched_;
             }

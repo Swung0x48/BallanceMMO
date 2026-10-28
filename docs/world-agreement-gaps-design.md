@@ -25,8 +25,9 @@ their 2026-10-23 line numbers.
 
 Status: design; step G0 built (WG0, 2026-10-28: SimTool `--probe-census`,
 §12 "As built (step WG0)"), step G1 built (WG1, 2026-10-28: parts A and B,
-the server on them with the bit clear, §12 "As built (step WG1)"), G2-G6,
-M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
+the server on them with the bit clear, §12 "As built (step WG1)"), step G2
+built (WG2, 2026-10-28: the server's world under `WORLD_PROXIMITY_UNION`,
+§12 "As built (step WG2)"), G3-G6, M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
 `session_host_support.hpp`, `session_host_world.hpp`, `session_client.cpp` and
@@ -2325,3 +2326,204 @@ WG1's live smoke (above, "UNATTRIBUTED") is attributed. No code changed.
   instant (`gapabs.py`), is a host stall; check
   `Microsoft-Windows-Ntfs/Operational` event 170 for D: before attributing
   it to code.
+
+### As built (step WG2, 2026-10-28): G2, the server's world under the bit
+
+**What exists.**
+- *The bit.* `session::WORLD_PROXIMITY_UNION = 1u << 2` (`entity/session.hpp`,
+  the bit §5 reserved). No protocol change: SessionStart and the journal
+  header (since v5) already carry `world_options`; P_G stays G3's.
+- *The server config.* `physics.proximity_union` (`config_manager`, default
+  **off**): sets the bit in every new session (`server.cpp`, beside the
+  placement bit) and says so in the room log. No client runs the rule before
+  G3, so a session with it on is the server's own test switch until then; G3
+  turns the default on with `anchor_probes`.
+- *The world* (PW). `world_options::proximity_union`. The anchor rewires class
+  `all` with `union_rules` set (frames at the first reset point,
+  `BMMO_NoBall`, exactly one gating probe per identity read, all or nothing);
+  a refused rewire fails the anchor ("proximity union (world option)
+  refused: ..."; only under the bit - with it clear the anchor ignores the
+  rewire's result as step G1's did); the anchor's log line ends "bit set" or
+  "bit clear". `probe_candidates()`:
+  every player whose clone is physicalized, in player id order, with the
+  clone's entity name. `place_probes()`: `proximity_union::place` from them,
+  once per tick (`probes_placed_tick_`); `tick()` under the bit places only
+  when nobody did for its tick (SimTool's scenes), and keeps
+  `place_proximity_legacy()` with the bit clear. `has_body` is the IVP body
+  test (`GetPhysicsObject` and `m_RealObject`). `step_state` carries the hold
+  section (`proximity_union::capture`) under the bit and
+  `restore_step_state` puts it back (§4.2's restore, on the server world's
+  rewinds: SimTool's savestate rounds). A hold that does not restore is
+  logged and counted (`proximity_hold_failures()`); a savestate round fails
+  on a change of the count. (`--replay-session`'s RESYNC restore of a client
+  journal captures and restores the replay world's own hold around its
+  counters - the server's hold is not on the wire - and a client journal is
+  replayed with the bit clear anyway, below.)
+- *The runner* (SRN). `place_probes()` first in `step()`, before the leavers
+  loop and the events (§2.4). The guard: the candidate set after each step is
+  kept and compared at the top of the next one; a change counts in
+  `probe_set_drift` (logged, the first 20, and a journal NOTE each). The
+  session end logs and journals "proximity union: skipped S, relatched R,
+  candidate set drift D".
+- *SimTool.* `--replay-session` takes the bit from a **server** journal's
+  header and places at the top of every stepped tick, before its PLAYER and
+  EVENT records. A client journal carries the server's world options
+  (`client_journal.cpp`), but no client runs the rule before G3, so its
+  replay keeps the bit clear and prints "journal world option
+  PROXIMITY_UNION ignored" (G3 lifts this with the clients' rule).
+  `--world-options PROXIMITY_UNION`
+  (bit 2) for the drop scene, alone or with `--savestate-check` (whose
+  replayed ticks then call `place_probes()`; the hold is restored with the
+  step state); the other modes refuse it. New drop-scene switches (their own
+  parser, `parse_union_arg`: `parse()`'s else-if chain is at MSVC's nesting
+  limit, C1061): `--drop-second-ball TYPE X Y Z` (player 2's ball, a second
+  candidate), `--drop-kill TICK` (both balls unphysicalized; with
+  `--savestate-check` before the window), `--probe-trace` (the frames and the
+  identity copies whose names hold the `--drop` name, on every report line),
+  `--probe-scramble before|after` (with the drop scene's savestate check
+  under the bit: each round moves every frame 1000 m along x through the
+  hold section just before the anchor's step state is restored - the restore
+  must put the hold back - or just after it, a stand-in for a lost hold
+  restore that the round must catch). A savestate round under the bit also
+  compares the hold section at its end tick with the straight pass's
+  ("proximity hold: ... differ"). `--savestate-check --verbose` now prints a
+  script difference's detail.
+
+**Adaptations (the code is what it is).**
+- *The latch and a null output* (WG1's note): `place()` reads the body-kind
+  Get Cell output's raw CK_ID. Id 0 (the block has not run) is left alone:
+  §2.2's rule speaks of an output that names an entity, and retail's
+  consumers read the output only after the Get Cell ran. A non-zero id whose
+  object is gone (a leaver's destroyed clone, `remove_player`'s
+  `DestroyObject`) names no candidate and is moved to the cell's value at
+  that tick, like any other (H2c, G-c7); reading the object instead of the
+  id would have taken a dead id for "never ran" and kept the fan on the
+  leaver (the step's review). No SimTool scene has a leave, so this branch
+  is exercised first by G3's H2c.
+- *The guard's set* is the runner's (the design puts the guard on the server
+  without naming the owner): physics_world gives the candidates, the runner
+  compares, so SimTool's scenes (which apply events between ticks) do not
+  count their own drops as drift.
+- *J-e is M1's.* With the trafo inputs on (the default since T2) every
+  ball-holding leaver already goes through `leaving` (its final resets are
+  queued), so its clone leaves after `place_probes()`, as §2.7 wants. With
+  the trafo inputs off, a ball holder with nothing queued is still removed
+  between two steps (SRN `remove_player`): under the bit the guard counts it,
+  and a replay of that server journal places before its PLAYER(-) record
+  where the live server had already removed the clone. Not reachable with
+  the default config; M1's always-queued leave (§2.7) closes it.
+- *V2's bridge scene.* The bridge module's two ObjectBs are 3.4 m apart
+  (`P_Modul_29_MF` and `Platte06` on the arena; the module is the same on
+  every level) and the 4 m probe's output 0 is In Range, so the Get Cell and
+  the Test run at every check while a ball is in range: a falling wood/paper
+  ball soon stops being the nearest to `P_Modul_29_MF`, and the bit-clear
+  identity then names the stone too (a first scene broke the bridge both
+  ways). The scene holds the paper ball at `P_Modul_29_MF` (re-beamed before
+  every tick, `--drop-again`) while the stone rests on the plates.
+- *V4's no-candidate interval* is a window in which both balls are dead
+  (killed in the lead), not a window across the deaths: `--savestate-check`
+  sets every event up before its window and no replay re-applies one.
+
+**Results** (x64 MSVC; `.local-tools/work/WG2`).
+- Builds: x64 BUILD-OK, x86 CLIENT-BUILD-OK (session.hpp is shared; deps
+  recorded in both trees). `BallanceMMOMessageTests` 590/590. GCC syntax
+  check 30/30 ok.
+- V2 (`v2.sh`, the arena): (a) P_Modul_01, ball A (stone) at XZ 40 m and
+  60 m below the Pusher, ball B (paper) at XZ 55 m and 3.5 m above: bit
+  clear, the frame follows B (3D nearest) and the Pusher never wakes (fell
+  0.000 m); under the bit the frame follows A and the Pusher is awake from
+  report tick 40 (fell 0.086 m). (b) P_Modul_29, the paper held at
+  `P_Modul_29_MF`, the stone on the plates: bit clear, the identity copy
+  names `Ball_Paper` throughout and the bridge holds (fell 2.507 m, the sag);
+  under the bit it names `Ball_Stone` and the bridge breaks between report
+  ticks 40 and 60 (fell 6.919 m). G-c5 both halves: PASS.
+- V3 (`v3.sh`, bit clear): the five server journals of `core_ref_s9`
+  (resync_snapoff 4122, swing_snapoff 3888, l8_cross 3166, solo1 2911, solo2
+  2895 ticks) replay `matched` = ticks, `checkpoint_mismatches=0` with the
+  step's SimTool and with the pre-step one (rSMK); the outputs equal but the
+  anchor's wall-clock `cktime`. Wire check rSMK vs rWG2 over `core_ref_s9`:
+  12/12 sends SAME, 12/12 journals IDENTICAL, `WIRE-CHECK: ALL SAME`.
+- V4 (`v4.sh` and the runs beside it, `--savestate-check --frames`, the
+  arena, two balls, under the bit): with both balls alive and the Pusher
+  woken inside the window, 23 named rounds anchored after its probe's Off
+  (69..145, depths 1-48) are byte-identical (blobs, world hashes, exact
+  cores, script records), as with the bit clear; with both balls dead from
+  tick 75 (windows 91-120, 91-150, 91-180), 50 rounds each, 0 failed.
+  `skipped` 0 in the V2 runs under the bit (`--probe-trace`; the
+  savestate rounds do not print it).
+- **Review round** (the fix-ups: the latch's raw id, the hold exercised and
+  compared, a failed hold restore failing the round, the bit-clear anchor
+  not failing on the rewire, client journals replayed with the bit clear;
+  `.local-tools/work/WG2/gate.sh`, `v3g.sh`, `g/`): x64 BUILD-OK (no x86
+  rebuild: the fix-up touched no file the retail mod includes), tests
+  590/590, GCC syntax check ok. V4's hold: the dead 90-tick window (90..179)
+  passes 50/50; with `--probe-scramble before` 50/50 (the restore puts the
+  frames back); with `--probe-scramble after` (the lost-restore stand-in)
+  **50/50 fail** - "proximity hold: ... differ" or P_Modul_18's 7 m probe
+  (`Last Check` 27 vs 32, ...) - so the rounds see the hold and the restore
+  is what makes them pass. The 23 named alive rounds pass under the bit, with
+  `--probe-scramble before` and with the bit clear; the 50-round alive
+  schedule fails exactly residual 1's two rounds (144:4, 87:9). V3 again:
+  the five `core_ref_s9` server journals matched = ticks,
+  `checkpoint_mismatches=0`, stdout equal to rSMK's but `cktime`. Wire check
+  rSMK vs rWG2: 12/12 sends SAME, 12/12 journals IDENTICAL, ALL SAME.
+- **Three residuals, all pre-existing and identical with the bit clear:**
+  - *The G1 membership leak* (queued, roadmap §4 item 4). The 50-round
+    schedule of the alive scene fails 2 rounds (anchor 144 depth 4, anchor
+    87 depth 9: P_Modul_01's root and its probe active in the replay, local 0
+    1 vs 0, `Last Check` 10 vs 6 / 1). The same two rounds fail with the bit
+    clear and one ball (the Pusher then wakes too) on this build and on
+    rSMK; each round alone passes; a round anchored before the probe's Off
+    (34:3, 47:20, 54:8) followed by one anchored after it fails, one
+    anchored after the Off (47:45, 68:48, 75:12) does not. Cause: the
+    earlier round's restore wrote P_Modul_01 back active and `reregister`
+    (`game/script_replay.hpp`) set its scene flag, `CKScene::Activate`d it
+    and so put its owner into `m_BeObjectNextFrame`; no live frame flushes
+    that between rounds and no restore takes it back when a later record has
+    the script finished, so `owner_pending_add` admits the owner and the
+    replayed frame runs the finished script from its start.
+  - *A 120-tick dead window's restore is refused* ("the PreSimulate queue
+    differs from the savestate's": the live queue at the end of the straight
+    pass holds `Physics WakeUp` of Gameplay_Ingame and four
+    `PhysicsCollDetection` of Sound_Manager, the anchor's none). Traced at
+    the review (`.local-tools/work/WG2/r2.sh`): it is neither the union's
+    nor the deaths'. On the **pre-step** SimTool (rSMK), one ball, no second
+    ball, no `--drop-kill`, no bit, the window 90..203 passes (50 rounds)
+    and 90..209 fails the same way; the world logs "retail ball parked (body
+    removed) at tick 204". The level start's Gameplay_Ingame physicalizes
+    the retail ball at 204 (its `Physics WakeUp`, Sound_Manager's collision
+    detection registrations) and the server world parks it at once
+    (`physics_world` `park_retail_ball`: Unphysicalize), so the entries find
+    no body and stay queued (`Process()` keeps an entry whose `Execute`
+    returns 0, rollback-engine-gaps §1.1) - a window that crosses 204 holds
+    entries its anchor's record lacks. (That the entries target the parked
+    ball is read from the timing; the queue was not dumped per entry.) They
+    are outside entries (no selected script's), which gap Q's hold sets
+    aside (`hold_outside_callbacks`, rollback-engine-gaps "As built (step
+    B7EG)"), but SimTool's `--savestate-check` binds no `callback_queue`, so
+    its restore compares the whole queue (mode 0) and refuses. A harness gap
+    of the server world's savestate check (the server never rewinds live;
+    both clients bind the hold): queued in roadmap §4 item 4.
+  - *The bridge scene's V4* (`v4.sh`'s `bridge`, 50 rounds) stops at its
+    first round, anchor 47 depth 45: "savestate restore, step 12
+    (controllers), world damaged: core of 'P_Modul_29_Platte06': no live
+    controller 'sys:unknown' (priority 405)". Priority 405 is
+    `IVP_CP_CONSTRAINTS`: the anchor's record holds a hinge of Platte06 that
+    the bridge's break inside the window (`Test "Ball_Stone"` True ->
+    `10 Hinges` input 2, Shutdown) destroyed, and the blob restore matches
+    recorded controllers to live ones (engine changes #17/#18) - it never
+    re-creates one. The same with the bit clear (`bridge_off`) and on the
+    pre-step SimTool with the stone alone (`g/bridge_smk.txt`, no step
+    switch): pre-existing, not the union's. Queued in roadmap §4 item 4 (a
+    constraint shut down inside the window).
+
+**Not run (deferred, with why).** A live session: with the bit clear (the
+default) nothing of the live path changed (V3, the wire check), and under the
+bit no client runs the rule before G3, so a live run would measure the clients'
+own-ball sensors against the server's union. The Arch server is not rebuilt
+(GCC compiles PW / SRN / server.cpp first there; the GCC syntax check covers
+the test target and the core only) - the next step with a live run rebuilds
+it. V4's alive-to-dead transition inside one window needs a lifecycle event
+inside a savestate window (G3's U2/U3 and H4 cover the client side). The
+latch's dead-id branch (a leaver's destroyed clone) has no SimTool scene (no
+leave in the drop scene): G3's H2c.

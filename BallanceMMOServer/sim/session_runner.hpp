@@ -433,6 +433,15 @@ namespace bmmo::sim {
             bmmo::session::trafo_acceptance trafo;
             uint64_t trafo_server_resets = 0, trafo_superseded = 0, trafo_rejected = 0;
             bool trafo_on() const { return (world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0; }
+            // Step G2 (world-agreement-gaps-design.md §2.2, §2.4), under
+            // WORLD_PROXIMITY_UNION: the candidate set (player ids) after the
+            // last step, and the guard: a step whose candidates at its top
+            // differ from it (a ball holder removed between two steps - J-e,
+            // step M1's) counts one in probe_set_drift (required 0).
+            bool union_on() const { return (world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0; }
+            std::vector<uint32_t> probe_set;
+            bool have_probe_set = false;
+            uint64_t probe_set_drift = 0;
             uint64_t superseded_births = 0, restamped_events = 0;
             std::vector<pending_event> events;   // sorted by applied tick on insertion
             uint32_t input_delay = 0;   // ticks of grace this session gives inputs

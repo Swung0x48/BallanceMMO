@@ -126,8 +126,8 @@ namespace bmmo::session {
 
     // session_start_msg::world_options bits (protocol 11): what every world
     // of the session runs, fixed by the server for the session's life (never
-    // a per-client choice).  Bit 2 is the world-agreement design's, bit 3
-    // the record-format design's (neither built yet).
+    // a per-client choice).  Bit 3 is the record-format design's (not built
+    // yet).
     // WORLD_PLACEMENT_CLONES (protocol 12, sector placement design 2.4, step
     // S5): every PH row whose object another row already places at another
     // matrix gets its own copy at the anchor (game/sector_placement.hpp), so
@@ -139,6 +139,17 @@ namespace bmmo::session {
     // a piece never collides with a local body (PE_Balloon*).
     constexpr uint32_t WORLD_PLACEMENT_CLONES = 1u << 0;
     constexpr uint32_t WORLD_TRAFO_INPUTS = 1u << 1;
+    // WORLD_PROXIMITY_UNION (docs/world-agreement-gaps-design.md 2.2-2.4,
+    // 5): every world puts its mechanism proximity frames, identity cells
+    // and latches by one rule (session/proximity_rules.hpp,
+    // game/proximity_union.hpp) from the balls with a body at the end of the
+    // previous tick, before that tick's lifecycle changes.  Step G2 built the
+    // server's world under it (physics.proximity_union, default off; the
+    // journal header's world_options carries it, SimTool's --replay-session
+    // honours it); the clients run it from step G3, which takes the protocol
+    // number (SessionReady's anchor_probes).  Until then no client runs it,
+    // so a session with the bit is for the server's own tests.
+    constexpr uint32_t WORLD_PROXIMITY_UNION = 1u << 2;
 
     // Who a session admits (the server's SessionReady handling; step B9DX,
     // the user's answer 7 of 2026-10-28, quoted in docs/roadmap.md 2: refuse

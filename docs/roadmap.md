@@ -732,6 +732,39 @@ numbers 1-10 are unchanged.
    entries but keeps the live selected ones), and **gap L as the design's
    four steps G6, G7, G8, G9** (§8; G6 = L1 built at step EL6), each with its own checks (L-H1..L-H6
    and L-R1/L-R2 are live runs beyond one batch's gate; G8 may stop on §9.3).
+   **Found at WG2, queued here (G1 membership leak):** `script_replay`'s
+   restore re-registers the owner of a script it writes back active
+   (`reregister`: the scene flag, `CKScene::Activate`, the owner put into
+   `m_BeObjectNextFrame`), and nothing undoes it when a later restore writes
+   that script back finished: a replay that ran no live frame in between
+   (SimTool's chained rounds; a host frame with two rewinds) then finds the
+   owner pending in the list and runs the finished script from its start.
+   Measured (world-agreement design, As built (step WG2)): the arena's
+   P_Modul_01 after its probe turned itself Off, a round anchored before
+   the Off followed by one anchored after it fails (`flags ...48 vs ...49`,
+   the probe re-run), each round alone passes, the same on the pre-step
+   build.
+   **Found at WG2, queued here (harness, gap Q's hold):** SimTool's
+   `--savestate-check` binds no `callback_queue`, so its restore compares
+   the whole PreSimulate queue (mode 0) instead of setting the outside
+   entries aside as both clients do (B7EG's hold). On the arena a window
+   that crosses tick 204 - the level start's retail ball, physicalized by
+   Gameplay_Ingame (`Physics WakeUp`, Sound_Manager's
+   `PhysicsCollDetection` x4) and parked by the server world at once, so the
+   entries find no body and stay queued - is refused ("PreSimulate queue
+   differs"); 90..203 passes, 90..209 fails, on the pre-step build with one
+   ball and no step switch. Fix: bind the hold in the savestate check (the
+   server world never rewinds live).
+   **Found at WG2, queued here (a constraint shut down inside the
+   window):** the arena's P_Modul_29 bridge breaking inside a savestate
+   window (`Test "Ball_Stone"` -> `10 Hinges` Shutdown) makes the restore
+   to an anchor before the break refuse: "core of 'P_Modul_29_Platte06': no
+   live controller 'sys:unknown' (priority 405)" - the record names a hinge
+   (`IVP_CP_CONSTRAINTS`) the live world destroyed, and the blob restore
+   only matches recorded controllers to live ones, it never re-creates one.
+   Pre-existing (the pre-step SimTool, the stone alone, anchor 47 depth 45).
+   A client's rewind across a break goes through the same restore (not
+   measured live).
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03
@@ -774,6 +807,12 @@ numbers 1-10 are unchanged.
    fan force held: headless and retail, placement on; pass = no "no live
    controller" at the import); if unmatched, the §4.3 alias moves forward to
    every mechanism force block.
+   **G1 and G2 are built (steps WG1, WG2):** the server's world places by
+   the union's rule under `WORLD_PROXIMITY_UNION` (bit 2, config
+   `physics.proximity_union`, default off until G3; V2 and V4 pass, the
+   bit-clear path unchanged: V3 and the wire check). Its J-e interplay
+   (a ball holder removed between two steps, trafo inputs off only) is
+   counted by the guard and waits for M1 (design, As built (step WG2)).
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick; **K3 = the Level 1 tutorial
    switched off** right after K1 (decision (c): every world activates the

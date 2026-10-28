@@ -95,6 +95,18 @@ namespace bmmo::sim {
         // tick, Trafo events run the sets' scripts in the trafo frame, a
         // piece never collides with a local body.  Off: every world as before.
         bool trafo_inputs = false;
+        // session::WORLD_PROXIMITY_UNION (world-agreement-gaps-design.md
+        // §2.2-§2.4, step G2): the proximity union's rules - the anchor
+        // rewires with the union rules (frames at the first reset point,
+        // BMMO_NoBall, one gating probe per identity read, all or nothing)
+        // and the frames, identity cells and latches are placed by
+        // place_probes() from the candidates (the physicalized clones at the
+        // end of the previous tick) under each block's own metric, with the
+        // hold.  The session runner calls place_probes() first in its step,
+        // before the leavers and the events; tick() places itself only when
+        // nobody did for its tick (SimTool's scenes).  Off: the bit-clear
+        // path (place_legacy inside tick(), step G1), bit for bit.
+        bool proximity_union = false;
         // Sector placement (docs/sector-placement-design.md 2.4, step S2):
         // at the anchor every PH row whose object an earlier row placed at
         // another matrix gets its own copy (game/sector_placement.hpp).  Off
@@ -207,6 +219,12 @@ namespace bmmo::sim {
             int random_cursor = 0;
             bool callback_pending = false;
             bmmo::session::gated_sector_union sectors;
+            // Step G2, under WORLD_PROXIMITY_UNION: the union's hold section
+            // (proximity_union::capture, §4.2) - the frames where they are
+            // and the by-name cells - put back by restore_step_state, so a
+            // no-candidate tick of a rewound window reads the hold the
+            // straight run read.  Empty with the bit clear.
+            std::vector<uint8_t> proximity_hold;
         };
         step_state capture_step_state() const;
         void restore_step_state(const step_state& state);
@@ -327,6 +345,23 @@ namespace bmmo::sim {
         // the rope bridge P_Modul_29 tears only for "Ball_Stone" - its clone
         // otherwise).
         void place_proximity_legacy();
+        // Step G2 (§2.2, §2.4), under WORLD_PROXIMITY_UNION: the candidates
+        // - every player whose clone is physicalized, in player id order,
+        // with the clone's entity name - and the union's place() from them.
+        // The session runner calls it first in its step (before the leavers
+        // and the events), SimTool's --replay-session before a tick's PLAYER
+        // and EVENT records; tick() calls it when nobody did for its tick.
+        // A no-op with the bit clear.
+        void place_probes();
+        std::vector<bmmo::session::probe_candidate> probe_candidates() const;
+        bool proximity_union_on() const { return options_.proximity_union; }
+        // Step G2's review: restore_step_state's hold restores that failed
+        // (each also logged); SimTool's savestate rounds fail on a change.
+        uint64_t proximity_hold_failures() const { return proximity_hold_failures_; }
+        // SimTool's --probe-scramble (step G2's review): every proximity
+        // frame moved by dx along x through the hold section (capture,
+        // edit, restore); a no-op with the bit clear.
+        void displace_probe_frames(float dx);
         size_t proximity_probe_count() const { return proximity_.probe_count(); }
         const bmmo::game::proximity_union& proximity() const { return proximity_; }
         // SimTool's --probe-census --release-check (§7.2 V5): release the
@@ -463,6 +498,11 @@ namespace bmmo::sim {
         std::set<int> used_slots_;
         bmmo::game::proximity_union proximity_;   // step G1 (game/proximity_union.hpp)
         bmmo::game::proximity_union::rewire_options proximity_options() const;
+        // Step G2: the tick place_probes() last placed for (tick() places
+        // itself when this is not its tick).
+        bool probes_placed_ = false;
+        uint32_t probes_placed_tick_ = 0;
+        uint64_t proximity_hold_failures_ = 0;
         CK_ID current_level_ = 0;
         // The session's script selection (game/session_host_support.hpp
         // session_script_selection: the selection both clients make at their
