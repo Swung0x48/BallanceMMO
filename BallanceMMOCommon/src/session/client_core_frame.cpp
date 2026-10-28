@@ -575,6 +575,13 @@ namespace bmmo::session {
         // again (step LB): made now, not left without a body.
         make_unmade_remakes();
         if (platform_.hooks.after_rewinds) platform_.hooks.after_rewinds(frame_tick);
+        // Step 7b (world-agreement-gaps-design.md 2.5, step G3): the
+        // proximity union's frames, identity cells and latches from this
+        // world's balls at the end of T-1 - every rewind of the frame has
+        // run, and no body change of T has been applied (held births at
+        // step 8, own births and deaths in the behaviour pass): the server's
+        // point, before its leavers and its events.
+        if (s.probes_active_) place_probes(frame_tick, {}, false);
         // The body changes stamped for this very tick, the own beam among
         // them: after the rewinds above, so none of them undoes one, and
         // before the union's pass and the step, where the server applies
@@ -758,6 +765,14 @@ namespace bmmo::session {
                     if (s.join_wakes_withheld_++ == 0)
                         logf("late join: wakeups before the apply are not reported (%s at tick %u first)", name.c_str(),
                              tick);
+                    return false;
+                }
+                // Step G5 (world agreement 2.6): under the proximity union
+                // every world wakes its mechanisms itself (principle (a)), so
+                // no world's wake is an input of another's: BodyRevived is
+                // not sent; the count stays for the status line.
+                if (s.world_options_ & WORLD_PROXIMITY_UNION) {
+                    ++s.revived_local_;
                     return false;
                 }
                 bmmo::session_event_msg revived;
@@ -1195,6 +1210,54 @@ namespace bmmo::session {
         std::copy(std::begin(msg.position), std::end(msg.position), pose.position);
         std::copy(std::begin(msg.rotation), std::end(msg.rotation), pose.rotation);
         while (poses.size() > kGhostPosesKept) poses.erase(poses.begin());
+    }
+
+    // Step G3 (world-agreement-gaps-design.md 2.2, 2.5): the candidate set
+    // of the place point - the balls with a body in this world at the end of
+    // the previous tick, one per player, by player id.  The own player: an
+    // entity the own ball has been this session that has a body; every other
+    // player: a mirror entity of theirs with a body (whether or not it has
+    // navigation).  A body the replay holds out (`held_out`) is none.
+    // Nothing here reads navigation, the rollback record or
+    // remote.physicalized, which in a replay describe the live state, not
+    // the replayed tick's (design 2.5, review).
+    std::vector<bmmo::session::probe_candidate> session_client_core::probe_candidates(
+        const std::function<bool(const std::string& entity)>& held_out) {
+        std::map<uint32_t, std::vector<std::string>> bodies;
+        const auto take = [&](uint32_t player, const std::string& entity) {
+            if (entity.empty() || (held_out && held_out(entity))) return;
+            bmmo_physics_body_state state{};
+            if (!platform_.body_state(entity, state)) return;
+            bodies[player].push_back(entity);
+        };
+        if (s.own_id_ != 0)
+            for (const std::string& entity: s.own_ball_entities_) take(s.own_id_, entity);
+        for (const auto& [entity, owner]: s.mirror_owners_)
+            if (owner.first != s.own_id_) take(owner.first, entity);
+        std::vector<bmmo::session::probe_candidate> out;
+        out.reserve(bodies.size());
+        for (const auto& [player, entities]: bodies) {
+            // More than one body of a player is an invariant violation (a
+            // trafo removes the old body with the new one's birth): counted,
+            // logged once, the first by name taken - a rule of names, so
+            // every world that meets it takes the same one.
+            if (entities.size() > 1 && s.probe_two_bodies_++ == 0)
+                logf("proximity union: player %u has %zu ball bodies at a place point (%s, %s): the first is the candidate",
+                     player, entities.size(), entities[0].c_str(), entities[1].c_str());
+            bmmo::session::probe_candidate c;
+            c.player = player;
+            c.entity = entities.front();
+            out.push_back(c);
+        }
+        return out;
+    }
+
+    void session_client_core::place_probes(uint32_t tick, const std::function<bool(const std::string& entity)>& held_out,
+                                           bool replayed) {
+        (void)tick;
+        if (!platform_.place_probes) return;
+        platform_.place_probes(probe_candidates(held_out));
+        ++(replayed ? s.probe_places_replayed_ : s.probe_places_live_);
     }
 
 }

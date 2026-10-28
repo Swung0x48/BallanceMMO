@@ -108,6 +108,13 @@ namespace bmmo::game {
         std::function<bool(std::vector<queued_callback>& out)> capture;
         std::function<int(const std::vector<CK_ID>& scope, const std::vector<queued_callback>& target, std::string& error)> restore;
     };
+    // Step G3 (docs/world-agreement-gaps-design.md 4.2): the proximity
+    // union's hold section of the record (game/proximity_union.hpp capture /
+    // restore), from the binding of a world under WORLD_PROXIMITY_UNION.
+    struct hold_hooks {
+        std::function<void(std::vector<uint8_t>& out)> capture;
+        std::function<bool(const uint8_t* data, size_t size, std::string& error)> restore;
+    };
 
     class script_replay {
     public:
@@ -148,9 +155,48 @@ namespace bmmo::game {
         // queued instead of a copy next to the live one.
         static constexpr uint32_t kVersionQueue = 4;
         static constexpr uint32_t kVersionTrafoQueue = 5;
-        static bool known_version(uint32_t v) { return v >= kVersion && v <= kVersionTrafoQueue; }
+        // v6 (docs/world-agreement-gaps-design.md 4.2, step G3): a sections
+        // word after the version replaces the version-encoded combination,
+        //   u32 sections: bit 0 the trafo list (as v3), bit 1 the queue
+        //   section (as v4), bit 2 the proximity union's hold section
+        // then the v2 body byte for byte, then each section present in that
+        // order.  The hold section (game/proximity_union.hpp capture):
+        //   u16 frames, per frame f32 x, y, z; u16 by-name copies, per copy
+        //   u32 the held entity's id (this process's).
+        // Written only when the binding passes the hold hooks (a world
+        // under WORLD_PROXIMITY_UNION), so every other record stays v2-v5
+        // byte for byte.  A v6 word with an unknown bit is refused.
+        static constexpr uint32_t kVersionSections = 6;
+        static constexpr uint32_t kSectionTrafo = 1u << 0;
+        static constexpr uint32_t kSectionQueue = 1u << 1;
+        static constexpr uint32_t kSectionHold = 1u << 2;
+        static constexpr uint32_t kSectionsKnown = kSectionTrafo | kSectionQueue | kSectionHold;
+        static bool known_version(uint32_t v) { return v >= kVersion && v <= kVersionSections; }
         static bool has_trafo(uint32_t v) { return v == kVersionTrafo || v == kVersionTrafoQueue; }
         static bool has_queue(uint32_t v) { return v == kVersionQueue || v == kVersionTrafoQueue; }
+        // The sections of a record whose version word was read at `pos`:
+        // v2-v5 from the version, v6 from its word (read here).  False: an
+        // unknown version, a truncated word or an unknown bit.
+        static bool read_sections(const std::vector<uint8_t>& in, size_t& pos, uint32_t version, uint32_t& sections) {
+            sections = 0;
+            if (!known_version(version)) return false;
+            if (version == kVersionSections) {
+                if (!get_u32(in, pos, sections)) return false;
+                return (sections & ~kSectionsKnown) == 0;
+            }
+            if (has_trafo(version)) sections |= kSectionTrafo;
+            if (has_queue(version)) sections |= kSectionQueue;
+            return true;
+        }
+        // The hold section's extent (its counts say how long it is).
+        static bool skip_hold(const std::vector<uint8_t>& in, size_t& pos) {
+            uint16_t frames = 0, names = 0;
+            if (!get_u16(in, pos, frames) || pos + static_cast<size_t>(frames) * 12 > in.size()) return false;
+            pos += static_cast<size_t>(frames) * 12;
+            if (!get_u16(in, pos, names) || pos + static_cast<size_t>(names) * 4 > in.size()) return false;
+            pos += static_cast<size_t>(names) * 4;
+            return true;
+        }
         // The queue section's counters (the core report's cbq field).
         struct queue_counters {
             uint64_t captured = 0, rebuilt = 0, removed = 0, rebuild_fail = 0, held = 0, holds = 0, unhold_clamped = 0,
@@ -944,7 +990,8 @@ namespace bmmo::game {
         // deterministic world, so two captures of the same tick compare
         // byte for byte.
         static bool capture(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
-                            std::vector<uint8_t>& out, const trafo_part* trafo = nullptr, const queue_hooks* queue = nullptr) {
+                            std::vector<uint8_t>& out, const trafo_part* trafo = nullptr, const queue_hooks* queue = nullptr,
+                            const hold_hooks* hold = nullptr) {
             out.clear();
             if (!context) return false;
             // Sized like this thread's previous record (a tick's scripts are
@@ -959,8 +1006,14 @@ namespace bmmo::game {
             } remember_size{out};
             const bool v3 = trafo && !trafo->empty();
             const bool with_queue = queue && queue->capture;
+            const bool with_hold = hold && hold->capture;   // step G3: record v6
             put_u32(out, kMagic);
-            put_u32(out, with_queue ? (v3 ? kVersionTrafoQueue : kVersionQueue) : (v3 ? kVersionTrafo : kVersion));
+            if (with_hold) {
+                put_u32(out, kVersionSections);
+                put_u32(out, (v3 ? kSectionTrafo : 0u) | (with_queue ? kSectionQueue : 0u) | kSectionHold);
+            } else {
+                put_u32(out, with_queue ? (v3 ? kVersionTrafoQueue : kVersionQueue) : (v3 ? kVersionTrafo : kVersion));
+            }
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 put_u32(out, static_cast<uint32_t>(list->size()));
                 for (CK_ID id: *list) {
@@ -1039,6 +1092,14 @@ namespace bmmo::game {
                     put_u8(out, e->slot);
                 }
                 queue_stats().captured += kept.size();
+            }
+            if (with_hold) {
+                // v6: the proximity union's hold section (step G3).
+                std::vector<uint8_t> section;
+                hold->capture(section);
+                size_t check = 0;
+                if (!skip_hold(section, check) || check != section.size()) return false;
+                out.insert(out.end(), section.begin(), section.end());
             }
             return true;
         }
@@ -1134,7 +1195,8 @@ namespace bmmo::game {
         static bool restore(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
                             const std::vector<uint8_t>& in, std::string* error, std::vector<CK_ID>* replayed = nullptr,
                             const std::vector<CK_ID>* kept_live = nullptr, bool replay_activation = false,
-                            const trafo_part* trafo = nullptr, const queue_hooks* queue = nullptr) {
+                            const trafo_part* trafo = nullptr, const queue_hooks* queue = nullptr,
+                            const hold_hooks* hold = nullptr) {
             if (error) error->clear();
             if (replayed) replayed->clear();
             last_restore() = restore_counters{};
@@ -1144,7 +1206,8 @@ namespace bmmo::game {
             size_t pos = 0;
             uint32_t magic = 0, version = 0;
             if (!get_u32(in, pos, magic) || magic != kMagic) return fail(error, "not a script snapshot");
-            if (!get_u32(in, pos, version) || !known_version(version))
+            uint32_t sections = 0;
+            if (!get_u32(in, pos, version) || !read_sections(in, pos, version, sections))
                 return fail(error, "snapshot version");
             std::vector<CKBehavior*> written;   // the root scripts written back (G1, live_membership)
             // Gap Q (design 2.2.3): a selected script the record has no
@@ -1188,7 +1251,7 @@ namespace bmmo::game {
             // written, active or not: the trafo frame runs them, and what
             // activates them is the trafo inputs the replay re-applies.
             std::vector<uint32_t> recorded;
-            if (has_trafo(version)) {
+            if (sections & kSectionTrafo) {
                 uint32_t count = 0;
                 if (!get_u32(in, pos, count)) return fail(error, "truncated trafo scripts");
                 for (uint32_t i = 0; i < count; ++i) {
@@ -1221,14 +1284,26 @@ namespace bmmo::game {
             }
             // v4 / v5: the queued entries of the recorded scripts (gap Q).
             std::vector<queued_callback> queued;
-            if (has_queue(version)) {
+            if (sections & kSectionQueue) {
                 uint16_t count = 0;
                 if (!get_u16(in, pos, count)) return fail(error, "truncated queue");
                 queued.resize(count);
                 for (queued_callback& e: queued)
                     if (!get_u32(in, pos, e.behavior) || !get_u8(in, pos, e.slot)) return fail(error, "truncated queue entry");
             }
+            // v6: the proximity union's hold section (step G3), put back
+            // below when the binding passes the hooks.
+            const size_t hold_at = pos;
+            if ((sections & kSectionHold) && !skip_hold(in, pos)) return fail(error, "truncated proximity hold section");
+            const size_t hold_end = pos;
             if (pos != in.size()) return fail(error, "trailing bytes");
+            // The frames and the by-name cells back at the anchor (design
+            // 4.2): a tick of the window without a candidate reads the hold.
+            if ((sections & kSectionHold) && hold && hold->restore) {
+                std::string why;
+                if (!hold->restore(in.data() + hold_at, hold_end - hold_at, why))
+                    return fail(error, ("proximity hold: " + why).c_str());
+            }
             if (trafo && !trafo->empty()) {
                 std::vector<uint32_t> selected;
                 for (CK_ID id: trafo->scripts) selected.push_back(static_cast<uint32_t>(id));
@@ -1281,7 +1356,7 @@ namespace bmmo::game {
             // from the record.  After the blocks: a force block restored
             // above with no controller and its entry queued comes back with
             // no controller and one entry, which runs when its body appears.
-            if (has_queue(version) && queue && queue->restore) {
+            if ((sections & kSectionQueue) && queue && queue->restore) {
                 std::vector<CK_ID> scope;
                 for (CKBehavior* beh: written) scope.push_back(beh->GetID());
                 scope.insert(scope.end(), unrecorded.begin(), unrecorded.end());
@@ -1468,12 +1543,13 @@ namespace bmmo::game {
             d.any = true;
             size_t pa = 0, pb = 0;
             uint32_t ma = 0, mb = 0, va = 0, vb = 0;
+            uint32_t sa = 0, sb = 0;
             if (!get_u32(a, pa, ma) || !get_u32(b, pb, mb) || !get_u32(a, pa, va) || !get_u32(b, pb, vb)
-                    || ma != mb || va != vb) {
+                    || ma != mb || va != vb || !read_sections(a, pa, va, sa) || !read_sections(b, pb, vb, sb) || sa != sb) {
                 d.logical = true; ++d.logical_count; d.where = "header";
                 return d;
             }
-            const bool v3 = has_trafo(va);
+            const bool v3 = (sa & kSectionTrafo) != 0;
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 uint32_t ca = 0, cb = 0;
                 if (!get_u32(a, pa, ca) || !get_u32(b, pb, cb) || ca != cb) {
@@ -1541,7 +1617,7 @@ namespace bmmo::game {
                     if (!diff_behavior(beh, script_name, a, pa, b, pb, d, masks)) return d;
                 }
             }
-            if (has_queue(va)) {
+            if (sa & kSectionQueue) {
                 // Gap Q: the recorded scripts' queued entries.
                 const auto read = [](const std::vector<uint8_t>& r, size_t& p, std::string& text) {
                     uint16_t n = 0;
@@ -1562,6 +1638,43 @@ namespace bmmo::game {
                                            + (qb.empty() ? std::string("(none)") : qb);
                     if (d.where.empty()) d.where = what;
                     d.note(what);
+                }
+            }
+            if (sa & kSectionHold) {
+                // Step G3 (design 4.2): a held by-name entity (or a count)
+                // that differs is a candidate-set difference - logical.  A
+                // frame's position is a copy of its candidate's position, so
+                // any correction of that ball moves it: float, like the
+                // sensors' arithmetic (WG3's review; the design's "logical"
+                // for frames made every correcting rollback count one).
+                const size_t ha = pa, hb = pb;
+                if (!skip_hold(a, pa) || !skip_hold(b, pb)) return d;
+                if (pa - ha != pb - hb || !std::equal(a.begin() + static_cast<std::ptrdiff_t>(ha),
+                                                      a.begin() + static_cast<std::ptrdiff_t>(pa),
+                                                      b.begin() + static_cast<std::ptrdiff_t>(hb))) {
+                    const size_t frames = static_cast<size_t>(a[ha] | (a[ha + 1] << 8));
+                    const size_t names_at = 2 + frames * 12;   // the copies' u16 count, from the section start
+                    std::string what;
+                    bool logical = pa - ha != pb - hb;
+                    const size_t n = std::min(pa - ha, pb - hb);
+                    for (size_t i = 0; i < n; ++i) {
+                        if (a[ha + i] == b[hb + i]) continue;
+                        if (i < 2 || (i >= names_at && i < names_at + 2)) {
+                            logical = true;
+                            what = "proximity hold: the counts differ";
+                        } else if (i < names_at) {
+                            if (what.empty()) what = "proximity hold: frame " + std::to_string((i - 2) / 12) + " differs [float]";
+                            continue;
+                        } else {
+                            logical = true;
+                            what = "proximity hold: by-name copy " + std::to_string((i - names_at - 2) / 4) + " differs";
+                        }
+                        break;
+                    }
+                    if (what.empty()) what = "proximity hold: the counts differ";
+                    if (logical) { d.logical = true; ++d.logical_count; d.note(what); }
+                    else ++d.float_count;
+                    if (d.where.empty()) d.where = what;
                 }
             }
             complete = pa == a.size() && pb == b.size();
@@ -1615,9 +1728,31 @@ namespace bmmo::game {
         // the walk meets.  localize() turns a portable record into a LOCAL v2
         // record for the selection of this world, which the existing restore
         // takes unchanged.
+        //   version 3 (world-agreement-gaps design 4.2 / 4.4 / 2.9, step G3,
+        //   protocol 16): a sections word after the version,
+        //     u32 sections: bit 0 the trafo scripts (as version 2), bit 1 the
+        //     proximity union's hold section
+        //   then the version 1 body byte for byte, then the trafo scripts if
+        //   bit 0, then u32 size + the hold section if bit 1, keyed by name
+        //   (game/proximity_union.hpp capture_portable):
+        //     u16 frames, per frame str frame name, f32 x, y, z;
+        //     u16 by-name copies, per copy str copy name, str the held
+        //     entity's name ("" none)
+        //   Written only when the hold capture is passed (the server's world
+        //   under WORLD_PROXIMITY_UNION), so every other record stays version
+        //   1 / 2 byte for byte.  An unknown bit is refused.
         static constexpr uint32_t kPortableMagic = 0x50534d42u;   // "BMSP"
         static constexpr uint32_t kPortableVersion = 1;
         static constexpr uint32_t kPortableVersionTrafo = 2;
+        static constexpr uint32_t kPortableVersionSections = 3;
+        static constexpr uint32_t kPortableSectionTrafo = 1u << 0;
+        static constexpr uint32_t kPortableSectionHold = 1u << 1;
+        // The hold section's halves (step G3): the server's world writes it by
+        // name, a client's localizes it to its own record's hold section
+        // (game/proximity_union.hpp localize_hold).
+        using portable_hold_capture = std::function<void(std::vector<uint8_t>& out)>;
+        using portable_hold_localize =
+            std::function<bool(const uint8_t* data, size_t size, std::vector<uint8_t>& out, std::string& error)>;
 
         // What capture_portable and localize met.  The lists are filled only
         // when `lists` is set (the SimTool check); each entry names the
@@ -1644,6 +1779,18 @@ namespace bmmo::game {
             // unportable (the name or registry entry is not in this world: the
             // local value is kept); keep-local scripts copied from the anchor.
             uint32_t objects_kept = 0, objects_resolved = 0, unportable = 0, kept_local = 0;
+            // localize, an input (step G3, design 2.9's player-ball reference):
+            // the names this world gives the capturing world's objects - the
+            // server's clone of a player -> this world's ball of that player
+            // (session/resync_rules.hpp resync_renames, the blob's own list).
+            // A reference whose recorded name is a key is resolved by the
+            // mapped name; `objects_renamed` counts them.
+            std::vector<std::pair<std::string, std::string>> renames;
+            uint32_t objects_renamed = 0;
+            // localize: the hold section (version 3) - 0 none in the record,
+            // 1 localized into the record, 2 left out (no localizer passed:
+            // the restore keeps this world's own hold).
+            uint8_t hold = 0;
             std::vector<std::string> registry_list, unnamed_list, ambiguous_list, server_private_list, unportable_list,
                 index_like_list;
         };
@@ -1659,9 +1806,9 @@ namespace bmmo::game {
         static bool index_record(const std::vector<uint8_t>& record, record_index& index) {
             index = {};
             size_t a = 0;
-            uint32_t magic = 0, version = 0, count = 0;
+            uint32_t magic = 0, version = 0, count = 0, sections = 0;
             if (!get_u32(record, a, magic) || magic != kMagic || !get_u32(record, a, version)
-                    || !known_version(version) || !get_u32(record, a, count))
+                    || !read_sections(record, a, version, sections) || !get_u32(record, a, count))
                 return false;
             for (uint32_t i = 0; i < count; ++i) {
                 record_index::script s;
@@ -1680,7 +1827,8 @@ namespace bmmo::game {
 
         static bool capture_portable(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
                                      std::vector<uint8_t>& out, std::string* error = nullptr,
-                                     portable_report* report = nullptr, const trafo_part* trafo = nullptr) {
+                                     portable_report* report = nullptr, const trafo_part* trafo = nullptr,
+                                     const portable_hold_capture* hold = nullptr) {
             out.clear();
             if (error) error->clear();
             if (!context) return fail(error, "no context");
@@ -1691,9 +1839,17 @@ namespace bmmo::game {
             // on), an empty one included: a world without a selected set says
             // so, and a world holding sets the record does not list fails
             // its localize instead of putting them to their built state.
+            // Version 3 (step G3) whenever the hold capture is passed, with
+            // the trafo scripts as its bit 0 under the same rule.
             const bool v2 = trafo != nullptr;
+            const bool with_hold = hold && *hold;
             put_u32(out, kPortableMagic);
-            put_u32(out, v2 ? kPortableVersionTrafo : kPortableVersion);
+            if (with_hold) {
+                put_u32(out, kPortableVersionSections);
+                put_u32(out, (v2 ? kPortableSectionTrafo : 0u) | kPortableSectionHold);
+            } else {
+                put_u32(out, v2 ? kPortableVersionTrafo : kPortableVersion);
+            }
             std::vector<std::pair<std::string, std::string>> keys;
             const auto put_scripts = [&](const std::vector<CK_ID>& ids) {
                 put_u32(out, static_cast<uint32_t>(ids.size()));
@@ -1723,6 +1879,12 @@ namespace bmmo::game {
                 put_u32(out, static_cast<uint32_t>(value));
             }
             if (v2 && !put_scripts(trafo->scripts)) return false;
+            if (with_hold) {
+                std::vector<uint8_t> section;
+                (*hold)(section);
+                put_u32(out, static_cast<uint32_t>(section.size()));
+                out.insert(out.end(), section.begin(), section.end());
+            }
             return true;
         }
 
@@ -1747,19 +1909,27 @@ namespace bmmo::game {
         static bool localize(CKContext* context, const selection& sel, const std::vector<uint8_t>& portable,
                              const std::vector<uint8_t>* local_anchor, const keep_local_fn& keep_local,
                              std::vector<uint8_t>& out, std::string* error = nullptr, portable_report* report = nullptr,
-                             const trafo_part* trafo = nullptr) {
+                             const trafo_part* trafo = nullptr, const portable_hold_localize* hold = nullptr) {
             out.clear();
             if (error) error->clear();
             if (!context) return fail(error, "no context");
             if (!sel.satellites.empty()) return fail(error, "satellite blocks are not portable");
             portable_report scratch;
             portable_report& r = report ? *report : scratch;
+            r.hold = 0;
             // The portable scripts by key: where each one's block starts.
             size_t pos = 0;
-            uint32_t magic = 0, version = 0, count = 0;
+            uint32_t magic = 0, version = 0, count = 0, sections = 0;
             if (!get_u32(portable, pos, magic) || magic != kPortableMagic) return fail(error, "not a portable script record");
-            if (!get_u32(portable, pos, version) || (version != kPortableVersion && version != kPortableVersionTrafo))
+            if (!get_u32(portable, pos, version)
+                    || (version != kPortableVersion && version != kPortableVersionTrafo && version != kPortableVersionSections))
                 return fail(error, "portable record version");
+            if (version == kPortableVersionSections) {
+                if (!get_u32(portable, pos, sections)) return fail(error, "truncated portable record");
+                if (sections & ~(kPortableSectionTrafo | kPortableSectionHold)) return fail(error, "portable record sections");
+            } else if (version == kPortableVersionTrafo) {
+                sections = kPortableSectionTrafo;
+            }
             if (!get_u32(portable, pos, count)) return fail(error, "truncated portable record");
             struct entry { std::string owner, name; size_t at = 0; bool used = false; };
             const auto read_entries = [&](uint32_t n, std::vector<entry>& list) {
@@ -1784,17 +1954,37 @@ namespace bmmo::game {
             // Version 2: the trafo scripts after the cells.
             std::vector<entry> trafo_entries;
             size_t end_at = portable.size();
-            if (version == kPortableVersionTrafo) {
-                size_t at = cells_at + static_cast<size_t>(kCellCount) * 5;
-                if (at > portable.size()) return fail(error, "truncated portable cells");
-                pos = at;
+            if (cells_at + static_cast<size_t>(kCellCount) * 5 > portable.size()) return fail(error, "truncated portable cells");
+            end_at = cells_at + static_cast<size_t>(kCellCount) * 5;
+            if (sections & kPortableSectionTrafo) {
+                pos = end_at;
                 uint32_t trafo_count = 0;
                 if (!get_u32(portable, pos, trafo_count)) return fail(error, "truncated portable trafo scripts");
                 if (!read_entries(trafo_count, trafo_entries)) return false;
                 end_at = pos;
                 if (!trafo) return fail(error, "the portable record carries a trafo part and this world has no trafo list");
             }
-            const bool v3 = version == kPortableVersionTrafo;
+            // Version 3: the hold section (step G3), localized by the host's
+            // union into this world's record order; without a localizer it is
+            // left out and the restore keeps this world's own hold.
+            std::vector<uint8_t> local_hold;
+            if (sections & kPortableSectionHold) {
+                pos = end_at;
+                uint32_t size = 0;
+                if (!get_u32(portable, pos, size) || pos + size > portable.size())
+                    return fail(error, "truncated portable hold section");
+                if (hold && *hold) {
+                    std::string why;
+                    if (!(*hold)(portable.data() + pos, size, local_hold, why))
+                        return fail(error, ("proximity hold: " + why).c_str());
+                    r.hold = 1;
+                } else {
+                    r.hold = 2;
+                }
+                end_at = pos + size;
+            }
+            const bool v3 = (sections & kPortableSectionTrafo) != 0;
+            const bool with_hold = r.hold == 1;
             // The local anchor's scripts by id: where each one's entry starts
             // (the id) and ends.
             record_index anchored;
@@ -1814,7 +2004,12 @@ namespace bmmo::game {
                 local_keys.push_back(std::move(key));
             }
             put_u32(out, kMagic);
-            put_u32(out, v3 ? kVersionTrafo : kVersion);
+            if (with_hold) {
+                put_u32(out, kVersionSections);
+                put_u32(out, (v3 ? kSectionTrafo : 0u) | kSectionHold);
+            } else {
+                put_u32(out, v3 ? kVersionTrafo : kVersion);
+            }
             put_u32(out, static_cast<uint32_t>(sel.scripts.size()));
             for (CK_ID id: sel.scripts) {
                 auto* beh = CKBehavior::Cast(context->GetObject(id));
@@ -1909,9 +2104,12 @@ namespace bmmo::game {
                         if (error) *error = "the local trafo list has no script " + e.owner + "/" + e.name;
                         return false;
                     }
-                pos = end_at;
             }
-            if (pos != portable.size()) { out.clear(); return fail(error, "trailing bytes in the portable record"); }
+            // end_at: past the cells, the trafo scripts and the hold section.
+            if (end_at != portable.size()) { out.clear(); return fail(error, "trailing bytes in the portable record"); }
+            // Record v6's hold section (no queue section: a localized record
+            // never carried one).
+            if (with_hold) out.insert(out.end(), local_hold.begin(), local_hold.end());
             return true;
         }
 
@@ -2493,6 +2691,16 @@ namespace bmmo::game {
                 if (!get_u32(in, pos, recorded_class) || !get_str(in, pos, name)) return fail(error, "truncated object reference");
                 if (!data || local->GetParameterClassID() == 0) return fail(error, ("an object reference on a parameter that holds none at " + parameter_place(block, output, index, local)).c_str());
                 ++r.objects;
+                // Step G3: a reference to the capturing world's ball of a
+                // player (the server's clone) means this world's ball of that
+                // player (a latched Get Cell output, design 2.9).
+                if (!name.empty())
+                    for (const auto& [from, to]: r.renames)
+                        if (from == name) {
+                            name = to;
+                            ++r.objects_renamed;
+                            break;
+                        }
                 CKObject* current = local_value ? context->GetObject(static_cast<CK_ID>(local_value)) : nullptr;
                 if (recorded_class == 0 && name.empty()) {          // no object: 0, never a stale local id
                     emit(0);

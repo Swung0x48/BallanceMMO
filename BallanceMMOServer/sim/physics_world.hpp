@@ -412,6 +412,12 @@ namespace bmmo::sim {
         // S2): the signature of the PH table at the anchor (placement on or
         // off) and the copies this world made (placement_clones).
         uint64_t anchor_placement() const { return anchor_placement_; }
+        // Step G3 (world agreement 2.3, 5): the mechanism-class signature of
+        // this world's proximity rewire - the clients' anchor_probes.
+        uint64_t probe_signature() const { return proximity_.signature(bmmo::game::probe_class::mechanism); }
+        // Step G5: BodyRevived events this world did not apply (the world
+        // option: every world wakes its own mechanisms).
+        uint64_t revived_ignored() const { return revived_ignored_; }
         const bmmo::game::sector_placement& placement() const { return placement_; }
 
     private:
@@ -503,6 +509,7 @@ namespace bmmo::sim {
         bool probes_placed_ = false;
         uint32_t probes_placed_tick_ = 0;
         uint64_t proximity_hold_failures_ = 0;
+        uint64_t revived_ignored_ = 0;   // step G5
         CK_ID current_level_ = 0;
         // The session's script selection (game/session_host_support.hpp
         // session_script_selection: the selection both clients make at their

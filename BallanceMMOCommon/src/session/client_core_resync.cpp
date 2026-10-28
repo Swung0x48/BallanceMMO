@@ -328,8 +328,25 @@ namespace bmmo::session {
         // 3. The scripts: the server's record, localized, the keep-local ones
         // from the anchor's own (2.4).  Refused: the anchor's own scripts,
         // and the rest of the apply as designed (never silent).
+        // The server's clone of each player -> this world's ball of that
+        // player (the own ball as the anchor recorded it, every mirror):
+        // the blob's renames (5.) and, step G3, the scripts' references to a
+        // clone (a latched Get Cell output, world-agreement design 2.9).
+        const auto clone_renames = [&]() {
+            std::map<uint32_t, std::string> local;
+            std::string local_own = s.rollback_.recorded_own_entity(anchor);
+            if (local_own.empty()) local_own = own_entity;
+            if (local_own.empty()) local_own = platform_.own_ball().entity;
+            local[s.own_id_] = local_own;
+            for (const auto& [player, remote]: s.remotes_)
+                if (remote.physicalized) local[player] = remote.entity;
+            return resync_renames(st.clones, local);
+        };
         std::vector<uint8_t> localized;
         resync_script_report script_report;
+        // Under the union only (the bit-clear clients keep today's own-ball
+        // sensors, and their localize stays as it was).
+        if (s.probes_active_) script_report.renames = clone_renames();
         std::string script_error;
         uint8_t outcome = JOURNAL_RESYNC_APPLIED;
         const bool scripts_ok = !st.scripts.empty()
@@ -342,6 +359,11 @@ namespace bmmo::session {
             logf("resync: the server's script state was refused at %s", st.scripts.empty() ? "an empty record" : script_error.c_str());
         }
         s.resync_unportable_ += script_report.unportable;
+        // Step G3: the server's proximity hold at S (portable version 3).
+        if (scripts_ok && script_report.hold)
+            logf("resync: the server's proximity hold at %u %s; %u clone reference(s) renamed", anchor,
+                 script_report.hold == 1 ? "localized into the record" : "left out (no localizer here: the anchor's own kept)",
+                 script_report.objects_renamed);
         // 4. The union: the server's at S, its stamps not applied yet from
         // the stamp log (2.5 "the merge").
         sector_union::state_type server_union;
@@ -388,15 +410,11 @@ namespace bmmo::session {
         spec.blob.blob = &st.savestate;
         spec.blob.excluded_prefixes = keep_local_body_prefixes();
         {
-            std::map<uint32_t, std::string> local;
             std::string local_own = s.rollback_.recorded_own_entity(anchor);
             if (local_own.empty()) local_own = own_entity;
             if (local_own.empty()) local_own = platform_.own_ball().entity;
-            local[s.own_id_] = local_own;
             if (own_kept && local_own != own_entity) spec.blob.excluded_prefixes.push_back("=" + local_own);
-            for (const auto& [player, remote]: s.remotes_)
-                if (remote.physicalized) local[player] = remote.entity;
-            spec.blob.renames = resync_renames(st.clones, local);
+            spec.blob.renames = clone_renames();
         }
         if (own_kept) {
             spec.blob.excluded_prefixes.push_back("=" + own_entity);

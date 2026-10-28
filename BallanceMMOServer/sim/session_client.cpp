@@ -43,6 +43,7 @@
 #include <game/sector_deactivate_pin.hpp>
 #include <game/sector_cell_split.hpp>
 #include <game/sector_placement.hpp>
+#include <game/proximity_union.hpp>
 #include <game/navigation_graph.hpp>
 #include <game/script_state.hpp>
 #include <game/session_host_support.hpp>
@@ -768,6 +769,7 @@ namespace {
         // Step S6: the copies go before the engine (release_placement).
         ~session_client() {
             if (g_physicalize_client == this) g_physicalize_client = nullptr;
+            release_proximity("the client exits");
             release_placement("the client exits");
         }
         // make_platform() hands core_ lambdas that hold `this`: a moved (or
@@ -783,6 +785,7 @@ namespace {
             eo.game_root = args_.root;
             eo.log = [](const std::string& text) { logf("[engine] %s", text.c_str()); };
             std::string error;
+            release_proximity("the engine reboots");
             release_placement("the engine reboots");
             engine_.reset();
             engine_ = bmmo::sim::headless_engine::create(eo, error);
@@ -1509,8 +1512,15 @@ namespace {
             p.localize_scripts = [this](const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor,
                                         std::vector<uint8_t>& out, std::string& error,
                                         bmmo::session::resync_script_report& report) {
+                // Step G3 (world agreement 4.4): under the union the server's
+                // hold at S goes into the record, localized by name.
+                const bmmo::game::script_replay::portable_hold_localize hold =
+                    [this](const uint8_t* data, size_t size, std::vector<uint8_t>& section, std::string& why) {
+                        return proximity_.localize_hold(engine_->context(), data, size, section, why);
+                    };
                 return bmmo::game::localize_session_scripts(engine_->context(), scripts_, portable, anchor, out, error, report,
-                                                            trafo_on_ ? &trafo_registry_.part() : nullptr);
+                                                            trafo_on_ ? &trafo_registry_.part() : nullptr,
+                                                            core_.proximity_union_active() ? &hold : nullptr);
             };
             p.forget_activations_from = [this](uint32_t tick) {
                 const size_t activations = manager_activations_.forget_from(tick);
@@ -1697,6 +1707,11 @@ namespace {
             // after the traces) and the status line at the session's end; this
             // client prints both as one log line each, with its counters.
             p.counters = [this]() { return counters(); };
+            // Step G3 (world agreement 2.5): the proximity union's place,
+            // live (pre_step step 7b) and in every replayed tick.
+            p.place_probes = [this](const std::vector<bmmo::session::probe_candidate>& candidates) {
+                proximity_.place(engine_->context(), candidates);
+            };
             p.hooks.window = [](const std::string& text) { log_line(text); };
             p.hooks.status = [](const std::string& text) { log_line(text); };
             p.hooks.after_journal = [this](uint32_t tick) {
@@ -2053,6 +2068,9 @@ namespace {
             leave_trafo_tick_ = 0;
             // Step S6: the previous session's copies, whatever comes next (a
             // reboot below, or a level load over a level that is not running).
+            // Step G3: the proximity union's rewire first (it may have rewired
+            // a copy's blocks), as the server's world releases it.
+            release_proximity("a new session begins");
             release_placement("a new session begins");
             if (bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
                 // Restart (host started the room again): reboot to the menu.
@@ -2151,6 +2169,15 @@ namespace {
             // one copy for every host).
             script_hooks_ = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(engine_->physics()));
             anchor_trafo();
+            // Step G3 (world-agreement-gaps-design.md 2.3, 2.4): under
+            // WORLD_PROXIMITY_UNION the mechanism proximity blocks and their
+            // identity reads are rewired right after the selection (after
+            // the placement's apply), and the core places them before every
+            // live and replayed tick (platform place_probes); the signature
+            // goes into SessionReady.  A refused rewire ends the session here,
+            // as a refused placement does.
+            uint64_t probe_signature = 0;
+            if (core_.proximity_union_active() && !rewire_proximity(probe_signature)) { ended_ = true; return; }
             if (!scripts_.empty()) {
                 const auto st = bmmo::game::script_replay::describe(engine_->context(), scripts_);
                 logf("script replay: %d scripts (%d active) + %d satellite blocks, %d blocks, %d parameters, %d force blocks, %d opaque: %s",
@@ -2233,11 +2260,47 @@ namespace {
             // The world's signature (step S6); --placement-signature (the
             // step S5 test switch, design 7.4 "mismatch") replaces it.
             report.placement = args_.placement_signature_given ? args_.placement_signature : placement_signature;
+            report.probes = probe_signature;   // step G3
             if (args_.placement_signature_given)
                 logf("--placement-signature: reporting %016llx instead of the world's %016llx",
                      static_cast<unsigned long long>(args_.placement_signature),
                      static_cast<unsigned long long>(placement_signature));
             core_.anchor(report);
+        }
+
+        // Step G3 (world-agreement-gaps-design.md 2.3): the mechanism class of
+        // the proximity union (the selection's scripts but the keep-local
+        // ones), with the union rules and the level's reset point and ball
+        // names; the signature for SessionReady.  False: refused (logged).
+        bool rewire_proximity(uint64_t& signature) {
+            CKContext* context = engine_->context();
+            CKIpionManager* physics = engine_->physics();
+            proximity_.has_body = [physics](CK3dEntity* entity) {
+                PhysicsObject* object = physics && entity ? physics->GetPhysicsObject(entity, FALSE) : nullptr;
+                return object && object->m_RealObject;
+            };
+            const bmmo::game::script_replay::selection sel =
+                scripts_.empty() ? bmmo::game::session_script_selection(context, core_.trafo_active()) : scripts_;
+            const std::string error = proximity_.rewire(context, bmmo::game::probe_class::mechanism, sel,
+                                                        bmmo::game::proximity_union::level_options(context));
+            for (const std::string& line: proximity_.lines()) logf("%s", line.c_str());
+            if (!error.empty()) {
+                logf("the proximity union (world option) refused: %s", error.c_str());
+                return false;
+            }
+            signature = proximity_.signature(bmmo::game::probe_class::mechanism);
+            logf("proximity union: %zu mechanism blocks, %zu identity reads rewired, signature %016llx",
+                 proximity_.probe_count(), proximity_.identity_count(), static_cast<unsigned long long>(signature));
+            return true;
+        }
+
+        // The union's sources back and its objects gone, before the engine
+        // that holds them goes or another anchor rewires (step G3; §2.4's
+        // session-end release).
+        void release_proximity(const char* why) {
+            if (!engine_ || (!proximity_.probe_count() && !proximity_.identity_count())) return;
+            const int restored = proximity_.release(engine_->context());
+            logf("proximity union released (%s): %d inputs back", why, restored);
         }
 
         // The sector placement of this world (docs/sector-placement-design.md
@@ -3758,6 +3821,14 @@ namespace {
                 so.live_membership = true;
                 // Step B7EG (gap Q): the PreSimulate queue with the records.
                 so.callback_queue = true;
+                // Step G3 (world agreement 4.2): the proximity union's hold
+                // section with every record (v6), back at the anchor.
+                if (core_.proximity_union_active()) {
+                    so.hold.capture = [this](std::vector<uint8_t>& out) { proximity_.capture(out); };
+                    so.hold.restore = [this](const uint8_t* data, size_t size, std::string& error) {
+                        return proximity_.restore(engine_->context(), data, size, error);
+                    };
+                }
                 so.on_restore_failed = [this](const std::string& error) {
                     if (script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
                 };
@@ -3863,6 +3934,8 @@ namespace {
             h.rebases = rebases_;
             h.activations_replayed = activations_replayed_;
             h.script_reset_skips = script_reset_skips_;
+            h.probes_skipped = proximity_.skipped();
+            h.probes_relatched = proximity_.relatched();
             return h;
         }
         void report() {
@@ -4057,6 +4130,10 @@ namespace {
         // The sector placement (step S6): the copies this process made at
         // its anchor, released before the engine goes (release_placement).
         bmmo::game::sector_placement placement_;
+        // The proximity union (step G3): the mechanism blocks this process
+        // rewired at its anchor under WORLD_PROXIMITY_UNION, released before
+        // the engine goes (release_proximity).
+        bmmo::game::proximity_union proximity_;
         // (kOwnEchoDeadlineTicks, kOwnEchoUplinkSettleTicks and
         // kOwnRecordKeepTicks moved into the core state at E7.)
         // The entity mirror_entity named last, which make_mirror poses and

@@ -1304,6 +1304,41 @@ TEST(SessionAdmission, AClientWithoutTheSessionCoreIsRefusedInEverySession) {
     EXPECT_EQ(no_core, parsed.reason);
 }
 
+// Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): SessionReady
+// carries the client's probe signature after the placement's; a protocol 15
+// client's message parses without it (0).
+TEST(ProbeWire, SessionReadyCarriesTheProbeSignature) {
+    bmmo::session_ready_msg msg{};
+    msg.session = 3;
+    msg.caps = bmmo::session::CAP_PLACEMENT;
+    msg.build_id = "b";
+    msg.anchor_placement = 0x91a138e4fd6e7254ULL;
+    msg.anchor_probes = 0x5e0b1c2d3a4f6789ULL;
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(16u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(bmmo::session::PHYSICS_PROTOCOL_VERSION, parsed.protocol);
+    EXPECT_EQ(0x91a138e4fd6e7254ULL, parsed.anchor_placement);
+    EXPECT_EQ(0x5e0b1c2d3a4f6789ULL, parsed.anchor_probes);
+    msg.clear();
+    expect_rejects_every_truncation(msg);
+    bmmo::session_ready_msg old{};
+    old.session = 3;
+    old.protocol = 15;
+    old.anchor_placement = 0x1234;
+    old.anchor_probes = 0x5678;
+    old.build_id = "b";
+    ASSERT_TRUE(old.serialize());
+    std::string bytes = stream_payload(old.raw);
+    bytes.resize(bytes.size() - sizeof(uint64_t));   // what a protocol 15 build wrote
+    bmmo::session_ready_msg back{};
+    back.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    ASSERT_TRUE(back.deserialize());
+    EXPECT_EQ(0x1234u, back.anchor_placement);
+    EXPECT_EQ(0u, back.anchor_probes);
+    EXPECT_EQ(0u, bmmo::session::WORLD_PROXIMITY_UNION
+                  & (bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS));
+}
+
 // A protocol 11 client sends no signature: its message still parses
 // (placement 0), so the server can say which protocol it runs.
 TEST(PlacementWire, AProtocol11SessionReadyParsesWithoutTheSignature) {
@@ -1489,7 +1524,7 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
 TEST(SpawnGhostWire, TheProtocolIs15) {
     // Step SPGH2: the spawn ghost's rule in every world and its state in the
     // travelling savestate (format 3); no message layout changed.
-    EXPECT_EQ(15u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "15 since step SPGH2 (the spawn ghost)";
+    EXPECT_LE(15u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "15 since step SPGH2 (the spawn ghost); 16 since G3";
 }
 
 TEST(GhostPoseWire, TheProtocolIs14AndThePoseRoundTrips) {

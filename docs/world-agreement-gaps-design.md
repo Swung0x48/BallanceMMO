@@ -27,7 +27,9 @@ Status: design; step G0 built (WG0, 2026-10-28: SimTool `--probe-census`,
 §12 "As built (step WG0)"), step G1 built (WG1, 2026-10-28: parts A and B,
 the server on them with the bit clear, §12 "As built (step WG1)"), step G2
 built (WG2, 2026-10-28: the server's world under `WORLD_PROXIMITY_UNION`,
-§12 "As built (step WG2)"), G3-G6, M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
+§12 "As built (step WG2)"), steps G3 and G5 built (WG3, 2026-10-28: the
+clients under the bit, BodyRevived retired, protocol 16, §12 "As built (step
+WG3)"), G4, G6, M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
 `session_host_support.hpp`, `session_host_world.hpp`, `session_client.cpp` and
@@ -2533,3 +2535,209 @@ it. V4's alive-to-dead transition inside one window needs a lifecycle event
 inside a savestate window (G3's U2/U3 and H4 cover the client side). The
 latch's dead-id branch (a leaver's destroyed clone) has no SimTool scene (no
 leave in the drop scene): G3's H2c.
+
+### As built (step WG3, 2026-10-28): G3 and G5, the clients under the bit and BodyRevived retired (protocol 16)
+
+**What exists.**
+- *Protocol 16* (`entity/session.hpp`): P_G is the next free number at
+  landing - 14 and 15 were taken by BALA and SPGH2 after revision 3 named
+  "14 at the earliest". `session_ready_msg::anchor_probes` (u64 after
+  `anchor_placement`, read from protocol 16 on, always written).
+- *The core (part D).* `client_core_frame.cpp`: pre_step **step 7b**
+  (`place_probes(frame_tick, {}, false)`) between `hooks.after_rewinds` and
+  `apply_held_lifecycle`, only while `probes_active_` (the world option and a
+  platform with `place_probes`, `proximity_union_active()`, fixed at
+  `begin`). `probe_candidates(held_out)`: the own player's entities of
+  `own_ball_entities_` with a body (`platform_.body_state`), every other
+  player's mirror entities with a body from the new `mirror_owners_` (entity
+  -> player, ball type; filled where `mirror_entities_` is, in
+  `physicalize_remote` and the gap L revive), whatever their navigation;
+  sorted by player id. `world_hooks_.place_probes` calls the same with the
+  replay's predicate. SessionReady carries `report.probes` when the union is
+  active, else 0; the anchor logs `anchor probe signature ...`.
+- *The engine (RB, HW, CP).* `rollback_world::place_probes(tick, held_out)`,
+  called first in every replayed tick of the one replay loop (input,
+  lifecycle, snapshot and resync rewinds), before the `born_now` insertions,
+  the re-creations and `pre_step`. `held_out(e)`: `e` has a plan item whose
+  `repose_tick` is this tick or later, unless it is a revived life still
+  alive at this tick (`revived_until` not passed: a ball dying at t counts at
+  t). `bind_session_world` binds it from `core_world_hooks::place_probes`.
+  `session_platform::place_probes` (CK-free: `proximity_rules.hpp`'s
+  `probe_candidate`).
+- *The record (SR, RBS).* Record **v6** exactly as §4.2's revision 3: `u32
+  sections` (bit 0 trafo, bit 1 queue, bit 2 hold), the v2 body, then the
+  sections; `read_sections` serves restore, diff and `index_record`;
+  unknown bits refused. `hold_hooks` (`script_replay.hpp`) and
+  `script_binding_options::hold`: a host binds them only under the bit, so
+  every other record stays v2-v5 byte for byte. The restore puts the hold
+  back after the trailing-bytes check; diff reports a hold difference as
+  logical (`proximity hold: frame k differs`).
+- *The headless host (SC).* `rewire_proximity()` right after the selection
+  and `anchor_trafo()` (so after the placement's apply), class `mechanism`,
+  `proximity_union::level_options(ctx)` (new: union rules, ResetPoints row
+  0's translation else CurrentLevel[0][3]'s, the Physicalize_GameBall names
+  - the server world's reads); a refused rewire ends the session like a
+  refused placement. `platform.place_probes` = `proximity_union::place`;
+  `has_body` the IVP body test; the hold hooks in the script binding;
+  `release_proximity()` before every `release_placement()` (client exit,
+  engine reboot, a new session). Host counters `probes_skipped` /
+  `probes_relatched`; the status line gains `probes: active places=live/replayed
+  two_bodies skipped relatched revived_local` only under the bit.
+- *G5.* The core sends no BodyRevived under the bit (`revived_local_`
+  counts the wakes); `server.cpp` drops one right after the duplicate
+  check: neither submitted nor relayed, `revived_ignored` per member, the
+  first noted in the log and as a journal NOTE (`session_runner::
+  journal_note`, new); `physics_world::apply_event` does not apply one
+  under the bit (`revived_ignored()`), which is SimTool's half.
+- *The server.* `physics.proximity_union` defaults **on**; SessionReady's
+  `anchor_probes` is compared with `physics_world::probe_signature()` (the
+  world's mechanism-class signature, through `world_ready_info`) after the
+  placement compare, late joiners included: a mismatch refuses that member
+  ("refused: probe mismatch (client ..., server ...)"; out of the session,
+  not out of the room, the rest go on - §2.3's "cannot join"; the gate
+  round's change after the review, which first had `end_physics_session`
+  as the placement mismatch does).
+- *SimTool.* `--replay-session` takes the bit from a client journal too
+  (the "ignored" line is gone).
+- *`proximity_union::rewire`* releases a previous rewire first (WG1's
+  "re-anchor without release").
+
+**Adaptations (the code is what it is).**
+- *No capability, and `place_probes` is not in the "missing op" check.* The
+  check runs at construction, before any world option is known; a required
+  op would stop the retail core host (no G4 yet) from running any session.
+  A host without the op runs with the union inactive, logs that it cannot
+  place, and sends 0, which the server refuses (§2.5's "the session must not
+  start", through §5's signature).
+- *The signature is compared under the bit only.* Clients rewire only under
+  the bit; with it clear they keep today's own-ball sensors and send 0.
+- *Interim state until G4: the retail core host is refused* by a server
+  with the default on ("probe mismatch (client 0000000000000000, ...)", the
+  SessionEnd reason "... this client's host cannot place its probes"); the
+  headless members of a mixed room go on. A retail test before WG4 needs
+  `physics.proximity_union: false` on the server.
+- *Two bodies of one player* (an invariant violation): the first entity by
+  name, not the lower ball type - a rule of names every world applies the
+  same way, and the core has no ball type for its own entities (the type
+  `mirror_owners_` stores is unused; the server never has two balls of one
+  player, so the rule is never exercised).
+- *A frame difference is float in `diff`* (gate round, the review's
+  finding): §4.2 says logical, but a frame is a copy of its candidate's
+  position, so every correction of that ball moved it and every correcting
+  rollback counted a logical script mismatch (8 "proximity hold: frame 0
+  differs" in the first resync_snapoff run). A count or a held by-name
+  entity that differs stays logical ("proximity hold: by-name copy k
+  differs"); the label no longer names a copy by a frame index.
+- *The hold section's order* (WG1's note): the union's (owner, script,
+  walk) order, the same in every world; a client's section lists the
+  mechanism blocks only, the server's every block (the section never
+  crosses worlds).
+- *The portable record carries the hold (version 3, protocol 16, §4.4 / §5;
+  the gate round, the review's finding 1).* `capture_portable` writes a
+  sections word (bit 0 the trafo scripts, bit 1 the hold) and, after the
+  trafo scripts, `u32 size` + the hold by name
+  (`proximity_union::capture_portable`: per frame its name and position, per
+  by-name copy its name and the held entity's name); only the server's
+  world under the bit passes the capture (`physics_world`'s resync state),
+  so every other record stays version 1 / 2 byte for byte. `localize` hands
+  the section to the host's localizer (`proximity_union::localize_hold`:
+  this union's frames and copies in its own order from the entries of their
+  names, the held entity found as `place` finds it; a missing name refuses
+  the whole record) and writes a local **v6** record with the hold section,
+  which the restore puts back at S. The headless host passes the localizer
+  while the union is active (`localize_session_scripts`' new `hold`
+  argument); the retail core host passes none until G4, and then the
+  section is left out (the anchor's own hold stays; logged).
+- *The player-ball reference is a rename, not a kind 4/5.* The mirrors
+  carry the server clones' names in every world; only the own ball's clone
+  has another name here, and the resync state already carries the clone
+  list the blob's renames are made from (`resync_renames`). The core hands
+  those renames to the localize (`resync_script_report::renames`, an input,
+  only while the union is active) and an object reference whose recorded
+  name is a clone's resolves to this world's ball of that player
+  (`objects_renamed`). So the portable format gains no parameter kind, and
+  the bit-clear localize is unchanged.
+
+**Results** (x64 MSVC, x86 MSVC, Arch GCC; `.local-tools/work/WG3`).
+- Builds: x64 BUILD-OK (header deps recorded: `client_core_messages.cpp.obj`
+  #deps 39), x86 CLIENT-BUILD-OK (the shared core; no retail file changed),
+  Arch server ARCH-BUILD-OK `ballanced-36c04e3d24c9+bmmo-13f7d8664a68-dirty`.
+  `BallanceMMOMessageTests` 595/595 (5 new: `ProbeWire`, three
+  `SessionClientCoreProbes` - U2's candidate rule with a held-out newborn, an
+  undriven mirror, a body-less mirror, two bodies, the own death; the
+  SessionReady signature in three arms; step 7b's order and no BodyRevived -
+  and `RollbackEngine.TheProbePlacePointComesFirst...` - U3's call order
+  `place@4 held, recreate Prop@4, pre_step@4`, `place@5 free`).
+  GCC syntax check 30/30 ok.
+- Wire check rRLC vs rWG3 over `core_ref_s9` (`NEW_EXTRA="--accept-protocol
+  15"`: the set is protocol 15, recorded with the bit clear): 12/12 journals
+  IDENTICAL; sends DIFFER in exactly one line per client, send #5/#6, 67 ->
+  75 bytes = SessionReady (protocol 16 and `anchor_probes` 0). With the bit
+  clear the headless client is unchanged but for that message's layout. The
+  set is not re-captured (queued).
+- Live 1, `l8_cross` (level 8, 4 clients, 0 ms, placement on, trafo inputs
+  off, snapshots off, the bit on by default; `maps/arena-test/wg3/l8_cross`):
+  every client's signature `0813ea4dd1855f26` = the server's mechanism
+  signature (35 blocks with the placement copies, 9 identity reads; the
+  server's `all` 63); server journal 3115/3115 matched, 0 BodyRevived
+  records; every one of the 33 mechanism bodies (the P_Modul_29 plates, the
+  Pusher, P_Modul_25/37 bridges, ...) **bit-equal to the server's FULL rows
+  at every common tick on all four clients** (`mech_rows.py`). On
+  `core_ref_s9` (bit clear) the same tool gives SFD's numbers: the plates
+  from 554 to 3.594 m on c0/c2/c3, Pusher 0.095 m, P_Modul_25 0.022 m,
+  P_Modul_37 0.020 m. Status: `skipped=0 relatched=0 two_bodies=0`,
+  `revived_local` 44-47 per client (the reports no longer sent).
+- Live 2, `resync_snapoff` (arena, 150 ms, client 2 paused 1000 ms at 1500 ->
+  one resync): verdict as `core_ref_s9`'s (FAIL on the pause's resync,
+  starvation 44, 129 frames past the reach); server 4127/4127 matched, 0
+  BodyRevived (169 on `core_ref_s9`); 28 mechanism bodies bit-equal
+  throughout on c0, c1, c3 (on `core_ref_s9`: P_Modul_34 2.74 m, P_Modul_03
+  1.37 m, P_Modul_30 0.34 m, Pusher 0.090 m, P_Modul_37 0.020 m - G-c's
+  signature, gone). **T1 (a) is gone**: SimTool replays of the four client
+  journals (`--write-journal`) against the server journal
+  (`replay_tick_compare.py`): c1 3484/3484 and c3 3539/3539 ticks identical
+  (hash and pose), c0 identical through 3478 and c2 through 3496 (a
+  4- and 41-tick tail past the last relayed frames), FULL checkpoints 0
+  differing on c1/c3; no BodyRevived exists to be applied at its stamp.
+- Not a divergence (root-caused in the gate round): c2's (the paused
+  client's) LOCAL rows of `P_Modul_26_Sack` / `_Rope` differ from the
+  server's by up to 4.81 / 2.05 m at 1588-1614 and are bit-equal from 1616
+  on (`core_ref_s9`'s c2: 4.65 / 1.98 m, the same shape). The exact resync
+  rebases the tick schedule first ("resynced: tick base 1588 (old tick
+  1521, delta -66) ... the server's state of it follows") and keeps
+  stepping its own world until the state arrives (1615, "[arrival]", then
+  the restore at 1587 and the 28-tick re-step). The rows of 1588-1614 are
+  that old world under the new numbers: each equals the server's row of
+  the tick 66 earlier bit for bit (`sack2.py`, every row of both bodies,
+  worst 0.0). A comparison of a resynced client's rows has to skip the wait
+  between "resynced" and "[arrival]"; nothing to fix.
+- *WG2-era journals.* SimTool's `--replay-session` and
+  `physics_world::apply_event` now apply G3/G5 to every journal whose
+  header has the bit; a protocol-15 journal recorded with the bit set (only
+  WG2's own test runs: the server's default was off until this step) had
+  its BodyRevived records applied live and replays differently now. Journal
+  v7 carries no protocol number to tell them apart; such a journal is
+  replayed with a pre-WG3 SimTool (e.g. `build-agent-rRLC`).
+
+- Gate round (after the review: the portable hold, the clone renames, the
+  refusal, the float frame diff): x64 BUILD-OK, x86 CLIENT-BUILD-OK, Arch
+  ARCH-BUILD-OK, `BallanceMMOMessageTests` 595/595, GCC 30/30; the wire
+  check over `core_ref_s9` exactly as before (12/12 journals IDENTICAL, the
+  one SessionReady line per client 67 -> 75 bytes): the bit-clear path
+  does not reach the new code. `resync_snapoff` again
+  (`maps/arena-test/wg3/resync_snapoff_g`, a third live run, over the
+  step's two): server 3847/3847 matched, 0 BodyRevived; c2 logs "the
+  server's proximity hold at 1588 localized into the record" and the
+  re-step's 41159 script bytes localize with 0 unportable; every mechanism
+  body bit-equal on c0, c1, c3 throughout and on c2 from the arrival (1616)
+  on; c2's rows of the wait 1589-1615 equal the server's rows 66 ticks
+  earlier bit for bit (`wait_rows.py`: 286 rows, 22 bodies, worst 0; the
+  first run: 308 rows, worst 0). The diff now reports "proximity hold:
+  frame k differs [float]" (0 logical).
+**Deferred to FULL** (the 15-minute gate ran builds, tests, GCC, the wire
+check and two live runs): U2's full scripted life sequence (only the
+subsets above), U3's script-record round trip with a changed
+`CurrentLevel[0][1]` (needs CK: a SimTool scene), V4 on the clients'
+records, H1-H5, H2b, H2c, H4, H7 and H8 in full, H6 (3 minutes with the
+same-batch control), the re-capture of the reference set at protocol 16,
+CPU parity, and the retail runs (G4 first).

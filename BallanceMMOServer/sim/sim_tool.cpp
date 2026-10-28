@@ -5525,10 +5525,11 @@ namespace {
         // Server journals only until G3: a client journal of a bit-on
         // session carries the server's world options (client_journal.cpp),
         // but no client runs the rule before G3, so its replay does not.
-        options.proximity_union = !client_journal
-            && (header.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;
-        if (client_journal && (header.world_options & bmmo::session::WORLD_PROXIMITY_UNION))
-            std::printf("journal world option PROXIMITY_UNION ignored: a client journal (no client runs the rule before G3)\n");
+        // Step G3: a client journal too - the clients run the same rule at
+        // the same point since G3 (a client journal carries the server's
+        // world options, client_journal.cpp).  Under the bit a BodyRevived
+        // record is not applied (step G5, physics_world::apply_event).
+        options.proximity_union = (header.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;
         if (header.world_options != 0) std::printf("journal world options %08x%s%s%s\n", header.world_options,
                                                    options.trafo_inputs ? " (trafo inputs)" : "",
                                                    options.placement_clones ? " (placement clones)" : "",

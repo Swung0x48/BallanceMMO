@@ -612,6 +612,7 @@ namespace bmmo::session {
                 return false;
             }
             s.mirror_entities_.insert(entity);
+            s.mirror_owners_[entity] = {event.player, event.ball_type};   // step G3
             if (remake) {
                 ++s.mirror_remakes_;
                 remote.physicalized = true;
@@ -1020,6 +1021,7 @@ namespace bmmo::session {
             if (made.made) {
                 ++s.mirror_revives_;
                 s.mirror_entities_.insert(life.name);
+                s.mirror_owners_[life.name] = {player, born->birth.ball_type};   // step G3
                 remote.entity = life.name;
                 remote.ball_type = born->birth.ball_type;
                 remote.physicalized = true;

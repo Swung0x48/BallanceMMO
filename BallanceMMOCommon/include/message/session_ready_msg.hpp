@@ -32,6 +32,14 @@ namespace bmmo {
         // protocol 12 on; an older client's message still parses (0), so
         // the server can say which protocol it runs.
         uint64_t anchor_placement = 0;
+        // Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): the
+        // mechanism-class signature of the client's proximity rewire
+        // (game/proximity_union.hpp signature), after `anchor_placement`;
+        // always filled, 0 when the session does not run the proximity
+        // union.  The server compares it with its own world's under
+        // WORLD_PROXIMITY_UNION, late joiners included.  Required from
+        // protocol 16 on; an older client's message still parses (0).
+        uint64_t anchor_probes = 0;
 
         session_ready_msg() : serializable_message(bmmo::SessionReady) {}
 
@@ -46,6 +54,7 @@ namespace bmmo {
             message_utils::write_string<uint16_t>(build_id.substr(0, session::MAX_NAME), raw);
             raw.write(reinterpret_cast<const char*>(&caps), sizeof(caps));
             raw.write(reinterpret_cast<const char*>(&anchor_placement), sizeof(anchor_placement));
+            raw.write(reinterpret_cast<const char*>(&anchor_probes), sizeof(anchor_probes));
             return raw.good();
         }
 
@@ -65,6 +74,8 @@ namespace bmmo {
             if (protocol >= 8 && !message_utils::read_variable(raw, &caps)) return false;
             anchor_placement = 0;
             if (protocol >= 12 && !message_utils::read_variable(raw, &anchor_placement)) return false;
+            anchor_probes = 0;
+            if (protocol >= 16 && !message_utils::read_variable(raw, &anchor_probes)) return false;
             return true;
         }
     };

@@ -930,6 +930,14 @@ namespace bmmo::sim {
             p.finished = true;
             return true;
         case event_type::BodyRevived: {
+            // Step G5 (world agreement 2.6): under WORLD_PROXIMITY_UNION no
+            // world changes a body because another world's script woke it -
+            // the live server never submits one (server.cpp drops them), and
+            // a journal's replay applies none.
+            if (options_.proximity_union) {
+                ++revived_ignored_;
+                return true;
+            }
             auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
                 const_cast<CKSTRING>(event.name.c_str()), CKCID_3DENTITY, nullptr));
             if (!entity) {
@@ -1463,8 +1471,15 @@ namespace bmmo::sim {
         out.union_state = bmmo::session::sector_union::serialize(sectors_.state());
         if (out.union_state.empty()) out.error = "the sector union does not serialize";
         std::string e;
+        // Step G3 (world-agreement-gaps design 4.4): under the bit the record
+        // carries the union's hold by name (version 3): a resync's or a late
+        // join's re-step starts from the server's frames and by-name cells.
+        const bmmo::game::script_replay::portable_hold_capture hold = [this](std::vector<uint8_t>& section) {
+            proximity_.capture_portable(section);
+        };
         if (!bmmo::game::script_replay::capture_portable(engine_->context(), script_selection_, script_hooks_, out.scripts, &e,
-                                                         nullptr, options_.trafo_inputs ? &trafo_registry_.part() : nullptr)) {
+                                                         nullptr, options_.trafo_inputs ? &trafo_registry_.part() : nullptr,
+                                                         options_.proximity_union ? &hold : nullptr)) {
             out.scripts.clear();
             if (out.error.empty()) out.error = "portable script record: " + e;
         }

@@ -643,6 +643,21 @@ namespace bmmo::session {
         // another (a later life the reconcile takes out and the replay
         // makes again from its inputs).
         std::set<std::string> mirror_entities_;
+        // Step G3 (world agreement 2.5): every mirror entity this session
+        // made, with its player and ball type - the candidates of the
+        // proximity union's place point (a life's entity is a candidate of
+        // its player while it has a body, the current one or a revived one).
+        std::map<std::string, std::pair<uint32_t, uint8_t>> mirror_owners_;
+        // The proximity union (step G3): on in this session (the world
+        // option, and the host places), its place calls live and replayed,
+        // and the invariant guard: two bodies of one player at a place point
+        // (counted, logged once; the first by name is taken).
+        bool probes_active_ = false;
+        uint64_t probe_places_live_ = 0, probe_places_replayed_ = 0, probe_two_bodies_ = 0;
+        // Step G5 (world agreement 2.6): the script wakes BodyRevived would
+        // have reported, kept for the status line (revived_local=) when the
+        // session runs the union and sends none.
+        uint64_t revived_local_ = 0;
         // ---- gap L, L3: the own ball (rollback-engine gaps design 2.3.4,
         // 9.7; step EL8) ----
         // An own entity's body removed live (the drain's "deleted" entry of
@@ -1025,6 +1040,12 @@ namespace bmmo::session {
         // session_capabilities::placement: SessionReady's anchor_placement
         // and the journal header's.
         uint64_t placement = 0;
+        // Step G3 (world agreement 2.3, 5): the mechanism-class signature
+        // of the host's proximity rewire (game/proximity_union.hpp
+        // signature) when the session runs the union, else 0: SessionReady's
+        // anchor_probes, which the server compares with its world's under
+        // WORLD_PROXIMITY_UNION.
+        uint64_t probes = 0;
     };
 
     // begin: refused when the server runs another physics protocol.
@@ -1364,6 +1385,16 @@ namespace bmmo::session {
         bool placement_active() const {
             return caps_.placement && (s.world_options_ & WORLD_PLACEMENT_CLONES) != 0;
         }
+        // Step G3 (world agreement 2.4, 2.5): whether this host rewires the
+        // mechanism proximity blocks at its anchor and the core places them
+        // before every live and replayed tick - the session's world option
+        // WORLD_PROXIMITY_UNION and a platform with place_probes.  A host
+        // without the operation sends no signature; the server refuses it.
+        bool proximity_union_active() const {
+            return (s.world_options_ & WORLD_PROXIMITY_UNION) != 0 && static_cast<bool>(platform_.place_probes);
+        }
+        uint64_t probe_two_bodies() const { return s.probe_two_bodies_; }
+        uint64_t revived_local() const { return s.revived_local_; }
         uint64_t trafo_missed() const { return s.trafo_missed_; }
         uint64_t trafo_sent() const { return s.trafo_sent_; }
         uint64_t trafo_original_leaks() const { return s.trafo_leaks_; }
@@ -1679,6 +1710,14 @@ namespace bmmo::session {
         void log_life(const bmmo::session_event_msg& event);
         // Before a replayed tick: the deaths a resync re-applies there.
         void drain_pending_deaths(uint32_t tick);
+        // Step G3 (world agreement 2.2, 2.5): the proximity union's
+        // candidates of this world at the place point - the own ball's
+        // entity with a body and every mirror entity with a body, one per
+        // player, by player id, minus the bodies `held_out` names (a
+        // replay's); and the place itself (the platform's place_probes).
+        std::vector<bmmo::session::probe_candidate> probe_candidates(
+            const std::function<bool(const std::string& entity)>& held_out);
+        void place_probes(uint32_t tick, const std::function<bool(const std::string& entity)>& held_out, bool replayed);
         // How deep the correction rewind of `tick` (its anchor tick - 1) may
         // go: max_resim_ticks, or the resync reach inside the last exact
         // resync's re-step window.

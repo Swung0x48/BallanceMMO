@@ -335,6 +335,7 @@ namespace bmmo::sim {
             info.anchor_hash = s->world->anchor_hash();
             info.anchor_surfaces = s->world->anchor_surfaces();
             info.anchor_placement = s->world->anchor_placement();
+            info.anchor_probes = s->world->probe_signature();   // step G3
             info.ball_rows = s->world->ball_rows();
             info.trafo_points = s->world->trafo_points();
             {
@@ -935,6 +936,14 @@ namespace bmmo::sim {
             r = s.resync_requests.erase(r);
             if (callbacks_.on_resync_state) callbacks_.on_resync_state(out);
         }
+    }
+
+    void session_runner::journal_note(uint32_t session, const std::string& text) {
+        post([this, session, text] {
+            auto it = sessions_.find(session);
+            if (it == sessions_.end() || !it->second->world) return;
+            it->second->journal.note(it->second->world->tick_index(), text);
+        });
     }
 
     void session_runner::describe(uint32_t session) {

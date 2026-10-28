@@ -33,6 +33,7 @@
 
 #include "clock_site.hpp"
 #include "rollback.hpp"
+#include "proximity_rules.hpp"
 #include "trafo_input.hpp"
 #include "../entity/session.hpp"
 #include "../physics/physics_rt_api.h"
@@ -130,6 +131,10 @@ namespace bmmo::session {
         int rebases = 0;
         uint64_t activations_replayed = 0;
         uint64_t script_reset_skips = 0;
+        // Step G3: the proximity union's place counts (proximity_union
+        // skipped / relatched), printed in the status line's probes section.
+        uint64_t probes_skipped = 0;
+        uint64_t probes_relatched = 0;
     };
 
     // What a host's localize_scripts met (step A3; game/script_replay.hpp
@@ -138,6 +143,14 @@ namespace bmmo::session {
         uint32_t scripts = 0, kept_local = 0;
         uint32_t objects_kept = 0, objects_resolved = 0, unportable = 0, ambiguous = 0;
         std::string first_unportable;   // where the first unportable reference was ("" none)
+        // Step G3: an input the core fills before the call - the server's
+        // clone of each player -> this world's ball of that player
+        // (resync_renames); a script reference to a clone localizes to it.
+        std::vector<std::pair<std::string, std::string>> renames;
+        uint32_t objects_renamed = 0;
+        // The record's proximity hold section (portable version 3): 0 none,
+        // 1 localized, 2 left out (the host has no localizer).
+        uint8_t hold = 0;
     };
 
     // What the core hands bind_world (design 2.2 bind_world, 2.4
@@ -209,6 +222,13 @@ namespace bmmo::session {
         // no half (unrevivable, counted).
         std::function<void(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended, bool savestate,
                            std::map<std::string, life_outcome>& out)> restore_lives;
+        // Step G3 (docs/world-agreement-gaps-design.md 2.5): the proximity
+        // union's place point of a replayed tick (rollback_world::
+        // place_probes): the core's candidates of the replayed world at the
+        // end of t-1, minus the bodies the replay holds out, handed to the
+        // platform's place_probes.  Empty unless the session runs the union
+        // (WORLD_PROXIMITY_UNION and a host that places).
+        std::function<void(uint32_t tick, const std::function<bool(const std::string& entity)>& held_out)> place_probes;
     };
 
     // The own ball as the host sees it after a step (design 2.2 own_ball;
@@ -659,6 +679,19 @@ namespace bmmo::session {
         // end).
         std::function<bool(const std::string& entity, float matrix[16])> entity_matrix;
         std::function<bool(const std::string& entity, const float matrix[16])> set_entity_matrix;
+
+        // ---- the proximity union (docs/world-agreement-gaps-design.md 2.5,
+        // step G3; game/proximity_union.hpp) ----
+        // Before the behaviour pass of a tick (live: pre_step step 7b; in a
+        // replay: rollback_world::place_probes): the frames, identity cells
+        // and latches of the mechanism blocks the host rewired at its anchor,
+        // from the candidates (player, ball entity with a body), sorted by
+        // player id.  Both hosts: proximity_union::place.  No capability: a
+        // session under WORLD_PROXIMITY_UNION needs it, and a host without it
+        // sends no probe signature (anchor_report::probes 0), which the
+        // server refuses (design 5) - so it is not in the "missing op" check
+        // that every session, the union's or not, runs at construction.
+        std::function<void(const std::vector<bmmo::session::probe_candidate>& candidates)> place_probes;
 
         // ---- the airship zone (step BALA; physics_state.hpp airship_zone_set) ----
         // On (at the anchor, with the own ball's nocoll group) or off (at the

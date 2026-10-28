@@ -156,6 +156,10 @@ namespace bmmo::sim {
         // placement design 2.4): what a SessionReady with CAP_PLACEMENT must
         // carry, late joiners included.
         uint64_t anchor_placement = 0;
+        // Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): the
+        // world's mechanism-class probe signature, what a SessionReady's
+        // anchor_probes must carry under WORLD_PROXIMITY_UNION.
+        uint64_t anchor_probes = 0;
         std::string error;
     };
 
@@ -296,6 +300,10 @@ namespace bmmo::sim {
         void request_resync_state(uint32_t session, uint32_t player, uint32_t base);
         // Diagnostics through the log callback.
         void describe(uint32_t session);
+        // A NOTE record in the session's journal at the tick it will simulate
+        // next (from any thread; posted).  Step G5: the first BodyRevived a
+        // member sent under WORLD_PROXIMITY_UNION, dropped.
+        void journal_note(uint32_t session, const std::string& text);
 
         // Readable from any thread: the tick the session will simulate next
         // (0 when unknown) and whether it is ticking.

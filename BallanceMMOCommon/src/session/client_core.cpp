@@ -77,6 +77,12 @@ namespace bmmo::session {
         // replay made before the live frames did is recorded from the
         // replayed tick that has it.
         world_hooks_.replay_mechanisms = [this]() { return movable_mechanisms(); };
+        // Step G3 (world agreement 2.5): the proximity union's place point
+        // of every replayed tick - the replayed world's balls at the end of
+        // t-1, minus what the replay holds out - when the session runs it.
+        world_hooks_.place_probes = [this](uint32_t tick, const std::function<bool(const std::string&)>& held_out) {
+            if (s.probes_active_) place_probes(tick, held_out, true);
+        };
         // Every decision the engine takes about a snapshot, straight into
         // the box: no log parsing needed to know what this client did.
         world_hooks_.on_correction = [this](const bmmo::session::rollback_correction& c) { journal_.rollback_correction(c); };
@@ -293,6 +299,10 @@ namespace bmmo::session {
         s.own_body_entity_.clear();
         s.own_ball_entities_.clear();
         s.mirror_entities_.clear();
+        s.mirror_owners_.clear();
+        s.probes_active_ = false;
+        s.probe_places_live_ = s.probe_places_replayed_ = s.probe_two_bodies_ = 0;
+        s.revived_local_ = 0;
         s.start_sector_pending_ = false;
         s.start_sectors_.clear();
         s.sectors_.reset();
@@ -354,6 +364,14 @@ namespace bmmo::session {
         if (msg.world_options & WORLD_PLACEMENT_CLONES)
             logf("session %u: every PH row gets its own object (world option placement clones)%s", s.session_,
                  caps_.placement ? "" : ", which this host cannot build (no placement capability)");
+        // Step G3 (world-agreement-gaps-design.md 2.4, 2.5): every world
+        // places the mechanism proximity blocks by the union's rule; a host
+        // that cannot sends no probe signature and the server refuses it.
+        s.probes_active_ = proximity_union_active();
+        if (msg.world_options & WORLD_PROXIMITY_UNION)
+            logf("session %u: the mechanism proximity blocks follow every ball (world option proximity union)%s",
+                 s.session_, s.probes_active_ ? "" : ", which this host cannot place (no place_probes): the server will "
+                                                     "refuse its signature");
         frame_ = frame_scratch{};
         return begin_result{};
     }
@@ -424,6 +442,11 @@ namespace bmmo::session {
         const uint64_t placement = caps_.placement ? report.placement : 0;
         if (caps_.placement) ready.caps |= bmmo::session::CAP_PLACEMENT;
         ready.anchor_placement = placement;
+        // Protocol 16 (world agreement 2.3, 5; step G3): the mechanism-class
+        // probe signature of this world's rewire, always filled (0 when the
+        // session does not run the union); the server compares it under
+        // WORLD_PROXIMITY_UNION, late joiners included.
+        ready.anchor_probes = s.probes_active_ ? report.probes : 0;
         ready.serialize();
         platform_.send(ready.raw.str(), send_mode::reliable);
         logf("anchored after %d load ticks: pose %016llx surfaces %016llx cores=%d factor=%.6f", report.load_ticks,
@@ -432,6 +455,9 @@ namespace bmmo::session {
         if (caps_.placement)
             logf("anchor placement signature %016llx (world option placement clones %s)",
                  static_cast<unsigned long long>(placement), (s.world_options_ & WORLD_PLACEMENT_CLONES) ? "on" : "off");
+        if (s.world_options_ & WORLD_PROXIMITY_UNION)
+            logf("anchor probe signature %016llx (world option proximity union)",
+                 static_cast<unsigned long long>(ready.anchor_probes));
         // The box starts where the session does: at the anchor the server
         // has to agree with, before the tick base is known.
         journal_.open(report.hash, report.build_id, report.own_name, placement);

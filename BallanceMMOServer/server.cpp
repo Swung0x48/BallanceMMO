@@ -570,6 +570,11 @@ public:
         // signature at its anchor, compared with every member's that declares
         // CAP_PLACEMENT (late joiners too).
         uint64_t anchor_placement = 0;
+        // Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): the
+        // world's mechanism-class probe signature, compared with every
+        // member's anchor_probes under WORLD_PROXIMITY_UNION (late joiners
+        // too).
+        uint64_t anchor_probes = 0;
         float spawn_position[3] = {}, spawn_rotation[4] = {0, 0, 0, 1};
         // Every resetpoint of the level (physics_world::resetpoints): where the
         // event validation expects a spawn or a respawn.
@@ -747,6 +752,8 @@ public:
             // name) does not, so the dedup key must not contain the stamp.
             std::vector<bmmo::session::repeat_event_key> recent_revives;
             uint64_t dropped_duplicate = 0, late_events = 0;
+            // Step G5: BodyRevived dropped under WORLD_PROXIMITY_UNION.
+            uint64_t revived_ignored = 0;
         };
         std::map<HSteamNetConnection, member_guard> guards;
         uint64_t rejected_events = 0, flagged_events = 0;
@@ -919,13 +926,13 @@ public:
             Printf("Room %u: every PH row gets its own object in this session (world option placement clones).", r.id);
         }
         // Step G2 (world-agreement-gaps-design.md 2.4, 5): the proximity
-        // union's rule in the server's world.  No client runs it before step
-        // G3 (which compares SessionReady's anchor_probes), so the clients'
-        // worlds keep their own-ball sensors: a test switch until then.
+        // union's rule in the server's world; from step G3 every client runs
+        // it too and SessionReady's anchor_probes is compared (the config's
+        // default on since G3).
         if (config_.physics_proximity_union) {
             s.world_options |= bmmo::session::WORLD_PROXIMITY_UNION;
-            Printf("Room %u: the server places its proximity probes by the union's rule in this session (world option "
-                   "proximity union; no client runs it before step G3).", r.id);
+            Printf("Room %u: every world places the mechanism proximity probes by the union's rule in this session "
+                   "(world option proximity union; BodyRevived retired).", r.id);
         }
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
@@ -1032,6 +1039,7 @@ public:
         s.anchor_hash = info.anchor_hash;
         s.anchor_surfaces = info.anchor_surfaces;
         s.anchor_placement = info.anchor_placement;
+        s.anchor_probes = info.anchor_probes;   // step G3
         s.ball_rows = info.ball_rows;
         s.trafo_points = info.trafo_points;
         for (int k = 0; k < 3; ++k) s.spawn_position[k] = info.spawn_position[k];
@@ -1763,11 +1771,11 @@ public:
         // out of the session, not out of the room - as the start barrier drops
         // a silent member - and the rest go on.
         const auto refusal = bmmo::session::session_ready_refusal(msg.caps, s.world_options);
-        const auto refuse = [&](const char* what) {
+        const auto refuse = [&](const char* what, const char* reason = nullptr) {
             Printf("Physics session %u: %s refused: %s (caps %08x, world options %08x).", s.id,
                    client_it->second.name, what, msg.caps, s.world_options);
             const uint32_t session = s.id;
-            send_session_end(session, c, bmmo::session::ready_refusal_reason(refusal));
+            send_session_end(session, c, reason ? reason : bmmo::session::ready_refusal_reason(refusal));
             physics_session_member_left(c);
         };
         // Step B9DX (the user, 2026-10-28: refuse it outright, no more
@@ -1788,6 +1796,24 @@ public:
             end_physics_session(msg.session, Sprintf("placement mismatch for %s (client %016llx, server %016llx)",
                     client_it->second.name, static_cast<unsigned long long>(msg.anchor_placement),
                     static_cast<unsigned long long>(s.anchor_placement)));
+            return;
+        }
+        // Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): under
+        // the proximity union every world rewired the same mechanism blocks,
+        // or their sensors do not agree.  Late joiners too (the signature
+        // does not depend on time).  A member whose host cannot place sends
+        // 0.  Either way it "cannot join" (design 2.3): refused - out of the
+        // session, not out of the room, and the rest go on (WG3's review: a
+        // retail core member before G4 would otherwise end every headless
+        // member's session).
+        if (s.world_ready && (s.world_options & bmmo::session::WORLD_PROXIMITY_UNION)
+                && msg.anchor_probes != s.anchor_probes) {
+            const std::string what = Sprintf("probe mismatch (client %016llx, server %016llx)",
+                    static_cast<unsigned long long>(msg.anchor_probes), static_cast<unsigned long long>(s.anchor_probes));
+            refuse(what.c_str(), msg.anchor_probes
+                    ? "this session's mechanism sensors (the proximity union) differ from this client's world"
+                    : "this session runs the proximity union (world option) and this client's host cannot place "
+                      "its probes");
             return;
         }
         // Protocol 11 (trafo-replication design 2.14): a session whose
@@ -1976,6 +2002,21 @@ public:
         // not a second submit, not a second relay.
         if (!s.events_seen.first(bmmo::session::lifecycle_key_of(msg, c))) {
             ++s.duplicate_events;
+            return;
+        }
+        // Step G5 (world-agreement-gaps-design.md 2.6): under the proximity
+        // union every world wakes its own mechanisms, so a BodyRevived is no
+        // input: neither submitted nor relayed, counted, and the first of
+        // each member noted in the log and the journal.
+        if (msg.type == bmmo::session::event_type::BodyRevived
+                && (s.world_options & bmmo::session::WORLD_PROXIMITY_UNION)) {
+            auto& guard = s.guards[c];
+            if (guard.revived_ignored++ == 0) {
+                const std::string text = Sprintf("BodyRevived from %s ignored (world option proximity union): %s at %u",
+                                                 client_it->second.name, msg.name.c_str(), msg.tick);
+                Printf("Physics session %u: %s.", s.id, text.c_str());
+                runner_->journal_note(s.id, text);
+            }
             return;
         }
         bmmo::sim::lifecycle_event event;

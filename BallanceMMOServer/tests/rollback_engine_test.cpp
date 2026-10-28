@@ -1370,6 +1370,68 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsReCreatedAtItsBirthTickWhenTheWor
     EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
 }
 
+// Step G3 (world-agreement-gaps-design.md 2.5, U3): the proximity union's
+// place point of a replayed tick comes once per tick, before anything of it -
+// the window-born re-creation and pre_step - and names a body the replay
+// still holds out (born at that tick or later) as held out.
+TEST(RollbackEngine, TheProbePlacePointComesFirstInEveryReplayedTickWithTheHeldOutBodies) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    auto w = world.adapter();
+    std::map<std::string, fake_body> births;
+    w.destroy_body = [&](const std::string& entity, uint32_t) {
+        if (!births.count(entity)) return false;
+        return world.bodies.erase(entity) > 0;
+    };
+    w.recreate_body = [&](const std::string& entity, uint32_t tick) {
+        world.calls.push_back("recreate " + entity + "@" + std::to_string(tick));
+        world.bodies[entity] = births.at(entity);
+        return true;
+    };
+    const auto pre = w.pre_step;
+    w.pre_step = [&world, pre](uint32_t tick) {
+        world.calls.push_back("pre_step@" + std::to_string(tick));
+        if (pre) pre(tick);
+    };
+    w.place_probes = [&world](uint32_t tick, const std::function<bool(const std::string&)>& held_out) {
+        world.calls.push_back("place@" + std::to_string(tick) + (held_out("Prop") ? " held" : " free")
+                              + (held_out("Remote") ? " remote-held" : ""));
+    };
+    rollback_tracked before;
+    before.remote_entities = {"Remote"};
+    rollback_tracked after = before;
+    after.mechanisms = {"Prop"};
+    for (uint32_t tick = 1; tick <= 6; ++tick) {
+        if (tick == 4) {
+            fake_body born;
+            born.position[0] = 10.0;
+            births["Prop"] = born;
+            world.bodies["Prop"] = born;
+        }
+        w.step();
+        engine.record(w, tick, tick >= 4 ? after : before, {{"Remote", input_frame{}}});
+    }
+    world.calls.clear();
+    fake_body server_remote = world.bodies["Remote"];
+    server_remote.position[0] += 1.0;
+    const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
+    auto entity_now = [](const body_state& body) -> std::string {
+        return body.kind == body_kind::Ball && body.owner == 2 ? "Remote" : "";
+    };
+    ASSERT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
+    std::vector<std::string> order;
+    for (const std::string& call: world.calls)
+        if (call.rfind("place@", 0) == 0 || call.rfind("pre_step@", 0) == 0 || call.rfind("recreate ", 0) == 0)
+            order.push_back(call);
+    const std::vector<std::string> expected = {
+        "place@3 held", "pre_step@3", "place@4 held", "recreate Prop@4", "pre_step@4",
+        "place@5 free", "pre_step@5", "place@6 free", "pre_step@6"};
+    EXPECT_EQ(order, expected);
+}
+
 // Step P of the session-core design, as gap L's L1 runs it (rollback-engine
 // gaps design 2.3.1, step EL6): a mechanism the anchor's record has that the
 // window destroyed (a replayed script's De Physicalize: the trafo pieces'

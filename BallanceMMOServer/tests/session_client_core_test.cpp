@@ -114,6 +114,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(rewind_for_lifecycle)
         BMMO_CORE_STEP(window_rewind_reach)
         BMMO_CORE_STEP(drain_pending_deaths)
+        BMMO_CORE_STEP(probe_candidates)
         BMMO_CORE_STEP(settle_held_tick)
         BMMO_CORE_STEP(check_own_body)
         BMMO_CORE_STEP(poll_own_trafo)
@@ -7375,6 +7376,134 @@ namespace {
         ASSERT_GE(at("poll_sector:126"), 0);
         EXPECT_LT(at("poll_sector:126"), at("poll_trafo:126"));
         EXPECT_LT(at("poll_trafo:126"), at("retire_trafo_sets:126"));
+    }
+
+    // Step G3 (world-agreement-gaps-design.md 2.2, 2.5, U2): the candidates
+    // of the place point are the balls with a body in this world, one per
+    // player, by player id - the own ball's entity with a body, every mirror
+    // entity with a body whether or not it is driven, nothing a replay holds
+    // out, nothing without a body; two bodies of one player are counted and
+    // the first by name taken.
+    TEST(SessionClientCoreProbes, CandidatesAreTheBallsWithABodyByPlayerId) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        auto& s = state_of(core);
+        s.own_id_ = 3;
+        s.own_ball_entities_ = {"Ball_Paper", "Ball_Wood"};       // the paper ball has no body now
+        s.mirror_owners_["Ball_Wood_Peer_9"] = {9, 1};            // no body: not a candidate
+        s.mirror_owners_["Ball_Stone_Peer_4"] = {4, 2};
+        s.mirror_owners_["Ball_Wood_Peer_4"] = {4, 1};            // a second body of 4: the invariant guard
+        s.mirror_owners_["Ball_Paper_Peer_2"] = {2, 0};           // undriven: still a candidate
+        s.remotes_[2].navigation = false;
+        fake.bodies_there = {"Ball_Wood", "Ball_Stone_Peer_4", "Ball_Wood_Peer_4", "Ball_Paper_Peer_2"};
+        const auto all = steps{core}.probe_candidates(std::function<bool(const std::string&)>{});
+        ASSERT_EQ(all.size(), 3u);
+        EXPECT_EQ(all[0].player, 2u);
+        EXPECT_EQ(all[0].entity, "Ball_Paper_Peer_2");
+        EXPECT_EQ(all[1].player, 3u);
+        EXPECT_EQ(all[1].entity, "Ball_Wood");
+        EXPECT_EQ(all[2].player, 4u);
+        EXPECT_EQ(all[2].entity, "Ball_Stone_Peer_4") << "the first by name";
+        EXPECT_EQ(core.probe_two_bodies(), 1u);
+        // A replay holds the newborn paper ball out: no candidate of player 2.
+        const auto held = steps{core}.probe_candidates([](const std::string& e) { return e == "Ball_Paper_Peer_2"; });
+        ASSERT_EQ(held.size(), 2u);
+        EXPECT_EQ(held[0].player, 3u);
+        EXPECT_EQ(held[1].player, 4u);
+        // The own ball dead (no body): the own player has none.
+        fake.bodies_there = {"Ball_Stone_Peer_4"};
+        const auto dead = steps{core}.probe_candidates(std::function<bool(const std::string&)>{});
+        ASSERT_EQ(dead.size(), 1u);
+        EXPECT_EQ(dead[0].player, 4u);
+    }
+
+    // Step G3 (design 2.4, 5): under WORLD_PROXIMITY_UNION a host that places
+    // sends its rewire's signature in SessionReady; without the world option,
+    // or without place_probes, it sends 0 whatever its report says.
+    TEST(SessionClientCoreProbes, SessionReadyCarriesTheProbeSignatureUnderTheBit) {
+        for (const int arm: {0, 1, 2}) {   // 0: bit and op, 1: bit without op, 2: op without bit
+            flow_fake fake;
+            session_platform p = fake.make_flow();
+            if (arm != 1) p.place_probes = [](const std::vector<bmmo::session::probe_candidate>&) {};
+            session_client_core core(std::move(p), session_capabilities{});
+            state_of(core).own_id_ = 3;
+            auto start = start_message(9, 3);
+            start.world_options = arm == 2 ? 0u : bmmo::session::WORLD_PROXIMITY_UNION;
+            ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
+            EXPECT_EQ(arm == 0, core.proximity_union_active()) << arm;
+            core.level_requested();
+            bmmo::session::anchor_report report;
+            report.build_id = "build-x";
+            report.own_name = "Me";
+            report.probes = 0x2c6aa1f5d1e0b7c3ULL;
+            core.anchor(report);
+            const auto ready = decode<bmmo::session_ready_msg>(fake.sent.at(0).first);
+            EXPECT_EQ(arm == 0 ? 0x2c6aa1f5d1e0b7c3ULL : 0u, ready.anchor_probes) << arm;
+            EXPECT_EQ(bmmo::session::PHYSICS_PROTOCOL_VERSION, ready.protocol);
+        }
+    }
+
+    // Steps G3 and G5 in the frame (design 2.5 step 7b, 2.6): under the bit
+    // the place point comes right after the rewinds' hook and before the held
+    // body changes, with the world's balls; and a mechanism's script wake is
+    // no BodyRevived any more - nothing is sent, the count is kept.
+    TEST(SessionClientCoreProbes, Step7bPlacesAfterTheRewindsAndNoBodyRevivedIsSent) {
+        journal_dir dir("probes_frame");
+        flow_fake fake;
+        fake.path = dir.path / "client.bmjr";
+        session_capabilities caps;
+        caps.own_body_control = true;
+        session_platform p = frame_platform(fake, true);
+        std::vector<std::vector<bmmo::session::probe_candidate>> placed;
+        p.place_probes = [&fake, &placed](const std::vector<bmmo::session::probe_candidate>& c) {
+            fake.calls.push_back("place_probes:" + std::to_string(c.size()));
+            placed.push_back(c);
+        };
+        session_client_core core(std::move(p), caps);
+        run_to_tick_125_four(core, fake);
+        auto& s = state_of(core);
+        s.world_options_ = bmmo::session::WORLD_PROXIMITY_UNION;
+        s.probes_active_ = true;
+        auto& four = s.remotes_[4];
+        four.entity = "Ball_0_BMMO_4";
+        four.physicalized = true;
+        four.navigation = true;
+        s.mirror_owners_["Ball_0_BMMO_4"] = {4, 0};
+        s.own_ball_entities_ = {"Ball_Wood"};
+        for (const char* name: {"Ball_Wood", "Ball_0_BMMO_4"}) {   // the journal fake's body_state answers from these
+            bmmo_physics_body_state body{};
+            std::snprintf(body.name, sizeof(body.name), "%s", name);
+            body.rotation[3] = 1.0;
+            fake.bodies.push_back(body);
+        }
+        fake.own_physical = true;
+        fake.driven = "Ball_Wood";
+        fake.replica_name = "Ball_Wood";
+        fake.mechanisms = {"P_Box"};
+        bmmo::session::body_event box_wakeup;
+        box_wakeup.what = bmmo::session::body_event::kind::wakeup;
+        box_wakeup.name = "P_Box";
+        fake.body_events = {box_wakeup};
+        const uint64_t sent_before = s.events_sent_;
+        ASSERT_EQ(core.next_tick(), 126u);
+        size_t from = fake.calls.size();
+        core.pre_step();
+        const auto pre = since(fake.calls, from);
+        const auto at = [&pre](const std::string& call) {
+            return static_cast<size_t>(std::find(pre.begin(), pre.end(), call) - pre.begin());
+        };
+        std::string listed;
+        for (const std::string& call: pre) listed += call + " | ";
+        ASSERT_LT(at("place_probes:2"), pre.size()) << listed;
+        ASSERT_LT(at("hook:after_rewinds:126"), at("place_probes:2"));
+        for (size_t i = at("hook:after_rewinds:126") + 1; i < at("place_probes:2"); ++i)
+            EXPECT_EQ(pre[i].rfind("body_state:", 0), 0u) << "only the candidates' body tests between: " << listed;
+        EXPECT_EQ(at("place_probes:2") + 1, at("sector_manager_active:off")) << listed;
+        ASSERT_EQ(placed.size(), 1u);
+        EXPECT_EQ(placed[0][0].player, s.own_id_ < 4 ? s.own_id_ : 4u);
+        ASSERT_TRUE(core.post_step(true));
+        EXPECT_EQ(s.events_sent_, sent_before) << "no BodyRevived under the proximity union";
+        EXPECT_EQ(core.revived_local(), 1u);
     }
 
 }

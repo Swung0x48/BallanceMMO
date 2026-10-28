@@ -128,6 +128,49 @@ namespace bmmo::game {
         // is checked.
         std::function<bool(CK3dEntity*)> has_body;
 
+        // A client host's options under the bit (step G3): the union rules,
+        // the level's first reset point and the Physicalize_GameBall names,
+        // read from the level's arrays the way the server's world reads them
+        // at its creation (physics_world: ResetPoints row 0's matrix
+        // translation, else CurrentLevel[0][3]'s; the ball table's column 0),
+        // so the signature's reset point is the server's.
+        static rewire_options level_options(CKContext* context) {
+            rewire_options o;
+            o.union_rules = true;
+            if (!context) return o;
+            const auto array = [context](const char* name) {
+                return CKDataArray::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>(name), CKCID_DATAARRAY));
+            };
+            bool have = false;
+            if (CKDataArray* table = array("ResetPoints")) {
+                VxMatrix m;
+                for (int row = 0; row < table->GetRowCount() && !have; ++row)
+                    if (table->GetElementValue(row, 0, &m)) {
+                        o.reset[0] = m[3][0];
+                        o.reset[1] = m[3][1];
+                        o.reset[2] = m[3][2];
+                        have = true;
+                    }
+            }
+            if (!have)
+                if (CKDataArray* current_level = array("CurrentLevel")) {
+                    VxMatrix m;
+                    if (current_level->GetElementValue(0, 3, &m)) {
+                        o.reset[0] = m[3][0];
+                        o.reset[1] = m[3][1];
+                        o.reset[2] = m[3][2];
+                    }
+                }
+            if (CKDataArray* balls = array("Physicalize_GameBall"))
+                for (int row = 0; row < balls->GetRowCount(); ++row) {
+                    char name[128] = {};
+                    balls->GetElementStringValue(row, 0, name, static_cast<int>(sizeof(name)));
+                    name[sizeof(name) - 1] = 0;
+                    o.ball_names.push_back(name);
+                }
+            return o;
+        }
+
         // At the anchor, after the sector placement's apply.  Returns "" on
         // success.  `sel` decides the mechanism class (probe_class::mechanism
         // rewires only those blocks; with probe_class::all it only marks
@@ -135,6 +178,12 @@ namespace bmmo::game {
         // when the selection exists).  The log lines are in describe().
         std::string rewire(CKContext* context, probe_class which, const script_replay::selection& sel,
                            const rewire_options& options) {
+            // Step G3 (WG1's note): a host that anchors again on the same
+            // level (a retail session after another, a resync's re-anchor)
+            // gives the previous rewire's sources back first - clear() alone
+            // would forget them, and the structural test would then find no
+            // Ball_Pos_Frame source and rewire nothing.
+            if (!probes_.empty() || !identities_.empty() || no_ball_) release(context);
             clear();
             which_ = which;
             options_ = options;
@@ -360,6 +409,122 @@ namespace bmmo::game {
                     held = array->GetElementObject(0, identities_[i].column);
                 u32(held ? static_cast<uint32_t>(held->GetID()) : 0u);
             }
+        }
+
+        // The portable hold section (design 4.2 / 4.4, the portable record's
+        // version 3, game/script_replay.hpp): the same hold keyed by name -
+        // u16 frames, per frame str frame name, f32 x, y, z; u16 by-name
+        // copies, per copy str copy name, str the held entity's name ("" none);
+        // str = u16 length, bytes.  The server's world writes every block it
+        // rewired (class all); a client takes its own by name.
+        void capture_portable(std::vector<uint8_t>& out) const {
+            out.clear();
+            CKContext* context = context_;
+            const auto u16 = [&out](uint16_t v) {
+                out.push_back(static_cast<uint8_t>(v));
+                out.push_back(static_cast<uint8_t>(v >> 8));
+            };
+            const auto str = [&](const std::string& s) {
+                u16(static_cast<uint16_t>(s.size()));
+                out.insert(out.end(), s.begin(), s.end());
+            };
+            const auto f32 = [&out](float v) {
+                uint32_t u;
+                std::memcpy(&u, &v, 4);
+                for (int s = 0; s < 32; s += 8) out.push_back(static_cast<uint8_t>(u >> s));
+            };
+            u16(static_cast<uint16_t>(probe_order_.size()));
+            for (size_t i: probe_order_) {
+                VxVector v(0.0f, 0.0f, 0.0f);
+                if (auto* frame = context ? CK3dEntity::Cast(context->GetObject(probes_[i].frame)) : nullptr)
+                    frame->GetPosition(&v);
+                str(probes_[i].frame_name);
+                f32(v.x);
+                f32(v.y);
+                f32(v.z);
+            }
+            std::vector<size_t> by_name;
+            for (size_t i: identity_order_)
+                if (identities_[i].by_name) by_name.push_back(i);
+            u16(static_cast<uint16_t>(by_name.size()));
+            for (size_t i: by_name) {
+                CKObject* held = nullptr;
+                if (auto* array = context ? CKDataArray::Cast(context->GetObject(identities_[i].array)) : nullptr)
+                    held = array->GetElementObject(0, identities_[i].column);
+                str(identities_[i].copy_name);
+                str(held && held->GetName() ? held->GetName() : "");
+            }
+        }
+
+        // A portable hold section as this world's hold section (capture's
+        // layout, this world's order): each frame and by-name copy of this
+        // union from the entry of its name.  A frame or copy the section does
+        // not name, or a held name this world does not have, refuses the
+        // whole section (the signature compare at SessionReady makes both
+        // impossible); the section's entries this world did not rewire (the
+        // server's non-mechanism blocks) are skipped.  The held entity is
+        // found the way place() finds it (the first 3D object of the name).
+        bool localize_hold(CKContext* context, const uint8_t* data, size_t size, std::vector<uint8_t>& out,
+                           std::string& error) const {
+            out.clear();
+            size_t at = 0;
+            const auto need = [&](size_t n) { return at + n <= size; };
+            const auto u16 = [&](uint16_t& v) {
+                if (!need(2)) return false;
+                v = static_cast<uint16_t>(data[at] | (data[at + 1] << 8));
+                at += 2;
+                return true;
+            };
+            const auto str = [&](std::string& s) {
+                uint16_t n = 0;
+                if (!u16(n) || !need(n)) return false;
+                s.assign(reinterpret_cast<const char*>(data + at), n);
+                at += n;
+                return true;
+            };
+            std::map<std::string, size_t> frames_at;   // name -> the 12 bytes' offset
+            std::map<std::string, std::string> held_by;
+            uint16_t frames = 0, names = 0;
+            if (!context || !u16(frames)) { error = "portable hold section truncated"; return false; }
+            for (uint16_t f = 0; f < frames; ++f) {
+                std::string name;
+                if (!str(name) || !need(12)) { error = "portable hold section truncated"; return false; }
+                if (!frames_at.emplace(name, at).second) { error = "portable hold section: frame " + name + " twice"; return false; }
+                at += 12;
+            }
+            if (!u16(names)) { error = "portable hold section truncated"; return false; }
+            for (uint16_t n = 0; n < names; ++n) {
+                std::string copy, held;
+                if (!str(copy) || !str(held)) { error = "portable hold section truncated"; return false; }
+                if (!held_by.emplace(copy, held).second) { error = "portable hold section: copy " + copy + " twice"; return false; }
+            }
+            if (at != size) { error = "portable hold section: trailing bytes"; return false; }
+            const auto put16 = [&out](uint16_t v) {
+                out.push_back(static_cast<uint8_t>(v));
+                out.push_back(static_cast<uint8_t>(v >> 8));
+            };
+            put16(static_cast<uint16_t>(probe_order_.size()));
+            for (size_t i: probe_order_) {
+                const auto it = frames_at.find(probes_[i].frame_name);
+                if (it == frames_at.end()) { error = "the server's hold has no frame " + probes_[i].frame_name; out.clear(); return false; }
+                out.insert(out.end(), data + it->second, data + it->second + 12);
+            }
+            std::vector<size_t> by_name;
+            for (size_t i: identity_order_)
+                if (identities_[i].by_name) by_name.push_back(i);
+            put16(static_cast<uint16_t>(by_name.size()));
+            for (size_t i: by_name) {
+                const auto it = held_by.find(identities_[i].copy_name);
+                if (it == held_by.end()) { error = "the server's hold has no copy " + identities_[i].copy_name; out.clear(); return false; }
+                uint32_t id = 0;
+                if (!it->second.empty()) {
+                    CKObject* held = context->GetObjectByNameAndClass(const_cast<CKSTRING>(it->second.c_str()), CKCID_3DOBJECT, nullptr);
+                    if (!held) { error = "copy " + identities_[i].copy_name + " holds " + it->second + ", not in this world"; out.clear(); return false; }
+                    id = static_cast<uint32_t>(held->GetID());
+                }
+                for (int s = 0; s < 32; s += 8) out.push_back(static_cast<uint8_t>(id >> s));
+            }
+            return true;
         }
 
         bool restore(CKContext* context, const uint8_t* data, size_t size, std::string& error) {

@@ -283,6 +283,16 @@ namespace bmmo::session {
         // body the history has born later in the window is parked until then
         // and is skipped whatever the caller says.
         std::function<void(uint32_t tick, std::map<std::string, uint32_t>& out)> replay_remotes;
+        // Optional (docs/world-agreement-gaps-design.md 2.5, step G3): the
+        // proximity union's place point of a replayed tick - before
+        // anything of tick `tick`: the window-born re-creations and
+        // insertions, pre_step and the step.  `held_out(entity)`: the
+        // replay still holds that body out of the world (its birth is at
+        // `tick` or later and it is not a revived life still alive then),
+        // so it is no candidate whatever body it has.  Called once per
+        // replayed tick, by every replay path (input, lifecycle, snapshot
+        // and resync rewinds all run this loop).
+        std::function<void(uint32_t tick, const std::function<bool(const std::string& entity)>& held_out)> place_probes;
         // Optional: the mechanism bodies the world has now - the very list
         // the caller's live records track as `mechanisms`.  Asked after each
         // replayed step.  The replay re-records every tick with the live
@@ -1872,6 +1882,20 @@ namespace bmmo::session {
                                       before.linear[0], before.linear[1], before.linear[2]);
                         trace += buf;
                     }
+                }
+                // Step G3 (world agreement 2.5): the proximity union's frames,
+                // identity cells and latches from the replayed world's balls
+                // at the end of t-1, before anything of t - the births below,
+                // pre_step and the step - as the live frame's step 7b.
+                if (world.place_probes) {
+                    const uint32_t at = t;
+                    world.place_probes(t, [&plan, at](const std::string& entity) {
+                        const auto it = plan.find(entity);
+                        if (it == plan.end()) return false;
+                        const restore& item = it->second;
+                        if (item.revived_until != 0 && static_cast<int32_t>(at - item.revived_until) <= 0) return false;
+                        return item.repose_tick != 0 && static_cast<int32_t>(item.repose_tick - at) >= 0;
+                    });
                 }
                 // The bodies born at this tick, made again before its scripts
                 // and step (the live Physicalize ran in this frame's script

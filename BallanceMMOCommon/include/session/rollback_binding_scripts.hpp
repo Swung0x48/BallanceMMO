@@ -85,6 +85,12 @@ namespace bmmo::session {
         // refusal of before).  No queue section is recorded without
         // callback_queue and replay_activation.  Off: as before.
         bool hold_outside = false;
+        // Step G3 (docs/world-agreement-gaps-design.md 4.2): the proximity
+        // union's hold section (game/proximity_union.hpp capture / restore)
+        // with every record - record v6 - and back at the anchor.  Bound by
+        // a client host under WORLD_PROXIMITY_UNION only; empty: no section,
+        // the records stay v2-v5 byte for byte.
+        bmmo::game::hold_hooks hold;
     };
 
     // Gap Q4's executed scripts (rollback-engine gaps design 2.2.4): every
@@ -185,11 +191,15 @@ namespace bmmo::session {
             };
         }
         const bmmo::game::queue_hooks* queue_ptr = queue.get();
-        world.capture_scripts = [context, selection, hooks, trafo, queue, queue_ptr](std::vector<uint8_t>& out) {
-            return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo, queue_ptr);
+        // Step G3: the hold section's hooks, when the host bound them.
+        std::shared_ptr<bmmo::game::hold_hooks> hold;
+        if (o.hold.capture && o.hold.restore) hold = std::make_shared<bmmo::game::hold_hooks>(o.hold);
+        const bmmo::game::hold_hooks* hold_ptr = hold.get();
+        world.capture_scripts = [context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr](std::vector<uint8_t>& out) {
+            return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo, queue_ptr, hold_ptr);
         };
-        world.restore_scripts = [o, context, selection, hooks, trafo, queue, queue_ptr](const std::vector<uint8_t>& bytes,
-                                                                                         uint32_t anchor) {
+        world.restore_scripts = [o, context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr](
+                                    const std::vector<uint8_t>& bytes, uint32_t anchor) {
             std::vector<CK_ID> kept_live;
             if (o.reset_ticks)
                 for (const auto& [id, reset_tick]: *o.reset_ticks)
@@ -201,7 +211,7 @@ namespace bmmo::session {
             bool& membership = bmmo::game::script_replay::live_membership();
             membership = o.live_membership;
             const bool ok = bmmo::game::script_replay::restore(context, *selection, *hooks, bytes, &error, o.scripts_replayed,
-                                                               &kept_live, o.replay_activation, trafo, queue_ptr);
+                                                               &kept_live, o.replay_activation, trafo, queue_ptr, hold_ptr);
             resize = false;
             membership = false;
             if (!ok && o.on_restore_failed) o.on_restore_failed(error);

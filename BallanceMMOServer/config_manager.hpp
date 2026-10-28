@@ -103,10 +103,10 @@ public:
     // physics.proximity_union (world-agreement-gaps-design.md 5, step G2):
     // session::WORLD_PROXIMITY_UNION - the server's world places its
     // proximity frames, identity cells and latches by the union's rule.
-    // Default off: no client runs the rule before step G3 (which turns the
-    // default on), so a session with it on is for the server's own tests;
-    // off is also the negative control and what old journals replay with.
-    bool physics_proximity_union = false;
+    // Default on since step G3 (the clients run the rule and send their
+    // probe signature, protocol 16); off is the negative control and what
+    // old journals replay with.
+    bool physics_proximity_union = true;
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

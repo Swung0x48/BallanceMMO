@@ -92,7 +92,18 @@ namespace bmmo::session {
     //      and the IVP savestate a SessionResyncState carries is format 3 -
     //      it holds the rule's per-group state, so a late joiner and a
     //      resynced member take the server's.  No message layout changed.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 15;
+    //  16  the proximity union on the clients and BodyRevived retired
+    //      (docs/world-agreement-gaps-design.md 2.3-2.6, 5; steps G3 and G5,
+    //      one release): under WORLD_PROXIMITY_UNION every world - the
+    //      server and each client - rewires the mechanism proximity blocks
+    //      and identity reads and places them before the leavers and the
+    //      events (a client: before its tick's held body changes, live and
+    //      in every replayed tick) by the block's metric with a hold; no
+    //      client sends BodyRevived and the server drops any it receives;
+    //      SessionReady carries the client's mechanism-class probe signature
+    //      (`anchor_probes`, after `anchor_placement`), which the server
+    //      compares with its world's, late joiners included.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 16;
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its
@@ -146,9 +157,9 @@ namespace bmmo::session {
     // previous tick, before that tick's lifecycle changes.  Step G2 built the
     // server's world under it (physics.proximity_union, default off; the
     // journal header's world_options carries it, SimTool's --replay-session
-    // honours it); the clients run it from step G3, which takes the protocol
-    // number (SessionReady's anchor_probes).  Until then no client runs it,
-    // so a session with the bit is for the server's own tests.
+    // honours it); the clients run it from step G3 (protocol 16:
+    // SessionReady's anchor_probes), and the server's default turned on with
+    // it; under the bit BodyRevived is retired (step G5).
     constexpr uint32_t WORLD_PROXIMITY_UNION = 1u << 2;
 
     // Who a session admits (the server's SessionReady handling; step B9DX,

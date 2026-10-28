@@ -494,6 +494,10 @@ namespace bmmo::session {
         binding.on_correction = hooks.on_correction;
         rollback_world world = bind_rollback_world(backend, binding);
         world.after_step = o.after_replayed_step;   // step N02R
+        // Step G3 (world agreement 2.5): the proximity union's place point
+        // of every replayed tick, the core's (empty when the session does
+        // not run the union).
+        world.place_probes = hooks.place_probes;
         // Step B1: a window-born body whose sector pass the replay's union
         // re-derivation moved or forgot is no missing birth.
         world.birth_moved = hooks.birth_moved;
