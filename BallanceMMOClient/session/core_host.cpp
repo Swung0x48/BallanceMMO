@@ -3120,13 +3120,24 @@ std::string BallanceMMOClient::core_host_status_text() {
     // Gap Q (step B7EG): the PreSimulate queue's part of the records and
     // of every replay: rebuilt/removed/held/unhold_clamped/rebuild_fail/
     // hold_fail/no_record.
+    // Step RTX: the two queue counters the headless 'cbq:' line has and
+    // cbq= left out - entries captured into records, holds run (one per
+    // rewind's replay, whether it found outside entries or none) - as
+    // cbqx=captured/holds, and
+    // RC4's dormant-script counters (step B6RC; the headless
+    // 'trafo_dormancy:' line) as dorm=from_ledger/healed/walked/
+    // guard_trips/restored_built.  Process-wide diagnostics, appended so
+    // the fields before them keep their places.
     const auto& q = bmmo::game::script_replay::queue_stats();
+    const auto& d = bmmo::game::script_replay::dormancy();
     return std::format("session={} phase={} core=1 tick={} assigned={} held={} keys_known={} own_phys={} "
-                       "backstops={} refused={} unmatched_resyncs={} {} cbq={}/{}/{}/{}/{}/{}/{}",
+                       "backstops={} refused={} unmatched_resyncs={} {} cbq={}/{}/{}/{}/{}/{}/{} cbqx={}/{} "
+                       "dorm={}/{}/{}/{}/{}",
                        core.session_id(), host_phase_name(host.phase), core.current_tick(), core.assigned() ? 1 : 0,
                        core.holding() ? 1 : 0, host.navigation_known ? 1 : 0, core.own_physicalized() ? 1 : 0,
                        core.own_body_backstops(), host.refused, core.unmatched_resyncs(), core.status_text(h),
-                       q.rebuilt, q.removed, q.held, q.unhold_clamped, q.rebuild_fail, q.hold_fail, q.no_record);
+                       q.rebuilt, q.removed, q.held, q.unhold_clamped, q.rebuild_fail, q.hold_fail, q.no_record,
+                       q.captured, q.holds, d.from_ledger, d.healed, d.walked, d.guard_trips, d.restored_built);
 }
 
 // The F3 panel's physics block for a core session.
