@@ -2411,6 +2411,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             // written back at its recorded length.
             so.live_order = &host.script_order;
             so.resize_strings = true;
+            // Step B2SW (G1, F): the behaviour manager's list as live.
+            so.live_membership = true;
             so.on_restore_failed = [this](const std::string& error) {
                 if (host.restore_logs++ < 8) logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());
             };

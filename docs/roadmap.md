@@ -376,6 +376,9 @@ numbers 1-10 are unchanged.
        the pieces bit-equal to the server's after the apply (50/50, 50/50,
        33/33); with the option on the originals are never selected, with it
        off the server has no trafo (resync design).
+     - *G1*: fixed - the script restore re-registers what it writes back
+       active (`script_replay` `live_membership`, the core hosts' bindings
+       and SimTool); the harness's own re-registration is now a count.
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

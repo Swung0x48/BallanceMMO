@@ -176,6 +176,79 @@ namespace bmmo::game {
             return on;
         }
 
+        // Step B2SW (resync finding G1): the behaviour
+        // manager's object list, as the live frame has it.  The live frame
+        // (CKBehaviorManager::Execute) runs, and processes the next-frame
+        // flags of, only the scripts whose owner is in m_BeObjects after the
+        // frame's ManageObjectsActivity; an owner whose scripts all finished
+        // left it (CKBeObject::ExecuteBehaviors -> RemoveObjectNextFrame), and
+        // a finished script's scene flag CK_SCENEOBJECT_ACTIVE was cleared
+        // (CKBehavior::CheckBehaviorActivity).  A replay's execute_frame calls
+        // Execute directly, so it saw neither.  With this switch on:
+        //   * restore re-registers every selected script it writes back active
+        //     whose owner the live frame would not run (G1): the scene flag
+        //     set first, then CKScene::Activate (exported by the retail CK2 as
+        //     by the reimplementation: ActivateScript adds the owner for the
+        //     next frame and, the scene flag being set, calls no
+        //     CKM_BEHAVIORACTIVATESCRIPT callback), then the record's own
+        //     next-frame flags put back over the ones Activate set;
+        // Off by default - the legacy retail path keeps the old rule - and
+        // switched on around the restore by a binding
+        // that asks for it (session/rollback_binding_scripts.hpp
+        // live_membership: the core hosts and the tools).
+        static bool& live_membership() {
+            static bool on = false;
+            return on;
+        }
+        struct membership_counters {
+            uint64_t reregistered = 0;   // restored-active scripts put back into the manager's list (G1)
+        };
+        static membership_counters& membership() {
+            static membership_counters counters;
+            return counters;
+        }
+        // Whether the live frame would run `beh`:
+        // its owner is in the behaviour manager's list after the next
+        // ManageObjectsActivity.  Read through the public members (the retail
+        // SDK exports no lookup); the pending table is walked, not hashed, so
+        // the mod's template code never depends on CK2.dll's hash function.
+        static bool owner_in_frame(CKContext* context, CKBehavior* beh) {
+            CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+            CKBehaviorManager* manager = context ? context->GetBehaviorManager() : nullptr;
+            if (!owner || !manager) return true;   // nothing to judge by: as before
+            const CK_ID id = owner->GetID();
+            for (auto it = manager->m_BeObjectNextFrame.Begin(); it != manager->m_BeObjectNextFrame.End(); ++it)
+                if (it.GetKey() == id) {
+                    if (*it > 0) return true;
+                    if (*it < 0) return false;
+                    break;
+                }
+            const XObjectPointerArray& objects = manager->m_BeObjects;
+            for (int i = 0; i < objects.Size(); ++i)
+                if (objects[i] == static_cast<CKObject*>(owner)) return true;
+            return false;
+        }
+        // G1: a root script the restore wrote back active (or about to be
+        // activated) whose owner the live frame would not run.  Returns true
+        // when it changed anything.
+        static bool reregister(CKContext* context, CKBehavior* beh) {
+            CKScene* scene = context ? context->GetCurrentScene() : nullptr;
+            if (!scene || !beh) return false;
+            if (!(beh->GetFlags() & (CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME))) return false;
+            bool changed = false;
+            if (!(scene->GetObjectFlags(beh) & CK_SCENEOBJECT_ACTIVE)) {
+                scene->ModifyObjectFlags(beh, CK_SCENEOBJECT_ACTIVE, 0);
+                changed = true;
+            }
+            if (!owner_in_frame(context, beh)) {
+                constexpr CKDWORD next = CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_DEACTIVATENEXTFRAME | CKBEHAVIOR_RESETNEXTFRAME;
+                const CKDWORD recorded = beh->GetFlags() & next;
+                scene->Activate(beh, FALSE);
+                beh->ModifyFlags(recorded, next & ~recorded);
+                changed = true;
+            }
+            return changed;
+        }
         // The joint blocks of the selected scripts that hold a handle on
         // `entity`: its body is their Target or their Object2 (input 0 of
         // all four).  IVP deletes a constraint or a spring with either of
@@ -591,6 +664,7 @@ namespace bmmo::game {
             if (!get_u32(in, pos, magic) || magic != kMagic) return fail(error, "not a script snapshot");
             if (!get_u32(in, pos, version) || (version != kVersion && version != kVersionTrafo))
                 return fail(error, "snapshot version");
+            std::vector<CKBehavior*> written;   // the root scripts written back (G1, live_membership)
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 const bool scripts = list == &sel.scripts;
                 uint32_t count = 0;
@@ -612,6 +686,7 @@ namespace bmmo::game {
                     const bool write = !scripts || replay_activation || (was_active && !reset_since);
                     if (!restore_behavior(beh, hooks, in, pos, error, write)) return false;
                     if (write && scripts && replayed) replayed->push_back(id);
+                    if (write && scripts) written.push_back(beh);
                 }
             }
             for (int c = 0; c < kCellCount; ++c) {
@@ -653,6 +728,11 @@ namespace bmmo::game {
                     ++last_restore().trafo_built;
                 }
             }
+            // G1 (live_membership): what the restore made active runs in the
+            // live frames after the replay too.
+            if (live_membership())
+                for (CKBehavior* beh: written)
+                    if (reregister(context, beh)) ++membership().reregistered;
             return true;
         }
 

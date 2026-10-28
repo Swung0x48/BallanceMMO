@@ -3157,6 +3157,7 @@ namespace {
         script_options.live_order = &live_order;       // step RO1
         script_options.live_orders_applied = &live_orders_applied;
         script_options.resize_strings = true;
+        script_options.live_membership = true;   // step B2SW (G1, F): the core hosts' rule
         std::vector<CK_ID> script_activations;
         if (passes) script_activations = bmmo::game::session_script_activations(context, scripts);
         bmmo::session::rollback_world binding;
@@ -4411,6 +4412,20 @@ namespace {
     int rc_unregistered_scripts(CKContext* context, const bmmo::game::script_replay::selection& sel, bool fix,
                                 std::string* names);   // defined with --resync-check below
 
+    // Step B2SW (resync finding G1): a restore of the tools that stands for
+    // a client's runs with the core hosts' rule - the script restore
+    // re-registers what it writes back active (script_replay
+    // live_membership), as the hosts' bindings ask for.
+    struct live_membership_scope {
+        bool previous;
+        explicit live_membership_scope(bool on) : previous(bmmo::game::script_replay::live_membership()) {
+            bmmo::game::script_replay::live_membership() = on;
+        }
+        ~live_membership_scope() { bmmo::game::script_replay::live_membership() = previous; }
+        live_membership_scope(const live_membership_scope&) = delete;
+        live_membership_scope& operator=(const live_membership_scope&) = delete;
+    };
+
     struct replay_resync_tools {
         bool ready = false;
         bmmo::game::script_replay::selection sel;
@@ -4607,7 +4622,8 @@ namespace {
             } else if (!script_replay::localize(context, tools.sel, portable, &v2, script_replay::keep_local_fn(), localized, &e,
                                                 &report)) {
                 result.scripts = "REFUSED (" + e + "): the replay's own kept";
-            } else if (!script_replay::restore(context, tools.sel, tools.hooks, localized, &e, nullptr, nullptr, true)) {
+            } else if (const live_membership_scope live(true);   // step B2SW (G1): the clients' rule
+                       !script_replay::restore(context, tools.sel, tools.hooks, localized, &e, nullptr, nullptr, true)) {
                 error = "the script restore failed: " + e;
                 return false;
             } else {
@@ -6519,15 +6535,25 @@ namespace {
                     return false;
                 }
             }
-            if (!script_replay::restore(context, sel, hooks, root.v2, &e, nullptr, nullptr, true)) {
-                std::fprintf(stderr, "root: script restore failed: %s\n", e.c_str());
-                return false;
+            const uint64_t reregistered_before = script_replay::membership().reregistered;
+            {
+                const live_membership_scope live(true);   // step B2SW (G1): the restore re-registers
+                if (!script_replay::restore(context, sel, hooks, root.v2, &e, nullptr, nullptr, true)) {
+                    std::fprintf(stderr, "root: script restore failed: %s\n", e.c_str());
+                    return false;
+                }
             }
-            // The harness's own restore re-registers what the record made
-            // active (rc_unregistered_scripts): the root is the warm-up run's.
+            // What the record made active is re-registered by the restore
+            // itself since step B2SW (G1); the harness only counts what is
+            // left (and re-registers it with --resync-reregister, the A/B).
             std::string names;
-            if (const int n = rc_unregistered_scripts(context, sel, true, &names); n > 0 && args.verbose)
-                std::printf("  root: %d script(s) re-registered with the behaviour manager:%s\n", n, names.c_str());
+            const uint64_t reregistered = script_replay::membership().reregistered - reregistered_before;
+            if (reregistered && args.verbose)
+                std::printf("  root: the restore re-registered %llu script(s) with the behaviour manager\n",
+                            static_cast<unsigned long long>(reregistered));
+            if (const int n = rc_unregistered_scripts(context, sel, args.resync_reregister, &names); n > 0)
+                std::printf("  root: %d restored-active script(s) unknown to the behaviour manager%s:%s\n", n,
+                            args.resync_reregister ? " (re-registered)" : " (left)", names.c_str());
             destroy(births);
             int reparented = 0;
             for (const auto& r: root_matrices) {
@@ -6940,6 +6966,7 @@ namespace {
             const bool localized_ok = script_replay::localize(context, sel, server.portable, &anchor.v2, keep_rule, localized,
                                                               &e, &localize_report);
             if (!localized_ok) std::printf("arm %c: localize refused the server's record: %s\n", arm, e.c_str());
+            const live_membership_scope live(true);   // step B2SW (G1): the clients' rule
             bool scripts_ok = script_replay::restore(context, sel, hooks, localized_ok ? localized : anchor.v2, &e, nullptr,
                                                      nullptr, true);
             if (!scripts_ok) std::printf("arm %c: script restore failed: %s\n", arm, e.c_str());
@@ -7441,6 +7468,7 @@ namespace {
             so.replay_activation = true;
             so.live_order = &late_live_order;   // step RO1
             so.resize_strings = true;
+            so.live_membership = true;   // step B2SW (G1, F): the core hosts' rule
             bmmo::session::bind_script_replay(bound, backend, so);
         };
         bmmo::session::rollback_world binding = bmmo::session::bind_session_world(backend, core_hooks, w);

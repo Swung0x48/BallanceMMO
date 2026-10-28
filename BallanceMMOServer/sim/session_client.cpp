@@ -3393,6 +3393,8 @@ namespace {
                 // written back at its recorded length.
                 so.live_order = &script_order_;
                 so.resize_strings = true;
+                // Step B2SW (G1, F): the behaviour manager's list as live.
+                so.live_membership = true;
                 so.on_restore_failed = [this](const std::string& error) {
                     if (script_restore_logs_++ < 8) logf("script replay: restore failed: %s", error.c_str());
                 };

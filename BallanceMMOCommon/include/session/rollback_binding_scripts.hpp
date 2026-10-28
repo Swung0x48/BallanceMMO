@@ -60,6 +60,10 @@ namespace bmmo::session {
         // is written back at the record's length (script_replay
         // resize_strings).  Off: left alone, as before (the legacy path).
         bool resize_strings = false;
+        // Step B2SW (resync finding G1): the restore re-registers with the
+        // behaviour manager what it writes back active (script_replay
+        // live_membership).  Off: as before (the legacy path).
+        bool live_membership = false;
     };
 
     // Installs capture/restore/diff and runs the scripts' frame after the
@@ -84,9 +88,12 @@ namespace bmmo::session {
             std::string error;
             bool& resize = bmmo::game::script_replay::resize_strings();
             resize = o.resize_strings;
+            bool& membership = bmmo::game::script_replay::live_membership();
+            membership = o.live_membership;
             const bool ok = bmmo::game::script_replay::restore(context, *selection, *hooks, bytes, &error, o.scripts_replayed,
                                                                &kept_live, o.replay_activation, trafo);
             resize = false;
+            membership = false;
             if (!ok && o.on_restore_failed) o.on_restore_failed(error);
             return ok;
         };

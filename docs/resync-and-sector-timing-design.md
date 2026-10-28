@@ -2983,6 +2983,31 @@ N2 on every world, T1's findings.**
   option off the server runs no trafo, so keeping the originals local is the
   only right answer. `resync_rules.hpp` is unchanged (its comment's "until
   step T2" now means "while the trafo inputs are off").
+- **G1 (a restored-active script that finished never runs again): fixed in
+  shared code.** `script_replay::restore` (game/script_replay.hpp), under
+  the new switch `live_membership()`, re-registers every selected root script
+  it writes back active (or with ACTIVATENEXTFRAME) whose owner the live
+  frame would not run: the scene flag `CK_SCENEOBJECT_ACTIVE` set first, then
+  `CKScene::Activate(script, FALSE)` - exported by the retail CK2.dll as by
+  the reimplementation; disassembled at this step (`CK2.dll`
+  `?Activate@CKScene` -> ActivateScript at 0x2402eeb0): it adds the owner for
+  the next frame (when active in the scene or the level) and, the scene flag
+  being set, calls no CKM_BEHAVIORACTIVATESCRIPT callback - then the record's
+  own next-frame flags put back. The behaviour manager's list is read through
+  its public members only (`m_BeObjects`, the pending table walked, not
+  hashed). `script_binding_options::live_membership` turns it on around the
+  restore; the core hosts (`core_host.cpp`, `session_client.cpp`) and the
+  SimTool bindings set it, the legacy retail path does not. SimTool's
+  `--resync-check` root and apply and `--replay-session`'s resync restore use
+  it too; the harness's own re-registration (`rc_unregistered_scripts`) now
+  only counts what is left (and fixes it with `--resync-reregister`, the
+  A/B). Evidence: L11 `--resync-check 150 180 --resync-arms E` `--verbose`:
+  the root restore re-registers the same 5 scripts the harness did before
+  (P_Modul_01_MF Script x2, P_Modul_25 script x2, P_Modul_37_MF Script), none
+  left, "warm-up run vs the run from the restored root: identical"; the A2
+  matrix cases l11_ER, l11_A5, arena_ER, arena_A4: every RESULT line equal to
+  rR12's (12 arms). No `--resync-check` arm met the case at its apply (none
+  needed the flag there), so the root is the case that needed it.
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob
