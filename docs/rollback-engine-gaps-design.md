@@ -1801,9 +1801,14 @@ from its hunks). Files of T3's set touched by this step: `sim_tool.cpp`
 - **Retail: the crash is the machine's.** The control - HEAD 781f981's x86
   build, the same two copies, the same driver (`CD1/cd1_gate.py`) - crashed
   identically (`d3d8.dll+0x54acd`, a write to 0x11a80, both copies, during
-  `TT Change ScreenMode`) with the monitor still Off Line (availability 8).
-  The step's retail session and Q-R1 wait for the close-out on a machine
-  with a display.
+  `TT Change ScreenMode`). [Corrected at step RTX: this note first blamed
+  the monitor being off line (availability 8); the display was not
+  involved. The cause was a bad state of the user's RTSS (RivaTuner
+  Statistics Server) overlay, which hooks d3d8: every launch from 03:05 to
+  03:28 on 2026-10-28 crashed there, the mod's builds and the game without
+  the mod alike; the user restarted RTSS at 03:29 and the same build reached
+  the start menu.] The step's retail session and Q-R1 were deferred; step
+  RTX ran them (below).
 - **Not run, deferred:** Q-U1/Q-U2 as unit tests (the record needs CK; no
   fake queue backend exists), Q-S1 and the rest of Q-S2 (SimTool's
   `--queue-block` and `--hold-outside` scenes with a savestate restore),
@@ -1820,6 +1825,91 @@ from its hunks). Files of T3's set touched by this step: `sim_tool.cpp`
   travelling blob does not compare the queue.
 - **Gap L (G6-G9) not built** in this step; queued as the four steps §8
   names (G6, G7, G8, G9), each with its own checks.
+
+## As built (step RTX, 2026-10-28): the deferred retail runs
+
+The retail runs B7EG, B2SX, B5RX and B6RC deferred (B7EG's because of the
+RTSS crash above), in three two-copy sessions of the x86 build of HEAD
+3eab89f plus this step's status fields: level 11, session core on (the
+default), the Arch server of B9DX's tree (`ballanced-36c04e3d24c9+bmmo-
+415f00be562d-dirty`, no server file changed since) with snapshots off
+(100000 / 100000), `trafo_inputs` and `placement_clones` on. Driver
+`.local-tools/work/RTX/rtx_retail.py`; outputs `scripts/retail/rtx_1..3`.
+Every game started (RTSS healthy).
+- **The retail status line** (`core_host.cpp` `core_host_status_text`, the
+  'session' verb) now ends with `cbqx=captured/holds` (the two queue
+  counters the headless `cbq:` line has and `cbq=` left out) and
+  `dorm=from_ledger/healed/walked/guard_trips/restored_built` (RC4's
+  counters, the headless `trafo_dormancy:` line); appended, so every field
+  before them keeps its place. Diagnostics only; no behaviour changed.
+- **The sessions.** rtx_1: client 1 `session force-rollback 13:24`, beamed
+  onto sector 1's `P_Trafo_Stone_MF001` at A = 285 (its Wood explosion
+  stamped and applied at 443 in both worlds), the up key held 305-435;
+  client 2 onto the same trafo at 585 (explosion 743, both worlds); client 1
+  onto the sector-2 checkpoint (`PC_TwoFlames_MF`, +4 m) at 785, client 2
+  at 985. rtx_2 / rtx_3: client 1 forced 13:24, the up key held from A + 30
+  to A + 400 (317-687) through an own death - rtx_2 rolled off the level
+  (the trafo reset of the cancelled activation at 721), rtx_3 beamed into
+  `Quader01` (no L11 entity is named Depth*; the ball died there: the death's trafo reset stamped 301,
+  unphysicalized 357, respawned 555) - and client 2's trafo at 387 (its
+  explosion 545, both worlds).
+- **Q-R1 / the #20 paths in Player.exe: partial** (client 1 / client 2):
+  only the empty-queue hold ran. The hold ran on every rewind and never
+  failed - `cbqx` holds 114 / 10, 94 / 14,
+  103 / 17 against `rb` 114 / 10, 94 / 14, 103 / 17; `cbq=0/0/0/0/0/0/0`
+  everywhere (nothing rebuilt, removed or held, no clamp, no rebuild or
+  hold failure, no rewind without a record); `sv=N/0/0` on all six (no savestate refusal);
+  `scripts_refused=0 blobs_refused=0`; no crash. **But `held` stayed 0**
+  (and `captured` 0): no entry, outside or selected, was in the queue at any
+  hold, even with keys held through two own deaths. The cause: the queue
+  fills only when a steering block runs on a ball without a body
+  (`Gameplay_Ingame`'s WakeUp / SetPhysicsForce, §1.1, the A6 drop arm:
+  the own Physicalize dropped while the ball is alive). A retail death
+  deactivates BallNav first and unphysicalizes a second later (rtx_3: the
+  beam into the cube at 287, unphysicalized 357), so no steering block runs
+  while the ball has no body. Q-R1's held > 0 and its queue-order compare
+  need its own recipe, the own Physicalize held while the ball is alive -
+  the retail `hold-event` verb, which does not exist (roadmap item 9, R6):
+  they stay on the close-out's deferred list. So the part of #20 that moves
+  entries - `callbacks_hold` returning > 0, then `callbacks_unhold` putting
+  them back - never executed in Player.exe; Q-R1 is not done (and the
+  `cbq=` field, which the row named, showed no hold: the holds show only in
+  the new `cbqx`).
+- **Found (item 4, queued): the sector-deactivation cell after a rewind
+  over the own crossing.** Symptom: rtx_1 client 1, the forced rewind at
+  819 (795 -> 819), whose last tick is the own crossing's poll tick (the
+  Sector stamped 828 = 819 + lead 9): "the scripts re-executed to tick 819
+  differ from the live record: cell IngameParameter[0][2] 0 vs 1" (live 0,
+  replayed 1). Cause: `IngameParameter[0][2]` is one of the record's three
+  cells (`script_replay.hpp` `cell_of`), written back at the anchor by a
+  restore with `replay_activation`; its live writer on a crossing is
+  Gameplay_Events / activate Sektor's pinned Set Cell (N2,
+  `sector_deactivate_pin.hpp`: a constant 0), a chain no replay runs. The
+  cell is 1 before the crossing and the pinned write turns it 0 at the
+  crossing tick (SimTool `--level 13 --drop P_Ball_Wood_MF 0 --drop-at 220
+  7.65 15 --drop-sector 1 --ticks 120 --cells-trace`, rB9DX: `tick=-1
+  [0][2]=1`, `tick=80 [0][2]=0`), so a rewind whose window holds the
+  crossing restores 1, and the world holds 1 until the next union pass:
+  here from 819 to the pass of sector +2 at 828, which writes
+  `[0][2] = 0` in every world (`sector_activation.hpp` `run_sector_pass`).
+  The divergence is that short and not a three-world split: on a client
+  the chain runs only for the own crossing (`sector_cell_split.hpp`; on
+  the server also for a clone's), and client 2 had none before 985, while
+  the anchor record at 795 held 1 (no pass had written 0 before), so
+  client 2's world also held 1 over 819-828 (inferred from the same
+  history; not logged) and only the server's clone crossing had written
+  0. The rewind made client 1 agree with client 2; the cell was per-player
+  state before this step either way. Effect today: none seen - the cell's
+  only reader is the sector manager's Start, and every manager run in a
+  session follows `run_sector_pass`'s `[0][2] = 0`. Pre-existing (the cell record is bridge v14's, the pin
+  9.25 / B2SW's; RTX changed only status text). Options: (a) leave
+  `[0][2]` out of what a restore writes (the passes set it themselves;
+  the record keeps it for the compare); (b) record the crossing's write
+  and replay it in the window; (c) leave it (no reader).
+- **Not run:** Q-R2 (void since B7EG); the B2SX record-format note's retail
+  follow check of the re-armed delayed link (no recipe reaches it in a
+  session); a frozen clock on retail (no knob stops it; the unit test
+  covers the request).
 
 ## As built (step B2SW, 2026-10-27): gap F fixed; the CPU cliff's closing check
 

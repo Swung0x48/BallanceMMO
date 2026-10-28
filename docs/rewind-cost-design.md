@@ -1598,6 +1598,18 @@ flagged COVERAGE-SHORT; solo1 / solo2 strict against the live journals:
 SAME / IDENTICAL (`rB5RXg_solo`). No CK2, IVP or physics_RT change and no
 engine change in this step; no protocol or journal change (13 / v7).
 
+*Retail (run at step RTX, 2026-10-28; rollback-engine-gaps design, "As
+built (step RTX)").* The retail smoke run of the RC3 default and of the
+frozen-clock re-anchor: three two-copy L11 sessions, core on, snapshots
+off (`scripts/retail/rtx_1..3`), client 1 forced 13:24 in each. Every core
+rewind went through `rewind_world` and none asked for a resync: `rb` 114 /
+10, 94 / 14, 103 / 17 (client 1 / client 2), `frozen=0` and `resyncs=0/0`
+on all six, no "resync requested" line, `far=0`, `starved=0`. The other
+half - a frozen clock asks once - is not reachable on retail: the world
+never pauses in a session and no verb stops the clock; the unit test
+`SessionClientCoreSectorRewind.AFrozenRewindOutsideASnapshotAsksForAResync`
+covers it.
+
 ## As built (step SFD)
 
 Step SFD root-causes the three drifts the body-set snapshots used to hide
@@ -1866,7 +1878,16 @@ one build at a time, and every C++ object of both trees now has its deps.
 Reruns: x64 BUILD-OK, x86 CLIENT-BUILD-OK, GCC 29/29, tests 555/555,
 `--trafo-record-check` (1)-(7) PASS, `wire_check.sh rSFD rB6RC rB6RCw2`
 over `core_ref_s8` ALL SAME. The retail host does not print the counters
-(no retail file changed).
+(no retail file changed). [Step RTX: the retail core host's status line now carries
+them, `dorm=from_ledger/healed/walked/guard_trips/restored_built`
+(`core_host.cpp`); its three L11 sessions with the trafo inputs on
+(`scripts/retail/rtx_1..3`, four trafo explosions and two cancelled-activation
+resets, each applied at its stamp in both worlds and on the server,
+`trafo_missed=0 run_failures=0` on all six): `guard_trips` 0 everywhere;
+rtx_1 client 1 / client 2 `dorm=53150/16/8866/0/1568` and
+`19114/16/3158/0/152` - the ledger served 86 % of the trafo scripts'
+captures (the headless h1_150 78 %); rtx_2 `44095/19/6830/0/1320`,
+`16195/17/2540/0/191`; rtx_3 `43474/19/11771/0/1305`, `15915/17/4244/0/233`.]
 
 **Item RC5 - the incremental restore (not built: stopped for a choice;
 written into this note at step B9DX from B6RC's patch

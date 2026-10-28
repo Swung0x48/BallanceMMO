@@ -464,9 +464,11 @@ numbers 1-10 are unchanged.
      - *T1 (a)*: **waits for world agreement's Q9** (the user's option
        (ii)); the cause, the server's relay skipping the owner for
        BodyRevived, is recorded in the resync design's B2SX note.
-     - Deferred to the final verification: a retail two-copy run with the
-       private [0][1] cell (core on), over the 15-minute budget (the
-       headless own crossing is verified live, `b2sx_stallg`); a retail
+     - Deferred to the final verification: [a retail two-copy run with the
+       private [0][1] cell (core on): run at step RTX, `scripts/retail/rtx_1`
+       - client 1's own crossing stamped 828 (poll 819 + lead 9), the pass
+       at 828 on both clients and the server, client 2's crossing into the
+       started sector stamped 1028 (resync design, B2SX note)]; a retail
        follow check of Q5's re-armed link (the "fires once" result is
        Ballanced CK2's, the retail Virtools `CK2.dll` was not checked).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
@@ -587,7 +589,32 @@ numbers 1-10 are unchanged.
    a parented body and restore it with `SetLocalMatrix` (a blob format
    change).
    Step B7EG built Q's G2-G4 (engine change #20, bridge v23, record v4/v5,
-   the hold; design "As built (step B7EG)"). Still queued here: **Q5** (the
+   the hold; design "As built (step B7EG)"). Its retail session crashed at
+   start-up in `d3d8.dll` - the user's RTSS overlay in a bad state (every
+   launch 03:05-03:28 on 2026-10-28, even without the mod; fixed by
+   restarting RTSS), not the display as B7EG first recorded. **Step RTX ran
+   the deferred retail runs** (design "As built (step RTX)"; three two-copy
+   L11 sessions, core on, snapshots off, trafo inputs and placement on,
+   `scripts/retail/rtx_1..3`): the #20 hold ran on every rewind in Player.exe,
+   with an empty queue only (holds = rewinds: 114 / 10, 94 / 14, 103 / 17; no hold, rebuild or unhold
+   failure; `sv=N/0/0`), RC3's re-anchor asked for no resync (`frozen=0`,
+   `resyncs=0/0`), RC4's guard never tripped with the trafo inputs on, and
+   B2SX's own crossing was stamped at its poll tick + lead. Q-R1's held > 0
+   was not reached: a retail death deactivates BallNav before it
+   unphysicalizes, so keys held while dead queue nothing; it needs the own
+   Physicalize held while the ball is alive (the retail `hold-event` verb,
+   item 9), so the part of #20 that moves entries never ran on retail and
+   Q-R1 is partial, not done. **Found at RTX, queued here:** a rewind whose window holds an
+   own checkpoint crossing leaves the record's `IngameParameter[0][2]` at
+   its pre-crossing 1 (the restore writes the cell; its live writer, the
+   chain's pinned Set Cell, is not replayed), so that client's world holds
+   1 until the next union pass writes 0 everywhere (rtx_1: 819-828); the
+   other client, with no own crossing, held 1 there too and only the
+   server's clone crossing had written 0, so it is per-player state for a
+   few ticks, not a lasting split; no reader today (every manager run
+   follows `run_sector_pass`'s 0). Options: (a) leave `[0][2]`
+   out of what a restore writes, (b) record and replay the crossing's
+   write, (c) leave it. Still queued here: **Q5** (the
    server's selected entries in a resync's portable record; a protocol
    change, 14 at the earliest - until then a resync holds the outside
    entries but keeps the live selected ones), and **gap L as the design's
@@ -642,6 +669,15 @@ numbers 1-10 are unchanged.
 
    **Deferred to the final verification** (checks a quick-tier step did
    not run; each step appends its own, the close-out runs them all):
+   - RTX (the retail runs B7EG, B2SX, B5RX and B6RC deferred, quick tier,
+     2026-10-28; three two-copy sessions, `scripts/retail/rtx_1..3`; done
+     and off this list: B7EG's empty-queue hold in Player.exe, B2SX's
+     [0][1] cell, RC3's no-false-resync half, RC4 with the trafo inputs on;
+     Q-R1 is partial and stays): (a) Q-R1's held > 0
+     and its queue-order compare (need the retail `hold-event` verb, item
+     9; no session reached a queued entry); (b) B2SX's retail follow check
+     of the re-armed delayed link (unchanged, item 2); (c) a frozen clock
+     on retail asking for one resync (no verb stops the clock; unit-tested).
    - RC1 (committed 2026-10-27, quick tier; the committed tree is the
      measured build: wire check ALL SAME, solo IDENTICAL): (a) the live
      four-client snapshots-off A/B of the committed build (§7 check 5 of

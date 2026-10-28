@@ -3136,7 +3136,22 @@ N2 on every world, T1's findings.**
   2 stamped for tick 473 (checkpoint, lead 35, input_delay 17)"), and both
   worlds ran the pass at 473 ("sector +2 at tick 473 ... stamped 473");
   server journal replay 2763/2763. The retail two-copy run is deferred to
-  the final verification (the 15-minute budget).
+  the final verification (the 15-minute budget). [Run at step RTX
+  (rollback-engine-gaps design, "As built (step RTX)"; `scripts/retail/
+  rtx_1`, L11, core on, snapshots off, trafo inputs and placement on):
+  both copies logged the sector-cell split; client 1, beamed onto the
+  sector-2 checkpoint at 785, logged "sector 2 stamped for tick 828
+  (checkpoint, lead 9, input_delay 6), event sent ahead" - its poll's tick
+  819 plus the lead - and both clients and the server ran "sector +2 at
+  tick 828 (player 4289819235, stamped 828)" (server S5 late=0); client 2's
+  own crossing into the sector the peer had started, beamed at 985, was
+  seen by its poll and stamped 1028 ("remote player ... entered sector 2,
+  stamped for tick 1028" on client 1; server late=0). One finding there,
+  pre-existing and queued in roadmap item 4: a rewind whose window holds
+  the own crossing leaves the record's `IngameParameter[0][2]` at its
+  pre-crossing 1 until the next union pass writes 0 in every world (rtx_1:
+  819-828; the peer, with no own crossing, held 1 there too; no reader
+  today).]
 - **T1 (a), the user's option (ii)** (2026-10-27): not built; it waits for
   the user's answer to world agreement's Q9. The cause stays as recorded at
   T1: `server.cpp`'s relay skips the owner for BodyRevived ("relayed to
