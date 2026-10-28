@@ -163,10 +163,20 @@ namespace bmmo::game {
                 }
             if (CKDataArray* balls = array("Physicalize_GameBall"))
                 for (int row = 0; row < balls->GetRowCount(); ++row) {
-                    char name[128] = {};
-                    balls->GetElementStringValue(row, 0, name, static_cast<int>(sizeof(name)));
-                    name[sizeof(name) - 1] = 0;
-                    o.ball_names.push_back(name);
+                    // The STRING cell holds the string's pointer in both SDKs
+                    // (sector_placement.hpp's read): GetElementStringValue
+                    // takes a size in Ballanced only (step WG4, the retail
+                    // host's build).  Only a STRING column is read so (any
+                    // other type would be a value, not a pointer: the name
+                    // stays empty and the probe signature refuses, closed),
+                    // and the name is cut at 127 characters like the
+                    // server's 128-byte read (physics_world.cpp).
+                    std::string name;
+                    if (balls->GetColumnType(0) == CKARRAYTYPE_STRING)
+                        if (auto* cell = balls->GetElement(row, 0))
+                            if (const char* text = reinterpret_cast<const char*>(*cell))
+                                name = std::string(std::string_view(text).substr(0, 127));
+                    o.ball_names.push_back(std::move(name));
                 }
             return o;
         }

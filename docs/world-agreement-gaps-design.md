@@ -29,7 +29,8 @@ the server on them with the bit clear, §12 "As built (step WG1)"), step G2
 built (WG2, 2026-10-28: the server's world under `WORLD_PROXIMITY_UNION`,
 §12 "As built (step WG2)"), steps G3 and G5 built (WG3, 2026-10-28: the
 clients under the bit, BodyRevived retired, protocol 16, §12 "As built (step
-WG3)"), G4, G6, M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
+WG3)"), step G4 built (WG4, 2026-10-28: the retail core host, §12 "As built (step
+WG4)"), G6, M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
 `session_host_support.hpp`, `session_host_world.hpp`, `session_client.cpp` and
@@ -2741,3 +2742,141 @@ subsets above), U3's script-record round trip with a changed
 records, H1-H5, H2b, H2c, H4, H7 and H8 in full, H6 (3 minutes with the
 same-batch control), the re-capture of the reference set at protocol 16,
 CPU parity, and the retail runs (G4 first).
+
+### As built (step WG4, 2026-10-28): G4, the retail core host (RL's part dropped, answer 7)
+
+**What exists** (`BallanceMMOClient/session/core_host.cpp`, CH; no protocol,
+record or journal change - G3 made all of them).
+- *The host state.* A file-scope `proximity_host` (the BML constraint: no
+  member) holds the `bmmo::game::proximity_union`, `active`, the last
+  anchor's signature and counters (anchors, refused, releases, restored);
+  `proximity_rewire` / `proximity_release` are the headless
+  `rewire_proximity` / `release_proximity` with the bridge's body test
+  (`physics_view::has_body` by the entity's name) and the logger.
+- *The anchor* (§2.4's RC row): right after the selection, the trafo
+  part and the force hooks - so after the placement's apply, as the
+  headless anchor - the union is released (a leftover) and, when the core
+  says `proximity_union_active()` (the world option and the platform op),
+  rewired with class `mechanism` over the session's selection and
+  `proximity_union::level_options`. A refused rewire ends the session
+  there ("the proximity union (world option) refused: ..."), as a refused
+  placement does. `anchor_report::probes` carries the signature (0 with
+  the bit clear).
+- *Per tick and in every replay* (§2.5): `session_platform::place_probes`
+  = `proximity_union::place`; the core runs step 7b and
+  `rollback_world::place_probes` as it does for the headless host.
+- *The records* (§4.2, §4.4): the script binding's `hold` capture /
+  restore while the union is active (record v6, as headless), and the exact
+  resync's localize gets `proximity_union::localize_hold`, so the server's
+  hold at S goes into the record instead of being left out (WG3's interim
+  "the retail core host passes none until G4" is closed).
+- *Counters.* `host_counters::probes_skipped / probes_relatched` in both
+  places this host fills them (the core's status line and the `session`
+  verb's), so the `probes:` field reads as on headless.
+- *Release* (§2.3 "Release", §2.4): in `core_host_end_local` after the
+  core's end ("proximity union released (the session ends): N inputs
+  back"), and at the top of `core_host_release_placement` (the level's
+  exit and the map load) before the placement's copies, as the headless
+  order has it.
+- *Tooling.* `session probes [status]` (automation verb; `ok probes
+  active= blocks= identities= signature= anchors= refused= releases=
+  restored= skipped= relatched=`), routed in `client_automation.cpp`.
+
+**Adaptations.**
+- *A shared header fix the retail build needed.*
+  `proximity_union::level_options` read the `Physicalize_GameBall` names
+  with the four-argument `GetElementStringValue`, which only Ballanced's
+  CK2 has (retail's takes three). It now reads the STRING cell's pointer
+  through `GetElement(row, 0)`, `sector_placement.hpp`'s read for both
+  SDKs, only when column 0 is `CKARRAYTYPE_STRING` (any other type leaves
+  the name empty, so the probe signature refuses - closed, where reading a
+  value as a pointer would crash), cut at 127 characters like the server's
+  128-byte read (`physics_world.cpp`). Headless reads the same names as
+  before: Ballanced's `GetStringValue` returns the cell's pointer for a
+  STRING column (`CKDataArray.cpp` 788-791) and `CopyStringToBuffer` cuts
+  at size - 1 = 127; `GetElement` there is `CKUINTPTR*`, so nothing is
+  truncated on x64. This is a code reading: the wire check below cannot
+  show it, because the `core_ref_s9` captures predate the union (their
+  journals have no "proximity union" line, `level_options` never runs in
+  them); a headless session with the bit on is deferred to FULL.
+- *The body test looks the entity up by name.* The retail
+  `proximity_rewire`'s `has_body` asks the bridge
+  `physics_view::has_body(entity->GetName())` (the first entity of that
+  name, then its body state); headless tests the entity it is given
+  (`GetPhysicsObject(entity)`). The two differ only when two 3D entities
+  share a candidate's name and the first found has no body (not seen:
+  `skipped=0` on both clients). A by-`CK_ID` body test in the bridge would
+  close it; its per-candidate cost (a lookup and a body-state copy each
+  tick and replayed tick) is part of FULL's CPU parity.
+- *The map load drops, it does not release.* A union still recorded at a
+  map load (the session's end and the level's exit both missed - not seen)
+  names objects of the previous level by `CK_ID`, which the load may have
+  reused; its record is dropped without touching the scene (logged), and
+  the placement's release follows as before.
+- *`active` is the host's* (the rewire made), not
+  `core.proximity_union_active()` re-read: the two agree for a session
+  that ran (a refused rewire ends it), and the host's survives the core's
+  end for the release order.
+
+**Results** (x86 MSVC, x64 MSVC, Arch GCC; `.local-tools/work/WG4`).
+- Builds: x86 CLIENT-BUILD-OK, x64 BUILD-OK (header deps recorded:
+  `session_client.cpp.obj` #deps 348). `BallanceMMOMessageTests` 595/595.
+  GCC syntax check 30/30 ok.
+- Wire check rWG3 vs rWG4 over `core_ref_s9` (`EXTRA="--accept-protocol
+  15"`): WIRE-CHECK: ALL SAME (12/12 sends SAME, 12/12 journals
+  IDENTICAL): the headless client is unchanged on captures without the
+  union (the header's names: the code reading above). Rerun after the
+  review's fix-up (column type check, 127-character cut): see the gate
+  round below.
+- Retail, L11, two copies, the Arch server of WG3 (union on, placement on,
+  trafo inputs off, snapshots off), client 2 with forced rollbacks every 25
+  ticks 10 deep, client 1 into sector 2, then the room closed
+  (`.local-tools/work/WG4/wg4_gate.py`; `scripts/retail/wg4_gate1`,
+  `wg4_gate2`):
+  - both anchors: "63 mechanism blocks, 11 identity reads rewired,
+    signature 6fb28962d52e7d48" = the server's mechanism signature (91
+    blocks, mechanism 63; 11 identity reads); assigned, no "probe
+    mismatch".
+  - `probes: active=1 places=694/6` (c1) and `706/226` (c2: 25 forced
+    rollbacks, 226 replayed ticks), `two_bodies=0 skipped=0 relatched=0`;
+    the server "skipped 0, relatched 0, candidate set drift 0"; 0
+    BodyRevived; no restore failure.
+  - Every mechanism body of the server's FULL rows that `mech_rows.py`
+    compares (17: the P_Modul_01 Pushers, P_Modul_19 Flaps, P_Modul_25
+    and P_Modul_37 bridges with their placement copies `_R21` / `_R23` /
+    `_R30`, the P_Modul_26 sacks and ropes, P_Modul_30, P_Modul_34)
+    bit-equal on both clients at every common tick (run 2: 352 ticks).
+    Run 1 showed `P_Modul_26_Sack`/`_Rope` 0.26 m on c1 at its last tick
+    only: c1 holds two LOCAL checkpoints of 732, the regular one (bit-equal
+    to the server's, and the tick hashes are equal) and the one `journal
+    mark` writes at the command's time, after tick 733 stepped (0.262 m =
+    one tick of the swinging sack); the tool took the last. A tooling
+    artifact of the mark, not a divergence.
+  - After the room's close: "proximity union released (the session ends):
+    74 inputs back" on both (63 + 11), `session probes` `active=0
+    blocks=0 releases=1 restored=74` (R4's half: the sources back).
+  - c2 once logged "proximity hold: frame 0 differs [float]" in a replay -
+    a frame is a copy of its ball's position, so a corrected remote moves
+    it (WG3's float classification); 0 logical.
+
+**Deferred to FULL** (the 15-minute gate ran the builds, tests, GCC, the
+wire check and two retail smoke runs): R1 (the arena with two retail and
+two headless clients, a headless ball waking P_Modul_01 first - needs the
+slot-13 hack and a scripted drive), R2's sensor crossings (P_Modul_01 /
+P_Modul_37 alone, the P_Modul_18 fan with two balls - needs driven balls on
+L11), R4's vanilla half (the Pusher waking for the own ball after the
+session without a reload), a retail exact resync under the bit (the
+hold's localize on retail), CPU parity, and a headless session with the
+bit on after the `level_options` change (the wire check's captures do not
+reach it).
+
+**Gate round** (the review's fix-up: the column type check and the
+127-character cut in `level_options`, the note). x64 BUILD-OK (the
+header's includers rebuilt, `session_client.cpp.obj` #deps 348),
+`BallanceMMOMessageTests` 595/595, GCC 30/30 ok, the wire check rWG3 vs
+the fixed rWG4 over `core_ref_s9` WIRE-CHECK: ALL SAME (24/24), x86
+CLIENT-BUILD-OK (`core_host.cpp` rebuilt). No live rerun: the fix-up
+changes the names only for a non-STRING column or a name over 127
+characters, neither on L11 (the runs above: 11 identity reads, the
+server's signature). The server does not call `level_options` (its own
+reader, `physics_world.cpp`), so the Arch server is not rebuilt.

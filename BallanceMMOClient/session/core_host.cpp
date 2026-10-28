@@ -58,6 +58,7 @@
 #endif
 
 #include <game/host_backend.hpp>
+#include <game/proximity_union.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_cell_split.hpp>
 #include <game/sector_placement.hpp>
@@ -767,6 +768,68 @@ namespace {
     };
     placement_host_state placement_host;
 
+    // ------------------------------------------------- the proximity union
+    // Step WG4 (world-agreement-gaps design 2.3, 2.4 row RC, G4): under
+    // WORLD_PROXIMITY_UNION the mechanism proximity blocks and their identity
+    // reads are rewired at the anchor (right after the selection, after the
+    // placement's apply), the core places them before every live and
+    // replayed tick (platform place_probes), the hold travels with the
+    // script records (v6) and the exact resync's portable record, and the
+    // signature goes into SessionReady.  The logic is the shared
+    // game/proximity_union.hpp, as the headless host has it; this host
+    // supplies the bridge's body test and the logger.  Released at the
+    // session's end (core_host_end_local) and, should that have been missed,
+    // at the level's exit and the next map load, before the placement's
+    // copies (it may have rewired a copy's blocks).  File-scope
+    // (BallanceMMOClient takes no member).
+    struct proximity_host_state {
+        bmmo::game::proximity_union union_;
+        bool active = false;          // the last anchor's: the core's proximity_union_active() and a rewire made
+        uint64_t signature = 0;       // the last anchor's (SessionReady's anchor_probes)
+        uint64_t anchors = 0, refused = 0, releases = 0, restored = 0;
+    };
+    proximity_host_state proximity_host;
+
+    // The anchor's rewire (the headless rewire_proximity): the mechanism
+    // class over the session's selection, the level's union options; false
+    // with `error` when refused (nothing is rewired then).
+    bool proximity_rewire(CKContext* context, const bmmo::physics::physics_view& view,
+                          const bmmo::game::script_replay::selection& sel, logger_wrapper* logger, std::string& error) {
+        const bmmo::physics::physics_view* v = &view;
+        proximity_host.union_.has_body = [v](CK3dEntity* entity) {
+            return entity && entity->GetName() && v->has_body(entity->GetName());
+        };
+        ++proximity_host.anchors;
+        error = proximity_host.union_.rewire(context, bmmo::game::probe_class::mechanism, sel,
+                                             bmmo::game::proximity_union::level_options(context));
+        for (const std::string& line: proximity_host.union_.lines()) logger->Info("Physics session: %s", line.c_str());
+        if (!error.empty()) {
+            ++proximity_host.refused;
+            proximity_host.active = false;
+            proximity_host.signature = 0;
+            error = "the proximity union (world option) refused: " + error;
+            return false;
+        }
+        proximity_host.active = true;
+        proximity_host.signature = proximity_host.union_.signature(bmmo::game::probe_class::mechanism);
+        logger->Info("Physics session: proximity union: %zu mechanism blocks, %zu identity reads rewired, signature %016llx",
+                     proximity_host.union_.probe_count(), proximity_host.union_.identity_count(),
+                     static_cast<unsigned long long>(proximity_host.signature));
+        return true;
+    }
+
+    // The union's sources back and its objects gone (the headless
+    // release_proximity); nothing when nothing is rewired.
+    void proximity_release(CKContext* context, logger_wrapper* logger, const char* why) {
+        proximity_host.active = false;
+        if (!proximity_host.union_.probe_count() && !proximity_host.union_.identity_count() && !proximity_host.union_.no_ball())
+            return;
+        const int restored = proximity_host.union_.release(context);
+        ++proximity_host.releases;
+        proximity_host.restored += static_cast<uint64_t>(restored);
+        logger->Info("Physics session: proximity union released (%s): %d inputs back", why, restored);
+    }
+
     double seconds_since(clock_type::time_point t) {
         return std::chrono::duration<double>(clock_type::now() - t).count();
     }
@@ -1259,6 +1322,17 @@ bool BallanceMMOClient::core_host_reload_ready() {
 void BallanceMMOClient::core_host_map_loaded() {
     // Step SP10: copies a missed exit left are recorded leftovers of the
     // previous level: released before any anchor of this one.
+    // Step WG4: a proximity union still recorded here (the session's end and
+    // the level's exit both missed) names objects of the previous level by
+    // CK_ID, which the load may have given to new objects: its record is
+    // dropped without touching the scene.
+    if (proximity_host.union_.probe_count() || proximity_host.union_.identity_count() || proximity_host.union_.no_ball()) {
+        logger_->Warn("Physics session: the proximity union of the previous level was not released (%zu blocks, %zu "
+                      "identity reads); its record is dropped at the map load", proximity_host.union_.probe_count(),
+                      proximity_host.union_.identity_count());
+        proximity_host.union_ = bmmo::game::proximity_union{};
+        proximity_host.active = false;
+    }
     core_host_release_placement("a map load");
     level_life.ran_union = false;
     if (!level_life.reloading) return;
@@ -1278,6 +1352,10 @@ void BallanceMMOClient::core_host_map_loaded() {
 // copies).  The shared helper (release_placement) does it; nothing when the
 // registry is empty.
 void BallanceMMOClient::core_host_release_placement(const char* why) {
+    // Step WG4: the proximity union first (it may have rewired a copy's
+    // blocks; the headless order).  The session's end released it already;
+    // this catches a missed one.
+    proximity_release(m_bml->GetCKContext(), logger_, why);
     if (placement_host.placement.copies().empty()) return;
     ++placement_host.releases;
     placement_host.released += static_cast<uint64_t>(bmmo::game::release_placement(
@@ -1633,6 +1711,25 @@ void BallanceMMOClient::core_host_anchor() {
     // The force hooks over the bridge (game/host_backend.hpp, one copy for
     // every host; step SP10 moved this host onto it).
     host.script_hooks = bmmo::game::force_hooks_for(static_cast<const bmmo::physics::physics_view*>(&physics_view_));
+    // Step WG4 (world-agreement-gaps design 2.3, 2.4 row RC): under
+    // WORLD_PROXIMITY_UNION the mechanism proximity blocks and their
+    // identity reads rewired right after the selection (after the
+    // placement's apply), as the headless anchor does; the core places them
+    // before every live and replayed tick (platform place_probes) and the
+    // signature goes into SessionReady.  A refused rewire ends the session
+    // here, as a refused placement does.  With the bit clear nothing is
+    // rewired (a previous anchor's union was released at its session's end).
+    uint64_t probe_signature = 0;
+    proximity_release(m_bml->GetCKContext(), logger_, "a new anchor");
+    if (core.proximity_union_active()) {
+        const bmmo::game::script_replay::selection sel = host.script_ids.empty()
+            ? bmmo::game::session_script_selection(m_bml->GetCKContext(), trafo_host.on) : host.script_ids;
+        if (!proximity_rewire(m_bml->GetCKContext(), physics_view_, sel, logger_, error)) {
+            core_host_end_local(error);
+            return;
+        }
+        probe_signature = proximity_host.signature;
+    }
     {
         const auto st = bmmo::game::script_replay::describe(m_bml->GetCKContext(), host.script_ids);
         logger_->Info("Physics session: script replay: %d scripts (%d active) + %d satellite blocks, %d blocks, %d parameters, "
@@ -1645,6 +1742,7 @@ void BallanceMMOClient::core_host_anchor() {
     report.build_id = physics_view_.build_id();
     report.own_name = get_display_nickname();
     report.placement = placement_host.signature;   // step SP10 (caps.placement)
+    report.probes = probe_signature;               // step WG4 (0 with the bit clear)
     if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) parameters->GetElementValue(0, 1, &report.sector_cell);
     host.phase = retail_host::phase_type::running;
     host.last_rebases = fixed_tick_.rebases();
@@ -1820,6 +1918,12 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                   static_cast<unsigned long long>(report_precision_failed), placement_host.active ? "on" : "off",
                   placement_host.made, static_cast<unsigned long long>(placement_host.signature));
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
+    // Step WG4 (world-agreement-gaps design 2.3 "Release"): the level
+    // outlives the session, so the union's sources go back now - vanilla play
+    // afterwards runs its mechanisms on Ball_Pos_Frame again, and the next
+    // anchor's structural test finds the level's sources.  After the core's
+    // end (its status line reads the union's counters).
+    proximity_release(m_bml->GetCKContext(), logger_, "the session ends");
     // Step T4: the sets go with the session (hooks.ended did it when the core
     // still ran; a core that ended first - a SessionEnd - did too).
     trafo_teardown(physics_view_, m_bml->GetCKContext(), logger_);
@@ -2220,8 +2324,15 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // world's own.
     p.localize_scripts = [this](const std::vector<uint8_t>& portable, const std::vector<uint8_t>* anchor,
                                 std::vector<uint8_t>& out, std::string& error, bs::resync_script_report& report) {
+        // Step WG4 (world agreement 4.4): under the union the server's hold
+        // at S goes into the record, localized by name (the headless host's).
+        const bmmo::game::script_replay::portable_hold_localize hold =
+            [this](const uint8_t* data, size_t size, std::vector<uint8_t>& section, std::string& why) {
+                return proximity_host.union_.localize_hold(m_bml->GetCKContext(), data, size, section, why);
+            };
         return bmmo::game::localize_session_scripts(m_bml->GetCKContext(), host.script_ids, portable, anchor, out, error,
-                                                    report, trafo_host.on ? &trafo_host.registry.part() : nullptr);
+                                                    report, trafo_host.on ? &trafo_host.registry.part() : nullptr,
+                                                    proximity_host.active ? &hold : nullptr);
     };
     p.forget_activations_from = [this](uint32_t tick) {
         const size_t activations = host.activations.forget_from(tick);
@@ -2677,6 +2788,14 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             so.live_membership = true;
             // Step B7EG (gap Q): the PreSimulate queue with the records.
             so.callback_queue = true;
+            // Step WG4 (world agreement 4.2): the proximity union's hold
+            // section with every record (v6), back at the anchor.
+            if (proximity_host.active) {
+                so.hold.capture = [](std::vector<uint8_t>& out) { proximity_host.union_.capture(out); };
+                so.hold.restore = [this](const uint8_t* data, size_t size, std::string& error) {
+                    return proximity_host.union_.restore(m_bml->GetCKContext(), data, size, error);
+                };
+            }
             so.on_restore_failed = [this](const std::string& error) {
                 if (host.restore_logs++ < 8) logger_->Warn("Physics session: script replay: restore failed: %s", error.c_str());
             };
@@ -2778,7 +2897,15 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         h.rebases = static_cast<int>(fixed_tick_.rebases());
         h.activations_replayed = host.activations_replayed;
         h.script_reset_skips = host.script_reset_skips;
+        h.probes_skipped = proximity_host.union_.skipped();     // step WG4
+        h.probes_relatched = proximity_host.union_.relatched();
         return h;
+    };
+    // Step WG4 (world agreement 2.5): the proximity union's place, live
+    // (pre_step step 7b) and in every replayed tick; the core calls it only
+    // while the union is active (the world option and this op).
+    p.place_probes = [this](const std::vector<bs::probe_candidate>& candidates) {
+        proximity_host.union_.place(m_bml->GetCKContext(), candidates);
     };
     p.hooks.window = [this](const std::string& text) { logger_->Info("%s", text.c_str()); };
     p.hooks.status = [this](const std::string& text) { logger_->Info("%s", text.c_str()); };
@@ -2900,6 +3027,16 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            placement_host.signature, placement_host.anchors, placement_host.refused,
                            placement_host.releases, placement_host.released);
     }
+    if (what == "probes") {
+        // Step WG4: this process's proximity union (status only).
+        if (!value.empty() && value != "status") return "error usage: session probes [status]";
+        return std::format("ok probes active={} blocks={} identities={} signature={:016x} anchors={} refused={} "
+                           "releases={} restored={} skipped={} relatched={}", proximity_host.active ? 1 : 0,
+                           proximity_host.union_.probe_count(), proximity_host.union_.identity_count(),
+                           proximity_host.signature, proximity_host.anchors, proximity_host.refused,
+                           proximity_host.releases, proximity_host.restored, proximity_host.union_.skipped(),
+                           proximity_host.union_.relatched());
+    }
     if (what == "force-rollback" && value == "at") {
         // Step EL8: 'session force-rollback at L:D[,L:D...]', one-shot.
         std::string items;
@@ -2952,7 +3089,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     }
     return "error usage: session core on|off|status | session force-rollback <every>:<depth> | "
            "session force-rollback at <live>:<depth>[,...] | session stall <ms> | "
-           "session drop-birth | session placement";
+           "session drop-birth | session placement | session probes";
 }
 
 // net lag <ms> [up|down] [at <tick>] | net blackout <ms> [up|down] [at <tick>]
@@ -3439,6 +3576,8 @@ std::string BallanceMMOClient::core_host_status_text() {
     h.rebases = static_cast<int>(fixed_tick_.rebases());
     h.activations_replayed = host.activations_replayed;
     h.script_reset_skips = host.script_reset_skips;
+    h.probes_skipped = proximity_host.union_.skipped();     // step WG4
+    h.probes_relatched = proximity_host.union_.relatched();
     // Gap Q (step B7EG): the PreSimulate queue's part of the records and
     // of every replay: rebuilt/removed/held/unhold_clamped/rebuild_fail/
     // hold_fail/no_record.
