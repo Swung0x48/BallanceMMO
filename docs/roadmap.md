@@ -396,6 +396,10 @@ numbers 1-10 are unchanged.
        world, the retail mod included; options: a private cell for the
        chain's [0][1] with the own poll reading it, as the phase cell's
        split, or another source for the own sector poll - the user's).
+     - *F*: fixed - the replay processes next-frame flags only where the
+       live frame did (the recorded live order); V9 0 FAIL lines,
+       `--late-sector-check` exit 0. *The CPU cliff*: closed - the recipe
+       (with `--drive`) rebases nowhere, t_max 29-30 ms.
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

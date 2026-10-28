@@ -60,9 +60,11 @@ namespace bmmo::session {
         // is written back at the record's length (script_replay
         // resize_strings).  Off: left alone, as before (the legacy path).
         bool resize_strings = false;
-        // Step B2SW (resync finding G1): the restore re-registers with the
-        // behaviour manager what it writes back active (script_replay
-        // live_membership).  Off: as before (the legacy path).
+        // Step B2SW (resync finding G1, rollback-engine gap F): the restore
+        // re-registers with the behaviour manager what it writes back active,
+        // and a replayed frame processes a script's next-frame flags only
+        // where the live frame would (script_replay live_membership).  Off:
+        // as before (the legacy path).
         bool live_membership = false;
     };
 
@@ -149,6 +151,8 @@ namespace bmmo::session {
             if (before) before(tick);
             std::string error;
             b->set_event_log_muted(true, error);
+            bool& membership = bmmo::game::script_replay::live_membership();
+            membership = o.live_membership;
             // Step RO1: the replayed scripts in the order the live frame of
             // this tick ran them (a copy: scripts_replayed is the restore's).
             const std::vector<CK_ID>& listed = o.scripts_replayed ? *o.scripts_replayed : selection->scripts;
@@ -163,11 +167,12 @@ namespace bmmo::session {
                 const std::vector<CK_ID> ordered(ids.begin(), ids.end());
                 if (o.live_orders_applied) ++*o.live_orders_applied;
                 bmmo::game::script_replay::execute_frame(context, *selection, o.delta_ms, &ordered,
-                                                         trafo && !trafo->empty() ? &trafo->scripts : nullptr);
+                                                         trafo && !trafo->empty() ? &trafo->scripts : nullptr, live);
             } else {
                 bmmo::game::script_replay::execute_frame(context, *selection, o.delta_ms, o.scripts_replayed,
-                                                         trafo && !trafo->empty() ? &trafo->scripts : nullptr);
+                                                         trafo && !trafo->empty() ? &trafo->scripts : nullptr, live);
             }
+            membership = false;
             b->set_event_log_muted(false, error);
         };
     }

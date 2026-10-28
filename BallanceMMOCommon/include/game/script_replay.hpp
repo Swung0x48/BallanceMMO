@@ -176,7 +176,7 @@ namespace bmmo::game {
             return on;
         }
 
-        // Step B2SW (resync finding G1): the behaviour
+        // Step B2SW (resync finding G1, rollback-engine gap F): the behaviour
         // manager's object list, as the live frame has it.  The live frame
         // (CKBehaviorManager::Execute) runs, and processes the next-frame
         // flags of, only the scripts whose owner is in m_BeObjects after the
@@ -192,8 +192,14 @@ namespace bmmo::game {
         //     next frame and, the scene flag being set, calls no
         //     CKM_BEHAVIORACTIVATESCRIPT callback), then the record's own
         //     next-frame flags put back over the ones Activate set;
+        //   * execute_frame processes a selected script's next-frame flags
+        //     only where the live frame did (F): its owner among those the
+        //     live frame of the replayed tick ran (the host's recorded live
+        //     order), or joining the list next frame (execute_scripts).  The
+        //     trafo list is not judged: the trafo frame runs it directly,
+        //     live too.
         // Off by default - the legacy retail path keeps the old rule - and
-        // switched on around the restore by a binding
+        // switched on around the restore and the replayed frame by a binding
         // that asks for it (session/rollback_binding_scripts.hpp
         // live_membership: the core hosts and the tools).
         static bool& live_membership() {
@@ -202,13 +208,14 @@ namespace bmmo::game {
         }
         struct membership_counters {
             uint64_t reregistered = 0;   // restored-active scripts put back into the manager's list (G1)
+            uint64_t flags_kept = 0;     // next-frame flags a replayed frame left as the live frame does (F)
         };
         static membership_counters& membership() {
             static membership_counters counters;
             return counters;
         }
-        // Whether the live frame would run `beh`:
-        // its owner is in the behaviour manager's list after the next
+        // Whether the live frame would process `beh`'s next-frame flags and
+        // run it: its owner is in the behaviour manager's list after the next
         // ManageObjectsActivity.  Read through the public members (the retail
         // SDK exports no lookup); the pending table is walked, not hashed, so
         // the mod's template code never depends on CK2.dll's hash function.
@@ -226,6 +233,17 @@ namespace bmmo::game {
             const XObjectPointerArray& objects = manager->m_BeObjects;
             for (int i = 0; i < objects.Size(); ++i)
                 if (objects[i] == static_cast<CKObject*>(owner)) return true;
+            return false;
+        }
+        // Whether `beh`'s owner is to join the behaviour manager's list at the
+        // next frame (a pending add, not yet applied).
+        static bool owner_pending_add(CKContext* context, CKBehavior* beh) {
+            CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+            CKBehaviorManager* manager = context ? context->GetBehaviorManager() : nullptr;
+            if (!owner || !manager) return false;
+            const CK_ID id = owner->GetID();
+            for (auto it = manager->m_BeObjectNextFrame.Begin(); it != manager->m_BeObjectNextFrame.End(); ++it)
+                if (it.GetKey() == id) return *it > 0;
             return false;
         }
         // G1: a root script the restore wrote back active (or about to be
@@ -249,6 +267,7 @@ namespace bmmo::game {
             }
             return changed;
         }
+
         // The joint blocks of the selected scripts that hold a handle on
         // `entity`: its body is their Target or their Object2 (input 0 of
         // all four).  IVP deletes a constraint or a spring with either of
@@ -744,8 +763,13 @@ namespace bmmo::game {
         // trafo frame runs before the engine's whole behaviour pass,
         // Gameplay_Ingame's satellites included (trafo-replication design
         // 2.5; sim/physics_world.cpp's frame hook).
+        // `live_members` (gap F, under live_membership): the selected scripts
+        // whose owner the live frame of this tick ran (the host's recorded
+        // live order, session/script_order.hpp); null: judged by the
+        // behaviour manager's list as it is now.
         static int execute_frame(CKContext* context, const selection& sel, float delta_ms,
-                                 const std::vector<CK_ID>* replayed = nullptr, const std::vector<CK_ID>* trafo = nullptr) {
+                                 const std::vector<CK_ID>* replayed = nullptr, const std::vector<CK_ID>* trafo = nullptr,
+                                 const std::vector<uint32_t>* live_members = nullptr) {
             if (!context) return 0;
             int executed = 0;
             if (trafo) executed += execute_scripts(context, *trafo, delta_ms);
@@ -759,14 +783,22 @@ namespace bmmo::game {
                 beh->Execute(delta_ms);
                 ++executed;
             }
-            executed += execute_scripts(context, replayed ? *replayed : sel.scripts, delta_ms);
+            executed += execute_scripts(context, replayed ? *replayed : sel.scripts, delta_ms, live_membership(), live_members);
             return executed;
         }
 
         // One behaviour frame of a list of root scripts: the next-frame flags
         // of every one first, then every active one in the list's order (the
         // selection's frame above, and the trafo frame of game/trafo_sets.hpp).
-        static int execute_scripts(CKContext* context, const std::vector<CK_ID>& scripts, float delta_ms) {
+        // `live_flags` (gap F, the selection's frame under live_membership):
+        // the flags of a script whose owner the live frame would not run are
+        // left set, as the live frame leaves them.  Which owners it ran: the
+        // live order recorded for the replayed tick (`live_members`), plus
+        // every owner the replay itself has put into the list for the next
+        // frame (a replayed activation, a restore's re-registration); without
+        // a recorded order, the list as it is now (owner_in_frame).
+        static int execute_scripts(CKContext* context, const std::vector<CK_ID>& scripts, float delta_ms,
+                                   bool live_flags = false, const std::vector<uint32_t>* live_members = nullptr) {
             if (!context) return 0;
             int executed = 0;
             for (CK_ID id: scripts) {
@@ -774,6 +806,16 @@ namespace bmmo::game {
                 if (!beh) continue;
                 const CKDWORD flags = beh->GetFlags();
                 if (flags & (CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_DEACTIVATENEXTFRAME)) {
+                    if (live_flags) {
+                        const bool member = live_members
+                            ? std::find(live_members->begin(), live_members->end(), static_cast<uint32_t>(id)) != live_members->end()
+                                  || owner_pending_add(context, beh)
+                            : owner_in_frame(context, beh);
+                        if (!member) {
+                            ++membership().flags_kept;
+                            continue;
+                        }
+                    }
                     beh->Activate((flags & CKBEHAVIOR_ACTIVATENEXTFRAME) != 0, (flags & CKBEHAVIOR_RESETNEXTFRAME) != 0);
                     beh->ModifyFlags(0, CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_DEACTIVATENEXTFRAME | CKBEHAVIOR_RESETNEXTFRAME);
                 }

@@ -1697,3 +1697,37 @@ cross-referenced (one comment above `retail_recipe` in
 `BallanceMMOServer/sim/physics_world.cpp`, a file T3 also changes, away
 from its hunks). Files of T3's set touched by this step: `sim_tool.cpp`
 (its own region and call sites, as above) and that one comment.
+
+## As built (step B2SW, 2026-10-27): gap F fixed; the CPU cliff's closing check
+
+- **F.** `script_replay::execute_frame` / `execute_scripts`, under
+  `live_membership()` (the switch the core hosts' bindings set, step B2SW's
+  G1 shares it; the legacy retail path keeps the old rule), process a selected
+  script's next-frame flags only where the live frame did: its owner among the
+  scripts the host's recorded live order lists for the replayed tick
+  (`live_script_order::at(tick)`, step RO1: the behaviour manager's
+  `m_BeObjects` as that live frame walked it), or put into the list for the
+  next frame by the replay itself (a replayed activation, a restore's
+  re-registration: the pending table, walked); without a recorded order, the
+  list as it is now. The trafo frame's list is not judged (the trafo frame
+  runs it directly, live too). Adapted from the first build, which judged by
+  the list as it is now: in the session-start window (record-format Q5's
+  scene) that kept a DEACTIVATENEXTFRAME the live frame of tick 4 had
+  consumed (`P_Modul_18_MF Script` flags 0x80000000 vs 0x80400000) - the
+  owner had left the list since; the recorded order is that frame's.
+  Checks: SP7's V9 (`.local-tools/work/SP7/v9r.sh`'s four arms, through
+  `B2SW/v9.sh`): rR12 50 FAIL lines, every one P_Modul_18_Particle Script's
+  flags 4194304 vs 0; rB2SWb 0 in every arm. `--late-sector-check` on the arena
+  (K 2 / 3 / 4, A - T 3 / 9 / 40, `--late-reference`): PASS, exit 0 (B1's
+  PASS-EXCEPT-REFERENCE, exit 4, before); script differences of the arm the
+  reference does not have 0.
+- **The CPU cliff's closing check.** B2's recipe (core_ref_rc1/cliff: 60 s,
+  `--latency-ms 150 --arm A5u --sectors 4 --keep-lane --event
+  2:1500:step=300:dir=up`, snapshots off, flags off) plus `--drive`, which
+  the harness needs since the drive stopped being implied (without it no
+  ball left sector 4 and no respawn happened: `b2sw_cliff`, `b2sw_cliff_off`):
+  `maps/arena-test/b2sw_cliff_drive`, build rB2SWb, the placement off - the
+  respawns at 2502, 2598, 2606, 2612 (three within 14 ticks) and 3436, 3531;
+  rebases 0 and resyncs 0 on all four clients, t_max 29-30 ms (RC1's capture
+  61-71 ms, B2's build rebased), the server journal 3542/3542, verdict PASS.
+  Closed.
