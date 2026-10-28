@@ -601,7 +601,18 @@ numbers 1-10 are unchanged.
    that only the server applies), the
    member-added message (trafo design 9.7: existing members do not know a
    late joiner's join order), leave and rejoin, BodyRevived retired (G5).
-   Its Q9 (the protocol landing order) needs the user.
+   **Its questions are answered (2026-10-28, the user's message quoted in
+   item 3; design §9 and §11.1):** Q7 = (b), verbatim "6. b，应该都复制一份
+   逻辑，同一个机关应该可以响应所有玩家" - per-player copies of the mechanism
+   logic, one mechanism responds to every player (the design revision it
+   needs is step WAD's); Q8 is superseded by answer 7 (no client without
+   the session core is served, step B9DX, so "RL ends locally" is moot);
+   Q9 was left to the orchestrator ("5. 你决定"), who chose **G-c first
+   (G0-G5), then the member lives (M0, M1)** - the user's own audit order
+   ("... F5, F6, F7, G-c, join-order message ..."), G-c being the residual
+   every snapshots-off check meets while M1 matters only with late joiners,
+   leaves and rejoins; P_G takes the next free protocol number at G3, P_M
+   the one after.
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick; **K3 = the Level 1 tutorial
    switched off** right after K1 (decision (c): every world activates the

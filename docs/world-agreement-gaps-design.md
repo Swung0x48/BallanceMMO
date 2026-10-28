@@ -1303,6 +1303,13 @@ directly and drive `Set Physics Globals` (audit #14).** (measurement)
   ball breaks the bridge. It needs a graph-copy step like SPD's and more script
   state per record.
 - Settle: the user picks; H2b's log shows what (a) does in practice.
+- **Answered (2026-10-28, the user, verbatim): "6. b，应该都复制一份逻辑，同一个
+  机关应该可以响应所有玩家"** - option (b): every player gets a copy of the
+  mechanism logic, one mechanism responds to every player (it confirms §11's
+  Q7 of 2026-10-24). The design revision (b) needs - the per-player copies
+  of the force and break sub-graphs, the graph-copy step, the record's
+  extra script state, the H2b / V2 criteria - is step WAD's, not written
+  here.
 
 **Q8. The legacy path and late joiners (needs the user).**
 
@@ -1313,10 +1320,27 @@ directly and drive `Set Physics Globals` (audit #14).** (measurement)
 - Alternative: the legacy path learns `SessionMember` (its own `players_`
   list), which adds a feature to a path R7 deletes.
 - Settle: the user picks.
+- **Superseded (2026-10-28, the user's answer 7, verbatim: "直接拒绝，不要继续
+  兼容非session core的客户端"):** the server refuses every client without
+  the session core (step B9DX), so no legacy client is ever in a session
+  and "RL ends locally" (on a late member at P_M, on the bit at P_G) is
+  moot; M1 and G4 add nothing to the legacy path (MC's "legacy end" in
+  M1's and G4's rows, and RL's row of §2.4, are dropped at WAD's revision).
 
 **Q9. Landing order of the protocol numbers (needs the user).** P_M and P_G
 follow RSD §11 Q5's rule; if the user wants M1 before the three designs that
 claim 10, M1 takes 10 and those take the following numbers.
+- **Answered (2026-10-28):** the user left it to the orchestrator ("5.
+  你决定"), who chose **G-c first (G0-G5, P_G), then the member lives (M0,
+  M1, P_M)**. The reason: it is the user's own audit order ("... F5, F6, F7,
+  G-c, join-order message ...", §8 Order), G-c's leader-only wakes are the
+  queued residual every snapshots-off check meets (P_Modul_03, _19_Flaps,
+  _34, the l8_cross P_Modul_29 plates), while M1 only matters with a late
+  joiner, a leave or a rejoin; and M1 builds on G3 cleanly (§8 Order: "if
+  it lands before G3, G3 builds on its lives" - the other way round is the
+  simpler one). P_G takes the next free protocol number when G3 lands (14
+  at the earliest; Q5 of the rollback gaps also claims 14 - whichever lands
+  first takes it) and P_M the next after it.
 
 ## 10. Review (revision 2)
 
@@ -1353,3 +1377,21 @@ reason is given.
   session locally. It is deleted at R7.
 - **Q6.** The narrowing of G-c stands: checkpoint flames, extra balls, the
   balloon and the tutorial stay on the own ball in a client world.
+
+### 11.1 Decisions (user, 2026-10-28)
+
+The user's answers to the orchestrator's seven open decisions (the whole
+message is quoted in `docs/roadmap.md` §4 item 3); three are this design's:
+
+- **Q7 = (b)**, verbatim: "6. b，应该都复制一份逻辑，同一个机关应该可以响应所有玩家"
+  (b: every world copies the logic per player; one mechanism must respond to
+  every player). It confirms §11's Q7 above; the design text (§2.2, §8) is
+  revised to it at step WAD.
+- **Q8 is superseded** by answer 7, verbatim: "7. 直接拒绝，不要继续兼容非session
+  core的客户端" (refuse it outright, no more compatibility with clients
+  without the session core): built at step B9DX, the server refuses every
+  such client, so the legacy path's local ends of this design (§2.4 RL,
+  §2.8, §5's legacy row, M1's and G4's MC) are moot.
+- **Q9**, answer 5, verbatim: "5. 你决定" (you decide) - the orchestrator
+  chose G-c (G0-G5) before the member lives (M0, M1); the reason is in §9
+  Q9.
