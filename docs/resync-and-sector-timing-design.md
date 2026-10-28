@@ -3151,7 +3151,8 @@ N2 on every world, T1's findings.**
   the own crossing leaves the record's `IngameParameter[0][2]` at its
   pre-crossing 1 until the next union pass writes 0 in every world (rtx_1:
   819-828; the peer, with no own crossing, held 1 there too; no reader
-  today).]
+  today). Answered 2026-10-28, the user's (b) "Record and replay"; built
+  at step N02R (As built (step N02R) below).]
 - **T1 (a), the user's option (ii)** (2026-10-27): not built; it waits for
   the user's answer to world agreement's Q9. The cause stays as recorded at
   T1: `server.cpp`'s relay skips the owner for BodyRevived ("relayed to
@@ -3162,6 +3163,101 @@ N2 on every world, T1's findings.**
   windows). If world agreement's G5 lands, BodyRevived is retired and the
   finding with it; otherwise the echo (option (i)) or SimTool reading the
   server journal (option (iii)) is the user's to choose then.
+
+## As built (step N02R, 2026-10-28): IngameParameter[0][2] recorded and replayed (the user's (b))
+
+- **The answer.** RTX's finding (the B2SX note above, roadmap section 4
+  item 4): a rewind whose window holds the own checkpoint crossing put the
+  anchor's `IngameParameter[0][2]` (1) back, because the record's three
+  cells are written at the anchor (`script_replay.hpp` `cell_of`) and the
+  cell's live writer - Gameplay_Events / activate Sektor's pinned Set Cell
+  (N2, a constant 0) - is a chain no replay runs. The user, 2026-10-28,
+  verbatim: "(b) Record and replay".
+- **Built (shared, one copy for every world).** `session_host_world.hpp`
+  `live_cell_writes` (CK-free): the cell before a live frame's scripts is
+  `seen` - a union pass's write (`manager_activations::record`) or the live
+  cells a rewind left (`note_cells`, from `live_cells_guard`'s destructor,
+  after its write-back and re-issue); a different value after the frame is
+  that frame's write, recorded under the frame's tick
+  (`manager_activations::record_pending`, which the core calls after every
+  live frame with `frame_tick + 1`). The replay writes it back after the
+  replayed step of that tick and before the tick's record is captured: a
+  new optional `rollback_world::after_step` (rollback.hpp, called right
+  after `world.step()` in the replay loop), set by `bind_session_world`
+  from `session_world_options::after_replayed_step`, which both hosts wire
+  to `manager_activations::after_replayed_step` (headless
+  `session_client.cpp`, retail `core_host.cpp`; each logs its first 8
+  writes: "replay: IngameParameter[0][2] = V written after replayed tick
+  T (its live frame's write)"). A resync's re-assign drops the writes from
+  its base on (`forget_from`), a late joiner's level walk the writes of the
+  frames before its pending slots (`forget_pending`, as A5 drops the
+  walk's activations). The server's world never rewinds and is untouched;
+  SimTool records but does not wire the hook (its modes are unchanged).
+- **Adapted (1): every live-frame write of [0][2], not only the
+  crossing's.** The cell has one more writer the replay does not run: the
+  death chain (Gameplay_Ingame / BallManager / Deactivate Ball's Set Cells,
+  whose Execute Script `sector_reset_guard` empties) writes the dying
+  ball's sector into [0][1] and [0][2]. That is EL8's "[0][2] 4 vs 0"
+  (resync_snapoff) and "[0][2] 1 vs 0" (swing_snapoff, the own death at
+  866) at the ends of windows across an own death. The mechanism is the
+  same, so the same rule takes it. Nothing a replayed script writes is
+  recorded: the sector manager writes no [0][2] (SimTool `--level 13 --drop
+  P_Ball_Wood_MF 0 --drop-sector 1 --drop-move 2 70 --ticks 120
+  --cells-trace`: [0][2] turns 0 at the pass of 70 and stays 0 over the
+  activation, 70-75), and a union pass writes before the frame's scripts
+  (`seen`).
+- **Adapted (2): written after the replayed step, not before the next
+  tick.** `manager_activations::replay` re-issues a pending activation at
+  the start of the tick that consumes it; a cell write there would miss
+  the record of the frame that made it, and a window ending at that frame
+  (RTX: 795 -> 819, the write in the live frame of 818) would still
+  differ. Hence the hook after the step.
+- **Evidence.** Unit tests 584 pass (582 + 2):
+  `LiveCellWrites.AChangeOverAFrameIsItsWrite` (the rule: first frame,
+  unchanged frame, a pass's write, a replaced numbering, forget/forget_from,
+  the 4096-tick trim) and
+  `RollbackEngine.ALiveFramesCellWriteIsWrittenAgainAfterItsReplayedStep`
+  (without `after_step` the window ending at the write's frame mismatches
+  and keeps the anchor's value; with it the window matches, the hook runs
+  once per replayed tick after that tick's step, and a later rewind
+  anchored at the write's tick restores the written value). Wire check
+  `rWAD -> rN02R` over `core_ref_s8`: 12/12 sends SAME, 12/12 journals
+  IDENTICAL; solo1 / solo2 sends SAME (2616, 2427), journals IDENTICAL.
+  The script check's cell lines in those replays: every `[0][2]` part is
+  gone - resync_snapoff 6 lines "[0][2] 4 vs 0" -> 0 (logical mismatches
+  13 -> 7, the rest G-c sensors), swing_snapoff "[0][2] 1 vs 0", "4 vs 0"
+  and "0 vs 1" -> 0 (logical 23 -> 17 over the four clients; two windows
+  whose only logical difference was the cell now report their float
+  sensor difference); l8_cross none before or after. Retail
+  (`scripts/retail/n02r_1`, `work/RTX/rtx_retail.py` cross recipe, L11,
+  core on, snapshots off, trafo inputs and placement on, Arch server of
+  this tree): client 1's forced rewinds 795 -> 819 and 808 -> 832 over its
+  own crossing (frame 818; "sector 2 stamped for tick 828") each logged
+  "IngameParameter[0][2] = 0 written after replayed tick 818", and no
+  script difference at any window's end (`scr=113/0/0/0/16`; rtx_1 had
+  "cell IngameParameter[0][2] 0 vs 1" at 819). The same session had one
+  tick-driver rebase at 858 on client 1 (forced 13:24 rewinds over the
+  sector-2 activation, t_max 207 ms against rtx_1's 149; the resync
+  re-stepped cleanly, 57 rows equal); a single smoke session's timing,
+  not evidence either way - the hook costs one map lookup per replayed
+  tick, and the headless replays' t_rep did not grow. B8EG's retail
+  instance (`b8eg_f13`, 2184 "[0][2] 0 vs 1") is not in `core_ref_s8` and
+  was not re-run here (one live run per quick step; the SimTool replay
+  does not wire the hook): it has rtx_1's signature (a crossing, 0 vs 1),
+  which n02r_1 shows gone; its re-run (`work/EG0/eg0_retail.py b8eg_f13
+  13:24`) is left to the stage close-out.
+- **Found, pre-existing, queued (roadmap 4 item 4): the death chain's
+  [0][1].** The same Deactivate Ball chain writes the dying ball's sector
+  into `IngameParameter[0][1]`, which this step leaves as it was (the
+  user's answer was for [0][2]): swing_snapoff still shows "[0][1] 1 vs 4"
+  (the own death in sector 1 at 866; the replay keeps the last pass's 4)
+  and "[0][1] 4 vs 3" (the death at 3167). rWAD has the same lines.
+  Reader today: none in a session with the core on - the manager reads
+  [0][1] only after a pass wrote it, and the own poll reads the private
+  copy (B2SX). Options: (a) leave it (no reader); (b) the same record and
+  replay for [0][1] (one more `live_cell_writes`; under a re-derived union
+  the death's value would be forced over the replayed passes' one at that
+  frame, as live); (c) leave [0][1] out of the script check's compare.
 
 ## 9. Open questions
 

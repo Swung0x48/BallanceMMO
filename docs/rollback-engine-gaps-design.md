@@ -1908,7 +1908,11 @@ Every game started (RTSS healthy).
   9.25 / B2SW's; RTX changed only status text). Options: (a) leave
   `[0][2]` out of what a restore writes (the passes set it themselves;
   the record keeps it for the compare); (b) record the crossing's write
-  and replay it in the window; (c) leave it (no reader).
+  and replay it in the window; (c) leave it (no reader). **Answered
+  (2026-10-28): the user's (b), verbatim "(b) Record and replay"; built at
+  step N02R** (resync design, As built (step N02R): every live-frame write
+  of [0][2] - the crossing's and the death chain's - recorded and written
+  back after its replayed step).
 - **Not run:** Q-R2 (void since B7EG); the B2SX record-format note's retail
   follow check of the re-armed delayed link (no recipe reaches it in a
   session); a frozen clock on retail (no knob stops it; the unit test

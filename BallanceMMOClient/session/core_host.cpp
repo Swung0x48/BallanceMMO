@@ -260,6 +260,7 @@ namespace {
         bs::local_birth_log births;
         bmmo::game::manager_activations activations;
         uint64_t activations_replayed = 0;
+        uint32_t deactivate_write_logs = 0;   // step N02R: the [0][2] writes replayed, logged (the first 8)
         // Step RO1: the order the live frames ran the replay's scripts in
         // (session/script_order.hpp; host-local, recorded after each frame).
         bs::live_script_order script_order;
@@ -538,6 +539,7 @@ namespace {
         host.births.clear();
         host.activations.clear();
         host.activations_replayed = 0;
+        host.deactivate_write_logs = 0;
         host.script_order.clear();
         host.script_ids = {};
         host.script_activations.clear();
@@ -2494,6 +2496,18 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         // Inside the replay (an explosion's referential is placed); the
         // rewinds' end re-issues with inside = false (keep_live_cells).
         w.replay_activation = [this](uint32_t tick) { core_host_replay_activation(tick, true); };
+        // Step N02R: after each replayed tick's step, the IngameParameter[0][2]
+        // its live frame's chains wrote (host support's
+        // manager_activations::after_replayed_step).
+        w.after_replayed_step = [this](uint32_t tick) {
+            if (!host.activations.after_replayed_step(m_bml->GetCKContext(), tick)) return;
+            if (host.deactivate_write_logs++ < 8) {
+                int value = 0;
+                if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) parameters->GetElementValue(0, 2, &value);
+                logger_->Info("Physics session: replay: IngameParameter[0][2] = %d written after replayed tick %u (its live "
+                              "frame's write)", value, tick);
+            }
+        };
         w.births = &host.births;
         // Step P: the trafo explosion pieces are made again at a restore
         // (the replayed reset takes them away again); T3: every set's too.

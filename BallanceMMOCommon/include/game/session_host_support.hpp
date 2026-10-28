@@ -290,10 +290,16 @@ namespace bmmo::game {
             scripts_reissued_ = 0;
             referentials_placed_ = 0;
             override_ = {};
+            deactivate_writes_.clear();
+            deactivate_writes_replayed_ = 0;
         }
         // The union's live pass of `tick` (platform record_activation), with
         // the cells as run_sector left them: the tick's pass slot.
-        void record(CKContext* context, uint32_t tick, bool reset) { slots_.set_pass(tick, read(context, reset)); }
+        void record(CKContext* context, uint32_t tick, bool reset) {
+            slots_.set_pass(tick, read(context, reset));
+            // Step N02R: what the frame's scripts start from.
+            note_cells(context);
+        }
         // A pass a replay re-derived for `tick` (platform set_union_pass):
         // what run_sector writes - activate `sector`, deactivate nothing,
         // reset - in the pass slot, bit for bit the live record of that pass.
@@ -310,13 +316,20 @@ namespace bmmo::game {
         // The manager's pending activations of the ticks from..to dropped
         // (platform forget_pending_activations, step A5); the pass slots and
         // the scripts' activations stay.
-        size_t forget_pending(uint32_t from, uint32_t to) { return slots_.forget_pending(from, to); }
+        // Step N02R: the [0][2] writes of the frames before those ticks go
+        // with them (the level's own walk, which the server's state at S ran
+        // long before); the count returned is the slots'.
+        size_t forget_pending(uint32_t from, uint32_t to) {
+            deactivate_writes_.forget(from != 0 ? from - 1 : 0, to - 1);
+            return slots_.forget_pending(from, to);
+        }
         const bmmo::session::activation_slots& slots() const { return slots_; }
         // Every record at a tick >= `tick` dropped - both slots, the script
         // activations and the explosion referentials (a resync's re-assign,
         // step A3, G-a).  Returns the ticks the manager's slots dropped.
         size_t forget_from(uint32_t tick) {
             const size_t n = slots_.forget_from(tick);
+            deactivate_writes_.forget_from(tick);   // step N02R
             scripts_by_tick_.erase(scripts_by_tick_.lower_bound(tick), scripts_by_tick_.end());
             referential_by_tick_.erase(referential_by_tick_.lower_bound(tick), referential_by_tick_.end());
             return n;
@@ -327,6 +340,11 @@ namespace bmmo::game {
         // activation of `scripts` (session_script_activations).
         void record_pending(CKContext* context, CK_ID manager_id, const std::vector<CK_ID>& scripts, uint32_t tick) {
             if (!context) return;
+            // Step N02R: IngameParameter[0][2] as the live frame of tick - 1
+            // left it - a change from what that frame started with is a write
+            // of a chain no replay runs (session_host_world.hpp
+            // live_cell_writes), written again after that tick's replayed step.
+            if (int deactivate = 0; read_deactivate(context, deactivate)) deactivate_writes_.after_frame(tick - 1, deactivate);
             if (auto* manager = manager_id ? CKBehavior::Cast(context->GetObject(manager_id)) : nullptr;
                     manager && (manager->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME))
                 slots_.record_pending(tick, read(context, (manager->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0));
@@ -390,6 +408,30 @@ namespace bmmo::game {
             }
             return due.back();
         }
+        // Step N02R: after the replayed step of `tick`, before its record is
+        // captured (session_world_options::after_replayed_step): the
+        // IngameParameter[0][2] its live frame wrote, if it wrote one.  True
+        // when a value was written.
+        bool after_replayed_step(CKContext* context, uint32_t tick) {
+            const int* recorded = deactivate_writes_.at(tick);
+            CKDataArray* parameters = recorded && context ? session_data_array(context, "IngameParameter") : nullptr;
+            if (!parameters) return false;
+            int value = *recorded;
+            if (!parameters->SetElementValue(0, 2, &value, sizeof(int))) return false;
+            ++deactivate_writes_replayed_;
+            return true;
+        }
+        // Step N02R: the cell as it stands before a live frame's scripts - a
+        // union pass's write (record), or what a rewind left in the live world
+        // (the live cells written back, or the replayed ones adopted;
+        // live_cells_guard).
+        void note_cells(CKContext* context) {
+            int deactivate = 0;
+            if (read_deactivate(context, deactivate)) deactivate_writes_.seen(deactivate);
+        }
+        // The [0][2] writes recorded and written again (diagnostics).
+        size_t deactivate_writes() const { return deactivate_writes_.size(); }
+        uint64_t deactivate_writes_replayed() const { return deactivate_writes_replayed_; }
         // Ball_Pos_Frame back on the parent it had, with the local matrix
         // it had, after a replayed explosion's tick (above).  Idempotent.
         void end_override(CKContext* context) {
@@ -421,7 +463,13 @@ namespace bmmo::game {
             }
             return a;
         }
+        static bool read_deactivate(CKContext* context, int& value) {
+            CKDataArray* parameters = context ? session_data_array(context, "IngameParameter") : nullptr;
+            return parameters && parameters->GetElementValue(0, 2, &value);
+        }
         bmmo::session::activation_slots slots_;
+        bmmo::session::live_cell_writes deactivate_writes_;   // step N02R
+        uint64_t deactivate_writes_replayed_ = 0;
         std::map<uint32_t, std::vector<script_activation>> scripts_by_tick_;
         std::map<uint32_t, VxMatrix> referential_by_tick_;
         uint64_t scripts_reissued_ = 0, referentials_placed_ = 0;
@@ -553,6 +601,8 @@ namespace bmmo::game {
             // state.  Re-issued for the frame about to run, as the replay
             // re-issues them inside its window.
             if (core_.rollback_stats().rollbacks != rollbacks_before_ && reissue_) reissue_(core_.current_tick() + 1);
+            // Step N02R: what the next live frame starts from.
+            if (activations_) activations_->note_cells(context_);
         }
         live_cells_guard(const live_cells_guard&) = delete;
         live_cells_guard& operator=(const live_cells_guard&) = delete;

@@ -132,6 +132,83 @@ namespace bmmo::session {
         std::map<uint32_t, entry> by_tick_;
     };
 
+    // Step N02R (roadmap 4 item 4, the user's (b) of 2026-10-28; resync
+    // design, As built (step N02R)): the writes of one data-array cell that a
+    // live frame's scripts made and no replayed script makes again -
+    // IngameParameter[0][2], which the checkpoint chain's pinned Set Cell
+    // (game/sector_deactivate_pin.hpp) and the death chain (Gameplay_Ingame /
+    // Deactivate Ball, game/sector_reset_guard.hpp) write in a live frame,
+    // and which no replay runs.  Without them a rewind over that frame put
+    // the anchor's value back and kept it until the next union pass (RTX:
+    // rtx_1 819-828, the script check "[0][2] 0 vs 1"; core_ref_s8: "4 vs 0"
+    // and "1 vs 0" after an own death).  The value the cell holds before a
+    // live frame's scripts is `seen` (the union pass's write, or the live
+    // cells a rewind left); a different value after that frame is that
+    // frame's write, recorded under the frame's tick; the replay writes it
+    // after the replayed step of that tick, before the tick's record is
+    // captured (rollback_world::after_step), so the replayed record of the
+    // frame carries the write as the live one does.  CK-free: the CK half
+    // (game/session_host_support.hpp manager_activations) reads and writes
+    // the cell.
+    class live_cell_writes {
+    public:
+        void clear() {
+            by_tick_.clear();
+            have_seen_ = false;
+            seen_ = 0;
+        }
+        // The cell before a live frame's scripts.
+        void seen(int value) {
+            seen_ = value;
+            have_seen_ = true;
+        }
+        // After the live frame of `tick`: the cell now.  A value other than
+        // the one seen before the frame is the frame's write, recorded for
+        // `tick` (true); otherwise a record of `tick` left from a numbering a
+        // resync replaced is dropped.  Before anything was seen (the first
+        // frame of a session) the value only becomes the seen one.
+        bool after_frame(uint32_t tick, int value) {
+            const bool written = have_seen_ && value != seen_;
+            if (written) {
+                by_tick_[tick] = value;
+                trim(tick);
+            } else {
+                by_tick_.erase(tick);
+            }
+            seen(value);
+            return written;
+        }
+        // The value the live frame of `tick` wrote, or null.
+        const int* at(uint32_t tick) const {
+            const auto it = by_tick_.find(tick);
+            return it == by_tick_.end() ? nullptr : &it->second;
+        }
+        // Every write at a tick >= `tick` dropped (a resync's re-assign).
+        size_t forget_from(uint32_t tick) {
+            size_t n = 0;
+            for (auto it = by_tick_.lower_bound(tick); it != by_tick_.end(); it = by_tick_.erase(it)) ++n;
+            return n;
+        }
+        // The writes of the frames from..to dropped (a late joiner's level
+        // walk, as activation_slots::forget_pending).
+        size_t forget(uint32_t from, uint32_t to) {
+            size_t n = 0;
+            for (auto it = by_tick_.lower_bound(from); it != by_tick_.end() && static_cast<int32_t>(it->first - to) <= 0;
+                 it = by_tick_.erase(it))
+                ++n;
+            return n;
+        }
+        size_t size() const { return by_tick_.size(); }
+
+    private:
+        void trim(uint32_t tick) {
+            while (!by_tick_.empty() && by_tick_.begin()->first + 4096 < tick) by_tick_.erase(by_tick_.begin());
+        }
+        std::map<uint32_t, int> by_tick_;
+        bool have_seen_ = false;
+        int seen_ = 0;
+    };
+
     // A body this world made (the event log's "recipe" line): the
     // Physicalize recipe, collision group and the entity's matrix at that
     // moment.  A rewind anchored before its tick re-creates or re-poses it
@@ -345,6 +422,11 @@ namespace bmmo::session {
         // the host's traces.
         std::function<void(uint32_t tick)> replay_activation;
         std::function<void(uint32_t tick)> before_replayed_tick;
+        // Step N02R: after each replayed tick's step, before its record is
+        // captured - the cell writes its live frame made that no replayed
+        // script makes (the host's manager_activations::after_replayed_step;
+        // rollback_world::after_step).  Unset: none.
+        std::function<void(uint32_t tick)> after_replayed_step;
         // The bodies this world made (birth_tick_of, birth_order, and the
         // birth an insert or a destroy uses).
         const local_birth_log* births = nullptr;
@@ -408,6 +490,7 @@ namespace bmmo::session {
         binding.replay_mechanisms = hooks.replay_mechanisms;
         binding.on_correction = hooks.on_correction;
         rollback_world world = bind_rollback_world(backend, binding);
+        world.after_step = o.after_replayed_step;   // step N02R
         // Step B1: a window-born body whose sector pass the replay's union
         // re-derivation moved or forgot is no missing birth.
         world.birth_moved = hooks.birth_moved;

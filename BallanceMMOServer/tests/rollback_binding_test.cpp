@@ -996,6 +996,42 @@ TEST(ActivationSlots, ForgetPending) {
     EXPECT_EQ(slots.forget_pending(140, 143), 0u);
 }
 
+// Step N02R (session_host_world.hpp live_cell_writes): a live frame's write
+// is a change from what the frame started with - the first frame only sets
+// that; an unchanged frame records nothing and drops a stale record of its
+// tick; forget_from and forget (inclusive) drop the old numbering's and a
+// level walk's writes.
+TEST(LiveCellWrites, AChangeOverAFrameIsItsWrite) {
+    bmmo::session::live_cell_writes writes;
+    EXPECT_FALSE(writes.after_frame(10, 4)) << "nothing seen before the first frame";
+    EXPECT_EQ(writes.at(10), nullptr);
+    EXPECT_TRUE(writes.after_frame(11, 0));   // a crossing: 4 -> 0
+    ASSERT_NE(writes.at(11), nullptr);
+    EXPECT_EQ(*writes.at(11), 0);
+    writes.seen(0);                           // a union pass's 0
+    EXPECT_FALSE(writes.after_frame(12, 0));
+    EXPECT_TRUE(writes.after_frame(13, 3));   // a death chain's sector
+    writes.seen(0);                           // the pass of 14 writes 0 again
+    EXPECT_FALSE(writes.after_frame(14, 0)) << "the pass's write is no frame's";
+    EXPECT_EQ(writes.size(), 2u);
+    // A resync's re-assign re-runs 13 under the new numbering, unchanged.
+    writes.seen(3);
+    EXPECT_FALSE(writes.after_frame(13, 3));
+    EXPECT_EQ(writes.at(13), nullptr) << "a record of the replaced numbering goes";
+    EXPECT_TRUE(writes.after_frame(20, 1));
+    EXPECT_TRUE(writes.after_frame(21, 2));
+    EXPECT_TRUE(writes.after_frame(22, 1));
+    EXPECT_EQ(writes.forget(20, 21), 2u);
+    EXPECT_EQ(writes.at(20), nullptr);
+    ASSERT_NE(writes.at(22), nullptr);
+    EXPECT_EQ(writes.forget_from(12), 1u) << "22 goes, 11 stays";
+    ASSERT_NE(writes.at(11), nullptr);
+    writes.after_frame(5000, 7);
+    EXPECT_EQ(writes.at(11), nullptr) << "more than 4096 ticks behind: dropped";
+    writes.clear();
+    EXPECT_FALSE(writes.after_frame(5001, 9)) << "clear forgets what was seen";
+}
+
 TEST(ActivationSlots, PendingThenPassAndForgetKeepsPending) {
     bmmo::session::activation_slots slots;
     bmmo::session::manager_activation pending;

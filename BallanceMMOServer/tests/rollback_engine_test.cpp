@@ -17,6 +17,7 @@
 #include <session/correction.hpp>
 #include <session/input_relay.hpp>
 #include <session/rollback.hpp>
+#include <session/session_host_world.hpp>
 #include <session/timeline.hpp>
 
 namespace {
@@ -2012,6 +2013,73 @@ TEST(RollbackEngine, RowForAnUnrecordedBodyRestoresFromTheRowInsteadOfRejectingT
     EXPECT_DOUBLE_EQ(world.bodies["Own"].position[0], 0.0);
     EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], 37.0);
     EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], 0.0f);
+}
+
+// Step N02R (roadmap 4 item 4, the user's (b) of 2026-10-28): a cell a live
+// frame's chain wrote and no replayed script writes again (IngameParameter
+// [0][2], the checkpoint chain's pinned Set Cell; session_host_world.hpp
+// live_cell_writes) is written after that tick's replayed step and before the
+// tick's record is captured (rollback_world::after_step).  A window ending at
+// the frame of the write then arrives at the live record, and a later rewind
+// anchored there restores the written value.  Without the hook the replay
+// keeps the anchor's value and the script check differs (RTX: rtx_1 819,
+// "cell IngameParameter[0][2] 0 vs 1").
+TEST(RollbackEngine, ALiveFramesCellWriteIsWrittenAgainAfterItsReplayedStep) {
+    for (const bool hooked: {false, true}) {
+        SCOPED_TRACE(hooked ? "after_step set" : "no after_step");
+        fake_world world;
+        world.bodies["Prop"].position[0] = 1.0;
+        rollback_engine engine;
+        auto w = world.adapter();
+        int cell = 1;   // the cell before the session's first write
+        bmmo::session::live_cell_writes writes;
+        w.capture_scripts = [&](std::vector<uint8_t>& out) {
+            out = {static_cast<uint8_t>(cell)};
+            return true;
+        };
+        w.restore_scripts = [&](const std::vector<uint8_t>& in, uint32_t) {
+            cell = in.at(0);
+            return true;
+        };
+        if (hooked)
+            w.after_step = [&](uint32_t tick) {
+                world.calls.push_back("after_step " + std::to_string(tick));
+                if (const int* value = writes.at(tick)) cell = *value;
+            };
+        const auto live = [&](uint32_t from, uint32_t to) {
+            for (uint32_t tick = from; tick <= to; ++tick) {
+                w.step();
+                if (tick == 5) cell = 0;   // the crossing's write, in the live frame of 5
+                writes.after_frame(tick, cell);
+                rollback_tracked tracked;
+                tracked.mechanisms = {"Prop"};
+                engine.record(w, tick, tracked, {});
+            }
+        };
+        live(1, 5);
+        ASSERT_EQ(writes.size(), 1u) << "the first frame only sets what is seen; 5 changed the cell";
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 2, 5, no_input, "test"));
+        if (!hooked) {
+            EXPECT_EQ(engine.stats().script_mismatches, 1u) << "the anchor's 1 kept to the end of the window";
+            EXPECT_EQ(cell, 1);
+            continue;
+        }
+        EXPECT_EQ(engine.stats().script_mismatches, 0u) << "the window ends at the write's frame: the live record";
+        EXPECT_EQ(cell, 0);
+        EXPECT_EQ(world.count("after_step "), 3) << "one per replayed tick (3, 4, 5)";
+        const size_t at5 = world.first("after_step 5");
+        size_t last_step = 0;
+        for (size_t i = 0; i < at5; ++i)
+            if (world.calls[i] == "step") last_step = i;
+        EXPECT_LT(world.first("after_step 4"), last_step) << "tick 5's step runs between the hooks of 4 and 5";
+        writes.seen(cell);   // the live cells a rewind left (live_cells_guard's note)
+        live(6, 8);
+        EXPECT_EQ(writes.size(), 1u) << "no frame after 5 changed the cell";
+        ASSERT_TRUE(engine.rewind_to(w, 5, 8, no_input, "test"));
+        EXPECT_EQ(engine.stats().script_mismatches, 0u) << "the replayed record of 5 carries the write";
+        EXPECT_EQ(cell, 0);
+    }
 }
 
 // 9.25 rule 5: the tracked set changing from one tick to the next is not a

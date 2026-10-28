@@ -258,6 +258,13 @@ namespace bmmo::session {
         // (game/script_replay.hpp), where the live frame runs them - before
         // the physics step.  Null on the server/tests.
         std::function<void(uint32_t tick)> pre_step;
+        // Optional (step N02R): after each re-simulated tick's step, before
+        // its record is captured - a write the live frame of `tick` made that
+        // no replayed script makes again (game/session_host_support.hpp
+        // manager_activations::after_replayed_step: IngameParameter[0][2],
+        // the checkpoint and death chains'), so the replayed record of that
+        // tick carries it as the live record does.  Null: none.
+        std::function<void(uint32_t tick)> after_step;
         // Optional: the navigated remote balls whose current body was born at
         // or before `tick`, each with the lifetime generation that body has
         // now.  Asked after pre_step(tick), which is where a birth deferred
@@ -1968,6 +1975,7 @@ namespace bmmo::session {
                 }
                 if (!world.step()) break;
                 ++stats_.resim_ticks;
+                if (world.after_step) world.after_step(t);   // step N02R
                 // Step RO1: a fixed birth destroyed at the restore is back
                 // after its birth tick's step when the replayed scripts made
                 // it; one that is not stays out (logged, the caller counts).

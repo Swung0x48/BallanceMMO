@@ -633,9 +633,20 @@ numbers 1-10 are unchanged.
    other client, with no own crossing, held 1 there too and only the
    server's clone crossing had written 0, so it is per-player state for a
    few ticks, not a lasting split; no reader today (every manager run
-   follows `run_sector_pass`'s 0). Options: (a) leave `[0][2]`
+   follows `run_sector_pass`'s 0). Options were (a) leave `[0][2]`
    out of what a restore writes, (b) record and replay the crossing's
-   write, (c) leave it. Still queued here: **Q5** (the
+   write, (c) leave it. **The user chose (b) (2026-10-28, verbatim "(b)
+   Record and replay"); built at step N02R** (resync design, As built
+   (step N02R)): every live-frame write of `[0][2]` (the crossing's and the
+   death chain's) is recorded and written back after its replayed step;
+   the `[0][2]` script-check lines of core_ref_s8 and rtx_1 are gone.
+   **Found at N02R, queued here (the user's to answer):** the death
+   chain's `IngameParameter[0][1]` write (Gameplay_Ingame / Deactivate
+   Ball: the dying ball's sector) is not replayed either - swing_snapoff's
+   "[0][1] 1 vs 4" / "4 vs 3" at the ends of windows across an own death;
+   no reader with the core on; options (a) leave it, (b) the same record
+   and replay for `[0][1]`, (c) leave `[0][1]` out of the compare. Still
+   queued here: **Q5** (the
    server's selected entries in a resync's portable record; a protocol
    change, 14 at the earliest - until then a resync holds the outside
    entries but keeps the live selected ones), and **gap L as the design's
