@@ -472,6 +472,22 @@ numbers 1-10 are unchanged.
        started sector stamped 1028 (resync design, B2SX note)]; a retail
        follow check of Q5's re-armed link (the "fires once" result is
        Ballanced CK2's, the retail Virtools `CK2.dll` was not checked).
+   - **Session I/O on the tick thread** (queued by step SMK, 2026-10-28):
+     every write of a session is synchronous on the tick / game thread -
+     the journal flushes after every player, event, checkpoint, note,
+     correction and resync record (`session/journal.hpp:817-843`, server,
+     headless client and retail mod alike), the headless client
+     `fflush`es its log after every line (`sim/session_client.cpp:692-707`)
+     and writes its capture there. WG1's smoke (949f960) met a 1-2 s
+     write stall of the host's D: drive (NTFS event 170) and every client
+     and the server stalled with it: rebases, resyncs, starvation past the
+     48-tick reach; on retail the same stall is a game freeze. Fix: a
+     buffered writer thread for the journal, the log and the capture (or
+     at least asynchronous flushes), so a storage stall delays the files,
+     not the tick; a crash then loses the writer's queue, which the
+     journal's flush-per-event rule was written to bound (choose the
+     bound when it is built). Evidence and numbers:
+     `world-agreement-gaps-design.md`, "As built (step SMK)".
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

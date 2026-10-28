@@ -2222,3 +2222,106 @@ path).
 - `game/checkpoint_phase.hpp:35` still names
   `physics_world::rewire_ball_identity_reads` in a comment (a retail-compiled
   header; G6's documentation pass).
+
+### As built (step SMK, 2026-10-28): the WG1 smoke regression attributed - a host storage stall, not code
+
+WG1's live smoke (above, "UNATTRIBUTED") is attributed. No code changed.
+
+- **What the metrics count.** A client's `frames` (status line) is the
+  number of steps since its tick base, so it restarts at every rebase /
+  resync: `frames` 311 of tick 3585 means "the last base was 311 ticks
+  ago", not "311 steps were run". `starved` counts the server's input
+  reports that found no fresh frame from the client; `lead` is how far the
+  client's own tick runs ahead of the server's. The pacer
+  (`session_client.cpp:2699-2713`) rebases a client whose schedule is more
+  than `rebase_threshold()` frames behind and asks for a resync.
+- **Where the time went (WG1's capture, sector 4).** The inbound captures
+  record every wall-clock read (`.local-tools/work/SMK/gaps.py`,
+  `gapabs.py`): every gap over 100 ms (11-13 per client) lies between
+  `pace_expected` and the next pass's `run_report`, i.e. inside `frame()`,
+  never in the pacer's sleep; on the shared steady clock the four clients'
+  gaps END at the same instant (to 1 ms: e.g. 17.765-17.776 s ->
+  18.935-18.936 s, the 1.16 s stall that rebased clients 0 and 1 at 886)
+  while they start up to 30 ms apart. Four processes released together are
+  blocked on one external resource, not running code. The server's journal
+  (`align.py`: header `utc_ms` + TICK `ms`) has its step gaps in the same
+  wall windows, although it runs in the WSL VM: the windows BEGIN together
+  (server 9.745..9.852 / clients 9.724..9.843 s; 13.825..14.017 /
+  13.815..14.033; 20.646..20.835 / 20.633..21.804 - the clients' third
+  window ends ~1 s after the server's, it is the 1.16 s stall above), so
+  the stall reaches Linux and Windows processes alike. The server's
+  windows recur on a ~1.36 s cadence (9.745 s + 1, 3, 6, 7, 8, 9 x ~1.36 s:
+  11.100, 13.825, 17.921, 19.261, 20.646, 22.034; 17.327 is off it), a
+  periodic outside event rather than anything the session does per tick. Sector 2 c0: a 1887.9 ms frame = its 124-tick rebase at 690; the
+  server held all four players' inputs 689..754 (`S2 held`), step max
+  716 ms. The four clients of each sector share their maximum frame time
+  (s2 1888-1911 ms, s3 2189.5-2189.6, s4 1160-1171).
+- **The cause.** Every process involved writes to the one NVMe drive D:
+  (Acer SSD N7000 2TB, disk 1): the clients' journals, logs and captures,
+  the server's log through 9P, and the Arch VM's ext4 (its `ext4.vhdx` is
+  `D:\Arch`, so the server's journal too). NTFS's hourly IO latency summary
+  for D: (`Microsoft-Windows-Ntfs/Operational` event 170, interval
+  14:54-15:54, which holds WG1's smoke 15:16-15:21) has `Write: Paging,
+  NonCached, Sync` 85 writes at 0.5-1 s, 29 at 1-2 s, 4 at 2-10 s, `Write:
+  NonPaging, Cached, Sync` (an ordinary buffered write) 5 at 0.5-1 s and 4
+  at 1-2 s, `File flush` max 1 s; the hour before (13:54-14:54) has none
+  over 512 ms. The drive stall is the trigger; what lets it reach the
+  tick is the code's: every write of a session runs synchronously on the
+  tick thread - the journal flushes the stream after every player, event,
+  checkpoint, note, correction and resync record
+  (`session/journal.hpp:817-843`, `record()`), the headless client's
+  `logf` / `log_line` `fflush(stdout)` after every line
+  (`sim/session_client.cpp:692-707`; stdout is `clientN.log` on D:), the
+  inbound capture `fwrite`s through the CRT buffer
+  (`sim/inbound_capture.hpp:270`), and the server's journal and log are
+  written from its step loop the same way. The shared core does the same
+  in the retail mod, on the game thread, where the same stall is a
+  1-2 s game freeze. A write that waits 1-2 s inside `frame()` puts the
+  client past the rebase threshold: rebase, resync, inputs late at the
+  server (starvation, relayed frames past the 48-tick reach). The
+  capture has no per-write timing, so which write each gap waited on is
+  not shown gap by gap; the `Paging, NonCached` bucket can also stall a
+  process on a page fault, which no writer thread removes. Queued as its
+  own item (roadmap §4 item 2, "Session I/O on the tick thread"): the
+  journal, log and capture writes move to a buffered writer thread (or
+  at least the per-record flushes become asynchronous), so a storage
+  stall delays the files, not the tick. Why the drive
+  stalled (its own write cache / garbage collection after the step's
+  writes, or a monitoring tool's polling) is outside the code and was not
+  identified; REF9's swing arm saw the same signature once (one 455-470 ms
+  frame in all four clients, 14:07-14:14, in the 256-512 ms bucket of that
+  hour).
+- **Not reproduced at HEAD 949f960, two runs** (WG1's exact arguments:
+  `s9_run.sh <label> snapoff 4 60 13 true`, clients `build-agent-rWG1`,
+  through `.local-tools/work/SMK/mon_run.sh` with typeperf / cpu_sampler /
+  vmstat monitors; stores `maps/arena-test/smk/head1|head2`, per-sector
+  `maps/arena-test/s9x_head1|head2`): head1 (15:38-15:44, the Arch binary
+  WG1 ran) and head2 (15:54-15:59, started 3 s after relinking the Arch
+  server from HEAD, `ballanced-36c04e3d24c9+bmmo-949f960cefe9`, WG1's
+  precondition): 4/4 sectors PASS in both, every client starved 0,
+  rebases 0, resyncs 0, relay_late 0, lag max 1-12, frame max 18-40 ms,
+  server step max 14.8 / 15.1 ms, no capture gap over 50 ms; mechanisms
+  3/17/9/32 per sector (WG1: 3/17/9/14), journals replay in full. The
+  sector-4 14 is the stall's resyncs, not fewer modules reached: WG1's
+  sector-4 clients also had 32/32 (c0 at tick 304, c1 331, c2 384, c3
+  420), then 0/0 after the resync at 886 (c0 966, c1 974) and 14/14 to
+  the end (c0 1261, c1 1300, c2 1065, c3 1080). `mechanisms=` is the
+  client's comparison registry (`mechanism_tracking_`, known/resolved),
+  which a resync or re-assign clears (`client_core.cpp:642`, `:703`) and
+  which learns names only from the Mechanism rows of a snapshot
+  (`client_core_messages.cpp:73-76`); with periodic snapshots off, after
+  a late resync it holds only what that resync's snapshot named. The
+  code is from 2026-10-22 (d64ff882, 90298726), before EL6. Sectors 2
+  and 3 resynced too and kept 17 and 9. It is a snapshot-path
+  diagnostic, not the world's content (the world's exactness is the
+  server journal replay); not queued. The WG1
+  numbers stay a one-off. The pre-step control (`build-agent-rWG0`) and the
+  bisect were not run: nothing reproduces at HEAD.
+- **el6_smoke2 is no control for it** (as WG1 said): `work/EL6/live.sh` ran
+  `--drive --latency-ms 150`, no captures, a single server for the four
+  sectors as here; it says nothing about a host stall either way.
+- **For later live judges:** a starvation / rebase failure whose clients
+  share their `frame_time` maximum, or whose capture gaps end at one
+  instant (`gapabs.py`), is a host stall; check
+  `Microsoft-Windows-Ntfs/Operational` event 170 for D: before attributing
+  it to code.
