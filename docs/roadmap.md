@@ -805,10 +805,19 @@ numbers 1-10 are unchanged.
      uses nothing of it). Found at R12, queued here (item 2): the cap's
      estimator over-states the per-tick cost of shallow rewinds that make
      bodies (`core_ref_s7/l8_cross`: 2.6-3.3 ms "a tick", cap 48); whether
-     the births' share leaves the replay stage is a design choice. Also
+     the births' share leaves the replay stage is a design choice
+     [the user, 2026-10-27: "拆成固定开销 (Recommended)" - built at step
+     B5RC as R12B and NOT built (the user, 2026-10-28, "按推荐继续"): the
+     over-statement was not the births (a birth tick ~0.1 ms over an
+     ordinary one) but the headless-only end-of-replay savestate text
+     diff, 7-10 ms in each of a session's first 8 such rewinds; step B5RX
+     (R12D) leaves that diff's time out of the meter (option (b)), the
+     l8_cross cap 48 / 82 / 48 / 48 -> 73 / 92 / 71 / 70; late-player
+     design §2.5 "As built (step B5RX)"]. Also
      for the user (R12 review): the cap before a client's first rewind is
      48, so a first stall deeper than 48 before any rewind still resyncs;
-     a different starting value is the user's to choose. The cap's samples
+     a different starting value is the user's to choose [the user,
+     2026-10-27: "保持 48 (Recommended)" - it stays 48]. The cap's samples
      are captured clock reads since the review round, so a capture replay
      reproduces the cap exactly; (f) a retail run with the review round's
      x86 build (its retail behaviour is unchanged: retail's `now` is its

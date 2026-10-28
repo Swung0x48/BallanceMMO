@@ -1525,3 +1525,32 @@ sources are fixed.
   off (headless `--no-rollback`, retail `session rollback off`) the blend
   ladder still sets the balls from every snapshot, as before (said in its
   comment).
+
+**Item R12D** (the late-player item of the batch; late-player design §2.5,
+"As built (step B5RX)"): R12B is not built, and the end-of-replay
+savestate check's text diff - the headless client's diagnostic - runs after
+the rewind's last cost-clock read, out of the cap's meter; B5RC's
+`--replay-free-cost-clock` landed with it as harness tooling (the replays of
+item RC3A use it).
+
+Verification (quick tier, 00:36:37-00:43:45, about 7 minutes): x64
+BUILD-OK, x86 CLIENT-BUILD-OK (the Arch server not rebuilt: no server file
+changed), GCC syntax 29/29 ok, `BallanceMMOMessageTests` 554/554; the wire
+check and the replays above (all offline, each under 40 s). No live run:
+R12D's cap was shown by the free-clock replay, RC3A's retail path is one
+configuration line equal to the core's default (the retail smoke run is
+deferred to the final verification). Gate round (00:53-01:00, about 7
+minutes, after the review's fix-ups): the build trees record no header
+dependencies (the localized MSVC `/showIncludes` prefix does not match
+`msvc_deps_prefix`: `ninja -t deps` lists 0 for every object), so every
+source that includes `client_core.hpp`, `rollback.hpp` or
+`inbound_capture.hpp` was touched and rebuilt (x64 29 objects, x86 14);
+x64 BUILD-OK, x86 CLIENT-BUILD-OK, GCC syntax 29/29 ok,
+`BallanceMMOMessageTests` 555/555;
+`OLD_EXTRA= NEW_EXTRA=--body-set-corrections wire_check.sh rB2SX rB5RXg
+rB5RXgc`: ALL SAME, every replay to its end (12 sends SAME, 12 journals
+IDENTICAL); the RC3 default replays (`rB5RXgd`) equal the implement round's
+(`rB5RXw_new`) in all 12 sends and journals, the 8 known short ones
+flagged COVERAGE-SHORT; solo1 / solo2 strict against the live journals:
+SAME / IDENTICAL (`rB5RXg_solo`). No CK2, IVP or physics_RT change and no
+engine change in this step; no protocol or journal change (13 / v7).

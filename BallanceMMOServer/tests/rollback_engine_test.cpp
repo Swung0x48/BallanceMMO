@@ -3439,6 +3439,69 @@ TEST(RollbackEngine, RewindCostCapFromTheClientsOwnRewinds) {
     EXPECT_EQ(mixed.cap(), 48u);
 }
 
+// Step B5RX (R12D): the end-of-replay savestate check's text diff (the
+// headless client's diagnostic, 7-10 ms a call) runs after the rewind's
+// last cost-clock read, so the meter holds the restore and the replay only;
+// the scripts' check (both hosts) stays inside it.  The same three reads in
+// the same order (a capture replays as before), and the lines are logged in
+// their old order.
+TEST(RollbackEngine, TheSavestateDiffIsLeftOutOfTheRewindCost) {
+    using time_point = std::chrono::steady_clock::time_point;
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Remote"];
+    rollback_engine engine;
+    auto w = world.adapter();
+    // A fake clock: 1 ms a step, 10 ms a savestate diff.
+    time_point now{};
+    std::vector<std::string> reads;
+    engine.set_cost_clock([&now, &reads](bmmo::session::clock_site site) {
+        reads.push_back(bmmo::session::clock_site_name(site));
+        return now;
+    });
+    const auto step = w.step;
+    w.step = [step, &now]() {
+        now += std::chrono::milliseconds(1);
+        return step();
+    };
+    int diffs = 0;
+    w.diff_savestate = [&now, &diffs, &world](const std::vector<uint8_t>&, const std::vector<uint8_t>&) {
+        ++diffs;
+        now += std::chrono::milliseconds(10);
+        world.calls.push_back("diff_savestate");
+        return std::string("a field");
+    };
+    rollback_tracked tracked;
+    tracked.remote_entities = {"Remote"};
+    input_frame predicted{};
+    predicted.keys = 1;
+    for (uint32_t tick = 1; tick <= 10; ++tick) {
+        world.pending_keys["Remote"] = predicted.keys;
+        w.step();
+        engine.record(w, tick, tracked, {{"Remote", predicted}});
+    }
+    // The corrected input moves the body differently: the replay ends on a
+    // blob that differs from the live record, so the diff runs.
+    const auto input_at = [](const std::string& entity, uint32_t, input_frame& out) {
+        if (entity != "Remote") return false;
+        out = input_frame{};
+        return true;
+    };
+    world.calls.clear();
+    reads.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 6, 10, input_at, "Remote input corrected at tick 7"));
+    EXPECT_EQ(diffs, 1);
+    EXPECT_EQ(reads, (std::vector<std::string>{"rewind_start", "rewind_replay", "rewind_end"}));
+    ASSERT_EQ(engine.rewind_cost().samples(), 1u);
+    EXPECT_NEAR(engine.rewind_cost().replay_ms_per_tick(), 1.0, 1e-9) << "4 steps in 4 ms, the diff's 10 ms left out";
+    EXPECT_NEAR(engine.rewind_cost().restore_ms(), 0.0, 1e-9);
+    const size_t diff_at = world.first("diff_savestate"), line_at = world.first("log savestate replay:"),
+                 rollback_at = world.first("log rollback to tick 6");
+    EXPECT_LT(diff_at, line_at);
+    EXPECT_LT(line_at, rollback_at) << "logged before the rewind's own line, as before";
+    EXPECT_LT(rollback_at, world.calls.size());
+}
+
 // Late-player design 3.3: the owner's own birth, made live at tick 5, was
 // applied by the server at tick 8 (a MOVED echo).  move_birth puts the
 // records where the server's world is: no body from 5 to 7 (no name, no

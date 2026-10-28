@@ -146,15 +146,30 @@ namespace bmmo::sim {
 
         const std::string& command_line() const { return command_line_; }
 
+        // A FREE site (the headless --replay-free-cost-clock, step B5RC,
+        // landed at B5RX): the
+        // replay reads its own clock there, and the capture's reads at that
+        // site are passed over wherever the replay meets them.  For a
+        // paired replay whose rewinds differ from the capture's (another
+        // rule, another build's clock reads): the rewind cost's reads
+        // (rewind_*) decide nothing but the cap.  Off by default: every read
+        // is taken in order.
+        static_assert(static_cast<size_t>(wall_site::count_) <= 64, "the free-site mask is one uint64_t");
+        void set_free(wall_site site) { free_ |= uint64_t(1) << static_cast<unsigned>(site); }
+        bool is_free(wall_site site) const { return (free_ >> static_cast<unsigned>(site)) & 1u; }
+        uint64_t free_skipped() const { return free_skipped_; }
+
         // The next record's tag; tag::end at the end of the data too.
         tag peek() const {
-            if (pos_ >= data_.size()) return tag::end;
-            return static_cast<tag>(data_[pos_]);
+            const size_t at = next_pos();
+            if (at >= data_.size()) return tag::end;
+            return static_cast<tag>(data_[at]);
         }
-        bool complete() const { return pos_ < data_.size() && peek() == tag::end; }
-        bool exhausted() const { return pos_ >= data_.size() || peek() == tag::end; }
+        bool complete() const { return next_pos() < data_.size() && peek() == tag::end; }
+        bool exhausted() const { return next_pos() >= data_.size() || peek() == tag::end; }
 
         bool take_iteration(uint64_t& index, uint64_t& steps) {
+            skip_free();
             if (peek() != tag::iteration || pos_ >= data_.size()) return false;
             const size_t at = pos_++;
             if (get_u64(index) && get_u64(steps)) { ++records_; return true; }
@@ -163,6 +178,7 @@ namespace bmmo::sim {
         }
 
         bool take_message(std::string& bytes) {
+            skip_free();
             if (peek() != tag::message || pos_ >= data_.size()) return false;
             const size_t at = pos_++;
             uint32_t size = 0;
@@ -178,6 +194,7 @@ namespace bmmo::sim {
         }
 
         bool take_connection(int32_t& state, uint32_t& handle, std::string& end_debug) {
+            skip_free();
             if (peek() != tag::connection || pos_ >= data_.size()) return false;
             const size_t at = pos_++;
             uint32_t s = 0;
@@ -193,6 +210,7 @@ namespace bmmo::sim {
         // The clock read at `site`: false, with `error` saying what the
         // capture holds instead, when the next record is anything else.
         bool take_clock(wall_site site, int64_t& value, std::string& error) {
+            skip_free();
             if (peek() != tag::clock || pos_ + 10 > data_.size()) {
                 error = std::string("expected a clock read at ") + wall_site_name(site) + ", the capture has " + describe_next();
                 return false;
@@ -210,15 +228,16 @@ namespace bmmo::sim {
         }
 
         std::string describe_next() const {
+            const size_t at = next_pos();
             switch (peek()) {
             case tag::iteration: return "a loop pass";
             case tag::message: return "a message";
             case tag::clock:
-                return pos_ + 1 < data_.size()
-                    ? std::string("a clock read at ") + wall_site_name(static_cast<wall_site>(data_[pos_ + 1]))
+                return at + 1 < data_.size()
+                    ? std::string("a clock read at ") + wall_site_name(static_cast<wall_site>(data_[at + 1]))
                     : std::string("a truncated clock read");
             case tag::connection: return "a connection state change";
-            case tag::end: return pos_ >= data_.size() ? "the end of the data (no end marker)" : "the end marker";
+            case tag::end: return at >= data_.size() ? "the end of the data (no end marker)" : "the end marker";
             }
             return "an unknown record";
         }
@@ -230,6 +249,23 @@ namespace bmmo::sim {
         }
 
     private:
+        // pos_, past any clock reads at a free site (each 10 bytes: tag,
+        // site, i64).
+        size_t next_pos() const {
+            size_t at = pos_;
+            while (free_ && at + 10 <= data_.size() && static_cast<tag>(data_[at]) == tag::clock
+                   && is_free(static_cast<wall_site>(data_[at + 1])))
+                at += 10;
+            return at;
+        }
+        void skip_free() {
+            while (free_ && pos_ + 10 <= data_.size() && static_cast<tag>(data_[pos_]) == tag::clock
+                   && is_free(static_cast<wall_site>(data_[pos_ + 1]))) {
+                pos_ += 10;
+                ++free_skipped_;
+            }
+        }
+
         void put_bytes(const void* p, size_t n) {
             if (n && !write_failed_ && std::fwrite(p, 1, n, file_) != n) write_failed_ = true;
         }
@@ -290,6 +326,8 @@ namespace bmmo::sim {
         std::vector<uint8_t> data_;
         size_t pos_ = 0;
         uint64_t records_ = 0;
+        uint64_t free_ = 0;            // set_free's sites, one bit each
+        uint64_t free_skipped_ = 0;    // captured reads at a free site passed over
         uint64_t messages_ = 0;
         std::string command_line_;
     };

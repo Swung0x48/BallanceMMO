@@ -1052,6 +1052,14 @@ namespace bmmo::session {
             // captures them and a capture replay takes the captured ones);
             // the stats keep their own reads (a replay's t_rest / t_rep are
             // the replay's own cost).
+            // Step B5RX (R12D, the user's option (b) of B5RC's stop): the
+            // meter's span ends at the last replayed tick's capture
+            // (cost_ends), before the end-of-replay savestate check whose
+            // text diff only the headless client runs (7-10 ms a call), so
+            // a headless client measures the cap a retail client would.  The
+            // same three reads in the same order: a capture replays as
+            // before.  A rewind that never reaches its last tick (frozen,
+            // too far, a failed step) still reads rewind_end at its end.
             struct rewind_timer {
                 using time_point = std::chrono::steady_clock::time_point;
                 rollback_stats& stats;
@@ -1059,13 +1067,18 @@ namespace bmmo::session {
                 const std::function<time_point(clock_site)>& clock;
                 uint64_t resim_before = stats.resim_ticks;
                 time_point started = std::chrono::steady_clock::now(), split{};
-                time_point cost_started = read(clock_site::rewind_start), cost_split{};
-                bool have_split = false;
+                time_point cost_started = read(clock_site::rewind_start), cost_split{}, cost_ended{};
+                bool have_split = false, have_cost_end = false;
                 time_point read(clock_site site) const { return clock ? clock(site) : std::chrono::steady_clock::now(); }
                 void replay_begins() {
                     split = std::chrono::steady_clock::now();
                     cost_split = read(clock_site::rewind_replay);
                     have_split = true;
+                }
+                void cost_ends() {
+                    if (!have_split || have_cost_end) return;
+                    cost_ended = read(clock_site::rewind_end);
+                    have_cost_end = true;
                 }
                 ~rewind_timer() {
                     const auto ended = std::chrono::steady_clock::now();
@@ -1076,7 +1089,7 @@ namespace bmmo::session {
                     if (have_split) stats.replay_us += us(split, ended);
                     stats.rewind_us_max = std::max(stats.rewind_us_max, us(started, ended));
                     if (have_split) {
-                        const auto cost_ended = read(clock_site::rewind_end);
+                        cost_ends();
                         cost.sample(static_cast<double>(us(cost_started, cost_split)) / 1000.0,
                                     static_cast<double>(us(cost_split, cost_ended)) / 1000.0,
                                     static_cast<uint32_t>(stats.resim_ticks - resim_before));
@@ -2042,6 +2055,19 @@ namespace bmmo::session {
                 // from the live record by design - with every member's trafo
                 // pieces in the blob that rendering was a twelfth of a 150 ms
                 // client's frame time (step TR3), for lines past the cap.
+                // Step B5RX (R12D): the scripts' check is made first (both
+                // hosts make it, so its time stays in the rewind's cost),
+                // then the rewind's cost ends, then the savestate check - the
+                // headless client's text diff, out of the meter; the lines
+                // are logged in their old order (savestate, then scripts).
+                bool script_differs = false, script_logical = true;
+                std::string script_where;
+                if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts && !rs
+                        && state.scripts != live_scripts) {
+                    script_differs = true;
+                    if (world.diff_scripts) script_where = world.diff_scripts(live_scripts, state.scripts, script_logical);
+                }
+                if (t == current_tick) timer.cost_ends();
                 if (t == current_tick && have_live_savestate && state.have_savestate && world.log
                         && savestate_replay_logs_ < 8 && state.savestate != live_savestate && rows.empty()) {
                     // A parked birth makes the live record describe a world
@@ -2062,17 +2088,14 @@ namespace bmmo::session {
                         }
                     }
                 }
-                if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts && !rs
-                        && state.scripts != live_scripts) {
-                    bool logical = true;
-                    std::string where;
-                    if (world.diff_scripts) where = world.diff_scripts(live_scripts, state.scripts, logical);
-                    if (logical) ++stats_.script_mismatches; else ++stats_.script_float_mismatches;
-                    if (world.log && (logical ? script_mismatch_logs_ : script_float_logs_)++ < script_log_cap_)
+                if (script_differs) {
+                    if (script_logical) ++stats_.script_mismatches; else ++stats_.script_float_mismatches;
+                    if (world.log && (script_logical ? script_mismatch_logs_ : script_float_logs_)++ < script_log_cap_)
                         world.log(std::string("script replay: the scripts re-executed to tick ") + std::to_string(t)
-                                  + (logical ? " differ from the live record: " : " differ in float parameters only: ")
-                                  + (where.empty() ? std::to_string(state.scripts.size()) + " vs "
-                                                       + std::to_string(live_scripts.size()) + " bytes" : where));
+                                  + (script_logical ? " differ from the live record: " : " differ in float parameters only: ")
+                                  + (script_where.empty() ? std::to_string(state.scripts.size()) + " vs "
+                                                              + std::to_string(live_scripts.size()) + " bytes"
+                                                          : script_where));
                 }
                 if (recorded) {
                     // The rows stay with their tick for the next replay.

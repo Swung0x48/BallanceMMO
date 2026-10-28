@@ -362,6 +362,16 @@ namespace {
         // no network and nothing sent.  Off by default.
         std::string capture_inbound;
         std::string replay_inbound;
+        // --replay-free-cost-clock (step B5RC, landed as harness tooling at
+        // B5RX: a measurement aid for paired replays): with --replay-inbound,
+        // the rewind cost's clock reads (rewind_start, rewind_replay,
+        // rewind_end) read this
+        // replay's own clock and the capture's reads at those sites are
+        // passed over, so a build or a rule whose rewinds differ from the
+        // capture's replays it to the end.  Those reads decide only the
+        // reach's cap: a replay whose cap does not bind keeps the journal
+        // of a strict one.  Off: every read is the capture's, in order.
+        bool replay_free_cost_clock = false;
         // --trace-sends FILE: one line per payload the session flow sends
         // (tick, Steam flags, size, FNV-1a 64), written in a replay too, where
         // nothing reaches the wire: the replay's check of the sends.  Off by
@@ -434,6 +444,7 @@ namespace {
                   "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)\n"
                   "       [--capture-inbound FILE | --replay-inbound FILE]   (record the inbound messages and clock reads; "
                   "replay them, unpaced, sending nothing)\n"
+                  "       [--replay-free-cost-clock]   (with --replay-inbound: the rewind cost's clock reads are the replay's own)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
                   "       [--ignore-snapshots] [--no-trafo-cap] [--trafo-no-resets] [--leave-at TICK | --leave-after-unphys D | --leave-after-trafo D]\n"
                   "       [--sector-at SECTOR:TICK]...   (enter SECTOR at TICK, an own Sector input; repeatable; --beam is too)\n"
@@ -609,6 +620,7 @@ namespace {
             }
             else if (arg == "--capture-inbound") { if (!(v = next())) return false; out.capture_inbound = v; }
             else if (arg == "--replay-inbound") { if (!(v = next())) return false; out.replay_inbound = v; }
+            else if (arg == "--replay-free-cost-clock") out.replay_free_cost_clock = true;
             else if (arg == "--trace-sends") { if (!(v = next())) return false; out.trace_sends = v; }
             else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
             else if (arg == "--no-trafo-cap") out.no_trafo_cap = true;
@@ -837,6 +849,12 @@ namespace {
                 }
                 logf("replay-inbound: replaying %s, captured as: %s", args_.replay_inbound.c_str(),
                      inbound_.command_line().c_str());
+                if (args_.replay_free_cost_clock) {
+                    for (const auto site: {bmmo::sim::wall_site::rewind_start, bmmo::sim::wall_site::rewind_replay,
+                                           bmmo::sim::wall_site::rewind_end})
+                        inbound_.set_free(site);
+                    logf("replay-inbound: the rewind cost's clock reads are this replay's own (--replay-free-cost-clock)");
+                }
                 const std::string differ = replay_arguments_differ(inbound_.command_line(), command_line);
                 if (!differ.empty())
                     logf("replay-inbound: warning: the arguments differ from the capture's (%s); a divergence may be "
@@ -874,6 +892,9 @@ namespace {
                         ++i;
                         continue;
                     }
+                    // A replay switch with no value (step B5RX): the
+                    // harness's clock choice, not the capture's.
+                    if (w == "--replay-free-cost-clock") continue;
                     kept.push_back(w);
                     if (w == "--record") { kept.push_back("<path>"); ++i; }
                 }
@@ -1643,6 +1664,7 @@ namespace {
         // replaying (a read at another site than the capture's next one is a
         // divergence).
         clock_type::time_point wall_now(bmmo::sim::wall_site site) {
+            if (inbound_.replaying() && inbound_.is_free(site)) return clock_type::now();
             if (inbound_.replaying()) {
                 int64_t value = 0;
                 std::string error;
@@ -1760,6 +1782,9 @@ namespace {
                          static_cast<unsigned long long>(inbound_.messages()),
                          inbound_.complete() ? "the capture's end marker reached" : "the capture had no end marker");
                 }
+                if (args_.replay_free_cost_clock)
+                    logf("replay-inbound: %llu captured rewind-cost reads passed over (--replay-free-cost-clock)",
+                         static_cast<unsigned long long>(inbound_.free_skipped()));
             }
             if (send_trace_) {
                 std::fclose(send_trace_);

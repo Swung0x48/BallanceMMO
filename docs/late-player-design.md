@@ -1121,6 +1121,74 @@ Review round (the step's review, two should-fix findings, both fixed):
   delegated to this step ("state which and why") and 48 is what every
   client claimed before step 12; a different starting value (for example
   the x64 measurement's 90) is the user's to choose.
+- **The user's answers to R12's two queued points (2026-10-27).** The
+  cap before a session's first rewind: **"保持 48 (Recommended)"** - it
+  stays 48 (the floor) until the first rewind is measured. The births'
+  share of the estimator: **"拆成固定开销 (Recommended)"** - built at step
+  B5RC as R12B and not committed: its premise was measured wrong (below).
+
+**As built (step B5RX, item R12D): R12B dropped; the headless-only savestate
+diff's time left out of the rewind cost meter** (the user, 2026-10-28,
+answering B5RC's stop: "按推荐继续" - option (b)). No CK2, physics_RT or IVP
+change; no protocol, journal or capture-format change.
+- **Why R12B is not built.** B5RC built it (`.local-tools/work/B5RC/r12b.patch`
+  stays a patch) and found the premise wrong (its diagnostic,
+  `work/B5RC/diag`, `cap_variants.py`): a birth tick at `l8_cross` costs
+  0.45-0.55 ms against 0.39-0.44 ms for an ordinary replayed tick - the
+  births are cheap. The 7.7-10.9 ms ticks that held the cap at 48 are a
+  rewind's LAST replayed tick, where the engine's end-of-replay savestate
+  check (`rollback.hpp`, the replay loop at `t == current_tick`) calls
+  `world.diff_savestate`, which renders both blobs as text: 7.2-10.3 ms a
+  call, at most 8 a session (`savestate_replay_logs_`). Only the headless
+  client installs that hook (`session_client.cpp`, "Diagnostic (headless
+  only: the mod has no blob diff)"; the engine keeps the live blob aside
+  only when the hook is set), so a retail client never pays it and the
+  headless meter was pessimistic against retail. The committed R12
+  estimator stays.
+- **As built** (`rollback.hpp`, `restore_and_replay`): the rewind timer
+  gained `cost_ends()`, the `rewind_end` read taken once; the last replayed
+  tick calls it right after its capture, so the meter's span is the restore
+  and the replay. The scripts' end-of-replay check (both hosts run it) is
+  made before that read and logged after the savestate line as before; the
+  savestate check (the headless text diff) runs after it. A rewind that
+  never reaches its last tick (frozen clock, too far, a failed step) still
+  reads `rewind_end` in the timer's destructor. The same three cost-clock
+  reads in the same order and no new site, so every existing capture
+  replays strictly (below); the log lines are unchanged in text and order.
+  What leaves the meter besides the diff: the record's store, the
+  navigation re-poll, the rewind's log line and its correction record - a
+  few microseconds, on both hosts alike. The stats' own `t_rest` / `t_rep`
+  are unchanged (they still include the diff). Unit test
+  `RollbackEngine.TheSavestateDiffIsLeftOutOfTheRewindCost` (a fake cost
+  clock, 1 ms a step and 10 ms a diff: 1.0 ms a tick, the reads
+  `rewind_start, rewind_replay, rewind_end`, the savestate line before the
+  rewind's line; the pre-R12D order would give 3.5 ms a tick).
+- **Harness tooling landed with it** (`inbound_capture.hpp`,
+  `session_client.cpp`): B5RC's `--replay-free-cost-clock` without R12B's
+  `rewind_tick` site - in a `--replay-inbound` replay the three rewind-cost
+  sites read the replay's own clock and the capture's reads at those sites
+  are passed over (counted in the replay's last line), so a build whose
+  rewinds differ from the capture's (RC3's paired replays) replays to the
+  end and the cap is the machine's own. Off by default: a strict replay is
+  unchanged (`free_` 0: `next_pos()` is `pos_`). The review's nit landed:
+  `static_assert(clock_site::count_ <= 64)` on the free-site mask.
+- **Checked.** Strict: `core_ref_s7`'s three multi-client arms replayed by
+  rB5RX with `--body-set-corrections` (the pre-RC3 control; RC3's default
+  changes those arms by design, item RC3A of the rewind-cost design) against
+  rB2SX's replays (`rB5RXw_old`): 12/12 sends SAME, 12/12 journals
+  IDENTICAL (`rB5RX_ctl`); `solo1` / `solo2` against their live journals:
+  SAME / IDENTICAL. The new cap (`l8_cross`, the same control arm with
+  `--replay-free-cost-clock`, the replay's own clock, four replays at once,
+  `rB5RX_capctl`; sends and journals still IDENTICAL to rB2SX's, the cap not
+  binding): **73 / 92 / 71 / 70** (0.61 / 0.49 / 0.63 / 0.63 ms a tick,
+  11 / 5 / 11 / 10 rewinds), against the captured R12 caps 48 / 82 / 48 /
+  48 (3.31 / 0.54 / 2.68 / 2.76 ms a tick) and B5RC's "R12 without the
+  diff" estimate 48 / 87 / 69 / 67 (its c0 48 came from a 9 ms stall outside
+  any tick, absent from this replay). The savestate check still ran (3 / 0 /
+  3 / 2 lines, as in rB2SX's replays).
+- **The trade-off the user accepted** (B5RC's option (b)): the 7-10 ms
+  hitch each of a headless session's first 8 such rewinds really costs is
+  not budgeted by the headless cap; retail never pays it.
 
 ### 2.6 The session stops waiting for one player
 
