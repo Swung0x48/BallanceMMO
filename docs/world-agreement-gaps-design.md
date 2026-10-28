@@ -191,6 +191,22 @@ P_Modul_29 breaks the bridge in the server's world and in the owner's world only
 A remote ball in a fan is pushed by the server and by its owner, but not by the
 other clients' copies of that fan, so their mirror of it diverges.
 
+*As measured at step SFD (snapshots off, nothing corrects it any more;
+`rewind-cost-design.md` "As built (step SFD)", case 3).* `core_ref_s7`'s
+`l8_cross` (level 8, 4 players, 0 ms): every P_Modul_29 plate and
+P_Modul_01_Pusher is bit-equal to the server's row through 552 on every
+client. At 554 c1 (2010866393, the ball within the 80 m probe #47020)
+reports `BodyRevived P_Modul_29_Platte04` and `P_Modul_01_Pusher`; the
+server applies it, c0 / c2 / c3 keep the plates asleep (row flags 2
+against the server's 3) at their rest pose until c2's own probe fires at
+614. The plates reach 1.4-1.8 m mean, worst 3.6 m (P_Modul_29_Platte05 at
+574), on c0 / c2 / c3; c1's world agrees (within 0.02 m). The same
+signature, smaller: `P_Modul_25_Bridge001` (c0's report at 407, 0.011 m on
+c1-c3) and `P_Modul_37_Bridge` (c3's at 501, 0.01 m on c0-c2). On the
+arena (`resync_snapoff` c1): P_Modul_01_Pusher 612, P_Modul_30_Wippe 1060
+(0.34 m at 1100), P_Modul_34_Schiebestein 1276, P_Modul_37_Bridge 1358 and
+P_Modul_03 1964 are woken on the server and asleep in c1's world.
+
 #### 1.1.4 Found while designing (each fixed here)
 
 - **G-c2, identity reads.** The `CurrentLevel[0][1]` reads of P_Modul_29 and

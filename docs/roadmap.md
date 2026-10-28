@@ -482,7 +482,21 @@ numbers 1-10 are unchanged.
    drifts those snapshots hid (B5RC: a Ball_Stone mirror 0.109 -> 21.3 m and
    an extra resync on resync_snapoff c1, remote-ball p99 5.0 -> 17.2 m on
    swing_snapoff c3, the P_Modul_29 plates 0.03 -> 1.4-1.8 m mean, worst 3.6
-   m, on l8_cross) are gaps for step SFD to root-cause and fix. Two
+   m, on l8_cross) are gaps for step SFD to root-cause and fix. **Step SFD
+   (`rewind-cost-design.md` "As built (step SFD)")**: (1) resync c1 first
+   left the server at tick 296 through the headless own ball's spawn offset
+   (a double sum against the event's float pose, 1 um; fixed in
+   `session_client.cpp`: remote balls p99 14.8 -> 4.8 m, max 21.3 -> 5.3 m),
+   then at 1238 through the own ball's IVP collision bookkeeping, which
+   differs from every clone of it from birth on every own ball (hull value
+   13-15 against 0.045, another overlap centre) while the rows are equal -
+   a new cause whose fix is the user's choice (SFD's stop: build clones the
+   owner's way, reset the owner's ball to a clone's at birth, or leave it);
+   (2) swing c3 is the balloon (exception (c)): at 3111 the server's ball
+   hits `PE_Balloon_Platform`, 0.9 m elsewhere in the client's world - the
+   exception leaks into a ball that touches the airship (for the user);
+   (3) l8_cross is G-c: c1's BodyRevived of P_Modul_29 at 554, applied by
+   the server only (item 5). Two
    consequences (B5RX's review): the frozen-clock re-anchor now follows
    every core rewind (`rewind_world`), not only a snapshot's; and the
    snapshots-off multi-client arms of `core_ref_s7` replay to their end
@@ -522,7 +536,9 @@ numbers 1-10 are unchanged.
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03
-   1.36 m, P_Modul_19_Flaps 0.8-1.8 mm, P_Modul_34 2.7 m), the
+   1.36 m, P_Modul_19_Flaps 0.8-1.8 mm, P_Modul_34 2.7 m; step SFD: the
+   l8_cross P_Modul_29 plates, 3.6 m worst, from c1's BodyRevived at 554
+   that only the server applies), the
    member-added message (trafo design 9.7: existing members do not know a
    late joiner's join order), leave and rejoin, BodyRevived retired (G5).
    Its Q9 (the protocol landing order) needs the user.

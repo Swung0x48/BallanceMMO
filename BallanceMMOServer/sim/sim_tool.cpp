@@ -5369,6 +5369,30 @@ namespace {
             }
             ++simulated;
             last_written_tick = group.tick;
+            // Step SFD: BMMO_REPLAY_SAVESTATE_DUMP=FROM,UNTIL,DIR writes the
+            // stepped world's savestate blob of every tick in [FROM, UNTIL] to
+            // DIR/<tick>.sav - the server's side of a client's --dump-savestate,
+            // for --savestate-diff / --savestate-describe (the hidden collision
+            // state a row does not show).
+            if (const char* spec = std::getenv("BMMO_REPLAY_SAVESTATE_DUMP"); spec && *spec) {
+                unsigned from = 0, until = 0;
+                char dir[1024] = {0};
+                if (std::sscanf(spec, "%u,%u,%1023[^\n]", &from, &until, dir) == 3 && group.tick >= from && group.tick <= until) {
+                    std::vector<uint8_t> blob;
+                    std::string dump_error;
+                    if (bmmo::physics::get_savestate(world->physics(), blob, dump_error)) {
+                        std::error_code ec;
+                        std::filesystem::create_directories(dir, ec);
+                        const std::filesystem::path path = std::filesystem::path(dir) / (std::to_string(group.tick) + ".sav");
+                        if (FILE* f = std::fopen(path.string().c_str(), "wb")) {
+                            std::fwrite(blob.data(), 1, blob.size(), f);
+                            std::fclose(f);
+                        }
+                    } else {
+                        std::fprintf(stderr, "tick %u: savestate dump: %s\n", group.tick, dump_error.c_str());
+                    }
+                }
+            }
             // Step SP8: the stepped world, before a RESYNC record below replaces
             // it - a client journal's resync tick traces the replay's own state,
             // not the server's.  The invariant replays server journals, which

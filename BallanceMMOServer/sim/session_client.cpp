@@ -2401,8 +2401,15 @@ namespace {
                 const float dir[3] = {reset[2][0], reset[2][1], reset[2][2]};
                 float offset[3];
                 bmmo::session::spawn_offset(join_order, core_.spawn_spacing(), right, dir, offset);
+                // The retail sum (core_host.cpp: the entity's world matrix
+                // plus the offset, in float, the matrix the body is made
+                // from), so the body is exactly the pose the Physicalize event
+                // carries and every other side builds its copy from.  The
+                // double sum of the body's position and the offset left this
+                // ball up to a float half-ulp (about 1 um at 24 m) off every
+                // copy of it (step SFD: resync_snapoff c1's first divergence).
                 double target[3];
-                for (int k = 0; k < 3; ++k) target[k] = state.position[k] + static_cast<double>(offset[k]);
+                for (int k = 0; k < 3; ++k) target[k] = static_cast<double>(own_capture_.pose[3][k] + offset[k]);
                 const float still[3] = {0.0f, 0.0f, 0.0f};
                 if (!bmmo::physics::set_body_state(engine_->physics(), name.c_str(), target, state.rotation, still, still,
                                                    bmmo::physics::wake_mode::keep, true, error)) {
@@ -2828,7 +2835,7 @@ namespace {
             CKIpionManager* physics = engine_->physics();
             if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
                 logf("body %s after live tick %u: %s", args_.trace_body.c_str(), tick,
-                     bmmo::physics::describe_body(physics, args_.trace_body.c_str()).c_str());
+                     describe_traced_body(physics).c_str());
             if (args_.trace_clock_until && tick >= args_.trace_clock_from && tick <= args_.trace_clock_until)
                 logf("clock after live tick %u: %s", tick, describe_clock().c_str());
             // --trace: what pushes the own ball - the navigation replica's
@@ -2985,6 +2992,25 @@ namespace {
             return clone;
         }
 
+        // --trace-body's line, with the body's row in hex floats after the
+        // description (step SFD): the row the journal's checkpoints carry, so
+        // a traced tick's final state can be compared bit for bit with the
+        // server's row of that tick.
+        std::string describe_traced_body(CKIpionManager* physics) {
+            std::string text = bmmo::physics::describe_body(physics, args_.trace_body.c_str());
+            bmmo::physics::body_state row{};
+            std::string error;
+            if (bmmo::physics::get_body_state(physics, args_.trace_body.c_str(), row, error)) {
+                char hex[400];
+                std::snprintf(hex, sizeof(hex), " | row pos=%a,%a,%a lin=%a,%a,%a sim=%d",
+                              row.position[0], row.position[1], row.position[2], static_cast<double>(row.linear[0]),
+                              static_cast<double>(row.linear[1]), static_cast<double>(row.linear[2]),
+                              row.simulated ? 1 : 0);
+                text += hex;
+            }
+            return text;
+        }
+
         // The engine clock and the frame step on one line, in hex floats: the
         // IVP times, the event queue, the manager's smoothed delta, the time
         // factor and the physics step it yields (--trace-clock and the
@@ -3007,6 +3033,24 @@ namespace {
         // argument's comment).  Overwrites: after a rewind the replayed ticks'
         // records are the replayed world's.
         void dump_savestate(uint32_t tick, const char* source = "live") {
+            // Step SFD: BMMO_DUMP_FINAL_LAG=N also writes the record of
+            // tick - N into <dir>/final/ at each live tick - a record that old
+            // is past every rewind's reach, so it is the world's final state
+            // of that tick (an ordinary rewind does not rewrite the files).
+            if (const char* lag_text = args_.dump_savestate_dir.empty() ? nullptr : std::getenv("BMMO_DUMP_FINAL_LAG"); lag_text && *lag_text && !std::strcmp(source, "live")) {
+                const uint32_t lag = static_cast<uint32_t>(std::atoi(lag_text));
+                const uint32_t old = tick > lag ? tick - lag : 0;
+                if (old && !args_.dump_savestate_dir.empty() && old >= args_.dump_savestate_from && old <= args_.dump_savestate_until)
+                    if (const std::vector<uint8_t>* final_blob = core_.recorded_savestate(old)) {
+                        std::error_code ec;
+                        const std::filesystem::path dir = std::filesystem::path(args_.dump_savestate_dir) / "final";
+                        std::filesystem::create_directories(dir, ec);
+                        if (FILE* f = std::fopen((dir / (std::to_string(old) + ".sav")).string().c_str(), "wb")) {
+                            std::fwrite(final_blob->data(), 1, final_blob->size(), f);
+                            std::fclose(f);
+                        }
+                    }
+            }
             compare_scripts(tick, source);
             if (args_.dump_savestate_dir.empty() || tick < args_.dump_savestate_from || tick > args_.dump_savestate_until) return;
             dump_scripts(tick);
@@ -3143,7 +3187,7 @@ namespace {
                 ++contact_traces_;
                 if (!args_.trace_body.empty() && now >= args_.trace_from && now <= args_.trace_until)
                     logf("body %s after the rewind (replayed to %u): %s", args_.trace_body.c_str(), now,
-                         bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
+                         describe_traced_body(engine_->physics()).c_str());
                 logf("contacts of %s after the rewind (replayed to %u): %s", core_.own_body_entity().c_str(), now,
                      bmmo::physics::describe_contacts(engine_->physics(), core_.own_body_entity().c_str()).c_str());
             }
@@ -3367,7 +3411,7 @@ namespace {
             w.before_replayed_tick = [this](uint32_t tick) {
                 if (!args_.trace_body.empty() && tick >= args_.trace_from && tick <= args_.trace_until)
                     logf("body %s before replayed tick %u: %s", args_.trace_body.c_str(), tick,
-                         bmmo::physics::describe_body(engine_->physics(), args_.trace_body.c_str()).c_str());
+                         describe_traced_body(engine_->physics()).c_str());
                 if (args_.trace_clock_until && tick >= args_.trace_clock_from && tick <= args_.trace_clock_until)
                     logf("clock before replayed tick %u: %s", tick, describe_clock().c_str());
                 if (args_.trace_restore && core_.own_physicalized() && !core_.own_body_entity().empty() && contact_traces_ < 48) {

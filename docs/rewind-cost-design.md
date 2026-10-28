@@ -1554,3 +1554,155 @@ IDENTICAL); the RC3 default replays (`rB5RXgd`) equal the implement round's
 flagged COVERAGE-SHORT; solo1 / solo2 strict against the live journals:
 SAME / IDENTICAL (`rB5RXg_solo`). No CK2, IVP or physics_RT change and no
 engine change in this step; no protocol or journal change (13 / v7).
+
+## As built (step SFD)
+
+Step SFD root-causes the three drifts the body-set snapshots used to hide
+(item RC3A above; the user, 2026-10-28: "不对，RC3要保留快照？现在应该尽可能假设快照
+不存在来做"), each to the tick and the state where the client's world first
+leaves the server's. Base 92836bd (protocol 13, journal v7; no protocol,
+journal, CK2, physics_RT or IVP change; no engine change). Captures:
+`core_ref_s7`'s snapshots-off arms, replayed with the RC3 default and
+`--replay-free-cost-clock`; the server's side is its own journal (FULL rows
+every 2 ticks) and SimTool replays of it.
+
+**Method (the tools of the step).** A client's LOCAL checkpoint is its live,
+predicted world, so it cannot say where a world first left the server's at
+150 ms. The final state of a tick (after the last rewind that replays it)
+is read from the headless client's `--trace-body NAME --trace-ticks A B`
+lines, which now end in the body's row in hex (`| row pos=... lin=...
+sim=`, `session_client.cpp` `describe_traced_body`), and compared bit for
+bit with the server's FULL row (`.local-tools/work/SFD/final_bits.py`;
+`hash_runs.py`, `first_body_div.py` for the LOCAL rows). The hidden
+collision state is compared through savestate blobs:
+`BMMO_DUMP_FINAL_LAG=N` with `--dump-savestate A B DIR` also writes
+`DIR/final/<t>.sav`, the record of tick t taken N live ticks later (past
+every rewind's reach, so the world's final state of t: an ordinary rewind
+does not rewrite the dumped files), and the SimTool's `--replay-session`
+with `BMMO_REPLAY_SAVESTATE_DUMP=FROM,UNTIL,DIR` writes the server world's
+blob of each tick (`sim_tool.cpp`); `--savestate-describe` and
+`.local-tools/work/SFD/sav_body_cmp.py` compare one body's sections across
+two worlds (names mapped).
+
+**(1) resync_snapoff c1, the Ball_Stone mirror of 4278410334 (0.109 m at
+1768, 21.3 m by 2460, an extra resync).** Two causes, in this order.
+- *First divergence: tick 296, a new cause, fixed (headless only).* The
+  mirror is bit-equal to the server's row through 294 and 1.4e-7 m off at
+  296, the tick it touches c1's own ball. The own ball has been 1.01e-6 m
+  off since its birth at 231, with every velocity bit equal: the headless
+  client's spawn offset (`capture_own_physicalize`) moved the body to the
+  DOUBLE sum of its position and the float offset (`x = -20 + -4.2f =
+  -24.1999998`), while the Physicalize event carries the FLOAT pose
+  (`-24.2f = -24.2000008`) that the server's clone and every other
+  client's mirror are built from - a float half-ulp at 24 m. The retail
+  host (`core_host.cpp`) adds the offset to the entity's float matrix
+  before the body is made, so it never had this. Fix
+  (`session_client.cpp`, the spawn-offset block): the target is the retail
+  sum `own_capture_.pose[3][k] + offset[k]` in float. After it the own
+  ball is bit-equal to the server through 1236 and the mirror through 1658.
+  Drift on the same captures (RC3 default, `rB5RX_rc3f` -> `rSFD_rc3`):
+  resync c1 remote balls mean 0.949 -> 0.402 m, p99 14.76 -> 4.85 m, max
+  21.26 -> 5.30 m; resync c3 mean 0.176 -> 0.137 m, p99 2.05 -> 1.54 m;
+  l8_cross c1 / c3 ball max 0.9 / 0.7 mm -> 0.3 / 0.1 mm; every other cell
+  unchanged.
+- *Then: the own ball's collision bookkeeping differs from every clone of
+  it from its birth (new; the fix is a choice, see the stop below).* With
+  the fix the own ball's row (position, rotation, both velocities) is
+  bit-equal to the server's at 1236 and differs at 1238: it crosses the
+  seam of `A_Floor_017` / `A_Floor_020` and its lateral speed drops
+  (-0.173 -> -0.040 m/s) one tick earlier than on the server (1238 against
+  1239-1240), with the same inputs. c1's ball as a MIRROR (a clone) in
+  c0's, c2's and c3's worlds stays bit-equal to the server through 1300.
+  The blobs show why: at 1236 the server's clone and c3's mirror of c1's
+  ball have the same hull entries (each mindist's recheck value) and the
+  same overlap element (centre, radius), modulo numbering; c1's own ball
+  has other hull entry values and another overlap centre (0x1.a21ae8p+8
+  against 0x1.a2d2ccp+8, 0.7 m apart) and radius. The difference is there
+  at the birth tick and on every own ball, the spawn offset or not: c0's
+  own ball (join order 0) at 231 has hull value 14.74 and
+  `time_of_next_reset` 16 where the server's clone has 0.045 and 0 (c1
+  13.07, c3 14.36), and its overlap centre is not the spawn point; IVP's
+  hull and overlap schedules then keep that phase for the body's life
+  (`IVP_Hull_Manager::reset_times` shifts every entry by the same amount).
+  The retail scripts create the own ball's body and move or recheck it
+  inside its creation frame (what exactly adds the 13-15 to the hull is
+  not pinned down: the bookkeeping, not the rows, shows it); a clone is
+  made once at the event's pose. Rows equal, so nothing shows it until a
+  contact that begins inside a PSI is found at another PSI - c1's seam at
+  1238 (own ball 3.7 mm off), whose ball then hits the mirror at 1660
+  (three-ball contact with c0's mirror; the mirror bit-equal through 1658,
+  2.4e-5 m and 0.0085 m/s off at 1660), which grows by contact: 0.030 m at
+  1768 (0.109 m before the fix), 1.69 m at 2200, 5.28 m at 2458 (21.3 m
+  before the fix). Measured in the headless client; the retail mod creates its own
+  ball through the same scripts and is expected to carry the same state
+  (not measured: no retail run).
+- *Also in c1's world (owned by queued items):* G-c one-client wakes
+  (P_Modul_01_Pusher 612, P_Modul_30_Wippe 1060 - 0.34 m at 1100,
+  P_Modul_34_Schiebestein 1276, P_Modul_37_Bridge 1358, P_Modul_03 1964:
+  asleep in c1's world, woken on the server; world agreement, Q9) and the
+  balloon from 2124 (exception (c)). None of them touched the own ball or
+  the mirror before 1660.
+- *The extra resync is a replay artefact.* The replayed own ball dies at
+  2464 and is reborn at 2662, the live one at 2470 / 2668 (the live run was
+  corrected by its snapshots); the capture holds the server's echo of the
+  live birth only, so the replay reports "own birth moved 2662 -> never"
+  and asks for a resync at 2876 (the replay stops there, 2974 of 3635
+  steps, as before the fix). A live session's server echoes the birth the
+  client really sent.
+
+**(2) swing_snapoff c3, remote-ball p99 5.0 -> 17.2 m (the control's 3.29 m
+correction of c0's ball at 3163).** Owned by exception (c), the balloon. The
+mirror of c0 (Ball_Stone_BMMO_3493379180) is bit-equal to the server
+through 3108 (4e-9 m at 3110). At 3111 the server's c0 ball hits
+`PE_Balloon_Platform` (velocity 17.62 -> 14.81 m/s, vy +2.12); in c3's
+world the platform is 0.88-0.91 m elsewhere (the balloon has differed since
+2862: platform 0.013 m, balloons 0.02 m, flags c0 s1) and the ball passes
+under it (contact found only at 3113). Same event, same tick on c1 (the
+B5RX "c1 p99 3.4 -> 4.5 m"; the mirror bit-equal through 3108, 0.085 m at
+3112). The balloon is never compared (exception (c)), but a ball that
+touches the airship carries the balloon's divergence into the balls: this
+is a consequence of that exception, for the user (the stop below).
+
+**(3) l8_cross c0 / c2 / c3, the P_Modul_29 plates (0.62 m at 561, mean
+1.4-1.8 m, worst 3.6 m).** Owned by world agreement's G-c (the client
+proximity sensors; P_Modul_29's 80 m probe #47020 wakes the plates). Every
+P_Modul_29 plate and P_Modul_01_Pusher is bit-equal to the server through
+552 on every client; at 554 the server's plates are simulated (flags 3)
+and on c0 / c2 / c3 asleep (flags 2) at their rest pose. The server's
+journal holds the cause: c1 (2010866393, the ball within 80 m) reports
+`BodyRevived P_Modul_29_Platte04` and `P_Modul_01_Pusher` at 554; the
+server applies it, the other members ignore it (G-c / G-c3, "a wake that
+only the reporting client's world made reaches only the server"); c2's own
+probe wakes them at 614, too late. c1's world is the one that agrees
+(plates within 0.02 m). The same signature, smaller, for
+`P_Modul_25_Bridge001` (c0's report at 407, 0.011 m on c1-c3) and
+`P_Modul_37_Bridge` (c3's at 501, 0.01 m on c0-c2). Not built here (the
+world-agreement track; its Q9 waits for the user).
+
+**The wire check after the fix** (control arm, the B5RX gate:
+`EXTRA=--body-set-corrections wire_check.sh rB5RX rSFDh rSFDwc2`):
+DIFFERENCES, every one attributed to the fix - the clients of join order 0
+(resync c0, swing c0, l8 c0) are SAME / IDENTICAL; every other client's
+journal first differs at its own ball's birth tick (l8 212, arena 231:
+the 1 um), sends SAME on 10 of 12; resync c3's sends differ and resync c1
+stops at 1886 steps (COVERAGE-SHORT: the control's snapshot rewind meets
+a world that no longer needs it). `core_ref_s7`'s live journals are
+therefore no longer the replays' strict reference for the clients of join
+order 1-3; the queued re-capture (`core_ref_s8`) takes the fixed build.
+
+**Stop (the user's choices).** (A) The own ball's collision bookkeeping
+(above): options - (a) build every world's copy of a player's ball the
+way its owner's scripts did (the clone put through the same creation-frame
+move / recheck; needs the retail path pinned down first and, if the
+pre-move pose must travel, a protocol field; changes the server and every
+mirror); (b) make the owner's ball match the clone at birth: re-create or
+reset its IVP collision state at the pose in the creation tick's
+PreSimulate (where the hosts already capture it) - a host capability the
+core drives, with an access-only physics_RT / IVP-private-access engine
+change, and the own ball's navigation controllers re-attached (a
+re-created body); (c) leave it (rare: it needs a contact that starts
+inside a PSI next to another ball), with no snapshot to correct it, only a
+resync. (B) The balloon leak: (i) accept it (only a ball that touches the
+airship), (ii) bring the balloon back into the agreement work (changes the
+user's decision "除了气球应该别的都是需要修的"), (iii) keep the airship out
+of the balls' collisions in every world (changes the level's behaviour).
