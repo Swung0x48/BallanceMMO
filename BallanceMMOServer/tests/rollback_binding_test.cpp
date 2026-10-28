@@ -559,6 +559,53 @@ TEST(RollbackBinding, SessionWorldHandsAMirrorsBirthToTheCore) {
     EXPECT_FALSE(parked.birth_from_inputs);
 }
 
+// Step OWNB: an own birth the scripts made, taken out at the restore by the
+// core (destroy_own_birth) and queued to be made again at its birth tick, is
+// one birth_from_inputs keeps as the replay steps it (own_birth_remade, next
+// to the mirror test): the engine asks right after destroy_body.  Without
+// the hook the own ball is not one.
+TEST(RollbackBinding, SessionWorldKeepsARemadeOwnBirthAsStepped) {
+    session_backend backend;
+    bmmo::session::core_world_hooks hooks;
+    hooks.mirror = [](const std::string& entity) { return entity.rfind("Ball_Wood_BMMO_", 0) == 0; };
+    hooks.ball = [](const std::string& entity) { return entity.rfind("Ball_Wood", 0) == 0; };
+    hooks.own_body = [](const std::string& entity) { return entity == "Ball_Wood"; };
+    hooks.remake_mirror_birth = [](const std::string&, uint32_t) { return true; };
+    bool queued = false;
+    hooks.destroy_own_birth = [&queued](const std::string& entity, uint32_t birth_tick, bool& destroyed) {
+        if (entity != "Ball_Wood" || birth_tick != 122) return false;
+        destroyed = queued = true;
+        return true;
+    };
+    hooks.own_birth_destroyable = [](const std::string& entity, uint32_t birth_tick) {
+        return entity == "Ball_Wood" && birth_tick == 122;
+    };
+    bmmo::session::local_birth_log births;
+    bmmo::session::session_world_options w;
+    w.births = &births;
+    {
+        rollback_world world = bmmo::session::bind_session_world(backend, hooks, w);
+        ASSERT_TRUE(world.birth_from_inputs);
+        EXPECT_TRUE(world.destroy_body("Ball_Wood", 122));
+        EXPECT_FALSE(world.birth_from_inputs("Ball_Wood")) << "no own_birth_remade hook: not one";
+        EXPECT_TRUE(world.birth_from_inputs("Ball_Wood_BMMO_5")) << "the mirror test stands";
+    }
+    queued = false;
+    hooks.own_birth_remade = [&queued](const std::string& entity) { return queued && entity == "Ball_Wood"; };
+    rollback_world world = bmmo::session::bind_session_world(backend, hooks, w);
+    EXPECT_FALSE(world.birth_from_inputs("Ball_Wood")) << "not taken out yet";
+    backend.calls.clear();
+    EXPECT_TRUE(world.destroy_body("Ball_Wood", 122));
+    EXPECT_TRUE(backend.calls.empty()) << "the core takes it out, not the binding";
+    EXPECT_TRUE(world.birth_from_inputs("Ball_Wood")) << "taken out and queued: kept as the replay steps it";
+    EXPECT_TRUE(world.birth_from_inputs("Ball_Wood_BMMO_5"));
+    EXPECT_FALSE(world.birth_from_inputs("P_Box"));
+    EXPECT_FALSE(world.destroy_body("Ball_Wood", 121)) << "another birth tick keeps the parking path";
+    ASSERT_TRUE(world.keeps_parked);
+    EXPECT_FALSE(world.keeps_parked("Ball_Wood", 122));
+    EXPECT_TRUE(world.keeps_parked("Ball_Wood", 121));
+}
+
 // Design 2.4 / 5.1 (E9): bind_session_world composes the core's hooks with
 // the host's options in one order.  Before a replayed tick: the core's
 // births, then the manager activation, then the host's traces (and a

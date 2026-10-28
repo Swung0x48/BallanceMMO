@@ -554,6 +554,15 @@ numbers 1-10 are unchanged.
    (1: RCX; 2: SFD (A), the own ball's IVP bookkeeping; 3: SFD (B), the
    airship; 4: RC5; 5: world agreement's Q9; 6: its Q7; 7: its Q8 and the
    legacy path; the last sentence lets the orchestrator commit and push).
+   Answer 2 is built at step OWNB (`rewind-cost-design.md` "As built (step
+   OWNB)"): the scripts make the own ball exactly as the server makes its
+   clone (no move inside the creation frame); SFD's differing bookkeeping was
+   the headless birth cell moved after the body was made (now before the
+   block, as retail) and the parked own birth of a rewind window (now taken
+   out and remade at its birth tick, its step kept; own body control only -
+   retail keeps parking until R6, measured there, queued in the core design's
+   R6 row); s7's 1238 seam crossing is unchanged to the
+   bit and traced to G-c (item 5).
    Answer 1 is option (a): H6 is judged by its absolute limits (starved
    within the band, the server's p99 within the budget, both met), so **the
    close-out is passed by the user's ruling** (H6's numbers stay recorded in

@@ -512,7 +512,12 @@ namespace bmmo::session {
             // Step LB: a mirror destroy_body took out is made again by the
             // core from the session's inputs; after its birth tick's step it
             // stays as the step made it (rollback_world::birth_from_inputs).
-            world.birth_from_inputs = mirror;
+            // Step OWNB: an own birth the scripts made, taken out and made
+            // again by the core, likewise (core_world_hooks::own_birth_remade).
+            const auto own_remade = hooks.own_birth_remade;
+            world.birth_from_inputs = [mirror, own_remade](const std::string& entity) {
+                return (mirror && mirror(entity)) || (own_remade && own_remade(entity));
+            };
             // Step P: a mechanism alive at the anchor that the window
             // destroyed (the trafo explosion pieces' reset, a script the
             // replay re-runs) is made again at the restore from the birth of

@@ -183,6 +183,14 @@ namespace bmmo::session {
         // rollback_world::keeps_parked from it and the ball / own_body /
         // mirror hooks, next to destroy_body.
         std::function<bool(const std::string& entity, uint32_t birth_tick)> own_birth_destroyable;
+        // Step OWNB: true when the restore just took `entity` out as an own
+        // birth the scripts made, queued to be made again at its birth tick
+        // the way the server makes its clone.  bind_session_world adds it to
+        // rollback_world::birth_from_inputs: like a mirror made again from
+        // the inputs, the replay's step is its state - the birth record was
+        // stepped with the remotes known then, the replay with those known
+        // now - and nothing writes the record over it.
+        std::function<bool(const std::string& entity)> own_birth_remade;
         // Step RR: the local entity a snapshot row of the server's body
         // (kind, owner) belongs to at a replayed tick (rollback_world::
         // row_entity): a mirror driven by then, or the resolved mechanism.

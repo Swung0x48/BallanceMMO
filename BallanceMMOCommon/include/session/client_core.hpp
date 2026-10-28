@@ -635,8 +635,15 @@ namespace bmmo::session {
             std::string entity;
             float matrix[16] = {};
             own_life life;   // the birth (death = false)
+            // Step OWNB: a birth the scripts made that a restore took out
+            // (destroy_moved_own_birth): made again from what is known now,
+            // so the replay's step is its state (own_birth_remade).
+            bool scripted = false;
         };
         std::vector<own_due> own_due_;
+        // Step OWNB: own births the scripts made that a restore took out and
+        // queued for the replay's drain (destroy_moved_own_birth).
+        uint64_t own_births_remade_ = 0;
         // Design 9.7 (a): each live tick's CK world matrix of every own
         // entity without a body after that frame (the death sequence and the
         // trafo animation move it, scripts no replay runs), written before
@@ -899,6 +906,17 @@ namespace bmmo::session {
         // with no body now).  Default false; headless
         // --remote-births-parked.
         bool remote_births_parked = false;
+        // Step OWNB (SFD (A), the user's answer 2 of 2026-10-28): true = an
+        // own birth the scripts made live inside a rewind's window keeps the
+        // parking path.  Default false: with own body control, the body is
+        // taken out at the restore and made again at its birth tick the way
+        // the Physicalize made it (remake_own_body: the pose, recipe and
+        // group it carried, the spawn kick of that tick - the server's clone
+        // and every mirror are made so), so the replayed world's own ball
+        // starts from a fresh body's collision bookkeeping instead of the
+        // live body's beamed back to its birth pose.  Headless
+        // --own-births-parked (the control arm).
+        bool own_births_parked = false;
         // Retail policy (design 4.1; R1), off by default (the headless
         // client never sets it).  `own_body_backstop`: 30 snapshots in a row
         // without a body of ours while our ball is physicalized re-report its
@@ -1709,6 +1727,7 @@ namespace bmmo::session {
         own_life* find_unanswered(uint32_t origin, uint8_t ball_type);
         const own_life* moved_own_life(const std::string& entity, uint32_t birth_tick) const;
         const own_life* destroyable_own_birth(const std::string& entity, uint32_t birth_tick) const;
+        const own_life* scripted_own_life(const std::string& entity, uint32_t birth_tick) const;   // step OWNB
         void process_own_echo(const bmmo::session_event_msg& msg, bool stale);
         void answer_set_aside(own_life& entry, bool made, bool superseded, uint32_t applied, const char* verdict);
         void expire_own_echoes();

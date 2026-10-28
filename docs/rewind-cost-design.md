@@ -1762,6 +1762,180 @@ airship), (ii) bring the balloon back into the agreement work (changes the
 user's decision "除了气球应该别的都是需要修的"), (iii) keep the airship out
 of the balls' collisions in every world (changes the level's behaviour).
 
+## As built (step OWNB)
+
+Step OWNB answers SFD's stop (A) with the user's answer 2 of 2026-10-28,
+verbatim: "应该尽可能遵循原版脚本" (follow the original scripts as far as
+possible: every world's copy comes about the way the original scripts make the
+owner's ball). Base be38d4d (protocol 13, journal v7); no protocol, journal,
+CK2, physics_RT or IVP change, no engine change.
+
+**The sequence, pinned down first (headless, a probe).** `BMMO_HULL_PROBE=<name
+prefix>` with `BMMO_HULL_PROBE_FILE=<path>` (`physics_state.cpp`, the text from
+`describe_hull_bookkeeping` in `physics_savestate_capture.cpp`; diagnostics
+only, inert without the variables) appends a body's IVP collision bookkeeping -
+the hull manager's clock and values, every hull entry (kind, value), the
+overlap element (centre, radius), the core's position, velocity, queued
+velocity change and mass - at its creation, its script wake, the start of its
+first 8 PSIs, every `write_body_state`, and the hosts' points (`own_capture`,
+`own_impulse`, `own_remade` in the headless client; `clone_made`,
+`clone_impulse` in `physics_world::apply_event`). What the original scripts do
+in the birth frame: `BallManager/New Ball` puts the entity on CurrentLevel[0,3]
+three seconds earlier; in the birth frame the Physicalize block calls
+`CreatePhysicsObjectOnParameters` (the body made at the entity's matrix,
+`ensure_in_simulation`, `enable_collision_detection`) and `NotifyScriptWakeup`;
+the PreSimulate pass runs the Physics WakeUp callback (`ensure_in_simulation`,
+a no-op on an awake body), then the capture and the spawn kick
+(`async_push_core`); then the PSIs. There is no move and no recheck of the body
+inside its creation frame. On `core_ref_s8/solo1` (join order 0, no rewind)
+the own ball and the server's clone are bit-equal in every probed field at
+creation and through the first 8 PSIs: the server's clone and every mirror
+(`physicalize` at the event pose, the same call with the same arguments, then
+the same kick) already come about the way the scripts make the owner's ball.
+SFD's attribution to "the level scripts moving or rechecking the body inside its
+creation frame" is wrong; the 13-15 in the hull and the reset 16 come from two
+other places:
+
+- *The headless birth cell (join order 1-3, headless only).*
+  `capture_own_physicalize` moved the script-made body to its birth cell with
+  `set_body_state` (wake keep, recheck): a beam of a fresh body. IVP's
+  `set_transformation` added the 4.2 m to the hull manager (`jump_add_hull`:
+  last = next = 4.2) and rechecked the overlap element (its entry 2.0 -> 6.2,
+  `tlast` set), where the clone made at the offset pose has 0. The retail host
+  never had it: `core_host_on_physicalize` moves the entity before the block
+  makes the body (BMLPlus broadcasts OnPhysicalize first).
+- *The rewind's parking path (both hosts).* An own birth inside a rewind's
+  window kept the parking path by design (B8EG item EGB, `keeps_parked`): the
+  anchor's blob does not know the body (restore "unknown=1"), so it keeps the
+  LIVE body's hull manager - from ticks after its birth: reset 16 =
+  int(6.17 + 10), set by a live check_for_reset at the birth time 6.17 s - and
+  is beamed to its birth pose (`write_body_state`, another `jump_add_hull` of
+  the distance rolled since) and re-posed after its birth tick. resync_snapoff
+  c0 crosses its own birth 231 three times (birth rewinds for the three late
+  mirrors), which is SFD's 14.74 / 16 on an own ball of join order 0.
+
+**What is built.**
+- *Headless: the birth cell before the block (`session_client.cpp`).*
+  `own_physicalize_hook` is installed on every Physicalize block of the level
+  (`install_physicalize_hook`, by prototype GUID 0x7522370e,0x37ec15ec, once the
+  navigation is known: 64 blocks on the arena) and calls `before_physicalize`
+  before the prototype's function - the headless form of BMLPlus's
+  OnPhysicalize. In a live tick, for the current ball without a body, it flags
+  the spawn (the entity on CurrentLevel[0,3]) and moves the entity to its birth
+  cell in float, the retail sum; `capture_own_physicalize` takes the flag from
+  it (the pose is the entity's, where the block made the body) and no longer
+  moves the body. Without the hook (none installed) the old spawn test runs
+  and the cell is skipped with a log line.
+- *Core: an own birth the scripts made is remade in the replay
+  (`client_core_lifecycle.cpp` `scripted_own_life`, `destroyable_own_birth`,
+  `destroy_moved_own_birth`).* With `own_body_control` and without the new
+  `config.own_births_parked` (headless `--own-births-parked`, the control arm),
+  an own birth made by the scripts at its stamp, not moved, of the body's
+  current lifetime, is no longer kept parked: `keeps_parked` says no, the
+  restore's `destroy_body` takes it out (`unmake_own_body`) and queues it in
+  `own_due_` (`scripted`), and the replay's drain makes it again at its birth
+  tick after that tick's remote events - where the live frame's scripts made it
+  - through `remake_own_body` (the pose, recipe, group and spawn kick its
+  Physicalize carried: the server's clone's way, measured equal to the
+  scripts'). What no replay reaches is made live (`settle_own_due`).
+- *Its step is its state (`client_platform.hpp` `own_birth_remade`,
+  `session_host_world.hpp`).* The first build compared the remade body with its
+  birth record after the step and wrote the record over it on a mismatch, as a
+  parked body: on resync c0 the respawn at 2650 met a mirror the live frame did
+  not have yet (velocity 2.80 -> 0.18 m/s in the first PSI, an impact) and the
+  record's stale state was written back, which made the pinned resync c0 remote
+  balls worse (p99 1.40 -> 21.1 m). The record was stepped with the remotes
+  known then, the replay with those known now: like a mirror remade from the
+  inputs (step LB), the core's `own_birth_remade` hook joins
+  `rollback_world::birth_from_inputs`, and the step stands.
+- **Adaptation (retail).** Retail declares no `own_body_control` (core design
+  §2.3: the game's Physicalize block owns the own ball; R6 is the step that
+  gives it), so on retail an own birth inside a window keeps the parking path
+  and its live hull bookkeeping; the step text's "make the server's clone and
+  every mirror come about by the same sequence" needs nothing there (they
+  already do), and the retail live birth is the clone's (the cell before the
+  block; measured, see *Retail* below). The retail remake is queued in the
+  core design's R6 row (the R6 step removes the parking of an own birth
+  inside a window when it declares own body control), not built here; no
+  retail code changed.
+- **Review fix-ups.** A binding test,
+  `RollbackBinding.SessionWorldKeepsARemadeOwnBirthAsStepped`, holds
+  `bind_session_world`'s composition of `own_birth_remade` into
+  `birth_from_inputs` (the lambda whose omission gave the first build's 21.1 m);
+  `ScriptedOwnBirthInsideTheWindowIsRemade` also drains the queued birth
+  (`drain_pending_lives` 121: nothing; 122: one `make_own` at 122). A
+  `scripted` due no replay reached is settled live like EL8's window lives,
+  its kick indexed by the current tick (comment at `settle_own_due`). The
+  Physicalize hook is installed with the navigation keys
+  (`discover_navigation`) only: the own capture
+  (`arm_own_physicalize_capture`) has the same precondition, so no capture
+  ever runs without the hook.
+
+**Evidence (core_ref_s8 and s7 captures, headless, rOWNB = this tree).**
+- *Birth.* The probe, the remade own ball against the server's clone (SimTool
+  replay of the arm's server journal): resync c1 (join order 1) after the third
+  birth rewind - SAME in every field at creation and through 8 PSIs (before:
+  hull last 4.2 at creation from the cell, then the parked body's reset 16);
+  resync c0 - SAME through 7 PSIs, then one overlap-connector entry value
+  differs (another ball's); l8_cross c1 (Ball_Wood, 212) - SAME through the 6
+  PSIs both sides probed. At the live birth (no rewind yet) the own ball is
+  equal at creation and the first PSI and parts at the second, when the
+  server's clone already has the late mirrors the client does not.
+- *Unit test.* `SessionClientCoreOwnLives.ScriptedOwnBirthInsideTheWindowIsRemade`
+  (control x own_births_parked; take-out, the queued remake at the birth tick,
+  `own_birth_remade`, a retired or later-generation life refused, the drain
+  at the birth tick) and the binding test above. 582/582.
+- *Retail (one two-copy L11 session, Arch server with placement on,
+  snapshots off, core on, `BMMO_HULL_PROBE=Ball` per game copy; the server's
+  clones probed by a SimTool replay of the server journal,
+  `.local-tools/work/OWNB/retail`, `ownb_retail.py`).* Both own balls
+  (Ball_Wood, join orders 0 and 1) against their server clones: SAME in every
+  field at creation and at the first PSI; at the second PSI the clone has one
+  more hull entry (type 0, 0.095) - the server's clones of both players are
+  born at the same tick, while each client's mirror of the other arrives late
+  and is made in a rewind's replay (the headless live birth parts at the same
+  PSI the same way). That rewind (rb 3, parked 1) is cause 2 on retail: the
+  restore's `write_body_state` puts the parked own ball back at its birth pose
+  with its later hull state (vpsi 6.21, `time_of_next_reset` 16) where the
+  clone has 0 - what R6 removes.
+- *Pinned paired replays (own keys pinned to the live run's,
+  `RC1d/gaps/pinned_replay.py`), resync_snapoff, remote balls against the
+  server's rows, rEL9 -> rOWNB:* c0 mean 0.166 -> 0.059 m, p99 1.40 -> 1.18 m,
+  max 2.35 -> 2.35 m (mechanisms mean 0.0170 -> 0.0153); c1 mean 0.469 -> 0.110
+  m, p99 7.35 -> 2.94 m, max 9.19 -> 5.17 m (mechanisms mean 0.0397 -> 0.0269,
+  p99 0.891 -> 0.833).
+- *SFD's 1238 seam crossing (core_ref_s7 resync c1) is NOT this.* With rOWNB
+  the own ball's final row is bit-equal to the server's through 1236 and
+  differs at 1238 by exactly what rEL9 gives (d 0.00298 m, dv 0.131 m/s): the
+  birth bookkeeping never caused it. Final-state blobs (`BMMO_DUMP_FINAL_LAG`,
+  `BMMO_REPLAY_SAVESTATE_DUMP`, `.local-tools/work/OWNB/sav_obj_cmp.py`) at
+  1236: the own ball's core, overlap element, exact mindists, contacts and hull
+  values equal the clone's (before: another overlap centre and other hull
+  values); what is left are three list orders - two tied hull entries (the
+  P_Modul_30_Wippe entry before A_Floor_013/016 in c1, after on the server) and
+  the A_Floor_017/020 overlap collision lists (P_Modul_25_Bridge's after the
+  balls in c1, before on the server) - and both bodies that set them differ in
+  c1's world (the Wippe's last PSI time, the bridge's rotation and spin): the
+  G-c one-client wakes SFD listed (Wippe 1060; Bridge001 reported by c0 at 407).
+  Pre-existing (rEL9 identical), owned by world agreement (G0-G5). Which of the
+  two orders moves the crossing is not isolated. On core_ref_s8 c1's own ball
+  is bit-equal to the server through 1698 with both binaries.
+- *Wire check (rEL9 -> rOWNB, core_ref_s8): DIFFERENCES, every one attributed.*
+  Every replay reached its end marker; sends SAME on 10/12 (resync c0 from
+  2661, c1 from 2675: the keep-lane bot steering on the own ball after its
+  respawn remake at 2650 / 2668); journals: swing c0 and l8 c0 IDENTICAL; every
+  client of join order 1-3 first differs at its own birth (231 arena, 212 L8)
+  in the TICK hash only (24-37 ticks, 0 checkpoints differ: the cell's hidden
+  state), except resync c0 / c1, whose rows first differ at 2658 / 2674 (the
+  respawn remakes). Solo1 / solo2 replays: IDENTICAL to their live journals.
+  core_ref_s8's join-order-1-3 journals and resync c0 / c1 are therefore no
+  longer the strict reference of the replays (no re-capture made: no protocol
+  change; the next set re-captured takes this build).
+- *Live smoke (one 4-client 60 s arena session, 150 ms, snapshots off, Arch
+  server rebuilt from this tree):* VERDICT PASS, starved 0, resyncs 0, far 0,
+  mism 0; 5-8 own-birth remakes per client, births recreated 59 / exact 59,
+  parked 0.
+
 ## As built (step B6RC)
 
 Step B6RC is the batch of RC4 and RC5. Base d97920e (protocol 13, journal

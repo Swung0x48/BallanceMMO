@@ -126,6 +126,11 @@ namespace bmmo::physics {
     // tick by tick.
     std::string describe_body(CKIpionManager* physics, const char* entity_name);
 
+    // Step OWNB's probe: with BMMO_HULL_PROBE=<name prefix> and
+    // BMMO_HULL_PROBE_FILE set, appends the body's collision bookkeeping
+    // (hull manager, hull entries, overlap element) under `label`.
+    void hull_probe(CKIpionManager* physics, const char* entity_name, const char* label);
+
     // ---- bridge API v16: the collision recheck as a pass of its own ----
 
     // Rebuild the body's collision pairs against the world as it stands now

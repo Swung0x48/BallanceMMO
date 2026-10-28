@@ -1493,7 +1493,11 @@ namespace bmmo::session {
     }
 
     // What no replay applied (it stopped before the tick): made live now,
-    // so the world keeps the body set it had before the rewind.
+    // so the world keeps the body set it had before the rewind.  (Step
+    // OWNB: a birth the scripts made, queued by destroy_moved_own_birth,
+    // is made here at the current tick, its spawn kick indexed by that
+    // tick, not by its birth tick as the server's clone was - the same as
+    // EL8's window lives; only an aborted replay leaves one.)
     void session_client_core::settle_own_due() {
         if (s.own_due_.empty()) return;
         std::vector<client_core_state::own_due> due;
@@ -2019,20 +2023,67 @@ namespace bmmo::session {
         return nullptr;
     }
 
-    // The moved own birth destroy_moved_own_birth takes out, or null: none
+    // Step OWNB (SFD (A)): an own birth the scripts made live at
+    // `birth_tick`, where the server applied it too (not moved), whose
+    // lifetime is still the body's.  Parked, such a body kept the live
+    // body's IVP collision bookkeeping (hull manager clock and values, hull
+    // entries, overlap element) from ticks after its birth, beamed back to
+    // its birth pose, into the replayed birth: every own ball a rewind
+    // crossed differed there from every copy of it (resync_snapoff c0 at
+    // 231: time_of_next_reset 16 against the server clone's 0).
+    const client_core_state::own_life* session_client_core::scripted_own_life(const std::string& entity,
+                                                                              uint32_t birth_tick) const {
+        for (const auto& life: s.own_life_)
+            if (!life.retired && life.what == own_life::kind::birth && life.made && !life.moved() && life.origin_live
+                    && life.entity == entity && life.origin == birth_tick && own_life_current(life, current_tick(), true))
+                return &life;
+        return nullptr;
+    }
+
+    // The own birth destroy_moved_own_birth takes out, or null: none
     // without own body control (design 2.3: the branch is inert).  The one
     // test behind both destroy_own_birth and own_birth_destroyable
-    // (rollback-engine gaps design 2.4, step B8EG item EGB).
+    // (rollback-engine gaps design 2.4, step B8EG item EGB).  A moved one
+    // (late-player design 3.3), or (step OWNB) one the scripts made at its
+    // stamp unless own_births_parked keeps it on the parking path.
     const client_core_state::own_life* session_client_core::destroyable_own_birth(const std::string& entity,
                                                                                   uint32_t birth_tick) const {
         if (!caps_.own_body_control) return nullptr;
-        return moved_own_life(entity, birth_tick);
+        if (const own_life* moved = moved_own_life(entity, birth_tick)) return moved;
+        if (config.own_births_parked) return nullptr;
+        return scripted_own_life(entity, birth_tick);
     }
 
     bool session_client_core::destroy_moved_own_birth(const std::string& entity, uint32_t birth_tick, bool& destroyed) {
         const own_life* life = destroyable_own_birth(entity, birth_tick);
         if (!life) return false;
-        destroyed = unmake_own_body(*life, current_tick(), "restore");
+        const own_life copy = *life;
+        destroyed = unmake_own_body(copy, current_tick(), "restore");
+        // Step OWNB: a birth the scripts made is made again at its birth
+        // tick by the replay's drain, after that tick's remote events -
+        // where the live frame's scripts made it (apply_own_due) - the way
+        // the Physicalize made it and the server makes its clone
+        // (remake_own_body).  What no replay reaches is made live after
+        // the rewind (settle_own_due).  A moved birth's remake is
+        // apply_own_lives' at its applied tick.
+        if (destroyed && !copy.moved()) {
+            client_core_state::own_due due;
+            due.tick = copy.origin;
+            due.entity = copy.entity;
+            due.life = copy;
+            due.scripted = true;
+            s.own_due_.push_back(std::move(due));
+            std::stable_sort(s.own_due_.begin(), s.own_due_.end(),
+                             [](const client_core_state::own_due& a, const client_core_state::own_due& b) {
+                                 if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
+                                 return a.death && !b.death;
+                             });
+            ++s.own_births_remade_;
+            if (s.own_births_remade_ <= 8)
+                logf("own birth: %s made by the scripts at tick %u taken out at the restore, made again at that tick in the"
+                     " replay (%llu so far)", copy.entity.c_str(), copy.origin,
+                     static_cast<unsigned long long>(s.own_births_remade_));
+        }
         return true;
     }
 

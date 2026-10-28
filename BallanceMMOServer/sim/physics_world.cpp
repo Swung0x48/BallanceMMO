@@ -923,6 +923,7 @@ namespace bmmo::sim {
             if (!ensure_collision_filter(error)) return false;
             if (!bmmo::physics::physicalize(manager, clone->GetName(), event.recipe, p.group.c_str(), error))
                 return false;
+            bmmo::physics::hull_probe(manager, clone->GetName(), "clone_made");
             p.ball = clone;
             p.ball_type = event.ball_type;
             p.physicalized = true;
@@ -953,6 +954,7 @@ namespace bmmo::sim {
                             idx, static_cast<double>(options_.spawn_impulse), id, event.tick);
                     log(text);
                 }
+                bmmo::physics::hull_probe(manager, clone->GetName(), "clone_impulse");
             }
             return true;
         }

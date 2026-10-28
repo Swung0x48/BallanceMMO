@@ -169,6 +169,9 @@ namespace bmmo::physics::ivp_access {
 }
 
 namespace bmmo::physics {
+    // physics_savestate_capture.cpp (step OWNB's probe).
+    std::string describe_hull_bookkeeping(IVP_Real_Object* object);
+
 
     const char* build_id() { return BMMO_PHYSICS_BUILD_ID; }
 
@@ -355,6 +358,32 @@ namespace bmmo::physics {
         void psi_watch_forget(IVP_Real_Object* object) {
             auto& v = psi_watches();
             v.erase(std::remove_if(v.begin(), v.end(), [object](const psi_watch& w) { return w.object == object; }), v.end());
+        }
+        // Step OWNB's probe (BMMO_HULL_PROBE=<name prefix>, lines appended
+        // to BMMO_HULL_PROBE_FILE): a body's collision bookkeeping at its
+        // creation, its script wake, the start of its first PSIs and the
+        // hosts' own probe points (hull_probe).  Diagnostics only.
+        const char* hull_probe_prefix() {
+            static const char* prefix = std::getenv("BMMO_HULL_PROBE");
+            return prefix && *prefix ? prefix : nullptr;
+        }
+        bool hull_probe_matches(const IVP_Real_Object* object) {
+            const char* prefix = hull_probe_prefix();
+            const char* name = object ? const_cast<IVP_Real_Object*>(object)->get_name() : nullptr;
+            return prefix && name && std::strncmp(name, prefix, std::strlen(prefix)) == 0;
+        }
+        void hull_probe_write(IVP_Real_Object* object, const char* label) {
+            static const char* file = std::getenv("BMMO_HULL_PROBE_FILE");
+            if (!file || !*file || !object) return;
+            if (FILE* f = std::fopen(file, "ab")) {
+                std::fprintf(f, "%s %s | %s\n", label, object->get_name() ? object->get_name() : "?",
+                             describe_hull_bookkeeping(object).c_str());
+                std::fclose(f);
+            }
+        }
+        std::vector<psi_watch>& hull_watches() {
+            static std::vector<psi_watch>* v = new std::vector<psi_watch>();
+            return *v;
         }
         std::string describe_core_for_psi(const IVP_Real_Object* object) {
             const IVP_Core* core = object ? object->get_core() : nullptr;
@@ -544,6 +573,11 @@ namespace bmmo::physics {
             void event_object_deleted(IVP_Event_Object* event) override {
                 record("deleted", event);
                 if (event && event->real_object) psi_watch_forget(event->real_object);
+                if (event && event->real_object) {
+                    auto& h = hull_watches();
+                    IVP_Real_Object* gone = event->real_object;
+                    h.erase(std::remove_if(h.begin(), h.end(), [gone](const psi_watch& w) { return w.object == gone; }), h.end());
+                }
             }
             void event_object_created(IVP_Event_Object* event) override {
                 record("created", event);
@@ -555,6 +589,10 @@ namespace bmmo::physics {
                 if (probe && *probe && event && event->real_object && event->real_object->get_name()
                         && std::strncmp(event->real_object->get_name(), probe, std::strlen(probe)) == 0)
                     psi_watches().push_back({event->real_object, event->real_object->get_name(), 6});
+                if (event && hull_probe_matches(event->real_object)) {
+                    hull_probe_write(event->real_object, muted ? "created(replay)" : "created");
+                    hull_watches().push_back({event->real_object, event->real_object->get_name(), 8});
+                }
                 // Diagnostics: BMMO_SIM_ALLOC_PERTURB=1 leaks a pseudo-random block after
                 // every body creation so later heap addresses land elsewhere; any change
                 // in the physics then proves a dependence on pointer values.
@@ -581,6 +619,14 @@ namespace bmmo::physics {
         public:
             IVP_Environment* environment = nullptr;
             void event_PSI(IVP_Event_PSI* event) override {
+                if (!hull_watches().empty()) {
+                    auto& h = hull_watches();
+                    for (auto& w: h) {
+                        hull_probe_write(w.object, g_event_log.muted ? "psi(replay)" : "psi");
+                        --w.remaining;
+                    }
+                    h.erase(std::remove_if(h.begin(), h.end(), [](const psi_watch& w) { return w.remaining <= 0; }), h.end());
+                }
                 if (g_event_log.muted) return;
                 auto& v = psi_watches();
                 if (v.empty() || g_event_log.text.size() > 256 * 1024) return;
@@ -606,6 +652,7 @@ namespace bmmo::physics {
         // environment check already happened in CKIpionManager. It shares the
         // listener's log so the entries keep one format and one drain point.
         void record_script_wakeup(IVP_Real_Object* object) {
+            if (hull_probe_matches(object)) hull_probe_write(object, g_event_log.muted ? "script_wakeup(replay)" : "script_wakeup");
             if (g_event_log.muted) return;
             if (!object || g_event_log.text.size() > 256 * 1024) return;
             IVP_Environment* environment = object->get_environment();
@@ -1189,6 +1236,13 @@ namespace bmmo::physics {
         return out;
     }
 
+    void hull_probe(CKIpionManager* physics, const char* entity_name, const char* label) {
+        if (!hull_probe_prefix() || !physics || !entity_name) return;
+        CK3dEntity* entity = find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE));
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        if (object && object->m_RealObject) hull_probe_write(object->m_RealObject, label);
+    }
+
     std::string describe_body(CKIpionManager* physics, const char* entity_name) {
         CK3dEntity* entity = physics ? find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE)) : nullptr;
         PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
@@ -1510,6 +1564,7 @@ namespace bmmo::physics {
                 return false;
             }
             bool beamed = false;
+            if (hull_probe_matches(real)) hull_probe_write(real, "write_body_state");
             // IVP integrates with a leapfrog: at every PSI the core's position
             // is advanced by the delta written at the PREVIOUS one, and the
             // rotation of the next PSI was predicted at this one.  The beam

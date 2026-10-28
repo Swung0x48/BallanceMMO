@@ -21,6 +21,7 @@
 #include "ivp_surface_manager.hxx"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <set>
@@ -855,5 +856,61 @@ namespace bmmo::physics::savestate {
             report->hull_entries = static_cast<uint32_t>(hull_entries);
         }
         return true;
+    }
+}
+
+// Step OWNB's probe (diagnostics only, read-only): one body's collision
+// bookkeeping on one line - the hull manager's clock and values, each hull
+// entry (kind and value), the overlap element - for following a body through
+// its creation frame (BMMO_HULL_PROBE, physics_state.cpp).
+namespace bmmo::physics {
+    std::string describe_hull_bookkeeping(IVP_Real_Object* object) {
+        if (!object) return "no object";
+        IVP_Hull_Manager* hm = object->get_hull_manager();
+        if (!hm) return "no hull manager";
+        const IVP_Hull_Manager_Base_Gradient& g = IVP_BMMO_State::hull_gradient(*hm);
+        IVP_Core* core = object->get_core();
+        IVP_Environment* env = object->get_environment();
+        char text[512];
+        std::snprintf(text, sizeof(text),
+                      "env=%a tlast=%a ms=%d core_ms=%d | hull vpsi=%a grad=%a cgrad=%a last=%a center=%a next=%a reset=%d | core cur=%a om=%a msrs=%a",
+                      env ? env->get_current_time().get_seconds() : -1.0, core ? core->time_of_last_psi.get_seconds() : -1.0,
+                      static_cast<int>(object->get_movement_state()), core ? static_cast<int>(core->movement_state) : -1,
+                      g.last_vpsi_time.get_seconds(), static_cast<double>(g.gradient), static_cast<double>(g.center_gradient),
+                      static_cast<double>(g.hull_value_last_vpsi), static_cast<double>(g.hull_center_value_last_vpsi),
+                      static_cast<double>(g.hull_value_next_psi), static_cast<int>(g.time_of_next_reset),
+                      core ? static_cast<double>(core->current_speed) : 0.0, core ? static_cast<double>(core->abs_omega) : 0.0,
+                      core ? static_cast<double>(core->max_surface_rot_speed) : 0.0);
+        std::string out = text;
+        out += " | entries";
+        IVP_U_Min_List& list = IVP_BMMO_State::hull_list(*hm);
+        std::snprintf(text, sizeof(text), " min=%a:", static_cast<double>(list.min_value));
+        out += text;
+        IVP_U_Min_List_Enumerator enumerator(&list);
+        int guard = 0;
+        while (IVP_U_Min_List_Element* header = enumerator.get_next_element_header()) {
+            if (++guard > 64) { out += " ..."; break; }
+            auto* listener = static_cast<IVP_Listener_Hull*>(header->element);
+            const int kind = listener ? static_cast<int>(listener->get_type()) : -1;
+            std::snprintf(text, sizeof(text), " %d=%a", kind, static_cast<double>(header->value));
+            out += text;
+        }
+        if (IVP_OV_Element* ov = object->get_ov_element()) {
+            std::snprintf(text, sizeof(text), " | ov c=%a,%a,%a r=%a node=%p", static_cast<double>(ov->center.k[0]),
+                          static_cast<double>(ov->center.k[1]), static_cast<double>(ov->center.k[2]), static_cast<double>(ov->radius),
+                          static_cast<void*>(ov->node));
+            out += text;
+        } else {
+            out += " | ov none";
+        }
+        if (core) {
+            std::snprintf(text, sizeof(text), " | pos=%a,%a,%a v=%a,%a,%a dv=%a,%a,%a m=%a", core->pos_world_f_core_last_psi.k[0],
+                          core->pos_world_f_core_last_psi.k[1], core->pos_world_f_core_last_psi.k[2],
+                          static_cast<double>(core->speed.k[0]), static_cast<double>(core->speed.k[1]), static_cast<double>(core->speed.k[2]),
+                          static_cast<double>(core->speed_change.k[0]), static_cast<double>(core->speed_change.k[1]),
+                          static_cast<double>(core->speed_change.k[2]), static_cast<double>(core->get_mass()));
+            out += text;
+        }
+        return out;
     }
 }

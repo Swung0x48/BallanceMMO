@@ -4063,6 +4063,74 @@ namespace {
         }
     }
 
+    // Step OWNB (SFD (A)): an own birth the scripts made at its stamp (not
+    // moved) inside a rewind's window is taken out at the restore and made
+    // again at its birth tick by the replay's drain (own_due), the way the
+    // server makes its clone - with own body control and without
+    // own_births_parked; otherwise it keeps the parking path.  A birth of
+    // another tick, a retired or a later-generation life, is not one.
+    TEST(SessionClientCoreOwnLives, ScriptedOwnBirthInsideTheWindowIsRemade) {
+        for (const bool control: {false, true})
+            for (const bool parked: {false, true}) {
+                SCOPED_TRACE(std::string(control ? "control" : "no control") + (parked ? ", own_births_parked" : ""));
+                flow_fake fake;
+                session_client_core* bound = nullptr;
+                session_capabilities caps;
+                caps.own_body_control = control;
+                session_client_core core(replay_platform(fake, bound), caps);
+                bound = &core;
+                run_to_tick_125(core, fake);
+                core.config.own_births_parked = parked;   // after begin(), which takes the session's
+                const auto& hooks = steps{core}.world_hooks();
+                ASSERT_TRUE(hooks.own_birth_destroyable);
+                state_of(core).own_body_entity_ = "Ball_Wood";
+                state_of(core).own_ball_entities_ = {"Ball_Wood"};
+                state_of(core).own_life_ = {own_birth(122)};
+                const bool remade = control && !parked;
+                EXPECT_EQ(hooks.own_birth_destroyable("Ball_Wood", 122), remade);
+                EXPECT_FALSE(hooks.own_birth_destroyable("Ball_Wood", 121)) << "another birth tick";
+                EXPECT_FALSE(hooks.own_birth_destroyable("Ball_Stone", 122)) << "another entity";
+                state_of(core).own_due_.clear();
+                const size_t from = fake.calls.size();
+                bool destroyed = false;
+                EXPECT_EQ(steps{core}.destroy_moved_own_birth("Ball_Wood", 122, destroyed), remade);
+                if (remade) {
+                    EXPECT_TRUE(destroyed);
+                    const auto calls = since(fake.calls, from);
+                    EXPECT_NE(std::find(calls.begin(), calls.end(), std::string("unmake_own:Ball_Wood:125")), calls.end());
+                    ASSERT_EQ(state_of(core).own_due_.size(), 1u) << "queued for the replay's drain";
+                    EXPECT_EQ(state_of(core).own_due_[0].tick, 122u);
+                    EXPECT_FALSE(state_of(core).own_due_[0].death);
+                    EXPECT_EQ(state_of(core).own_due_[0].life.entity, "Ball_Wood");
+                    EXPECT_EQ(state_of(core).own_births_remade_, 1u);
+                    EXPECT_TRUE(state_of(core).own_due_[0].scripted);
+                    ASSERT_TRUE(hooks.own_birth_remade);
+                    EXPECT_TRUE(hooks.own_birth_remade("Ball_Wood")) << "kept as the replay steps it (birth_from_inputs)";
+                    EXPECT_FALSE(hooks.own_birth_remade("Ball_Stone"));
+                    // The replay's drain makes it again at its birth tick, not before.
+                    const size_t drain = fake.calls.size();
+                    steps{core}.drain_pending_lives(121);
+                    EXPECT_EQ(count_prefix(since(fake.calls, drain), "make_own:"), 0u) << "not before its birth tick";
+                    EXPECT_EQ(state_of(core).own_due_.size(), 1u);
+                    steps{core}.drain_pending_lives(122);
+                    const auto made = since(fake.calls, drain);
+                    EXPECT_EQ(count_prefix(made, "make_own:Ball_Wood:P#2:122"), 1u) << "made once, at 122";
+                    EXPECT_EQ(count_prefix(made, "make_own:"), 1u);
+                    EXPECT_TRUE(state_of(core).own_due_.empty()) << "drained";
+                    EXPECT_FALSE(hooks.own_birth_remade("Ball_Wood")) << "nothing queued any more";
+                } else {
+                    EXPECT_TRUE(state_of(core).own_due_.empty());
+                    if (hooks.own_birth_remade) EXPECT_FALSE(hooks.own_birth_remade("Ball_Wood"));
+                }
+                // A retired life, and a life of an earlier generation, are not.
+                state_of(core).own_life_[0].retired = true;
+                EXPECT_FALSE(hooks.own_birth_destroyable("Ball_Wood", 122));
+                state_of(core).own_life_[0].retired = false;
+                state_of(core).generations_["Ball_Wood"] = 3;
+                EXPECT_FALSE(hooks.own_birth_destroyable("Ball_Wood", 122)) << "a death or a trafo since";
+            }
+    }
+
     TEST(SessionClientCoreOwnLives, MovedEcho) {
         {
             flow_fake fake;

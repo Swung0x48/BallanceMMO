@@ -256,6 +256,9 @@ namespace {
         // --remote-births-parked (gap L, L-H6's control arm, step EL7): a
         // mirror born inside a rewind's window keeps the parking path.
         bool remote_births_parked = false;
+        // --own-births-parked (step OWNB's control arm): an own birth the
+        // scripts made inside a rewind's window keeps the parking path.
+        bool own_births_parked = false;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
@@ -581,6 +584,7 @@ namespace {
             else if (arg == "--savestate-strict") out.savestate_strict = true;
             else if (arg == "--trace-plan") out.trace_plan = true;
             else if (arg == "--remote-births-parked") out.remote_births_parked = true;
+            else if (arg == "--own-births-parked") out.own_births_parked = true;
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
@@ -729,14 +733,35 @@ namespace {
         bool armed_ = false;
     };
 
+    // Step OWNB (SFD (A)): the headless form of BMLPlus's OnPhysicalize, which
+    // the retail mod's birth cell rides on (core_host.cpp
+    // core_host_on_physicalize): every Physicalize block of the level runs
+    // through this function, which lets the client move the own ball's entity
+    // to its birth cell BEFORE the block makes the body from the entity's
+    // matrix, as the retail host does.  Moving the body afterwards (the old
+    // capture_own_physicalize) was a beam of a fresh body: IVP added the 4.2 m
+    // to its hull manager and rechecked its overlap element, so every own ball
+    // of join order 1-3 began with other collision bookkeeping than the
+    // server's clone and every mirror, which are made at the offset pose.  The
+    // original function is the prototype's (one for every block); the client
+    // is the one session running in this process.
+    int own_physicalize_hook(const CKBehaviorContext& context);
+    CKBEHAVIORFCT g_physicalize_original = nullptr;
+    session_client* g_physicalize_client = nullptr;
+    const CKGUID kPhysicalizeGuid(0x7522370e, 0x37ec15ec);   // physics_RT Behaviors/Physicalize.cpp
+
     class session_client : public role {
         // Needs capture_own_physicalize() (design 9.10); kept private like the
         // rest of the frame-loop internals.
         friend class own_physicalize_callback;
+        friend int own_physicalize_hook(const CKBehaviorContext& context);
     public:
         explicit session_client(arguments args) : args_(std::move(args)) {}
         // Step S6: the copies go before the engine (release_placement).
-        ~session_client() { release_placement("the client exits"); }
+        ~session_client() {
+            if (g_physicalize_client == this) g_physicalize_client = nullptr;
+            release_placement("the client exits");
+        }
         // make_platform() hands core_ lambdas that hold `this`: a moved (or
         // copied) client would leave them calling into the old object.
         session_client(session_client&&) = delete;
@@ -1509,6 +1534,7 @@ namespace {
             };
             p.arm_own_capture = [this](uint32_t tick) {
                 live_tick_serial_ = ++live_ticks_;
+                live_tick_number_ = tick;
                 arm_own_physicalize_capture(live_tick_serial_, tick);
             };
             // post_step: the pending manager activation, the navigation
@@ -1552,6 +1578,7 @@ namespace {
                 navigation_ = graph;
                 navigation_known_ = true;
                 logf("navigation keys known at tick %u (%zu leaves)", tick, graph.leaves.size());
+                install_physicalize_hook();
                 return true;
             };
             p.own_ball = [this]() {
@@ -1674,6 +1701,7 @@ namespace {
             c.script_diff_logs = args_.script_diff_logs;
             c.trace_plan = args_.trace_plan;
             c.remote_births_parked = args_.remote_births_parked;
+            c.own_births_parked = args_.own_births_parked;
             c.rollback = args_.rollback;
             c.correct = args_.correct;
             c.trace = args_.trace;
@@ -2290,6 +2318,7 @@ namespace {
                     const_cast<CKSTRING>(spec.entity.c_str()), CKCID_3DENTITY, nullptr));
             bmmo::physics::physics_direct direct(engine_->physics());
             bmmo::session::own_body_made made = bmmo::game::make_own_body(direct, entity, spec);
+            bmmo::physics::hull_probe(engine_->physics(), spec.entity.c_str(), "own_remade");
             if (made.made && spec.with_replica) {
                 const int ball_type = ball_type_of(spec.entity);
                 const float force =
@@ -2387,6 +2416,75 @@ namespace {
                 physics->m_PreSimulateCallbacks->Process(new own_physicalize_callback(physics, behavior, this, serial, tick));
         }
 
+        // Step OWNB: own_physicalize_hook on every Physicalize block of the
+        // level (once, when the level's navigation is known: the scripts are
+        // loaded by then).  A block made later (none in the retail levels)
+        // would keep the plain function and its own birth the old test.
+        void install_physicalize_hook() {
+            CKContext* context = engine_->context();
+            const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
+            CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
+            int hooked = 0;
+            for (int i = 0; i < count; ++i) {
+                auto* behavior = CKBehavior::Cast(context->GetObject(ids[i]));
+                // A block has a prototype GUID only when it uses a function.
+                if (!behavior || !behavior->IsUsingFunction() || behavior->GetPrototypeGuid() != kPhysicalizeGuid) continue;
+                const CKBEHAVIORFCT function = behavior->GetFunction();
+                if (function == &own_physicalize_hook) { ++hooked; continue; }
+                if (!g_physicalize_original) g_physicalize_original = function;
+                if (function != g_physicalize_original) continue;   // not the prototype's: left alone
+                behavior->SetFunction(&own_physicalize_hook);
+                ++hooked;
+            }
+            g_physicalize_client = this;
+            physicalize_hooked_ = hooked;
+            logf("Physicalize hook: %d block(s)", hooked);
+        }
+
+        // Step OWNB: before a Physicalize block of a live tick makes the own
+        // ball's body - what the retail host does in OnPhysicalize, which
+        // BMLPlus broadcasts before the block creates the body
+        // (core_host_on_physicalize): the spawn flag (the entity at the
+        // level's resetpoint CurrentLevel[0,3]) and the birth cell
+        // (session/spawn_impulse.hpp), the entity moved off the resetpoint in
+        // float, the retail sum, so the block makes the body exactly at the
+        // pose the Physicalize event carries and every other side makes its
+        // copy at.  Nothing in a replayed step (no live tick), for a block
+        // that keeps an existing body, or for any other entity.
+        void before_physicalize(CKBehavior* behavior) {
+            if (!behavior || !behavior->IsInputActive(0) || live_tick_serial_ == 0) return;
+            auto* target = CK3dEntity::Cast(behavior->GetTarget());
+            CK3dEntity* ball = current_ball();
+            if (!target || target != ball || !target->GetName()) return;
+            CKIpionManager* physics = engine_->physics();
+            if (!physics || physics->GetPhysicsObject(target)) return;
+            const std::string name = target->GetName();
+            if (name == core_.own_body_entity()) return;
+            own_pre_.valid = true;
+            own_pre_.serial = live_tick_serial_;
+            own_pre_.entity = name;
+            own_pre_.spawn = false;
+            const VxMatrix& world = target->GetWorldMatrix();
+            VxMatrix reset;
+            CKDataArray* level = engine_->data_array("CurrentLevel");
+            if (!level || !level->GetElementValue(0, 3, &reset)) return;
+            const float dx = world[3][0] - reset[3][0];
+            const float dy = world[3][1] - reset[3][1];
+            const float dz = world[3][2] - reset[3][2];
+            own_pre_.spawn = (dx * dx + dy * dy + dz * dz) < 1e-6f;
+            const uint8_t join_order = static_cast<uint8_t>(core_.own_join_order() < 0 ? 63 : core_.own_join_order());
+            if (!own_pre_.spawn || core_.spawn_spacing() <= 0.0f || join_order % bmmo::session::kSpawnOffsets == 0) return;
+            const float right[3] = {reset[0][0], reset[0][1], reset[0][2]};
+            const float dir[3] = {reset[2][0], reset[2][1], reset[2][2]};
+            float offset[3];
+            bmmo::session::spawn_offset(join_order, core_.spawn_spacing(), right, dir, offset);
+            VxMatrix moved = world;
+            for (int k = 0; k < 3; ++k) moved[3][k] += offset[k];
+            target->SetWorldMatrix(moved);
+            logf("spawn offset (%.3f,%.3f,%.3f) for join order %u at tick %u", static_cast<double>(offset[0]),
+                 static_cast<double>(offset[1]), static_cast<double>(offset[2]), join_order, live_tick_number_);
+        }
+
         // The own ball's Physicalize as the retail script made it (design
         // 9.10), from own_physicalize_callback's PreSimulate pass of the live
         // tick: after this tick's scripts, so a Physicalize block that ran
@@ -2409,52 +2507,39 @@ namespace {
             bmmo_physics_body_state state{};
             std::string error;
             if (!bmmo::physics::get_body_state(engine_->physics(), name.c_str(), state, error)) return;   // no body yet
+            bmmo::physics::hull_probe(engine_->physics(), name.c_str(), "own_capture");
             own_capture_.valid = true;
             own_capture_.tick = tick;
             own_capture_.entity = name;
             own_capture_.pose = ball->GetWorldMatrix();
             own_capture_.spawn = false;
-            VxMatrix reset;
-            bool have_reset = false;
-            if (CKDataArray* level = engine_->data_array("CurrentLevel")) {
-                if (level->GetElementValue(0, 3, &reset)) {
-                    have_reset = true;
+            // Step OWNB: the spawn flag as own_physicalize_hook saw the entity
+            // before the block made the body (at the resetpoint, before the
+            // birth cell moved it), as the retail host flags it.  The pose is
+            // the entity's now: the block made the body there and nothing has
+            // moved either since.
+            if (own_pre_.valid && own_pre_.serial == live_tick_serial_ && own_pre_.entity == name) {
+                own_capture_.spawn = own_pre_.spawn;
+            } else {
+                // No block of this tick went through the hook (it is not
+                // installed): the old test, and no birth cell.
+                VxMatrix reset;
+                CKDataArray* level = engine_->data_array("CurrentLevel");
+                if (level && level->GetElementValue(0, 3, &reset)) {
                     const float dx = own_capture_.pose[3][0] - reset[3][0];
                     const float dy = own_capture_.pose[3][1] - reset[3][1];
                     const float dz = own_capture_.pose[3][2] - reset[3][2];
                     own_capture_.spawn = (dx * dx + dy * dy + dz * dz) < 1e-6f;
                 }
+                if (own_capture_.spawn && core_.spawn_spacing() > 0.0f)
+                    logf("spawn offset: the Physicalize hook did not see the own birth at tick %u (%d blocks hooked): no birth cell",
+                         tick, physicalize_hooked_);
             }
+            own_pre_.valid = false;
             if (!own_capture_.spawn) return;
             const uint8_t join_order = static_cast<uint8_t>(core_.own_join_order() < 0 ? 63 : core_.own_join_order());
-            // The birth cell (session/spawn_impulse.hpp): the ball is moved
-            // off the resetpoint before anything else sees it - the kick
-            // below, the pose the Physicalize event carries, this tick's step
-            // - so every side creates the clone where this ball is.
-            if (core_.spawn_spacing() > 0.0f && have_reset && join_order % bmmo::session::kSpawnOffsets != 0) {
-                const float right[3] = {reset[0][0], reset[0][1], reset[0][2]};
-                const float dir[3] = {reset[2][0], reset[2][1], reset[2][2]};
-                float offset[3];
-                bmmo::session::spawn_offset(join_order, core_.spawn_spacing(), right, dir, offset);
-                // The retail sum (core_host.cpp: the entity's world matrix
-                // plus the offset, in float, the matrix the body is made
-                // from), so the body is exactly the pose the Physicalize event
-                // carries and every other side builds its copy from.  The
-                // double sum of the body's position and the offset left this
-                // ball up to a float half-ulp (about 1 um at 24 m) off every
-                // copy of it (step SFD: resync_snapoff c1's first divergence).
-                double target[3];
-                for (int k = 0; k < 3; ++k) target[k] = static_cast<double>(own_capture_.pose[3][k] + offset[k]);
-                const float still[3] = {0.0f, 0.0f, 0.0f};
-                if (!bmmo::physics::set_body_state(engine_->physics(), name.c_str(), target, state.rotation, still, still,
-                                                   bmmo::physics::wake_mode::keep, true, error)) {
-                    logf("spawn offset: %s", error.c_str());
-                } else {
-                    for (int k = 0; k < 3; ++k) own_capture_.pose[3][k] = static_cast<float>(target[k]);
-                    logf("spawn offset (%.3f,%.3f,%.3f) for join order %u at tick %u", static_cast<double>(offset[0]),
-                         static_cast<double>(offset[1]), static_cast<double>(offset[2]), join_order, tick);
-                }
-            }
+            // (The birth cell moved the entity before the block made the
+            // body: own_physicalize_hook.)
             if (core_.spawn_impulse() <= 0.0f) return;
             const uint32_t idx = bmmo::session::spawn_direction_index(core_.seed(), join_order, tick);
             if (!bmmo::physics::push_impulse(engine_->physics(), name.c_str(), bmmo::session::kSpawnDirectionTable[idx],
@@ -2462,6 +2547,7 @@ namespace {
                 logf("spawn impulse: %s", error.c_str());
             else
                 logf("spawn impulse index=%u at tick %u", idx, tick);
+            bmmo::physics::hull_probe(engine_->physics(), name.c_str(), "own_impulse");
         }
 
         bool navigation_active() const {
@@ -3790,6 +3876,17 @@ namespace {
         uint32_t queue_traces_ = 0;                          // --trace-restore PreSimulate queue lines (the first 24)
         std::string compare_scripts_last_;   // the last logged first difference, so only changes are logged
         int contact_traces_ = 0;                            // --trace-restore: contact lines logged around rewinds
+        // Step OWNB: the own ball's Physicalize block as own_physicalize_hook
+        // saw it before the block ran (the live tick, the entity, and the
+        // spawn flag of the entity before the birth cell moved it).
+        struct {
+            bool valid = false;
+            uint64_t serial = 0;
+            std::string entity;
+            bool spawn = false;
+        } own_pre_;
+        int physicalize_hooked_ = 0;          // the Physicalize blocks own_physicalize_hook is on
+        uint32_t live_tick_number_ = 0;       // the session tick of the live tick live_tick_serial_ numbers
         // The own ball's last Physicalize as capture_own_physicalize() saw it
         // before the step: what report_physicalize sends (design 9.10).
         struct {
@@ -3865,6 +3962,11 @@ namespace {
         // destroyed first, as the journal was.
         bmmo::session::session_client_core core_{make_platform(), make_capabilities()};
     };
+
+    int own_physicalize_hook(const CKBehaviorContext& context) {
+        if (g_physicalize_client) g_physicalize_client->before_physicalize(context.Behavior);
+        return g_physicalize_original ? g_physicalize_original(context) : CKBR_GENERICERROR;
+    }
 
     int own_physicalize_callback::Execute() {
         if (!armed_) {
