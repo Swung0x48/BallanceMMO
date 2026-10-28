@@ -723,6 +723,40 @@ Nothing in the retail layout moves (the member is appended), no IVP file is
 touched, and a build without the bridge's listener only carries a pointer that
 is null between calls.
 
+## 20. (reserved: the PreSimulate queue's access, rollback-engine-gaps design gap Q)
+
+## 21. A local parameter's object accessors on a 64-bit build (CK2)
+
+File: `Source/CK2/src/CKBehavior.cpp` (`CKBehavior::GetLocalParameterObject`,
+`CKBehavior::SetLocalParameterObject`; CK2 is the reimplementation, a
+submodule of Ballanced).
+
+Both accessors moved a `CK_ID` (4 bytes) through `CKParameter::GetValue` /
+`SetValue`, which copy the parameter's own size. For a parameter wider than a
+`CK_ID` - a pointer parameter on a 64-bit build - `SetValue` read 4 bytes past
+the id on the stack and `GetValue` wrote 4 bytes past it. The particle block
+(TT_ParticleSystems_RT `GeneralParticleSystem.cpp:415`) clears its emitter
+pointer at BEHAVIORDETACH with `SetLocalParameterObject(0, NULL)`, which left
+`0x00007FF600000000` instead of a null pointer; a context reset that detached a
+`P_Extra_*` copy's particle block before its Extra block then let the Extra
+block's `DestroyExtra` deactivate the particle script, whose
+DEACTIVATESCRIPT callback (`ShowParticles`) read it: 0xC0000005 at world
+teardown (sector-placement design, "As built (step S2)" and S7's V9
+`--free-ids-before-load 20000` arm). Since this change a parameter wider than a
+`CK_ID` is read through its buffer (the id's 4 bytes) and written as the id
+zero-extended to the parameter's size; a parameter of 4 bytes or less takes
+the old path. The values are the ones a 32-bit build reads and writes - the
+retail game (x86) can never meet the case, its pointers being 4 bytes - so no
+simulation result changes: a pointer parameter set from an object now holds
+the id with zero high bytes instead of stack bytes, and a null object gives a
+null pointer. Not behind `IVP_PORTABLE_BMMO` (not an IVP file).
+
+Evidence (step B2SW): SP7's V9 `--free-ids-before-load 20000` arm (L8 drop
+scene, placement on) crashed after its last tick on rR12 (exit 139, the S2
+stack); with the change it exits on its verdict, and the tick-hash streams of
+the teardown sweep are unchanged (see the sector-placement design, "As built
+(step B2SW)").
+
 ---
 
 ## Bridge notes: the script replay's record, version 2 (no engine change)

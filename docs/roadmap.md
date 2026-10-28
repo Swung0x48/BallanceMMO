@@ -386,6 +386,9 @@ numbers 1-10 are unchanged.
        design).
      - *Step P's race*: re-measured snapshots off - both clients in state B,
        every body exact from 218; moot since R3; closed (core design).
+     - *The x64 teardown over-read*: engine change #21 (CK2); V9's
+       `--free-ids-before-load 20000` arm and L6-L9 of a 20000-id sweep no
+       longer crash, tick hashes identical (sector-placement design 12.6).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

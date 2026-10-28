@@ -2595,3 +2595,22 @@ a SimTool tick costs at most 0.11 ms (on and off within the scatter).
 - **Host unification's queue** (HU1's inventory: the trafo set hooks, the
   retail level-file counters glue, the anchor sequence itself, N2 on every
   world, the 30-unmatched-snapshots rule): roadmap §4 item 1.
+
+### 12.6 As built (step B2SW, 2026-10-27): the x64 teardown over-read, fixed
+
+Engine change #21 (`docs/engine-changes.md`; CK2 `CKBehavior.cpp`, the
+reimplementation, a submodule of Ballanced): `GetLocalParameterObject` and
+`SetLocalParameterObject` move a `CK_ID` through a parameter wider than one
+(a pointer parameter on x64) by its first 4 bytes, the rest zero, instead of
+copying the parameter's whole size from or into the 4-byte id; a parameter of
+4 bytes or less takes the old path (retail x86 cannot meet the case). Checks
+(`.local-tools/work/B2SW/`): SP7's V9 on rR12: 50 FAIL lines (all gap F) and
+the `--free-ids-before-load 20000` arm exit 139 at teardown; on rB2SW / rB2SWb
+0 FAIL lines in all four arms, `free` exit 0. A teardown sweep L1-L13, the
+placement on, the drop scene with sectors 1 / 2 and a move to 3 at 20, 120
+ticks, `--tick-hashes`: rR12 and rB2SW both exit 0 with identical tick-hash
+streams (121 lines each) on every level; the same sweep with
+`--free-ids-before-load 20000`: rR12 crashes after its last tick on L6, L7, L8
+and L9 (0xC0000005 reading 0x00007FF700000008, the S2 signature), rB2SW exits
+0 on all 13 with tick hashes identical to rR12's. §12.5's first point is
+closed.
