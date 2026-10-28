@@ -180,6 +180,7 @@ broken: server and clients are rebuilt together.
 | **Sector placement S1-S11, the track** (`sector-placement-design.md` §12 is the consolidated record): one object per PH row at the anchor in every world, the level-walk gate, the retail level reload; S11 the records | cd501af, 5b536b2, 81c6803, 72108fd, 5cd1c11, bc88b8e, 0d1178b, 3242755, d0c7b28, 48d1c32, fa8218d; S11 the `docs:` commit after fa8218d | built; the user's rule "entering the next sector changes nothing in the previous one" holds on L8 and L11 by the invariant check, offline and networked |
 | Rollback engine gaps G0 (EG0): diagnostics - the counted birth failures, the 1378 difference, the outside producers | 0b73af2 | built |
 | Record-format gaps K0: SimTool `--array-reads`, `--globals-trace`, `--world-options` | 49e2cc8 | built |
+| World agreement G0 (WG0): SimTool `--probe-census`, the read-only proximity census | the `sim:` commit after dba4d3d | V1 PASS on L1-L13, placement off and on: 290 mechanism blocks, 58 fans + 13 bridges (132 units with the placement), every count as design §1.1.2 |
 | Rewind cost RC1: the replay re-predicts a remote's tail past its newest relayed frame with that frame (hold-last) | 5f967b4 | input rewinds -83..-87 % (swing, H1 at 150 ms), -67..-77 % (cliff), -44 % at 50 ms; no rebase in any arm; CPU parity -36 % |
 | Resync lag RL1: a re-anchor's base on the fixed deadline schedule (server only) | 3daa19a | the other clients' relay lag after a resync 36-37 -> 20-21 ticks (resync_snapoff); resync_at150 c0 26.77 -> 22.3 |
 | Trafo T3 (step TR3b): the core and the headless host, merged onto RC1 and RL1 | 3394ffd | H1 at 150 ms, snapshots off: pieces 150/150 bit-equal on four clients, starved 0/0/0/0 against the control's 0/0/0/0 |
@@ -743,6 +744,10 @@ numbers 1-10 are unchanged.
    The legacy parts are dropped (answer 7). The design's step Q7 needs
    every world to know every life's join order (J1), so it comes after M1,
    not right after G3: the order is G0-G6, M0, M1, Q7.
+   **G0 is built (step WG0):** SimTool `--probe-census`, V1 PASS on
+   L1-L13 with the placement off and on (design §12 "As built (step
+   WG0)": the counts, the signatures G1 must reproduce, the two unit
+   shapes on every fan and bridge, placed copies included).
    **WAD-A (queued by WAD's review, a measurement):** a force controller is
    named `rt:force/<block id>` (engine change #18), and a block id agrees
    across worlds only if both worlds created the same objects in the same

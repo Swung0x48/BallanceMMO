@@ -58,6 +58,7 @@
 #include "placement_tool.hpp"
 #include "placement_trace.hpp"
 #include "array_census.hpp"   // step K0
+#include "probe_census.hpp"   // step WG0
 #include <entity/session.hpp>
 #include <game/script_replay.hpp>
 #include <game/session_host_support.hpp>
@@ -425,6 +426,13 @@ namespace {
         // unchanged (order included), and the run's --write-record must
         // equal the same run's without the switch.
         bool queue_roundtrip = false;
+        // Step WG0 (world-agreement-gaps-design.md §7.2 V1, §8 G0):
+        // --probe-census, the proximity census of --level's session world at
+        // its anchor (sim/probe_census.hpp): per class the blocks the
+        // design's rewire would take, their names, facts, identity reads,
+        // gating probes, units and the signature; read-only, a mode of its
+        // own (--level N [--placement on] [--world-options B]).
+        bool probe_census = false;
         // Step K0 (record-format-gaps-design.md §8, read-only tools):
         // --array-reads [--client-scope] [--array-reads-all]: the array-read
         // census of --level's session world at its anchor (design 2.2, S2;
@@ -928,6 +936,7 @@ namespace {
             else if (arg == "--ball-off-wake-only") out.ball_off_wake_only = true;      // step EG0
             else if (arg == "--ball-off-drop-all") out.ball_off_drop_all = true;        // step EG0
             else if (arg == "--queue-roundtrip") out.queue_roundtrip = true;            // step B7EG
+            else if (arg == "--probe-census") out.probe_census = true;                  // step WG0
             else if (!parse_trafo_arg(arg, next, out) && !parse_record_format_arg(arg, next, out)) return false;
         }
         // --list of a journal and the savestate file verbs are pure file
@@ -2296,7 +2305,7 @@ namespace {
                 || args.placement_trace_ball)
             && (!args.drop_entity.empty() || args.savestate_check || !args.late_run.empty() || args.late_sector_check
                 || args.resync_check || args.portable_scripts_check || args.list_placement || args.array_reads
-                || args.spawn_test > 0 || !args.nav_mode.empty() || !args.synth_trafo_session.empty()
+                || args.probe_census || args.spawn_test > 0 || !args.nav_mode.empty() || !args.synth_trafo_session.empty()
                 || !args.describe_script.empty() || !args.savestate_diff[0].empty()
                 || !args.savestate_describe.empty())) {
             std::fprintf(stderr, "--placement-trace / --placement-trace-player / --drop-sectors-above with "
@@ -8316,7 +8325,7 @@ namespace {
         const bool scene = !args.drop_entity.empty() || (args.savestate_check && args.spawn_test <= 0);
         const bool world_mode = scene || args.spawn_test > 0 || args.savestate_check || args.portable_scripts_check
             || args.list_placement || args.resync_check || args.late_sector_check || !args.late_run.empty()
-            || args.array_reads;
+            || args.array_reads || args.probe_census;
         const bool file_mode = !args.replay_session.empty() || !args.synth_trafo_session.empty() || !args.replay.empty()
             || !args.nav_mode.empty() || !args.savestate_diff[0].empty() || !args.savestate_describe.empty()
             || !args.describe_script.empty();
@@ -8327,6 +8336,10 @@ namespace {
                                       || args.portable_scripts_check || args.list_placement || args.resync_check
                                       || args.late_sector_check || !args.late_run.empty()))
             why = "--array-reads is a mode of its own (--level N [--world-options B] [--placement on])";
+        else if (args.probe_census && (args.array_reads || file_mode || scene || args.spawn_test > 0 || args.savestate_check
+                                       || args.portable_scripts_check || args.list_placement || args.resync_check
+                                       || args.late_sector_check || !args.late_run.empty()))
+            why = "--probe-census is a mode of its own (--level N [--world-options B] [--placement on])";   // step WG0
         else if (args.globals_trace && (file_mode || !scene || args.late_sector_check || !args.late_run.empty()
                                         || args.resync_check || args.portable_scripts_check || args.list_placement))
             why = "--globals-trace is for the drop scene (--drop) and the sector scene (--savestate-check without "
@@ -8339,7 +8352,7 @@ namespace {
             why = "--world-options: only bit 0 (PLACEMENT_CLONES) and bit 1 (TRAFO_INPUTS) exist; bit 2 is the "
                   "world-agreement design's and bit 3 the record-format design's (step K3), neither built";
         else if ((args.world_options & bmmo::session::WORLD_TRAFO_INPUTS)
-                 && !(args.array_reads || (!args.drop_entity.empty() && !args.trafo.any() && args.late_run.empty()
+                 && !(args.array_reads || args.probe_census || (!args.drop_entity.empty() && !args.trafo.any() && args.late_run.empty()
                                           && !args.late_sector_check && !args.resync_check && !args.savestate_check
                                           && !args.portable_scripts_check && !args.list_placement)))
             // Only the world honours the bit: the other modes make their own
@@ -8348,7 +8361,7 @@ namespace {
             // trafo sets (--trafo-*) build a second registry for the same
             // players.  A verdict about a selection the world does not run
             // would mislead.
-            why = "--world-options TRAFO_INPUTS: only with --array-reads, or --drop without the --trafo-* sets (the "
+            why = "--world-options TRAFO_INPUTS: only with --array-reads or --probe-census, or --drop without the --trafo-* sets (the "
                   "other modes make their own script selection without the bit)";
         else if (args.world_options_given && args.placement_given
                  && ((args.world_options & bmmo::session::WORLD_PLACEMENT_CLONES) != 0) != args.placement)
@@ -8376,6 +8389,25 @@ namespace {
         bmmo::sim::array_census::print(census, world->level(), args.array_reads_client, args.array_reads_all);
         std::fflush(stdout);   // before the world goes: the engine's shutdown may not return through main
         return 0;
+    }
+
+    // --probe-census (world-agreement-gaps-design.md §7.2 V1, step WG0):
+    // the proximity census of --level's session world at its anchor
+    // (sim/probe_census.hpp), nothing ticked, nothing written.  The
+    // selection is the one every world makes (session_script_selection,
+    // with the world's trafo bit).  Exit 0 PASS, 3 FAIL, 1 when the world
+    // fails.
+    int run_probe_census(const arguments& args) {
+        auto world = create_session_world(args, 0.0f);
+        if (!world) return 1;
+        CKContext* context = world->engine().context();
+        const bool trafo = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
+        const auto sel = bmmo::game::session_script_selection(context, trafo);
+        const auto census = bmmo::sim::probe_census::run(context, sel, world->placement(), world->resetpoints(),
+                                                         world->proximity_probe_count());
+        const int code = bmmo::sim::probe_census::print(census, world->level(), args.placement);
+        std::fflush(stdout);   // before the world goes: the engine's shutdown may not return through main
+        return code;
     }
 
 }
@@ -8496,6 +8528,10 @@ int main(int argc, char** argv) {
             "           (step K0: every data-array access of the selected scripts at the anchor, classified recorded,\n"
             "            private, load-time, sound or unrecorded; --client-scope: a client world's view, the server's\n"
             "            ball identity copies read as the array they copy; read-only)\n"
+            "       BallanceMMOSimTool --root <game dir> --level N --probe-census [--placement on]\n"
+            "           (step WG0: the proximity census at the anchor - per block its class, frame name, ObjectB,\n"
+            "            Distance, axes, Use Outputs, Barycenter; per identity read its kind, gating probe and unit;\n"
+            "            the signature; V1's checks against design 1.1.2; read-only; exit 0 PASS, 3 FAIL)\n"
             "       --drop ... | --savestate-check --drop-sector N ... [--globals-trace]  (step K0: the physics time\n"
             "            factor, delta and gravity after every scene tick, and every change)\n"
             "       --world-options BITS  (step K0, a physics_world mode: a number or PLACEMENT_CLONES,TRAFO_INPUTS;\n"
@@ -8539,6 +8575,7 @@ int main(int argc, char** argv) {
     if (args.portable_scripts_check) return run_portable_scripts_check(args);
     if (args.list_placement) return run_list_placement(args);
     if (args.array_reads) return run_array_reads(args);   // step K0
+    if (args.probe_census) return run_probe_census(args);   // step WG0
     if (!args.drop_entity.empty()) return run_drop(args);
     if (args.spawn_test > 0) return run_spawn_test(args);
     bmmo::sim::engine_options options;

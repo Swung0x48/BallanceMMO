@@ -23,7 +23,8 @@ comes after M1 (§8 Order). §10.1 lists what changed. Revision 3 cites the
 code at HEAD 473f6e8 where it adds a reference; the older references keep
 their 2026-10-23 line numbers.
 
-Status: design, not built. Base: HEAD 4882ec2 (R2) with step P in the working
+Status: design; step G0 built (WG0, 2026-10-28: SimTool `--probe-census`,
+§12 "As built (step WG0)"), G1-G6, M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
 `session_host_support.hpp`, `session_host_world.hpp`, `session_client.cpp` and
@@ -1942,3 +1943,131 @@ message is quoted in `docs/roadmap.md` §4 item 3); three are this design's:
 - **Q9**, answer 5, verbatim: "5. 你决定" (you decide) - the orchestrator
   chose G-c (G0-G5) before the member lives (M0, M1); the reason is in §9
   Q9.
+
+## 12. As built
+
+### As built (step WG0, 2026-10-28): G0, the census
+
+**What exists.** SimTool `--probe-census` (`--level N [--placement on]
+[--world-options B]`, a mode of its own): `BallanceMMOServer/sim/probe_census.hpp`
+(new, SimTool only) and its dispatch in ST (`run_probe_census`). It builds
+`--level`'s session world (`create_session_world`, the server's
+`physics_world`), takes the selection every world makes
+(`session_script_selection` with the world's trafo bit) and prints, per
+block of the structural set, its class, the §2.3 frame name
+`BMMO_Prox_<owner>_<n>`, ObjectB, Distance, `Check Axis`, `Use Outputs`,
+Barycenter, `Squared Distance` and the exactness inputs; per identity read
+its §2.3 copy name `CurrentLevel#BMMOId_<owner>_<n>`, its kind, its gating
+probe and (revision 3) its unit; the §2.3 signature of the mechanism class
+and of `all`; and V1's checks as `check ... PASS|FAIL` lines with a last line
+`PROBE-CENSUS: PASS|FAIL` (exit 0 / 3, 1 when the world fails).
+`.local-tools/work/WG0/census_all.py SIMTOOL OUTDIR` runs L1-L13, placement
+off and on, in parallel and compares the two runs of each level.
+
+**Adaptations (the code is what it is).**
+- *Read-only, so on the server's rewired world.* G0 comes before G1, so
+  there is no `proximity_union::rewire` to call, and the only session world
+  SimTool has (`physics_world`) has already rewired its own blocks at its
+  anchor (PW `rewire_proximity_probes`, `rewire_ball_identity_reads`). The
+  census therefore rewires nothing: it computes what §2.3's rewire takes
+  per class and the names it gives. Its structural test accepts an ObjectA
+  of `Ball_Pos_Frame` or of a server frame `BMMO_Prox_*`, and an identity
+  read's target of `CurrentLevel` or a server copy `CurrentLevel_BMMO_Ball_*`
+  (same columns). The check `server rewire` asserts that the server took
+  exactly the structural set: no block left on `Ball_Pos_Frame`, the
+  census's count equal to the world's (`proximity_probe_count`), no read of
+  a rewired script left on `CurrentLevel`. G1 replaces the reading of the
+  server's names when the server moves onto `proximity_union`.
+- *Classes.* `mechanism` is §2.3's predicate (root script in the selection,
+  not `keep_local_script`); the others are named for the table: `balloon`
+  (keep-local), `flame` (owner `PC_*`/`PS_*`), `extra` (`P_Extra*`),
+  `other` (none on any level). An identity read belongs to a class when its
+  root script has at least one probe of that class; its gating probes are
+  taken among that class's probes, from the links of the Get Cell's own
+  graph (an output IO of the probe to an input IO of the Get Cell).
+- *The signature's bytes* (§2.3 lists the fields, not the layout): FNV-1a
+  64 over the class's blocks in (owner, script, walk) order, each `str
+  frame, str ObjectB, f32 Distance, i32 axes, i32 Use Outputs, f32
+  exactness min, f32 exactness max`; then the identity reads in the same
+  order, each `str copy, u8 kind (1 by-name, 0 body), str gating frame`
+  (empty unless exactly one); then `str` the entity
+  `CurrentLevel[0][ActiveBall]` names (`Ball_Wood` on every level); then the
+  `ResetPoints` row 0 position as 3 x f32. A `str` is a u32 length and the
+  bytes; numbers are little-endian. G1's `proximity_union::signature()` is
+  to give the same values (the table below is its reference).
+- *The unit (§2.10) is measured, not refused.* The unit rule and its
+  refusal belong to Q7 (`session/mechanism_units.hpp`); the census applies
+  §2.10's definitions read-only and asserts WAD's two shapes. D: every block
+  with an input or a target whose real source is the Get Cell's output, a
+  destination of it, or the output of a parameter operation reading one of
+  those. C: the blocks of the Get Cell's graph on a behaviour-link path
+  (links of that graph between its children) from the gating probe to a
+  block of D. S: that graph's locals that a block of U writes (an output's
+  destination) and a block of U reads. Shape `graph` when U is every child
+  of a sub-behaviour graph and S is every local a child of it writes,
+  `blocks` otherwise. Refused (check `unit shapes` FAIL): a block of D or
+  the gating probe outside the Get Cell's graph, a `blocks` unit with
+  state, or anything but the fan (`graph`, D = {Box Box Intersection,
+  SetPhysicsForce}, C = 2 Binary Switch + 2 Identity, |S| = 2) or the
+  bridge (`blocks`, D = {Test} through `Get Name`, C and S empty). Found:
+  the fan's SetPhysicsForce takes the ball through its input 1 `Pos
+  Referential` **and** its target (§2.10 names only the target); Box Box
+  Intersection through input 0 `Entity 0`; the bridge's Test through input
+  1, from the `Get Name` operation.
+- *Placement.* Each copy the world's placement made (`placement().copies()`)
+  is matched with its row's original: the copy's structural blocks (found
+  by the copy's own object list) must equal the original's (its scripts
+  walked), per class (check `placement copies`); the §1.1.2 counts, which
+  the tool carries for L1-L13, are compared with the census minus the
+  copies' blocks.
+
+**Results** (x64 SimTool, `--root C:/Users/geekerwan/Desktop/Ballance-Agent`,
+`.local-tools/work/WG0/v1c`; every run `PROBE-CENSUS: PASS`, `CENSUS-ALL:
+PASS`; the signatures are the same in three runs):
+
+| level | all / mechanism, placement off | identity body / by-name | signature (mechanism, off) | placement on: copies, all / mechanism, units (placed) | signature (mechanism, on) |
+|---|---|---|---|---|---|
+| 1 | 18 / 3 | 0 / 0 | `114852193bd4e4c6` | 23, 31 / 3, 0 (0) | `114852193bd4e4c6` |
+| 2 | 47 / 32 | 9 / 1 | `97f181c37c994ea5` | 26, 74 / 41, 13 (3) | `5ee9383bab2d1ea9` |
+| 3 | 32 / 15 | 3 / 1 | `7766ad6162079841` | 17, 43 / 16, 4 (0) | `e31825e59490084a` |
+| 4 | 30 / 12 | 3 / 1 | `d4d42a426535af8a` | 29, 51 / 15, 5 (1) | `7a4bd76aef13b4d6` |
+| 5 | 28 / 14 | 2 / 0 | `6914d9f9a53c4ea1` | 27, 50 / 23, 3 (1) | `f93386ef03be698d` |
+| 6 | 43 / 29 | 8 / 2 | `ee920746cec7334a` | 25, 70 / 44, 15 (5) | `e329d4795b288466` |
+| 7 | 39 / 25 | 4 / 2 | `72b3926dc08e669a` | 28, 65 / 39, 10 (4) | `d47b1bf38b0310b2` |
+| 8 | 29 / 14 | 2 / 1 | `1a9a91787766b44d` | 39, 63 / 35, 9 (6) | `0813ea4dd1855f26` |
+| 9 | 43 / 27 | 5 / 1 | `ebfef3e92d176b4e` | 46, 90 / 61, 16 (10) | `03e0c6df3cc40c64` |
+| 10 | 47 / 32 | 5 / 2 | `f597b4fd51b3e3cf` | 47, 97 / 71, 18 (11) | `d363e670b07d2aad` |
+| 11 | 47 / 32 | 5 / 1 | `40d4a5cd58c5e49c` | 53, 91 / 63, 11 (5) | `6fb28962d52e7d48` |
+| 12 | 60 / 43 | 11 / 0 | `54dfd2fdb859a84a` | 62, 136 / 89, 26 (15) | `6048b208ea5a437b` |
+| 13 (arena) | 24 / 12 | 1 / 1 | `3f04691f6dae5292` | 0, 24 / 12, 2 (0) | `3f04691f6dae5292` |
+
+- Every count equals §1.1.2's table: the mechanism column sums to 290, the
+  identity reads to 58 body (fans) and 13 by-name (bridges); `all` equals
+  the server's own count on every level, placement off and on (the server
+  rewires the copies too); every level's `all` is mechanism + 7 flames +
+  extras + 2 balloon blocks, `other` 0. The `all` identity reads equal the
+  mechanism ones on every level: no flame, extra or balloon script reads
+  `ActiveBall` (check `all identities` asserts it).
+- The placement-on signature is the one the server runs since SP10
+  (`physics.placement_clones` on by default); it differs from the
+  placement-off one wherever the copies hold mechanism blocks or identity
+  reads, and equals it on L1 and L13 (no copied mechanism block).
+- On all 290 mechanism blocks: Barycenter 0, `Squared Distance` 1, axes 5
+  (219 blocks) or 7 (71). Every identity read has exactly one gating probe.
+  Every frame and copy name is unique and none holds `_BMMO_` or `_Peer_`,
+  placement on included.
+- Units: 71 with the placement off (58 `graph` fans, S = locals 20
+  `TurnON_Permission` and 21 `TurnOFF_Permission`; 13 `blocks` bridges),
+  132 with it on (114 fans, 18 bridges): the placed copies of fans and
+  bridges are units of the same two shapes.
+- With the placement on, every copy holds exactly its original's blocks,
+  per class, and the counts grow by exactly the copied rows' blocks (the
+  census minus the copies equals the placement-off run on every level);
+  L11's 53 copies are SP8's 53. Most copied blocks are extras (`P_Extra`
+  rows: L12 +30).
+
+**Not in G0.** V1's listing from the x86 and Linux SimTools is V6's (step
+Q7); the release round trip is V5 (G1). `probe_census.hpp` has been compiled
+by MSVC x64 only: the GCC syntax check (`linux_test_syntax.sh`) covers the
+test target and the session core, not SimTool, so the first GCC compile of
+the census is the Linux SimTool build of V6.
