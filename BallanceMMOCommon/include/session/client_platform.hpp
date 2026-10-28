@@ -676,6 +676,28 @@ namespace bmmo::session {
         // ghost is to be moved to its owner's relayed pose, else null.
         std::function<void(const std::string& entity, bool ghost, const float* matrix)> show_ghost;
 
+        // ---- the spawn ghost (step SPGH; physics_state.hpp spawn_ghost_set) ----
+        // On (at the anchor) or off (at the end): the rule's pair filter and
+        // PSI hook in this world; `info` gets areas, radius, solidified,
+        // rechecks, overlap waits, spawn births marked, bodies resumed solid
+        // (a trafo's new ball); returns 1 on, 0 off, -1 error.  Optional:
+        // a host without it runs no spawn ghost (every world must run it,
+        // so both hosts of the core bind it).
+        std::function<int(bool enable, bool respawns, double radius, double info[7], std::string& error)> spawn_ghost;
+        // 1: the entity's body is a spawn ghost now; 0: solid; -1: no body.
+        std::function<int(const std::string& entity)> spawn_ghost_state;
+        // Step SPGH2: a spawn birth of `group` (physics_state.hpp
+        // spawn_ghost_birth: a Physicalize the lifecycle flags SPAWN, before
+        // its tick's step).  The core calls it for a mirror's birth, an own
+        // remake, a replay's own birth and a live own birth the host saw
+        // before the body was made (own_physicalized, own_birth_seen); the
+        // core decides which births are spawns.
+        std::function<bool(const std::string& group)> spawn_ghost_birth;
+        // Optional, display only: a ball (`own`: this client's own ball, else
+        // a mirror) drawn translucent while it is a spawn ghost, or as
+        // itself again.
+        std::function<void(const std::string& entity, bool own, bool ghost)> show_spawn_ghost;
+
         // ---- rollback (design 2.2; E4) ----
         // The rollback engine's view of the host's world, bound anew on every
         // use, never cached (the options take the own key count by value).

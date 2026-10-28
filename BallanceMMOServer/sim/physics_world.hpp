@@ -395,8 +395,13 @@ namespace bmmo::sim {
         // Step BALA: the airship zone over this world (no own ball: every
         // player ball is a clone), installed once the level is loaded.
         void install_airship_zone();
+        // Step SPGH: the spawn ghost over this world.
+        void install_spawn_ghost();
         std::vector<std::pair<uint32_t, uint32_t>> airship_entries_;   // (player, tick) not yet taken
         bool airship_box_logged_ = false;
+        // Step SPGH2: the spawn ghost's counters as last logged (a body that
+        // came to a solid group - a trafo's new ball - and the births).
+        uint64_t spawn_ghost_resumed_logged_ = 0, spawn_ghost_births_logged_ = 0;
 
         struct player {
             uint32_t id = 0;
@@ -416,6 +421,8 @@ namespace bmmo::sim {
             // zone in this life (a ghost from there: frozen, out of the
             // sync); 0 while it is not.
             uint32_t airship_tick = 0;
+            // Step SPGH: its ball a spawn ghost after the last step.
+            bool spawn_ghost = false;
         };
         CK3dEntity* clone_ball(player& p, uint8_t ball_type, std::string& error);
         std::string ball_name(uint8_t ball_type) const;

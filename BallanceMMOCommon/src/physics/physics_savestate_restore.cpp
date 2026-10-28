@@ -702,6 +702,27 @@ namespace bmmo::physics::savestate {
             physics_->m_PhysicsDeltaTime = physics_->m_DeltaTime * physics_->m_PhysicsTimeFactor;
             ivp_srand(static_cast<int>(world_.ivp_seed));
             bmmo::physics::random_set_state(world_.random_state);
+            // Format 3 (step SPGH2): the spawn ghost's per-group state, before
+            // anything below rechecks a body (the pair filter reads it).  A
+            // blob without it (the rule off where it was captured, format 2)
+            // leaves a rule-on world with no group seen.  A travelling blob's
+            // groups ("P#<join order>") are every world's names.
+            {
+                std::vector<bmmo::physics::spawn_ghost_record> groups;
+                if (world_.spawn_ghost_present) {
+                    groups.reserve(world_.spawn_ghost.size());
+                    for (const auto& g : world_.spawn_ghost) {
+                        bmmo::physics::spawn_ghost_record r;
+                        r.group = g.group;
+                        r.seen = g.seen;
+                        r.present = g.present;
+                        r.solid = g.solid;
+                        r.marked = g.marked;
+                        groups.push_back(std::move(r));
+                    }
+                }
+                bmmo::physics::spawn_ghost_record_set(physics_, groups);
+            }
             // Monotonic cache token: never rewound, bumped before any IVP
             // computation of the restore, and every cache dropped (a bump
             // alone only invalidates simulated objects' caches).

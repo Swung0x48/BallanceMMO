@@ -174,7 +174,11 @@ public:
 namespace bmmo::physics::savestate {
 
     constexpr uint32_t kMagic = 0x53565349u;     // "ISVS"
-    constexpr uint32_t kFormatVersion = 2u;
+    // 3 (step SPGH2): the spawn ghost's per-group state after the tables
+    // (world_record::spawn_ghost).  2 is still read (no spawn ghost section:
+    // an old journal's RESYNC blob).
+    constexpr uint32_t kFormatVersion = 3u;
+    constexpr uint32_t kFormatVersionOldest = 2u;
 
     // ------------------------------------------------------------------
     // Records.  Every index is into the tables of the same world_record.
@@ -354,6 +358,13 @@ namespace bmmo::physics::savestate {
         int32_t type = 0;                 // m_Type
     };
 
+    // One group's spawn ghost state (physics_state.hpp spawn_ghost_record;
+    // format 3), sorted by group.
+    struct spawn_ghost_group_record {
+        std::string group;
+        uint8_t seen = 0, present = 0, solid = 0, marked = 0;
+    };
+
     struct world_record {
         // identity and clock
         uint64_t environment_id = 0;      // the IVP_Environment pointer, as an integer: a blob never applies to a rebuilt environment
@@ -382,6 +393,12 @@ namespace bmmo::physics::savestate {
         int32_t ov_root = -1;
         std::vector<cache_slot_record> cache_slots;   // the cache ring, slot by slot
         int32_t cache_reuse_index = 0;
+        // Format 3 (step SPGH2): the spawn ghost rule's state, when the rule
+        // is on in the capturing world (spawn_ghost_present 1).  A restore
+        // into a world with the rule on puts it back (a blob without it -
+        // the rule off there, or format 2 - clears it: no body seen yet).
+        uint8_t spawn_ghost_present = 0;
+        std::vector<spawn_ghost_group_record> spawn_ghost;
     };
 
     // ------------------------------------------------------------------

@@ -222,6 +222,10 @@ namespace bmmo::session {
             struct ghost_pose { float position[3] = {}; float rotation[4] = {0, 0, 0, 1}; };
             std::map<uint32_t, ghost_pose> ghost_poses;
             bool ghost_shown = false;
+            // Step SPGH: whether this world's copy of the ball is a spawn
+            // ghost after the last frame, and whether it is shown as one.
+            bool spawn_ghost = false;
+            bool spawn_ghost_shown = false;
         };
 
         // The own ball's body changes the history has to keep (late-player
@@ -370,6 +374,14 @@ namespace bmmo::session {
         uint64_t own_corrections_out_of_sync_ = 0;   // held notices / forced frames of a tick the own ball had left the sync at
         uint64_t resyncs_own_kept_ = 0;              // resyncs that kept the out-of-sync own ball local
         uint64_t airship_rows_skipped_ = 0;          // snapshot ball rows of a ball in its zone, not applied
+        // Step SPGH: the spawn ghost rule of this world (installed at the
+        // anchor), and the own ball's state after the last frame.
+        bool spawn_ghost_active_ = false;
+        bool own_spawn_ghost_ = false;
+        bool own_spawn_ghost_shown_ = false;
+        std::string own_spawn_ghost_entity_;         // the entity shown translucent
+        uint64_t spawn_ghost_transitions_ = 0;       // ghost -> solid seen after a frame (own and mirrors)
+        uint64_t spawn_ghost_births_ = 0;            // step SPGH2: spawn births marked (live and replayed)
         bool own_physicalized_ = false;
         bool assigned_ = false;
         uint32_t last_assign_first_tick_ = 0;  // the assignment applied last: its redundant copies are ignored
@@ -1167,6 +1179,17 @@ namespace bmmo::session {
         // reports (report_physicalize) run.
         void own_physicalized(const own_birth_report& report);
         void own_unphysicalized(uint32_t tick);
+        // Step SPGH2: the live own ball's Physicalize as a host saw it before
+        // the block made the body (own_physicalized calls it; a host whose
+        // own reports come from the event log calls it from its own hook).
+        // The core decides, with the predicate commit_own_birth flags the
+        // event SPAWN by (own_birth_is_spawn), whether it begins the own
+        // spawn ghost life (physics_state.hpp spawn_ghost_birth), as the
+        // server's copy's does at the same tick.
+        void own_birth_seen(const own_birth_pose& pose, uint32_t tick);
+        // The one spawn predicate of an own birth: the event's
+        // PHYSICALIZE_FLAG_SPAWN, the spawn impulse's and the ghost life's.
+        static bool own_birth_is_spawn(const own_birth_pose& pose) { return pose.captured && pose.spawn; }
         // A beam of the own ball to `position`, upright and at rest (the
         // headless --beam, the retail verb): made at post_step step 29 of
         // the frame that stepped T, stamped T + 1.
@@ -1468,6 +1491,12 @@ namespace bmmo::session {
         // mirror's place in the airship zone, the own pose sent while in it,
         // the ghosts shown at their owners' relayed poses.
         void airship_frame(uint32_t tick);
+        // Step SPGH: the spawn ghosts' bookkeeping and display after each
+        // live frame (the rule itself is the physics layer's).
+        void spawn_ghost_frame(uint32_t tick);
+        // Step SPGH2: a spawn birth of `group` marked in this world's rule
+        // (platform spawn_ghost_birth), when the rule is on.
+        void note_spawn_birth(const std::string& group, uint32_t tick, const char* where);
         // Whether `tick` is at or after the tick the own ball left the sync.
         bool own_out_of_sync_at(uint32_t tick) const {
             return s.own_airship_tick_ != 0 && static_cast<int32_t>(tick - s.own_airship_tick_) >= 0;

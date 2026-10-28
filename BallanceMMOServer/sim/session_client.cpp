@@ -1436,6 +1436,26 @@ namespace {
             p.airship_zone_contains = [this](const std::string& name) {
                 return bmmo::physics::airship_zone_contains(engine_->physics(), name.c_str());
             };
+            // Step SPGH: the spawn ghost over this world (physics_state.hpp);
+            // no display (show_spawn_ghost stays empty: nothing is drawn).
+            p.spawn_ghost = [this](bool enable, bool respawns, double radius, double info[7], std::string& error) {
+                bmmo::physics::spawn_ghost_info out;
+                if (!bmmo::physics::spawn_ghost_set(engine_->physics(), enable, respawns, radius, out, error)) return -1;
+                info[0] = static_cast<double>(out.areas);
+                info[1] = out.radius;
+                info[2] = static_cast<double>(out.solidified);
+                info[3] = static_cast<double>(out.rechecks);
+                info[4] = static_cast<double>(out.overlap_waits);
+                info[5] = static_cast<double>(out.births);
+                info[6] = static_cast<double>(out.resumed);
+                return out.active ? 1 : 0;
+            };
+            p.spawn_ghost_state = [this](const std::string& name) {
+                return bmmo::physics::spawn_ghost_state(engine_->physics(), name.c_str());
+            };
+            p.spawn_ghost_birth = [this](const std::string& group) {
+                return bmmo::physics::spawn_ghost_birth(engine_->physics(), group.c_str());
+            };
             p.airship_zone_box = [this](double box[6]) {
                 bmmo::physics::airship_zone_box zone;
                 bmmo::physics::airship_zone_get(engine_->physics(), zone);
@@ -2513,6 +2533,16 @@ namespace {
             const float dy = world[3][1] - reset[3][1];
             const float dz = world[3][2] - reset[3][2];
             own_pre_.spawn = (dx * dx + dy * dy + dz * dz) < 1e-6f;
+            // Step SPGH2: the own birth as seen before the block makes the
+            // body, where the retail host's own_physicalized sees it; the
+            // core decides whether it begins a spawn ghost life.
+            {
+                bmmo::session::own_birth_pose seen;
+                seen.captured = true;
+                seen.spawn = own_pre_.spawn;
+                for (int k = 0; k < 3; ++k) seen.position[k] = world[3][k];
+                core_.own_birth_seen(seen, live_tick_number_);
+            }
             const uint8_t join_order = static_cast<uint8_t>(core_.own_join_order() < 0 ? 63 : core_.own_join_order());
             if (!own_pre_.spawn || core_.spawn_spacing() <= 0.0f || join_order % bmmo::session::kSpawnOffsets == 0) return;
             const float right[3] = {reset[0][0], reset[0][1], reset[0][2]};
@@ -2575,6 +2605,13 @@ namespace {
                 if (own_capture_.spawn && core_.spawn_spacing() > 0.0f)
                     logf("spawn offset: the Physicalize hook did not see the own birth at tick %u (%d blocks hooked): no birth cell",
                          tick, physicalize_hooked_);
+                // Step SPGH2: without the hook the birth is seen only here,
+                // after the block made the body (still before the PSIs).
+                bmmo::session::own_birth_pose seen;
+                seen.captured = true;
+                seen.spawn = own_capture_.spawn;
+                for (int k = 0; k < 3; ++k) seen.position[k] = own_capture_.pose[3][k];
+                core_.own_birth_seen(seen, tick);
             }
             own_pre_.valid = false;
             if (!own_capture_.spawn) return;

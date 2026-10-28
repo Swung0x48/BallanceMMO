@@ -11,6 +11,7 @@
 
 #include "message/session_ready_msg.hpp"
 #include "message/session_resync_msg.hpp"
+#include "session/spawn_impulse.hpp"
 
 #include <cstdarg>
 #include <cstdio>
@@ -449,6 +450,22 @@ namespace bmmo::session {
             else if (r == 0) logf("airship zone: the level has no airship");
             else logf("airship zone on, own group %s (the box is taken once the platform has its body)", s.own_group_.c_str());
         }
+        // Step SPGH (the user's spawn ghost rule of 2026-10-28): every ball
+        // born a ghost in its spawn area, solid once it left the area and
+        // overlaps no other ball - the physics layer's, in every world alike.
+        s.spawn_ghost_active_ = false;
+        s.own_spawn_ghost_ = false;
+        if (platform_.spawn_ghost) {
+            double info[7] = {};
+            std::string error;
+            const int r = platform_.spawn_ghost(true, bmmo::session::kSpawnGhostRespawns, bmmo::session::kSpawnGhostRadius,
+                                                info, error);
+            s.spawn_ghost_active_ = r == 1;
+            if (r < 0) logf("spawn ghost: %s", error.c_str());
+            else if (r == 1)
+                logf("spawn ghost on: %.0f spawn areas of %.3f m (the level start and the resetpoints), respawns %s", info[0],
+                     info[1], bmmo::session::kSpawnGhostRespawns ? "included" : "excluded");
+        }
         // Step T3 (design 2.4): every member's piece set and the own one, by
         // player id, after the host's quiesce (its anchor work): the server
         // built the same at add_player.
@@ -509,10 +526,26 @@ namespace bmmo::session {
         if (platform_.hooks.ended) platform_.hooks.ended();
         for (auto& [id, remote]: s.remotes_) {
             if (remote.ghost_shown && platform_.show_ghost) platform_.show_ghost(remote.entity, false, nullptr);
+            else if (remote.spawn_ghost_shown && platform_.show_spawn_ghost) platform_.show_spawn_ghost(remote.entity, false, false);
             if (remote.navigation) platform_.detach_mirror_navigation(remote.entity);
             if (remote.physicalized) platform_.unmake_mirror(remote.entity);
         }
         s.remotes_.clear();
+        // Step SPGH: the rule off with the session, every ball shown as itself.
+        if (s.spawn_ghost_active_) {
+            if (s.own_spawn_ghost_shown_ && platform_.show_spawn_ghost)
+                platform_.show_spawn_ghost(s.own_spawn_ghost_entity_, true, false);
+            s.own_spawn_ghost_shown_ = false;
+            double info[7] = {};
+            std::string error;
+            if (platform_.spawn_ghost && platform_.spawn_ghost(false, false, bmmo::session::kSpawnGhostRadius, info, error) >= 0)
+                logf("spawn ghost: %llu ghost -> solid transitions seen after frames, %llu spawn births marked; physics "
+                     "layer: %.0f solidified, %.0f pair rechecks, %.0f overlap waits, %.0f births, %.0f resumed solid",
+                     static_cast<unsigned long long>(s.spawn_ghost_transitions_),
+                     static_cast<unsigned long long>(s.spawn_ghost_births_), info[2], info[3], info[4], info[5], info[6]);
+        }
+        s.spawn_ghost_active_ = false;
+        s.own_spawn_ghost_ = false;
         // Step BALA: the zone off with the session.
         if (s.airship_active_)
             logf("airship: ghost poses sent %llu received %llu shown %llu; own corrections not applied %llu; ball rows not applied %llu; resyncs that kept the own ball %llu",

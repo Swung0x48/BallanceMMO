@@ -922,6 +922,8 @@ namespace bmmo::session {
         apply_requested_beam(tick);
         // Step BALA: the airship zone's ghosts and the own pose.
         airship_frame(tick);
+        // Step SPGH: the spawn ghosts' log and display.
+        spawn_ghost_frame(tick);
         // The record for this tick was captured before the corrections
         // above, so a rollback to it would restore the divergent pose and
         // lose the correction on the first re-simulated tick.  Re-capture
@@ -1061,7 +1063,10 @@ namespace bmmo::session {
                     logf("airship: player %u's ghost %s is out of the zone at tick %u", id, remote.entity.c_str(), tick);
                 remote.airship_tick = 0;
                 remote.ghost_poses.clear();
-                if (remote.ghost_shown && platform_.show_ghost) platform_.show_ghost(remote.entity, false, nullptr);
+                if (remote.ghost_shown && platform_.show_ghost) {
+                    platform_.show_ghost(remote.entity, false, nullptr);
+                    remote.spawn_ghost_shown = false;   // shown solid now: a spawn ghost is shown again (spawn_ghost_frame)
+                }
                 remote.ghost_shown = false;
                 continue;
             }
@@ -1110,6 +1115,72 @@ namespace bmmo::session {
             platform_.show_ghost(remote.entity, true, matrix);
             remote.ghost_shown = true;
             ++s.ghost_poses_shown_;
+        }
+    }
+
+    // ---------------------------------------------------- the spawn ghost
+    // Step SPGH (the user's rule of 2026-10-28; rewind-cost design "As built
+    // (step SPGH)").  The rule is the physics layer's (physics_state.hpp
+    // spawn_ghost_set): every world decides each ball's ghost -> solid PSI
+    // from its own copy.  What is left here: the log of each transition this
+    // world's frames see, and the display - a ghost translucent (retail; the
+    // headless host draws nothing).  A mirror the airship zone shows as a
+    // ghost already is left to it.
+    void session_client_core::note_spawn_birth(const std::string& group, uint32_t tick, const char* where) {
+        if (!s.spawn_ghost_active_ || !platform_.spawn_ghost_birth || group.empty()) return;
+        const bool marked = platform_.spawn_ghost_birth(group);
+        ++s.spawn_ghost_births_;
+        if (s.spawn_ghost_births_ <= 64)
+            logf("spawn ghost: %s %s a spawn birth at tick %u (%s)", group.c_str(), marked ? "marked" : "not marked (rule off)",
+                 tick, where);
+    }
+
+    void session_client_core::spawn_ghost_frame(uint32_t tick) {
+        if (!s.spawn_ghost_active_ || !platform_.spawn_ghost_state) return;
+        const std::string own_entity = s.own_physicalized_ ? s.own_body_entity_ : std::string();
+        const int own = own_entity.empty() ? -1 : platform_.spawn_ghost_state(own_entity);
+        if (own == 0 && s.own_spawn_ghost_) {
+            ++s.spawn_ghost_transitions_;
+            logf("spawn ghost: the own ball %s is solid at tick %u", own_entity.c_str(), tick);
+        } else if (own == 1 && !s.own_spawn_ghost_) {
+            logf("spawn ghost: the own ball %s is a spawn ghost at tick %u", own_entity.c_str(), tick);
+        }
+        s.own_spawn_ghost_ = own == 1;
+        // The display is asserted on every frame a ball is a ghost, not only
+        // at the change: the host's own paths re-colour a ball under it (the
+        // level start's fade-in of the own ball, a mirror's unmake / remake
+        // showing it solid), and a ghost must keep looking like one.
+        if (platform_.show_spawn_ghost) {
+            if (s.own_spawn_ghost_shown_ && (!s.own_spawn_ghost_ || s.own_spawn_ghost_entity_ != own_entity)) {
+                platform_.show_spawn_ghost(s.own_spawn_ghost_entity_, true, false);
+                s.own_spawn_ghost_shown_ = false;
+            }
+            if (s.own_spawn_ghost_) {
+                platform_.show_spawn_ghost(own_entity, true, true);
+                s.own_spawn_ghost_shown_ = true;
+                s.own_spawn_ghost_entity_ = own_entity;
+            }
+        }
+        for (auto& [id, remote]: s.remotes_) {
+            const int state = remote.physicalized ? platform_.spawn_ghost_state(remote.entity) : -1;
+            if (state < 0) {
+                // No body: the host shows a bodiless mirror its own way, and
+                // the next life starts from there.
+                remote.spawn_ghost = false;
+                remote.spawn_ghost_shown = false;
+                continue;
+            }
+            const bool ghost = state == 1;
+            if (!ghost && remote.spawn_ghost) {
+                ++s.spawn_ghost_transitions_;
+                logf("spawn ghost: player %u's ball %s is solid at tick %u", id, remote.entity.c_str(), tick);
+            } else if (ghost && !remote.spawn_ghost) {
+                logf("spawn ghost: player %u's ball %s is a spawn ghost at tick %u", id, remote.entity.c_str(), tick);
+            }
+            remote.spawn_ghost = ghost;
+            if (!platform_.show_spawn_ghost || remote.ghost_shown) continue;   // the airship's ghost display wins
+            if (ghost || remote.spawn_ghost_shown) platform_.show_spawn_ghost(remote.entity, false, ghost);
+            remote.spawn_ghost_shown = ghost;
         }
     }
 

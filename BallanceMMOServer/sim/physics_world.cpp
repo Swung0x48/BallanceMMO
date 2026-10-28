@@ -276,6 +276,7 @@ namespace bmmo::sim {
         sectors_.reset();
         if (!ensure_collision_filter(error)) return false;
         install_airship_zone();
+        install_spawn_ghost();
         rewire_proximity_probes();
         rewire_ball_identity_reads();
         // Step A3 (resync design 2.3): the selection the clients make at
@@ -399,6 +400,24 @@ namespace bmmo::sim {
             return;
         }
         log("world: airship zone on (the box is taken once the platform has its body)");
+    }
+
+    // Step SPGH: the spawn ghost (physics_state.hpp spawn_ghost_set), the
+    // same rule as every client's: a clone is born a ghost and turns solid
+    // once it left every spawn area and overlaps no other ball.
+    void physics_world::install_spawn_ghost() {
+        spawn_ghost_resumed_logged_ = spawn_ghost_births_logged_ = 0;   // spawn_ghost_set restarts the counters
+        bmmo::physics::spawn_ghost_info info;
+        std::string error;
+        if (!bmmo::physics::spawn_ghost_set(physics(), true, bmmo::session::kSpawnGhostRespawns,
+                                            bmmo::session::kSpawnGhostRadius, info, error)) {
+            log("world: spawn ghost: " + error);
+            return;
+        }
+        char text[160];
+        std::snprintf(text, sizeof(text), "world: spawn ghost on: %u spawn areas of %.3f m, respawns %s", info.areas, info.radius,
+                      bmmo::session::kSpawnGhostRespawns ? "included" : "excluded");
+        log(text);
     }
 
     bool physics_world::park_retail_ball() {
@@ -842,6 +861,10 @@ namespace bmmo::sim {
             context->DestroyObject(entity);
         }
         if (p.cam_ref) context->DestroyObject(p.cam_ref);
+        // Step SPGH2: a leave ends the group's life (physics_state.hpp
+        // spawn_ghost_forget): the next member that takes this join order
+        // begins its first life as a ghost.
+        if (manager && !p.group.empty()) bmmo::physics::spawn_ghost_forget(manager, p.group.c_str());
         used_slots_.erase(p.slot);
         players_.erase(it);
         body_set_changed_ = true;
@@ -941,6 +964,10 @@ namespace bmmo::sim {
             }
             clone->SetWorldMatrix(matrix_from_pose(event.position, event.rotation));
             if (!ensure_collision_filter(error)) return false;
+            // Step SPGH2: a spawn birth begins the ball's spawn ghost life;
+            // a trafo's or a beam's Physicalize (no SPAWN flag) keeps it.
+            if (event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN)
+                bmmo::physics::spawn_ghost_birth(manager, p.group.c_str());
             if (!bmmo::physics::physicalize(manager, clone->GetName(), event.recipe, p.group.c_str(), error))
                 return false;
             bmmo::physics::hull_probe(manager, clone->GetName(), "clone_made");
@@ -1115,6 +1142,35 @@ namespace bmmo::sim {
                     + " is in the airship zone at tick " + std::to_string(tick_) + " (a ghost from here)");
             } else if (in_zone != 1) {
                 p.airship_tick = 0;
+            }
+        }
+        // Step SPGH: each clone's spawn ghost transitions, logged.
+        for (auto& [id, p]: players_) {
+            const int ghost = p.physicalized && p.ball ? bmmo::physics::spawn_ghost_state(manager, p.ball->GetName()) : -1;
+            if (ghost == 1 && !p.spawn_ghost)
+                log("world: spawn ghost: player " + std::to_string(id) + "'s ball " + p.ball->GetName()
+                    + " is a spawn ghost at tick " + std::to_string(tick_));
+            else if (ghost == 0 && p.spawn_ghost)
+                log("world: spawn ghost: player " + std::to_string(id) + "'s ball " + p.ball->GetName() + " is solid at tick "
+                    + std::to_string(tick_));
+            p.spawn_ghost = ghost == 1;
+        }
+        // Step SPGH2: the counters, logged when they move - a resumed body
+        // is a trafo's new ball that stayed solid.
+        {
+            bmmo::physics::spawn_ghost_info info;
+            if (bmmo::physics::spawn_ghost_get(manager, info) && info.active
+                && (info.resumed != spawn_ghost_resumed_logged_ || info.births != spawn_ghost_births_logged_)) {
+                char text[200];
+                std::snprintf(text, sizeof(text),
+                              "world: spawn ghost at tick %u: %llu births, %llu resumed solid, %llu solidified, %llu rechecks",
+                              tick_, static_cast<unsigned long long>(info.births),
+                              static_cast<unsigned long long>(info.resumed),
+                              static_cast<unsigned long long>(info.solidified),
+                              static_cast<unsigned long long>(info.rechecks));
+                log(text);
+                spawn_ghost_resumed_logged_ = info.resumed;
+                spawn_ghost_births_logged_ = info.births;
             }
         }
         ++tick_;

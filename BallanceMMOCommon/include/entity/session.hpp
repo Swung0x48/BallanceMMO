@@ -85,7 +85,14 @@ namespace bmmo::session {
     //      whose own ball is in the zone sends SessionGhostPose, which the
     //      server relays to the others for display (message/
     //      session_ghost_pose_msg.hpp).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 14;
+    //  15  the spawn ghost (steps SPGH, SPGH2, the user's spawn rule of
+    //      2026-10-28): every world runs the spawn area's pair rule
+    //      (physics_state.hpp spawn_ghost_set), a Physicalize flagged
+    //      PHYSICALIZE_FLAG_SPAWN begins a ball's ghost life in every world,
+    //      and the IVP savestate a SessionResyncState carries is format 3 -
+    //      it holds the rule's per-group state, so a late joiner and a
+    //      resynced member take the server's.  No message layout changed.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 15;
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its

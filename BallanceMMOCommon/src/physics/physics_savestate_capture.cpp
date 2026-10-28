@@ -817,6 +817,24 @@ namespace bmmo::physics::savestate {
         out.time_factor = physics->m_PhysicsTimeFactor;
         out.ivp_seed = static_cast<int32_t>(ivp_srand_read());
         out.random_state = bmmo::physics::random_get_state();
+        // Format 3 (step SPGH2): the spawn ghost's per-group state, when the
+        // rule is on in this world.
+        {
+            std::vector<bmmo::physics::spawn_ghost_record> groups;
+            if (bmmo::physics::spawn_ghost_record_get(physics, groups)) {
+                out.spawn_ghost_present = 1;
+                out.spawn_ghost.reserve(groups.size());
+                for (const auto& g : groups) {
+                    savestate::spawn_ghost_group_record r;
+                    r.group = g.group;
+                    r.seen = g.seen;
+                    r.present = g.present;
+                    r.solid = g.solid;
+                    r.marked = g.marked;
+                    out.spawn_ghost.push_back(std::move(r));
+                }
+            }
+        }
         for (int i = 0; i < physics->m_MovableObjects.len(); ++i) {
             const int32_t o = c.live.index_of(physics->m_MovableObjects.element_at(i));
             if (o < 0) { c.fail("the movable list holds an object outside the physics table"); return failed(); }

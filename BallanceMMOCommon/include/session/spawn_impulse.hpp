@@ -134,4 +134,22 @@ namespace bmmo::session {
     inline const float* spawn_direction(int32_t seed, uint8_t join_order, uint32_t tick) {
         return kSpawnDirectionTable[spawn_direction_index(seed, join_order, tick)];
     }
+
+    // The spawn ghost (step SPGH, the user's rule of 2026-10-28: "开始的时候，
+    // 在出生点区域是透明球（和未启用物理碰撞一样），然后远离出生点才物理化",
+    // settled as "only ball-to-ball collision off"; physics_state.hpp
+    // spawn_ghost_set).  A spawn area is a sphere of kSpawnGhostRadius
+    // around the level start and around every resetpoint of the level; a
+    // player ball is born a ghost (it passes through every other player
+    // ball and is drawn translucent) and turns solid for the rest of its life
+    // at the first PSI its core is outside every area while it overlaps no
+    // other ball.  12 m holds every one of the 16 birth cells of the default
+    // spacing (the farthest is sqrt(5) x 4.2 = 9.39 m out) with the ball
+    // (2 m radius) inside.  A binary fraction: the same double everywhere.
+    constexpr double kSpawnGhostRadius = 12.0;
+    // Whether a respawn at a resetpoint is born a ghost as well (true), or
+    // only a ball's first life (false): the one switch the report names for
+    // the user (both are built behind it); every world runs one build, so the
+    // switch is a constant, not a wire field.
+    constexpr bool kSpawnGhostRespawns = true;
 }

@@ -45,6 +45,7 @@
 #include <filesystem>
 #include <format>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -107,6 +108,72 @@ namespace {
     // How many reads ran switched, and how many could not switch (the
     // session end's log line, step SP10: TR4c confirmed in a retail run).
     uint64_t report_precision_reads = 0, report_precision_failed = 0;
+
+    // ------------------------------------------------------------ the spawn ghost display
+    // Step SPGH: the own ball drawn translucent while it is a spawn ghost -
+    // its current mesh's materials at half alpha with alpha blending, each
+    // material's own diffuse and blend state kept here and put back when it
+    // turns solid (or dies, or the session ends).  The mirrors are the spirit
+    // balls' own materials (game_objects::set_ghost).  File scope:
+    // BallanceMMOClient keeps its layout.
+    struct own_ghost_material {
+        VxColor diffuse;
+        CKBOOL alpha_blend = FALSE;
+        VXBLEND_MODE source = VXBLEND_ONE, dest = VXBLEND_ZERO;
+    };
+    // Called on every frame the own ball is a ghost (the core re-asserts it:
+    // the level start's fade-in writes the same materials), so the entity
+    // is looked up once per name and a material's own state is kept the
+    // first time it is seen; its alpha comes back as 1 (a state kept while a
+    // fade-in was still running would otherwise leave the ball see-through).
+    std::map<CK_ID, own_ghost_material> own_ghost_materials;
+    std::string own_ghost_name;
+    CK_ID own_ghost_entity = 0;
+    void show_own_spawn_ghost(CKContext* context, const std::string& name, bool ghost) {
+        if (!ghost) {
+            for (const auto& [id, saved]: own_ghost_materials)
+                if (auto* mat = static_cast<CKMaterial*>(context ? context->GetObject(id) : nullptr)) {
+                    VxColor color = saved.diffuse;
+                    color.a = 1.0f;
+                    mat->SetDiffuse(color);
+                    mat->EnableAlphaBlend(saved.alpha_blend);
+                    mat->SetSourceBlend(saved.source);
+                    mat->SetDestBlend(saved.dest);
+                }
+            own_ghost_materials.clear();
+            own_ghost_name.clear();
+            own_ghost_entity = 0;
+            return;
+        }
+        if (!context) return;
+        auto* ball = CK3dObject::Cast(own_ghost_name == name ? context->GetObject(own_ghost_entity) : nullptr);
+        if (!ball) {
+            ball = CK3dObject::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()), CKCID_3DOBJECT,
+                                                                           nullptr));
+            own_ghost_name = name;
+            own_ghost_entity = ball ? ball->GetID() : 0;
+        }
+        CKMesh* mesh = ball ? ball->GetCurrentMesh() : nullptr;
+        if (!mesh) return;
+        for (int i = 0; i < mesh->GetMaterialCount(); ++i) {
+            CKMaterial* mat = mesh->GetMaterial(i);
+            if (!mat) continue;
+            if (!own_ghost_materials.count(mat->GetID())) {
+                own_ghost_material saved;
+                saved.diffuse = mat->GetDiffuse();
+                saved.alpha_blend = mat->AlphaBlendEnabled();
+                saved.source = mat->GetSourceBlend();
+                saved.dest = mat->GetDestBlend();
+                own_ghost_materials[mat->GetID()] = saved;
+            }
+            VxColor color = mat->GetDiffuse();
+            color.a = 0.5f;
+            mat->SetDiffuse(color);
+            mat->EnableAlphaBlend(TRUE);
+            mat->SetSourceBlend(VXBLEND_SRCALPHA);
+            mat->SetDestBlend(VXBLEND_INVSRCALPHA);
+        }
+    }
     struct report_precision_53 {
 #if defined(_MSC_VER) && defined(_M_IX86)
         unsigned int saved = 0;
@@ -2472,6 +2539,31 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             for (int k = 0; k < 4; ++k) world[r][k] = matrix[r * 4 + k];
         entity->SetWorldMatrix(world);
     };
+    // Step SPGH: the spawn ghost over this world (physics_state.hpp, bridge
+    // v25) and its display: a ghost is translucent, the own ball's materials
+    // (show_own_spawn_ghost) or a spirit ball's (game_objects::set_ghost).
+    p.spawn_ghost = [this](bool enable, bool respawns, double radius, double info[7], std::string& error) {
+        bmmo::physics::spawn_ghost_info out;
+        if (!physics_view_.spawn_ghost_set(enable, respawns, radius, out, error)) return -1;
+        info[0] = static_cast<double>(out.areas);
+        info[1] = out.radius;
+        info[2] = static_cast<double>(out.solidified);
+        info[3] = static_cast<double>(out.rechecks);
+        info[4] = static_cast<double>(out.overlap_waits);
+        info[5] = static_cast<double>(out.births);
+        info[6] = static_cast<double>(out.resumed);
+        return out.active ? 1 : 0;
+    };
+    p.spawn_ghost_state = [this](const std::string& name) { return physics_view_.spawn_ghost_state(name.c_str()); };
+    p.spawn_ghost_birth = [this](const std::string& group) { return physics_view_.spawn_ghost_birth(group.c_str()); };
+    p.show_spawn_ghost = [this](const std::string& name, bool own, bool ghost) {
+        if (own) {
+            show_own_spawn_ghost(m_bml->GetCKContext(), name, ghost);
+            return;
+        }
+        if (const auto it = host.mirror_player.find(name); it != host.mirror_player.end())
+            objects_.set_ghost(it->second, ghost);
+    };
     p.set_entity_matrix = [this](const std::string& name, const float matrix[16]) {
         auto* entity = CK3dEntity::Cast(m_bml->GetCKContext()->GetObjectByNameAndParentClass(
                 const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
@@ -3139,6 +3231,9 @@ bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixe
                       join_order, tick);
     }
     record_birth();   // after the offset: the matrix the body is made from
+    // (Step SPGH2: own_physicalized also begins the own spawn ghost life
+    // when the core counts the birth a spawn - before the block makes the
+    // body, as the server's copy's does at this tick.)
     core.own_physicalized(report);
     host.own_group_set = false;
     if (report.pose.spawn && core.spawn_impulse() > 0.0f) {

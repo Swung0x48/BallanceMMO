@@ -30,6 +30,7 @@
 #include <bmmo_build_id.h>
 
 #include <algorithm>
+#include <array>
 #include <typeinfo>
 #include <cfloat>
 #include <cmath>
@@ -3172,6 +3173,386 @@ namespace bmmo::physics {
         if (!airship_is_player(real)) return 0;
         if (airship_in_box(*state, real)) return 1;
         return airship_is_own(*state, real) && airship_own_life(*state, airship_now(physics->GetEnvironment())) ? 1 : 0;
+    }
+
+    // ---- bridge API v25: the spawn ghost (steps SPGH, SPGH2) ----
+
+    namespace {
+        class spawn_ghost_filter;
+        class spawn_ghost_listener;
+        struct spawn_ghost_state_t {
+            bool enabled = false;
+            bool respawns = true;
+            double radius = 0.0;
+            // The spawn areas' centres (the level start and every
+            // resetpoint), in the order the tables give them; duplicates
+            // dropped.  Read when the rule is switched on, and at a PSI again
+            // while none was found.
+            std::vector<std::array<double, 3>> areas;
+            // Per group, the state the IVP savestate carries
+            // (spawn_ghost_record): step SPGH2 moved it there from IVP clock
+            // intervals, so a rollback and the one state transfer restore it
+            // with the world it belongs to.
+            struct group_state {
+                bool seen = false;      // its first life began
+                bool present = false;   // a body in collision detection at the last PSI
+                bool solid = false;
+                bool marked = false;    // a spawn birth since the last PSI
+            };
+            std::map<std::string, group_state> groups;
+            uint64_t solidified = 0, rechecks = 0, overlap_waits = 0, births = 0, resumed = 0;
+            spawn_ghost_filter* filter = nullptr;
+            spawn_ghost_listener* listener = nullptr;
+            IVP_Environment* environment = nullptr;
+        };
+        std::map<CKIpionManager*, spawn_ghost_state_t>& spawn_ghost_states() {
+            static auto* states = new std::map<CKIpionManager*, spawn_ghost_state_t>();   // never destroyed (see airship_states)
+            return *states;
+        }
+        spawn_ghost_state_t* find_spawn_ghost_state(CKIpionManager* physics) {
+            auto& states = spawn_ghost_states();
+            const auto it = states.find(physics);
+            return it == states.end() ? nullptr : &it->second;
+        }
+        std::string spawn_ghost_group(const IVP_Real_Object* object) {
+            const char* ident = object ? object->nocoll_group_ident : nullptr;
+            if (!ident) return {};
+            size_t n = 0;
+            while (n < IVP_NO_COLL_GROUP_STRING_LEN && ident[n]) ++n;
+            return std::string(ident, n);
+        }
+        // A ghost: a player ball whose group is not solid, or had no body at
+        // the last PSI (a body made since - a birth, a trafo's new ball -
+        // is inserted as a ghost, and the next PSI settles it: a solid group
+        // has its pairs rechecked there).  A group never seen is a ghost.
+        bool spawn_ghost_is_ghost(const spawn_ghost_state_t& state, const IVP_Real_Object* object) {
+            if (!airship_is_player(object)) return false;
+            const auto it = state.groups.find(spawn_ghost_group(object));
+            return it == state.groups.end() || !it->second.present || !it->second.solid;
+        }
+        bool spawn_ghost_in_area(const spawn_ghost_state_t& state, const IVP_U_Point* p) {
+            const double r2 = state.radius * state.radius;
+            for (const auto& c: state.areas) {
+                const double dx = p->k[0] - c[0], dy = p->k[1] - c[1], dz = p->k[2] - c[2];
+                if (dx * dx + dy * dy + dz * dz < r2) return true;
+            }
+            return false;
+        }
+        void spawn_ghost_read_areas(CKIpionManager* physics, spawn_ghost_state_t& state) {
+            state.areas.clear();
+            CKContext* context = physics ? physics->m_Context : nullptr;
+            if (!context) return;
+            auto add = [&](const VxMatrix& m) {
+                const std::array<double, 3> c = {m[3][0], m[3][1], m[3][2]};
+                if (std::find(state.areas.begin(), state.areas.end(), c) == state.areas.end()) state.areas.push_back(c);
+            };
+            VxMatrix matrix;
+            if (auto* level = static_cast<CKDataArray*>(context->GetObjectByNameAndClass(
+                        const_cast<CKSTRING>("CurrentLevel"), CKCID_DATAARRAY)))
+                if (level->GetRowCount() > 0 && level->GetColumnCount() > 3 && level->GetElementValue(0, 3, &matrix))
+                    add(matrix);
+            if (auto* table = static_cast<CKDataArray*>(context->GetObjectByNameAndClass(
+                        const_cast<CKSTRING>("ResetPoints"), CKCID_DATAARRAY)))
+                for (int row = 0; row < table->GetRowCount(); ++row)
+                    if (table->GetElementValue(row, 0, &matrix)) add(matrix);
+        }
+
+        // The pair rule: two player balls collide only when neither is a
+        // ghost.  Every other pair: IVP_TRUE (the meta filter ANDs).
+        class spawn_ghost_filter : public IVP_Collision_Filter {
+        public:
+            CKIpionManager* physics = nullptr;
+            IVP_Environment* environment = nullptr;
+            IVP_BOOL check_objects_for_collision_detection(IVP_Real_Object* object0, IVP_Real_Object* object1) override {
+                const spawn_ghost_state_t* state = find_spawn_ghost_state(physics);
+                if (!state || !state->enabled) return IVP_TRUE;
+                if (!airship_is_player(object0) || !airship_is_player(object1)) return IVP_TRUE;
+                return spawn_ghost_is_ghost(*state, object0) || spawn_ghost_is_ghost(*state, object1) ? IVP_FALSE : IVP_TRUE;
+            }
+            void environment_will_be_deleted(IVP_Environment*) override {
+                if (spawn_ghost_state_t* state = find_spawn_ghost_state(physics))
+                    if (state->filter == this) state->filter = nullptr;
+                delete this;
+            }
+        };
+
+        // At the start of every PSI: the groups brought up to date (a
+        // group's first body begins its first life as a ghost; a body that
+        // came to a solid group since the last PSI - a trafo's new ball - is
+        // solid and rechecked, its pairs were refused while it was
+        // inserted), then every ghost outside every area that overlaps no
+        // other player ball turned solid - all decided on the positions as
+        // they stand, before any recheck - and the new solid balls rechecked
+        // in group order.
+        class spawn_ghost_listener : public IVP_Listener_PSI {
+        public:
+            CKIpionManager* physics = nullptr;
+            IVP_Environment* environment = nullptr;
+            void event_PSI(IVP_Event_PSI*) override {
+                spawn_ghost_state_t* state = find_spawn_ghost_state(physics);
+                if (!state || !state->enabled || !physics) return;
+                if (state->areas.empty()) spawn_ghost_read_areas(physics, *state);
+                // Every player ball in collision detection, asleep or not:
+                // the manager's whole object table, not m_MovableObjects -
+                // CKIpionManager takes a frozen (sleeping) core out of that
+                // list (PhysicsObjectListener::event_object_frozen), and a
+                // ball at rest would read as bodiless.  A body with no
+                // overlap-tree node is left out: a rollback's restore parks a
+                // body born after its anchor that way until its birth tick
+                // (it is not in this tick's world yet).  Sorted by group,
+                // then name: the table's hash order is never used.
+                std::vector<std::pair<std::string, IVP_Real_Object*>> balls;
+                for (auto it = physics->m_PhysicsObjects.Begin(); it != physics->m_PhysicsObjects.End(); ++it) {
+                    IVP_Real_Object* object = (*it).m_RealObject;
+                    IVP_Core* core = object ? object->get_core() : nullptr;
+                    if (!core || core->physical_unmoveable || !airship_is_player(object)) continue;
+                    const IVP_OV_Element* e = object->get_ov_element();
+                    if (!e || !e->node) continue;
+                    balls.emplace_back(spawn_ghost_group(object), object);
+                }
+                std::sort(balls.begin(), balls.end(), [](const auto& x, const auto& y) {
+                    if (x.first != y.first) return x.first < y.first;
+                    const char* nx = x.second->get_name();
+                    const char* ny = y.second->get_name();
+                    return std::strcmp(nx ? nx : "", ny ? ny : "") < 0;
+                });
+                // The groups: present now or not, the first life begun, the
+                // bodies that need their pairs rechecked noted.
+                std::vector<IVP_Real_Object*> recheck;
+                std::map<std::string, bool> has_body;
+                for (const auto& [group, object]: balls) has_body[group] = true;
+                for (auto& [group, g]: state->groups)
+                    if (!has_body.count(group)) {
+                        g.present = false;
+                        g.marked = false;
+                    }
+                // One decision per group, on its first body by name.  A group
+                // has one body in collision detection at a PSI (the ball; a
+                // body a rollback parks is left out above), so the name
+                // order, which differs across worlds (a server clone, a
+                // Ball_*, a mirror entity), never picks between two.
+                std::string last;
+                for (const auto& [group, object]: balls) {
+                    auto& g = state->groups[group];
+                    if (!last.empty() && last == group) continue;
+                    last = group;
+                    if (!g.seen) {
+                        g.seen = true;
+                        g.solid = false;   // the first life: a ghost
+                    }
+                    if (!g.present && g.solid) {
+                        // A body that came to a solid group (a trafo's new
+                        // ball, a beam across a PSI): it stays solid, and its
+                        // pairs, refused while it was inserted, are made now.
+                        ++state->resumed;
+                        recheck.push_back(object);
+                    } else if (g.present && g.marked) {
+                        // A spawn birth while a body was there at the last
+                        // PSI (a death and a respawn between two PSIs): the
+                        // pairs the new body was given while it read solid go.
+                        recheck.push_back(object);
+                    }
+                    g.present = true;
+                    g.marked = false;
+                }
+                // The decisions, on the positions as they stand.
+                for (const auto& [group, object]: balls) {
+                    auto& g = state->groups[group];
+                    if (g.solid) continue;
+                    IVP_Core* core = object->get_core();
+                    const IVP_U_Point* p = core->get_position_PSI();
+                    if (spawn_ghost_in_area(*state, p)) continue;
+                    bool overlaps = false;
+                    for (const auto& [other_group, other]: balls) {
+                        if (other == object) continue;
+                        IVP_Core* oc = other->get_core();
+                        const IVP_U_Point* q = oc->get_position_PSI();
+                        const double reach = static_cast<double>(core->upper_limit_radius) + static_cast<double>(oc->upper_limit_radius);
+                        const double dx = p->k[0] - q->k[0], dy = p->k[1] - q->k[1], dz = p->k[2] - q->k[2];
+                        if (dx * dx + dy * dy + dz * dz < reach * reach) {
+                            overlaps = true;
+                            break;
+                        }
+                    }
+                    if (overlaps) {
+                        ++state->overlap_waits;
+                        continue;
+                    }
+                    g.solid = true;
+                    ++state->solidified;
+                    if (std::find(recheck.begin(), recheck.end(), object) == recheck.end()) recheck.push_back(object);
+                }
+                // The pairs a ghost was refused: made now where another
+                // player ball's overlap-tree sphere meets its own (IVP would
+                // have a collision checker there); otherwise the next
+                // re-insertion of either finds the pair, as for any two
+                // bodies coming together.  In group order.
+                std::sort(recheck.begin(), recheck.end(), [&](IVP_Real_Object* x, IVP_Real_Object* y) {
+                    const std::string gx = spawn_ghost_group(x), gy = spawn_ghost_group(y);
+                    if (gx != gy) return gx < gy;
+                    const char* nx = x->get_name();
+                    const char* ny = y->get_name();
+                    return std::strcmp(nx ? nx : "", ny ? ny : "") < 0;
+                });
+                for (IVP_Real_Object* object: recheck) {
+                    const IVP_OV_Element* e = object->get_ov_element();
+                    if (!e) continue;
+                    bool close_by = false;
+                    for (const auto& [other_group, other]: balls) {
+                        const IVP_OV_Element* f = other == object ? nullptr : other->get_ov_element();
+                        if (!f) continue;
+                        const double reach = static_cast<double>(e->radius) + static_cast<double>(f->radius);
+                        const double dx = static_cast<double>(e->center.k[0]) - f->center.k[0];
+                        const double dy = static_cast<double>(e->center.k[1]) - f->center.k[1];
+                        const double dz = static_cast<double>(e->center.k[2]) - f->center.k[2];
+                        if (dx * dx + dy * dy + dz * dz < reach * reach) {
+                            close_by = true;
+                            break;
+                        }
+                    }
+                    if (!close_by) continue;
+                    object->recheck_collision_filter();
+                    ++state->rechecks;
+                }
+            }
+            void environment_will_be_deleted(IVP_Environment*) override {
+                if (spawn_ghost_state_t* state = find_spawn_ghost_state(physics))
+                    if (state->listener == this) state->listener = nullptr;
+                delete this;
+            }
+        };
+    }
+
+    bool spawn_ghost_set(CKIpionManager* physics, bool enable, bool respawns, double radius, spawn_ghost_info& out,
+                         std::string& error) {
+        error.clear();
+        out = spawn_ghost_info{};
+        if (!physics) {
+            error = "no physics manager";
+            return false;
+        }
+        spawn_ghost_state_t& state = spawn_ghost_states()[physics];
+        if (!enable) {
+            // Off: `out` carries the counters as they stood (active false).
+            spawn_ghost_get(physics, out);
+            out.active = false;
+            state.enabled = false;
+            return true;
+        }
+        state.enabled = false;
+        IVP_Environment* environment = physics->GetEnvironment();
+        if (!environment) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        if (!(radius > 0.0)) {
+            error = "the spawn area radius must be positive";
+            return false;
+        }
+        state.respawns = respawns;
+        state.radius = radius;
+        state.groups.clear();
+        state.solidified = state.rechecks = state.overlap_waits = state.births = state.resumed = 0;
+        spawn_ghost_read_areas(physics, state);
+        if (state.environment != environment) {
+            // A new environment (a level loaded since): the old one's filter
+            // and listener went with it (environment_will_be_deleted).
+            state.filter = nullptr;
+            state.listener = nullptr;
+            state.environment = environment;
+        }
+        if (!state.filter) {
+            auto* meta = static_cast<IVP_Meta_Collision_Filter*>(environment->get_collision_filter());
+            if (!meta) {
+                error = "the environment has no collision filter";
+                return false;
+            }
+            auto* filter = new spawn_ghost_filter();
+            filter->physics = physics;
+            filter->environment = environment;
+            meta->add_collision_filter(filter);
+            state.filter = filter;
+        }
+        if (!state.listener) {
+            auto* listener = new spawn_ghost_listener();
+            listener->physics = physics;
+            listener->environment = environment;
+            environment->add_listener_PSI(listener);
+            state.listener = listener;
+        }
+        state.enabled = true;
+        return spawn_ghost_get(physics, out);
+    }
+
+    bool spawn_ghost_get(CKIpionManager* physics, spawn_ghost_info& out) {
+        out = spawn_ghost_info{};
+        const spawn_ghost_state_t* state = physics ? find_spawn_ghost_state(physics) : nullptr;
+        if (!state || !state->enabled) return true;
+        out.active = true;
+        out.areas = static_cast<uint32_t>(state->areas.size());
+        out.radius = state->radius;
+        out.solidified = state->solidified;
+        out.rechecks = state->rechecks;
+        out.overlap_waits = state->overlap_waits;
+        out.births = state->births;
+        out.resumed = state->resumed;
+        return true;
+    }
+
+    int spawn_ghost_state(CKIpionManager* physics, const char* entity_name) {
+        const spawn_ghost_state_t* state = physics ? find_spawn_ghost_state(physics) : nullptr;
+        CK3dEntity* entity = physics ? find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE)) : nullptr;
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        if (!object || !object->m_RealObject) return -1;
+        if (!state || !state->enabled) return 0;
+        return spawn_ghost_is_ghost(*state, object->m_RealObject) ? 1 : 0;
+    }
+
+    bool spawn_ghost_birth(CKIpionManager* physics, const char* group) {
+        spawn_ghost_state_t* state = physics ? find_spawn_ghost_state(physics) : nullptr;
+        if (!state || !state->enabled || !group || !*group) return false;
+        auto& g = state->groups[bounded(group, IVP_NO_COLL_GROUP_STRING_LEN)];
+        if (g.seen && !state->respawns) return true;   // only the first life is a ghost
+        g.solid = false;
+        g.marked = true;
+        ++state->births;
+        return true;
+    }
+
+    void spawn_ghost_forget(CKIpionManager* physics, const char* group) {
+        spawn_ghost_state_t* state = physics ? find_spawn_ghost_state(physics) : nullptr;
+        if (!state || !state->enabled || !group || !*group) return;
+        state->groups.erase(bounded(group, IVP_NO_COLL_GROUP_STRING_LEN));
+    }
+
+    bool spawn_ghost_record_get(CKIpionManager* physics, std::vector<spawn_ghost_record>& out) {
+        out.clear();
+        const spawn_ghost_state_t* state = physics ? find_spawn_ghost_state(physics) : nullptr;
+        if (!state || !state->enabled) return false;
+        out.reserve(state->groups.size());
+        for (const auto& [group, g]: state->groups) {   // std::map: sorted by group
+            spawn_ghost_record r;
+            r.group = group;
+            r.seen = g.seen ? 1 : 0;
+            r.present = g.present ? 1 : 0;
+            r.solid = g.solid ? 1 : 0;
+            r.marked = g.marked ? 1 : 0;
+            out.push_back(std::move(r));
+        }
+        return true;
+    }
+
+    void spawn_ghost_record_set(CKIpionManager* physics, const std::vector<spawn_ghost_record>& in) {
+        spawn_ghost_state_t* state = physics ? find_spawn_ghost_state(physics) : nullptr;
+        if (!state || !state->enabled) return;
+        state->groups.clear();
+        for (const auto& r: in) {
+            auto& g = state->groups[r.group];
+            g.seen = r.seen != 0;
+            g.present = r.present != 0;
+            g.solid = r.solid != 0;
+            g.marked = r.marked != 0;
+        }
     }
 
     // ---- bridge API v8: session clock guard ----

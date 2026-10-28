@@ -383,6 +383,85 @@ namespace bmmo::physics {
     // body.
     int airship_zone_contains(CKIpionManager* physics, const char* entity_name);
 
+    // ---- bridge API v25: the spawn ghost (steps SPGH, SPGH2; the user's
+    // rule of 2026-10-28, docs/rewind-cost-design.md "As built (step SPGH)"
+    // and "As built (step SPGH2)") ----
+    //
+    // Spawn areas: a sphere of `radius` around the level start
+    // (CurrentLevel[0][3]) and around every row of the level's ResetPoints
+    // table, read when the rule is switched on (again at a PSI while none
+    // was found).  With the rule on, a player ball (nocoll group "P#...") is
+    // a GHOST in its spawn life: it never collides with another player ball
+    // (every other pair is unchanged: it rolls, falls and steers as usual).
+    // A spawn life begins at a group's first body and at every spawn birth
+    // (spawn_ghost_birth: a Physicalize the lifecycle flags SPAWN - a
+    // respawn at a resetpoint), and only there: a trafo, a beam or a body a
+    // rollback makes again keeps the group's state.  At the start of every
+    // PSI each ghost whose core is outside every area and overlaps no other
+    // player ball (centre distance at least the sum of the cores' upper limit
+    // radii; every player ball in collision detection counts, asleep or not)
+    // turns SOLID; a body that came since the last PSI to a solid group (a
+    // trafo) and a new solid ball have their pairs rechecked there where
+    // another player ball's overlap-tree sphere meets theirs (a group with no
+    // body at the last PSI reads as a ghost while its new body is inserted),
+    // sorted by group.  `respawns` false: only a group's first life is a
+    // ghost.  enable = false switches it off; `out` then carries the counters
+    // as they stood (active false).
+    // The state is a few flags per group (spawn_ghost_record below) that the
+    // IVP savestate carries (physics_savestate.hpp, format 3): a rollback's
+    // restore and the one state transfer (a late join's or a resync's
+    // travelling blob) put it back with the world it belongs to.  Every
+    // decision reads only the world's own copies, so the server and every
+    // client decide at the same PSI from the same inputs.
+    struct spawn_ghost_info {
+        bool active = false;
+        uint32_t areas = 0;            // spawn areas found
+        double radius = 0.0;
+        uint64_t solidified = 0;       // ghost -> solid transitions so far
+        uint64_t rechecks = 0;         // pair rechecks (new solid balls and resumed bodies near another ball)
+        uint64_t overlap_waits = 0;    // PSIs a ghost outside every area waited for an overlap to end
+        uint64_t births = 0;           // spawn births marked (spawn_ghost_birth)
+        uint64_t resumed = 0;          // bodies that came to a solid group (a trafo) and stayed solid
+    };
+    bool spawn_ghost_set(CKIpionManager* physics, bool enable, bool respawns, double radius, spawn_ghost_info& out,
+                         std::string& error);
+    bool spawn_ghost_get(CKIpionManager* physics, spawn_ghost_info& out);
+    // 1 when `entity`'s body is a player ball that is a spawn ghost now, 0
+    // when it is solid (or not a player ball, or the rule is off), -1 when
+    // it has no body.
+    int spawn_ghost_state(CKIpionManager* physics, const char* entity_name);
+    // A spawn birth of `group` ("P#<join order>"): the Physicalize the
+    // lifecycle flags PHYSICALIZE_FLAG_SPAWN, in every world at its applied
+    // tick, before that tick's step (the server's apply_event, a mirror's
+    // birth, the own ball's capture or remake, a replay's re-issue).  The
+    // group's state is a ghost from here (with `respawns` false only before
+    // its first life).  Idempotent.  False when the rule is off.
+    bool spawn_ghost_birth(CKIpionManager* physics, const char* group);
+    // A member left (the server's remove_player, after its ball is gone):
+    // `group`'s state is dropped, so the next member that takes the join
+    // order begins its first life as a ghost however its first body is made
+    // (step SPGH2 review: a leave ends a life).  The server's world only: a
+    // late joiner and a resynced member take the server's records through the
+    // one state transfer; the members, which are not told of a leave yet,
+    // follow with world agreement's member messages (M0/M1).  Nothing when
+    // the rule is off.
+    void spawn_ghost_forget(CKIpionManager* physics, const char* group);
+
+    // One group's spawn ghost state, as the IVP savestate records it.
+    struct spawn_ghost_record {
+        std::string group;
+        uint8_t seen = 0;      // a body of the group was seen at a PSI (its first life began)
+        uint8_t present = 0;   // the group had a body in collision detection at the last PSI
+        uint8_t solid = 0;     // solid (0: a ghost)
+        uint8_t marked = 0;    // a spawn birth was marked since the last PSI
+    };
+    // The state of every group, sorted by group.  False (and `out` empty)
+    // when the rule is off in this world.
+    bool spawn_ghost_record_get(CKIpionManager* physics, std::vector<spawn_ghost_record>& out);
+    // Replaces the state (a restore); nothing when the rule is off.  An
+    // empty list is a world before any body was seen.
+    void spawn_ghost_record_set(CKIpionManager* physics, const std::vector<spawn_ghost_record>& in);
+
     // ---- bridge API v8: session clock guard ----
 
     // Keeps the retail pause menu (which stops Gameplay_Ingame and writes the

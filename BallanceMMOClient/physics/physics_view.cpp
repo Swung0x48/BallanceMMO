@@ -1023,6 +1023,43 @@ namespace bmmo::physics {
         return api_->airship_zone_get(manager_, box);
     }
 
+    bool physics_view::spawn_ghost_set(bool enable, bool respawns, double radius, bmmo::physics::spawn_ghost_info& out,
+                                       std::string& error) const {
+        error.clear();
+        out = bmmo::physics::spawn_ghost_info{};
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->spawn_ghost_set) {
+            error = "the physics_RT bridge lacks spawn_ghost_set";
+            return false;
+        }
+        char text[256] = {};
+        double info[7] = {};
+        const int32_t r = api_->spawn_ghost_set(manager_, enable ? 1 : 0, respawns ? 1 : 0, radius, info, text, sizeof(text));
+        if (r < 0) {
+            error = text[0] ? text : "spawn_ghost_set failed";
+            return false;
+        }
+        out.active = r == 1;
+        out.areas = static_cast<uint32_t>(info[0]);
+        out.radius = info[1];
+        out.solidified = static_cast<uint64_t>(info[2]);
+        out.rechecks = static_cast<uint64_t>(info[3]);
+        out.overlap_waits = static_cast<uint64_t>(info[4]);
+        out.births = static_cast<uint64_t>(info[5]);
+        out.resumed = static_cast<uint64_t>(info[6]);
+        return true;
+    }
+
+    int physics_view::spawn_ghost_state(const char* entity_name) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->spawn_ghost_state) return 0;
+        return api_->spawn_ghost_state(manager_, entity_name);
+    }
+
+    bool physics_view::spawn_ghost_birth(const char* group) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->spawn_ghost_birth) return false;
+        return api_->spawn_ghost_birth(manager_, group) == 1;
+    }
+
     int physics_view::airship_zone_contains(const char* entity_name) const {
         if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->airship_zone_contains) return 0;
         return api_->airship_zone_contains(manager_, entity_name);

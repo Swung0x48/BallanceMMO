@@ -187,6 +187,15 @@ namespace bmmo::physics {
         int airship_zone_contains(const char* entity_name) const;
         // 1 with the box (min xyz, max xyz) once taken, 0 not yet, -1 off.
         int airship_zone_get(double box[6]) const;
+        // ---- bridge API v25 (step SPGH): the spawn ghost
+        // (physics_state.hpp spawn_ghost_set / spawn_ghost_state).
+        bool spawn_ghost_set(bool enable, bool respawns, double radius, bmmo::physics::spawn_ghost_info& out,
+                             std::string& error) const;
+        // 1 ghost, 0 solid (or off), -1 no body.
+        int spawn_ghost_state(const char* entity_name) const;
+        // Step SPGH2: a spawn birth of `group` (physics_state.hpp
+        // spawn_ghost_birth); false when the rule is off.
+        bool spawn_ghost_birth(const char* group) const;
         // ---- bridge API v22 (step T4): the savestate's controller alias
         // (physics_savestate.hpp set_controller_alias); a null `alias`
         // removes it.

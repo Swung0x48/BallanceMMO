@@ -476,6 +476,17 @@ namespace bmmo::physics::savestate {
         }
 
         template <class IO>
+        inline void io(IO& s, spawn_ghost_group_record& g) {
+            io(s, g.group);
+            io(s, g.seen);
+            io(s, g.present);
+            io(s, g.solid);
+            io(s, g.marked);
+        }
+
+        // The tables of format 2; format 3 appends the spawn ghost section
+        // (write_world / read_world).
+        template <class IO>
         inline void io(IO& s, world_record& w) {
             io(s, w.environment_id);
             io(s, w.current_time);
@@ -656,6 +667,9 @@ namespace bmmo::physics::savestate {
         out_io o{w};
         // The writer only reads the record; one field list serves both ways.
         io(o, const_cast<world_record&>(world));
+        // Format 3: the spawn ghost section.
+        io(o, const_cast<uint8_t&>(world.spawn_ghost_present));
+        io(o, const_cast<std::vector<spawn_ghost_group_record>&>(world.spawn_ghost));
     }
 
     bool read_world(reader& r, world_record& world, std::string& error) {
@@ -673,12 +687,17 @@ namespace bmmo::physics::savestate {
             error = text;
             return false;
         }
-        if (version != kFormatVersion) {
-            error = "savestate format " + std::to_string(version) + ", this build reads " + std::to_string(kFormatVersion);
+        if (version < kFormatVersionOldest || version > kFormatVersion) {
+            error = "savestate format " + std::to_string(version) + ", this build reads " + std::to_string(kFormatVersionOldest)
+                  + ".." + std::to_string(kFormatVersion);
             return false;
         }
         in_io i{r};
         io(i, world);
+        if (version >= 3u) {
+            io(i, world.spawn_ghost_present);
+            io(i, world.spawn_ghost);
+        }
         if (!r.ok()) {
             error = "savestate truncated or corrupt at byte " + std::to_string(r.pos) + " of " + std::to_string(r.size);
             world = world_record{};
@@ -865,6 +884,18 @@ namespace bmmo::physics::savestate {
             e.put("random_state", w.random_state);
             e.put("ov_root", w.ov_root);
             e.put("cache_reuse_index", w.cache_reuse_index);
+
+            // Format 3: the spawn ghost's groups (step SPGH2).
+            e.rec("spawn_ghost", "-");
+            e.put("present", w.spawn_ghost_present);
+            e.put("groups", static_cast<int64_t>(w.spawn_ghost.size()));
+            for (const auto& g : w.spawn_ghost) {
+                e.rec("ghost", g.group);
+                e.put("seen", g.seen);
+                e.put("present", g.present);
+                e.put("solid", g.solid);
+                e.put("marked", g.marked);
+            }
 
             e.rec("movable", "-");
             e.put("objects", e.objects(w.movable_objects));

@@ -2444,3 +2444,388 @@ reaches the last sector by the checkpoint chain); the translucent ghost on
 screen; remote input corrections of a ghost still rewind (harmless: the
 replay re-freezes it); a protocol-14 reference set (`core_ref_s9`, five live
 arms).
+
+## As built (step SPGH)
+
+(Landed with step SPGH2 below, which replaced the clock-interval record with
+per-group flags in the IVP savestate and made a ghost life begin only at a
+spawn birth; the rest of this note stands.)
+
+The spawn ghost: the user's rule of 2026-10-28 (verbatim:
+"开始的时候，在出生点区域是透明球（和未启用物理碰撞一样），然后远离出生点才物理化"),
+settled when asked as "only ball-to-ball collision off": inside its spawn area
+a ball rolls, falls and steers as usual, passes through every other player's
+ball and is drawn translucent; once it has left the area it collides with
+balls again and is drawn solid. Base cf7bcae, protocol 14 and journal v7
+unchanged, bridge API 24 -> **25**. No IVP or physics_RT source changed; no
+engine change; nothing on the wire.
+
+**The rule is the physics layer's** (`physics_state.cpp` "bridge API v25: the
+spawn ghost", one implementation for the server, the headless host and the
+retail plugin; `spawn_ghost_set`, `spawn_ghost_state`). Spawn areas: a sphere
+of `kSpawnGhostRadius` = 12 m (`session/spawn_impulse.hpp`; it holds all 16
+birth cells of the default spacing, the farthest sqrt(5) x 4.2 = 9.39 m out,
+with the ball inside) around `CurrentLevel[0][3]` and every row of the
+level's `ResetPoints` table (arena: 4 areas, level 8: 5), read when the rule
+is switched on. A collision filter refuses a pair of player balls (`P#...`)
+when either is a ghost; every other pair is unchanged. A PSI listener, at the
+start of every PSI, brings each group's lives up to date and turns a ghost
+solid for the rest of its life at the first PSI its core is outside every
+area while it overlaps no other player ball (centre distance at least the sum
+of the cores' `upper_limit_radius`); a ball that leaves while overlapping
+waits (`overlap_waits`) and turns solid at the first PSI it overlaps none, so
+no world starts a contact from an overlap. All decisions of a PSI are taken
+on the positions as they stand, then the new solid balls whose overlap-tree
+sphere meets another player ball's have their pairs rechecked
+(`recheck_collision_filter`, in group order) - the pairs a ghost was refused
+are made at that PSI in every world; a ball with no other ball near is not
+rechecked, so a solo world is unchanged to the bit (no recheck touches its
+overlap tree). `kSpawnGhostRespawns` (true): a respawn at a resetpoint is
+born a ghost like the first life; false builds the other reading (only a
+group's first life a ghost) - the one switch, a constant (every world runs
+one build), for the user.
+
+**Record and rollback** (adaptation 1: the step asked for the rule "in the
+script / savestate record"; it is kept, like BALA's latch, as IVP clock
+intervals, which the savestate already carries): per group a list of lives
+`[born, gone)` and the clock each turned solid. A rollback's restore puts the
+clock back, so the filter reads the state as it stood at the anchor (a life
+covering the clock, solid only if its solid clock is not after it) - a body
+revived inside a window (gap L) gets its life's state - and every PSI first
+forgets what lies after its clock (a life born later, a later solid clock,
+an end the replay outlives), so the replay decides again at the same PSI.
+Not covered: a restore that refuses its savestate and keeps the live clock
+(`restore_clock` off: the clock is not rewound, the latch reads the live
+clock), and a travelling blob of a world whose clock base differs (a late
+joiner's resync) - there a ball outside every area and clear of the others
+is solid again at the first PSI, a ball inside an area may differ until it
+leaves. A world that enables the rule with balls already alive (a late
+joiner) starts them all as ghosts.
+
+**Bodies asleep count** (found by the retail run, fixed in the step):
+`CKIpionManager::m_MovableObjects` drops a frozen core
+(`PhysicsObjectListener::event_object_frozen`, physics_RT
+`CKIpionManager.cpp:113-121`), so the first build, which listed the balls from
+it, closed a resting ball's life and showed it a ghost again 22 ticks after it
+came to rest (retail: the beamed balls, solid at 429 / 616 / 772, ghosts again
+at 451 / 638 / 794 in all three worlds) - and a sleeping ball was invisible
+to the overlap test. The listener now walks the manager's whole object table
+(`m_PhysicsObjects`, sorted by group then name). The same list feeds BALA's
+airship listener (own-ball latch closed at "no body", ghosts found): a latched
+own ball that falls asleep on its airship closes its latch there - not
+reproduced, queued for the airship's owner (BALA), not changed here.
+
+**The core** (`client_core_frame.cpp` `spawn_ghost_frame`, after
+`airship_frame`): installs the rule at the anchor after the airship zone (the
+server after its airship zone too: one PSI-listener order), logs each ball's
+ghost and solid ticks as this world's frames see them (log only, no journal
+note: a solo journal stays byte-identical), and asks the host to draw a ghost
+translucent on every frame it is one (retail: `show_spawn_ghost` - the own
+ball's current mesh materials at alpha 0.5 with alpha blending, their own
+state kept in file-scope statics of `core_host.cpp` and restored with alpha 1;
+a mirror through `game_objects::set_ghost`; the airship's ghost display wins
+on a mirror it shows). Every frame, because the host re-colours a ball under
+the core (the level start's fade-in of the own ball; a mirror's unmake /
+remake shows it solid): the run's first build drew the change once and both
+balls were back to opaque by tick ~407 (screenshots). The headless host
+draws nothing. The server logs each clone's transitions.
+
+**The start pile, measured.** Root cause of the residual: the default
+spacing does not keep the birth cells a diameter apart - the resetpoint's
+axes are not unit length, so the 4.2 cells land 3.958 m apart (resync arm,
+c0 and c2's cells; a stone ball is 4 across): two balls are born in contact,
+and the contact resolves differently per world. In the old build exactly
+that pair's own balls leave the server's rows first, at 232 (0.031 m), the
+others at 234 and 252. Pinned replays (own keys from the live journals,
+`work/SPGH/pinned_replay13.py`) against SimTool replays of the server
+journals with the same binary, own ball vs the server's row, ticks 230-1100:
+
+| arm | rBALA2 (before) | SPGH |
+|---|---|---|
+| resync_snapoff | own balls off from 232/252/232/234, 1.15 / 0.19 / 1.08 / 0.57 m in 230-330 | c0, c2, c3 bit-equal for the whole window; c1 bit-equal to 674 |
+| swing_snapoff | off from 232/702/232/234, 1.13 / - / 1.13 / 0.62 m in 230-330 | all four bit-equal to 676-702 |
+
+The later differences (674-702) are the replay's, not the rule's: the pinned
+keys were steered in the old world, so in the new one c1's ball falls (death
+script at 674, unphysicalized at 740; the live session's c1 died at 2470)
+while the SimTool server replays the journal's old events. All worlds decide
+the transitions at the same PSI: resync 329 / 333 / 341 / 341 and swing 328
+/ 331 / 380 / 380 in every client world (a rewind took 330 back to 341 in the
+three where it was decided first). Live (one run, 4 headless clients,
+arena, 60 s, 150 ms, drive + keep-lane, snapshots off, the Arch server
+rebuilt; `maps/arena-test/SPGH_live/lane`, `SPGH_live_lane`): PASS, server
+replay 4119/4119, starved / resyncs / unmatched 0. Own ball vs the server's
+rows against BALA's run of the same arm (`BALA_live/airship`): the first
+difference moved from 232 / 252 / 232 / 234 (0.20-1.15 m in the start
+window) to 1168 / 2088 / 676 / 712 (none in the start window); the
+respawn window 2600-3000 (respawns at 2522-2608) is bit-equal on all four
+in this one smoke run (not evidence by itself: no pinned replay covers the
+respawns yet)
+(before: 0.10 / 0.99 / 4.76 / 0.25 m). The 2000-2400 and 3000+ windows are
+the airship (the own ball out of the sync, BALA), the 600-1600 ones
+(0.7-0.95 m on c2/c3, present before) are not at a spawn. The live journals
+replay IDENTICAL with the asleep fix (pinned, all four), and the live server
+journal 4119/4119.
+
+**Spawn spacing and the spawn impulse** (removing either is the user's
+choice, not built): with the rule, balls inside a spawn area never touch, so
+neither is needed for determinism any more - coincident balls stay ghosts
+until they have separated and left the area. The spacing still decides
+where the balls first meet once solid; the impulse still pushes them apart
+so they leave the overlap sooner (without it two balls born on one point
+holding the same keys stay overlapping ghosts). Not measured with either
+removed (it needs a live run with another server config; deferred).
+
+**Checks (quick tier).** 585 tests pass; GCC 29/29 ok (three times); x64
+BUILD-OK, x86 CLIENT-BUILD-OK (header deps valid on both trees), ARCH-BUILD-OK
+(clean, then with the slot-13 hack for the retail run, then clean with the
+fix). Solo arms of `core_ref_s8` (`--accept-protocol 13`): sends SAME and
+journals IDENTICAL against rBALA2 (solo1 2700, solo2 2427 sends), with the
+first and the fixed build. Wire check `- rSPGH2 rSPGH2w rBALA2w_new`
+(`EXTRA=--accept-protocol 13`): l8_cross c1-c3 sends SAME, c0's first
+difference at 407 (an event's order); every journal's first TICK difference is
+the first tick all balls exist (l8 213, swing / resync 252: the old build's
+born-in-contact pair); the resync / swing sends differ from 253-799 (the
+replay's steer reacts to the new trajectories) and the swing replays stop
+COVERAGE-SHORT at 1160-1415, resync c0/c1/c3 near 2950 (a clock read the old
+capture never made); these unpinned replays of a pre-rule capture cannot
+stay equal, so the pinned replays above are the step's evidence. Retail, two
+copies (`scripts/retail/SPGH_retail`, arena in slot 13, snapshots off,
+trafo inputs and placement on; the first build): both balls born ghosts in
+both worlds (own 212, mirror 214 / 215); client 1 beamed onto client 2's
+ball at 238 stayed where it was put (no push); beamed 25 m down the lane it
+turned solid at 429 in all three worlds (client 2's mirror at its birth
+record's rewind); client 2 beamed 1 m from it and 6 m past it. The SimTool
+replay of that session's server journal with the fixed build: client 1's
+clone solid at 429 for good, client 2's stays a ghost while it overlaps
+client 1's sleeping ball (616) and turns solid at 772 when beamed clear -
+the overlap wait the first build missed (982/982 ticks matched, both builds).
+
+**Not done / deferred.** A retail run with the fixed build (the step's two
+live runs were spent: the translucent display re-asserted every frame and
+the asleep fix are verified by build and by the server replay only, not on
+screen); a run with spacing 0 or no impulse; a protocol-14 reference set;
+a pinned replay over the respawn window; CPU cost of the listener (it walks
+and sorts the whole object table at every PSI, replays and the server
+included; CPU parity is the close-out's).
+
+**Review findings (open, the user's decision first).** (1) The ghost state
+does not travel with the one state transfer: `spawn_ghost_set(true)` at a
+late joiner's anchor (`client_core.cpp` anchor) clears every group's lives,
+so its first PSI opens a ghost life for every ball alive in the server's
+world - a ball solid on the server but inside a resetpoint's 12 m sphere
+stays a ghost in the joiner's world until it leaves it, and two solid
+balls touching outside every area wait as overlapping ghosts there while
+they keep colliding on the server; a running client's resync keeps the
+lives its own world decided (the blob moves the bodies, not the lives).
+Exact needs the lives in the transfer (the portable script record or the
+savestate blob: a record/format change on the resync wire, so the next
+protocol and journal numbers). (2) A trafo opens a new life: the group has
+no `P#` body while the pieces fly, so the new ball is born a ghost and,
+within 12 m of a resetpoint, passes through other balls until it leaves
+the sphere (outside every area and clear of the others it is solid at its
+first PSI, as before). A trafo is not a birth; telling it from a respawn
+needs the lifecycle (an input) in the physics layer, or the lives in the
+record of (1). (3) Retail `show_own_spawn_ghost` sets alpha on the own
+ball mesh's materials and restores alpha 1: a material the level shares
+with other objects would draw translucent with it (not checked).
+
+## As built (step SPGH2)
+
+Step SPGH's spawn ghost, landed with its two review findings fixed: the
+ghost state travels with the world (the orchestrator's option (A'), under the
+user's "run on, log problems and continue" of 2026-10-28) and a trafo is not
+a birth. Base c9ca444 with SPGH's saved work applied (stash@{0}; only
+`docs/roadmap.md` needed a hand merge). Protocol 14 -> **15**, savestate
+format 2 -> **3**, bridge API 25 (SPGH's, one function added), journal v7
+unchanged. No IVP or physics_RT source changed; no engine change.
+
+**The state is a few flags per group, in the IVP savestate.** SPGH kept the
+lives as IVP clock intervals beside the world; a rollback read them through
+the rewound clock, but the one state transfer carried none of them (a
+joiner's `spawn_ghost_set` cleared them and re-opened a ghost life for every
+live ball; a resync kept the client's own decisions). Now
+(`physics_state.cpp` `spawn_ghost_state_t::group_state`) each `P#` group
+holds `seen` (its first life began), `present` (a body in collision
+detection at the last PSI), `solid` and `marked` (a spawn birth since the
+last PSI), read and written as `spawn_ghost_record`s
+(`spawn_ghost_record_get` / `_set`). The savestate carries them after its
+tables (`physics_savestate_internal.hpp` `world_record::spawn_ghost`,
+format 3; `physics_savestate_capture.cpp` next to the random state;
+`physics_savestate_restore.cpp` restores them in the clock step, before
+anything rechecks a body; `describe_savestate` / `diff_savestate` show them
+as `spawn_ghost` / `ghost <group>` records). So every rollback restore and
+the travelling blob of a late join or an A3 resync put back the state the
+world it belongs to had: the server's groups are every world's names
+(`P#<join order>`). A blob without the section (the rule off where it was
+captured, or format 2) leaves a rule-on world with no group seen; format 2
+is still read (an old journal's RESYNC blob). The clock bookkeeping is gone
+(no "forget the future" pass). Not covered, as for every other piece of
+state: a rollback whose savestate restore was refused keeps the live flags.
+
+**A trafo is not a birth** (adaptation: the step asked for "a life ends only
+at a death / leave, from the lifecycle the physics layer is given"; built as
+the equivalent "a ghost life begins only at a spawn birth"). A group's first
+body begins its first life as a ghost; after that only
+`spawn_ghost_birth(group)` (bridge `spawn_ghost_birth`) makes it a ghost
+again: a Physicalize the lifecycle flags `PHYSICALIZE_FLAG_SPAWN` (the
+retail script physicalized the ball at the level's resetpoint), in every
+world at its applied tick, before that tick's step - the server's
+`apply_event` (`physics_world.cpp`), a mirror's birth
+(`client_core_lifecycle.cpp` `physicalize_remote`), an own remake
+(`remake_own_body`), the live own birth (`session_client_core::own_birth_seen`
+with the pose the host saw before the block made the body: retail through
+`own_physicalized`, headless from its Physicalize hook `before_physicalize`,
+or `capture_own_physicalize` where no block was hooked; the core decides with
+`own_birth_is_spawn`, the predicate the event's SPAWN flag is set by) and, in a replay, the own
+spawn birth of the tick (`drain_pending_lives`: the live capture does not
+run in a replay, and retail parks its own window birth instead of remaking
+it). A death keeps the group's state; while a group has no body at a PSI it
+reads as a ghost, so the body that comes next is inserted with no ball
+pairs, and at the next PSI a solid group's new body (a trafo's new ball) is
+solid and has its pairs rechecked (`resumed`), a spawn's stays a ghost.
+With `respawns` false a mark after the first life is ignored. A death and a
+respawn between two PSIs (the group never bodiless) recheck the new body
+there, which drops the pairs it was given while it read solid.
+
+**A leave ends a life** (review finding 3). The server's `remove_player`
+drops the leaver's group (`spawn_ghost_forget`, after its ball is gone), so
+the next member that takes the join order (`assign_join_order` reuses the
+lowest free one) begins its first life as a ghost however its first body is
+made - also a first Physicalize that is not SPAWN-flagged, which before
+took the `resumed` path and was solid. A late joiner and a resynced member
+take this through the server's blob; the members are not told of a leave
+(or of the joiner's join order, below) and follow with M0/M1.
+
+**Parked bodies are left out.** A rollback restore keeps a body born after
+its anchor parked outside collision detection until its birth tick (no
+overlap-tree node); SPGH's listener counted it from the restore on (a life
+opened early, an overlap partner that is not in the world yet). The listener
+now skips a ball whose overlap element has no tree node.
+
+**Protocol 15** (`entity/session.hpp`): no message layout changed; every
+world runs the rule, a SPAWN Physicalize begins a ghost life everywhere, and
+a SessionResyncState's blob is format 3, so a protocol-14 peer is refused at
+the handshake rather than at its first resync. The journal format is
+unchanged (the RESYNC record's blob is opaque; the reader takes 2 and 3).
+
+**Checks (quick tier; about 8 minutes of check wall time, two live runs).** x64 BUILD-OK,
+x86 CLIENT-BUILD-OK (with the slot-13 hack, reverted), Arch ARCH-BUILD-OK
+twice (hacked, then clean for the live run); header deps valid on both
+Windows trees; 586 tests pass; GCC syntax check every line ok.
+- Wire check `rSPGH rSPGH2 rSPGH2w` on `core_ref_s8` (`EXTRA=--accept-protocol
+  13`; `build-agent-rSPGH` is HEAD c9ca444's x64, the rule off): every
+  client's send #5 differs (SessionReady's protocol 15); l8_cross c1-c3
+  otherwise SAME, c0 from 407 (an event's order, as SPGH's); resync / swing
+  from 253 / 627-647 (c1 1643) and every journal from 252 (the first tick
+  all balls exist: the rule) - SPGH's signature against HEAD; the resync
+  c0/c1/c3 replays stop COVERAGE-SHORT near 2950 with BOTH binaries (a clock
+  read the capture never made: pre-existing).
+- Solo (`core_ref_s8` solo1/solo2, HEAD vs SPGH2): journals IDENTICAL, sends
+  SAME but #5.
+- SPGH's live rule-on session (`work/SPGH/liverun`, recorded by SPGH's build,
+  protocol 14) replayed with the own keys pinned by this build: all four
+  journals IDENTICAL to the live ones (19468-19639 records; the start, the
+  respawns at 2522-2608 and the window 2600-3000 included), and the SimTool
+  replay of its server journal 4119/4119 ticks matched. The new state store
+  and the trafo rule decide every transition of that session as SPGH did.
+- The start pile (pinned replays of `core_ref_s8` resync / swing against
+  SimTool replays of their server journals, this build, 230-1100): resync
+  c0, c2, c3 own balls bit-equal throughout, c1 to 674; swing all four to
+  676-702 (the replay's keys, as SPGH); before (rBALA2) 232 / 252 / 232 / 234,
+  0.19-1.15 m in 230-330.
+- The blob round trip with the groups in it: SimTool `--savestate-check
+  --spawn-test 4` on the arena, 30-40 rounds each at impulse 3, 10 and 20 m/s:
+  PASS (every restored-and-replayed tick's blob, ghost section included,
+  byte-equal to the straight pass; at 20 m/s the four ghosts turn solid at
+  tick 55 inside the window). Level 1's scene is vacuous (no contact).
+- One live run (`maps/arena-test/SPGH2_live/latejoin`, 4 headless clients,
+  arena, 60 s, 150 ms, snapshots off, trafo inputs and placement on, client 3
+  joining at the host's tick 1200): server replay 4038/4038; starved 0. The
+  joiner's RESYNC blob (S 1355) holds `P#0..P#2 seen=1 present=1 solid=1`;
+  the joiner showed the three mirrors as ghosts before the apply (its anchor
+  world) and solid after it, as the server had them since 334 / 382; its own
+  ball ghost 1560, solid 1699 = the server's clone. (A first attempt never
+  started: the server could not bind its port.) VERDICT FAIL on the
+  harness's late-join criterion (client 3 relayed 102 frames past the
+  rollback reach, lag max 47) - not a spawn ghost matter.
+
+**The gate round** (the review's findings 1-3 fixed, 4 deferred, the nits
+answered). (1) The `resumed` and `births` counters are exported
+(`spawn_ghost_set`'s `info_out[7]`, bridge v25 as SPGH2 found it, both
+hosts), printed in the client's session-end line, and the server logs them
+whenever they move (`world: spawn ghost at tick T: ...`). (2) One predicate,
+one point in time: the hosts no longer decide an own spawn birth
+(`own_spawn_birth` is gone); the core's `own_birth_seen` applies
+`own_birth_is_spawn`, and both hosts call it before the block makes the body
+(retail in `own_physicalized`, headless in its Physicalize hook - before, it
+marked after the block). The headless SPAWN flag is still decided at the
+report (`captured` needs the capture of the same tick and entity), exactly
+as the spawn kick has been since OWNB, so a birth the report does not
+capture differs in the flag, the kick and the mark alike (pre-existing).
+(3) A leave ends a life (above). (5) The name order in the listener never
+picks between two bodies of a group (one ball per group in collision
+detection; parked bodies left out), said in the code. (6) The shared ball
+materials: for the deferred retail run.
+Gate checks (about 4 minutes): x64 BUILD-OK, x86 CLIENT-BUILD-OK (no hack),
+deps VALID on both trees, 586 tests pass, GCC 29/29 ok. Every journal of
+the implement round is reproduced byte for byte by the gate build: the 12
+multi-client `core_ref_s8` replays (sends SAME, journals IDENTICAL to
+`rSPGH2w_new`; resync c0/c1/c3 COVERAGE-SHORT at 2954-2960 as before), solo1
+/ solo2 (IDENTICAL to HEAD's and the implement round's), SPGH's live session
+with the own keys pinned (all four IDENTICAL to the live journals), its server
+journal 4119/4119. The trafo evidence: `maps/arena-test/b6rc/h1_150`
+(protocol 13, four balls trafo Stone -> Wood at 818-862 and -> Paper at
+1176-1224, one more at 1871), replayed with the rule on: the server
+(SimTool) has every new ball resumed solid at its physicalize tick (`9
+resumed solid`, no ghost line after 231), every client's mirror transitions
+equal the server's (solid 328 / 331 / 380 / 380), and no trafo opens a
+ghost life.
+
+**Residual found at the gate (root-caused, queued: item OWG).** In every
+client the own ball reads as a ghost for one frame at each of its trafos
+(c0 818 -> solid 819, c1 824 -> 825, c2 841 -> 842, c3 866 -> 867; the
+server's clone is solid at 818 / 824 / 841 / 862). Cause: both hosts give
+the own ball its `P#` group in post_step step 17 (`own_body_upkeep`:
+headless `session_client.cpp`, retail `core_host.cpp`; unchanged since M3),
+after its birth tick's PSIs, while the server's clone has it from its
+Physicalize. During its birth tick the live own body is no player ball
+(`airship_is_player` reads the group): its pairs with player balls are
+made at insertion (the server's clone: none as a ghost, or made by the
+PSI's recheck when it resumes), and the group change does not re-ask the
+filter. At a trafo both end solid with the same pairs (cosmetic: one
+translucent frame on retail). At a spawn birth next to another player's
+ball the live own ball would keep that pair through its ghost life; a
+rollback over the birth tick remakes (headless) or re-inserts (retail
+unpark) the body with its group and repairs it, so it is left only where
+no rollback reaches back over the birth. Fix (item OWG): give the own body
+its group before its birth tick's PSIs on both hosts (headless in
+`capture_own_physicalize`, retail in the PreSimulate pass the spawn kick
+uses) and re-ask the filter for it; checks: a pinned replay and the
+retail run. It changes every live own birth, so it needs the live and
+retail runs this gate had no budget left for.
+
+**Residual found (pre-existing, queued: world agreement §1.2, the
+member-added message, roadmap item 5 M0/M1).** The existing members do not
+know the joiner's join order: they kick its mirror with index 8 where the
+server and the joiner use 12 (63 vs 3 in the index), and its mirror's group
+is `P#63`. The mirror drifts from the server's clone (17.8 m in clients 0-2)
+and turned solid there at 1659 against the server's 1699 (it left the area
+on another path). For the spawn ghost the group name matters too: a resync
+of such a member brings the server's `P#3` state while its mirror is `P#63`
+(read as never seen: a ghost until it leaves the area clear of the others).
+Fixed by M0/M1's member-added message; nothing here. M0/M1 must also tell
+the members of a leave, so that they drop the leaver's group as the
+server does (`spawn_ghost_forget`) before a joiner takes its join order.
+
+**Not done / deferred** (each beyond the step's 15-minute gate and two live
+runs, for FULL): the retail two-copy run (ghosts pass through each other,
+translucency every frame, a resting ball solid, on screen; the retail own
+spawn re-marked inside a rollback window); a trafo near a resetpoint (no
+check reaches it: no arm trafos inside a spawn area; the code path is the
+`resumed` branch); an A3 resync of a running member across a ghost -> solid
+transition and a touching solid pair near a resetpoint at a transfer; the
+runs with spacing 0 and without the spawn impulse (measure only; removing
+either is the user's choice); a protocol-15 reference set (the multi-client
+`core_ref_s8` arms no longer replay comparably: the rule changes their
+world from tick 252).

@@ -579,6 +579,38 @@ numbers 1-10 are unchanged.
    balls from the manager's whole object table (`m_PhysicsObjects`, sorted),
    as the SPGH patch's listener does; check with a pinned replay of an
    airship arm.
+   The spawn ghost the user added to it (2026-10-28: a ball is a
+   translucent ghost with ball-to-ball collision off in its spawn area
+   until it has left it) is built at step SPGH (`rewind-cost-design.md`
+   "As built (step SPGH)"; bridge API 25, no wire change): every world
+   decides each ball's solid PSI on its own copy; the start pile
+   (born-in-contact cells: the 4.2 spacing lands 3.958 m apart) is gone
+   in pinned replays (own balls bit-equal with the server's rows through
+   the start window); one live smoke run also showed the respawn window
+   bit-equal (not evidence by itself; a pinned replay over the respawns is
+   owed); spacing and impulse are no longer needed for determinism -
+   removing them is the user's choice. The review's two findings are
+   fixed at step SPGH2 (`rewind-cost-design.md` "As built (step SPGH2)";
+   protocol 15, savestate format 3): the per-group ghost state is in the
+   IVP savestate, so a rollback, a late join and a resync carry it, and a
+   ghost life begins only at a spawn birth (a trafo keeps the state).
+   Left with world agreement M0/M1 (item 5): existing members name a late
+   joiner's mirror `P#63` and kick it with another index (§1.2), so its
+   ghost state is their own until the member-added message lands; they are
+   not told of a leave either, so they keep the leaver's group state, which
+   the server drops at the leave (`spawn_ghost_forget`) - M0/M1 has them drop
+   it too. **Queued, item OWG** (found at SPGH2's gate,
+   `rewind-cost-design.md` "As built (step SPGH2)"): both hosts give the own
+   ball its `P#` group after its birth tick's PSIs (`own_body_upkeep`, post_step
+   step 17), the server's clone has it from its Physicalize; under the spawn
+   ghost the live own ball is no player ball for that tick (one translucent
+   frame at a trafo; at a spawn next to another ball a pair kept through the
+   ghost life where no rollback reaches back over the birth). Fix: the group
+   set before the PSIs on both hosts (headless `capture_own_physicalize`,
+   retail the spawn kick's PreSimulate pass) with the filter re-asked; check
+   with a pinned replay and the retail run. A protocol-15 reference set
+   (REF9) is owed before the next wire check: `core_ref_s8`'s multi-client
+   arms differ from tick 252 under the rule.
    Answer 1 is option (a): H6 is judged by its absolute limits (starved
    within the band, the server's p99 within the budget, both met), so **the
    close-out is passed by the user's ruling** (H6's numbers stay recorded in

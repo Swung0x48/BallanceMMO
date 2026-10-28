@@ -762,6 +762,36 @@ namespace {
         return bmmo::physics::airship_zone_contains(static_cast<CKIpionManager*>(manager), entity_name);
     }
 
+    // v25: the spawn ghost (step SPGH).
+    int32_t api_spawn_ghost_set(void* manager, int32_t enable, int32_t respawns, double radius, double* info_out,
+                                char* error, uint32_t error_size) {
+        std::string text;
+        bmmo::physics::spawn_ghost_info info;
+        if (!bmmo::physics::spawn_ghost_set(static_cast<CKIpionManager*>(manager), enable != 0, respawns != 0, radius, info,
+                                            text)) {
+            set_error(error, error_size, text);
+            return -1;
+        }
+        if (info_out) {
+            info_out[0] = static_cast<double>(info.areas);
+            info_out[1] = info.radius;
+            info_out[2] = static_cast<double>(info.solidified);
+            info_out[3] = static_cast<double>(info.rechecks);
+            info_out[4] = static_cast<double>(info.overlap_waits);
+            info_out[5] = static_cast<double>(info.births);
+            info_out[6] = static_cast<double>(info.resumed);
+        }
+        return info.active ? 1 : 0;
+    }
+
+    int32_t api_spawn_ghost_state(void* manager, const char* entity_name) {
+        return bmmo::physics::spawn_ghost_state(static_cast<CKIpionManager*>(manager), entity_name);
+    }
+
+    int32_t api_spawn_ghost_birth(void* manager, const char* group) {
+        return bmmo::physics::spawn_ghost_birth(static_cast<CKIpionManager*>(manager), group) ? 1 : 0;
+    }
+
     int32_t api_airship_zone_get(void* manager, double* box_out) {
         bmmo::physics::airship_zone_box box;
         bmmo::physics::airship_zone_get(static_cast<CKIpionManager*>(manager), box);
@@ -931,6 +961,9 @@ namespace {
         api_airship_zone_set,
         api_airship_zone_contains,
         api_airship_zone_get,
+        api_spawn_ghost_set,
+        api_spawn_ghost_state,
+        api_spawn_ghost_birth,
     };
 }
 

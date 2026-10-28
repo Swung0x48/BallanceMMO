@@ -440,6 +440,16 @@ namespace bmmo::session {
     // reaches it.  (Before step EL7 the deaths, then only a resync's, came
     // after every birth of the tick.)
     void session_client_core::drain_pending_lives(uint32_t tick) {
+        // Step SPGH2: an own spawn birth of this tick (its stamp, not moved:
+        // a moved one is remade at its applied tick, remake_own_body) begins
+        // the spawn ghost life again in the replay - the live frame's host
+        // birth (own_birth_seen) does not run in a replay, and the
+        // restore put the state back to the anchor's.
+        if (s.spawn_ghost_active_)
+            for (const auto& life: s.own_life_)
+                if (!life.retired && life.made && life.what == own_life::kind::birth && life.spawn && !life.moved()
+                    && life.origin == tick)
+                    note_spawn_birth(life.group.empty() ? s.own_group_ : life.group, tick, "replayed own birth");
         if (s.pending_births_.empty() && s.pending_deaths_.empty() && !own_lives_due(tick)) {
             apply_own_due(tick);
             return;
@@ -592,6 +602,10 @@ namespace bmmo::session {
                 spec.kick_index = bmmo::session::spawn_direction_index(s.seed_, static_cast<uint8_t>(join_order), event.tick);
                 spec.kick_strength = s.spawn_impulse_;
             }
+            // Step SPGH2: a spawn birth begins the ball's spawn ghost life (a
+            // trafo's or a beam's Physicalize keeps it), as the server's
+            // apply_event does at this tick.
+            if (event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) note_spawn_birth(spec.group, event.tick, "mirror birth");
             const mirror_made made = platform_.make_mirror(spec);
             if (!made.made) {
                 logf("remote physicalize %s: %s", entity.c_str(), made.error.c_str());
@@ -1557,7 +1571,7 @@ namespace bmmo::session {
         if (!report.pose.captured) logf("warning: physicalize pose taken from the entity after the tick (no capture before the step)");
         std::copy(std::begin(report.pose.position), std::end(report.pose.position), event.position);
         std::copy(std::begin(report.pose.rotation), std::end(report.pose.rotation), event.rotation);
-        const bool spawn = report.pose.captured && report.pose.spawn;
+        const bool spawn = own_birth_is_spawn(report.pose);
         if (spawn) event.flags |= bmmo::session::PHYSICALIZE_FLAG_SPAWN;
         event.recipe = report.recipe;
         send_event(event);
@@ -1587,9 +1601,14 @@ namespace bmmo::session {
     }
 
     void session_client_core::own_physicalized(const own_birth_report& report) {
+        own_birth_seen(report.pose, report.tick);
         client_core_state::own_report queued;
         queued.report = report;
         s.own_reports_.push_back(std::move(queued));
+    }
+
+    void session_client_core::own_birth_seen(const own_birth_pose& pose, uint32_t tick) {
+        if (own_birth_is_spawn(pose)) note_spawn_birth(s.own_group_, tick, "own birth");
     }
 
     void session_client_core::own_unphysicalized(uint32_t tick) {
@@ -1801,6 +1820,9 @@ namespace bmmo::session {
         spec.recipe = to_bridge_recipe(life.recipe);
         spec.group = life.group;
         spec.tick = tick;
+        // Step SPGH2: a spawn birth begins the spawn ghost life (before the
+        // body is made), as the server's copy's does at this tick.
+        if (life.spawn) note_spawn_birth(life.group.empty() ? s.own_group_ : life.group, tick, where);
         if (life.spawn && s.spawn_impulse_ > 0.0f) {
             const uint8_t join_order = static_cast<uint8_t>(s.own_join_order_ < 0 ? 63 : s.own_join_order_);
             spec.kick = true;

@@ -1486,8 +1486,14 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
 // Protocol 14 (step BALA): the airship ghost's relayed pose.
 // ---------------------------------------------------------------------
 
+TEST(SpawnGhostWire, TheProtocolIs15) {
+    // Step SPGH2: the spawn ghost's rule in every world and its state in the
+    // travelling savestate (format 3); no message layout changed.
+    EXPECT_EQ(15u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "15 since step SPGH2 (the spawn ghost)";
+}
+
 TEST(GhostPoseWire, TheProtocolIs14AndThePoseRoundTrips) {
-    EXPECT_EQ(14u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "14 since step BALA (the airship ghost's pose)";
+    EXPECT_LE(14u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "14 since step BALA (the airship ghost's pose)";
     bmmo::session_ghost_pose_msg msg{};
     msg.session = 7;
     msg.player = 1234;
