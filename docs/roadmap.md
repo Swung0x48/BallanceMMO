@@ -754,7 +754,12 @@ numbers 1-10 are unchanged.
    entries find no body and stay queued - is refused ("PreSimulate queue
    differs"); 90..203 passes, 90..209 fails, on the pre-step build with one
    ball and no step switch. Fix: bind the hold in the savestate check (the
-   server world never rewinds live).
+   server world never rewinds live). **Built at step RLQ**
+   (rollback-engine-gaps design, As built (step RLQ)): the savestate check
+   binds the clients' hold (`hold_outside`, and with the session recipe the
+   queue section too) and compares blobs with the outside entries set
+   aside, as a replay captures them; 90..209 passes 50/50,
+   `--savestate-no-hold` still refuses.
    **Found at WG2, queued here (a constraint shut down inside the
    window):** the arena's P_Modul_29 bridge breaking inside a savestate
    window (`Test "Ball_Stone"` -> `10 Hinges` Shutdown) makes the restore

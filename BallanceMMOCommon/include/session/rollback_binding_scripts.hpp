@@ -75,7 +75,28 @@ namespace bmmo::session {
         // replay_activation (every selected script written and executed).
         // Off: as before (the legacy path).
         bool callback_queue = false;
+        // Step RLQ (roadmap section 4 item 4, the harness half of gap Q):
+        // Q4's hold alone, bound without replay_activation too - SimTool's
+        // --savestate-check on its v14 recipe (a script inactive at the
+        // anchor keeps its live state), which the clients never run.  The
+        // hold is the clients' code below; its executed set is still every
+        // selected and trafo script, so an entry of a selected script the
+        // v14 restore does not write stays compared (fail-closed, the
+        // refusal of before).  No queue section is recorded without
+        // callback_queue and replay_activation.  Off: as before.
+        bool hold_outside = false;
     };
+
+    // Gap Q4's executed scripts (rollback-engine gaps design 2.2.4): every
+    // selected one and every trafo script.  An entry of any other script is
+    // held out of a replay (the hold below); step RLQ's savestate check
+    // holds the same set around its expected blobs.
+    inline std::vector<uint32_t> replay_executed_scripts(const bmmo::game::script_replay::selection& selection,
+                                                         const bmmo::game::script_replay::trafo_part* trafo) {
+        std::vector<uint32_t> executed(selection.scripts.begin(), selection.scripts.end());
+        if (trafo) executed.insert(executed.end(), trafo->scripts.begin(), trafo->scripts.end());
+        return executed;
+    }
 
     // Installs capture/restore/diff and runs the scripts' frame after the
     // caller's own pre_step work.  No-op when there is no selection.
@@ -92,7 +113,6 @@ namespace bmmo::session {
         std::shared_ptr<bmmo::game::queue_hooks> queue;
         if (o.callback_queue && o.replay_activation) {
             using bmmo::game::queued_callback;
-            using bmmo::game::script_replay;
             queue = std::make_shared<bmmo::game::queue_hooks>();
             queue->capture = [b](std::vector<queued_callback>& out) {
                 std::vector<bmmo_physics_callback> all;
@@ -124,18 +144,21 @@ namespace bmmo::session {
                 }
                 return b->callbacks_rebuild(s, t, error);
             };
+        }
+        if ((o.callback_queue && o.replay_activation) || o.hold_outside) {
+            using bmmo::game::script_replay;
             // Q4: every entry of a script the replay does not execute is
             // live state - held out of the queue from before the restore
             // touches anything to the end of the replay, so no replayed
             // Process() runs it and no restore refuses for it; the queue
             // check (the blob's) then compares the executed scripts' entries
             // only.  The executed scripts: every selected one and every
-            // trafo script (replay_activation).
+            // trafo script (replay_activation; with hold_outside alone, see
+            // there).
             const auto log = world.log;
             auto hold_logs = std::make_shared<uint32_t>(0);
             world.hold_outside_callbacks = [b, selection, trafo, log, hold_logs](uint32_t anchor, bool have_record) {
-                std::vector<uint32_t> executed(selection->scripts.begin(), selection->scripts.end());
-                if (trafo) executed.insert(executed.end(), trafo->scripts.begin(), trafo->scripts.end());
+                const std::vector<uint32_t> executed = replay_executed_scripts(*selection, trafo);
                 std::string error;
                 const int held = b->callbacks_hold(executed, error);
                 auto& stats = script_replay::queue_stats();

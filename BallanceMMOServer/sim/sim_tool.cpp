@@ -9,7 +9,7 @@
 //   BallanceMMOSimTool --root <game dir> --level N --level-at T --restore-at TICK [ENTITY] [--ticks N]
 //   BallanceMMOSimTool --root <game dir> --level N --savestate-check [scene switches] [--ticks N] [--rounds R]
 //       [--max-depth D] [--seed S] [--savestate-every K] [--savestate-lead L] [--frames] [--legacy-restore]
-//       [--savestate-trace PATH] [--stop-on-divergence] [--verbose]
+//       [--savestate-no-hold] [--queue-trace] [--savestate-trace PATH] [--stop-on-divergence] [--verbose]
 //   BallanceMMOSimTool --root <game dir> --level N --resync-check S B [--resync-arms ERSA] [--resync-stamp SECTOR TICK]
 //       [--resync-sector K] [--resync-drop TICK --drop <entity> <ball type>] [--resync-watch NAME]
 //       [--resync-player ID] [--resync-server-blob FILE [--resync-blob-rename OLD NEW] [--resync-blob-adopt-environment]]
@@ -343,6 +343,12 @@ namespace {
         bool savestate_inert_from_birth = false;
         bool savestate_frames = false;
         bool legacy_restore = false;
+        // Step RLQ (gap Q's hold in the harness): --savestate-check binds the
+        // clients' PreSimulate outside-entry hold (B7EG's Q4, and with the
+        // clients' recipe the queue section too); --savestate-no-hold leaves
+        // both unbound, the binding before RLQ (the hold's negative control:
+        // a window across the level start's parked-ball entries refuses).
+        bool savestate_no_hold = false;
         std::string savestate_trace;
         // The trafo sets (docs/trafo-replication-design.md 7.2, step T1):
         // --trafo-sets N / --trafo-players a,b,.. [--trafo-reverse]
@@ -978,7 +984,8 @@ namespace {
             else if (arg == "--savestate-lead") { if (!(v = next())) return false; out.savestate_lead = std::atoi(v); }
             else if (arg == "--savestate-inert-from-birth") out.savestate_inert_from_birth = true;
             else if (arg == "--frames") out.savestate_frames = true;
-            else if (arg == "--legacy-restore") out.legacy_restore = true;
+            else if (arg == "--legacy-restore" || arg == "--savestate-no-hold")        // step RLQ: one branch (C1061)
+                (arg == "--legacy-restore" ? out.legacy_restore : out.savestate_no_hold) = true;
             else if (arg == "--savestate-trace") { if (!(v = next())) return false; out.savestate_trace = v; }
             else if (arg == "--list-callback-blocks") out.list_callback_blocks = true;   // step EG0
             else if (arg == "--queue-trace") out.queue_trace = true;                     // step EG0
@@ -1529,6 +1536,10 @@ namespace {
 
         struct queue_tracer {
             std::string last;
+            // Step RLQ: each retail entry's target too (target_text) and
+            // whether that target has a physics object now (--savestate-check
+            // --queue-trace; the --replay lines are unchanged without it).
+            bool targets = false;
             void after_frame(const bmmo::sim::headless_engine& engine, long long frame) {
                 CKContext* context = engine.context();
                 std::string queue;
@@ -1542,6 +1553,13 @@ namespace {
                             queue += " " + std::to_string(slot) + ":";
                             if (proto) queue += std::to_string(cb->m_BehaviorID) + "<" + proto + ">@" + object_text(root_of(beh));
                             else queue += std::string("bmmo/") + typeid(*cb).name();
+                            if (targets && proto) {
+                                CKParameterIn* in = beh->GetTargetParameter();
+                                CKParameter* source = in ? in->GetRealSource() : nullptr;
+                                auto* entity = CK3dEntity::Cast(source ? source->GetValueObject() : beh->GetOwner());
+                                const bool body = entity && engine.physics() && engine.physics()->GetPhysicsObject(entity);
+                                queue += "{" + target_text(beh) + (body ? " has-body" : " NO-BODY") + "}";
+                            }
                         }
                 }
                 std::string ball = "none";
@@ -3526,6 +3544,16 @@ namespace {
         script_options.live_orders_applied = &live_orders_applied;
         script_options.resize_strings = true;
         script_options.live_membership = true;   // step B2SW (G1, F): the core hosts' rule
+        // Step RLQ (gap Q's hold, rollback-engine-gaps design 2.2.4): the
+        // clients' PreSimulate queue binding.  With the clients' recipe
+        // (replay_activation) the queue section and the hold, as both core
+        // hosts bind them; on the v14 recipe the hold alone.  Every entry of
+        // a script the replay does not execute (Gameplay_Ingame's and
+        // Sound_Manager's for the level start's retail ball, which the world
+        // parks at once, so they stay queued) is then live state set aside
+        // for the replay instead of a whole-queue compare that refuses.
+        script_options.callback_queue = !args.savestate_no_hold;
+        script_options.hold_outside = !args.savestate_no_hold;
         std::vector<CK_ID> script_activations;
         if (passes) script_activations = bmmo::game::session_script_activations(context, scripts);
         bmmo::session::rollback_world binding;
@@ -3609,6 +3637,46 @@ namespace {
         const auto no_input = [](const std::string&, uint32_t, bmmo::session::input_frame&) { return false; };
 
         // ---- the straight pass
+        // Step RLQ: --queue-trace, the PreSimulate queue after each straight
+        // step whenever it changes (frame = the tick the step leads to), each
+        // entry with its target and whether that has a body.
+        eg0::queue_tracer queue_tracer;
+        queue_tracer.targets = true;
+        // Step RLQ: with the hold bound, an outside entry is live state (gap
+        // Q4): the replay never runs its script, and a blob captured inside a
+        // replay lacks it (rollback-engine-gaps "As built (step B7EG)").  So
+        // the blobs a round compares - the straight pass's expected B[t] and
+        // the depth-0 restore probe - are captured with the same entries set
+        // aside (callbacks_hold of the executed scripts, the capture, the
+        // put-back to their places), as a replay captures; the executed
+        // scripts' entries stay in and are compared byte for byte.  The
+        // engine's own record of a tick keeps the whole queue (the restore's
+        // scoped check is what skips the outside entries there).
+        const bool hold_bound = frames && !args.savestate_no_hold && !scripts.scripts.empty();
+        const std::vector<uint32_t> executed =
+            hold_bound ? bmmo::session::replay_executed_scripts(scripts, trafo ? &trafo->registry().part() : nullptr)
+                       : std::vector<uint32_t>{};
+        int outside_ticks = 0, outside_max = 0;   // straight ticks with outside entries, the most at once
+        const auto capture_compared = [&](const std::vector<uint8_t>* whole, std::vector<uint8_t>& out, std::string& why,
+                                          int& held) {
+            held = 0;
+            if (!hold_bound) {
+                if (whole) { out = *whole; return true; }
+                return bmmo::physics::get_savestate(physics, out, why);
+            }
+            held = bmmo::physics::callbacks_hold(physics, executed, why);
+            if (held < 0) return false;
+            bool ok = true;
+            if (held == 0 && whole) out = *whole;
+            else ok = bmmo::physics::get_savestate(physics, out, why);
+            std::string put_back_error;
+            if (bmmo::physics::callbacks_unhold(physics, put_back_error) != 0) {
+                why = "the outside entries' put-back was clamped (their order changed)";
+                ok = false;
+            }
+            return ok;
+        };
+        std::vector<uint8_t> compared;
         if (passes) bmmo::physics::drain_event_log(physics);   // step S7: the window's births only
         std::string error;
         std::vector<straight_tick> straight(static_cast<size_t>(window));
@@ -3641,8 +3709,19 @@ namespace {
                 std::fprintf(stderr, "savestate-check: capture failed at tick %u: %s\n", t, error.c_str());
                 return 1;
             }
-            rec.blob_hash = bmmo::physics::hash_savestate(blob.data(), blob.size());
-            rec.blob_size = blob.size();
+            // Step RLQ: the blob a round compares (the outside entries set
+            // aside when the hold is bound; `blob` itself when it is not).
+            int held = 0;
+            if (!capture_compared(&blob, compared, error, held)) {
+                std::fprintf(stderr, "savestate-check: the compared capture failed at tick %u: %s\n", t, error.c_str());
+                return 1;
+            }
+            if (held > 0) {
+                ++outside_ticks;
+                outside_max = std::max(outside_max, held);
+            }
+            rec.blob_hash = bmmo::physics::hash_savestate(compared.data(), compared.size());
+            rec.blob_size = compared.size();
             blob_max = std::max(blob_max, blob.size());
             contacts_min = std::min(contacts_min, report.contacts);
             collisions_min = std::min(collisions_min, report.collisions);
@@ -3661,7 +3740,7 @@ namespace {
             }
             if (keep_this) {
                 rec.kept = true;
-                rec.blob = blob;
+                rec.blob = compared;   // step RLQ
                 rec.exact = bmmo::physics::describe_cores_exact(physics);
             }
             // The engine's record of this tick: bodies, extras, contacts,
@@ -3705,6 +3784,7 @@ namespace {
                 return 1;
             }
             if (frames) live_order.record(t + 1u, bmmo::game::script_replay::live_frame_order(context, scripts));   // step RO1
+            if (args.queue_trace) queue_tracer.after_frame(world->engine(), static_cast<long long>(t) + 1);   // step RLQ
             if (passes) {
                 // Step S7: the step's births (keyed by the record that first
                 // carries them, t+1, the tick a rewind replays this step as),
@@ -3834,7 +3914,8 @@ namespace {
                 }
                 bmmo::physics::drain_event_log(physics);
                 std::vector<uint8_t> live;
-                if (!bmmo::physics::get_savestate(physics, live, remake_error) || !straight[static_cast<size_t>(e)].kept
+                int live_held = 0;   // step RLQ: captured as the straight pass captured e
+                if (!capture_compared(nullptr, live, remake_error, live_held) || !straight[static_cast<size_t>(e)].kept
                         || live != straight[static_cast<size_t>(e)].blob) {
                     std::printf("  round %zu: the re-made live world at %u is not the straight pass's%s\n", r,
                                 t0 + static_cast<uint32_t>(e), straight[static_cast<size_t>(e)].kept ? "" : " (not kept)");
@@ -3908,7 +3989,8 @@ namespace {
                     std::vector<uint8_t> live;
                     std::vector<std::string> remade = bmmo::physics::movable_body_names(physics);
                     std::sort(remade.begin(), remade.end());
-                    if (!bmmo::physics::get_savestate(physics, live, remake_error) || !end_rec.kept || live != end_rec.blob
+                    int live_held = 0;   // step RLQ: captured as the straight pass captured e
+                    if (!capture_compared(nullptr, live, remake_error, live_held) || !end_rec.kept || live != end_rec.blob
                             || remade != end_rec.bodies
                             || std::any_of(first_birth.begin(), first_birth.end(), [&](const auto& b) {
                                    return b.second > t0 && has_body(b.first) != (b.second <= end_tick);
@@ -3949,6 +4031,11 @@ namespace {
             restore_refused = false;
             const uint64_t restored_before = engine.stats().savestates_restored;
             const uint64_t resim_before = engine.stats().resim_ticks;
+            // Step RLQ's review: the compared blobs leave the outside entries
+            // out, so their order is judged here - the engine's put-back at
+            // the end of the replay must not clamp one, nor its hold fail.
+            const uint64_t clamped_before = bmmo::game::script_replay::queue_stats().unhold_clamped;
+            const uint64_t hold_fail_before = bmmo::game::script_replay::queue_stats().hold_fail;
             const bool rewound = engine.rewind_to(binding, t0 + static_cast<uint32_t>(a), t0 + static_cast<uint32_t>(e),
                                                   no_input, "savestate-check");
             // rewind_to's true says the request was handled, not that a replay
@@ -3960,6 +4047,12 @@ namespace {
                 restore_broke = true;
             } else if (world->proximity_hold_failures() != hold_failures_before) {
                 failure = "the proximity union's hold was not restored (physics_world::restore_step_state)";
+            } else if (bmmo::game::script_replay::queue_stats().hold_fail != hold_fail_before) {
+                failure = "the PreSimulate queue's outside-entry hold failed (step RLQ)";
+            } else if (bmmo::game::script_replay::queue_stats().unhold_clamped != clamped_before) {
+                failure = "the outside entries' put-back was clamped (their order changed): "
+                        + std::to_string(bmmo::game::script_replay::queue_stats().unhold_clamped - clamped_before)
+                        + " entr" + (bmmo::game::script_replay::queue_stats().unhold_clamped - clamped_before == 1 ? "y" : "ies");
             } else if (!legacy && engine.stats().savestates_restored != restored_before + 1u) {
                 failure = "the engine did not restore the anchor's blob (fell back to the per-body path)";
             } else if (engine.stats().resim_ticks != resim_before + static_cast<uint64_t>(d)) {
@@ -3971,8 +4064,11 @@ namespace {
             // Restore identity: the world the first replayed tick starts from
             // (d == 0: the world the rewind left) is the anchor's blob.
             if (failure.empty() && restored_blob.empty()) {
+                // Step RLQ: as the straight pass captured the anchor (the
+                // rewind's put-back is done: no hold is active here).
                 std::string probe_error;
-                if (!bmmo::physics::get_savestate(physics, restored_blob, probe_error)) failure = "capture error: " + probe_error;
+                int probe_held = 0;
+                if (!capture_compared(nullptr, restored_blob, probe_error, probe_held)) failure = "capture error: " + probe_error;
             }
             // --savestate-inert-from-birth (a diagnostic): the latest FIXED
             // body first born inside (anchor, e]; until its record the
@@ -4108,7 +4204,8 @@ namespace {
                     const straight_tick& expected = straight[static_cast<size_t>(i)];
                     std::vector<uint8_t> blob_now;
                     std::string follow_capture;
-                    if (!bmmo::physics::get_savestate(physics, blob_now, follow_capture)) {
+                    int follow_held = 0;   // step RLQ: captured as the straight pass captured this tick
+                    if (!capture_compared(nullptr, blob_now, follow_capture, follow_held)) {
                         failure = "follow: capture error at " + std::to_string(t + 1u) + ": " + follow_capture;
                         break;
                     }
@@ -4257,6 +4354,20 @@ namespace {
             std::printf("savestate-check: live script order (step RO1): %zu change(s) recorded, %llu replayed frame(s) ran"
                         " in it\n", static_cast<size_t>(live_order.changes()),
                         static_cast<unsigned long long>(live_orders_applied));
+        if (frames) {
+            // Step RLQ: the PreSimulate queue binding's counters (the clients'
+            // cbq line).
+            const auto& q = bmmo::game::script_replay::queue_stats();
+            std::printf("savestate-check: cbq (step RLQ, hold %s): straight ticks with outside entries=%d (at most %d)"
+                        " captured=%llu rebuilt=%llu removed=%llu held=%llu holds=%llu"
+                        " unhold_clamped=%llu rebuild_fail=%llu hold_fail=%llu no_record=%llu\n",
+                        args.savestate_no_hold ? "off" : passes ? "+queue section" : "only", outside_ticks, outside_max,
+                        static_cast<unsigned long long>(q.captured), static_cast<unsigned long long>(q.rebuilt),
+                        static_cast<unsigned long long>(q.removed), static_cast<unsigned long long>(q.held),
+                        static_cast<unsigned long long>(q.holds), static_cast<unsigned long long>(q.unhold_clamped),
+                        static_cast<unsigned long long>(q.rebuild_fail), static_cast<unsigned long long>(q.hold_fail),
+                        static_cast<unsigned long long>(q.no_record));
+        }
         std::printf("%s rounds=%d failed=%d\n", args.savestate_inert_from_birth ? "DIAGNOSTIC" : pass ? "PASS" : "FAIL", run,
                     failed);
         std::fflush(stdout);

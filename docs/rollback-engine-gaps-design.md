@@ -2700,3 +2700,113 @@ G10 (records) is review only.
   PASS 160/160 (400 revived, 352 births exact, missing 0).
 - **Not run, deferred:** L-H6 (FULL), a retail session (the change
   reaches retail through the shared binding; FULL).
+
+## As built (step RLQ, 2026-10-28): the savestate check binds gap Q's hold
+
+Found at WG2 (roadmap §4 item 4, "harness, gap Q's hold"): SimTool's
+`--savestate-check` bound no `callback_queue`, so its blob restores compared
+the whole PreSimulate queue (mode 0) where both clients set the outside
+entries aside (Q4, B7EG's hold).
+
+- **The entries, dumped per entry** (new: `--queue-trace` works in
+  `--savestate-check`, each entry with its target and whether that has a
+  body; `.local-tools/work/RLQ/v1/dump.txt`). WG2's scene (arena, P_Modul_01
+  drop, one ball, lead 60, window 90..209): the world logs "retail ball
+  parked (body removed) at tick 204"; the queue is empty to record 205, holds
+  `27403 <Physics WakeUp>@Gameplay_Ingame` at record 206 and that plus
+  `6471, 6489, 6507, 6271 <Physics Collision Detection>@Sound_Manager` from
+  record 207 on - all five targeting `Ball_Stone#42243` (a Gameplay_Ingame /
+  Sound_Manager local), which has **no body**. WG2's inference (read from
+  the timing only) is confirmed: they target the parked retail ball.
+- **The binding (shared, one implementation).** `script_binding_options`
+  gains `hold_outside` (`session/rollback_binding_scripts.hpp`): Q4's hold
+  bound without `replay_activation` too. **Adapted:** B7EG bound the hold
+  only with `callback_queue && replay_activation` (the clients' recipe);
+  the savestate check's default recipe is the v14 one (a script inactive at
+  the anchor keeps its live state), which no client runs, so the hold alone
+  is bound there by the new switch. The hold is the clients' lambda,
+  unchanged; its executed set (every selected and trafo script) moved into
+  `replay_executed_scripts`, which the hold and the check both call. On the
+  v14 recipe an entry of a selected script the restore does not write stays
+  compared (fail-closed, the refusal of before); no queue section is
+  recorded there. Both clients are unchanged (they never set
+  `hold_outside`; the wire check below). The savestate check sets
+  `callback_queue` and `hold_outside` (`--savestate-no-hold` neither: the
+  binding before RLQ, kept as the negative control); with the session
+  recipe (`--session-recipe` / a `--second-move` in the window) that is the
+  clients' whole Q binding, record v4 / v5 included.
+- **The compared blobs (adapted, the harness's half of Q4).** Binding the
+  hold alone fixes the restore but not the compare: the replay never runs
+  an outside script, and a blob captured inside a replay lacks the held
+  entries (the B7EG note's "diagnostic noise"), so a round crossing record
+  206 failed `world - callbacks 1 0` (2 of 50 rounds, measured). The
+  check therefore captures every blob it compares against or with - the
+  straight pass's expected B[t], the depth-0 restore probe, the re-made
+  live world's premise and the follow - with the same outside entries set
+  aside (`callbacks_hold(executed)`, the capture, `callbacks_unhold`; a
+  clamped put-back fails the capture). The engine's own record of a tick
+  keeps the whole queue (the restore's scoped check skips the outside
+  entries there, as in the clients), and the executed scripts' entries are
+  still compared byte for byte. The hold and put-back around a straight
+  capture leave the straight pass bit for bit as it was: its 120
+  `straight` trace lines (world hash, pose hash, cores, blob size, contacts)
+  are identical with and without the hold. **What this gives up, and how it
+  is judged instead (the review's finding):** the compared blobs never hold
+  the outside entries, so a blob compare cannot see one put back in the
+  wrong place. The order is judged separately: a round fails when the
+  engine's put-back at the end of the replay clamped an entry or its hold
+  failed (the cbq `unhold_clamped` / `hold_fail` counters grew during the
+  round). The NUMBER of outside entries is deliberately not compared with
+  the straight pass's: an outside script runs in the harness's live time,
+  which the rounds' rewinds never turn back, so it drifts ahead of the
+  straight pass's tick. Measured: comparing the count (the depth-0 probe and
+  the follow) failed B2SX's L13 cell 13/60 and L2 1/60 with "5 outside
+  entries vs 0" - Gameplay_Ingame's level start physicalizes the retail
+  ball during round 31 of L13 (the world logs "retail ball parked (body
+  removed) at tick 11", its rewound tick) and round 58 of L2, after enough
+  cumulative live steps, while the straight pass (ticks 3..43) never
+  reaches it; every depth-0 round after it carries the five WG2 entries.
+  That is Q4's premise (outside entries are live state, a rewind leaves
+  them), so the count stays out and only the put-back's order is judged
+  (B7EG's clamp). Since RLQ the straight pass's `--savestate-trace` `blob_hash` /
+  `blob_size` describe the compared blob (the outside entries left out)
+  on the ticks that have some (206 on in WG2's scene), so such a trace
+  differs from a pre-RLQ one there without a real difference. The summary prints
+  `cbq (step RLQ, hold only|+queue section|off): straight ticks with
+  outside entries=N (at most M)` and the clients' cbq counters.
+- **Checks** (quick tier, `.local-tools/work/RLQ/v1.sh`, `v2.sh`, `v5.sh`;
+  rRLQ = this tree, rWG2 = the pre-step build): x64 BUILD-OK (deps valid),
+  x86 CLIENT-BUILD-OK (`core_host.cpp` recompiled, deps valid), unit tests
+  590/590, GCC syntax check 30/30 ok, wire check rWG2 -> rRLQ over
+  `core_ref_s9`: 12/12 sends SAME, 12/12 journals IDENTICAL, ALL SAME.
+  - WG2's scene, 90..209, 50 rounds, depth <= 48: **PASS 50/50** (rWG2:
+    refused at round 0, "the PreSimulate queue differs", the five entries
+    above); 90..203 PASS 50/50 (unchanged); `--savestate-no-hold` on rRLQ
+    refuses at round 0 exactly as rWG2 (negative control); `--legacy-restore`
+    still FAILS 50/50 (`restore identity: world - collisions 17 5`).
+  - WG2 V4's dead scene under `PROXIMITY_UNION` (two balls killed at 75),
+    90..209: **PASS 50/50** (WG2: refused); with `--probe-scramble after`
+    still **FAILS 50/50** (P_Modul_18's `Last Check` 27 vs 32): the
+    proximity hold's scramble is not hidden by the queue hold.
+  - B2SX's session-recipe gate cells (`--drop P_Ball_Wood_MF 0
+    --drop-settle 2 --ticks 40 --rounds 60 --max-depth 1 --seed 1
+    --session-recipe`; the clients' whole Q binding here): L2 **60/60 PASS**
+    (rWG2: round 57 refused on gap Q, 58 run), L13 **60/60 PASS** (rWG2:
+    round 31 refused, 32 run) - the residual B2SX's gate named as gap Q's
+    is gone; held 25 / 185 outside entries over 74 / 83 holds, 0 clamped,
+    0 rebuild or hold failures.
+  - Unchanged (the two other WG2 residuals, queued): the alive scene's
+    50-round schedule fails exactly 144:4 and 87:9 on rRLQ and rWG2 (the G1
+    membership leak); the bridge scene stops at its first round 47:45 on
+    both ("no live controller 'sys:unknown' (priority 405)").
+  - Gate round (the put-back verdict added, SimTool only): x64 BUILD-OK,
+    GCC 30/30 ok; WG2's scene 90..209 and 90..203 PASS 50/50, the dead
+    scene PASS 50/50, L2 / L13 PASS 60/60 (0 clamped, 0 hold failures),
+    and the controls fail as before (`--savestate-no-hold` refused at round
+    0, `--legacy-restore` 50/50, `--probe-scramble after` 50/50). The new
+    verdict never fired here (nothing clamped); no run forces a clamp.
+- **Not run, deferred:** a live session and the solo snapshots-off replay
+  (no client path changed: the clients never set `hold_outside`, and the
+  executed set is the same expression moved into a function; the wire
+  check's 12 replays are byte-identical); a retail run (the retail mod
+  only recompiled the refactored header).
