@@ -2810,3 +2810,131 @@ entries aside (Q4, B7EG's hold).
   executed set is the same expression moved into a function; the wire
   check's 12 replays are byte-identical); a retail run (the retail mod
   only recompiled the refactored header).
+
+## As built (step RLM, 2026-10-28): the G1 membership leak
+
+Roadmap §4 item 4 (found at WG2). What was built, what the measurement
+showed about the item's premise, and what stays queued.
+
+- **The leak, as it really is.** `script_replay::reregister` (B2SW's G1)
+  puts the owner of a script the restore wrote back active into the
+  behaviour manager's pending table (`CKScene::Activate`: +1 in
+  `m_BeObjectNextFrame`) and may set its scene flag. Only a live frame's
+  `ManageObjectsActivity` consumes a pending add, and the replay's
+  `execute_frame` calls `Execute` directly (no `ExecuteBehaviors`, so no
+  `RemoveObjectNextFrame` when the script finishes). So the registration
+  outlived what it was for: (1) a replay that ran the script to its end
+  left the owner pending for the live frame after it, which in the straight
+  run had dropped it a frame after the script ended; (2) a later restore
+  of the same live frame (SimTool's chained rounds; a host frame with two
+  rewinds) that wrote the script back finished still found the owner
+  pending, so `owner_pending_add` admitted it in the replayed frames.
+- **The fix, in the shared restore (`game/script_replay.hpp`, one copy for
+  every world):** a registration ledger. `reregister` enters what it did
+  (the script, its owner, whether the pending add and the scene flag are
+  its own - the pending count is read before and after the `Activate`).
+  `restore` (under `live_membership`) first takes back the registrations
+  of the scripts it writes (`take_back_registrations`: the pending add
+  decremented in the public table, never below what was there; the scene
+  flag cleared only if the ledger set it), then registers again what it
+  writes back active. `execute_frame` notes which registered scripts ran
+  (`note_ran`) and at its end settles the ledger
+  (`settle_registrations`): a registered script that did not run in this
+  frame and is neither active nor to be activated gives its owner's
+  pending add back - the live frame finds nothing to execute for the owner
+  in the frame after the script's end and drops it, so after that frame
+  the straight run's `owner_in_frame` is false too. The scene flag is left
+  there: the script's own end (`CheckBehaviorActivity`) clears it as live.
+  A script the restore does not write (the v14 rule's kept live state)
+  keeps its registration. The ledger belongs to one live frame (the time
+  manager's main tick count): a live frame in between consumed the pending
+  adds and the scene flags are live state again, so the entries are
+  dropped and nothing is taken back; a take-back only decrements a
+  positive count, so a table a live frame cleared within the same tick
+  count loses nothing that is not ours. Counters `membership().unregistered`
+  and `settled`. No host change: the core hosts' binding already sets
+  `live_membership` around the restore and the replayed frame.
+- **The witness (SimTool `--savestate-check --frames`):** the straight pass
+  records at each kept tick, per selected script, whether the next live
+  frame would run its owner (`owner_in_frame`); each round compares its end
+  with it and the summary prints `owner membership at round ends (step
+  RLM): N of M round(s) differ`, with the ledger's counters. Reported, not
+  judged (the replay does not run the live frame's list, gap F; a new
+  verdict would change every earlier gate's meaning). Negative control
+  `--savestate-no-ledger`: the ledger emptied before every rewind and
+  every replayed frame, i.e. the restore before RLM.
+- **Measured** (WG2 V4's alive scene: level 13, P_Modul_01 with its
+  Pusher's probe, two balls, `PROXIMITY_UNION`, `--frames --ticks 120
+  --max-depth 48`; `.local-tools/work/RLM/v1.sh`, `v2.sh`), the clients'
+  recipe (`--session-recipe`), 50-round schedules: seeds 1/2/3 PASS 50/50
+  on rRLQ and on rRLM (scripts, blobs, hashes). The witness: with the
+  ledger **0/50, 0/50, 0/50** rounds differ (registrations 25/20/17, taken
+  back by a restore 8/6/6, settled 17/14/11); with `--savestate-no-ledger`
+  **42/50, 44/50, 41/50** differ, every one `P_Modul_01_MF Script 0 vs 1`
+  (the straight pass has dropped the owner, the replay left it pending).
+  The named pair 54:8,144:4 PASS 2/2 with and without the ledger (the
+  explicit rounds with the session recipe re-make the live world at e with
+  whole frames, which flush the table).
+- **The item's premise was wrong for its measured case** (the WG2 note's
+  cause): WG2's failing rounds (anchor 144 depth 4, anchor 87 depth 9:
+  `flags 2147483648 vs 2147483649`, the probe's locals) run SimTool's
+  default **v14 recipe** (no `--session-recipe`: `replay_activation`
+  off), and they fail the same with depth 0 - `--savestate-rounds
+  54:8,144:0` (and 70:0, 100:0, 120:0) fail identically with no replayed
+  frame at all (`.local-tools/work/RLM/i2.sh`), so nothing ran the
+  finished script. Cause: under the v14 rule a script that is inactive at
+  the anchor is not written; it keeps its live state. SimTool chains its
+  rounds without a live frame or a re-made live world (when no pass is in
+  the window), so after a round ending at e' = 62 with the probe active,
+  a round anchored at 144 > e' keeps the probe's state of 62 - a live
+  state no host holds (a host's anchor is never after its live tick, and
+  every core host binds the clients' recipe, which writes every selected
+  script). Identical on rRLQ and rRLM with and without the ledger (50
+  rounds: 2 failed, the same two); the witness shows those two rounds as
+  the kept registration, correctly (the kept live script is active).
+  Pre-existing, root-caused, a harness artefact of a recipe only the legacy
+  retail path uses: queued in roadmap §4 item 4 with its options (not
+  chosen here).
+- **Checks (QUICK):** x64 BUILD-OK (twice: the shared change, then the
+  SimTool control switch; `ninja -t deps` of session_client.cpp.obj
+  VALID, 346 deps), x86 CLIENT-BUILD-OK (core_host, physics_session_client
+  and the core sources rebuilt), unit tests 590/590, GCC syntax check 30/30
+  ok. Wire check rRLQ -> rRLM over `core_ref_s9`: 12/12 sends SAME, 12/12
+  journals IDENTICAL, `WIRE-CHECK: ALL SAME`. `core_ref_s9`'s solo1 /
+  solo2 replayed from their captures with rRLMb
+  (`.local-tools/work/RLM/solo_replay.sh`, REF9's recipe): both reach the
+  end marker, sends SAME (2718, 2694), journals IDENTICAL under
+  `e0_compare.py` (byte compare differs at the header's build id only).
+  The script-difference lines at window ends: unchanged (the 14 replays'
+  journals are identical).
+- **Review fix-up: the pending add is the owner's.** `reregister` enters
+  the pending add against the first script of an owner it re-registers; a
+  second script of the same owner finds the owner already pending and
+  enters none. The live frame keeps an owner while any of its scripts
+  executes (`CKBeObject::ExecuteBehaviors` drops it only when none did),
+  so `settle_registrations` holds an entry that carries the pending add
+  while any script of its owner ran in the frame (`note_ran` marks the
+  owner's entries too) or is active / to be activated (`owner_keeps`,
+  over `GetScriptCount`/`GetScript`, scripts outside the selection
+  included), and `take_back_registrations` keeps the pending add on the
+  entry (taking back only the scene flag) when a script of the owner that
+  this restore does not write is still active. Without it, an owner with
+  two scripts written back active lost its membership when the first one
+  ended in the replay, and the second never ran live again. The arena's
+  module owners have one selected script each, so the measured numbers
+  are unchanged; the gate round re-ran them on the fix-up build rRLMc
+  (x64 BUILD-OK, x86 CLIENT-BUILD-OK, tests 590/590, GCC 30/30 ok, wire
+  check rRLQ -> rRLMc `ALL SAME`, solo1/solo2 sends SAME and journals
+  IDENTICAL; witness 0/50, 0/50, 0/50 with the same counters, control
+  42/50, the pair 2/2, v14 seed 1 the same two rounds 144:4 and 87:9).
+  The multi-script owner itself has no scene in the arena: it is fixed by
+  the live rule, not measured.
+- **Not run, deferred:** the live 4-client headless smoke session and a
+  two-copy retail run (the Arch server would have to be rebuilt from this
+  tree first, which with the session takes the gate past 15 minutes; the
+  change is behaviour-identical on all 14 replayed captures, so a single
+  live session adds no evidence the replays lack); a headless session with
+  two rewinds in one host frame on a real capture (no capture holds one;
+  SimTool's chained rounds are the clients' binding - `rollback_world`,
+  `bind_scripts` with `live_membership` - without a live frame between
+  them, which is that case).

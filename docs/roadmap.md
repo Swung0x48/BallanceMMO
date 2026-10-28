@@ -744,6 +744,23 @@ numbers 1-10 are unchanged.
    the Off followed by one anchored after it fails (`flags ...48 vs ...49`,
    the probe re-run), each round alone passes, the same on the pre-step
    build.
+   **Built at step RLM** (rollback-engine-gaps design, As built (step
+   RLM)): `script_replay`'s registration ledger - a restore takes back an
+   earlier restore's registrations of the scripts it writes, a replayed
+   frame gives a finished script's pending add back; SimTool's witness
+   (`owner membership at round ends`) 41-44 of 50 rounds -> 0 of 50 on the
+   clients' recipe. **The measured WG2 failure was not this leak:** it
+   fails at depth 0 too. **Queued here (the v14 chain artefact):**
+   SimTool's default `--savestate-check` recipe is v14's (no
+   `--session-recipe`): a script inactive at the anchor is not written and
+   keeps its live state, and the rounds are chained without a live frame,
+   so a round anchored after the previous round's end keeps a script state
+   from before its anchor (P_Modul_01's probe, active at 62, kept at 144) -
+   a state no host reaches. Options (not chosen): (a) judge such scenes
+   with `--session-recipe` (every core host's recipe; v14 is the legacy
+   path's, frozen until R7); (b) SimTool re-makes the live world at e for
+   every v14 round (as the pass rounds do: whole frames from t0, ~e frames
+   per round); (c) leave it as a known artefact of the v14 recipe.
    **Found at WG2, queued here (harness, gap Q's hold):** SimTool's
    `--savestate-check` binds no `callback_queue`, so its restore compares
    the whole PreSimulate queue (mode 0) instead of setting the outside

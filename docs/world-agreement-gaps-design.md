@@ -2482,6 +2482,12 @@ WG1's live smoke (above, "UNATTRIBUTED") is attributed. No code changed.
     that between rounds and no restore takes it back when a later record has
     the script finished, so `owner_pending_add` admits the owner and the
     replayed frame runs the finished script from its start.
+    *(Corrected at step RLM, rollback-engine-gaps design "As built (step
+    RLM)": the two rounds fail identically at depth 0, with no replayed
+    frame, so the cause is not the pending list but SimTool's v14 recipe:
+    a script inactive at the anchor keeps its live state, here the state
+    the previous chained round left. The leak itself is real and fixed at
+    RLM; this artefact is queued in roadmap §4 item 4.)*
   - *A 120-tick dead window's restore is refused* ("the PreSimulate queue
     differs from the savestate's": the live queue at the end of the straight
     pass holds `Physics WakeUp` of Gameplay_Ingame and four

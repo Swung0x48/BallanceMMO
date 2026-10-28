@@ -9,7 +9,7 @@
 //   BallanceMMOSimTool --root <game dir> --level N --level-at T --restore-at TICK [ENTITY] [--ticks N]
 //   BallanceMMOSimTool --root <game dir> --level N --savestate-check [scene switches] [--ticks N] [--rounds R]
 //       [--max-depth D] [--seed S] [--savestate-every K] [--savestate-lead L] [--frames] [--legacy-restore]
-//       [--savestate-no-hold] [--queue-trace] [--savestate-trace PATH] [--stop-on-divergence] [--verbose]
+//       [--savestate-no-hold] [--savestate-no-ledger] [--queue-trace] [--savestate-trace PATH] [--stop-on-divergence] [--verbose]
 //   BallanceMMOSimTool --root <game dir> --level N --resync-check S B [--resync-arms ERSA] [--resync-stamp SECTOR TICK]
 //       [--resync-sector K] [--resync-drop TICK --drop <entity> <ball type>] [--resync-watch NAME]
 //       [--resync-player ID] [--resync-server-blob FILE [--resync-blob-rename OLD NEW] [--resync-blob-adopt-environment]]
@@ -349,6 +349,11 @@ namespace {
         // both unbound, the binding before RLQ (the hold's negative control:
         // a window across the level start's parked-ball entries refuses).
         bool savestate_no_hold = false;
+        // Step RLM: --savestate-no-ledger empties script_replay's
+        // registration ledger before every restore and every replayed frame,
+        // so nothing is taken back - the restore before RLM (the G1
+        // membership leak's negative control; the witness line shows it).
+        bool savestate_no_ledger = false;
         std::string savestate_trace;
         // The trafo sets (docs/trafo-replication-design.md 7.2, step T1):
         // --trafo-sets N / --trafo-players a,b,.. [--trafo-reverse]
@@ -984,8 +989,9 @@ namespace {
             else if (arg == "--savestate-lead") { if (!(v = next())) return false; out.savestate_lead = std::atoi(v); }
             else if (arg == "--savestate-inert-from-birth") out.savestate_inert_from_birth = true;
             else if (arg == "--frames") out.savestate_frames = true;
-            else if (arg == "--legacy-restore" || arg == "--savestate-no-hold")        // step RLQ: one branch (C1061)
-                (arg == "--legacy-restore" ? out.legacy_restore : out.savestate_no_hold) = true;
+            else if (arg == "--legacy-restore" || arg == "--savestate-no-hold" || arg == "--savestate-no-ledger")   // RLQ, RLM: one branch (C1061)
+                (arg == "--legacy-restore" ? out.legacy_restore
+                 : arg == "--savestate-no-hold" ? out.savestate_no_hold : out.savestate_no_ledger) = true;
             else if (arg == "--savestate-trace") { if (!(v = next())) return false; out.savestate_trace = v; }
             else if (arg == "--list-callback-blocks") out.list_callback_blocks = true;   // step EG0
             else if (arg == "--queue-trace") out.queue_trace = true;                     // step EG0
@@ -3162,6 +3168,7 @@ namespace {
         std::vector<uint8_t> blob;       // kept ticks
         std::string exact;               // kept ticks: describe_cores_exact
         std::vector<uint8_t> scripts;    // kept ticks, --frames: script_replay::capture
+        std::string membership;          // kept ticks, --frames: each selected script's owner in the next frame (step RLM)
         std::vector<std::string> bodies; // a pass inside the window (step S7): the movable bodies, sorted
         bmmo::physics::world_hash hash;
         bmmo::sim::physics_world::step_state counters;
@@ -3499,6 +3506,7 @@ namespace {
         binding_options.savestate = !legacy;
         binding_options.savestate_flags = bmmo::physics::SAVESTATE_STRICT;
         binding_options.before_replayed_tick = [&](uint32_t tick) {
+            if (args.savestate_no_ledger) bmmo::game::script_replay::registrations().entries.clear();   // step RLM's control
             if (tick == probe_tick) {
                 std::string probe_error;
                 if (!bmmo::physics::get_savestate(physics, restored_blob, probe_error)) capture_error = probe_error;
@@ -3687,6 +3695,23 @@ namespace {
         uint32_t contacts_max = 0, collisions_max = 0, systems_max = 0;
         size_t blob_max = 0;
         std::vector<uint8_t> blob;
+        // Step RLM (the G1 membership leak's witness): whether the next live
+        // frame would run each selected script's owner (script_replay::
+        // owner_in_frame: the behaviour manager's pending table, then its
+        // list), one character per script - the straight pass's at a kept
+        // tick, a round's at its end.  Reported, not judged: the replay does
+        // not run the live frame's list (gap F).
+        const auto owner_membership = [&]() {
+            std::string out;
+            for (CK_ID id: scripts.scripts) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                out += !beh ? '-' : bmmo::game::script_replay::owner_in_frame(context, beh) ? '1' : '0';
+            }
+            return out;
+        };
+        int membership_rounds = 0, membership_differ = 0;
+        std::string membership_first;
+        const bmmo::game::script_replay::membership_counters membership_before = bmmo::game::script_replay::membership();
         const auto started = std::chrono::steady_clock::now();
         for (int i = 0; i < window; ++i) {
             straight_tick& rec = straight[static_cast<size_t>(i)];
@@ -3703,6 +3728,7 @@ namespace {
                     std::fprintf(stderr, "savestate-check: script capture failed at tick %u\n", t);
                     return 1;
                 }
+                if (keep_this) rec.membership = owner_membership();
             }
             bmmo::physics::savestate_report report;
             if (!bmmo::physics::get_savestate(physics, blob, error, &report)) {
@@ -4036,6 +4062,7 @@ namespace {
             // the end of the replay must not clamp one, nor its hold fail.
             const uint64_t clamped_before = bmmo::game::script_replay::queue_stats().unhold_clamped;
             const uint64_t hold_fail_before = bmmo::game::script_replay::queue_stats().hold_fail;
+            if (args.savestate_no_ledger) bmmo::game::script_replay::registrations().entries.clear();   // step RLM's control
             const bool rewound = engine.rewind_to(binding, t0 + static_cast<uint32_t>(a), t0 + static_cast<uint32_t>(e),
                                                   no_input, "savestate-check");
             // rewind_to's true says the request was handled, not that a replay
@@ -4161,6 +4188,25 @@ namespace {
                             for (const auto& [block, bits]: masks)
                                 for (uint32_t m = bits; m; m &= m - 1) ++rearmed_ignored_bits;
                         }
+                    }
+                }
+                // Step RLM: the owners' membership at e, the witness.
+                if (frames && expected.kept && !expected.membership.empty()) {
+                    ++membership_rounds;
+                    const std::string now = owner_membership();
+                    if (now != expected.membership) {
+                        ++membership_differ;
+                        std::string which;
+                        for (size_t k = 0; k < now.size() && k < expected.membership.size(); ++k)
+                            if (now[k] != expected.membership[k]) {
+                                auto* beh = CKBehavior::Cast(context->GetObject(scripts.scripts[k]));
+                                which += std::string(which.empty() ? "" : ", ") + (beh && beh->GetName() ? beh->GetName() : "?") + " "
+                                       + expected.membership[k] + " vs " + now[k];
+                            }
+                        const std::string line = "round=" + std::to_string(r) + " anchor=" + std::to_string(t0 + static_cast<uint32_t>(a)) + " depth="
+                                               + std::to_string(d) + ": " + which;
+                        if (membership_first.empty()) membership_first = line;
+                        if (args.verbose) std::printf("  membership: %s\n", line.c_str());
                     }
                 }
                 // Step G2's review: the proximity union's hold at e (the
@@ -4350,6 +4396,16 @@ namespace {
         const bool pass = failed == 0 && run == static_cast<int>(schedule.size()) && (!trafo || trafo->failures() == 0)
                        && (!passes || ((passes_made > 0 || window_moves.empty()) && pass_recreate_failures == 0
                                        && pass_missing == 0 && fixed_births_missing == 0));
+        if (frames) {
+            const auto& m = bmmo::game::script_replay::membership();
+            std::printf("savestate-check: owner membership at round ends (step RLM): %d of %d round(s) differ from the straight"
+                        " pass%s%s; registrations %llu, taken back by a restore %llu, settled %llu\n",
+                        membership_differ, membership_rounds, membership_first.empty() ? "" : ", first: ",
+                        membership_first.c_str(),
+                        static_cast<unsigned long long>(m.reregistered - membership_before.reregistered),
+                        static_cast<unsigned long long>(m.unregistered - membership_before.unregistered),
+                        static_cast<unsigned long long>(m.settled - membership_before.settled));
+        }
         if (frames)
             std::printf("savestate-check: live script order (step RO1): %zu change(s) recorded, %llu replayed frame(s) ran"
                         " in it\n", static_cast<size_t>(live_order.changes()),

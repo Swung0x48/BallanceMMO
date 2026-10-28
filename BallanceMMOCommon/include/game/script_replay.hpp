@@ -327,6 +327,8 @@ namespace bmmo::game {
         struct membership_counters {
             uint64_t reregistered = 0;   // restored-active scripts put back into the manager's list (G1)
             uint64_t flags_kept = 0;     // next-frame flags a replayed frame left as the live frame does (F)
+            uint64_t unregistered = 0;   // step RLM: a registration taken back by a later restore that wrote its script
+            uint64_t settled = 0;        // step RLM: a registration taken back once its script finished in the replay
         };
         static membership_counters& membership() {
             static membership_counters counters;
@@ -364,25 +366,189 @@ namespace bmmo::game {
                 if (it.GetKey() == id) return *it > 0;
             return false;
         }
+        // Step RLM (the G1 membership leak): what reregister did, so that it
+        // can be taken back.  A registration is the restore's own, not the
+        // live frame's: the owner's pending add (+1 in m_BeObjectNextFrame,
+        // which only the next live frame's ManageObjectsActivity consumes)
+        // and the scene flag it set.  Nothing in a replay consumes either, so
+        // without the ledger a later restore that wrote the script back
+        // finished (SimTool's chained rounds; a host frame with two rewinds)
+        // found the owner still pending, and a replay that ran the script to
+        // its end left the owner pending for the live frame after it, which
+        // had dropped it (CKBeObject::ExecuteBehaviors -> RemoveObjectNextFrame).
+        // The ledger is the live frame's: a live frame in between (the time
+        // manager's main tick count moved) consumed the pending adds, and the
+        // scene flags are then live state - the entries are dropped, nothing
+        // taken back.
+        struct registration {
+            CK_ID script = 0, owner = 0;
+            bool pending = false;      // the owner's pending add is this registration's
+            bool scene_flag = false;   // the script's scene flag was set by it
+            bool ran = false;          // the script ran in the current replayed frame
+        };
+        struct registration_ledger {
+            CKDWORD frame = 0;   // the live frame the entries belong to
+            std::vector<registration> entries;
+        };
+        static registration_ledger& registrations() {
+            static registration_ledger ledger;
+            return ledger;
+        }
+        static CKDWORD live_frame_id(CKContext* context) {
+            CKTimeManager* time = context ? context->GetTimeManager() : nullptr;
+            return time ? time->GetMainTickCount() : 0;
+        }
+        // The ledger as of the current live frame: emptied when a live frame
+        // ran since its entries were made.
+        static registration_ledger& current_registrations(CKContext* context) {
+            registration_ledger& ledger = registrations();
+            const CKDWORD frame = live_frame_id(context);
+            if (ledger.frame != frame) {
+                ledger.entries.clear();
+                ledger.frame = frame;
+            }
+            return ledger;
+        }
+        static int pending_count(CKBehaviorManager* manager, CK_ID id) {
+            if (!manager) return 0;
+            for (auto it = manager->m_BeObjectNextFrame.Begin(); it != manager->m_BeObjectNextFrame.End(); ++it)
+                if (it.GetKey() == id) return *it;
+            return 0;
+        }
+        // Takes one pending add of `id` back (RemoveObjectNextFrame's count,
+        // written through the public table: a count of 0 is no change).  Only
+        // a positive count is touched: a cleared table has nothing of ours.
+        static bool pending_take_back(CKBehaviorManager* manager, CK_ID id) {
+            if (!manager) return false;
+            for (auto it = manager->m_BeObjectNextFrame.Begin(); it != manager->m_BeObjectNextFrame.End(); ++it)
+                if (it.GetKey() == id) {
+                    if (*it <= 0) return false;
+                    *it -= 1;
+                    return true;
+                }
+            return false;
+        }
+        static void take_back(CKContext* context, const registration& r, bool scene_flag) {
+            if (r.pending) pending_take_back(context->GetBehaviorManager(), r.owner);
+            if (scene_flag && r.scene_flag)
+                if (CKScene* scene = context->GetCurrentScene())
+                    if (auto* beh = CKBehavior::Cast(context->GetObject(r.script)))
+                        if (scene->GetObjectFlags(beh) & CK_SCENEOBJECT_ACTIVE) scene->ModifyObjectFlags(beh, 0, CK_SCENEOBJECT_ACTIVE);
+        }
+        // A restore that writes `written` back: the registrations an earlier
+        // restore of this live frame made for them are taken back first
+        // (the pending add and the scene flag), so the restore starts from
+        // the live frame's membership; reregister then registers again what
+        // this restore writes back active.  A script it does not write (the
+        // v14 rule's kept live state) keeps its registration.
+        // Whether a script of `owner` other than those in `skip` is active or
+        // to be activated: the live frame keeps an owner in its list while
+        // any of its scripts executes (CKBeObject::ExecuteBehaviors drops it
+        // only when none did), so a registration's pending add is the
+        // owner's, not one script's.
+        static bool owner_keeps(CKContext* context, CK_ID owner_id, const std::vector<CKBehavior*>* skip = nullptr) {
+            auto* owner = CKBeObject::Cast(context ? context->GetObject(owner_id) : nullptr);
+            if (!owner) return false;
+            const int count = owner->GetScriptCount();
+            for (int i = 0; i < count; ++i) {
+                CKBehavior* script = owner->GetScript(i);
+                if (!script || !(script->GetFlags() & (CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME))) continue;
+                if (skip && std::find(skip->begin(), skip->end(), script) != skip->end()) continue;
+                return true;
+            }
+            return false;
+        }
+        static uint32_t take_back_registrations(CKContext* context, const std::vector<CKBehavior*>& written) {
+            registration_ledger& ledger = current_registrations(context);
+            uint32_t taken = 0;
+            for (auto it = ledger.entries.begin(); it != ledger.entries.end();) {
+                const bool rewritten = std::any_of(written.begin(), written.end(),
+                                                   [&](CKBehavior* beh) { return beh && beh->GetID() == it->script; });
+                if (!rewritten) { ++it; continue; }
+                // A script of the same owner this restore does not write
+                // (outside the selection, or the v14 rule's kept live state)
+                // still active: the owner's pending add stays with the entry
+                // (review of step RLM); only the scene flag is taken back.
+                if (it->pending && owner_keeps(context, it->owner, &written)) {
+                    take_back(context, registration{it->script, it->owner, false, it->scene_flag, false}, true);
+                    it->scene_flag = false;
+                    ++it;
+                    ++taken;
+                    continue;
+                }
+                take_back(context, *it, true);
+                it = ledger.entries.erase(it);
+                ++taken;
+            }
+            return taken;
+        }
+        // The end of a replayed frame (live_membership): a registered script
+        // that did not run in it and is neither active nor to be activated
+        // has finished - the live frame would have found nothing to execute
+        // for its owner and dropped it (RemoveObjectNextFrame), so its
+        // pending add is taken back.  The scene flag is left: the script's
+        // own end (CheckBehaviorActivity) clears it as live.  A pending add
+        // is the owner's: it is held while any script of the owner ran in
+        // the frame or is active or to be activated (the live rule:
+        // CKBeObject::ExecuteBehaviors drops an owner only when none of its
+        // scripts executed; review of step RLM).
+        static uint32_t settle_registrations(CKContext* context) {
+            registration_ledger& ledger = current_registrations(context);
+            uint32_t settled = 0;
+            for (auto it = ledger.entries.begin(); it != ledger.entries.end();) {
+                auto* beh = CKBehavior::Cast(context->GetObject(it->script));
+                const bool live = it->pending ? owner_keeps(context, it->owner)
+                                              : beh && (beh->GetFlags() & (CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME));
+                if (it->ran || live) {
+                    it->ran = false;
+                    ++it;
+                    continue;
+                }
+                take_back(context, *it, false);
+                it = ledger.entries.erase(it);
+                ++settled;
+            }
+            return settled;
+        }
+        // A script ran in the replayed frame: its own registration, and every
+        // registration that holds its owner's pending add, count it.
+        static void note_ran(CKBehavior* beh) {
+            if (!beh) return;
+            const CK_ID script = beh->GetID();
+            CKBeObject* owner = beh->GetOwner();
+            const CK_ID owner_id = owner ? owner->GetID() : 0;
+            for (registration& r: registrations().entries)
+                if (r.script == script || (r.pending && owner_id && r.owner == owner_id)) r.ran = true;
+        }
         // G1: a root script the restore wrote back active (or about to be
         // activated) whose owner the live frame would not run.  Returns true
-        // when it changed anything.
+        // when it changed anything.  What it changes is entered in the
+        // ledger (step RLM).
         static bool reregister(CKContext* context, CKBehavior* beh) {
             CKScene* scene = context ? context->GetCurrentScene() : nullptr;
             if (!scene || !beh) return false;
             if (!(beh->GetFlags() & (CKBEHAVIOR_ACTIVE | CKBEHAVIOR_ACTIVATENEXTFRAME))) return false;
+            registration entry;
+            entry.script = beh->GetID();
+            CKBeObject* owner = beh->GetOwner();
+            entry.owner = owner ? owner->GetID() : 0;
             bool changed = false;
             if (!(scene->GetObjectFlags(beh) & CK_SCENEOBJECT_ACTIVE)) {
                 scene->ModifyObjectFlags(beh, CK_SCENEOBJECT_ACTIVE, 0);
+                entry.scene_flag = true;
                 changed = true;
             }
             if (!owner_in_frame(context, beh)) {
                 constexpr CKDWORD next = CKBEHAVIOR_ACTIVATENEXTFRAME | CKBEHAVIOR_DEACTIVATENEXTFRAME | CKBEHAVIOR_RESETNEXTFRAME;
                 const CKDWORD recorded = beh->GetFlags() & next;
+                CKBehaviorManager* manager = context->GetBehaviorManager();
+                const int before = owner ? pending_count(manager, entry.owner) : 0;
                 scene->Activate(beh, FALSE);
                 beh->ModifyFlags(recorded, next & ~recorded);
+                entry.pending = owner && pending_count(manager, entry.owner) == before + 1;
                 changed = true;
             }
+            if (entry.scene_flag || entry.pending) current_registrations(context).entries.push_back(entry);
             return changed;
         }
 
@@ -1010,10 +1176,15 @@ namespace bmmo::game {
                 queue_stats().rebuilt += target.size();
             }
             // G1 (live_membership): what the restore made active runs in the
-            // live frames after the replay too.
-            if (live_membership())
+            // live frames after the replay too.  Step RLM: an earlier
+            // restore's registrations of the scripts written here are taken
+            // back first - one written back finished must not find its owner
+            // still pending from a rewind of the same live frame.
+            if (live_membership()) {
+                membership().unregistered += take_back_registrations(context, written);
                 for (CKBehavior* beh: written)
                     if (reregister(context, beh)) ++membership().reregistered;
+            }
             return true;
         }
 
@@ -1046,6 +1217,9 @@ namespace bmmo::game {
                 ++executed;
             }
             executed += execute_scripts(context, replayed ? *replayed : sel.scripts, delta_ms, live_membership(), live_members);
+            // Step RLM: a registered script that finished before this frame
+            // gives its owner's pending add back, as the live frame drops it.
+            if (live_membership()) membership().settled += settle_registrations(context);
             return executed;
         }
 
@@ -1092,6 +1266,7 @@ namespace bmmo::game {
                 auto* beh = CKBehavior::Cast(context->GetObject(scripts[i]));
                 if (!beh || !beh->IsActive()) continue;
                 if (ledger) ledger->set_dormant(i, false);
+                if (live_flags) note_ran(beh);   // step RLM: the registration ledger
                 beh->Execute(delta_ms);
                 ++executed;
             }
