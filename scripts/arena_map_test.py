@@ -1928,18 +1928,21 @@ def verdict(case, event_clients=()):
         if r['exit_code'] != 0 or 'first_divergence=-1' not in r['summary']:
             problems.append('journal replay diverged')
     inter = case['interaction']
+    # The interaction is read off the corrections, which need snapshots to
+    # disagree with: a run against a server whose snapshots are off (the
+    # snapshot-free measurements, a few dozen lifecycle-forced ones in
+    # 60 s) has none to show even when every mechanism and every ball is
+    # tracked and in step, so there both checks are a note, not a failure.
+    snapshot_free = all((c['metrics'] or {}).get('snapshots', 0) < 100 for c in case['clients']
+                        if not c.get('never_started'))
+    free_note = ' (snapshot-free run: the corrections cannot show it)' if snapshot_free else ''
     if not inter['mechanism_bodies_corrected']:
-        # The interaction is read off the corrections, which need snapshots to
-        # disagree with: a run against a server whose snapshots are off (the
-        # snapshot-free measurements, a few dozen lifecycle-forced ones in
-        # 60 s) has none to show even when every mechanism is tracked and in
-        # step, so there it is a note, not a failure.
-        snapshot_free = all((c['metrics'] or {}).get('snapshots', 0) < 100 for c in case['clients']
-                            if not c.get('never_started'))
-        (warnings if snapshot_free else problems).append(
-            'no mechanism interaction observed' + (' (snapshot-free run: the corrections cannot show it)' if snapshot_free else ''))
+        (warnings if snapshot_free else problems).append('no mechanism interaction observed' + free_note)
+    # Ball-to-ball interaction too is only observable through the body-set
+    # corrections (peer_balls_corrected), so every snapshot-free multi-client
+    # arm failed on it (step B9DX, item HWARN; found at REF8's review).
     if len(case['clients']) > 1 and not inter['peer_balls_corrected']:
-        problems.append('no ball-to-ball interaction observed')
+        (warnings if snapshot_free else problems).append('no ball-to-ball interaction observed' + free_note)
     return problems, warnings
 
 
