@@ -578,7 +578,12 @@ numbers 1-10 are unchanged.
    (no body) and is re-latched only when it is in the box again. Fix: list the
    balls from the manager's whole object table (`m_PhysicsObjects`, sorted),
    as the SPGH patch's listener does; check with a pinned replay of an
-   airship arm.
+   airship arm. **Done at step ASL** (`rewind-cost-design.md` "As built
+   (step ASL)"; no wire or API change): reproduced offline - a latched own
+   ball braked to rest just past the box's face fell asleep and the old
+   binary closed its latch ("back in the sync", the relayed poses stopped);
+   both listeners now take their balls from one helper over
+   `m_PhysicsObjects`, and the latch holds.
    The spawn ghost the user added to it (2026-10-28: a ball is a
    translucent ghost with ball-to-ball collision off in its spawn area
    until it has left it) is built at step SPGH (`rewind-cost-design.md`

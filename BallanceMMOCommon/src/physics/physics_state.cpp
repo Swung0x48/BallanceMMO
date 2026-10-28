@@ -2867,6 +2867,7 @@ namespace bmmo::physics {
                 double entered = 0.0;
                 double gone = 0.0;
                 bool open = true;
+                bool asleep_logged = false;   // step ASL: its first PSI asleep logged
             };
             std::vector<own_life> own_lives;
             uint64_t own_rechecks = 0;
@@ -2889,6 +2890,43 @@ namespace bmmo::physics {
         bool airship_is_player(const IVP_Real_Object* object) {
             const char* ident = object ? object->nocoll_group_ident : nullptr;
             return ident && std::strncmp(ident, kAirshipPlayerPrefix, std::strlen(kAirshipPlayerPrefix)) == 0;
+        }
+        // A body's collision group as a string (the ident is not
+        // NUL-terminated at its full length).
+        std::string player_ball_group(const IVP_Real_Object* object) {
+            const char* ident = object ? object->nocoll_group_ident : nullptr;
+            if (!ident) return {};
+            size_t n = 0;
+            while (n < IVP_NO_COLL_GROUP_STRING_LEN && ident[n]) ++n;
+            return std::string(ident, n);
+        }
+        // Every player ball in collision detection, asleep or not, for the
+        // PSI listeners (the airship zone's and the spawn ghost's; step ASL):
+        // the manager's whole object table, not m_MovableObjects -
+        // CKIpionManager takes a frozen (sleeping) core out of that list
+        // (physics_RT PhysicsObjectListener::event_object_frozen), and a ball
+        // at rest would read as bodiless.  A body with no overlap-tree node
+        // is left out: a rollback's restore parks a body born after its
+        // anchor that way until its birth tick (it is not in this tick's
+        // world yet).  Sorted by group, then name: the table's hash order is
+        // never used.
+        std::vector<std::pair<std::string, IVP_Real_Object*>> player_balls_in_detection(CKIpionManager* physics) {
+            std::vector<std::pair<std::string, IVP_Real_Object*>> balls;
+            for (auto it = physics->m_PhysicsObjects.Begin(); it != physics->m_PhysicsObjects.End(); ++it) {
+                IVP_Real_Object* object = (*it).m_RealObject;
+                IVP_Core* core = object ? object->get_core() : nullptr;
+                if (!core || core->physical_unmoveable || !airship_is_player(object)) continue;
+                const IVP_OV_Element* e = object->get_ov_element();
+                if (!e || !e->node) continue;
+                balls.emplace_back(player_ball_group(object), object);
+            }
+            std::sort(balls.begin(), balls.end(), [](const auto& x, const auto& y) {
+                if (x.first != y.first) return x.first < y.first;
+                const char* nx = x.second->get_name();
+                const char* ny = y.second->get_name();
+                return std::strcmp(nx ? nx : "", ny ? ny : "") < 0;
+            });
+            return balls;
         }
         bool airship_is_own(const airship_zone_state& state, const IVP_Real_Object* object) {
             return state.own_group[0]
@@ -2959,9 +2997,12 @@ namespace bmmo::physics {
         // the box is taken out of the simulation - its pairs rechecked
         // (the filter now refuses every partner), then frozen.  A ghost woken
         // since (the navigation's Physics WakeUp on a key edge) is frozen
-        // again before it moves.  The candidates are sorted by their group
-        // ("P#<join order>", the same in every world) so two entering in one
-        // PSI are frozen in one order everywhere.
+        // again before it moves.  The candidates come sorted by their group
+        // ("P#<join order>", the same in every world), then name, so two
+        // entering in one PSI are frozen in one order everywhere.  The balls
+        // are read from the manager's whole object table
+        // (player_balls_in_detection, step ASL): a latched own ball that
+        // falls asleep keeps its body, and its latch.
         class airship_zone_listener : public IVP_Listener_PSI {
         public:
             CKIpionManager* physics = nullptr;
@@ -2972,10 +3013,8 @@ namespace bmmo::physics {
                 if (!state->ready && !airship_take_box(physics, *state)) return;
                 std::vector<IVP_Real_Object*> ghosts;
                 IVP_Real_Object* own = nullptr;
-                IVP_U_Vector<IVP_Real_Object>& movables = physics->m_MovableObjects;
-                for (int i = 0; i < movables.len(); ++i) {
-                    IVP_Real_Object* object = movables.element_at(i);
-                    if (!object || !airship_is_player(object)) continue;
+                for (const auto& entry: player_balls_in_detection(physics)) {
+                    IVP_Real_Object* object = entry.second;
                     if (airship_is_own(*state, object)) {
                         if (!own) own = object;
                         continue;
@@ -3015,11 +3054,23 @@ namespace bmmo::physics {
                                 life.gone = now;
                             }
                     }
+                    // Step ASL: a latched own ball asleep (its core frozen, so
+                    // out of m_MovableObjects) keeps its latch; its first such
+                    // PSI in the life is logged (stdout only: no state, no
+                    // decision reads it).
+                    IVP_Core* own_core = own ? own->get_core() : nullptr;
+                    if (own_core && !IVP_MTIS_SIMULATED(own_core->movement_state))
+                        for (auto& life: state->own_lives)
+                            if (life.entered <= now && (life.open || now < life.gone) && !life.asleep_logged) {
+                                life.asleep_logged = true;
+                                const char* name = own->get_name();
+                                std::printf("[bmmo] airship: the own ball %s is asleep in its latch at clock %.6f "
+                                            "(latched at %.6f; %s m_MovableObjects): the latch holds\n",
+                                            name ? name : "?", now, life.entered,
+                                            physics->m_MovableObjects.index_of(own) < 0 ? "not in" : "still in");
+                            }
                 }
                 if (ghosts.empty()) return;
-                std::sort(ghosts.begin(), ghosts.end(), [](const IVP_Real_Object* x, const IVP_Real_Object* y) {
-                    return std::strncmp(x->nocoll_group_ident, y->nocoll_group_ident, IVP_NO_COLL_GROUP_STRING_LEN) < 0;
-                });
                 for (IVP_Real_Object* object: ghosts) {
                     object->recheck_collision_filter();
                     object->disable_simulation();
@@ -3214,20 +3265,13 @@ namespace bmmo::physics {
             const auto it = states.find(physics);
             return it == states.end() ? nullptr : &it->second;
         }
-        std::string spawn_ghost_group(const IVP_Real_Object* object) {
-            const char* ident = object ? object->nocoll_group_ident : nullptr;
-            if (!ident) return {};
-            size_t n = 0;
-            while (n < IVP_NO_COLL_GROUP_STRING_LEN && ident[n]) ++n;
-            return std::string(ident, n);
-        }
         // A ghost: a player ball whose group is not solid, or had no body at
         // the last PSI (a body made since - a birth, a trafo's new ball -
         // is inserted as a ghost, and the next PSI settles it: a solid group
         // has its pairs rechecked there).  A group never seen is a ghost.
         bool spawn_ghost_is_ghost(const spawn_ghost_state_t& state, const IVP_Real_Object* object) {
             if (!airship_is_player(object)) return false;
-            const auto it = state.groups.find(spawn_ghost_group(object));
+            const auto it = state.groups.find(player_ball_group(object));
             return it == state.groups.end() || !it->second.present || !it->second.solid;
         }
         bool spawn_ghost_in_area(const spawn_ghost_state_t& state, const IVP_U_Point* p) {
@@ -3292,30 +3336,9 @@ namespace bmmo::physics {
                 spawn_ghost_state_t* state = find_spawn_ghost_state(physics);
                 if (!state || !state->enabled || !physics) return;
                 if (state->areas.empty()) spawn_ghost_read_areas(physics, *state);
-                // Every player ball in collision detection, asleep or not:
-                // the manager's whole object table, not m_MovableObjects -
-                // CKIpionManager takes a frozen (sleeping) core out of that
-                // list (PhysicsObjectListener::event_object_frozen), and a
-                // ball at rest would read as bodiless.  A body with no
-                // overlap-tree node is left out: a rollback's restore parks a
-                // body born after its anchor that way until its birth tick
-                // (it is not in this tick's world yet).  Sorted by group,
-                // then name: the table's hash order is never used.
-                std::vector<std::pair<std::string, IVP_Real_Object*>> balls;
-                for (auto it = physics->m_PhysicsObjects.Begin(); it != physics->m_PhysicsObjects.End(); ++it) {
-                    IVP_Real_Object* object = (*it).m_RealObject;
-                    IVP_Core* core = object ? object->get_core() : nullptr;
-                    if (!core || core->physical_unmoveable || !airship_is_player(object)) continue;
-                    const IVP_OV_Element* e = object->get_ov_element();
-                    if (!e || !e->node) continue;
-                    balls.emplace_back(spawn_ghost_group(object), object);
-                }
-                std::sort(balls.begin(), balls.end(), [](const auto& x, const auto& y) {
-                    if (x.first != y.first) return x.first < y.first;
-                    const char* nx = x.second->get_name();
-                    const char* ny = y.second->get_name();
-                    return std::strcmp(nx ? nx : "", ny ? ny : "") < 0;
-                });
+                // Every player ball in collision detection, asleep or not,
+                // sorted by group, then name (player_balls_in_detection).
+                const std::vector<std::pair<std::string, IVP_Real_Object*>> balls = player_balls_in_detection(physics);
                 // The groups: present now or not, the first life begun, the
                 // bodies that need their pairs rechecked noted.
                 std::vector<IVP_Real_Object*> recheck;
@@ -3388,7 +3411,7 @@ namespace bmmo::physics {
                 // re-insertion of either finds the pair, as for any two
                 // bodies coming together.  In group order.
                 std::sort(recheck.begin(), recheck.end(), [&](IVP_Real_Object* x, IVP_Real_Object* y) {
-                    const std::string gx = spawn_ghost_group(x), gy = spawn_ghost_group(y);
+                    const std::string gx = player_ball_group(x), gy = player_ball_group(y);
                     if (gx != gy) return gx < gy;
                     const char* nx = x->get_name();
                     const char* ny = y->get_name();
@@ -3538,7 +3561,7 @@ namespace bmmo::physics {
 
         bool adopt_group_now(CKIpionManager* physics, IVP_Real_Object* object, const char* group, own_group_result& out) {
             out.entity = object->get_name() ? object->get_name() : "";
-            out.old_group = spawn_ghost_group(object);
+            out.old_group = player_ball_group(object);
             const std::string wanted = group ? bounded(group, IVP_NO_COLL_GROUP_STRING_LEN * 4) : std::string();
             if (wanted.size() >= IVP_NO_COLL_GROUP_STRING_LEN) return false;
             out.player_pairs_before = count_player_pairs(object);

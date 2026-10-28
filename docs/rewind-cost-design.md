@@ -2941,3 +2941,87 @@ with the server's clone for 60 ticks after the trafo, and a logged
 the one case where the earlier recheck changes physics); a death and a
 respawn between two PSIs; and a frame-by-frame translucency record on
 retail.
+
+## As built (step ASL)
+
+Queue item ASL (found by reading the code at step SPGH; roadmap §4 item 3):
+BALA's `airship_zone_listener` found the own ball in
+`CKIpionManager::m_MovableObjects`, which physics_RT empties of a frozen
+core (`PhysicsObjectListener::event_object_frozen`, `CKIpionManager.cpp:113-121`),
+so a latched own ball that fell asleep read as bodiless and its latch closed
+as at a death. No protocol, journal, savestate or bridge API change; no
+engine change (IVP and physics_RT untouched).
+
+**Reproduced** (the step's offline arm, `.local-tools/work/ASL/asl_rest.py`:
+`BALA_live/airship` client 0's capture replayed with its own keys pinned to
+the live journal until tick 2290 / 2305, then DOWN for 80 ticks and no key,
+`--accept-protocol 14`). The own ball is latched at tick 2238 (clock
+67.000002), brakes, rolls on past the box's +x face (941.625) and comes to
+rest at x = 948.01 / 956.13, outside the box but inside its latch. With the
+old binary (rOWG) the core logs at tick 2871 / 2922 "the own ball Ball_Stone
+is not latched in the airship zone ... any more (a rewind to before its
+entry at 2238): back in the sync" - no rewind happened, the ball fell asleep
+- and from there the 44-byte `SessionGhostPose` sends stop (317 / 342 poses,
+the last at 2870 / 2920), the own-correction gates of BALA's review round
+open again and the pair rule no longer restricts the ball (outside the box,
+unlatched). Inside the box the same close happens but the pair rule still
+restricts by position; the ball is re-latched (and rechecked) at its wake.
+
+**What was built** (`physics_state.cpp`): one helper for both PSI listeners,
+`player_balls_in_detection(physics)` - every player ball (group `P#...`,
+not `physical_unmoveable`) in the manager's whole object table
+`m_PhysicsObjects` whose overlap-tree element has a node (a body a
+rollback's restore parks until its birth tick is left out), sorted by group,
+then name - and `player_ball_group` (SPGH2's `spawn_ghost_group`, renamed).
+The spawn ghost listener's own scan (SPGH2) is now that helper, unchanged
+in behaviour. The airship listener takes the own ball and the ghost
+candidates from it; the ghost candidates still need a simulated core, and
+come in (group, name) order, so the old sort by group is gone. The first
+PSI of a latched life at which the own core is asleep is logged to stdout
+once (`[bmmo] airship: the own ball ... is asleep in its latch at clock T
+(latched at T0; not in m_MovableObjects): the latch holds`); no state or
+decision reads it. **Adaptation:** the old list also offered a simulated
+player ball with no overlap-tree node as a ghost candidate; the helper
+leaves such a body out (it collides with nothing, and the rule that parks
+it is the restore's), as the spawn ghost listener already did.
+
+**Checks (quick tier; about 10 minutes of check wall time, one live
+run).** x64 BUILD-OK, x86 CLIENT-BUILD-OK (no slot-13 hack: no retail run),
+ARCH-BUILD-OK `ballanced-36c04e3d24c9+bmmo-cd66ed66b702-dirty`; 586 tests
+pass; GCC syntax check 29/29 ok (it does not compile `physics_state.cpp`).
+- The reproduction above with the new binary (rASL): no "back in the sync",
+  the latch holds, poses continue to the capture's end (624, the last at
+  3484), the asleep line at clock 86.166669 / 87.712124 ("not in
+  m_MovableObjects"). Old vs new: journals IDENTICAL, every send but the
+  44-byte poses and the tick-0 build-id hello the same.
+- Wire check `rOWG rASL rASLw` over `core_ref_s8` (`EXTRA=--accept-protocol
+  13`): every send SAME and every journal IDENTICAL on all 12 replays; the
+  verdict line says DIFFERENCES only for the pre-existing COVERAGE-SHORT of
+  resync_snapoff c0/c1/c3 at 2954-2960 on both binaries (as SPGH2 and OWG
+  recorded). No asleep line in any of them. solo1 / solo2: sends SAME,
+  journals IDENTICAL to rOWG's.
+- The airship arm `BALA_live/airship` pinned (`SPGH2/pinned_replay_acc.py`,
+  ACCEPT=14), rOWG vs rASL: all four journals IDENTICAL and sends SAME; both
+  binaries stop DIVERGED at the same records (c0 2989, c1 1251, c2 2825, c3
+  2835 steps): the capture's server is pre-SPGH2 (protocol 14) and SPGH2's
+  spawn ghost changes the world from the first spawn (pre-existing).
+- Server worlds, SimTool `--replay-session`, rOWG vs rASL: SPGH_live/lane
+  4119/4119 on both; BALA_live/airship, swing_snapoff, resync_snapoff
+  diverge at 232 on both (pre-SPGH2 journals, as above); all four written
+  journals IDENTICAL old vs new.
+- One live run (4 headless clients, arena, 60 s, 150 ms, drive + keep-lane,
+  snapshots off, the Arch server rebuilt; `maps/arena-test/ASL_live/airship`):
+  PASS, server replay 4049/4049, starved/resyncs/far 0, two own zone entries
+  per client (2146/3156, 2086/3052, 2154/3109, 2162/3104), 8 server zone
+  lines; no ball came to rest in its latch (a smoke test only).
+
+**Not done / deferred** (for FULL): a retail run of a latched own ball at
+rest (the shared code is the retail plugin's too; the x86 build compiles it,
+no retail session ran), and an own ball asleep inside the box on the
+airship's movable planks (the reproduction's ball rests on the static floor
+past the box; the planks' sway may keep it awake), and CPU parity old vs new
+on L8/L11 (cpu_parity.sh rOWG rASL): the airship listener now walks the
+manager's whole object table (static bodies too) instead of the movable list,
+so with the spawn ghost listener the table is walked twice per PSI, replayed
+PSIs included; small, but this host runs near the CPU edge (7d11651). If it
+shows, build the ball list once per PSI and share it between the listeners.
