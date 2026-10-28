@@ -93,7 +93,8 @@ public:
     // world option WORLD_PLACEMENT_CLONES - every PH row whose object another
     // row already places at another matrix gets its own copy at the anchor,
     // in every world.  A member whose SessionReady does not declare
-    // CAP_PLACEMENT is refused by such a session.  On by default since step
+    // CAP_PLACEMENT (the legacy retail path) is refused by every session
+    // since step B9DX, whatever this option.  On by default since step
     // S10 (the retail core host builds the copies and declares the
     // capability; it was off from S5 to S10, adaptation M3, while no retail
     // host could); off, the server builds no copy (the negative control,

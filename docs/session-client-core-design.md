@@ -6550,6 +6550,75 @@ core (7.1 decision 1), and step P's spawn race re-measured.**
   builds (network-thread receive time against the frame's drain time) for a
   difference with no effect on any world. Closed as measured.
 
+**As built (step B9DX, 2026-10-28): clients without the session core are
+refused (the user's answer 7, §7.1).** Base 415f00b (protocol 13, journal
+v7). No protocol or journal change, no CK2, IVP or physics_RT change.
+
+- **The mark.** No hello field said "session core" until now, but one
+  capability does in fact: since S6 / S10 both core hosts declare
+  `CAP_PLACEMENT` in every SessionReady (`session_capabilities::placement`
+  is set unconditionally by the headless host, `session_client.cpp:1626`,
+  and the retail core host, `core_host.cpp:996`, whatever the session's
+  world options; the core adds the bit at `client_core.cpp:389`), and the
+  legacy path declares no capability at all (`ready.caps = 0`,
+  `physics_session_client.cpp:341`, :1486). So the step adds no bit and
+  needs no protocol bump (the task allowed one if nothing told it):
+  *adapted* - a new `CAP_SESSION_CORE` bit would have changed every core
+  SessionReady's bytes (the wire check's SessionReady sends) for a
+  distinction the existing bit already makes.
+- **The rule, written once** (`entity/session.hpp`, after the world-option
+  bits): `session_ready_refusal(caps, world_options)` returns
+  `no_session_core` without `CAP_PLACEMENT`, `no_trafo_inputs` for a
+  `WORLD_TRAFO_INPUTS` session without `CAP_TRAFO_INPUTS` (a core host
+  without the trafo inputs: the headless `--no-trafo-cap` /
+  `--no-script-replay` arms), else `none`; `ready_refusal_reason` is the
+  SessionEnd text ("this server runs physics sessions only for clients
+  with the session core, and this client runs the legacy session path
+  (turn it on: session core on)").
+- **The server** (`server.cpp` `handle_session_ready`): after the protocol
+  and engine checks, a `no_session_core` member is refused - SessionEnd to
+  that member, out of the session, not out of the room, the rest go on, as
+  the trafo refusal did - whatever the world options; then every member's
+  placement signature is compared (all admitted members declare the cap);
+  then the trafo refusal. The order of the two older checks is kept. The
+  old "no CAP_PLACEMENT in a session with placement clones" branch is gone
+  (subsumed); the log line is "refused: no session core (no CAP_PLACEMENT)
+  (caps 00000000, world options ...)".
+- **The retail mod is unchanged** (the legacy path gets nothing new; it
+  already shows a server's SessionEnd reason: `handle_session_end` ->
+  `physics_session_end_local("ended by the server: " + reason)` -> "Physics
+  session N over (...)"). With the server's placement on (the default) the
+  legacy path still ends at SessionStart before the level restart, as since
+  S10, and its caps-0 SessionReady is refused at once; with the placement
+  off it restarts the level, anchors, and is refused at its SessionReady.
+  *Found:* in that second case the refusal reaches the player 10 s late -
+  the legacy anchor hold blocks the game thread until a SessionAssign or
+  its 10 s timeout ("no tick assignment after 10 s; the world starts
+  anyway"), and the SessionEnd, queued with `run_on_game_thread` at once,
+  runs after it. Left as is (the legacy path gets nothing new; R7 deletes
+  it); the one-line alternative, ending the legacy session locally at
+  SessionStart for every session as the placement branch does, is a
+  legacy behaviour change and is not made.
+- **Checks** (quick tier, about 6 minutes of wall clock with the builds):
+  `SessionAdmission.AClientWithoutTheSessionCoreIsRefusedInEverySession`
+  (every world-option combination: caps 0 and caps without `CAP_PLACEMENT`
+  refused; a core member with the trafo inputs admitted everywhere, without
+  them only outside a trafo session; the reasons name the switch, fit
+  `MAX_REASON` and survive a SessionEnd round trip); 561/561 tests; x64
+  BUILD-OK, x86 CLIENT-BUILD-OK, Arch ARCH-BUILD-OK, GCC 29/29; the wire
+  check `rB7EG -> rB9DX` over `core_ref_s8` ALL SAME (12 send traces, 12
+  journals IDENTICAL: the core-on headless clients' SessionReady is
+  unchanged). One two-copy retail run (`scripts/retail/b9dx_lgx`, L11,
+  the Arch server with snapshots off and BOTH world options off - the one
+  configuration in which the legacy path used to get a session; client 1
+  `session core on`, client 2 `session core off`): the server logged
+  "Player673_0 refused: no session core (no CAP_PLACEMENT) (caps 00000000,
+  world options 00000000)" at the same second as client 1's SessionReady
+  (caps 0000000f), client 1 was assigned at once and ran to tick 1028
+  (resyncs 0, starved 0, mechanisms 15/15), and client 2 showed "Physics
+  session 1 over (ended by the server: this server runs physics sessions
+  only for clients with the session core, ...)" and stayed idle.
+
 ## 7. Open questions
 
 1. **Retail's resync triggers.** Retail resyncs on `too_far`, `frozen`, 30
@@ -6600,6 +6669,14 @@ The proposals above are adopted as written:
 4. The retail tooling (latency and blackout injection, `replay session`, the
    hold-event verb) is built in R0 and R6 as planned.
 5. `physics_direct` is extended only as far as host support needs it.
+
+**Decision (2026-10-28, the user, verbatim): "直接拒绝，不要继续兼容非session
+core的客户端"** (refuse it outright, stop keeping clients without the session
+core compatible). Decision 3 above is narrowed: the legacy switch still
+compiles until R7 deletes the path, but the server refuses every physics
+session to a client without the session core ("As built (step B9DX)" at the
+end of §6.2), so `session core off` gets a refusal, not a session, and no
+check, run or deferred item is spent on it any more.
 
 ## 8. Revision 2: review findings and what became of them
 

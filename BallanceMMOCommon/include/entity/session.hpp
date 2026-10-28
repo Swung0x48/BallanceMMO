@@ -106,8 +106,9 @@ namespace bmmo::session {
     // session when it differs from its own world's (late joiners too: the
     // signature does not depend on time).  A member without it (the legacy
     // retail path; the headless host before step S6, the retail core host
-    // before S10) sends 0, which is not compared, and is refused by a
-    // session with WORLD_PLACEMENT_CLONES.
+    // before S10) sends 0, which is not compared; it was refused by a
+    // session with WORLD_PLACEMENT_CLONES, and since step B9DX by every
+    // session (session_ready_refusal below: the bit marks the session core).
     constexpr uint32_t CAP_PLACEMENT = 1u << 3;
 
     // session_start_msg::world_options bits (protocol 11): what every world
@@ -125,6 +126,45 @@ namespace bmmo::session {
     // a piece never collides with a local body (PE_Balloon*).
     constexpr uint32_t WORLD_PLACEMENT_CLONES = 1u << 0;
     constexpr uint32_t WORLD_TRAFO_INPUTS = 1u << 1;
+
+    // Who a session admits (the server's SessionReady handling; step B9DX,
+    // the user's answer 7 of 2026-10-28, quoted in docs/roadmap.md 2: refuse
+    // it outright, stop keeping clients without the session core
+    // compatible).  The server serves a physics session only to a member
+    // that runs the session core, whatever the session's world_options.  No
+    // new bit and no protocol change: since steps S6 / S10 both session-core
+    // hosts declare CAP_PLACEMENT in every SessionReady (the host capability
+    // session_capabilities::placement, set unconditionally by the headless
+    // host and the retail core host, with or without
+    // WORLD_PLACEMENT_CLONES), and the legacy retail path (session core off)
+    // declares no capability at all (caps 0).  A session with
+    // WORLD_TRAFO_INPUTS still refuses a core member that does not run the
+    // trafo inputs (the headless --no-trafo-cap / --no-script-replay arms).
+    // A refused member leaves the session, not the room.
+    enum class ready_refusal : uint8_t {
+        none = 0,
+        no_session_core,   // no CAP_PLACEMENT: the legacy retail path
+        no_trafo_inputs,   // WORLD_TRAFO_INPUTS without CAP_TRAFO_INPUTS
+    };
+    inline ready_refusal session_ready_refusal(uint32_t caps, uint32_t world_options) {
+        if (!(caps & CAP_PLACEMENT)) return ready_refusal::no_session_core;
+        if ((world_options & WORLD_TRAFO_INPUTS) && !(caps & CAP_TRAFO_INPUTS)) return ready_refusal::no_trafo_inputs;
+        return ready_refusal::none;
+    }
+    // The SessionEnd reason the refused member is sent (the retail mod shows
+    // it in the chat: "Physics session N over (ended by the server: ...)").
+    inline const char* ready_refusal_reason(ready_refusal refusal) {
+        switch (refusal) {
+        case ready_refusal::no_session_core:
+            return "this server runs physics sessions only for clients with the session core, and this client runs "
+                   "the legacy session path (turn it on: session core on)";
+        case ready_refusal::no_trafo_inputs:
+            return "this session runs the trafo as an input (world option trafo inputs) and "
+                   "this client cannot (it needs the session core: session core on)";
+        case ready_refusal::none: break;
+        }
+        return "";
+    }
 
     // session_assign_msg::flags (protocol 10).  STATE_FOLLOWS: a
     // SessionResyncState of tick first_tick - 1 follows on the reliable

@@ -1264,6 +1264,46 @@ TEST(PlacementWire, SessionReadyCarriesThePlacementSignature) {
     expect_rejects_every_truncation(msg);
 }
 
+// Step B9DX (the user, 2026-10-28: refuse it outright, no more compatibility):
+// the server refuses a member without the session core whatever the world
+// options; the legacy retail path's SessionReady (caps 0) is that member.
+// A core member (CAP_PLACEMENT, which both core hosts always declare) is
+// refused only by a trafo-inputs session it cannot run.
+TEST(SessionAdmission, AClientWithoutTheSessionCoreIsRefusedInEverySession) {
+    using bmmo::session::ready_refusal;
+    using bmmo::session::session_ready_refusal;
+    const uint32_t P = bmmo::session::WORLD_PLACEMENT_CLONES, T = bmmo::session::WORLD_TRAFO_INPUTS;
+    const uint32_t core = bmmo::session::CAP_PLACEMENT | bmmo::session::CAP_LEAD | bmmo::session::CAP_RESYNC_STATE;
+    for (const uint32_t options: {0u, P, T, P | T}) {
+        // The legacy retail path (physics_session_client.cpp: ready.caps = 0).
+        EXPECT_EQ(ready_refusal::no_session_core, session_ready_refusal(0u, options)) << options;
+        // Every capability but the core's mark is still not the core.
+        EXPECT_EQ(ready_refusal::no_session_core,
+                  session_ready_refusal(bmmo::session::CAP_LEAD | bmmo::session::CAP_RESYNC_STATE
+                                        | bmmo::session::CAP_TRAFO_INPUTS, options)) << options;
+        // A core member with the trafo inputs is admitted everywhere.
+        EXPECT_EQ(ready_refusal::none, session_ready_refusal(core | bmmo::session::CAP_TRAFO_INPUTS, options)) << options;
+        // A core member without them only where the trafo is not an input.
+        EXPECT_EQ((options & T) ? ready_refusal::no_trafo_inputs : ready_refusal::none,
+                  session_ready_refusal(core, options)) << options;
+    }
+    // The reasons the refused member is shown name the switch.
+    const std::string no_core = bmmo::session::ready_refusal_reason(ready_refusal::no_session_core);
+    EXPECT_NE(std::string::npos, no_core.find("session core on"));
+    EXPECT_LE(no_core.size(), bmmo::session::MAX_REASON);
+    const std::string no_trafo = bmmo::session::ready_refusal_reason(ready_refusal::no_trafo_inputs);
+    EXPECT_NE(std::string::npos, no_trafo.find("trafo inputs"));
+    EXPECT_LE(no_trafo.size(), bmmo::session::MAX_REASON);
+    EXPECT_EQ(std::string{}, bmmo::session::ready_refusal_reason(ready_refusal::none));
+    // The refusal reaches the member as a SessionEnd whose reason survives
+    // the wire whole.
+    bmmo::session_end_msg end{};
+    end.session = 4;
+    end.reason = no_core;
+    auto parsed = round_trip(end);
+    EXPECT_EQ(no_core, parsed.reason);
+}
+
 // A protocol 11 client sends no signature: its message still parses
 // (placement 0), so the server can say which protocol it runs.
 TEST(PlacementWire, AProtocol11SessionReadyParsesWithoutTheSignature) {

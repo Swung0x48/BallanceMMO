@@ -1347,10 +1347,11 @@ runs of S4 are unaffected (the arena has 0 copies either way).
   of `handle_session_ready` (no `late` condition on it) but no test or run
   covers it - S6's run starts its mismatching client at session start.
 - **Deferred** (roadmap §4 item 7's list): the wire check (needs S6's
-  re-capture); a retail two-copy run with core off and on (the SessionReady
-  bytes changed for both modes; no retail source changed); a session with
-  `placement_clones` on (its refusal of a member without the cap, and of
-  the retail core host); `--replay` record mode with the new default (no
+  re-capture); a retail two-copy run with core on (the SessionReady
+  bytes changed; no retail source changed; its core-off half removed at
+  B9DX); [a session with `placement_clones` on refusing a member without
+  the cap: removed at B9DX, whose refusal of every client without the
+  session core ran there]; `--replay` record mode with the new default (no
   retail tick record of a pooled level at hand, as at S2); a
   `--replay-session` of a client journal from a trafo-on session (its header
   now carries `world_options`).
@@ -2172,9 +2173,10 @@ host's `release_placement` differ only in when they log).
    active|idle`), `level walk seen at tick N` with N equal to a fresh server
    anchor's, its owed passes after the walk, `mechanisms=K/K`, signature
    equal.
-6. The legacy path (`session core off`) with the placement on: the session
-   ends locally with "the placement needs the session core"; with the
-   server's placement off, the legacy run 1 works as today.
+6. [Removed at step B9DX: the legacy path (`session core off`) with the
+   placement on and off. The user, 2026-10-28: the server refuses every
+   client without the session core, so no run checks the legacy path any
+   more; the refusal itself is B9DX's, `scripts/retail/b9dx_lgx`.]
 
 ### 7.6 CPU
 
@@ -2344,7 +2346,8 @@ host's `release_placement` differ only in when they log).
   6, 486-487, 0).
 - **Deferred** (roadmap §4 item 7's list): §7.5 run 1 on L8 and runs 3-6;
   §7.6 retail x86 CPU; the headless A/B arms with the new default; CPU
-  parity; three launches without a hang; a core-off retail session.
+  parity; three launches without a hang [a core-off retail session:
+  removed at B9DX].
 
 ## 8. Steps
 

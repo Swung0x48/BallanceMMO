@@ -49,7 +49,17 @@ of what the code does.
   that S10 turned the server's placement on by default and that a member
   without the core is then refused from the session: "最终应该是要开启的？
   那就全部开启", then "core在正式客户端开启吧"). `session core off` still
-  selects the legacy path for the next session until R7 deletes it.
+  selects the legacy path for the next session until R7 deletes it, and
+  every server refuses that session (next point).
+- **Clients without the session core are refused** (the user, 2026-10-28,
+  answer 7 of the seven quoted in §4 item 3, verbatim: "直接拒绝，不要继续兼容
+  非session core的客户端" - refuse it outright, stop keeping clients without
+  the session core compatible). The server refuses a physics session to a
+  member whose SessionReady does not come from the session core, whatever
+  the session's world options (step B9DX, item LGX; the core design's "As
+  built (step B9DX)"); the legacy code still compiles until R7 deletes it,
+  but no check, run or deferred item is spent on `session core off` any
+  more.
 - **Host logic is written once** (the user, 2026-10-27, asked why Stage C -
   one core - does not come first, told that the core is already shared and
   that what is still written two or three times is the per-host glue, e.g.
@@ -423,9 +433,9 @@ numbers 1-10 are unchanged.
        (`BMMO_SESSION_STALL`) is built; a 56-deep notice was taken by a
        56-tick rewind live, no resync.
      - Deferred to the final verification: a same-recipe retail run of the
-       previous build for T4 (c)'s contrast; a retail run with the session
-       core off (N2 refactored the legacy path's pin functions onto the
-       shared header); P's instrumented pair (moot).
+       previous build for T4 (c)'s contrast; P's instrumented pair (moot).
+       [A retail run with the session core off was removed at B9DX: no
+       core-off check is run any more, §2.]
    - **Swept at B2SX (2026-10-27; the user: "好的按你推荐的做，并且明确记录下来CK2有哪些改动（和之前一样）")**,
      B2SW's leftovers, one batch (the CK2 part - engine change #21 in the
      Swung0x48/CK2 fork, `docs/engine-changes.md` - was the orchestrator's,
@@ -606,6 +616,19 @@ numbers 1-10 are unchanged.
    On pass: snapshots off in the deployed configuration and in the retail
    default; only the one state transfer remains.
 
+   **Removed at step B9DX** (the user, 2026-10-28, answer 7: the server
+   refuses every client without the session core, so no check exists for
+   `session core off` any more, §2): RL1 (c)'s legacy member's floor + 3;
+   TR3b (g)'s and SP5 (b)'s and HU1 (a)'s core-off halves (their core-on
+   runs stay); TR4 (d) (R4, core off against `p3_off_P`); SP5 (c) (a
+   legacy member refused by a placement session - the refusal is now
+   B9DX's, run there, `scripts/retail/b9dx_lgx`); RO1 (e) (a core-off
+   retail run); SP10 (a)'s run 6 (the legacy path with the placement on
+   and off) and SP10 (f) (core off with the placement off); REACH + R12
+   (e) (a retail run with `session core off`); item 2's B2SW entry's
+   retail run with the session core off. The items below keep their
+   letters; each removed one says so.
+
    **Deferred to the final verification** (checks a quick-tier step did
    not run; each step appends its own, the close-out runs them all):
    - RC1 (committed 2026-10-27, quick tier; the committed tree is the
@@ -631,7 +654,7 @@ numbers 1-10 are unchanged.
      4 above the start members', `late_tick_lead_ticks` is not clamped);
      (b) also measures the resynced member's own correction in a non-stall
      resync while the server waits or lags (the held window lead + D - e);
-     (c) also a legacy (core off) member's floor + 3; (d) logs the re-step
+     (c) [a legacy (core off) member's floor + 3: removed at B9DX]; (d) logs the re-step
      depth and its apply time; and (e) a late joiner in the first
      start_base periods after the all-ready moment (the signed schedule
      tick).
@@ -646,12 +669,12 @@ numbers 1-10 are unchanged.
      joiner's reconcile); (f) the re-capture of `core_ref_t3` with the
      final binaries (the pre-RC1 set is not replayable by the merged
      build: its journals differ from tick 253, hold-last); (g) a retail
-     two-copy run of the merged x86 build, core off and on (built,
+     two-copy run of the merged x86 build, core on (built,
      CLIENT-BUILD-OK; no BallanceMMOClient source changed, but the
-     shared engine and savestate changes reach both retail modes - the
-     savestate index rewrite, and the replay-mismatch counter of
-     `rollback.hpp` now counted only while logged, the first 8; neither
-     changes a simulation result, and the core-off BAR rests on this run).
+     shared engine and savestate changes reach the core - the savestate
+     index rewrite, and the replay-mismatch counter of `rollback.hpp` now
+     counted only while logged, the first 8; neither changes a simulation
+     result; its core-off half was removed at B9DX).
    - TR4 (trafo T4, the retail host, quick tier, 2026-10-27; ran: x64 and
      x86 builds, 522 tests, GCC 29 ok, the wire check rTR3b -> rTR4 ALL
      SAME twice, ONE two-copy retail session on L11 with core on and
@@ -661,7 +684,8 @@ numbers 1-10 are unchanged.
      own echoes off) and R2b with `net lag 150` (late Trafo events inside
      input rewinds); (c) R3, a second session in one game process after a
      single-player paper trafo (sets rebuilt, no `_Trafo` object left,
-     the quiesce's 18/18); (d) R4, core off against `p3_off_P`; (e) R5, the
+     the quiesce's 18/18); (d) [R4, core off against `p3_off_P`: removed
+     at B9DX]; (e) R5, the
      wire on trafo-free captures with the retail build; (f) an out-of-reach
      trafo rejected and logged; (g) the H arms' A/B; (h) CPU parity;
      (i) three launches without a hang.
@@ -674,12 +698,12 @@ numbers 1-10 are unchanged.
      replayed matched and refused when its signature is altered, a
      protocol-11 capture refused): (a) the wire check - impossible until
      S6 re-captures the reference set at protocol 12; (b) a retail two-copy
-     run of the SP5 x86 build, core off and core on (no retail source
-     changed, but SessionReady's bytes and the journal header changed for
-     both modes; the core-off BAR rests on it); (c) a session with
-     `physics.placement_clones` on: a member without `CAP_PLACEMENT` (the
-     legacy path, the retail core host) refused out of the session, the
-     rest running; (d) SimTool `--replay` (record mode) with its new
+     run of the SP5 x86 build, core on (no retail source changed, but
+     SessionReady's bytes and the journal header changed; its core-off
+     half was removed at B9DX); (c) [a member without `CAP_PLACEMENT`
+     refused out of a placement session, the rest running: removed at
+     B9DX, whose run `b9dx_lgx` shows the refusal of every such member,
+     the rest running]; (d) SimTool `--replay` (record mode) with its new
      default on, on a retail tick record of a pooled level made with and
      without the copies; (e) a `--replay-session` of a CLIENT journal of a
      trafo-on session (SP5 writes `world_options` into the client header, so
@@ -738,10 +762,8 @@ numbers 1-10 are unchanged.
      measurement step: (A) an activation whose first execution is inside a
      replay and (B) the server and a retail client running one frame live
      in different orders - whether either changes numbers (switch to one
-     canonical order on every host only if one does); (e) a core-off retail
-     run (the legacy path gets none of RO1: its binding passes no live
-     order and leaves `resize_strings` off, but the shared headers it
-     compiles changed); (f) a GCC/Linux compile of `script_replay.hpp`'s
+     canonical order on every host only if one does); (e) [a core-off
+     retail run: removed at B9DX]; (f) a GCC/Linux compile of `script_replay.hpp`'s
      CK-side code (`linux_test_syntax.sh` does not cover it); (g) a resync
      capture with a fixed body born inside its window (the review fix-up
      keeps the deferral under a travelling blob and after a failed script
@@ -816,7 +838,8 @@ numbers 1-10 are unchanged.
      server world's new option-off check on L1-L13 (`--list-placement`,
      every anchor reached, no level holds copies); no live run - a
      byte-identical refactor): (a) a retail two-copy run of the HU1 x86
-     build, core off and on (no retail behaviour changed: the new
+     build, core on (its core-off half removed at B9DX; no retail
+     behaviour changed: the new
      `core_host.cpp` lines are explicit instantiations nothing calls, but
      the shared headers it compiles changed); (b) the solo snapshots-off
      exactness replay (no rollback or session code changed); (c) a live
@@ -836,19 +859,16 @@ numbers 1-10 are unchanged.
      (exit to the menu and a menu load, the release at the map load, and
      the builder copies' names after a leak check), 4 (a trafo copy:
      L8 row 19's paper trafo, with `trafo_inputs` on), 5 (a late retail
-     joiner, `sector manager` trace) and 6 (the legacy path, `session core
-     off`, with the placement on: the local end and the server's
-     immediate "no CAP_PLACEMENT" refusal of that member, the others
-     starting without the 8 s barrier; and off: run 1 as today), and the
+     joiner, `sector manager` trace) [run 6, the legacy path with the
+     placement on and off: removed at B9DX], and the
      retail option-off release path (`prepare_unplaced` releasing copies a
      level still holds: a session with the option off on a level that ran
      one with it on, `session reload off`), never exercised on retail;
      (b) §7.6 retail x86 (run 1 on L9 or L12 at `net lag 150`, the
      cost lines; the anchor's apply took 1.43-1.45 s on retail x86 for
      L11's 53 copies); (c) the headless A/B arms with the default now on;
-     (d) CPU parity; (e) three launches without a hang; (f) a retail
-     session core off with the placement off (the legacy BAR: its only
-     change is the local end on the option, which does not fire); (g) the
+     (d) CPU parity; (e) three launches without a hang; (f) [a retail
+     session core off with the placement off: removed at B9DX]; (g) the
      review's nit on step 8: an object-valued attribute of a hierarchy
      member naming an object outside the hierarchy (expected none; the
      remap covers H only since SP10), counted in the listing.
@@ -866,9 +886,8 @@ numbers 1-10 are unchanged.
      `trafo_inputs` session's estimator line); (c) a live run with
      patience on (the wait's patience branch is unit-tested only); (d)
      core_ref_s7's other arms (`core_ref_s6` README's "left for the final
-     verification" list, re-captured at protocol 13); (e) a retail run
-     with `session core off` (the legacy path parses the new header byte,
-     uses nothing of it). Found at R12, queued here (item 2): the cap's
+     verification" list, re-captured at protocol 13); (e) [a retail run
+     with `session core off`: removed at B9DX]. Found at R12, queued here (item 2): the cap's
      estimator over-states the per-tick cost of shallow rewinds that make
      bodies (`core_ref_s7/l8_cross`: 2.6-3.3 ms "a tick", cap 48); whether
      the births' share leaves the replay stage is a design choice

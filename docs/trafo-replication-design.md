@@ -1265,7 +1265,7 @@ style).
 | R2 two clients | `p3_two.py` (level 11, s1 P_Trafo_Stone, beams at 300/340, snapshots 2/66), with the R2 config (lifecycle_rewind and own_echoes off) | each client has both players' wood sets; every piece row bit-equal to the server's at every common checkpoint after arrival; late Trafo events made in input rewinds; reference-map digest of the retail logs equals the headless digest (I2 across CK2 implementations); far 0, resyncs 0, mism within `p3_b_P` band |
 | R2b lag | R2 with `net lag 150` on client 2 | as R2; client 2's late Trafo events all inside rewinds |
 | R3 second session | two sessions in one game process without a reload, with a single-player paper explosion 5 s before the second session's start | sets rebuilt; no `_Trafo` object of the first session left (object count); the quiesce removes the single-player pieces and wind (log counts 18/18); R2's criteria in the second session |
-| R4 core off | `r2off_run.py` | world option off; bit-equal to `p3_off_P` |
+| R4 core off | [removed at step B9DX: the server refuses every client without the session core (the user, 2026-10-28)] `r2off_run.py` | world option off; bit-equal to `p3_off_P` |
 | R5 wire | `wire_check.sh` old vs new on trafo-free captures | journals identical but header version/world options; sends identical but version, caps and world-option bytes |
 
 ### 7.5 What each check proves
@@ -2671,7 +2671,7 @@ the one-pair rule of 2026-10-27).
   - Deferred to the final verification (roadmap §4 item 11): the second
     H1 pair, H1 at 0 ms for (d), H3b, H5, H7, the re-capture of
     `core_ref_t3`; the retail two-copy run of the merged x86 build, core
-    off and on (none at TR3b: no BallanceMMOClient source changed, but the
+    on (its core-off half removed at B9DX; none at TR3b: no BallanceMMOClient source changed, but the
     shared engine and savestate changes reach both retail modes - the
     savestate index rewrite, and `rollback.hpp`'s replay-mismatch counter
     now counted only while logged, the first 8; neither changes a
@@ -2833,7 +2833,8 @@ quick tier).**  The retail host runs the trafo as an input with
     to the gate itself.
 - **Deferred to the final verification** (roadmap §4 item 11): R1-R5 beyond
   the one session (R1's solo forced arms, R2 with the R2 config and R2b at
-  150 ms, R3's second session in one process, R4 core off, R5 the wire on
+  150 ms, R3's second session in one process, [R4 core off: removed at
+  B9DX], R5 the wire on
   trafo-free captures with the retail build), an out-of-reach trafo
   rejected and logged, the H arms' A/B, CPU parity, three launches without a
   hang.

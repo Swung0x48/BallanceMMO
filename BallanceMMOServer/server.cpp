@@ -1734,45 +1734,42 @@ public:
                 return;
             }
         }
+        // Who the session admits (entity/session.hpp session_ready_refusal):
+        // out of the session, not out of the room - as the start barrier drops
+        // a silent member - and the rest go on.
+        const auto refusal = bmmo::session::session_ready_refusal(msg.caps, s.world_options);
+        const auto refuse = [&](const char* what) {
+            Printf("Physics session %u: %s refused: %s (caps %08x, world options %08x).", s.id,
+                   client_it->second.name, what, msg.caps, s.world_options);
+            const uint32_t session = s.id;
+            send_session_end(session, c, bmmo::session::ready_refusal_reason(refusal));
+            physics_session_member_left(c);
+        };
+        // Step B9DX (the user, 2026-10-28: refuse it outright, no more
+        // compatibility): a client without the session core (no CAP_PLACEMENT:
+        // the legacy retail path, session core off) is refused whatever the
+        // world options - before 2026-10-28 only a session with placement
+        // clones or trafo inputs refused it.
+        if (refusal == bmmo::session::ready_refusal::no_session_core) {
+            refuse("no session core (no CAP_PLACEMENT)");
+            return;
+        }
         // Protocol 12 (sector placement design 2.4, 5; step S5): the same
         // placement, or the two worlds do not hold the same objects.  For
         // late joiners too - unlike the anchor hashes below, the signature
-        // does not depend on time.  A member whose host does not compute it
-        // (no CAP_PLACEMENT: the legacy retail path, and the session-core
-        // hosts until their step) sends 0 and is not compared, and a session
-        // whose world option builds the copies refuses it, as a session with
-        // trafo inputs refuses a member without them.
-        if (msg.caps & bmmo::session::CAP_PLACEMENT) {
-            if (s.world_ready && msg.anchor_placement != s.anchor_placement) {
-                end_physics_session(msg.session, Sprintf("placement mismatch for %s (client %016llx, server %016llx)",
-                        client_it->second.name, static_cast<unsigned long long>(msg.anchor_placement),
-                        static_cast<unsigned long long>(s.anchor_placement)));
-                return;
-            }
-        } else if (s.world_options & bmmo::session::WORLD_PLACEMENT_CLONES) {
-            const std::string reason = "this session gives every PH row its own object (world option placement clones) "
-                                       "and this client cannot (it needs the session core with the placement: "
-                                       "session core on)";
-            Printf("Physics session %u: %s refused: no CAP_PLACEMENT (caps %08x) in a session with placement clones.", s.id,
-                   client_it->second.name, msg.caps);
-            const uint32_t session = s.id;
-            send_session_end(session, c, reason);
-            physics_session_member_left(c);
+        // does not depend on time.  Every member admitted here declares
+        // CAP_PLACEMENT and sends its signature.
+        if (s.world_ready && msg.anchor_placement != s.anchor_placement) {
+            end_physics_session(msg.session, Sprintf("placement mismatch for %s (client %016llx, server %016llx)",
+                    client_it->second.name, static_cast<unsigned long long>(msg.anchor_placement),
+                    static_cast<unsigned long long>(s.anchor_placement)));
             return;
         }
         // Protocol 11 (trafo-replication design 2.14): a session whose
         // world option makes the trafo an input refuses a member that cannot
-        // run it (the legacy retail path, session core off): out of the
-        // session, not out of the room - as the start barrier drops a silent
-        // member - and the rest go on.
-        if ((s.world_options & bmmo::session::WORLD_TRAFO_INPUTS) && !(msg.caps & bmmo::session::CAP_TRAFO_INPUTS)) {
-            const std::string reason = "this session runs the trafo as an input (world option trafo inputs) and "
-                                       "this client cannot (it needs the session core: session core on)";
-            Printf("Physics session %u: %s refused: no CAP_TRAFO_INPUTS (caps %08x) in a session with trafo inputs.", s.id,
-                   client_it->second.name, msg.caps);
-            const uint32_t session = s.id;
-            send_session_end(session, c, reason);
-            physics_session_member_left(c);
+        // run it (a core host without the trafo inputs).
+        if (refusal == bmmo::session::ready_refusal::no_trafo_inputs) {
+            refuse("no CAP_TRAFO_INPUTS in a session with trafo inputs");
             return;
         }
         if (!s.late.count(c) && s.world_ready

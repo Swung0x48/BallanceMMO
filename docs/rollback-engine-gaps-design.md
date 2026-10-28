@@ -1414,6 +1414,10 @@ The user's order places F5-F7 after R3-R5 (audit §5). Within this track, G1
   covers the pieces only (audit §5).
 - *Settle:* the user chooses. (b) is my recommendation, because it keeps one
   implementation.
+- **Superseded (2026-10-28, the user's answer 7, verbatim: "直接拒绝，不要继续兼容
+  非session core的客户端"):** the server refuses every client without the
+  session core (step B9DX, item LGX), so RL never runs a session and #7 on
+  RL is moot until R7 deletes it; Q-R2 (void since B7EG) is not run either.
 
 **9.2 `own_body_in_replay` on retail.**
 
