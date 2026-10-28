@@ -195,7 +195,7 @@ namespace bmmo::session {
                      "resync: restepped=%llu/%llu depth=%llu states=%llu stale=%llu refused=%llu deferred=%llu/%llu "
                      "snaps_dropped=%llu scripts_refused=%llu blobs_refused=%llu destroyed=%llu unexplained=%llu "
                      "unattributed=%llu unmapped=%llu unportable=%llu holds=%llu/%llu hold_max=%.0f window_rew=%llu subsumed=%llu amended=%llu resent=%llu join_wakes_withheld=%llu "
-                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f reach=%u/%u/%zu%s",
+                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f reach=%u/%u/%zu cap=%u/%.2f/%.3f/%llu wait=%u%s",
                      static_cast<int>(s.phase_), s.session_, current_tick(), s.assigned_ ? 1 : 0, s.held_ ? 1 : 0,
                      static_cast<long long>(s.frames_since_anchor_),
                      static_cast<unsigned long long>(s.inputs_sent_), static_cast<unsigned long long>(s.events_sent_),
@@ -352,6 +352,13 @@ namespace bmmo::session {
                      // session, and the history it keeps.
                      s.rollback_.thresholds().max_resim_ticks,
                      std::max(s.reach_max_, s.rollback_.thresholds().max_resim_ticks), s.rollback_.thresholds().history_ticks,
+                     // cap=cap/restore ms/replay ms per tick/rewinds (step
+                     // R12: the cap's estimator) and wait= the server's wait
+                     // in the newest relay header (protocol 13).
+                     s.rollback_.rewind_cost().cap(), s.rollback_.rewind_cost().restore_ms(),
+                     s.rollback_.rewind_cost().replay_ms_per_tick(),
+                     static_cast<unsigned long long>(s.rollback_.rewind_cost().samples()),
+                     static_cast<unsigned>(s.server_wait_),
                      trafo.c_str());
     }
 

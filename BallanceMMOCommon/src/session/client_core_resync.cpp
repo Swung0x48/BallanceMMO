@@ -562,7 +562,10 @@ namespace bmmo::session {
 
     // Late-player plan step 12 (design 2.5): the per-client reach.  Every
     // first arrival of a server tick's datagram is one sample of the relay
-    // lag; the reach is clamp(p99 over the last 4 windows + 8, 48, 120),
+    // lag; the reach is clamp(p99 over the last 4 windows + 8 + w, 48, cap)
+    // (step R12, the user's decisions: w the server's wait in the newest
+    // header, cap this client's own rewind cost's, rollback.hpp
+    // rewind_cost_meter, at most 120),
     // re-derived at every sample (from the first one: the design's starting
     // value, L_assigned + ceil(rtt/2) + 8, is that lag measured, which the
     // core has and the assignment does not carry), so it rises within the
@@ -574,7 +577,7 @@ namespace bmmo::session {
     void session_client_core::sample_reach(uint32_t lag) {
         s.reach_meter_.sample(window_index_of(current_tick()), lag);
         if (config.reach_ticks != 0 || !config.rollback) return;
-        apply_reach(s.reach_meter_.reach(), "relay lag");
+        apply_reach(s.reach_meter_.reach(s.server_wait_, s.rollback_.rewind_cost().cap()), "relay lag");
     }
 
     void session_client_core::apply_reach(uint32_t reach, const char* why) {
@@ -584,9 +587,13 @@ namespace bmmo::session {
         s.reach_max_ = std::max(s.reach_max_, reach);
         if (s.reach_logs_ < 32) {
             ++s.reach_logs_;
-            logf("reach: %u ticks at tick %u (%s: p99 %u over %llu samples of the last %zu windows; history %zu%s)", reach,
+            const auto& cost = s.rollback_.rewind_cost();
+            logf("reach: %u ticks at tick %u (%s: p99 %u over %llu samples of the last %zu windows + %u + wait %u, "
+                 "cap %u from %llu rewinds: restore %.2f ms, replay %.3f ms/tick; history %zu%s)", reach,
                  current_tick(), why, s.reach_meter_.p99(), static_cast<unsigned long long>(s.reach_meter_.samples()),
-                 bmmo::session::reach_meter::kWindows, s.rollback_.thresholds().history_ticks,
+                 bmmo::session::reach_meter::kWindows, bmmo::session::kReachMarginTicks, s.server_wait_, cost.cap(),
+                 static_cast<unsigned long long>(cost.samples()), cost.restore_ms(), cost.replay_ms_per_tick(),
+                 s.rollback_.thresholds().history_ticks,
                  s.rollback_.thresholds().history_ticks != history_before ? ", grown" : "");
         }
     }

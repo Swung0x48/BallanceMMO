@@ -988,9 +988,10 @@ TEST(SessionRemoteInputMsg, SerializeDeserializeRoundTripWithTheWindow) {
     for (int i = 0; i < 8; ++i) se.frames.push_back(relay_frame(static_cast<uint8_t>(i), -1.0f));
     still.entries.push_back(se);
     ASSERT_TRUE(still.serialize());
-    // opcode, session, tick, count, acked, held_total, epoch; then the
-    // entry's player and nframes; and the empty held section's count.
-    const size_t header = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) * 3 + sizeof(uint32_t) + 1;
+    // opcode, session, tick, count, acked, held_total, epoch, wait
+    // (protocol 13); then the entry's player and nframes; and the empty
+    // held section's count.
+    const size_t header = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) * 3 + 1 + sizeof(uint32_t) + 1;
     EXPECT_EQ(still.size(), header + 4 + 36 + 7 * 4 + 1);
 }
 
@@ -1010,7 +1011,7 @@ TEST(SessionRemoteInputMsg, RejectsTruncationBadCountsAndUnknownHeaders) {
     ASSERT_TRUE(msg.serialize());
     const std::string payload = stream_payload(msg.raw);
     const size_t count_offset = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2;
-    const size_t nframes_offset = count_offset + 1 + sizeof(uint32_t) * 3 + sizeof(uint32_t);
+    const size_t nframes_offset = count_offset + 1 + sizeof(uint32_t) * 3 + 1 + sizeof(uint32_t);   // + wait (protocol 13)
     const size_t first_header_offset = nframes_offset + 1;
     const size_t second_header_offset = first_header_offset + 4 + 36;
     auto parses = [&](size_t offset, char value) {
@@ -1075,6 +1076,7 @@ TEST(SessionRemoteInputMsg, V3RoundTripWithTheHeldSection) {
     msg.acked = 1201;
     msg.held_total = 17;
     msg.epoch = 1000;
+    msg.wait = 21;
     bmmo::session_remote_input_msg::entry e;
     e.player = 77;
     e.frames.push_back(relay_frame(5, -1.0f));
@@ -1098,6 +1100,7 @@ TEST(SessionRemoteInputMsg, V3RoundTripWithTheHeldSection) {
     EXPECT_EQ(parsed.acked, 1201u);
     EXPECT_EQ(parsed.held_total, 17u);
     EXPECT_EQ(parsed.epoch, 1000u);
+    EXPECT_EQ(parsed.wait, 21u) << "protocol 13: the recipient's wait";
     ASSERT_EQ(parsed.entries.size(), 1u);
     ASSERT_EQ(parsed.entries[0].frames.size(), 2u);
     EXPECT_FLOAT_EQ(parsed.entries[0].frames[1].cam_dir[2], -1.0f);
@@ -1125,12 +1128,14 @@ TEST(SessionRemoteInputMsg, V3RoundTripWithTheHeldSection) {
     header_only.tick = 50;
     header_only.acked = 50;
     header_only.epoch = 40;
+    header_only.wait = 255;
     auto parsed_header = round_trip(header_only);
     EXPECT_EQ(header_only.size(), bmmo::session::kRelayDatagramHeader + 1);
     EXPECT_TRUE(parsed_header.entries.empty());
     EXPECT_TRUE(parsed_header.held.empty());
     EXPECT_EQ(parsed_header.acked, 50u);
     EXPECT_EQ(parsed_header.epoch, 40u);
+    EXPECT_EQ(parsed_header.wait, 255u);
     // More than 32 records, or a back the 5 bits cannot name, are not written.
     bmmo::session_remote_input_msg many{};
     many.tick = 100;
@@ -1235,7 +1240,7 @@ TEST(TrafoWire, TheProtocolIs11AndTheBitsAreDistinct) {
 // ---------------------------------------------------------------------
 
 TEST(PlacementWire, TheProtocolIs12AndTheBitsAreDistinct) {
-    EXPECT_EQ(12u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(13u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "13 since step R12 (the relay header's wait)";
     EXPECT_EQ(1u << 0, bmmo::session::WORLD_PLACEMENT_CLONES) << "the design's bit 0";
     EXPECT_EQ(0u, bmmo::session::WORLD_PLACEMENT_CLONES & bmmo::session::WORLD_TRAFO_INPUTS);
     EXPECT_NE(0u, bmmo::session::CAP_PLACEMENT);
@@ -1251,7 +1256,7 @@ TEST(PlacementWire, SessionReadyCarriesThePlacementSignature) {
     msg.build_id = "b";
     msg.anchor_placement = 0x91a138e4fd6e7254ULL;
     auto parsed = round_trip(msg);
-    EXPECT_EQ(12u, parsed.protocol);
+    EXPECT_EQ(bmmo::session::PHYSICS_PROTOCOL_VERSION, parsed.protocol);
     EXPECT_EQ(bmmo::session::CAP_PLACEMENT | bmmo::session::CAP_LEAD, parsed.caps);
     EXPECT_EQ(0x91a138e4fd6e7254ULL, parsed.anchor_placement);
     EXPECT_EQ(0x1111u, parsed.anchor_hash);

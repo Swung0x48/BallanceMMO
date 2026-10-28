@@ -48,13 +48,14 @@ namespace bmmo::session {
     static_assert(kRelayRing > MAX_RELAY_FRAMES, "a window must fit the ring");
 
     // Bytes of one datagram's fixed part (opcode, session, tick, count, and
-    // since protocol 7 the recipient's acked, held_total and epoch) and of
+    // since protocol 7 the recipient's acked, held_total and epoch, since
+    // protocol 13 its wait) and of
     // one entry on the wire (session_remote_input_msg): the builder packs to a
     // budget of one GameNetworkingSockets packet, because an unreliable
     // message split over several packets is lost whole when any of them is,
     // and one over k_cbMaxUnreliableMsgSizeSend (16.5 KB) is quietly sent
     // reliable - the stall this relay exists to remove.
-    constexpr size_t kRelayDatagramHeader = 4 + 4 + 4 + 1 + 4 + 4 + 4;   // opcode u32, session, tick, count, acked, held_total, epoch
+    constexpr size_t kRelayDatagramHeader = 4 + 4 + 4 + 1 + 4 + 4 + 4 + 1;   // opcode u32, session, tick, count, acked, held_total, epoch, wait
     constexpr size_t kRelayDatagramBudget = 1100;
 
     // ------------------------------------------------------------ held notices
@@ -97,6 +98,9 @@ namespace bmmo::session {
         input_frame frame{};
         bool held = false;
         uint32_t source = kHeldSourceDefault;
+        // Step R12 (protocol 13): the player's wait as its relay header
+        // carries it (lateness.hpp server_wait_meter::value).
+        uint8_t wait = 0;
     };
 
     // Whether a held record goes inline rather than by reference: the client

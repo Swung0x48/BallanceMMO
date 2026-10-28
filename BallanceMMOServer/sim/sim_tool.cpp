@@ -4180,6 +4180,19 @@ namespace {
                     ++delivered;
                     return true;
                 }
+                case bmmo::session::journal_tag::wait: {
+                    // Version 7 (step R12): the server's wait in a player's
+                    // relay header from `tick` on (a client's: the header's
+                    // server tick).
+                    const uint32_t tick = in.u32();
+                    const uint32_t player = in.u32();
+                    const uint8_t wait = in.u8();
+                    if (!in.ok) break;
+                    seen_tick(tick);
+                    std::printf("tick %-8u wait player=%u %u ticks\n", tick, player, static_cast<unsigned>(wait));
+                    ++delivered;
+                    return true;
+                }
                 case bmmo::session::journal_tag::header:
                 default:
                     break;

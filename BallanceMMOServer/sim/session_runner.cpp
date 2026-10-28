@@ -475,6 +475,8 @@ namespace bmmo::sim {
             s.patience.erase(player);
             s.leads.erase(player);
             s.acked.erase(player);
+            s.waits.erase(player);
+            s.waits_journalled.erase(player);
             s.bodiless.forget(player);
             // A session waiting for readiness may now be complete.
             if (!s.running && !s.failed && s.world && !s.players.empty()
@@ -997,7 +999,21 @@ namespace bmmo::sim {
         }
         std::vector<bmmo::session::applied_input> applied;
         applied.reserve(s.inputs.size());
+        size_t member_index = 0;
         for (auto& [player, buffer]: s.inputs) {
+            // Step R12 (protocol 13): this member's wait at this step into
+            // its meter; the relay header carries the meter's value.
+            auto& wait_meter = s.waits[player];
+            wait_meter.sample(tick, member_index < s.step_waits.size() ? s.step_waits[member_index] : 0.0);
+            ++member_index;
+            const uint8_t wait = wait_meter.value();
+            if (recording) {
+                const auto journalled = s.waits_journalled.find(player);
+                if (journalled == s.waits_journalled.end() || journalled->second != wait) {
+                    s.waits_journalled[player] = wait;
+                    s.journal.wait(tick, player, wait);
+                }
+            }
             bool fresh = false;
             uint32_t source = bmmo::session::INPUT_SOURCE_DEFAULT;
             // Before take() moves the cursor past it.
@@ -1011,7 +1027,7 @@ namespace bmmo::sim {
             if (config_.patience && !fresh && !settled) s.patience[player].waiver.substituted();
             s.world->set_input(player, frame);
             s.last_frames[player] = frame;
-            applied.push_back(bmmo::session::applied_input{player, frame, !fresh, source});
+            applied.push_back(bmmo::session::applied_input{player, frame, !fresh, source, wait});
             // What the world consumed, not what arrived on the wire: the wire
             // can lose, duplicate and reorder, the world cannot.  The source
             // of a substitute is not recorded: the applied bytes are what a
@@ -1486,9 +1502,24 @@ namespace bmmo::sim {
                             if (entry.cut.size() > 256) entry.cut.pop_front();
                         }
                     }
+                    // Step R12: each member's wait at this step (lateness.hpp
+                    // server_wait_ticks), from the same view the test just
+                    // passed: how much longer it would have held this tick
+                    // for that member's missing frame.
+                    {
+                        const double to_deadline = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), at);
+                        s.step_waits.assign(members.size(), 0.0);
+                        for (size_t i = 0; i < members.size(); ++i) {
+                            bool paced = false;
+                            for (size_t k = 0; k < members.size(); ++k)
+                                if (k != i && members[k].has) { paced = true; break; }
+                            s.step_waits[i] = bmmo::session::server_wait_ticks(to_deadline, members[i], config_.patience, paced);
+                        }
+                    }
                     {
                         const auto started = clock::now();
                         step(s);
+                        s.step_waits.clear();
                         s.step_us.push_back(static_cast<uint32_t>(
                             std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count()));
                         // Every 10 s of ticks: the step's cost, the budget

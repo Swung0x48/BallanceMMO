@@ -453,6 +453,12 @@ namespace bmmo::session {
         uint64_t reach_changes_ = 0;
         uint32_t reach_max_ = 0;
         uint32_t reach_logs_ = 0;
+        // Step R12 (protocol 13): the server's wait in the newest relay
+        // header (any epoch: it is the session's step timing, not the
+        // numbering's), which the reach adds to its margin, and whether
+        // one was received (the WAIT journal record on each change).
+        uint8_t server_wait_ = 0;
+        bool server_wait_known_ = false;
         static constexpr uint32_t kRelayLagBuckets = 129;
         std::array<uint32_t, kRelayLagBuckets> relay_lag_hist_{};
         // The window: line (window_text).  The status line's counters are

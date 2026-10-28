@@ -32,6 +32,11 @@
 // with the header's WORLD_PLACEMENT_CLONES and refuses one whose signature
 // differs from a non-zero anchor_placement; an older file reads as 0
 // (unknown, not compared).
+// Version 7 (protocol 13, late-player design 2.5, step R12) adds the WAIT
+// record (tag 9): the server's wait a relay header carried (server: one per
+// member whenever the value it puts in that member's headers changes;
+// client: whenever the newest header's value it received changes).  Nothing
+// replays it; it is what sized the reach.
 //
 //   file   = magic "BMMOJRNL" (8 bytes) , u32 version , record*
 //   record = u8 tag , u32 payload_size , payload[payload_size]
@@ -50,6 +55,11 @@
 //                     u32 applied_at, u8 outcome, then the union, the portable
 //                     script record and the server's savestate as u32-sized byte
 //                     strings - enough for an offline re-step (step T1)
+//   tag 9 WAIT        (version 7, step R12): u32 tick, u32 player, u8 wait -
+//                     the server's wait in that player's relay header from
+//                     `tick` on (session_remote_input_msg::wait); `tick` is
+//                     the server's step tick, in a client's file too (the
+//                     header's msg.tick, not the client's own tick then)
 //
 // Every record but the header carries a tick as its first field, so a reader
 // groups the file by tick without understanding a single tag.  The length
@@ -85,18 +95,19 @@
 namespace bmmo::session {
     enum class journal_tag : uint8_t {
         header = 0, player = 1, input = 2, event = 3, tick = 4,
-        checkpoint = 5, note = 6, correction = 7, resync = 8
+        checkpoint = 5, note = 6, correction = 7, resync = 8, wait = 9
     };
     enum class journal_kind : uint8_t { server = 0, client = 1 };
 
     // 4: the RESYNC record (protocol 10, resync design 5, step A3).
     // 5: the HEADER's world_options and the Trafo EVENT (protocol 11, step T2).
     // 6: the HEADER's anchor_placement (protocol 12, sector placement step S5).
-    constexpr uint32_t kJournalVersion = 6;
+    // 7: the WAIT record (protocol 13, late-player step R12).
+    constexpr uint32_t kJournalVersion = 7;
     // The oldest version this reader still takes (see the format note above).
     constexpr uint32_t kJournalOldestReadable = 2;
     constexpr char kJournalMagic[8] = {'B', 'M', 'M', 'O', 'J', 'R', 'N', 'L'};
-    constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::resync);
+    constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::wait);
     // A str never exceeds this; a longer one makes the record invalid.
     constexpr size_t kJournalMaxString = 4096;
     // A checkpoint never carries more bodies than this (about 600 KB of
@@ -571,6 +582,14 @@ namespace bmmo::session {
         std::vector<journal_trafo_entry> trafo;
     };
 
+    // tag 9 WAIT (version 7, step R12): the server's wait for `player` as
+    // its relay header carries it from `tick` on.
+    struct journal_wait {
+        uint32_t tick = 0;
+        uint32_t player = 0;
+        uint8_t wait = 0;
+    };
+
     class journal_writer {
     public:
         journal_writer() = default;
@@ -756,6 +775,16 @@ namespace bmmo::session {
             record(journal_tag::resync, payload);
         }
 
+        void wait(uint32_t tick, uint32_t player, uint8_t wait) {
+            if (!writable()) return;
+            last_tick_ = tick;
+            std::string payload;
+            journal_detail::write_u32(payload, tick);
+            journal_detail::write_u32(payload, player);
+            journal_detail::write_u8(payload, wait);
+            record(journal_tag::wait, payload);
+        }
+
         void flush() {
             if (stream_.is_open()) stream_.flush();
         }
@@ -839,6 +868,7 @@ namespace bmmo::session {
         std::vector<journal_note> notes;
         std::vector<journal_correction> corrections;
         std::vector<journal_resync> resyncs;   // version 4
+        std::vector<journal_wait> waits;       // version 7
     };
 
     struct journal {
@@ -1142,6 +1172,18 @@ namespace bmmo::session {
                     auto& group = groups[r.tick];
                     group.tick = r.tick;
                     group.resyncs.push_back(std::move(r));
+                    ++delivered;
+                    return true;
+                }
+                case journal_tag::wait: {
+                    journal_wait w;
+                    w.tick = in.u32();
+                    w.player = in.u32();
+                    w.wait = in.u8();
+                    if (!in.ok) break;
+                    auto& group = groups[w.tick];
+                    group.tick = w.tick;
+                    group.waits.push_back(w);
                     ++delivered;
                     return true;
                 }

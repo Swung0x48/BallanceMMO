@@ -48,7 +48,7 @@ import sys
 import tempfile
 
 MAGIC = b"BMMOJRNL"
-VERSION = 6   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9); 4: RESYNC (protocol 10); 5: HEADER world_options, Trafo EVENT (protocol 11); 6: HEADER anchor_placement (protocol 12)
+VERSION = 7   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9); 4: RESYNC (protocol 10); 5: HEADER world_options, Trafo EVENT (protocol 11); 6: HEADER anchor_placement (protocol 12); 7: WAIT (protocol 13)
 OLDEST_READABLE = 2   # a version 2 file has no event origin: its stamp is the origin
 
 TAG_HEADER = 0
@@ -60,9 +60,10 @@ TAG_CHECKPOINT = 5
 TAG_NOTE = 6
 TAG_CORRECTION = 7
 TAG_RESYNC = 8      # version 4: a client's resync state applied as tick S (resync design 5, step A3)
+TAG_WAIT = 9        # version 7: the server's wait in a player's relay header from a tick on (late-player step R12)
 TAG_NAMES = {TAG_HEADER: "HEADER", TAG_PLAYER: "PLAYER", TAG_INPUT: "INPUT", TAG_EVENT: "EVENT",
              TAG_TICK: "TICK", TAG_CHECKPOINT: "CHECKPOINT", TAG_NOTE: "NOTE", TAG_CORRECTION: "CORRECTION",
-             TAG_RESYNC: "RESYNC"}
+             TAG_RESYNC: "RESYNC", TAG_WAIT: "WAIT"}
 
 KIND_SERVER = 0
 KIND_CLIENT = 1
@@ -431,7 +432,7 @@ class JournalTick(object):
     """Every record of one tick; a group exists when the tick has any record."""
 
     __slots__ = ("tick", "players", "inputs", "events", "has_tick", "record",
-                 "checkpoints", "notes", "corrections", "resyncs")
+                 "checkpoints", "notes", "corrections", "resyncs", "waits")
 
     def __init__(self, tick):
         self.tick = tick
@@ -444,6 +445,7 @@ class JournalTick(object):
         self.notes = []
         self.corrections = []
         self.resyncs = []
+        self.waits = []
 
     def bare(self):
         """Only a TICK record: nothing a triage pass wants to look at."""
@@ -712,6 +714,9 @@ class JournalReader(object):
         elif tag == TAG_RESYNC:
             record = self._resync(cursor)
             journal.group(record["tick"]).resyncs.append(record)
+        elif tag == TAG_WAIT:
+            record = self._wait(cursor)
+            journal.group(record["tick"]).waits.append(record)
         journal.trailing_bytes += cursor.remaining()
 
     @staticmethod
@@ -852,6 +857,10 @@ class JournalReader(object):
     @staticmethod
     def _note(cursor):
         return {"tick": cursor.u32(), "text": cursor.string()}
+
+    @staticmethod
+    def _wait(cursor):
+        return {"tick": cursor.u32(), "player": cursor.u32(), "wait": cursor.u8()}
 
     @staticmethod
     def _resync(cursor):

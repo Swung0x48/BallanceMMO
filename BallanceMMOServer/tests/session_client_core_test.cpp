@@ -1842,6 +1842,9 @@ namespace {
         auto& st = state_of(core);
         EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 48u);
         EXPECT_EQ(st.rollback_.thresholds().history_ticks, 96u);
+        // Step R12: a measured rewind cost whose cap does not bind (120).
+        st.rollback_.rewind_cost().sample(1.0, 0.1 * 48, 48);
+        ASSERT_EQ(st.rollback_.rewind_cost().cap(), 120u);
         // A copy or an older header is no sample.
         const auto deliver = [&](int frames, uint32_t lag) {
             st.frames_since_anchor_ = frames;
@@ -1865,7 +1868,7 @@ namespace {
         for (const auto& call: since(fake.calls, from))
             grown += call.find("reach: ") != std::string::npos && call.find("history 128, grown") != std::string::npos;
         EXPECT_EQ(grown, 1);
-        EXPECT_NE(core.status_text({}).find(" reach=60/60/128"), std::string::npos);
+        EXPECT_NE(core.status_text({}).find(" reach=60/60/128 cap=120/1.00/0.100/1 wait=0"), std::string::npos);
         // The raised windows age out: 4 windows of 21 bring the floor back,
         // and the history stays.
         for (int i = 120; i < 400; ++i) deliver(100 + i, 21);
@@ -1887,6 +1890,50 @@ namespace {
         ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
         EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 48u);
         EXPECT_EQ(st.reach_max_, 48u);
+    }
+
+    // Step R12 (protocol 13, the user's decisions of 2026-10-27): the newest
+    // header's wait widens the reach (p99 + 8 + w), and this client's own
+    // rewind cost caps it - a slow machine's lower.  R5's run-end case: a
+    // header lag of 43 and a wait of 21 give 72, which a 64-deep notice is
+    // inside; at step 12's 51 it resynced.
+    TEST(SessionClientCoreRelay, TheServerWaitWidensTheReachUpToTheCap) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        auto& st = state_of(core);
+        int frames = 100;
+        const auto deliver = [&](uint32_t lag, uint8_t wait) {
+            st.frames_since_anchor_ = frames++;
+            auto msg = relay_message(core.current_tick() - lag, 120);
+            msg.wait = wait;
+            core.on_session_remote_input(msg);
+        };
+        for (int i = 0; i < 60; ++i) deliver(43, 21);
+        EXPECT_EQ(st.server_wait_, 21u);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 48u) << "no rewind measured yet: the cap is the floor";
+        // x64's measured cost (3 ms, 0.46 ms a tick): cap 92.
+        st.rollback_.rewind_cost().sample(3.0, 0.46 * 48, 48);
+        deliver(43, 21);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 72u);
+        EXPECT_EQ(st.rollback_.thresholds().history_ticks, 128u);
+        EXPECT_NE(core.status_text({}).find(" reach=72/72/128 cap=92/3.00/0.460/1 wait=21"), std::string::npos)
+            << core.status_text({});
+        deliver(43, 60);                                 // a larger wait: the cap binds
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, 92u);
+        // A slow machine: 20 rewinds at 0.8 ms a tick and 6 ms of restore
+        // bring the cap down to floor(39.45 / 0.8...) and the reach with it.
+        for (int i = 0; i < 40; ++i) st.rollback_.rewind_cost().sample(6.0, 0.8 * 48, 48);
+        const uint32_t slow_cap = st.rollback_.rewind_cost().cap();
+        EXPECT_LT(slow_cap, 92u);
+        EXPECT_GE(slow_cap, 48u);
+        deliver(43, 60);
+        EXPECT_EQ(st.rollback_.thresholds().max_resim_ticks, slow_cap);
+        // A new session: the wait and the cost start over.
+        ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
+        EXPECT_EQ(st.server_wait_, 0u);
+        EXPECT_FALSE(st.server_wait_known_);
+        EXPECT_EQ(st.rollback_.rewind_cost().samples(), 0u);
     }
 
     // replay_corrected_inputs: one replay for the frame's corrections, inside
@@ -2398,7 +2445,7 @@ namespace {
         steps{core}.drain_due_events(126);
         {
             const std::vector<std::string> expected = {
-                "keep_live_cells:enter:125", "bind_world", "step", "step", "step",
+                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay", "step", "step", "step", "now:rewind_end",
                 "keep_live_cells:exit:rolled back",
                 "log:0:remote physicalize of 4: the replay did not reach tick 123, made live",
                 "mirror_entity:4:0", "make_mirror:Ball_0_BMMO_4:P#0",
@@ -2890,10 +2937,10 @@ namespace {
         }
         {
             const std::vector<std::string> expected = {
-                "keep_live_cells:enter:126", "bind_world",
+                "keep_live_cells:enter:126", "bind_world", "now:rewind_start", "now:rewind_replay",
                 "pre_step:124", "step", "pre_step:125", "step",
                 "pre_step:126", "write_body:Ball_Wood:711.000000:wake", "step",
-                "keep_live_cells:exit:rolled back"};
+                "now:rewind_end", "keep_live_cells:exit:rolled back"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
 
@@ -2928,6 +2975,7 @@ namespace {
             bound = &core;
             run_to_tick_125(core, fake);
             auto& st = state_of(core);
+            st.rollback_.rewind_cost().sample(1.0, 0.1 * 48, 48);   // step R12: a cap of 120
             st.held_floor_ = 120;
             st.frames_since_anchor_ = 61;
             ASSERT_EQ(core.current_tick(), 180u);
@@ -2965,8 +3013,10 @@ namespace {
             const auto calls = since(fake.calls, from);
             const auto steps_taken = std::count(calls.begin(), calls.end(), std::string("step"));
             EXPECT_EQ(steps_taken, 80) << "anchor 45, ticks 46..125 re-simulated";
-            ASSERT_GE(calls.size(), 4u);
-            EXPECT_EQ(calls[2], "pre_step:46");
+            ASSERT_GE(calls.size(), 6u);
+            EXPECT_EQ(calls[2], "now:rewind_start");   // step R12: the cap's clock reads
+            EXPECT_EQ(calls[3], "now:rewind_replay");
+            EXPECT_EQ(calls[4], "pre_step:46");
             EXPECT_EQ(calls.back(), "keep_live_cells:exit:rolled back");
         }
         EXPECT_EQ(state_of(core).forced_rollbacks_, 1u);
@@ -3015,11 +3065,11 @@ namespace {
             steps{core}.process_own_echoes();
             const std::vector<std::string> expected = {
                 "body_state:Ball_Wood", "mute_event_log:on", "unmake_own:Ball_Wood:125", "mute_event_log:off",
-                "keep_live_cells:enter:125", "bind_world",
+                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay",
                 "pre_step:122", "step", "pre_step:123", "step",
                 "pre_step:124", "mute_event_log:on", "make_own:Ball_Wood:P#2:124", "mute_event_log:off",
                 "log:0:own body: Ball_Wood made at (5.000,0.000,0.000) before tick 124 (replay, moved birth)", "step",
-                "pre_step:125", "step",
+                "pre_step:125", "step", "now:rewind_end",
                 "log:0:own physicalize stamped 122 moved to 124 by the server at local tick 125: rewound to 121 (0 records "
                 "changed, made again in the replay)",
                 "keep_live_cells:exit:rolled back"};
@@ -3092,8 +3142,8 @@ namespace {
             steps{core}.process_own_echoes();
             const std::vector<std::string> expected = {
                 "body_state:Ball_Wood", "mute_event_log:on", "unmake_own:Ball_Wood:125", "mute_event_log:off",
-                "keep_live_cells:enter:125", "bind_world",
-                "pre_step:122", "step", "pre_step:123", "step", "pre_step:124", "step", "pre_step:125", "step",
+                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay",
+                "pre_step:122", "step", "pre_step:123", "step", "pre_step:124", "step", "pre_step:125", "step", "now:rewind_end",
                 "log:0:own physicalize stamped 122 never made by the server at local tick 125: rewound to 121 (0 records "
                 "changed, removed from the history)",
                 "keep_live_cells:exit:rolled back"};
@@ -3165,8 +3215,8 @@ namespace {
                 if (control && !pair) {
                     expected = {
                         "body_state:Ball_Wood", "mute_event_log:on", "unmake_own:Ball_Wood:125", "mute_event_log:off",
-                        "keep_live_cells:enter:125", "bind_world",
-                        "pre_step:122", "step", "pre_step:123", "step", "pre_step:124", "step", "pre_step:125", "step",
+                        "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay",
+                        "pre_step:122", "step", "pre_step:123", "step", "pre_step:124", "step", "pre_step:125", "step", "now:rewind_end",
                         "log:0:own physicalize stamped 122 never made by the server at local tick 125: rewound to 121 (0 "
                         "records changed, removed from the history)",
                         "keep_live_cells:exit:rolled back"};
@@ -4208,7 +4258,7 @@ namespace {
         EXPECT_NE(text.find(" lag=40/30 "), std::string::npos) << "the 99th percentile: " << text;
         EXPECT_NE(text.find(" amend_failures=0 rebases=7 resyncs=0/0 "), std::string::npos) << text;
         EXPECT_NE(text.find(" deferred=0 activations=8 scr=0/0/0/0/9 t_rest="), std::string::npos) << text;
-        const std::string tail_text = "input: reports=4 starved=1 (25%) worst=0 lead=0.0 reach=48/48/96";
+        const std::string tail_text = "input: reports=4 starved=1 (25%) worst=0 lead=0.0 reach=48/48/96 cap=48/0.00/0.000/0 wait=0";
         ASSERT_GE(text.size(), tail_text.size());
         EXPECT_EQ(text.substr(text.size() - tail_text.size()), tail_text) << "the last field, not cut off";
         EXPECT_GT(text.size(), 256u) << "past the first buffer, whole";
@@ -4695,12 +4745,12 @@ namespace {
         steps{core}.rewind_for_sectors();
         {
             const std::vector<std::string> expected = {
-                "keep_live_cells:enter:125", "bind_world",
+                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay",
                 "replayed:122", "sector_manager_active:off", "set_union_pass:122:3",
                 "log:0:sector +3 at tick 122 (player 4, stamped 122), running: 1 3 (re-derived in a rewind at live tick 125)",
                 "replayed:123", "sector_manager_active:off",
                 "replayed:124", "sector_manager_active:off",
-                "replayed:125", "sector_manager_active:off",
+                "replayed:125", "sector_manager_active:off", "now:rewind_end",
                 "keep_live_cells:exit:rolled back", "sector_cell_adopted",
                 "log:0:remote player 4 entered sector 3, stamped for tick 122 (late by 4: rewound to 121)"};
             EXPECT_EQ(since(fake.calls, from), expected);
@@ -4882,7 +4932,7 @@ namespace {
             steps{core}.drain_due_events(126);
             steps{core}.rewind_for_sectors();
             const std::vector<std::string> expected = {
-                "keep_live_cells:enter:125", "bind_world", "keep_live_cells:exit",
+                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay", "now:rewind_end", "keep_live_cells:exit",
                 "log:0:remote player 4 entered sector 3, stamped for tick 122 (LATE: the server started it already)",
                 "log:0:late sector stamp for tick 122 is outside the rollback history at local tick 125: stamped live, resync",
                 "now:resync_limiter", "send:0",

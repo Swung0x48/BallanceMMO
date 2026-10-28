@@ -455,7 +455,7 @@ TEST(SessionJournal, ResyncRecordRoundTrip) {
     EXPECT_EQ(300u, r.scripts.size());
     EXPECT_EQ(70003u, r.savestate.size());
     EXPECT_EQ("end", r.savestate.substr(70000));
-    EXPECT_EQ(6u, kJournalVersion) << "6: the HEADER's anchor placement (protocol 12)";
+    EXPECT_EQ(7u, kJournalVersion) << "7: the WAIT record (protocol 13)";
     EXPECT_EQ(2u, kJournalOldestReadable) << "version 2, 3 and 4 files still read";
 }
 
@@ -1166,6 +1166,34 @@ TEST(SessionJournal, TrafoEventsOfOneTickAreKeptApartByTheirFlags) {
     EXPECT_EQ(bmmo::session::TRAFO_RESET, left[240][1]);
     ASSERT_EQ(1u, left[380].size());
     EXPECT_EQ(0, left[380][0]);
+}
+
+// Journal v7 (protocol 13, late-player step R12): the WAIT record - the
+// server's wait a player's relay header carried from a tick on - reads back
+// into its tick's group, beside the other records of that tick.
+TEST(SessionJournal, V7WaitRecord) {
+    const temp_dir dir("v7_wait");
+    const auto path = dir.file("session.bmjr");
+    {
+        journal_writer w;
+        std::string error;
+        ASSERT_TRUE(w.open(path, make_header(), 0, error)) << error;
+        w.wait(130, 7, 21);
+        w.tick(130, bmmo::physics::world_hash{}, 0);
+        w.wait(400, 7, 255);
+        w.wait(400, 8, 0);
+        w.close();
+    }
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_EQ(0u, out.unknown_records);
+    EXPECT_TRUE(out.warning.empty()) << out.warning;
+    std::vector<std::tuple<uint32_t, uint32_t, unsigned>> waits;
+    for (const auto& group: out.ticks)
+        for (const auto& w: group.waits) waits.emplace_back(w.tick, w.player, static_cast<unsigned>(w.wait));
+    const std::vector<std::tuple<uint32_t, uint32_t, unsigned>> expected{{130, 7, 21}, {400, 7, 255}, {400, 8, 0}};
+    EXPECT_EQ(expected, waits);
 }
 
 // Journal v6 (protocol 12, sector placement design 5, step S5): the anchor's

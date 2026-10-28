@@ -1102,8 +1102,16 @@ public:
         // and the held section are the recipient's own, and a solo player,
         // or one whose window happens to be empty, needs them as much as
         // anyone (the header-only datagram is 26 bytes).
+        // Protocol 13 (step R12): the recipient's wait, as the runner
+        // measured it for this step; 0 for a member the step did not drive.
+        const auto wait_of = [&applied](HSteamNetConnection m) -> uint8_t {
+            for (const auto& a: applied)
+                if (static_cast<HSteamNetConnection>(a.player) == m) return a.wait;
+            return 0;
+        };
         for (const auto m: s.members) {
             auto& n = s.notices[m];
+            const uint8_t wait = wait_of(m);
             size_t trimmed = 0;
             const std::optional<uint32_t> held_from = n.assigned ? std::optional<uint32_t>(n.epoch) : std::nullopt;
             for (auto& datagram: s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, is_member, held_from,
@@ -1114,6 +1122,7 @@ public:
                 msg.acked = n.acked;
                 msg.held_total = n.held_total;
                 msg.epoch = n.epoch;
+                msg.wait = wait;
                 for (auto& w: datagram.entries) {
                     bmmo::session_remote_input_msg::entry e;
                     e.player = w.player;

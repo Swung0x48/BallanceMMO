@@ -24,6 +24,45 @@
 
 using namespace bmmo::session;
 
+// Step R12 (protocol 13, the user's decision of 2026-10-27): a member's wait
+// at a step is how much longer the step test would have held the tick for
+// its missing frame - patience off, the step's earliness (deadline - the step,
+// in ticks); patience on, until its patience (minus its lead), nothing while
+// it is waived and another member's frame paces the tick; never negative.
+TEST(ServerWait, TheStepTestsHoldForAMissingFrame) {
+    patience_member p;
+    p.lead = 5.0;
+    EXPECT_DOUBLE_EQ(server_wait_ticks(21.4, p, false, true), 21.4) << "patience off: until the deadline";
+    EXPECT_DOUBLE_EQ(server_wait_ticks(-3.0, p, false, true), 0.0) << "stepped late: no wait";
+    EXPECT_DOUBLE_EQ(server_wait_ticks(21.4, p, true, true), 16.4) << "patience on: until its patience";
+    EXPECT_DOUBLE_EQ(server_wait_ticks(4.0, p, true, true), 0.0);
+    p.waived = true;
+    EXPECT_DOUBLE_EQ(server_wait_ticks(21.4, p, true, true), 0.0) << "waived and paced: not waited for";
+    EXPECT_DOUBLE_EQ(server_wait_ticks(21.4, p, true, false), 16.4) << "the pacing floor: waited for";
+    EXPECT_DOUBLE_EQ(server_wait_ticks(21.4, p, false, true), 21.4) << "the waiver is patience's";
+}
+
+// The header's value: the largest wait of the last 4 windows of 60 server
+// ticks, rounded up, at most 255; a window ages out once 4 newer ones exist.
+TEST(ServerWait, TheHeaderCarriesTheLargestOfFourWindows) {
+    server_wait_meter m;
+    EXPECT_EQ(m.value(), 0u);
+    for (uint32_t t = 600; t < 660; ++t) m.sample(t, t == 630 ? 21.2 : 20.0);
+    EXPECT_EQ(m.value(), 22u) << "21.2 rounded up";
+    m.sample(660, 0.0);                       // a substituted step: at the deadline
+    EXPECT_EQ(m.value(), 22u) << "a deadline step's own 0 says nothing about the wait";
+    for (uint32_t t = 661; t < 840; ++t) m.sample(t, 6.7);
+    EXPECT_EQ(m.value(), 22u) << "window 10 still counts at 13";
+    m.sample(840, 6.7);                       // window 14: 10 is out
+    EXPECT_EQ(m.value(), 7u);
+    m.sample(700, 30.0);                      // window 11, still inside
+    EXPECT_EQ(m.value(), 30u);
+    m.sample(500, 90.0);                      // window 8: aged out, dropped
+    EXPECT_EQ(m.value(), 30u);
+    m.sample(841, 400.0);
+    EXPECT_EQ(m.value(), 255u) << "saturated";
+}
+
 namespace {
     constexpr double kTickMs = 1000.0 / 66.0;
     constexpr uint32_t kInputDelay = 16;

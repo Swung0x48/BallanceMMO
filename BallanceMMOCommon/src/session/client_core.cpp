@@ -183,6 +183,15 @@ namespace bmmo::session {
         s.reach_meter_.clear();
         s.reach_changes_ = 0;
         s.reach_logs_ = 0;
+        // Step R12: the session's own rewinds measure its cap (its level's
+        // world is what a rewind restores and replays), and its server's
+        // headers say the wait.
+        s.rollback_.rewind_cost().clear();
+        // Its samples are the flow's clock reads (the cap decides the
+        // reach): the headless client captures them, retail reads its clock.
+        s.rollback_.set_cost_clock([this](clock_site site) { return platform_.now(site); });
+        s.server_wait_ = 0;
+        s.server_wait_known_ = false;
         s.rollback_.thresholds().history_ticks = bmmo::session::rollback_thresholds{}.history_ticks;
         s.rollback_.set_reach(config.reach_ticks ? std::clamp(config.reach_ticks, bmmo::session::kReachFloorTicks,
                                                               bmmo::session::kReachCapTicks)

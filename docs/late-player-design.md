@@ -984,6 +984,144 @@ run-end resync (core design, "As built (step R5)": relay lag 41-43, the
 notice 64 deep) gives p99 43 -> reach 51 < 64. Not changed here; it is the
 user's choice (roadmap §2, the user's rule of 2026-10-27).
 
+**As built (step R12, the user's two decisions of 2026-10-27).** The margin
+is 8 + the server's wait, the wait is on the wire, and the cap is estimated
+at run time from the client's own rewind cost:
+`reach = clamp(p99 + 8 + w, 48, cap)`, `cap = clamp(floor((B - restore_ms) /
+replay_ms_per_tick), 48, 120)`, B = 3 ticks (`kReachHitchBudgetMs` =
+3000 / 66 ms, the user's "3 帧，约 45 ms").
+- **w, defined from the runner's step test** (`lateness.hpp`
+  `server_wait_ticks`): a member's wait at a step is how much longer the
+  test would have held that tick for its missing frame - patience off,
+  `deadline(T) - the instant the runner stepped T` in ticks (the step's
+  earliness; what REACH called the session's smallest slack, since a step
+  with every frame in happens at the latest arrival); patience on,
+  `to_deadline - lead` of that member, 0 while it is waived and another
+  member's frame paces the tick; never negative (a step at or after the
+  deadline - a substituted tick, a catch-up - waited for nothing). `run()`
+  computes it per member from the same `patience_members` view the test
+  just passed (`session_state::step_waits`); `step()` feeds each member's
+  `server_wait_meter` and puts its value on `applied_input::wait`.
+- **On the wire** (protocol 13, `entity/session.hpp`): the relay header
+  ends with `wait u8` after `epoch` (`session_remote_input_msg`; the header
+  is 26 bytes, `kRelayDatagramHeader`), the recipient's own: the largest
+  wait of its last 4 windows of 60 server ticks, rounded up, at most 255.
+  The largest, not a percentile: a notice's own datagram (stepped at the
+  deadline) carries a wait of 0 for its tick, so the value must come from
+  the steps around it; the 4 windows match the client's p99 span.
+- **Journal v7** (`journal.hpp`): tag 9 WAIT `u32 tick, u32 player, u8
+  wait`, written by the server when a member's header value changes and by
+  the core when the newest received header's value changes; read into
+  `journal_tick::waits`, `journal_trace.py` reads it, `e0_compare.py
+  --live` leaves it out (the server's step timing, like a RECEIVED
+  checkpoint's place). Nothing replays it.
+- **The core** (both hosts, one copy): `note_held_section` takes the
+  newest header's wait (any epoch) before the lag sample; `sample_reach`
+  asks `reach_meter::reach(wait, cap)`; the `reach:` line names the p99,
+  the margin, the wait, the cap and its averages; the status line's
+  `reach=now/deepest/history` is followed by `cap=cap/restore ms/replay ms
+  per tick/rewinds wait=w`. The estimator is `rollback.hpp`
+  `rewind_cost_meter`, fed by `restore_and_replay`'s timer (every rewind
+  that replayed a tick: input, own, lifecycle, snapshot, forced, a
+  resync's re-step): the restore an exponential average (weight 1/16), the
+  replay per tick as decayed sums of ms and of ticks (a 2-tick rewind
+  counts less than a 48-tick one). **Before the first sample the cap is
+  48**: without a measurement no deeper claim than every client made
+  before step 12 (and a client that never rewinds needs no deeper reach);
+  the first rewind, of any depth, is a sample. A session starts its meter
+  and its wait over (its level's world is what its rewinds cost). The
+  history becomes 128 when the reach passes 48, as at step 12. The
+  headless `--reach N` still pins the reach (cap and wait ignored).
+
+Verified (quick tier, 16.5 minutes of wall time with the reference
+re-capture, about 1.5 over the 15): x64 BUILD-OK, x86 CLIENT-BUILD-OK (the
+client target's 29 objects cleaned first: struct layouts changed), Arch
+ARCH-BUILD-OK, GCC syntax 29/29, `BallanceMMOMessageTests` 548/548 (new:
+`ServerWait.TheStepTestsHoldForAMissingFrame`,
+`ServerWait.TheHeaderCarriesTheLargestOfFourWindows`,
+`RollbackEngine.ReachAddsTheServerWaitUpToTheCap`,
+`RollbackEngine.RewindCostCapFromTheClientsOwnRewinds` - a slower machine's
+samples give 69 against 92, the trafo-on cost 48 -,
+`SessionJournal.V7WaitRecord`,
+`SessionClientCoreRelay.TheServerWaitWidensTheReachUpToTheCap`; and every
+rewind of the 120-deep lockstep test is a cost sample). The stall recipe
+(REACH's `reach_stall.sh` on rR12, 4 clients, 150 ms, snapshots off, client
+0 `--stall-ms 600:450`, `maps/arena-test/r12_stall`): the server's journal
+has each member's wait 22 at 27, 23 from 118 to the end of play (0 once the
+clients left); every client read 22 then 23; the reach was 52-53 (p99 21-22
++ 8 + 23) and 73 for four windows after the stall's burst (p99 42), where
+step 12 gave 48 and 50; client 0's 8 substituted ticks were all taken
+ahead (subst 8/0/8), no notice past the reach, no resync, no rebase; caps
+105-120 (restore 0.4-1.0 ms, 0.23-0.42 ms a tick); the server journal
+replays 3528/3528. The retail two-copy run on L11 (`work/R12/r12_retail.py`,
+the core on by default, placement on, snapshots off, `net lag 150` both
+ways on both, the key record, client 1 `session force-rollback 30:48`,
+`scripts/retail/r12_retail`): both clients assigned in 11.0 s, wait 22 on
+the wire (21 at 28, 22 from 38; 23..31 in the last ticks after `net lag 0`,
+the slack growing by the lag), reach 52-53 with history 128 from tick 91,
+**the estimator's cap on retail x86 85-94** (client 1, 167 rewinds incl.
+143 forced 48 deep: 94, restore 0.64 ms, 0.476 ms a replayed tick; client
+2, 39 natural rewinds: 90, 0.64 ms, 0.493 ms), no resync, 15/15
+mechanisms; **the retail x86 memory at history 128**: Player.exe private
+bytes 150.3 / 152.2 MB before the session, 186.6-192.5 MB during it (peak
+working set 193.5 MB), flat over the 60 s - the whole session state,
+history included, is under 43 MB, so the 32 extra records are at most about
+11 MB of a 32-bit process; the server journal replays 4353/4353 and both
+client journals read as v7 with their WAIT records. The protocol bump makes
+every `core_ref_s6` capture refuse: the set is re-captured as
+`maps/arena-test/core_ref_s7` (its README; the same five arms and recipes;
+`wire_check.sh` defaults to it) and `wire_check.sh - rR12 rR12w` is ALL SAME
+(12/12 sends, 12/12 journals IDENTICAL); `solo1` replayed BYTE-IDENTICAL,
+`solo1` vs `solo2` `--live` IDENTICAL.
+
+Found: **the estimator over-states the per-tick cost of shallow rewinds
+that make bodies.** In `core_ref_s7/l8_cross` (0 ms) every client's 7-9
+rewinds were lifecycle rewinds whose replay stage is mostly births'
+bookkeeping: 2.6-3.3 ms "a tick", cap 48 (one client 70). It changed
+nothing there (p99 + 8 + 13 is under 48) and deeper rewinds outweigh them
+(the replay is weighted by ticks), but a session whose first rewinds are a
+few shallow births keeps a low cap until deeper ones come. Not changed
+here: excluding the births' share from the replay stage is a design choice
+(the cost is real, it is the per-tick model that does not fit it); queued
+under roadmap §4 item 2 with the step's deferred checks.
+
+Review round (the step's review, two should-fix findings, both fixed):
+- **The cap's samples are the flow's clock reads.** The cap decides
+  `max_resim_ticks` (a rewind past it is refused, a held notice past the
+  reach resyncs), so a cap measured with the replay's own clock made a
+  capture replay exact only while the cap did not bind (the replays' caps
+  differed from the live ones by a few ticks). Per the core design's 5.2
+  (5) rule - every wall-clock read the flow makes goes through `now(site)` -
+  `restore_and_replay`'s timer now reads three new sites for the meter
+  (`clock_site.hpp` `rewind_start`, `rewind_replay`, `rewind_end`; the
+  engine's `set_cost_clock`, which the core sets to the platform's `now`
+  at every session start; the stats' `t_rest` / `t_rep` keep their own
+  reads, so a replay still measures its own cost): the headless client
+  captures them and a capture replay takes the captured ones; retail reads
+  its clock. Nothing is journalled for it (the capture carries it). The
+  three reads are part of the call order the core tests pin (eight
+  `session_client_core_test` lists gained them). The captures change, so
+  `core_ref_s7` was captured again with the final binaries (rR12b; the
+  first R12 set, which the final binaries cannot replay, was set aside);
+  every replay's cap, reach and `far` equal the live ones (12/12 status
+  lines, every `reach:` line identical), `wire_check.sh - rR12b rR12bw`
+  ALL SAME, `solo1` BYTE-IDENTICAL (5954 records), `solo1` vs `solo2`
+  `--live` IDENTICAL.
+- **`SimTool --replay-session --list` reads the WAIT record** (it stopped
+  at the first one: "record 64 (tag 9) does not parse"): `r12_stall`'s
+  client 0 and server journals list in full (dropped 0; 2 and 16 WAIT
+  lines). A client's WAIT record is filed under the header's server tick
+  (`journal.hpp` says so).
+- **The cap before the first sample is 48, and its consequence**: the
+  user's "even a first, unwarned stall is covered" holds once the client
+  has rewound once. A client that has not rewound yet (a solo player, the
+  first seconds of a session) keeps the reach at 48 whatever p99 + 8 + w
+  asks; at about 200 ms (h about 28, w 23) its first stall's notice would be
+  h + w + 1 = 52 deep and resync. Not changed: the pre-sample value was
+  delegated to this step ("state which and why") and 48 is what every
+  client claimed before step 12; a different starting value (for example
+  the x64 measurement's 90) is the user's to choose.
+
 ### 2.6 The session stops waiting for one player
 
 Part one makes a late frame harmless to the server's state. It does not stop
@@ -2440,7 +2578,16 @@ last sector is entered.
    x64 headless client, 0.45 ms per replayed tick, about 150 ms with the
    trafo inputs on; a 48-deep one 21-32 ms. The cap - 120, a lower one such
    as 72, or one tied to the trafo inputs - is open, the user's choice;
-   retail x86 and the trafo-on cost are not measured.)
+   retail x86 and the trafo-on cost are not measured.) **Resolved
+   (2026-10-27, the user's decisions, built at step R12, §2.5 "As built
+   (step R12)")**: the cap is estimated at run time by every client from
+   its own rewind cost, `clamp(floor((B - restore_ms) / replay_ms_per_tick),
+   48, 120)` with B = 3 ticks (about 45 ms), and the margin is 8 + the
+   server's wait, which the server writes into every relay header
+   (protocol 13). Measured: retail x86 85-94, x64 headless 104-120. Until
+   a client's first rewind the cap is 48 (no measurement yet), so a first
+   stall deeper than 48 before any rewind still resyncs (§2.5, review
+   round).
 2. **Session-wide sizing.** Should `input_delay` and the start base be sized
    from a robust statistic rather than the worst ping, now that part two can
    lift one slow member on its own? The principles freeze them during a

@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "../entity/session.hpp"
+#include "clock_site.hpp"
 #include "../message/message_utils.hpp"
 #include "../message/session_snapshot_msg.hpp"
 #include "../physics/physics_rt_api.h"
@@ -507,11 +508,77 @@ namespace bmmo::session {
     // kLeadSectorReachTicks, the server's Sector bound, stays at it: a
     // client's reach is never below it), the cap the deepest reach the sent
     // ring resolves (input_relay.hpp kHeldMaxReachTicks).
+    //
+    // Step R12 (late-player design 2.5 "As built (step R12)", the user's two
+    // decisions of 2026-10-27) changes the margin and the cap:
+    //     reach = clamp(p99 + 8 + w, 48, cap)
+    // w the server's wait in the newest relay header (protocol 13,
+    // lateness.hpp server_wait_meter: a notice of a substituted tick is
+    // h + w + 1 deep, h the header lag sampled here), and cap this client's
+    // own rewind cost's (rewind_cost_meter below), never above 120.
     constexpr uint32_t kReachFloorTicks = 48;
     constexpr uint32_t kReachCapTicks = 120;
     constexpr uint32_t kReachMarginTicks = 8;
     constexpr size_t kReachHistoryTicks = 128;
     static_assert(kReachCapTicks + 1 <= kReachHistoryTicks, "the deepest reach's anchor must stay in the history");
+
+    // Step R12, the cap (the user's decision of 2026-10-27: "estimate the
+    // best value at run time"; the hitch budget B: "3 帧，约 45 ms" - three
+    // ticks): the deepest rewind this client can do inside B,
+    //     cap = clamp(floor((B - restore_ms) / replay_ms_per_tick), 48, 120),
+    // from moving averages of its own rewinds (rollback_engine's timer: the
+    // restore stage and the replay stage of every rewind that replayed a
+    // tick - input, own, lifecycle, snapshot, forced, a resync's re-step).
+    // The replay is weighted by ticks (decayed sums of ms and of ticks, so a
+    // 2-tick rewind does not count as much as a 48-tick one); the weight of
+    // the newest sample is 1/16.  Before the first sample the cap is the
+    // floor: no measurement, no deeper claim than every client made before
+    // step 12 (and a client that never rewinds needs no deeper reach).
+    constexpr double kReachHitchBudgetMs = 3.0 * 1000.0 / 66.0;   // B: 3 ticks, 45.45 ms
+    class rewind_cost_meter {
+    public:
+        static constexpr double kWeight = 1.0 / 16.0;
+
+        void clear() { *this = rewind_cost_meter{}; }
+
+        // One rewind: its restore stage, its replay stage, the ticks it
+        // replayed (a rewind that replayed none is no sample).
+        void sample(double restore_ms, double replay_ms, uint32_t ticks) {
+            if (ticks == 0) return;
+            if (!samples_) {
+                restore_ms_ = restore_ms;
+                replay_ms_sum_ = replay_ms;
+                replay_ticks_sum_ = static_cast<double>(ticks);
+            } else {
+                restore_ms_ += kWeight * (restore_ms - restore_ms_);
+                replay_ms_sum_ = (1.0 - kWeight) * replay_ms_sum_ + replay_ms;
+                replay_ticks_sum_ = (1.0 - kWeight) * replay_ticks_sum_ + static_cast<double>(ticks);
+            }
+            ++samples_;
+        }
+
+        uint64_t samples() const { return samples_; }
+        double restore_ms() const { return restore_ms_; }
+        double replay_ms_per_tick() const { return replay_ticks_sum_ > 0.0 ? replay_ms_sum_ / replay_ticks_sum_ : 0.0; }
+
+        uint32_t cap() const {
+            if (!samples_) return kReachFloorTicks;
+            const double per_tick = replay_ms_per_tick();
+            const double room = kReachHitchBudgetMs - restore_ms_;
+            if (room <= 0.0) return kReachFloorTicks;
+            if (per_tick <= 0.0) return kReachCapTicks;
+            const double ticks = std::floor(room / per_tick);
+            if (ticks >= static_cast<double>(kReachCapTicks)) return kReachCapTicks;
+            if (ticks <= static_cast<double>(kReachFloorTicks)) return kReachFloorTicks;
+            return static_cast<uint32_t>(ticks);
+        }
+
+    private:
+        uint64_t samples_ = 0;
+        double restore_ms_ = 0.0;
+        double replay_ms_sum_ = 0.0;
+        double replay_ticks_sum_ = 0.0;
+    };
 
     // The relay lag samples of the last kWindows windows (a window is the
     // core's window: line, kWindowTicks of own ticks), as histograms, and
@@ -563,10 +630,12 @@ namespace bmmo::session {
             return kBuckets - 1;
         }
 
-        // The reach those samples ask for: the floor without any.
-        uint32_t reach() const {
+        // The reach those samples ask for (step R12: p99 + 8 + the server's
+        // wait, at most `cap`, never below the floor): the floor without any.
+        uint32_t reach(uint32_t wait = 0, uint32_t cap = kReachCapTicks) const {
             if (!samples()) return kReachFloorTicks;
-            return std::clamp(p99() + kReachMarginTicks, kReachFloorTicks, kReachCapTicks);
+            const uint32_t top = std::clamp(cap, kReachFloorTicks, kReachCapTicks);
+            return std::clamp(p99() + kReachMarginTicks + wait, kReachFloorTicks, top);
         }
 
     private:
@@ -976,21 +1045,44 @@ namespace bmmo::session {
                 for (const auto& [entity, nav]: rs->navs) at->navs[entity] = nav;
             // Times the two stages for the stats: everything up to the replay
             // loop is the restore, the rest is the replay.
+            // Step R12: and feeds the cap's meter, the stages in ms and the
+            // ticks this rewind replayed.  The cap decides max_resim_ticks,
+            // so the meter's times are the flow's wall-clock reads
+            // (cost_clock_, clock_site rewind_*: the headless client
+            // captures them and a capture replay takes the captured ones);
+            // the stats keep their own reads (a replay's t_rest / t_rep are
+            // the replay's own cost).
             struct rewind_timer {
+                using time_point = std::chrono::steady_clock::time_point;
                 rollback_stats& stats;
-                std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now(), split{};
+                rewind_cost_meter& cost;
+                const std::function<time_point(clock_site)>& clock;
+                uint64_t resim_before = stats.resim_ticks;
+                time_point started = std::chrono::steady_clock::now(), split{};
+                time_point cost_started = read(clock_site::rewind_start), cost_split{};
                 bool have_split = false;
-                void replay_begins() { split = std::chrono::steady_clock::now(); have_split = true; }
+                time_point read(clock_site site) const { return clock ? clock(site) : std::chrono::steady_clock::now(); }
+                void replay_begins() {
+                    split = std::chrono::steady_clock::now();
+                    cost_split = read(clock_site::rewind_replay);
+                    have_split = true;
+                }
                 ~rewind_timer() {
                     const auto ended = std::chrono::steady_clock::now();
-                    const auto us = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+                    const auto us = [](time_point a, time_point b) {
                         return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
                     };
                     stats.restore_us += us(started, have_split ? split : ended);
                     if (have_split) stats.replay_us += us(split, ended);
                     stats.rewind_us_max = std::max(stats.rewind_us_max, us(started, ended));
+                    if (have_split) {
+                        const auto cost_ended = read(clock_site::rewind_end);
+                        cost.sample(static_cast<double>(us(cost_started, cost_split)) / 1000.0,
+                                    static_cast<double>(us(cost_split, cost_ended)) / 1000.0,
+                                    static_cast<uint32_t>(stats.resim_ticks - resim_before));
+                    }
                 }
-            } timer{stats_};
+            } timer{stats_, rewind_cost_, cost_clock_};
             const bool frozen = world.simulating && !world.simulating();
             const auto generation_now = [&](const std::string& entity) -> uint32_t {
                 for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
@@ -2034,6 +2126,15 @@ namespace bmmo::session {
             return at && at->have_scripts ? &at->scripts : nullptr;
         }
         rollback_thresholds& thresholds() { return thresholds_; }
+        // Step R12: this client's rewind cost and the cap it gives, and the
+        // clock its samples read (the session core passes the platform's
+        // `now`, so a capture replay measures the live cost; unset,
+        // steady_clock).
+        rewind_cost_meter& rewind_cost() { return rewind_cost_; }
+        const rewind_cost_meter& rewind_cost() const { return rewind_cost_; }
+        void set_cost_clock(std::function<std::chrono::steady_clock::time_point(clock_site)> clock) {
+            cost_clock_ = std::move(clock);
+        }
         // Late-player plan step 12: the per-client reach (reach_meter, or a
         // pinned value).  max_resim_ticks takes `reach`; the history grows to
         // kReachHistoryTicks once the reach exceeds the floor and stays
@@ -2604,6 +2705,8 @@ namespace bmmo::session {
         };
         std::vector<moved_birth> moved_births_;
         rollback_stats stats_;
+        rewind_cost_meter rewind_cost_;   // step R12: the cap's moving averages
+        std::function<std::chrono::steady_clock::time_point(clock_site)> cost_clock_;   // step R12: its samples' clock
         // A live record whose capture waits for its amend (record's
         // capture_now false).
         bool awaiting_capture_ = false;

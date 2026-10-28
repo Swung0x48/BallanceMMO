@@ -460,6 +460,7 @@ namespace {
         uint64_t refused = 0;           // rewinds the engine refused (anchor not recorded)
         uint64_t savestates_restored = 0;
         uint64_t savestate_failures = 0;
+        uint64_t cost_samples = 0;      // step R12: rewinds the cap's meter took
     };
 
     // Two identical savestate worlds fed identical inputs: the control is
@@ -507,6 +508,7 @@ namespace {
         }
         compare(kTicks, "at the end, tick");
         outcome.savestates_restored = engine.stats().savestates_restored;
+        outcome.cost_samples = engine.rewind_cost().samples();
         outcome.savestate_failures = engine.stats().savestate_failures;
         return outcome;
     }
@@ -3311,6 +3313,7 @@ TEST(RollbackEngine, PerClientReach120RewindsDeepBitExact) {
             EXPECT_TRUE(deep.exact) << deep.first_difference;
             EXPECT_EQ(deep.savestates_restored, deep.rewinds);
             EXPECT_EQ(deep.savestate_failures, 0u);
+            EXPECT_EQ(deep.cost_samples, deep.rewinds) << "step R12: every rewind that replayed is a cost sample";
 
             const lockstep_outcome fixed = run_lockstep(depth, every, true);
             EXPECT_EQ(fixed.rewinds, 0u);
@@ -3363,6 +3366,77 @@ TEST(RollbackEngine, ReachMeterIsTheRelayLagP99OverFourWindows) {
     meter.clear();
     EXPECT_EQ(meter.samples(), 0u);
     EXPECT_EQ(meter.reach(), 48u);
+}
+
+// Step R12 (late-player design 2.5, the user's decisions of 2026-10-27): the
+// reach is clamp(p99 + 8 + w, 48, cap) - w the server's wait from the relay
+// header, cap this client's own rewind cost's.  R5's run-end case: p99 43
+// and a notice 64 deep (w 21 at the arena) - 72 covers it, 51 did not.
+TEST(RollbackEngine, ReachAddsTheServerWaitUpToTheCap) {
+    using bmmo::session::reach_meter;
+    reach_meter meter;
+    EXPECT_EQ(meter.reach(21, 120), 48u) << "no samples: the floor, whatever the wait";
+    for (int i = 0; i < 60; ++i) meter.sample(10, 43);
+    EXPECT_EQ(meter.reach(), 51u) << "the margin alone (step 12)";
+    EXPECT_EQ(meter.reach(21, 120), 72u);
+    EXPECT_GE(meter.reach(21, 120), 64u) << "R5's 64-deep notice is inside";
+    EXPECT_EQ(meter.reach(21, 60), 60u) << "the cap binds";
+    EXPECT_EQ(meter.reach(21, 30), 48u) << "a cap is never below the floor";
+    EXPECT_EQ(meter.reach(21, 500), 72u) << "nor above 120";
+    EXPECT_EQ(meter.reach(255, 500), 120u);
+    meter.clear();
+    for (int i = 0; i < 60; ++i) meter.sample(10, 20);
+    EXPECT_EQ(meter.reach(7, 120), 48u) << "20 + 8 + 7 is under the floor";
+}
+
+// Step R12, the cap: clamp(floor((B - restore) / replay per tick), 48, 120),
+// B = 3 ticks (45.45 ms), from moving averages of this client's own rewinds
+// (restore weighted 1/16 per rewind, the replay by ticks).  Before the first
+// sample: the floor.  A slow machine's samples give a lower cap.
+TEST(RollbackEngine, RewindCostCapFromTheClientsOwnRewinds) {
+    using bmmo::session::rewind_cost_meter;
+    EXPECT_NEAR(bmmo::session::kReachHitchBudgetMs, 45.4545, 1e-3);
+    rewind_cost_meter fast;
+    EXPECT_EQ(fast.cap(), 48u) << "no measurement: the floor";
+    fast.sample(3.0, 0.0, 0);
+    EXPECT_EQ(fast.samples(), 0u) << "a rewind that replayed nothing is no sample";
+    // The orchestrator's worked example: x64, trafo inputs off - 3 ms of
+    // restore, 0.46 ms a replayed tick: floor(42.45 / 0.46) = 92.
+    fast.sample(3.0, 0.46 * 48, 48);
+    EXPECT_EQ(fast.samples(), 1u);
+    EXPECT_NEAR(fast.restore_ms(), 3.0, 1e-9);
+    EXPECT_NEAR(fast.replay_ms_per_tick(), 0.46, 1e-9);
+    EXPECT_EQ(fast.cap(), 92u);
+    // The same machine with the trafo inputs on (1.25 ms a tick): 33 -> 48.
+    rewind_cost_meter trafo;
+    trafo.sample(3.0, 1.25 * 30, 30);
+    EXPECT_EQ(trafo.cap(), 48u);
+    // A slower machine: 4 ms of restore, 0.6 ms a tick -> 69, lower than 92.
+    rewind_cost_meter slow;
+    for (int i = 0; i < 20; ++i) slow.sample(4.0, 0.6 * 20, 20);
+    EXPECT_NEAR(slow.replay_ms_per_tick(), 0.6, 1e-9);
+    EXPECT_EQ(slow.cap(), 69u);
+    EXPECT_LT(slow.cap(), fast.cap());
+    // A very fast one is capped at 120; a restore past B leaves the floor.
+    rewind_cost_meter fastest;
+    fastest.sample(1.0, 0.1 * 10, 10);
+    EXPECT_EQ(fastest.cap(), 120u);
+    rewind_cost_meter hopeless;
+    hopeless.sample(50.0, 1.0, 10);
+    EXPECT_EQ(hopeless.cap(), 48u);
+    // The replay is weighted by ticks: a 2-tick rewind of 2 ms (1 ms a tick,
+    // its fixed overhead) moves a 48-tick history far less than 1/16 of the
+    // way to 1 ms; the restore moves by exactly 1/16.
+    rewind_cost_meter mixed;
+    mixed.sample(3.0, 0.46 * 48, 48);
+    mixed.sample(5.0, 2.0, 2);
+    EXPECT_NEAR(mixed.restore_ms(), 3.0 + (5.0 - 3.0) / 16.0, 1e-9);
+    const double per_tick = (0.46 * 48 * 15.0 / 16.0 + 2.0) / (48 * 15.0 / 16.0 + 2.0);
+    EXPECT_NEAR(mixed.replay_ms_per_tick(), per_tick, 1e-9);
+    EXPECT_LT(mixed.replay_ms_per_tick(), 0.49) << "an unweighted 1/16 step would be 0.49";
+    mixed.clear();
+    EXPECT_EQ(mixed.samples(), 0u);
+    EXPECT_EQ(mixed.cap(), 48u);
 }
 
 // Late-player design 3.3: the owner's own birth, made live at tick 5, was

@@ -785,4 +785,83 @@ namespace bmmo::session {
         bool waived_ = false;
         uint64_t episodes_ = 0;
     };
+
+    // ------------------------------------------------------------ the wait
+    // Step R12 (late-player design 2.5 "As built (step R12)", the user's
+    // decision of 2026-10-27: the reach's margin is 8 + the server's wait,
+    // and the server says its wait in every relay datagram, protocol 13).
+    //
+    // A notice of p's substituted tick T leaves with the server's step of T,
+    // and the runner steps T without p's frame only when the step test above
+    // lets it: the datagrams p samples its header lag from leave when the
+    // test passed with every frame in, so the notice is later than they are
+    // by exactly how much longer the test would have held T for p's missing
+    // frame - p's WAIT at T, in ticks:
+    //   - patience off: until the deadline, `to_deadline` (deadline(T) - the
+    //     instant the runner stepped T, in ticks; the step's earliness);
+    //   - patience on: until p's patience, to_deadline - p.lead; nothing
+    //     while p is waived and another member's frame paces T (the pacing
+    //     floor).
+    // Never negative: a step at or after the deadline (a substituted tick, a
+    // catch-up after a stall) would have waited for nothing.  The case is an
+    // ordinary late frame (p unsettled); a tick a lead reset froze or a
+    // re-anchor skipped is substituted without a wait, which this
+    // over-states (the safe side: a deeper reach costs CPU, not a resync).
+    inline double server_wait_ticks(double to_deadline, const patience_member& p, bool patience,
+                                    bool paced_by_others) {
+        if (!patience) return std::max(0.0, to_deadline);
+        if (p.waived && paced_by_others) return 0.0;
+        return std::max(0.0, to_deadline - p.lead);
+    }
+
+    // What one member's relay header carries (session_remote_input_msg's
+    // `wait`): the largest wait of its last kWindows windows of
+    // kWindowTicks server ticks - the same span as the client's header-lag
+    // p99 (rollback.hpp reach_meter: 4 windows of 60 own ticks) - rounded up
+    // to whole ticks, at most 255.  The largest, not a percentile: the
+    // notice that matters is the one of a tick the server had to wait for,
+    // and its datagram's own wait (0, stepped at the deadline) says nothing
+    // about it; the steps around it say how long the wait was.
+    class server_wait_meter {
+    public:
+        static constexpr uint32_t kWindowTicks = 60;
+        static constexpr size_t kWindows = 4;
+
+        void sample(uint32_t tick, double wait) {
+            const uint32_t window = tick / kWindowTicks;
+            if (!any_ || static_cast<int32_t>(window - newest_) > 0) {
+                newest_ = window;
+                any_ = true;
+            }
+            auto& slot = slots_[window % kWindows];
+            if (!slot.used || slot.window != window) {
+                if (slot.used && static_cast<int32_t>(window - slot.window) < 0) return;   // older than the slot's
+                slot = window_slot{};
+                slot.used = true;
+                slot.window = window;
+            }
+            if (wait > slot.max) slot.max = wait;
+        }
+
+        // The header's value: 0 before any sample.
+        uint8_t value() const {
+            double max = 0.0;
+            for (const auto& slot: slots_)
+                if (slot.used && any_ && static_cast<int32_t>(newest_ - slot.window) >= 0
+                        && newest_ - slot.window < kWindows && slot.max > max)
+                    max = slot.max;
+            const double up = std::ceil(max);
+            return up >= 255.0 ? 255 : static_cast<uint8_t>(up);
+        }
+
+    private:
+        struct window_slot {
+            bool used = false;
+            uint32_t window = 0;
+            double max = 0.0;
+        };
+        std::array<window_slot, kWindows> slots_{};
+        uint32_t newest_ = 0;
+        bool any_ = false;
+    };
 }

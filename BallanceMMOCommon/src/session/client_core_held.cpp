@@ -67,6 +67,13 @@ namespace bmmo::session {
             s.acked_header_known_ = true;
             s.acked_header_tick_ = msg.tick;
             s.header_acked_ = msg.acked;
+            // Step R12 (protocol 13): the server's wait, before the lag
+            // below samples the reach with it.
+            if (!s.server_wait_known_ || s.server_wait_ != msg.wait) {
+                s.server_wait_known_ = true;
+                s.server_wait_ = msg.wait;
+                if (journal_.journalling()) journal_.writer().wait(msg.tick, s.own_id_, msg.wait);
+            }
         }
         if (newer_ack && static_cast<int32_t>(msg.tick - s.tick_base_) >= 0) {
             ++s.input_reports_;

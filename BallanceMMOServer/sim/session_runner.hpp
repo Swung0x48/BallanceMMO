@@ -448,6 +448,15 @@ namespace bmmo::sim {
             uint32_t start_base = 0;
             bmmo::session::tick_scheduler scheduler;
             bmmo::session::snapshot_cadence cadence;
+            // Step R12 (protocol 13, lateness.hpp server_wait_ticks): each
+            // member's wait at the step about to run, set by run() from the
+            // step test's view right before step() (in `inputs` order; empty
+            // = no wait known, 0), the meter of the last 4 windows' largest,
+            // which the relay header carries (applied_input::wait), and the
+            // value last journalled (a WAIT record when it changes).
+            std::vector<double> step_waits;
+            std::map<uint32_t, bmmo::session::server_wait_meter> waits;
+            std::map<uint32_t, uint8_t> waits_journalled;
             // Step A3: the resync states owed, player -> base (emitted after
             // the step of base - 1).
             std::map<uint32_t, uint32_t> resync_requests;

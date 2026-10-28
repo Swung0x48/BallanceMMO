@@ -416,10 +416,10 @@ TEST(RelayHeld, PlacementAndTheHeaderOnlyDatagram) {
     EXPECT_TRUE(own[0].held.empty());
     EXPECT_TRUE(own[1].entries.empty());
     EXPECT_EQ(own[1].held.size(), 32u);
-    EXPECT_EQ(datagram_bytes(own[1], 0), 25u + 161u);   // the header and a full section by reference
+    EXPECT_EQ(datagram_bytes(own[1], 0), 26u + 161u);   // the header (26 B since protocol 13) and a full section by reference
     auto own_msg = to_message(own[1], 31, 0);
     ASSERT_TRUE(own_msg.serialize());
-    EXPECT_EQ(own_msg.size(), 25u + 161u);
+    EXPECT_EQ(own_msg.size(), 26u + 161u);
 }
 
 // A record is a 5-byte reference to the frame the client itself sent, and

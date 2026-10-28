@@ -165,6 +165,8 @@ broken: server and clients are rebuilt together.
 | Host unification HU1: the placement's host logic and three other host copies as shared helpers (the rule "host logic is written once", §2) | 48d1c32 | byte-identical: wire check ALL SAME, server journals 2993/2993 and 4153/4153 |
 | Sector placement S10: the retail core host, `CKContext::CopyObjects`, the legacy path's local end, `physics.placement_clones` on by default | fa8218d | two-copy L11 run, two sessions with the reload: the server's hashes and signature, 53 copies, every placement body exact by name |
 | Core default CD1 (the user's decision, §2): the retail session core on by default | the `retail:` commit after 832f1a9 | two-copy L11 run, neither client sending `session core`: both core=on, both assigned in 10.6 s, 53 copies and signature `5d22d3b5a61c38cb` on both and the server, sector +2 at 103, 23/23 mechanisms, no rebase or resync |
+| Late-player step 12 (REACH): the per-client reach from the relay lag, history 128 above 48; open question 1 measured | c1563b6 | x64: a 48-deep rewind frame p99 21.4 ms, 120 deep 50.9 ms; found the margin did not cover the server's wait |
+| Late-player step R12 (the user's two decisions): the server's wait in the relay header (protocol 13 / journal v7) and the cap from the client's own rewind cost; `core_ref_s7` re-captured | the `session:` commit after c1563b6 | reach = clamp(p99 + 8 + w, 48, cap): w 22-23 on the wire, reach 52-53 (73 after a stall's burst) at 150 ms; cap 85-94 on retail x86 (0.64 ms restore, 0.48 ms a tick), 105-120 on x64; the cap's samples are captured clock reads (a capture replay reproduces it: 12/12 replay caps equal the live ones) |
 | **Sector placement S1-S11, the track** (`sector-placement-design.md` §12 is the consolidated record): one object per PH row at the anchor in every world, the level-walk gate, the retail level reload; S11 the records | cd501af, 5b536b2, 81c6803, 72108fd, 5cd1c11, bc88b8e, 0d1178b, 3242755, d0c7b28, 48d1c32, fa8218d; S11 the `docs:` commit after fa8218d | built; the user's rule "entering the next sector changes nothing in the previous one" holds on L8 and L11 by the invariant check, offline and networked |
 | Rollback engine gaps G0 (EG0): diagnostics - the counted birth failures, the 1378 difference, the outside producers | 0b73af2 | built |
 | Record-format gaps K0: SimTool `--array-reads`, `--globals-trace`, `--world-options` | 49e2cc8 | built |
@@ -271,7 +273,13 @@ numbers 1-10 are unchanged.
      tick 20648, past the reach of 48 ticks"; R5's run-end resync is the
      same). Late-player plan step 12 (the per-client reach) and open
      question 1. Not established: why the trial's client stopped reaching
-     the server at 20485.
+     the server at 20485. **Built**: REACH (c1563b6, the per-client reach)
+     and R12 (the user's decisions of 2026-10-27: the margin is 8 + the
+     server's wait, which every relay header carries since protocol 13,
+     and the cap is estimated from the client's own rewind cost with a
+     3-tick budget; late-player design §2.5 "As built (step R12)", §7
+     question 1 resolved). Still open: why the trial's server stalled
+     (646 / 595 ms between steps), which no reach covers past 120.
    - **Resync T2**: the trafo scripts out of `keep_local`
      (`resync-and-sector-timing-design.md` §8), unless TR3b's deferred H3b
      and a forced resync during a piece life show T3 covers it.
@@ -668,6 +676,27 @@ numbers 1-10 are unchanged.
      placement", the core design's host support table and "As built (step
      S)", the protocol doc, `collision-overhaul-design.md` 9.30, this
      roadmap): nothing deferred.
+   - REACH + R12 (late-player step 12 and the user's two decisions,
+     2026-10-27, quick tier; late-player design §2.5 "As built (step
+     R12)"): (a) a live notice in the (48, reach] band - no harness knob
+     stalls the server or the downlink while the client steps on (the
+     unit tests cover it); (b) the trafo-inputs-on cost and cap (a
+     `trafo_inputs` session's estimator line); (c) a live run with
+     patience on (the wait's patience branch is unit-tested only); (d)
+     core_ref_s7's other arms (`core_ref_s6` README's "left for the final
+     verification" list, re-captured at protocol 13); (e) a retail run
+     with `session core off` (the legacy path parses the new header byte,
+     uses nothing of it). Found at R12, queued here (item 2): the cap's
+     estimator over-states the per-tick cost of shallow rewinds that make
+     bodies (`core_ref_s7/l8_cross`: 2.6-3.3 ms "a tick", cap 48); whether
+     the births' share leaves the replay stage is a design choice. Also
+     for the user (R12 review): the cap before a client's first rewind is
+     48, so a first stall deeper than 48 before any rewind still resyncs;
+     a different starting value is the user's to choose. The cap's samples
+     are captured clock reads since the review round, so a capture replay
+     reproduces the cap exactly; (f) a retail run with the review round's
+     x86 build (its retail behaviour is unchanged: retail's `now` is its
+     clock).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

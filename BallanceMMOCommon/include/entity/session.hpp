@@ -73,7 +73,13 @@ namespace bmmo::session {
     //      of every member that declares the cap with its own world's -
     //      late joiners included - and refuses a member without the cap in
     //      a session with the bit.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 12;   // 4: SessionStart carries spawn_spacing
+    //  13  the server's wait in the relay header (late-player design 2.5,
+    //      step R12, the user's decision of 2026-10-27): every
+    //      session_remote_input_msg ends its header with wait u8, the
+    //      recipient's wait at the server (session/lateness.hpp
+    //      server_wait_meter), which a session-core client adds to its
+    //      rollback reach's margin of 8.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 13;   // 4: SessionStart carries spawn_spacing
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its

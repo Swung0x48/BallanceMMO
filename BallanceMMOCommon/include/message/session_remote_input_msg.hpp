@@ -19,7 +19,7 @@ namespace bmmo {
     // as the server (design 9.1) and lands every frame by its tick.
     //
     // Layout: session u32, tick u32 (the newest), count u8, acked u32,
-    // held_total u32, epoch u32; per entry: player u32, nframes u8
+    // held_total u32, epoch u32, wait u8 (protocol 13); per entry: player u32, nframes u8
     // (1..MAX_RELAY_FRAMES, the ticks tick-nframes+1..tick, oldest first); per
     // frame: header u8, keys u8, ball_type u8, flags u8 and, when the header
     // has FRAME_CAMERA, cam_right/cam_up/cam_dir f32x3.  The first frame of an
@@ -40,6 +40,13 @@ namespace bmmo {
     // above with the camera always present.  The section is always there,
     // nheld 0 when there is nothing to say, and nothing may follow it: a v6
     // datagram, which ends with its entries, does not parse.
+    //
+    // Protocol 13 (step R12, late-player design 2.5): the header ends with
+    // wait u8, after epoch - the RECIPIENT's wait at the server
+    // (lateness.hpp server_wait_meter: the largest of its last 240 ticks'
+    // steps, whole ticks), how much later a notice of its substituted tick
+    // leaves than the datagrams it samples its header lag from.  Its client
+    // sizes its rollback reach with it (rollback.hpp reach_meter).
     struct session_remote_input_msg : public serializable_message {
         struct entry {
             uint32_t player = 0;
@@ -54,7 +61,7 @@ namespace bmmo {
         static constexpr uint8_t FRAME_CAMERA = 1;
         static constexpr uint8_t HELD_BACK_MASK = 0x1F;
         static constexpr uint8_t HELD_INLINE = 0x80;
-        static_assert(sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) * 3 == session::kRelayDatagramHeader,
+        static_assert(sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) * 3 + 1 == session::kRelayDatagramHeader,
                       "the relay's byte budget counts this header");
         static_assert(session::kHeldNoticeTicks - 1 <= HELD_BACK_MASK, "back fits its bits");
 
@@ -63,6 +70,7 @@ namespace bmmo {
         uint32_t acked = 0;                // the recipient's last tick applied fresh
         uint32_t held_total = 0;           // the recipient's substituted ticks at or after epoch
         uint32_t epoch = 0;                // the recipient's assigned base
+        uint8_t wait = 0;                  // protocol 13: the recipient's wait at the server, ticks
         std::vector<entry> entries;        // <= MAX_PLAYERS_PER_SESSION
         std::vector<held_record> held;     // <= kHeldNoticeTicks, the recipient's own
 
@@ -92,6 +100,7 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&acked), sizeof(acked));
             raw.write(reinterpret_cast<const char*>(&held_total), sizeof(held_total));
             raw.write(reinterpret_cast<const char*>(&epoch), sizeof(epoch));
+            raw.write(reinterpret_cast<const char*>(&wait), sizeof(wait));
             for (const entry* e: written) {
                 raw.write(reinterpret_cast<const char*>(&e->player), sizeof(e->player));
                 // More frames than the cap: the newest ones are what matter.
@@ -130,6 +139,7 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &acked)) return false;
             if (!message_utils::read_variable(raw, &held_total)) return false;
             if (!message_utils::read_variable(raw, &epoch)) return false;
+            if (!message_utils::read_variable(raw, &wait)) return false;
             entries.clear();
             entries.reserve(count);
             for (uint8_t i = 0; i < count; ++i) {
