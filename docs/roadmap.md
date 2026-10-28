@@ -630,7 +630,7 @@ numbers 1-10 are unchanged.
    server's selected entries in a resync's portable record; a protocol
    change, 14 at the earliest - until then a resync holds the outside
    entries but keeps the live selected ones), and **gap L as the design's
-   four steps G6, G7, G8, G9** (§8), each with its own checks (L-H1..L-H6
+   four steps G6, G7, G8, G9** (§8; G6 = L1 built at step EL6), each with its own checks (L-H1..L-H6
    and L-R1/L-R2 are live runs beyond one batch's gate; G8 may stop on §9.3).
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to

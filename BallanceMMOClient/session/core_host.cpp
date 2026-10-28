@@ -2470,9 +2470,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         // Step EG0 diagnostics: every destroy_body the binding refuses (a
         // birth item's refusal counts birth_recreate_failures; since step
         // B8EG a ball's birth item never gets here - keeps_parked counts it
-        // births_parked_balls; the savestate-failure path's
-        // destroy_body(entity, 0) is not counted; a refused recreate_body is
-        // counted but not logged here).
+        // births_parked_balls; since step EL6 a refused blob no longer
+        // destroys the revived bodies; a refused recreate_body is counted
+        // but not logged here).
         if (diag_trace_plan() && world.destroy_body) {
             auto destroy = world.destroy_body;
             world.destroy_body = [this, destroy](const std::string& entity, uint32_t birth_tick) {

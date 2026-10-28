@@ -191,6 +191,13 @@ namespace bmmo::session {
         // re-derivation moved or forgot the sector pass that made it live
         // (rollback_world::birth_moved).
         std::function<bool(const std::string& entity, uint32_t birth_tick)> birth_moved;
+        // Gap L (rollback-engine gaps design 2.3.1, step EL6): the core's
+        // half of rollback_world::restore_lives - the balls (own and
+        // mirrors, L2/L3) - asked first by bind_session_world, before the
+        // host's mechanism half.  Unset until G7 / G8 build it: an ended
+        // ball life is then answered by no half (unrevivable, counted).
+        std::function<void(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended, bool savestate,
+                           std::map<std::string, life_outcome>& out)> restore_lives;
     };
 
     // The own ball as the host sees it after a step (design 2.2 own_ball;

@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -479,6 +480,15 @@ namespace {
     // The binding's backend plus the methods bind_session_world calls (the
     // mechanism destroy and the birth insert).
     struct session_backend : fake_backend {
+        // Gap L (step EL6): bodies the world has none of (get_body fails).
+        std::set<std::string> bodiless;
+        bool get_body_state(const char* entity, bmmo_physics_body_state& out, std::string& error) {
+            if (bodiless.count(entity)) {
+                calls.push_back(std::string("get_body ") + entity);
+                return false;
+            }
+            return fake_backend::get_body_state(entity, out, error);
+        }
         bool set_event_log_muted(bool muted, std::string&) {
             calls.push_back(muted ? "mute" : "unmute");
             return true;
@@ -678,7 +688,69 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     EXPECT_FALSE(world.revive_body("P_Plank", 130)) << "the make refused";
     EXPECT_EQ(backend.calls, std::vector<std::string>({"mute", "physicalize P_Plank", "unmute"}));
     backend.refuse_writes = false;
-    order.clear();
+
+    // restore_lives (gap L, L1; rollback-engine gaps design 2.3.1, step
+    // EL6): no core half here; the host's is step P's revive moved
+    // unchanged - only with the savestate, only a mechanism with no body now
+    // and no later life born inside the window, through revive_body (the
+    // revivable set, the A-life's birth), in the order given; the answer is
+    // revived until the life's end.
+    {
+        using bmmo::session::ended_life;
+        using bmmo::session::life_kind;
+        ASSERT_TRUE(world.restore_lives);
+        backend.bodiless = {"Ball_Wood", "Ball_Stone_piece01", "P_Box", "P_Plank", "P_Gate"};
+        const std::vector<ended_life> ended = {
+            {"Ball_Wood", 1, 140, 0, life_kind::own},             // a ball: the core's half
+            {"Ball_Stone_piece01", 1, 135, 0, life_kind::mechanism},
+            {"P_Plank", 1, 133, 138, life_kind::mechanism},       // born again at 138: the known gap until G9
+            {"P_Box", 2, 131, 0, life_kind::mechanism},
+            {"P_Gate", 1, 132, 0, life_kind::mechanism},          // not revivable
+            {"P_Alive", 1, 134, 0, life_kind::mechanism}};        // a body now: nothing to make
+        std::map<std::string, bmmo::session::life_outcome> out;
+        backend.calls.clear();
+        order.clear();
+        world.restore_lives(130, 140, ended, false, out);
+        EXPECT_TRUE(out.empty()) << "the per-body path: step P's revive is savestate-only until G9";
+        EXPECT_TRUE(backend.calls.empty());
+        world.restore_lives(130, 140, ended, true, out);
+        ASSERT_EQ(out.size(), 2u);
+        EXPECT_EQ(out.at("Ball_Stone_piece01").revived_until, 135u);
+        EXPECT_EQ(out.at("P_Box").revived_until, 131u);
+        EXPECT_EQ(out.at("P_Box").remade_at, 0u);
+        std::vector<std::string> made;
+        for (const auto& call: backend.calls)
+            if (call.rfind("physicalize ", 0) == 0) made.push_back(call);
+        EXPECT_EQ(made, std::vector<std::string>({"physicalize Ball_Stone_piece01", "physicalize P_Box"}));
+        EXPECT_EQ(order, std::vector<std::string>({"put back Ball_Stone_piece01 4", "put back P_Box 3"}))
+            << "P_Box's life at 130 is the birth of 122";
+        backend.bodiless.clear();
+        order.clear();
+
+        // The core's half first: a name it answered is not asked again.
+        bmmo::session::core_world_hooks with_core = hooks;
+        std::vector<std::string> asked;
+        with_core.restore_lives = [&](uint32_t anchor, uint32_t now, const std::vector<ended_life>& lives, bool savestate,
+                                      std::map<std::string, bmmo::session::life_outcome>& answer) {
+            asked.push_back(std::to_string(anchor) + ":" + std::to_string(now) + ":" + std::to_string(lives.size())
+                            + (savestate ? ":blob" : ":bodies"));
+            answer["Ball_Wood"].revived_until = 140;
+            answer["P_Box"].remade_at = 139;
+        };
+        rollback_world cored = bmmo::session::bind_session_world(backend, with_core, w);
+        backend.bodiless = {"Ball_Wood", "P_Box"};
+        backend.calls.clear();
+        std::map<std::string, bmmo::session::life_outcome> answered;
+        cored.restore_lives(130, 140, ended, true, answered);
+        EXPECT_EQ(asked, std::vector<std::string>({"130:140:6:blob"}));
+        EXPECT_EQ(answered.at("Ball_Wood").revived_until, 140u);
+        EXPECT_EQ(answered.at("P_Box").revived_until, 0u) << "answered by the core: the host's half leaves it";
+        EXPECT_EQ(answered.at("P_Box").remade_at, 139u);
+        for (const auto& call: backend.calls) EXPECT_NE(call, "physicalize P_Box");
+        backend.bodiless.clear();
+        order.clear();
+    }
+
     backend.refuse_writes = true;
     EXPECT_FALSE(world.destroy_body("P_Box", 120));
     EXPECT_EQ(order, std::vector<std::string>({"destroy failed P_Box: no body"}));
@@ -704,6 +776,7 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     rollback_world plain = bmmo::session::bind_session_world(backend, hooks, parked);
     EXPECT_FALSE(plain.destroy_body);
     EXPECT_FALSE(plain.revive_body);
+    EXPECT_FALSE(plain.restore_lives) << "no half: no restore_lives (the engine skips the detection)";
     EXPECT_FALSE(plain.insert_birth);
     EXPECT_EQ(plain.birth_tick_of("P_Box"), 0u) << "no birth log";
     bmmo::session::session_world_options unrevivable;

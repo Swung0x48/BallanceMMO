@@ -1369,13 +1369,15 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsReCreatedAtItsBirthTickWhenTheWor
     EXPECT_NEAR(world.bodies["Prop"].position[0], born_at + 2.0 * 3.0 * kDt, 1e-9);
 }
 
-// Step P of the session-core design: with revive_body installed and the
-// savestate applied, a mechanism the anchor's record has that the window
-// destroyed (a replayed script's De Physicalize: the trafo pieces' reset) is
-// made again at the restore - before the blob, which then puts its state of
-// T back - so the replayed ticks before its death have it, and the replayed
-// script takes it away again where the live one did.  A refused blob takes
-// the made body out again.
+// Step P of the session-core design, as gap L's L1 runs it (rollback-engine
+// gaps design 2.3.1, step EL6): a mechanism the anchor's record has that the
+// window destroyed (a replayed script's De Physicalize: the trafo pieces'
+// reset) is an ended life handed to restore_lives, whose half makes it again
+// at the restore - before the blob, which then puts its state of T back - so
+// the replayed ticks before its death have it, and the replayed script takes
+// it away again where the live one did.  A refused blob no longer takes the
+// made body out (2.3.1 step 7): it stays, and the per-body path writes it
+// from its A record.  The engine never calls revive_body itself.
 TEST(RollbackEngine, AMechanismTheWindowDestroyedIsMadeAgainAtTheRestoreForTheReplay) {
     for (const bool refuse: {false, true}) {
         SCOPED_TRACE(refuse ? "blob refused" : "blob applied");
@@ -1396,10 +1398,22 @@ TEST(RollbackEngine, AMechanismTheWindowDestroyedIsMadeAgainAtTheRestoreForTheRe
             if (replaying && world.bodies.contains("Prop")) replayed_before_death = world.bodies["Prop"].position[0];
             world.bodies.erase("Prop");
         };
-        w.revive_body = [&](const std::string& entity, uint32_t anchor) {
-            world.calls.push_back("revive " + entity + "@" + std::to_string(anchor));
-            world.bodies[entity] = fake_body{};   // made from its birth: the blob puts its state back
-            return true;
+        w.revive_body = [&](const std::string& entity, uint32_t) {
+            world.calls.push_back("engine called revive_body " + entity);
+            return false;
+        };
+        std::vector<bmmo::session::ended_life> handed;
+        bool handed_savestate = false;
+        w.restore_lives = [&](uint32_t anchor, uint32_t now, const std::vector<bmmo::session::ended_life>& ended,
+                              bool savestate, std::map<std::string, bmmo::session::life_outcome>& out) {
+            world.calls.push_back("restore_lives @" + std::to_string(anchor) + " now " + std::to_string(now));
+            handed = ended;
+            handed_savestate = savestate;
+            for (const auto& life: ended) {
+                world.calls.push_back("revive " + life.name + "@" + std::to_string(anchor));
+                world.bodies[life.name] = fake_body{};   // made from its birth: the blob puts its state back
+                out[life.name].revived_until = life.end_tick;
+            }
         };
         w.destroy_body = [&](const std::string& entity, uint32_t tick) {
             world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
@@ -1433,14 +1447,197 @@ TEST(RollbackEngine, AMechanismTheWindowDestroyedIsMadeAgainAtTheRestoreForTheRe
         replaying = true;
         EXPECT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
         ASSERT_EQ(world.count("revive Prop@2"), 1);
+        EXPECT_EQ(world.count("engine called revive_body"), 0);
+        EXPECT_EQ(world.count("restore_lives @2 now 6"), 1);
+        ASSERT_EQ(handed.size(), 1u) << "the remote ball's life did not end";
+        EXPECT_EQ(handed[0].name, "Prop");
+        EXPECT_EQ(handed[0].generation, 1u);
+        EXPECT_EQ(handed[0].end_tick, 4u);
+        EXPECT_EQ(handed[0].reborn_at, 0u);
+        EXPECT_TRUE(handed[0].kind == bmmo::session::life_kind::mechanism);
+        EXPECT_TRUE(handed_savestate);
         EXPECT_LT(world.first("revive Prop"), world.first("set_savestate")) << "made before the blob goes back";
-        EXPECT_FALSE(world.bodies.contains("Prop")) << "taken away again by the replayed script (or the refusal)";
+        EXPECT_FALSE(world.bodies.contains("Prop")) << "taken away again by the replayed script";
+        EXPECT_EQ(world.count("destroy Prop"), 0) << "a revived body is never taken out by the engine";
+        EXPECT_EQ(engine.stats().lives_ended, 1u);
+        EXPECT_EQ(engine.stats().lives_revived_mech, 1u);
+        EXPECT_EQ(engine.stats().lives_unrevivable, 0u);
         if (!refuse) {
-            EXPECT_EQ(world.count("destroy Prop"), 0);
+            EXPECT_EQ(world.count("set_body Prop"), 0) << "covered by the blob";
             EXPECT_EQ(replayed_before_death, live_before_death) << "the blob's state of tick 2, replayed to the death";
         } else {
-            EXPECT_EQ(world.count("destroy Prop@0"), 1) << "the per-body path has no record of that lifetime";
+            // The per-body path writes it from its A record.
+            EXPECT_EQ(world.count("set_body Prop"), 1);
+            EXPECT_EQ(replayed_before_death, live_before_death)
+                << "the record of tick 2 carries the pose and the velocity the fake steps with";
         }
+    }
+}
+
+// Gap L, L-U1 (rollback-engine gaps design 2.3.1 step 1, 7.1): the end of a
+// life is the first record after A whose generation for the name differs
+// from A's; a record without the body but with A's generation (a moved
+// birth's gap) is no end; a life alive now has none; restore_lives runs after
+// the hold and before the scripts' restore and the blob, only when a replay
+// follows; generation_at reads a record's generation.
+TEST(RollbackEngine, EndedLivesAreFoundByTheirGenerationAndHandedOverBeforeTheScriptsAndTheBlob) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Remote"] = {};
+    for (const char* name: {"Gone", "Gap", "Alive"}) world.bodies[name].position[0] = 20.0;
+    rollback_engine engine;
+    auto w = world.adapter();
+    w.hold_outside_callbacks = [&](uint32_t, bool) {
+        world.calls.push_back("hold");
+        return 0;
+    };
+    w.unhold_outside_callbacks = [&]() { world.calls.push_back("unhold"); };
+    w.capture_scripts = [&](std::vector<uint8_t>& out) {
+        out = {1};
+        return true;
+    };
+    w.restore_scripts = [&](const std::vector<uint8_t>&, uint32_t) {
+        world.calls.push_back("restore_scripts");
+        return true;
+    };
+    std::vector<bmmo::session::ended_life> handed;
+    w.restore_lives = [&](uint32_t, uint32_t, const std::vector<bmmo::session::ended_life>& ended, bool,
+                          std::map<std::string, bmmo::session::life_outcome>&) {
+        world.calls.push_back("restore_lives");
+        handed = ended;
+    };
+    // Ticks 1..8.  "Gone": generation 1, deleted at 5 (generation 2), the
+    // name never comes back.  "Gap": no body over 4..5 (a moved birth's gap),
+    // generation 1 throughout.  "Alive": generation 1 throughout.
+    for (uint32_t tick = 1; tick <= 8; ++tick) {
+        if (tick == 5) world.bodies.erase("Gone");
+        if (tick == 4) world.bodies.erase("Gap");
+        if (tick == 6) world.bodies["Gap"].position[0] = 20.0;
+        rollback_tracked tracked;
+        tracked.remote_entities = {"Remote"};
+        tracked.mechanisms = {"Alive"};
+        if (tick < 5) tracked.mechanisms.push_back("Gone");
+        if (tick < 4 || tick > 5) tracked.mechanisms.push_back("Gap");
+        tracked.generations = {{"Gone", tick < 5 ? 1u : 2u}, {"Gap", 1u}, {"Alive", 1u}, {"Remote", 1u}};
+        w.step();
+        engine.record(w, tick, tracked, {{"Remote", input_frame{}}});
+    }
+    uint32_t generation = 99;
+    EXPECT_TRUE(engine.generation_at("Gone", 4, generation));
+    EXPECT_EQ(generation, 1u);
+    EXPECT_TRUE(engine.generation_at("Gone", 5, generation));
+    EXPECT_EQ(generation, 2u);
+    EXPECT_TRUE(engine.generation_at("Nobody", 5, generation));
+    EXPECT_EQ(generation, 0u) << "a name the record does not list is generation 0";
+    EXPECT_FALSE(engine.generation_at("Gone", 42, generation)) << "no record of tick 42";
+
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 2, 8, no_input, "test"));
+    ASSERT_EQ(handed.size(), 1u) << "the moved birth's gap and the living name are no ends";
+    EXPECT_EQ(handed[0].name, "Gone");
+    EXPECT_EQ(handed[0].generation, 1u);
+    EXPECT_EQ(handed[0].end_tick, 5u) << "the first record with another generation";
+    EXPECT_LT(world.first("hold"), world.first("restore_lives"));
+    EXPECT_LT(world.first("restore_lives"), world.first("restore_scripts"));
+    EXPECT_LT(world.first("restore_lives"), world.first("set_savestate"));
+    EXPECT_EQ(engine.stats().lives_ended, 1u);
+    EXPECT_EQ(engine.stats().lives_unrevivable, 1u) << "answered by no half";
+    EXPECT_EQ(world.count("log lives: Gone (alive at tick 2, generation 1) ended at tick 5"), 1) << "logged by name";
+
+    // An anchor after the end: no ended life.  A frozen clock: no replay, no call.
+    handed.clear();
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 6, 8, no_input, "test"));
+    EXPECT_EQ(world.count("restore_lives"), 0) << "nothing ended inside (6, 8]";
+    world.clock_running = false;
+    world.calls.clear();
+    ASSERT_TRUE(engine.rewind_to(w, 7, 8, no_input, "test"));
+    EXPECT_EQ(world.count("restore_lives"), 0);
+}
+
+// Gap L, L-U2 (rollback-engine gaps design 2.3.1 steps 4-5, 7.1): the
+// two-half plan item.  "Prop" lives from tick 1 (generation 1), the replayed
+// script removes it at 4 (generation 2) and makes a later life at 6
+// (generation 3).  The half revives the A-life and takes the later one out:
+// revived {until 4} + remade_at 6.  On the blob path the A-life is covered at
+// A (no write), driven and recorded over [A, 4), absent over [4, 6), and made
+// at 6 by the replayed script, where it is compared with its birth record
+// (births_recreated_exact).  On the per-body path it is written from its A
+// record.
+TEST(RollbackEngine, ARevivedLifeWithALaterBirthIsPlannedInTwoHalves) {
+    for (const bool blob: {true, false}) {
+        SCOPED_TRACE(blob ? "blob path" : "per-body path");
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Remote"].position[0] = 5.0;
+        world.navs["Remote"] = {};
+        world.bodies["Prop"].position[0] = 10.0;
+        world.bodies["Prop"].linear[0] = 3.0f;
+        rollback_engine engine;
+        engine.set_exact_restore(blob);
+        auto w = world.adapter();
+        fake_body reborn;
+        reborn.position[0] = 30.0;
+        reborn.linear[0] = -1.0f;
+        std::map<uint32_t, bool> has_prop_before_step;
+        bool replaying = false;
+        w.pre_step = [&](uint32_t tick) {
+            if (tick == 4) world.bodies.erase("Prop");
+            if (tick == 6) world.bodies["Prop"] = reborn;
+            if (replaying) has_prop_before_step[tick] = world.bodies.contains("Prop");
+        };
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return world.bodies.erase(entity) > 0;
+        };
+        std::map<std::string, fake_body> at_anchor;
+        w.restore_lives = [&](uint32_t, uint32_t, const std::vector<bmmo::session::ended_life>& ended, bool,
+                              std::map<std::string, bmmo::session::life_outcome>& out) {
+            for (const auto& life: ended) {
+                ASSERT_EQ(life.name, "Prop");
+                EXPECT_EQ(life.end_tick, 4u);
+                EXPECT_EQ(life.reborn_at, 6u) << "the plan's birth item";
+                world.calls.push_back("take out " + life.name);
+                world.bodies.erase(life.name);       // the later life, taken out
+                world.bodies[life.name] = fake_body{};   // the A-life, made from its birth
+                out[life.name].revived_until = life.end_tick;
+                out[life.name].remade_at = life.reborn_at;
+            }
+        };
+        rollback_tracked base;
+        base.remote_entities = {"Remote"};
+        std::map<uint32_t, fake_body> live_prop;
+        for (uint32_t tick = 1; tick <= 8; ++tick) {
+            w.pre_step(tick);
+            w.step();
+            rollback_tracked tracked = base;
+            if (tick < 4 || tick >= 6) tracked.mechanisms = {"Prop"};
+            tracked.generations = {{"Prop", tick < 4 ? 1u : tick < 6 ? 2u : 3u}};
+            engine.record(w, tick, tracked, {{"Remote", input_frame{}}});
+            if (world.bodies.contains("Prop")) live_prop[tick] = world.bodies["Prop"];
+        }
+        world.calls.clear();
+        replaying = true;
+        ASSERT_TRUE(engine.rewind_to(w, 2, 8, no_input, "test"));
+        EXPECT_EQ(engine.stats().lives_ended, 1u);
+        EXPECT_EQ(engine.stats().lives_revived_mech, 1u);
+        EXPECT_EQ(engine.stats().lives_remade, 1u);
+        EXPECT_EQ(engine.stats().lives_unrevivable, 0u);
+        EXPECT_EQ(world.count("destroy Prop"), 0) << "taken out by the half, not by the destroy loop";
+        EXPECT_TRUE(has_prop_before_step[3]) << "the A-life is in the replay before its end";
+        EXPECT_FALSE(has_prop_before_step[5]) << "no body between its end and the later birth";
+        EXPECT_TRUE(has_prop_before_step[6]);
+        bmmo_physics_body_state recorded{};
+        ASSERT_TRUE(engine.recorded_body_state("Prop", 3, recorded)) << "the A-life recorded over [A, D)";
+        EXPECT_EQ(recorded.position[0], live_prop[3].position[0]);
+        EXPECT_FALSE(engine.recorded_body("Prop", 5));
+        EXPECT_EQ(engine.stats().births_recreated_exact, 1u) << "the later life on its birth record at 6";
+        EXPECT_EQ(engine.stats().birth_recreate_mismatches, 0u);
+        EXPECT_EQ(world.bodies["Prop"].position[0], live_prop[8].position[0]);
+        // The A half: covered by the blob (no write), else written from the
+        // A record once; the birth half is never written (it landed exactly).
+        EXPECT_EQ(world.count("set_body Prop"), blob ? 0 : 1);
     }
 }
 

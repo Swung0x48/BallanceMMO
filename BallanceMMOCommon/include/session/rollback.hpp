@@ -132,6 +132,35 @@ namespace bmmo::session {
         uint32_t deferred = 0;            // ...or at their birth tick
     };
 
+    // Gap L, L1 (rollback-engine gaps design 2.3.1, step EL6): a life of a
+    // tracked name that the anchor's record has a body for and that ends
+    // inside the window (A, now] - its end is the first record after A
+    // whose generation for the name differs from A's (a record without the
+    // body but with A's generation, a moved birth's gap, is no end).
+    // `reborn_at`: the birth tick of the name's later life inside the
+    // window (the restore plan's birth item), 0 when none.  `kind`: what
+    // the name was in A's tracked set.
+    enum class life_kind : uint8_t { own, mirror, mechanism };
+    struct ended_life {
+        std::string name;
+        uint32_t generation = 0;   // the A-life's
+        uint32_t end_tick = 0;     // D
+        uint32_t reborn_at = 0;    // E, or 0
+        life_kind kind = life_kind::mechanism;
+    };
+    // What a half of rollback_world::restore_lives did about one ended life:
+    //   revived_until  != 0: the A-life's body exists again (made muted at
+    //                  the restore); its state is the A record's, and the
+    //                  replay removes it at this tick (its end);
+    //   remade_at      != 0: the later life of the name was taken out at the
+    //                  restore and the replay makes it again at this tick;
+    //   a name can carry both; one with neither is unrevivable (counted and
+    //   logged by name by the engine).
+    struct life_outcome {
+        uint32_t revived_until = 0;
+        uint32_t remade_at = 0;
+    };
+
     struct rollback_world {
         std::function<bool(const std::string& entity, bmmo_physics_body_state& out)> get_body;
         // Optional (step TR3): a body every world simulates from the same
@@ -351,16 +380,28 @@ namespace bmmo::session {
         // back from the blob; the replayed script takes it away again at the
         // tick the live one did.  `anchor` is the restore's tick: the caller
         // makes the lifetime alive then (its latest birth up to that tick),
-        // muted.  false: not made (no birth known); the replay then runs
-        // without it, as before.  Only on the savestate path; a refused blob
-        // takes the made bodies out again (destroy_body).  Not for a body a
-        // new lifetime of which is born inside the window (it has a birth
-        // plan item: destroyed and made again at that birth instead; the
-        // replay runs without it from the anchor to its death, logged).  The
-        // caller counts and logs what it made (no engine counter: the
-        // engine is held by the legacy retail state, whose layout stays as it
-        // is until R7, session-core design 3.2).
+        // muted.  false: not made (no birth known).  The caller counts and
+        // logs what it made.
+        // Since step EL6 (gap L, L1) the engine never calls this itself: it
+        // is the host's primitive, which bind_session_world composes into
+        // the mechanism half of restore_lives below (only on the savestate
+        // path, not for a name with a later life born in the window - step
+        // P's rule, generalized at G9).
         std::function<bool(const std::string& entity, uint32_t anchor)> revive_body;
+        // Optional (gap L, L1; rollback-engine gaps design 2.3.1, step EL6):
+        // the lives that end inside the window, found by the engine from the
+        // records' generations, handed to the world before the scripts'
+        // state and the savestate go back, only when a replay follows (on
+        // the savestate and the per-body path alike).  The halves -
+        // bind_session_world: the core's (the balls, L2/L3), then the host's
+        // (the mechanisms, L4) - make what they can revive muted and answer
+        // per name in `out` (life_outcome).  `savestate` says whether the
+        // blob will be tried (step P's revive is savestate-only until G9).
+        // The engine plans a revived name from its A record and a remade one
+        // from its birth record (the two-half plan item); a revived body
+        // stays when the blob is refused, and the per-body path writes it.
+        std::function<void(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended, bool savestate,
+                           std::map<std::string, life_outcome>& out)> restore_lives;
         // Optional, the default way for a body born inside the window when the
         // caller has its Physicalize matrix: the parked body is put where and
         // how its Physicalize made it at the START of its birth tick, before
@@ -700,6 +741,15 @@ namespace bmmo::session {
         uint64_t births_missing = 0;                // destroyed at a restore and not made again by its birth tick's replayed scripts
         uint64_t births_moved = 0;                  // ...because the replay's union re-derivation moved or forgot their pass (step B1)
         uint64_t replay_mechanisms_added = 0;       // replayed ticks' records that name a mechanism body the live record did not (replay_mechanisms)
+        // Gap L, L1 (step EL6; only where the world has restore_lives): the
+        // lives alive at an anchor that ended inside its window, those a half
+        // revived (by A's kind), those whose later life a half took out for
+        // the replay to make again, and those revived by no half - absent
+        // from the replay between the anchor and their end (logged by name).
+        uint64_t lives_ended = 0;
+        uint64_t lives_revived_own = 0, lives_revived_mirror = 0, lives_revived_mech = 0;
+        uint64_t lives_remade = 0;
+        uint64_t lives_unrevivable = 0;
         uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         // The IVP savestate (rollback_world::set_savestate): restores that put
@@ -1248,25 +1298,10 @@ namespace bmmo::session {
                 }
                 plan[entity] = item;
             }
-            if (trace_plan_ && world.log && plan_traces_ < 16) {
-                ++plan_traces_;
-                int rows_used = 0, records = 0, births = 0;
-                std::string born;
-                for (const auto& [entity, item]: plan) {
-                    if (item.repose_tick) {
-                        ++births;
-                        if (births <= 12) born += " " + entity + "@" + std::to_string(item.repose_tick);
-                    } else if (item.from_row) {
-                        ++rows_used;
-                    } else {
-                        ++records;
-                    }
-                }
-                world.log("restore plan at tick " + std::to_string(anchor) + " (now " + std::to_string(current_tick)
-                          + ", " + reason + "): " + std::to_string(records) + " from our records, "
-                          + std::to_string(rows_used) + " from rows, " + std::to_string(births)
-                          + " born in the window" + (born.empty() ? "" : ":" + born));
-            }
+            // Gap L, L1: a birth item's birth half is what it was planned
+            // with (a revive below gives the item its A-life half).
+            for (auto& [entity, item]: plan)
+                if (item.repose_tick) item.birth = {item.state, item.mode, item.extra, item.have_extra};
             // The clock first: the beam below stamps every restored core with
             // the environment's time_of_last_psi, so the environment has to be
             // at T before any body is.  Only when a replay will follow - a
@@ -1320,33 +1355,36 @@ namespace bmmo::session {
                 calm_shift = 0.0;
             };
             if (replay_follows && !try_savestate) rewind_clock();
-            // The mechanisms alive at T that the window destroyed (step P,
-            // rollback_world::revive_body): made again first, so the scripts'
-            // state (a force block's controller on them) and the blob find
-            // them.  Not one a new lifetime of which is born in the window
-            // (a plan item: destroyed and made again at that birth; such a
-            // lifetime is missing from the replay between the anchor and its
-            // death - logged, the known gap).  The world's hook counts and
-            // logs what it made.
-            std::vector<std::string> revived;
-            if (try_savestate && world.revive_body) {
-                size_t reborn = 0;
-                std::string first_reborn;
-                for (const auto& entity: at->tracked.mechanisms) {
-                    if (at->bodies.find(entity) == at->bodies.end()) continue;
-                    if (rs && rs->gone.count(entity)) continue;   // step T3: the reconcile took it out
-                    if (const auto p = plan.find(entity); p != plan.end()) {
-                        if (p->second.repose_tick != 0 && !reborn++) first_reborn = entity;
-                        continue;
+            // Gap L, L1 (rollback-engine gaps design 2.3.1, step EL6): the
+            // lives alive at T that end inside the window, handed to the
+            // world's halves (rollback_world::restore_lives) - step P's
+            // revive of the mechanisms the window destroyed is the host's
+            // half now - before the scripts' state (a force block's
+            // controller on a revived body) and the blob, which then find
+            // them; then each answer goes into its plan item.
+            if (replay_follows && world.restore_lives)
+                revive_ended_lives(world, *at, anchor, current_tick, try_savestate, rs, plan);
+            if (trace_plan_ && world.log && plan_traces_ < 16) {
+                ++plan_traces_;
+                int rows_used = 0, records = 0, births = 0, revived = 0;
+                std::string born, alive;
+                for (const auto& [entity, item]: plan) {
+                    if (item.revived_until && ++revived <= 12)
+                        alive += " " + entity + "<" + std::to_string(item.revived_until);
+                    if (item.repose_tick) {
+                        ++births;
+                        if (births <= 12) born += " " + entity + "@" + std::to_string(item.repose_tick);
+                    } else if (item.from_row) {
+                        ++rows_used;
+                    } else {
+                        ++records;
                     }
-                    bmmo_physics_body_state live{};
-                    if (world.get_body(entity, live)) continue;
-                    if (world.revive_body(entity, anchor)) revived.push_back(entity);
                 }
-                if (reborn && world.log)
-                    world.log("revive: " + std::to_string(reborn) + " mechanism(s) alive at tick " + std::to_string(anchor)
-                              + " are born again inside the window (" + first_reborn
-                              + " first): not made at the restore, the replay runs without them until their death");
+                world.log("restore plan at tick " + std::to_string(anchor) + " (now " + std::to_string(current_tick)
+                          + ", " + reason + "): " + std::to_string(records) + " from our records, "
+                          + std::to_string(rows_used) + " from rows, " + std::to_string(births)
+                          + " born in the window" + (born.empty() ? "" : ":" + born)
+                          + (revived ? ", " + std::to_string(revived) + " revived:" + alive : std::string()));
             }
             // The mechanism scripts' state at T, before the bodies: a force
             // block restored here re-creates or deletes its IVP controller,
@@ -1401,7 +1439,9 @@ namespace bmmo::session {
                 // blob meets the object set it recorded and nothing is parked.
                 if (world.destroy_body) {
                     for (auto& [entity, item]: plan) {
-                        if (!item.repose_tick) continue;
+                        // A later life a half of restore_lives took out
+                        // already (remade_at): recreate set there.
+                        if (!item.repose_tick || item.recreate) continue;
                         const bool parked_ball = world.keeps_parked && world.keeps_parked(entity, item.repose_tick);
                         if (!parked_ball && world.destroy_body(entity, item.repose_tick)) {
                             item.recreate = true;
@@ -1473,8 +1513,10 @@ namespace bmmo::session {
                     ++stats_.clock_rewinds;
                     calm_shift = 0.0;
                     if (!rs) {
+                        // A revived life (L1) is covered at A like any body
+                        // from our record, its later birth or not.
                         for (auto& [entity, item]: plan)
-                            if (!item.from_row && !item.repose_tick) item.covered = true;
+                            if (!item.from_row && (!item.repose_tick || item.revived_until)) item.covered = true;
                     } else {
                         // A resync: the blob put back every body it knows (the
                         // server's state at S); a row the body has now bit for
@@ -1484,7 +1526,7 @@ namespace bmmo::session {
                         // anchor's record and is rechecked into the tree.
                         const std::set<std::string> unknown(outcome.unknown_bodies.begin(), outcome.unknown_bodies.end());
                         for (auto& [entity, item]: plan) {
-                            if (item.repose_tick) continue;
+                            if (item.repose_tick && !item.revived_until) continue;
                             if (unknown.count(entity)) {
                                 item.force_recheck = true;
                                 if (!item.from_row && ro) ++ro->from_record;
@@ -1527,10 +1569,9 @@ namespace bmmo::session {
                     }
                 } else {
                     ++stats_.savestate_failures;
-                    // The bodies made again for the blob go: the per-body
-                    // path has no record of their lifetime to restore.
-                    if (world.destroy_body)
-                        for (const auto& entity: revived) world.destroy_body(entity, 0);
+                    // Gap L, L1 (2.3.1 step 7): the bodies restore_lives
+                    // revived stay; their plan items (the A records) are not
+                    // covered, so the per-body path below writes them.
                     if (world.log && stats_.savestate_failures % 8 == 1)
                         world.log("savestate: the blob of tick " + std::to_string(anchor) + " ("
                                   + std::to_string(at->savestate.size()) + " bytes) was refused, per-body restore instead ("
@@ -1544,9 +1585,9 @@ namespace bmmo::session {
             // state: a body being frozen gets no queue (a frozen body's queue
             // is meaningless), the unit countdown is written in a pass of its
             // own below, after every body is back and IVP has regrouped them.
-            const auto extra_mask = [&](const restore& item, bool unit_pass) -> uint32_t {
-                uint32_t fields = item.extra.fields;
-                if (!restore_impulses_ || item.mode == wake_mode::freeze) fields &= ~BMMO_PHYSICS_EXTRA_IMPULSES;
+            const auto extra_mask = [&](const bmmo_physics_core_extra& extra, wake_mode mode, bool unit_pass) -> uint32_t {
+                uint32_t fields = extra.fields;
+                if (!restore_impulses_ || mode == wake_mode::freeze) fields &= ~BMMO_PHYSICS_EXTRA_IMPULSES;
                 if (!restore_quaternions_) fields &= ~BMMO_PHYSICS_EXTRA_QUATS;
                 if (!restore_calm_) fields &= ~BMMO_PHYSICS_EXTRA_CALM;
                 if (!restore_unit_) fields &= ~BMMO_PHYSICS_EXTRA_UNIT;
@@ -1554,10 +1595,14 @@ namespace bmmo::session {
                 else fields &= ~BMMO_PHYSICS_EXTRA_UNIT;
                 return fields;
             };
-            const auto write_extra = [&](const std::string& entity, const restore& item, bool unit_pass) {
-                if (!item.have_extra || !world.set_body_extra) return;
-                bmmo_physics_core_extra extra = item.extra;
-                extra.fields = extra_mask(item, unit_pass);
+            // The extra of the item's A half (state / mode / extra) or of its
+            // birth half (`birth`: the re-pose after its birth tick's step).
+            const auto write_extra = [&](const std::string& entity, const restore& item, bool unit_pass, bool birth_half = false) {
+                const bmmo_physics_core_extra& source = birth_half ? item.birth.extra : item.extra;
+                const wake_mode mode = birth_half ? item.birth.mode : item.mode;
+                if (!(birth_half ? item.birth.have_extra : item.have_extra) || !world.set_body_extra) return;
+                bmmo_physics_core_extra extra = source;
+                extra.fields = extra_mask(source, mode, unit_pass);
                 if (extra.fields == 0) return;
                 if (extra.fields & BMMO_PHYSICS_EXTRA_CALM)
                     for (int k = 0; k < 2; ++k) extra.calm_time[k] += calm_shift;
@@ -1592,7 +1637,8 @@ namespace bmmo::session {
                 // (Measured without this: a box born inside a 48-tick window
                 // left its spot 5 m up in the first live tick after the
                 // replay.)
-                const bool parked_inert = savestate_applied && item.repose_tick != 0;
+                // (A revived life with a later birth is the A-life here: written.)
+                const bool parked_inert = savestate_applied && item.repose_tick != 0 && !item.revived_until;
                 const bool recheck = recheck_on_restore_ && !parked_inert
                                    && (item.force_recheck || write_moves_body(live, item.state));
                 const bool deferred = recheck && two_pass_recheck_ && world.recheck_body;
@@ -1602,8 +1648,8 @@ namespace bmmo::session {
                 if (item.from_row && ro) ++ro->rows_written;
                 // After the pose write, which zeroed the queue.  A body born in
                 // the window is parked here and gets its record's extra at the
-                // re-pose instead.
-                if (!item.repose_tick) write_extra(entity, item, false);
+                // re-pose instead; a revived life is written from its A record.
+                if (!item.repose_tick || item.revived_until) write_extra(entity, item, false);
                 // What we wrote from a row is the authoritative state of T now:
                 // without this the next snapshot of T compares against the
                 // prediction we just discarded and rolls back again.
@@ -1649,7 +1695,7 @@ namespace bmmo::session {
             // IVP after the rechecks above, so the write lands on the units as
             // they are now (last writer wins within a unit).
             for (auto& [entity, item]: plan)
-                if (!item.repose_tick && !item.covered) write_extra(entity, item, true);
+                if ((!item.repose_tick || item.revived_until) && !item.covered) write_extra(entity, item, true);
             // The friction contacts the anchor's record had and the live world
             // lacks - a contact that ended inside the window.  IVP creates a
             // contact only on an impact, and a body put back on the floor it
@@ -1660,7 +1706,7 @@ namespace bmmo::session {
             // did; a body born in the window has no record of its own here.
             if (restore_contacts_ && world.set_contacts)
                 for (auto& [entity, item]: plan) {
-                    if (item.repose_tick || (item.covered && !item.recontact)) continue;
+                    if ((item.repose_tick && !item.revived_until) || (item.covered && !item.recontact)) continue;
                     const auto it = at->contacts.find(entity);
                     if (it == at->contacts.end()) continue;
                     const int made = world.set_contacts(entity, it->second, contact_flags_);
@@ -1694,7 +1740,9 @@ namespace bmmo::session {
                 if (world.replay_mechanisms) {
                     std::vector<std::string> mechanisms;
                     for (std::string& name: world.replay_mechanisms()) {
-                        if (const auto p = plan.find(name); p != plan.end() && p->second.repose_tick != 0) continue;
+                        if (const auto p = plan.find(name); p != plan.end() && p->second.repose_tick != 0
+                                && !p->second.revived_until)
+                            continue;
                         if (!at->tracked.generations.count(name)) at->tracked.generations[name] = generation_now(name);
                         mechanisms.push_back(std::move(name));
                     }
@@ -1870,8 +1918,11 @@ namespace bmmo::session {
                         // held out of the world - neither driven nor recorded
                         // (recorded, a later rewind would restore the parked
                         // pose as an ordinary body and release it early).
+                        // (Not a revived life before its end: the A-life is
+                        // driven and recorded over [A, D).)
                         if (const auto parked = plan.find(entity); parked != plan.end() && parked->second.repose_tick != 0
-                                && static_cast<int32_t>(parked->second.repose_tick - t) > 0)
+                                && static_cast<int32_t>(parked->second.repose_tick - t) > 0
+                                && !(static_cast<int32_t>(parked->second.revived_until - t) > 0))
                             continue;
                         const bool named = std::find(remotes.begin(), remotes.end(), entity) != remotes.end();
                         const auto was = step_tracked.generations.find(entity);
@@ -1957,17 +2008,17 @@ namespace bmmo::session {
                     // says.
                     if (item.from_inputs) {
                         if (item.rebirth && ro) ++ro->remade;
-                        if (same_body_state(live, item.state)) {
+                        if (same_body_state(live, item.birth.state)) {
                             ++stats_.births_recreated_exact;
                         } else if (world.log && recreate_logs_++ < 8) {
                             char buf[200];
                             std::snprintf(buf, sizeof(buf), " dp=(%.3g,%.3g,%.3g) dv=(%.3g,%.3g,%.3g)%s",
-                                          live.position[0] - item.state.position[0], live.position[1] - item.state.position[1],
-                                          live.position[2] - item.state.position[2],
-                                          static_cast<double>(live.linear[0]) - item.state.linear[0],
-                                          static_cast<double>(live.linear[1]) - item.state.linear[1],
-                                          static_cast<double>(live.linear[2]) - item.state.linear[2],
-                                          live.simulated != item.state.simulated ? " sleep differs" : "");
+                                          live.position[0] - item.birth.state.position[0], live.position[1] - item.birth.state.position[1],
+                                          live.position[2] - item.birth.state.position[2],
+                                          static_cast<double>(live.linear[0]) - item.birth.state.linear[0],
+                                          static_cast<double>(live.linear[1]) - item.birth.state.linear[1],
+                                          static_cast<double>(live.linear[2]) - item.birth.state.linear[2],
+                                          live.simulated != item.birth.state.simulated ? " sleep differs" : "");
                             world.log("birth: " + entity + " made again at tick " + std::to_string(t)
                                       + " from the inputs it has now, kept against its birth record:" + buf);
                         }
@@ -1980,7 +2031,7 @@ namespace bmmo::session {
                     // beam would only zero what the step computed.  A
                     // difference is measured and corrected as before.
                     if (item.recreate || item.inserted) {
-                        if (same_body_state(live, item.state)) {
+                        if (same_body_state(live, item.birth.state)) {
                             ++(item.recreate ? stats_.births_recreated_exact : stats_.births_inserted_exact);
                             continue;
                         }
@@ -1988,19 +2039,19 @@ namespace bmmo::session {
                         if (world.log && recreate_logs_++ < 8) {
                             char buf[200];
                             std::snprintf(buf, sizeof(buf), " dp=(%.3g,%.3g,%.3g) dv=(%.3g,%.3g,%.3g)%s",
-                                          live.position[0] - item.state.position[0], live.position[1] - item.state.position[1],
-                                          live.position[2] - item.state.position[2],
-                                          static_cast<double>(live.linear[0]) - item.state.linear[0],
-                                          static_cast<double>(live.linear[1]) - item.state.linear[1],
-                                          static_cast<double>(live.linear[2]) - item.state.linear[2],
-                                          live.simulated != item.state.simulated ? " sleep differs" : "");
+                                          live.position[0] - item.birth.state.position[0], live.position[1] - item.birth.state.position[1],
+                                          live.position[2] - item.birth.state.position[2],
+                                          static_cast<double>(live.linear[0]) - item.birth.state.linear[0],
+                                          static_cast<double>(live.linear[1]) - item.birth.state.linear[1],
+                                          static_cast<double>(live.linear[2]) - item.birth.state.linear[2],
+                                          live.simulated != item.birth.state.simulated ? " sleep differs" : "");
                             world.log("birth: " + entity + (item.recreate ? " re-created" : " inserted") + " at tick "
                                       + std::to_string(t) + " is not at its birth record after the step:" + buf);
                         }
                     }
-                    world.set_body(entity, item.state, item.mode, true);
-                    write_extra(entity, item, false);
-                    write_extra(entity, item, true);
+                    world.set_body(entity, item.birth.state, item.birth.mode, true);
+                    write_extra(entity, item, false, true);
+                    write_extra(entity, item, true, true);
                 }
                 // The snapshot rows a restore anchored at this tick wrote (step
                 // RR): the server's state after this step, written again the
@@ -2047,8 +2098,10 @@ namespace bmmo::session {
                     std::vector<std::string> added;
                     for (std::string& name: world.replay_mechanisms()) {
                         if (named.count(name)) continue;
+                        // (Not before a revived life's end: the body is the A-life then.)
                         if (const auto it = plan.find(name); it != plan.end() && it->second.repose_tick != 0
-                                && static_cast<int32_t>(it->second.repose_tick - t) > 0) {
+                                && static_cast<int32_t>(it->second.repose_tick - t) > 0
+                                && !(static_cast<int32_t>(it->second.revived_until - t) > 0)) {
                             if (!it->second.recreate) continue;   // parked
                             it->second.repose_tick = t;           // made early by the replay: no birth re-pose later
                         }
@@ -2251,6 +2304,19 @@ namespace bmmo::session {
         void set_exact_restore(bool enable) { exact_restore_ = enable; }
         // Log which branch every body of a restore took (capped at 16).
         void set_trace_plan(bool enable) { trace_plan_ = enable; }
+
+        // Gap L (rollback-engine gaps design 2.3.4, read at step EL6 for
+        // L3's replay-tick life test): the lifetime generation `entity` has
+        // in the record of `tick` (0 when the record does not list it);
+        // false when no record of that tick is kept.  Inside a replay the
+        // ticks before the one being replayed are its re-captured records,
+        // which take their generations from the live records.
+        bool generation_at(const std::string& entity, uint32_t tick, uint32_t& out) const {
+            const tick_state* state = find_const(tick);
+            if (!state) return false;
+            out = generation_in(*state, entity);
+            return true;
+        }
 
         bool recorded_input(const std::string& entity, uint32_t tick, input_frame& out) const {
             const tick_state* at = find_const(tick);
@@ -2526,6 +2592,23 @@ namespace bmmo::session {
             // it anyway.
             bool recontact = false;
             uint32_t repose_tick = 0;    // 0: none - re-pose at this replayed tick
+            // Gap L, L1 (step EL6): != 0, a life alive at the anchor that a
+            // half of restore_lives revived; `state` is then its A record (or
+            // a row), written at the anchor (covered by the blob), and the
+            // replay removes the body at this tick.  With repose_tick too (a
+            // later life of the name, born inside the window), the item has
+            // two halves: the A-life over [A, revived_until), the birth at
+            // repose_tick (`birth`).
+            uint32_t revived_until = 0;
+            // The birth half: what a body born at repose_tick is re-posed to
+            // and compared with after that tick's step (its birth record).
+            // For a plain birth item the same as state / mode / extra.
+            struct birth_half {
+                bmmo_physics_body_state state{};
+                wake_mode mode = wake_mode::keep;
+                bmmo_physics_core_extra extra{};
+                bool have_extra = false;
+            } birth;
             bool from_inputs = false;    // destroyed and made again from the inputs: kept as stepped (birth_from_inputs)
             // A resync's destroy (resync_spec::destroy): a body of the anchor
             // world the server's state at S lacks, made again by the replay at
@@ -2596,7 +2679,8 @@ namespace bmmo::session {
             std::unordered_set<std::string> targets;
             const auto parked = [&](const std::string& name) {
                 const auto it = plan.find(name);
-                return it != plan.end() && it->second.repose_tick != 0 && static_cast<int32_t>(it->second.repose_tick - t) > 0;
+                return it != plan.end() && it->second.repose_tick != 0 && static_cast<int32_t>(it->second.repose_tick - t) > 0
+                    && !(static_cast<int32_t>(it->second.revived_until - t) > 0);   // gap L: the A-life until its end
             };
             bmmo_physics_body_state live{};
             for (const auto& [entity, row]: recorded.rows) {
@@ -2631,6 +2715,127 @@ namespace bmmo::session {
                     else stats_.contacts_restored += static_cast<uint64_t>(made);
                 }
             return written;
+        }
+
+        // Gap L, L1 (rollback-engine gaps design 2.3.1, step EL6): the lives
+        // the anchor's record has a body for that end inside (A, now] - in
+        // A's tracked order (own, remotes, mechanisms: the order step P made
+        // the mechanisms again in) - handed to rollback_world::restore_lives,
+        // and each answer put into the plan: a revived name from its A record
+        // (a row it has outranks the record, 4), a remade one as a birth item
+        // at that tick from its birth record, already taken out (`recreate`);
+        // a name no half revived is counted and logged by name.  The end of
+        // a life is a change of its generation only (a moved birth's gap
+        // keeps it); generations only grow, so a name whose newest record in
+        // the window still has A's generation is alive now.
+        void revive_ended_lives(const rollback_world& world, const tick_state& at, uint32_t anchor, uint32_t current_tick,
+                                bool savestate, const resync_spec* rs, std::map<std::string, restore>& plan) {
+            const tick_state* newest = nullptr;
+            for (auto it = history_.rbegin(); it != history_.rend(); ++it)
+                if (static_cast<int32_t>(it->tick - anchor) > 0 && static_cast<int32_t>(it->tick - current_tick) <= 0) {
+                    newest = &*it;
+                    break;
+                }
+            if (!newest) return;
+            std::vector<ended_life> ended;
+            std::set<std::string> seen;
+            const auto consider = [&](const std::string& name, life_kind kind) {
+                if (name.empty() || !seen.insert(name).second) return;
+                if (at.bodies.find(name) == at.bodies.end()) return;
+                if (rs && rs->gone.count(name)) return;   // step T3: the reconcile took it out
+                const uint32_t generation = generation_in(at, name);
+                if (generation_in(*newest, name) == generation) return;
+                ended_life life;
+                life.name = name;
+                life.generation = generation;
+                life.end_tick = newest->tick;
+                life.kind = kind;
+                for (const tick_state& state: history_) {
+                    if (static_cast<int32_t>(state.tick - anchor) <= 0 || static_cast<int32_t>(state.tick - newest->tick) > 0)
+                        continue;
+                    if (generation_in(state, name) != generation) {
+                        life.end_tick = state.tick;
+                        break;
+                    }
+                }
+                if (const auto p = plan.find(name); p != plan.end()) life.reborn_at = p->second.repose_tick;
+                ended.push_back(std::move(life));
+            };
+            consider(at.tracked.own_entity, life_kind::own);
+            for (const auto& name: at.tracked.remote_entities) consider(name, life_kind::mirror);
+            for (const auto& name: at.tracked.mechanisms) consider(name, life_kind::mechanism);
+            if (ended.empty()) return;
+            std::map<std::string, life_outcome> out;
+            world.restore_lives(anchor, current_tick, ended, savestate, out);
+            stats_.lives_ended += ended.size();
+            const auto sleep_of = [this](const bmmo_physics_body_state& state, wake_mode otherwise) {
+                return sleep_as_recorded_ ? (state.simulated ? wake_mode::wake : wake_mode::freeze) : otherwise;
+            };
+            for (const ended_life& life: ended) {
+                const auto o = out.find(life.name);
+                const life_outcome got = o == out.end() ? life_outcome{} : o->second;
+                if (got.remade_at) {
+                    restore* item = nullptr;
+                    if (const auto p = plan.find(life.name); p != plan.end() && p->second.repose_tick == got.remade_at) {
+                        item = &p->second;
+                    } else if (const tick_state* born = find_const(got.remade_at); born) {
+                        if (const auto b = born->bodies.find(life.name); b != born->bodies.end()) {
+                            restore made;
+                            made.state = b->second;
+                            made.mode = sleep_of(made.state, wake_mode::wake);
+                            made.repose_tick = got.remade_at;
+                            made.force_recheck = true;
+                            if (const auto ex = born->extras.find(life.name); ex != born->extras.end()) {
+                                made.extra = ex->second;
+                                made.have_extra = true;
+                            }
+                            made.birth = {made.state, made.mode, made.extra, made.have_extra};
+                            item = &(plan[life.name] = made);
+                        }
+                    }
+                    if (item) {
+                        item->recreate = true;
+                        item->from_inputs = world.birth_from_inputs && world.birth_from_inputs(life.name);
+                        ++stats_.lives_remade;
+                    } else if (world.log && lives_logs_++ < 8) {
+                        world.log("lives: " + life.name + " remade at tick " + std::to_string(got.remade_at)
+                                  + " has no birth record there: not compared after that tick");
+                    }
+                }
+                if (got.revived_until) {
+                    const auto p = plan.find(life.name);
+                    if (p != plan.end() && p->second.repose_tick && !p->second.recreate) {
+                        // A later life of the name is still in the world:
+                        // one body per name - the half must take it out.
+                        if (world.log && lives_logs_++ < 8)
+                            world.log("lives: " + life.name + " revived at tick " + std::to_string(anchor)
+                                      + " while its later life born at " + std::to_string(p->second.repose_tick)
+                                      + " is not taken out: kept on the birth item");
+                    } else {
+                        restore& item = plan[life.name];
+                        if (!item.from_row) {
+                            item.state = at.bodies.at(life.name);
+                            item.mode = sleep_of(item.state, wake_mode::keep);
+                            const auto ex = at.extras.find(life.name);
+                            item.have_extra = ex != at.extras.end();
+                            item.extra = item.have_extra ? ex->second : bmmo_physics_core_extra{};
+                        }
+                        item.revived_until = got.revived_until;
+                        ++(life.kind == life_kind::own      ? stats_.lives_revived_own
+                           : life.kind == life_kind::mirror ? stats_.lives_revived_mirror
+                                                            : stats_.lives_revived_mech);
+                        continue;
+                    }
+                }
+                ++stats_.lives_unrevivable;
+                if (world.log && lives_logs_++ < 8)
+                    world.log("lives: " + life.name + " (alive at tick " + std::to_string(anchor) + ", generation "
+                              + std::to_string(life.generation) + ") ended at tick " + std::to_string(life.end_tick)
+                              + " inside the window and was revived by no half: the replay runs without it until then"
+                              + (savestate ? " (the savestate skips it)" : "")
+                              + (life.reborn_at ? "; its later life is born at " + std::to_string(life.reborn_at) : std::string())
+                              + " (" + std::to_string(stats_.lives_unrevivable) + " so far)");
+            }
         }
 
         // The oldest record that carries `entity` in its current lifetime: the
@@ -2789,6 +2994,7 @@ namespace bmmo::session {
         uint32_t savestate_replay_logs_ = 0;
         uint32_t recreate_logs_ = 0;
         uint32_t replay_mechanism_logs_ = 0;
+        uint32_t lives_logs_ = 0;   // gap L: unrevivable and inconsistent answers logged (capped)
         uint32_t script_float_logs_ = 0;
         bool trace_plan_ = false;
         uint32_t plan_traces_ = 0;

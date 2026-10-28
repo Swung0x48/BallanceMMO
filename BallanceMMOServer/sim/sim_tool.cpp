@@ -3216,6 +3216,11 @@ namespace {
         std::set<uint32_t> trafo_birth_ticks, trafo_death_ticks;   // record ticks a piece first / no longer has
         int trafo_rounds_births = 0, trafo_rounds_deaths = 0;
         uint64_t trafo_recreated = 0, trafo_recreated_exact = 0, trafo_missing = 0;
+        // Gap L, L1 (step EL6): the lives alive at a round's anchor that end
+        // inside its window, revived by restore_lives' halves or not; rounds
+        // with any, and those whose every one was revived.
+        uint64_t trafo_lives_ended = 0, trafo_lives_revived = 0, trafo_lives_unrevivable = 0;
+        int trafo_rounds_lives = 0, trafo_rounds_lives_revived = 0;
 
         // ---- the script replay (--frames): the mechanism scripts and the
         // hooks that carry the force blocks' controllers, as the headless
@@ -3981,6 +3986,23 @@ namespace {
                 trafo_recreated += engine.stats().births_recreated - pristine.stats().births_recreated;
                 trafo_recreated_exact += engine.stats().births_recreated_exact - pristine.stats().births_recreated_exact;
                 trafo_missing += engine.stats().births_missing - pristine.stats().births_missing;
+                const uint64_t ended = engine.stats().lives_ended - pristine.stats().lives_ended;
+                const auto revived_all = [](const bmmo::session::rollback_stats& s) {   // every kind (own, mirror, mechanism)
+                    return s.lives_revived_own + s.lives_revived_mirror + s.lives_revived_mech;
+                };
+                const uint64_t revived = revived_all(engine.stats()) - revived_all(pristine.stats());
+                const uint64_t unrevivable = engine.stats().lives_unrevivable - pristine.stats().lives_unrevivable;
+                trafo_lives_ended += ended;
+                trafo_lives_revived += revived;
+                trafo_lives_unrevivable += unrevivable;
+                if (ended) {
+                    ++trafo_rounds_lives;
+                    if (!unrevivable && revived == ended) ++trafo_rounds_lives_revived;
+                }
+                if (args.verbose && ended)
+                    std::printf("  round %zu: lives ended %llu, revived %llu, unrevivable %llu\n", r,
+                                static_cast<unsigned long long>(ended), static_cast<unsigned long long>(revived),
+                                static_cast<unsigned long long>(unrevivable));
             }
             if (passes) {   // step S7
                 for (uint32_t x: pass_ticks)
@@ -4043,6 +4065,11 @@ namespace {
                         " their birth record, missing %llu\n", trafo_rounds_births, trafo_rounds_deaths, trafo_birth_ticks.size(),
                         trafo_death_ticks.size(), static_cast<unsigned long long>(trafo_recreated),
                         static_cast<unsigned long long>(trafo_recreated_exact), static_cast<unsigned long long>(trafo_missing));
+            std::printf("savestate-check: lives (gap L, L1): rounds with a life ended inside the window %d, every one revived"
+                        " in %d; lives ended %llu, revived %llu, unrevivable %llu\n", trafo_rounds_lives,
+                        trafo_rounds_lives_revived, static_cast<unsigned long long>(trafo_lives_ended),
+                        static_cast<unsigned long long>(trafo_lives_revived),
+                        static_cast<unsigned long long>(trafo_lives_unrevivable));
         }
         if (passes) {   // step S7
             std::printf("savestate-check: passes inside the window %zu (rounds crossing one %d), window births logged %zu,"

@@ -2063,3 +2063,149 @@ numbers below.
   journals IDENTICAL (the tool's DIFFERENCES line is its missing
   client1-3 files of a one-client arm). The retail arm above ran it (205
   restores in Player.exe, `sv=205/0/0`).
+
+## As built (step EL6, 2026-10-28): gap L, step G6 (L1)
+
+Step G6 of §8 on HEAD 5eea6a5: the engine's half of L1 and the host's
+mechanism half; the ball halves (L2, L3) are G7 / G8.
+
+- **Detection** (`rollback_engine::revive_ended_lives`, `rollback.hpp`):
+  only when the world has `restore_lives` and a replay follows (both
+  paths). Candidates are the names of A's tracked set with a body record
+  at A, in A's tracked order (own, remotes, mechanisms: the order step P
+  made the mechanisms again in), minus a resync's `gone`. A name whose
+  newest record in (A, now] has A's generation is alive (generations only
+  grow), so the forward scan for the first record with another generation
+  runs only for the ended ones; a moved birth's gap keeps the generation
+  and is no end. `ended_life = {name, generation, end_tick, reborn_at,
+  kind}`: **adapted**, `reborn_at` (the plan's birth item of a later life)
+  and `kind` (own / mirror / mechanism by A's tracked set) were added, so
+  that a half can keep step P's "not a name born again in the window" and
+  leave the balls to the core.
+- **`rollback_world::restore_lives(anchor, now, ended, savestate, out)`**:
+  **adapted**, it takes `savestate` (whether the blob will be tried):
+  step P's revive is savestate-only until G9, and the hook is called on
+  both paths. `life_outcome = {revived_until, remade_at}`; a name with
+  neither is unrevivable (no explicit flag).
+- **Order, adapted:** the plan is computed first, as before (it is pure
+  computation over the history); the hook then runs where step P's
+  revive ran - after `replay_follows`, the hold and the clock, before the
+  scripts' restore and the blob - and its answers amend the items: a
+  revived name gets its A record (state, sleep as recorded, extra) unless
+  a snapshot row planned it (§4: the row outranks), and `revived_until`;
+  a remade name becomes a birth item at E from the record of E (or keeps
+  its birth item) with `recreate` set (the destroy loop skips it,
+  `from_inputs` from `birth_from_inputs`). A revive answered for a name
+  whose later life is still in the world (a birth item without `recreate`)
+  is logged and ignored. The plan trace moved after the hook and adds
+  `revived`.
+- **The two-half item** (`restore::revived_until`, `restore::birth`): every
+  reader of 2.3.1 step 5 as the table says; plus two the table did not
+  list: `reapply_rows`' parked test and the resync's mechanism list exempt
+  a revived life before its end. A plain birth item's `birth` is its
+  planned state / mode / extra (unchanged behaviour); the re-pose writes
+  `birth` (pose and extra).
+- **Refused blob:** the revived bodies stay (the old
+  `destroy_body(entity, 0)` of the revive list is gone); their items are
+  not covered, so the per-body path writes them from their A records.
+- **Step P's revive in the host half** (`bind_session_world`,
+  `session_host_world.hpp`): the core's half (`core_world_hooks::
+  restore_lives`, unset until G7 / G8) first, then the mechanism half:
+  savestate only, mechanisms only, a name no half answered, no later life
+  in the window (the old "born again" log line, unchanged), no body now,
+  `revive_body` (unchanged: the revivable set, the A-life's birth, muted);
+  `revived_until` = the end. `rollback_world::revive_body` stays as the
+  host's primitive; the engine never calls it. Two differences from the
+  old engine loop, both outside every measured case: a name whose only
+  plan item is a snapshot row is now revived (the row then written on it),
+  and a mechanism with no body now but A's generation (a muted removal) is
+  no ended life and is not revived. Two more, from the revived body now
+  having a plan item (both what 2.3.1's reader table asks, neither in
+  L-S0's byte-identical rounds nor in the captures, whose trafo inputs are
+  off): when the blob drops its contacts the item is marked `recontact`
+  and `set_contacts` writes A's contacts on it (under step P the blob
+  alone did); and in the resync branch with a travelling blob, a revived
+  piece the server's blob does not know gets `force_recheck` and a write
+  from its A record, where step P left it at its `put_back` birth pose for
+  the unknown-body loop to recheck.
+- **Detection's reading of an unlisted name, documented:** detection reads
+  `generation_in(newest, name)`, which is 0 for a name the newest record
+  does not list, so such a name counts as an end, while `generation_now`
+  reads it as keeping its last listed generation. No case today: the core
+  copies its cumulative `generations_` into every record
+  (`client_core_frame.cpp`) and clears them only at a session's start, so
+  a tracked name is listed in every record of its session. A host or
+  harness with sparse generation maps would see false ends; they can only
+  add to `unrevivable` (the host half checks `get_body`), never revive a
+  body wrongly.
+- **Per-name skip logging, adapted:** the engine logs each unrevivable
+  life by name (first 8: "lives: <name> (alive at tick A, generation g)
+  ended at tick D inside the window and was revived by no half ... (the
+  savestate skips it)"), not the restorer's own skip list: the bridge
+  carries no names of skipped objects to the retail host (a bridge API
+  change), and every ball is a tracked name, which is what L-H1 asks.
+  The cap of 8 lines is per engine and shared with the inconsistent-answer
+  lines, so G7's L-H1 ("names no ball") is judged on the `lives=`
+  counter's `unrevivable`, not on the log.
+- **`generation_at(entity, tick, out)`** (public): the generation in the
+  record of `tick` (0 when unlisted; false without a record). For G8.
+- **Counters:** `rollback_stats::lives_ended / lives_revived_own /
+  lives_revived_mirror / lives_revived_mech / lives_remade /
+  lives_unrevivable`; the status line (shared, so retail's too) carries
+  `lives=ended/own/mirror/mech/remade/unrevivable` after `missing=`;
+  SimTool's `--savestate-check` with trafo inputs prints a `lives (gap L,
+  L1)` line whose `revived` sums all three kinds (own, mirror, mechanism),
+  so it stays right once G7 / G8 revive balls. `late_birth_kept` waits for
+  G7.
+- **Layout:** `rollback_stats` grew by the six `uint64_t` counters and
+  `rollback_engine` by `lives_logs_`; `physics_session_state` holds the
+  engine by value and `BallanceMMOClient` holds that state, so the BML
+  class grows, against core design §3.2's "no counter (layout)" for
+  `rollback_engine` until R7. Precedent: B8EG's `births_parked_balls`,
+  REACH and R12 grew it the same way and the RTX retail runs did not hang.
+  The x86 build recompiled every includer of `BallanceMMOClient.h` (21
+  objects, `BallanceMMOClient.cpp`, PSC, `core_host`, `client_automation`,
+  `room_client` among them), so no stale layout ships; the FULL retail
+  launch confirms there is no start-up hang.
+- **Checks (quick tier):** x64 and x86 builds (deps valid), GCC 29/29 ok,
+  unit tests 566 pass - L-U1 =
+  `RollbackEngine.EndedLivesAreFoundByTheirGenerationAndHandedOverBeforeTheScriptsAndTheBlob`
+  (end = first record with another generation, a moved birth's gap and a
+  living name are no ends, hold < restore_lives < scripts < blob, none
+  without a replay, `generation_at`), L-U2 =
+  `RollbackEngine.ARevivedLifeWithALaterBirthIsPlannedInTwoHalves` (blob
+  and per-body: covered at A / written from A, present before D, absent
+  over [D, E), `births_recreated_exact` at E), step P's test rewritten
+  (refused blob: the body stays and is written once), the binding's
+  composition test (savestate-only, kinds, reborn, order, core first).
+  **L-S0, adapted recipe** (`work/EL6/ls0.sh`: `--savestate-check` drives
+  explosions only as trafo inputs - level 2, `--drop-settle 250 --ticks 250
+  --trafo-sets 1 --explode-player 1 wood 10 ... --reset-player 1 wood 40
+  --rounds 80 --max-depth 48 --seed 7`): rEL6 PASS 80/80, 9 rounds cross
+  the pieces' death, 144 lives ended, 144 revived, 0 unrevivable, 48
+  births re-made, all exact; the round lines (end hashes) equal rB8EG's
+  byte for byte. `--legacy-restore` (the negative control, per-body):
+  FAIL 80/80 in both builds with identical lines; 144 unrevivable (the
+  per-body revive is G9's). Wire check rB8EG -> rEL6 over core_ref_s8:
+  12/12 sends SAME, 12/12 journals IDENTICAL; solo1 / solo2 sends SAME,
+  journals IDENTICAL. The replays' `lives=` show the open ball halves:
+  swing_snapoff c0-c3 4 / 8 / 9 / 4 and resync_snapoff 3 / 2 / 2 / 2
+  ended lives, all unrevivable (`Ball_Stone` and its mirrors, e.g.
+  `Ball_Stone_BMMO_2755103046` alive at 700, ended at 721); l8_cross 0.
+- **Live smoke (gate round):** the implement round's run (`el6_smoke`)
+  never started a session: the Arch server was a stale build made with
+  the slot-13 hack applied, while the headless client (built without it)
+  announces `original_map_hashes[13]`, so the server's
+  `is_original_level` refused it ("physics sessions need an original
+  level", `server.cpp:2403-2405`). The gate round rebuilt the Arch server
+  from this step's tree without the hack (`ballanced-36c04e3d24c9+bmmo-
+  5eea6a5a1dd1-dirty`; a retail run needs it rebuilt with the hack) and
+  ran `work/EL6/live.sh el6_smoke2`: 4 clients, 60 s, 150 ms, snapshots
+  off, every client exit 0, mism 0, max_err 0, mechanisms 52/52, 24-52
+  savestate rollbacks each, `lives=` 1-2 ended per client, all
+  unrevivable - `Ball_Stone` (the own ball's death inside a window, G7's
+  half). L-S0 rerun with the SimTool's summed `revived`: unchanged
+  (144 / 144 / 0; the round lines of both paths equal rB8EG's).
+- **Not run, deferred:** L-H0 as a same-batch live control (the wire
+  check is its deterministic form); a retail session (no retail code
+  changed, one comment).

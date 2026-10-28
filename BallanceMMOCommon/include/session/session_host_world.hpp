@@ -535,6 +535,45 @@ namespace bmmo::session {
                     return ok;
                 };
         }
+        // Gap L, L1 (rollback-engine gaps design 2.3.1, step EL6): the
+        // ended lives' two halves, the core's first (the balls, L2/L3),
+        // then the host's (the mechanisms, L4).  The host's half is step P's
+        // revive, moved here unchanged (2.3.1 step 6): only on the savestate
+        // path, only a mechanism of the anchor's tracked set with no body
+        // now and no later life born inside the window (that one is the
+        // known gap until G9: logged as step P logged it), made by
+        // revive_body (the revivable set, the birth of the A-life, muted) in
+        // the anchor's tracked order; its end is where the replayed script
+        // takes it away again.  A name a half answered already is not asked
+        // again.
+        if (hooks.restore_lives || world.revive_body) {
+            const auto core_lives = hooks.restore_lives;
+            const auto revive = world.revive_body;
+            const auto get_body = world.get_body;
+            const auto log = world.log;
+            world.restore_lives = [core_lives, revive, get_body, log](uint32_t anchor, uint32_t now,
+                                                                      const std::vector<ended_life>& ended, bool savestate,
+                                                                      std::map<std::string, life_outcome>& out) {
+                if (core_lives) core_lives(anchor, now, ended, savestate, out);
+                if (!revive || !savestate) return;
+                size_t reborn = 0;
+                std::string first_reborn;
+                for (const ended_life& life: ended) {
+                    if (life.kind != life_kind::mechanism || out.count(life.name)) continue;
+                    if (life.reborn_at) {
+                        if (!reborn++) first_reborn = life.name;
+                        continue;
+                    }
+                    bmmo_physics_body_state live{};
+                    if (get_body && get_body(life.name, live)) continue;
+                    if (revive(life.name, anchor)) out[life.name].revived_until = life.end_tick;
+                }
+                if (reborn && log)
+                    log("revive: " + std::to_string(reborn) + " mechanism(s) alive at tick " + std::to_string(anchor)
+                        + " are born again inside the window (" + first_reborn
+                        + " first): not made at the restore, the replay runs without them until their death");
+            };
+        }
         // Step RO1: the CK-free half of the guard on destroying an untracked
         // window birth at the restore for the replayed scripts to make again
         // (rollback_world::remade_by_replay; bind_script_replay adds the
