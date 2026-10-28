@@ -2412,15 +2412,12 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         // log): a replay across an explosion physicalizes the set's pieces
         // again, and OnPhysicalize would log them at the live tick + 1, where
         // a later rewind would take them for bodies born after its anchor.
-        // With the trafo as an input only (the mechanism births of a session
-        // without it keep the R-steps' feed unchanged).
+        // Step B2SW (T4 finding c): in every session, the trafo inputs on or
+        // off - without them a replay across an original explosion (step P's
+        // path) or a sector pass makes its bodies again the same way.
         if (world.pre_step) {
             const auto inner = world.pre_step;
             world.pre_step = [inner](uint32_t tick) {
-                if (!trafo_host.on) {
-                    inner(tick);
-                    return;
-                }
                 trafo_host.birth_tick = tick;
                 trafo_host.if_absent = true;
                 inner(tick);

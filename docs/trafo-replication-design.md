@@ -2969,6 +2969,24 @@ change; the legacy retail path untouched.
 - **Not done:** T4's (c) (the retail birth log of a replayed tick without
   the trafo inputs) stays queued.
 
+**As built (step B2SW, 2026-10-27): T4's finding (c), the retail birth log
+without the trafo inputs.** The core host's `world.pre_step` wrap
+(`core_host.cpp`) puts a replayed tick's births under that tick - only when
+the log lacks them there - in every session, not only with the trafo inputs:
+without them a replay across an original explosion (step P's path, the trafo
+scripts in the selection) or a sector pass makes its bodies again the same way,
+and OnPhysicalize logged them at the live tick + 1. Retail checks
+(`scripts/retail/b2sw_retail_1` and `_2`: Level 11, two copies, core on,
+snapshots off, the placement on, the trafo inputs off, both beamed onto
+P_Trafo_Stone at 300 / 340; `_2` with `net lag 150` both ways): no "birth log:
+... made by the replayed tick" line in either run (every replayed birth was in
+the log at its tick already, so nothing went to live + 1), client 2 of `_2`
+(rewinds of 20-23 ticks across its own explosion near 506) births recreated
+17/17 exactly at their records, missing 0; resyncs 0 on all four clients. The
+recreate failures (1 / 1 in `_1`, 1 / 5 in `_2`) are the pre-existing count of
+ball births inside a window (1 / 1 in `cd1_gate1` and `r3_spawn_1`); a
+same-recipe run of the previous build was not made (the contrast is deferred).
+
 ## 9. Open questions
 
 **9.1 CK copy semantics on the retail CK2.dll.** The open points are:

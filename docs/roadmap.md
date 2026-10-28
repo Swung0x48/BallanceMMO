@@ -405,6 +405,8 @@ numbers 1-10 are unchanged.
        design (the resync's held window sends no notices); **(a) the
        user's choice** (an echo now, a protocol change G5 would retire, or
        wait for world agreement's Q9).
+     - *Trafo T4 (c)*: the retail birth log's replayed-tick rule in every
+       session (trafo design).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift
