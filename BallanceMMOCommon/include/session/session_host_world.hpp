@@ -477,6 +477,23 @@ namespace bmmo::session {
                 if (!ok && failed) failed(entity, error);
                 return ok;
             };
+            // Rollback-engine gaps design 2.4 (step B8EG, item EGB): the
+            // balls destroy_body above refuses by design, asked first by the
+            // destroy loop and counted apart from real failures.  KEEP IN
+            // STEP WITH destroy_body: its tests in its order, without its
+            // side effects (the core's own_birth_destroyable is
+            // destroy_own_birth's test alone).  A host that gives
+            // destroy_own_birth without that query gets no keeps_parked:
+            // every refusal then counts as a failure, as before.
+            if (!own_birth || hooks.own_birth_destroyable) {
+                const auto own_destroyable = hooks.own_birth_destroyable;
+                world.keeps_parked = [own_destroyable, mirror, ball, own_body](const std::string& entity,
+                                                                               uint32_t birth_tick) {
+                    if (own_destroyable && own_destroyable(entity, birth_tick)) return false;
+                    if (mirror && mirror(entity)) return false;
+                    return (ball && ball(entity)) || (own_body && own_body(entity));
+                };
+            }
             // Step LB: a mirror destroy_body took out is made again by the
             // core from the session's inputs; after its birth tick's step it
             // stays as the step made it (rollback_world::birth_from_inputs).

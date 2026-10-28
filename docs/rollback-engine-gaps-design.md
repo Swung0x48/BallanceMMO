@@ -1944,3 +1944,82 @@ Every game started (RTSS healthy).
   rebases 0 and resyncs 0 on all four clients, t_max 29-30 ms (RC1's capture
   61-71 ms, B2's build rebased), the server journal 3542/3542, verdict PASS.
   Closed.
+
+## As built (step B8EG, 2026-10-28): gap B (G1)
+
+Item EGB of roadmap §4 item 4, built on HEAD 622d3f2; the quick-tier gate's
+numbers below.
+
+**Item EGB: gap B, step G1 (§2.4), as designed.**
+
+- `beam_own_ball` (`client_core_lifecycle.cpp`): the navigated beam without
+  own body control no longer bumps the generation at the request (the old
+  CL:703-704 branch is gone); only the in-place move without the
+  navigation replica, which no replay redoes, still bumps. Invariant B
+  holds on both capability settings.
+- Counter split (review 2 #13): `rollback_world::keeps_parked` and
+  `rollback_stats::births_parked_balls` (`rollback.hpp`); the destroy loop
+  asks it first, a ball's birth item is not passed to `destroy_body` and is
+  counted apart, the rest (a refused mechanism destroy, a failed moved own
+  birth or mirror remake) still counts `birth_recreate_failures`. The status
+  line carries it as `parked=` after `births=`.
+- **Adaptation:** the design's `keeps_parked` takes the entity only. It
+  takes the birth tick too, because the core's moved own birth
+  (`destroy_own_birth`, with own body control) is a ball that
+  `destroy_body` does take out: asked first, a ball-only test would have
+  kept it parked. `bind_session_world` builds it, as the design places it,
+  right next to `destroy_body` and from the same hooks, in `destroy_body`'s
+  order (moved own birth -> not parked; mirror -> not parked; any other
+  ball or the own body -> parked), so the world is the same as before. The
+  first test needs `destroy_own_birth`'s answer without its side effect
+  (`unmake_own_body`), so the core gains one pure hook,
+  `core_world_hooks::own_birth_destroyable`, and both it and
+  `destroy_moved_own_birth` go through one function,
+  `session_client_core::destroyable_own_birth` (own body control and
+  `moved_own_life`): the two cannot drift apart. A host that gives
+  `destroy_own_birth` without that query gets no `keeps_parked` (every
+  refusal counts as a failure, as before); with `park_births` neither is
+  installed. SimTool's binding (`rollback_binding_scripts.hpp`) has no
+  balls and leaves it unset. (The review's should-fix: the first build had
+  the core compose `keeps_parked` itself, a second copy of `destroy_body`'s
+  order in another file.)
+- Tests: B-U1 = `SessionClientCoreOwnLives.BeamWrittenInPlaceWithoutOwnBodyControl`
+  (no generation change at the request, the beam's life keeps generation 0,
+  the stamp written live and in a forced replay; the non-navigated move
+  bumps); B-U2 = `RollbackEngine.AParkedBallBirthIsCountedApartFromARefusedDestroy`
+  (the ball reaches `keeps_parked` and never `destroy_body`,
+  `births_parked_balls` 1, the refused mechanism `birth_recreate_failures`
+  1), the binding half `RollbackBinding.KeepsParkedIsDestroyBodysTestsWithoutItsSideEffects`
+  (asking never calls `destroy_own_birth`; `destroy_body` refuses wherever
+  it says parked) and the core half
+  `SessionClientCoreOwnLives.OwnBirthDestroyableIsDestroyOwnBirthsTest`.
+- **B-R1, one arm on retail** (`maps/arena-test/b8eg_f13`,
+  `work/EG0/eg0_retail.py b8eg_f13 13:24`, arena, core on, snapshots off,
+  Arch server of this tree with the slot-13 hack): `rb=205 sv=205/0/0`,
+  `births=0/0/0+45/45/0/0` - `birth_recreate_failures` 0 (EG0's `eg0_f13`:
+  11), no refused destroy in the plan trace (EG0: 11, five of them the beams
+  650 / 900 x2 / 1300 x2); the script replay differs from the live record at
+  one tick only, 2184 `IngameParameter[0][2]` 0 vs 1 (RTX's queued finding;
+  EG0: 5, among them the beam windows 650 and 910); resyncs 0. The arm's
+  binary predates the `parked=` field (added after the run), so the parked
+  count was not read; §1.3's model (`work/EG0/birth_items.py` on this log)
+  gives 11 items under the old rule, 5 of them beams, so 6 parked births
+  (212, 817, 1567, two windows each) remain to be read off the status line.
+- The control `maps/arena-test/b8eg_ctl` (`eg0_retail.py b8eg_ctl 0`, the
+  final binary with `parked=`; `parked=0`, no forced rewinds) hit a 580 ms
+  host stall at tick 456 (04:45:12.576 -> 13.158), its tick driver rebased
+  and it resynced (`resyncs=1/1`), so `e0_compare.py --live` matches the arm
+  only up to there: TICK hash and pose identical at every tick 8..495 (the
+  forced windows over the spawn 212 included), different from 496 on. The
+  beam windows' "every non-piece body bit-exact against the control" and
+  the parked count are deferred to the stage close-out (two live runs per
+  step).
+- **TR3's R4 is not B's** (roadmap §4 item 4 named it under B): R4 is
+  headless (H5 131:47), and the headless host has own body control
+  (`session_client.cpp:1612`), which B1's removed branch never ran on. Its
+  line "own beam stamped 651 retired ... generation 1 -> 2" is
+  `apply_own_lives`' life test against the LIVE generation, bumped by the
+  trafo's Unphysicalize at 653 inside the window - §2.3.4's replay-tick life
+  test, step G8 (L3). The retail arm shows the same signature: "own beam
+  stamped 650 retired at tick 650 (replay): Ball_Stone has had another life
+  since (generation 1 -> 2)" (the stone dies at 652). R4 moves to G8.

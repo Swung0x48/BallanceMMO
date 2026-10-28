@@ -2467,9 +2467,10 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                 trafo_host.if_absent = false;
             };
         }
-        // Step EG0 diagnostics: every destroy_body the binding refuses (for a
-        // birth item - a ball - the engine counts it as
-        // birth_recreate_failures; the savestate-failure path's
+        // Step EG0 diagnostics: every destroy_body the binding refuses (a
+        // birth item's refusal counts birth_recreate_failures; since step
+        // B8EG a ball's birth item never gets here - keeps_parked counts it
+        // births_parked_balls; the savestate-failure path's
         // destroy_body(entity, 0) is not counted; a refused recreate_body is
         // counted but not logged here).
         if (diag_trace_plan() && world.destroy_body) {

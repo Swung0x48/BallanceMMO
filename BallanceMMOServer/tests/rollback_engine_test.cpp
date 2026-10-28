@@ -1593,6 +1593,58 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsParkedWhenTheWorldCannotMakeItAga
     EXPECT_EQ(engine.stats().birth_recreate_failures, 1u);
 }
 
+// Rollback-engine gaps design 2.4 (B-U2, step B8EG item EGB): a ball's birth
+// item that keeps the parking path by design is not passed to destroy_body
+// and counts births_parked_balls; a refused mechanism destroy still counts
+// birth_recreate_failures.  Both are parked and re-posed the same way.
+TEST(RollbackEngine, AParkedBallBirthIsCountedApartFromARefusedDestroy) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    auto w = world.adapter();
+    w.destroy_body = [&](const std::string& entity, uint32_t) {
+        world.calls.push_back("destroy " + entity);
+        return false;
+    };
+    w.recreate_body = [&](const std::string&, uint32_t) { return true; };
+    w.keeps_parked = [&](const std::string& entity, uint32_t tick) {
+        world.calls.push_back("keeps_parked " + entity + "@" + std::to_string(tick));
+        return entity == "Ball";
+    };
+
+    rollback_tracked before;
+    before.remote_entities = {"Remote"};
+    rollback_tracked after = before;
+    after.mechanisms = {"Prop"};
+    after.own_entity = "Ball";
+    for (uint32_t tick = 1; tick <= 6; ++tick) {
+        if (tick == 4) {
+            world.bodies["Prop"].position[0] = 10.0;
+            world.bodies["Prop"].linear[0] = 3.0f;
+            world.bodies["Ball"].position[0] = 20.0;
+        }
+        w.step();
+        engine.record(w, tick, tick >= 4 ? after : before, {{"Remote", input_frame{}}});
+    }
+    world.calls.clear();
+    fake_body server_remote = world.bodies["Remote"];
+    server_remote.position[0] += 1.0;
+    const auto snapshot = snapshot_of(2, {ball_body(2, server_remote)});
+    auto entity_now = [](const body_state& body) -> std::string {
+        return body.kind == body_kind::Ball && body.owner == 2 ? "Remote" : "";
+    };
+    EXPECT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
+    EXPECT_EQ(world.count("keeps_parked Ball@4"), 1);
+    EXPECT_EQ(world.count("keeps_parked Prop@4"), 1);
+    EXPECT_EQ(world.count("destroy Ball"), 0) << "a parked ball never reaches destroy_body";
+    EXPECT_EQ(world.count("destroy Prop"), 1);
+    EXPECT_EQ(engine.stats().births_parked_balls, 1u);
+    EXPECT_EQ(engine.stats().birth_recreate_failures, 1u) << "the mechanism only";
+    EXPECT_EQ(engine.stats().births_recreated, 0u);
+}
+
 // 9.25 rule 1: a row for a body we have no record of at T is not a rejection.
 // The body exists now, so the row is the best pose anyone has for it at T and
 // the restore uses it; the snapshot corrects the rest of the world as usual.

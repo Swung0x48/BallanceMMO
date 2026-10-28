@@ -175,6 +175,13 @@ namespace bmmo::session {
         // the parking path (step P: the identity the "Ball_" prefix stood
         // in for, which the trafo explosion pieces share).
         std::function<bool(const std::string& entity)> ball;
+        // destroy_own_birth's test without its side effect (rollback-engine
+        // gaps design 2.4, step B8EG item EGB): true when destroy_own_birth
+        // would take `entity` at `birth_tick` out (a moved own birth, with
+        // own body control).  bind_session_world builds
+        // rollback_world::keeps_parked from it and the ball / own_body /
+        // mirror hooks, next to destroy_body.
+        std::function<bool(const std::string& entity, uint32_t birth_tick)> own_birth_destroyable;
         // Step RR: the local entity a snapshot row of the server's body
         // (kind, owner) belongs to at a replayed tick (rollback_world::
         // row_entity): a mirror driven by then, or the resolved mechanism.

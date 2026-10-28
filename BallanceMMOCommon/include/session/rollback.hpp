@@ -313,6 +313,16 @@ namespace bmmo::session {
         // body still missing after that tick's step is counted (births_missing).
         std::function<bool(const std::string& entity, uint32_t birth_tick)> destroy_body;
         std::function<bool(const std::string& entity, uint32_t birth_tick)> recreate_body;
+        // Optional, with destroy_body (rollback-engine gaps design 2.4, step
+        // B8EG item EGB): a body born inside the window that keeps the
+        // parking path by design - a ball (the own ball's birth the scripts
+        // made, whose replica's controllers are on it) - is not passed to
+        // destroy_body and is counted births_parked_balls, so that
+        // birth_recreate_failures counts real failures only.  False for a
+        // body destroy_body takes out (a moved own birth, a mirror the core
+        // makes again).  The world is the same either way: destroy_body
+        // refuses such a ball without touching it.
+        std::function<bool(const std::string& entity, uint32_t birth_tick)> keeps_parked;
         // Optional (step B1, resync design 2.8): a body destroy_body took out
         // that the replay is not to make at its live birth tick - the replay
         // re-derives the sector union and moved or forgot the pass that made
@@ -686,6 +696,7 @@ namespace bmmo::session {
         uint64_t births_recreated_exact = 0;        // ...and found at exactly their birth record after that tick's step
         uint64_t birth_recreate_mismatches = 0;     // ...or not: re-posed from the record as a parked body would be
         uint64_t birth_recreate_failures = 0;       // destroy or recreate refused: the body was parked / is missing
+        uint64_t births_parked_balls = 0;           // birth items of balls kept on the parking path by design (keeps_parked)
         uint64_t births_missing = 0;                // destroyed at a restore and not made again by its birth tick's replayed scripts
         uint64_t births_moved = 0;                  // ...because the replay's union re-derivation moved or forgot their pass (step B1)
         uint64_t replay_mechanisms_added = 0;       // replayed ticks' records that name a mechanism body the live record did not (replay_mechanisms)
@@ -1391,13 +1402,15 @@ namespace bmmo::session {
                 if (world.destroy_body) {
                     for (auto& [entity, item]: plan) {
                         if (!item.repose_tick) continue;
-                        if (world.destroy_body(entity, item.repose_tick)) {
+                        const bool parked_ball = world.keeps_parked && world.keeps_parked(entity, item.repose_tick);
+                        if (!parked_ball && world.destroy_body(entity, item.repose_tick)) {
                             item.recreate = true;
                             item.from_inputs = world.birth_from_inputs && world.birth_from_inputs(entity);
                             ++stats_.births_recreated;
                             if (item.rebirth && ro) ++ro->destroyed;
                         } else {
-                            ++stats_.birth_recreate_failures;
+                            if (parked_ball) ++stats_.births_parked_balls;
+                            else ++stats_.birth_recreate_failures;
                             if (item.rebirth) {
                                 // Not destroyed: it stays, from the anchor's
                                 // record (counted; the reconcile could not

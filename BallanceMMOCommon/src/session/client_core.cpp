@@ -96,6 +96,12 @@ namespace bmmo::session {
             return false;
         };
         world_hooks_.ball = [this](const std::string& entity) { return is_ball(entity); };
+        // Rollback-engine gaps design 2.4 (step B8EG, item EGB):
+        // destroy_own_birth's test alone (destroyable_own_birth is the one
+        // both use), for bind_session_world's keeps_parked.
+        world_hooks_.own_birth_destroyable = [this](const std::string& entity, uint32_t birth_tick) {
+            return destroyable_own_birth(entity, birth_tick) != nullptr;
+        };
         // Step RR: a snapshot row's body at a replayed tick, by the server's
         // identity - the mirror the player's ball is driven as by then (the
         // replay_remotes rule), or the resolved mechanism.  The own ball is

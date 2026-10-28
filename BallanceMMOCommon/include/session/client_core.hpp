@@ -1547,6 +1547,7 @@ namespace bmmo::session {
         void set_aside_unanswered(own_life::aside why);
         own_life* find_unanswered(uint32_t origin, uint8_t ball_type);
         const own_life* moved_own_life(const std::string& entity, uint32_t birth_tick) const;
+        const own_life* destroyable_own_birth(const std::string& entity, uint32_t birth_tick) const;
         void process_own_echo(const bmmo::session_event_msg& msg, bool stale);
         void answer_set_aside(own_life& entry, bool made, bool superseded, uint32_t applied, const char* verdict);
         void expire_own_echoes();

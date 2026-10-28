@@ -824,8 +824,14 @@ namespace bmmo::session {
     //
     // Without own body control (design 2.3) the record is kept the same
     // way, but its stamp is an in-place write (write_beam), live and in
-    // every replay that crosses it, and the generation is bumped here, at
-    // the request, as the in-place branch below does.
+    // every replay that crosses it.  On both capability settings a
+    // navigated beam is a move within one life and keeps the generation
+    // (rollback-engine gaps design 1.3 invariant B, 2.4; step B8EG item
+    // EGB): bumped at the request, after the record of `tick`, it made
+    // every anchor before the stamp fail record_at's generation test, so
+    // a replay took the ball for one born at the stamp, parked it at its
+    // post-beam pose and fed it the pre-beam inputs.  Only the in-place
+    // move without the navigation replica, which no replay redoes, bumps.
     void session_client_core::beam_own_ball(uint32_t tick) {
         const std::string name = platform_.own_ball().entity;
         if (name.empty() || !s.own_physicalized_) {
@@ -840,8 +846,6 @@ namespace bmmo::session {
         if (!navigated) {
             if (!write_beam(name, s.beam_position_, tick)) return;
             ++s.generations_[name];   // the server rebuilds its copy: a new lifetime
-        } else if (!caps_.own_body_control) {
-            ++s.generations_[name];   // design 2.3: the server's new lifetime, bumped at the request
         }
         own_life beam;
         beam.what = own_life::kind::beam;
@@ -1162,9 +1166,18 @@ namespace bmmo::session {
         return nullptr;
     }
 
+    // The moved own birth destroy_moved_own_birth takes out, or null: none
+    // without own body control (design 2.3: the branch is inert).  The one
+    // test behind both destroy_own_birth and own_birth_destroyable
+    // (rollback-engine gaps design 2.4, step B8EG item EGB).
+    const client_core_state::own_life* session_client_core::destroyable_own_birth(const std::string& entity,
+                                                                                  uint32_t birth_tick) const {
+        if (!caps_.own_body_control) return nullptr;
+        return moved_own_life(entity, birth_tick);
+    }
+
     bool session_client_core::destroy_moved_own_birth(const std::string& entity, uint32_t birth_tick, bool& destroyed) {
-        if (!caps_.own_body_control) return false;
-        const own_life* life = moved_own_life(entity, birth_tick);
+        const own_life* life = destroyable_own_birth(entity, birth_tick);
         if (!life) return false;
         destroyed = unmake_own_body(*life, current_tick(), "restore");
         return true;

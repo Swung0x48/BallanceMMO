@@ -3020,10 +3020,13 @@ namespace {
         EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 1u) << "not bumped";
     }
 
-    // Design 5.1 "Beam", without own body control: the generation bumped at
-    // the request, the record kept, and its stamp one write_body live at
-    // T+1 and one in a forced replay that crosses T+1.  Without a
-    // navigation replica the ball is moved at once and nothing is kept.
+    // Design 5.1 "Beam", without own body control: the record kept, and its
+    // stamp one write_body live at T+1 and one in a forced replay that
+    // crosses T+1.  The generation is not bumped (rollback-engine gaps
+    // design 2.4, B-U1, step B8EG item EGB): a beam is a move within one
+    // life.  Without a navigation replica the ball is moved at once,
+    // nothing is kept and the generation is bumped (the server's new
+    // lifetime, which no replay redoes).
     TEST(SessionClientCoreOwnLives, BeamWrittenInPlaceWithoutOwnBodyControl) {
         flow_fake fake;
         session_client_core* bound = nullptr;
@@ -3044,9 +3047,9 @@ namespace {
                 "at that tick (no own body control)"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 1u) << "bumped at the request";
+        EXPECT_EQ(state_of(core).generations_.count("Ball_Wood"), 0u) << "not bumped at the request: one life";
         ASSERT_EQ(state_of(core).own_life_.size(), 1u);
-        EXPECT_EQ(state_of(core).own_life_[0].generation, 1u);
+        EXPECT_EQ(state_of(core).own_life_[0].generation, 0u);
         from = fake.calls.size();
         steps{core}.apply_held_lifecycle(126);
         {
@@ -3084,7 +3087,7 @@ namespace {
                 "now (no navigation replica)"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
-        EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 2u);
+        EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 1u) << "the in-place move: a new lifetime";
         EXPECT_TRUE(state_of(core).own_life_.empty());
     }
 
@@ -3174,6 +3177,52 @@ namespace {
     // a moved birth out (the live cells kept until the move's last line, as
     // the headless client kept them).  Without the control: nothing when snapshots run,
     // a resync when they do not, and the restore's branch is inert.
+    // Rollback-engine gaps design 2.4 (B-U2's core half, step B8EG item
+    // EGB): the core hooks bind_session_world builds keeps_parked from
+    // (RollbackBinding.KeepsParkedIsDestroyBodysTestsWithoutItsSideEffects)
+    // answer what destroy_body refuses by design - the own ball's birth and
+    // any other own ball entity are balls, a mirror is a mirror - and
+    // own_birth_destroyable answers exactly when destroy_own_birth acts: a
+    // moved own birth at its applied tick, with own body control only.
+    TEST(SessionClientCoreOwnLives, OwnBirthDestroyableIsDestroyOwnBirthsTest) {
+        for (const bool control: {false, true}) {
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_capabilities caps;
+            caps.own_body_control = control;
+            session_client_core core(replay_platform(fake, bound), caps);
+            bound = &core;
+            run_to_tick_125(core, fake);
+            const auto& hooks = steps{core}.world_hooks();
+            ASSERT_TRUE(hooks.own_birth_destroyable);
+            ASSERT_TRUE(hooks.ball);
+            ASSERT_TRUE(hooks.own_body);
+            ASSERT_TRUE(hooks.mirror);
+            // bind_session_world's keeps_parked, over the core's hooks.
+            const auto keeps_parked = [&hooks](const std::string& entity, uint32_t tick) {
+                if (hooks.own_birth_destroyable(entity, tick)) return false;
+                if (hooks.mirror(entity)) return false;
+                return hooks.ball(entity) || hooks.own_body(entity);
+            };
+            state_of(core).own_body_entity_ = "Ball_Wood";
+            state_of(core).own_ball_entities_ = {"Ball_Wood", "Ball_Stone"};
+            state_of(core).remotes_[4].entity = "Ball_0_BMMO_4";
+            EXPECT_TRUE(keeps_parked("Ball_Wood", 122)) << "the own ball's birth the scripts made";
+            EXPECT_TRUE(keeps_parked("Ball_Stone", 122)) << "an entity the own ball has been";
+            EXPECT_FALSE(keeps_parked("Ball_0_BMMO_4", 122)) << "a mirror: the core makes it again";
+            EXPECT_FALSE(keeps_parked("P_Box", 122)) << "a mechanism";
+            state_of(core).own_life_ = {own_birth(120)};
+            state_of(core).own_life_[0].applied = 122;   // moved: made again at 122 in the replay
+            EXPECT_EQ(keeps_parked("Ball_Wood", 122), !control) << "a moved own birth is destroyed with own body control";
+            EXPECT_TRUE(keeps_parked("Ball_Wood", 121)) << "another birth tick";
+            EXPECT_EQ(hooks.own_birth_destroyable("Ball_Wood", 122), control);
+            EXPECT_FALSE(hooks.own_birth_destroyable("Ball_Wood", 121));
+            bool destroyed = false;
+            EXPECT_FALSE(steps{core}.destroy_moved_own_birth("Ball_Wood", 121, destroyed)) << "the same answer at 121";
+            if (!control) EXPECT_FALSE(steps{core}.destroy_moved_own_birth("Ball_Wood", 122, destroyed));
+        }
+    }
+
     TEST(SessionClientCoreOwnLives, MovedEcho) {
         {
             flow_fake fake;

@@ -694,6 +694,10 @@ TEST(RollbackBinding, SessionWorldComposesTheCoresHooksInTheDesignsOrder) {
     EXPECT_EQ(backend.calls, std::vector<std::string>({"set_body_matrix P_Box simulated",
                                                        "set_body_matrix Ball_Stone_piece01 simulated"}));
 
+    // keeps_parked (rollback-engine gaps design 2.4, step B8EG item EGB):
+    // none while the core's destroy_own_birth comes without its test.
+    EXPECT_FALSE(world.keeps_parked) << "destroy_own_birth without own_birth_destroyable";
+
     // --park-births: no destroy; without --insert-births: no insert.
     bmmo::session::session_world_options parked;
     parked.park_births = true;
@@ -950,4 +954,50 @@ TEST(RollbackBinding, AFixedWindowBirthWithNoLifetimeAtTheAnchorIsOneTheReplayMa
     bmmo::session::session_world_options parked = w;
     parked.park_births = true;
     EXPECT_FALSE(bmmo::session::bind_session_world(backend, hooks, parked).remade_by_replay);
+}
+
+// Rollback-engine gaps design 2.4 (step B8EG, item EGB): keeps_parked is
+// destroy_body's tests in its order without its side effects - a moved own
+// birth (the core's own_birth_destroyable) and a mirror are taken out, any
+// other ball and the own body stay parked, a mechanism is destroyed - and
+// asking it never calls the core's destroy_own_birth.  --park-births
+// installs neither.
+TEST(RollbackBinding, KeepsParkedIsDestroyBodysTestsWithoutItsSideEffects) {
+    session_backend backend;
+    std::vector<std::string> calls;
+    bmmo::session::core_world_hooks hooks;
+    hooks.destroy_own_birth = [&](const std::string& entity, uint32_t tick, bool& destroyed) {
+        calls.push_back("destroy_own_birth " + entity);
+        if (entity != "Own_Moved" || tick != 120) return false;
+        destroyed = true;
+        return true;
+    };
+    hooks.own_birth_destroyable = [](const std::string& entity, uint32_t tick) {
+        return entity == "Own_Moved" && tick == 120;
+    };
+    hooks.own_body = [](const std::string& entity) { return entity == "Own_Body"; };
+    hooks.mirror = [](const std::string& entity) { return entity == "Mirror_Box"; };
+    hooks.ball = [](const std::string& entity) { return entity == "Ball_Wood" || entity == "Own_Moved"; };
+    rollback_world world = bmmo::session::bind_session_world(backend, hooks, bmmo::session::session_world_options{});
+    ASSERT_TRUE(world.keeps_parked);
+    ASSERT_TRUE(world.destroy_body);
+    EXPECT_FALSE(world.keeps_parked("Own_Moved", 120)) << "a moved own birth: destroy_body takes it out";
+    EXPECT_TRUE(world.keeps_parked("Own_Moved", 121)) << "the same ball at another tick: parked";
+    EXPECT_FALSE(world.keeps_parked("Mirror_Box", 120)) << "a mirror: the core makes it again";
+    EXPECT_TRUE(world.keeps_parked("Ball_Wood", 120));
+    EXPECT_TRUE(world.keeps_parked("Own_Body", 120));
+    EXPECT_FALSE(world.keeps_parked("P_Box", 120)) << "a mechanism";
+    EXPECT_TRUE(calls.empty()) << "asking never calls destroy_own_birth";
+    EXPECT_TRUE(backend.calls.empty());
+    // destroy_body agrees wherever keeps_parked says parked: it refuses.
+    EXPECT_FALSE(world.destroy_body("Own_Moved", 121));
+    EXPECT_FALSE(world.destroy_body("Ball_Wood", 120));
+    EXPECT_FALSE(world.destroy_body("Own_Body", 120));
+    EXPECT_TRUE(backend.calls.empty()) << "nothing taken out";
+    EXPECT_TRUE(world.destroy_body("Own_Moved", 120)) << "and takes the moved own birth out";
+    bmmo::session::session_world_options parked;
+    parked.park_births = true;
+    const rollback_world plain = bmmo::session::bind_session_world(backend, hooks, parked);
+    EXPECT_FALSE(plain.keeps_parked);
+    EXPECT_FALSE(plain.destroy_body);
 }

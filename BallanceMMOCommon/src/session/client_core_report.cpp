@@ -189,7 +189,7 @@ namespace bmmo::session {
         return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu remake=%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
-                     "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu unmatched_run=%d/%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
+                     "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu unmatched_run=%d/%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu parked=%llu missing=%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                      "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                      "sectors: rew=%llu/%llu depth=%llu forgot=%llu births_moved=%llu phase_misses=%llu walk_timeouts=%llu "
                      "resync: restepped=%llu/%llu depth=%llu states=%llu stale=%llu refused=%llu deferred=%llu/%llu "
@@ -295,6 +295,9 @@ namespace bmmo::session {
                      static_cast<unsigned long long>(rs.birth_insert_mismatches),
                      static_cast<unsigned long long>(rs.births_recreated), static_cast<unsigned long long>(rs.births_recreated_exact),
                      static_cast<unsigned long long>(rs.birth_recreate_mismatches), static_cast<unsigned long long>(rs.birth_recreate_failures),
+                     // parked: birth items of balls kept parked by design
+                     // (keeps_parked; rollback-engine gaps design 2.4).
+                     static_cast<unsigned long long>(rs.births_parked_balls),
                      static_cast<unsigned long long>(rs.births_missing),
                      static_cast<unsigned long long>(rs.unknown_rechecks_deferred), static_cast<unsigned long long>(h.activations_replayed),
                      static_cast<unsigned long long>(rs.script_restores), static_cast<unsigned long long>(rs.script_restore_failures),

@@ -588,6 +588,15 @@ numbers 1-10 are unchanged.
    path change, so the exact checks rerun), or record the local matrix of
    a parented body and restore it with `SetLocalMatrix` (a blob format
    change).
+   **Step B8EG built B (G1)** (design "As built (step B8EG)"): B - the
+   navigated beam keeps the generation, ball birth items are counted
+   `births_parked_balls` (`parked=`) apart from real failures; one retail
+   arm (13:24): `birth_recreate_failures` 11 -> 0, no script difference in a
+   beam window. TR3's R4 is not B's: it is headless (own body control) and
+   is the replay-tick life test of G8 (L3), where it now waits.
+   Deferred to item 7: B-R1's control
+   comparison of the beam windows and its parked count (the control run
+   stalled 580 ms and resynced at 456).
    Step B7EG built Q's G2-G4 (engine change #20, bridge v23, record v4/v5,
    the hold; design "As built (step B7EG)"). Its retail session crashed at
    start-up in `d3d8.dll` - the user's RTSS overlay in a bad state (every
