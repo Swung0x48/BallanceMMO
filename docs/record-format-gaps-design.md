@@ -874,3 +874,111 @@ scene's trafo sets would build a second registry for the same players.
 Bits 2 (WAG) and 3 (this design's `SESSION_CLOCK`, K3) are refused as not
 built; so are `--world-options` on a journal replay (the header carries
 them), in the modes without a session world, and a number above 32 bits.
+
+## As built (step B2SW, 2026-10-27): Q5 / A23 decided - a harness gap
+
+- **Session or harness: the harness.** The settle of §9 Q5, on the headless
+  client: a solo session (`maps/arena-test/b2sw_q5h`, arena, snapshots off)
+  with `--force-rollback 1:4` - a depth-4 rewind at every tick from the
+  first frame (tick base 8; the first rewind "to tick 8", re-simulating 4
+  ticks), which covers Init Ingame's sector-1 activation (the module scripts
+  told to reset at 9, 10 and 14) and its births - against `core_ref_s7/solo1`
+  (`e0_compare --live`): every LOCAL checkpoint's fields equal at every tick
+  (`.local-tools/work/B2SW/ckdiff.py`: 1182/1182, only the body ORDER of 276
+  from 1820 on, the bodies a replayed sector pass makes again), births
+  recreated 12/12 exact by tick 63. The clients' recipe - the activations
+  recorded every frame and re-issued, the window's births destroyed at a
+  restore and made again, every selected script written back - handles the
+  start window. SimTool's `--savestate-check` without a `--second-move`
+  binds none of it (a plain savestate binding, `replay_activation` off), so
+  anchors 4-6 met the sector-1 bodies born after them ("objects 43 48" /
+  "53 58") and the depth-0 rounds 14-32 a manager restored from a record
+  the replay did not activate again.
+- **The harness fixed, as far as its own recipe goes.** `--session-recipe`
+  (sim_tool.cpp) binds the S7 path's session recipe without a
+  `--second-move` (the window that starts at the session start). With it,
+  `--drop-settle 2` / `3`, 60 rounds, depth <= 1, seed 1 (build rB2SWb):
+  L2 4 of 58 and 3 of 60 rounds failed (without it 48 and 47 of 60); L13 3
+  of 32 and 2 of 58 (without it 2 of 6 and 7 of 15 before a salvaged world
+  stopped the run); the two A23 kinds are gone (no "objects" mismatch, no
+  manager active flag).
+  What remains, each with its owner:
+  - `--drop-settle 0` (t0 = tick 1): the live-world re-make restores t0,
+    whose blob is refused - "the environment's gravity differs" - A18, the
+    session-start write of gravity and time factor (C3 of this design,
+    queued), so the round's premise fails at 6 and 14;
+  - from tick 31-34: "the PreSimulate queue differs" - rollback-engine gap
+    Q (roadmap §4 item 4, step EGQ);
+  - **not root-caused here (root-caused and closed at step B2SX, below):**
+    depth-0 rounds at anchors 4-5, right after the
+    harness re-made the round's live world from t0 = 3: "Gameplay_
+    SectorManager / Deactivate Sector: outputs 0 vs 1". The re-made world
+    (t0's record restored, then the straight pass's live frames re-run to e)
+    passes its blob premise but its manager's Deactivate Sector output
+    differs from the straight pass's record; whether the re-make or the
+    restore leaves it is not established. H (above) shows no such effect in
+    a client (positions; the client journal carries no script state).
+  Q5 is therefore decided (a harness gap, with the client exact) and its
+  harness fix built, with one residual open (roadmap §4 item 2).
+
+## As built (step B2SX, 2026-10-27): Q5's residual - the restore's re-armed delayed link, ignored at depth 0
+
+- **The cause** (the orchestrator's investigation, `.local-tools/work/Q5R/`).
+  Gameplay_SectorManager has one delayed link, `Deactivate Sector.out0 ->
+  Set Cell.in0`, delay 4, in flight at ticks 3-5 of the straight pass
+  (countdown 3/4, 2/4, 1/4; it fires at 6), its source output recorded off
+  at every tick (the capture takes the output as it stands,
+  `script_replay.hpp` `put_activation`; the graph switched it off when it
+  queued the link). When the record says a link is in flight, the restore
+  re-arms it: the countdown set to the record's and the source output
+  turned back on, so the next frame queues the link again
+  (`restore_behavior`, counted in `last_restore().links_rearmed`). A depth-0
+  round of `--savestate-check` runs no frame between the rewind and its
+  script compare, so it sees that output on against the record's off:
+  "Deactivate Sector: outputs 0 vs 1". 14 of 14 depth-0 rounds at an
+  in-flight anchor failed (12 seeds, L2 and L13); every depth >= 1 round
+  and every depth-0 round at 6 or later passed; the live-world re-make was
+  ruled out. Not a session gap: a client never compares its scripts before
+  the next frame.
+- **The fix, the user's option (a)** (2026-10-27): the harness's depth-0
+  script compare leaves out exactly the output bits the restore turned
+  back on and compares everything else; the restore and the record format
+  are unchanged. `script_replay.hpp`: `last_rearmed_outputs()` (the
+  (block, output) pairs `links_rearmed` counts, cleared at every restore),
+  `rearmed_output_masks()`, and an optional `masks` argument of `diff`
+  (`any` is then whether anything else differs). `sim_tool.cpp`: the
+  depth-0 compare passes the masks; the summary counts the rounds that were
+  equal but for those bits.
+- **The case the investigation left untested**: a restore that re-arms
+  while the live world also has the link in flight. SimTool
+  `--savestate-rounds T:D[:F],...` runs named rounds (anchor tick, depth,
+  then F live frames compared with the straight pass's blobs and scripts:
+  the follow); a named round's live world is always made again at its own
+  e (the scripts the binding does not rewind - the Gameplay_* chains - then
+  stand at e like the selection, as in a client, whose rewind always ends at
+  its live tick). Every round printed the live link in flight before its
+  rewind (countdown 1/4 at e = 5, 2/4 at 4, 3/4 at 3), so every re-arm met
+  a link already in the graph's list (Ballanced CK2 keeps a link in that
+  list once, `CKBL_OLD_IN_DELAYED_LIST`, and leaves a running countdown
+  alone). L2 and L13 `--drop-settle 2` (`3:2:3,4:1:0,5:0:3,4:1:0,3:0:5,
+  5:0:3,3:1:4,4:1:0,4:0:4`) and L2 `--drop-settle 3`: 9, 9 and 6 rounds,
+  0 failed; every follow tick's blob and scripts equal the straight pass's;
+  the link's destination input on at 6 only, in every follow that crossed
+  6 (6 of 22 follow ticks, 6 of 22, 4 of 12) - it fires once, at 6. That
+  holds for Ballanced CK2 (the headless worlds, SimTool, the server); the
+  retail Virtools `CK2.dll`'s handling of a re-armed link already in its
+  list was not checked (the re-arm itself predates this step): a retail
+  follow check is on the final verification's deferred list. A first
+  version chained a named round's live world from the previous round's
+  end: L13's round 8 (anchor 4, depth 0, the live world at 5 from round 7's
+  replay) then failed at 5 on `P_Modul_18_MF Script`'s
+  DEACTIVATENEXTFRAME - the Gameplay_* scripts, never rewound, were a tick
+  ahead of the selection (a world no client has); with the world made at e
+  the same round passes.
+- **The gate** (`rB2SX`, `--session-recipe`, `--ticks 40 --rounds 60
+  --max-depth 1 --seed 1`): L2 `--drop-settle 2` 1 of 58 rounds failed, `3`
+  1 of 60; L13 `2` 1 of 32, `3` 1 of 58 - each the named owner gap Q ("the
+  PreSimulate queue differs", ticks 31-34; the L13 `2` run stops there, a
+  salvaged world, as before); the depth-0 compares equal but for the
+  re-armed bit: 3, 2, 2, 1 rounds - exactly B2SW's residual rounds.
+  `--drop-settle 0` keeps A18 (C3).

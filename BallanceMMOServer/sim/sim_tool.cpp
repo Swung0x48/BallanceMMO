@@ -184,6 +184,11 @@ namespace {
         int drop_move_sector = 0;      // --drop-move SECTOR TICK: the player moves on at that tick
         int drop_move_tick = 0;
         bool n2_pin = true;            // --n2-pin on|off (step B2SW): the chains' deactivate cell pinned at the anchor
+        bool session_recipe = false;   // --session-recipe (step B2SW, Q5): savestate-check binds the clients' recipe
+        // --savestate-rounds T:D[:F],... (step B2SX, Q5): these rounds instead
+        // of the seeded schedule - anchor tick T, depth D, then F live frames
+        // past the round's end compared with the straight pass (the follow).
+        std::vector<std::array<int, 3>> savestate_explicit;
         bool cells_trace = false;      // --cells-trace (step B2SW): IngameParameter[0][1]/[0][2], the union, the bodies
         float drop_at[3] = {};         // --drop-at X Y Z: drop there instead (PH matrix of a module)
         bool have_drop_at = false;
@@ -779,6 +784,21 @@ namespace {
                 out.n2_pin = mode == "on";
             }
             else if (arg == "--cells-trace") out.cells_trace = true;
+            else if (arg == "--session-recipe") out.session_recipe = true;
+            else if (arg == "--savestate-rounds") {   // step B2SX: T:D[:F],...
+                if (!(v = next())) return false;
+                std::string list = v;
+                size_t at = 0;
+                while (at <= list.size()) {
+                    const size_t comma = std::min(list.find(',', at), list.size());
+                    const std::string item = list.substr(at, comma - at);
+                    std::array<int, 3> round{-1, -1, 0};
+                    if (std::sscanf(item.c_str(), "%d:%d:%d", &round[0], &round[1], &round[2]) < 2
+                            || round[0] < 0 || round[1] < 0 || round[2] < 0) return false;
+                    out.savestate_explicit.push_back(round);
+                    at = comma + 1;
+                }
+            }
             else if (arg == "--spawn-test") { if (!(v = next())) return false; out.spawn_test = std::atoi(v); }
             else if (arg == "--spawn-impulse") { if (!(v = next())) return false; out.spawn_impulse = static_cast<float>(std::atof(v)); }
             else if (arg == "--spawn-ball") { if (!(v = next())) return false; out.spawn_ball = std::atoi(v); }
@@ -2677,6 +2697,48 @@ namespace {
 
     struct savestate_round { int anchor = 0; int depth = 0; };   // window indices
 
+    // Step B2SX (Q5): every delayed link of `graph`'s tree (initial delay > 1)
+    // as "source.outN->destination.inM countdown C/I dest D", where D is
+    // whether the destination input is active (a link that fired at the end
+    // of the last frame has switched it on); `in_flight` counts the links
+    // whose countdown is between 0 and the initial delay, `fired` those
+    // whose destination input is on.
+    std::string describe_delayed_links(CKBehavior* graph, int& in_flight, int& fired) {
+        std::string text;
+        if (!graph || graph->IsUsingFunction()) return text;
+        const auto io_name = [](CKBehaviorIO* io, bool output) {
+            CKBehavior* owner = io ? io->GetOwner() : nullptr;
+            std::string name = owner && owner->GetName() ? owner->GetName() : "?";
+            if (owner) {
+                const int count = output ? owner->GetOutputCount() : owner->GetInputCount();
+                for (int k = 0; k < count; ++k)
+                    if ((output ? owner->GetOutput(k) : owner->GetInput(k)) == io)
+                        return name + (output ? ".out" : ".in") + std::to_string(k);
+            }
+            return name;
+        };
+        for (int i = 0; i < graph->GetSubBehaviorLinkCount(); ++i) {
+            CKBehaviorLink* link = graph->GetSubBehaviorLink(i);
+            if (!link || link->GetInitialActivationDelay() <= 1) continue;
+            const int initial = link->GetInitialActivationDelay(), live = link->GetActivationDelay();
+            CKBehaviorIO* to = link->GetOutBehaviorIO();
+            CKBehavior* owner = to ? to->GetOwner() : nullptr;
+            bool active = false;
+            if (owner)
+                for (int k = 0; k < owner->GetInputCount(); ++k)
+                    if (owner->GetInput(k) == to) active = owner->IsInputActive(k) != FALSE;
+            if (live > 0 && live < initial) ++in_flight;
+            if (active) ++fired;
+            text += (text.empty() ? "" : "; ") + io_name(link->GetInBehaviorIO(), true) + "->" + io_name(to, false)
+                  + " countdown " + std::to_string(live) + "/" + std::to_string(initial) + " dest " + (active ? "1" : "0");
+        }
+        for (int i = 0; i < graph->GetSubBehaviorCount(); ++i) {
+            const std::string sub = describe_delayed_links(graph->GetSubBehavior(i), in_flight, fired);
+            if (!sub.empty()) text += (text.empty() ? "" : "; ") + sub;
+        }
+        return text;
+    }
+
     // Knuth's MMIX LCG; the high half per draw.  The same seed gives the same
     // schedule on every platform.
     std::vector<savestate_round> savestate_schedule(unsigned long long seed, int rounds, int max_depth, int window) {
@@ -2987,7 +3049,14 @@ namespace {
             }
             window_moves[static_cast<uint32_t>(m.tick)].push_back(m.sector);
         }
-        const bool passes = !window_moves.empty();
+        // Step B2SW (record-format Q5 / A23): --session-recipe binds the
+        // clients' recipe - the session world's binding, every frame's
+        // pending activations recorded and re-issued, the window's births
+        // destroyed at a restore and made again by the replay, every selected
+        // script written back - without a --second-move too: the window that
+        // starts at the session start holds Init Ingame's sector-1 activation
+        // and its births, which a client's history holds with this recipe.
+        const bool passes = !window_moves.empty() || args.session_recipe;
         if (passes && (!frames || legacy || !args.trafo.players.empty())) {
             std::fprintf(stderr, "savestate-check: a --second-move inside the window needs --frames (the pass runs the module"
                                  " scripts), and is not built with --legacy-restore or trafo inputs\n");
@@ -3078,13 +3147,38 @@ namespace {
         }
 
         // ---- the schedule first: it decides which blobs are kept
-        const std::vector<savestate_round> schedule = savestate_schedule(
-            args.savestate_seed, args.savestate_rounds, args.savestate_max_depth, window);
+        // Step B2SX (Q5): --savestate-rounds names the rounds instead (anchor
+        // ticks, so window index = T - t0), each with its follow.
+        std::vector<savestate_round> schedule;
+        std::vector<int> follows;
+        if (args.savestate_explicit.empty()) {
+            schedule = savestate_schedule(args.savestate_seed, args.savestate_rounds, args.savestate_max_depth, window);
+            follows.assign(schedule.size(), 0);
+        } else {
+            const int base = static_cast<int>(world->tick_index());
+            for (const auto& [tick, depth, follow]: args.savestate_explicit) {
+                savestate_round entry;
+                entry.anchor = tick - base;
+                entry.depth = depth;
+                if (entry.anchor < 0 || entry.anchor + depth + follow >= window) {
+                    std::fprintf(stderr, "savestate-check: --savestate-rounds %d:%d:%d is outside the window %d..%d\n", tick,
+                                 depth, follow, base, base + window - 1);
+                    return 2;
+                }
+                schedule.push_back(entry);
+                follows.push_back(follow);
+            }
+            if (!frames) {
+                std::fprintf(stderr, "savestate-check: --savestate-rounds' follow steps whole frames: it needs --frames\n");
+                return 2;
+            }
+        }
         std::vector<char> keep(static_cast<size_t>(window), 0);
         for (int i = 0; i < window; i += args.savestate_every) keep[static_cast<size_t>(i)] = 1;
-        for (const auto& entry: schedule) {
+        for (size_t r = 0; r < schedule.size(); ++r) {
+            const auto& entry = schedule[r];
             keep[static_cast<size_t>(entry.anchor)] = 1;
-            keep[static_cast<size_t>(entry.anchor + entry.depth)] = 1;
+            for (int k = 0; k <= follows[r]; ++k) keep[static_cast<size_t>(entry.anchor + entry.depth + k)] = 1;
         }
         int kept = 0;
         for (char k: keep) kept += k ? 1 : 0;
@@ -3446,6 +3540,10 @@ namespace {
         // engine restores the anchor from its own record and re-steps a+1..a+d
         // through the binding, re-recording each tick.
         int run = 0, failed = 0;
+        // Step B2SX (Q5): depth-0 compares that differed only in outputs the
+        // restore re-armed (ignored, option (a)), and the follows run.
+        int rearmed_ignored_rounds = 0, rearmed_ignored_bits = 0, follow_ticks = 0, follow_fired = 0;
+        CKBehavior* const manager_graph = manager_id ? CKBehavior::Cast(context->GetObject(manager_id)) : nullptr;
         bool dumped = false;
         std::vector<uint8_t> current;
         const auto rounds_started = std::chrono::steady_clock::now();
@@ -3528,7 +3626,13 @@ namespace {
                 bool fixed_differ = false;
                 for (const auto& [name, tick]: first_birth)
                     if (tick > t0 && has_body(name) != (tick <= end_tick)) fixed_differ = true;
-                if (now != end_rec.bodies || fixed_differ) {
+                // Step B2SX: a named round's live world is always made again
+                // at its e - the scripts the binding does not rewind (the
+                // Gameplay_* chains) then stand at e like the selection, as in
+                // a client, whose rewind always ends at its live tick; a world
+                // chained from another round's end has them at that tick, and
+                // its next live frame (the follow) is not the straight pass's.
+                if (now != end_rec.bodies || fixed_differ || !args.savestate_explicit.empty()) {
                     ++pass_remakes;
                     std::string remake_error, mute_error;
                     // Newest first, each name once, put back at its earliest
@@ -3579,6 +3683,15 @@ namespace {
                                     + " is not the straight pass's";
                     }
                 }
+            }
+            // Step B2SX (Q5): a named round says whether the live world it
+            // rewinds has a delayed link in flight (the re-arm's two cases).
+            if (!args.savestate_explicit.empty() && manager_graph) {
+                int in_flight = 0, fired = 0;
+                const std::string links = describe_delayed_links(manager_graph, in_flight, fired);
+                std::printf("  round %zu: before the rewind to %u: %s delayed link(s) of Gameplay_SectorManager in flight"
+                            " live: %s\n", r, t0 + static_cast<uint32_t>(a), std::to_string(in_flight).c_str(),
+                            links.c_str());
             }
             // The world's own per-tick bookkeeping (tick index, RNG cursors,
             // the sector union) at the anchor; the engine knows the physics.
@@ -3688,10 +3801,87 @@ namespace {
                     if (!bmmo::game::script_replay::capture(context, scripts, hooks, bytes)) {
                         failure = "script capture error";
                     } else if (bytes != expected.scripts) {
-                        const auto difference = bmmo::game::script_replay::diff(context, scripts, expected.scripts, bytes);
-                        failure = "scripts: " + difference.where + " (" + std::to_string(difference.logical_count)
-                                + " logical, " + std::to_string(difference.float_count) + " float)";
+                        // Step B2SX (record-format Q5 / A23, the user's option
+                        // (a)): at depth 0 no frame ran after the restore, so
+                        // an output it turned back on to re-arm an in-flight
+                        // delayed link (script_replay.hpp restore_behavior)
+                        // still reads on where the record has it off; exactly
+                        // those bits are left out, everything else compared.
+                        const auto masks = d == 0 ? bmmo::game::script_replay::rearmed_output_masks()
+                                                  : std::map<CK_ID, uint32_t>{};
+                        const auto difference = bmmo::game::script_replay::diff(context, scripts, expected.scripts, bytes,
+                                                                                masks.empty() ? nullptr : &masks);
+                        if (difference.any) {
+                            failure = "scripts: " + difference.where + " (" + std::to_string(difference.logical_count)
+                                    + " logical, " + std::to_string(difference.float_count) + " float)";
+                        } else {
+                            ++rearmed_ignored_rounds;
+                            for (const auto& [block, bits]: masks)
+                                for (uint32_t m = bits; m; m &= m - 1) ++rearmed_ignored_bits;
+                        }
                     }
+                }
+            }
+            // Step B2SX (Q5's untested case): a named round's follow - F live
+            // frames past e, as the straight pass stepped them, each tick's
+            // blob and scripts compared with the straight pass's; a delayed
+            // link the restore re-armed must fire once, where the straight
+            // pass's fired (its destination input on at that record only).
+            const int follow = failure.empty() && r < follows.size() ? follows[r] : 0;
+            if (follow > 0) {
+                if (trafo) {
+                    failure = "follow: not built with trafo inputs";
+                } else {
+                    // The world's counters as the straight pass had them at e;
+                    // the RNG cursors as the replay left them.
+                    auto counters = straight[static_cast<size_t>(e)].counters;
+                    counters.rng_cursor = ivp_srand_read();
+                    counters.random_cursor = bmmo::physics::random_get_state();
+                    world->restore_step_state(counters);
+                }
+                for (int k = 1; failure.empty() && k <= follow; ++k) {
+                    const int i = e + k;
+                    const uint32_t t = t0 + static_cast<uint32_t>(i) - 1u;   // the step at t makes record i
+                    fail_index = i;
+                    if (passes) moves_before(t);
+                    // What a client does for the live frame a rewind ends
+                    // before (live_cells_guard, step B1): the activations the
+                    // straight pass had pending for this frame re-issued - a
+                    // restore writes back the scripts, not the live world's
+                    // pending activations of another tick.
+                    if (passes && k == 1) activations.replay(context, manager_id, t + 1u, false);
+                    std::string follow_error;
+                    if (!step(follow_error)) { failure = "follow: the step at " + std::to_string(t) + " failed: " + follow_error; break; }
+                    bmmo::physics::drain_event_log(physics);
+                    ++follow_ticks;
+                    const straight_tick& expected = straight[static_cast<size_t>(i)];
+                    std::vector<uint8_t> blob_now;
+                    std::string follow_capture;
+                    if (!bmmo::physics::get_savestate(physics, blob_now, follow_capture)) {
+                        failure = "follow: capture error at " + std::to_string(t + 1u) + ": " + follow_capture;
+                        break;
+                    }
+                    if (expected.kept ? blob_now != expected.blob
+                                      : bmmo::physics::hash_savestate(blob_now.data(), blob_now.size()) != expected.blob_hash) {
+                        failure = "follow: blob at " + std::to_string(t + 1u) + ": "
+                                + (expected.kept ? blob_difference(expected.blob, blob_now) : std::string("hash differs"));
+                        break;
+                    }
+                    std::vector<uint8_t> bytes;
+                    if (expected.kept && !bmmo::game::script_replay::capture(context, scripts, hooks, bytes)) {
+                        failure = "follow: script capture error";
+                        break;
+                    }
+                    if (expected.kept && bytes != expected.scripts) {
+                        const auto difference = bmmo::game::script_replay::diff(context, scripts, expected.scripts, bytes);
+                        failure = "follow: scripts at " + std::to_string(t + 1u) + ": " + difference.where;
+                        break;
+                    }
+                    int in_flight = 0, fired = 0;
+                    const std::string links = manager_graph ? describe_delayed_links(manager_graph, in_flight, fired) : "";
+                    follow_fired += fired;
+                    std::printf("  round %zu: follow tick %u: blob and scripts as the straight pass; manager's delayed"
+                                " link(s): %s\n", r, t + 1u, links.c_str());
                 }
             }
 
@@ -3756,6 +3946,10 @@ namespace {
         std::fprintf(stderr, "savestate-check: straight pass %.2f s, %d rounds %.2f s\n", straight_seconds, run,
                      rounds_seconds);
         summary(run, failed);
+        if (frames)   // step B2SX (Q5)
+            std::printf("savestate-check: depth-0 script compares equal but for outputs the restore re-armed (ignored):"
+                        " %d round(s), %d bit(s); follow ticks %d, a delayed link's destination on in %d of them\n",
+                        rearmed_ignored_rounds, rearmed_ignored_bits, follow_ticks, follow_fired);
         if (trafo) {
             std::printf("savestate-check: trafo births logged %zu, lifetimes changed %zu, inputs %zu, sets %zu\n",
                         trafo_birth_count, trafo_generations.size(), trafo->log().size(), trafo->registry().sets().size());
@@ -3777,14 +3971,15 @@ namespace {
             std::printf("savestate-check: fixed window births destroyed at a restore for the replayed scripts (step RO1): back"
                         " after their birth tick %llu, missing %llu\n", static_cast<unsigned long long>(fixed_births_back),
                         static_cast<unsigned long long>(fixed_births_missing));
-            if (passes_made == 0) std::printf("savestate-check: no --second-move inside the window made a pass\n");
+            if (passes_made == 0 && !window_moves.empty())
+                std::printf("savestate-check: no --second-move inside the window made a pass\n");
             if (args.savestate_inert_from_birth)
                 std::printf("savestate-check: --savestate-inert-from-birth: %d rounds compared from a fixed window birth's"
                             " record on (a diagnostic: no verdict)\n", inert_rounds);
         }
         const bool pass = failed == 0 && run == static_cast<int>(schedule.size()) && (!trafo || trafo->failures() == 0)
-                       && (!passes || (passes_made > 0 && pass_recreate_failures == 0 && pass_missing == 0
-                                       && fixed_births_missing == 0));
+                       && (!passes || ((passes_made > 0 || window_moves.empty()) && pass_recreate_failures == 0
+                                       && pass_missing == 0 && fixed_births_missing == 0));
         if (frames)
             std::printf("savestate-check: live script order (step RO1): %zu change(s) recorded, %llu replayed frame(s) ran"
                         " in it\n", static_cast<size_t>(live_order.changes()),
@@ -8103,6 +8298,10 @@ int main(int argc, char** argv) {
             "           [--drop-at X Y Z] [--drop-prop ENTITY] ... | --drop-sector N] [--ticks N] [--rounds R] [--max-depth D]\n"
             "           [--seed S] [--savestate-every K] [--savestate-lead L] [--frames] [--legacy-restore]\n"
             "           [--savestate-trace PATH] [--stop-on-divergence] [--verbose] [--savestate-inert-from-birth]\n"
+            "           [--session-recipe]  (step B2SW: the clients' recipe - births, activations, every script written\n"
+            "            back - without a --second-move, for a window that starts at the session start)\n"
+            "           [--savestate-rounds T:D[:F],...]  (step B2SX: these rounds - anchor tick T, depth D - instead of\n"
+            "            the seeded ones, each followed by F live frames compared with the straight pass; needs --frames)\n"
             "           (IVP savestate robustness check: chained seeded rollbacks must reproduce the straight run's\n"
             "            savestate blobs byte for byte; exit 0 PASS, 3 FAIL, 2 vacuous scene)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --portable-scripts-check [--drop-settle N] [--verbose]\n"

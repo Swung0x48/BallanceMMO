@@ -386,6 +386,12 @@ numbers 1-10 are unchanged.
        design).
      - *Step P's race*: re-measured snapshots off - both clients in state B,
        every body exact from 218; moot since R3; closed (core design).
+     - *Q5 / A23*: a harness gap (the headless client exact through the
+       start window with a depth-4 rewind every tick); SimTool's
+       `--session-recipe` closes both A23 kinds; a depth-0
+       "Deactivate Sector outputs" difference at anchors 4-5 was left open
+       here (closed at B2SX, below); the rest of the start window is A18
+       (C3, item 6) and gap Q (item 4).
      - *The x64 teardown over-read*: engine change #21 (CK2); V9's
        `--free-ids-before-load 20000` arm and L6-L9 of a 20000-id sweep no
        longer crash, tick hashes identical (sector-placement design 12.6).
@@ -418,6 +424,21 @@ numbers 1-10 are unchanged.
        previous build for T4 (c)'s contrast; a retail run with the session
        core off (N2 refactored the legacy path's pin functions onto the
        shared header); P's instrumented pair (moot).
+   - **Swept at B2SX (2026-10-27; the user: "好的按你推荐的做，并且明确记录下来CK2有哪些改动（和之前一样）")**,
+     B2SW's leftovers, one batch (the CK2 part - engine change #21 in the
+     Swung0x48/CK2 fork, `docs/engine-changes.md` - was the orchestrator's,
+     8a0b7cc):
+     - *Q5 / A23*: **closed** - the depth-0 residual was the restore's
+       re-armed delayed link (`Deactivate Sector.out0 -> Set Cell.in0`,
+       in flight at 3-5: the restore turns its source output back on, a
+       depth-0 compare sees it before any frame); the harness's depth-0
+       compare ignores exactly those bits (option (a)); a restore that
+       re-arms while the live world has the link in flight fires it once,
+       at 6 (record-format design, "As built (step B2SX)"). What remains of
+       the start window: A18 (C3, item 6), gap Q (item 4).
+     - Deferred to the final verification: a retail
+       follow check of Q5's re-armed link (the "fires once" result is
+       Ballanced CK2's, the retail Virtools `CK2.dll` was not checked).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

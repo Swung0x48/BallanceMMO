@@ -165,6 +165,27 @@ namespace bmmo::game {
             static restore_counters counters;
             return counters;
         }
+        // Step B2SX (record-format Q5 / A23, the user's option (a)): the
+        // outputs the last restore turned back on to re-arm an in-flight
+        // delayed link - the ones links_rearmed counts - as (block, output
+        // index).  The record has such an output off (the capture takes it as
+        // it stands, and the graph switched it off when it queued the link);
+        // the restore switches it on so that the next frame queues the link
+        // again.  A compare made right after a restore, before any frame ran
+        // (a depth-0 rollback check), sees exactly these bits differ; it
+        // ignores them through rearmed_output_masks() and diff's `masks`.
+        static std::vector<std::pair<CK_ID, int>>& last_rearmed_outputs() {
+            static std::vector<std::pair<CK_ID, int>> outputs;
+            return outputs;
+        }
+        // The last restore's re-armed outputs as one bit mask per block (an
+        // output index of 32 or more is not recorded and not re-armed).
+        static std::map<CK_ID, uint32_t> rearmed_output_masks() {
+            std::map<CK_ID, uint32_t> masks;
+            for (const auto& [block, index]: last_rearmed_outputs())
+                if (index >= 0 && index < 32) masks[block] |= 1u << index;
+            return masks;
+        }
         // Step RO1: whether a restore writes back a string parameter whose
         // length changed since the record (restore_parameter).  Off by
         // default - the legacy retail path keeps the old rule, the value left
@@ -677,6 +698,7 @@ namespace bmmo::game {
             if (error) error->clear();
             if (replayed) replayed->clear();
             last_restore() = restore_counters{};
+            last_rearmed_outputs().clear();
             if (!context) return fail(error, "no context");
             size_t pos = 0;
             uint32_t magic = 0, version = 0;
@@ -846,8 +868,23 @@ namespace bmmo::game {
                 detail += (detail.empty() ? "" : "; ") + what;
             }
         };
+        // `masks` (step B2SX, Q5): per block, output bits left out of the
+        // compare (rearmed_output_masks: what a restore turned back on);
+        // `any` is then whether anything else differs.  Only a walk that
+        // read both records to their ends with nothing counted is equal: a
+        // difference the walk does not count (trailing bytes, a truncated
+        // record) keeps `any`.
         static difference diff(CKContext* context, const selection& sel, const std::vector<uint8_t>& a,
-                               const std::vector<uint8_t>& b) {
+                               const std::vector<uint8_t>& b, const std::map<CK_ID, uint32_t>* masks = nullptr) {
+            bool complete = false;
+            difference d = diff_walk(context, sel, a, b, masks, complete);
+            if (masks && complete && d.logical_count == 0 && d.float_count == 0 && d.where.empty()) d.any = false;
+            return d;
+        }
+        static difference diff_walk(CKContext* context, const selection& sel, const std::vector<uint8_t>& a,
+                                    const std::vector<uint8_t>& b, const std::map<CK_ID, uint32_t>* masks,
+                                    bool& complete) {
+            complete = false;
             difference d;
             if (a == b) return d;
             d.any = true;
@@ -876,7 +913,7 @@ namespace bmmo::game {
                     if (!qa) continue;
                     auto* beh = context ? CKBehavior::Cast(context->GetObject(id)) : nullptr;
                     const std::string script_name = beh && beh->GetName() ? beh->GetName() : std::to_string(id);
-                    if (!diff_behavior(beh, script_name, a, pa, b, pb, d)) return d;
+                    if (!diff_behavior(beh, script_name, a, pa, b, pb, d, masks)) return d;
                 }
             }
             for (int c = 0; c < kCellCount; ++c) {
@@ -911,9 +948,10 @@ namespace bmmo::game {
                     if (!qa) continue;
                     auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(ia))) : nullptr;
                     const std::string script_name = beh && beh->GetName() ? beh->GetName() : std::to_string(ia);
-                    if (!diff_behavior(beh, script_name, a, pa, b, pb, d)) return d;
+                    if (!diff_behavior(beh, script_name, a, pa, b, pb, d, masks)) return d;
                 }
             }
+            complete = pa == a.size() && pb == b.size();
             return d;
         }
 
@@ -1287,13 +1325,16 @@ namespace bmmo::game {
         }
 
         static bool diff_behavior(CKBehavior* beh, const std::string& script, const std::vector<uint8_t>& a, size_t& pa,
-                                  const std::vector<uint8_t>& b, size_t& pb, difference& d) {
+                                  const std::vector<uint8_t>& b, size_t& pb, difference& d,
+                                  const std::map<CK_ID, uint32_t>* masks = nullptr) {
             const std::string block = script + " / " + (beh && beh->GetName() ? beh->GetName() : "?");
             uint32_t xa = 0, xb = 0;
             // id, flags, inputs, outputs
             static const char* const kNames[4] = {"id", "flags", "inputs", "outputs"};
             for (int k = 0; k < 4; ++k) {
                 if (!get_u32(a, pa, xa) || !get_u32(b, pb, xb)) { d.logical = true; ++d.logical_count; if (d.where.empty()) d.where = block + ": truncated"; return false; }
+                if (k == 3 && masks && beh)   // step B2SX (Q5): the outputs a restore re-armed
+                    if (const auto m = masks->find(beh->GetID()); m != masks->end()) { xa &= ~m->second; xb &= ~m->second; }
                 if (xa != xb) {
                     d.logical = true; ++d.logical_count;
                     const std::string what = block + ": " + kNames[k] + " " + std::to_string(xa) + " vs " + std::to_string(xb);
@@ -1363,7 +1404,7 @@ namespace bmmo::game {
                 if (!get_u8(a, pa, qa) || !get_u8(b, pb, qb) || qa != qb) { d.logical = true; ++d.logical_count; if (d.where.empty()) d.where = block + ": child presence"; return false; }
                 if (!qa) continue;
                 CKBehavior* child = beh ? beh->GetSubBehavior(i) : nullptr;
-                if (!diff_behavior(child, script, a, pa, b, pb, d)) return false;
+                if (!diff_behavior(child, script, a, pa, b, pb, d, masks)) return false;
             }
             uint16_t la = 0, lb = 0;
             if (!get_u16(a, pa, la) || !get_u16(b, pb, lb) || la != lb) { d.logical = true; ++d.logical_count; if (d.where.empty()) d.where = block + ": delayed link count"; return false; }
@@ -2078,6 +2119,7 @@ namespace bmmo::game {
                         link->SetActivationDelay(recorded);
                         owner->ActivateOutput(index, TRUE);
                         ++last_restore().links_rearmed;
+                        last_rearmed_outputs().emplace_back(owner->GetID(), index);   // step B2SX (Q5)
                     } else {
                         ++last_restore().links_unrestorable;
                     }
