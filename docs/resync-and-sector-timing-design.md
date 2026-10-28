@@ -3259,6 +3259,76 @@ N2 on every world, T1's findings.**
   the death's value would be forced over the replayed passes' one at that
   frame, as live); (c) leave [0][1] out of the script check's compare.
 
+## As built (step N01R, 2026-10-28): IngameParameter[0][1] recorded and replayed (the user's (b))
+
+- **The answer.** N02R's finding (the note above, roadmap section 4 item
+  4): the death chain (Gameplay_Ingame / BallManager / Deactivate Ball's Set
+  Cells; its Execute Script emptied by `sector_reset_guard`) also writes
+  the dying ball's sector into `IngameParameter[0][1]`, and no replay runs
+  it, so a window across an own death ended with the last union pass's
+  value (swing_snapoff "[0][1] 1 vs 4" at 866, "4 vs 3" at 3157). The user,
+  2026-10-28, verbatim: "(b) Record and replay".
+- **Built: N02R's mechanism, one more cell, no second mechanism.**
+  `game/session_host_support.hpp` `manager_activations` keeps one
+  `live_cell_writes` per cell (`cell_writes_[2]`: [0][2], [0][1];
+  `written_column`), and every N02R call site walks both: `record` /
+  `note_cells` note what each cell holds before a live frame's scripts,
+  `record_pending` records each cell's change over the frame under that
+  frame's tick, `forget_from` / `forget_pending` / `clear` drop both, and
+  `after_replayed_step` writes each recorded value after the replayed
+  step of its tick and returns the cells written as a mask (bit 1 << 1:
+  [0][1], 1 << 2: [0][2]; it returned a bool at N02R). Both hosts only
+  changed their log lines (headless `session_client.cpp`, retail
+  `core_host.cpp`: one "replay: IngameParameter[0][C] = V written after
+  replayed tick T (its live frame's write)" line per cell written, the
+  first 8 hook calls; the retail counter stays in the file-scope host
+  struct). The server's world never rewinds and does not use
+  `manager_activations`; SimTool records but does not wire the hook, as
+  at N02R.
+- **The union's own [0][1] writes are not recorded.** A pass writes
+  [0][1] = J in `run_sector_pass` before the frame's scripts, and
+  `manager_activations::record` notes the cell after it (`seen`), so only
+  a change made by the frame's scripts is a write; in the replay the pass
+  is re-issued before the step (`replay`) and the death's recorded value
+  is written over it after the step - as live, where the chain wrote it
+  over the live pass's. The checkpoint chain's own [0][1] Set Cell writes
+  the private copy since B2SX, so it is never recorded; B2SX's private
+  copy and the own sector poll are unchanged (the poll reads the copy and
+  still sees each crossing once). The sector manager writes no [0][1]
+  (SimTool `--level 13 --drop P_Ball_Wood_MF 0 --drop-sector 1
+  --drop-move 2 70 --ticks 120 --cells-trace`, rASL: [0][1] = 2 from the
+  pass of 70 through the activation 70-75). `sector_cell_adopted` reads
+  [0][1] after a re-derived rewind only for a poll without the private
+  copy; it now reads the death's value where live has it.
+- **Evidence.** Unit tests 587 pass (+1:
+  `RollbackEngine.ADeathsSectorCellWriteIsWrittenOverTheReplayedPass` -
+  passes at 3 and 5 are seen, not recorded; the death's write in the
+  frame of the pass of 5 is; without `after_step` the window ends with
+  the replayed pass's 4 and mismatches, with it the window matches and a
+  later rewind anchored at 5 restores the death's value). Wire check
+  `rASL -> rN01R` over `core_ref_s9`: 12/12 sends SAME, 12/12 journals
+  IDENTICAL; solo1 / solo2 c0 sends SAME (2718, 2694), journals IDENTICAL.
+  The script check's window-end lines: swing_snapoff's every "[0][1]"
+  line gone (11 -> 0: c1 8 - 868, 893, 903, 925, 934, 935, 3164, 3167 -
+  c2 925 and 3233, c3 3213; each "[0][1]"-only, so no window there
+  differs any more), resync_snapoff and l8_cross had none; every other
+  line identical before and after (no new script difference;
+  resync_snapoff c3's P_Modul_19 proximity at 1846 is G-c's). Retail
+  (`scripts/retail/n01r_1`, `work/N01R/n01r_retail.py`, L11, core on,
+  snapshots off, trafo inputs and placement on, client 1 force-rollback
+  13:24): client 2's crossing made the pass of sector 2 at 328 in both
+  worlds; client 1's own death at 529 (the DepthTestCube Quader01) was
+  replayed twice, each time "IngameParameter[0][1] = 1 written after
+  replayed tick 529" and "[0][2] = 1" after it; no cell line at any
+  window's end (`scr=71/0/0/1/18`; the one float-only difference, at 728,
+  is P_Modul_18's proximity "Current Distance", in a window 175 ticks
+  after the death's that no pass wrote the cell in - not a cell, and not a
+  reader of one: P_Modul_18_MF's Get Cell column 1 reads `CurrentLevel`
+  (ActiveBall), not `IngameParameter` (record-format-gaps-design.md), and
+  its Set Cell column 1 writes a sound-slot array; client 2
+  `scr=12/0/0/0/0`). Without this step that window would also have
+  carried the stale pass value, as swing_snapoff's later windows did.
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

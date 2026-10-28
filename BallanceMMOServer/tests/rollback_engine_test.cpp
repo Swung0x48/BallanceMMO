@@ -2082,6 +2082,73 @@ TEST(RollbackEngine, ALiveFramesCellWriteIsWrittenAgainAfterItsReplayedStep) {
     }
 }
 
+// Step N01R (roadmap 4 item 4, the user's (b) of 2026-10-28): the same for
+// IngameParameter[0][1], which the death chain writes (the dying ball's
+// sector) and the union's passes write too - a pass before the frame's
+// scripts (live: manager_activations::record notes it as seen; replay: the
+// pass re-issued before the tick's step).  A pass's own write is never a
+// recorded frame write; the death's write in the frame of a pass is, and the
+// replay writes it over the replayed pass's value after that tick's step, as
+// live (swing_snapoff: "[0][1] 1 vs 4" at the end of a window across the own
+// death at 866).
+TEST(RollbackEngine, ADeathsSectorCellWriteIsWrittenOverTheReplayedPass) {
+    for (const bool hooked: {false, true}) {
+        SCOPED_TRACE(hooked ? "after_step set" : "no after_step");
+        fake_world world;
+        world.bodies["Prop"].position[0] = 1.0;
+        rollback_engine engine;
+        auto w = world.adapter();
+        int cell = 1;   // [0][1] before the session's first write
+        const std::map<uint32_t, int> passes = {{3, 3}, {5, 4}};   // the union's passes: tick -> sector
+        bmmo::session::live_cell_writes writes;
+        w.capture_scripts = [&](std::vector<uint8_t>& out) {
+            out = {static_cast<uint8_t>(cell)};
+            return true;
+        };
+        w.restore_scripts = [&](const std::vector<uint8_t>& in, uint32_t) {
+            cell = in.at(0);
+            return true;
+        };
+        // The replay re-issues the pass of a tick before its step.
+        w.pre_step = [&](uint32_t tick) {
+            if (const auto p = passes.find(tick); p != passes.end()) cell = p->second;
+        };
+        if (hooked)
+            w.after_step = [&](uint32_t tick) {
+                if (const int* value = writes.at(tick)) cell = *value;
+            };
+        const auto live = [&](uint32_t from, uint32_t to) {
+            for (uint32_t tick = from; tick <= to; ++tick) {
+                if (const auto p = passes.find(tick); p != passes.end()) {
+                    cell = p->second;   // the live pass, before the frame's scripts
+                    writes.seen(cell);
+                }
+                w.step();
+                if (tick == 5) cell = 1;   // the own death in sector 1, in the frame of the pass of 5
+                writes.after_frame(tick, cell);
+                rollback_tracked tracked;
+                tracked.mechanisms = {"Prop"};
+                engine.record(w, tick, tracked, {});
+            }
+        };
+        live(1, 6);
+        ASSERT_EQ(writes.size(), 1u) << "the passes' writes (3: 3, 5: 4) are seen, not recorded; the death's is";
+        ASSERT_NE(writes.at(5), nullptr);
+        EXPECT_EQ(*writes.at(5), 1);
+        ASSERT_TRUE(engine.rewind_to(w, 2, 6, no_input, "test"));
+        if (!hooked) {
+            EXPECT_EQ(engine.stats().script_mismatches, 1u) << "the replayed pass's 4 kept to the end of the window";
+            EXPECT_EQ(cell, 4);
+            continue;
+        }
+        EXPECT_EQ(engine.stats().script_mismatches, 0u) << "the death's 1 written over the replayed pass's 4";
+        EXPECT_EQ(cell, 1);
+        ASSERT_TRUE(engine.rewind_to(w, 5, 6, no_input, "test"));
+        EXPECT_EQ(engine.stats().script_mismatches, 0u) << "the replayed record of 5 carries the death's write";
+        EXPECT_EQ(cell, 1);
+    }
+}
+
 // 9.25 rule 5: the tracked set changing from one tick to the next is not a
 // reason to throw the window away.  A body that joined it mid-window simply has
 // no record at T - it is held at its birth pose and released at its birth tick.

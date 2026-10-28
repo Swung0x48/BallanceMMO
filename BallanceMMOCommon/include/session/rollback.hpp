@@ -262,8 +262,9 @@ namespace bmmo::session {
         // its record is captured - a write the live frame of `tick` made that
         // no replayed script makes again (game/session_host_support.hpp
         // manager_activations::after_replayed_step: IngameParameter[0][2],
-        // the checkpoint and death chains'), so the replayed record of that
-        // tick carries it as the live record does.  Null: none.
+        // the checkpoint and death chains', and [0][1], the death chain's,
+        // step N01R), so the replayed record of that tick carries it as the
+        // live record does.  Null: none.
         std::function<void(uint32_t tick)> after_step;
         // Optional: the navigated remote balls whose current body was born at
         // or before `tick`, each with the lifetime generation that body has

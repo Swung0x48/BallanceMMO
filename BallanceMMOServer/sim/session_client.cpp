@@ -2018,7 +2018,7 @@ namespace {
             manager_activations_.clear();
             script_order_.clear();
             activations_replayed_ = 0;
-            deactivate_write_logs_ = 0;
+            cell_write_logs_ = 0;
             beam_done_ = false;
             beam2_done_ = false;
             more_beams_done_.assign(args_.more_beams.size(), false);
@@ -3630,14 +3630,19 @@ namespace {
             w.replay_activation = [this](uint32_t tick) { replay_manager_activation(tick, true); };
             // Step N02R: after each replayed tick's step, the
             // IngameParameter[0][2] its live frame's chains wrote (host
-            // support's manager_activations::after_replayed_step).
+            // support's manager_activations::after_replayed_step); step
+            // N01R: and the [0][1].
             w.after_replayed_step = [this](uint32_t tick) {
                 if (args_.park_births) return;
-                int value = 0;
-                if (!manager_activations_.after_replayed_step(engine_->context(), tick)) return;
-                if (deactivate_write_logs_++ < 8) {
-                    if (CKDataArray* parameters = engine_->data_array("IngameParameter")) parameters->GetElementValue(0, 2, &value);
-                    logf("replay: IngameParameter[0][2] = %d written after replayed tick %u (its live frame's write)", value, tick);
+                const int written = manager_activations_.after_replayed_step(engine_->context(), tick);
+                if (!written || cell_write_logs_++ >= 8) return;
+                CKDataArray* parameters = engine_->data_array("IngameParameter");
+                for (int column = 1; column <= 2; ++column) {
+                    int value = 0;
+                    if (!(written & (1 << column))) continue;
+                    if (parameters) parameters->GetElementValue(0, column, &value);
+                    logf("replay: IngameParameter[0][%d] = %d written after replayed tick %u (its live frame's write)", column,
+                         value, tick);
                 }
             };
             w.before_replayed_tick = [this](uint32_t tick) {
@@ -3961,7 +3966,7 @@ namespace {
         // support's manager_activations, plan doc 10).
         bmmo::game::manager_activations manager_activations_;
         uint64_t activations_replayed_ = 0;
-        uint32_t deactivate_write_logs_ = 0;   // step N02R: the [0][2] writes replayed, logged (the first 8)
+        uint32_t cell_write_logs_ = 0;   // steps N02R, N01R: the [0][2] / [0][1] writes replayed, logged (the first 8 hook calls that wrote a cell)
         bmmo::session::live_script_order script_order_;   // step RO1: the live frames' script order
         void record_manager_activation(uint32_t tick, bool reset) {
             manager_activations_.record(engine_->context(), tick, reset);

@@ -149,7 +149,10 @@ namespace bmmo::session {
     // captured (rollback_world::after_step), so the replayed record of the
     // frame carries the write as the live one does.  CK-free: the CK half
     // (game/session_host_support.hpp manager_activations) reads and writes
-    // the cell.
+    // the cell.  Step N01R (the user's (b) for [0][1], 2026-10-28): the CK
+    // half keeps one of these per cell - [0][2] and IngameParameter[0][1],
+    // which the death chain writes too (the dying ball's sector); a union
+    // pass's [0][1] is written before the frame's scripts, so it is `seen`.
     class live_cell_writes {
     public:
         void clear() {

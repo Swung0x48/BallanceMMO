@@ -327,7 +327,7 @@ namespace {
         bs::local_birth_log births;
         bmmo::game::manager_activations activations;
         uint64_t activations_replayed = 0;
-        uint32_t deactivate_write_logs = 0;   // step N02R: the [0][2] writes replayed, logged (the first 8)
+        uint32_t cell_write_logs = 0;   // steps N02R, N01R: the [0][2] / [0][1] writes replayed, logged (the first 8 hook calls that wrote a cell)
         // Step RO1: the order the live frames ran the replay's scripts in
         // (session/script_order.hpp; host-local, recorded after each frame).
         bs::live_script_order script_order;
@@ -608,7 +608,7 @@ namespace {
         host.births.clear();
         host.activations.clear();
         host.activations_replayed = 0;
-        host.deactivate_write_logs = 0;
+        host.cell_write_logs = 0;
         host.script_order.clear();
         host.script_ids = {};
         host.script_activations.clear();
@@ -2624,14 +2624,17 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         w.replay_activation = [this](uint32_t tick) { core_host_replay_activation(tick, true); };
         // Step N02R: after each replayed tick's step, the IngameParameter[0][2]
         // its live frame's chains wrote (host support's
-        // manager_activations::after_replayed_step).
+        // manager_activations::after_replayed_step); step N01R: and the [0][1].
         w.after_replayed_step = [this](uint32_t tick) {
-            if (!host.activations.after_replayed_step(m_bml->GetCKContext(), tick)) return;
-            if (host.deactivate_write_logs++ < 8) {
+            const int written = host.activations.after_replayed_step(m_bml->GetCKContext(), tick);
+            if (!written || host.cell_write_logs++ >= 8) return;
+            CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
+            for (int column = 1; column <= 2; ++column) {
                 int value = 0;
-                if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) parameters->GetElementValue(0, 2, &value);
-                logger_->Info("Physics session: replay: IngameParameter[0][2] = %d written after replayed tick %u (its live "
-                              "frame's write)", value, tick);
+                if (!(written & (1 << column))) continue;
+                if (parameters) parameters->GetElementValue(0, column, &value);
+                logger_->Info("Physics session: replay: IngameParameter[0][%d] = %d written after replayed tick %u (its live "
+                              "frame's write)", column, value, tick);
             }
         };
         w.births = &host.births;

@@ -1912,7 +1912,8 @@ Every game started (RTSS healthy).
   (2026-10-28): the user's (b), verbatim "(b) Record and replay"; built at
   step N02R** (resync design, As built (step N02R): every live-frame write
   of [0][2] - the crossing's and the death chain's - recorded and written
-  back after its replayed step).
+  back after its replayed step; step N01R does the same for the death
+  chain's [0][1], the user's (b) again).
 - **Not run:** Q-R2 (void since B7EG); the B2SX record-format note's retail
   follow check of the re-armed delayed link (no recipe reaches it in a
   session); a frozen clock on retail (no knob stops it; the unit test
