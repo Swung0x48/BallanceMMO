@@ -528,6 +528,13 @@ namespace bmmo::sim {
         std::deque<std::function<void()>> commands_;
         bool stopping_ = false;
         std::map<uint32_t, std::unique_ptr<session_state>> sessions_;  // simulation thread only
+        // Step B2SW: the harness's server-side stall, from the environment
+        // (BMMO_SESSION_STALL=TICK:MS[,TICK:MS...], unset in every deployment):
+        // the step of each TICK is held MS ms after the step test passed it,
+        // as a slow step would be (the trial's 646 / 595 ms, a journal write
+        // to a slow file system).  Read once, before the thread starts;
+        // simulation thread only after that.
+        std::map<uint32_t, uint32_t> debug_stalls_;
 
         // cross-thread view
         mutable std::mutex view_mutex_;

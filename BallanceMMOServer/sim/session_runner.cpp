@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <system_error>
 
@@ -67,10 +68,36 @@ namespace bmmo::sim {
             std::snprintf(text, sizeof(text), "%.2f", value);
             return text;
         }
+
+        // Step B2SW: BMMO_SESSION_STALL=TICK:MS[,TICK:MS...] (the harness's
+        // server-side stall); a malformed entry is skipped.
+        std::map<uint32_t, uint32_t> parse_session_stalls(const char* text) {
+            std::map<uint32_t, uint32_t> out;
+            if (!text) return out;
+            const std::string spec = text;
+            size_t from = 0;
+            while (from < spec.size()) {
+                const size_t comma = spec.find(',', from);
+                const std::string item = spec.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+                const size_t colon = item.find(':');
+                if (colon != std::string::npos && colon > 0 && colon + 1 < item.size()) {
+                    const unsigned long tick = std::strtoul(item.substr(0, colon).c_str(), nullptr, 10);
+                    const unsigned long ms = std::strtoul(item.substr(colon + 1).c_str(), nullptr, 10);
+                    if (ms > 0 && ms <= 10000) out[static_cast<uint32_t>(tick)] = static_cast<uint32_t>(ms);
+                }
+                if (comma == std::string::npos) break;
+                from = comma + 1;
+            }
+            return out;
+        }
     }
 
     session_runner::session_runner(runner_config config, session_callbacks callbacks)
         : config_(std::move(config)), callbacks_(std::move(callbacks)) {
+        debug_stalls_ = parse_session_stalls(std::getenv("BMMO_SESSION_STALL"));
+        for (const auto& [tick, ms]: debug_stalls_)
+            log("debug: BMMO_SESSION_STALL holds the step of tick " + std::to_string(tick) + " for " + std::to_string(ms)
+                + " ms (a harness stall; unset in deployments)");
         thread_ = std::thread([this] { run(); });
     }
 
@@ -1518,6 +1545,16 @@ namespace bmmo::sim {
                     }
                     {
                         const auto started = clock::now();
+                        // Step B2SW: the harness's stall (BMMO_SESSION_STALL),
+                        // inside the step's timing as a slow step would be.
+                        if (!debug_stalls_.empty())
+                            if (const auto stall = debug_stalls_.find(tick); stall != debug_stalls_.end()) {
+                                const uint32_t ms = stall->second;
+                                debug_stalls_.erase(stall);
+                                log("[session " + std::to_string(s.id) + "] debug stall: the step of tick " + std::to_string(tick)
+                                    + " held " + std::to_string(ms) + " ms (BMMO_SESSION_STALL)");
+                                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                            }
                         step(s);
                         s.step_waits.clear();
                         s.step_us.push_back(static_cast<uint32_t>(

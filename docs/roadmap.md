@@ -407,6 +407,17 @@ numbers 1-10 are unchanged.
        wait for world agreement's Q9).
      - *Trafo T4 (c)*: the retail birth log's replayed-tick rule in every
        session (trafo design).
+     - *The trial's server stall*: established - the journal's flush to
+       `/mnt/d` through WSL's 9P (writes up to 523 ms measured, ext4 0.7 ms)
+       holds a step, and the catch-up loop then substitutes up to 10 queued
+       frames per member; **the fix is the user's choice** (late-player
+       design, "As built (step B2SW)"). The harness's server stall
+       (`BMMO_SESSION_STALL`) is built; a 56-deep notice was taken by a
+       56-tick rewind live, no resync.
+     - Deferred to the final verification: a same-recipe retail run of the
+       previous build for T4 (c)'s contrast; a retail run with the session
+       core off (N2 refactored the legacy path's pin functions onto the
+       shared header); P's instrumented pair (moot).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

@@ -2697,3 +2697,63 @@ last sector is entered.
 Scripts for this record: `rv4_check.py`, `rv4_hyst.py`, `rv4_ep.py`,
 `rv4_w.py`, `rv4_a10.py`, `rv4_a10b.py` and `rv4_a10c.py`, in the session's
 scratchpad.
+
+## As built (step B2SW, 2026-10-27): the trial's server stall
+
+**As built (step B2SW, 2026-10-27): what stalled the trial's server, and a
+server-side stall for the harness.**
+
+- **The stall's cause (measured).** The trial's server journal
+  (`TRIAL1/rounds/round1-holdlast/server`, `.local-tools/work/B2SW/
+  step_gaps.py`): 36122 steps; gaps over 100 ms at 1794 (335), 1850 (232),
+  10918 (327), 20584 (646), 20676 (153), 20770 (595), 20838 (326), 27587
+  (339), 27655 (242), 35594 (102). The ones at or under 336 ms fit a
+  deadline wait (the largest slack, 22 ticks); 646 and 595 do not. The server
+  writes its journal on the step thread and flushes it at every checkpoint
+  (every 2 ticks in the trial) to `journal_dir` =
+  `/mnt/d/repos/BallanceMMO/maps/arena-test/wsl/journals`, a Windows drive
+  seen through WSL's 9P file system. The journal's pattern on that file
+  system (`flushbench.py`, 1800-byte writes every 30.3 ms for 300 s, run
+  twice at once in the Arch WSL): `/mnt/d` p50 1.3 ms, p99 7.9, p999 16.4,
+  **max 523 ms**, 3 writes over 50 ms (61, 179, 523 ms); the WSL ext4 home
+  directory, same moment: max 0.7 ms. So a checkpoint flush can hold a step
+  for half a second - the size of the two unexplained gaps. Then a server
+  rule of its own turns the stall into substitutions: the runner's catch-up
+  loop (`session_runner::run`) steps up to `max_catch_up_ticks` (10) due
+  ticks before it drains its command queue again, and the members' frames
+  for those ticks are queued there (submit_input posts them) although they
+  arrived before their deadlines - every member's 9-10 ticks after the stall
+  are substituted (the trial: "S2 held ... ticks=20585..20593 n=9 src=20584",
+  "20771..20779 n=9 src=20770"; the harness: n=6-8 per stall, ≤ 10 always).
+  Their notices then come back h + stall deep (the trial's 61-64). Not
+  fixed: both halves have options (the user's, below).
+- **The harness's server stall** (`session_runner`): the environment variable
+  `BMMO_SESSION_STALL=TICK:MS[,TICK:MS...]`, read once at start (logged),
+  holds the step of each TICK for MS ms after the step test passed it, inside
+  the step's timing - a slow step. Unset in every deployment; the Arch server
+  inherits it from `wsl -d Arch -- env BMMO_SESSION_STALL=... bash
+  arch_server_lp.sh ...` (`.local-tools/work/B2SW/live.sh`, `STALL=`).
+- **A notice past 48 taken without a resync, live**
+  (`maps/arena-test/b2sw_stall4`: 2 clients, 150 ms, snapshots off, client 0
+  `--brake-tap 3:7` so a repeated frame differs from its own; stalls 560 ms at
+  1300 and 660 ms at 1700): the server substituted ticks 1302-1309 of both
+  clients from 1301's frame; client 0's notice for its own tick 1303 arrived
+  at local 1358, 56 deep - past the fixed 48 - while the burst of headers
+  after the stall had lifted its reach 51 -> 86 ("reach: 86 ticks at tick
+  1358 (relay lag: p99 57 ... + 8 + wait 21, cap 120)"), and it was taken by
+  "rollback to tick 1302 (own input substituted at tick 1303), re-simulated
+  56 ticks"; resyncs 0/0 on both clients; the server journal replays
+  2324/2324. (420 ms stalls: rewinds of 47-48, inside the floor,
+  `b2sw_stall3`.)
+- **The user's choice** (reported): (A) the stall - (i) keep the journal off
+  the 9P file system in the harness and the trial (an ext4 directory, copied
+  out after the run; config only), (ii) write the journal from a writer
+  thread so no file system can hold a step (the black box then loses up to
+  the queued records on a crash instead of up to the last flush), (iii) flush
+  less often (by time, not per checkpoint); (B) the catch-up substitutions -
+  (i) drain the command queue before every catch-up step (a frame that
+  arrived before the step is used; one that arrived after its deadline during
+  the stall would be used too), (ii) the same but honouring each frame's
+  arrival against its tick's deadline (exact to the deadline rule; the input
+  buffer would carry arrival times), (iii) leave it (the per-client reach of
+  R12 covers stalls up to about cap - h - 1 ticks).
