@@ -568,6 +568,17 @@ numbers 1-10 are unchanged.
    (step BALA)"; protocol 14, bridge API 24): a positional airship zone in
    every world, another player's ball frozen there as a ghost and never
    touching any airship, the owner's pose relayed for display.
+   **Queued, item ASL** (found by reading the code at step SPGH, not
+   reproduced): BALA's `airship_zone_listener` (`physics_state.cpp`
+   `event_PSI`) finds the own ball in `CKIpionManager::m_MovableObjects`,
+   which drops a frozen core (`PhysicsObjectListener::event_object_frozen`,
+   physics_RT `CKIpionManager.cpp:113-121`; SPGH's retail run showed a
+   resting ball leaving that list 22 ticks after it came to rest), so a
+   latched own ball that falls asleep closes its latch as if it had died
+   (no body) and is re-latched only when it is in the box again. Fix: list the
+   balls from the manager's whole object table (`m_PhysicsObjects`, sorted),
+   as the SPGH patch's listener does; check with a pinned replay of an
+   airship arm.
    Answer 1 is option (a): H6 is judged by its absolute limits (starved
    within the band, the server's p99 within the budget, both met), so **the
    close-out is passed by the user's ruling** (H6's numbers stay recorded in
