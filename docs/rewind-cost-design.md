@@ -160,6 +160,10 @@ re-predicted ticks and after them (§7, check 4); the server is not touched.
   generation. Exactness: the record must still restore bit-exact (the
   savestate checks of `ivp-savestate`), and a body woken by a write must not
   reuse the sleeping copy.
+  **Not built, the user's choice 2026-10-28** (option (c) of step B5RC's
+  stop: "按推荐继续"; "As built (step B5RX)", item RC2S, at the end): neither
+  the per-body blob bytes nor a sleep generation exist, so RC2 as written
+  needs a format change; the two forms kept for later are recorded there.
 - **RC3, no body-set full snapshot while snapshots are off** (8.7-10.7 %):
   the lifecycle full snapshots a snapshots-off session still receives. They
   are today a correction the client applies, so dropping them is not a pure
@@ -217,7 +221,7 @@ names no server file); the own ball's feed; the legacy retail path
 | step | what | checks |
 |---|---|---|
 | RC1 | the hold-last re-prediction (§2) | §7; quick tier |
-| RC2 | incremental capture for sleeping bodies | the savestate exactness set, the wire check (ALL SAME: no behaviour change), CPU parity, H1 at 150 ms |
+| RC2 | incremental capture for sleeping bodies - **not built, the user's choice 2026-10-28** (the blob has no per-body bytes and IVP no sleep generation; options (a) / (b) kept for later: "As built (step B5RX)", item RC2S) | the savestate exactness set, the wire check (ALL SAME: no behaviour change), CPU parity, H1 at 150 ms |
 | RC3 | no body-set full snapshot while snapshots are off | its own drift check, the snapshots-off arms |
 | RC4 | the dormant-script encoding (trafo design 9.4) | script replay exactness, the wire check |
 | RC5 | incremental restore | the savestate checks, the wire check |
@@ -1354,3 +1358,49 @@ the Arch server rebuilt from this tree, journal build id
     02:34:28-02:35:08; R7 - R6 -0.02 to -0.07 per change, the screen bound
     holds on all 30), the rest docs only (no rebuild, no rerun); the verdict
     is unchanged.
+
+## As built (step B5RX)
+
+Step B5RX is the batch that lands the user's answers to step B5RC's three
+stops (2026-10-28: "按推荐继续" - go on as recommended - and, for RC3, the
+correction quoted under item RC3A). Base e0caa8a (protocol 13, journal v7;
+no protocol or journal change). B5RC committed nothing; its code and
+measurements are kept in `.local-tools/work/B5RC/` (`rc3.patch`,
+`r12b.patch`, `all_code.patch`, `docs.patch`, the git ref
+`refs/b5rc/rc3-code-v2`). This step changes nothing in CK2, physics_RT or
+IVP and records no engine change.
+
+**Item RC2S - RC2 not built (the user's choice, option (c)).** The design
+(§3) reuses "a sleeping body's per-body reads and blob bytes ... keyed by
+the body and its sleep generation"; neither exists in a reusable form
+(B5RC, checked by the orchestrator):
+- *The blob has no per-body bytes.* `capture_world`
+  (`BallanceMMOCommon/src/physics/physics_savestate_capture.cpp`) numbers
+  every collision checker (`add_collision`, :146-158: a checker's number is
+  its encounter order), contact, friction system, simulation unit and
+  overlap node at first encounter, in one walk over the whole world, and an
+  object's record refers to them by those numbers (`ov_collisions`, the
+  hull entries' collision, the exact / invalid / friction synapses, the
+  core's `unit`, `ov_node`, a controller's friction system). A checker made
+  or freed for any body earlier in the walk renumbers every later record,
+  so a sleeping body's bytes change while it sleeps.
+- *No sleep generation.* IVP keeps no wake or write counter; adding one is
+  an IVP source change, which the engine-change discipline allows only for
+  a proven discrepancy, not for a cost cut.
+- *The blob is on the wire*: SessionResyncState carries it
+  (`session_resync_state_msg.hpp`:37), so a format change is a protocol
+  change.
+
+The two options kept for later (CPUPROF's split: a sleeping body costs a
+capture 4.5-4.7 us, 3.2 of it the blob, 1.3-1.4 the per-body reads):
+(a) a per-object blob format with name-keyed references (checkers by
+object pair and edge, contacts by system and pair), a sleeping object's
+section reused while its live fields compare equal - at most 3.2 of the
+4.6 us per sleeping body; a protocol bump (the travelling blob) and changes
+to capture, restore, describe, diff and the validator; (b) a cache of the
+rollback engine's per-body reads (`rollback_engine::capture`'s get_body /
+extra / contacts) for a body asleep in the previous record and now, every
+engine write (restore, set_body, recreate, destroy, rows) invalidating it -
+at most 1.3-1.4 us, no format change; a script that moves a sleeping body
+outside the engine's writes (a teleport through physics_RT) is the
+exactness risk to rule out first. Docs only: no code.

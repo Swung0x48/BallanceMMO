@@ -463,7 +463,17 @@ numbers 1-10 are unchanged.
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift
    check), RC4 the dormant-script encoding (5 %; trafo design 9.4), RC5 an
-   incremental restore (3-4 %). The close-out is the trafo design's H4 / H6
+   incremental restore (3-4 %). **RC2 is not built (the user's choice,
+   2026-10-28, option (c) of step B5RC's stop: "按推荐继续")**: the blob
+   has no per-body bytes (`capture_world` numbers checkers, contacts,
+   units and overlap nodes world-wide at first encounter, so a sleeping
+   body's record changes while it sleeps), IVP keeps no wake counter (an
+   IVP change, not allowed for a cost cut) and the blob is on the wire; the
+   options kept for later are (a) a per-object blob with name-keyed
+   references (at most 3.2 of 4.6 us per sleeping body, a protocol bump)
+   and (b) a cache of the rollback engine's per-body reads (at most
+   1.3-1.4 us, no format change) - `rewind-cost-design.md` "As built (step
+   B5RX)". The close-out is the trafo design's H4 / H6
    **with snapshots on** (decision (b), 2026-10-25) against T3's
    snapshots-off numbers (TR3b's H1 at 150 ms: t_rep 0.99-1.15 s, t_max
    43-46 ms, starved 0, against the option-off control's 0.34-0.41 s, 12-14
