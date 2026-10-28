@@ -6532,6 +6532,24 @@ core (7.1 decision 1), and step P's spawn race re-measured.**
   ticks (2309, 2578), at the server's own step gaps of 342 ms and more (its
   journal's TICK clock): the trial's server stall (late-player design, "As
   built (step B2SW)"), not this rule.
+- **Step P's race, re-measured (no code).** `scripts/retail/b2sw_retail_1`:
+  P's spawn recipe (Level 11, both beamed onto P_Trafo_Stone at 300 / 340,
+  `replay session` r0_keys.bmrc) with snapshots OFF, the placement on, core
+  on, no net lag. Both clients drained the peer's tick-212 Physicalize late
+  (state B): the rewind "to tick 211 (ball of ... born at tick 212),
+  re-simulated 3 ticks" made the birth at its stamp inside the replay. The
+  LOCAL checkpoints against the server journal (`tr3/svc.py --balls`): at 214
+  the own ball 0.1708 m (P's state-B number, written live before the late
+  birth was known) and the peer's ball missing (212-214, the same
+  checkpoints); at 216 the own ball exact, the mirror 0.0102 m (its relayed
+  inputs); at 218 17/17 bodies exact on both clients; resyncs 0. So A and B
+  no longer change the world (R3's lifecycle rewind makes the birth at its
+  stamp whatever frame drains it); what is left of the race is the one live
+  LOCAL checkpoint before the drain. What made P land in B more often was
+  not identified and is moot now: it would need the instrumented pair of
+  builds (network-thread receive time against the frame's drain time) for a
+  difference with no effect on any world. Closed as measured.
+
 ## 7. Open questions
 
 1. **Retail's resync triggers.** Retail resyncs on `too_far`, `frozen`, 30
