@@ -145,6 +145,22 @@ namespace bmmo::physics {
         bool force_block_set(uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error) const {
             return bmmo::physics::force_block_set(manager, behavior_id, in, error);
         }
+        // v27 (step RLC): a joint block's constraint image.
+        bool joint_block_get(uint32_t behavior_id, bmmo_physics_joint_image& out, std::string& error) const {
+            return bmmo::physics::joint_block_get(manager, behavior_id, out, error);
+        }
+        bool joint_block_set(uint32_t behavior_id, const bmmo_physics_joint_image& in, std::string& error) const {
+            return bmmo::physics::joint_block_set(manager, behavior_id, in, error);
+        }
+        bool joint_blocks_order(const std::vector<uint32_t>& behavior_ids, const std::vector<int16_t>& orders,
+                                uint32_t& moved, std::string& error) const {
+            if (orders.size() != 2 * behavior_ids.size()) {
+                error = "two places per block";
+                return false;
+            }
+            return bmmo::physics::joint_blocks_order(manager, behavior_ids.data(), orders.data(),
+                                                     static_cast<uint32_t>(behavior_ids.size()), moved, error);
+        }
         // v23, the PreSimulate queue (rollback-engine-gaps design 2.2.2, gap Q).
         bool callbacks_get(std::vector<bmmo_physics_callback>& out, std::string& error) const {
             return bmmo::physics::callbacks_get(manager, out, error);

@@ -47,12 +47,14 @@
 // not executed (its bodies are on the rollback's birth branch).
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <session/resync_rules.hpp>
@@ -73,6 +75,19 @@ namespace bmmo::game {
     struct script_replay_hooks {
         std::function<bool(CKBehavior* block, force_block_state& out)> capture_force;
         std::function<bool(CKBehavior* block, const force_block_state& state)> restore_force;
+        // Step RLC (bridge API v27): a joint block's constraint as an image
+        // (the bridge's own bytes; empty when the block holds none), and one
+        // made again from an image on a block that holds none.  Without them
+        // the joint part of a record is v2's presence byte alone.  `order`
+        // (step RLC's review): the constraint's place in its two cores'
+        // controller lists among the controllers of its key
+        // (bmmo_physics_joint_image::order) - what the blob cannot tell
+        // apart; order_joints puts the given blocks' constraints back in
+        // the places named (the lists changed, -1 with a message).
+        std::function<bool(CKBehavior* block, std::vector<uint8_t>& image, std::array<int16_t, 2>& order)> capture_joint;
+        std::function<bool(CKBehavior* block, const std::vector<uint8_t>& image)> restore_joint;
+        std::function<int(const std::vector<std::pair<CKBehavior*, std::array<int16_t, 2>>>& blocks, std::string& error)>
+            order_joints;
     };
 
     // One PreSimulate queue entry (bridge API v23, rollback-engine-gaps
@@ -101,6 +116,11 @@ namespace bmmo::game {
         // links, the three data-array cells the sector manager and the modules
         // read (plan doc 10).
         static constexpr uint32_t kVersion = 2;
+        // Step RLC: in a local record (every version) a joint block's handle
+        // byte is 0 (none), 1 (one) or kJointImaged (one, and a u32 hash of
+        // its image and its two i16 core-list places follow - the joint
+        // ledger below); the portable record keeps 0 / 1.  The record is
+        // this process's own, so no version.
         // v3 (docs/trafo-replication-design.md 4.5, step T1): the v2 record,
         // byte for byte after the version word, then the trafo sets' scripts
         // keyed by id - written only when a trafo part is selected, so every
@@ -257,10 +277,97 @@ namespace bmmo::game {
             uint32_t joints_released = 0;   // handles nulled because the rollback destroyed their body (release_joints)
             uint32_t trafo_built = 0;       // trafo scripts the record did not list, put to their set's built state (v3)
             uint32_t strings_resized = 0;   // string parameters written back at another length (step RO1, resize_strings)
+            // Step RLC: constraints made again from the record's image (the
+            // window shut them down), and live ones replaced by it (the window
+            // shut down and re-made them: another image).
+            uint32_t joints_recreated = 0, joints_replaced = 0;
+            // Step RLC's review: core lists whose constraints the restore put
+            // back in the record's order (a constraint made again lands last).
+            uint32_t joints_reordered = 0;
         };
         static restore_counters& last_restore() {
             static restore_counters counters;
             return counters;
+        }
+
+        // Step RLC (roadmap section 4 item 4, "a constraint shut down inside
+        // the window"; rollback-engine-gaps design, As built (step RLC)).  A
+        // joint block's constraint is made from the bodies' poses at its
+        // Create and never changes afterwards; a Shutdown inside a rollback
+        // window deletes it, and no pose at the anchor computes it again.
+        // So every capture that sees a constraint names it in the record by
+        // the hash of its image (kJointImaged, below) and keeps the image
+        // here, per block, the most recently seen last; a restore to a tick
+        // at which the block held a constraint the live world no longer has
+        // (or holds another one) makes it again from that image, before the
+        // blob, which then finds it among the core's controllers.  The
+        // ledger is this process's: the images never travel (the portable
+        // record carries the presence alone, and a localized record names no
+        // image - its restore takes the block's latest one).
+        static constexpr uint8_t kJointImaged = 2;   // the handle byte: present, a u32 image hash follows (local records)
+        struct joint_ledger {
+            struct entry {
+                uint32_t hash = 0;
+                std::vector<uint8_t> image;
+            };
+            static constexpr size_t kKeep = 8;   // images per block
+            std::map<CK_ID, std::vector<entry>> blocks;
+            void note(CK_ID id, uint32_t hash, const std::vector<uint8_t>& image) {
+                std::vector<entry>& list = blocks[id];
+                if (!list.empty() && list.back().hash == hash) return;
+                for (size_t i = 0; i < list.size(); ++i) {
+                    if (list[i].hash != hash) continue;
+                    entry e = std::move(list[i]);
+                    list.erase(list.begin() + static_cast<std::ptrdiff_t>(i));
+                    list.push_back(std::move(e));
+                    return;
+                }
+                list.push_back(entry{hash, image});
+                if (list.size() > kKeep) list.erase(list.begin());
+            }
+            // hash 0: the block's latest image (a record that names none).
+            const entry* find(CK_ID id, uint32_t hash) const {
+                const auto it = blocks.find(id);
+                if (it == blocks.end() || it->second.empty()) return nullptr;
+                if (!hash) return &it->second.back();
+                for (const entry& e: it->second)
+                    if (e.hash == hash) return &e;
+                return nullptr;
+            }
+        };
+        static joint_ledger& joints() {
+            static joint_ledger ledger;
+            return ledger;
+        }
+        struct joint_counters {
+            uint64_t imaged = 0;       // captures that named a constraint by its image
+            uint64_t recreated = 0;    // constraints made again at a restore
+            uint64_t replaced = 0;     // live constraints replaced by the record's
+            uint64_t missing = 0;      // the record had one, the restore could not make it
+            uint64_t unmatched = 0;    // a live constraint with another image the ledger no longer holds the record's for (left)
+            uint64_t reordered = 0;    // core lists put back in the record's constraint order
+            uint64_t order_failed = 0; // restores refused because that order could not be put back
+        };
+        static joint_counters& joint_stats() {
+            static joint_counters counters;
+            return counters;
+        }
+        // SimTool's control (--joint-order-off): the restore leaves the
+        // constraints' order as it finds it, as before the review.
+        static bool& joint_order_off() {
+            static bool off = false;
+            return off;
+        }
+        // The joint blocks the restore under way found imaged in its record,
+        // with their recorded places (restore_joint fills it, restore orders).
+        static std::vector<std::pair<CKBehavior*, std::array<int16_t, 2>>>& joints_to_order() {
+            static std::vector<std::pair<CKBehavior*, std::array<int16_t, 2>>> blocks;
+            return blocks;
+        }
+        static uint32_t joint_image_hash(const std::vector<uint8_t>& image) {
+            uint32_t h = 2166136261u;
+            for (uint8_t b: image) { h ^= b; h *= 16777619u; }
+            return h ? h : 1u;
         }
         // Step B2SX (record-format Q5 / A23, the user's option (a)): the
         // outputs the last restore turned back on to re-arm an in-flight
@@ -1032,6 +1139,7 @@ namespace bmmo::game {
             if (replayed) replayed->clear();
             last_restore() = restore_counters{};
             last_rearmed_outputs().clear();
+            joints_to_order().clear();
             if (!context) return fail(error, "no context");
             size_t pos = 0;
             uint32_t magic = 0, version = 0;
@@ -1134,6 +1242,35 @@ namespace bmmo::game {
                     if (!restore_script_block(beh, hooks, built->second, error)) return false;
                     trafo->set_dormant(trafo->index_of(static_cast<CK_ID>(id)), true);
                     ++last_restore().trafo_built;
+                }
+            }
+            // Step RLC's review: the blob matches a core's controllers by
+            // priority and name, which every constraint shares, so it keeps
+            // the constraints in the order the live lists have them - and a
+            // constraint made again above was appended to its cores' lists.
+            // The record's places go back here, before the blob (whose
+            // simulation units are built from the cores' lists).  Only when a
+            // place differs: the blocks holding a constraint now, in one call.
+            if (!joints_to_order().empty() && hooks.capture_joint && hooks.order_joints && !joint_order_off()) {
+                std::vector<std::pair<CKBehavior*, std::array<int16_t, 2>>> held;
+                bool differs = false;
+                for (const auto& [beh, order]: joints_to_order()) {
+                    std::vector<uint8_t> image;
+                    std::array<int16_t, 2> live{-1, -1};
+                    if (!hooks.capture_joint(beh, image, live) || image.empty()) continue;
+                    held.emplace_back(beh, order);
+                    if (live != order) differs = true;
+                }
+                if (differs) {
+                    std::string why;
+                    const int moved = hooks.order_joints(held, why);
+                    if (moved < 0) {
+                        ++joint_stats().order_failed;
+                        if (error) *error = "joint order: " + why;
+                        return false;
+                    }
+                    last_restore().joints_reordered += static_cast<uint32_t>(moved);
+                    joint_stats().reordered += static_cast<uint64_t>(moved);
                 }
             }
             // Gap Q (design 2.2.3): the PreSimulate entries of every script
@@ -1876,9 +2013,29 @@ namespace bmmo::game {
             if (ja) {
                 uint8_t ha = 0, hb = 0;
                 if (!get_u8(a, pa, ha) || !get_u8(b, pb, hb)) return false;
-                if (ha != hb) {
+                uint32_t ia = 0, ib = 0;
+                uint16_t oa[2] = {0xffffu, 0xffffu}, ob[2] = {0xffffu, 0xffffu};
+                if ((ha == kJointImaged && (!get_u32(a, pa, ia) || !get_u16(a, pa, oa[0]) || !get_u16(a, pa, oa[1])))
+                    || (hb == kJointImaged && (!get_u32(b, pb, ib) || !get_u16(b, pb, ob[0]) || !get_u16(b, pb, ob[1]))))
+                    return false;
+                if ((ha != 0) != (hb != 0)) {
                     d.logical = true; ++d.logical_count;
-                    const std::string what = block + ": joint handle " + std::to_string(ha) + " vs " + std::to_string(hb);
+                    const std::string what = block + ": joint handle " + std::to_string(ha != 0) + " vs " + std::to_string(hb != 0);
+                    if (d.where.empty()) d.where = what;
+                    d.note(what);
+                } else if (ia && ib && ia != ib) {
+                    // Step RLC: two constraints made from different poses.
+                    d.logical = true; ++d.logical_count;
+                    const std::string what = block + ": joint image " + std::to_string(ia) + " vs " + std::to_string(ib);
+                    if (d.where.empty()) d.where = what;
+                    d.note(what);
+                } else if (ia && ib && (oa[0] != ob[0] || oa[1] != ob[1])) {
+                    // Step RLC's review: the same constraint at another place
+                    // among its cores' constraints (another solve order).
+                    d.logical = true; ++d.logical_count;
+                    const std::string what = block + ": joint order " + std::to_string(static_cast<int16_t>(oa[0])) + "/"
+                        + std::to_string(static_cast<int16_t>(oa[1])) + " vs " + std::to_string(static_cast<int16_t>(ob[0])) + "/"
+                        + std::to_string(static_cast<int16_t>(ob[1]));
                     if (d.where.empty()) d.where = what;
                     d.note(what);
                 }
@@ -2023,7 +2180,7 @@ namespace bmmo::game {
             const int outs = beh->GetOutputParameterCount();
             put_u16(out, static_cast<uint16_t>(outs));
             for (int i = 0; i < outs; ++i) capture_parameter(beh->GetOutputParameter(i), out);
-            put_force_and_joint(beh, hooks, out);
+            put_force_and_joint(beh, hooks, out, true);
             if (beh->IsUsingFunction()) { put_u16(out, 0); put_u16(out, 0); return; }
             const int children = beh->GetSubBehaviorCount();
             put_u16(out, static_cast<uint16_t>(children));
@@ -2052,7 +2209,11 @@ namespace bmmo::game {
         }
 
         // The force block's controller and the joint block's handle presence.
-        static void put_force_and_joint(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {
+        // `local`: this process's record, whose handle byte may name the
+        // constraint's image (kJointImaged + u32 hash, step RLC); the
+        // portable record keeps v2's presence byte.
+        static void put_force_and_joint(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out,
+                                        bool local) {
             force_block_state force;
             if (is_force_block(beh) && hooks.capture_force && hooks.capture_force(beh, force)) {
                 put_u8(out, 1);
@@ -2064,7 +2225,20 @@ namespace bmmo::game {
             }
             if (is_joint_block(beh)) {
                 put_u8(out, 1);
-                put_u8(out, joint_handle(beh) ? 1 : 0);
+                const bool held = joint_handle(beh) != nullptr;
+                std::vector<uint8_t> image;
+                std::array<int16_t, 2> order{-1, -1};
+                if (held && local && hooks.capture_joint && hooks.capture_joint(beh, image, order) && !image.empty()) {
+                    const uint32_t hash = joint_image_hash(image);
+                    joints().note(beh->GetID(), hash, image);
+                    ++joint_stats().imaged;
+                    put_u8(out, kJointImaged);
+                    put_u32(out, hash);
+                    put_u16(out, static_cast<uint16_t>(order[0]));
+                    put_u16(out, static_cast<uint16_t>(order[1]));
+                } else {
+                    put_u8(out, held ? 1 : 0);
+                }
             } else {
                 put_u8(out, 0);
             }
@@ -2278,7 +2452,7 @@ namespace bmmo::game {
             const int outs = beh->GetOutputParameterCount();
             put_u16(out, static_cast<uint16_t>(outs));
             for (int i = 0; i < outs; ++i) capture_portable_parameter(context, beh->GetOutputParameter(i), out, r, block, true, i);
-            put_force_and_joint(beh, hooks, out);
+            put_force_and_joint(beh, hooks, out, false);
             if (beh->IsUsingFunction()) { put_u16(out, 0); put_u16(out, 0); return; }
             const int children = beh->GetSubBehaviorCount();
             put_u16(out, static_cast<uint16_t>(children));
@@ -2459,7 +2633,11 @@ namespace bmmo::game {
         static bool skip_tail(const std::vector<uint8_t>& in, size_t& pos, bool portable) {
             uint8_t has = 0;
             if (!get_u8(in, pos, has) || (has && !skip(in, pos, 49))) return false;
-            if (!get_u8(in, pos, has) || (has && !skip(in, pos, 1))) return false;
+            if (!get_u8(in, pos, has)) return false;
+            if (has) {
+                uint8_t handle = 0;
+                if (!get_u8(in, pos, handle) || (handle == kJointImaged && !skip(in, pos, 8))) return false;
+            }
             uint16_t children = 0, delayed = 0;
             if (!get_u16(in, pos, children)) return false;
             for (int i = 0; i < children; ++i) {
@@ -2519,6 +2697,58 @@ namespace bmmo::game {
             return true;
         }
 
+        // A joint block back to the record's constraint (before the blob,
+        // which matches recorded controllers to live ones and makes none).
+        static void restore_joint(CKBehavior* beh, const script_replay_hooks& hooks, bool had_handle, uint32_t image_hash,
+                                  const std::array<int16_t, 2>& order) {
+            const bool has_handle = joint_handle(beh) != nullptr;
+            // Step RLC's review: put in order with the record's other imaged
+            // constraints once every block is restored (restore, below).
+            if (had_handle && image_hash) joints_to_order().emplace_back(beh, order);
+            if (!had_handle && has_handle) {
+                // The block's own reset: deletes its constraint or spring
+                // while both cores still exist and nulls the handle, as
+                // physics_RT's own ResetPhysicsBehaviorHandles does.
+                beh->CallCallbackFunction(CKM_BEHAVIORRESET);
+                ++last_restore().joints_reset;
+                return;
+            }
+            if (!had_handle) return;
+            if (has_handle) {
+                // Step RLC: the same constraint, unless a Shutdown and a
+                // Create inside the window made another one (another image).
+                if (!image_hash || !hooks.capture_joint || !hooks.restore_joint) return;
+                std::vector<uint8_t> live;
+                std::array<int16_t, 2> live_order{-1, -1};
+                if (!hooks.capture_joint(beh, live, live_order) || live.empty() || joint_image_hash(live) == image_hash) return;
+                const joint_ledger::entry* recorded = joints().find(beh->GetID(), image_hash);
+                if (!recorded) {
+                    ++joint_stats().unmatched;
+                    return;
+                }
+                const std::vector<uint8_t> image = recorded->image;
+                beh->CallCallbackFunction(CKM_BEHAVIORRESET);
+                if (hooks.restore_joint(beh, image)) {
+                    ++last_restore().joints_replaced;
+                    ++joint_stats().replaced;
+                } else {
+                    ++last_restore().joints_missing;
+                    ++joint_stats().missing;
+                }
+                return;
+            }
+            // Step RLC: shut down inside the window - made again from its
+            // image (a record naming none: the block's latest).
+            const joint_ledger::entry* recorded = hooks.restore_joint ? joints().find(beh->GetID(), image_hash) : nullptr;
+            if (recorded && hooks.restore_joint(beh, recorded->image)) {
+                ++last_restore().joints_recreated;
+                ++joint_stats().recreated;
+            } else {
+                ++last_restore().joints_missing;
+                ++joint_stats().missing;
+            }
+        }
+
         static bool restore_behavior(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in,
                                      size_t& pos, std::string* error, bool write = true) {
             uint32_t id = 0, flags = 0, in_mask = 0, out_mask = 0;
@@ -2553,19 +2783,15 @@ namespace bmmo::game {
             if (!get_u8(in, pos, has_joint)) return fail(error, "truncated joint");
             if (has_joint) {
                 uint8_t had_handle = 0;
+                uint32_t image_hash = 0;
+                uint16_t places[2] = {0xffffu, 0xffffu};
                 if (!get_u8(in, pos, had_handle)) return fail(error, "truncated joint");
-                if (write && is_joint_block(beh)) {
-                    const bool has_handle = joint_handle(beh) != nullptr;
-                    if (!had_handle && has_handle) {
-                        // The block's own reset: deletes its constraint or
-                        // spring while both cores still exist and nulls the
-                        // handle, as physics_RT's own ResetPhysicsBehaviorHandles does.
-                        beh->CallCallbackFunction(CKM_BEHAVIORRESET);
-                        ++last_restore().joints_reset;
-                    } else if (had_handle && !has_handle) {
-                        ++last_restore().joints_missing;
-                    }
-                }
+                if (had_handle == kJointImaged
+                    && (!get_u32(in, pos, image_hash) || !get_u16(in, pos, places[0]) || !get_u16(in, pos, places[1])))
+                    return fail(error, "truncated joint");
+                if (write && is_joint_block(beh))
+                    restore_joint(beh, hooks, had_handle != 0, image_hash,
+                                  {static_cast<int16_t>(places[0]), static_cast<int16_t>(places[1])});
             }
             if (!get_u16(in, pos, children)) return fail(error, "truncated children");
             const int now = beh->IsUsingFunction() ? 0 : beh->GetSubBehaviorCount();

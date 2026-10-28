@@ -482,6 +482,51 @@ namespace bmmo::physics {
         return true;
     }
 
+    // v27 (step RLC): a joint block's constraint image.
+    bool physics_view::joint_block_get(uint32_t behavior_id, bmmo_physics_joint_image& out, std::string& error) const {
+        error.clear();
+        out.size = 0;
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->joint_block_get) {
+            error = "the physics_RT bridge lacks joint_block_get";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->joint_block_get(manager_, behavior_id, &out, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::joint_block_set(uint32_t behavior_id, const bmmo_physics_joint_image& in, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->joint_block_set) {
+            error = "the physics_RT bridge lacks joint_block_set";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->joint_block_set(manager_, behavior_id, &in, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::joint_blocks_order(const std::vector<uint32_t>& behavior_ids, const std::vector<int16_t>& orders,
+                                          uint32_t& moved, std::string& error) const {
+        error.clear();
+        moved = 0;
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->joint_blocks_order) {
+            error = "the physics_RT bridge lacks joint_blocks_order";
+            return false;
+        }
+        if (orders.size() != 2 * behavior_ids.size()) { error = "two places per block"; return false; }
+        char text[256] = {};
+        if (!api_->joint_blocks_order(manager_, behavior_ids.data(), orders.data(), static_cast<uint32_t>(behavior_ids.size()),
+                                      &moved, text, sizeof(text))) {
+            error = text;
+            return false;
+        }
+        return true;
+    }
+
     // v23: the PreSimulate queue.
     bool physics_view::callbacks_get(std::vector<bmmo_physics_callback>& out, std::string& error) const {
         error.clear();

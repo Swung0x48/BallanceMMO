@@ -77,6 +77,11 @@ namespace bmmo::physics {
         // ---- bridge API v14: the script replay ----
         bool force_block_get(uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error) const;
         bool force_block_set(uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error) const;
+        // ---- bridge API v27 (step RLC): a joint block's constraint image ----
+        bool joint_block_get(uint32_t behavior_id, bmmo_physics_joint_image& out, std::string& error) const;
+        bool joint_block_set(uint32_t behavior_id, const bmmo_physics_joint_image& in, std::string& error) const;
+        bool joint_blocks_order(const std::vector<uint32_t>& behavior_ids, const std::vector<int16_t>& orders,
+                                uint32_t& moved, std::string& error) const;
         bool set_event_log_muted(bool muted, std::string& error) const;
         // ---- bridge API v23: the PreSimulate queue (rollback-engine-gaps
         // design 2.2.2, gap Q); the bridge's counts, -1 on an error ----

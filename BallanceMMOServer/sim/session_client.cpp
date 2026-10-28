@@ -3892,6 +3892,17 @@ namespace {
                      static_cast<unsigned long long>(q.rebuild_fail), static_cast<unsigned long long>(q.hold_fail),
                      static_cast<unsigned long long>(q.no_record));
             }
+            // Step RLC: the joint ledger - constraints named by their image in
+            // the records, made again or replaced at a restore, in this process.
+            {
+                const auto& j = bmmo::game::script_replay::joint_stats();
+                logf("joints: imaged=%llu recreated=%llu replaced=%llu missing=%llu unmatched=%llu reordered=%llu"
+                     " order_failed=%llu",
+                     static_cast<unsigned long long>(j.imaged), static_cast<unsigned long long>(j.recreated),
+                     static_cast<unsigned long long>(j.replaced), static_cast<unsigned long long>(j.missing),
+                     static_cast<unsigned long long>(j.unmatched), static_cast<unsigned long long>(j.reordered),
+                     static_cast<unsigned long long>(j.order_failed));
+            }
             if (frame_time_count_)
                 logf("frame_time: frames=%llu p50=%.1f p99=%.1f p999=%.1f max=%.1f ms",
                      static_cast<unsigned long long>(frame_time_count_), frame_time_quantile(0.5),

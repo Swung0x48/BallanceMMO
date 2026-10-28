@@ -354,6 +354,14 @@ namespace {
         // so nothing is taken back - the restore before RLM (the G1
         // membership leak's negative control; the witness line shows it).
         bool savestate_no_ledger = false;
+        // Step RLC's review: --joint-shuffle takes every constraint a joint
+        // block holds out and makes it again from its own image before each
+        // round's rewind (highest block id first), so the cores' lists hold
+        // them in another order than the anchor's record names - what a
+        // constraint shut down and made again inside the window leaves;
+        // --joint-order-off is its control (the restore leaves that order).
+        bool joint_shuffle = false;
+        bool joint_order_off = false;
         std::string savestate_trace;
         // The trafo sets (docs/trafo-replication-design.md 7.2, step T1):
         // --trafo-sets N / --trafo-players a,b,.. [--trafo-reverse]
@@ -989,9 +997,12 @@ namespace {
             else if (arg == "--savestate-lead") { if (!(v = next())) return false; out.savestate_lead = std::atoi(v); }
             else if (arg == "--savestate-inert-from-birth") out.savestate_inert_from_birth = true;
             else if (arg == "--frames") out.savestate_frames = true;
-            else if (arg == "--legacy-restore" || arg == "--savestate-no-hold" || arg == "--savestate-no-ledger")   // RLQ, RLM: one branch (C1061)
+            else if (arg == "--legacy-restore" || arg == "--savestate-no-hold" || arg == "--savestate-no-ledger"
+                     || arg == "--joint-shuffle" || arg == "--joint-order-off")   // RLQ, RLM, RLC: one branch (C1061)
                 (arg == "--legacy-restore" ? out.legacy_restore
-                 : arg == "--savestate-no-hold" ? out.savestate_no_hold : out.savestate_no_ledger) = true;
+                 : arg == "--savestate-no-hold" ? out.savestate_no_hold
+                 : arg == "--joint-shuffle" ? out.joint_shuffle
+                 : arg == "--joint-order-off" ? out.joint_order_off : out.savestate_no_ledger) = true;
             else if (arg == "--savestate-trace") { if (!(v = next())) return false; out.savestate_trace = v; }
             else if (arg == "--list-callback-blocks") out.list_callback_blocks = true;   // step EG0
             else if (arg == "--queue-trace") out.queue_trace = true;                     // step EG0
@@ -2950,6 +2961,34 @@ namespace {
 
     struct savestate_round { int anchor = 0; int depth = 0; };   // window indices
 
+    // Step RLC's review (--joint-shuffle): every constraint a joint block
+    // holds, taken out by the block's own reset and made again from its own
+    // image (the same fields), highest block id first - each lands last in
+    // its cores' controller lists.  Returns how many were made again.
+    int shuffle_joints(CKContext* context, const bmmo::game::script_replay_hooks& hooks) {
+        using bmmo::game::script_replay;
+        if (!context || !hooks.capture_joint || !hooks.restore_joint) return 0;
+        std::vector<CK_ID> blocks;
+        const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
+        CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
+        for (int i = 0; i < count; ++i) {
+            auto* beh = CKBehavior::Cast(context->GetObject(ids[i]));
+            if (beh && script_replay::is_joint_block(beh) && script_replay::joint_handle(beh)) blocks.push_back(ids[i]);
+        }
+        std::sort(blocks.rbegin(), blocks.rend());
+        int made = 0;
+        for (CK_ID id: blocks) {
+            auto* beh = CKBehavior::Cast(context->GetObject(id));
+            std::vector<uint8_t> image;
+            std::array<int16_t, 2> order{-1, -1};
+            if (!hooks.capture_joint(beh, image, order) || image.empty()) continue;
+            beh->CallCallbackFunction(CKM_BEHAVIORRESET);
+            if (hooks.restore_joint(beh, image)) ++made;
+            else std::fprintf(stderr, "--joint-shuffle: block %u could not be made again\n", static_cast<unsigned>(id));
+        }
+        return made;
+    }
+
     // Step B2SX (Q5): every delayed link of `graph`'s tree (initial delay > 1)
     // as "source.outN->destination.inM countdown C/I dest D", where D is
     // whether the destination input is active (a link that fired at the end
@@ -3396,6 +3435,7 @@ namespace {
         // client installs them.
         bmmo::game::script_replay::selection scripts;
         bmmo::game::script_replay_hooks hooks;
+        bmmo::game::script_replay::joint_order_off() = args.joint_order_off;   // step RLC's review: the control
         if (frames) {
             scripts = bmmo::game::script_replay::select(context);
             hooks = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics));   // step HU1: one copy (game/host_backend.hpp)
@@ -4063,6 +4103,11 @@ namespace {
             const uint64_t clamped_before = bmmo::game::script_replay::queue_stats().unhold_clamped;
             const uint64_t hold_fail_before = bmmo::game::script_replay::queue_stats().hold_fail;
             if (args.savestate_no_ledger) bmmo::game::script_replay::registrations().entries.clear();   // step RLM's control
+            if (args.joint_shuffle) {
+                const int shuffled = shuffle_joints(context, hooks.capture_joint ? hooks
+                                                    : bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics)));
+                std::printf("  round %zu: --joint-shuffle made %d constraint(s) again before the rewind\n", r, shuffled);
+            }
             const bool rewound = engine.rewind_to(binding, t0 + static_cast<uint32_t>(a), t0 + static_cast<uint32_t>(e),
                                                   no_input, "savestate-check");
             // rewind_to's true says the request was handled, not that a replay
@@ -4392,6 +4437,16 @@ namespace {
             if (args.savestate_inert_from_birth)
                 std::printf("savestate-check: --savestate-inert-from-birth: %d rounds compared from a fixed window birth's"
                             " record on (a diagnostic: no verdict)\n", inert_rounds);
+        }
+        {
+            // Step RLC: the joint ledger (constraints named by their image in
+            // the records, made again or replaced at a restore).
+            const auto& j = bmmo::game::script_replay::joint_stats();
+            std::printf("savestate-check: joints (step RLC): imaged=%llu recreated=%llu replaced=%llu missing=%llu"
+                        " unmatched=%llu reordered=%llu order_failed=%llu\n", static_cast<unsigned long long>(j.imaged),
+                        static_cast<unsigned long long>(j.recreated), static_cast<unsigned long long>(j.replaced),
+                        static_cast<unsigned long long>(j.missing), static_cast<unsigned long long>(j.unmatched),
+                        static_cast<unsigned long long>(j.reordered), static_cast<unsigned long long>(j.order_failed));
         }
         const bool pass = failed == 0 && run == static_cast<int>(schedule.size()) && (!trafo || trafo->failures() == 0)
                        && (!passes || ((passes_made > 0 || window_moves.empty()) && pass_recreate_failures == 0

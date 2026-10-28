@@ -787,6 +787,23 @@ numbers 1-10 are unchanged.
    Pre-existing (the pre-step SimTool, the stone alone, anchor 47 depth 45).
    A client's rewind across a break goes through the same restore (not
    measured live).
+   **Built at step RLC** (rollback-engine-gaps design, As built (step
+   RLC)): a joint block's constraint is named in the local record by the
+   hash of its image (its own fields, read through physics_RT, bridge API
+   v27, no engine change) and kept in a per-process ledger; a restore whose
+   record had a constraint the live block lost (or another one) makes it
+   again from that image before the blob, and puts the constraints back
+   in their recorded places among their cores' controllers (the blob
+   cannot tell constraints apart; the place is in the local record too).
+   The bridge window 47:45 and the 50-round schedule on the clients'
+   recipe PASS (20 constraints made again); every constraint made again
+   in another order before each rewind (`--joint-shuffle`) PASS 20/20
+   with 22 lists put back, FAIL 20/20 ("joint order") with the order
+   pass off; live, four stone balls on the bridge at 150 ms, clients 2 and 3
+   rewound across their break with every blob taken. Residuals met, not
+   this item's: SimTool's v14 chain artefact (above, P_Modul_25's flags in
+   8 of 50 v14 rounds) and G-c (the worlds break the bridge at different
+   ticks: the probe and the identity read run on each client's own ball).
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03

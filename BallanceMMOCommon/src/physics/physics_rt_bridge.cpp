@@ -792,6 +792,52 @@ namespace {
         return bmmo::physics::spawn_ghost_birth(static_cast<CKIpionManager*>(manager), group) ? 1 : 0;
     }
 
+    // v27 (step RLC): a joint block's constraint image (physics_state.cpp).
+    int32_t api_joint_block_get(void* manager, uint32_t behavior_id, bmmo_physics_joint_image* out, char* error,
+                                uint32_t error_size) {
+        if (!manager || !out) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::joint_block_get(static_cast<CKIpionManager*>(manager), behavior_id, *out, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_joint_block_set(void* manager, uint32_t behavior_id, const bmmo_physics_joint_image* in, char* error,
+                                uint32_t error_size) {
+        if (!manager || !in) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::joint_block_set(static_cast<CKIpionManager*>(manager), behavior_id, *in, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_joint_blocks_order(void* manager, const uint32_t* behavior_ids, const int16_t* orders, uint32_t count,
+                                   uint32_t* moved, char* error, uint32_t error_size) {
+        if (!manager) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        uint32_t changed = 0;
+        if (!bmmo::physics::joint_blocks_order(static_cast<CKIpionManager*>(manager), behavior_ids, orders, count, changed,
+                                               text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        if (moved) *moved = changed;
+        return 1;
+    }
+
     int32_t api_own_group_queue(void* manager, const char* entity_name, const char* group, uint32_t behavior_id,
                                 char* error, uint32_t error_size) {
         if (!manager || !entity_name) {
@@ -977,6 +1023,9 @@ namespace {
         api_spawn_ghost_state,
         api_spawn_ghost_birth,
         api_own_group_queue,
+        api_joint_block_get,
+        api_joint_block_set,
+        api_joint_blocks_order,
     };
 }
 

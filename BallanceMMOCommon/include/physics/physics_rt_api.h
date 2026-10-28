@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 26u  /* v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) */
+#define BMMO_PHYSICS_API_VERSION 27u  /* v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -150,6 +150,25 @@ typedef struct bmmo_physics_force_block {
     double position[3];   /* PhysicsControllerForce::m_Position (object space) */
     double force[3];      /* PhysicsControllerForce::m_Force */
 } bmmo_physics_force_block;
+
+/* A joint block's constraint as an image (v27, step RLC; game/script_replay.hpp
+ * joint hooks): Set Physics Hinge / Ball Joint / Slider keep an
+ * IVP_Constraint_Local in local 0, whose fields are fixed when it is made
+ * (the bodies' poses then).  `bytes` is the bridge's own serialization of
+ * those fields (this process's build only, never on the wire): size 0 = the
+ * block holds no constraint (or a handle that is not among its bodies'
+ * cores' controllers - a stale one).  `order` (get only, not in `bytes`):
+ * the constraint's place in the controllers_of_core of the core of its
+ * anchor R's body [0] and anchor A's body [1], counted among the
+ * controllers of its priority and name - the only order the savestate
+ * blob cannot tell apart (it matches controllers by priority and name);
+ * -1: no such core list holds it. */
+#define BMMO_PHYSICS_JOINT_IMAGE_SIZE 512
+typedef struct bmmo_physics_joint_image {
+    uint32_t size;
+    int16_t order[2];
+    uint8_t bytes[BMMO_PHYSICS_JOINT_IMAGE_SIZE];
+} bmmo_physics_joint_image;
 
 /* One PreSimulate queue entry (v23, the rollback engine gaps design 2.2.2):
  * the block that queued it, the root script that block belongs to, its slot
@@ -718,6 +737,28 @@ typedef struct bmmo_physics_api_v2 {
      * behavior `behavior_id` (2), as push_impulse does; 0 with a message. */
     int32_t (*own_group_queue)(void* ipion_manager, const char* entity_name, const char* group, uint32_t behavior_id,
                                char* error, uint32_t error_size);
+
+    /* ---- v27: a joint block's constraint (step RLC; physics_state.hpp
+     * joint_block_get / joint_block_set) ----
+     * get: the image of the IVP_Constraint_Local the block (behavior_id)
+     * holds in local 0 (size 0 when it holds none); 0 with a message when
+     * the block is not a constraint joint or its constraint cannot be read.
+     * set: the block must hold no constraint; one is made on the block's
+     * bodies (as its own callback does) and given every field of `in`, and
+     * the block's local 0 points at it; 0 with a message (nothing made).
+     * order: puts the constraints of the `count` blocks back in the order
+     * their images' `order` names (two values per block, as get fills
+     * them) in every core list they are in, by swapping them among the
+     * places the controllers of their priority and name take in that list
+     * (the others stay where they are); *moved = the lists changed.  0 with
+     * a message, nothing changed, when a list holds such a controller that
+     * no given block holds or the given places are not 0..n-1. */
+    int32_t (*joint_block_get)(void* ipion_manager, uint32_t behavior_id, bmmo_physics_joint_image* out,
+                               char* error, uint32_t error_size);
+    int32_t (*joint_block_set)(void* ipion_manager, uint32_t behavior_id, const bmmo_physics_joint_image* in,
+                               char* error, uint32_t error_size);
+    int32_t (*joint_blocks_order)(void* ipion_manager, const uint32_t* behavior_ids, const int16_t* orders,
+                                  uint32_t count, uint32_t* moved, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

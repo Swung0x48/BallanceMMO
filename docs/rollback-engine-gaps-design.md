@@ -2938,3 +2938,174 @@ showed about the item's premise, and what stays queued.
   SimTool's chained rounds are the clients' binding - `rollback_world`,
   `bind_scripts` with `live_membership` - without a live frame between
   them, which is that case).
+
+## As built (step RLC, 2026-10-28): a constraint shut down inside the window
+
+Roadmap §4 item 4 (found at WG2). The arena's P_Modul_29 bridge breaking
+inside a savestate window (`Test "Ball_Stone"` -> `10 Hinges` input 2,
+Shutdown of one `Set Physics Hinge`) made every restore to an anchor before
+the break refuse: "savestate restore, step 12 (controllers), world damaged:
+core of 'P_Modul_29_Platte06': no live controller 'sys:unknown' (priority
+405)" - the blob names the hinge (`IVP_CP_CONSTRAINTS`) by (priority, name)
+and the restore only matches recorded controllers to live ones.
+
+- **Cause, in full.** A joint block's (Hinge, Ball Joint, Slider)
+  `IVP_Constraint_Local` is made by its deferred callback, and `init()`
+  turns the world-space anchor and axes into each core's space with the two
+  bodies' poses of that moment (`m_Rfs_f_Rcs`, `m_Afs_f_Acs`, the mappings,
+  the borders); nothing the blocks call changes those fields afterwards.
+  The script record kept only whether the block held a handle (v2); a
+  restore whose record had one and whose live block had none counted
+  `joints_missing` ("nothing can make those") and left it, so the blob
+  refused. No pose at the anchor computes the constraint again (the anchor
+  is after its Create; the plates have swung about the hinge since), so
+  "re-running the creation" cannot be exact; the constraint's own fields
+  can.
+- **The fix (no IVP change, no engine change, no protocol change; bridge
+  API v27).** physics_RT's side (`physics_state.cpp`, `joint_block_get` /
+  `joint_block_set`, reached through `ivp_private_access.hpp`'s
+  explicit-instantiation `thief`): the image of a block's constraint - the
+  two bodies' roles (target / Object2), the axis types, borders, factors,
+  both anchors with their rotation matrices, the mappings and dims - and a
+  constraint made on the block's two bodies through the block's own path
+  (`CKIpionManager::CreateConstraint`, a default template naming the two
+  objects, which decides only the cores it links) and given every field of
+  an image. Transient fields stay out of the image: the FIXED bit
+  `do_simulation_controller` sets and clears on a LIMITED axis every step
+  and `matrix_size`, both recomputed before any use in the step; the
+  restore writes them as `init()` leaves them. A constraint with a maximum
+  impulse (none of the blocks makes one) is not imaged (fail-closed).
+  The script replay's side (`game/script_replay.hpp`, one copy for every
+  host): `script_replay_hooks` gains `capture_joint` / `restore_joint`
+  (bound by `host_backend.hpp force_hooks_for` for the headless client, the
+  SimTool, the server world and the retail core host); a LOCAL record's
+  handle byte becomes 2 (`kJointImaged`) followed by the u32 FNV-1a hash of
+  the image whenever the hook reads one, and the image goes into a
+  per-process ledger (per block, the 8 most recently seen images). The
+  portable record (the wire, the resync) keeps the 0 / 1 byte, so a
+  localized record names no image and its restore takes the block's latest;
+  the legacy path binds no joint hook, so its records stay byte for byte as
+  before. The restore (`restore_joint`, before the blob, as a force block's
+  controller): record had none, live has one -> the block's reset, as
+  before; record had one, live has none -> made again from the recorded
+  image (`joints_recreated`; no image -> `joints_missing`, the refusal of
+  before); both have one with different images (a Shutdown and a Create
+  inside the window made another) -> the block's reset, then made again
+  from the recorded image (`joints_replaced`); `diff` reports two images as
+  a logical difference ("joint image"). The blob then finds the constraint
+  among the core's controllers and puts the units and the movement state
+  back as recorded - but NOT, on its own, the order of the constraints
+  among themselves (below).
+- **The constraints' order (the review's finding, fixed in the step).** The
+  blob names a controller by priority and name, and every constraint is
+  ('sys:unknown', 405), so `order_controllers` matches the recorded ones to
+  the live ones in live order: a constraint made again is appended to its
+  cores' `controllers_of_core`, and when it was not the last of its key there
+  the restored lists (and the simulation units the blob builds from them,
+  `sim_unit_calc_redundants`) hold the constraints in another order than
+  recorded - no refusal, another solve order. So the local record's
+  `kJointImaged` entry also carries the constraint's two places (in the core
+  lists of its anchor R's and anchor A's bodies, counted among the
+  controllers of its key; `bmmo_physics_joint_image::order`, outside the
+  image bytes and the hash), `diff` reports a changed place ("joint order"),
+  and the restore, once every block is written and before the blob, reads
+  the places of every imaged block's constraint and, when one differs from
+  the record, puts them back in one call (`script_replay_hooks::order_joints`
+  -> bridge `joint_blocks_order`: swaps among the places the key's
+  controllers take in each list; a list holding such a controller no given
+  block holds, or places that are not 0..n-1, refuse the restore,
+  `order_failed`, nothing changed). The arena's bridge alone does not
+  exercise it: its `10 Hinges` chain is made in one order and the stone's
+  Shutdown reaches the LAST hinge made (block 47535), so the remade one is
+  last in its lists anyway. `--joint-shuffle` (SimTool) exercises it: before
+  every rewind every constraint a joint block holds is taken out by the
+  block's reset and made again from its own image, highest block id first.
+  Also from the review: the capture finds the block's constraint among its
+  bodies' cores' controllers instead of dereferencing local 0 (a body a
+  script Dephysicalizes deletes its constraint without the block knowing:
+  no image then, the presence byte alone); the image carries the CK ids of
+  the block's two bodies and `joint_block_set` refuses an image of others
+  (the ledger is the process's: a block id a later level reuses never gets
+  a stale image); and the image is read whole before anything is made.
+- **Adapted:** the design named two roads (the script replay re-running the
+  creation; physics_RT re-making the joint from recorded parameters). The
+  first is not exact (the poses of the Create are gone); the parameters are
+  recorded as the constraint's own fields in a process-local ledger rather
+  than in the record, so neither the portable record nor a journal changes
+  (no protocol number taken). Record versions are unchanged (the local
+  record is this process's own).
+- **Checks (QUICK, `.local-tools/work/RLC`; rRLC / rRLCb = this tree, rRLM =
+  HEAD's build).** x64 BUILD-OK (`ninja -t deps` of session_client.cpp.obj
+  VALID, 346), x86 CLIENT-BUILD-OK (core_host / physics_view / the bridge
+  rebuilt; deps VALID, 1260), unit tests 590/590, GCC syntax check 30/30
+  ok, plus `physics_state.cpp` under GCC 16 with the Arch tree's own flags
+  (`gcc_state.sh`) ok.
+  - The bridge window (WG2's scene: level 13, P_Modul_29, the stone on the
+    plates, the paper held at the MF, `PROXIMITY_UNION`; `r0.sh`, `r2.sh`):
+    anchor 47 depth 45 **PASS** (rRLM: refused, "no live controller
+    'sys:unknown' (priority 405)"), the same with the bit clear PASS;
+    `joints: recreated=1`. The 50-round schedule on the clients' recipe
+    (`--session-recipe`): **PASS 50/50**, recreated=20, replaced=0,
+    missing=0 (rRLM: refused at round 0). On SimTool's default v14 recipe
+    42 of 50 pass; the 8 that fail (132:8, 115:15, 100:40, 144:4, 90:20,
+    87:9, 91:44, 119:16) all fail `P_Modul_25 script: flags 2147483648 vs
+    2147483649` and 132:8 and 100:40 pass alone - the queued v14 chain
+    artefact of step RLM (a script inactive at the anchor keeps a later
+    round's state), not a joint.
+  - A constraint created inside the window: the arena with sector 2's
+    activation inside the window (`--drop-sector 1 --second-move 2 260`,
+    window 210..409, 50 rounds; the bridge's plates and hinges are born at
+    the activation): **PASS 50/50** (7 rounds cross it, 84 bodies destroyed
+    at a restore and made again by the replay, every one exact; rRLM PASS
+    50/50 too) - the hinges made in the window go with their bodies at the
+    restore and the replay makes them again with the same image (the
+    records, hashes included, compare byte for byte).
+  - Wire check rRLM -> rRLC over `core_ref_s9`: 12/12 sends SAME, 12/12
+    journals IDENTICAL, `WIRE-CHECK: ALL SAME`. Solo snapshots-off replays
+    (solo1 / solo2, rRLC): end marker reached, sends SAME (2718, 2694),
+    journals IDENTICAL under `e0_compare.py` (bytes differ at the header's
+    build id only).
+  - Live, headless (one run, `live.sh`, label `rlc_live`): four rRLCb
+    clients beamed onto P_Modul_29 in slot 13 (every ball Ball_Stone),
+    `--latency-ms 150`, Arch server snapshots off (trafo inputs and
+    placement on; the server binary not rebuilt - this step changes no
+    server behaviour): the harness VERDICT PASS (server journal 3860/3860
+    matched, 0 checkpoint mismatches). The bridge broke in every world;
+    clients 2 and 3 rewound across their break (`joints: recreated=1` each)
+    and every blob restore of every client was taken (`sv=32/0/0, 51/0/0,
+    53/0/0, 51/0/0`: restored / refused / capture failures). The worlds
+    disagree on WHEN the bridge breaks (the server and client 0 at ~741,
+    client 1 ~775, clients 2 and 3 ~910; the four-ball pile on the plates
+    from tick 742 on): the bridge's 4 m probe and its identity read run on
+    the client's own ball, the G-c residual (world agreement, Q7 (b)), not
+    this step.
+  - Live, retail (one run, CD1's two-copy L11 gate, core on by default,
+    snapshots off): both assigned, core=1, rollbacks 3 / 4 with every blob
+    taken (`sv=3/0/0`, `sv=4/0/0`), no crash. L11 has no P_Modul_29, so the
+    run shows the v27 bridge and the hooks load and capture on the x86
+    plugin, not a recreated joint.
+  - The gate round, after the order fix-up (`r3.sh`, one fix-up build
+    copied to rRLC): x64 BUILD-OK (physics_world.cpp.obj deps VALID, 269),
+    x86 CLIENT-BUILD-OK (core_host deps VALID, 1260), tests 590/590, GCC
+    30/30 ok and `physics_state.cpp` under the Arch flags ok. The bridge
+    window 47:45 PASS (recreated=1, reordered=0), the 50-round session
+    recipe PASS 50/50 (recreated=20, reordered=0), the window across
+    sector 2's activation PASS 50/50. `--joint-shuffle` (12 constraints
+    made again before each of 20 rewinds, session recipe): **PASS 20/20**,
+    22 core lists put back (recreated=8, order_failed=0); its control with
+    `--joint-order-off`: **FAIL 20/20**, every round "P_Modul_29_MF Script /
+    Set Physics Hinge: joint order 0/-1 vs 1/-1 (2 logical, 0 float)" at the
+    window's end - the record now sees the order the blob cannot; on these
+    windows no blob differed before it (0 float: the bridge's solve order
+    left no bit changed there, which the order fix does not rely on). Wire
+    check rRLM -> rRLC over `core_ref_s9`: `WIRE-CHECK: ALL SAME` (24 of 24
+    SAME / IDENTICAL); solo1 / solo2 replays: sends SAME (2718, 2694),
+    journals IDENTICAL (bytes differ at the build id only). No live run in
+    the gate round (the step's two were spent in the implement round).
+- **Not run, deferred:** a retail run on the arena's bridge (slot 13) that
+  rewinds across a break (the retail core logs no joint counters; one
+  retail run fitted the budget and L11's gate was the short one); the Arch
+  server rebuild (no server behaviour changed; `physics_state.cpp` checked
+  under GCC instead); a live run of the fix-up (the order pass runs in a
+  live rewind only when a place differs; the step's two live runs were
+  spent).

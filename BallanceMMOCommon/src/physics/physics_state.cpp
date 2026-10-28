@@ -12,6 +12,7 @@
 #include "ivp_mindist.hxx"
 #include "ivp_friction.hxx"
 #include "ivp_clustering_longrange.hxx"
+#include "ivp_constraint_local.hxx"
 #include <physics/ball_navigation.hpp>
 #include <session/resync_rules.hpp>
 #include "ivp_time.hxx"
@@ -30,6 +31,7 @@
 #include <bmmo_build_id.h>
 
 #include <algorithm>
+#include <iterator>
 #include <array>
 #include <typeinfo>
 #include <cfloat>
@@ -1972,6 +1974,462 @@ namespace bmmo::physics {
         if (!BmmoPhysicsForceBlockRestore(beh, in.exists, in.position, in.force)) {
             error = "the force block's body is not physicalized";
             return false;
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // v27 (step RLC): a joint block's constraint as an image.
+    //
+    // Set Physics Hinge, Physics Ball Joint and Set Physics Slider keep the
+    // IVP_Constraint_Local their callback made in local 0.  Its fields are
+    // fixed when it is made: init() turns the world-space anchor and axes
+    // into each core's space with the bodies' poses of that moment, and
+    // nothing the blocks call changes them afterwards.  A Shutdown inside a
+    // rollback window deletes it, and nothing at the anchor's poses can
+    // compute it again - so the script replay keeps the image of every
+    // constraint it sees (game/script_replay.hpp joint ledger) and a restore
+    // to a tick at which the block held one makes a constraint on the same
+    // two bodies and gives it every field of the image.  Transient fields
+    // are left out of the image: the FIXED bit do_simulation_controller sets
+    // and clears on a LIMITED axis every step, and matrix_size, which it
+    // recomputes before any use; the restore writes them as init() leaves
+    // them.  The image is this build's own bytes and never leaves the
+    // process.  No IVP change: the private fields are reached through the
+    // explicit-instantiation shim (ivp_private_access.hpp's thief).
+    // ------------------------------------------------------------------
+}
+
+namespace bmmo::physics::ivp_access {
+    using cl_float6 = IVP_FLOAT[IVP_TR_INDEX_MAX];
+    using cl_axis6 = IVP_CONSTRAINT_AXIS_TYPE[IVP_TR_INDEX_MAX];
+    struct cl_force_factor { using type = IVP_FLOAT IVP_Constraint_Local::*; friend type steal(cl_force_factor); };
+    struct cl_damp { using type = IVP_FLOAT IVP_Constraint_Local::*; friend type steal(cl_damp); };
+    struct cl_fixed { using type = cl_axis6 IVP_Constraint_Local::*; friend type steal(cl_fixed); };
+    struct cl_left { using type = cl_float6 IVP_Constraint_Local::*; friend type steal(cl_left); };
+    struct cl_right { using type = cl_float6 IVP_Constraint_Local::*; friend type steal(cl_right); };
+    struct cl_stiffness { using type = IVP_FLOAT IVP_Constraint_Local::*; friend type steal(cl_stiffness); };
+    struct cl_maxforce { using type = IVP_Constraint_Local_MaxImpulse* IVP_Constraint_Local::*; friend type steal(cl_maxforce); };
+    struct cl_anchor_r { using type = IVP_Constraint_Local_Anchor IVP_Constraint_Local::*; friend type steal(cl_anchor_r); };
+    struct cl_anchor_a { using type = IVP_Constraint_Local_Anchor IVP_Constraint_Local::*; friend type steal(cl_anchor_a); };
+    struct cl_map_t { using type = IVP_U_Mapping IVP_Constraint_Local::*; friend type steal(cl_map_t); };
+    struct cl_map_r { using type = IVP_U_Mapping IVP_Constraint_Local::*; friend type steal(cl_map_r); };
+    struct cl_ftd { using type = unsigned char IVP_Constraint_Local::*; friend type steal(cl_ftd); };
+    struct cl_frd { using type = unsigned char IVP_Constraint_Local::*; friend type steal(cl_frd); };
+    struct cl_ltd { using type = unsigned char IVP_Constraint_Local::*; friend type steal(cl_ltd); };
+    struct cl_lrd { using type = unsigned char IVP_Constraint_Local::*; friend type steal(cl_lrd); };
+    struct cl_msize { using type = unsigned char IVP_Constraint_Local::*; friend type steal(cl_msize); };
+
+    template struct thief<cl_force_factor, &IVP_Constraint_Local::force_factor>;
+    template struct thief<cl_damp, &IVP_Constraint_Local::damp_factor_div_force>;
+    template struct thief<cl_fixed, &IVP_Constraint_Local::fixed>;
+    template struct thief<cl_left, &IVP_Constraint_Local::borderleft_Rfs>;
+    template struct thief<cl_right, &IVP_Constraint_Local::borderright_Rfs>;
+    template struct thief<cl_stiffness, &IVP_Constraint_Local::limited_axis_stiffness>;
+    template struct thief<cl_maxforce, &IVP_Constraint_Local::maxforce>;
+    template struct thief<cl_anchor_r, &IVP_Constraint_Local::m_Rfs_f_Rcs>;
+    template struct thief<cl_anchor_a, &IVP_Constraint_Local::m_Afs_f_Acs>;
+    template struct thief<cl_map_t, &IVP_Constraint_Local::mapping_uRfs_f_Rfs>;
+    template struct thief<cl_map_r, &IVP_Constraint_Local::mapping_uRrs_f_Rrs>;
+    template struct thief<cl_ftd, &IVP_Constraint_Local::fixedtrans_dim>;
+    template struct thief<cl_frd, &IVP_Constraint_Local::fixedrot_dim>;
+    template struct thief<cl_ltd, &IVP_Constraint_Local::limitedtrans_dim>;
+    template struct thief<cl_lrd, &IVP_Constraint_Local::limitedrot_dim>;
+    template struct thief<cl_msize, &IVP_Constraint_Local::matrix_size>;
+}
+
+namespace bmmo::physics {
+    namespace {
+        constexpr uint8_t kJointImageVersion = 1;
+
+        // The blocks whose local 0 is an IVP_Constraint (Set Physics Spring
+        // keeps an IVP_Actuator_Spring: not one of them).
+        bool is_constraint_joint(CKBehavior* beh) {
+            if (!beh || !beh->IsUsingFunction()) return false;
+            const CKGUID g = beh->GetPrototypeGuid();
+            return g == CKGUID(0x5e624f0a, 0x35160450) || g == CKGUID(0x41cd3653, 0x0de60c1d)
+                || g == CKGUID(0x2973360e, 0x23d31aa7);
+        }
+
+        // The block's two bodies: role 1 its target, role 2 its Object2
+        // (input 0 of all three blocks).
+        CK3dEntity* joint_entity(CKBehavior* beh, uint8_t role) {
+            if (role == 1) return static_cast<CK3dEntity*>(beh->GetTarget());
+            if (role == 2 && beh->GetInputParameterCount() > 0)
+                return static_cast<CK3dEntity*>(beh->GetInputParameterObject(0));
+            return nullptr;
+        }
+        IVP_Real_Object* joint_body(CKIpionManager* physics, CKBehavior* beh, uint8_t role) {
+            CK3dEntity* entity = joint_entity(beh, role);
+            if (!entity) return nullptr;
+            PhysicsObject* po = physics->GetPhysicsObject(entity, FALSE);
+            return po ? po->m_RealObject : nullptr;
+        }
+        // The CK id of a role's entity (0: none), in the image: a block id a
+        // later level reuses never gets an image of other bodies (step RLC's
+        // review; the ledger is the process's).
+        int32_t joint_entity_id(CKBehavior* beh, uint8_t role) {
+            CK3dEntity* entity = role ? joint_entity(beh, role) : nullptr;
+            return entity ? static_cast<int32_t>(entity->GetID()) : 0;
+        }
+
+        struct image_writer {
+            bmmo_physics_joint_image& out;
+            bool overflow = false;
+            void put(const void* p, size_t n) {
+                if (out.size + n > sizeof(out.bytes)) { overflow = true; return; }
+                std::memcpy(out.bytes + out.size, p, n);
+                out.size += static_cast<uint32_t>(n);
+            }
+            void u8(uint8_t v) { put(&v, 1); }
+            void i32(int32_t v) { put(&v, 4); }
+            void f(IVP_FLOAT v) { put(&v, sizeof(v)); }
+            void d(double v) { put(&v, 8); }
+        };
+        struct image_reader {
+            const bmmo_physics_joint_image& in;
+            size_t pos = 0;
+            bool bad = false;
+            void get(void* p, size_t n) {
+                if (bad || pos + n > in.size || in.size > sizeof(in.bytes)) { bad = true; std::memset(p, 0, n); return; }
+                std::memcpy(p, in.bytes + pos, n);
+                pos += n;
+            }
+            uint8_t u8() { uint8_t v = 0; get(&v, 1); return v; }
+            int32_t i32() { int32_t v = 0; get(&v, 4); return v; }
+            IVP_FLOAT f() { IVP_FLOAT v = 0; get(&v, sizeof(v)); return v; }
+            double d() { double v = 0; get(&v, 8); return v; }
+        };
+
+        void put_matrix3(image_writer& w, const IVP_U_Matrix3& m) {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) w.d(static_cast<double>(m.get_elem(r, c)));
+        }
+        void get_matrix3(image_reader& rd, IVP_U_Matrix3& m) {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) m.set_elem(r, c, static_cast<IVP_DOUBLE>(rd.d()));
+        }
+        void put_anchor(image_writer& w, const IVP_Constraint_Local_Anchor& a) {
+            put_matrix3(w, a);
+            for (int k = 0; k < 3; ++k) w.d(static_cast<double>(a.vv.k[k]));
+            w.u8(a.rot ? 1 : 0);
+            if (a.rot) put_matrix3(w, *a.rot);
+        }
+        void get_anchor(image_reader& rd, IVP_Constraint_Local_Anchor& a) {
+            get_matrix3(rd, a);
+            for (int k = 0; k < 3; ++k) a.vv.k[k] = static_cast<decltype(+a.vv.k[0])>(rd.d());
+            if (rd.u8()) {
+                if (!a.rot) a.rot = new IVP_U_Matrix3;
+                get_matrix3(rd, *a.rot);
+            } else if (a.rot) {
+                P_DELETE(a.rot);
+                a.rot = nullptr;
+            }
+        }
+        // A LIMITED axis without the FIXED bit do_simulation_controller
+        // sets and clears on it every step (the DUMMY marker kept as is).
+        int32_t steady_axis(IVP_CONSTRAINT_AXIS_TYPE t) {
+            const int32_t v = static_cast<int32_t>(t);
+            if (t == IVP_CONSTRAINT_AXIS_DUMMY) return v;
+            return (v & IVP_CONSTRAINT_AXIS_LIMITED) ? static_cast<int32_t>(IVP_CONSTRAINT_AXIS_LIMITED) : v;
+        }
+        CKBehavior* behavior_of(CKIpionManager* physics, uint32_t behavior_id, std::string& error) {
+            CKContext* context = physics ? physics->m_Context : nullptr;
+            auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(behavior_id))) : nullptr;
+            if (!beh) error = "no behavior " + std::to_string(behavior_id);
+            else if (!is_constraint_joint(beh)) { error = "not a constraint joint block"; beh = nullptr; }
+            return beh;
+        }
+
+        // The key the savestate blob matches controllers by (priority and
+        // name; physics_savestate_restore.cpp order_controllers).
+        bool same_key(IVP_Controller* x, IVP_Controller* c) {
+            if (!x || !c || x->get_controller_priority() != c->get_controller_priority()) return false;
+            const char* a = x->get_controller_name();
+            const char* b = c->get_controller_name();
+            return (a && b) ? std::strcmp(a, b) == 0 : a == b;
+        }
+        // The block's constraint, found among its bodies' cores' controllers
+        // and never by dereferencing local 0 on its own: a body a script
+        // Dephysicalizes deletes its constraint (core_is_going_to_be_deleted)
+        // without the block's handle being nulled (step RLC's review).
+        IVP_Constraint* held_constraint(CKIpionManager* physics, CKBehavior* beh) {
+            IVP_Constraint* handle = nullptr;
+            beh->GetLocalParameterValue(0, &handle);
+            if (!handle) return nullptr;
+            for (uint8_t role = 1; role <= 2; ++role) {
+                IVP_Real_Object* object = joint_body(physics, beh, role);
+                IVP_Core* core = object ? object->get_core() : nullptr;
+                if (!core) continue;
+                for (int i = 0; i < core->controllers_of_core.len(); ++i) {
+                    auto* constraint = dynamic_cast<IVP_Constraint*>(core->controllers_of_core.element_at(i));
+                    if (constraint && constraint == handle) return constraint;
+                }
+            }
+            return nullptr;
+        }
+        // `c`'s place in `core`'s controllers, counted among those of its key.
+        int16_t place_in(IVP_Core* core, IVP_Controller* c) {
+            if (!core) return -1;
+            int16_t place = 0;
+            for (int i = 0; i < core->controllers_of_core.len(); ++i) {
+                IVP_Controller* x = core->controllers_of_core.element_at(i);
+                if (x == c) return place;
+                if (same_key(x, c)) ++place;
+            }
+            return -1;
+        }
+    }
+
+    bool joint_block_get(CKIpionManager* physics, uint32_t behavior_id, bmmo_physics_joint_image& out, std::string& error) {
+        namespace access = bmmo::physics::ivp_access;
+        error.clear();
+        out.size = 0;
+        out.order[0] = out.order[1] = -1;
+        CKBehavior* beh = behavior_of(physics, behavior_id, error);
+        if (!beh) return false;
+        // No image for a handle none of its bodies' cores holds (none, or a
+        // stale one): the record keeps the presence byte alone.
+        IVP_Constraint* handle = held_constraint(physics, beh);
+        if (!handle) return true;
+        auto* c = dynamic_cast<IVP_Constraint_Local*>(handle);
+        if (!c) {
+            error = "the block's constraint is not an IVP_Constraint_Local";
+            return false;
+        }
+        if (c->*steal(access::cl_maxforce())) {
+            error = "a constraint with a maximum impulse is not imaged";
+            return false;
+        }
+        const IVP_Constraint_Local_Anchor& ar = c->*steal(access::cl_anchor_r());
+        const IVP_Constraint_Local_Anchor& aa = c->*steal(access::cl_anchor_a());
+        auto role_of = [&](IVP_Real_Object* object, uint8_t& role) {
+            role = 0;
+            if (!object) return true;
+            for (uint8_t r = 1; r <= 2; ++r)
+                if (joint_body(physics, beh, r) == object) { role = r; return true; }
+            return false;
+        };
+        uint8_t role_r = 0, role_a = 0;
+        if (!role_of(ar.object, role_r) || !role_of(aa.object, role_a)) {
+            error = "a body of the constraint is neither the block's target nor its Object2";
+            return false;
+        }
+        image_writer w{out};
+        w.u8(kJointImageVersion);
+        w.u8(role_r);
+        w.u8(role_a);
+        w.i32(joint_entity_id(beh, role_r));
+        w.i32(joint_entity_id(beh, role_a));
+        const IVP_CONSTRAINT_AXIS_TYPE* fixed = c->*steal(access::cl_fixed());
+        const IVP_FLOAT* left = c->*steal(access::cl_left());
+        const IVP_FLOAT* right = c->*steal(access::cl_right());
+        for (int i = 0; i < IVP_TR_INDEX_MAX; ++i) w.i32(steady_axis(fixed[i]));
+        for (int i = 0; i < IVP_TR_INDEX_MAX; ++i) w.f(left[i]);
+        for (int i = 0; i < IVP_TR_INDEX_MAX; ++i) w.f(right[i]);
+        w.f(c->*steal(access::cl_force_factor()));
+        w.f(c->*steal(access::cl_damp()));
+        w.f(c->*steal(access::cl_stiffness()));
+        put_anchor(w, ar);
+        put_anchor(w, aa);
+        const IVP_U_Mapping& mt = c->*steal(access::cl_map_t());
+        const IVP_U_Mapping& mr = c->*steal(access::cl_map_r());
+        for (int k = 0; k < 3; ++k) w.u8(static_cast<uint8_t>(mt.k[k]));
+        for (int k = 0; k < 3; ++k) w.u8(static_cast<uint8_t>(mr.k[k]));
+        w.u8(c->*steal(access::cl_ftd()));
+        w.u8(c->*steal(access::cl_frd()));
+        w.u8(c->*steal(access::cl_ltd()));
+        w.u8(c->*steal(access::cl_lrd()));
+        if (w.overflow) {
+            out.size = 0;
+            error = "the constraint's image does not fit";
+            return false;
+        }
+        out.order[0] = ar.object ? place_in(ar.object->get_core(), c) : static_cast<int16_t>(-1);
+        out.order[1] = aa.object ? place_in(aa.object->get_core(), c) : static_cast<int16_t>(-1);
+        return true;
+    }
+
+    bool joint_block_set(CKIpionManager* physics, uint32_t behavior_id, const bmmo_physics_joint_image& in, std::string& error) {
+        namespace access = bmmo::physics::ivp_access;
+        error.clear();
+        CKBehavior* beh = behavior_of(physics, behavior_id, error);
+        if (!beh) return false;
+        IVP_Constraint* handle = nullptr;
+        beh->GetLocalParameterValue(0, &handle);
+        if (handle) {
+            error = "the block holds a constraint";
+            return false;
+        }
+        if (!physics->GetEnvironment()) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        {
+            // The whole image read once before anything is made (step RLC's
+            // review: CreateConstraint links the cores and units at once).
+            image_reader dry{in};
+            const bool version = dry.u8() == kJointImageVersion;
+            for (int i = 0; i < 2; ++i) dry.u8();
+            for (int i = 0; i < 2; ++i) dry.i32();
+            for (int i = 0; i < IVP_TR_INDEX_MAX; ++i) dry.i32();
+            for (int i = 0; i < 2 * IVP_TR_INDEX_MAX + 3; ++i) dry.f();
+            for (int a = 0; a < 2; ++a) {
+                for (int i = 0; i < 12; ++i) dry.d();
+                if (dry.u8())
+                    for (int i = 0; i < 9; ++i) dry.d();
+            }
+            for (int i = 0; i < 10; ++i) dry.u8();
+            if (!version || dry.bad || dry.pos != in.size) {
+                error = version ? "a truncated or overlong joint image" : "not a joint image of this build";
+                return false;
+            }
+        }
+        image_reader rd{in};
+        if (rd.u8() != kJointImageVersion || rd.bad) {
+            error = "not a joint image of this build";
+            return false;
+        }
+        const uint8_t role_r = rd.u8(), role_a = rd.u8();
+        const int32_t id_r = rd.i32(), id_a = rd.i32();
+        if (id_r != joint_entity_id(beh, role_r) || id_a != joint_entity_id(beh, role_a)) {
+            error = "the image is of other bodies than the block's";
+            return false;
+        }
+        IVP_Real_Object* object_r = role_r ? joint_body(physics, beh, role_r) : nullptr;
+        IVP_Real_Object* object_a = role_a ? joint_body(physics, beh, role_a) : nullptr;
+        if ((role_r && !object_r) || (role_a && !object_a) || (!object_r && !object_a)) {
+            error = "a body of the constraint is not physicalized";
+            return false;
+        }
+        // The objects alone decide what the constructor links (the cores of
+        // the constraint system, the unit fusion); every field it computed
+        // from the poses of now is written over below.
+        IVP_Template_Constraint tmpl;
+        tmpl.objectR = object_r;
+        tmpl.objectA = object_a;
+        IVP_Constraint* made = physics->CreateConstraint(&tmpl);
+        auto* c = dynamic_cast<IVP_Constraint_Local*>(made);
+        if (!c) {
+            if (made) delete made;
+            error = "the constraint could not be made";
+            return false;
+        }
+        IVP_CONSTRAINT_AXIS_TYPE* fixed = c->*steal(access::cl_fixed());
+        IVP_FLOAT* left = c->*steal(access::cl_left());
+        IVP_FLOAT* right = c->*steal(access::cl_right());
+        for (int i = 0; i < IVP_TR_INDEX_MAX; ++i) fixed[i] = static_cast<IVP_CONSTRAINT_AXIS_TYPE>(rd.i32());
+        for (int i = 0; i < IVP_TR_INDEX_MAX; ++i) left[i] = rd.f();
+        for (int i = 0; i < IVP_TR_INDEX_MAX; ++i) right[i] = rd.f();
+        c->*steal(access::cl_force_factor()) = rd.f();
+        c->*steal(access::cl_damp()) = rd.f();
+        c->*steal(access::cl_stiffness()) = rd.f();
+        get_anchor(rd, c->*steal(access::cl_anchor_r()));
+        get_anchor(rd, c->*steal(access::cl_anchor_a()));
+        IVP_U_Mapping& mt = c->*steal(access::cl_map_t());
+        IVP_U_Mapping& mr = c->*steal(access::cl_map_r());
+        for (int k = 0; k < 3; ++k) mt.k[k] = static_cast<char>(rd.u8());
+        for (int k = 0; k < 3; ++k) mr.k[k] = static_cast<char>(rd.u8());
+        unsigned char& ftd = c->*steal(access::cl_ftd());
+        unsigned char& frd = c->*steal(access::cl_frd());
+        unsigned char& ltd = c->*steal(access::cl_ltd());
+        unsigned char& lrd = c->*steal(access::cl_lrd());
+        ftd = rd.u8();
+        frd = rd.u8();
+        ltd = rd.u8();
+        lrd = rd.u8();
+        c->*steal(access::cl_msize()) = static_cast<unsigned char>(ftd + frd + ltd + lrd);
+        if (rd.bad || rd.pos != in.size) {
+            delete c;
+            error = "a truncated or overlong joint image";
+            return false;
+        }
+        beh->SetLocalParameterValue(0, &made);
+        return true;
+    }
+
+    bool joint_blocks_order(CKIpionManager* physics, const uint32_t* behavior_ids, const int16_t* orders, uint32_t count,
+                            uint32_t& moved, std::string& error) {
+        namespace access = bmmo::physics::ivp_access;
+        error.clear();
+        moved = 0;
+        if (count && (!behavior_ids || !orders)) {
+            error = "null argument";
+            return false;
+        }
+        struct member {
+            IVP_Controller* controller;
+            int16_t place;
+        };
+        std::vector<std::pair<IVP_Core*, std::vector<member>>> lists;   // first seen first
+        for (uint32_t i = 0; i < count; ++i) {
+            CKBehavior* beh = behavior_of(physics, behavior_ids[i], error);
+            if (!beh) return false;
+            auto* c = dynamic_cast<IVP_Constraint_Local*>(held_constraint(physics, beh));
+            if (!c) {
+                error = "block " + std::to_string(behavior_ids[i]) + " holds no constraint to order";
+                return false;
+            }
+            IVP_Real_Object* objects[2] = {(c->*steal(access::cl_anchor_r())).object,
+                                           (c->*steal(access::cl_anchor_a())).object};
+            for (int k = 0; k < 2; ++k) {
+                const int16_t place = orders[2 * i + static_cast<uint32_t>(k)];
+                IVP_Core* core = objects[k] ? objects[k]->get_core() : nullptr;
+                if (place < 0 || !core) continue;
+                auto it = std::find_if(lists.begin(), lists.end(), [core](const auto& l) { return l.first == core; });
+                if (it == lists.end()) {
+                    lists.emplace_back(core, std::vector<member>{});
+                    it = std::prev(lists.end());
+                }
+                it->second.push_back(member{c, place});
+            }
+        }
+        // Every list checked before any is changed.
+        struct plan_entry {
+            IVP_Core* core;
+            std::vector<int> slots;                   // the places of the key's controllers in the list
+            std::vector<IVP_Controller*> by_place;   // what each of them is to hold
+        };
+        std::vector<plan_entry> plan;
+        for (const auto& [core, members]: lists) {
+            IVP_Controller* key = members.front().controller;
+            plan_entry entry{core, {}, std::vector<IVP_Controller*>(members.size(), nullptr)};
+            for (int i = 0; i < core->controllers_of_core.len(); ++i)
+                if (same_key(core->controllers_of_core.element_at(i), key)) entry.slots.push_back(i);
+            for (const member& m: members) {
+                const auto place = static_cast<size_t>(m.place);
+                if (!same_key(m.controller, key) || place >= entry.by_place.size() || entry.by_place[place]) {
+                    error = "the recorded places of a core's constraints are not 0.." + std::to_string(members.size() - 1);
+                    return false;
+                }
+                entry.by_place[place] = m.controller;
+            }
+            if (entry.slots.size() != members.size()) {
+                error = "a core holds " + std::to_string(entry.slots.size()) + " constraints of the key, "
+                      + std::to_string(members.size()) + " of them ordered";
+                return false;
+            }
+            for (int slot: entry.slots)
+                if (std::find(entry.by_place.begin(), entry.by_place.end(), core->controllers_of_core.element_at(slot))
+                        == entry.by_place.end()) {
+                    error = "a core holds a constraint no ordered block holds";
+                    return false;
+                }
+            plan.push_back(std::move(entry));
+        }
+        for (plan_entry& entry: plan) {
+            IVP_U_Vector<IVP_Controller>& list = entry.core->controllers_of_core;
+            bool changed = false;
+            for (size_t j = 0; j < entry.slots.size(); ++j) {
+                if (list.element_at(entry.slots[j]) == entry.by_place[j]) continue;
+                for (size_t k = j + 1; k < entry.slots.size(); ++k)
+                    if (list.element_at(entry.slots[k]) == entry.by_place[j]) {
+                        list.swap_elems(entry.slots[j], entry.slots[k]);
+                        changed = true;
+                        break;
+                    }
+            }
+            if (changed) ++moved;
         }
         return true;
     }

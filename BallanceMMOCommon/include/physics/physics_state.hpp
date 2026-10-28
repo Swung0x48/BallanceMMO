@@ -53,6 +53,16 @@ namespace bmmo::physics {
     // block's controller, and the event log's mute.
     bool force_block_get(CKIpionManager* physics, uint32_t behavior_id, bmmo_physics_force_block& out, std::string& error);
     bool force_block_set(CKIpionManager* physics, uint32_t behavior_id, const bmmo_physics_force_block& in, std::string& error);
+    // v27 (step RLC): a joint block's IVP_Constraint_Local as an image, and
+    // one made again from an image on a block that holds none (the table
+    // entries of the same names in physics_rt_api.h).
+    bool joint_block_get(CKIpionManager* physics, uint32_t behavior_id, bmmo_physics_joint_image& out, std::string& error);
+    bool joint_block_set(CKIpionManager* physics, uint32_t behavior_id, const bmmo_physics_joint_image& in, std::string& error);
+    // The blocks' constraints back in the core-list order `orders` names
+    // (two per block, bmmo_physics_joint_image::order); `moved` = the lists
+    // changed.  False with a message, nothing changed (the table entry).
+    bool joint_blocks_order(CKIpionManager* physics, const uint32_t* behavior_ids, const int16_t* orders, uint32_t count,
+                            uint32_t& moved, std::string& error);
     void set_event_log_muted(bool muted);
     // v23, the PreSimulate queue (rollback-engine-gaps design 2.2.2, gap Q;
     // engine change #20).  physics_savestate_common.cpp; see the table entries

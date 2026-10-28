@@ -1264,6 +1264,34 @@ mod's own buffer; the headless digests are unchanged
 
 ---
 
+## Bridge notes: a joint block's constraint image (bridge API v27, no engine change)
+
+Step RLC (rollback-engine-gaps design, As built (step RLC)). Not an engine
+change: nothing under `submodule/Ballanced` moved. Set Physics Hinge, Physics
+Ball Joint and Set Physics Slider keep the `IVP_Constraint_Local` their
+callback made in local 0, and its fields are fixed at that moment from the
+two bodies' poses; a Shutdown inside a rollback window deletes it and no pose
+at the anchor computes it again, so the savestate's controller step refused
+("no live controller 'sys:unknown' (priority 405)"). `joint_block_get` reads
+the constraint's fields as an image (this build's own bytes, never on the
+wire) and `joint_block_set` makes a constraint on the block's two bodies
+through `CKIpionManager::CreateConstraint` and gives it every field of an
+image, then points the block's local 0 at it. Both live in the bridge
+(`BallanceMMOCommon/src/physics/physics_state.cpp`) and reach the private
+fields through the explicit-instantiation shim of `ivp_private_access.hpp`
+(no friend, no header change). Transient fields (a LIMITED axis's
+per-step FIXED bit, `matrix_size`) are recomputed by
+`do_simulation_controller` before any use and are written as `init()` leaves
+them. The retail block's own code is untouched. The same table entry set
+(step RLC's review) also reports the constraint's place among the
+controllers of its priority and name in each of its cores'
+`controllers_of_core` (`bmmo_physics_joint_image::order`, outside the image
+bytes) and `joint_blocks_order` puts given blocks' constraints back in such
+places with `swap_elems` (a constraint made again is appended, and the
+savestate matches a core's controllers by priority and name only); the image
+carries the CK ids of the block's two bodies, and a handle none of its
+bodies' cores holds is never dereferenced (no image).
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off
