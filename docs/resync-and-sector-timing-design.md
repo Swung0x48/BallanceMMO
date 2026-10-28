@@ -210,6 +210,13 @@ this design. G-c is outside this track.
 - For this design it means only one thing: the Proximity state that a
   resync imports from the server is correct at S, and the client then runs
   it under its own-ball semantics.
+- *Closed under `WORLD_PROXIMITY_UNION` (protocol 16;
+  `docs/world-agreement-gaps-design.md`, steps G1-G5, written at step
+  WG6).* Every world, the server and each client, rewires the mechanism
+  blocks and their identity reads and places them on the nearest ball with
+  a body by one rule; BodyRevived is retired. The server's default is on
+  since G3, so I1 holds for the Proximity state after S too (§9 Q6). The
+  line references above are the code before G1.
 
 **G-d. The resync's anchor is not at the tick its label says (Δ ≠ 0).**
 
@@ -432,6 +439,31 @@ It writes a **local v2 record** and touches no world state.
     `unportable`. These are the server's private objects: `BMMO_Prox_*`,
     the `BMMO_Ball_*` arrays and player clones. Proximity frames are wired
     to inputs, which are not captured.
+  - *Amended by world agreement (`docs/world-agreement-gaps-design.md`
+    §2.9, steps G1-G4, protocol 16; written at step WG6).* Under
+    `WORLD_PROXIMITY_UNION` (the server's default since G3) the frames and
+    the identity copies are no longer the server's private objects: every
+    world makes them, with the same names (`BMMO_Prox_<owner>_<n>`,
+    `CurrentLevel#BMMOId_<owner>_<n>`; the `BMMO_Ball_*` names are gone
+    since G1), so they are **portable since that design**. What a tick
+    without a candidate keeps (the frames' positions, the by-name copies'
+    entities: the hold) travels **by name** in a section of the portable
+    record (`kPortableVersionSections` = version 3, a sections word: bit 0
+    the trafo scripts, bit 1 the hold; `proximity_union::capture_portable`,
+    written only by the server's world under the bit) and `localize` hands
+    it to the host's `proximity_union::localize_hold`, which writes it into
+    the local v6 record's hold section (a missing name refuses the whole
+    record). An object reference whose recorded name is a player clone's
+    resolves to this world's ball of that player through the resync's
+    clone renames (`resync_script_report::renames`, only while the union
+    is active), not through a new parameter kind: the design's kind 4 was
+    not needed (world-agreement "As built (step WG3)"). `BMMO_NoBall`
+    (made under the bit, the same name in every world) is portable by
+    name too; no portable section carries it today, since the hold holds
+    only the by-name copies and they keep their entity rather than naming
+    it. It enters the hold once Q7's slot rules (world-agreement §2.10)
+    let a by-name cell read it. With the bit clear the record, the
+    localize and the `unportable` count are as above, byte for byte.
 - **`keep_local(owner, script)`** scripts copy their bytes from
   `local_anchor` instead. The predicate is a core rule (one implementation,
   `session/resync_rules.hpp`, CK-free):
@@ -3433,6 +3465,9 @@ the sector-placement design both ask for journal version 4).
   - expected: client 0 never wakes it until a snapshot.
 - Owner and order to be set by the user. Until then I1 holds for the
   imported Proximity state at S and not after it.
+- *Settled (step WG6's note):* the fix is the world-agreement design's
+  G-c (the user's answers of 2026-10-24 and 2026-10-28), built at steps
+  WG1-WG4, protocol 16; see §1.3 G-c.
 
 **Q7. The retail resync hold blocks a frame.**
 

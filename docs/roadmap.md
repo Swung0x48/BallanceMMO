@@ -852,6 +852,13 @@ numbers 1-10 are unchanged.
    bit-clear path unchanged: V3 and the wire check). Its J-e interplay
    (a ball holder removed between two steps, trafo inputs off only) is
    counted by the guard and waits for M1 (design, As built (step WG2)).
+   **G3-G6 are built (steps WG3, WG4, WG6):** the clients run the rule
+   under the bit (protocol 16, `anchor_probes` compared, BodyRevived
+   retired), and the server's default is on. The retail core host runs it
+   too (WG4), and the documents follow it (WG6: RSD §2.4, the protocol
+   doc, `collision-overhaul-design.md` 9.31). The checks deferred to FULL
+   are listed in the design's "As built (step WG3)" and "(step WG4)".
+   Next: M0, M1, then Q7.
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick; **K3 = the Level 1 tutorial
    switched off** right after K1 (decision (c): every world activates the

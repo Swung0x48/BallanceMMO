@@ -26,10 +26,22 @@
 // force block's controller is captured and re-created through a hook the
 // physics bridge provides.
 //
-// The sensors' reference.  Every TT Scaleable Proximity in a mechanism script
-// measures Ball_Pos_Frame, not the ball; that frame is a CHILD of the ball
-// entity (parent=Ball_Stone, traced on the replay), so it follows the ball's
-// restored and replayed body without any script.  The selection has room for
+// The sensors' reference.  In the retail graph every TT Scaleable Proximity
+// in a mechanism script measures Ball_Pos_Frame, not the ball; that frame is
+// a CHILD of the ball entity (parent=Ball_Stone, traced on the replay), so it
+// follows the ball's restored and replayed body without any script.  That is
+// still what a session with WORLD_PROXIMITY_UNION clear runs (a client's
+// sensors watch its own ball only, G-c).  Under the bit (protocol 16,
+// docs/world-agreement-gaps-design.md §2.2-§2.5, steps G2-G4) every world
+// rewires the mechanism blocks to private frames BMMO_Prox_<owner>_<n> and
+// their ActiveBall reads to private copies CurrentLevel#BMMOId_<owner>_<n>
+// (game/proximity_union.hpp), which the host puts on the nearest ball with a
+// body (own or mirror; session/proximity_rules.hpp) before the lifecycle
+// changes of every live and every replayed tick; what a tick without a
+// candidate keeps (the frames' positions, the by-name copies' entities)
+// travels in the record's hold section (v6 bit 2, hold_hooks below), so a
+// replay re-derives or restores the sensors' input without any script
+// either.  The selection has room for
 // "satellite" blocks of other scripts, should a level drive a sensors'
 // reference from a script; the arena needs none, and the one candidate
 // measured (Gameplay_Ingame's TT Set Dynamic Position with Ball_Pos_Frame as

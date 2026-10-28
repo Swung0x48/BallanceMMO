@@ -32,7 +32,8 @@
 //
 // So the checkpoints get a cell of their own: a private copy of CurrentLevel
 // (the precedent is the server's ball identity copies,
-// physics_world::rewire_ball_identity_reads).  A session-owned parameter
+// once physics_world::rewire_ball_identity_reads, now the identity copies of
+// game/proximity_union.hpp, CurrentLevel#BMMOId_<owner>_<n>).  A session-owned parameter
 // naming the copy feeds the Target of
 //
 //   * the chain's two Set Cells of the cell;

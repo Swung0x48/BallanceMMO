@@ -30,7 +30,8 @@ built (WG2, 2026-10-28: the server's world under `WORLD_PROXIMITY_UNION`,
 §12 "As built (step WG2)"), steps G3 and G5 built (WG3, 2026-10-28: the
 clients under the bit, BodyRevived retired, protocol 16, §12 "As built (step
 WG3)"), step G4 built (WG4, 2026-10-28: the retail core host, §12 "As built (step
-WG4)"), G6, M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
+WG4)"), step G6 done (WG6, 2026-10-28: the documentation pass, §12 "As built
+(step WG6)"), M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
 `session_host_support.hpp`, `session_host_world.hpp`, `session_client.cpp` and
@@ -2880,3 +2881,80 @@ changes the names only for a non-STRING column or a name over 127
 characters, neither on L11 (the runs above: 11 identity reads, the
 server's signature). The server does not call `level_options` (its own
 reader, `physics_world.cpp`), so the Arch server is not rebuilt.
+
+### As built (step WG6, 2026-10-28): G6, the documentation pass
+
+**What changed** (comments and documents only; no code, protocol, record or
+journal change).
+- *SR:29-37* (`game/script_replay.hpp`, the header's "The sensors'
+  reference" paragraph): it no longer says that every mechanism sensor
+  measures the own ball's child frame. It says that the retail graph does,
+  and so does a session with `WORLD_PROXIMITY_UNION` clear (G-c). Under the
+  bit (protocol 16) every world rewires the mechanism blocks and reads to
+  `BMMO_Prox_<owner>_<n>` / `CurrentLevel#BMMOId_<owner>_<n>`
+  (`game/proximity_union.hpp`) and places them before the lifecycle
+  changes of every live and replayed tick. What a tick without a candidate
+  keeps travels in the record's hold section (v6 bit 2, `hold_hooks`).
+- *`game/checkpoint_phase.hpp:35`* (WG1's "Left for later steps"): the
+  precedent it cites is now named as the union's identity copies (once
+  `physics_world::rewire_ball_identity_reads`).
+- *RSD §2.4* (`docs/resync-and-sector-timing-design.md`): the `unportable`
+  bullet gains the amendment of §2.9's "RSD A1" row. Under the bit the
+  frames and the identity copies are made by every world with the same
+  names, so they are portable since this design. The hold travels by name
+  (portable version 3, sections bit 1), and a clone reference resolves
+  through the resync's renames.
+- *`docs/rooms-and-sessions-protocol.md`*: protocol 16 (the bit, the
+  rewire and the place point, record v6 and portable version 3,
+  `anchor_probes` and its compare and refusal, BodyRevived retired), the
+  `world_options` row's bit 2, the BodyRevived row, the
+  `physics.proximity_union` config line, and the current protocol number
+  (13 -> 16).
+- *`docs/collision-overhaul-design.md` 9.31* (Chinese, `glossary-zh.md`'s
+  terms): G-c's problem, G0-G6, the numbers of WG0-WG4 and the residuals.
+
+**Adaptations.**
+- *`BMMO_NoBall` is named in the amendment as portable by name but
+  carried by no section yet* (the review's nit on the "RSD A1" row). Under
+  the bit `make_no_ball` creates it in every world, but only the body-kind
+  cells name it; the hold section carries the by-name copies, which keep
+  their entity. `localize_hold` looks a held name up as a `CKCID_3DOBJECT`
+  and `BMMO_NoBall` is a plain 3D entity, so Q7, whose slot rules make a
+  by-name cell read it (§2.10), must widen that lookup when it puts it in
+  the hold.
+- *§2.9's kind 4 is described as not built.* The row wanted RSD §2.4 to
+  gain "a portable kind 4, (player id, ball type)". WG3 resolved a clone
+  reference through the resync renames instead ("As built (step WG3)", "The
+  player-ball reference is a rename"). The amendment says that and names
+  the portable section that was built.
+- *RSD §1.3 G-c and §9 Q6 get a closing note too.* §2.9's "RSD I1 / G-c
+  note" row wants I1 to hold after S as well. The row names only RSD §2.4,
+  but the gap paragraph and the open question would otherwise still read
+  as open. Each gets one short note that points to this design and leaves
+  the original text as it was.
+- *The protocol doc covers P_G only.* SessionMember, lives, `life`, the
+  bits of Q7, `mechanism_slots` and the join-order cap (§5's last row)
+  belong to M1 and Q7, whose rows name the protocol doc, so they are not
+  written here. The doc had not described protocols 14 (BALA) and 15
+  (SPGH2) either. It gains one paragraph that points to
+  `entity/session.hpp`'s comment for them, not their layouts. Its two
+  opcode lists (the file header and §2) still end at `SessionLeadAck`,
+  without `SessionResyncState` (A3) or `SessionGhostPose` (BALA). They
+  are left as they are: they are not this design's, and the authoritative
+  list is `message/message.hpp`.
+- *§1.1's "Clients" and "BodyRevived" paragraphs stay as written.* They
+  are the problem statement of 2026-10-23. The as-built notes are the
+  record of what the code does now.
+- *The roadmap* (§4 item 5) gains one line saying that G3-G6 are built,
+  beside WG1/WG2's line, with a pointer to these notes for the checks
+  deferred to FULL. It is not in the row.
+
+**Checks** (`.local-tools/work/WG6`; the two headers changed in comments
+only).
+- x64 BUILD-OK (50 steps; `session_client.cpp.obj` #deps 348, both
+  headers among them), x86 CLIENT-BUILD-OK (24 steps),
+  `BallanceMMOMessageTests` 595/595, GCC syntax check 30/30 ok.
+- Wire check rWG4 vs rWG6 over `core_ref_s9` (`EXTRA="--accept-protocol
+  15"`): 12/12 sends SAME, 12/12 journals IDENTICAL, `WIRE-CHECK: ALL
+  SAME`.
+- No live run: nothing that runs changed.
