@@ -18,6 +18,7 @@
 
 #include <game/checkpoint_phase.hpp>
 #include <game/menu_driver.hpp>
+#include <game/sector_deactivate_pin.hpp>
 #include <session/bridge_recipe.hpp>   // to_bridge_recipe (found by ADL): the shared copy since step R0
 #include <session/spawn_impulse.hpp>
 #include <session/rollback_binding.hpp>
@@ -1048,6 +1049,22 @@ void BallanceMMOClient::death_reset_restore() {
 // same kind of parameter and one of them must keep working; the original source
 // (a direct source, or the input this one shares its source with) goes back at
 // session end.
+namespace {
+    // The retail table's row as the shared pin (game/sector_deactivate_pin.hpp,
+    // step B2SW): the table keeps its layout (BallanceMMOClient's members).
+    template <class Write>
+    bmmo::game::deactivate_pin sector_deactivate_pin_of(const Write& write) {
+        bmmo::game::deactivate_pin pin;
+        pin.block = write.block;
+        pin.input = write.input;
+        pin.retail_source = write.retail_source;
+        pin.retail_shared = write.retail_shared;
+        pin.retail_real = write.retail_real;
+        pin.zero = write.zero;
+        return pin;
+    }
+}
+
 bool BallanceMMOClient::sector_deactivate_resolve() {
     sector_deactivate_count_ = 0;
     for (auto& write: sector_deactivate_) write = {};
@@ -1079,55 +1096,22 @@ bool BallanceMMOClient::sector_deactivate_resolve_one(CKBehavior* script, const 
     if (!chain) return refuse("the group is missing");
     CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
     if (!parameters) return refuse("the IngameParameter array is missing");
-    CKBehavior* block = nullptr;
-    bool target_known = false;
-    const int subs = chain->GetSubBehaviorCount();
-    for (int i = 0; i < subs; ++i) {
-        CKBehavior* sub = chain->GetSubBehavior(i);
-        const char* prototype = sub && sub->IsUsingFunction() ? sub->GetPrototypeName() : nullptr;
-        if (!prototype || std::strcmp(prototype, "Set Cell") != 0) continue;
-        int row = -1, column = -1;
-        sub->GetInputParameterValue(0, &row);
-        sub->GetInputParameterValue(1, &column);
-        if (row != 0 || column != 2) continue;   // [0][1] is the activate write: it stays
-        // A block that demonstrably writes another array is not ours; one whose
-        // target cannot be read here (it is bound through a parameter this pass
-        // cannot resolve) still counts, because the chain and the cell already
-        // identify it - the ambiguity is reported below.
-        CKBeObject* target = sub->GetTarget();
-        if (target && target != static_cast<CKBeObject*>(parameters)) continue;
-        if (block) return refuse("more than one Set Cell writes IngameParameter[0][2]");
-        block = sub;
-        target_known = target != nullptr;
-    }
-    if (!block) return refuse("no Set Cell in that group writes IngameParameter[0][2]");
-    if (!target_known)
+    // Step B2SW: the pin itself is the shared one (game/sector_deactivate_pin.hpp),
+    // which the headless client and the server's world make at their anchor too.
+    bmmo::game::deactivate_pin pin;
+    std::string error;
+    if (!bmmo::game::pin_deactivate_cell(context, chain, parameters, pin, error)) return refuse(error);
+    if (!pin.target_known)
         logger_->Warn("Physics session: the Set Cell of %s/%s does not name its array here; taking the one "
                       "writing cell [0][2]", script_name, group_name);
-    CKParameterIn* input = block->GetInputParameter(2);   // "Value"
-    if (!input) return refuse("the Set Cell block has no Value input");
-    CKParameter* source = input->GetRealSource();
-    if (!source) return refuse("its Value input has no source");
-    if (source->GetGUID() != CKPGUID_INT || source->GetDataSize() != static_cast<int>(sizeof(int)))
-        return refuse("its Value input is not an int parameter");
-    auto* zero = context->CreateCKParameterLocal(const_cast<CKSTRING>("BMMO_SectorKeep"), CKPGUID_INT, TRUE);
-    if (!zero) return refuse("could not create the session's constant");
-    const int none = 0;
-    zero->SetValue(&none, sizeof(none));
-    CKParameterIn* shared = input->GetSharedSource();
-    CKParameter* direct = input->GetDirectSource();
-    if (input->SetDirectSource(zero) != CK_OK) {
-        context->DestroyObject(zero);
-        return refuse("the Value input refused the session's constant");
-    }
     sector_deactivate_write& write = sector_deactivate_[sector_deactivate_count_++];
-    write.block = block->GetID();
+    write.block = pin.block;
     write.chain = group_name;
-    write.input = 2;
-    write.retail_source = direct ? direct->GetID() : 0;
-    write.retail_shared = shared ? shared->GetID() : 0;
-    write.retail_real = source->GetID();
-    write.zero = zero->GetID();
+    write.input = pin.input;
+    write.retail_source = pin.retail_source;
+    write.retail_shared = pin.retail_shared;
+    write.retail_real = pin.retail_real;
+    write.zero = pin.zero;
     write.applied = true;
     logger_->Info("Physics session: the sector deactivation in %s/%s (Set Cell -> IngameParameter[0][2]) is "
                   "pinned to 0", script_name, group_name);
@@ -1140,16 +1124,8 @@ bool BallanceMMOClient::sector_deactivate_resolve_one(CKBehavior* script, const 
 void BallanceMMOClient::sector_deactivate_apply() {
     CKContext* context = m_bml->GetCKContext();
     for (int i = 0; i < sector_deactivate_count_; ++i) {
-        sector_deactivate_write& write = sector_deactivate_[i];
-        if (!write.block || !write.zero) continue;
-        CKBehavior* block = session_block(context, write.block, "Set Cell");
-        CKParameterIn* input = block ? block->GetInputParameter(write.input) : nullptr;
-        auto* zero = CKParameter::Cast(context->GetObject(write.zero));
-        if (!input || !zero) continue;
-        CKParameter* current = input->GetRealSource();
-        if (current == zero) continue;   // still ours
-        if (!current || current->GetID() != write.retail_real) continue;
-        if (input->SetDirectSource(zero) == CK_OK)
+        const sector_deactivate_write& write = sector_deactivate_[i];
+        if (bmmo::game::repin_deactivate_cell(context, sector_deactivate_pin_of(write)))
             logger_->Info("Physics session: the sector deactivation in %s was re-pinned to 0",
                           write.chain ? write.chain : "?");
     }
@@ -1159,27 +1135,12 @@ void BallanceMMOClient::sector_deactivate_restore() {
     CKContext* context = m_bml->GetCKContext();
     for (int i = 0; i < sector_deactivate_count_; ++i) {
         sector_deactivate_write& write = sector_deactivate_[i];
-        CKBehavior* block = write.block ? session_block(context, write.block, "Set Cell") : nullptr;
-        CKParameterIn* input = block ? block->GetInputParameter(write.input) : nullptr;
-        auto* zero = write.zero ? CKParameter::Cast(context->GetObject(write.zero)) : nullptr;
-        bool referenced = false;
-        if (input && zero && input->GetRealSource() == zero) {
-            referenced = true;
-            if (write.retail_shared) {
-                auto* shared = CKParameterIn::Cast(context->GetObject(write.retail_shared));
-                if (shared && input->ShareSourceWith(shared) == CK_OK) referenced = false;
-            } else {
-                auto* source = CKParameter::Cast(context->GetObject(write.retail_source));
-                if (source && input->SetDirectSource(source) == CK_OK) referenced = false;
-            }
-            if (referenced)
-                logger_->Warn("Physics session: the Value input of %s could not be handed back to its retail "
-                              "source; the session's constant is left in place", write.chain ? write.chain : "?");
-        }
         // Destroying a parameter an input still points at would leave a dangling
         // source behind, so the one case that keeps it is the one where the input
-        // still reads it.
-        if (zero && !referenced) context->DestroyObject(zero);
+        // still reads it (game/sector_deactivate_pin.hpp unpin_deactivate_cell).
+        if (!bmmo::game::unpin_deactivate_cell(context, sector_deactivate_pin_of(write)))
+            logger_->Warn("Physics session: the Value input of %s could not be handed back to its retail "
+                          "source; the session's constant is left in place", write.chain ? write.chain : "?");
         write = {};
     }
     sector_deactivate_count_ = 0;

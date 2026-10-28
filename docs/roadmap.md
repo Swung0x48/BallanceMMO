@@ -389,6 +389,13 @@ numbers 1-10 are unchanged.
      - *The x64 teardown over-read*: engine change #21 (CK2); V9's
        `--free-ids-before-load 20000` arm and L6-L9 of a 20000-id sweep no
        longer crash, tick hashes identical (sector-placement design 12.6).
+     - *N2 on every world*: `game/sector_deactivate_pin.hpp`, the retail
+       mod's copy a use of it; the A4 race reproduced offline and fixed.
+       **Found, queued here**: the chain's [0][1] Set Cell in the frame of
+       a pass of another sector activates the chain's sector instead (every
+       world, the retail mod included; options: a private cell for the
+       chain's [0][1] with the own poll reading it, as the phase cell's
+       split, or another source for the own sector poll - the user's).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

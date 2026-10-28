@@ -101,6 +101,11 @@ namespace bmmo::sim {
         // (--placement-fail-at, design 7.2 V12), -1 = none.
         bool placement_clones = false;
         int placement_fail_at = -1;
+        // N2 (step B2SW, game/sector_deactivate_pin.hpp): the checkpoint's and
+        // the level reset's IngameParameter[0][2] Set Cell pinned to 0 at the
+        // anchor.  Every world pins; false only for SimTool's A/B
+        // (--n2-pin off).
+        bool pin_checkpoint_deactivation = true;
         // SimTool's id-layout test hooks (sector placement design 7.2 V7/V9,
         // step S7: --free-ids-before-load, --perturb-ids), unset in every
         // other world: before_level_load runs after the boot, right before

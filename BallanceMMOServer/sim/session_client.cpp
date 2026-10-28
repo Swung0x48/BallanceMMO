@@ -40,6 +40,7 @@
 #include <game/menu_driver.hpp>
 #include <game/checkpoint_phase.hpp>
 #include <game/sector_activation.hpp>
+#include <game/sector_deactivate_pin.hpp>
 #include <game/sector_placement.hpp>
 #include <game/navigation_graph.hpp>
 #include <game/script_state.hpp>
@@ -1423,6 +1424,9 @@ namespace {
                     logf("the sector reset in %s (Execute Script -> Gameplay_SectorManager) is neutralized", chain.c_str());
                 if (const int again = checkpoint_phase_.keep(engine_->context()))
                     logf("the checkpoint chain's phase cell: %d target(s) handed back to CurrentLevel were moved to the copy again", again);
+                // N2 kept, as the retail mod keeps it (step B2SW).
+                if (const int again = bmmo::game::repin_checkpoint_deactivation(engine_->context(), deactivate_pins_))
+                    logf("the chains' sector deactivation: %d input(s) handed back were re-pinned to 0", again);
             };
             p.hooks.after_rewinds = [this](uint32_t) { maybe_force_rollback(); };
             p.drive = [this](const std::string& entity, const bmmo::session::input_frame& frame, std::string& error) {
@@ -1875,6 +1879,11 @@ namespace {
             // base.cmo's chain survives a level exit, and a split it still
             // carried would have this anchor's apply refuse.
             checkpoint_phase_.restore(engine_->context());
+            // N2's pins handed back the same way (step B2SW): a pin made on
+            // top of the previous session's would take its constant for the
+            // retail source.
+            if (const int left = bmmo::game::unpin_checkpoint_deactivation(engine_->context(), deactivate_pins_))
+                logf("the chains' sector deactivation: %d input(s) could not be handed back and stay on their constant", left);
             sector_manager_id_ = 0;
             // Step T3: the previous session's sets went at its end; the
             // registry and its level reference start over (a reboot below
@@ -2011,6 +2020,16 @@ namespace {
                     logf("the level's checkpoint sector activation was NOT held (%s): crossings activate here at "
                          "once and are reported after the fact - this client is out of lockstep on every sector it enters",
                          hold_error.c_str());
+            }
+            {
+                // N2 (step B2SW, game/sector_deactivate_pin.hpp): the held
+                // chains' deactivate cell pinned to 0, as the retail mod does,
+                // so an own crossing in the frame of a union pass deactivates
+                // nothing in this world either.
+                std::string report;
+                const int pinned = bmmo::game::pin_checkpoint_deactivation(engine_->context(), report, &deactivate_pins_);
+                logf("the chains' sector deactivation (IngameParameter[0][2]) pinned to 0 in %d of 2 (%s)", pinned,
+                     report.c_str());
             }
             {
                 // The chain's own phase cell (game/checkpoint_phase.hpp): its
@@ -3555,6 +3574,7 @@ namespace {
         bmmo::game::script_replay_hooks script_hooks_;
         bmmo::game::checkpoint_phase_split checkpoint_phase_;  // the chain's own phase cell (game/checkpoint_phase.hpp)
         bmmo::game::sector_reset_guard reset_guard_;         // the retail sector resets, neutralized (game/sector_reset_guard.hpp)
+        std::vector<bmmo::game::deactivate_pin> deactivate_pins_;   // N2's pins (game/sector_deactivate_pin.hpp)
         uint32_t script_restore_logs_ = 0;
         uint32_t script_reset_logs_ = 0;
         std::map<CK_ID, uint32_t> script_reset_ticks_;        // the tick each script was last told to reset

@@ -4,6 +4,7 @@
 #include "CKIpionManager.h"
 #include "PhysicsCallback.h"
 
+#include <game/sector_deactivate_pin.hpp>
 #include <game/session_host_support.hpp>
 #include <physics/physics_direct.hpp>
 #include <physics/physics_savestate.hpp>
@@ -298,6 +299,21 @@ namespace bmmo::sim {
             else
                 log("world: the level's checkpoint sector activation was NOT held (" + hold_error
                     + "): a checkpoint a clone crosses activates a sector behind update_sectors()");
+        }
+        // N2 (step B2SW, game/sector_deactivate_pin.hpp): the held chains'
+        // deactivate cell pinned to 0, as the retail mod does, so a clone's
+        // crossing in the frame of an update_sectors pass deactivates nothing
+        // here either.  Pinned once: this world is booted for its session and
+        // destroyed with it, and no code of it hands an input back (the
+        // checkpoint phase split below is applied once for the same reason).
+        // Off only for SimTool's A/B (--n2-pin off).
+        if (options_.pin_checkpoint_deactivation) {
+            std::string report;
+            const int pinned = bmmo::game::pin_checkpoint_deactivation(engine_->context(), report);
+            log("world: the chains' sector deactivation (IngameParameter[0][2]) pinned to 0 in " + std::to_string(pinned)
+                + " of 2 (" + report + ")");
+        } else {
+            log("world: the chains' sector deactivation is NOT pinned (--n2-pin off)");
         }
         // The chain behind the hold keeps writing CurrentLevel[0][4], the cell
         // the modules of a pass branch on in their first frame; a clone's

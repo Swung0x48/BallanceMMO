@@ -3008,6 +3008,50 @@ N2 on every world, T1's findings.**
   matrix cases l11_ER, l11_A5, arena_ER, arena_A4: every RESULT line equal to
   rR12's (12 arms). No `--resync-check` arm met the case at its apply (none
   needed the flag there), so the root is the case that needed it.
+- **N2 on every world: built.** The pin is `game/sector_deactivate_pin.hpp`
+  (`pin_deactivate_cell`, `repin_deactivate_cell`, `unpin_deactivate_cell`,
+  `pin_checkpoint_deactivation`); the retail mod's
+  `sector_deactivate_resolve_one` / `_apply` / `_restore` are uses of it (the
+  table keeps its layout: BallanceMMOClient's members), and the headless
+  client (`session_client.cpp`, after the checkpoint hold) and the server's
+  world (`physics_world.cpp`, after the hold; `world_options::
+  pin_checkpoint_deactivation`, off only for SimTool's `--n2-pin off`) pin
+  both chains at their anchor. The headless client keeps its pins as the
+  retail mod keeps its own: re-pinned in its frame guard (`script_guards`,
+  beside the reset guard and the phase split, `repin_checkpoint_deactivation`)
+  and handed back when the next session begins (`unpin_checkpoint_
+  deactivation`, beside the phase split's restore: base.cmo's chains survive
+  a level exit, and a pin made on top of the last would take its constant
+  for the retail source). The server's world pins once and keeps nothing: it
+  is booted for its session and destroyed with it (`physics_world::create`),
+  and no code of it hands an input back - its phase split is applied once
+  for the same reason (review round). Adapted: the chains are found as the retail
+  mod finds them, a direct sub-behaviour of the script (BML's `FindFirstBB`
+  default is not hierarchical): Event_handler has a nested behaviour named
+  "reset Level" too, which a depth-first search met first (the first build
+  pinned 1 of 2 on every level; now 2 of 2 on L1-L13 and in both retail
+  clients). **The a4_resync_n2 case, reproduced offline** (its capture is
+  protocol 10): SimTool `--level 13 --drop P_Ball_Wood_MF 0 --drop-at 220
+  3.65 15 --drop-sector 1 --drop-move 2 T --cells-trace` (a ball dropped on
+  the sector-2 checkpoint flame, crossing at tick 80; a pass of sector 2 at
+  T): with `--n2-pin off` and T = 80 (the pass's manager starts in the
+  crossing's frame) the chain writes [0][2] = 1 before the manager reads it
+  and sector 1 is deactivated (bodies 57 -> 52, 66 at the end instead of
+  71); with the pin, [0][2] stays 0 and the world ends with 71 at every T in
+  76-81 (the A4 race, the server's world). **Found: [0][1] does matter**
+  (the case the A4 note asked to check): a crossing of sector K's checkpoint
+  in the frame of a pass of another sector J writes [0][1] = K after
+  `run_sector_pass` wrote J, and the manager activates K instead of J - the
+  same scene with `--drop-move 3 80`: union {1,3} in the world's
+  bookkeeping, sector 2's 14 bodies made (71) instead of sector 3's 6 (63 at
+  T 79 and 81). Pre-existing on every world, the retail mod included (N2
+  leaves [0][1] for the own sector poll); queued in roadmap §4 item 2.
+  Wire check `rR12 -> rB2SWb`: sends 12/12 SAME; journals 5/12 identical,
+  7/12 (swing_snapoff c0-c3, l8_cross c0, c1, c3) identical order-free -
+  body order only: the pin's two `BMMO_SectorKeep` parameters, made at the
+  headless anchor, shift the CK ids of everything made after it (with the
+  first build's one pin only swing_snapoff differed). The five server
+  journals of `core_ref_s7` replay matched (4111, 3914, 3019, 2813, 2855).
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

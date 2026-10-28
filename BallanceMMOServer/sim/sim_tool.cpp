@@ -182,6 +182,8 @@ namespace {
         int drop_settle = 30;          // --drop-settle N: ticks between the sector and the drop
         int drop_move_sector = 0;      // --drop-move SECTOR TICK: the player moves on at that tick
         int drop_move_tick = 0;
+        bool n2_pin = true;            // --n2-pin on|off (step B2SW): the chains' deactivate cell pinned at the anchor
+        bool cells_trace = false;      // --cells-trace (step B2SW): IngameParameter[0][1]/[0][2], the union, the bodies
         float drop_at[3] = {};         // --drop-at X Y Z: drop there instead (PH matrix of a module)
         bool have_drop_at = false;
         // --drop-prop ENTITY: beam that level prop (a non-player ball placed by
@@ -768,6 +770,13 @@ namespace {
                 if (!(v = next())) return false; out.drop_move_sector = std::atoi(v);
                 if (!(v = next())) return false; out.drop_move_tick = std::atoi(v);
             }
+            else if (arg == "--n2-pin") {
+                if (!(v = next())) return false;
+                const std::string mode = v;
+                if (mode != "on" && mode != "off") return false;
+                out.n2_pin = mode == "on";
+            }
+            else if (arg == "--cells-trace") out.cells_trace = true;
             else if (arg == "--spawn-test") { if (!(v = next())) return false; out.spawn_test = std::atoi(v); }
             else if (arg == "--spawn-impulse") { if (!(v = next())) return false; out.spawn_impulse = static_cast<float>(std::atof(v)); }
             else if (arg == "--spawn-ball") { if (!(v = next())) return false; out.spawn_ball = std::atoi(v); }
@@ -1911,6 +1920,7 @@ namespace {
         options.placement_clones = args.placement;            // step S2
         options.placement_fail_at = args.placement_fail_at;
         options.trafo_inputs = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;   // step K0
+        options.pin_checkpoint_deactivation = args.n2_pin;   // step B2SW: --n2-pin off is the A/B
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         // Step S7: the id layout (--free-ids-before-load, --perturb-ids).
         if (args.free_ids_before_load > 0) {
@@ -2412,6 +2422,30 @@ namespace {
         };
         report_parts(-1);
         placement_tick_report(args, *world, -1, true);
+        // Step B2SW (--cells-trace): the sector manager's two cells, the
+        // union and the physicalized bodies, whenever one of them changes.
+        std::string cells_last;
+        const auto trace_cells = [&](int tick) {
+            if (!args.cells_trace) return;
+            CKContext* context = world->engine().context();
+            auto* parameters = CKDataArray::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>("IngameParameter"),
+                                                                                  CKCID_DATAARRAY, nullptr));
+            int activate = -1, deactivate = -1;
+            if (parameters) {
+                parameters->GetElementValue(0, 1, &activate);
+                parameters->GetElementValue(0, 2, &deactivate);
+            }
+            std::string union_text;
+            for (int s: world->active_sectors()) union_text += (union_text.empty() ? "" : ",") + std::to_string(s);
+            const int bodies = bmmo::physics::list_bodies(world->physics(), nullptr, 0);
+            char text[160];
+            std::snprintf(text, sizeof(text), "cells [0][1]=%d [0][2]=%d union={%s} bodies=%d", activate, deactivate,
+                          union_text.c_str(), bodies);
+            if (cells_last == text) return;
+            cells_last = text;
+            std::printf("tick=%d %s\n", tick, text);
+        };
+        trace_cells(-1);
         std::map<std::string, double> start;
         for (const auto& body: watched(*world)) start.emplace(body.name, body.position[1]);
         for (int i = 0; i < args.ticks; ++i) {
@@ -2426,6 +2460,7 @@ namespace {
                 dump_surfaces(world->engine());
             if (!scene_tick(args, *world, error)) { std::fprintf(stderr, "tick failed: %s\n", error.c_str()); return 1; }
             if (trafo) trafo->after_frame(i, {});
+            trace_cells(i);   // step B2SW
             if (args.report_every > 0 && i % args.report_every == 0) report_parts(i);
             placement_tick_report(args, *world, i, (args.report_every > 0 && i % args.report_every == 0) || i + 1 == args.ticks);
         }
@@ -8035,7 +8070,10 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool --root <game dir> --level N --drop <entity> <ball type> [--ticks N]\n"
             "           [--drop-at X Y Z] [--drop-height F] [--drop-sector N] [--drop-second-sector N]\n"
             "           [--drop-settle N] [--drop-move SECTOR TICK] [--drop-prop ENTITY]\n"
-            "           [--drop-player-at X Y Z] (mechanism check in a session world)\n"
+            "           [--drop-player-at X Y Z] [--cells-trace] (mechanism check in a session world; --cells-trace:\n"
+            "            IngameParameter[0][1]/[0][2], the union and the physicalized bodies on every change)\n"
+            "       any session world: [--n2-pin on|off]  (step B2SW: the checkpoint and level-reset chains'\n"
+            "            IngameParameter[0][2] Set Cell pinned to 0 at the anchor, default on; off is the A/B)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S]\n"
             "           [--spawn-ball T] [--ticks K] [--report-every R] (spawn-impulse determinism check)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK\n"
