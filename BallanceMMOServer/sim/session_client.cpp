@@ -1369,7 +1369,29 @@ namespace {
             p.own_birth_capture = [this](const std::string& entity, uint32_t tick) { return own_birth_capture(entity, tick); };
             p.make_own = [this](const bmmo::session::own_body_spec& spec) { return remake_own_body(spec); };
             p.unmake_own = [this](const std::string& entity, const float position[3], const float rotation[9], uint32_t tick,
-                                  std::string& error) { return unmake_own_body(entity, position, rotation, tick, error); };
+                                  bool death, std::string& error) {
+                return unmake_own_body(entity, position, rotation, tick, death, error);
+            };
+            // Step EL8 (gap L, L3; design 9.7): an entity's CK world matrix.
+            p.entity_matrix = [this](const std::string& name, float matrix[16]) {
+                auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
+                        const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+                if (!entity) return false;
+                const VxMatrix& world = entity->GetWorldMatrix();
+                for (int r = 0; r < 4; ++r)
+                    for (int k = 0; k < 4; ++k) matrix[r * 4 + k] = world[r][k];
+                return true;
+            };
+            p.set_entity_matrix = [this](const std::string& name, const float matrix[16]) {
+                auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
+                        const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+                if (!entity) return false;
+                VxMatrix world;
+                for (int r = 0; r < 4; ++r)
+                    for (int k = 0; k < 4; ++k) world[r][k] = matrix[r * 4 + k];
+                entity->SetWorldMatrix(world);
+                return true;
+            };
             // The sectors' (E8): Gameplay_SectorManager's state (found once,
             // as the union pass found it), one union pass, its activation
             // record for the replay, and the own sector poll.
@@ -1614,6 +1636,7 @@ namespace {
         bmmo::session::session_capabilities make_capabilities() const {
             bmmo::session::session_capabilities caps;
             caps.own_body_control = true;
+            caps.own_body_in_replay = true;   // step EL8 (gap L, L3)
             caps.slew = true;
             caps.nonblocking_hold = true;
             caps.whole_frame = args_.replay_scripts;
@@ -2235,43 +2258,50 @@ namespace {
         // The own body taken out (platform unmake_own: the core mutes the
         // event log around it, and logs a failure): the navigation replica
         // shut down first, the entity put at the pose its Physicalize
-        // carried, where the body is made again.
+        // carried, where the body is made again.  Step EL8: a replayed own
+        // death (`death`) leaves the replica as the live death left it; a
+        // navigation made for a revive goes with the body.  The body part is
+        // host support's (make_own_body / unmake_own_body, shared with the
+        // retail core host).
         bool unmake_own_body(const std::string& name, const float position[3], const float rotation[9], uint32_t tick,
-                             std::string& error) {
-            own_navigation_off(name, tick);
-            const bool ok = bmmo::physics::unphysicalize(engine_->physics(), name.c_str(), error);
-            if (auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
-                        const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr)))
-                entity->SetWorldMatrix(matrix_from_pose(position, rotation));
-            return ok;
+                             bool death, std::string& error) {
+            if (revive_navigations_.erase(name)) {
+                std::string nav_error;
+                if (!bmmo::physics::navigation_destroy(engine_->physics(), name.c_str(), nav_error))
+                    logf("own body at tick %u: the revive's navigation of %s: %s", tick, name.c_str(), nav_error.c_str());
+            } else if (!death) {
+                own_navigation_off(name, tick);
+            }
+            auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
+                    const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+            bmmo::physics::physics_direct direct(engine_->physics());
+            return bmmo::game::unmake_own_body(direct, entity, name, position, rotation, error);
         }
 
         // The own body made again the way the server makes it (platform
         // make_own: the core mutes the event log around it, then logs and
         // counts what it did): a body still there taken out first, the pose,
         // recipe and group its Physicalize carried, and a spawn's kick.
+        // Step EL8: a revived life (with_replica) gets the navigation the
+        // replay drives it with (host support's attach_revive_navigation).
         bmmo::session::own_body_made remake_own_body(const bmmo::session::own_body_spec& spec) {
-            bmmo::session::own_body_made made;
-            CKIpionManager* physics = engine_->physics();
             own_navigation_off(spec.entity, spec.tick);
             auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
                     const_cast<CKSTRING>(spec.entity.c_str()), CKCID_3DENTITY, nullptr));
-            if (!entity) return made;
-            made.found = true;
-            std::string error;
-            bmmo_physics_body_state there{};
-            if (bmmo::physics::get_body_state(physics, spec.entity.c_str(), there, error)
-                    && !bmmo::physics::unphysicalize(physics, spec.entity.c_str(), error)) {
-                made.took_out_failed = true;
-                made.took_out_error = error;
+            bmmo::physics::physics_direct direct(engine_->physics());
+            bmmo::session::own_body_made made = bmmo::game::make_own_body(direct, entity, spec);
+            if (made.made && spec.with_replica) {
+                const int ball_type = ball_type_of(spec.entity);
+                const float force =
+                        ball_type >= 0 && ball_type < static_cast<int>(ball_rows_.size()) ? ball_rows_[ball_type].force : 0.0f;
+                bool created = false;
+                std::string error;
+                if (!bmmo::game::attach_revive_navigation(direct, navigation_, own_replica_, spec.entity, force, created,
+                                                          error))
+                    logf("own body at tick %u: the revive's navigation of %s: %s", spec.tick, spec.entity.c_str(),
+                         error.c_str());
+                if (created) revive_navigations_.insert(spec.entity);
             }
-            entity->SetWorldMatrix(matrix_from_pose(spec.position, spec.rotation));
-            made.made = bmmo::physics::physicalize(physics, spec.entity.c_str(), spec.recipe, spec.group.c_str(), error);
-            made.error = error;
-            if (made.made && spec.kick)
-                made.kicked = bmmo::physics::push_impulse(physics, spec.entity.c_str(),
-                                                          bmmo::session::kSpawnDirectionTable[spec.kick_index],
-                                                          spec.kick_strength, 0, made.kick_error);
             return made;
         }
 
@@ -3822,6 +3852,9 @@ namespace {
         // own_replica since E9): whether it drives the own ball, the entity
         // it was last attached to, and the keys it polls.
         bmmo::game::own_replica own_replica_;
+        // Step EL8: the navigations made for revived own lives (the trafo's
+        // old ball), destroyed with the body at the replayed death.
+        std::set<std::string> revive_navigations_;
         bool body_guard_ = false;
         std::string body_guard_entity_;
         int step_diag_ = 0;

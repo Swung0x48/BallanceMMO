@@ -19,7 +19,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -220,7 +222,7 @@ namespace bmmo::session {
         };
         const std::string reason = "ball of " + std::to_string(player) + " born at tick "
                                  + std::to_string(event_tick);
-        const scope_guard keep_cells = platform_.keep_live_cells(*this);
+        const scope_guard keep_cells = keep_live_cells();
         if (rewind_world(event_tick - 1, now, input_at, reason)) {
             ++s.life_rewinds_;
             s.life_rewind_depth_ += now - (event_tick - 1);
@@ -438,7 +440,10 @@ namespace bmmo::session {
     // reaches it.  (Before step EL7 the deaths, then only a resync's, came
     // after every birth of the tick.)
     void session_client_core::drain_pending_lives(uint32_t tick) {
-        if (s.pending_births_.empty() && s.pending_deaths_.empty() && !own_lives_due(tick)) return;
+        if (s.pending_births_.empty() && s.pending_deaths_.empty() && !own_lives_due(tick)) {
+            apply_own_due(tick);
+            return;
+        }
         struct due_life {
             uint32_t player = 0, origin = 0;
             bmmo::session::event_type type = bmmo::session::event_type::Physicalize;
@@ -494,6 +499,11 @@ namespace bmmo::session {
             s.mechanism_tracking_.mark_dirty();
         }
         if (own) apply_own_lives(tick, "replay", false);
+        // Step EL8 (design 2.3.4 "In the replay at D"): the own ball's
+        // queued changes last - after the remote events of the tick, before
+        // its scripts (live, the retail scripts removed the ball in the
+        // frame's behaviour pass, after the drain).
+        apply_own_due(tick);
     }
 
     // ----------------------------------------------------------- mirrors
@@ -1128,6 +1138,384 @@ namespace bmmo::session {
     }
 
 
+    // ================================================ own lives in windows
+    // Gap L, L3 (rollback-engine gaps design 2.3.4, 9.7; step EL8).
+
+    // The pose a matrix carries, in the layout own_body_spec and
+    // unmake_own take (rotation rows, then the translation row).
+    namespace {
+        void pose_of_matrix(const float matrix[16], float position[3], float rotation[9]) {
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k) rotation[r * 3 + k] = matrix[r * 4 + k];
+            for (int k = 0; k < 3; ++k) position[k] = matrix[12 + k];
+        }
+    }
+
+    // An own entity's body gone in a live frame (the drain's "deleted"
+    // entry: a death, or the old ball of a trafo), with the life's
+    // generation and the entity's matrix after the frame (design 2.3.4
+    // "Own deaths in the log"; review 1 #7).  Nothing is sent: the death's
+    // own report (report_unphysicalize) is unchanged.  Adapted: recorded at
+    // the drain, the one site both own-lifecycle sources and the trafo's
+    // old ball reach, not in report_unphysicalize (which knows no entity
+    // and never sees the trafo's old ball).
+    void session_client_core::note_own_death(const std::string& entity, uint32_t tick, uint32_t generation) {
+        if (!config.rollback) return;
+        client_core_state::own_death death;
+        death.tick = tick;
+        death.entity = entity;
+        death.generation = generation;
+        if (platform_.entity_matrix) death.has_matrix = platform_.entity_matrix(entity, death.matrix);
+        s.own_deaths_.push_back(std::move(death));
+        while (s.own_deaths_.size() > 64) s.own_deaths_.erase(s.own_deaths_.begin());
+    }
+
+    // Kept while a rewind can be anchored before the death (the rule of the
+    // other own records, retire_own_lives).
+    void session_client_core::retire_own_deaths() {
+        const uint32_t now = current_tick();
+        s.own_deaths_.erase(std::remove_if(s.own_deaths_.begin(), s.own_deaths_.end(),
+                                           [this, now](const client_core_state::own_death& d) {
+                                               return !s.rollback_.knows_tick(d.tick - 1)
+                                                   && static_cast<int32_t>(now - d.tick) > 0;
+                                           }),
+                            s.own_deaths_.end());
+    }
+
+    // A renumbering (resync, SessionAssign): the ticks these name are gone.
+    void session_client_core::clear_own_window_state() {
+        s.own_deaths_.clear();
+        s.own_due_.clear();
+        s.own_matrices_.clear();
+    }
+
+    // Design 9.7 (a): after the live record of `tick`, the CK matrix of
+    // every own entity without a body (the scripts no replay runs move it:
+    // the death sequence to the resetpoint at D+1, the trafo animation).
+    void session_client_core::record_own_matrices(uint32_t tick) {
+        if (!config.rollback || !platform_.entity_matrix) return;
+        while (!s.own_matrices_.empty() && static_cast<int32_t>(s.own_matrices_.rbegin()->first - tick) >= 0)
+            s.own_matrices_.erase(std::prev(s.own_matrices_.end()));
+        std::vector<client_core_state::own_matrix> bodiless;
+        for (const auto& entity: s.own_ball_entities_) {
+            if (entity == s.own_body_entity_) continue;
+            bmmo_physics_body_state state{};
+            if (platform_.body_state(entity, state)) continue;
+            client_core_state::own_matrix m;
+            m.entity = entity;
+            if (platform_.entity_matrix(entity, m.matrix)) bodiless.push_back(std::move(m));
+        }
+        if (!bodiless.empty()) s.own_matrices_[tick] = std::move(bodiless);
+        const uint32_t keep = static_cast<uint32_t>(s.rollback_.thresholds().history_ticks);
+        while (!s.own_matrices_.empty() && static_cast<int32_t>(s.own_matrices_.begin()->first + keep - tick) < 0)
+            s.own_matrices_.erase(s.own_matrices_.begin());
+    }
+
+    // Before the scripts of a replayed `tick`: the live matrix after the
+    // frame of that same tick, for each own entity that has no body in the
+    // replay either (a body is the replay's: the restore or the step wrote
+    // it).  The tick's own record, not the one before it: the scripts that
+    // move a dead ball (Gameplay_Ingame's death sequence, which puts it on
+    // the resetpoint at D+1) are not replayed and, live, run before the
+    // modules whose proximities read it - so the modules of tick t read the
+    // matrix the frame of t ends with.  Measured on core_ref_s8
+    // resync_snapoff c0 (death 2452, resetpoint at 2453): with the record
+    // of t-1 the replayed 2453 left the ball at its death pose, P_Modul_18's
+    // TT Scaleable Proximity sampled it there and held that distance to the
+    // window's end (2459: "Current Distance" differs from the live record);
+    // with the record of t it does not.  Nothing is written where the
+    // entity already has the value bit for bit (gap P: SetWorldMatrix
+    // re-derives the local matrix, and with KeepChildren the children's,
+    // with rounding).
+    void session_client_core::write_own_matrices(uint32_t tick) {
+        if (!platform_.set_entity_matrix || !platform_.entity_matrix) return;
+        const auto it = s.own_matrices_.find(tick);
+        if (it == s.own_matrices_.end()) return;
+        for (const auto& m: it->second) {
+            bmmo_physics_body_state state{};
+            if (platform_.body_state(m.entity, state)) continue;
+            float current[16];
+            if (platform_.entity_matrix(m.entity, current) && std::memcmp(current, m.matrix, sizeof(current)) == 0)
+                continue;
+            if (platform_.set_entity_matrix(m.entity, m.matrix)) ++s.own_matrix_writes_;
+        }
+    }
+
+    // The core's scope around a rewind: the host's guard, and the own
+    // entities without a body before the rewind put back where the live
+    // scripts had them if they have none after it either (a revived life
+    // removed again at its death, the matrices written into the replay).
+    scope_guard session_client_core::keep_live_cells() {
+        auto host = std::make_shared<scope_guard>(platform_.keep_live_cells(*this));
+        if (!config.rollback || !platform_.entity_matrix || !platform_.set_entity_matrix)
+            return scope_guard([host]() mutable { host.reset(); });
+        std::vector<client_core_state::own_matrix> saved;
+        for (const auto& entity: s.own_ball_entities_) {
+            if (entity == s.own_body_entity_) continue;
+            bmmo_physics_body_state state{};
+            if (platform_.body_state(entity, state)) continue;
+            client_core_state::own_matrix m;
+            m.entity = entity;
+            if (platform_.entity_matrix(entity, m.matrix)) saved.push_back(std::move(m));
+        }
+        return scope_guard([this, host, saved]() mutable {
+            for (const auto& m: saved) {
+                bmmo_physics_body_state state{};
+                if (platform_.body_state(m.entity, state)) continue;
+                float current[16];   // gap P: no write of the value it has
+                if (platform_.entity_matrix(m.entity, current) && std::memcmp(current, m.matrix, sizeof(current)) == 0)
+                    continue;
+                platform_.set_entity_matrix(m.entity, m.matrix);
+            }
+            host.reset();
+        });
+    }
+
+    // The core's half of rollback_world::restore_lives for the own ball
+    // (2.3.4 "Revive", "Own events inside the window"), before the mirrors'.
+    //
+    // Per own life alive at `anchor` (A) that ends inside (A, now]:
+    //   its logged death D (own_deaths_: that entity and generation);
+    //   a later life of the same name with a body now (a respawn of that
+    //   ball in the window) is taken out (unmake_own, muted) and remade at
+    //   its birth stamp E (answered remade_at = E);
+    //   the A-life is made (make_own, muted) at the A record's pose, with
+    //   the ball table's recipe in the own group, no kick, with_replica;
+    //   its death is queued at D with its matrix (answered revived_until =
+    //   D).  The pre-rewind matrix is the core's scope's (keep_live_cells).
+    // Then per own life born AND ended inside the window (no body now, no
+    // record at A: L-U9): remade at its stamp and removed at its death.
+    // Own births in the window whose life is alive now and whose name was
+    // not revived stay on the parking path, as before.
+    // Generations are not touched: the replay re-captures its records with
+    // the live records' generations, and the muted changes bump nothing.
+    void session_client_core::reconcile_own_lives(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended,
+                                                  std::map<std::string, life_outcome>& out) {
+        if (!caps_.own_body_in_replay || s.resync_restoring_) return;
+        const auto stamp_in = [](uint32_t stamp, uint32_t after, uint32_t upto) {
+            return static_cast<int32_t>(stamp - after) > 0 && static_cast<int32_t>(stamp - upto) <= 0;
+        };
+        const auto fail = [this](const std::string& name, const std::string& why) {
+            ++s.own_revive_failures_;
+            if (s.own_revive_failures_ <= 8)
+                logf("lives: own %s not revived: %s (%llu so far)", name.c_str(), why.c_str(),
+                     static_cast<unsigned long long>(s.own_revive_failures_));
+        };
+        // The first logged death of `entity`'s life `generation` after `after`.
+        const auto death_of = [&](const std::string& entity, uint32_t generation, uint32_t after)
+                -> const client_core_state::own_death* {
+            const client_core_state::own_death* found = nullptr;
+            for (const auto& d: s.own_deaths_)
+                if (d.entity == entity && d.generation == generation && stamp_in(d.tick, after, now)
+                        && (!found || static_cast<int32_t>(d.tick - found->tick) < 0))
+                    found = &d;
+            return found;
+        };
+        const auto queue_death = [this](const client_core_state::own_death& d) {
+            client_core_state::own_due due;
+            due.tick = d.tick;
+            due.death = true;
+            due.entity = d.entity;
+            std::copy(std::begin(d.matrix), std::end(d.matrix), due.matrix);
+            if (!d.has_matrix) {
+                // No matrix read (a host without entity_matrix): the record's
+                // pose before the death stands in (the scope puts the live
+                // one back at the end).
+                bmmo_physics_body_state state{};
+                if (s.rollback_.recorded_body_state(d.entity, d.tick - 1, state)) {
+                    float rotation[9];
+                    quaternion_rows(state.rotation, rotation);
+                    for (int r = 0; r < 3; ++r)
+                        for (int k = 0; k < 3; ++k) due.matrix[r * 4 + k] = rotation[r * 3 + k];
+                    for (int k = 0; k < 3; ++k) due.matrix[12 + k] = static_cast<float>(state.position[k]);
+                    due.matrix[15] = 1.0f;
+                }
+            }
+            s.own_due_.push_back(std::move(due));
+        };
+        const auto queue_remake = [this](const own_life& life) {
+            client_core_state::own_due due;
+            due.tick = life.applied;
+            due.entity = life.entity;
+            due.life = life;
+            s.own_due_.push_back(std::move(due));
+        };
+        // The newest own birth of `entity` made at its stamp in (after, now].
+        // A moved birth is not one: rollback_world calls restore_lives
+        // BEFORE destroy_body, so a moved own birth (own_body_control only,
+        // the headless client) still has its body here, and the moved path
+        // (destroy_moved_own_birth, then its re-make at the server's tick)
+        // owns it.  Such a life fails below ("its body now was not born
+        // after its death"), counted in olives' failed, and keeps today's
+        // behaviour (not revived); L-H4 covers it.
+        const auto birth_of = [&](const std::string& entity, uint32_t after) -> const own_life* {
+            const own_life* found = nullptr;
+            for (const auto& life: s.own_life_)
+                if (life.what == own_life::kind::birth && life.made && !life.moved() && life.entity == entity
+                        && stamp_in(life.applied, after, now)
+                        && (!found || static_cast<int32_t>(life.applied - found->applied) > 0))
+                    found = &life;
+            return found;
+        };
+        for (const ended_life& life: ended) {
+            if (life.kind != life_kind::own || out.count(life.name)) continue;
+            const auto* death = death_of(life.name, life.generation, anchor);
+            if (!death) {
+                fail(life.name, "no own death of generation " + std::to_string(life.generation) + " logged in ("
+                                    + std::to_string(anchor) + ", " + std::to_string(now) + "]");
+                continue;
+            }
+            bmmo_physics_body_state state{};
+            if (!s.rollback_.recorded_body_state(life.name, anchor, state)) {
+                fail(life.name, "no body in the record of tick " + std::to_string(anchor));
+                continue;
+            }
+            bmmo_physics_body_state there{};
+            const bool body_now = platform_.body_state(life.name, there);
+            const own_life* later = body_now ? birth_of(life.name, death->tick) : nullptr;
+            if (body_now && !later) {
+                fail(life.name, "its body now was not born after its death at tick " + std::to_string(death->tick));
+                continue;
+            }
+            const own_life later_copy = later ? *later : own_life{};
+            const client_core_state::own_death death_copy = *death;
+            if (later) {
+                // The same-name step: the later life out, remade at E.
+                std::string error;
+                bool ok = false;
+                {
+                    const event_log_mute mute(*this);
+                    ok = platform_.unmake_own(life.name, later_copy.position, later_copy.rotation, anchor, false, error);
+                }
+                if (!ok) {
+                    fail(life.name, "its later life could not be taken out: " + error);
+                    continue;
+                }
+            }
+            own_body_spec spec;
+            spec.entity = life.name;
+            for (int k = 0; k < 3; ++k) spec.position[k] = static_cast<float>(state.position[k]);
+            quaternion_rows(state.rotation, spec.rotation);
+            bmmo::session::ball_recipe recipe;
+            platform_.ball_recipe_of(life.name, recipe);
+            spec.recipe = to_bridge_recipe(recipe);
+            spec.group = s.own_group_;
+            spec.tick = anchor;
+            spec.with_replica = true;
+            own_body_made made;
+            {
+                const event_log_mute mute(*this);
+                made = platform_.make_own(spec);
+            }
+            s.mechanism_tracking_.mark_dirty();
+            if (made.took_out_failed)
+                logf("lives: own %s at the restore of tick %u: unphysicalize: %s", life.name.c_str(), anchor,
+                     made.took_out_error.c_str());
+            if (!made.found || !made.made) {
+                fail(life.name, made.found ? "make_own: " + made.error : std::string("no 3D entity of that name"));
+                if (later) {
+                    // The later life still comes back at its stamp.
+                    queue_remake(later_copy);
+                    out[life.name].remade_at = later_copy.applied;
+                    ++s.own_window_remakes_;
+                }
+                continue;
+            }
+            ++s.own_revives_;
+            queue_death(death_copy);
+            out[life.name].revived_until = death_copy.tick;
+            if (later) {
+                queue_remake(later_copy);
+                out[life.name].remade_at = later_copy.applied;
+                ++s.own_window_remakes_;
+            }
+            if (s.own_revives_ <= 16) {
+                const std::string remade = later ? ", its later life remade at tick " + std::to_string(later_copy.applied)
+                                                 : std::string();
+                logf("lives: own %s (alive at tick %u, generation %u) revived until tick %u%s%s", life.name.c_str(), anchor,
+                     life.generation, death_copy.tick, remade.c_str(),
+                     death_copy.has_matrix ? "" : " (no death matrix: the record's pose)");
+            }
+        }
+        // Own lives born and ended inside the window (no body now).
+        for (const auto& life: s.own_life_) {
+            if (life.what != own_life::kind::birth || !life.made || life.moved() || out.count(life.entity)) continue;
+            if (!stamp_in(life.applied, anchor, now)) continue;
+            const auto* death = death_of(life.entity, life.generation, life.applied);
+            if (!death) continue;   // alive now: parked, as before
+            bmmo_physics_body_state there{};
+            if (platform_.body_state(life.entity, there)) continue;   // a later life of the name lives: left as before
+            const own_life copy = life;
+            const client_core_state::own_death death_copy = *death;
+            queue_remake(copy);
+            queue_death(death_copy);
+            out[copy.entity].remade_at = copy.applied;
+            ++s.own_window_remakes_;
+            logf("lives: own %s born at tick %u and dead at tick %u inside (%u, %u]: remade and removed in the replay",
+                 copy.entity.c_str(), copy.applied, death_copy.tick, anchor, now);
+        }
+        // The queue in tick order (a death before a birth of one tick).
+        std::stable_sort(s.own_due_.begin(), s.own_due_.end(),
+                         [](const client_core_state::own_due& a, const client_core_state::own_due& b) {
+                             if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
+                             return a.death && !b.death;
+                         });
+    }
+
+    // The own changes queued for a replayed `tick` (the end of
+    // drain_pending_lives): a revived life's death with its matrix, muted,
+    // the navigation left as the live death left it; a window life made
+    // the way the server makes it (remake_own_body).
+    void session_client_core::apply_own_due(uint32_t tick) {
+        if (s.own_due_.empty()) return;
+        std::vector<client_core_state::own_due> due;
+        for (auto it = s.own_due_.begin(); it != s.own_due_.end();)
+            if (it->tick == tick) {
+                due.push_back(std::move(*it));
+                it = s.own_due_.erase(it);
+            } else ++it;
+        for (const auto& d: due) {
+            if (d.death) {
+                float position[3], rotation[9];
+                pose_of_matrix(d.matrix, position, rotation);
+                std::string error;
+                bool ok = false;
+                {
+                    const event_log_mute mute(*this);
+                    ok = platform_.unmake_own(d.entity, position, rotation, tick, true, error);
+                }
+                s.mechanism_tracking_.mark_dirty();
+                if (!ok) logf("lives: own %s: the replayed death at tick %u: %s", d.entity.c_str(), tick, error.c_str());
+            } else {
+                remake_own_body(d.life, tick, "replay (window life)");
+            }
+        }
+    }
+
+    // What no replay applied (it stopped before the tick): made live now,
+    // so the world keeps the body set it had before the rewind.
+    void session_client_core::settle_own_due() {
+        if (s.own_due_.empty()) return;
+        std::vector<client_core_state::own_due> due;
+        due.swap(s.own_due_);
+        for (const auto& d: due) {
+            ++s.own_due_settled_;
+            logf("lives: own %s %s queued for tick %u was not replayed: applied live", d.entity.c_str(),
+                 d.death ? "death" : "birth", d.tick);
+            if (d.death) {
+                float position[3], rotation[9];
+                pose_of_matrix(d.matrix, position, rotation);
+                std::string error;
+                const event_log_mute mute(*this);
+                platform_.unmake_own(d.entity, position, rotation, current_tick(), true, error);
+            } else {
+                remake_own_body(d.life, current_tick(), "settled live");
+            }
+            s.mechanism_tracking_.mark_dirty();
+        }
+    }
+
+
     // ======================================================= own lives (E7)
     // Moved from the headless client (session_client.cpp at f2227b0): the
     // own ball's body changes the history keeps (struct own_life), the beam,
@@ -1359,7 +1747,17 @@ namespace bmmo::session {
     // generation) ended it, and a replay that made its body again would
     // put back a body the live run no longer has, with nothing in the
     // replay to take it out again.
-    bool session_client_core::own_life_current(const own_life& life) const {
+    //
+    // Step EL8 (rollback-engine gaps design 2.3.4, review 1 #5): a replayed
+    // tick asks the world the change acts on - the generation of the entity
+    // in the live record of tick - 1 (a replay re-captures its records with
+    // the live records' generations) - not the live generation, which a
+    // death after the change has bumped already: a beam inside a life that
+    // dies later in the same window is applied in the replay.  Without a
+    // record of tick - 1, the live generation, as before.
+    bool session_client_core::own_life_current(const own_life& life, uint32_t tick, bool live) const {
+        uint32_t recorded = 0;
+        if (!live && s.rollback_.generation_at(life.entity, tick - 1, recorded)) return recorded == life.generation;
         const auto generation = s.generations_.find(life.entity);
         return (generation == s.generations_.end() ? 0u : generation->second) == life.generation;
     }
@@ -1375,7 +1773,7 @@ namespace bmmo::session {
         bool ok = false;
         {
             const event_log_mute mute(*this);
-            ok = platform_.unmake_own(life.entity, life.position, life.rotation, tick, error);
+            ok = platform_.unmake_own(life.entity, life.position, life.rotation, tick, false, error);
         }
         s.mechanism_tracking_.mark_dirty();
         if (!ok && s.own_lives_applied_ < 16)
@@ -1458,12 +1856,23 @@ namespace bmmo::session {
                                  && (live ? !life.origin_live : life.origin_live);
             const bool remake_due = life.moved() && life.applied == tick && (!live || !life.applied_live);
             if (!beam_stamp && !remake_due) continue;
-            if (!own_life_current(life)) {
+            if (!own_life_current(life, tick, live)) {
                 const auto generation = s.generations_.find(life.entity);
-                logf("own %s stamped %u retired at tick %u (%s): %s has had another life since (generation %u -> %u)",
-                     life.what == own_life::kind::beam ? "beam" : "birth", life.origin, tick, where,
-                     life.entity.c_str(), life.generation, generation == s.generations_.end() ? 0u : generation->second);
-                life.retired = true;
+                // Step EL8: a replay never retires (only the live frames
+                // do, live_own_lives / retire_own_lives): the next replay
+                // may revive the life it belongs to.
+                if (live) {
+                    logf("own %s stamped %u retired at tick %u (%s): %s has had another life since (generation %u -> %u)",
+                         life.what == own_life::kind::beam ? "beam" : "birth", life.origin, tick, where,
+                         life.entity.c_str(), life.generation, generation == s.generations_.end() ? 0u : generation->second);
+                    life.retired = true;
+                } else if (s.own_lives_applied_ < 16) {
+                    uint32_t recorded = 0;
+                    s.rollback_.generation_at(life.entity, tick - 1, recorded);
+                    logf("own %s stamped %u not applied at tick %u (%s): %s is in another life there (generation %u, the "
+                         "record of tick %u: %u)", life.what == own_life::kind::beam ? "beam" : "birth", life.origin, tick,
+                         where, life.entity.c_str(), life.generation, tick - 1, recorded);
+                }
                 continue;
             }
             if (beam_stamp) {
@@ -1552,6 +1961,7 @@ namespace bmmo::session {
             const uint32_t last = life.moved() ? life.applied : life.origin;
             return done && !s.rollback_.knows_tick(last - 1);
         }), s.own_life_.end());
+        retire_own_deaths();
     }
 
     // A resync renumbers onto the server's tick and its full snapshot
@@ -1561,6 +1971,7 @@ namespace bmmo::session {
     // A birth still unanswered is set aside (own_unanswered_): its echo,
     // when it comes, is not one a record of the new numbering can take.
     void session_client_core::rebase_own_lives() {
+        clear_own_window_state();
         set_aside_unanswered(own_life::aside::resync);
         s.own_life_.erase(std::remove_if(s.own_life_.begin(), s.own_life_.end(), [this](own_life& life) {
             if (life.what != own_life::kind::beam || static_cast<int32_t>(life.origin - s.tick_base_) < 0) return true;
@@ -1603,7 +2014,7 @@ namespace bmmo::session {
                                                                            uint32_t birth_tick) const {
         for (const auto& life: s.own_life_)
             if (!life.retired && life.moved() && life.entity == entity && life.applied == birth_tick
-                    && own_life_current(life))
+                    && own_life_current(life, current_tick(), true))
                 return &life;
         return nullptr;
     }
@@ -1894,7 +2305,7 @@ namespace bmmo::session {
         const char* what = life.what == own_life::kind::beam ? "beam" : "birth";
         const std::string head = std::string("own ") + what + " moved " + std::to_string(life.origin) + " -> "
                                + (made ? std::to_string(applied) : std::string("never"));
-        if (life.what == own_life::kind::birth && own_life_current(life)) {
+        if (life.what == own_life::kind::birth && own_life_current(life, now, true)) {
             if (!caps_.own_body_control) {
                 if (!made && life.state != own_life::verdict::superseded) re_report_own_birth(life, now);
             } else {
@@ -1992,7 +2403,7 @@ namespace bmmo::session {
             resync_own_life(life, made, applied, "past the reach (depth " + std::to_string(static_cast<int>(now - anchor)) + ")");
             return;
         }
-        const bool alive = own_life_current(life);
+        const bool alive = own_life_current(life, now, true);
         if (made && !alive) {
             resync_own_life(life, made, applied, "its life has ended since (plan step 22)");
             return;

@@ -74,7 +74,7 @@ namespace bmmo::session {
         auto input_at = [this](const std::string& name, uint32_t tick, bmmo::session::input_frame& out) {
             return recorded_input_at(name, tick, out);
         };
-        const scope_guard keep_cells = platform_.keep_live_cells(*this);
+        const scope_guard keep_cells = keep_live_cells();
         const std::string reason = own ? "own input substituted at tick " + std::to_string(anchor)
                                        : entity + " input corrected at tick " + std::to_string(anchor);
         if (has_own) s.own_replay_pacer_.ran();
@@ -134,7 +134,7 @@ namespace bmmo::session {
             return recorded_input_at(name, tick, out);
         };
         const uint32_t anchor = now - depth;
-        forced_rewind result{false, platform_.keep_live_cells(*this)};
+        forced_rewind result{false, keep_live_cells()};
         // Deeper than max_resim_ticks only up to the resync reach, the depth
         // an exact resync re-steps (step A4: the retail 80-tick re-step
         // timing of resync design 9 Q2); a depth within max_resim_ticks is
@@ -327,7 +327,7 @@ namespace bmmo::session {
                 reason += " " + std::to_string(l.sector) + (l.moved ? " moved " + std::to_string(l.tick) + "->" + std::to_string(l.applied)
                                                                     : " stamped " + std::to_string(l.tick) + " (late)");
             {
-                const scope_guard keep_cells = platform_.keep_live_cells(*this);
+                const scope_guard keep_cells = keep_live_cells();
                 rd.active = true;
                 const bool rolled = rewind_world(anchor, now, input_at, reason);
                 rd.active = false;
@@ -723,6 +723,14 @@ namespace bmmo::session {
                 // The body behind a tracked name changed: a new lifetime for
                 // it, and the mechanism registry has to ask the world again.
                 if (!name.empty()) {
+                    // Step EL8 (gap L, L3): an own entity's body gone - the
+                    // own ball's death, or a trafo's old ball - logged with
+                    // the life's generation and its matrix after this frame.
+                    if (event.what == body_event::kind::deleted
+                            && (name == ball_name || s.own_ball_entities_.count(name) != 0)) {
+                        const auto generation = s.generations_.find(name);
+                        note_own_death(name, tick, generation == s.generations_.end() ? 0u : generation->second);
+                    }
                     ++s.generations_[name];
                     s.mechanism_tracking_.mark_dirty();
                 }
@@ -849,6 +857,7 @@ namespace bmmo::session {
             while (!s.union_records_.empty() && static_cast<int32_t>(s.union_records_.rbegin()->first - tick) >= 0)
                 s.union_records_.erase(std::prev(s.union_records_.end()));
             s.union_records_[tick] = s.sectors_.state();
+            record_own_matrices(tick);   // step EL8 (design 9.7 (a))
             {
                 const uint32_t keep = static_cast<uint32_t>(s.rollback_.thresholds().history_ticks);
                 while (!s.union_records_.empty()

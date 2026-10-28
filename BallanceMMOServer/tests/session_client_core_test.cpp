@@ -48,6 +48,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <tuple>
 #include <chrono>
 #include <cstdint>
@@ -120,6 +121,8 @@ namespace bmmo::session {
         BMMO_CORE_STEP(apply_trafo_inputs)
         BMMO_CORE_STEP(retire_trafo)
         BMMO_CORE_STEP(reconcile_trafo)
+        BMMO_CORE_STEP(note_own_death)
+        BMMO_CORE_STEP(keep_live_cells)
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -272,8 +275,8 @@ namespace {
                 made.kicked = spec.kick;
                 return made;
             };
-            p.unmake_own = [this](const std::string& entity, const float*, const float*, uint32_t tick, std::string&) {
-                calls.push_back("unmake_own:" + entity + ":" + std::to_string(tick));
+            p.unmake_own = [this](const std::string& entity, const float*, const float*, uint32_t tick, bool death, std::string&) {
+                calls.push_back("unmake_own:" + entity + ":" + std::to_string(tick) + (death ? ":death" : ""));
                 return true;
             };
             // The sectors' (E8).
@@ -3006,6 +3009,306 @@ namespace {
         for (const auto& e: s.life_log_) left.emplace_back(e.player, e.applied);
         EXPECT_EQ(left, (std::vector<std::pair<uint32_t, uint32_t>>{{4, old_tick}, {5, old_tick + 5}, {5, old_tick + 6}, {6, late}}));
         EXPECT_EQ(s.life_log_[0].birth.tick, old_tick) << "the Physicalize as it came";
+    }
+
+    // ---- gap L, L3: the own ball (rollback-engine gaps design 2.3.4, 9.7;
+    // step EL8) ----
+
+    // The matrices the fake's entity_matrix / set_entity_matrix read and
+    // write, by entity, with the calls logged.
+    struct own_matrices {
+        std::map<std::string, std::array<float, 16>> m;
+        void install(session_platform& p, std::vector<std::string>& calls) {
+            p.entity_matrix = [this, &calls](const std::string& entity, float out[16]) {
+                calls.push_back("entity_matrix:" + entity);
+                const auto it = m.find(entity);
+                if (it == m.end()) return false;
+                std::copy(it->second.begin(), it->second.end(), out);
+                return true;
+            };
+            p.set_entity_matrix = [this, &calls](const std::string& entity, const float in[16]) {
+                calls.push_back("set_entity_matrix:" + entity + ":" + std::to_string(in[12]));
+                std::copy(in, in + 16, m[entity].begin());
+                return true;
+            };
+        }
+        static std::array<float, 16> at(float x) {
+            std::array<float, 16> a{};
+            a[0] = a[5] = a[10] = a[15] = 1.0f;
+            a[12] = x;
+            return a;
+        }
+    };
+
+    // Records of the own ball `entity` over [from, to]: tracked as the own
+    // entity with a body at x, or (alive = false) bodiless; `generation`.
+    void own_span(session_client_core& core, uint32_t from, uint32_t to, const std::string& entity, bool alive, double x,
+                  uint32_t generation) {
+        for (uint32_t t = from; t <= to; ++t) {
+            bmmo::session::rollback_tracked tracked;
+            if (alive) tracked.own_entity = entity;
+            tracked.generations[entity] = generation;
+            bmmo::session::rollback_world world;
+            world.get_body = [entity, alive, x](const std::string& name, bmmo_physics_body_state& out) {
+                if (!alive || name != entity) return false;
+                out = bmmo_physics_body_state{};
+                out.movable = out.simulated = true;
+                out.position[0] = x;
+                out.rotation[3] = 1.0;
+                return true;
+            };
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            state_of(core).rollback_.record(world, t, tracked, {});
+        }
+    }
+
+    session_capabilities own_replay_caps() {
+        session_capabilities caps;
+        caps.own_body_in_replay = true;
+        return caps;
+    }
+
+    // L-U6: Ball_Wood alive at A = 110 (generation 1) dies at D = 115 (the
+    // drain logged it with its matrix); now 125, no body.  The own half
+    // revives it at the A record's pose through make_own (the own group, no
+    // kick, with the replica), answers revived until 115 and removes it in
+    // the replay's drain of 115 with the death's matrix (a replayed death).
+    // The core's scope puts the bodiless entity's pre-rewind matrix back.
+    // Without own_body_in_replay nothing is made and nothing answered (the
+    // engine counts the life unrevivable).
+    TEST(SessionClientCoreLives, AnOwnDeathInTheWindowIsRevivedAndRemovedAtItsTick) {
+        flow_fake fake;
+        own_matrices matrices;
+        session_platform platform = fake.make_flow();
+        matrices.install(platform, fake.calls);
+        std::vector<float> unmade_x;
+        platform.unmake_own = [&fake, &unmade_x](const std::string& entity, const float* position, const float*, uint32_t tick,
+                                                 bool death, std::string&) {
+            fake.calls.push_back("unmake_own:" + entity + ":" + std::to_string(tick) + (death ? ":death" : ""));
+            unmade_x.push_back(position[0]);
+            return true;
+        };
+        session_client_core core(std::move(platform), own_replay_caps());
+        run_to_tick_125(core, fake);
+        core.config.rollback = true;
+        auto& s = state_of(core);
+        const std::string wood = "Ball_Wood";
+        s.own_ball_entities_ = {wood};
+        s.own_body_entity_.clear();
+        s.generations_ = {{wood, 2}};
+        own_span(core, 110, 114, wood, true, 7.0, 1);
+        own_span(core, 115, 125, wood, false, 0.0, 2);
+        matrices.m[wood] = own_matrices::at(31.0f);   // after frame 115: the death sequence's
+        steps{core}.note_own_death(wood, 115, 1);
+        ASSERT_EQ(s.own_deaths_.size(), 1u);
+        EXPECT_TRUE(s.own_deaths_[0].has_matrix);
+        EXPECT_EQ(s.own_deaths_[0].matrix[12], 31.0f) << "the matrix after frame D";
+        EXPECT_EQ(s.own_deaths_[0].generation, 1u);
+        matrices.m[wood] = own_matrices::at(-20.0f);   // live, by now: the resetpoint
+
+        bmmo::session::scope_guard scope = steps{core}.keep_live_cells();
+        std::map<std::string, bmmo::session::life_outcome> out;
+        size_t from = fake.calls.size();
+        steps{core}.world_hooks().restore_lives(110, 125, {{wood, 1, 115, 0, bmmo::session::life_kind::own}}, true, out);
+        {
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "make_own:" + wood + ":" + s.own_group_ + ":110"), 1u);
+            EXPECT_EQ(count_prefix(calls, "unmake_own:"), 0u) << "no later life to take out";
+        }
+        ASSERT_EQ(fake.own_specs.size(), 1u);
+        EXPECT_EQ(fake.own_specs[0].position[0], 7.0f) << "the A record's pose";
+        EXPECT_FALSE(fake.own_specs[0].kick) << "no kick at a revive";
+        EXPECT_TRUE(fake.own_specs[0].with_replica);
+        EXPECT_EQ(out[wood].revived_until, 115u);
+        EXPECT_EQ(out[wood].remade_at, 0u);
+        EXPECT_EQ(s.own_revives_, 1u);
+        EXPECT_EQ(s.generations_.at(wood), 2u) << "untouched: the records carry the generations";
+        from = fake.calls.size();
+        for (uint32_t t = 111; t <= 125; ++t) steps{core}.drain_pending_lives(t);
+        {
+            const auto calls = since(fake.calls, from);
+            const std::vector<std::string> death = {"mute_event_log:on", "unmake_own:" + wood + ":115:death",
+                                                    "mute_event_log:off"};
+            const auto at = std::search(calls.begin(), calls.end(), death.begin(), death.end());
+            EXPECT_NE(at, calls.end()) << "the death replayed at 115, muted";
+            EXPECT_EQ(count_prefix(calls, "unmake_own:"), 1u);
+        }
+        ASSERT_EQ(unmade_x.size(), 1u);
+        EXPECT_EQ(unmade_x[0], 31.0f) << "at the death's matrix";
+        EXPECT_TRUE(s.own_due_.empty());
+        // The replay moved the bodiless entity; the scope puts it back.
+        matrices.m[wood] = own_matrices::at(5.0f);
+        from = fake.calls.size();
+        { bmmo::session::scope_guard done = std::move(scope); }
+        {
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "set_entity_matrix:" + wood), 1u);
+        }
+        EXPECT_EQ(matrices.m[wood][12], -20.0f) << "the pre-rewind matrix";
+
+        // Without the capability: nothing made, nothing answered.
+        flow_fake plain;
+        session_platform p2 = plain.make_flow();
+        session_client_core core2(std::move(p2), session_capabilities{});
+        run_to_tick_125(core2, plain);
+        core2.config.rollback = true;
+        state_of(core2).own_ball_entities_ = {wood};
+        own_span(core2, 110, 114, wood, true, 7.0, 1);
+        own_span(core2, 115, 125, wood, false, 0.0, 2);
+        steps{core2}.note_own_death(wood, 115, 1);
+        std::map<std::string, bmmo::session::life_outcome> out2;
+        from = plain.calls.size();
+        steps{core2}.world_hooks().restore_lives(110, 125, {{wood, 1, 115, 0, bmmo::session::life_kind::own}}, true, out2);
+        EXPECT_EQ(count_prefix(since(plain.calls, from), "make_own:"), 0u);
+        EXPECT_TRUE(out2.empty()) << "unanswered: the engine counts it unrevivable";
+    }
+
+    // L-U7 (H): the same name born again in the window - Ball_Wood alive at
+    // A = 110 dies at 115 and is born again at E = 118 (alive now).  The
+    // later life is taken out at the restore (not a replayed death), the
+    // A-life revived until 115, and the later life remade at 118 by
+    // remake_own_body (its Physicalize's pose and recipe, the spawn kick of
+    // 118), after the death of 115.
+    TEST(SessionClientCoreLives, AnOwnSameNameRebirthIsTakenOutAndRemadeAtItsStamp) {
+        flow_fake fake;
+        own_matrices matrices;
+        session_platform platform = fake.make_flow();
+        matrices.install(platform, fake.calls);
+        session_client_core core(std::move(platform), own_replay_caps());
+        run_to_tick_125(core, fake);
+        core.config.rollback = true;
+        auto& s = state_of(core);
+        const std::string wood = "Ball_Wood";
+        s.own_ball_entities_ = {wood};
+        s.own_body_entity_ = wood;
+        s.generations_ = {{wood, 3}};
+        fake.bodies_there = {wood};
+        own_span(core, 110, 114, wood, true, 7.0, 1);
+        own_span(core, 115, 117, wood, false, 0.0, 2);
+        own_span(core, 118, 125, wood, true, 40.0, 3);
+        steps{core}.note_own_death(wood, 115, 1);
+        client_core_state::own_life birth;
+        birth.what = client_core_state::own_life::kind::birth;
+        birth.origin = birth.applied = 118;
+        birth.entity = wood;
+        birth.generation = 3;
+        birth.position[0] = 40.0f;
+        birth.recipe.mass = 2.0f;
+        birth.group = s.own_group_;
+        birth.spawn = true;
+        birth.origin_live = birth.applied_live = true;
+        s.own_life_.push_back(birth);
+
+        std::map<std::string, bmmo::session::life_outcome> out;
+        size_t from = fake.calls.size();
+        steps{core}.world_hooks().restore_lives(110, 125, {{wood, 1, 115, 118, bmmo::session::life_kind::own}}, true, out);
+        {
+            const auto calls = since(fake.calls, from);
+            const auto out_at = std::find(calls.begin(), calls.end(), "unmake_own:" + wood + ":110");
+            const auto made_at = std::find_if(calls.begin(), calls.end(),
+                                              [](const std::string& c) { return c.rfind("make_own:", 0) == 0; });
+            ASSERT_NE(out_at, calls.end()) << "the later life taken out at the restore (no replayed death)";
+            ASSERT_NE(made_at, calls.end());
+            EXPECT_LT(out_at - calls.begin(), made_at - calls.begin()) << "taken out before the revive";
+        }
+        EXPECT_EQ(out[wood].revived_until, 115u);
+        EXPECT_EQ(out[wood].remade_at, 118u);
+        EXPECT_EQ(s.own_window_remakes_, 1u);
+        ASSERT_EQ(s.own_due_.size(), 2u);
+        EXPECT_TRUE(s.own_due_[0].death);
+        EXPECT_EQ(s.own_due_[0].tick, 115u);
+        EXPECT_FALSE(s.own_due_[1].death);
+        EXPECT_EQ(s.own_due_[1].tick, 118u);
+        from = fake.calls.size();
+        for (uint32_t t = 111; t <= 125; ++t) steps{core}.drain_pending_lives(t);
+        {
+            const auto calls = since(fake.calls, from);
+            const auto death = std::find(calls.begin(), calls.end(), "unmake_own:" + wood + ":115:death");
+            const auto remake = std::find_if(calls.begin(), calls.end(),
+                                             [&wood](const std::string& c) { return c.rfind("make_own:" + wood, 0) == 0; });
+            ASSERT_NE(death, calls.end());
+            ASSERT_NE(remake, calls.end());
+            EXPECT_LT(death - calls.begin(), remake - calls.begin());
+        }
+        ASSERT_EQ(fake.own_specs.size(), 2u);
+        EXPECT_EQ(fake.own_specs[1].tick, 118u);
+        EXPECT_EQ(fake.own_specs[1].position[0], 40.0f) << "its Physicalize's pose";
+        EXPECT_TRUE(fake.own_specs[1].kick) << "the spawn kick of its stamp";
+        EXPECT_FALSE(fake.own_specs[1].with_replica);
+        EXPECT_TRUE(s.own_due_.empty());
+    }
+
+    // L-U9 (own half): an own life born at 117 and dead at 121, both inside
+    // the window of A = 110 (no record of it at A, no body now): remade at
+    // 117 and removed at 121 in the replay, answered remade_at = 117.
+    TEST(SessionClientCoreLives, AnOwnLifeInsideTheWindowIsMadeAndRemoved) {
+        flow_fake fake;
+        own_matrices matrices;
+        session_platform platform = fake.make_flow();
+        matrices.install(platform, fake.calls);
+        session_client_core core(std::move(platform), own_replay_caps());
+        run_to_tick_125(core, fake);
+        core.config.rollback = true;
+        auto& s = state_of(core);
+        const std::string paper = "Ball_Paper";
+        s.own_ball_entities_ = {paper};
+        own_span(core, 110, 116, paper, false, 0.0, 0);
+        own_span(core, 117, 120, paper, true, 3.0, 1);
+        own_span(core, 121, 125, paper, false, 0.0, 2);
+        client_core_state::own_life birth;
+        birth.what = client_core_state::own_life::kind::birth;
+        birth.origin = birth.applied = 117;
+        birth.entity = paper;
+        birth.generation = 1;
+        birth.origin_live = birth.applied_live = true;
+        s.own_life_.push_back(birth);
+        steps{core}.note_own_death(paper, 121, 1);
+        std::map<std::string, bmmo::session::life_outcome> out;
+        steps{core}.world_hooks().restore_lives(110, 125, {}, true, out);
+        EXPECT_EQ(out[paper].remade_at, 117u);
+        EXPECT_EQ(out[paper].revived_until, 0u);
+        size_t from = fake.calls.size();
+        for (uint32_t t = 111; t <= 125; ++t) steps{core}.drain_pending_lives(t);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(count_prefix(calls, "make_own:" + paper), 1u);
+        EXPECT_EQ(count_prefix(calls, "unmake_own:" + paper + ":121:death"), 1u);
+        EXPECT_TRUE(s.own_due_.empty());
+    }
+
+    // L-U11: a beam stamped T = 115 inside a life that dies at 117, the
+    // window over both (the live generation is the dead life's).  A replay
+    // applies the beam at 115 (the record of 114 is its life's) and never
+    // retires it; a replay in which the record of 114 names another life
+    // skips it, still without retiring; only a live frame retires.
+    TEST(SessionClientCoreLives, ABeamInsideALifeThatDiesLaterIsAppliedInTheReplay) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        core.config.rollback = true;
+        auto& s = state_of(core);
+        const std::string wood = "Ball_Wood";
+        s.generations_ = {{wood, 2}};   // the death at 117 bumped it
+        own_span(core, 110, 116, wood, true, 7.0, 1);
+        own_span(core, 117, 125, wood, false, 0.0, 2);
+        client_core_state::own_life beam;
+        beam.what = client_core_state::own_life::kind::beam;
+        beam.origin = beam.applied = 115;
+        beam.entity = wood;
+        beam.generation = 1;
+        beam.position[0] = 12.0f;
+        beam.origin_live = beam.applied_live = true;
+        s.own_life_.push_back(beam);
+        size_t from = fake.calls.size();
+        steps{core}.drain_pending_lives(115);
+        EXPECT_EQ(count_prefix(since(fake.calls, from), "write_body:" + wood + ":12"), 1u) << "applied in the replay";
+        ASSERT_EQ(s.own_life_.size(), 1u);
+        EXPECT_FALSE(s.own_life_[0].retired) << "a replay never retires";
+        // A life the record of 114 does not have: not applied, not retired.
+        s.own_life_[0].generation = 5;
+        from = fake.calls.size();
+        steps{core}.drain_pending_lives(115);
+        EXPECT_EQ(count_prefix(since(fake.calls, from), "write_body:"), 0u);
+        EXPECT_FALSE(s.own_life_[0].retired);
     }
 
     // A late birth inside the history is deferred into the replay of its

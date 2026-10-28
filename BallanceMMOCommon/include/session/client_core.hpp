@@ -609,6 +609,51 @@ namespace bmmo::session {
         // another (a later life the reconcile takes out and the replay
         // makes again from its inputs).
         std::set<std::string> mirror_entities_;
+        // ---- gap L, L3: the own ball (rollback-engine gaps design 2.3.4,
+        // 9.7; step EL8) ----
+        // An own entity's body removed live (the drain's "deleted" entry of
+        // an own ball entity: a death, or the old ball of a trafo): its tick
+        // D, the life's generation (before the bump) and the entity's CK
+        // world matrix after frame D.  Kept while a rewind can be anchored
+        // before it, as the other own records.  (Adapted: a list of its own,
+        // not a third own_life kind - the echo matching scans own_life_ by
+        // origin and verdict and would take a death for a birth.)
+        struct own_death {
+            uint32_t tick = 0;
+            std::string entity;
+            uint32_t generation = 0;
+            float matrix[16] = {};
+            bool has_matrix = false;
+        };
+        std::vector<own_death> own_deaths_;
+        // What the own reconcile queued into the replay, applied at the end
+        // of drain_pending_lives(tick): a revived life's death (its matrix)
+        // or a window life's birth remade at its stamp.
+        struct own_due {
+            uint32_t tick = 0;
+            bool death = false;
+            std::string entity;
+            float matrix[16] = {};
+            own_life life;   // the birth (death = false)
+        };
+        std::vector<own_due> own_due_;
+        // Design 9.7 (a): each live tick's CK world matrix of every own
+        // entity without a body after that frame (the death sequence and the
+        // trafo animation move it, scripts no replay runs), written before
+        // each replayed tick's scripts from that same tick's record (the
+        // movers run before the modules that read it; step EL8's gate).
+        struct own_matrix {
+            std::string entity;
+            float matrix[16] = {};
+        };
+        std::map<uint32_t, std::vector<own_matrix>> own_matrices_;
+        // olives=revived/failed/remade/settled/matrices: own lives revived
+        // at a restore, those that could not be (no logged death, no record,
+        // a refused make), window lives remade at their stamp, queued own
+        // changes no replay applied (made live after the rewind), and the
+        // matrices written into replayed ticks.
+        uint64_t own_revives_ = 0, own_revive_failures_ = 0, own_window_remakes_ = 0, own_due_settled_ = 0;
+        uint64_t own_matrix_writes_ = 0;
         uint64_t births_overtaken_ = 0;   // older births dropped (same tick) or re-ordered (earlier) behind a death
         bool resync_pending_ = false;
         // ---- step A3: the exact resync (resync design 2.6) ----
@@ -1306,6 +1351,22 @@ namespace bmmo::session {
         // the body now out, every window event queued (review finding 1).
         void reconcile_remote_lives(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended,
                                     std::map<std::string, life_outcome>& out);
+        // Gap L, L3 (rollback-engine gaps design 2.3.4, step EL8): the own
+        // half - an own life alive at `anchor` that ended inside the window
+        // is made again at the A record's pose (make_own, muted, with the
+        // replica) and its logged death queued at D; a later life of the same
+        // name, and an own life born and ended inside the window, are taken
+        // out and remade at their stamp.  Only with own_body_in_replay.
+        void reconcile_own_lives(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended,
+                                 std::map<std::string, life_outcome>& out);
+        // The own changes reconcile_own_lives queued that no replay applied:
+        // made live after the rewind (olives=.../settled).
+        void settle_own_due();
+        // The core's scope around every rewind (step EL8): the host's
+        // keep_live_cells, and the CK matrices of the own entities without a
+        // body put back to their pre-rewind values at the end (design 2.3.4
+        // "At the replay's end", 9.7).
+        scope_guard keep_live_cells();
         // After a rewind: the reconcile's queued events no replay applied
         // (the replay stopped short), made live in stamp order.
         void settle_unreplayed_lives(uint32_t now);
@@ -1624,7 +1685,19 @@ namespace bmmo::session {
         void beam_own_ball(uint32_t tick);
         bool write_beam(const std::string& name, const double position[3], uint32_t tick);
         void record_own_birth(const bmmo::session_event_msg& event, const std::string& entity);
-        bool own_life_current(const own_life& life) const;
+        // `tick` and `live` (step EL8, design 2.3.4): a replayed tick tests
+        // the generation of the live record of tick - 1, a live frame the
+        // live generation.
+        bool own_life_current(const own_life& life, uint32_t tick, bool live) const;
+        // Step EL8: an own entity's body gone live (the drain), the matrices
+        // of the bodiless own entities after a live frame, written before a
+        // replayed tick, and the queued own changes of a replayed tick.
+        void note_own_death(const std::string& entity, uint32_t tick, uint32_t generation);
+        void record_own_matrices(uint32_t tick);
+        void write_own_matrices(uint32_t tick);
+        void apply_own_due(uint32_t tick);
+        void retire_own_deaths();
+        void clear_own_window_state();
         bool unmake_own_body(const own_life& life, uint32_t tick, const char* where);
         bool remake_own_body(const own_life& life, uint32_t tick, const char* where);
         void apply_own_lives(uint32_t tick, const char* where, bool live);

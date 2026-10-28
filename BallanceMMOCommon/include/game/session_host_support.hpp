@@ -159,6 +159,72 @@ namespace bmmo::game {
         return own_replica_attach::created;
     }
 
+    // The own ball's body made again (platform make_own; E7, moved here from
+    // the headless client at step EL8 so the retail core host makes it the
+    // same way - rollback-engine gaps design 2.3.4 "RC capability"): a body
+    // still there taken out first, the entity posed as its Physicalize
+    // carried, physicalized with that recipe in the own group, and a spawn's
+    // kick.  What drives the body (the replica) is the host's, before and
+    // after (attach_revive_navigation).
+    template <class Backend>
+    bmmo::session::own_body_made make_own_body(Backend& backend, CK3dEntity* entity, const bmmo::session::own_body_spec& spec) {
+        bmmo::session::own_body_made made;
+        if (!entity) return made;
+        made.found = true;
+        std::string error;
+        bmmo_physics_body_state there{};
+        if (backend.get_body_state(spec.entity.c_str(), there, error) && !backend.unphysicalize(spec.entity.c_str(), error)) {
+            made.took_out_failed = true;
+            made.took_out_error = error;
+        }
+        entity->SetWorldMatrix(matrix_from_pose(spec.position, spec.rotation));
+        made.made = backend.physicalize(spec.entity.c_str(), spec.recipe, spec.group.c_str(), error);
+        made.error = error;
+        if (made.made && spec.kick)
+            made.kicked = backend.push_impulse(spec.entity.c_str(), bmmo::session::kSpawnDirectionTable[spec.kick_index],
+                                               spec.kick_strength, 0, made.kick_error);
+        return made;
+    }
+
+    // The own body taken out (platform unmake_own), the entity put at the
+    // given pose.  What drove it is the host's (before: the replica's state
+    // off, or a revive's navigation destroyed; a replayed death leaves the
+    // replica as the live death did).
+    template <class Backend>
+    bool unmake_own_body(Backend& backend, CK3dEntity* entity, const std::string& name, const float position[3],
+                         const float rotation[9], std::string& error) {
+        const bool ok = backend.unphysicalize(name.c_str(), error);
+        if (entity) entity->SetWorldMatrix(matrix_from_pose(position, rotation));
+        return ok;
+    }
+
+    // A revived own life's navigation (own_body_spec::with_replica, step
+    // EL8): nothing to make when the replica is on the entity (a death: live,
+    // the replica follows the dead ball); otherwise (the trafo's old ball:
+    // the replica moved on to the new one) a navigation of its own, polling
+    // off (a replay feeds the recorded frames), made after the body, so the
+    // restore's set_nav and the blob find its controllers.  `created`: the
+    // host destroys it with the body at the replayed death.
+    template <class Backend>
+    bool attach_revive_navigation(Backend& backend, const navigation_graph& graph, const own_replica& replica,
+                                  const std::string& entity, float force, bool& created, std::string& error) {
+        created = false;
+        if (replica.active && replica.entity == entity) return true;
+        if (!graph.valid()) {
+            error = "no navigation graph";
+            return false;
+        }
+        float directions[8][3] = {};
+        int key_codes[8] = {};
+        uint32_t key_blocks[8] = {};
+        const int count = navigation_leaves(graph, directions, key_codes, key_blocks);
+        if (!backend.navigation_create(entity.c_str(), "CamRef_BMMO_self", graph.ball_navigation, directions, count, force,
+                                       error))
+            return false;
+        created = true;
+        return backend.navigation_poll(entity.c_str(), false, key_codes, key_blocks, count, error);
+    }
+
     // Every activation of Gameplay_SectorManager the live frames made, by
     // the tick whose frame consumed it: the union's own passes (before the
     // frame) and the ones scripts outside the replay asked for (Init

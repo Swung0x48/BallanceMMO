@@ -47,6 +47,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -232,6 +233,12 @@ namespace {
         bmmo::game::navigation_graph navigation;
         bool navigation_known = false;
         bmmo::game::own_replica own_replica;
+        // Step EL8 (gap L, L3): the navigations made for revived own lives
+        // (the trafo's old ball), destroyed with the body at the replayed
+        // death, and the own bodies make_own / unmake_own made and took out
+        // (the guard's log line says what a rewind did).
+        std::set<std::string> revive_navigations;
+        uint64_t own_bodies_made = 0, own_bodies_unmade = 0;
         bool own_group_set = false;
         bool body_guard = false;
         std::string body_guard_entity;
@@ -274,6 +281,10 @@ namespace {
         // a rewind D ticks deep.
         uint32_t force_every = 0, force_depth = 12;
         uint64_t forced = 0;
+        // 'session force-rollback at L:D[,L:D...]' (step EL8, rollback-engine
+        // gaps design 7.4 L-R1's one-shot form): one rewind D deep after the
+        // frame of live tick L, each once.
+        std::vector<std::pair<uint32_t, uint32_t>> force_once;
 
         // 'session drop-birth' (a testing tool, R1 (c)): the next own
         // Physicalize the core sends is kept off the wire (hooks.
@@ -518,6 +529,7 @@ namespace {
         host.navigation = {};
         host.navigation_known = false;
         host.own_replica = {};
+        host.revive_navigations.clear();
         host.own_group_set = false;
         host.input_muted = false;
         host.mirror_player.clear();
@@ -536,6 +548,7 @@ namespace {
         host.script_reset_skips = 0;
         host.restore_logs = host.savestate_logs = host.contact_logs = host.destroy_logs = host.line_logs = 0;
         host.forced = 0;
+        host.force_once.clear();
         host.frames = host.refused = 0;
         host.drop_births_armed = 0;
         host.births_dropped = 0;
@@ -978,6 +991,11 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     if (host.phase != retail_host::phase_type::idle) core_host_end_local("replaced by a new session");
     bs::session_capabilities caps;
     caps.own_body_control = false;   // the game's Physicalize block owns the own ball (design 2.3)
+    // Step EL8 (rollback-engine gaps design 2.3.4 "RC capability"): make_own /
+    // unmake_own on the bridge, called by the core from restore_lives and the
+    // replay's drain only - an own life ending inside a window is revived and
+    // removed again at its death; every body so made is gone by `now`.
+    caps.own_body_in_replay = true;
     caps.slew = true;                // R5: the tick driver slews (core_host_pacer), SessionReady caps = CAP_LEAD
     caps.nonblocking_hold = false;   // the anchor hold blocks inside OnProcess
     caps.whole_frame = false;
@@ -2347,9 +2365,87 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         return physics_view_.navigation_poll(entity.c_str(), !host.input_muted, host.own_replica.key_codes,
                                              host.own_replica.key_blocks, host.own_replica.key_count, error);
     };
-    // arm_own_capture, own_birth_capture, make_own, unmake_own: empty (the
-    // own births come from OnPhysicalize, and the game's Physicalize block
-    // owns the own ball: design 2.3).
+    // arm_own_capture, own_birth_capture: empty (the own births come from
+    // OnPhysicalize, and the game's Physicalize block owns the own ball:
+    // design 2.3).  make_own, unmake_own (step EL8, own_body_in_replay):
+    // inside a rewind only, through host support's make_own_body /
+    // unmake_own_body - the headless client's code - on the bridge.  The
+    // replica: a revived life gets a navigation when the replica is not on
+    // it (attach_revive_navigation), destroyed with the body at its
+    // replayed death; any other take-out shuts the replica's leaves first,
+    // a replayed death leaves them as the live death did.
+    p.make_own = [this](const bs::own_body_spec& spec) {
+        std::string error;
+        if (host.own_replica.active && host.own_replica.entity == spec.entity) {
+            const bmmo_physics_nav_state off{};
+            if (!physics_view_.navigation_set_state(spec.entity.c_str(), off, error))
+                logger_->Warn("Physics session core: own body %s: navigation shutdown: %s", spec.entity.c_str(), error.c_str());
+        }
+        auto* entity = CK3dEntity::Cast(m_bml->GetCKContext()->GetObjectByNameAndParentClass(
+                const_cast<CKSTRING>(spec.entity.c_str()), CKCID_3DENTITY, nullptr));
+        bs::own_body_made made = bmmo::game::make_own_body(physics_view_, entity, spec);
+        bool created = false;
+        const int row = made.made && spec.with_replica ? ball_row_of(m_bml, spec.entity) : 0;
+        if (made.made && spec.with_replica && row < 0) {
+            // No ball table row: no force to give a navigation (never row
+            // 0's); the revived body runs without one.
+            logger_->Warn("Physics session core: own body %s: no ball table row, no revive navigation", spec.entity.c_str());
+        } else if (made.made && spec.with_replica) {
+            const float force = ball_force(static_cast<uint8_t>(row));
+            if (!bmmo::game::attach_revive_navigation(physics_view_, host.navigation, host.own_replica, spec.entity, force,
+                                                      created, error))
+                logger_->Warn("Physics session core: own body %s: the revive's navigation: %s", spec.entity.c_str(),
+                              error.c_str());
+            if (created) host.revive_navigations.insert(spec.entity);
+        }
+        if (made.made) ++host.own_bodies_made;
+        logger_->Info("Physics session core: own body %s made for tick %u (%s%s%s)", spec.entity.c_str(), spec.tick,
+                      made.made ? "made" : (made.found ? "refused" : "no entity"),
+                      spec.with_replica ? (created ? ", revive navigation created" : ", the replica drives it") : "",
+                      spec.kick ? ", kicked" : "");
+        return made;
+    };
+    p.unmake_own = [this](const std::string& name, const float position[3], const float rotation[9], uint32_t tick, bool death,
+                          std::string& error) {
+        std::string nav_error;
+        const bool revive_nav = host.revive_navigations.erase(name) != 0;
+        if (revive_nav) {
+            if (!physics_view_.navigation_destroy(name.c_str(), nav_error))
+                logger_->Warn("Physics session core: own body %s: the revive's navigation: %s", name.c_str(), nav_error.c_str());
+        } else if (!death && host.own_replica.active && host.own_replica.entity == name) {
+            const bmmo_physics_nav_state off{};
+            if (!physics_view_.navigation_set_state(name.c_str(), off, nav_error))
+                logger_->Warn("Physics session core: own body %s: navigation shutdown: %s", name.c_str(), nav_error.c_str());
+        }
+        auto* entity = CK3dEntity::Cast(m_bml->GetCKContext()->GetObjectByNameAndParentClass(
+                const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+        const bool ok = bmmo::game::unmake_own_body(physics_view_, entity, name, position, rotation, error);
+        if (ok) ++host.own_bodies_unmade;
+        logger_->Info("Physics session core: own body %s taken out at tick %u (%s%s%s)", name.c_str(), tick,
+                      ok ? "done" : error.c_str(), death ? ", replayed death" : "",
+                      revive_nav ? ", revive navigation destroyed" : "");
+        return ok;
+    };
+    // Step EL8 (design 9.7): an entity's CK world matrix.
+    p.entity_matrix = [this](const std::string& name, float matrix[16]) {
+        auto* entity = CK3dEntity::Cast(m_bml->GetCKContext()->GetObjectByNameAndParentClass(
+                const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+        if (!entity) return false;
+        const VxMatrix& world = entity->GetWorldMatrix();
+        for (int r = 0; r < 4; ++r)
+            for (int k = 0; k < 4; ++k) matrix[r * 4 + k] = world[r][k];
+        return true;
+    };
+    p.set_entity_matrix = [this](const std::string& name, const float matrix[16]) {
+        auto* entity = CK3dEntity::Cast(m_bml->GetCKContext()->GetObjectByNameAndParentClass(
+                const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+        if (!entity) return false;
+        VxMatrix world;
+        for (int r = 0; r < 4; ++r)
+            for (int k = 0; k < 4; ++k) world[r][k] = matrix[r * 4 + k];
+        entity->SetWorldMatrix(world);
+        return true;
+    };
 
     // ---- own ball ----
     p.ball_recipe_of = [this](const std::string& entity, bs::ball_recipe& recipe) {
@@ -2488,7 +2584,35 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         auto guard = std::make_shared<bmmo::game::live_cells_guard>(
                 m_bml->GetCKContext(), core, true, [this](uint32_t tick) { core_host_replay_activation(tick); },
                 &host.activations);
-        return bs::scope_guard([guard]() mutable { guard.reset(); });
+        // Step EL8 (design 9.2): the guard's view after a rewind that made or
+        // took out an own body - the replica and the own ball's matrix (the
+        // core's scope puts the matrices of bodiless own entities back
+        // before it ends this one: session_client_core::keep_live_cells).
+        const uint64_t made_before = host.own_bodies_made, unmade_before = host.own_bodies_unmade;
+        return bs::scope_guard([this, guard, made_before, unmade_before]() mutable {
+            guard.reset();
+            if (host.own_bodies_made == made_before && host.own_bodies_unmade == unmade_before) return;
+            const std::string replica = host.own_replica.entity;
+            float m[16] = {};
+            bool have = false;
+            if (auto* entity = CK3dEntity::Cast(m_bml->GetCKContext()->GetObjectByNameAndParentClass(
+                        const_cast<CKSTRING>(replica.c_str()), CKCID_3DENTITY, nullptr))) {
+                const VxMatrix& world = entity->GetWorldMatrix();
+                for (int r = 0; r < 4; ++r)
+                    for (int k = 0; k < 4; ++k) m[r * 4 + k] = world[r][k];
+                have = true;
+            }
+            bmmo_physics_nav_state nav{};
+            std::string error;
+            const bool nav_ok = host.own_replica.active && physics_view_.navigation_get_state(replica.c_str(), nav, error);
+            logger_->Info("Physics session core: rewind made %llu / took out %llu own bodies; replica %s active=%d "
+                          "nav=%d/%02x/%02x/%02x; matrix %s (%a,%a,%a); revive navigations left %zu",
+                          static_cast<unsigned long long>(host.own_bodies_made - made_before),
+                          static_cast<unsigned long long>(host.own_bodies_unmade - unmade_before), replica.c_str(),
+                          host.own_replica.active ? 1 : 0, nav_ok ? nav.active : -1, nav.key_mask, nav.controller_mask,
+                          nav.create_pending_mask, have ? "" : "(no entity)", static_cast<double>(m[12]),
+                          static_cast<double>(m[13]), static_cast<double>(m[14]), host.revive_navigations.size());
+        });
     };
 
     // ---- journal: ModLoader/BMMOJournals, the newest 10 kept, and only
@@ -2517,7 +2641,22 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // verb): after the frame's own rewinds, every E ticks, D deep.
     p.hooks.after_rewinds = [this](uint32_t) {
         if (host.core) log_mirror_births(logger_, *host.core);
-        if (!host.force_every || !host.core) return;
+        if (!host.core) return;
+        // Step EL8: the one-shot rewinds due after this frame.
+        if (!host.force_once.empty()) {
+            const uint32_t live = host.core->current_tick();
+            for (auto it = host.force_once.begin(); it != host.force_once.end();) {
+                if (it->first != live) {
+                    ++it;
+                    continue;
+                }
+                const auto once = host.core->force_rewind(it->second);
+                logger_->Info("Physics session: one-shot forced rewind at tick %u, %u deep (anchor %u): %s", live, it->second,
+                              live - it->second, once.rolled ? "rolled" : "not rolled");
+                it = host.force_once.erase(it);
+            }
+        }
+        if (!host.force_every) return;
         // The cadence is the verb's; whether the rewind can run this early
         // is the core's (force_rewind does nothing before depth + 2 ticks).
         const uint32_t now = host.core->current_tick();
@@ -2616,6 +2755,25 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            placement_host.signature, placement_host.anchors, placement_host.refused,
                            placement_host.releases, placement_host.released);
     }
+    if (what == "force-rollback" && value == "at") {
+        // Step EL8: 'session force-rollback at L:D[,L:D...]', one-shot.
+        std::string items;
+        args >> items;
+        std::istringstream list(items);
+        std::string item;
+        std::vector<std::pair<uint32_t, uint32_t>> parsed;
+        while (std::getline(list, item, ',')) {
+            const size_t colon = item.find(':');
+            if (colon == std::string::npos) return "error usage: session force-rollback at <live>:<depth>[,<live>:<depth>...]";
+            const long live = std::strtol(item.c_str(), nullptr, 10);
+            const long depth = std::strtol(item.c_str() + colon + 1, nullptr, 10);
+            if (live < 1 || depth < 1 || depth > 1000)
+                return "error usage: session force-rollback at <live>:<depth>[,<live>:<depth>...]";
+            parsed.emplace_back(static_cast<uint32_t>(live), static_cast<uint32_t>(depth));
+        }
+        for (const auto& once: parsed) host.force_once.push_back(once);
+        return std::format("ok {} one-shot forced rewind(s) armed ({} pending)", parsed.size(), host.force_once.size());
+    }
     if (what == "force-rollback") {
         const size_t colon = value.find(':');
         const long every = std::strtol(value.c_str(), nullptr, 10);
@@ -2647,7 +2805,8 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         return std::format("ok the next own Physicalize is kept off the wire (armed {}, dropped so far {})",
                            host.drop_births_armed, host.births_dropped);
     }
-    return "error usage: session core on|off|status | session force-rollback <every>:<depth> | session stall <ms> | "
+    return "error usage: session core on|off|status | session force-rollback <every>:<depth> | "
+           "session force-rollback at <live>:<depth>[,...] | session stall <ms> | "
            "session drop-birth | session placement";
 }
 

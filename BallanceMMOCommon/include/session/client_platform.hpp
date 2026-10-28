@@ -282,6 +282,13 @@ namespace bmmo::session {
         uint32_t kick_index = 0;
         float kick_strength = 0.0f;
         uint32_t tick = 0;
+        // Gap L, L3 (rollback-engine gaps design 2.3.4, step EL8): a life
+        // revived at a restore.  The host makes sure a navigation drives the
+        // entity (the own replica when it is on it, else one made for the
+        // revive and destroyed with the body at its replayed death), so the
+        // restore's set_nav and the blob find its controllers and the replay
+        // feeds the recorded own frames to it.
+        bool with_replica = false;
     };
     // What make_own did: `found` (false: the host has no such entity, and
     // did nothing); a body still there taken out first, or that failing
@@ -629,8 +636,21 @@ namespace bmmo::session {
         // carried (false and `error`: not taken out).  The host shuts down
         // what drives the body first (headless: the navigation replica).
         std::function<own_body_made(const own_body_spec& spec)> make_own;
+        // `death` (step EL8): an own death replayed at its tick (gap L, L3) -
+        // the navigation is left as the live death left it (its controllers
+        // lose their core with the body), except a navigation made for the
+        // revive (own_body_spec::with_replica), which goes with the body.
         std::function<bool(const std::string& entity, const float position[3], const float rotation[9], uint32_t tick,
-                           std::string& error)> unmake_own;
+                           bool death, std::string& error)> unmake_own;
+        // Step EL8 (rollback-engine gaps design 2.3.4, 9.7), required with
+        // session_capabilities::own_body_in_replay, optional otherwise: an
+        // entity's CK world matrix read (row-major, VxMatrix order; false:
+        // no such entity) and written.  The own death's pose, and the own
+        // entities' matrices while they have no body (recorded per live
+        // tick, written before each replayed tick, put back at the rewind's
+        // end).
+        std::function<bool(const std::string& entity, float matrix[16])> entity_matrix;
+        std::function<bool(const std::string& entity, const float matrix[16])> set_entity_matrix;
 
         // ---- rollback (design 2.2; E4) ----
         // The rollback engine's view of the host's world, bound anew on every
@@ -711,6 +731,15 @@ namespace bmmo::session {
         bool nonblocking_hold = false;   // the anchor hold returns to the host loop
         bool whole_frame = false;        // a replayed tick may run a whole engine frame (bind_world fills whole_frame)
         own_lifecycle_source own_lifecycle = own_lifecycle_source::event_log;   // or host_hooks
+        // Step EL8 (rollback-engine gaps design 2.3.4): the host fills
+        // make_own / unmake_own (and entity_matrix / set_entity_matrix) and
+        // the core may call them from restore_lives and the replay's drain
+        // only - an own life ending inside a window is revived at the restore
+        // and removed again at its replayed death, an own life born in the
+        // window is remade at its stamp.  Every body made so is gone again at
+        // a tick <= now.  Without it such a life is unrevivable (counted).
+        // own_body_control implies nothing here: a host declares both.
+        bool own_body_in_replay = false;
         // Step T3 (trafo-replication design 2.14): the host builds the
         // per-player piece sets and runs the trafo as an input (poll_trafo,
         // make_trafo_set, run_trafo, trafo_final, trafo_frame,
@@ -793,9 +822,13 @@ namespace bmmo::session {
         if (!platform.unpack_bytes) return "unpack_bytes";   // the state's packed sections
         if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
             return "own_birth_capture";
-        if (caps.own_body_control) {
+        if (caps.own_body_control || caps.own_body_in_replay) {
             if (!platform.make_own) return "make_own";
             if (!platform.unmake_own) return "unmake_own";
+        }
+        if (caps.own_body_in_replay) {   // step EL8
+            if (!platform.entity_matrix) return "entity_matrix";
+            if (!platform.set_entity_matrix) return "set_entity_matrix";
         }
         if (caps.trafo_inputs) {   // step T3
             if (!platform.poll_trafo) return "poll_trafo";

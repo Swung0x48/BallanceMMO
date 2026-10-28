@@ -1501,6 +1501,9 @@ shows only the controller-list difference.**
   `Ball_Pos_Frame` differing from the live run in a window across an own
   death). (a) is my recommendation; it also covers the trafo animation of a
   live run.
+- **Settled (step EL8):** (a) built (As built (step EL8)), with the
+  record of t itself written before replayed tick t; confirmed on retail
+  by L-R1 with `BMMO_TRACE_ENTITY` (`el8_lr1g`).
 
 ---
 
@@ -2378,3 +2381,185 @@ ball's half (L3) is G8; the mechanisms' generalization (L4) is G9.
   holds a life born and ended inside one window). No live run (the step's
   two were spent in the implement round): the window path has the unit
   tests as its only check until FULL.
+
+## As built (step EL8, 2026-10-28): gap L, step G8 (L3)
+
+Step G8 of §8 on HEAD 6931c90: the own ball's half of L (2.3.4) and §9.7.
+The mechanisms' generalization (L4) is G9.
+
+- **Own deaths in the log** (`client_core_state::own_death`,
+  `note_own_death`): **adapted** in two ways.
+  - A list of its own (`own_deaths_`), not a third `own_life::kind`: the
+    echo matching (`process_own_echo`, `client_core_lifecycle.cpp`) takes
+    the first `own_life` with the echo's origin, ball type and verdict
+    `sent`, so a death entry would be taken for a birth echoed at the same
+    tick (a trafo's old ball dies in the frame its new one is born).
+  - Recorded at the frame's drain (`client_core_frame.cpp`, the "deleted"
+    entry of an entity that is the own ball or ever was:
+    `own_ball_entities_`), before the generation bump, not in
+    `report_unphysicalize`: the drain is the one site both own-lifecycle
+    sources reach, and the only one that sees the trafo's old ball (the
+    event-log path reports a death only for the current ball, and
+    `report_unphysicalize` knows no entity). Nothing new is sent.
+  - The matrix is `entity_matrix` after frame D; retired once no rewind
+    can be anchored before it (`retire_own_deaths`, from
+    `retire_own_lives`), cleared at every renumbering
+    (`clear_own_window_state`).
+- **Platform** (`client_platform.hpp`): `own_body_spec::with_replica`;
+  `unmake_own` gained `bool death`; new `entity_matrix` /
+  `set_entity_matrix` (CK world matrix, row-major); new capability
+  `own_body_in_replay` (requires make_own / unmake_own / entity_matrix /
+  set_entity_matrix). The headless client declares it beside
+  `own_body_control`; the retail core host declares it with
+  `own_body_control` still false.
+- **The life test at a replayed tick** (`own_life_current(life, tick,
+  live)`): as specified - a replay compares with `generation_at(entity,
+  tick - 1)` (the replay re-captures its records with the live records'
+  generations, so this is the live record's), a live frame with the live
+  generation; a replay never retires (it logs "not applied ... in another
+  life there" instead). The echo paths and `moved_own_life` keep the live
+  test.
+- **The own reconcile** (`session_client_core::reconcile_own_lives`,
+  asked by the core's `restore_lives` hook before the mirrors'):
+  per ended own life, its logged death (same entity and generation, the
+  first in (A, now]); a body of that name now must be a later life born
+  after the death (the newest own birth record, made at its stamp), which
+  is taken out at the restore (`unmake_own`, not a death) and queued for
+  `remake_own_body` at E (answered `remade_at = E`); the A-life is made by
+  `make_own` muted (A record's pose, `ball_recipe_of`, `own_group_`, no
+  kick, `with_replica`), its death queued at D (answered `revived_until =
+  D`). Then every own birth record stamped in (A, now] whose life died in
+  the window and that has no body now (L-U9) is remade at its stamp and
+  removed at its death. Own births whose life is alive now and whose name
+  was not revived stay parked, as before. **Adapted:** generations are not
+  touched (the muted changes bump nothing; the re-captured records carry
+  the live generations); the pre-rewind matrix is saved by the core's
+  rewind scope (below), not by the revive.
+- **In the replay** (`apply_own_due`, at the end of
+  `drain_pending_lives`, after the remote events and `apply_own_lives`):
+  a death is `unmake_own(entity, pose of the death's matrix, D, death =
+  true)` muted; a remake is `remake_own_body`. What no replay applied is
+  applied live after the rewind (`settle_own_due`, beside
+  `settle_unreplayed_lives`; counted).
+- **The replica, adapted** (2.3.4 says "the replica detached first" at D
+  and "RC saves `host.own_replica` ... and puts it back in the guard"): a
+  replayed death leaves the replica as the live death left it - its leaves'
+  controllers lose their core with the body
+  (`core_is_going_to_be_deleted_event`, `ball_navigation.cpp`), exactly
+  as live - so neither host's replica record or navigation state is
+  changed by a revive and nothing needs putting back. When the replica is
+  not on the revived entity (a trafo's old ball: live, the replica moved
+  on to the new ball), host support's `attach_revive_navigation` makes a
+  navigation of its own for it (polling off; the restore's `set_nav` then
+  gives it A's state), and the host destroys it with the body at the
+  replayed death (`revive_navigations_`, headless member; retail
+  file-scope `host.revive_navigations`). The body part is host support's
+  `make_own_body` / `unmake_own_body` (moved from the headless client,
+  unchanged); both hosts call them.
+- **The matrix (§9.7, settled: option (a) built)**: `record_own_matrices`
+  stores, after each live record, the CK matrix of every own entity
+  without a body; `write_own_matrices(t)` (first in
+  `before_replayed_tick`) writes the record of t itself (the matrix the
+  live frame of t ended with) to each of those that has no body in the
+  replay either, and nothing where the entity already has that value bit
+  for bit (gap P's rule: `SetWorldMatrix` re-derives the local matrix,
+  and the children's, with rounding); and the core's rewind scope
+  (`session_client_core::keep_live_cells`, which now wraps the host's
+  guard at all four rewind sites) saves the bodiless own entities'
+  matrices on entry and writes them back on exit when they still have no
+  body and differ. **Gate round (review finding 1):** the implement round
+  wrote the record of t - 1, and the capture replays showed new float
+  script differences at the end of windows across a revived own death
+  (resync_snapoff c0 2459 and c2 2444 P_Modul_18 / P_Modul_29, c1 2472
+  PE_Balloon "Current Distance"). Cause, measured with a per-tick
+  diagnostic of the own entities' matrices (live before the step, live
+  record, replay before the scripts): c0's ball dies at 2452, and the
+  live frame 2453 moves the bodiless `Ball_Stone` from its death pose
+  (1017.56, -97.37, 15.02) to the resetpoint (700, 3.326, 15); that mover
+  (the death sequence) is not replayed and, live, runs before the modules
+  whose `TT Scaleable Proximity` reads the ball, so the modules of 2453
+  read the resetpoint. Writing the record of 2452 left the replayed 2453's
+  ball at the death pose; P_Modul_18's scaleable proximity sampled it
+  there and held that distance until the window's end (its check
+  interval grows with the distance). With the record of t every one of
+  those differences is gone (and the swing_snapoff c1 867 / c2 922
+  P_Modul03 float differences that rEL7 had stay gone); against rEL7 the
+  only changes in the replays' script-difference lines are those three
+  float differences removed (resync c2 2444, swing c1 867, c2 922), none
+  added. The candidates "the revived ball is not driven as live" and
+  "the death pose is written too early" are refuted by the same
+  diagnostic: in all 17 revive windows of resync_snapoff / swing_snapoff
+  the own ball's full body state before each replayed tick (position,
+  rotation, linear and angular velocity, simulated, movement state) is
+  bit-identical to the live state before that tick, and over 4,285
+  bodiless own-entity ticks the live state after every rewind equals the
+  one before it. Matrix writes dropped from 76-364 per client to 0-4
+  (swing_snapoff c0 196 -> 0: the inactive ball types after a trafo are
+  never written). (b) (the frame's parent chain) is not built: no measured case
+  re-parents `Ball_Pos_Frame`. The retail confirmation (L-R1 with
+  `BMMO_TRACE_ENTITY`) is open (below).
+- **Retail verb:** `session force-rollback at L:D[,L:D...]` (one-shot
+  rewinds after the frame of live tick L; L-R1's form).
+- **Counters:** the status line's `olives=revived/failed/remade/settled/
+  matrices` after `mlives=`.
+- **Checks (quick tier):** x64 build, x86 build (21 objects recompiled,
+  `BallanceMMOClient.cpp`, PSC, `core_host`, `client_automation`,
+  `room_client` among them; deps valid), GCC 29/29 ok, unit tests 580 pass
+  (576 + 4: L-U6 `SessionClientCoreLives.AnOwnDeathInTheWindowIsRevivedAndRemovedAtItsTick`
+  (with the capability-off half), L-U7
+  `...AnOwnSameNameRebirthIsTakenOutAndRemadeAtItsStamp`, L-U9 own half
+  `...AnOwnLifeInsideTheWindowIsMadeAndRemoved`, L-U11
+  `...ABeamInsideALifeThatDiesLaterIsAppliedInTheReplay`). Wire check rEL7
+  -> rEL8 over core_ref_s8: 12/12 sends SAME, 12/12 journals IDENTICAL;
+  solo1 / solo2 sends SAME (2616, 2427), journals IDENTICAL. The replays
+  now revive the own `Ball_Stone` that EL6 / EL7 left unrevivable:
+  `lives=` unrevivable 0 in every replay (swing_snapoff c1 / c2 3 / 4 own
+  revived, resync_snapoff 3 / 3 / 2 / 2; l8_cross and the solo arms have
+  none), `olives=` failed 0, matrices written 76-364 per client.
+- **Gate round.** Also: a moved own birth is not a later life
+  (`birth_of`): `rollback_world` calls `restore_lives` before
+  `destroy_body`, so a moved own birth (headless, `own_body_control`)
+  still has its body at the reconcile and the moved path owns it; such a
+  life fails ("its body now was not born after its death", olives'
+  failed) and keeps today's behaviour, L-H4 covers it (review finding 4,
+  stated in the code). Retail: a revived ball with no ball table row gets
+  no navigation (logged) instead of row 0's force (finding 5).
+- **Checks (gate round):** x64 BUILD-OK, tests 580 pass, GCC 29/29 ok
+  (unchanged), x86 CLIENT-BUILD-OK (20 objects, the slot-13 hack applied
+  and reverted), wire check rEL7 -> rEL8g over core_ref_s8: ALL SAME
+  (12/12 sends SAME, 12/12 journals IDENTICAL), solo1 / solo2 sends SAME,
+  journals IDENTICAL; `lives=` unrevivable 0, `olives=` failed 0
+  everywhere. **L-R1** (`maps/arena-test/el8_lr1g`, after
+  `r3_retail.py arena-install`; eg0_retail.py, core on, snapshots off,
+  `at 664:24,1377:17,1380:16,1384:16`): the four forced rewinds each log
+  the own ball revived (`Ball_Stone` <652 over the beam at 650, which the
+  replay applies: the replayed 650 has the ball at (0, 4, 43); `Ball_Wood`
+  <1369 three times) and its removal at D ("taken out ... replayed
+  death"); `olives=4/0/0/0/15`, `lives=4/4/0/0/0/0`; no script
+  difference and no savestate-replay difference at any rewind's end (the
+  1378 "Current Distance" difference of r2_a_f13 does not appear); no
+  warning; the guard's matrix after each rewind equals the live trace's
+  before it (664: (-0x1.3204d8p-9, 0x1.abca96p+1, 0x1.58p+5)), replica
+  inactive as live; `BMMO_TRACE_ENTITY` (§9.7's settle): before every
+  replayed tick the traced `Ball_Pos_Frame` / `Ball_Stone` / `Ball_Wood`
+  equal the live run's - after tick t - 1 while the ball has a body,
+  after tick t (the written record) while it has none - except at the
+  ticks a body appears or goes (650: the beam; 1370: the resetpoint
+  written for D + 1); the own lifecycle (deaths 652 / 1369, births 817,
+  respawn 1567 at the same bits) equals `eg0_ctl`'s (the same recipe on
+  EG0's binary; not a same-batch control). **L-S3 not run:** SimTool has
+  no own-ball revive (the own half of `restore_lives` is the core's,
+  which SimTool does not run), so the check needs a new SimTool scene;
+  and the capture replays cannot stand in: Gameplay_Ingame's force
+  controller (`rt:force/26432`) is on the own core only while a key is
+  held, and at every anchor of the 15 distinct revive windows of
+  resync_snapoff / swing_snapoff the live core was `n=1 sys:unknown/1000`,
+  exactly the revived core's. So §9.3 has no L-S3 result: it stays open
+  and does not go to the user yet.
+- **Not run, deferred:** L-S3 (a SimTool own-revive scene: new tooling),
+  L-H3, L-H4 (headless live runs: the step's two live runs went to L-R1,
+  the first `el8_lr1` with no session because both game copies had the
+  original `Level_13.NMO` back), L-H6 (FULL). Seen in the offline
+  replays and pre-existing (rEL7 has it at the same ticks): the logical
+  `IngameParameter` cell differences at the end of windows across an own
+  death (`[0][2] 4 vs 0`, `[0][1] 1 vs 4`), L-H3's to judge.

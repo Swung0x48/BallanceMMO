@@ -41,7 +41,10 @@ namespace bmmo::session {
         // in the replayed frame (script_replay::execute_frame's trafo list).
         // Step EL7 (gap L, L2): the births and the deaths in one drain, in
         // the server's order (drain_pending_lives).
+        // Step EL8 (design 9.7 (a)): first the own entities' matrices of the
+        // live frame before, for those without a body.
         world_hooks_.before_replayed_tick = [this](uint32_t tick) {
+            write_own_matrices(tick);
             drain_pending_lives(tick);
             apply_trafo_inputs(tick, true);
             rederive_union_tick(tick);
@@ -116,8 +119,11 @@ namespace bmmo::session {
         // Gap L, L2 (rollback-engine gaps design 2.3.3, step EL7): the
         // core's half of rollback_world::restore_lives - the mirrors (the
         // own ball's half is L3, step G8).
+        // Step EL8 (L3): the own ball's half first (design 2.3.1 step 3:
+        // the balls, own and mirrors).
         world_hooks_.restore_lives = [this](uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended, bool,
                                             std::map<std::string, life_outcome>& out) {
+            reconcile_own_lives(anchor, now, ended, out);
             reconcile_remote_lives(anchor, now, ended, out);
         };
         world_hooks_.row_entity = [this](bmmo::session::body_kind kind, uint32_t owner, uint32_t tick) -> std::string {
@@ -249,6 +255,7 @@ namespace bmmo::session {
         s.generations_.clear();
         s.amend_failures_ = 0;
         s.own_life_.clear();
+        clear_own_window_state();   // step EL8
         s.own_echoes_.clear();
         s.own_echoes_stale_.clear();
         s.own_unanswered_.clear();
@@ -621,6 +628,7 @@ namespace bmmo::session {
             // (an unanswered birth is set aside for its echo).
             set_aside_unanswered(own_life::aside::resync);
             s.own_life_.clear();
+            clear_own_window_state();   // step EL8
             s.mechanism_tracking_.clear();
             if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::assign_renumber);
         }
@@ -679,6 +687,7 @@ namespace bmmo::session {
         if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen", true);
         // Step EL7: what the reconcile queued and no replay applied.
         settle_unreplayed_lives(now);
+        settle_own_due();   // step EL8: the own ball's
         return rolled;
     }
 
