@@ -654,6 +654,13 @@ namespace bmmo::session {
         bool resync_owed_ = false;
         std::string resync_owed_reason_;
         int consecutive_hard_ = 0;
+        // Session-core design 7.1 decision 1 (step B2SW, a core rule for both
+        // hosts since): authoritative snapshots in a row whose tick the
+        // history has no record of - a numbering desync - and the resyncs
+        // that run asked for.  Reset by a matched snapshot and by every
+        // resync request that goes out.
+        int consecutive_unmatched_ = 0;
+        uint64_t unmatched_resyncs_ = 0;
         clock_type::time_point last_resync_request_{};
         uint64_t resyncs_sent_ = 0, resyncs_done_ = 0, sessions_ended_ = 0;
         bmmo::session::rollback_engine rollback_;
@@ -1136,6 +1143,12 @@ namespace bmmo::session {
         // re-reports and the resync requests sent.
         uint64_t own_body_backstops() const { return s.own_backstops_; }
         uint64_t resyncs_sent() const { return s.resyncs_sent_; }
+        // Session-core design 7.1 decision 1 (step B2SW): the resyncs asked
+        // for by kUnmatchedSnapshotRun snapshots in a row with no record of
+        // their tick.
+        static constexpr int kUnmatchedSnapshotRun = 30;
+        uint64_t unmatched_resyncs() const { return s.unmatched_resyncs_; }
+        int unmatched_run() const { return s.consecutive_unmatched_; }
         // Step T3: this session runs the trafo as an input (the host's sets,
         // the hold, the quiesce at its anchor); the counters the gates read.
         bool trafo_active() const { return s.trafo_active_; }

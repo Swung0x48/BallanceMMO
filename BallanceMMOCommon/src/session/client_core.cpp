@@ -289,6 +289,10 @@ namespace bmmo::session {
         s.snapshots_without_own_ = 0;
         s.own_backstops_ = 0;
         s.last_backstop_ = {};
+        // Step B2SW (U30): the run of unmatched snapshots and the resyncs it
+        // asked for are this session's (the retail host's copy reset both here).
+        s.consecutive_unmatched_ = 0;
+        s.unmatched_resyncs_ = 0;
         // Step T3: the trafo as an input runs in this session when the
         // server's world option says so and this host can (design 2.14).
         s.world_options_ = msg.world_options;
@@ -657,6 +661,7 @@ namespace bmmo::session {
         s.resync_in_flight_ = true;
         s.last_resync_request_ = now;
         s.consecutive_hard_ = 0;
+        s.consecutive_unmatched_ = 0;   // step B2SW: a resync answers the run too
         // A SessionLead's slew in flight ends here, acknowledged in full
         // (late-player design 2.8, lead_slew::finish_reanchored): the
         // server re-anchors this client at L_eff, the first lead plus the

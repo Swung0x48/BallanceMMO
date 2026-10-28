@@ -1595,6 +1595,64 @@ namespace {
         EXPECT_EQ(state_of(core).remote_writes_, 1u);
     }
 
+    // Session-core design 7.1 decision 1 (step B2SW, the retail host's
+    // transitional trigger until then): 30 authoritative snapshots in a row
+    // with no record of their tick ask for a resync, from the core, for both
+    // hosts.  Counted per snapshot: a stale one neither counts nor ends the
+    // run; the request resets it; with the rollback off nothing is counted.
+    TEST(SessionClientCoreSnapshot, ThirtyUnmatchedSnapshotsInARowAskForAResync) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(assign_message(9, 120));
+        ASSERT_TRUE(core.config.rollback);
+        for (uint32_t t = 0; t < 29; ++t) core.on_session_snapshot(snapshot_message(9, 130 + t, false, {}));
+        EXPECT_EQ(core.rollback_stats().unmatched, 29u) << "no record of any of them";
+        EXPECT_EQ(core.unmatched_run(), 29);
+        EXPECT_EQ(state_of(core).resyncs_sent_, 0u);
+        core.on_session_snapshot(snapshot_message(9, 150, false, {}));
+        EXPECT_EQ(state_of(core).snapshots_stale_, 1u);
+        EXPECT_EQ(core.unmatched_run(), 29) << "a stale snapshot is not one of the run";
+        size_t from = fake.calls.size();
+        core.on_session_snapshot(snapshot_message(9, 159, false, {}));
+        {
+            const auto calls = since(fake.calls, from);
+            const std::vector<std::string> expected = {
+                "own_ball", "keep_live_cells:enter:120", "bind_world",
+                "log:0:30 snapshots in a row with no record of their tick (the last 159, local tick 120)",
+                "now:resync_limiter", "send:0",
+                "log:0:resync requested (30 snapshots with no record of their tick) at tick 120",
+                "keep_live_cells:exit"};
+            EXPECT_EQ(calls, expected);
+        }
+        EXPECT_EQ(state_of(core).resyncs_sent_, 1u);
+        EXPECT_EQ(core.unmatched_resyncs(), 1u);
+        EXPECT_EQ(core.unmatched_run(), 0) << "reset by the request";
+        // A run under way ends with any resync request that goes out.
+        for (uint32_t t = 0; t < 5; ++t) core.on_session_snapshot(snapshot_message(9, 160 + t, false, {}));
+        EXPECT_EQ(core.unmatched_run(), 5);
+        fake.advance(std::chrono::seconds(11));   // past the limiter and the in-flight give-up
+        core.request_resync("test");
+        EXPECT_EQ(state_of(core).resyncs_sent_, 2u);
+        EXPECT_EQ(core.unmatched_run(), 0);
+        // The rollback off (the legacy ladder): not counted.
+        core.config.rollback = false;
+        for (uint32_t t = 0; t < 40; ++t) core.on_session_snapshot(snapshot_message(9, 170 + t, false, {}));
+        EXPECT_EQ(core.unmatched_run(), 0);
+        EXPECT_EQ(core.unmatched_resyncs(), 1u);
+        // A run the limiter holds back is not counted as a resync asked for.
+        core.config.rollback = true;
+        for (uint32_t t = 0; t < 30; ++t) core.on_session_snapshot(snapshot_message(9, 220 + t, false, {}));
+        EXPECT_EQ(state_of(core).resyncs_sent_, 2u) << "within 10 s of the last request: held back";
+        EXPECT_EQ(core.unmatched_resyncs(), 1u);
+        // A run under way does not carry into the next session.
+        for (uint32_t t = 0; t < 25; ++t) core.on_session_snapshot(snapshot_message(9, 260 + t, false, {}));
+        EXPECT_EQ(core.unmatched_run(), 25);
+        ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
+        EXPECT_EQ(core.unmatched_run(), 0);
+        EXPECT_EQ(core.unmatched_resyncs(), 0u);
+    }
+
     // ------------------------------- the relay and late-player parts one and two
     // Step E5: SessionRemoteInput's intake and note_input_correction, the held
     // section, SessionLead with its forced own frames, replay_corrected_inputs

@@ -206,13 +206,11 @@ namespace {
         clock_type::time_point restart_deadline{};
         uint64_t last_rebases = 0;
         uint64_t frames = 0, refused = 0;
-        // The transitional host trigger (design 3.2, until 7.1 decision 1):
-        // the run of snapshots with no record of their tick.  (The input
-        // starvation detector beside it went at R4: the core's held
-        // notices and check_held_complete answer what it guessed at.)
-        int consecutive_unmatched = 0;
-        uint64_t resyncs_seen = 0;
-        uint64_t unmatched_resyncs = 0;
+        // (The transitional host triggers of design 3.2 are gone: the input
+        // starvation detector at R4 - the core's held notices and
+        // check_held_complete answer what it guessed at - and the run of
+        // snapshots with no record of their tick at B2SW, a core rule for
+        // both hosts since, design 7.1 decision 1.)
 
         // The mailbox drain: what the game thread took, dispatched to the
         // core or - while no core session runs (R0: always) - decoded, to
@@ -530,9 +528,6 @@ namespace {
         host.restore_logs = host.savestate_logs = host.contact_logs = host.destroy_logs = host.line_logs = 0;
         host.forced = 0;
         host.frames = host.refused = 0;
-        host.consecutive_unmatched = 0;
-        host.resyncs_seen = 0;
-        host.unmatched_resyncs = 0;
         host.drop_births_armed = 0;
         host.births_dropped = 0;
         host.beams_pending.clear();
@@ -1642,26 +1637,12 @@ void BallanceMMOClient::core_host_frame() {
             host.input_muted = muted;
         }
     }
-    const uint64_t unmatched_before = host.core->rollback_stats().unmatched;
     core_host_drain();
     if (!core_session_running()) return;   // the drain ended the session
     auto& core = *host.core;
-    // Transitional host triggers (design 3.2): 30 snapshots in a row with no
-    // record of their tick (a numbering desync; design 7.1 decision 1) ...
-    if (core.resyncs_sent() != host.resyncs_seen) {
-        host.resyncs_seen = core.resyncs_sent();
-        host.consecutive_unmatched = 0;
-    }
-    if (core.config.rollback && !core.resync_pending()) {
-        const uint64_t unmatched = core.rollback_stats().unmatched - unmatched_before;
-        if (unmatched == 0) host.consecutive_unmatched = 0;
-        else host.consecutive_unmatched += static_cast<int>(unmatched);
-        if (host.consecutive_unmatched >= 30) {
-            ++host.unmatched_resyncs;
-            core.request_resync("30 snapshots with no record of their tick");
-            host.consecutive_unmatched = 0;
-        }
-    }
+    // (30 snapshots in a row with no record of their tick - a numbering
+    // desync, design 7.1 decision 1 - is the core's rule since step B2SW,
+    // client_core_messages.cpp apply_snapshot.)
     // (The input-starvation detector that followed here is deleted at R4:
     // every own tick the server substituted is named by a held notice,
     // amended and replayed by the core, and a notice that never arrives is
@@ -2565,7 +2546,8 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            "mute_source_differs={}",
                            core_on.load() ? "on" : "off", core_latched.load() ? 1 : 0, host.core ? 1 : 0,
                            host.core_error, host.sessions_seen, host_phase_name(host.phase), host.frames, host.refused,
-                           host.core ? host.core->own_body_backstops() : 0, host.births_dropped, host.unmatched_resyncs,
+                           host.core ? host.core->own_body_backstops() : 0, host.births_dropped,
+                           host.core ? host.core->unmatched_resyncs() : 0,
                            mailbox.pushed(), mailbox.dropped(), host.drained,
                            host.starts, host.discarded, host.undecodable, host.beams_made, host.nav_source_differs,
                            host.mute_source_differs);
@@ -3100,7 +3082,7 @@ std::string BallanceMMOClient::core_host_status_text() {
                        "backstops={} refused={} unmatched_resyncs={} {}",
                        core.session_id(), host_phase_name(host.phase), core.current_tick(), core.assigned() ? 1 : 0,
                        core.holding() ? 1 : 0, host.navigation_known ? 1 : 0, core.own_physicalized() ? 1 : 0,
-                       core.own_body_backstops(), host.refused, host.unmatched_resyncs, core.status_text(h));
+                       core.own_body_backstops(), host.refused, core.unmatched_resyncs(), core.status_text(h));
 }
 
 // The F3 panel's physics block for a core session.

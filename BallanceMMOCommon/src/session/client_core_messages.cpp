@@ -155,6 +155,7 @@ namespace bmmo::session {
             };
             const scope_guard keep_cells = platform_.keep_live_cells(*this);
             const uint64_t frozen_before = s.rollback_.stats().frozen;
+            const uint64_t unmatched_before = s.rollback_.stats().unmatched;
             // Step T3: the trafo pieces are inputs' bodies here, exact by
             // the replay; a row of one is a restore source only when it
             // breaches (rollback_world::row_on_breach_only).
@@ -168,6 +169,26 @@ namespace bmmo::session {
             // back together (design 4.1, 7 Q1: a core rule for both hosts
             // from R1; retail is the host whose clock can freeze).
             if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen");
+            // Session-core design 7.1 decision 1 (step B2SW; the retail host's
+            // transitional trigger until then, core_host.cpp): snapshots in a
+            // row with no record of their tick are a numbering desync, which
+            // only a re-anchor repairs.  Counted per snapshot - a matched one
+            // ends the run, a tick without a snapshot does not - and only
+            // here, past the resync-pending return above, as the host did.
+            if (s.rollback_.stats().unmatched != unmatched_before) {
+                if (++s.consecutive_unmatched_ >= kUnmatchedSnapshotRun) {
+                    logf("%d snapshots in a row with no record of their tick (the last %u, local tick %u)",
+                         s.consecutive_unmatched_, snapshot.tick, current_tick());
+                    s.consecutive_unmatched_ = 0;
+                    // Counted only when the request went out (the limiter
+                    // may hold it back).
+                    const uint64_t sent_before = s.resyncs_sent_;
+                    request_resync("30 snapshots with no record of their tick");
+                    if (s.resyncs_sent_ != sent_before) ++s.unmatched_resyncs_;
+                }
+            } else {
+                s.consecutive_unmatched_ = 0;
+            }
             if (rolled) {
                 ++s.snapshot_rollbacks_;
                 s.snapshot_rollback_depth_ += current_tick() - snapshot.tick;

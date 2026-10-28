@@ -379,6 +379,11 @@ numbers 1-10 are unchanged.
      - *G1*: fixed - the script restore re-registers what it writes back
        active (`script_replay` `live_membership`, the core hosts' bindings
        and SimTool); the harness's own re-registration is now a count.
+     - *The 30-unmatched rule*: in the core for both hosts, counted per
+       snapshot (adapted: the host's copy reset every frame and could not
+       fire), the session's (zeroed at `begin`); never fired live, the
+       snapshots-on arm included (`b2sw_u30on`, 16 client runs) (core
+       design).
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

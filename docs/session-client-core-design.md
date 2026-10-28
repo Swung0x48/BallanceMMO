@@ -6486,6 +6486,52 @@ S11). Where it adds to §1.2, §2.2-§2.4, §3.1 and §3.2:
   `physics.placement_clones` is on by default since S10; the deferred checks
   are `docs/roadmap.md` §4's list.
 
+**As built (step B2SW, 2026-10-27): the 30-unmatched-snapshots rule in the
+core (7.1 decision 1), and step P's spawn race re-measured.**
+
+- **The rule, one copy for both hosts.** `apply_snapshot`
+  (client_core_messages.cpp) counts, after the rollback's `on_snapshot`, a
+  run of authoritative snapshots whose tick the history has no record of
+  (`rollback_stats().unmatched` grew): the 30th in a row logs "30 snapshots
+  in a row with no record of their tick (the last T, local tick L)" and asks
+  for a resync ("30 snapshots with no record of their tick"). A matched
+  snapshot ends the run; a stale one (dropped before the rollback) neither
+  counts nor ends it; every resync request that goes out resets it (beside
+  `consecutive_hard_`); while a resync is pending, or with the rollback off,
+  nothing is counted - where the host's trigger counted. The run and its
+  resync count are the session's: `begin` zeroes both, as the host did at
+  every session start; a request the limiter holds back (2 s / 10 s) is not
+  counted as asked for. State
+  `consecutive_unmatched_` / `unmatched_resyncs_`, accessors
+  `unmatched_run()` / `unmatched_resyncs()`, `kUnmatchedSnapshotRun = 30`;
+  the status line's rollback part gains `unmatched_run=run/resyncs`. The
+  retail host's transitional trigger (core_host.cpp, its three statics) is
+  deleted; its status lines read `unmatched_resyncs=` from the core.
+  **Adapted: counted per snapshot.** The host's copy (R4's note: ported as
+  PSC:2115) reset on every frame with no unmatched snapshot, frames without
+  a snapshot included, so with a snapshot every 2 ticks it could never reach
+  30 - a dead rule. The decision's words ("30 unmatched snapshots", the
+  code's "30 snapshots in a row with no record of their tick") are what is
+  built; the legacy path keeps its own copy, unchanged.
+  Checks: `SessionClientCoreSnapshot.ThirtyUnmatchedSnapshotsInARowAskForAResync`
+  (29 then a stale one: run 29, nothing asked; the 30th: the log line, the
+  request, the run 0; a request for another reason resets a run of 5; with
+  the rollback off nothing counts; a run of 30 the limiter holds back is not
+  counted; a run of 25 does not carry into the next session), 549/549. Live,
+  snapshots off (`maps/arena-test/b2sw_A`, 4 clients, 150 ms, two forced and
+  two missed-trafo resyncs; `b2sw_cliff_drive`; the stall runs):
+  `unmatched_run=0/0` on every client; the two retail runs too
+  (`unmatched_resyncs=0`). Snapshots off the rule cannot run (it lives in
+  `apply_snapshot`), so the arm that exercises it is the snapshots-on one,
+  run at the review round: `maps/arena-test/b2sw_u30on` (4 clients, 150 ms,
+  snapshots 2 / 66, the arena's four sectors at 60 s each, build `rB2SWc`):
+  16 client runs, `unmatched_run=0/0` on all - it never fired. Unmatched
+  snapshots did occur (16-18 on three clients of sector 3, after its
+  resyncs renumbered them), counted and ended by matched ones short of 30.
+  Those resyncs were "tick schedule rebased" on all four clients at the same
+  ticks (2309, 2578), at the server's own step gaps of 342 ms and more (its
+  journal's TICK clock): the trial's server stall (late-player design, "As
+  built (step B2SW)"), not this rule.
 ## 7. Open questions
 
 1. **Retail's resync triggers.** Retail resyncs on `too_far`, `frozen`, 30
