@@ -3236,11 +3236,25 @@ bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixe
     // body, as the server's copy's does at this tick.)
     core.own_physicalized(report);
     host.own_group_set = false;
+    // The PreSimulate pass's anchor: a live behavior (the Ball Navigation
+    // script).
+    uint32_t behavior_id = host.navigation.ball_navigation;
+    if (behavior_id == 0) behavior_id = bmmo::game::read_navigation_graph(m_bml->GetCKContext()).ball_navigation;
+    // Step OWG: the body in the player's group before this tick's PSIs, as
+    // the server's clone is from its Physicalize (the block makes it in the
+    // script's group; upkeep at post_step step 17 is after the PSIs), its
+    // pairs re-asked: queued into this frame's PreSimulate pass ahead of the
+    // spawn impulse, as the headless host does it in capture_own_physicalize.
+    {
+        std::string error;
+        const int queued = physics_view_.own_group_queue(name.c_str(), core.own_group().c_str(), behavior_id, error);
+        if (queued == 0)
+            logger_->Warn("Physics session: own ball group at tick %u: %s", tick, error.c_str());
+        else if (queued == 1)
+            host.own_group_set = true;
+    }
     if (report.pose.spawn && core.spawn_impulse() > 0.0f) {
-        // Queued into this frame's PreSimulate pass, anchored to a live
-        // behavior (the Ball Navigation script).
-        uint32_t behavior_id = host.navigation.ball_navigation;
-        if (behavior_id == 0) behavior_id = bmmo::game::read_navigation_graph(m_bml->GetCKContext()).ball_navigation;
+        // Queued into this frame's PreSimulate pass as well.
         const uint32_t index = bs::spawn_direction_index(core.seed(), join_order, tick);
         std::string error;
         if (physics_view_.push_impulse(name.c_str(), bs::kSpawnDirectionTable[index], core.spawn_impulse(), behavior_id, error))

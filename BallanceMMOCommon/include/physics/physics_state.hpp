@@ -462,6 +462,41 @@ namespace bmmo::physics {
     // empty list is a world before any body was seen.
     void spawn_ghost_record_set(CKIpionManager* physics, const std::vector<spawn_ghost_record>& in);
 
+    // ---- bridge API v26 (step OWG): the own ball's player group before its
+    // birth tick's PSIs ----
+    //
+    // The retail script makes the own ball with its own collision group (not
+    // a player group), while the server's clone and every remade copy are
+    // made in the player's group "P#<join order>".  Both client hosts give
+    // the live own body its group in the PreSimulate pass of its birth tick,
+    // after the block made it and before the PSIs (headless:
+    // capture_own_physicalize; retail: a callback queued at OnPhysicalize),
+    // so the birth tick's PSIs see a player ball, as the server's do.  The
+    // pairs it was given at its insertion under the old group are re-asked:
+    // IVP re-asks the filter only when the overlap tree re-inserts the body,
+    // so the group alone would leave a pair with a ghost (or no pair with a
+    // solid ball) until then.
+    struct own_group_result {
+        std::string entity;
+        std::string old_group;      // the group the block made the body in
+        int player_pairs_before = -1;   // the body's collision pairs with player balls before the recheck
+        int player_pairs_after = -1;    // and after (-1: not rechecked)
+        bool rechecked = false;     // the group changed and the body is in collision detection
+        int ghost = -1;             // spawn_ghost_state of the body after the change
+    };
+    // Sets `group` on the body of `entity_name` now and, when the group
+    // changed, re-asks the filter for its pairs (recheck_collision_filter).
+    bool adopt_own_group(CKIpionManager* physics, const char* entity_name, const char* group, own_group_result& out,
+                         std::string& error);
+    // adopt_own_group when the body exists (1); otherwise, when `behavior_id`
+    // names a live behavior, queued into the manager's PreSimulate pass of
+    // this frame as push_impulse does (2) - the Physicalize block that makes
+    // the body runs before it.  0 with a message on failure.  Either path
+    // logs its adoption to stdout (the bridge's BMMO_PHYSICS_STDOUT).
+    int queue_own_group(CKIpionManager* physics, const char* entity_name, const char* group, uint32_t behavior_id,
+                        std::string& error);
+    std::string describe_own_group(const own_group_result& r);
+
     // ---- bridge API v8: session clock guard ----
 
     // Keeps the retail pause menu (which stops Gameplay_Ingame and writes the

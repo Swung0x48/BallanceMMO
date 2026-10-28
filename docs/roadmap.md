@@ -599,16 +599,20 @@ numbers 1-10 are unchanged.
    ghost state is their own until the member-added message lands; they are
    not told of a leave either, so they keep the leaver's group state, which
    the server drops at the leave (`spawn_ghost_forget`) - M0/M1 has them drop
-   it too. **Queued, item OWG** (found at SPGH2's gate,
-   `rewind-cost-design.md` "As built (step SPGH2)"): both hosts give the own
-   ball its `P#` group after its birth tick's PSIs (`own_body_upkeep`, post_step
-   step 17), the server's clone has it from its Physicalize; under the spawn
-   ghost the live own ball is no player ball for that tick (one translucent
-   frame at a trafo; at a spawn next to another ball a pair kept through the
-   ghost life where no rollback reaches back over the birth). Fix: the group
-   set before the PSIs on both hosts (headless `capture_own_physicalize`,
-   retail the spawn kick's PreSimulate pass) with the filter re-asked; check
-   with a pinned replay and the retail run. A protocol-15 reference set
+   it too. **Item OWG, done at step OWG** (found at SPGH2's gate;
+   `rewind-cost-design.md` "As built (step OWG)"; bridge API v26, no wire
+   change): both hosts give the live own body its `P#` group in the
+   PreSimulate pass of its birth tick (headless `capture_own_physicalize`,
+   retail a callback queued at OnPhysicalize ahead of the spawn kick), its
+   pairs re-asked, as the server's clone has it from its Physicalize. The
+   one-frame ghost at a trafo is gone (h1_150 and retail); the spawn pair
+   SPGH2 supposed never existed - the script's group is `Ball`, which the
+   player filter keeps apart from every player ball (0 player pairs at all
+   28 own births checked). Unverified: the branch where the recheck adds a
+   pair (a trafo or respawn in contact range of a solid player ball, logged
+   `player pairs 0 -> N`, N > 0) never ran; FULL owes one deterministic
+   headless cell for it (a remote ball resting within ~1 m of a trafo point,
+   own ball vs the server's clone for 60 ticks). A protocol-15 reference set
    (REF9) is owed before the next wire check: `core_ref_s8`'s multi-client
    arms differ from tick 252 under the rule.
    Answer 1 is option (a): H6 is judged by its absolute limits (starved

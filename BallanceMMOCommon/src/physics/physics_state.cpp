@@ -3519,6 +3519,144 @@ namespace bmmo::physics {
         return true;
     }
 
+    // ---- step OWG: the own ball's player group before its birth tick's PSIs
+    namespace {
+        int count_player_pairs(IVP_Real_Object* object) {
+            IVP_OV_Element* e = object ? object->get_ov_element() : nullptr;
+            if (!e) return -1;
+            int n = 0;
+            for (int k = 0; k < e->collision_fvector.len(); ++k) {
+                IVP_Collision* c = e->collision_fvector.element_at(k);
+                if (!c) continue;
+                IVP_Real_Object* objects[2] = {nullptr, nullptr};
+                c->get_objects(objects);
+                IVP_Real_Object* other = objects[0] == object ? objects[1] : objects[0];
+                if (other && other != object && airship_is_player(other)) ++n;
+            }
+            return n;
+        }
+
+        bool adopt_group_now(CKIpionManager* physics, IVP_Real_Object* object, const char* group, own_group_result& out) {
+            out.entity = object->get_name() ? object->get_name() : "";
+            out.old_group = spawn_ghost_group(object);
+            const std::string wanted = group ? bounded(group, IVP_NO_COLL_GROUP_STRING_LEN * 4) : std::string();
+            if (wanted.size() >= IVP_NO_COLL_GROUP_STRING_LEN) return false;
+            out.player_pairs_before = count_player_pairs(object);
+            object->change_nocoll_group_ident(wanted.empty() ? nullptr : wanted.c_str());
+            // The pairs the insertion made under the old group are re-asked
+            // only when the group changed and the body has an overlap-tree
+            // element (a body made without collision has none).
+            if (out.old_group != wanted && object->get_ov_element()) {
+                object->recheck_collision_filter();
+                out.rechecked = true;
+                out.player_pairs_after = count_player_pairs(object);
+            }
+            const spawn_ghost_state_t* state = find_spawn_ghost_state(physics);
+            out.ghost = state && state->enabled ? (spawn_ghost_is_ghost(*state, object) ? 1 : 0) : 0;
+            return true;
+        }
+
+        // Queued at the own ball's OnPhysicalize (retail), run in the same
+        // frame's PreSimulate pass: the block has made the body by then.
+        // The first Execute is the enqueue's own call (impulse_callback).
+        class own_group_callback final : public PhysicsCallback {
+        public:
+            own_group_callback(CKIpionManager* manager, CKBehavior* behavior, CK_ID entity, const std::string& group)
+                : PhysicsCallback(manager, behavior, 2), entity_(entity), group_(group) {}
+            int Execute() override {
+                if (!armed_) {
+                    armed_ = true;
+                    return 0;
+                }
+                CK3dEntity* entity = m_IpionManager && m_IpionManager->m_Context
+                    ? CK3dEntity::Cast(m_IpionManager->m_Context->GetObject(entity_)) : nullptr;
+                PhysicsObject* object = entity ? m_IpionManager->GetPhysicsObject(entity) : nullptr;
+                own_group_result r;
+                if (!object || !object->m_RealObject || !adopt_group_now(m_IpionManager, object->m_RealObject, group_.c_str(), r))
+                    std::printf("[bmmo] own group: %s has no body at the PreSimulate pass\n",
+                                entity && entity->GetName() ? entity->GetName() : "?");
+                else
+                    std::printf("[bmmo] own group: %s\n", describe_own_group(r).c_str());
+                return 1;
+            }
+        private:
+            CK_ID entity_;
+            std::string group_;
+            bool armed_ = false;
+        };
+    }
+
+    std::string describe_own_group(const own_group_result& r) {
+        char text[300];
+        std::snprintf(text, sizeof(text), "%s '%s' -> player group, %s (player pairs %d -> %d), %s", r.entity.c_str(),
+                      r.old_group.c_str(), r.rechecked ? "rechecked" : "not rechecked", r.player_pairs_before,
+                      r.player_pairs_after, r.ghost == 1 ? "a spawn ghost" : "solid or rule off");
+        return text;
+    }
+
+    bool adopt_own_group(CKIpionManager* physics, const char* entity_name, const char* group, own_group_result& out,
+                         std::string& error) {
+        error.clear();
+        out = own_group_result{};
+        if (!physics || !physics->GetEnvironment()) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+        CK3dEntity* entity = find_entity(physics, name);
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        if (!object || !object->m_RealObject) {
+            error = "no physics body for '" + name + "'";
+            return false;
+        }
+        if (!adopt_group_now(physics, object->m_RealObject, group, out)) {
+            error = std::string("collision group too long: ") + (group ? group : "");
+            return false;
+        }
+        return true;
+    }
+
+    int queue_own_group(CKIpionManager* physics, const char* entity_name, const char* group, uint32_t behavior_id,
+                        std::string& error) {
+        error.clear();
+        if (!physics || !physics->GetEnvironment()) {
+            error = "physics environment is unavailable";
+            return 0;
+        }
+        const std::string name = bounded(entity_name, BMMO_PHYSICS_NAME_SIZE);
+        CK3dEntity* entity = find_entity(physics, name);
+        if (!entity) {
+            error = "no 3D entity named '" + name + "'";
+            return 0;
+        }
+        const std::string wanted = group ? bounded(group, IVP_NO_COLL_GROUP_STRING_LEN * 4) : std::string();
+        if (wanted.size() >= IVP_NO_COLL_GROUP_STRING_LEN) {
+            error = "collision group too long: " + wanted;
+            return 0;
+        }
+        if (PhysicsObject* object = physics->GetPhysicsObject(entity); object && object->m_RealObject) {
+            // The body exists already: set now, logged as the queued path
+            // logs it (the callback), so every retail adoption leaves a trace.
+            own_group_result r;
+            adopt_group_now(physics, object->m_RealObject, wanted.c_str(), r);
+            std::printf("[bmmo] own group (set at once): %s\n", describe_own_group(r).c_str());
+            return 1;
+        }
+        CKBehavior* behavior = behavior_id && physics->m_Context
+            ? CKBehavior::Cast(physics->m_Context->GetObject(behavior_id)) : nullptr;
+        if (!behavior) {
+            error = "no live behavior to anchor the PreSimulate pass for '" + name + "' (behavior id " +
+                    std::to_string(behavior_id) + ")";
+            return 0;
+        }
+        if (!physics->m_PreSimulateCallbacks) {
+            error = "the physics manager has no PreSimulate queue";
+            return 0;
+        }
+        physics->m_PreSimulateCallbacks->Process(new own_group_callback(physics, behavior, entity->GetID(), wanted));
+        return 2;
+    }
+
     void spawn_ghost_forget(CKIpionManager* physics, const char* group) {
         spawn_ghost_state_t* state = physics ? find_spawn_ghost_state(physics) : nullptr;
         if (!state || !state->enabled || !group || !*group) return;

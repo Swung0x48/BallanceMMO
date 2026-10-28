@@ -196,6 +196,10 @@ namespace bmmo::physics {
         // Step SPGH2: a spawn birth of `group` (physics_state.hpp
         // spawn_ghost_birth); false when the rule is off.
         bool spawn_ghost_birth(const char* group) const;
+        // ---- bridge API v26 (step OWG): the own ball's player group set before
+        // its birth tick's PSIs (physics_state.hpp queue_own_group): 1 set now,
+        // 2 queued into this frame's PreSimulate pass, 0 with `error`.
+        int own_group_queue(const char* entity_name, const char* group, uint32_t behavior_id, std::string& error) const;
         // ---- bridge API v22 (step T4): the savestate's controller alias
         // (physics_savestate.hpp set_controller_alias); a null `alias`
         // removes it.

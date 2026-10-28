@@ -792,6 +792,18 @@ namespace {
         return bmmo::physics::spawn_ghost_birth(static_cast<CKIpionManager*>(manager), group) ? 1 : 0;
     }
 
+    int32_t api_own_group_queue(void* manager, const char* entity_name, const char* group, uint32_t behavior_id,
+                                char* error, uint32_t error_size) {
+        if (!manager || !entity_name) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        const int r = bmmo::physics::queue_own_group(static_cast<CKIpionManager*>(manager), entity_name, group, behavior_id, text);
+        if (r == 0) set_error(error, error_size, text);
+        return r;
+    }
+
     int32_t api_airship_zone_get(void* manager, double* box_out) {
         bmmo::physics::airship_zone_box box;
         bmmo::physics::airship_zone_get(static_cast<CKIpionManager*>(manager), box);
@@ -964,6 +976,7 @@ namespace {
         api_spawn_ghost_set,
         api_spawn_ghost_state,
         api_spawn_ghost_birth,
+        api_own_group_queue,
     };
 }
 

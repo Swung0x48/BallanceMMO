@@ -2829,3 +2829,115 @@ runs with spacing 0 and without the spawn impulse (measure only; removing
 either is the user's choice); a protocol-15 reference set (the multi-client
 `core_ref_s8` arms no longer replay comparably: the rule changes their
 world from tick 252).
+
+## As built (step OWG)
+
+Queue item OWG (found at SPGH2's gate, "Residual found at the gate" above):
+the live own ball is given its `P#` group before its birth tick's PSIs on
+both hosts, its pairs re-asked of the filter; bridge API v26, no protocol or
+journal change, no engine change (IVP untouched).
+
+**What the reproduction found.** The retail script makes the own ball in
+the collision group `Ball` (logged at every own birth of every check below:
+`'Ball' -> player group`). The player filter refuses every pair between a
+player ball and a `Ball` body (`player_collision_filter`), so during its
+birth tick the live own body had *no* pair with any player ball - not the
+pair SPGH2 supposed. Measured: the body's player pairs at the adoption, i.e.
+what the old code carried through the birth tick, were 0 at all 28 own
+births the checks reach (SPGH's live session pinned: 4 starts and 7
+respawns; solo1/solo2: 2 starts; `b6rc/h1_150`: 4 starts and 7 trafos;
+retail: 2 starts, 1 respawn, 1 trafo). What the late group did change: the
+group's state in the spawn ghost rule. At the birth tick's PSI the own
+group had no body (`present` false, `marked` cleared there, where the
+server's clone counts), so the own ball read as a ghost for that frame
+after a trafo and was `resumed` (its pairs rechecked when another ball is
+close by) one PSI later than the server's clone; and a death and respawn
+between two PSIs (`present && marked`, the recheck of the new body's pairs)
+was decided differently. The spawn worry of SPGH2 (a pair kept through the
+ghost life) does not arise; the trafo frame is the residual, and a solid
+ball next to the trafo would have gone one PSI without its pairs.
+
+**What was built.** One implementation in the physics layer
+(`physics_state.cpp` `adopt_own_group` / `queue_own_group`): set the group,
+and when it changed and the body has an overlap-tree element, call
+`recheck_collision_filter` (IVP re-asks the filter only when the overlap
+tree re-inserts a body); the result (old group, player pairs before / after,
+the spawn ghost state after) is logged. The headless host calls
+`adopt_own_group` in `capture_own_physicalize` (the PreSimulate pass of the
+live birth tick, the block has made the body, before the PSIs and before
+the spawn impulse). The retail host calls `queue_own_group` from its
+OnPhysicalize (bridge API v26 `own_group_queue`): the body does not exist
+yet, so an `own_group_callback` is queued into the same frame's PreSimulate
+pass, ahead of the spawn impulse's `impulse_callback`, anchored to the Ball
+Navigation behavior as that one is; it is one of BallanceMMO's own
+callbacks (`is_bmmo_callback`), so the savestate and the gap Q queue check
+leave it out as they leave the impulse out. The post_step step 17 upkeep
+stays as the fallback (the same group: no recheck). Remade own bodies were
+already made in the group (`make_own`, `spec.group`), so a replay is
+unchanged. **Adaptation:** the design named the retail point "the spawn
+kick's PreSimulate pass"; the kick is queued only at a spawn, so the group
+has its own callback, queued at every own birth (a trafo included) where
+the kick is queued.
+
+**Checks (quick tier; about 7 minutes of check wall time, one live run).**
+x64 BUILD-OK, x86 CLIENT-BUILD-OK (with the slot-13 hack, reverted), Arch
+ARCH-BUILD-OK (hacked for the retail run, then clean); header deps VALID on
+both Windows trees; 586 tests pass; GCC syntax check every line ok.
+- Wire check `rSPGH2 rOWG rOWGw` on `core_ref_s8` (`EXTRA=--accept-protocol
+  13`): every send SAME and every journal IDENTICAL on all 12 multi-client
+  replays; the verdict line says DIFFERENCES only for the pre-existing
+  COVERAGE-SHORT of resync_snapoff c0/c1/c3 at 2954-2960 (both binaries, as
+  SPGH2 recorded). Solo1 / solo2: sends SAME, journals IDENTICAL to rSPGH2's.
+- SPGH's live rule-on session, own keys pinned, replayed by this build: all
+  four journals IDENTICAL to the live ones and to rSPGH2's pinned replays
+  (the starts at 231, the respawns at 2522-2608 and 3479-3535 included).
+- The trafo evidence `b6rc/h1_150`, replayed by this build: the own ball's
+  one-frame ghost at each trafo is gone in all four clients (before, rSPGH2:
+  c0 818/1176, c1 824/1190, c2 841/1203, c3 866; now no ghost line after
+  the start); the four journals IDENTICAL to rSPGH2's (c3's replay stops at
+  pass 7951 with both binaries: a clock read the capture never made,
+  pre-existing).
+- One retail run (`scripts/retail/OWG_retail`, two copies, the arena,
+  snapshots off, trafo inputs and placement on): client 1's trafo at 1134
+  shows no ghost frame (`resumed` at 1134, as the server's clone: "spawn
+  ghost at tick 1134: ... 1 resumed solid"); the own transitions equal the
+  server's (solid 436 / 778, client 2's respawn a ghost at 1239 on both);
+  the physics stdout logs the four retail adoptions (`'Ball' -> player
+  group`, player pairs 0 -> 0); the own spawn is re-marked in a rollback
+  window ("P#0 marked a spawn birth at tick 212 (replayed own birth)").
+  SPGH2's deferred retail checks, by screenshot: the balls overlap at the
+  spawn and pass through (client 1 beamed onto client 2: neither pushed);
+  client 2 beamed 1 m onto client 1's resting solid ball stays a ghost
+  (client 1's ball not moved, 2.562 m before and after) and turns solid
+  once 7 m past it (778); client 1's own ball shows opaque while the ghost
+  mirror overlaps it (the shared-material nit not seen). The translucency
+  is judged by eye on the screenshots, not measured frame by frame.
+
+**Unverified: the branch where the recheck adds pairs.** Every adoption
+the checks reached logged `player pairs 0 -> 0` and every journal equals
+rSPGH2's, so the only branch through which OWG changes a simulation result
+- `recheck_collision_filter` creating a pair with a solid player ball in
+contact range of the own body at its birth tick (`pairs_after > 0`) - has
+not run on either host. There the client's pair is made by IVP's recheck in
+the PreSimulate pass while the server's clone got its pair at insertion; if
+the two land in a different `collision_fvector` / mindist order, that is
+known cause (A) (the own ball's collision bookkeeping) starting at the birth
+tick. Nothing measured says it is wrong; it is simply not measured.
+
+**Gate fix-ups (review nits).** `queue_own_group`'s immediate path (the
+body already exists at OnPhysicalize) now logs its adoption to stdout as the
+queued callback does (`[bmmo] own group (set at once): ...`), so every
+retail adoption leaves a trace; a missing anchor behavior is reported as
+such ("no live behavior to anchor the PreSimulate pass ...") and a missing
+PreSimulate queue separately, instead of "'X' is not physicalized". Both are
+log text only; neither is reachable from the headless client (it calls
+`adopt_own_group`).
+
+**Not done / deferred** (beyond the step's gate, for FULL): a trafo beside
+another solid ball - the FULL cell: a deterministic headless arm with a
+remote ball resting within about 1 m of a trafo point, the own ball compared
+with the server's clone for 60 ticks after the trafo, and a logged
+`player pairs 0 -> N` with N > 0 required (no arm or run has one yet; it is
+the one case where the earlier recheck changes physics); a death and a
+respawn between two PSIs; and a frame-by-frame translucency record on
+retail.

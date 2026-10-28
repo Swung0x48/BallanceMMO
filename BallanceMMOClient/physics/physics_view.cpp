@@ -1060,6 +1060,20 @@ namespace bmmo::physics {
         return api_->spawn_ghost_birth(manager_, group) == 1;
     }
 
+    int physics_view::own_group_queue(const char* entity_name, const char* group, uint32_t behavior_id,
+                                      std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return 0; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->own_group_queue) {
+            error = "the physics_RT bridge lacks own_group_queue";
+            return 0;
+        }
+        char text[256] = {};
+        const int r = api_->own_group_queue(manager_, entity_name, group, behavior_id, text, sizeof(text));
+        if (r == 0) error = text;
+        return r;
+    }
+
     int physics_view::airship_zone_contains(const char* entity_name) const {
         if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->airship_zone_contains) return 0;
         return api_->airship_zone_contains(manager_, entity_name);

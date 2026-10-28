@@ -2579,6 +2579,27 @@ namespace {
             std::string error;
             if (!bmmo::physics::get_body_state(engine_->physics(), name.c_str(), state, error)) return;   // no body yet
             bmmo::physics::hull_probe(engine_->physics(), name.c_str(), "own_capture");
+            // Step OWG: the body in the player's group before this tick's PSIs,
+            // as the server's clone is from its Physicalize: the block made it
+            // in the script's group, and upkeep (post_step step 17) comes after
+            // the PSIs - the birth tick would see no player ball here (one
+            // ghost frame at a trafo; at a spawn the pairs its insertion made
+            // with player balls kept).  The pairs are re-asked when the group
+            // changed.  The retail host does the same from its OnPhysicalize
+            // (queue_own_group: this frame's PreSimulate pass).
+            {
+                bmmo::physics::own_group_result adopted;
+                if (bmmo::physics::adopt_own_group(engine_->physics(), name.c_str(), core_.own_group().c_str(), adopted, error)) {
+                    own_group_set_ = true;
+                    if (own_group_logs_ < 64) {
+                        ++own_group_logs_;
+                        logf("own group at tick %u: %s", tick, bmmo::physics::describe_own_group(adopted).c_str());
+                    }
+                } else {
+                    logf("own ball group at tick %u: %s", tick, error.c_str());
+                }
+                bmmo::physics::hull_probe(engine_->physics(), name.c_str(), "own_group");
+            }
             own_capture_.valid = true;
             own_capture_.tick = tick;
             own_capture_.entity = name;
@@ -3993,6 +4014,7 @@ namespace {
         uint64_t live_tick_serial_ = 0;
         uint64_t live_ticks_ = 0;
         bool own_group_set_ = false;
+        int own_group_logs_ = 0;   // step OWG: the first 64 adoptions logged
         int load_waited_ = 0;
         bmmo::game::sequencer_state level_sequencers_;
         bmmo::game::proximity_countdown_state level_proximities_;   // step Q, as the server's

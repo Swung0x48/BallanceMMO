@@ -492,8 +492,8 @@ namespace bmmo::physics::savestate {
                            bool ignore_order = false);
 
     // BallanceMMO's own PreSimulate callbacks (navigation_callback in
-    // ball_navigation.cpp, impulse_callback and clock_guard_callback in
-    // physics_state.cpp): queued and consumed by the bridge around every step
+    // ball_navigation.cpp, impulse_callback, clock_guard_callback and step
+    // OWG's own_group_callback in physics_state.cpp): queued and consumed by the bridge around every step
     // (the rollback calls set_nav, which queues one, BEFORE set_savestate; the
     // key-polling one is off for the whole of a replay), so they are not part
     // of the retail state a blob carries or a restore guards.  They live in
@@ -504,7 +504,8 @@ namespace bmmo::physics::savestate {
         if (!callback) return false;
         const char* name = typeid(*callback).name();
         if (!name) return false;
-        static const char* const kNames[] = {"navigation_callback", "impulse_callback", "clock_guard_callback"};
+        static const char* const kNames[] = {"navigation_callback", "impulse_callback", "clock_guard_callback",
+                                             "own_group_callback"};
         for (const char* known : kNames)
             if (std::strstr(name, known)) return true;
         return false;
