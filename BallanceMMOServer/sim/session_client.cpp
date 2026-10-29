@@ -134,6 +134,21 @@ namespace {
         // nothing before depth + 2 played ticks: the anchor would wrap).  A
         // diagnostic: off by default.
         std::map<uint32_t, uint32_t> force_rollback_at;
+        // --reset-level-at T|b+N and --activate-script NAME:T|NAME:b+N (close-out
+        // step H1, FULL rows RK3R-rec and RK3F; test only, off by default):
+        // once, right after live tick T (b+N: N ticks after this session's
+        // first assigned tick, the tick base, so b+N runs before frame N+2),
+        // send "Reset Level" to Level and All_Balls - the message a lost last
+        // life or the ESC menu's restart sends, as the retail automation
+        // verb `restart` does - or activate the root script NAME (reset) in
+        // the current scene - what a respawn or a pause resume does to
+        // Gameplay_Refresh.  A live action of this world alone: a rewind does
+        // not replay it.
+        int64_t reset_level_at = -1;
+        bool reset_level_rel = false;
+        std::string activate_script;
+        int64_t activate_script_at = -1;
+        bool activate_script_rel = false;
         // --replay-scripts: step a replayed tick with the WHOLE frame
         // (context_->Process(), i.e. behaviours and managers) instead of the
         // physics alone.
@@ -498,6 +513,8 @@ namespace {
                   "       [--capture-inbound FILE | --replay-inbound FILE]   (record the inbound messages and clock reads; "
                   "replay them, unpaced, sending nothing)\n"
                   "       [--force-rollback EVERY:DEPTH | --force-rollback-at T:D[,T:D...]]   (diagnostic forced rewinds; -at: T >= D + 2)\n"
+                  "       [--reset-level-at T|b+N] [--activate-script NAME:T|NAME:b+N]   (test: once after live tick T or tick base+N,\n"
+                  "         send \"Reset Level\" / activate the root script NAME; live only)\n"
                   "       [--replay-free-cost-clock]   (with --replay-inbound: the rewind cost's clock reads are the replay's own)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
                   "       [--io-flush MODE | log=MODE,journal=MODE,capture=MODE]   (MODE none|batch|record, default batch: the\n"
@@ -573,6 +590,22 @@ namespace {
                     if (comma == std::string::npos) break;
                     at = comma + 1;
                 }
+            }
+            else if (arg == "--reset-level-at" || arg == "--activate-script") {   // close-out step H1
+                if (!(v = next())) return false;
+                std::string spec = v;
+                std::string name;
+                if (arg == "--activate-script") {
+                    const size_t colon = spec.rfind(':');
+                    if (colon == std::string::npos || colon == 0) return false;
+                    name = spec.substr(0, colon);
+                    spec = spec.substr(colon + 1);
+                }
+                const bool rel = spec.rfind("b+", 0) == 0;
+                const long long t = std::atoll(spec.c_str() + (rel ? 2 : 0));
+                if (t < 0) return false;
+                if (arg == "--reset-level-at") { out.reset_level_at = t; out.reset_level_rel = rel; }
+                else { out.activate_script = name; out.activate_script_at = t; out.activate_script_rel = rel; }
             }
             else if (arg == "--checkpoint-ticks") {
                 if (!(v = next())) return false;
@@ -3359,6 +3392,10 @@ namespace {
                     return;
                 }
             }
+            // --reset-level-at / --activate-script (close-out step H1): once,
+            // after this live tick's step.
+            if (core_.assigned() && (args_.reset_level_at >= 0 || args_.activate_script_at >= 0))
+                h1_test_actions(current_tick());
             // --resync-at (step A3): a resync asked for while this client
             // keeps stepping, once.
             if (!resync_at_done_ && core_.assigned()) {
@@ -3765,6 +3802,54 @@ namespace {
             if (!bmmo::physics::navigation_input(engine_->physics(), own_replica_.entity.c_str(), 0, cam[0], cam[1],
                                                  cam[2], false, error))
                 logf("own navigation rows after a rewind: %s", error.c_str());
+        }
+
+        // --reset-level-at / --activate-script (close-out step H1, FULL rows
+        // RK3R-rec and RK3F): the first call names the tick base (b+N is
+        // relative to it); each action runs once, at the first live tick at
+        // or after its due tick.
+        void h1_test_actions(uint32_t now) {
+            if (!h1_base_known_) {
+                h1_base_known_ = true;
+                h1_base_ = now;
+            }
+            CKContext* context = engine_->context();
+            const auto due = [&](int64_t at, bool rel) {
+                return static_cast<uint32_t>(rel ? h1_base_ + static_cast<uint32_t>(at) : static_cast<uint32_t>(at));
+            };
+            if (args_.reset_level_at >= 0 && !h1_reset_done_
+                    && static_cast<int32_t>(now - due(args_.reset_level_at, args_.reset_level_rel)) >= 0) {
+                h1_reset_done_ = true;
+                CKMessageManager* messages = context ? context->GetMessageManager() : nullptr;
+                if (!messages) {
+                    logf("--reset-level-at: no message manager at tick %u", now);
+                } else {
+                    const CKMessageType reset = messages->AddMessageType(const_cast<CKSTRING>("Reset Level"));
+                    int sent = 0;
+                    for (const char* target: {"Level", "All_Balls"}) {
+                        auto* object = static_cast<CKBeObject*>(
+                            context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(target), CKCID_BEOBJECT, nullptr));
+                        if (object && messages->SendMessageSingle(reset, object)) ++sent;
+                    }
+                    logf("--reset-level-at: \"Reset Level\" sent to %d of 2 objects (Level, All_Balls) after tick %u "
+                         "(tick base %u)", sent, now, h1_base_);
+                }
+            }
+            if (args_.activate_script_at >= 0 && !h1_activate_done_
+                    && static_cast<int32_t>(now - due(args_.activate_script_at, args_.activate_script_rel)) >= 0) {
+                h1_activate_done_ = true;
+                CKBehavior* script = bmmo::game::find_root_script(context, args_.activate_script.c_str());
+                CKScene* scene = context ? context->GetCurrentScene() : nullptr;
+                if (!script || !scene) {
+                    logf("--activate-script: %s not found (or no scene) at tick %u", args_.activate_script.c_str(), now);
+                } else {
+                    const bool was_active = script->IsActive() != FALSE;
+                    scene->Activate(script, TRUE);
+                    logf("--activate-script: %s (#%u) activated after tick %u (tick base %u, frame %u next; it was %s)",
+                         args_.activate_script.c_str(), static_cast<unsigned>(script->GetID()), now, h1_base_,
+                         now - h1_base_ + 2, was_active ? "active" : "inactive");
+                }
+            }
         }
 
         // Rewind for no reason at all, on a fixed cadence (--force-rollback).
@@ -4482,6 +4567,10 @@ namespace {
         std::string compare_scripts_last_;   // the last logged first difference, so only changes are logged
         int contact_traces_ = 0;                            // --trace-restore: contact lines logged around rewinds
         std::set<uint32_t> force_rollback_at_done_;          // close-out step S3: --force-rollback-at ticks already rewound
+        bool h1_base_known_ = false;                         // close-out step H1: --reset-level-at / --activate-script
+        uint32_t h1_base_ = 0;
+        bool h1_reset_done_ = false;
+        bool h1_activate_done_ = false;
         // Step OWNB: the own ball's Physicalize block as own_physicalize_hook
         // saw it before the block ran (the live tick, the entity, and the
         // spawn flag of the entity before the birth cell moved it).

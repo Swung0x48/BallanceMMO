@@ -1866,3 +1866,55 @@ server, protocol, journal, bridge or IVP change.
   656/656; GCC `linux_test_syntax.sh` 31/31, `linux_sim_syntax.sh` 5/5 (with
   `sim_tool.cpp`); `ninja -t deps` of sim_tool.cpp.obj 289 VALID. No wire
   check: nothing the headless client or the shared code compiles changed.
+
+## As built (step H1, FULL close-out, 2026-10-29): H1 (replaced), H2, H4, RK3F, RK3R-rec
+
+Rows RK1-a/b/d, RK3-b, RK3F and RK3R-rec of the close-out plan, run on the
+Arch server of HEAD 193c9a5b and the headless client rH1 (two test switches
+added, off by default: `--reset-level-at` and `--activate-script`,
+session_client.cpp); the full numbers are in `docs/roadmap.md` §4 item 7,
+"Run at H1". Level 1 founders' tick base 27 (frame f = tick 26 + f).
+
+- **H1 (replaced) and H4, offline from the live captures** (`h1_full/l1_main`,
+  clients 0 and 1, `BMMO_TRACE_TIMEFACTOR=1`): `--force-rollback-at` 47:19
+  (anchor 28, the first record: H4), 46:19 (anchor 27, across frame 2's
+  globals write: `globals=2/1/1/0/0`, one replay across the change -
+  RK1 (d)) and 50:16 (anchor frame 8, across the tutorial's frames 9..16):
+  rows equal to the unforced replay at every LOCAL and FINAL checkpoint,
+  no factor-0 write, no "differs from the live record" beyond the control's.
+  Adapted: H4 on Level 1 instead of L2 / the arena (the arena's H4 rewind
+  is the same code path; the globals change exists only at frame 2).
+- **H2** (client 1 beamed onto the ExtraLife chapter spot at 2001; beamed
+  once, not held - no hold verb): frozen 0, resyncs 0, `globals=0/0/0/0/0`
+  on all four; no chapter runs under the bit.
+- **RK3F shows** (§3 D5 of the plan, the user's): Gameplay_Refresh
+  activated before frame 12 in one world (`--activate-script
+  Gameplay_Refresh:b+10`, standing in for a respawn or a pause resume)
+  writes factor 0 at frame 12 until the exit's 2.0 at frame 16; that
+  world's level props part from the others for good (0.56 m, 0.37 m),
+  frozen 0 (four ticks are below the frozen-clock detection), no resync.
+  Cause: RK3H's hold covers Init's frame-9 block only; Gameplay_Refresh's
+  `Tutorial freeze/unfreeze` (#29832) still writes 0 while the tutorial's
+  freeze flag is set, i.e. until the exit path clears it (its 2.0 lands in
+  frame 16). Options for the user (not decided): (a) hold #29832's factor
+  input too, with RK3H's redirect (its other writes are 2.0 already);
+  (b) accept it as a known limit (exposure: a respawn or a pause resume
+  within frames 9..15 of the level start, about 106 ms; it is not
+  detected).
+- **RK3R-rec**: "Reset Level" sent at 1500: the own ball unphysicalized,
+  the trafo resets and the sector manager's reset as in a death, the
+  tutorial's Init re-runs (its held write 2.0); no new own ball within 940
+  ticks, so no chapter freeze was reached headless - the retail run (RT2)
+  records the full path through the menu's restart.
+- **The two switches are live-only** (gate-round review): neither action
+  is journaled or re-applied in replayed frames, so a run measures it only
+  while no restore in the acting world is anchored at or before the action
+  tick (a restore of Gameplay_Refresh's or the reset handling's script state
+  would undo it and no replay redoes it). Read from the `l1_reset` logs
+  ("savestate restore at tick"): client 2 (activation after tick 37)
+  restores first at 259; client 3 (reset after tick 1500) restored at 1489
+  before the reset and at 1527 next - no anchor at or before the action
+  after it, so both runs hold. A
+  replay of those two captures needs the same switch and still diverges
+  wherever a rewind crosses the action, by construction; RK3F and RK3R-rec
+  were read from the live journals and logs, not from replays.

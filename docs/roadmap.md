@@ -924,6 +924,76 @@ numbers 1-10 are unchanged.
    live frame; V4b alive 50/50, the after-restore reading at pending 0 in
    50/50 rounds (the before-the-rewind line shows the last replay's adds,
    left for the next live frame by RLM's rule).
+   **Queued at FULL step H1 (2026-10-29, found by SP7-c's forced replays of
+   the live L8 cross at 150 ms, pre-existing, not decided here):** the
+   deferral of an untracked window-born fixed body (RO1: kept inert from
+   the restore and rechecked into the tree at its birth tick) leaks into
+   the records the replay captures before that tick - they hold the inert
+   body - so a SECOND rewind anchored on one of them (before the birth
+   tick) restores the body as a known one, runs no recheck, and its
+   overlap-tree membership stays wrong for good. Measured
+   (`maps/arena-test/h1_full/l8_cross_150`, client 2's capture, rH1; the
+   pair arm and its control replayed again with rS3, HEAD 193c9a5b's build
+   without H1's switches: both journals IDENTICAL to rH1's, the same
+   "hull P_Dome_MF" line - pre-existing on HEAD):
+   `--force-rollback-at 350:24` (anchor 326, 1 body unknown to the blob)
+   or `360:24` (anchor 336) alone are exact; the pair 350:24,360:24 (the
+   s2 pass at 335 and s4 at 342 inside both windows) logs at the second
+   rewind "the world re-simulated to tick 360 differs from the live
+   record: hull P_Dome_MF entries [ov@...] [] | ov P_Dome_MF in_hull 1 0",
+   and from then on the world has 3 overlap-tree nodes fewer than the
+   straight run (P_Dome_MF, a fixed body of the s4 pass, is born at 346 in
+   the straight run - absent from its blobs at 345, present at 346 - and is
+   `in_hull=1` at 350; the first replay's records hold it, inert, from
+   330 on; after the pair it is `in_hull=0 node=-1` at 350, 360 and 700) (`--savestate-diff` of the dumps: ov_nodes 69/66 at
+   350..362, 75/72 at 700), every body value still bit-equal (45/45
+   bodies at every checkpoint) until client 2's own ball, beamed onto s3
+   at 741, lands: collisions 176/175 at 742, the ball 0.41 m off the
+   server at 758, 8.1 m at 942 (`first_divergence.py`). A host frame
+   with two natural rewinds 10 ticks apart over a sector pass is ordinary
+   at 150 ms, so a live client can part from the server this way. Options
+   (each a rollback-engine change, none decided): (a) mark a deferred
+   body in the records captured before its birth tick (a later restore
+   from such a record treats it as unknown again and keeps the deferral);
+   (b) extend RO1's destroy-and-remake to these bodies (the replayed
+   activation makes them; needs the guard RO1 lacked for them); (c) at
+   every restore, treat a body whose birth-log tick is after the anchor
+   as window-born even when the record knows it. Check: the pair arm
+   above and `--force-rollback 10:24` on all four l8_cross_150 captures:
+   FINAL rows equal to the free-clock control (now: bodies 0, one ball
+   off from 758). Tools: `.local-tools/work/H1/h1_forced.sh`.
+   **Found at FULL step H1 (2026-10-29, H7 at 150 ms; cause NOT
+   established and NOT shown pre-existing - deferred, see the end of this
+   entry):**
+   a late joiner's trafo pieces remade by the join's reconcile run a
+   fraction of a tick behind the server's. `h1_full/h7_join` (client 3
+   joins at 1550, S 1705, re-stepped to 1761; the reconcile remade 6 type
+   sets, both paper sets among them, 102 pieces kept out of the restore):
+   pieces 73/102 bit-equal; `Ball_Paper_piece06_Trafo3569020499`, falling
+   off the level at a constant (-6.464, -3.333, 6.464) m/s on both sides
+   (the wind's horizontal part included, bit-equal velocities), is
+   0.098 m behind client 0's and the server's at its first LOCAL
+   checkpoint after the re-step (1762) and stays on the same line - a
+   quarter of a 2-tick step, i.e. a time offset of the remade pieces'
+   cores, not a state difference (the 128 rows at S were equal);
+   `pieces.py` first counts it at 2006 (its player's next Trafo event),
+   worst 4.42 m. Candidate cause, not established: a leapfrog-phase
+   difference between the cores the reconcile made fresh and the
+   founders' blob-restored ones (the IVP restore's leapfrog delta family);
+   from 1724 to 1762 the joiner's piece covers 37.5 ticks of displacement
+   where client 0's covers 38.0. Not confirmed because a late joiner's
+   capture does not replay (S2), so no savestate dump of the joiner's
+   world exists, and the piece names (`_Trafo<id>`) are known only after a
+   run starts; the check: one live H7 with `--trace-body <piece>
+   --trace-ticks S S+5` on the joiner and a founder (or `--dump-savestate`
+   at S+1 on both). TR3's H7 (102/102) had no moving piece at the join,
+   so no earlier build ran this case: whether it predates H1's HEAD is not
+   known (H1 changed no shared or headless code path - wire check 36/36
+   IDENTICAL - so it is not H1's). Deferred, not waived: the trace run is a
+   13th live run, over H1's planned 11-12 (12 used); the reconcile code
+   (`client_core_trafo.cpp` `reconcile_trafo`, the remake branch) makes the
+   pieces fresh with `birth_tick = anchor` and leaves their state to the
+   rows and the blob of S, which is where the trace must look first.
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03
@@ -1700,6 +1770,112 @@ numbers 1-10 are unchanged.
      §7.2); (b) the round's compare at e runs after the client's
      end-of-rewind steps (a change of the rule the round is judged by,
      as B2SX's option (a) was).
+   - **Run at H1 (2026-10-29, HEAD 193c9a5b + two test switches of the
+     headless client; headless batch 1; `.local-tools/work/H1/`, x64
+     `build-agent-rH1`, the Arch server `ballanced-36c04e3d24c9+bmmo-193c9a5b3878`
+     (no maphack), every run snapshots off, trafo inputs and placement
+     on unless named, captures under `maps/arena-test/h1_full/`):** new
+     `--reset-level-at T|b+N` ("Reset Level" to Level and All_Balls, as
+     the retail `restart` verb's message) and `--activate-script NAME:T|NAME:b+N`
+     (session_client.cpp; off by default; wire check rS3 -> rH1 over
+     core_ref_s12: 36/36 journals IDENTICAL, ALL SAME; 661 tests; GCC sim
+     syntax ok). 12 live runs. **TR3b-a** H1 at 150 ms: option on
+     pieces 150/150 on all four, starved/rebases/far/resyncs 0 against the
+     off control's 0, late 0, missed 0, leaks 0, server journal matched;
+     the on arm's VERDICT FAIL is client 3's 18 relayed frames past the
+     reach in its last 11 ticks: when client 0's run ends (2121) it stops
+     sending without leaving, the server waits ~340 ms for its frame
+     before holding the last one (TICK gap 342 ms at 2122; the control
+     shows 351 ms at 2111), so every frame relayed meanwhile is late by
+     that much and the last client's lag (21-28 before) climbs to 50
+     (reach 48) - an end-of-run harness artefact, in every 150 ms H arm
+     (REF12's h1_150 c3 45/42, TR3b's 42/42), not a world difference.
+     The pair's band (per client, on / off): t_rep 741-1031 / 370-527 ms,
+     t_max 48-50 / 14-15 ms, t_cap 1576-1639 / 889-922 ms, t_rest 94-130 /
+     30-43 ms, inrew 23-34 / 19-30, server step p99 0.8-3.2 / 0.6-0.9 ms;
+     TR3b's first pair: t_rep 990-1150 / 340-410, t_max 43-46 / 12-14,
+     t_cap 1690-1770 / 880-920, inrew 25-35 / 21-30 - the same band.
+     **TR3b-b** H1 at 0 ms: PASS, pieces 132/132 on all four, late Trafo
+     events 0. **TRL-lm** `trafo_life_mismatches` 0 in every trafo-on
+     server log. **TR3b-e**: `trl_live_B2`'s joiner kept all 12 sets (no
+     remake to read), so H7 was run (`h7_join`): the reconcile remade 6
+     sets incl. both paper sets; wind present (identical wind velocities);
+     **pieces 73/102 - queued in item 4 above**; its VERDICT names 12
+     late frames of the joiner at the join (lag 55/48: RL1-a's joiner
+     lag, H3's). **SP7-c** L8 cross at 150 ms (`l8_cross_150`, PASS live,
+     signatures and sector ticks equal): plain replays IDENTICAL;
+     `--force-rollback 10:24`: 45/45 bodies equal to the control at every
+     LOCAL and FINAL checkpoint, `birth_recreate_failures` 0, but client
+     2's own ball (and every mirror of it) 0.41 m off from 758 - the
+     chained-rewind deferral leak queued in item 4 above. **RO1-g**
+     (`ro1g_l8`): client 0's resync S 322 -> 348 holds the s2 / s4 passes,
+     "rechecked 0+3 deferred" under the travelling blob, 0 refused; its
+     bodies after the resync differ from a non-resynced client exactly as
+     in the run without a resync (the see-saw's mirror effect, 0.027 m);
+     the capture replays IDENTICAL (the arena's `ro1g` holds no fixed
+     birth: 0+0). **RLM-2rw** (`rlm2rw`, client 1 `--force-rollback 5:12`
+     live): 2 host frames with a natural and a forced rewind (720, 860),
+     the capture replayed with the switch IDENTICAL, sends SAME;
+     taken back 0 (neither second restore anchored before a replayed
+     activation). FX1's ledger exercised offline instead: `h1_150_on`
+     client 0 with `--force-rollback-at 844:29,862:30` (each in the frame
+     of a natural rewind whose window holds a trafo explosion, anchored
+     before it): `replayed_adds=2 replayed_taken_back=1`, LOCAL and FINAL
+     rows equal to the unforced replay at every checkpoint (153 bodies,
+     4 balls) - the ledger's first exercised take-back. Pieces were
+     compared only in the arms with explosions (h1_150_on, h1_0_on,
+     h7_join); the Level 1, `rlm2rw` and `qh1_a6drop` runs had trafo
+     resets only (no piece moved). **RK1-a/b/d** (`l1_main`, base 27, offline from the
+     captures, clients 0 and 1, `BMMO_TRACE_TIMEFACTOR=1`): 47:19 (anchor
+     28, H4's first record), 46:19 (anchor 27, across the frame-2 globals
+     write: `globals=2/1/1/0/0`, RK1-d's rewind across a change) and 50:16
+     (anchor frame 8, across frames 9..16): LOCAL and FINAL rows equal to
+     the control at every checkpoint, no factor-0 write, no added "differs
+     from the live record" (8 = the control's). **RK3-b** (H2, client 1
+     beamed onto the ExtraLife spot (-170.978, 21.5, -137.735) at 2001 -
+     beamed once, not held): frozen 0, resyncs 0, `globals=0/0/0/0/0` on
+     all four; client 1 equal to the server from 1990, mirrors from 2040.
+     **RK3F: shows** (`l1_reset` client 2, `--activate-script
+     Gameplay_Refresh:b+10`, i.e. frame 12): Gameplay_Refresh writes
+     factor 0 at tick 38 (frame 12) in that world alone, until the exit's
+     2.0 at frame 16; frozen 0, no resync; the level props differ from
+     tick 38 on for good (P_Ball_Paper_MF* 0.56 m, P_Ball_Wood_MF 0.37 m,
+     boxes 4-18 mm) - the plan's §3 D5, the user's (widen the hold or
+     accept); the trigger is a direct activation, standing in for a
+     respawn / pause resume in frames 9..15. **RK3R-rec** (`l1_reset`,
+     `l1_reset2`, client 3 `--reset-level-at 1500`): own ball
+     unphysicalized at 1536, own trafo resets stamped and applied by the
+     server at 1538, the sector manager told to reset, Event_handler /
+     Ingame / Refresh / Tutorial (its held Init) write 2.0; no new own
+     ball in 940 ticks (own_phys 0 to the end; a beam at 1700 found no
+     body), so no chapter, no freeze, no resync - the headless switch
+     sends the message only, not the menu's restart output; RT2's retail
+     `restart` is where the full path is recorded. **B7EG-QH Q-H1**
+     (`qh1_a6drop`, client 2 `--hold-event physicalize:2:drop`): cbq
+     held 61 over 68 holds, `unhold_clamped = rebuild_fail = hold_fail =
+     no_record = 0`, `sv=N/0/0`, 0 "PreSimulate queue differs"; client 2
+     resyncs once (the drop arm's own-birth resync, expected); forced
+     rewinds at 2400/2450/2600/2680 (`--trace-restore`): rows equal to
+     the control at every LOCAL and FINAL checkpoint; the queue equal
+     after two, and after the two in the bodiless span short of the
+     bridge's own `Ball Navigation` callback (bridge entries are never
+     held; replayed frames do not run Gameplay_Ingame, which queues it;
+     `rearm_own_navigation` returns early without an own body; the next
+     live frame queues it again - no body effect). **Q-H2 not run -
+     deferred**: the design settles its recipe and pass
+     (rollback-engine-gaps-design.md §7.3 Q-H2: `drop-body <entity>
+     <from>:<to>` on client 3 for P_Modul_34_Kiste and P_Modul_08_Schaukel,
+     e8ab2_swing_n1 sector 4, 150 ms, 10 % loss; `sv=N/0/0`, no queue
+     growth, one controller per force block, the dropping client's
+     mechanism rows equal to its control's), but the verb does not exist
+     (the gate-round review's finding; the run's first report wrongly
+     called the case unsettled). Building it needs it tick-keyed and
+     re-applied in replayed frames (a live-only drop is undone by any
+     restore anchored before FROM, which the pass criteria rule out), plus
+     one live run with its control - over H1's planned 11-12 live runs
+     (12 used). Post-N4 no session queues a selected entry naturally
+     (B7EG), so the #20 hold of selected entries is exercised only by the
+     SimTool scenes (Q-S1) until then.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 
