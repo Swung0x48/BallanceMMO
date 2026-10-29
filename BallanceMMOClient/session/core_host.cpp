@@ -430,6 +430,109 @@ namespace {
     };
     retail_host host;
 
+    // Step BALL (review finding 1): the airship ghosts handed to the legacy
+    // display.  game_objects::update moves such a spirit ball's entity by the
+    // owner's legacy stream - a wall-clock pose, different in every world -
+    // but the proximity union's place point (proximity_union.hpp place,
+    // entity->GetPosition) and the savestate's entity matrix read a ball's CK
+    // matrix inside the core's frame, where the server and every other world
+    // have the frozen body's last physics_RT write.  So the CK matrix belongs
+    // to physics inside core_host_frame and to the stream outside it:
+    //   * a ghost is handed to the legacy display only while its body is
+    //     frozen (the zone's freeze; physics_RT then writes no CK matrix for
+    //     it), so the matrix it had when it was handed over is the physics
+    //     one, and it stays the same while the frozen state does;
+    //   * captured inside the frame (CK physics-owned there: the entity was
+    //     physicalized until handed over, pinned at the frame's start, or
+    //     written by a restore / replay, which never run the stream), with
+    //     the frozen body's pose it belongs to;
+    //   * written back at the frame's start (objects_.update, after
+    //     core_host_process in OnProcess, moved it for the render), so the
+    //     records, restores, replays and place points of the frame see it;
+    //   * a body no longer frozen at the frame's end (a replay or a beam took
+    //     it out) is physicalized again at once: the stream never moves an
+    //     entity whose body physics_RT writes.
+    // File scope: BallanceMMOClient keeps its layout.
+    struct ghost_pin {
+        bool held = false;   // matrix and pose captured
+        VxMatrix matrix;
+        double position[3] = {};
+        double rotation[4] = {};
+    };
+    std::map<std::string, ghost_pin> ghost_pins;
+
+    CK3dEntity* ghost_entity(CKContext* context, const std::string& name) {
+        return context ? CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()),
+                                                                                 CKCID_3DENTITY, nullptr))
+                       : nullptr;
+    }
+
+    bool ghost_pin_matches(const ghost_pin& pin, const bmmo_physics_body_state& state) {
+        return pin.held && std::memcmp(pin.position, state.position, sizeof(pin.position)) == 0
+               && std::memcmp(pin.rotation, state.rotation, sizeof(pin.rotation)) == 0;
+    }
+
+    // Inside the frame only: CK holds the physics matrix there.
+    void ghost_pin_capture(ghost_pin& pin, CK3dEntity* entity, const bmmo_physics_body_state& state) {
+        if (ghost_pin_matches(pin, state)) return;
+        pin.matrix = entity->GetWorldMatrix();
+        std::memcpy(pin.position, state.position, sizeof(pin.position));
+        std::memcpy(pin.rotation, state.rotation, sizeof(pin.rotation));
+        pin.held = true;
+    }
+
+    void ghost_release(game_objects& objects, const std::string& name) {
+        if (const auto it = host.mirror_player.find(name); it != host.mirror_player.end())
+            objects.set_physicalized(it->second, true);
+    }
+
+    // The frame's start: every held ghost's physics matrix back.  A frozen
+    // body that moved since its capture (nothing between two frames can move
+    // one) is released rather than pinned to a stale matrix.
+    void ghost_pins_begin(CKContext* context, bmmo::physics::physics_view& view, game_objects& objects) {
+        std::string error;
+        for (auto it = ghost_pins.begin(); it != ghost_pins.end();) {
+            bmmo_physics_body_state state{};
+            CK3dEntity* entity = ghost_entity(context, it->first);
+            if (!entity || !it->second.held) {
+                ++it;
+                continue;
+            }
+            const bool body = view.get_body_state(it->first.c_str(), state, error);
+            if (!body || state.simulated || !ghost_pin_matches(it->second, state)) {
+                if (body) ghost_release(objects, it->first);
+                it = ghost_pins.erase(it);
+                continue;
+            }
+            entity->SetWorldMatrix(it->second.matrix);
+            ++it;
+        }
+    }
+
+    // The frame's end, before objects_.update moves the ghosts for the
+    // render: each frozen ghost's matrix (re)captured - a replay of this
+    // frame may have frozen it elsewhere - and a body the frame unfroze
+    // released.  A mirror without a body (a death) is left a legacy ball, as
+    // unmake_mirror left it.
+    void ghost_pins_end(CKContext* context, bmmo::physics::physics_view& view, game_objects& objects) {
+        std::string error;
+        for (auto it = ghost_pins.begin(); it != ghost_pins.end();) {
+            bmmo_physics_body_state state{};
+            CK3dEntity* entity = ghost_entity(context, it->first);
+            if (!entity || !view.get_body_state(it->first.c_str(), state, error)) {
+                it = ghost_pins.erase(it);
+                continue;
+            }
+            if (state.simulated) {
+                ghost_release(objects, it->first);
+                it = ghost_pins.erase(it);
+                continue;
+            }
+            ghost_pin_capture(it->second, entity, state);
+            ++it;
+        }
+    }
+
     const char* opcode_name(int code) {
         switch (code) {
         case bmmo::SessionStart: return "SessionStart";
@@ -440,7 +543,6 @@ namespace {
         case bmmo::SessionEnd: return "SessionEnd";
         case bmmo::SessionLead: return "SessionLead";
         case bmmo::SessionResyncState: return "SessionResyncState";
-        case bmmo::SessionGhostPose: return "SessionGhostPose";
         default: return "?";
         }
     }
@@ -465,7 +567,6 @@ namespace {
         case bmmo::SessionLead: { bmmo::session_lead_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionEnd: { bmmo::session_end_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionResyncState: { bmmo::session_resync_state_msg m{}; return decode_bytes(bytes, m); }
-        case bmmo::SessionGhostPose: { bmmo::session_ghost_pose_msg m{}; return decode_bytes(bytes, m); }
         default: return false;
         }
     }
@@ -604,6 +705,7 @@ namespace {
         host.own_group_set = false;
         host.input_muted = false;
         host.mirror_player.clear();
+        ghost_pins.clear();   // step BALL
         host.mirror_type.clear();
         host.ball_forces.clear();
         host.births.clear();
@@ -1089,7 +1191,6 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
     case bmmo::SessionEvent:
     case bmmo::SessionLead:
     case bmmo::SessionResyncState:   // step A3 (protocol 10): the core path alone; the legacy one ignores it
-    case bmmo::SessionGhostPose:     // step BALA (protocol 14): the core path alone
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         return true;
     default:
@@ -1800,6 +1901,13 @@ void BallanceMMOClient::core_host_anchor() {
 // the next CKContext::Process steps.
 void BallanceMMOClient::core_host_frame() {
     std::string error;
+    // Step BALL: the airship ghosts' CK matrices are physics_RT's for the
+    // whole frame (ghost_pins above), the stream's again after it.
+    ghost_pins_begin(m_bml->GetCKContext(), physics_view_, objects_);
+    struct pins_end_scope {
+        std::function<void()> run;
+        ~pins_end_scope() { run(); }
+    } pins_end{[this] { ghost_pins_end(m_bml->GetCKContext(), physics_view_, objects_); }};
     {
         auto& core = *host.core;
         // Re-attached every frame: a sector change or a level reset destroys
@@ -1980,11 +2088,6 @@ void BallanceMMOClient::core_host_dispatch(int code, const std::string& bytes) {
     case bmmo::SessionResyncState: {
         bmmo::session_resync_state_msg msg{};
         if (decode(msg)) core.on_session_resync_state(std::move(msg));
-        break;
-    }
-    case bmmo::SessionGhostPose: {
-        bmmo::session_ghost_pose_msg msg{};
-        if (decode(msg)) core.on_session_ghost_pose(msg);
         break;
     }
     case bmmo::SessionEnd: {
@@ -2625,8 +2728,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         return true;
     };
     // Step BALA: the airship zone over this world (physics_state.hpp, bridge
-    // v24) and the ghosts' display: a spirit ball whose owner left the sync
-    // in its zone is translucent and follows the owner's relayed pose.
+    // v24) and the ghosts' display.
     p.airship_zone = [this](bool enable, const std::string& own_group, double box[6], std::string& error) {
         bmmo::physics::airship_zone_box zone;
         if (!physics_view_.airship_zone_set(enable, own_group.c_str(), zone, error)) return -1;
@@ -2638,17 +2740,50 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     };
     p.airship_zone_contains = [this](const std::string& name) { return physics_view_.airship_zone_contains(name.c_str()); };
     p.airship_zone_box = [this](double box[6]) { return physics_view_.airship_zone_get(box); };
-    p.show_ghost = [this](const std::string& name, bool ghost, const float* matrix) {
-        if (const auto it = host.mirror_player.find(name); it != host.mirror_player.end())
-            objects_.set_ghost(it->second, ghost);
-        if (!matrix) return;
-        auto* entity = CK3dEntity::Cast(m_bml->GetCKContext()->GetObjectByNameAndParentClass(
-                const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
-        if (!entity) return;
-        VxMatrix world;
-        for (int r = 0; r < 4; ++r)
-            for (int k = 0; k < 4; ++k) world[r][k] = matrix[r * 4 + k];
-        entity->SetWorldMatrix(world);
+    // Step BALL (protocol 17, the user's decision of 2026-10-28 "switch to the old path"):
+    // a ghost is the spirit ball handed back to game_objects::update - not
+    // marked physicalized, so the legacy ball stream (the owner's
+    // OwnedCompressedBallState, relayed by the server inside a physics room
+    // too) moves it with the legacy interpolation / extrapolation, and
+    // translucent like any shadow-mode ball.  The body is parked by the zone
+    // itself: frozen and collision-free where its copy entered, in every
+    // world alike (physics_state.cpp airship_zone_listener), so nothing here
+    // touches it.  Nothing reads the moved CK matrix back into it: physics_RT
+    // writes a CK matrix from IVP only for a body in m_MovableObjects (a
+    // frozen one is not) and never the other way; a mirror is re-made from
+    // its lifecycle spec (make_mirror_body poses the entity first) and a
+    // rollback's restore takes the IVP state from the blob.  And nothing in
+    // the core's frame reads the moved matrix (the place point, the records):
+    // the frame runs on the frozen body's physics matrix (ghost_pins).
+    // Handed over only while the body is frozen (a body in the box is frozen
+    // at the next PSI; until then it stays physicalized, so its matrix stays
+    // physics_RT's).  Asked on every frame of the span (set_physicalized is
+    // idempotent).  Off: a mirror that still has its body (a rewind to
+    // before the entry, a resync, a beam) is solid and still again, with the
+    // physics matrix the frame pinned (written back here when it is asked
+    // outside a frame, the core's end); one whose body is gone (a death)
+    // stays a legacy ball, as unmake_mirror left it, until its respawn
+    // re-makes it from the lifecycle.
+    p.show_ghost = [this](const std::string& name, bool ghost) {
+        const auto it = host.mirror_player.find(name);
+        if (it == host.mirror_player.end()) return;
+        bmmo_physics_body_state state{};
+        std::string error;
+        const bool body = physics_view_.get_body_state(name.c_str(), state, error);
+        auto* entity = ghost_entity(m_bml->GetCKContext(), name);
+        const auto pin = ghost_pins.find(name);
+        if (ghost) {
+            if (!body || !entity || state.simulated) return;   // not frozen yet, or no body
+            auto& held = ghost_pins[name];
+            ghost_pin_capture(held, entity, state);   // inside the frame: the physics matrix
+            objects_.set_physicalized(it->second, false);
+            return;
+        }
+        if (pin != ghost_pins.end()) {
+            if (body && entity && ghost_pin_matches(pin->second, state)) entity->SetWorldMatrix(pin->second.matrix);
+            ghost_pins.erase(pin);
+        }
+        if (body) objects_.set_physicalized(it->second, true);
     };
     // Step SPGH: the spawn ghost over this world (physics_state.hpp, bridge
     // v25) and its display: a ghost is translucent, the own ball's materials

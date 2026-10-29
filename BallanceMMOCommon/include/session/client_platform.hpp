@@ -704,10 +704,15 @@ namespace bmmo::session {
         // The zone as it stands: 1 with the box once it is taken (the
         // platform has its body), 0 not yet, -1 off.
         std::function<int(double box[6])> airship_zone_box;
-        // Optional, display only: a mirror shown as a ghost (semi-transparent)
-        // or as itself again; `matrix` (row-major, VxMatrix order) when the
-        // ghost is to be moved to its owner's relayed pose, else null.
-        std::function<void(const std::string& entity, bool ghost, const float* matrix)> show_ghost;
+        // Optional, display only: a mirror shown as an airship ghost or as
+        // itself again.  Asked on every live frame the mirror is one (a host
+        // path that re-makes or re-colours the mirror is overridden at the
+        // next frame).  Step BALL (protocol 17, the user's "switch to the old path"):
+        // the host shows the ghost where its owner's legacy ball stream puts
+        // it (retail: the spirit ball handed back to game_objects::update,
+        // translucent); the body stays frozen where the zone froze it, and
+        // nothing the host does reads the moved entity back into it.
+        std::function<void(const std::string& entity, bool ghost)> show_ghost;
 
         // ---- the spawn ghost (step SPGH; physics_state.hpp spawn_ghost_set) ----
         // On (at the anchor) or off (at the end): the rule's pair filter and

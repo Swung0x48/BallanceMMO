@@ -98,7 +98,10 @@ namespace bmmo {
         SessionLead,
         SessionLeadAck,
         SessionResyncState,
-        SessionGhostPose,     // protocol 14 (step BALA)
+        // SessionGhostPose (protocols 14-16, step BALA) was the next value;
+        // retired at protocol 17 (step BALL): the airship ghost is shown at
+        // its owner's legacy ball stream.  It was the last opcode, so no
+        // other value moved.
     };
 
     template<typename T, opcode C = None>

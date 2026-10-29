@@ -84,7 +84,7 @@ namespace bmmo::session {
     //      ghost in it (physics_state.hpp airship_zone_set), and a member
     //      whose own ball is in the zone sends SessionGhostPose, which the
     //      server relays to the others for display (message/
-    //      session_ghost_pose_msg.hpp).
+    //      session_ghost_pose_msg.hpp; both retired at 17).
     //  15  the spawn ghost (steps SPGH, SPGH2, the user's spawn rule of
     //      2026-10-28): every world runs the spawn area's pair rule
     //      (physics_state.hpp spawn_ghost_set), a Physicalize flagged
@@ -103,7 +103,15 @@ namespace bmmo::session {
     //      SessionReady carries the client's mechanism-class probe signature
     //      (`anchor_probes`, after `anchor_placement`), which the server
     //      compares with its world's, late joiners included.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 16;
+    //  17  SessionGhostPose retired (step BALL, the user's decision of
+    //      2026-10-28 "switch to the old path"): a ghost in the airship zone is shown at
+    //      its owner's legacy ball stream (OwnedCompressedBallState, which
+    //      the server relays inside a physics room as outside one) - the
+    //      retail host hands the spirit ball back to the legacy update while
+    //      the zone keeps its body frozen in every world.  No client sends
+    //      the pose and the opcode is gone (it was the last one: no other
+    //      opcode moved).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 17;
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its

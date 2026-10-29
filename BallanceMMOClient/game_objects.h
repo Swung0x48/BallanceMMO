@@ -321,10 +321,12 @@ public:
 		set_ball_solid(id, it->second, physicalized);
 	}
 
-	// Step BALA (the airship rule): a physicalized ball whose owner left the
-	// sync in the airship zone is a ghost here - translucent, and still left
-	// where the session puts it (update() does not move a physicalized
-	// ball); off, it looks as its physicalized state says again.
+	// Step SPGH (the spawn ghost): a physicalized ball that is a spawn ghost
+	// here - translucent, and still left where the session puts it (update()
+	// does not move a physicalized ball); off, it looks as its physicalized
+	// state says again.  (Step BALA used it for the airship ghost too; since
+	// step BALL that one is set_physicalized(id, false): the legacy stream
+	// moves it.)
 	void set_ghost(HSteamNetConnection id, bool ghost) {
 		std::lock_guard lk(mutex_);
 		auto it = objects_.find(id);

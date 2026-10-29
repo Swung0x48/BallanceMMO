@@ -1107,12 +1107,6 @@ namespace {
                 core_.on_session_resync_state(std::move(msg));
                 break;
             }
-            case bmmo::SessionGhostPose: {
-                bmmo::session_ghost_pose_msg msg;
-                if (!fill(msg)) return;
-                core_.on_session_ghost_pose(msg);
-                break;
-            }
             case bmmo::SessionEvent: {
                 bmmo::session_event_msg msg;
                 if (!fill(msg)) return;
@@ -1460,6 +1454,9 @@ namespace {
             // Step BALA: the airship zone over this world (physics_state.hpp);
             // no ghost display (show_ghost stays empty: a headless world draws
             // nothing, and a mirror's CK matrix stays where its body is).
+            // Step BALL: a headless client sends no legacy ball stream either,
+            // so its own ball's ghost does not move in other worlds (test
+            // only; rewind-cost design "As built (step BALL)").
             p.airship_zone = [this](bool enable, const std::string& own_group, double box[6], std::string& error) {
                 bmmo::physics::airship_zone_box zone;
                 if (!bmmo::physics::airship_zone_set(engine_->physics(), enable, own_group.c_str(), zone, error)) return -1;

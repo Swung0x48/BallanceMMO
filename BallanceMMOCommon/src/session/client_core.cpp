@@ -551,7 +551,7 @@ namespace bmmo::session {
         // until E6; not muted).
         if (platform_.hooks.ended) platform_.hooks.ended();
         for (auto& [id, remote]: s.remotes_) {
-            if (remote.ghost_shown && platform_.show_ghost) platform_.show_ghost(remote.entity, false, nullptr);
+            if (remote.ghost_shown && platform_.show_ghost) platform_.show_ghost(remote.entity, false);
             else if (remote.spawn_ghost_shown && platform_.show_spawn_ghost) platform_.show_spawn_ghost(remote.entity, false, false);
             if (remote.navigation) platform_.detach_mirror_navigation(remote.entity);
             if (remote.physicalized) platform_.unmake_mirror(remote.entity);
@@ -574,9 +574,8 @@ namespace bmmo::session {
         s.own_spawn_ghost_ = false;
         // Step BALA: the zone off with the session.
         if (s.airship_active_)
-            logf("airship: ghost poses sent %llu received %llu shown %llu; own corrections not applied %llu; ball rows not applied %llu; resyncs that kept the own ball %llu",
-                 static_cast<unsigned long long>(s.ghost_poses_sent_), static_cast<unsigned long long>(s.ghost_poses_received_),
-                 static_cast<unsigned long long>(s.ghost_poses_shown_),
+            logf("airship: ghosts shown %llu; own corrections not applied %llu; ball rows not applied %llu; resyncs that kept the own ball %llu",
+                 static_cast<unsigned long long>(s.ghosts_shown_),
                  static_cast<unsigned long long>(s.own_corrections_out_of_sync_),
                  static_cast<unsigned long long>(s.airship_rows_skipped_),
                  static_cast<unsigned long long>(s.resyncs_own_kept_));

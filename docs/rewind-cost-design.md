@@ -2282,6 +2282,10 @@ config migration would be a design choice and is not made here.
 
 ## As built (step BALA)
 
+(Step BALL, below SPGH2's note: the relayed pose is retired at protocol 17 -
+the ghost is moved by its owner's legacy ball stream; everything else here
+stands.)
+
 The airship rule: SFD's stop (B) answered by the user on 2026-10-28 (answer 3,
 verbatim: "每个世界应该都有自己独立的飞船副本，且不纳入同步，每个客户端看到的飞船不同。"),
 refined the same day to option (A) "Own ball only" and to the ghost: "用转发位置的吧
@@ -2444,6 +2448,173 @@ reaches the last sector by the checkpoint chain); the translucent ghost on
 screen; remote input corrections of a ghost still rewind (harmless: the
 replay re-freezes it); a protocol-14 reference set (`core_ref_s9`, five live
 arms).
+
+## As built (step BALL)
+
+The user's decision of 2026-10-28 (verbatim: "改用旧链路" - switch to the old
+path), after asking whether the pre-collision shadow-ball multiplayer could
+carry the spawn and airship ghosts: **the airship ghost is moved by the legacy
+spirit-ball stream and SessionGhostPose is retired.** The spawn ghost stays as
+SPGH2 built it (simulated in every world, so all worlds agree when it turns
+solid). Base aca2cdc, protocol 16 -> **17**, journal v7 and the bridge API
+unchanged; no IVP or physics_RT source changed; no engine change.
+
+**Retired.** `message/session_ghost_pose_msg.hpp` (taken out of the tree), its
+opcode (it was the last one, so no other opcode moved; `message.hpp` says so
+where it was), the core's pose send in `airship_frame`, `on_session_ghost_pose`,
+the per-mirror pose map and the `kGhostPose*` constants, the counters
+(`ghost_poses_sent_ / received_ / shown_` -> `ghosts_shown_`, the ghost spans
+handed to the host's display; the end-of-session line is now "airship: ghosts
+shown N; ..."), the server's `handle_session_ghost_pose` and its dispatch, and
+the headless and retail mailbox cases. A protocol-16 client is refused at
+SessionReady as any other protocol mismatch. Kept unchanged: the zone and its
+pair rule (physics layer), the own latch, the leaving-the-sync rule and every
+gate on it (`own_airship_tick_`, `settle_held_tick`, `take_held_ahead`,
+`correct_own_tick`, `take_forced_own`, `amend_for_resync`, `apply_snapshot`'s
+skip, the resync's kept own ball), the journal NOTEs.
+
+**The core and the platform.** `session_platform::show_ghost(entity, ghost)`
+lost its matrix. The core asks it on every live frame of a mirror's ghost span
+(idempotent on the host), so a mirror that a rewind un-made and re-made inside
+the span - `make_mirror` marks it physicalized and solid - is handed back at
+the next frame; off once, when the body leaves the zone or is gone, and at the
+session end.
+
+**Retail** (`core_host.cpp` `p.show_ghost`). On: `game_objects::
+set_physicalized(player, false)` - `game_objects::update` moves the spirit ball
+by its owner's legacy stream (`OwnedCompressedBallState`, which the retail mod
+sends at 66 Hz through `poll_and_send_state` inside a physics session as
+outside one, and the server's `tick()` relays room-scoped) with the legacy
+interpolation / extrapolation, translucent with a shadow-mode ball's dynamic
+opacity; handed over only while its body is frozen (a body in the box is
+frozen at the next PSI and stays physicalized until then). Off: only while the
+mirror still has its body (a beam's or a resync's pose outside the zone, a
+rewind to before the entry) - `set_physicalized(true)` (solid, left where the
+session puts it) with the physics matrix the frame pinned (see the review
+fix-up below; no host-computed matrix); a mirror whose body is gone (a death) stays a legacy
+ball, as `unmake_mirror` leaves every bodiless mirror, until its respawn
+re-makes it from the lifecycle. `game_objects::set_ghost` (translucent, still)
+is the spawn ghost's alone now (its comment says so); no data member was added
+anywhere (`PlayerObjects` and `BallanceMMOClient` unchanged).
+
+**Adaptation 1: the park is the zone's.** The step said the retail host parks
+the mirror's body so nothing physical reads the CK entity. The zone already
+parks it, in every world alike: frozen and collision-free where its copy
+entered (`airship_zone_listener`, `disable_simulation`), positional. A
+retail-only park (moving, detaching or un-making the body) would make this
+world differ from the server's and the headless worlds, whose frozen copy
+stays at its entry pose (a proximity-union candidate there, `probe_candidates`
+reads `body_state`). So the host does nothing to the body, and the readers of
+the moved CK entity were checked instead: physics_RT writes a CK matrix from
+IVP only for a body in `m_MovableObjects` (a frozen core leaves it at
+`event_object_frozen`, `CKIpionManager.cpp` PhysicsObjectListener and
+`Simulate`) and reads one only to create a body (`GetWorldMatrix` before the
+template), which a mirror gets only from `make_mirror_body`, which poses the
+entity from the lifecycle spec first (`session_host_support.hpp`); the IVP
+savestate's capture records the CK matrix and its restore only writes it back
+(display), the IVP state comes from the blob; the world hash and the zone
+predicate read IVP cores. In a frame the core's work (rewinds, a woken ghost's
+physics write) runs in `core_host_frame` before `objects_.update` in the same
+`OnProcess`, so the pose drawn is the stream's. That list missed one reader,
+which the review found: **BMMO's own place point** - `proximity_union::place`
+reads each candidate's position with `entity->GetPosition`, and a frozen ghost
+is a candidate (`probe_candidates` takes every mirror whose `body_state`
+succeeds), live (pre_step step 7b) and in every replayed tick; the savestate's
+entity matrix is recorded inside the frame too. With the stream's pose there a
+probe frame or an identity cell could be placed differently from the server's
+and the headless worlds (which have the frozen body's last physics_RT write),
+and a replay would read the current stream pose for every replayed tick. Not
+new here (BALA wrote the relayed pose into CK every frame and the union, WG3/
+WG4, landed after it), but the step's requirement. **Review fix-up: the
+pinned ghost matrix** (`core_host.cpp` `ghost_pins`, file scope): the CK
+matrix of a ghost is physics_RT's for the whole of `core_host_frame` and the
+stream's only outside it. A ghost is handed to the legacy display only while
+its body is frozen, and its CK matrix is captured inside the frame (physics-
+owned there: physicalized until the hand-over, pinned, or written by a
+restore / replay, which never run the stream) together with the frozen pose
+it belongs to; at the frame's start (`objects_.update` runs after
+`core_host_process` in `OnProcess` and moved it for the render) the matrix is
+written back while the frozen pose is unchanged; at the frame's end it is
+captured again (a replay of the frame may have frozen the body elsewhere) and
+a body the frame unfroze is physicalized at once (the stream never moves an
+entity whose body physics_RT writes). So the records, the restores, the
+replays and the place points see the server's matrix, bit for bit (the
+matrix physics_RT itself wrote, not a host conversion - which also removes
+the ghost-off write of a host-computed `matrix_from_pose`, ulps off
+physics_RT's own, that a rewind to before the entry with a sleeping body
+would have left for the place point). What remains is BALA's review finding
+(4), narrowed: a CK-level script that reads a ghost entity's position (a
+body-kind identity read) in the behaviour pass, which runs outside the frame,
+sees the stream's pose on retail where BALA showed the relayed pose;
+per-player units must read the IVP core. Gate round of the fix-up (retail
+code and a test only; no shared code, so no wire check): x86 CLIENT-BUILD-OK,
+x64 BUILD-OK, 595 tests pass, GCC 30/30 ok, one retail two-copy run
+(`scripts/retail/BALL_retail2`, same driver and server arguments): client 2's
+mirror a ghost at tick 448, moved by the stream (rest mean 0.013 m; held keys
+0.35-0.54 m; the own ball rolled off the platform's edge and fell, the ghost
+1-4 m behind at fall speed), out of the zone at 903 when the death un-made
+it, solid after the respawn (0.000-0.001 m), and again after the death
+beam's respawn; client 2: corrections compared 0, resyncs 0, snapshot
+rollbacks 0, remote corrections 0, max_err 0, input rewinds 2 -> 20 (the
+remote's key edges, fall and death). The pinned matrix itself is not
+observable through the command file (it reads CK before the frame, i.e. the
+drawn pose); a world comparison of a ghost-nearest probe is deferred to the
+close-out.
+
+**Known limits** (recorded, not built): a headless client sends no legacy
+stream, so its own ball's airship ghost does not move in other worlds (test
+only); the server's `ghost_mode` sends legacy positions to ghost spectators
+only, so under it an airship ghost stands still like every other legacy
+position; `update()` moves the spirit ball of the stream's ball type (a trafo
+on the airship would switch the visible one); the owner's relayed input edges
+still rewind a ghost's world (BALA's note: harmless, the replay re-freezes it;
+measured below).
+
+**Checks (quick tier, about 10 minutes of check time).** x64 BUILD-OK (the tree's
+`/showIncludes` deps were empty for 86 objects - the includers of the changed
+headers were touched and rebuilt), x86 CLIENT-BUILD-OK (deps recorded),
+ARCH-BUILD-OK `ballanced-36c04e3d24c9+bmmo-aca2cdc6a5cc-dirty` (slot-13 hack,
+reverted after), 595/595 tests (`GhostPoseWire.RetiredAtProtocol17` replaces
+the round trip), GCC 30/30 ok. Wire check `rWM0 -> rBALL` over `core_ref_s9`
+(`EXTRA="--accept-protocol 15"`; every replay reached its capture's end
+marker, rc 0): 12/12 journals IDENTICAL; every send difference attributed by
+a sequence diff (`.local-tools/work/BALL/attribute.py`): the SessionReady
+(protocol 16 -> 17) in each of the 12, and in swing_snapoff and resync_snapoff
+the unreliable 44-byte poses removed and nothing else - 77/119/118/115 and
+256/234/234/233, each run starting exactly at that client's own zone tick
+(swing 3090/2920/2983/2982, resync 2177/2086/2248/2267); l8_cross none (its
+airship never gets a body). One two-copy retail run
+(`scripts/retail/BALL_retail`, arena in slot 13, snapshots off, trafo inputs
+and placement on, 80 s): client 1 beamed onto `PE_Balloon_Platform`
+(930, 0, 15), its own ball latched at 446; client 2's mirror
+`Ball_Stone_Peer_2516035257` a ghost from 447 (one span, `ghosts shown 1`).
+Position log (client 1's own ball and client 2's spirit ball sampled
+alternately, the own position interpolated to each ghost sample's time):
+at rest 0.000 m; client 1 rolling about at up to ~18 m/s with held keys, 37
+samples, mean 0.33-0.58 m per key phase, max 0.73 m, the ghost tracking every
+turn (the gap is the sampling's round trip and the stream's extrapolation),
+while client 2's body of it stayed parked - its zone predicate never let go
+until the beam, although the entity went to x 960, z 48, far outside the box.
+Client 1 then beamed itself to (60, -30, 15): the beam's lifecycle took the
+body out of the zone in client 2's world at 1093 ("out of the zone"), the
+mirror was solid and simulated there (the fall within 0.1-0.6 m of the own),
+died, respawned as a spawn ghost at 1360 and turned solid; after it the
+mirror is within 0.001-0.007 m of the own ball (lockstep again). Client 2's
+own world over the ghost span (session counters at 440 and 1084):
+corrections compared 0, resyncs 0, snapshot rollbacks 0, remote corrections
+0, max_err 0; input rewinds 2 -> 18 (rb 3 -> 21), every one attributed in
+the window lines to client 1's relayed inputs (its key edges) - the
+pre-existing ghost-input rewind above, not the stream. Client 1: own
+corrections not applied 0.
+
+**Deferred.** The solo snapshots-off exactness run (a live run: the changed
+core code is the airship display alone, which no solo arm reaches, and the
+wire check's 12 journals are identical); the translucency on screen (client
+2's camera follows its own ball 950 m away; the code path is
+`set_ball_solid(false)`); a server-vs-client body comparison of the ghost
+span (`worst_bodies.py` found no common checkpoint between the retail
+journals and the server's); a protocol-17 reference set (`core_ref_s9` is
+protocol 15, opened with `--accept-protocol 15`).
 
 ## As built (step SPGH)
 

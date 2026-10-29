@@ -1315,7 +1315,7 @@ TEST(ProbeWire, SessionReadyCarriesTheProbeSignature) {
     msg.anchor_placement = 0x91a138e4fd6e7254ULL;
     msg.anchor_probes = 0x5e0b1c2d3a4f6789ULL;
     auto parsed = round_trip(msg);
-    EXPECT_EQ(16u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_LE(16u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "16 since G3; 17 since step BALL";
     EXPECT_EQ(bmmo::session::PHYSICS_PROTOCOL_VERSION, parsed.protocol);
     EXPECT_EQ(0x91a138e4fd6e7254ULL, parsed.anchor_placement);
     EXPECT_EQ(0x5e0b1c2d3a4f6789ULL, parsed.anchor_probes);
@@ -1518,7 +1518,8 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
 }
 
 // ---------------------------------------------------------------------
-// Protocol 14 (step BALA): the airship ghost's relayed pose.
+// Protocols 14 (step BALA), 15 (SPGH2) and 17 (step BALL): the airship and
+// spawn ghosts.
 // ---------------------------------------------------------------------
 
 TEST(SpawnGhostWire, TheProtocolIs15) {
@@ -1527,22 +1528,16 @@ TEST(SpawnGhostWire, TheProtocolIs15) {
     EXPECT_LE(15u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "15 since step SPGH2 (the spawn ghost); 16 since G3";
 }
 
-TEST(GhostPoseWire, TheProtocolIs14AndThePoseRoundTrips) {
-    EXPECT_LE(14u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "14 since step BALA (the airship ghost's pose)";
-    bmmo::session_ghost_pose_msg msg{};
-    msg.session = 7;
-    msg.player = 1234;
-    msg.tick = 3111;
-    msg.position[0] = 930.5f; msg.position[1] = 1.25f; msg.position[2] = -15.0f;
-    msg.rotation[0] = 0.0f; msg.rotation[1] = 0.6f; msg.rotation[2] = 0.0f; msg.rotation[3] = 0.8f;
-    auto parsed = round_trip(msg);
-    EXPECT_EQ(bmmo::SessionGhostPose, parsed.code);
-    EXPECT_EQ(7u, parsed.session);
-    EXPECT_EQ(1234u, parsed.player);
-    EXPECT_EQ(3111u, parsed.tick);
-    EXPECT_EQ(930.5f, parsed.position[0]);
-    EXPECT_EQ(-15.0f, parsed.position[2]);
-    EXPECT_EQ(0.8f, parsed.rotation[3]);
-    msg.clear();
-    expect_rejects_every_truncation(msg);
+TEST(GhostPoseWire, RetiredAtProtocol17) {
+    // Step BALL (the user's "switch to the old path", 2026-10-28): SessionGhostPose
+    // (protocols 14-16) is gone - an airship ghost is shown at its owner's
+    // legacy ball stream.  It was the last opcode, so no other value moved
+    // (the message and its header are gone: a use would not compile).  What
+    // is checked here is the protocol a client of this tree says at
+    // SessionReady, which the server matches exactly.
+    EXPECT_LE(17u, bmmo::session::PHYSICS_PROTOCOL_VERSION) << "17 since step BALL (SessionGhostPose retired)";
+    bmmo::session_ready_msg ready{};
+    ready.session = 7;
+    auto parsed = round_trip(ready);
+    EXPECT_EQ(bmmo::session::PHYSICS_PROTOCOL_VERSION, parsed.protocol);
 }
