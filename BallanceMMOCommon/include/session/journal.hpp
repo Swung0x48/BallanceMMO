@@ -601,10 +601,12 @@ namespace bmmo::session {
     // Writes a journal.  Step SIO: the records go to an io_queue
     // (session/io_queue.hpp).  With an io_poster (the host's I/O strand) the
     // tick thread only appends finished bytes and the strand writes them, in
-    // order, with no flush - the user's decision (2026-10-29): a writer
-    // thread and no proactive flush.  Without one (the SimTool, the tests,
-    // the retail legacy path) it writes on the caller's thread with the
-    // per-record flushes it always had.  The bytes are the same either way.
+    // order - the user's decision (2026-10-29): a writer thread and no flush
+    // on the tick thread; the strand flushes as the io_flush mode says (step
+    // IOF: none / batch / record, batch by default).  Without one (the
+    // SimTool, the tests, the retail legacy path) it writes on the caller's
+    // thread with the per-record flushes it always had, whatever the mode.
+    // The bytes are the same either way.
     class journal_writer {
     public:
         journal_writer() = default;
@@ -614,8 +616,10 @@ namespace bmmo::session {
 
         // `max_bytes` == 0 means no limit.  The directory must exist.
         // `poster` (step SIO): the host's I/O strand; empty = synchronous.
+        // `flush` (step IOF): the strand's flush mode (ignored synchronous).
         bool open(const std::filesystem::path& path, const journal_header& header, uint64_t max_bytes,
-                  std::string& error, io_poster poster = {}, uint64_t max_queued = kJournalMaxQueued) {
+                  std::string& error, io_poster poster = {}, uint64_t max_queued = kJournalMaxQueued,
+                  io_flush flush = io_flush::batch) {
             close();
             last_input_.clear();
             capped_ = false;
@@ -623,7 +627,7 @@ namespace bmmo::session {
             last_tick_ = header.first_tick;
             max_bytes_ = max_bytes;
             path_ = path;
-            if (!sink_.open(path, std::move(poster), max_queued, error)) {
+            if (!sink_.open(path, std::move(poster), max_queued, error, 0, flush)) {
                 path_.clear();
                 return false;
             }
@@ -807,6 +811,9 @@ namespace bmmo::session {
         // Explicit and blocking: everything queued is written and handed to
         // the OS.  No session path calls it (step SIO).
         void flush() { sink_.flush(); }
+        // Step IOF: the writer strand's flush mode and its fflushes so far.
+        io_flush flush_mode() const { return sink_.flush_mode(); }
+        uint64_t writer_flushes() const { return sink_.flushes(); }
 
         // With a writer thread the close is posted (the strand writes what is
         // queued, then closes the file) and this returns at once.
@@ -861,9 +868,10 @@ namespace bmmo::session {
                                           + " bytes waiting for the disk), recording stopped"), true);
                 return;
             }
-            // Step SIO: with a writer thread nothing is flushed (the user's
-            // decision); a crash loses what the queue and the stdio buffer
-            // hold (world-agreement-gaps-design.md, As built (step SIO)).
+            // Step SIO: with a writer thread nothing is flushed here (the
+            // strand flushes by its io_flush mode, step IOF); a crash loses
+            // what the queue and the stdio buffer hold
+            // (world-agreement-gaps-design.md, As built (steps SIO, IOF)).
             // Synchronous, as before: a crash must not cost more than the
             // ticks since the last thing that happened; TICK and INPUT ride
             // along with the next flush.

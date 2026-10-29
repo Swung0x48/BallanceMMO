@@ -761,11 +761,15 @@ namespace bmmo::session {
         // Step SIO (session I/O off the tick thread): a new strand of the
         // host's I/O executor for one file (session/io_pool.hpp
         // strand_poster); the journal's records are written there, in order,
-        // with no flush, and the tick thread only appends them.  Empty: the
-        // journal is written on the tick thread (the fallback).  Headless:
-        // its own one-thread io_pool; retail: BallanceMMOClient's
-        // thread_pool_.
+        // and the tick thread only appends them.  Empty: the journal is
+        // written on the tick thread (the fallback).  Headless: its own
+        // one-thread io_pool; retail: BallanceMMOClient's thread_pool_.
         std::function<io_poster()> io_strand;
+        // Step IOF: the journal strand's flush mode (session/io_queue.hpp
+        // io_flush), asked once per journal opened.  Empty: batch (the
+        // default).  Headless: --io-flush; retail: the SessionJournalFlush
+        // property.
+        std::function<io_flush()> journal_flush;
 
         // ---- the trafo as an input (trafo-replication design 2.3-2.5, 2.11,
         // 4.7; step T3), required with session_capabilities::trafo_inputs ----

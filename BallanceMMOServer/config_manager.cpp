@@ -140,6 +140,25 @@ bool config_manager::load() {
             decltype(mute_list_vector){"00000001-0002-0003-0004-000000000005"});
     muted_players = std::unordered_set(mute_list_vector.begin(), mute_list_vector.end());
     bmmo::set_auto_flush_log(yaml_load_value(config_, "auto_flush_log", false));
+    {
+        // Step IOF: session I/O's flush mode.  The server writes one session
+        // I/O stream, the journals; its log file is written by the logging
+        // thread itself and keeps auto_flush_log, and it has no capture.
+        if (!config_["session_io"] || !config_["session_io"].IsMap())
+            config_["session_io"] = YAML::Node(YAML::NodeType::Map);
+        YAML::Node session_io = config_["session_io"];
+        const std::string journal = yaml_load_value(session_io, "journal",
+                std::string(bmmo::session::io_flush_name(session_io_journal_flush)));
+        if (!bmmo::session::parse_io_flush(journal, session_io_journal_flush)) {
+            Printf("Warning: session_io.journal \"%s\" is not none, batch or record; using batch.", journal);
+            session_io_journal_flush = bmmo::session::io_flush::batch;
+            session_io["journal"] = std::string("batch");
+        }
+        for (const char* stream: {"log", "capture"})
+            if (session_io[stream])
+                Printf("Note: session_io.%s is a headless client stream; the server has none "
+                       "(its log file follows auto_flush_log).", stream);
+    }
 
     ifile.close();
     save(false);
@@ -215,6 +234,11 @@ void config_manager::save(bool reload_values) {
                    "# - Ghost mode: whether to enable ghost mode, where players are invisible to each other except spectators and operators.\n"
                    "# - Options for log levels: important, warning, msg.\n"
                    "# - Auto flush log: whether to automatically flush the log file after each output.\n"
+                   "# - Session I/O (session_io): journal = when the server's I/O thread flushes a physics session's\n"
+                   "#   journal: none (only when its buffer fills and at the close), batch (default: once after each batch\n"
+                   "#   it writes) or record (after each record); never on a session's own thread, and the file's bytes are\n"
+                   "#   the same in every mode. The server's log file is not session I/O: auto_flush_log still decides it\n"
+                   "#   (true flushes after every line, like record; false leaves it to the buffer, like none).\n"
                    "# - Map name list style: \"md5_hash: name\".\n"
                    "# - Life count list style: \"md5_hash: count\".\n"
                    "# - Op list / reserved names data style: \"playername: uuid\".\n"

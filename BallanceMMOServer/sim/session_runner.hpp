@@ -54,9 +54,12 @@ namespace bmmo::sim {
         uint64_t journal_max_bytes = 256ull << 20;   // per session file; 0 = no limit
         // Step SIO (session I/O off the tick thread): a new strand of the
         // server's I/O pool for one journal (session/io_pool.hpp); the
-        // runner thread only appends the records, the strand writes them with
-        // no flush.  Empty: the journal is written on the runner thread.
+        // runner thread only appends the records, the strand writes them and
+        // flushes as journal_flush says (step IOF; config.yml
+        // session_io.journal, batch by default).  Empty: the journal is
+        // written on the runner thread with its old flush points.
         std::function<bmmo::session::io_poster()> io_strand;
+        bmmo::session::io_flush journal_flush = bmmo::session::io_flush::batch;
         uint32_t journal_checkpoint_ticks = 660;     // full body checkpoint cadence; 0 = none
         // Late-player design 2.6: the session stops waiting for one player at
         // that player's patience instead of the deadline, with the streak

@@ -492,12 +492,14 @@ numbers 1-10 are unchanged.
      strand of the host's pool (retail `thread_pool_`, the server's and the
      headless client's own one-thread pool), no proactive flush, bounded
      queues, crash drains; the crash-loss bound and the checks in
-     `world-agreement-gaps-design.md`, "As built (step SIO)". **Waiting on
-     the user:** whether the headless client's stdout log is flushed once
-     per written batch on the writer thread, for `arena_map_test.py`'s
-     `LogWatch` (it arms link events and late joins from the live log; with
-     no flush they fire up to about 3 s late) - built without; the
-     alternative is `.local-tools/work/SIO/sio_log_flush_per_batch.patch`.
+     `world-agreement-gaps-design.md`, "As built (step SIO)". **Flush
+     option built by step IOF (2026-10-29)**, the user's answer to SIO's
+     pending question: a per-stream mode none / batch / record (log,
+     journal, capture), default batch, always on the writer strand, never
+     on the tick thread (headless `--io-flush`, server `config.yml`
+     `session_io.journal`, retail `Gameplay/SessionJournalFlush`);
+     `arena_map_test.py`'s `LogWatch` sees each line within one batch
+     again; `world-agreement-gaps-design.md`, "As built (step IOF)".
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

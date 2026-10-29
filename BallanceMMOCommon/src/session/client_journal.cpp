@@ -64,10 +64,13 @@ namespace bmmo::session::core {
         header.utc_ms = platform.utc_ms(clock_site::journal_utc);
         journal_start_ = platform.now(clock_site::journal_start);
         std::string error;
-        // Step SIO: the host's I/O strand writes the file (no flush); none:
-        // the tick thread does, as before.
+        // Step SIO: the host's I/O strand writes the file, flushing as the
+        // host's mode says (step IOF, batch by default); none: the tick
+        // thread does, as before.
         if (!journal_.open(path, header, kJournalMaxBytes, error,
-                           platform.io_strand ? platform.io_strand() : bmmo::session::io_poster{})) {
+                           platform.io_strand ? platform.io_strand() : bmmo::session::io_poster{},
+                           bmmo::session::kJournalMaxQueued,
+                           platform.journal_flush ? platform.journal_flush() : bmmo::session::io_flush::batch)) {
             core_.logf("journal: %s", error.c_str());
             return;
         }

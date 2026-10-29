@@ -136,6 +136,11 @@ namespace {
         bool legacy_first_step = false;   // --legacy-first-step (step B2SW, T1 b): step the groups before the first simulated one
         bool journal_trace = false;
         std::string write_journal;
+        // --io-flush (step IOF): the headless client's spelling (MODE or
+        // log=..,journal=..,capture=..).  The SimTool has no I/O strand: its
+        // --write-journal is written on its own thread with the synchronous
+        // journal's flush points, which no mode changes (io_queue.hpp).
+        bmmo::session::io_flush_config io_flush;
         int level = 0;
         int ticks = 660;
         int level_at_tick = 200;
@@ -783,7 +788,11 @@ namespace {
             else if (arg == "--ignore-resync") out.ignore_resync = true;
             else if (arg == "--legacy-first-step") out.legacy_first_step = true;
             else if (arg == "--journal-trace") out.journal_trace = true;
-            else if (arg == "--write-journal") { if (!(v = next())) return false; out.write_journal = v; }
+            else if (arg == "--write-journal" || arg == "--io-flush") {   // one branch (C1061); --io-flush: step IOF
+                if (!(v = next())) return false;
+                if (arg == "--write-journal") out.write_journal = v;
+                else if (!bmmo::session::parse_io_flush_config(v, out.io_flush)) return false;
+            }
             else if (arg == "--level") { if (!(v = next())) return false; out.level = std::atoi(v); }
             else if (arg == "--ticks") { if (!(v = next())) return false; out.ticks = std::atoi(v); out.ticks_explicit = true; }
             else if (arg == "--level-at") { if (!(v = next())) return false; out.level_at_tick = std::atoi(v); }
@@ -5599,7 +5608,10 @@ namespace {
             std::error_code ec;
             if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
             std::string open_error;
-            if (!out.open(path, out_header, 0, open_error)) {
+            // No poster: synchronous, so --io-flush's journal mode is
+            // passed for the record and does not apply (step IOF).
+            if (!out.open(path, out_header, 0, open_error, {}, bmmo::session::kJournalMaxQueued,
+                          args.io_flush.journal)) {
                 std::fprintf(stderr, "%s\n", open_error.c_str());
                 return 1;
             }
@@ -8958,6 +8970,8 @@ int main(int argc, char** argv) {
             "       BallanceMMOSimTool [--root <game dir>] --replay-session <file.bmjr> [--list] [--ticks N]\n"
             "           [--from A --to B] [--dump-entity NAME] [--stop-on-divergence] [--journal-trace]\n"
             "           [--write-journal <out.bmjr>] [--report-every N] [--continue-after-jump]\n"
+            "           [--io-flush MODE | journal=MODE,...]   (step IOF; the SimTool writes --write-journal on its own\n"
+            "            thread, with the synchronous journal's flush points: no mode changes them)\n"
             "           [--ignore-resync]\n"
             "           [--placement-trace PATH [--drop-sector N] [--placement-trace-player ID]] [--drop-sectors-above N]\n"
             "           (step SP8, the networked invariant: sector N's rows (default 1) traced after every replayed\n"

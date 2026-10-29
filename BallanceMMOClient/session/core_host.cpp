@@ -3033,9 +3033,22 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // with the SessionJournal property on (read once per session, as the
     // legacy path does) ----
     // Step SIO (session I/O off the tick thread): the journal is written by
-    // a strand of the mod's existing asio thread pool (thread_pool_), with no
-    // flush; the game thread only appends the records.
+    // a strand of the mod's existing asio thread pool (thread_pool_); the
+    // game thread only appends the records.  Step IOF: the strand flushes as
+    // the SessionJournalFlush property says (none / batch / record; batch
+    // when it is anything else), read when the journal opens.
     p.io_strand = [this] { return bs::strand_poster(thread_pool_.get_executor()); };
+    p.journal_flush = [this] {
+        auto mode = bs::io_flush::batch;
+        if (auto* prop = config_manager_["session_journal_flush"]) {
+            const std::string text = prop->GetString() ? prop->GetString() : "";
+            if (!bs::parse_io_flush(text, mode)) {
+                logger_->Warn("SessionJournalFlush \"%s\" is not none, batch or record: batch", text.c_str());
+                mode = bs::io_flush::batch;
+            }
+        }
+        return mode;
+    };
     p.journal_path = [this](const bs::journal_header& header) -> std::filesystem::path {
         if (!config_manager_["session_journal"]->GetBoolean()) return {};
         const auto directory = bs::client_journal::directory();

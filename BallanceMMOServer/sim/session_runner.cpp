@@ -240,7 +240,8 @@ namespace bmmo::sim {
         s.journal_start = clock::now();
         std::string error;
         if (!s.journal.open(path, header, config_.journal_max_bytes, error,
-                            config_.io_strand ? config_.io_strand() : bmmo::session::io_poster{})) {
+                            config_.io_strand ? config_.io_strand() : bmmo::session::io_poster{},
+                            bmmo::session::kJournalMaxQueued, config_.journal_flush)) {
             log(prefix + error);
             return;
         }

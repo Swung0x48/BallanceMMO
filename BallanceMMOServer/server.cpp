@@ -821,9 +821,11 @@ public:
         rc.journal_max_bytes = static_cast<uint64_t>(config_.physics_journal_max_mb) << 20;
         rc.journal_checkpoint_ticks = config_.physics_journal_checkpoint_ticks;
         // Step SIO: the journals are written by the server's own one-thread
-        // I/O pool (no flush), never on the runner thread.
+        // I/O pool, never on the runner thread; it flushes them as
+        // session_io.journal says (step IOF, batch by default).
         io_pool_ = std::make_unique<bmmo::session::io_pool>(1);
         rc.io_strand = [pool = io_pool_.get()] { return pool->strand(); };
+        rc.journal_flush = config_.session_io_journal_flush;
         physics_seed_ = rc.seed;
         bmmo::sim::session_callbacks callbacks;
         callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };

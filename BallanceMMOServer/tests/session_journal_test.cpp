@@ -1533,3 +1533,139 @@ TEST(SessionIo, StreamQueueKeepsTheOrderAndLeavesTheStreamOpen) {
     std::fclose(stream);
     EXPECT_EQ(expected + "after\n", read_file(path));
 }
+
+// ---------------------------------------------------------------------------
+// Step IOF: the writer's flush mode (session/io_queue.hpp io_flush).
+
+TEST(SessionIo, FlushModeParsesEveryStreamOrEach) {
+    io_flush_config c;
+    EXPECT_EQ(io_flush::batch, c.log);
+    EXPECT_EQ(io_flush::batch, c.journal);
+    EXPECT_EQ(io_flush::batch, c.capture);
+    ASSERT_TRUE(parse_io_flush_config("record", c));
+    EXPECT_EQ(io_flush::record, c.log);
+    EXPECT_EQ(io_flush::record, c.journal);
+    EXPECT_EQ(io_flush::record, c.capture);
+    ASSERT_TRUE(parse_io_flush_config("log=none,capture=batch", c));
+    EXPECT_EQ(io_flush::none, c.log);
+    EXPECT_EQ(io_flush::record, c.journal);   // not named: kept
+    EXPECT_EQ(io_flush::batch, c.capture);
+    EXPECT_EQ("log=none,journal=record,capture=batch", io_flush_config_text(c));
+    const io_flush_config before = c;
+    for (const char* bad: {"", "always", "log=", "log=sometimes", "disk=none", "log=none,", "=none", "log:none"}) {
+        EXPECT_FALSE(parse_io_flush_config(bad, c)) << bad;
+        EXPECT_EQ(io_flush_config_text(before), io_flush_config_text(c)) << bad;
+    }
+}
+
+namespace {
+    // A journal by a stalled strand released twice (two batches: the header
+    // and 5 notes, then 3 notes) and closed: the bytes on disk after the
+    // first batch, the mode's flushes, and the file at the end.
+    struct flush_run {
+        std::string after_first;
+        uint64_t flushes = 0;
+        std::string final_bytes;
+    };
+    flush_run journal_in_two_batches(const std::filesystem::path& path, io_flush mode) {
+        flush_run out;
+        held_poster held;
+        journal_writer writer;
+        std::string error;
+        EXPECT_TRUE(writer.open(path, make_header(), 0, error, held.poster(), kJournalMaxQueued, mode)) << error;
+        EXPECT_EQ(mode, writer.flush_mode());
+        write_notes(writer, 5);
+        EXPECT_EQ(1u, held.run());
+        out.after_first = read_file(path);
+        for (int i = 0; i < 3; ++i) writer.note(static_cast<uint32_t>(200 + i), "late " + std::to_string(i));
+        EXPECT_EQ(1u, held.run());
+        out.flushes = writer.writer_flushes();
+        writer.close();
+        EXPECT_EQ(1u, held.run());
+        out.final_bytes = read_file(path);
+        return out;
+    }
+}
+
+// Every mode writes the synchronous writer's bytes; only when they reach the
+// OS differs: none leaves them to the stdio buffer, batch flushes once per
+// batch, record once per record, and none of it on the appending thread.
+TEST(SessionIo, FlushModesWriteTheSameBytesAndFlushAsTheModeSays) {
+    const temp_dir dir("iof_journal_modes");
+    std::string expected;
+    std::string first_batch;
+    {
+        const auto path = dir.file("sync.bmjr");
+        journal_writer writer;
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        write_notes(writer, 5);
+        writer.flush();
+        first_batch = read_file(path);
+        for (int i = 0; i < 3; ++i) writer.note(static_cast<uint32_t>(200 + i), "late " + std::to_string(i));
+        writer.close();
+        expected = read_file(path);
+    }
+    ASSERT_FALSE(first_batch.empty());
+    ASSERT_LT(first_batch.size(), 512u);   // well inside one stdio buffer: an unflushed batch stays in it
+    ASSERT_GT(expected.size(), first_batch.size());
+
+    const auto none = journal_in_two_batches(dir.file("none.bmjr"), io_flush::none);
+    const auto batch = journal_in_two_batches(dir.file("batch.bmjr"), io_flush::batch);
+    const auto record = journal_in_two_batches(dir.file("record.bmjr"), io_flush::record);
+    EXPECT_EQ(expected, none.final_bytes);
+    EXPECT_EQ(expected, batch.final_bytes);
+    EXPECT_EQ(expected, record.final_bytes);
+    // when they reach the OS
+    EXPECT_EQ("", none.after_first);
+    EXPECT_EQ(first_batch, batch.after_first);
+    EXPECT_EQ(first_batch, record.after_first);
+    EXPECT_EQ(0u, none.flushes);
+    EXPECT_EQ(2u, batch.flushes);    // two batches with records (the close's own batch is the fclose)
+    EXPECT_EQ(9u, record.flushes);   // the header record, 5 notes, 3 notes
+
+    // A synchronous writer ignores the mode: its own flush points, as before.
+    {
+        const auto path = dir.file("sync_none.bmjr");
+        journal_writer writer;
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error, {}, kJournalMaxQueued, io_flush::none)) << error;
+        writer.note(100, "note 0");   // a NOTE is a synchronous flush point
+        EXPECT_FALSE(writer.asynchronous());
+        EXPECT_FALSE(read_file(path).empty());
+        EXPECT_EQ(0u, writer.writer_flushes());
+        writer.close();
+    }
+}
+
+// The log's shape (a stream someone else owns) in each mode, and a mode
+// changed after the open (the headless client's log is open before its
+// command line is read).
+TEST(SessionIo, StreamFlushModesAndALateModeChange) {
+    const temp_dir dir("iof_stream_modes");
+    for (const io_flush mode: {io_flush::none, io_flush::batch, io_flush::record}) {
+        const auto path = dir.file(std::string("log_") + io_flush_name(mode) + ".txt");
+        std::FILE* stream = std::fopen(path.string().c_str(), "wb");
+        ASSERT_NE(nullptr, stream);
+        std::string expected;
+        held_poster held;
+        io_queue log;
+        log.open_stream(stream, held.poster(), 1 << 20);   // the default: batch
+        EXPECT_EQ(io_flush::batch, log.flush_mode());
+        log.set_flush(mode);
+        EXPECT_EQ(mode, log.flush_mode());
+        for (int i = 0; i < 4; ++i) {
+            std::string line = "tick base " + std::to_string(i) + " assigned\n";
+            expected += line;
+            EXPECT_TRUE(log.append(std::move(line)));
+        }
+        EXPECT_EQ(1u, held.run());
+        EXPECT_EQ(mode == io_flush::none ? std::string() : expected, read_file(path)) << io_flush_name(mode);
+        EXPECT_EQ(mode == io_flush::none ? 0u : mode == io_flush::batch ? 1u : 4u, log.flushes())
+            << io_flush_name(mode);
+        log.close();
+        held.run();
+        EXPECT_EQ(expected, read_file(path));   // the close hands the stream to the OS in every mode
+        std::fclose(stream);
+    }
+}

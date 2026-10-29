@@ -123,6 +123,15 @@ void config_manager::init_config() {
                          "\"/mmo journal mark <text>\" leaves a note at the current tick.");
     tmp_prop->SetDefaultBoolean(true);
     props_["session_journal"] = tmp_prop;
+    // Step IOF: the session journal writer's flush mode (session/io_queue.hpp
+    // io_flush); read with SessionJournal when a session starts.
+    tmp_prop = config->GetProperty("Gameplay", "SessionJournalFlush");
+    tmp_prop->SetComment("When the session journal's writer thread flushes the file: \"batch\" (default: once after each "
+                         "batch it writes), \"record\" (after every record) or \"none\" (only when its buffer fills and at "
+                         "the end). Never on the game thread; the file is the same in every mode, only how much of it a crash "
+                         "can lose differs. Read when a session starts.");
+    tmp_prop->SetDefaultString("batch");
+    props_["session_journal_flush"] = tmp_prop;
 }
 
 void config_manager::load_external_config() {

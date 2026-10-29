@@ -4,9 +4,20 @@
 // "As built (step SIO)").  A file writer the tick thread only hands finished
 // bytes to: append() moves them into an in-memory queue under a short lock
 // and posts one write task; the task runs on the host's I/O strand and writes
-// everything queued, in order, with no flush.  A host disk stall then delays
-// the file, never the tick (WG1's smoke, step SMK: NTFS event 170 froze every
-// tick thread at once because the journal flushed after every event).
+// everything queued, in order.  A host disk stall then delays the file, never
+// the tick (WG1's smoke, step SMK: NTFS event 170 froze every tick thread at
+// once because the journal flushed after every event).
+//
+// Flushing (step IOF; the user, 2026-10-29: "a flush option with the modes
+// discussed, default flush per batch"): each queue has an io_flush mode -
+// none (the stdio buffer reaches the OS when it fills and at the close; SIO's
+// committed behaviour), batch (one fflush after each written batch, the
+// default) or record (one fflush after each appended chunk: a journal record,
+// a log line, a capture pass).  Every mode flushes on the writer strand only,
+// never on the tick thread, and no mode changes a byte of the file.  The mode
+// applies only with a writer thread: a synchronous queue (no poster) keeps
+// the flush points its owner always had (journal_writer's per-record flushes
+// of the SimTool, the tests, the retail legacy path).
 //
 // The journal (session/journal.hpp journal_writer), the headless client's log
 // and its inbound capture each own one.  The host hands in an io_poster: a
@@ -51,6 +62,77 @@ namespace bmmo::session {
     // writer thread, the queue writes on the caller's thread.
     using io_poster = std::function<void(io_task)>;
 
+    // Step IOF: when the writer strand hands a file's stdio buffer to the OS
+    // (see the header comment).  Never on the tick thread.
+    enum class io_flush : uint8_t {
+        none = 0,     // only when the buffer fills, at the close and in the exit / crash drains
+        batch = 1,    // once after each written batch (the default)
+        record = 2,   // after each appended chunk (a record, a line, a capture pass)
+    };
+
+    inline const char* io_flush_name(io_flush mode) {
+        switch (mode) {
+            case io_flush::none: return "none";
+            case io_flush::record: return "record";
+            default: return "batch";
+        }
+    }
+    inline bool parse_io_flush(const std::string& text, io_flush& out) {
+        if (text == "none") out = io_flush::none;
+        else if (text == "batch") out = io_flush::batch;
+        else if (text == "record") out = io_flush::record;
+        else return false;
+        return true;
+    }
+
+    // The mode of each session I/O stream, every one batch by default.  A
+    // host uses the streams it has: the headless client all three, the
+    // server and the retail mod only the journal (their own logs are not
+    // session I/O; the server's log file keeps auto_flush_log).
+    struct io_flush_config {
+        io_flush log = io_flush::batch;
+        io_flush journal = io_flush::batch;
+        io_flush capture = io_flush::batch;
+    };
+    // "MODE" (every stream) or "STREAM=MODE[,STREAM=MODE...]" with STREAM
+    // log / journal / capture; a stream not named keeps its mode in `out`.
+    // False on anything else (`out` is then unchanged).
+    inline bool parse_io_flush_config(const std::string& text, io_flush_config& out) {
+        io_flush_config result = out;
+        io_flush every{};
+        if (parse_io_flush(text, every)) {
+            result.log = result.journal = result.capture = every;
+            out = result;
+            return true;
+        }
+        size_t at = 0;
+        bool any = false;
+        while (at <= text.size()) {
+            const size_t comma = text.find(',', at);
+            const size_t end = comma == std::string::npos ? text.size() : comma;
+            const std::string item = text.substr(at, end - at);
+            const size_t eq = item.find('=');
+            if (eq == std::string::npos) return false;
+            const std::string stream = item.substr(0, eq);
+            io_flush mode{};
+            if (!parse_io_flush(item.substr(eq + 1), mode)) return false;
+            if (stream == "log") result.log = mode;
+            else if (stream == "journal") result.journal = mode;
+            else if (stream == "capture") result.capture = mode;
+            else return false;
+            any = true;
+            if (comma == std::string::npos) break;
+            at = comma + 1;
+        }
+        if (!any) return false;
+        out = result;
+        return true;
+    }
+    inline std::string io_flush_config_text(const io_flush_config& c) {
+        return std::string("log=") + io_flush_name(c.log) + ",journal=" + io_flush_name(c.journal)
+             + ",capture=" + io_flush_name(c.capture);
+    }
+
     namespace io_detail {
 
         struct queue_state {
@@ -66,11 +148,10 @@ namespace bmmo::session {
             std::timed_mutex io_mutex;
             std::FILE* file = nullptr;
             bool own_file = true;          // false: stdout, never closed
-            // fflush after each written batch.  Off everywhere: the user's
-            // decision (2026-10-29) is no proactive flush; whether the
-            // headless log should be flushed per batch for a live reader
-            // (arena_map_test.py's LogWatch) waits on the user (step SIO).
-            bool flush_batches = false;
+            // Step IOF: the writer's flush mode (io_flush; batch by default,
+            // the user's decision of 2026-10-29).  Atomic: the headless
+            // client sets its log's mode after the log is open (set_flush).
+            std::atomic<uint8_t> flush_mode{static_cast<uint8_t>(io_flush::batch)};
             // A reopen of a path whose previous file is still being written
             // by its strand (the headless client's second session journal):
             // the file is opened on the writer, after `predecessor` is
@@ -86,6 +167,7 @@ namespace bmmo::session {
             // ---- statistics (atomics: read by the owner on its thread)
             std::atomic<uint64_t> peak_bytes{0};
             std::atomic<uint64_t> batches{0};
+            std::atomic<uint64_t> flushes{0};   // the mode's fflushes (step IOF), not the close's or a drain's
             std::atomic<bool> failed{false};
 
             queue_state() = default;
@@ -159,12 +241,17 @@ namespace bmmo::session {
             r.queues.swap(live);
         }
 
-        // io_mutex held.
-        inline void write_chunks(queue_state& s, const std::vector<std::string>& chunks) {
+        // io_mutex held.  `flush_each` (the writer's record mode, step IOF):
+        // one fflush after each chunk written.
+        inline void write_chunks(queue_state& s, const std::vector<std::string>& chunks, bool flush_each = false) {
             for (const auto& c: chunks) {
                 if (!s.file || s.failed.load(std::memory_order_relaxed)) return;
                 if (!c.empty() && std::fwrite(c.data(), 1, c.size(), s.file) != c.size())
                     s.failed.store(true, std::memory_order_relaxed);
+                if (flush_each) {
+                    std::fflush(s.file);
+                    s.flushes.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
         // io_mutex held.
@@ -238,10 +325,16 @@ namespace bmmo::session {
             if (const uint32_t delay = test_delay_ms())
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay));
             ensure_open_locked(*s, kWait);
-            write_chunks(*s, chunks);
+            // Step IOF: the flush mode, on this strand only.  A close flushes
+            // (fclose) anyway, so the batch flush is skipped then.
+            const auto mode = static_cast<io_flush>(s->flush_mode.load(std::memory_order_relaxed));
+            write_chunks(*s, chunks, mode == io_flush::record);
             s->batches.fetch_add(1, std::memory_order_relaxed);
             if (close) finish_file(*s);
-            else if (s->flush_batches && s->file) std::fflush(s->file);
+            else if (mode == io_flush::batch && s->file && !chunks.empty()) {
+                std::fflush(s->file);
+                s->flushes.fetch_add(1, std::memory_order_relaxed);
+            }
         }
 
         inline queue_state::~queue_state() {
@@ -285,15 +378,18 @@ namespace bmmo::session {
         // file out and closes it first - the tick thread neither truncates
         // under the open handle nor waits; an open failure then shows as
         // failed().  Without one the old file is finished here (bounded wait).
+        //
+        // `flush` (step IOF): the writer's flush mode; ignored without a
+        // poster (a synchronous owner flushes where it always did).
         bool open(const std::filesystem::path& path, io_poster poster, uint64_t max_queued, std::string& error,
-                  size_t buffer_bytes = 0) {
+                  size_t buffer_bytes = 0, io_flush flush = io_flush::batch) {
             close();
             auto previous = closing_.lock();
             closing_.reset();
             if (previous && (previous->closed.load(std::memory_order_acquire) || previous->path != path))
                 previous.reset();
             if (previous && poster) {
-                attach(nullptr, true, std::move(poster), max_queued, false);
+                attach(nullptr, true, std::move(poster), max_queued, flush);
                 state_->path = path;
                 state_->open_path = path;
                 state_->open_buffer = buffer_bytes;
@@ -315,18 +411,32 @@ namespace bmmo::session {
                 return false;
             }
             if (buffer_bytes) std::setvbuf(f, nullptr, _IOFBF, buffer_bytes);
-            attach(f, true, std::move(poster), max_queued, false);
+            attach(f, true, std::move(poster), max_queued, flush);
             state_->path = path;
             return true;
         }
 
-        // A stream someone else owns (stdout): never closed, and (the user's
-        // decision, step SIO) not flushed per batch - only at the close and
-        // the exit / crash drains.
-        void open_stream(std::FILE* stream, io_poster poster, uint64_t max_queued) {
+        // A stream someone else owns (stdout): never closed; flushed by the
+        // writer as `flush` says (step IOF; SIO built it with none), and at
+        // the close and the exit / crash drains.
+        void open_stream(std::FILE* stream, io_poster poster, uint64_t max_queued, io_flush flush = io_flush::batch) {
             close();
-            attach(stream, false, std::move(poster), max_queued, false);
+            attach(stream, false, std::move(poster), max_queued, flush);
         }
+
+        // Step IOF: changes the writer's flush mode of the open file; the
+        // next batch uses it (the headless client's log, opened before its
+        // command line is read).
+        void set_flush(io_flush flush) {
+            if (state_) state_->flush_mode.store(static_cast<uint8_t>(flush), std::memory_order_relaxed);
+        }
+        io_flush flush_mode() const {
+            return state_ ? static_cast<io_flush>(state_->flush_mode.load(std::memory_order_relaxed)) : io_flush::batch;
+        }
+        // The mode's fflushes the writer made in this file (step IOF; the
+        // close's and the drains' not counted).  After a close it is the
+        // count as of the close call: a batch still running then is missed.
+        uint64_t flushes() const { return state_ ? state_->flushes.load(std::memory_order_relaxed) : flushes_; }
 
         bool is_open() const { return state_ != nullptr; }
         bool async() const { return state_ && state_->poster; }
@@ -368,9 +478,10 @@ namespace bmmo::session {
         }
 
         // Explicit and blocking: everything queued is written and handed to
-        // the OS.  Nothing in a session calls it per record (the user's
-        // decision, step SIO: no proactive flush); the synchronous journal's
-        // own per-record flushes (the legacy path, the SimTool) use it.
+        // the OS.  Nothing in a session calls it per record (step SIO: the
+        // tick thread never flushes; the writer's io_flush mode does, step
+        // IOF); the synchronous journal's own per-record flushes (the legacy
+        // path, the SimTool) use it.
         void flush() {
             if (!state_) return;
             std::lock_guard io(state_->io_mutex);
@@ -384,6 +495,7 @@ namespace bmmo::session {
             if (!state_) return;
             auto s = std::move(state_);
             batches_ = s->batches.load(std::memory_order_relaxed);
+            flushes_ = s->flushes.load(std::memory_order_relaxed);
             failed_ = s->failed.load(std::memory_order_relaxed);
             if (s->poster) {
                 bool post = false;
@@ -411,6 +523,7 @@ namespace bmmo::session {
             if (!state_) return;
             auto s = std::move(state_);
             batches_ = s->batches.load(std::memory_order_relaxed);
+            flushes_ = s->flushes.load(std::memory_order_relaxed);
             {
                 std::lock_guard q(s->queue_mutex);
                 s->close_requested = true;
@@ -426,15 +539,16 @@ namespace bmmo::session {
         }
 
     private:
-        void attach(std::FILE* f, bool own, io_poster poster, uint64_t max_queued, bool flush_batches) {
+        void attach(std::FILE* f, bool own, io_poster poster, uint64_t max_queued, io_flush flush) {
             auto s = std::make_shared<io_detail::queue_state>();
             s->file = f;
             s->own_file = own;
-            s->flush_batches = flush_batches;
+            s->flush_mode.store(static_cast<uint8_t>(flush), std::memory_order_relaxed);
             s->poster = std::move(poster);
             s->max_queued = max_queued;
             peak_ = 0;
             batches_ = 0;
+            flushes_ = 0;
             failed_ = false;
             if (s->poster) io_detail::register_queue(s);
             state_ = std::move(s);
@@ -446,6 +560,7 @@ namespace bmmo::session {
         std::weak_ptr<io_detail::queue_state> closing_;
         uint64_t peak_ = 0;     // the owner's copy (append runs on the owner's side)
         uint64_t batches_ = 0;   // after close
+        uint64_t flushes_ = 0;   // after close
         bool failed_ = false;    // after close
     };
 

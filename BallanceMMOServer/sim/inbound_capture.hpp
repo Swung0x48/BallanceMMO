@@ -58,11 +58,13 @@ namespace bmmo::sim {
         // `clock_den`: the steady clock's ticks per second, so a replay on a
         // clock of another period refuses the file instead of misreading it.
         // `poster` (step SIO): the host's I/O strand - the records are
-        // handed to it once per pass (iteration) and written there with no
-        // flush; empty: written on this thread.
+        // handed to it once per pass (iteration) and written there; empty:
+        // written on this thread.  `flush` (step IOF): the strand's flush
+        // mode (record = once per pass handed over).
         bool open_capture(const std::string& path, const std::string& command_line, int64_t clock_den,
-                          std::string& error, bmmo::session::io_poster poster = {}) {
-            if (!file_.open(path, std::move(poster), kMaxQueued, error, 1 << 20)) {
+                          std::string& error, bmmo::session::io_poster poster = {},
+                          bmmo::session::io_flush flush = bmmo::session::io_flush::batch) {
+            if (!file_.open(path, std::move(poster), kMaxQueued, error, 1 << 20, flush)) {
                 error = "cannot write " + path;
                 return false;
             }

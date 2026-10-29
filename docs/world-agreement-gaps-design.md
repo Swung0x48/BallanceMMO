@@ -3430,7 +3430,9 @@ there, an asio strand of a pool instead of a dedicated thread).
   between (a) an `fflush` per written batch on the writer thread (never on
   the tick thread; the implement round had it), (b) no flush (built), (c)
   a per-process opt-in the harness sets (the server's `auto_flush_log` is
-  the precedent). Native code writing to stdout directly (an engine DLL's
+  the precedent). **Answered:** the user chose (a) and asked for a flush
+  option with all three modes, default per batch - built by step IOF (next
+  note). Native code writing to stdout directly (an engine DLL's
   `printf`) can now land ahead of queued lines; cosmetic. Before
   `start_session_io()` and after static destruction a line is written and
   flushed directly, as before. **The capture** (`sim/inbound_capture.hpp`): the records of a main-loop
@@ -3516,3 +3518,101 @@ there, an asio strand of a pool instead of a dedicated thread).
   GCC check and the wire check rerun (numbers in the commit message); the
   live smoke and the retail run were not rerun (the live paths' bytes are
   unchanged and the step had used its two live runs).
+
+### As built (step IOF, 2026-10-29): a flush option for session I/O
+
+SIO's pending decision, answered by the user (2026-10-29): "(a) Flush per
+batch", then "加个flush的选项，然后包含你说的那些模式。默认flush per batch" (add a
+flush option with the modes discussed; the default is flush per batch).
+
+- **One mode enum, in the shared writer** (`session/io_queue.hpp`):
+  `io_flush { none, batch, record }`. `none` = no flush until the close (and the
+  exit / crash drains): SIO's committed log behaviour. `batch` = one `fflush`
+  after each batch the strand writes (the default everywhere; a batch that ends
+  with the close is not flushed separately, its `fclose` does it). `record` =
+  one `fflush` after each appended chunk - a journal record, a log line, a
+  capture pass (the capture hands its records over once per main-loop pass or
+  per 256 KiB, so its "record" is a pass) - the pre-SIO granularity without the
+  tick thread. Every mode flushes **on the writer strand only** (`run_batch` /
+  `write_chunks`), never on the tick thread, and no mode changes a byte of a
+  file. The mode is per queue (`queue_state::flush_mode`, atomic), given to
+  `io_queue::open` / `open_stream` (default `batch`), changeable with
+  `set_flush` (the headless log is open before its command line is read);
+  `io_queue::flushes()` counts the mode's flushes (not the close's or a
+  drain's). `io_flush_config { log, journal, capture }` and
+  `parse_io_flush_config` (`MODE` for every stream, or
+  `log=MODE,journal=MODE,capture=MODE`, any subset) are the one spelling the
+  hosts share. `queue_state::flush_batches` (SIO's always-false flag) is gone.
+- **Synchronous writers keep their flush points** (no poster: the SimTool, the
+  tests, the retail legacy path): the mode is not consulted there;
+  `journal_writer` still flushes after player / event / checkpoint / note /
+  correction / resync records. `journal_writer::open` and
+  `inbound_capture::open_capture` take the mode as a defaulted last argument.
+- **Per host.** Headless client: `--io-flush MODE | log=..,journal=..,capture=..`
+  (usage line; each stream batch by default), the log's mode set right after
+  the command line is parsed, the journal's through a new
+  `session_platform::journal_flush` (`client_platform.hpp`; empty = batch;
+  `client_journal::open` asks it once per journal), the capture's through
+  `open_capture`. `--io-flush` is stripped like `--trace-sends` by
+  `replay_arguments_differ`, so a capture replays under any mode (the reference
+  captures were recorded without it). Server: `config.yml` gets a top-level
+  `session_io:` map with `journal:` (none / batch / record, default batch;
+  anything else is a warning and batch), carried as
+  `runner_config::journal_flush` to `session_runner::open_journal`.
+  **Adaptation:** the step names log / journal / capture keys for the server,
+  but the server writes one session I/O stream, its journals: its log file is
+  written by the logging thread itself (`misc.cpp` `DebugOutput`, no writer
+  strand, so no batches) and it has no capture. So the server reads `journal`,
+  and a `log` or `capture` key present in the file is answered with a note
+  ("a headless client stream; the server has none (its log file follows
+  auto_flush_log)") and has no effect; nothing is written for them by default.
+  `auto_flush_log` keeps working unchanged and still decides the server's log
+  file (true flushes after every line, like `record`; false leaves it to the
+  buffer, like `none`); the config comment says so. Retail: a BML property
+  `Gameplay/SessionJournalFlush` (string, default `batch`; anything else is
+  logged and taken as batch), read with `SessionJournal` when a journal opens,
+  through `config_manager`'s existing `props_` map (no `BallanceMMOClient` data
+  member) and `p.journal_flush` in `core_host.cpp`; the mod has no session-I/O
+  log or capture. SimTool: `--io-flush` is parsed (merged into the
+  `--write-journal` branch: one more `else if` hit MSVC's C1061 nesting limit)
+  and passed to its `--write-journal` writer, which has no poster, so - as the
+  step's own rule "without a poster behaviour stays as SIO left it" requires -
+  it changes nothing there (the usage line says so).
+- **Defaults changed by this step** (the user's decision): every writer with a
+  poster now flushes once per batch - the headless log (was none), the
+  headless and retail journals, the server's journals and the headless capture
+  (were none). The crash-loss bound of SIO's note shrinks accordingly: a hard
+  kill now loses the queue (empty in a healthy run) plus at most the last
+  batch's bytes not yet flushed, instead of up to one stdio buffer.
+- **Checks (QUICK, about 13 minutes).** `BallanceMMOMessageTests` 614/614
+  (three new `SessionIo.*`: the parser (every form, a stream not named kept,
+  eight malformed specs refused with the config unchanged); a journal by a
+  stalled strand released in two batches, then closed, in each mode - the
+  final bytes equal the synchronous writer's in all three, the bytes on disk
+  after the first batch are none / the whole batch / the whole batch, the
+  mode's flushes 0 / 2 / 9 (header + 5 notes + 3 notes), and a synchronous
+  writer given `none` still flushes at its NOTE; the stdout shape in each mode
+  after a late `set_flush`: a batch of four lines visible after the batch
+  except under none, flushes 0 / 1 / 4, every line there after the close).
+  GCC syntax check 30/30 ok. Builds: x64 BUILD-OK, x86 CLIENT-BUILD-OK (the
+  ten includers of `client_platform.hpp` rebuilt, deps valid), Arch server
+  `ballanced-36c04e3d24c9+bmmo-b65f7eadc1ef-dirty`. Wire check `rSIO` vs
+  `rIOF` over `core_ref_s11`: 12/12 sends SAME, 12/12 journals IDENTICAL, ALL
+  SAME. Live smoke (`work/IOF/live.sh iof_live`: 4 clients, 60 s, LANE arm,
+  snapshots off; clients 0-2 default, client 3 `--io-flush log=none` as the
+  control; a 0 ms proxy spike on clients 1 and 3 at tick 600; the server's
+  test config with `session_io.journal: record` and a `log:` key; a 5 ms log
+  poller beside the harness): the server kept `journal: record`, printed the
+  `log` note, and its journal replayed 4117/4117 matched (checkpoint
+  mismatches 0); VERDICT PASS, starved 0, rebases 0, resyncs 0 on all four;
+  both events armed from tick base 27. Visibility of the clients' tick-stamped
+  log lines after the base line, against the tick clock: batch clients 0-2
+  saw every line 0.001-0.088 s after it was due (polls of 10 ms plus a batch),
+  and the three base lines within 5 ms of each other; the `none` control saw
+  them up to 2.586 s late in buffer-sized steps (72 reads against 470-598),
+  SIO's symptom. Not run: a retail session (retail code only reads the
+  option and hands it to the shared writer, which the tests and the headless
+  run exercise; the x86 build compiles it), the solo replay (no rollback or
+  session logic touched; the wire check's journal identity covers the bytes).
+  SIO's `.local-tools/work/SIO/sio_log_flush_per_batch.patch` is superseded
+  (not applied).

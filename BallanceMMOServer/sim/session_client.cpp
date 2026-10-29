@@ -392,6 +392,11 @@ namespace {
         // nothing reaches the wire: the replay's check of the sends.  Off by
         // default.
         std::string trace_sends;
+        // --io-flush MODE | STREAM=MODE[,...] (step IOF): when the I/O
+        // strand flushes the log, the journal and the capture (none, batch,
+        // record; batch each by default).  Never on the tick thread; no
+        // mode changes a byte of any file.
+        bmmo::session::io_flush_config io_flush;
         // Step T3 test switches (trafo-replication design 7.3).
         // --no-trafo-cap (H10): the host does not declare the trafo_inputs
         // capability (SessionReady without CAP_TRAFO_INPUTS; a session with
@@ -478,6 +483,8 @@ namespace {
                   "replay them, unpaced, sending nothing)\n"
                   "       [--replay-free-cost-clock]   (with --replay-inbound: the rewind cost's clock reads are the replay's own)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
+                  "       [--io-flush MODE | log=MODE,journal=MODE,capture=MODE]   (MODE none|batch|record, default batch: the\n"
+                  "         I/O thread's fflush - never, once per written batch, or per log line / journal record / capture pass)\n"
                   "       [--ignore-snapshots] [--no-trafo-cap] [--trafo-no-resets] [--leave-at TICK | --leave-after-unphys D | --leave-after-trafo D]\n"
                   "       [--rejoin-at TICK]   (leave the room at TICK and join it again on the same connection, once)\n"
                   "       [--leave-room-at TICK]   (leave the room at TICK, end the session and exit once out of the room)\n"
@@ -658,6 +665,9 @@ namespace {
             else if (arg == "--replay-inbound") { if (!(v = next())) return false; out.replay_inbound = v; }
             else if (arg == "--replay-free-cost-clock") out.replay_free_cost_clock = true;
             else if (arg == "--trace-sends") { if (!(v = next())) return false; out.trace_sends = v; }
+            else if (arg == "--io-flush") {
+                if (!(v = next()) || !bmmo::session::parse_io_flush_config(v, out.io_flush)) return false;
+            }
             else if (arg == "--start-sector") { if (!(v = next())) return false; out.start_sector = std::atoi(v); }
             else if (arg == "--no-trafo-cap") out.no_trafo_cap = true;
             else if (arg == "--ignore-snapshots") out.ignore_snapshots = true;
@@ -713,14 +723,14 @@ namespace {
     }
 
     // Step SIO (session I/O off the tick thread; world-agreement-gaps-design.md,
-    // "As built (step SIO)"): the client's one-thread I/O pool, which writes
-    // the journal, the capture and this log, and the log's writer.  The log
-    // goes to stdout in the order it was logged, written by the pool's strand
-    // with no fflush at all (the user's decision: no proactive flush; stdout's
-    // stdio buffer reaches the file when it fills, at the close and in the
-    // exit / crash drains - a live reader such as arena_map_test.py's LogWatch
-    // sees lines in buffer-sized steps; whether to flush per batch for it
-    // waits on the user).  Before start_session_io() and
+    // "As built (steps SIO, IOF)"): the client's one-thread I/O pool, which
+    // writes the journal, the capture and this log, and the log's writer.
+    // The log goes to stdout in the order it was logged, written by the
+    // pool's strand, never flushed on the tick thread; the strand flushes it
+    // as --io-flush log=MODE says (step IOF, the user's decision of
+    // 2026-10-29: batch by default - one fflush per written batch, so a live
+    // reader such as arena_map_test.py's LogWatch sees each line within one
+    // batch; none = SIO's buffer-sized steps).  Before start_session_io() and
     // after the log is closed (static destruction), a line is written and
     // flushed here as before.  Static, pool first: the log is destroyed (and
     // drained) first, then the pool runs what is still queued and joins -
@@ -742,7 +752,15 @@ namespace {
         auto& io = session_io_state();
         io.pool = std::make_unique<bmmo::session::io_pool>(1);
         std::lock_guard lk(io.log_mutex);
-        io.log.open_stream(stdout, io.pool->strand(), kLogMaxQueued);
+        io.log.open_stream(stdout, io.pool->strand(), kLogMaxQueued, bmmo::session::io_flush::batch);
+    }
+
+    // Step IOF: the log is open before the command line is read; its
+    // --io-flush mode applies from the next batch.
+    void set_log_flush(bmmo::session::io_flush mode) {
+        auto& io = session_io_state();
+        std::lock_guard lk(io.log_mutex);
+        io.log.set_flush(mode);
     }
 
     // A new strand of the client's I/O pool for one file (empty before
@@ -977,7 +995,8 @@ namespace {
             std::string error;
             const int64_t den = static_cast<int64_t>(clock_type::period::den / clock_type::period::num);
             if (!args_.capture_inbound.empty()) {
-                if (!inbound_.open_capture(args_.capture_inbound, command_line, den, error, session_io_strand())) {
+                if (!inbound_.open_capture(args_.capture_inbound, command_line, den, error, session_io_strand(),
+                                           args_.io_flush.capture)) {
                     logf("capture-inbound: %s", error.c_str());
                     return false;
                 }
@@ -1027,8 +1046,10 @@ namespace {
                 std::vector<std::string> kept;
                 for (size_t i = 1; i < out.size(); ++i) {
                     const std::string& w = out[i];
+                    // --io-flush (step IOF): when files are flushed, not
+                    // what the session does.
                     if (w == "--server" || w == "--journal" || w == "--capture-inbound" || w == "--replay-inbound" ||
-                        w == "--trace-sends") {
+                        w == "--trace-sends" || w == "--io-flush") {
                         ++i;
                         continue;
                     }
@@ -1462,6 +1483,7 @@ namespace {
             // first one (<stem>.rejoin<N><ext>) instead of over it.
             // Step SIO: the journal is written by the client's I/O pool.
             p.io_strand = [] { return session_io_strand(); };
+            p.journal_flush = [this] { return args_.io_flush.journal; };   // step IOF
             p.journal_path = [this](const bmmo::session::journal_header&) {
                 std::filesystem::path path(args_.journal);
                 if (rejoins_ > 0 && !path.empty())
@@ -4362,6 +4384,7 @@ int main(int argc, char** argv) {
     bmmo::sim::set_crash_drain(drain_session_io);
     arguments args;
     if (!parse(argc, argv, args)) { usage(); return 1; }
+    set_log_flush(args.io_flush.log);   // step IOF
     // The engine changes the working directory to the game's Bin while it
     // boots: a relative dump directory means the one the client was started
     // in (the harness gives every client its own).

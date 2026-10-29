@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "server_data.hpp"
+#include "session/io_queue.hpp"
 
 class config_manager {
 private:
@@ -115,6 +116,11 @@ public:
     std::string physics_journal_dir = "journals";
     uint32_t physics_journal_max_mb = 256;
     uint32_t physics_journal_checkpoint_ticks = 660;
+    // session_io.journal (step IOF): when the server's I/O strand flushes a
+    // session journal - none, batch (default, one fflush per written batch)
+    // or record (one per record); never on the runner thread.  The server's
+    // own log file is not session I/O: auto_flush_log still governs it.
+    bmmo::session::io_flush session_io_journal_flush = bmmo::session::io_flush::batch;
     std::unordered_map<std::string, std::string> physics_allowed_mods;  // mod id -> version; empty = no check
     ESteamNetworkingSocketsDebugOutputType logging_level = k_ESteamNetworkingSocketsDebugOutputType_Important;
 
