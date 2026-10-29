@@ -3322,3 +3322,54 @@ lead_test.cpp says the same), and the live window between a leave and its
 R is about 3 ticks, too narrow to hit from the harness: the fixture is
 queued for the close-out. The protocol-18 reference set is queued as step
 REF10 (core_ref_s10), right after this commit.
+
+### As built (step REF10, 2026-10-28): core_ref_s10, the protocol-18 reference set
+
+Protocol 18 made every `core_ref_s9` capture refuse, so WM1 queued the set's
+re-capture. `maps/arena-test/core_ref_s10` holds `core_ref_s9`'s five arms
+(`resync_snapoff`, `swing_snapoff`, `l8_cross`, `solo1`, `solo2`) with their
+arguments unchanged, captured by WM1's committed x64 build (`build-agent-rWM1`)
+against the Arch server built from e12e832 with the clean id
+`ballanced-36c04e3d24c9+bmmo-e12e832ad8de`, snapshots off; its README.md has
+the binaries, the numbers and the comparison with `core_ref_s9`, and
+`.local-tools/wire_check.sh` now defaults to it (`core_ref_s9` stays for
+protocol 15-17 binaries; a protocol-18 binary cannot replay it: refused at
+SessionStart, and with `--accept-protocol 15` the replay of its solo1 diverges
+from the capture at step 522, the events having no life trailer). No source
+changed.
+
+- **The bit.** The arms run with WORLD_PROXIMITY_UNION set: it is the server's
+  default (`config_manager.hpp:109`) and the test config's, so the set is what
+  a deployed server runs. The visible consequences in the sends: no
+  BodyRevived (G5), so about 190-290 fewer sends a client and an `l8_cross`
+  event count of 126 instead of about 1015; with BALL's retired poses and
+  WM1's life trailer this accounts for every send-mix difference against
+  `core_ref_s9`. `trafo_inputs` and `placement_clones` stay as `core_ref_s9`
+  had them (the arguments are unchanged).
+- **A void first pass.** The first capture of the two 60 s arms (without the
+  host-load sampler, right after the Arch build) logged 509-1227 ms frames on
+  all four clients at the same ticks (resyncs on every swing client); the
+  same binaries under `cpu_sampler.ps1` minutes later logged at most 49 ms.
+  This is attributed to a host stall, not measured: it has SMK's signature
+  (all four processes stalled at the same ticks, gone on the rerun under
+  `cpu_sampler.ps1`, where total CPU was 6.7-13.5 % and no outside process
+  passed 1.6 %), but no sampler ran during the void pass. A process
+  `krig-miner.exe` (started from the user's Downloads folder at 21:50) was
+  running; it used under 0.2 % during the kept runs and is unmeasured for the
+  void pass, so it is not excluded as a cause. The two arms were re-captured
+  and the void logs kept in `maps/arena-test/ref10_void_a/`.
+- **The x64 tree's lost header deps.** `build-agent` had `#deps 0` on 17
+  objects (physics_state, physics_world, sim_tool, config_manager, the
+  session client's client_journal and seven client_core_* among them), the
+  B5RX/B6RC signature; `bmmo_build_id.h` changed and physics_state.cpp was
+  not rebuilt. The sources were touched and rebuilt: every object's code and
+  data sections are the same as before (only `.chks64` and the debug sections
+  differ; physics_state's `.rdata` is the build-id string), so rWM1 is HEAD's
+  code, which the wire check rWM1 vs `build-agent-rREF10` (HEAD, clean id)
+  confirms. rWM1's journals carry WM1's pre-commit id `...+bmmo-a7127c43375c-dirty`.
+- **Checks.** Each server journal replays matched (4136, 3947, 3171, 2930,
+  2927 ticks). `wire_check.sh - rWM1` (replays vs the live traces) and
+  `wire_check.sh rWM1 rREF10`: no COVERAGE-SHORT, 12/12 sends SAME, 12/12
+  journals IDENTICAL, ALL SAME; the replays' final status fields and `reach:`
+  lines equal the live ones. solo1 / solo2 replay to their end markers, sends
+  SAME, journals byte-identical with rWM1. 603 tests pass, GCC check all ok.
