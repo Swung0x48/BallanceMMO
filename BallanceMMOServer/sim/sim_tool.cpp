@@ -3319,6 +3319,14 @@ namespace {
         std::string membership;          // kept ticks, --frames: each selected script's owner in the next frame (step RLM)
         std::vector<std::string> bodies; // a pass inside the window (step S7): the movable bodies, sorted
         std::vector<uint32_t> cells;     // the written-cell columns (step RK2's review): per column rows, then the values
+        // Close-out step FX2: before the step at this tick, the activations
+        // pending for its frame (Gameplay_SectorManager and the selected
+        // scripts session_script_activations names: id, reset) and the
+        // manager's IngameParameter cells [0][1] / [0][2] - what a re-made
+        // live world re-issues where a script outside the selection asked.
+        std::vector<std::pair<CK_ID, bool>> pending;
+        int manager_cells[2] = {0, 0};
+        bool have_manager_cells = false;
         bmmo::physics::world_hash hash;
         bmmo::sim::physics_world::step_state counters;
     };
@@ -3859,6 +3867,71 @@ namespace {
         const std::map<std::string, bmmo::session::input_frame> no_inputs;
         const auto no_input = [](const std::string&, uint32_t, bmmo::session::input_frame&) { return false; };
 
+        // Close-out step FX2: a re-made live world (below) restores t0 and
+        // steps whole frames to e, but the scripts outside the selection are
+        // not rewound - they stand wherever the straight pass and the earlier
+        // rounds left them - so their one-shot work of the window's frames
+        // never recurs there: Init Ingame's Execute Script of
+        // Gameplay_SectorManager at the session start (sector 1, the births
+        // at 7) and its Set Physics Globals of frame 1 (the A18 write).  The
+        // straight pass notes, before each step, the activations its frame
+        // consumes (the manager's, with its two cells, and the selected
+        // scripts'); the re-make re-issues each one its own world lacks
+        // before the same step - only those, so an activation the selection
+        // itself makes again is not issued twice (CKScene::Activate counts
+        // in m_BeObjectNextFrame, step FX1) - and puts back the globals the
+        // straight step ran with (record t+1's, rollback.hpp's C3 rule 2.3
+        // step 3).  A union pass is made by the re-stepped frame itself
+        // (moves_before, update_sectors), never re-issued here.
+        std::vector<CK_ID> pending_watch;
+        if (passes) {
+            if (manager_id) pending_watch.push_back(manager_id);
+            for (CK_ID id: script_activations)
+                if (id != manager_id) pending_watch.push_back(id);
+        }
+        const auto capture_pending = [&](straight_tick& rec) {
+            rec.pending.clear();
+            for (CK_ID id: pending_watch) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                if (beh && (beh->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME))
+                    rec.pending.emplace_back(id, (beh->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0);
+            }
+            rec.have_manager_cells = false;
+            if (CKDataArray* parameters = bmmo::game::session_data_array(context, "IngameParameter"))
+                rec.have_manager_cells = parameters->GetElementValue(0, 1, &rec.manager_cells[0])
+                                      && parameters->GetElementValue(0, 2, &rec.manager_cells[1]);
+        };
+        uint64_t remake_reissued = 0, remake_extra_pending = 0, remake_globals_written = 0, remake_steps = 0;
+        const auto reissue_pending = [&](const straight_tick& rec, uint32_t t) {
+            CKScene* scene = context->GetCurrentScene();
+            for (const auto& [id, reset]: rec.pending) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                if (!beh || !scene || (beh->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME)) continue;
+                if (id == manager_id && rec.have_manager_cells)
+                    if (CKDataArray* parameters = bmmo::game::session_data_array(context, "IngameParameter")) {
+                        parameters->SetElementValue(0, 1, const_cast<int*>(&rec.manager_cells[0]), sizeof(int));
+                        parameters->SetElementValue(0, 2, const_cast<int*>(&rec.manager_cells[1]), sizeof(int));
+                    }
+                scene->Activate(beh, reset ? TRUE : FALSE);
+                ++remake_reissued;
+                if (args.verbose)
+                    std::printf("  re-made live world: before the step at %u re-issued %s's activation%s\n", t,
+                                beh->GetName() ? beh->GetName() : "?", reset ? " (reset)" : "");
+            }
+            // The other way round (reported, not undone): an activation the
+            // re-made world has pending that the straight pass's frame had not.
+            for (CK_ID id: pending_watch) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                if (!beh || !(beh->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME)) continue;
+                if (std::none_of(rec.pending.begin(), rec.pending.end(), [id](const auto& p) { return p.first == id; })) {
+                    ++remake_extra_pending;
+                    if (args.verbose)
+                        std::printf("  re-made live world: before the step at %u %s is pending, the straight pass's was not\n",
+                                    t, beh->GetName() ? beh->GetName() : "?");
+                }
+            }
+        };
+
         // ---- the straight pass
         // Step RLQ: --queue-trace, the PreSimulate queue after each straight
         // step whenever it changes (frame = the tick the step leads to), each
@@ -4022,6 +4095,7 @@ namespace {
                 if (const auto due = window_moves.find(t); due != window_moves.end())
                     for (int sector: due->second) std::printf("savestate-check: tick=%u player 2 moved to sector %d\n", t, sector);
                 moves_before(t);
+                capture_pending(rec);   // close-out step FX2
             }
             if (!step(error)) {
                 std::fprintf(stderr, "savestate-check: the straight pass's step at tick %u failed: %s\n", t, error.c_str());
@@ -4116,7 +4190,8 @@ namespace {
         // before the witnesses and the follow: the world a client has at e.
         // (The replay identity already compares every replayed tick's
         // globals: the blob carries the factor, the physics delta and the
-        // gravity.)  The re-made live worlds get t0's after their restore.
+        // gravity.)  The re-made live worlds get t0's after their restore,
+        // and each re-stepped frame the straight step's (step FX2).
         bmmo_physics_globals end_globals{};
         bool have_end_globals = false;
         {
@@ -4130,6 +4205,21 @@ namespace {
                 ++globals_put_failures;
                 std::printf("  the harness could not put the globals back: %s\n", globals_error.c_str());
             }
+        };
+        // Close-out step FX2: before a re-made live world's step at t, the
+        // globals the straight step at t ran with (the record of t+1's); a
+        // write that changes them is counted.
+        const auto put_step_globals = [&](uint32_t t) {
+            const bmmo_physics_globals* g = pristine.recorded_globals(t + 1u);
+            if (!g) return;
+            bmmo_physics_globals now{};
+            std::string globals_error;
+            if (backend.get_physics_globals(now, globals_error)
+                    && now.time_factor == g->time_factor && now.gravity[0] == g->gravity[0]
+                    && now.gravity[1] == g->gravity[1] && now.gravity[2] == g->gravity[2])
+                return;
+            put_globals(g);
+            ++remake_globals_written;
         };
         // Step B2SX (Q5): depth-0 compares that differed only in outputs the
         // restore re-armed (ignored, option (a)), and the follows run.
@@ -4183,6 +4273,8 @@ namespace {
                 put_globals(pristine.recorded_globals(t0));   // C3: the re-made world at t0
                 for (int i = 0; i < e; ++i) {
                     trafo->apply_inputs(t0 + static_cast<uint32_t>(i) + 1u, true);
+                    put_step_globals(t0 + static_cast<uint32_t>(i));   // step FX2
+                    ++remake_steps;
                     if (!step(remake_error)) {
                         std::fprintf(stderr, "savestate-check: re-stepping round %zu's live world failed: %s\n", r, remake_error.c_str());
                         return 1;
@@ -4256,6 +4348,11 @@ namespace {
                     put_globals(pristine.recorded_globals(t0));   // C3: the re-made world at t0
                     for (int i = 0; i < e; ++i) {
                         moves_before(t0 + static_cast<uint32_t>(i));
+                        // Step FX2: what the outside scripts' frames did in
+                        // the straight pass and do not do again here.
+                        reissue_pending(straight[static_cast<size_t>(i)], t0 + static_cast<uint32_t>(i));
+                        put_step_globals(t0 + static_cast<uint32_t>(i));
+                        ++remake_steps;
                         if (!step(remake_error)) {
                             std::fprintf(stderr, "savestate-check: re-stepping round %zu's live world failed: %s\n", r,
                                          remake_error.c_str());
@@ -4691,6 +4788,8 @@ namespace {
                         trafo_rounds_lives_revived, static_cast<unsigned long long>(trafo_lives_ended),
                         static_cast<unsigned long long>(trafo_lives_revived),
                         static_cast<unsigned long long>(trafo_lives_unrevivable));
+            std::printf("savestate-check: re-made live worlds (step FX2): steps %llu, per-tick globals written %llu\n",
+                        static_cast<unsigned long long>(remake_steps), static_cast<unsigned long long>(remake_globals_written));
         }
         if (passes) {   // step S7
             std::printf("savestate-check: passes inside the window %zu (rounds crossing one %d), window births logged %zu,"
@@ -4701,6 +4800,11 @@ namespace {
                         static_cast<unsigned long long>(pass_recreated_exact),
                         static_cast<unsigned long long>(pass_recreate_failures), static_cast<unsigned long long>(pass_missing),
                         pass_remakes);
+            std::printf("savestate-check: re-made live worlds (step FX2): steps %llu, outside activations re-issued %llu,"
+                        " pending the straight pass's frame had not %llu, per-tick globals written %llu\n",
+                        static_cast<unsigned long long>(remake_steps), static_cast<unsigned long long>(remake_reissued),
+                        static_cast<unsigned long long>(remake_extra_pending),
+                        static_cast<unsigned long long>(remake_globals_written));
             std::printf("savestate-check: fixed window births destroyed at a restore for the replayed scripts (step RO1): back"
                         " after their birth tick %llu, missing %llu\n", static_cast<unsigned long long>(fixed_births_back),
                         static_cast<unsigned long long>(fixed_births_missing));

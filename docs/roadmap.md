@@ -1650,6 +1650,56 @@ numbers 1-10 are unchanged.
      the airship, c3 bit-equal 2692-3163 then a LOCAL-row contact
      prediction 3164-3206 (FINAL rows bit-equal, D0); swing_snapoff all
      four bit-equal over both respawn windows.
+   - **Run at FX2 (2026-10-29, HEAD cd77a19b + SimTool only; S1b to a
+     verdict, record-format-gaps-design.md "As built (step FX2)";
+     `.local-tools/work/FX2/`, binary `build-agent-rFX2`):** SimTool's
+     re-made live world now gets, before each re-stepped frame, the
+     globals the straight step ran with (the record of t+1's) and the
+     activations the straight pass's frame consumed that its own world
+     lacks (Init Ingame's Execute Script of Gameplay_SectorManager at the
+     session start); nothing outside `BallanceMMOServer/sim`. **S1b
+     (`--session-recipe --drop-settle 0`, L2 and L13, seeds 1-5): 10/10
+     runs to a verdict** (60 rounds each, window 1..40), C3 replays 1-2
+     per run (12 in all, every one anchored before the first change at 2),
+     0 "gravity differs", 0 clock failures, 0 premise failures (S2: every
+     run stopped at round 3-4 on the premise); 165 re-made worlds, 161
+     per-tick globals writes, 145 outside activations re-issued, 0 the
+     other way. **Not 600/600:** 20
+     of 600 rounds fail, all of one harness residual (below). Regression
+     arms PASS with 0 re-issues and 0 globals writes: S1b at
+     `--drop-settle 12` 10 x 60/60, V4b alive 50/50, V9 L11 move (default
+     lead) and L8 move (lead 180) 50/50 each (a union pass inside the
+     re-make, never re-issued), EL9's L-S1 trafo scene 160/160 (21249
+     re-made steps; the trafo branch's per-tick globals put is built but
+     its window has no globals change, so no write is exercised). Tests
+     656/656, GCC 31/31 and `linux_sim_syntax.sh` 5/5 ok.
+     **Residual (harness only, queued here):** every failing round
+     compares at a tick e <= 2 (t0 = 1), on Gameplay_SectorManager only:
+     (i) depth 0 at e 1 or 2 - its delayed link `Deactivate Sector.out0 ->
+     Set Cell.in0` (delay 4) "countdown 4 vs 0": the straight pass's
+     record holds the initial 4 (never queued yet), the stand-in live
+     world 0 (fired in its own later history), and the restore writes a
+     countdown only when the record has the link in flight
+     (`script_replay.hpp` `restore_behavior`); (ii) anchor 1 depth 1
+     ending at 2 - flags (the pending activation from Init Ingame's frame
+     1), the same countdown and `CurrentLevel[0][4]` 1 vs 0 (Init Ingame's
+     write): the round compares at e before what a client does at a
+     rewind's end (`live_cells_guard`: the live cells written back, the
+     pending activation re-issued), B2SX's family. Not a client gap: a
+     client whose live tick is <= 2 has never fired the link, and named
+     rounds 1:2:2, 1:3:2, 1:4:2, 2:1:2, 2:2:2, 2:3:3, 2:4:2, 3:1:2,
+     1:12:2, 2:12:2 (L2 and L13) - replays crossing frames 1-2, one with
+     the link in flight live - pass every replayed tick, the end and the
+     follow. The two forms split (FX2's review): **(i) is a harness
+     fidelity gap, queued here as its own harness item** (the
+     orchestrator's to schedule, no user decision): the round's live
+     world takes the straight pass's not-in-flight delayed-link
+     countdowns of e before the round, re-made or chained (12 rounds);
+     **(ii) is the user's rule question** (8 rounds, not decided here):
+     (a) leave it, S1b counted on its own kinds (globals and clock,
+     §7.2); (b) the round's compare at e runs after the client's
+     end-of-rewind steps (a change of the rule the round is judged by,
+     as B2SX's option (a) was).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

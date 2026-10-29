@@ -1757,3 +1757,112 @@ or IVP change; no world changes (the census only reads the graph).
 - **Not run here:** a retail run (the retail core host runs the same
   `anchor_log`; its status line is read by the close-out's retail batches,
   RT1-RT3).
+
+## As built (step FX2, 2026-10-29): S1b with `--session-recipe` to a verdict - the re-made live world's per-tick globals and outside activations
+
+FULL step FX2 (the stage A close-out, `.local-tools/work/FULL/plan.md` FX2;
+RK1-d, "S1b with `--session-recipe`", which S2 could not run to a verdict).
+SimTool only (`BallanceMMOServer/sim/sim_tool.cpp`); no shared, client,
+server, protocol, journal, bridge or IVP change.
+
+- **The cause (S2).** A round whose live world must stand at e on the other
+  side of a window birth re-makes it: t0's record restored, then the straight
+  pass's whole frames re-stepped to e. The scripts outside the selection are
+  not rewound (they stand where the straight pass and the earlier rounds left
+  them), so their one-shot work of the window's frames never recurred there:
+  at `--drop-settle 0` (t0 = 1) Init Ingame's Set Physics Globals of frame 1
+  (A18: gravity -20, factor 2 from record 2 on; the re-made world kept t0's
+  -9.81, 1) and its Execute Script of Gameplay_SectorManager (pending before
+  frame 2; sector 1's births at 7). The premise "the re-made live world at e
+  is the straight pass's" failed at round 3-4 of every run.
+- **The fix.** (1) Before each re-stepped frame at t the globals the straight
+  step at t ran with - the record of t+1's, the engine's own rule for a
+  replayed tick (C3, §2.3 step 3, `rollback.hpp`) - written when they differ
+  (`put_step_globals`), in the session-recipe re-make and in the trafo
+  re-make alike. (2) The straight pass notes, before each step, the
+  activations its frame consumes - Gameplay_SectorManager's (with
+  IngameParameter[0][1] / [0][2]) and those of the selected scripts
+  `session_script_activations` names (`straight_tick::pending`,
+  `capture_pending`); the re-make re-issues, before the same step, only the
+  ones its own world lacks (`reissue_pending`: the cells, then
+  `CKScene::Activate(script, reset)`), so an activation the selection makes
+  again itself is never issued twice (an Activate counts in
+  `m_BeObjectNextFrame`, step FX1), and a union pass is made by the
+  re-stepped frame itself, never re-issued. An activation the re-made world
+  has that the straight pass's frame had not is counted, not undone. The
+  summary prints `re-made live worlds (step FX2): steps, outside activations
+  re-issued, pending the straight pass's frame had not, per-tick globals
+  written`.
+- **S1b** (`--savestate-check --frames --session-recipe --drop
+  P_Ball_Wood_MF 0 --drop-settle 0 --ticks 40 --rounds 60 --max-depth 1`, L2
+  and L13, seeds 1-5; `.local-tools/work/FX2/s1b.sh`, `run1/`): **10/10 runs
+  to a verdict**, 60 rounds each; C3 replays 1-2 per run, 12 in all, every one
+  `replays_start` (anchored before the first change at 2: A18's frame-1 write
+  exercised); 0 "gravity differs", 0 clock failures, 0 premise failures; 165
+  re-made worlds, 161 per-tick globals writes, 145 outside activations
+  re-issued (Gameplay_SectorManager, reset, before the step at 2), 0 the other
+  way. By §7.2's count (globals and clock kinds only) S1b passes; 20 of the
+  600 rounds fail, all of the residual below.
+- **The residual (harness, root-caused, not fixed here).** Every failing round
+  compares at a tick e <= 2, on Gameplay_SectorManager only, in two forms:
+  - depth 0 at e = 1 or 2 (12 rounds): "delayed link 0 countdown 4 vs 0" -
+    the link `Deactivate Sector.out0 -> Set Cell.in0` (delay 4, B2SX) holds the
+    initial 4 in the straight pass's records 1-2 (not yet queued: the manager
+    first runs in frame 2), 0 in the stand-in live world (fired in its own
+    later history), and `restore_behavior` (`script_replay.hpp`) writes a
+    countdown only when the record has the link in flight (0 < c < initial),
+    so a depth-0 compare reads the live world's own value;
+  - anchor 1, depth 1, ending at 2 (8 rounds): the manager's flags (the
+    pending activation Init Ingame's frame 1 left), the same countdown and
+    `CurrentLevel[0][4]` 1 vs 0 (Init Ingame's write in frame 1, which the
+    manager overwrites with 0 in frame 2 before any reader): the replay never
+    runs Init Ingame, and the round compares at e before what a client does
+    at a rewind's end (`live_cells_guard`: the live cells written back, the
+    activation pending for the live frame re-issued) - B2SX's family ("a
+    client never compares its scripts before the next frame").
+  Not a client gap: a client whose live tick is <= 2 has never fired the link
+  (its live value is the record's), and every round that compares after frame
+  2 passes - named rounds 1:2:2, 1:3:2, 1:4:2, 2:1:2 (the link in flight
+  live, at 3), 2:2:2, 2:3:3, 2:4:2, 3:1:2, 1:12:2 and 2:12:2 on L2 and L13
+  (`FX2/named/`, `try1/`): every replayed tick's blob, the end's scripts and
+  the follow equal; the replays from 1 re-make sector 1's 5 births exactly.
+  The two forms are different kinds of thing (FX2's review):
+  - form (i) is a fidelity gap of the harness's stand-in live world, not a
+    rule: no client whose live tick is <= 2 holds the fired countdown 0. Its
+    fix is harness only and inside FX2's own premise ("the live world at e is
+    the straight pass's"): the straight pass notes each kept tick's
+    not-in-flight countdowns of the selected scripts' delayed links, and the
+    round's live world takes those of e before the round - in a re-made
+    world and also in one that is not re-made (a depth-0 round at e <= 2 may
+    run on a world chained from the previous round, whose bodies already
+    match, so a write inside `reissue_pending` alone would not reach it).
+    It is the orchestrator's to queue as a harness item; not built here,
+    because it changes every round's live world and so needs the S1b and
+    regression arms again, beyond FX2's gate round;
+  - form (ii) is a rule question and the user's: the round compares at e
+    before a client's end-of-rewind steps; options (a) leave it - S1b judged
+    by its own kinds (globals and clock, §7.2), the 8 rounds a known harness
+    artifact; (b) the round's compare at e runs after the client's
+    end-of-rewind steps (`live_cells_guard`'s write-back and re-issue) - a
+    change of the rule the round is judged by, as B2SX's option (a) was.
+- **Known limits of the re-issue** (FX2's review, not changed): a watched
+  script already pending in the re-made world with another reset bit than
+  the straight pass's, or a manager already pending whose IngameParameter
+  [0][1] / [0][2] differ, is skipped without a count (the cells are written
+  only with a re-issue) - neither is in the blob the premise compares; the
+  re-issues of one frame go in `pending_watch` order (the manager, then
+  `session_script_activations`), not the straight pass's order of addition
+  to `m_BeObjectNextFrame` - harmless while only the manager is ever
+  re-issued (145/145), a frame-order question (replay-script-order family)
+  if two ever are; with both trafo and passes the two summary lines print
+  the same `remake_steps` / `remake_globals_written` totals, not split by
+  branch.
+- **Regressions** (`FX2/regress.sh`, `settle12/`): S1b at `--drop-settle 12`
+  10 x 60/60 with 0 re-issues and 0 globals writes (S2's settle-12 result);
+  V4b alive 50/50; V9 L11 move (default lead) and L8 move (lead 180) 50/50
+  each - a union pass inside the re-make, 0 re-issued, 0 the other way; EL9's
+  L-S1 trafo scene 160/160 (21249 re-made steps; its window has no globals
+  change, so the trafo branch's write is built but not exercised). Tests
+  656/656; GCC `linux_test_syntax.sh` 31/31, `linux_sim_syntax.sh` 5/5 (with
+  `sim_tool.cpp`); `ninja -t deps` of sim_tool.cpp.obj 289 VALID. No wire
+  check: nothing the headless client or the shared code compiles changed.
