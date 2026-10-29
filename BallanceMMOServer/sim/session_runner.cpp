@@ -5,6 +5,7 @@
 
 #include <physics/physics_state.hpp>
 #include <session/lifecycle.hpp>
+#include <session/member_lives.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -127,6 +128,19 @@ namespace bmmo::sim {
         auto& v = views_[s.id];
         v.next_tick = s.world ? s.world->tick_index() : 0;
         v.running = s.running;
+        // Step M1 (J4): the largest removal tick of a leaving life.
+        uint32_t horizon = 0;
+        for (const auto& [player, leaving]: s.leaving) {
+            (void) player;
+            if (horizon == 0 || static_cast<int32_t>(leaving.remove_at - horizon) > 0) horizon = leaving.remove_at;
+        }
+        v.leaving_horizon = horizon;
+    }
+
+    uint32_t session_runner::leaving_horizon(uint32_t session) const {
+        std::lock_guard lk(view_mutex_);
+        auto it = views_.find(session);
+        return it == views_.end() ? 0 : it->second.leaving_horizon;
     }
 
     uint32_t session_runner::current_tick(uint32_t session) const {
@@ -324,6 +338,7 @@ namespace bmmo::sim {
                 }
                 s->players.insert(player);
                 s->join_orders[player] = join_order;
+                s->lives[player] = 1;   // step M1: a member present at the start is in its first life
                 s->inputs[player].reset(first_tick);
                 s->journal.player(first_tick, player, join_order, true,
                                   i < names.size() ? names[i] : std::string{});
@@ -366,6 +381,12 @@ namespace bmmo::sim {
                     log("[session " + std::to_string(s.id) + "] " + text);
                     s.journal.note(s.world->tick_index(), text);
                 }
+                if (s.world) {   // step M1 (J2): the slot fallbacks, 0 by the server's join orders
+                    const std::string text = "member lives: join orders taken in the world "
+                        + std::to_string(s.world->join_orders_taken());
+                    log("[session " + std::to_string(s.id) + "] " + text);
+                    s.journal.note(s.world->tick_index(), text);
+                }
                 s.journal.note(s.world ? s.world->tick_index() : 0,
                                "end: " + (reason.empty() ? std::string("session destroyed") : reason));
                 s.journal.close();
@@ -376,34 +397,77 @@ namespace bmmo::sim {
         });
     }
 
-    void session_runner::add_player(uint32_t session, uint32_t player, uint8_t join_order,
+    void session_runner::add_player(uint32_t session, uint32_t player, uint8_t join_order, uint16_t life,
                                     const std::string& name) {
-        post([this, session, player, join_order, name] {
+        post([this, session, player, join_order, life, name] {
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
-            // Back before its old self was taken out: the old one goes now.
-            if (s.leaving.count(player)) finish_leave(s, player, s.world->tick_index());
-            std::string error;
-            if (!s.world->add_player(player, join_order, error)) {
-                log("[session " + std::to_string(session) + "] add_player failed: " + error);
-                if (s.world->trafo_failed()) {
-                    s.failed = true;
-                    s.running = false;
-                    s.journal.note(s.world->tick_index(), "end: " + error);
-                    if (callbacks_.on_failed) callbacks_.on_failed(s.id, error);
-                }
+            // Step M1 (J-f): back before its old life was taken out.  The old
+            // life keeps every event it has queued (they were relayed, every
+            // member applies them); this add runs right after its removal,
+            // so the new life's J is the old life's R.
+            if (const auto l = s.leaving.find(player); l != s.leaving.end()) {
+                l->second.rejoin = true;
+                l->second.rejoin_order = join_order;
+                l->second.rejoin_life = life;
+                l->second.rejoin_name = name;
+                log("[session " + std::to_string(session) + "] player " + std::to_string(player) + " rejoined (life "
+                    + std::to_string(life) + ", join order " + std::to_string(join_order)
+                    + ") while its old life is leaving: added at its removal, tick " + std::to_string(l->second.remove_at));
+                s.journal.note(s.world->tick_index(), "rejoin: p" + std::to_string(player) + " life " + std::to_string(life)
+                               + " waits for its old life's removal at tick " + std::to_string(l->second.remove_at));
                 return;
             }
-            s.players.insert(player);
-            s.join_orders[player] = join_order;
-            s.inputs[player].reset(s.world->tick_index());
-            s.cadence.force_full();
-            s.journal.player(s.world->tick_index(), player, join_order, true, name);
+            add_now(s, player, join_order, life, name);
         });
     }
 
+    void session_runner::add_now(session_state& s, uint32_t player, uint8_t join_order, uint16_t life,
+                                 const std::string& name) {
+        member_change change;
+        change.session = s.id;
+        change.player = player;
+        change.life = life;
+        change.join_order = join_order;
+        change.tick = s.world->tick_index();
+        std::string error;
+        if (!s.world->add_player(player, join_order, error)) {
+            log("[session " + std::to_string(s.id) + "] add_player failed: " + error);
+            change.in_world = false;
+            if (s.world->trafo_failed()) {
+                s.failed = true;
+                s.running = false;
+                s.journal.note(s.world->tick_index(), "end: " + error);
+                if (callbacks_.on_failed) callbacks_.on_failed(s.id, error);
+            }
+            // Step M1: the member gets SessionEnd, not a SessionStart for a
+            // world with no slot for it.
+            if (!s.failed && callbacks_.on_player_add_failed) callbacks_.on_player_add_failed(change, error);
+            return;
+        }
+        s.players.insert(player);
+        s.join_orders[player] = join_order;
+        s.lives[player] = life;
+        s.inputs[player].reset(s.world->tick_index());
+        s.cadence.force_full();
+        s.journal.player(s.world->tick_index(), player, join_order, true, name);
+        if (callbacks_.on_player_added) callbacks_.on_player_added(change);
+    }
+
     void session_runner::finish_leave(session_state& s, uint32_t player, uint32_t tick) {
+        // Step M1: what on_player_removed reports, read before the entries
+        // go; and a rejoin that waited for this removal (J-f).
+        member_change removed;
+        removed.session = s.id;
+        removed.player = player;
+        removed.tick = tick;
+        const auto held = s.join_orders.find(player);
+        removed.in_world = held != s.join_orders.end();
+        removed.join_order = removed.in_world ? held->second : 0;
+        if (const auto l = s.lives.find(player); l != s.lives.end()) removed.life = l->second;
+        session_state::leaving_player rejoin;
+        if (const auto l = s.leaving.find(player); l != s.leaving.end() && l->second.rejoin) rejoin = l->second;
         // Join order is the world's business at add time only; a removal
         // needs the player id alone.
         s.journal.player(tick, player, 0, false, {});
@@ -421,6 +485,8 @@ namespace bmmo::sim {
                     return e.player == player && e.event.type != bmmo::session::event_type::Trafo;
                 }), s.events.end());
         s.cadence.force_full();
+        if (removed.in_world && callbacks_.on_player_removed) callbacks_.on_player_removed(removed);
+        if (rejoin.rejoin && s.world) add_now(s, player, rejoin.rejoin_order, rejoin.rejoin_life, rejoin.rejoin_name);
     }
 
     void session_runner::remove_player(uint32_t session, uint32_t player) {
@@ -428,6 +494,29 @@ namespace bmmo::sim {
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
             auto& s = *it->second;
+            // Step M1: a player the world does not hold - its add failed, or
+            // it rejoined while its old life was leaving and left again
+            // before that add ran.  The waiting add is dropped (its join
+            // order released by on_player_removed, in_world false); nothing
+            // of it is in the world, so nothing is relayed or queued.
+            if (!s.players.count(player)) {
+                if (const auto l = s.leaving.find(player); l != s.leaving.end() && l->second.rejoin) {
+                    member_change dropped;
+                    dropped.session = s.id;
+                    dropped.player = player;
+                    dropped.life = l->second.rejoin_life;
+                    dropped.join_order = l->second.rejoin_order;
+                    dropped.tick = s.world ? s.world->tick_index() : 0;
+                    dropped.in_world = false;
+                    l->second.rejoin = false;
+                    log("[session " + std::to_string(s.id) + "] player " + std::to_string(player) + " left again before"
+                        " its rejoin (life " + std::to_string(dropped.life) + ") was added: the rejoin is dropped");
+                    if (callbacks_.on_player_removed) callbacks_.on_player_removed(dropped);
+                }
+                s.ready.erase(player);
+                s.inputs.erase(player);
+                return;
+            }
             // Its last patience counts, before the entry goes.
             if (config_.patience && s.running && s.world && s.inputs.count(player))
                 report_patience(s, s.world->tick_index(), "player left", &player);
@@ -457,7 +546,11 @@ namespace bmmo::sim {
                 // other events are (and applied before them).
                 const bool queued = s.trafo_on() || std::any_of(s.events.begin(), s.events.end(),
                         [player](const pending_event& e) { return e.player == player; });
-                if (has_ball && queued) {
+                // Step M1 (J-e): every leave with a ball goes through the
+                // queue, so the server applies the Unphysicalize at `next`
+                // inside the events loop, in the leaver's rank, as every
+                // client does, and takes the player out at next + 1.
+                if (has_ball) {
                     lifecycle_event death;
                     death.type = bmmo::session::event_type::Unphysicalize;
                     death.tick = gone.applied;
@@ -465,8 +558,6 @@ namespace bmmo::sim {
                     auto pos = std::upper_bound(s.events.begin(), s.events.end(), gone.applied,
                         [](uint32_t t, const pending_event& e) { return static_cast<int32_t>(t - e.applied) < 0; });
                     s.events.insert(pos, std::move(pe));
-                }
-                if (has_ball) {
                     log("[session " + std::to_string(s.id) + "] player " + std::to_string(player)
                         + " left with a ball: Unphysicalize relayed for tick " + std::to_string(gone.applied)
                         + " (next tick " + std::to_string(next) + ")");
@@ -480,6 +571,7 @@ namespace bmmo::sim {
                         a.applied = gone.applied;
                         a.type = bmmo::session::event_type::Unphysicalize;
                         a.intake = clock::now();
+                        a.life = life_of(s, player);
                         callbacks_.on_event_accepted(a);
                     }
                 }
@@ -493,7 +585,7 @@ namespace bmmo::sim {
                     const float none[3] = {};
                     for (const auto& d: s.trafo.leaver(player, F)) queue_trafo(s, d, none, clock::now(), 0, "leaver");
                 }
-                if (queued) {
+                if (bmmo::session::leaver_stays(has_ball, queued)) {
                     auto& leaving = s.leaving[player];
                     leaving.remove_at = bmmo::session::lifecycle_leaver_removal_tick(s.events, player, next);
                     if (const auto f = s.last_frames.find(player); f != s.last_frames.end()) leaving.frame = f->second;
@@ -516,6 +608,7 @@ namespace bmmo::sim {
             s.waits.erase(player);
             s.waits_journalled.erase(player);
             s.bodiless.forget(player);
+            publish_state(s);   // step M1: the leaving horizon (J4)
             // A session waiting for readiness may now be complete.
             if (!s.running && !s.failed && s.world && !s.players.empty()
                     && std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
@@ -712,6 +805,7 @@ namespace bmmo::sim {
                 a.dropped = true;
                 a.token = token;
                 a.intake = arrival;
+                if (const auto found = sessions_.find(session); found != sessions_.end()) a.life = life_of(*found->second, player);
                 callbacks_.on_event_accepted(a);
             };
             auto it = sessions_.find(session);
@@ -746,6 +840,7 @@ namespace bmmo::sim {
                     for (int k = 0; k < 3; ++k) a.position[k] = event.position[k];
                     a.token = token;
                     a.intake = arrival;
+                    a.life = life_of(s, player);
                     callbacks_.on_event_accepted(a);
                 };
                 if (!s.trafo_on() || event.ball_type >= bmmo::session::kTrafoTypes) {
@@ -799,6 +894,7 @@ namespace bmmo::sim {
                 a.superseded = superseded;
                 a.token = token;
                 a.intake = arrival;
+                a.life = life_of(s, player);
                 callbacks_.on_event_accepted(a);
             };
             if (verdict.superseded) {
@@ -873,6 +969,7 @@ namespace bmmo::sim {
             a.ball_type = d.type;
             a.flags = d.flags;
             a.intake = arrival;
+            a.life = life_of(s, d.player);
             callbacks_.on_event_accepted(a);
         }
     }

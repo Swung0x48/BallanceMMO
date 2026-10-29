@@ -74,13 +74,19 @@ namespace bmmo::session::core {
                          + " as " + own_name + "(" + std::to_string(s.own_id_) + ", join "
                          + std::to_string(s.own_join_order_) + "):";
         journal_announced_.clear();
-        for (const auto& p: s.players_) {
-            const std::string name = p.id == s.own_id_ ? own_name : std::to_string(p.id);
-            journal_.player(header.first_tick, p.id, p.join_order, true, name);
-            journal_announced_.insert(p.id);
-            note += " " + name + "(" + std::to_string(p.id) + ", join " + std::to_string(p.join_order) + ")";
+        own_name_ = own_name;
+        // Step M1: SessionStart's lives (from 0) name the start note; every
+        // life's PLAYER records, a SessionMember's that came while loading
+        // included, are written by the core's journal_member_lives below.
+        for (auto& l: core_.s.lives_) {
+            l.journaled_add = l.journaled_remove = false;
+            if (l.from != 0) continue;
+            const std::string name = l.entry.id == s.own_id_ ? own_name : std::to_string(l.entry.id);
+            note += " " + name + "(" + std::to_string(l.entry.id) + ", join " + std::to_string(l.entry.join_order) + ")";
         }
         journal_.note(header.first_tick, note);
+        first_tick_ = header.first_tick;
+        core_.journal_member_lives();
         journal_last_checkpoint_ = 0;
         journal_have_checkpoint_ = false;
         journal_checkpoint_pending_ = false;
@@ -97,20 +103,37 @@ namespace bmmo::session::core {
         if (journalling()) journal_.note(core_.current_tick(), text);
     }
 
+    // Step M1: the PLAYER records come from the lives (add_player at J,
+    // leave_player at R).  A record of a player no life names yet writes a
+    // note once and nothing else - no guessed join order (it was 255).
     void client_journal::announce_player(uint32_t player, uint32_t tick) {
-        if (player == 0 || !journal_announced_.insert(player).second) return;
-        int join_order = -1;
-        for (const auto& p: core_.s.players_) if (p.id == player) join_order = p.join_order;
-        journal_.player(tick, player, join_order < 0 ? 255 : static_cast<uint8_t>(join_order), true,
-                        std::to_string(player));
-        if (join_order < 0)
-            journal_.note(tick, "late join: p" + std::to_string(player)
-                          + " has records but was never announced to this client; join order unknown");
+        if (player == 0 || journal_announced_.count(player)) return;
+        for (const auto& l: core_.s.lives_)
+            if (l.entry.id == player) return;
+        journal_announced_.insert(player);
+        if (journalling())
+            journal_.note(tick, "p" + std::to_string(player)
+                          + " has records before its member message: its PLAYER record follows from that message");
     }
 
-    void client_journal::leave_player(uint32_t player) {
-        if (!journalling() || journal_announced_.erase(player) == 0) return;
-        journal_.player(core_.current_tick(), player, 0, false, {});
+    void client_journal::add_player(const bmmo::session::player_entry& entry, uint32_t from) {
+        if (!journalling()) return;
+        // At J (a life from the start: the journal's first tick), not before
+        // the numbering's first tick: a late join or a resync leaves a hole
+        // in the file below its base, and the replay restores the server's
+        // state there (RESYNC) with every body of the life in it.
+        const uint32_t lowest = core_.s.assigned_ && static_cast<int32_t>(core_.s.tick_base_ - first_tick_) > 0
+                              ? core_.s.tick_base_ : first_tick_;
+        const uint32_t tick = from == 0 ? first_tick_ : static_cast<int32_t>(from - lowest) < 0 ? lowest : from;
+        const std::string name = entry.id == core_.s.own_id_ ? own_name_ : std::to_string(entry.id);
+        journal_.player(tick, entry.id, entry.join_order, true, name);
+    }
+
+    void client_journal::leave_player(uint32_t player, uint32_t tick) {
+        if (!journalling()) return;
+        const uint32_t lowest = core_.s.assigned_ && static_cast<int32_t>(core_.s.tick_base_ - first_tick_) > 0
+                              ? core_.s.tick_base_ : first_tick_;
+        journal_.player(static_cast<int32_t>(tick - lowest) < 0 ? lowest : tick, player, 0, false, {});
     }
 
     void client_journal::lifecycle_event(uint32_t player, const bmmo::session_event_msg& e) {

@@ -31,6 +31,7 @@
 #include <physics/physics_state.hpp>
 #include <session/lifecycle.hpp>
 #include <session/input_relay.hpp>
+#include <session/member_lives.hpp>
 #include <cmath>
 #endif
 
@@ -707,6 +708,27 @@ public:
         // per-player slot use this number, so the server and every side agree
         // on the spawn direction without exchanging it separately.
         std::map<HSteamNetConnection, uint8_t> join_orders;
+        // Step M1 (world-agreement-gaps-design.md 2.7).  `lives`: each id's
+        // current life in this session - the count of its adds, from 1; never
+        // erased, so a rejoin on the same connection is the next life.
+        // `retiring_orders` (J2): the join order of a life that left the
+        // session but is still in the runner's world (until its removal, R),
+        // keyed by (id, life) because a rejoin's new life may already hold
+        // another order; assign_join_order treats them as held, and
+        // on_player_removed releases one.  `started`: the members that have
+        // their SessionStart, which SessionMember goes to.
+        std::map<HSteamNetConnection, uint16_t> lives;
+        std::map<std::pair<HSteamNetConnection, uint16_t>, uint8_t> retiring_orders;
+        std::set<HSteamNetConnection> started;
+        // --hold-member-ms (test builds): SessionMember messages waiting to
+        // leave, the reliable copy and then the repeats.
+        struct held_member {
+            std::chrono::steady_clock::time_point due{};
+            std::vector<uint32_t> to;
+            std::string bytes;
+        };
+        std::vector<held_member> held_members;
+        uint64_t member_messages = 0;
         // Each member's last Physicalize as relayed (serialized, player, applied
         // tick and origin set), so a late joiner can build the bodies that
         // already exist, with its ORIGIN (late-player design 3.1): an
@@ -811,6 +833,11 @@ public:
         };
         callbacks.on_lead = [this](const bmmo::sim::lead_notice& notice) { on_session_lead(notice); };
         callbacks.on_event_accepted = [this](const bmmo::sim::accepted_event& a) { on_event_accepted(a); };
+        callbacks.on_player_added = [this](const bmmo::sim::member_change& c) { on_player_added(c); };
+        callbacks.on_player_removed = [this](const bmmo::sim::member_change& c) { on_player_removed(c); };
+        callbacks.on_player_add_failed = [this](const bmmo::sim::member_change& c, const std::string& error) {
+            on_player_add_failed(c, error);
+        };
         callbacks.on_failed = [this](uint32_t session, const std::string& reason) {
             std::lock_guard lk(state_mutex_);
             end_physics_session(session, "simulation failed: " + reason);
@@ -842,13 +869,20 @@ public:
 
     // Lowest join_order not currently held by another member of s; stable for
     // the member's stay in the session (design 9.10).
+    // Step M1 (J2): an order held by a life the runner has not removed yet
+    // (retiring_orders) is not free either.
     static uint8_t assign_join_order(physics_session_state& s, HSteamNetConnection c) {
-        std::set<uint8_t> used;
+        std::set<uint8_t> used, retiring;
         for (const auto& [member, order]: s.join_orders) used.insert(order);
-        uint8_t order = 0;
-        while (used.count(order)) ++order;
+        for (const auto& [life, order]: s.retiring_orders) retiring.insert(order);
+        const uint8_t order = bmmo::session::lowest_free_join_order(used, retiring);
         s.join_orders[c] = order;
         return order;
+    }
+
+    // Step M1: the member's next life in this session (its add's number).
+    static uint16_t begin_life(physics_session_state& s, HSteamNetConnection c) {
+        return ++s.lives[c];
     }
 
     // The session's latency budget, measured once, before the world exists: the
@@ -910,6 +944,7 @@ public:
             s.members.push_back(m.id);
             client_session_[m.id] = s.id;
             assign_join_order(s, m.id);
+            begin_life(s, m.id);   // 1: the runner's create_session numbers its members the same
         }
         // Design 9.10: one number for the whole session - the world is built
         // with it and every SessionStart carries it.  Decided here, before the
@@ -1025,6 +1060,7 @@ public:
             entry.id = s.members[i];
             const auto jo = s.join_orders.find(entry.id);
             entry.join_order = jo != s.join_orders.end() ? jo->second : static_cast<uint8_t>(i);
+            entry.life = s.lives.count(entry.id) ? s.lives.at(entry.id) : 1;   // step M1
             entry.ball_type = 0;
             for (int k = 0; k < 3; ++k) entry.spawn_position[k] = s.spawn_position[k];
             for (int k = 0; k < 4; ++k) entry.spawn_rotation[k] = s.spawn_rotation[k];
@@ -1032,6 +1068,99 @@ public:
         }
         msg.serialize();
         send(to, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        s.started.insert(to);   // step M1: SessionMember goes to it from now on
+    }
+
+    // Step M1 (world-agreement-gaps-design.md 2.7): a SessionMember to every
+    // member that has its SessionStart, except the player itself, reliably
+    // and through the lifecycle events' unreliable repeats (a lost reliable
+    // copy is ~400 ms late by retransmit).  --hold-member-ms holds both.
+    void send_session_member(physics_session_state& s, uint8_t kind, uint32_t tick, const bmmo::session::player_entry& entry) {
+        bmmo::session_member_msg msg;
+        msg.session = s.id;
+        msg.kind = kind;
+        msg.tick = tick;
+        msg.entry = entry;
+        msg.serialize();
+        std::string bytes = msg.raw.str();
+        std::vector<uint32_t> to;
+        for (const auto m: s.started)
+            if (m != static_cast<HSteamNetConnection>(entry.id)
+                    && std::find(s.members.begin(), s.members.end(), m) != s.members.end())
+                to.push_back(static_cast<uint32_t>(m));
+        ++s.member_messages;
+        Printf("Physics session %u: SessionMember %s p%u life %u join order %u at tick %u to %zu member(s)%s.", s.id,
+               kind == bmmo::session::MEMBER_ADDED ? "added" : "removed", entry.id, static_cast<unsigned>(entry.life),
+               static_cast<unsigned>(entry.join_order), tick, to.size(),
+               test_hold_member_ms() ? Sprintf(" (held %u ms)", test_hold_member_ms()).c_str() : "");
+        if (to.empty()) return;
+        if (test_hold_member_ms() > 0) {
+            s.held_members.push_back({std::chrono::steady_clock::now() + std::chrono::milliseconds(test_hold_member_ms()),
+                                      std::move(to), std::move(bytes)});
+            return;
+        }
+        for (const auto m: to)
+            send(static_cast<HSteamNetConnection>(m), bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+        s.event_repeats.push(std::move(bytes), std::move(to));
+    }
+
+    bmmo::session::player_entry member_entry(const physics_session_state& s, const bmmo::sim::member_change& c) const {
+        bmmo::session::player_entry entry;
+        entry.id = c.player;
+        entry.join_order = c.join_order;
+        entry.life = c.life;
+        entry.ball_type = 0;
+        for (int k = 0; k < 3; ++k) entry.spawn_position[k] = s.spawn_position[k];
+        for (int k = 0; k < 4; ++k) entry.spawn_rotation[k] = s.spawn_rotation[k];
+        return entry;
+    }
+
+    // Simulation thread (step M1): a life entered the runner's world.  A late
+    // joiner hears of the session only now (its SessionStart), so nothing of
+    // it can precede its add; every member with a SessionStart is told.
+    void on_player_added(const bmmo::sim::member_change& c) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(c.session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        const auto member = static_cast<HSteamNetConnection>(c.player);
+        const bool is_member = std::find(s.members.begin(), s.members.end(), member) != s.members.end();
+        if (is_member && s.late.count(member) && !s.started.count(member)) send_session_start(s, member, 0);
+        send_session_member(s, bmmo::session::MEMBER_ADDED, c.tick, member_entry(s, c));
+    }
+
+    // Simulation thread (step M1): a life left the runner's world (R), or a
+    // life that never reached it was dropped.  Its join order is free again.
+    void on_player_removed(const bmmo::sim::member_change& c) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(c.session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        s.retiring_orders.erase({static_cast<HSteamNetConnection>(c.player), c.life});
+        if (c.in_world) send_session_member(s, bmmo::session::MEMBER_REMOVED, c.tick, member_entry(s, c));
+    }
+
+    // Simulation thread (step M1): the world refused the add.  The member
+    // gets SessionEnd instead of a SessionStart for a world with no slot for
+    // it, and leaves the session; nothing held its order.
+    void on_player_add_failed(const bmmo::sim::member_change& c, const std::string& error) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(c.session);
+        if (it == physics_sessions_.end()) return;
+        const auto member = static_cast<HSteamNetConnection>(c.player);
+        Printf("Physics session %u: %s (life %u) could not be added to the world: %s", c.session,
+               get_client_name(member), static_cast<unsigned>(c.life), error);
+        // Only while the member is still on this life: one that left and
+        // came back meanwhile is on a newer life, which this does not end.
+        const auto cs = client_session_.find(member);
+        const auto& lives = it->second.lives;
+        const bool same_life = lives.count(member) && lives.at(member) == c.life;
+        if (cs != client_session_.end() && cs->second == c.session && same_life) {
+            send_session_end(c.session, member, "could not be added to the world: " + error);
+            physics_session_member_left(member);
+        }
+        if (auto again = physics_sessions_.find(c.session); again != physics_sessions_.end())
+            again->second.retiring_orders.erase({member, c.life});
     }
 
     // Simulation thread: the world finished booting.
@@ -1372,10 +1501,14 @@ public:
                 ci->second.ping_peak_ms = std::max(ci->second.ping_peak_ms, ping);
         }
         const uint8_t join_order = assign_join_order(s, c);
-        runner_->add_player(s.id, c, join_order, get_client_name(c));
+        const uint16_t life = begin_life(s, c);
+        runner_->add_player(s.id, c, join_order, life, get_client_name(c));
         if (runner_->running(s.id)) {
+            // Step M1 (world-agreement-gaps-design.md 2.7): its SessionStart
+            // goes from on_player_added, once the runner holds this life (a
+            // rejoin waits there for its old life's removal); the real tick
+            // base follows in SessionAssign.
             s.late.insert(c);
-            send_session_start(s, c, 0);   // the real tick base follows in SessionAssign
         } else if (s.world_ready) {
             send_session_start(s, c, 0);
             // A member joining before the barrier lifted needs the window to
@@ -1388,7 +1521,8 @@ public:
                 s.start_deadline = std::chrono::steady_clock::now() + bmmo::sim::kStartBarrierTimeout;
             }
         }
-        Printf("Physics session %u: %s joined%s.", s.id, get_client_name(c), s.late.count(c) ? " late" : "");
+        Printf("Physics session %u: %s joined%s (life %u, join order %u).", s.id, get_client_name(c),
+               s.late.count(c) ? " late" : "", static_cast<unsigned>(life), static_cast<unsigned>(join_order));
     }
 
     void physics_session_member_left(HSteamNetConnection c) {
@@ -1413,7 +1547,14 @@ public:
             s.notices.erase(notice);
         }
         s.late.erase(c);
-        s.join_orders.erase(c);
+        s.started.erase(c);
+        // Step M1 (J2): the order stays held until the runner removed this
+        // life (on_player_removed), so no joiner can take it meanwhile.
+        if (const auto jo = s.join_orders.find(c); jo != s.join_orders.end()) {
+            s.retiring_orders[{c, s.lives.count(c) ? s.lives.at(c) : uint16_t{0}}] = jo->second;
+            s.join_orders.erase(jo);
+        }
+        for (auto& h: s.held_members) h.to.erase(std::remove(h.to.begin(), h.to.end(), static_cast<uint32_t>(c)), h.to.end());
         s.last_physicalize.erase(c);
         s.last_unphysicalize.erase(c);
         // Its events still waiting for the runner stay: their acceptance was
@@ -1663,6 +1804,16 @@ public:
     void send_assign_repeats() {
         const auto now = std::chrono::steady_clock::now();
         for (auto& [id, s]: physics_sessions_) {
+            // --hold-member-ms (step M1, test builds): a held SessionMember
+            // leaves once its time is up, then repeats like any event.
+            for (auto h = s.held_members.begin(); h != s.held_members.end();) {
+                if (now < h->due) { ++h; continue; }
+                for (const auto m: h->to)
+                    send(static_cast<HSteamNetConnection>(m), h->bytes.data(), h->bytes.size(),
+                         k_nSteamNetworkingSend_ReliableNoNagle);
+                if (!h->to.empty()) s.event_repeats.push(std::move(h->bytes), std::move(h->to));
+                h = s.held_members.erase(h);
+            }
             s.event_repeats.send_due([this, &s](uint32_t to, const std::string& bytes) {
                 if (std::find(s.members.begin(), s.members.end(), static_cast<HSteamNetConnection>(to)) != s.members.end())
                     send(to, bytes.data(), bytes.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
@@ -1849,11 +2000,26 @@ public:
         // built (step RL1b)").
         const uint32_t join_lead = s.late.count(c) ? late_join_lead(s, c, msg.caps) : 0;
         const bool join_state = (msg.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
-        const uint32_t assigned = s.late.count(c) ? runner_->reanchor_tick(s.id, join_lead, join_state) : s.start_tick_base;
+        uint32_t assigned = s.late.count(c) ? runner_->reanchor_tick(s.id, join_lead, join_state) : s.start_tick_base;
+        // Step M1 (J4, J-h): not before the removal of any life the server
+        // still holds - the joiner was never told of a life that left before
+        // it joined, and from its base on its world never needs one.
+        // The lead the joiner is judged by grows with the base (review of
+        // step M1): otherwise lead_adjust reads it as early by the delta.
+        uint32_t join_clamp_delta = 0;
+        if (s.late.count(c)) {
+            const uint32_t horizon = runner_->leaving_horizon(s.id);
+            const uint32_t clamped = bmmo::session::late_join_base(assigned, horizon);
+            if (clamped != assigned)
+                Printf("Physics session %u: %s's base %u moved to %u, the removal of a leaving life (J4).", s.id,
+                       client_it->second.name, assigned, clamped);
+            join_clamp_delta = clamped - assigned;
+            assigned = clamped;
+        }
         if (!s.leads.count(c)) {
             auto& lead = s.leads[c];
             lead.caps = msg.caps;
-            lead.assigned_lead = s.late.count(c) ? join_lead : s.start_tick_base;
+            lead.assigned_lead = s.late.count(c) ? join_lead + join_clamp_delta : s.start_tick_base;
             // Flag off, the runner gets no command it did not get before.
             if (config_.physics_lead_adjust) {
                 runner_->set_player_lead(msg.session, c, msg.caps, lead.assigned_lead);
@@ -2278,6 +2444,7 @@ public:
         msg.player = a.player;
         msg.tick = a.applied;
         msg.origin_tick = a.origin;
+        msg.life = a.life;   // step M1: the life the runner accepted it for
         msg.state = static_cast<uint8_t>((a.applied != a.origin ? bmmo::session::EVENT_STATE_MOVED : 0)
                                          | (a.superseded ? bmmo::session::EVENT_STATE_SUPERSEDED : 0)
                                          | (a.rejected ? bmmo::session::EVENT_STATE_REJECTED : 0));

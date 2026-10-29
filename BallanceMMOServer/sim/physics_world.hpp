@@ -249,6 +249,8 @@ namespace bmmo::sim {
         // per-player offset, design 9.10); a taken slot falls back to the
         // lowest free one and logs it.
         bool add_player(uint32_t id, uint8_t join_order, std::string& error);
+        // Step M1: how many adds found their join order taken (J2: 0).
+        uint64_t join_orders_taken() const { return join_orders_taken_; }
         void remove_player(uint32_t id);
         bool has_player(uint32_t id) const { return players_.count(id) != 0; }
         size_t player_count() const { return players_.size(); }
@@ -502,6 +504,7 @@ namespace bmmo::sim {
         bmmo::game::sector_cell_split sector_cell_;   // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;
+        uint64_t join_orders_taken_ = 0;   // step M1: add_player's slot fallbacks (J2 says 0)
         bmmo::game::proximity_union proximity_;   // step G1 (game/proximity_union.hpp)
         bmmo::game::proximity_union::rewire_options proximity_options() const;
         // Step G2: the tick place_probes() last placed for (tick() places

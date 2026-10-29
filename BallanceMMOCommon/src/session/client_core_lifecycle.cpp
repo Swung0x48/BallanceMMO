@@ -85,8 +85,40 @@ namespace bmmo::session {
         // design 3.3).  Handled in the frame, before its other
         // rewinds (process_own_echoes), not here between two frames.
         if (msg.player == s.own_id_ && s.own_id_ != 0) {
+            // Step M1: a repeat of an event of our previous life in this
+            // session (a rejoin on the same connection) is no echo of ours.
+            if (msg.life != 0 && s.own_member_life_ != 0 && msg.life != s.own_member_life_) {
+                ++s.own_other_life_echoes_;
+                return;
+            }
             s.own_echoes_.push_back(std::move(msg));
             return;
+        }
+        // Step M1 (world-agreement-gaps-design.md 2.8, the refusal rule): an
+        // event of a life this client has not been told of is parked until
+        // its SessionMember arrives - no mirror is ever made with a
+        // placeholder join order.  The one exception is a late joiner's
+        // catch-up: a Sector stamp before this numbering's first tick of a
+        // life that left before it joined (the server resends its whole
+        // sector history; J4: its world never needs the life, only the
+        // sectors the union grew by), which starts live as before.
+        if (const auto* life = bmmo::session::find_member_life(s.lives_, msg.player, msg.life); !life) {
+            if (msg.type == bmmo::session::event_type::Sector && s.assigned_
+                    && static_cast<int32_t>(msg.tick - s.tick_base_) < 0) {
+                ++s.catchup_unknown_lives_;
+            } else {
+                ++s.events_parked_;
+                if (s.events_parked_ <= 50)
+                    logf("member lives: event %d of p%u life %u for tick %u parked: its life was not announced yet",
+                         static_cast<int>(msg.type), msg.player, static_cast<unsigned>(msg.life), msg.tick);
+                s.parked_events_[{msg.player, msg.life}].push_back(std::move(msg));
+                return;
+            }
+        } else if (!bmmo::session::member_life_covers(*life, msg.tick)) {
+            // J3 makes it impossible; applied as stamped (the server did).
+            ++s.member_life_outside_;
+            logf("member lives: event %d of p%u life %u at tick %u is outside the life [%u, %u)", static_cast<int>(msg.type),
+                 msg.player, static_cast<unsigned>(msg.life), msg.tick, life->from, life->until);
         }
         // Queued, not applied here: an event applied on arrival lands
         // at an arbitrary point relative to this client's physics step
@@ -127,7 +159,7 @@ namespace bmmo::session {
         // (protocol 9, late-player design 3.1).
         std::stable_sort(due.begin(), due.end(),
                          [this](const bmmo::session_event_msg& a, const bmmo::session_event_msg& b) {
-                             const uint32_t ja = join_rank(a.player), jb = join_rank(b.player);
+                             const uint32_t ja = join_rank(a.player, a.tick), jb = join_rank(b.player, b.tick);
                              if (ja != jb) return ja < jb;
                              if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
                              return bmmo::session::lifecycle_apply_before(ja, a.origin_tick, a.type,
@@ -160,10 +192,10 @@ namespace bmmo::session {
         std::vector<bmmo::session_event_msg> held;
         held.swap(s.held_lifecycle_);
         if (!held.empty()) {
-            const uint32_t own_rank = join_rank(s.own_id_);
+            const uint32_t own_rank = join_rank(s.own_id_, frame_tick);
             bool own_placed = false;
             for (const auto& event: held) {
-                if (!own_placed && join_rank(event.player) > own_rank) {
+                if (!own_placed && join_rank(event.player, event.tick) > own_rank) {
                     live_own_lives(frame_tick);
                     own_placed = true;
                 }
@@ -173,11 +205,134 @@ namespace bmmo::session {
         live_own_lives(frame_tick);   // applies once; afterwards only retires
     }
 
-    // A member's place in the server's order of a tick's events: its join
-    // order, an unknown player after every known one.
-    uint32_t session_client_core::join_rank(uint32_t player) const {
-        for (const auto& p: s.players_) if (p.id == player) return static_cast<uint32_t>(p.join_order);
-        return 256u;
+    // A member's place in the server's order of a tick's events: the join
+    // order of its life that `tick` names (step M1: J3, an event of a life
+    // is applied inside it, and two lives of one id never overlap), an
+    // unknown player after every known one - unreachable since events of
+    // an unknown life are parked.
+    uint32_t session_client_core::join_rank(uint32_t player, uint32_t tick) const {
+        const auto* life = bmmo::session::member_life_at(s.lives_, player, tick);
+        return life ? static_cast<uint32_t>(life->entry.join_order) : 256u;
+    }
+
+    int session_client_core::mirror_join_order(uint32_t player, uint32_t tick) {
+        if (const auto* life = bmmo::session::member_life_at(s.lives_, player, tick)) return life->entry.join_order;
+        ++s.mirrors_outside_lives_;
+        logf("member lives: a mirror of p%u for tick %u has no life: grouped and kicked as 63", player, tick);
+        return 63;
+    }
+
+    // ------------------------------------------------------ member lives
+    // SessionMember (step M1, world-agreement-gaps-design.md 2.8).
+    void session_client_core::on_session_member(const bmmo::session_member_msg& msg) {
+        ++s.member_messages_;
+        if (msg.session != s.session_ || s.phase_ == client_core_state::phase::idle) return;
+        const auto& entry = msg.entry;
+        const char* kind = msg.kind == bmmo::session::MEMBER_ADDED ? "added" : "removed";
+        if (entry.id == s.own_id_) {
+            logf("member lives: SessionMember %s names our own id (life %u): ignored", kind, static_cast<unsigned>(entry.life));
+            return;
+        }
+        if (msg.kind == bmmo::session::MEMBER_ADDED) {
+            if (auto* known = bmmo::session::find_member_life(s.lives_, entry.id, entry.life)) {
+                if (known->entry.join_order == entry.join_order) {
+                    ++s.member_copies_;
+                    return;
+                }
+                const std::string why = "member " + std::to_string(entry.id) + " life " + std::to_string(entry.life)
+                    + " re-announced with join order " + std::to_string(entry.join_order) + ", had "
+                    + std::to_string(known->entry.join_order);
+                logf("member lives: %s: the session ends here", why.c_str());
+                end(why);
+                return;
+            }
+            bmmo::session::member_life life;
+            life.entry = entry;
+            life.from = msg.tick;
+            if (const auto early = s.early_removals_.find({entry.id, entry.life}); early != s.early_removals_.end()) {
+                life.until = early->second;
+                s.early_removals_.erase(early);
+            }
+            s.lives_.push_back(life);
+            logf("member lives: member +%u life %u join %u (server tick %u)%s", entry.id, static_cast<unsigned>(entry.life),
+                 static_cast<unsigned>(entry.join_order), msg.tick, life.until ? " (its removal came first)" : "");
+            journal_.note("member +p" + std::to_string(entry.id) + " life " + std::to_string(entry.life) + " join "
+                          + std::to_string(entry.join_order) + " (server tick " + std::to_string(msg.tick) + ")");
+            journal_member_lives();
+            if (s.phase_ != client_core_state::phase::running) return;
+            // Step T3 (trafo-replication design 2.4): its piece set, outside
+            // any replay ("a player first seen in a message").
+            if (s.trafo_active_) ensure_trafo_set(entry.id, "its member message");
+            // Its parked events go to the drain, each at its tick; one whose
+            // tick has passed takes the late path there (a rewind to its
+            // stamp, or a resync beyond the reach), now with its life's join
+            // order, group and kick.
+            if (const auto parked = s.parked_events_.find({entry.id, entry.life}); parked != s.parked_events_.end()) {
+                auto events = std::move(parked->second);
+                s.parked_events_.erase(parked);
+                logf("member lives: %zu parked event(s) of p%u life %u released", events.size(), entry.id,
+                     static_cast<unsigned>(entry.life));
+                for (auto& event: events) {
+                    ++s.parked_applied_;
+                    if (!bmmo::session::member_life_covers(life, event.tick)) ++s.member_life_outside_;
+                    s.pending_events_.push_back(std::move(event));
+                }
+            }
+            return;
+        }
+        auto* known = bmmo::session::find_member_life(s.lives_, entry.id, entry.life);
+        if (!known) {
+            // Its `added` copies are all late: kept and applied when it comes.
+            s.early_removals_[{entry.id, entry.life}] = msg.tick;
+            logf("member lives: member -%u life %u (server tick %u) before its addition: kept", entry.id,
+                 static_cast<unsigned>(entry.life), msg.tick);
+            return;
+        }
+        if (known->until != 0) {
+            ++s.member_copies_;
+            return;
+        }
+        known->until = msg.tick;
+        logf("member lives: member -%u life %u join %u (server tick %u)", entry.id, static_cast<unsigned>(entry.life),
+             static_cast<unsigned>(known->entry.join_order), msg.tick);
+        journal_.note("member -p" + std::to_string(entry.id) + " life " + std::to_string(entry.life) + " (server tick "
+                      + std::to_string(msg.tick) + ")");
+        journal_member_lives();
+    }
+
+    // The PLAYER records of the lives: an add waits until every older life
+    // of its id has closed (its removal written first), so a rejoin's
+    // PLAYER(-) and PLAYER(+) at one tick are in that order in the file
+    // whatever order their messages came in.  Nothing while the journal is
+    // not open; client_journal::open writes them then.
+    void session_client_core::journal_member_lives() {
+        if (!journal_.journalling()) return;
+        bool progress = true;
+        while (progress) {
+            progress = false;
+            for (auto& life: s.lives_) {
+                if (life.journaled_add && life.until != 0 && !life.journaled_remove) {
+                    journal_.leave_player(life.entry.id, life.until);
+                    life.journaled_remove = true;
+                    progress = true;
+                }
+            }
+            for (auto& life: s.lives_) {
+                if (life.journaled_add) continue;
+                // A life told of after SessionStart waits for the numbering
+                // (its J is a server tick; a record before the base would sit
+                // in the hole a late join or a resync leaves in the file).
+                if (life.from != 0 && !s.assigned_) continue;
+                bool older_open = false;
+                for (const auto& other: s.lives_)
+                    if (other.entry.id == life.entry.id && other.entry.life < life.entry.life && !other.journaled_remove)
+                        older_open = true;
+                if (older_open) continue;
+                journal_.add_player(life.entry, life.from);
+                life.journaled_add = true;
+                progress = true;
+            }
+        }
     }
 
     // ---------------------------------------------------------- rewinds
@@ -478,14 +633,14 @@ namespace bmmo::session {
                 due.push_back(std::move(life));
                 it = s.pending_deaths_.erase(it);
             } else ++it;
-        std::stable_sort(due.begin(), due.end(), [this](const due_life& a, const due_life& b) {
-            return bmmo::session::lifecycle_apply_before(join_rank(a.player), a.origin, a.type,
-                                                         join_rank(b.player), b.origin, b.type);
+        std::stable_sort(due.begin(), due.end(), [this, tick](const due_life& a, const due_life& b) {
+            return bmmo::session::lifecycle_apply_before(join_rank(a.player, tick), a.origin, a.type,
+                                                         join_rank(b.player, tick), b.origin, b.type);
         });
         bool own = own_lives_due(tick);
-        const uint32_t own_rank = join_rank(s.own_id_);
+        const uint32_t own_rank = join_rank(s.own_id_, tick);
         for (const auto& life: due) {
-            if (own && join_rank(life.player) > own_rank) {
+            if (own && join_rank(life.player, tick) > own_rank) {
                 apply_own_lives(tick, "replay", false);
                 own = false;
             }
@@ -592,8 +747,7 @@ namespace bmmo::session {
             std::copy(std::begin(event.position), std::end(event.position), spec.position);
             std::copy(std::begin(event.rotation), std::end(event.rotation), spec.rotation);
             spec.recipe = to_bridge_recipe(event.recipe);
-            int join_order = 63;
-            for (const auto& p: s.players_) if (p.id == event.player) join_order = p.join_order;
+            const int join_order = mirror_join_order(event.player, event.tick);   // step M1: the life's
             spec.group = "P#" + std::to_string(join_order);
             // The spawn kick goes with the body (design 2.2 make_mirror): its
             // direction from the stamp, as the server derives it.
@@ -1009,8 +1163,7 @@ namespace bmmo::session {
                 for (int k = 0; k < 3; ++k) spec.position[k] = static_cast<float>(state.position[k]);
                 quaternion_rows(state.rotation, spec.rotation);
                 spec.recipe = to_bridge_recipe(born->birth.recipe);
-                int join_order = 63;
-                for (const auto& p: s.players_) if (p.id == player) join_order = p.join_order;
+                const int join_order = mirror_join_order(player, born->applied);   // step M1: the life's
                 spec.group = "P#" + std::to_string(join_order);
                 {
                     const event_log_mute mute(*this);
@@ -1133,8 +1286,8 @@ namespace bmmo::session {
         if (due.empty()) return;
         std::stable_sort(due.begin(), due.end(), [this](const left& a, const left& b) {
             if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
-            return bmmo::session::lifecycle_apply_before(join_rank(a.player), a.origin, a.type, join_rank(b.player), b.origin,
-                                                         b.type);
+            return bmmo::session::lifecycle_apply_before(join_rank(a.player, a.tick), a.origin, a.type,
+                                                         join_rank(b.player, b.tick), b.origin, b.type);
         });
         for (const auto& l: due) {
             ++s.lives_settled_live_;

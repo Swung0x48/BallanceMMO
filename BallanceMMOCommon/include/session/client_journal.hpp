@@ -80,23 +80,16 @@ namespace bmmo::session {
             void close(const std::string& reason);
             void note(const std::string& text);
 
-            // The roster only ever comes from SessionStart, which the server
-            // sends to the joining client alone: a player who joins later is
-            // never named to us, yet its relayed frames and its events are
-            // journalled all the same.  Without a PLAYER record a replay drops
-            // every one of them and that player's ball is silently missing,
-            // so the first record that names an unknown id announces it here.
-            // The join order decides the spawn impulse direction, so a guessed
-            // one is worth a warning rather than a silent wrong answer.
+            // Step M1 (world-agreement-gaps-design.md 2.8): every PLAYER
+            // record comes from a life - SessionStart's and each
+            // SessionMember's (session_client_core::journal_member_lives):
+            // PLAYER(+) at the life's J (clamped to the journal's first tick)
+            // with its join order, PLAYER(-) at its R.  A relayed record of a
+            // player no life names yet only notes it once (before M1 it wrote
+            // a PLAYER record with the guessed join order 255).
             void announce_player(uint32_t player, uint32_t tick);
-            // The other end of announce_player: PlayerLeft is the only
-            // unambiguous "that member is gone" signal a remaining client gets
-            // (the leaver's relayed Unphysicalize is the same message a living
-            // player sends when its ball dies), and the server drops it from
-            // the session world at that moment, so a replay of this file has
-            // to drop it too.  Forgetting the id lets a rejoin announce itself
-            // again.
-            void leave_player(uint32_t player);
+            void add_player(const bmmo::session::player_entry& entry, uint32_t from);
+            void leave_player(uint32_t player, uint32_t tick);
             // A lifecycle event as the wire carries it; `player` is who it
             // belongs to (the server fills that in on the way out, so an own
             // event has to name itself here).
@@ -134,7 +127,9 @@ namespace bmmo::session {
             uint32_t journal_last_checkpoint_ = 0;
             bool journal_have_checkpoint_ = false;
             bool journal_checkpoint_pending_ = false;
-            std::set<uint32_t> journal_announced_;   // ids that already have a PLAYER record
+            std::set<uint32_t> journal_announced_;   // ids with no life whose records were noted (step M1)
+            std::string own_name_;                    // open()'s, for the own PLAYER record
+            uint32_t first_tick_ = 0;                 // the header's first_tick: a PLAYER record is not before it
         };
 
     }

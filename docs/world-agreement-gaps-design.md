@@ -32,7 +32,8 @@ clients under the bit, BodyRevived retired, protocol 16, §12 "As built (step
 WG3)"), step G4 built (WG4, 2026-10-28: the retail core host, §12 "As built (step
 WG4)"), step G6 done (WG6, 2026-10-28: the documentation pass, §12 "As built
 (step WG6)"), step M0 built (WM0, 2026-10-28: the tools, §12 "As built
-(step WM0)"), M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
+(step WM0)"), step M1 built (WM1, 2026-10-28: member lives and J2, protocol 18,
+§12 "As built (step WM1)"), Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
 `session_host_support.hpp`, `session_host_world.hpp`, `session_client.cpp` and
@@ -3095,3 +3096,229 @@ checks, two live runs).
   room and run on; M1 ends the session with a log line instead. A switch
   whose tick is already behind a late joiner's base fires at once without
   a warning.
+
+### As built (step WM1, 2026-10-28): M1, member lives and J2 (protocol 18)
+
+**Protocol.** P_M is **18** (`PHYSICS_PROTOCOL_VERSION`, 17 was step
+BALL's; `PHYSICS_PROTOCOL_MEMBER_LIVES` names it). `SessionMember`
+(`message/session_member_msg.hpp`) is appended after `SessionResyncState`:
+it takes the value `SessionGhostPose` had (retired at 17), and no other
+opcode moved. `player_entry.life` (u16) is written into SessionStart from
+protocol 18 on (the reader reads it only from a sender that says 18, so an
+older server's SessionStart is still refused by its number, not as a
+truncated message). `session_event_msg.life` (u16) ends the trailer after
+`state`, unconditionally. The reader refuses kind outside {1, 2}, join order
+>= 64, id 0 and life 0 (U4). The journal layout is unchanged (v7).
+
+**What exists.**
+- *CK-free rules* (`session/member_lives.hpp`, new): `member_life`
+  (entry, `from` = J, `until` = R, and the client journal's two flags),
+  `find_member_life`, `member_life_covers`, `member_life_at` (the life a
+  tick names), and the server's `lowest_free_join_order` (J2),
+  `late_join_base` (J4) and `leaver_stays` (J-e).
+- *The runner* (SRN/SRH). `add_player(..., life, name)`; `session_state::lives`
+  (each id's current life); an add of an id still in `leaving` is stored
+  in the leaving entry (`rejoin`) and run by `finish_leave` right after the
+  old life's removal, at the same tick (J-f: no event erased, J = R).
+  `add_now` fires `on_player_added` or `on_player_add_failed`;
+  `finish_leave` fires `on_player_removed` (the removed life's order, read
+  before the erase). Every leave with a ball queues its Unphysicalize and
+  stays in the world to `next + 1` (J-e; `has_ball` alone, was `has_ball
+  && queued`). `accepted_event.life` on every path (submitted events, the
+  leaver's Unphysicalize, `queue_trafo`'s server resets, a dropped event).
+  `leaving_horizon(session)`: the view value J4 reads, published by
+  `publish_state` (also after a remove). The session end logs and journals
+  `member lives: join orders taken in the world N`.
+- *The world* (PW): the "falling back to slot" path is logged as `ERROR join
+  order N taken in the world` and counted (`join_orders_taken()`); it keeps
+  working (an old journal's replay can still meet it).
+- *The server* (SV). `lives` (per id, never erased), `retiring_orders`,
+  `started` (filled by `send_session_start`), the SessionStart entries'
+  `life`; `begin_life` at the start and at every join; a late joiner's
+  SessionStart goes from `on_player_added` (not from
+  `physics_session_member_joined`); `send_session_member` to every started
+  member except the player, reliable plus `event_repeats`, held by
+  `--hold-member-ms` (test builds: the held copies leave from the main
+  loop, `send_assign_repeats`, then repeat like any event);
+  `on_player_add_failed` ends that member (SessionEnd with the error, then
+  `physics_session_member_left`); the late base is clamped by
+  `late_join_base(..., leaving_horizon)` and logged when it moves;
+  `on_event_accepted` relays `msg.life = a.life` before the one serialize
+  every copy (`last_physicalize`, `sector_history`, `trafo_relayed`, the
+  repeats) is taken from.
+- *The core* (CC/CL/CM). `players_` is now `lives_`: SessionStart's lives
+  (from 0) and every `SessionMember(added)`; nothing erased during a
+  session. `on_session_member` as §2.8 (copies ignored, a removal before its
+  addition kept in `early_removals_`, own id ignored, a conflicting join
+  order ends the session locally), accepted from `begin()` on (loading or
+  running). Parking in `on_session_event` before the queue; the parked
+  events of a life go to `pending_events_` when it arrives (the drain then
+  takes the late path for a passed tick). `join_rank(player, tick)` and
+  `mirror_join_order(player, tick)` (the group and kick of a mirror and of
+  a remade one). The session end logs and journals `member lives: N lives,
+  M member messages (C copies), events parked P (applied A, dropped D),
+  outside their life O, mirrors outside the lives X, own echoes of another
+  life E, catch-up stamps of untold lives K, PLAYER records not written W`.
+- *The client journal* (CJ). PLAYER records come from the lives
+  (`journal_member_lives`, `add_player(entry, J)`, `leave_player(player,
+  R)`); `announce_player` writes a note once for an id no life names, never
+  a PLAYER record (no `join=255`).
+- *The hosts.* SC decodes `SessionMember` into `on_session_member`; CH
+  names it, decodes it, latches it into the mailbox (the core path alone)
+  and dispatches it, and ends the host's session locally when the core
+  ended on a conflict. The room `PlayerLeft` no longer writes a PLAYER(-)
+  on either host (the member message does, at R). MC is not changed.
+
+**Adapted** (the code is what it is; each is within the principles).
+1. *Life numbers are the server's, carried to the runner.* §2.7 has the
+   runner count adds. A pre-start joiner's SessionStart is sent from
+   `physics_session_member_joined`, before the posted add runs, so the
+   server could not list the life the runner would count. The server
+   numbers lives at its own add call (`begin_life`: the count of adds of
+   the id in the session, from 1; the start members are 1, as
+   `create_session` numbers them) and passes the number to `add_player`.
+   A failed add skips its number; lives are keys, not a sequence.
+2. *`retiring_orders` is a map keyed by (id, life)*, not a
+   `std::set<uint8_t>`: a rejoin's new life may already hold another order
+   while its old one retires. `on_player_removed` releases by the key; it
+   also fires (with `in_world` false, no SessionMember) for a life that
+   never reached the world: a deferred rejoin cancelled by a second leave
+   (`remove_player` of an id the world does not hold), so no order sticks.
+   A failed add releases its order in `on_player_add_failed`.
+3. *Runner callbacks take one struct* (`member_change`: session, player,
+   life, join order, tick, `in_world`) instead of the design's argument
+   lists.
+4. *Lookups by (player, applied tick), not a life field threaded through
+   `pending_birth` / `due_life` / `pending_deaths`.* J3 puts every event
+   of a life inside [J, R), and two lives of one id never overlap, so the
+   applied tick names the life (`member_life_at`); where an old life's R is
+   not heard yet it is still open, and the newer life (the later J) wins
+   from its J on. The event's own life is used where the event is in hand
+   (parking, the outside check). Both counters (`member_life_outside`,
+   `mirrors_outside_lives`) stay at 0 when the rule holds.
+5. *A late joiner's catch-up Sector stamps are not parked.* The server
+   resends its whole `sector_history` to a joiner (and to a resynced
+   member), stamps of lives that left before the joiner joined included;
+   §2.8 would park them for ever and the joiner's union would never grow by
+   their sectors. A Sector event of an unknown life stamped before this
+   numbering's first tick (`tick_base_`, once assigned) takes the existing
+   catch-up path ("starts live") and is counted (`catch-up stamps of untold
+   lives`); every other event of an unknown life is parked.
+6. *An own event of another life* (a repeat of the previous life's
+   Unphysicalize reaching a rejoiner) is no echo of ours: dropped and
+   counted.
+7. *The journal's PLAYER records.* A life's PLAYER(+) waits until every
+   older life of its id has its PLAYER(-), so a rejoin's PLAYER(-) and
+   PLAYER(+) at one tick are in that order in the file whatever order the
+   messages came in (§2.8 needs it for SimTool's file order). A life told
+   of after SessionStart is journalled once the numbering is assigned, at
+   `max(J, tick_base_)`: a record below a late join's or a resync's base
+   would sit in the hole the renumbering leaves and make the replay see one
+   more jump. The removal is clamped the same way.
+8. *`/bigobj` for `BallanceMMOMessageTests`*: the core test unit passed
+   MSVC's section limit with M1's tests (C1128), as SimTool's did at RO1.
+9. *Test fixtures*: the core tests' other ids (5-10) get a life with join
+   order 63 - the placeholder an unknown id had before M1, so the ranks,
+   groups and kicks those tests were written against are unchanged; every
+   test event carries life 1.
+
+**Checks** (QUICK tier; about 11 minutes of checks, one live run).
+- x64 BUILD-OK (`session_messages_test.cpp.obj` #deps 111, VALID); x86
+  CLIENT-BUILD-OK (23 objects, `core_host.cpp`, `BallanceMMOClient.cpp`,
+  `physics_session_client.cpp`, `room_client.cpp` among them: the header
+  deps held, #deps 1426 / 1240 VALID before the build); ARCH-BUILD-OK
+  (`ballanced-36c04e3d24c9+bmmo-a7127c43375c-dirty`); GCC syntax check 30/30
+  ok; `BallanceMMOMessageTests` 603/603 (595 + U4 `SessionMemberMsg`, U5
+  (a), (b) on time and past its tick (the late path: made at its stamp as
+  `P#5` with the life's kick, its rewind asked for), (d), (e), (h),
+  loading, the journal's file order `SessionClientCoreMemberLives`, U6's
+  rules `MemberLives`).
+- Live smoke (`maps/arena-test/wm1_live`, rWM1, Arch server snapshots off,
+  trafo inputs and placement on, 4 clients 45 s, `--rejoin 2:1200
+  --join-late 3:1500 --leave 1:1800`): every client rc 0, the server
+  journal 3573/3573 matched, `checkpoint_mismatches=0`, VERDICT PASS,
+  `join orders taken in the world 0`.
+  - J5: the rejoiner's old life leaves at 1201 and stays to 1203; its new
+    life (join order 3: its old order 2 was retiring) is added at 1203 =
+    R; SessionMember removed then added at 1203 to clients 0 and 1; its
+    spawn kick index 14 at 1442 on the server and in clients 0, 1, 3; its
+    own ball in `client2.rejoin1.bmjr` exact at all 180 checkpoints of
+    1442-1800 (`body_series.py --body ball:2727132572`); the mirrors on
+    clients 0 and 1 off 0.0152 m for 3 checkpoints after its spawn
+    (1444-1448), exact from 1450.
+  - J1: the joiner added at 1515 with join order 2 (released at 1203);
+    every client journal has `player +p1747523703 join=2` at 1515 and no
+    `join=255`; spawn kick index 40 at 1734 on the server and in clients
+    0, 1 and 2's second life (before M1: 60 against 56); its mirror off
+    0.0109 m for 3 checkpoints after its spawn (1770-1774), exact from
+    1776 in every client.
+  - J2/J-e: client 1's ball leave at 1799, removed at 1801 (`next + 1`),
+    SessionMember removed at 1801 to the three others.
+  - `events_parked` 0 (the reliable member message came first: J3's
+    held-message arm is deferred), copies 18 of 21 on client 1.
+  - SimTool `--replay-session` of `client0.bmjr`: the rejoin's and the
+    joiner's PLAYER records add them with their recorded orders (kick
+    indices 14 and 40, as the server), no "no PLAYER record" note, 20
+    checkpoints, 0 mismatches.
+- Seen, not this step's: client 3's (the late joiner's) LOCAL checkpoints
+  are off the server's between its base 1530 and the state's re-step to
+  1551 (15.48 m at 1550; exact from 1552): A5's join window, where the
+  world runs from the level start until the state of base - 1 is applied.
+  Its journal's replay stops at a jump 212 -> 788: the catch-up events are
+  journalled at their own (old) ticks, as before M1.
+
+**A known bound.** `lowest_free_join_order` still hands out orders 64-255
+(as `assign_join_order` did), while the SessionMember reader refuses a join
+order of 64 or more: a 65th order held or retiring at once would give a
+life no client can be told of (its events parked for good). Before M1 the
+world's 64 slots and the fallback bounded it the same way; step Q7's cap
+below K closes it.
+
+**Deferred** (with why).
+- *The wire check and the re-capture.* Protocol 18 makes every reference
+  capture refuse (the events have no `life` trailer, so even
+  `--accept-protocol` cannot replay them: SessionStart parses, the first
+  SessionEvent does not). A new reference set means re-capturing the five
+  arms (`core_ref_s9`'s recipe, about 7 minutes, five live sessions): past
+  the step's two-live-run cap. Every later headless step's wire check is
+  vacuous until a protocol-18 set exists, so the re-capture is best queued
+  as its own small step right after M1 commits (`s9_all.sh` with a new
+  store, the committed binaries), before Q7.
+- *R3* (a retail late joiner and a retail member): a second live run of
+  about 6 minutes past the 15-minute budget. The x86 build compiled the
+  host's plumbing; R3 is its first live use.
+- *J3* (`--hold-member-ms 300`): `.local-tools/arch_server_lp.sh` starts
+  the server with `--port` alone, so the flag cannot be passed without
+  changing the shared launcher; the parking itself is covered by U5 (b).
+- *J1b (10 % loss, 5 seeds), J2 (order reuse with contact), J4 (a join inside a leaving interval), U5 (c),
+  (f), (g), (i), U6's fake-runner test, U7's SimTool-level test*: more live
+  arms and test scaffolding than the budget holds; the live run above
+  covers J1, J5 and J-e once each.
+- *WM0's harness nits*: the harness verdict reads `client{i}.bmjr` only
+  (the rejoiner's second life is not judged; its second base would count
+  among the resync bases); a refused rejoin Join; a switch behind a late
+  joiner's base. Not changed here.
+
+**The review round.** Three changes, no behaviour a live run reaches:
+the late joiner's `assigned_lead` grows with the J4 clamp (`join_lead` plus
+the delta the clamp moved the base by), so `lead_adjust` does not read a
+clamped joiner as early by that delta (as before, `assigned_lead` is the
+nominal lead: `reanchor_tick_on_schedule` already places a joiner off
+`next + join_lead`); `on_player_add_failed` ends the member's session only
+while the member is still on the failed life (one that left and came back
+meanwhile is on a newer life the failure is not about); the runner's two
+`if (has_ball)` blocks in `remove_player` are one. The second-leave cancel
+and the failed-add release were verified by reading, not by a test: the
+dropped change carries the waiting life (`rejoin_life`) and
+`on_player_removed` erases `(id, life)` before it checks `in_world`, so
+the new life's order is released and no SessionMember goes out; `add_now`
+never ran, so the runner's `lives` still holds the old life, which
+`finish_leave` reports at R with the leaving entry's `rejoin` cleared (no
+add follows); `on_player_add_failed` inserts the order into
+`retiring_orders` through `physics_session_member_left` and erases it right
+after. A runner-level test needs a world-less `session_runner` fixture,
+which the test target does not have (it does not link `BallanceMMOSim`;
+lead_test.cpp says the same), and the live window between a leave and its
+R is about 3 ticks, too narrow to hit from the harness: the fixture is
+queued for the close-out. The protocol-18 reference set is queued as step
+REF10 (core_ref_s10), right after this commit.

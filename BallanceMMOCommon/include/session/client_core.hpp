@@ -86,6 +86,7 @@
 #include "journal.hpp"
 #include "lead_slew.hpp"
 #include "lifecycle.hpp"
+#include "member_lives.hpp"
 #include "mechanism_tracking.hpp"
 #include "own_correction.hpp"
 #include "rollback.hpp"
@@ -97,6 +98,7 @@
 #include "../message/session_event_msg.hpp"
 #include "../message/session_input_msg.hpp"
 #include "../message/session_lead_msg.hpp"
+#include "../message/session_member_msg.hpp"
 #include "../message/session_remote_input_msg.hpp"
 #include "../message/session_resync_state_msg.hpp"
 #include "../message/session_start_msg.hpp"
@@ -349,7 +351,27 @@ namespace bmmo::session {
         std::vector<bmmo::session_event_msg> pending_events_;
         int32_t seed_ = 1;
         int level_ = 1;
-        std::vector<bmmo::session::player_entry> players_;
+        // Step M1 (world-agreement-gaps-design.md 2.8): every life of every
+        // member this client was told of - SessionStart's (from 0) and each
+        // SessionMember(added) since, with its removal tick once heard.
+        // Nothing is erased during a session: a replay across a life's R
+        // still reads its entry.  Every lookup that used to take the id alone
+        // takes the life the applied tick names (member_life_at; J3: two
+        // lives of one id never overlap, and an event of a life is applied
+        // inside it).
+        std::vector<bmmo::session::member_life> lives_;
+        // An event of a life not told of yet (its SessionMember still on the
+        // way), by (player, life): applied once the life arrives, through
+        // the late path when its tick has passed.  Never a mirror made with a
+        // placeholder join order.
+        std::map<std::pair<uint32_t, uint16_t>, std::vector<bmmo::session_event_msg>> parked_events_;
+        // A SessionMember(removed) of a life whose `added` has not come yet:
+        // (player, life) -> R, applied when it arrives.
+        std::map<std::pair<uint32_t, uint16_t>, uint32_t> early_removals_;
+        uint16_t own_member_life_ = 0;   // the own entry's life (SessionStart)
+        uint64_t member_messages_ = 0, member_copies_ = 0, events_parked_ = 0, parked_applied_ = 0;
+        uint64_t member_life_outside_ = 0, mirrors_outside_lives_ = 0, own_other_life_echoes_ = 0;
+        uint64_t catchup_unknown_lives_ = 0;
         int own_join_order_ = -1;
         float spawn_impulse_ = 0.0f;             // SessionStart::spawn_impulse (design 9.10)
         float spawn_spacing_ = 0.0f;             // SessionStart::spawn_spacing (session/spawn_impulse.hpp)
@@ -1174,6 +1196,20 @@ namespace bmmo::session {
         // its first arrival, an echo of our own event is queued for the
         // frame's echoes, another member's for its due tick.
         void on_session_event(bmmo::session_event_msg&& msg);
+        // SessionMember (protocol 18; world-agreement-gaps-design.md 2.8,
+        // step M1): a life of another member added at J or removed at R.
+        // Accepted in every phase after begin() of the same session - not
+        // dropped while loading: nothing sends a lost member entry again.
+        // A copy is ignored; a life re-announced with another join order
+        // ends the session locally (no mirror group could be trusted).  The
+        // life's parked events go to the drain; its PLAYER records go to the
+        // journal at J and R.
+        void on_session_member(const bmmo::session_member_msg& msg);
+        // Step M1: every life this client was told of (tests, diagnostics).
+        const std::vector<bmmo::session::member_life>& member_lives() const { return s.lives_; }
+        uint64_t events_parked() const { return s.events_parked_; }
+        uint64_t member_life_outside() const { return s.member_life_outside_; }
+        uint64_t mirrors_outside_lives() const { return s.mirrors_outside_lives_; }
         // SessionResyncState (step A3, resync design 2.6.4): the server's
         // state of tick base - 1 for the pending exact resync; applied as
         // that tick and re-stepped to the live one now, or - its bodies not
@@ -1728,7 +1764,17 @@ namespace bmmo::session {
         void amend_for_resync(uint32_t tick, const bmmo::session::input_frame& frame);
 
         // The remote lifecycle (E6, client_core_lifecycle.cpp).
-        uint32_t join_rank(uint32_t player) const;
+        // Step M1: a member's place in the server's order of a tick's events
+        // - the join order of its life that `tick` names (256: none).
+        uint32_t join_rank(uint32_t player, uint32_t tick) const;
+        // The join order a mirror of `player` made for `tick` is grouped and
+        // kicked with: its life's; 63 (counted, mirrors_outside_lives) for a
+        // player with no life - unreachable since events are parked.
+        int mirror_join_order(uint32_t player, uint32_t tick);
+        // The PLAYER records of the lives not journalled yet (a life's add
+        // waits for its id's older lives to close, so a rejoin's PLAYER(-)
+        // precedes its PLAYER(+) at one tick in file order).
+        void journal_member_lives();
         void apply_event(const bmmo::session_event_msg& event);
         void make_remote_birth(const bmmo::session_event_msg& event);
         void rewind_for_lifecycle(const bmmo::session_event_msg& event);

@@ -124,6 +124,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(reconcile_trafo)
         BMMO_CORE_STEP(note_own_death)
         BMMO_CORE_STEP(keep_live_cells)
+        BMMO_CORE_STEP(join_rank)
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -739,9 +740,14 @@ namespace {
         state_of(core).own_id_ = 3;
         state_of(core).own_join_order_ = 1;
         bmmo::session::player_entry own, other;
-        own.id = 3; own.join_order = 1;
-        other.id = 4; other.join_order = 0;
-        state_of(core).players_ = {own, other};
+        own.id = 3; own.join_order = 1; own.life = 1;
+        other.id = 4; other.join_order = 0; other.life = 1;
+        state_of(core).lives_.clear();
+        for (const auto& entry: {own, other}) {
+            bmmo::session::member_life life;
+            life.entry = entry;
+            state_of(core).lives_.push_back(life);
+        }
     }
 
     // A host that journals must be able to stamp the header and read bodies.
@@ -825,11 +831,11 @@ namespace {
         event.ball_type = 1;
         event.recipe.collision_surface = "surface";
         event.recipe.convex_meshes = {"a", "b"};
-        core.journal().lifecycle_event(7, event);   // never announced: a late join
+        core.journal().lifecycle_event(7, event);   // no life names it: a note, no PLAYER record (step M1)
 
         const double server[3] = {9.0, 8.0, 7.0};
         core.journal().body_correction(2, "Ball_Paper", 102, 0.5, server);
-        core.journal().leave_player(4);
+        core.journal().leave_player(4, 102);   // step M1: at the server's R
         core.journal().close("bye");
         EXPECT_FALSE(core.journal().journalling());
 
@@ -857,7 +863,7 @@ namespace {
         const std::vector<std::string> expected_notes = {
             "0 start: session 9 level 13 as Me(3, join 1): Me(3, join 1) 4(4, join 0)",
             "102 hello",
-            "102 late join: p7 has records but was never announced to this client; join order unknown",
+            "102 p7 has records before its member message: its PLAYER record follows from that message",
             "102 end: bye"};
         EXPECT_EQ(notes, expected_notes);
 
@@ -977,16 +983,40 @@ namespace {
         msg.spawn_spacing = 4.2f;
         msg.map.level = 13;
         bmmo::session::player_entry own, other;
-        own.id = own_id; own.join_order = 2;
-        other.id = own_id + 1; other.join_order = 0;
+        own.id = own_id; own.join_order = 2; own.life = 1;
+        other.id = own_id + 1; other.join_order = 0; other.life = 1;
         msg.players = {other, own};
         return msg;
     }
 
     // begin, level_requested and anchor with a session of id 9 for own id 3.
+    // Step M1: a member life (life 1, from the start) for `id` with `order`,
+    // replacing one the fixture gave it.  The fixtures give every other id
+    // the tests send events for (5-10) join order 63, the placeholder an
+    // unknown player had before the lives - its rank, group and kick are
+    // what these tests were written against.
+    void set_test_life(session_client_core& core, uint32_t id, uint8_t order) {
+        auto& lives = state_of(core).lives_;
+        lives.erase(std::remove_if(lives.begin(), lives.end(),
+                                   [id](const bmmo::session::member_life& l) { return l.entry.id == id; }),
+                    lives.end());
+        bmmo::session::member_life life;
+        life.entry.id = id;
+        life.entry.join_order = order;
+        life.entry.life = 1;
+        lives.push_back(life);
+    }
+
+    // Step M1: the member lives' account end() logs, for a fixture session
+    // (two lives from SessionStart and the six test lives, nothing journalled).
+    const char* const kEndLivesLine = "log:0:member lives: 8 lives, 0 member messages (0 copies), events parked 0 (applied 0, "
+                                      "dropped 0), outside their life 0, mirrors outside the lives 0, own echoes of another life "
+                                      "0, catch-up stamps of untold lives 0, PLAYER records not written 0";
+
     void run_to_anchor(session_client_core& core, flow_fake& fake) {
         state_of(core).own_id_ = 3;
         ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
+        for (uint32_t id = 5; id <= 10; ++id) set_test_life(core, id, 63);
         core.level_requested();
         bmmo::session::anchor_report report;
         report.hash.pose = 0x51;
@@ -1059,7 +1089,7 @@ namespace {
         EXPECT_TRUE(state_of(core).remotes_.empty());
         EXPECT_EQ(state_of(core).phase_, client_core_state::phase::idle) << "loading only once the host requested the level";
         const std::vector<std::string> expected = {
-            "log:0:session 9 starting: level 13, 2 players, join order 2, seed 11, input delay 4, sector lead 7"};
+            "log:0:session 9 starting: level 13, 2 players, join order 2, life 1, seed 11, input delay 4, sector lead 7"};
         EXPECT_EQ(fake.calls, expected);
         core.level_requested();
         EXPECT_EQ(state_of(core).phase_, client_core_state::phase::loading);
@@ -1087,7 +1117,7 @@ namespace {
             state_of(core).window_index_ = 3;
             run_to_anchor(core, fake);
             const std::vector<std::string> expected = {
-                "log:0:session 9 starting: level 13, 2 players, join order 2, seed 11, input delay 4, sector lead 7",
+                "log:0:session 9 starting: level 13, 2 players, join order 2, life 1, seed 11, input delay 4, sector lead 7",
                 "hook:numbering_restarted:anchor_origin",
                 "now:anchor_hold",
                 "send:0",
@@ -1415,7 +1445,7 @@ namespace {
         from = fake.calls.size();
         core.on_session_end(ours);
         const std::vector<std::string> expected = {
-            "log:0:session 9 ended: ", "hook:ending", "hook:ended",
+            "log:0:session 9 ended: ", "hook:ending", kEndLivesLine, "hook:ended",
             "hook:status"};
         EXPECT_EQ(since(fake.calls, from), expected);
         ASSERT_EQ(fake.statuses.size(), 1u);
@@ -2089,6 +2119,7 @@ namespace {
         msg.type = type;
         msg.tick = tick;
         msg.origin_tick = origin;
+        msg.life = 1;   // step M1: the server fills it on relay
         return msg;
     }
 
@@ -2102,11 +2133,8 @@ namespace {
     // order 3); the own player 3 is join order 2, player 4 join order 0.
     void run_to_tick_125_four(session_client_core& core, flow_fake& fake) {
         run_to_tick_125(core, fake);
-        bmmo::session::player_entry five, six;
-        five.id = 5; five.join_order = 1;
-        six.id = 6; six.join_order = 3;
-        state_of(core).players_.push_back(five);
-        state_of(core).players_.push_back(six);
+        set_test_life(core, 5, 1);
+        set_test_life(core, 6, 3);
     }
 
     // Counted always; this running session's only; a copy is counted and
@@ -3580,7 +3608,7 @@ namespace {
         const size_t from = fake.calls.size();
         core.on_session_end(ours);
         const std::vector<std::string> expected = {
-            "log:0:session 9 ended: ", "hook:ending", "hook:ended",
+            "log:0:session 9 ended: ", "hook:ending", kEndLivesLine, "hook:ended",
             "detach_mirror_navigation:Ball_0_BMMO_4", "unmake_mirror:Ball_0_BMMO_4", "hook:status"};
         EXPECT_EQ(since(fake.calls, from), expected);
         EXPECT_TRUE(state_of(core).remotes_.empty());
@@ -6025,10 +6053,7 @@ namespace {
         b1_session(core, fake, 125);
         core.on_session_event(sector_message(4, 3, 124, 124));   // join order 0: drained first
         core.on_session_event(sector_message(5, 2, 122, 122));
-        bmmo::session::player_entry five;
-        five.id = 5;
-        five.join_order = 1;
-        state_of(core).players_.push_back(five);
+        set_test_life(core, 5, 1);
         size_t from = fake.calls.size();
         b1_frames(core, 126, 126);
         const auto calls = since(fake.calls, from);
@@ -7506,4 +7531,194 @@ namespace {
         EXPECT_EQ(core.revived_local(), 1u);
     }
 
+
+    // ------------------------------------------------- member lives (step M1)
+    // world-agreement-gaps-design.md 2.7, 2.8, 7.1 U5, U6.
+
+    bmmo::session_member_msg member_message(uint8_t kind, uint32_t id, uint16_t life, uint8_t order, uint32_t tick) {
+        bmmo::session_member_msg msg;
+        msg.session = 9;
+        msg.kind = kind;
+        msg.tick = tick;
+        msg.entry.id = id;
+        msg.entry.life = life;
+        msg.entry.join_order = order;
+        return msg;
+    }
+
+    // U5 (a), (b), (d), (j): an event of a life not announced yet is parked,
+    // then released by its SessionMember and drained at its tick with the
+    // life's join order: group P#k, the kick index from k, never 63.
+    TEST(SessionClientCoreMemberLives, ParkedUntilTheMemberThenMadeWithItsJoinOrder) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        auto spawn = event_message(11, bmmo::session::event_type::Physicalize, 126, 126);
+        spawn.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+        core.on_session_event(std::move(spawn));
+        EXPECT_EQ(core.events_parked(), 1u);
+        EXPECT_TRUE(state_of(core).pending_events_.empty()) << "parked, not queued";
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 11, 1, 5, 120));
+        ASSERT_EQ(state_of(core).pending_events_.size(), 1u) << "released into the drain";
+        EXPECT_TRUE(state_of(core).parked_events_.empty());
+        // A copy changes nothing.
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 11, 1, 5, 120));
+        EXPECT_EQ(state_of(core).member_copies_, 1u);
+        size_t from = fake.calls.size();
+        steps{core}.drain_due_events(126);
+        steps{core}.apply_held_lifecycle(126);
+        const uint32_t kick = bmmo::session::spawn_direction_index(11, 5, 126);
+        const auto calls = since(fake.calls, from);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "make_mirror:Ball_0_BMMO_11:P#5:kick" + std::to_string(kick)),
+                  calls.end());
+        EXPECT_EQ(core.mirrors_outside_lives(), 0u);
+        EXPECT_EQ(core.member_life_outside(), 0u);
+        EXPECT_EQ(steps{core}.join_rank(11, 126), 5u);
+        // Our own id in a SessionMember is ignored.
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 3, 2, 9, 130));
+        EXPECT_EQ(bmmo::session::find_member_life(core.member_lives(), 3, 2), nullptr);
+    }
+
+    // U5 (b)/(c): the member message comes after the event's tick has
+    // passed - released, the event takes the late path at the next drain:
+    // made at its stamp with the life's group and kick (P#5, never 63), and
+    // its rewind asked for (outside this fixture's history: refused and
+    // logged, as any late birth).
+    TEST(SessionClientCoreMemberLives, AParkedEventPastItsTickTakesTheLatePath) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        auto spawn = event_message(11, bmmo::session::event_type::Physicalize, 122, 122);
+        spawn.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+        core.on_session_event(std::move(spawn));
+        EXPECT_EQ(core.events_parked(), 1u);
+        steps{core}.drain_due_events(126);
+        EXPECT_TRUE(state_of(core).remotes_.empty()) << "parked: nothing made";
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 11, 1, 5, 110));
+        const size_t from = fake.calls.size();
+        steps{core}.drain_due_events(127);
+        const auto calls = since(fake.calls, from);
+        const uint32_t kick = bmmo::session::spawn_direction_index(11, 5, 122);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "make_mirror:Ball_0_BMMO_11:P#5:kick" + std::to_string(kick)),
+                  calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:lifecycle event of 11 stamped tick 122 is outside the rollback history at local tick 125: "
+                            "the body set disagrees until a snapshot re-anchors it"),
+                  calls.end());
+        EXPECT_EQ(core.mirrors_outside_lives(), 0u);
+        EXPECT_EQ(core.member_life_outside(), 0u);
+        ASSERT_EQ(state_of(core).remotes_.count(11), 1u);
+        EXPECT_TRUE(state_of(core).remotes_.at(11).physicalized);
+    }
+
+    // U5 (h): a rejoin on the same id - removed(p, 1, R) and added(p, 2, R)
+    // in reverse arrival order: the old life ranks with its order up to R,
+    // the new one with its own from R; no session end.  A removal before its
+    // addition is kept until the addition comes.
+    TEST(SessionClientCoreMemberLives, ARejoinKeepsEachLifesOrder) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 2, 7, 150));
+        EXPECT_EQ(steps{core}.join_rank(12, 149), 4u) << "the old life, its removal not heard yet";
+        EXPECT_EQ(steps{core}.join_rank(12, 150), 7u);
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 150));
+        EXPECT_EQ(steps{core}.join_rank(12, 149), 4u);
+        EXPECT_EQ(steps{core}.join_rank(12, 150), 7u);
+        EXPECT_EQ(bmmo::session::find_member_life(core.member_lives(), 12, 1)->until, 150u);
+        // removed before added
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 13, 1, 2, 160));
+        EXPECT_EQ(bmmo::session::find_member_life(core.member_lives(), 13, 1), nullptr);
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 13, 1, 2, 140));
+        ASSERT_NE(bmmo::session::find_member_life(core.member_lives(), 13, 1), nullptr);
+        EXPECT_EQ(bmmo::session::find_member_life(core.member_lives(), 13, 1)->until, 160u);
+        EXPECT_EQ(core.session_phase(), client_core_state::phase::running);
+        // An echo of our own previous life is no echo of ours.
+        auto old = event_message(3, bmmo::session::event_type::Unphysicalize, 124, 124);
+        old.life = 7;
+        core.on_session_event(std::move(old));
+        EXPECT_TRUE(state_of(core).own_echoes_.empty());
+        EXPECT_EQ(state_of(core).own_other_life_echoes_, 1u);
+    }
+
+    // U5 (e): a life re-announced with another join order ends the session
+    // locally (no mirror group could be trusted).
+    TEST(SessionClientCoreMemberLives, AConflictingJoinOrderEndsTheSession) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 11, 1, 5, 120));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 11, 1, 6, 120));
+        EXPECT_EQ(core.session_phase(), client_core_state::phase::idle);
+    }
+
+    // A member message is taken while loading (not dropped like an event),
+    // and one of another session is not.
+    TEST(SessionClientCoreMemberLives, TakenWhileLoading) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        state_of(core).own_id_ = 3;
+        ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
+        core.level_requested();
+        ASSERT_EQ(core.session_phase(), client_core_state::phase::loading);
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 11, 1, 5, 120));
+        auto other = member_message(bmmo::session::MEMBER_ADDED, 12, 1, 6, 120);
+        other.session = 8;
+        core.on_session_member(other);
+        EXPECT_NE(bmmo::session::find_member_life(core.member_lives(), 11, 1), nullptr);
+        EXPECT_EQ(bmmo::session::find_member_life(core.member_lives(), 12, 1), nullptr);
+    }
+
+    // U7's writer half: a rejoin's PLAYER(-) precedes its PLAYER(+) at one
+    // tick in file order whatever order the messages came in, at the
+    // server's ticks, with the life's join order (no 255).
+    TEST(SessionClientCoreMemberLives, JournalWritesEachLifeAtItsTicks) {
+        journal_dir dir("lives");
+        journal_fake fake;
+        fake.path = dir.path / "client.bmjr";
+        session_client_core core(fake.make_journal(), session_capabilities{});
+        start_session(core);
+        state_of(core).phase_ = client_core_state::phase::running;
+        core.journal().open(bmmo::physics::world_hash{}, "build-x", "Me");
+        state_of(core).assigned_ = true;
+        state_of(core).tick_base_ = 100;
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 2, 7, 150));
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 150));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 14, 1, 5, 90));   // before the base
+        core.journal().close("bye");
+        bmmo::session::journal j;
+        std::string error;
+        ASSERT_TRUE(bmmo::session::read_journal(fake.path, j, error)) << error;
+        std::vector<std::string> records;
+        for (const auto& t: j.ticks)
+            for (const auto& p: t.players)
+                records.push_back(std::to_string(p.tick) + (p.added ? " +" : " -") + std::to_string(p.id) + " join "
+                                  + std::to_string(p.join_order));
+        const std::vector<std::string> expected = {"0 +3 join 1", "0 +4 join 0", "100 +14 join 5", "110 +12 join 4",
+                                                   "150 -12 join 0", "150 +12 join 7"};
+        EXPECT_EQ(records, expected);
+    }
+
+    // U6 at the rules' level (session/member_lives.hpp): the server's join
+    // order skips a retiring order; the late base is not before the leaving
+    // horizon; a leave with a ball always stays through the queue.
+    TEST(MemberLives, ServerRules) {
+        EXPECT_EQ(bmmo::session::lowest_free_join_order({0, 2}, {1}), 3);
+        EXPECT_EQ(bmmo::session::lowest_free_join_order({0, 2}, {}), 1);
+        EXPECT_EQ(bmmo::session::lowest_free_join_order({}, {0}), 1);
+        EXPECT_EQ(bmmo::session::late_join_base(1600, 0), 1600u);
+        EXPECT_EQ(bmmo::session::late_join_base(1600, 1590), 1600u);
+        EXPECT_EQ(bmmo::session::late_join_base(1600, 1603), 1603u);
+        EXPECT_TRUE(bmmo::session::leaver_stays(true, false)) << "J-e: a ball leave is always queued";
+        EXPECT_TRUE(bmmo::session::leaver_stays(false, true));
+        EXPECT_FALSE(bmmo::session::leaver_stays(false, false));
+        std::vector<bmmo::session::member_life> lives(2);
+        lives[0].entry.id = 5; lives[0].entry.life = 1; lives[0].until = 150;
+        lives[1].entry.id = 5; lives[1].entry.life = 2; lives[1].from = 150;
+        EXPECT_EQ(bmmo::session::member_life_at(lives, 5, 149)->entry.life, 1);
+        EXPECT_EQ(bmmo::session::member_life_at(lives, 5, 150)->entry.life, 2);
+        EXPECT_EQ(bmmo::session::member_life_at(lives, 6, 150), nullptr);
+    }
 }

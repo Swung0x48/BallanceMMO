@@ -1541,3 +1541,68 @@ TEST(GhostPoseWire, RetiredAtProtocol17) {
     auto parsed = round_trip(ready);
     EXPECT_EQ(bmmo::session::PHYSICS_PROTOCOL_VERSION, parsed.protocol);
 }
+
+// Step M1 (world-agreement-gaps-design.md 7.1 U4): SessionMember round trip
+// and refusals; player_entry.life in SessionStart and session_event_msg.life.
+TEST(SessionMemberMsg, RoundTripAndRefusals) {
+    EXPECT_EQ(18u, bmmo::session::PHYSICS_PROTOCOL_MEMBER_LIVES);
+    EXPECT_LE(bmmo::session::PHYSICS_PROTOCOL_MEMBER_LIVES, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    bmmo::session_member_msg msg{};
+    msg.session = 4;
+    msg.kind = bmmo::session::MEMBER_ADDED;
+    msg.tick = 1844;
+    msg.entry.id = 142763540;
+    msg.entry.join_order = 3;
+    msg.entry.life = 2;
+    msg.entry.spawn_position[1] = 5.f;
+    msg.entry.spawn_rotation[3] = 1.f;
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(4u, parsed.session);
+    EXPECT_EQ(bmmo::session::MEMBER_ADDED, parsed.kind);
+    EXPECT_EQ(1844u, parsed.tick);
+    EXPECT_EQ(142763540u, parsed.entry.id);
+    EXPECT_EQ(3, parsed.entry.join_order);
+    EXPECT_EQ(2, parsed.entry.life);
+    EXPECT_FLOAT_EQ(5.f, parsed.entry.spawn_position[1]);
+    EXPECT_FLOAT_EQ(1.f, parsed.entry.spawn_rotation[3]);
+    bmmo::session_member_msg fresh{};   // serialize() appends: a message not serialized yet
+    fresh.kind = bmmo::session::MEMBER_REMOVED;
+    fresh.entry.id = 5;
+    fresh.entry.life = 1;
+    expect_rejects_every_truncation(fresh);
+    const auto refused = [](uint8_t kind, uint8_t order, uint32_t id, uint16_t life) {
+        bmmo::session_member_msg bad{};
+        bad.kind = kind;
+        bad.entry.join_order = order;
+        bad.entry.id = id;
+        bad.entry.life = life;
+        EXPECT_TRUE(bad.serialize());
+        bmmo::session_member_msg back{};
+        const std::string bytes = bad.raw.str();
+        back.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        return !back.deserialize();
+    };
+    EXPECT_FALSE(refused(bmmo::session::MEMBER_REMOVED, 1, 9, 1));
+    EXPECT_TRUE(refused(0, 1, 9, 1)) << "kind 0";
+    EXPECT_TRUE(refused(3, 1, 9, 1)) << "kind 3";
+    EXPECT_TRUE(refused(bmmo::session::MEMBER_ADDED, 64, 9, 1)) << "join order 64";
+    EXPECT_TRUE(refused(bmmo::session::MEMBER_ADDED, 1, 0, 1)) << "id 0";
+    EXPECT_TRUE(refused(bmmo::session::MEMBER_ADDED, 1, 9, 0)) << "life 0";
+
+    bmmo::session_start_msg start{};
+    start.mode = bmmo::room::mode::Physics;
+    bmmo::session::player_entry p{};
+    p.id = 7; p.join_order = 2; p.life = 3;
+    start.players = {p};
+    auto start_back = round_trip(start);
+    ASSERT_EQ(1u, start_back.players.size());
+    EXPECT_EQ(3, start_back.players[0].life);
+
+    bmmo::session_event_msg event{};
+    event.session = 1; event.player = 7; event.tick = 10; event.origin_tick = 9;
+    event.type = bmmo::session::event_type::Unphysicalize;
+    event.life = 3;
+    auto event_back = round_trip(event);
+    EXPECT_EQ(3, event_back.life);
+    EXPECT_EQ(9u, event_back.origin_tick);
+}

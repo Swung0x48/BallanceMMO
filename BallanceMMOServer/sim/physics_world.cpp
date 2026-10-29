@@ -705,8 +705,13 @@ namespace bmmo::sim {
                 error = "no free player slot";
                 return false;
             }
-            log("world: join order " + std::to_string(wanted) + " for player " + std::to_string(id)
-                + " is taken, falling back to slot " + std::to_string(slot));
+            // Step M1 (world-agreement-gaps-design.md 2.7, J2): the server
+            // never hands out an order a life in this world still holds, so
+            // this is an invariant violation (a SimTool replay of an old
+            // journal can still meet it).  Kept working, logged and counted.
+            ++join_orders_taken_;
+            log("world: ERROR join order " + std::to_string(wanted) + " taken in the world (player " + std::to_string(id)
+                + "): falling back to slot " + std::to_string(slot));
         }
         p.slot = slot;
         p.group = kPlayerGroupPrefix + std::to_string(slot);

@@ -80,6 +80,8 @@ namespace bmmo {
                 raw.write(reinterpret_cast<const char*>(&p.ball_type), sizeof(p.ball_type));
                 raw.write(reinterpret_cast<const char*>(p.spawn_position), sizeof(p.spawn_position));
                 raw.write(reinterpret_cast<const char*>(p.spawn_rotation), sizeof(p.spawn_rotation));
+                if (protocol >= session::PHYSICS_PROTOCOL_MEMBER_LIVES)
+                    raw.write(reinterpret_cast<const char*>(&p.life), sizeof(p.life));
             }
             return raw.good();
         }
@@ -123,6 +125,12 @@ namespace bmmo {
                 if (!message_utils::read_variable(raw, &p.ball_type)) return false;
                 if (!raw.read(reinterpret_cast<char*>(p.spawn_position), sizeof(p.spawn_position))) return false;
                 if (!raw.read(reinterpret_cast<char*>(p.spawn_rotation), sizeof(p.spawn_rotation))) return false;
+                // Protocol 18 (step M1): the entry's life.  Read only from a
+                // sender that says it writes it, so an older server's
+                // SessionStart still parses and is refused by its protocol
+                // number, with that reason, not as a truncated message.
+                if (protocol >= session::PHYSICS_PROTOCOL_MEMBER_LIVES
+                        && !message_utils::read_variable(raw, &p.life)) return false;
                 players.push_back(p);
             }
             return true;

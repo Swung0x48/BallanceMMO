@@ -1064,7 +1064,8 @@ namespace {
                 if (!fill(msg)) return;
                 logf("room event %d (error %s) room %u actor %u subject %u %s", static_cast<int>(msg.type),
                      bmmo::room::error_string(msg.error), msg.room, msg.actor, msg.subject, msg.reason.c_str());
-                if (msg.type == bmmo::room::event_type::PlayerLeft) core_.journal().leave_player(msg.subject);
+                // Step M1: a member's PLAYER(-) is its SessionMember(removed)'s,
+                // at the server's R (no longer at this room event's tick).
                 if (msg.type == bmmo::room::event_type::RequestDenied && msg.error != bmmo::room::error_code::None) {
                     if (join_sent_ && !in_room_) join_sent_ = false;   // retry on the next state
                 }
@@ -1111,6 +1112,14 @@ namespace {
                 bmmo::session_event_msg msg;
                 if (!fill(msg)) return;
                 core_.on_session_event(std::move(msg));
+                break;
+            }
+            case bmmo::SessionMember: {   // protocol 18, step M1
+                bmmo::session_member_msg msg;
+                if (!fill(msg)) return;
+                // A re-announced join order ends the core's session (design
+                // 2.8); the main loop then only idles (phase::idle: no frame).
+                core_.on_session_member(msg);
                 break;
             }
             case bmmo::SessionRemoteInput: {

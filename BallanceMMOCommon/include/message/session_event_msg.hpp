@@ -23,6 +23,11 @@ namespace bmmo {
         session::event_type type = session::event_type::Physicalize;
         uint32_t origin_tick = 0;   // the sender's stamp; equal to `tick` when sent by a client
         uint8_t state = 0;          // session::EVENT_STATE_*; server only, 0 when sent by a client
+        // Protocol 18 (world-agreement-gaps-design.md 2.7, step M1): the
+        // life of `player` the event belongs to; the server fills it on
+        // relay, a client sends 0.  A receiver keys a member's events by
+        // (player, life) and parks those of a life it has not been told of.
+        uint16_t life = 0;
 
         // Union of optional payloads; serialize()/deserialize() only put the
         // fields the current `type` needs on the wire.
@@ -165,6 +170,7 @@ namespace bmmo {
             }
             raw.write(reinterpret_cast<const char*>(&origin_tick), sizeof(origin_tick));
             raw.write(reinterpret_cast<const char*>(&state), sizeof(state));
+            raw.write(reinterpret_cast<const char*>(&life), sizeof(life));
             return raw.good();
         }
 
@@ -205,6 +211,7 @@ namespace bmmo {
             }
             if (!message_utils::read_variable(raw, &origin_tick)) return false;
             if (!message_utils::read_variable(raw, &state)) return false;
+            if (!message_utils::read_variable(raw, &life)) return false;
             // An origin after the applied tick is not something the server
             // ever writes: the re-stamp only moves an event later.
             if (static_cast<int32_t>(tick - origin_tick) < 0) return false;

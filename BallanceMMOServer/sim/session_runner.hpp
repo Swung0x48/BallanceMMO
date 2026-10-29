@@ -101,6 +101,28 @@ namespace bmmo::sim {
         bool dropped = false;
         uint64_t token = 0;
         std::chrono::steady_clock::time_point intake{};
+        // Protocol 18 (world-agreement-gaps-design.md 2.7, step M1): the
+        // life of `player` the event belongs to - the one the runner held
+        // when it accepted it (a leaver's Unphysicalize and final resets:
+        // the leaving life's).  The server relays it in the message.
+        uint16_t life = 0;
+    };
+
+    // Step M1 (world-agreement-gaps-design.md 2.7): a life of a player
+    // entered or left the runner's world.  `tick`: an add's J (the tick of
+    // its PLAYER record, world->tick_index() at the add), a removal's R
+    // (finish_leave's).  `join_order` the life's, read before the runner
+    // forgets it.  `in_world`: false for a life whose add never reached the
+    // world (a failed add, or a deferred rejoin cancelled by a second
+    // leave) - no member was told of it, the server only lets go of its
+    // join order.
+    struct member_change {
+        uint32_t session = 0;
+        uint32_t player = 0;
+        uint16_t life = 0;
+        uint8_t join_order = 0;
+        uint32_t tick = 0;
+        bool in_world = true;
     };
 
     // One SessionLead for the server to send (late-player design 2.2).
@@ -195,6 +217,16 @@ namespace bmmo::sim {
         // accepted lifecycle event, re-stamped (late-player design 3.1).  The
         // server relays it from here to every member, the owner included.
         std::function<void(const accepted_event&)> on_event_accepted;
+        // Step M1 (world-agreement-gaps-design.md 2.7), simulation thread:
+        // the end of every add that reached the world (a posted add, or a
+        // rejoin deferred to its old life's removal); an add the world
+        // refused (`error`); the end of every finish_leave of a life the
+        // world held, and a life dropped before it got there (in_world
+        // false).  The server sends SessionMember from the first and the
+        // last, a late joiner's SessionStart from the first.
+        std::function<void(const member_change&)> on_player_added;
+        std::function<void(const member_change&, const std::string& error)> on_player_add_failed;
+        std::function<void(const member_change&)> on_player_removed;
         // A tick failed or the world died; the server ends the session.
         std::function<void(uint32_t session, const std::string& reason)> on_failed;
         std::function<void(const std::string&)> log;
@@ -240,7 +272,15 @@ namespace bmmo::sim {
         // `reason` goes into the journal as `end: <reason>` before it closes.
         void destroy_session(uint32_t session, const std::string& reason = {});
         // `name` is the player's display name for the journal's PLAYER record.
-        void add_player(uint32_t session, uint32_t player, uint8_t join_order, const std::string& name = {});
+        // `life` (step M1): which of the player's lives in this session this
+        // add starts - the server numbers them (its count of adds of the id,
+        // from 1; the members present at create_session are life 1), so the
+        // SessionStart it sends before the add can already list it.  An add
+        // of a player whose old life is still leaving waits for that life's
+        // removal and runs right after it, at the same tick (J-f): no event
+        // of the old life is erased.
+        void add_player(uint32_t session, uint32_t player, uint8_t join_order, uint16_t life,
+                        const std::string& name = {});
         // A player that leaves with a ball gets its Unphysicalize from here
         // (late-player design 3.2), at the runner's own tick, through
         // on_event_accepted (token 0).  One with events accepted and relayed
@@ -322,6 +362,11 @@ namespace bmmo::sim {
         uint32_t reanchor_tick(uint32_t session, uint32_t lead, bool resync_state) const;
         // Tick to assign to a late joiner anchoring now.
         uint32_t late_join_tick(uint32_t session) const;
+        // Step M1 (J4): the largest removal tick of the session's leaving
+        // lives, 0 when none.  A late joiner's base is not before it, so a
+        // life the joiner is never told of has ended in the server's world
+        // by its first tick.  A view value, like current_tick.
+        uint32_t leaving_horizon(uint32_t session) const;
         size_t session_count() const;
         // The session's journal file, empty when it is not recording.
         std::string journal_path(uint32_t session) const;
@@ -424,8 +469,18 @@ namespace bmmo::sim {
             struct leaving_player {
                 uint32_t remove_at = 0;
                 bmmo::session::input_frame frame{};
+                // Step M1 (J-f): an add of the same id that came while this
+                // life was leaving, run right after its finish_leave.
+                bool rejoin = false;
+                uint8_t rejoin_order = 0;
+                uint16_t rejoin_life = 0;
+                std::string rejoin_name;
             };
             std::map<uint32_t, leaving_player> leaving;
+            // Step M1: each player's current life (the number its last add
+            // carried); kept after its removal, for the events the leaving
+            // life still has queued.
+            std::map<uint32_t, uint16_t> lives;
             // The re-stamp and the superseded-birth rule (design 3.1), per
             // player, decided when an event is accepted.
             bmmo::session::lifecycle_acceptance acceptance;
@@ -501,6 +556,14 @@ namespace bmmo::sim {
         // Takes a leaver out of the world before the step of `tick`, with
         // the journal's PLAYER record at that tick.
         void finish_leave(session_state& s, uint32_t player, uint32_t tick);
+        // Step M1: the add itself (the posted one, or a deferred rejoin's
+        // after finish_leave), with on_player_added / on_player_add_failed.
+        void add_now(session_state& s, uint32_t player, uint8_t join_order, uint16_t life, const std::string& name);
+        // The player's current life (0: never added).
+        static uint16_t life_of(const session_state& s, uint32_t player) {
+            const auto it = s.lives.find(player);
+            return it == s.lives.end() ? 0 : it->second;
+        }
         // A Trafo decision of the ledger queued as a pending event (the
         // server's own resets and the accepted client events alike), and
         // for a runner-made one (token 0) the relay through
@@ -560,7 +623,8 @@ namespace bmmo::sim {
         // schedule reanchor_tick needs; both never move once `scheduled`
         // (start_ticking, the one place a schedule starts).
         struct view { uint32_t next_tick = 0; bool running = false; std::chrono::steady_clock::time_point start{}; uint32_t first_tick = 0;
-                      std::string journal; std::chrono::steady_clock::time_point schedule_start{}; bool scheduled = false; };
+                      std::string journal; std::chrono::steady_clock::time_point schedule_start{}; bool scheduled = false;
+                      uint32_t leaving_horizon = 0; };
         std::map<uint32_t, view> views_;
     };
 }

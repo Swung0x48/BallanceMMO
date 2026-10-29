@@ -111,7 +111,20 @@ namespace bmmo::session {
     //      the zone keeps its body frozen in every world.  No client sends
     //      the pose and the opcode is gone (it was the last one: no other
     //      opcode moved).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 17;
+    //  18  member lives (docs/world-agreement-gaps-design.md 2.7, 2.8, 5;
+    //      step M1): SessionMember (server -> client: a life of a member
+    //      added at J or removed at R, with its player_entry); player_entry
+    //      carries the life (`life`, u16, from 1; the n-th add of an id in
+    //      the session), so SessionStart lists each member's current life;
+    //      session_event_msg ends with `life` (the server fills it on relay,
+    //      a client sends 0); a leave with a ball always goes through the
+    //      runner's queue (its Unphysicalize at `next`, the PLAYER(-) at
+    //      `next + 1`); a join order is free again only after its life was
+    //      removed from the server's world (J2); a late joiner's base is at
+    //      or after every leaving life's removal.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 18;
+    // The protocol whose SessionStart entries carry `life` (step M1).
+    constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its
@@ -321,7 +334,15 @@ namespace bmmo::session {
         uint8_t ball_type = 0;
         float spawn_position[3] = {};
         float spawn_rotation[4] = {};
+        // Protocol 18 (world-agreement-gaps-design.md 2.7, step M1): which
+        // of the player's lives in this session the entry is - the server's
+        // count of its adds, from 1.  0 only in an entry a test builds.
+        uint16_t life = 0;
     };
+
+    // session_member_msg::kind (protocol 18).
+    constexpr uint8_t MEMBER_ADDED = 1;
+    constexpr uint8_t MEMBER_REMOVED = 2;
 
     // session_input_msg per-tick sample.
     struct input_frame {

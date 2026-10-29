@@ -267,6 +267,11 @@ if (BUILD_SERVER_TESTS)
     if (WIN32)
         target_compile_definitions(BallanceMMOMessageTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     endif()
+    if (MSVC)
+        # session_client_core_test.cpp is past MSVC's default section limit
+        # since step M1's tests (C1128), as SimTool's unit was at RO1.
+        target_compile_options(BallanceMMOMessageTests PRIVATE /bigobj)
+    endif ()
     include(GoogleTest)
     gtest_discover_tests(BallanceMMOMessageTests DISCOVERY_MODE PRE_TEST)
 endif()

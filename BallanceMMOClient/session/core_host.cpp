@@ -543,6 +543,7 @@ namespace {
         case bmmo::SessionEnd: return "SessionEnd";
         case bmmo::SessionLead: return "SessionLead";
         case bmmo::SessionResyncState: return "SessionResyncState";
+        case bmmo::SessionMember: return "SessionMember";
         default: return "?";
         }
     }
@@ -567,6 +568,7 @@ namespace {
         case bmmo::SessionLead: { bmmo::session_lead_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionEnd: { bmmo::session_end_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionResyncState: { bmmo::session_resync_state_msg m{}; return decode_bytes(bytes, m); }
+        case bmmo::SessionMember: { bmmo::session_member_msg m{}; return decode_bytes(bytes, m); }
         default: return false;
         }
     }
@@ -1191,6 +1193,7 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
     case bmmo::SessionEvent:
     case bmmo::SessionLead:
     case bmmo::SessionResyncState:   // step A3 (protocol 10): the core path alone; the legacy one ignores it
+    case bmmo::SessionMember:        // step M1 (protocol 18): the core path alone
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         return true;
     default:
@@ -2088,6 +2091,17 @@ void BallanceMMOClient::core_host_dispatch(int code, const std::string& bytes) {
     case bmmo::SessionResyncState: {
         bmmo::session_resync_state_msg msg{};
         if (decode(msg)) core.on_session_resync_state(std::move(msg));
+        break;
+    }
+    case bmmo::SessionMember: {   // step M1 (world-agreement-gaps-design.md 2.8)
+        bmmo::session_member_msg msg{};
+        if (decode(msg)) {
+            core.on_session_member(msg);
+            // A life re-announced with another join order ends the core's
+            // session locally (design 2.8): the host's ends with it.
+            if (core.session_phase() == bs::client_core_state::phase::idle && host.phase != retail_host::phase_type::idle)
+                core_host_end_local("a member's life was re-announced with another join order");
+        }
         break;
     }
     case bmmo::SessionEnd: {
@@ -3584,11 +3598,12 @@ bool BallanceMMOClient::core_host_on_finish() {
     return true;
 }
 
-// PlayerLeft: the member goes from the journal's roster (room_client.cpp).
+// PlayerLeft (room_client.cpp): a session the core runs takes the member's
+// PLAYER(-) from its SessionMember(removed), at the server's R (step M1), so
+// the room event writes nothing; the legacy journal is not this session's.
 bool BallanceMMOClient::core_host_leave_player(uint32_t player) {
-    if (host.phase == retail_host::phase_type::idle || !host.core) return false;
-    host.core->journal().leave_player(player);
-    return true;
+    (void) player;
+    return host.phase != retail_host::phase_type::idle && host.core;
 }
 
 // The automation 'beam': core.request_beam, made in place at post_step step

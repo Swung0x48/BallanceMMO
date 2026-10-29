@@ -102,6 +102,10 @@ namespace bmmo {
         // retired at protocol 17 (step BALL): the airship ghost is shown at
         // its owner's legacy ball stream.  It was the last opcode, so no
         // other value moved.
+        // Protocol 18 (step M1, world-agreement-gaps-design.md 2.7): member
+        // lives.  It takes the value SessionGhostPose had; a build of
+        // protocol 14-16 is refused at SessionStart before it could read one.
+        SessionMember,
     };
 
     template<typename T, opcode C = None>

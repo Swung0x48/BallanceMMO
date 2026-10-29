@@ -245,15 +245,30 @@ namespace bmmo::session {
         s.spawn_impulse_ = msg.spawn_impulse;
         s.spawn_spacing_ = msg.spawn_spacing;
         s.level_ = msg.map.level > 0 ? msg.map.level : config.level;
-        s.players_ = msg.players;
+        // Step M1 (world-agreement-gaps-design.md 2.8): the lives listed in
+        // SessionStart, each from the start (from 0); SessionMember adds the
+        // later ones.
+        s.lives_.clear();
+        for (const auto& p: msg.players) {
+            bmmo::session::member_life life;
+            life.entry = p;
+            s.lives_.push_back(life);
+        }
+        s.parked_events_.clear();
+        s.early_removals_.clear();
+        s.member_messages_ = s.member_copies_ = s.events_parked_ = s.parked_applied_ = 0;
+        s.member_life_outside_ = s.mirrors_outside_lives_ = s.own_other_life_echoes_ = s.catchup_unknown_lives_ = 0;
         s.own_join_order_ = -1;
-        for (const auto& p: s.players_) {
+        s.own_member_life_ = 0;
+        for (const auto& p: msg.players) {
             if (p.id != s.own_id_) continue;
             s.own_join_order_ = p.join_order;
+            s.own_member_life_ = p.life;
         }
         s.own_group_ = "P#" + std::to_string(s.own_join_order_ < 0 ? 63 : s.own_join_order_);
-        logf("session %u starting: level %d, %zu players, join order %d, seed %d, input delay %u, sector lead %u",
-             s.session_, s.level_, s.players_.size(), s.own_join_order_, s.seed_, static_cast<unsigned>(s.input_delay_),
+        logf("session %u starting: level %d, %zu players, join order %d, life %u, seed %d, input delay %u, sector lead %u",
+             s.session_, s.level_, msg.players.size(), s.own_join_order_, static_cast<unsigned>(s.own_member_life_), s.seed_,
+             static_cast<unsigned>(s.input_delay_),
              static_cast<unsigned>(s.sector_lead_));
         // Fresh runtime state.
         s.assigned_ = false;
@@ -497,7 +512,7 @@ namespace bmmo::session {
         // built the same at add_player.
         if (s.trafo_active_) {
             std::set<uint32_t> members;
-            for (const auto& p: s.players_) members.insert(p.id);
+            for (const auto& l: s.lives_) members.insert(l.entry.id);
             members.insert(s.own_id_);
             for (uint32_t player: members) ensure_trafo_set(player, "the anchor");
         }
@@ -544,6 +559,26 @@ namespace bmmo::session {
     // same room reloads the level (host restart) through begin.
     void session_client_core::end(const std::string& reason) {
         if (platform_.hooks.ending) platform_.hooks.ending();
+        // Step M1: the member lives' account.  A parked event whose life was
+        // never told of is dropped here (the server cannot produce one).
+        if (s.session_ != 0) {
+            size_t parked_left = 0;
+            for (const auto& [key, events]: s.parked_events_) parked_left += events.size();
+            size_t journal_pending = 0;
+            if (journal_.journalling())
+                for (const auto& l: s.lives_) if (!l.journaled_add) ++journal_pending;
+            const std::string text = "member lives: " + std::to_string(s.lives_.size()) + " lives, "
+                + std::to_string(s.member_messages_) + " member messages (" + std::to_string(s.member_copies_)
+                + " copies), events parked " + std::to_string(s.events_parked_) + " (applied "
+                + std::to_string(s.parked_applied_) + ", dropped " + std::to_string(parked_left)
+                + "), outside their life " + std::to_string(s.member_life_outside_) + ", mirrors outside the lives "
+                + std::to_string(s.mirrors_outside_lives_) + ", own echoes of another life "
+                + std::to_string(s.own_other_life_echoes_) + ", catch-up stamps of untold lives "
+                + std::to_string(s.catchup_unknown_lives_) + ", PLAYER records not written " + std::to_string(journal_pending);
+            logf("%s", text.c_str());
+            journal_.note(text);
+            s.parked_events_.clear();
+        }
         journal_.close(reason);
         // After the journal closed: the own body guard is lifted (host
         // state; hooks.ended, a back-call until E11), and every mirror's
@@ -690,6 +725,7 @@ namespace bmmo::session {
             if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::assign_resync);
             logf("resynced: tick base %u", s.tick_base_);
             journal_.note("resync: tick base " + std::to_string(s.tick_base_));
+            journal_member_lives();   // step M1: a life told of meanwhile, at the new base at the earliest
             return;
         }
         s.assigned_ = true;
@@ -743,6 +779,7 @@ namespace bmmo::session {
         logf("tick base %u assigned (%lld frames since anchor)", s.tick_base_, static_cast<long long>(s.frames_since_anchor_));
         journal_.note("assigned: tick base " + std::to_string(s.tick_base_) + " ("
                       + std::to_string(s.frames_since_anchor_) + " frames since the anchor)");
+        journal_member_lives();   // step M1: the lives told of while unassigned
         if (exact_join) {
             // The resync's anchor (2.6.1 steps 2-5): the frames from the base
             // run normally, the owed passes live (stamped late, 2.7 case 4),
