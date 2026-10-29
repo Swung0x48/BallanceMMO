@@ -117,6 +117,12 @@ public:
     // on (with the union only: the units are placed by its rule); off is
     // the negative control and G3's single-ball rules.
     bool physics_player_mechanisms = true;
+    // physics.session_clock (record-format-gaps-design.md 5, 8 row K3 = C4;
+    // step RK3, protocol 20): session::WORLD_SESSION_CLOCK - on Level 1
+    // every world switches the tutorial off (its exit activated before frame
+    // 10 after its anchor, game/tutorial_exit.hpp).  Default on; off is the
+    // negative control (the tutorial freezes every world at its own moments).
+    bool physics_session_clock = true;
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

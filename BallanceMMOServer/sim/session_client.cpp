@@ -39,6 +39,7 @@
 #include <entity/version.hpp>
 #include <game/menu_driver.hpp>
 #include <game/checkpoint_phase.hpp>
+#include <game/tutorial_exit.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_deactivate_pin.hpp>
 #include <game/sector_cell_split.hpp>
@@ -1848,6 +1849,11 @@ namespace {
             p.place_probes = [this](const std::vector<bmmo::session::probe_candidate>& candidates) {
                 proximity_.place(engine_->context(), candidates);
             };
+            // Step RK3: the Level 1 tutorial's exit, before frame 10 (the
+            // core decides when; game/tutorial_exit.hpp activates).
+            p.tutorial_exit = [this](uint32_t, std::string& error) {
+                return tutorial_exit_.activate(engine_->context(), error);
+            };
             p.hooks.window = [](const std::string& text) { log_line(text); };
             p.hooks.status = [](const std::string& text) { log_line(text); };
             p.hooks.after_journal = [this](uint32_t tick) {
@@ -2387,6 +2393,19 @@ namespace {
                 else
                     logf("the checkpoint chain's sector cell was NOT split (%s): an own crossing in the frame of a pass of "
                          "another sector makes the manager activate the crossed one here", trouble.c_str());
+            }
+            // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option
+            // (c)): the Level 1 tutorial's exit event, found now; the core
+            // activates it before frame 10 (platform tutorial_exit).
+            tutorial_exit_.clear();
+            if (core_.tutorial_off()) {
+                const std::string trouble = tutorial_exit_.resolve(engine_->context());
+                if (trouble.empty())
+                    logf("the Level 1 tutorial is switched off before frame %d (world option session clock): %s",
+                         bmmo::game::kTutorialExitFrame, tutorial_exit_.where.c_str());
+                else
+                    logf("the Level 1 tutorial's exit was NOT found (%s): the tutorial freezes this world at its own moments",
+                         trouble.c_str());
             }
             if (args_.start_sector > 0) {
                 // Before the assignment: pending until the first assigned
@@ -4235,6 +4254,7 @@ namespace {
         bmmo::game::sector_reset_guard reset_guard_;         // the retail sector resets, neutralized (game/sector_reset_guard.hpp)
         std::vector<bmmo::game::deactivate_pin> deactivate_pins_;   // N2's pins (game/sector_deactivate_pin.hpp)
         bmmo::game::sector_cell_split chain_cell_split_;     // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)
+        bmmo::game::tutorial_exit tutorial_exit_;            // step RK3: the Level 1 tutorial's exit event (found at the anchor)
         uint32_t script_restore_logs_ = 0;
         uint32_t script_reset_logs_ = 0;
         std::map<CK_ID, uint32_t> script_reset_ticks_;        // the tick each script was last told to reset

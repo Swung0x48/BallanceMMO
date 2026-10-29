@@ -396,6 +396,14 @@ namespace bmmo::session {
             logf("session %u: one mechanism responds to every player (world option player mechanisms, K = %u slots)%s",
                  s.session_, static_cast<unsigned>(msg.mechanism_slots),
                  (msg.world_options & WORLD_PROXIMITY_UNION) ? "" : " - WITHOUT the proximity union: not run");
+        // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)).
+        if (msg.world_options & WORLD_SESSION_CLOCK)
+            logf("session %u: the Level 1 tutorial is switched off (world option session clock)%s", s.session_,
+                 s.level_ != SESSION_CLOCK_TUTORIAL_LEVEL ? " - not Level 1: no tutorial to switch off"
+                 : platform_.tutorial_exit ? ": its exit is activated before frame 10 (frozen in frames 9..15 still)"
+                 : ": Level 1, but this host cannot switch the tutorial off (no tutorial_exit) - it freezes this world at its own moments");
+        s.world_frames_ = -1;
+        s.tutorial_exit_pending_ = false;
         frame_ = frame_scratch{};
         return begin_result{};
     }
@@ -416,6 +424,11 @@ namespace bmmo::session {
         s.sector_cell_ = report.sector_cell;
         s.chain_cell_ = report.sector_cell;   // step B2SX: a private copy starts from the anchor's cell
         s.frames_since_anchor_ = 0;
+        // Step RK3: the world's own frame count starts at its anchor; the
+        // tutorial's exit is due once per anchor.
+        s.world_frames_ = 0;
+        s.tutorial_exit_pending_ = tutorial_off() && static_cast<bool>(platform_.tutorial_exit);
+        s.globals_logged_ = false;
         s.phase_ = client_core_state::phase::running;
         if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::anchor_origin);
         // The window: line starts over with the session (its first call

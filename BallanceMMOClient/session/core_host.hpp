@@ -24,6 +24,12 @@ namespace bmmo::session {
         // default since 2026-10-27, and nothing in the legacy session path
         // reads it.
         bool core_enabled();
+        // Step RK3: a core session past its anchor switches this level's
+        // tutorial off (the world option session clock on Level 1) - the
+        // core activates the tutorial's exit at its frame, so the main
+        // branch's own exit on a countdown restart (OnStartLevel's timer)
+        // stays out of it.  False whenever no core session runs.
+        bool core_tutorial_owned();
         // Step Q: the level's proximity countdowns as loaded (a file-scope
         // static of core_host.cpp; both paths' anchors restore them).
         bmmo::game::proximity_countdown_state& level_proximities();

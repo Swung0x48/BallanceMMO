@@ -7701,6 +7701,80 @@ namespace {
         EXPECT_EQ(records, expected);
     }
 
+    // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)): the
+    // core activates the Level 1 tutorial's exit (platform tutorial_exit)
+    // once, right before the world's frame 10 after its anchor - its tick is
+    // the base + 9 - and only on Level 1 under WORLD_SESSION_CLOCK; a
+    // re-assign before frame 10 neither moves it off the world's frame 10
+    // (counted in world steps, never from the assigned tick) nor fires it
+    // twice; a new anchor brings it back.
+    TEST(SessionClientCoreTutorial, TheExitBeforeFrameTenOnLevelOneUnderTheBit) {
+        for (const int arm: {0, 1, 2, 3}) {   // 0: L1 + bit, 1: L1 no bit, 2: L13 + bit, 3: L1 + bit, no op
+            flow_fake fake;
+            session_platform p = frame_platform(fake, false);
+            std::vector<uint32_t> exits;
+            std::vector<int> exit_frames;   // the 1-based pre_step the hook ran in
+            int pre_steps = 0;
+            if (arm != 3)
+                p.tutorial_exit = [&exits, &exit_frames, &pre_steps](uint32_t tick, std::string&) {
+                    exits.push_back(tick);
+                    exit_frames.push_back(pre_steps);
+                    return true;
+                };
+            session_client_core core(std::move(p), session_capabilities{});
+            state_of(core).own_id_ = 3;
+            auto start = start_message(9, 3);
+            start.map.level = arm == 2 ? 13 : 1;
+            start.world_options = arm == 1 ? 0u : bmmo::session::WORLD_SESSION_CLOCK;
+            ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
+            EXPECT_EQ(arm == 0 || arm == 3, core.tutorial_off()) << arm;
+            for (uint32_t id = 5; id <= 10; ++id) set_test_life(core, id, 63);
+            core.level_requested();
+            bmmo::session::anchor_report report;
+            report.build_id = "build-x";
+            report.own_name = "Me";
+            core.anchor(report);
+            core.on_session_assign(assign_message(9, 120));
+            for (int frame = 1; frame <= 14; ++frame) {
+                if (frame == 5) core.on_session_assign(assign_message(9, 300));   // a re-assign: the world goes on
+                pre_steps = frame;
+                core.pre_step();
+                ASSERT_TRUE(core.post_step(true)) << arm << " frame " << frame;
+            }
+            if (arm == 0)
+                EXPECT_EQ(exit_frames, std::vector<int>({10})) << "once, in the world's 10th frame, the re-assign at 5 notwithstanding";
+            else
+                EXPECT_TRUE(exits.empty()) << arm;
+            if (arm == 0) {
+                // A new anchor (a level reload of the same session): due once more.
+                core.level_requested();
+                core.anchor(report);
+                core.on_session_assign(assign_message(9, 500));
+                for (int frame = 1; frame <= 10; ++frame) {
+                    pre_steps = frame;
+                    core.pre_step();
+                    ASSERT_TRUE(core.post_step(true));
+                }
+                EXPECT_EQ(exit_frames, std::vector<int>({10, 10}));
+                ASSERT_EQ(exits.size(), 2u);
+                EXPECT_EQ(exits[1], 509u) << "before frame 10, tick base + 9";
+            }
+        }
+    }
+
+    // The one timing rule both the client core and physics_world call: due
+    // when the world has stepped exit_frame - 1 times since its anchor.
+    TEST(SessionClientCoreTutorial, ExitDueRule) {
+        EXPECT_FALSE(bmmo::session::tutorial_exit_due(-1));
+        EXPECT_FALSE(bmmo::session::tutorial_exit_due(0));
+        EXPECT_FALSE(bmmo::session::tutorial_exit_due(8));
+        EXPECT_TRUE(bmmo::session::tutorial_exit_due(9));
+        EXPECT_FALSE(bmmo::session::tutorial_exit_due(10));
+        EXPECT_TRUE(bmmo::session::tutorial_exit_due(15, 16));
+        EXPECT_TRUE(bmmo::session::tutorial_exit_due(0, 1));
+        static_assert(bmmo::session::tutorial_exit_due(bmmo::session::SESSION_CLOCK_TUTORIAL_EXIT_FRAME - 1));
+    }
+
     // U6 at the rules' level (session/member_lives.hpp): the server's join
     // order skips a retiring order; the late base is not before the leaving
     // horizon; a leave with a ball always stays through the queue.

@@ -1032,6 +1032,15 @@ public:
             Printf("Room %u: one mechanism responds to every player in this session (world option player mechanisms, "
                    "%u slots; join orders below it).", r.id, static_cast<unsigned>(s.mechanism_slots));
         }
+        // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)):
+        // on Level 1 every world switches the tutorial off at the same frame
+        // after its anchor (game/tutorial_exit.hpp); the bit is harmless on
+        // the other levels, so it is set whatever the level.
+        if (config_.physics_session_clock) {
+            s.world_options |= bmmo::session::WORLD_SESSION_CLOCK;
+            Printf("Room %u: the Level 1 tutorial is switched off in every world of this session (world option "
+                   "session clock).", r.id);
+        }
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
         std::vector<std::pair<uint32_t, uint8_t>> players;

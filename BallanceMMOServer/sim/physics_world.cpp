@@ -371,6 +371,21 @@ namespace bmmo::sim {
             log(std::string("world: the checkpoint chain's sector cell is NOT split (")
                 + (held ? "--n2-cell off" : "the activation is not held") + ")");
         }
+        // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)):
+        // the Level 1 tutorial's exit event, found now and activated by
+        // tick() right before frame tutorial_exit_frame.
+        tutorial_exit_.clear();
+        tutorial_exit_done_ = false;
+        first_step_tick_ = -1;
+        if (options_.session_clock && options_.level == bmmo::game::kTutorialLevel) {
+            const std::string trouble = tutorial_exit_.resolve(context);
+            if (trouble.empty())
+                log("world: the Level 1 tutorial is switched off at frame " + std::to_string(options_.tutorial_exit_frame)
+                    + " (world option session clock): " + tutorial_exit_.where);
+            else
+                log("world: the Level 1 tutorial's exit was NOT found (" + trouble
+                    + "): the tutorial freezes this world at its own moments");
+        }
         {
             // Hex, like every other place these two are printed (the client's
             // anchor line, SessionEnd's mismatch reason, the sim tool): the
@@ -1016,6 +1031,24 @@ namespace bmmo::sim {
         // union's pass, before the behaviour pass and the step - every
         // selected set's scripts, sets by player id, with the fixed delta.
         if (options_.trafo_inputs) bmmo::game::trafo_frame(context, trafo_registry_, kFixedDeltaMs);
+        // Step RK3: the tutorial's exit right before frame
+        // tutorial_exit_frame after the anchor, once.  The frame is counted
+        // from the world's first step: on the server tick_ is the session's
+        // tick (set_tick_index: the start base), in SimTool's scenes 0 at
+        // the anchor.
+        if (first_step_tick_ < 0) first_step_tick_ = tick_;
+        if (tutorial_exit_.resolved() && !tutorial_exit_done_
+                && bmmo::session::tutorial_exit_due(static_cast<int64_t>(tick_) - first_step_tick_,
+                                                    options_.tutorial_exit_frame)) {
+            tutorial_exit_done_ = true;
+            std::string exit_error;
+            if (tutorial_exit_.activate(context, exit_error))
+                log("world: the Level 1 tutorial's exit activated before frame "
+                    + std::to_string(static_cast<int64_t>(tick_) - first_step_tick_ + 1) + " (tick " + std::to_string(tick_)
+                    + ")");
+            else
+                log("world: the Level 1 tutorial's exit could not be activated: " + exit_error);
+        }
         if (frame_hook_) frame_hook_();
         // Navigation edges and parking run from the PreSimulate pass (see
         // tick_callback); one callback at a time in case a tick had no

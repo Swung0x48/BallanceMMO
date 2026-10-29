@@ -883,6 +883,17 @@ namespace bmmo::session {
         uint32_t world_options_ = 0;
         // Step Q7: SessionStart's mechanism_slots under WORLD_PLAYER_MECHANISMS, else 0.
         uint8_t mechanism_slots_ = 0;
+        // Step RK3 (record-format-gaps-design.md 8 row K3 = C4): the world
+        // steps since the anchor (-1 before it; a re-assign does not reset
+        // it, unlike frames_since_anchor_), and whether the Level 1
+        // tutorial's exit is still to be activated for this anchor.
+        int64_t world_frames_ = -1;
+        bool tutorial_exit_pending_ = false;
+        // Step RK3: the live time factor after the previous frame, for the
+        // log of its changes in the first frames after the anchor (the
+        // session-start write, the tutorial's freeze and its exit).
+        float globals_logged_factor_ = 0.0f;
+        bool globals_logged_ = false;
         bool trafo_active_ = false;
         // Every applied or pending trafo input by applied tick, own, remote
         // and server-stamped (design 2.5): the live tick's applied before the
@@ -1433,6 +1444,15 @@ namespace bmmo::session {
         // copies: G3's single-ball rules).
         uint8_t mechanism_slots() const {
             return (s.world_options_ & WORLD_PLAYER_MECHANISMS) && proximity_union_active() ? s.mechanism_slots_ : 0;
+        }
+        // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)):
+        // whether this session switches the Level 1 tutorial off - the
+        // world option WORLD_SESSION_CLOCK on Level 1.  The host finds the
+        // tutorial's exit at its anchor when it is set; the core activates it
+        // (platform tutorial_exit) before frame
+        // SESSION_CLOCK_TUTORIAL_EXIT_FRAME.
+        bool tutorial_off() const {
+            return (s.world_options_ & WORLD_SESSION_CLOCK) != 0 && s.level_ == SESSION_CLOCK_TUTORIAL_LEVEL;
         }
         uint64_t probe_two_bodies() const { return s.probe_two_bodies_; }
         uint64_t revived_local() const { return s.revived_local_; }

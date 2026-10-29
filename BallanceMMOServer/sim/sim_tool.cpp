@@ -505,6 +505,12 @@ namespace {
         bool globals_trace = false;
         bool world_options_given = false;
         uint32_t world_options = 0;
+        // Step RK3: --tutorial-exit-frame N (a measurement switch, with
+        // --world-options SESSION_CLOCK on --level 1): the frame before which
+        // the world activates the tutorial's exit; default the shared
+        // constant every session world uses (game/tutorial_exit.hpp).
+        int tutorial_exit_frame = bmmo::game::kTutorialExitFrame;
+        bool tutorial_exit_frame_given = false;
         bool placement_given = false;   // --placement was on the command line (checked against bit 0)
     };
 
@@ -726,6 +732,7 @@ namespace {
             else if (name == "TRAFO_INPUTS") out |= bmmo::session::WORLD_TRAFO_INPUTS;
             else if (name == "PROXIMITY_UNION") out |= bmmo::session::WORLD_PROXIMITY_UNION;   // step G2
             else if (name == "PLAYER_MECHANISMS") out |= bmmo::session::WORLD_PLAYER_MECHANISMS;   // step Q7
+            else if (name == "SESSION_CLOCK") out |= bmmo::session::WORLD_SESSION_CLOCK;   // step RK3
             else return false;
             if (stop == std::string::npos) break;
             start = stop + 1;
@@ -775,6 +782,14 @@ namespace {
         else if (arg == "--world-options") {
             if (!(v = next()) || !parse_world_options_value(v, out.world_options)) return false;
             out.world_options_given = true;
+        }
+        else if (arg == "--tutorial-exit-frame") {   // step RK3
+            if (!(v = next())) return false;
+            char* end = nullptr;
+            const long frame = std::strtol(v, &end, 10);
+            if (!end || *end || frame < 1 || frame > 100000) return false;
+            out.tutorial_exit_frame = static_cast<int>(frame);
+            out.tutorial_exit_frame_given = true;
         }
         else return false;
         return true;
@@ -2147,6 +2162,9 @@ namespace {
         options.proximity_union = (args.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;   // step G2
         // Step Q7: the per-player units under the union (the drop scene, V7).
         options.mechanism_slots = options.proximity_union ? static_cast<uint8_t>(args.mechanism_slots) : 0;
+        // Step RK3: the Level 1 tutorial's exit (physics_world::tick).
+        options.session_clock = (args.world_options & bmmo::session::WORLD_SESSION_CLOCK) != 0;
+        options.tutorial_exit_frame = args.tutorial_exit_frame;
         options.pin_checkpoint_deactivation = args.n2_pin;   // step B2SW: --n2-pin off is the A/B
         options.split_sector_cell = args.n2_cell;            // step B2SX: --n2-cell off is the A/B
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
@@ -5620,11 +5638,17 @@ namespace {
         // copies of every per-player unit, bound per tick by join order.
         options.mechanism_slots = options.proximity_union && (header.world_options & bmmo::session::WORLD_PLAYER_MECHANISMS)
             ? header.mechanism_slots : 0;
-        if (header.world_options != 0) std::printf("journal world options %08x%s%s%s%s\n", header.world_options,
+        // Step RK3 (protocol 20): the Level 1 tutorial's exit at frame 10 -
+        // the server's world and every client world take it at the same
+        // frame after their anchor, so a server or a client journal replays
+        // with it.
+        options.session_clock = (header.world_options & bmmo::session::WORLD_SESSION_CLOCK) != 0;
+        if (header.world_options != 0) std::printf("journal world options %08x%s%s%s%s%s\n", header.world_options,
                                                    options.trafo_inputs ? " (trafo inputs)" : "",
                                                    options.placement_clones ? " (placement clones)" : "",
                                                    options.proximity_union ? " (proximity union)" : "",
-                                                   options.mechanism_slots ? " (player mechanisms)" : "");
+                                                   options.mechanism_slots ? " (player mechanisms)" : "",
+                                                   options.session_clock ? " (session clock)" : "");
         if (options.mechanism_slots) std::printf("journal mechanism slots %u\n", static_cast<unsigned>(options.mechanism_slots));
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         auto world = bmmo::sim::physics_world::create(options, error);
@@ -8840,9 +8864,12 @@ namespace {
                   "header)";
         else if (args.world_options_given
                  && (args.world_options & ~(bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS
-                                            | bmmo::session::WORLD_PROXIMITY_UNION | bmmo::session::WORLD_PLAYER_MECHANISMS)))
-            why = "--world-options: only bit 0 (PLACEMENT_CLONES), bit 1 (TRAFO_INPUTS), bit 2 (PROXIMITY_UNION) and bit 4 "
-                  "(PLAYER_MECHANISMS, with --player-mechanisms K) exist; bit 3 is the record-format design's (step K3), not built";
+                                            | bmmo::session::WORLD_PROXIMITY_UNION | bmmo::session::WORLD_SESSION_CLOCK
+                                            | bmmo::session::WORLD_PLAYER_MECHANISMS)))
+            why = "--world-options: only bit 0 (PLACEMENT_CLONES), bit 1 (TRAFO_INPUTS), bit 2 (PROXIMITY_UNION), bit 3 "
+                  "(SESSION_CLOCK, step RK3) and bit 4 (PLAYER_MECHANISMS, with --player-mechanisms K) exist";
+        else if (args.tutorial_exit_frame_given && !(args.world_options & bmmo::session::WORLD_SESSION_CLOCK))
+            why = "--tutorial-exit-frame N goes with --world-options SESSION_CLOCK (the exit runs on --level 1 only)";
         else if (args.mechanism_slots && !(args.probe_census && args.probe_release_check)
                  && !(!args.drop_entity.empty() && (args.world_options & bmmo::session::WORLD_PROXIMITY_UNION)))
             why = "--player-mechanisms K: with --probe-census --release-check (V6), or the drop scene under --world-options "
@@ -9227,9 +9254,11 @@ int main(int argc, char** argv) {
             "            the signature; V1's checks against design 1.1.2; read-only; exit 0 PASS, 3 FAIL)\n"
             "       --drop ... | --savestate-check --drop-sector N ... [--globals-trace]  (step K0: the physics time\n"
             "            factor, delta and gravity after every scene tick, and every change)\n"
-            "       --world-options BITS  (step K0, a physics_world mode: a number or PLACEMENT_CLONES,TRAFO_INPUTS;\n"
-            "            the session world's session::WORLD_* bits; bit 0 = --placement on; TRAFO_INPUTS only with\n"
-            "            --array-reads or --drop without the --trafo-* sets)\n");
+            "       --world-options BITS  (step K0, a physics_world mode: a number or PLACEMENT_CLONES,TRAFO_INPUTS,\n"
+            "            PROXIMITY_UNION,SESSION_CLOCK,PLAYER_MECHANISMS; the session world's session::WORLD_* bits;\n"
+            "            bit 0 = --placement on; TRAFO_INPUTS only with --array-reads or --drop without the --trafo-* sets;\n"
+            "            SESSION_CLOCK: on --level 1 the tutorial's exit before frame 10, step RK3)\n"
+            "       --tutorial-exit-frame N  (step RK3, with --world-options SESSION_CLOCK: the exit before frame N)\n");
         return 2;
     }
     if (const int code = check_scene_switches(args)) return code;   // step S3: before every dispatch

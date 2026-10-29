@@ -636,6 +636,21 @@ namespace bmmo::session {
         // after the rewinds above: a replayed step runs the PreSimulate
         // pass too, and only the live tick may capture.
         if (platform_.arm_own_capture) platform_.arm_own_capture(frame_tick);
+        // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)):
+        // the Level 1 tutorial's exit, right before the world's frame
+        // SESSION_CLOCK_TUTORIAL_EXIT_FRAME after its anchor - live only,
+        // once per anchor (a replay never runs Gameplay_Tutorial, and the
+        // records carry the factor each live step used, C3).
+        if (s.tutorial_exit_pending_ && tutorial_exit_due(s.world_frames_)) {
+            s.tutorial_exit_pending_ = false;
+            std::string exit_error;
+            if (platform_.tutorial_exit(frame_tick, exit_error))
+                logf("the Level 1 tutorial's exit activated before frame %d (tick %u)", SESSION_CLOCK_TUTORIAL_EXIT_FRAME,
+                     frame_tick);
+            else
+                logf("the Level 1 tutorial's exit could not be activated before frame %d (tick %u): %s - the tutorial "
+                     "freezes this world at its own moments", SESSION_CLOCK_TUTORIAL_EXIT_FRAME, frame_tick, exit_error.c_str());
+        }
     }
 
     // Design 1.3 post_step: the world has stepped T.
@@ -659,6 +674,8 @@ namespace bmmo::session {
         }
         if (!stepped) return false;
         s.frames_since_anchor_ = frame_.f;
+        if (s.world_frames_ >= 0) ++s.world_frames_;   // step RK3: the world stepped once more since its anchor
+
         // An activation of Gameplay_SectorManager this frame's scripts asked
         // for (Init Ingame's Execute Script at the level start, Event_handler):
         // pending as next-frame flags now, consumed by the next frame.  A
@@ -947,6 +964,22 @@ namespace bmmo::session {
         if (config.rollback && !s.rollback_.amend_record(world(), tick)) {
             if (s.amend_failures_++ == 0)
                 logf("amend_record found no history entry for tick %u (the tick was dropped)", tick);
+        }
+        // Step RK3: the live time factor's changes in the first 64 frames
+        // after the anchor (the session-start write in frame 2, the Level 1
+        // tutorial's freeze and its exit), from this tick's record (C3) -
+        // every world's line is comparable with the server world's and
+        // SimTool's --globals-trace.  A log line only: no platform call,
+        // nothing recorded, sent or journalled.
+        if (s.world_frames_ >= 1 && s.world_frames_ <= 64) {
+            if (const bmmo_physics_globals* g = s.rollback_.recorded_globals(tick)) {
+                if (s.globals_logged_ && g->time_factor != s.globals_logged_factor_)
+                    logf("globals: time factor %.6g -> %.6g at tick %u (frame %lld after the anchor)",
+                         static_cast<double>(s.globals_logged_factor_), static_cast<double>(g->time_factor), tick,
+                         static_cast<long long>(s.world_frames_));
+                s.globals_logged_factor_ = g->time_factor;
+                s.globals_logged_ = true;
+            }
         }
         // The host's traces of the frame (step 30a), then the window: line
         // this tick closes, once assigned (step 31; E10).  The host's

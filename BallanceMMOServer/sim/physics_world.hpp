@@ -38,6 +38,7 @@
 #include <game/script_replay.hpp>
 #include <game/script_state.hpp>
 #include <game/checkpoint_phase.hpp>
+#include <game/tutorial_exit.hpp>
 #include <game/sector_cell_split.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_placement.hpp>
@@ -121,6 +122,15 @@ namespace bmmo::sim {
         // (--placement-fail-at, design 7.2 V12), -1 = none.
         bool placement_clones = false;
         int placement_fail_at = -1;
+        // session::WORLD_SESSION_CLOCK (record-format-gaps-design.md 8 row
+        // K3 = C4, option (c); step RK3): on Level 1 the tutorial's exit
+        // event (game/tutorial_exit.hpp) is activated once, right before the
+        // world's frame tutorial_exit_frame after the anchor (frame 1 = the
+        // first tick).  Off: the tutorial runs as the level has it.
+        // tutorial_exit_frame: SimTool's --tutorial-exit-frame (a
+        // measurement switch); every session world uses the shared constant.
+        bool session_clock = false;
+        int tutorial_exit_frame = bmmo::game::kTutorialExitFrame;
         // N2 (step B2SW, game/sector_deactivate_pin.hpp): the checkpoint's and
         // the level reset's IngameParameter[0][2] Set Cell pinned to 0 at the
         // anchor.  Every world pins; false only for SimTool's A/B
@@ -510,6 +520,17 @@ namespace bmmo::sim {
         bmmo::session::gated_sector_union sectors_;   // the rule every side runs (session/sector_union.hpp)
         bmmo::game::checkpoint_phase_split checkpoint_phase_;   // the chain's own phase cell (game/checkpoint_phase.hpp)
         bmmo::game::sector_cell_split sector_cell_;   // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)
+        // Step RK3: the Level 1 tutorial's exit (resolved at the anchor under
+        // WORLD_SESSION_CLOCK), and whether tick() activated it - once, never
+        // again after a step-state restore (the exit is live-only).
+        bmmo::game::tutorial_exit tutorial_exit_;
+        bool tutorial_exit_done_ = false;
+        // The tick index of the world's first step after its anchor (-1:
+        // none yet): the frame count is tick_ - first_step_tick_ + 1, so a
+        // world numbered from a session's start base (set_tick_index) counts
+        // its frames from its anchor as every client does (step RK3's
+        // review: tick_ itself is the session's tick on the server).
+        int64_t first_step_tick_ = -1;
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;
         uint64_t join_orders_taken_ = 0;   // step M1: add_player's slot fallbacks (J2 says 0)

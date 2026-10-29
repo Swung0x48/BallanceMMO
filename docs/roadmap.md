@@ -291,6 +291,15 @@ numbers 1-10 are unchanged.
      3-tick budget; late-player design §2.5 "As built (step R12)", §7
      question 1 resolved). Still open: why the trial's server stalled
      (646 / 595 ms between steps), which no reach covers past 120.
+   - **SimTool's re-made live world skips the Level 1 tutorial's freeze**
+     (step RK3, a harness gap, not a client gap): `--savestate-check`'s
+     re-made live world re-runs the straight pass's frames on a
+     Gameplay_Tutorial it never rewinds (the exit already ran), so a round
+     whose t0 is before the freeze (frames 9..15) and whose e is after it
+     fails its premise (L1 `--drop-settle 3 --session-recipe`, seed 2:
+     rounds e = 6 chained and e = 16, named round 9:7 too). Fix: the
+     re-make puts each re-run frame's recorded globals (C3), or the harness
+     rewinds Gameplay_Tutorial with the selection.
    - **Resync T2**: the trafo scripts out of `keep_local`
      (`resync-and-sector-timing-design.md` §8), unless TR3b's deferred H3b
      and a forced resync during a piece life show T3 covers it.
@@ -912,9 +921,13 @@ numbers 1-10 are unchanged.
    change; S1 failed rounds 23/30 -> 0/30 (seed 7), 0/1500 (seeds 1-5 x
    300); the design's "As built
    (step RK1)"); **K3 = the Level 1 tutorial
-   switched off** right after K1 (decision (c): every world activates the
-   tutorial's exit 10 frames after the level start, counted in frames, the
-   delay the main branch uses and the user requires); K2, the ActiveBall
+   switched off** (**built, step RK3**, protocol 20, world option
+   `WORLD_SESSION_CLOCK`: every world activates the tutorial's exit before
+   frame 10 after its anchor; measured: the exit lands in frame 16, so every
+   world is frozen at frames 9..15 - founders and the server at the same
+   ticks, a late joiner alone (its import re-steps its own frozen ticks);
+   whether to close that with a hold of the tutorial's factor writes waits
+   for the user; the design's "As built (step RK3)"); K2, the ActiveBall
    census, after world agreement's G3 / G4 (it must also decide the sector
    manager's `PH[*][4]` read that K0 found, written in play only on
    extra-point rows).
@@ -1235,6 +1248,20 @@ numbers 1-10 are unchanged.
      the 14 replays); (c) R2, H4 on a retail core host (the x86 build is
      CLIENT-BUILD-OK, not run); (d) S1b with `--session-recipe` (the
      re-made live world gets t0's globals since RK1, not measured).
+   - RK3 (record-format K3 = C4, the Level 1 tutorial switched off, quick
+     tier, 2026-10-29; ran: x64, x86, Arch, tests 633/633, GCC 30/30, the
+     wire check rRK1 -> rRK3 on `core_ref_s11` (SessionReady's protocol
+     field only, journals IDENTICAL), SimTool S3 / S4, one retail L1 run and
+     one headless L1 run with a late joiner, both on the first build's
+     server (its frame-numbering bug, fixed after them and checked by
+     replay)): (a) a live run of the fixed server, L1, founders and a late
+     joiner (H3: the joiner's 7-tick lag measured); (b) H2, a client at a
+     chapter spot; (c) H5, the arena recipes with the bit; (d) R1's ESC;
+     (e) a test of `physics_world`'s frame count with a non-zero
+     `set_tick_index` (the message-test target does not link
+     `BallanceMMOSim`; the shared rule `tutorial_exit_due` is unit-tested,
+     the server's count is guarded by the replay log line "exit activated
+     before frame 10 (tick base+9)" of a Level 1 journal with base != 0).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

@@ -1,8 +1,8 @@
 # Record-format gaps: the ActiveBall cell (F13), the physics globals per tick (F14), the tutorial's clock (G-T)
 
 Status: design, revision 2 (after two reviews; §10 lists every finding and
-what became of it). Steps K0 (49e2cc8) and K1 (C3, step RK1) are built
-("As built" notes at the end); K2 and K3 are not. Track C of the post-audit designs. It
+what became of it). Steps K0 (49e2cc8), K1 (C3, step RK1) and K3 (C4 as
+option (c), step RK3) are built ("As built" notes at the end); K2 is not. Track C of the post-audit designs. It
 covers audit items #13 and #14 of the rollback-coverage audit
 (`scratchpad/audit/rollback-coverage-audit.md` §1, §2 F9/F10; the user's order
 in §5 calls them F13/F14), and the gaps found while checking them, reported per
@@ -1095,3 +1095,149 @@ check where the deterministic ones above cover the change): H1 (L1, a
 forced rewind inside the freeze, live); H4 (2 clients, a forced rewind to
 the first record, live - the case exists, measured above); R2 (the retail
 H4); the 16 captures of §7.5 are now `core_ref_s11` (done above).
+
+## As built (step RK3, 2026-10-29): K3 = C4, the Level 1 tutorial switched off
+
+Option (c) of §11 Q1, as the K3 row of §8 says: not §2.4's hold. Protocol
+**20** (the next free number; the header's "12" is nominal), world option
+bit 3 `WORLD_SESSION_CLOCK` (the name §5 reserved; it now means "the
+tutorial switched off"), the server's config `physics.session_clock`,
+default on. No journal version (the header's `world_options` carries the
+bit, §5), no bridge or engine change, no IVP change, no script-record
+change.
+
+- **The shared support** is `game/tutorial_exit.hpp` (new; CK API only):
+  `tutorial_exit::resolve` is the main branch's `edit_Gameplay_Tutorial`
+  find (Gameplay_Tutorial / `Kapitel Aktion` / `Tut continue/exit`, its
+  `Set Physics Globals`, the block linked into that block's input 0 - the
+  exit-key `Key` block, #34198 headless, #34506 retail - and its output 0);
+  `activate` sets that IO active. The level and the frame are CK-free
+  constants in `entity/session.hpp` (`SESSION_CLOCK_TUTORIAL_LEVEL = 1`,
+  `SESSION_CLOCK_TUTORIAL_EXIT_FRAME = 10`).
+- **Who decides.** In a client world the core: `tutorial_off()` (the bit
+  and level 1), `world_frames_` (world steps since the anchor; unlike
+  `frames_since_anchor_` a re-assign does not reset it, a new anchor does),
+  and in `pre_step`, last, once per anchor and never in a replay, the
+  platform's new optional `tutorial_exit(tick, error)` right before frame 10
+  (the tick is base + 9). Both hosts fill it (headless `session_client.cpp`,
+  retail `core_host.cpp`, its exit IO a file-scope static) and resolve at
+  their anchor when `tutorial_off()`. The server's world decides it in
+  `physics_world::tick` from `world_options::session_clock` (session runner
+  from the bit; SimTool from `--world-options SESSION_CLOCK` and from a
+  replayed header). The retail main branch's own exit on a countdown restart
+  (`OnStartLevel`'s 10-frame timer, `BallanceMMOClient.cpp`) now stays out
+  of a core session that switches the tutorial off
+  (`core_host.hpp` `core_tutorial_owned()`); with `session core off` it is
+  as before.
+- **Frame numbering, found by the live run.** The first build counted the
+  server world's frames from `tick_`, which the session runner numbers from
+  the start base (`set_tick_index`): with base 8 the server activated the
+  exit before frame 2, where it has no effect (below), and its world stayed
+  frozen until the 25 s timer while every client unfroze - founders'
+  mechanisms 0.05 m apart at the unfreeze tick 42 (base 27) and 1 m by 52 in
+  the headless run. `physics_world` now counts from its first step
+  (`first_step_tick_`), and the timing rule is stated once,
+  `entity/session.hpp` `tutorial_exit_due(frames_stepped, exit_frame)`,
+  which the core (`world_frames_`) and `physics_world` (`tick_ -
+  first_step_tick_`) both call (the review's should-fix; a unit test of the
+  rule, `SessionClientCoreTutorial.ExitDueRule`; a unit test of
+  `physics_world`'s count with a non-zero `set_tick_index` cannot be built
+  by the test target, which does not link `BallanceMMOSim` - its guard is
+  the replay log line below). Replaying that run's server journal with the fixed
+  binary (`--write-journal`) and comparing the three founders' live
+  journals with it: every mechanism exact through the freeze and the
+  unfreeze; the first divergence is a mirror ball at 268 (0.060 m), the
+  queued snapshots-off residual.
+- **The trace** (new, a log line only): the core logs the live time
+  factor's changes in the first 64 frames after the anchor from each
+  tick's record (C3), "globals: time factor a -> b at tick T (frame F after
+  the anchor)"; no platform call, nothing sent or journalled.
+
+**Measured: the exit does not make the tutorial freeze-free.** §11's "so
+the tutorial never freezes any world" does not hold. SimTool S3 (`--level 1
+--drop P_Ball_Wood_MF 0 --globals-trace`, `BMMO_TRACE_TIMEFACTOR=1`, with
+`--tutorial-exit-frame N`, a measurement switch): the tutorial writes 0 in
+frame 9 (tick 8) in every case; the exit activated before frame 5 or 9 has
+no effect (frozen until the 25 s timer, tick 1664, as with the bit clear);
+activated before frame 10, 11, 13, 15 or 16 the exit path writes 2.0 in
+frame 16 (tick 15) every time, activated before frame 20 in frame 20 itself
+(tick 19); Gameplay_Tutorial is no longer an active root afterwards (no
+chapter freeze can follow; 1800 ticks, no further write). So an activation
+from frame 10 on is kept until frame 16, the first frame whose behaviour
+pass takes it, and the 2.0 cannot come earlier through this IO: **every world is frozen for 7 ticks, frames
+9..15 after its anchor**. The same in the retail world (two copies, L1,
+base 8: 0 at tick 16, the exit before tick 17, 2.0 at tick 23 on both) and
+the headless client (base 27: 0 at 35, 2.0 at 42). What follows:
+
+- **Founding members and the server:** the same session ticks everywhere
+  (all count from the same base), so no divergence (the replay above).
+  C3 replays a window across the freeze exactly (S4 below).
+- **A rewind while the live clock is frozen** (the live tick in
+  base+8..base+14) takes the frozen path (§6: unchanged): history dropped,
+  a resync asked for. None happened in either run (no rewind in that
+  window), but a player holding a key through the "Go!" can cause one.
+- **A late joiner** freezes its own world at its frames 9..15, while the
+  server's runs: in the headless run client 3 (base 893) logs 0 at 901 and
+  2.0 at 908, and its import's re-step (892 -> 921) replays its own records
+  of 901..907 at factor 0, so its world stays 7 ticks of physics behind the
+  server's from then on. The size of that divergence was not measured: that
+  run's server had the frame-numbering bug above, so the joiner imported a
+  frozen world. **This is the decision handed to the user** (the step's
+  report): accept it; or add to (c) a hold of the tutorial's factor writes
+  (§2.4's (a), or only the frame-9 0 write), so no world ever freezes; both
+  depart from nothing built here. The review named one more, not
+  investigated: stop Gameplay_Tutorial before its Init writes the frame-9
+  0, instead of the exit IO (Init Ingame already writes 2.0 in frame 2); it
+  departs from the main branch's way and from the user's "10 frames are
+  necessary", and nothing is measured for it.
+
+**Checks (quick tier).** `BallanceMMOMessageTests` 633/633, 634/634 after
+the review's fix-up (U7 as
+`SessionStartMsg.SessionClockBitRoundTrips` and
+`SessionJournal.SessionClockInTheHeader`; the core's decision as
+`SessionClientCoreTutorial.TheExitBeforeFrameTenOnLevelOneUnderTheBit`:
+once at base + 9 on L1 under the bit, not without it, not on L13, not
+without the op, once in the world's 10th frame with a re-assign at frame
+5, again after a new anchor; the rule as `ExitDueRule`); GCC
+30/30; x64 BUILD-OK, x86 CLIENT-BUILD-OK, Arch ARCH-BUILD-OK. Wire check
+rRK1 -> rRK3 on `core_ref_s11` (`--accept-protocol 18`): every send equal
+but SessionReady's protocol field (19 -> 20) in all 12 clients, 12/12
+journals IDENTICAL, every replay to its end. S3 as above. S4 (S1's command
+with the bit, seed 7): 30/30, no globals write (every round after the
+freeze). Across the freeze (`--drop-settle 3 --ticks 30 --rounds 40
+--max-depth 12 --session-recipe`): seed 1 40/40 (C3 replays 18, 8 of them
+from before the frame-2 write), seed 2 38/40; the two failures are the
+harness's re-made live world (round premise at 6 and 16: SimTool re-runs the
+straight pass's frames on a Gameplay_Tutorial it does not rewind, so the
+re-made world skips the freeze; as named rounds the e = 6 one passes, the
+e = 16 one fails the same way; no client re-makes a live world); the
+bit-clear control fails 40/40 on the frozen path. Retail, two copies, L1,
+snapshots off (`.local-tools/work/RK3/rk3_retail.py`): both anchors found
+the exit, both activated it before frame 10, `frozen=0`, `resyncs=0`,
+`globals=0/0/0/0/0`; the server journal replayed 1763/1763 (with the bug
+above, the old binary). Headless, L1, 4 clients, client 3 joining at 700,
+150 ms, snapshots off (`maps/arena-test/rk3_h3`): every replay rc 0, as
+analysed above.
+
+**What the live runs did and did not exercise.** Both ran on the first
+build's server (the exit before frame 2): the retail run shows the retail
+host path and the retail timing (0 in frame 9, 2.0 in frame 16, as the
+headless client and the fixed server world), not retail-vs-server
+agreement; the fixed server is checked only by the replay above, and the
+Arch binary is rebuilt with it, so the next live L1 run is its first live
+exercise. The regression guard for the frame numbering: `--replay-session`
+of any L1 journal whose start base is not 0 must log "exit activated before
+frame 10 (tick base+9)" (SimTool's own scenes number from 0 and cannot show
+it). The two runs' server journals replay 1763/1763 and 3804/3804 only with
+the pre-fix binary; with the fix they diverge at the unfreeze tick by
+construction. The S4 premise failures are a SimTool harness gap (queued in
+roadmap §4 item 2 with B2SW/B2SX's harness residuals), not a client gap.
+
+**Dropped:** §4.4's legacy retail half (the legacy path is refused since
+B9DX). **Deferred to the final verification:** H2 (a client beamed to a
+chapter spot: covered by the measurement that the exit deactivates
+Gameplay_Tutorial, not run live), H3 with the fixed server (the late
+joiner's divergence, measured), H5 (the arena recipes with the bit: the
+wire check covers the bit-clear path; the bit is a no-op off L1, not run),
+R1's ESC during a chapter (no chapter runs), and a live run of the fixed
+server.

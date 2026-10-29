@@ -287,6 +287,8 @@ namespace bmmo::sim {
             // Step Q7 (world-agreement-gaps-design.md §2.10): the units copied
             // K times at the anchor, under the union only.
             options.mechanism_slots = options.proximity_union ? s->mechanism_slots : 0;
+            // Step RK3: the Level 1 tutorial's exit at frame 10 (physics_world::tick).
+            options.session_clock = (world_option_bits & bmmo::session::WORLD_SESSION_CLOCK) != 0;
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };

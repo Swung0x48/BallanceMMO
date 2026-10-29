@@ -64,6 +64,7 @@
 #include <game/sector_placement.hpp>
 #include <game/session_host_support.hpp>
 #include <game/trafo_sets.hpp>
+#include <game/tutorial_exit.hpp>
 #include <session/bridge_recipe.hpp>
 #include <session/client_core.hpp>
 #include <session/spawn_impulse.hpp>
@@ -81,7 +82,12 @@ namespace {
     // keeps the cell it polls).  File scope: BallanceMMOClient keeps its
     // layout.
     bmmo::game::sector_cell_split core_chain_cell;
+    // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)): the
+    // Level 1 tutorial's exit event, found at the core session's anchor and
+    // activated by the core before frame 10 (platform tutorial_exit).
+    bmmo::game::tutorial_exit core_tutorial_exit;
 }
+
 
 // Host logic written once (step HU1, docs/roadmap.md section 2): this host
 // calls the shared placement helper (game/sector_placement.hpp
@@ -1164,6 +1170,12 @@ bool bmmo::session::retail::core_enabled() {
     return core_on.load();
 }
 
+// Step RK3: a core session past its anchor that switches this level's
+// tutorial off (record-format-gaps-design.md 8 row K3 = C4).
+bool bmmo::session::retail::core_tutorial_owned() {
+    return core_session_running() && host.core->tutorial_off();
+}
+
 bmmo::game::proximity_countdown_state& bmmo::session::retail::level_proximities() {
     return level_proximity_state;
 }
@@ -1780,6 +1792,19 @@ void BallanceMMOClient::core_host_anchor() {
             logger_->Error("Physics session: the checkpoint chain's sector cell was NOT split (%s): an own crossing in "
                            "the frame of a pass of another sector makes the manager activate the crossed one here",
                            trouble.c_str());
+    }
+    // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)): the
+    // Level 1 tutorial's exit event, found now; the core activates it before
+    // frame 10 (platform tutorial_exit).
+    core_tutorial_exit.clear();
+    if (core.tutorial_off()) {
+        const std::string trouble = core_tutorial_exit.resolve(m_bml->GetCKContext());
+        if (trouble.empty())
+            logger_->Info("Physics session: the Level 1 tutorial is switched off before frame %d (world option session "
+                          "clock): %s", bmmo::game::kTutorialExitFrame, core_tutorial_exit.where.c_str());
+        else
+            logger_->Error("Physics session: the Level 1 tutorial's exit was NOT found (%s): the tutorial freezes this "
+                           "world at its own moments", trouble.c_str());
     }
     {
         const int restored = level_sequencers_.restore(m_bml->GetCKContext());
@@ -3096,6 +3121,11 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // while the union is active (the world option and this op).
     p.place_probes = [this](const std::vector<bs::probe_candidate>& candidates) {
         proximity_host.union_.place(m_bml->GetCKContext(), candidates);
+    };
+    // Step RK3: the Level 1 tutorial's exit, before frame 10 (the core
+    // decides when; game/tutorial_exit.hpp activates).
+    p.tutorial_exit = [this](uint32_t, std::string& error) {
+        return core_tutorial_exit.activate(m_bml->GetCKContext(), error);
     };
     p.hooks.window = [this](const std::string& text) { logger_->Info("%s", text.c_str()); };
     p.hooks.status = [this](const std::string& text) { logger_->Info("%s", text.c_str()); };

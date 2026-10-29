@@ -628,7 +628,10 @@ void BallanceMMOClient::OnStartLevel()
             add_lives(maps_it->second.initial_life_count);
         }
 
-        if (current_map_.level == 1 && countdown_restart_ && connected()) {
+        // Step RK3: a core session that switches the tutorial off activates
+        // its exit at its own frame (core_host.hpp core_tutorial_owned).
+        if (current_map_.level == 1 && countdown_restart_ && connected()
+                && !bmmo::session::retail::core_tutorial_owned()) {
             auto* tutorial_exit = static_cast<CKBehaviorIO*>(m_bml->GetCKContext()->GetObject(tutorial_exit_event_));
             tutorial_exit->Activate();
         }

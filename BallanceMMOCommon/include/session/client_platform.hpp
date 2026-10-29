@@ -694,6 +694,17 @@ namespace bmmo::session {
         // that every session, the union's or not, runs at construction.
         std::function<void(const std::vector<bmmo::session::probe_candidate>& candidates)> place_probes;
 
+        // ---- the Level 1 tutorial switched off (record-format-gaps-design.md
+        // 8 row K3 = C4, option (c); step RK3; game/tutorial_exit.hpp) ----
+        // Right before the live frame SESSION_CLOCK_TUTORIAL_EXIT_FRAME after
+        // the anchor of a Level 1 session under WORLD_SESSION_CLOCK, once per
+        // anchor, never in a replay: activate the tutorial's exit event the
+        // host found at its anchor.  `tick` is the frame's tick.  False with
+        // `error`: the event was not found or is gone (logged; the tutorial
+        // then freezes this world at its own moments).  Both hosts fill it;
+        // a host without it is logged at the session's start under the bit.
+        std::function<bool(uint32_t tick, std::string& error)> tutorial_exit;
+
         // ---- the airship zone (step BALA; physics_state.hpp airship_zone_set) ----
         // On (at the anchor, with the own ball's nocoll group) or off (at the
         // end): the zone's pair rule and PSI hook in this world; `box` gets

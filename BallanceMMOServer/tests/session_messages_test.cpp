@@ -141,6 +141,21 @@ TEST(SessionStartMsg, MechanismSlots) {
     EXPECT_EQ(0u, round_trip(off).mechanism_slots) << "without the bit a 0 parses";
 }
 
+// U7 (record-format-gaps-design.md 7.1; step RK3, protocol 20): the world
+// option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
+TEST(SessionStartMsg, SessionClockBitRoundTrips) {
+    EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
+    EXPECT_EQ(20u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    bmmo::session_start_msg msg{};
+    msg.mode = bmmo::room::mode::Physics;
+    msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
+    bmmo::session::player_entry p{};
+    p.id = 5; p.join_order = 0; p.life = 1;
+    msg.players = {p};
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES, parsed.world_options);
+}
+
 TEST(SessionStartMsg, DeserializeRejectsEveryTruncation) {
     bmmo::session_start_msg msg{};
     msg.room = 1; msg.session = 1;

@@ -1232,6 +1232,18 @@ TEST(SessionJournal, V6AnchorPlacement) {
     EXPECT_EQ(WORLD_PLACEMENT_CLONES, out.header.world_options);
 }
 
+// U7 (record-format-gaps-design.md 7.1, 5; step RK3): WORLD_SESSION_CLOCK
+// rides in the header's world options, no journal version of its own.
+TEST(SessionJournal, SessionClockInTheHeader) {
+    journal_header h = make_header();
+    h.world_options = WORLD_SESSION_CLOCK | WORLD_PROXIMITY_UNION;
+    std::string payload;
+    journal_detail::write_header_payload(payload, h);
+    journal_header back;
+    ASSERT_TRUE(journal_detail::read_header_payload(payload, back));
+    EXPECT_EQ(WORLD_SESSION_CLOCK | WORLD_PROXIMITY_UNION, back.world_options);
+}
+
 // Journal v8 (protocol 19, world agreement step Q7): the session's mechanism
 // slot count trails the placement signature; a v7 header reads as 0.
 TEST(SessionJournal, V8MechanismSlots) {
