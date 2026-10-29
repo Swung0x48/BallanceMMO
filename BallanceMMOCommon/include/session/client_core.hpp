@@ -962,6 +962,11 @@ namespace bmmo::session {
         // The LOCAL checkpoint cadence in ticks (headless --checkpoint-ticks,
         // retail BMMO_JOURNAL_CHECKPOINT_TICKS); 0 = core::kJournalCheckpointTicks.
         uint32_t journal_checkpoint_ticks = 0;
+        // Diagnostic (headless --final-checkpoints, step D0): also journal
+        // each checkpoint tick's FINAL state as its rollback record leaves
+        // the history (JOURNAL_CHECKPOINT_FINAL).  Off: no such record, and
+        // nothing else changes either way.
+        bool journal_final_checkpoints = false;
         // The level to load when SessionStart names none (headless --level).
         int level = 1;
         // The rollback engine's switches, applied by begin (E3).  The defaults
@@ -1216,6 +1221,10 @@ namespace bmmo::session {
         void release_hold(const char* why);
         // SessionEnd: drop the mirrors and go idle.
         void end(const std::string& reason);
+        // Step D0 (the --final-checkpoints diagnostic): before a journal
+        // closes, the records still held are journalled as FINAL rows too
+        // (rollback_engine::retire_remaining).  Nothing without the switch.
+        void retire_final_checkpoints(const char* why);
 
         // ---- messages (E3: decoded by the host; on_message is not built) ----
         void on_session_assign(const bmmo::session_assign_msg& msg);

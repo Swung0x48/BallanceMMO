@@ -271,4 +271,19 @@ namespace bmmo::session::core {
         journal_checkpoint_pending_ = false;
     }
 
+    // Step D0: not part of the LOCAL bookkeeping above (cadence, rate limit),
+    // which stays the live rows' own: a journal written with the switch has
+    // every record the one written without it has, plus these.
+    bool client_journal::final_checkpoint(uint32_t tick, const std::vector<bmmo::session::body_state>& bodies,
+                                          bool confirmed) {
+        if (!journalling()) return false;
+        const uint32_t cadence = this->cadence();
+        if (cadence == 0 || tick % cadence != 0) return false;
+        journal_.checkpoint(tick, static_cast<uint8_t>(bmmo::session::JOURNAL_CHECKPOINT_LOCAL
+                                                       | bmmo::session::JOURNAL_CHECKPOINT_FINAL
+                                                       | (confirmed ? 0 : bmmo::session::JOURNAL_CHECKPOINT_UNCONFIRMED)),
+                            bodies);
+        return true;
+    }
+
 }

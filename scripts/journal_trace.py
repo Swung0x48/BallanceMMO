@@ -87,6 +87,8 @@ CHECKPOINT_FULL = 1
 CHECKPOINT_LOCAL = 2
 CHECKPOINT_RECEIVED = 4
 CHECKPOINT_RESYNC = 8   # version 4: the rows of a resync state
+CHECKPOINT_FINAL = 16    # client, diagnostic (headless --final-checkpoints, step D0): the final state, with LOCAL
+CHECKPOINT_UNCONFIRMED = 32   # with FINAL only: a remote ball was stepped with a frame not relayed for the tick
 RESYNC_OUTCOMES = {0: "applied", 1: "refused_scripts", 2: "timed_out"}
 
 EVENT_TYPES = {0: "Physicalize", 1: "Unphysicalize", 2: "Sector", 3: "Finish", 4: "BodyRevived", 5: "Trafo"}
@@ -1181,7 +1183,8 @@ def _fmt_tick(record):
 
 def _checkpoint_flags(flags):
     return _flag_names(flags, ((CHECKPOINT_FULL, "FULL"), (CHECKPOINT_LOCAL, "LOCAL"),
-                               (CHECKPOINT_RECEIVED, "RECEIVED"), (CHECKPOINT_RESYNC, "RESYNC")))
+                               (CHECKPOINT_RECEIVED, "RECEIVED"), (CHECKPOINT_RESYNC, "RESYNC"),
+                               (CHECKPOINT_FINAL, "FINAL"), (CHECKPOINT_UNCONFIRMED, "UNCONFIRMED")))
 
 
 def _fmt_checkpoint(record):

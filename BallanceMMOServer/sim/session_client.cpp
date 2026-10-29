@@ -115,6 +115,9 @@ namespace {
         // with the server, it has to be dense enough to bisect - pass 2, the
         // same as the server's journal_checkpoint_ticks.
         uint32_t checkpoint_ticks = 660;
+        // --final-checkpoints (step D0): also journal each checkpoint tick's
+        // FINAL state, as its rollback record leaves the history (diagnostic).
+        bool final_checkpoints = false;
         // --force-rollback <every>:<depth>: rewind `depth` ticks every `every`
         // ticks, with no network reason to.  Isolates how faithful a replay is
         // from everything else: in a solo session the world is a pure function
@@ -551,6 +554,7 @@ namespace {
                 if (!(v = next())) return false;
                 out.checkpoint_ticks = static_cast<uint32_t>(std::max(1, std::atoi(v)));
             }
+            else if (arg == "--final-checkpoints") out.final_checkpoints = true;
             else if (arg == "--join-first") out.join_first = true;
             else if (arg == "--room") { if (!(v = next())) return false; out.room = static_cast<uint32_t>(std::atoi(v)); }
             else if (arg == "--host") out.host = true;
@@ -1005,6 +1009,7 @@ namespace {
             }
             // A session still running when the client goes down says so in its
             // box rather than just stopping mid-file.
+            core_.retire_final_checkpoints(stopped);
             core_.journal().close(stopped);
             report();
             finish_inbound();
@@ -1942,6 +1947,7 @@ namespace {
         bmmo::session::core_config make_core_config() const {
             bmmo::session::core_config c;
             c.journal_checkpoint_ticks = args_.checkpoint_ticks;
+            c.journal_final_checkpoints = args_.final_checkpoints;
             c.level = args_.level;
             c.verbose = args_.trace;
             c.restore_recheck = args_.restore_recheck;

@@ -44,6 +44,8 @@ import journal_trace as jt
 KIND_BALL = 0
 LOCAL = 2       # JOURNAL_CHECKPOINT_LOCAL
 RECEIVED = 4    # JOURNAL_CHECKPOINT_RECEIVED
+FINAL = 16      # JOURNAL_CHECKPOINT_FINAL (step D0, always with LOCAL)
+UNCONFIRMED = 32   # JOURNAL_CHECKPOINT_UNCONFIRMED (with FINAL only)
 
 
 def key_of(body):
@@ -72,7 +74,7 @@ def excluded(key, exclude):
 TRAFO_PLAYER = re.compile(r'_Trafo\d+$')
 
 
-def worlds(journal, want_local, prefix='', ownerless_by_name=False, exclude=(), trafo_by_type=False):
+def worlds(journal, want_local, prefix='', ownerless_by_name=False, exclude=(), trafo_by_type=False, final=False):
     """tick -> {key: position}, from the checkpoints of the kind asked for.
 
     `prefix` keeps only map bodies whose name starts with it (and drops the
@@ -98,6 +100,12 @@ def worlds(journal, want_local, prefix='', ownerless_by_name=False, exclude=(), 
             continue
         is_local = bool(cp['flags'] & LOCAL)
         if is_local != want_local:
+            continue
+        # Step D0: a FINAL row (headless --final-checkpoints) carries LOCAL
+        # too; it is read only when asked for (final=True), never mixed in,
+        # and one flagged UNCONFIRMED (a remote ball stepped with a frame not
+        # relayed for the tick: not the tick's confirmed state) is not read.
+        if bool(cp['flags'] & FINAL) != final or cp['flags'] & UNCONFIRMED:
             continue
         row = out.setdefault(cp['tick'], {})
         for b in cp['bodies']:
@@ -155,6 +163,9 @@ def main():
                          "use P_ to look at the shared world on its own")
     ap.add_argument('--from', dest='tick_from', type=int, default=0,
                     help='compare only the ticks from this one on')
+    ap.add_argument('--final', action='store_true',
+                    help="the clients' FINAL rows (a journal written with the headless --final-checkpoints, "
+                         "step D0: each tick's state once no rewind reaches it) instead of the live LOCAL rows")
     ap.add_argument('--exclude', action='append', default=[], metavar='PREFIX',
                     help='drop the bodies whose name starts with PREFIX (repeatable), e.g. PE_Balloon')
     args = ap.parse_args()
@@ -169,7 +180,8 @@ def main():
     for pattern in args.clients:
         paths.extend(sorted(pathlib.Path(p) for p in glob.glob(pattern)) or [pathlib.Path(pattern)])
     for path in paths:
-        client = worlds(jt.read_journal(str(path)), want_local=True, prefix=args.prefix, exclude=args.exclude)
+        client = worlds(jt.read_journal(str(path)), want_local=True, prefix=args.prefix, exclude=args.exclude,
+                        final=args.final)
         first, shared, missing = compare(server, client, args.tolerance, args.tick_from)
         print('%s: %d local checkpoints, %d ticks comparable' % (path.name, len(client), shared))
         if not shared:

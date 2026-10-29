@@ -1273,6 +1273,98 @@ TEST(RollbackEngine, HistoryIsBounded) {
     EXPECT_EQ(engine.stats().unmatched, 1u);
 }
 
+// Step D0: each record leaving the bounded history is shown to the retire
+// observer once, oldest first, with the tracked set and the bodies it holds;
+// no observer, no call (and nothing else differs).
+TEST(RollbackEngine, TheRetireObserverSeesEachRecordLeavingTheHistory) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    bmmo::session::rollback_thresholds thresholds;
+    thresholds.history_ticks = 5;
+    rollback_engine engine(thresholds);
+    std::vector<uint32_t> retired;
+    std::map<uint32_t, double> retired_own_x;
+    engine.set_retire_observer([&](uint32_t tick, const rollback_tracked& tracked,
+                                   const std::map<std::string, bmmo_physics_body_state>& bodies,
+                                   const std::map<std::string, input_frame>&) {
+        retired.push_back(tick);
+        EXPECT_EQ(tracked.own_entity, "Own");
+        ASSERT_EQ(bodies.count("Own"), 1u);
+        ASSERT_EQ(bodies.count("Remote"), 1u);
+        retired_own_x[tick] = bodies.at("Own").position[0];
+    });
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    tracked.remote_entities = {"Remote"};
+    auto w = world.adapter();
+    std::map<uint32_t, double> live_own_x;
+    for (uint32_t tick = 1; tick <= 12; ++tick) {
+        world.bodies["Own"].position[0] += 0.25;   // the tick's motion, whatever made it
+        w.step();
+        engine.record(w, tick, tracked, {});
+        live_own_x[tick] = world.bodies["Own"].position[0];
+    }
+    EXPECT_EQ(engine.history_size(), 5u);
+    ASSERT_EQ(retired, (std::vector<uint32_t>{1, 2, 3, 4, 5, 6, 7}));
+    for (const auto& [tick, x]: retired_own_x) EXPECT_EQ(x, live_own_x[tick]) << "tick " << tick;
+    engine.set_retire_observer(nullptr);
+    w.step();
+    engine.record(w, 13, tracked, {});
+    EXPECT_EQ(retired.size(), 7u);
+    EXPECT_EQ(engine.history_size(), 5u);
+}
+
+// Step D0 gate: a record a rewind re-stepped is retired with the REPLAYED
+// state and the frames it was replayed with, not the first-recorded ones;
+// retire_remaining shows every record still held once (the session's end),
+// leaves the history as it is, and shows nothing a second time.
+TEST(RollbackEngine, ARetiredRecordCarriesTheReplayedStateAndFrames) {
+    fake_world world;
+    world.bodies["Own"];
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Own"] = {};
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    std::map<uint32_t, input_frame> own_inputs;
+    run_ticks(world, engine, 6, 100, own_inputs);   // first recorded: the key never held
+    input_frame held{};
+    held.keys = 1;
+    held.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+    ASSERT_TRUE(engine.amend_recorded_input("Own", 4, held));
+    auto w = world.adapter();
+    const auto own_input_at = [&](const std::string& entity, uint32_t tick, input_frame& out) {
+        if (entity != "Own") return false;
+        const auto it = own_inputs.find(tick);
+        if (it == own_inputs.end()) return false;
+        out = it->second;
+        return true;
+    };
+    ASSERT_TRUE(engine.rewind_to(w, 3, 6, own_input_at, "own input substituted at tick 4"));
+    std::vector<uint32_t> retired;
+    std::map<uint32_t, float> own_linear;
+    std::map<uint32_t, uint8_t> own_keys;
+    engine.set_retire_observer([&](uint32_t tick, const rollback_tracked&,
+                                   const std::map<std::string, bmmo_physics_body_state>& bodies,
+                                   const std::map<std::string, input_frame>& inputs) {
+        retired.push_back(tick);
+        own_linear[tick] = bodies.at("Own").linear[0];
+        if (const auto it = inputs.find("Own"); it != inputs.end()) own_keys[tick] = it->second.keys;
+        EXPECT_EQ(inputs.count("Remote"), 1u) << "tick " << tick;
+    });
+    EXPECT_EQ(engine.retire_remaining(), 6u);
+    ASSERT_EQ(retired, (std::vector<uint32_t>{1, 2, 3, 4, 5, 6}));
+    EXPECT_EQ(own_keys[3], 0u);
+    EXPECT_EQ(own_keys[4], 1u);   // the amended frame the replay stepped tick 4 with
+    EXPECT_EQ(own_keys[5], 0u);
+    EXPECT_FLOAT_EQ(own_linear[3], 0.0f);
+    EXPECT_FLOAT_EQ(own_linear[4], 1.0f);   // replayed; first recorded 0
+    EXPECT_FLOAT_EQ(own_linear[6], 1.0f);
+    EXPECT_EQ(engine.history_size(), 6u);
+    EXPECT_EQ(engine.retire_remaining(), 0u);   // the observer is gone
+    EXPECT_EQ(retired.size(), 6u);
+}
+
 // 9.25 rule 4, the trafo case: the ball of the window's first ticks is gone, so
 // nothing restores it (it is skipped, not an excuse to drop the window), and
 // the ball the trafo created never existed at T.  It is parked at the pose it

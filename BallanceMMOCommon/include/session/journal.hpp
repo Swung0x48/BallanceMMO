@@ -140,6 +140,17 @@ namespace bmmo::session {
     constexpr uint8_t JOURNAL_CHECKPOINT_LOCAL = 2;      // client: its own world
     constexpr uint8_t JOURNAL_CHECKPOINT_RECEIVED = 4;   // client: a snapshot as received
     constexpr uint8_t JOURNAL_CHECKPOINT_RESYNC = 8;     // client: the rows of a resync state (version 4)
+    // Client, diagnostic only (headless --final-checkpoints, step D0): the
+    // tick's FINAL state, written as its rollback record leaves the history
+    // (rollback_engine::set_retire_observer), always together with LOCAL so
+    // every reader that skips or keeps LOCAL rows treats it alike.  Absent
+    // from every journal written without the switch.
+    constexpr uint8_t JOURNAL_CHECKPOINT_FINAL = 16;
+    // With FINAL only: a remote ball was stepped at this tick with a frame
+    // that is not the one relayed for the tick (none relayed yet - the
+    // hold-last prediction or a hole's stand-in - or one that differs and
+    // was never replayed), so the row is not the tick's confirmed state.
+    constexpr uint8_t JOURNAL_CHECKPOINT_UNCONFIRMED = 32;
     // RESYNC `outcome`
     constexpr uint8_t JOURNAL_RESYNC_APPLIED = 0;          // applied as tick S and re-stepped
     constexpr uint8_t JOURNAL_RESYNC_REFUSED_SCRIPTS = 1;  // applied, the server's scripts refused (the client's own kept)

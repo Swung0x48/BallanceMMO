@@ -43,12 +43,14 @@ ap.add_argument('--trafo-by-type', action='store_true',
                 help='key a trafo set piece without its player id (two solo sessions: step T3)')
 ap.add_argument('--exclude', action='append', default=[], metavar='PREFIX',
                 help='drop the bodies whose name starts with PREFIX (repeatable), e.g. PE_Balloon')
+ap.add_argument('--final', action='store_true',
+                help='the FINAL rows of journals written with the headless --final-checkpoints (step D0)')
 args = ap.parse_args()
 
 control = fd.worlds(jt.read_journal(args.control), want_local=True, ownerless_by_name=args.by_name,
-                    exclude=args.exclude, trafo_by_type=args.trafo_by_type)
+                    exclude=args.exclude, trafo_by_type=args.trafo_by_type, final=args.final)
 arm = fd.worlds(jt.read_journal(args.arm), want_local=True, ownerless_by_name=args.by_name,
-                exclude=args.exclude, trafo_by_type=args.trafo_by_type)
+                exclude=args.exclude, trafo_by_type=args.trafo_by_type, final=args.final)
 
 
 def pair_balls(row_a, row_b):

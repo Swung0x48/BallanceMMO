@@ -6698,6 +6698,105 @@ in the harness.
   airship latch; client 2 resyncs 1 = the rejoin; client 3's joiner lead,
   the A8 criterion for `lead_adjust` on).
 
+**As built (step D0, 2026-10-29): a client's FINAL rows, the headline's
+measurement.** The stage close-out's dry run (FULL plan §2 D0, §4 C1: the
+headline judges every ball at confirmed checkpoints in the client's final,
+post-rewind state; D0 was to establish whether the journal carries it).
+- **It did not.** A LOCAL checkpoint is written once, at the end of the live
+  frame that steps its tick (`client_core_frame.cpp` `post_step`,
+  `journal_.local_checkpoint`); a rewind's replay re-records the tick in the
+  rollback history (`rollback.hpp` `restore_and_replay`, "a replay re-records
+  the tick") and writes no journal record. So every live row past the relay
+  lag holds the mirrors' predictions (hold-last) and whatever an own ball
+  touched among them; nothing in the journal says which rows a later rewind
+  replaced (`rewind_to` reports no CORRECTION record), and the INPUT records
+  cannot tell either (a relayed frame is journalled whenever it arrives, so
+  "the tick's inputs are all in the journal" holds for every row).
+- **The diagnostic** (off by default; the only change with it off is an unset
+  `std::function`): `rollback_engine::set_retire_observer` is called with each
+  record as it leaves the history (`record`'s `pop_front`). No rewind reaches
+  it any more, so its bodies are the tick's final state. The core installs it
+  when `core_config::journal_final_checkpoints` (headless
+  `--final-checkpoints`) is set and journals the record's bodies at the LOCAL
+  cadence's ticks as a checkpoint with flags `LOCAL | FINAL`
+  (`JOURNAL_CHECKPOINT_FINAL = 16`, `journal.hpp`; `client_journal::final_checkpoint`),
+  a ball keyed by its owner as `local_checkpoint` does (the own entity, or a
+  remote entity looked up in every name a remote carried while the observer
+  ran). Not covered: the records a re-anchor drops (`invalidate_history`: a resync, an assignment).
+  No journal version change (a reader that knows LOCAL skips or keeps the row
+  as LOCAL: SimTool's `--replay-session` skips LOCAL rows in its dictionary
+  and its compare); `scripts/first_divergence.py` reads FINAL rows only with
+  `--final` (`worlds(..., final=)`, also `scripts/worst_bodies.py --final`,
+  `.local-tools/work/WG3/mech_rows.py --final`) and never mixes them into the
+  live rows; `journal_trace.py` prints the flag. The retail host does not set
+  it. Used by replaying a capture (`e0_replay.py --extra=--final-checkpoints`):
+  the replay is the live client's computation (wire check: journals
+  IDENTICAL), so its FINAL rows are the live run's.
+- **Measured on `core_ref_s12`** (`.local-tools/work/D0/final_replay.sh`,
+  `hl_judge.py`): with the switch on, the 8 replays of `swing_snapoff` and
+  `resync_snapoff` send byte-identical traces and write journals identical to
+  the switch-off replays record for record but the FINAL rows. On the FINAL
+  rows (1538-1649 checkpoints a client), against the server's FULL rows, the
+  airship spans left out (BALA): every own ball, every mirror and every body
+  but the airship's (34 per client) bit-equal (position, rotation,
+  velocities, flags), no body-set difference, in both arms on all four
+  clients - client 2 of `resync_snapoff` from its resync's S on (its 1392..1587
+  records were dropped by the resync). The live rows' differences are
+  predictions the later rewinds replaced: the start-window mirrors (0.003-1.1 m
+  from 250), the beam pair at 702 (555 m), the swing at 714-722 (0.84 m,
+  c1-c3), and the own balls' "mid-lane residual" (`resync_snapoff` c3 1156
+  0.083 m, c0 1788 0.005 m: each beside mirrors still on predicted inputs -
+  c3's neighbour 4.35 m away already 0.04-0.42 m off from 1148, c0's two
+  4.01 m away off from the same tick) - 0 on the FINAL rows.
+- **Gate round (the review's two should-fix):** (1) the session's tail:
+  `rollback_engine::retire_remaining` shows every record still held to the
+  observer once, oldest first, and unsets it (the history is left as it is);
+  the core calls it (`session_client_core::retire_final_checkpoints`) before
+  each journal close - `end`, `begin`'s "a new session started", and the
+  headless client's stop - so a session's FINAL rows reach its last tick
+  (each client: "the 128 records still held retired"). (2) "inputs all
+  confirmed" is measured, not assumed: the observer is given the record's
+  `inputs` too, and a row in which a remote ball WITH A BODY at the tick was
+  stepped with a frame that is not the one relayed for that tick (the ring
+  lacks it: hold-last or a hole's stand-in; or it differs and no replay
+  applied it) carries `JOURNAL_CHECKPOINT_UNCONFIRMED = 32` (with FINAL only;
+  the first 16 such rows a session are logged with the entity and the
+  reason). A name with no body at the tick is skipped: its frame drove
+  nothing, and the core deliberately replays nothing for it
+  (`relay_bodiless_`) - counting those flagged the dead players' spans
+  (swing 872-886, 906-922, ...) although their rows were bit-equal. The own
+  ball: a substitution the server notices amends the record and replays it,
+  and a lost notice ends in a resync (`check_held_complete`) whose re-anchor
+  drops the records it covers - but that is judged `kHeldGapTicks` (64)
+  server ticks later and the resync arrives a trip after its request, which
+  can come after a record at the history floor (96) leaves. So a row also
+  carries UNCONFIRMED while a resync is pending or while the completeness
+  watch (`held_gap_watch_`) holds a server tick at or after the row's tick
+  whose `held_total` is ahead of the notices learned. A frame substituted
+  whose notice is lost and not yet counted in any watch entry is still not
+  seen (no relayed datagram of a later server tick has arrived): on an arm
+  with substitutions the HL cross-checks the own rows against the server
+  journal's INPUT records. And "not relayed" has a second cause: the relay
+  ring (`kRelayRing` 128, `input_relay.hpp`) is as long as the history at
+  the reach cap (128), so a record retired at depth 128 still finds its
+  tick's frame only while the relay lag is at least one tick - an
+  UNCONFIRMED row on a near-zero-lag arm may be a ring eviction, not a hole.
+  `first_divergence.py --final` and `hl_judge.py` skip UNCONFIRMED rows
+  (`hl_judge.py --unconfirmed` judges only them); `ghost_state.py` skips
+  FINAL rows. Re-measured on `core_ref_s12` (`d0_final/g3`): the confirmed
+  rows now run to each session's end (swing 3340-3382, covering the respawn
+  at 3351; resync 3352-3416) - own balls, mirrors and bodies all bit-equal,
+  no body-set difference, both arms, all four clients. The UNCONFIRMED rows
+  are the tail's last 10-31 rows of each client (swing c0 none) and
+  `resync_snapoff` c2 1374..1392 (the paused client's predictions just
+  before its resync); among them swing c3's mirror 3290 at 3412-3426 is off
+  by up to 0.056 m - a prediction, rightly not judged. Remaining limits:
+  records a resync drops are not retired (c2 1394..1587); a mirror name
+  reused by another player inside a history length is keyed to the newer
+  owner (a false difference, never a false pass); with the switch on the
+  checkpoint bytes roughly double, so `journal_max_bytes` caps a long run
+  earlier - capture live without the switch and replay with it.
+
 ## 7. Open questions
 
 1. **Retail's resync triggers.** Retail resyncs on `too_far`, `frozen`, 30

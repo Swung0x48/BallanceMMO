@@ -79,7 +79,8 @@ def balls(journal, want_local):
     (LOCAL for a client, FULL for the server)."""
     out = {}
     for cp in journal.checkpoints():
-        if bool(cp['flags'] & jt.CHECKPOINT_LOCAL) != want_local or not cp['bodies']:
+        # Step D0: a FINAL row (headless --final-checkpoints) is not the live world.
+        if bool(cp['flags'] & jt.CHECKPOINT_LOCAL) != want_local or not cp['bodies'] or cp['flags'] & jt.CHECKPOINT_FINAL:
             continue
         row = {b['owner']: tuple(b['position']) for b in cp['bodies'] if b['kind'] == 0 and b['owner']}
         out[cp['tick']] = row   # the last checkpoint of a tick wins (as first_divergence.worlds)

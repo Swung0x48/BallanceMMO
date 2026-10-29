@@ -910,7 +910,36 @@ namespace bmmo::session {
             }
             if (capture_now) note_globals_change(world, state, history_.empty() ? nullptr : &history_.back());
             history_.push_back(std::move(state));
-            while (history_.size() > thresholds_.history_ticks) history_.pop_front();
+            while (history_.size() > thresholds_.history_ticks) {
+                const tick_state& oldest = history_.front();
+                if (retire_observer_) retire_observer_(oldest.tick, oldest.tracked, oldest.bodies, oldest.inputs);
+                history_.pop_front();
+            }
+        }
+
+        // Step D0 (FULL): a diagnostic observer of each record as it leaves
+        // the history.  No rewind reaches it any more (a rewind is anchored
+        // at a record still held; a resync is answered from the history
+        // too), so its bodies are the tick's FINAL state - every replay that
+        // re-stepped the tick re-recorded it - and `inputs` the frames that
+        // state was stepped with (the observer judges whether they were the
+        // confirmed ones).  A record a re-anchor drops (invalidate_history:
+        // a resync, the session's assignment) is not retired; the records
+        // still held when the session ends are retired by retire_remaining.
+        // Unset by default: nothing reads or changes a simulation for it.
+        using retire_observer = std::function<void(uint32_t tick, const rollback_tracked& tracked,
+                                                   const std::map<std::string, bmmo_physics_body_state>& bodies,
+                                                   const std::map<std::string, input_frame>& inputs)>;
+        void set_retire_observer(retire_observer observer) { retire_observer_ = std::move(observer); }
+        // The session's end (step D0 gate): every record still held is shown
+        // to the observer, oldest first, as the newest the client ever had
+        // of its tick; the history itself is left as it is, and the observer
+        // is unset so no record is shown twice.  Returns how many.
+        size_t retire_remaining() {
+            if (!retire_observer_) return 0;
+            for (const tick_state& state: history_) retire_observer_(state.tick, state.tracked, state.bodies, state.inputs);
+            retire_observer_ = nullptr;
+            return history_.size();
         }
 
         // Test support (SimTool --savestate-check with bodies born and
@@ -3182,6 +3211,7 @@ namespace bmmo::session {
 
         rollback_thresholds thresholds_;
         std::deque<tick_state> history_;
+        retire_observer retire_observer_;   // step D0: the final-state diagnostic (unset = none)
         // The births the server moved (move_birth), while a rewind can still
         // be anchored inside their gap.
         struct moved_birth {

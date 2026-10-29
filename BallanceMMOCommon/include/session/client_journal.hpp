@@ -109,6 +109,11 @@ namespace bmmo::session {
             // among them, is a mechanism) and the mechanisms it is running.
             // `own_ball` is the own ball's entity name (empty: none).
             void local_checkpoint(uint32_t tick, const std::string& own_ball);
+            // Step D0: a tick's final state (the record leaving the rollback
+            // history, its bodies already keyed by owner by the core), at the
+            // LOCAL cadence's ticks only; flags LOCAL | FINAL, and UNCONFIRMED
+            // unless `confirmed`.  Whether a row was written.
+            bool final_checkpoint(uint32_t tick, const std::vector<bmmo::session::body_state>& bodies, bool confirmed);
 
             // The records the flow writes itself (INPUT, TICK, RECEIVED
             // checkpoints) go straight to the writer while that flow is still

@@ -198,6 +198,7 @@ namespace bmmo::session {
         }
         // A box of the previous session is closed with its own numbering,
         // before begin_session resets the tick base under it.
+        retire_final_checkpoints("a new session started");
         journal_.close("a new session started");
         config = cfg;
         s.rollback_.set_verbose(config.verbose);
@@ -215,6 +216,98 @@ namespace bmmo::session {
         s.rollback_.set_exact_restore(config.savestate);
         s.rollback_.set_script_log_cap(config.script_diff_logs);
         s.rollback_.set_trace_plan(config.trace_plan);
+        // Step D0 (FULL): the final-state diagnostic.  A ball is keyed by its
+        // owner as local_checkpoint does; a mirror's entity is looked up in
+        // every name a remote has carried while the observer ran (a record
+        // leaves the history up to its length after its tick, when that life
+        // may be over), and an unknown one gets owner 0 (not comparable).
+        // The row is CONFIRMED when every remote ball the record drove (one
+        // with a body at the tick) was driven by the frame relayed for that
+        // very tick (the ring has it
+        // and it is the recorded one); otherwise it carries UNCONFIRMED -
+        // the hold-last prediction, a hole's stand-in, or a relayed frame no
+        // replay applied.  The own ball: a substitution the server notices
+        // amends the record and replays it, and one whose notice is lost
+        // ends in a resync whose re-anchor drops the records it covers; a
+        // record leaving while such a notice may still come, or while that
+        // resync is pending, is UNCONFIRMED too.
+        if (config.journal_final_checkpoints) {
+            s.rollback_.set_retire_observer(
+                [this, names = std::map<std::string, uint32_t>{}, unconfirmed_logs = 0u](
+                    uint32_t tick, const bmmo::session::rollback_tracked& tracked,
+                    const std::map<std::string, bmmo_physics_body_state>& bodies,
+                    const std::map<std::string, bmmo::session::input_frame>& inputs) mutable {
+                    for (const auto& [id, remote]: s.remotes_)
+                        if (!remote.entity.empty()) names[remote.entity] = id;
+                    const char* why = nullptr;
+                    const std::string* why_entity = nullptr;
+                    for (const auto& [entity, frame]: inputs) {
+                        if (entity.empty() || entity == tracked.own_entity) continue;
+                        // No body behind the name at the tick (a dead player's
+                        // mirror, a birth not arrived): the frame drove nothing
+                        // (note_input_correction's relay_bodiless_, no replay).
+                        if (bodies.find(entity) == bodies.end()) continue;
+                        uint32_t player = 0;
+                        if (const auto it = names.find(entity); it != names.end()) player = it->second;
+                        if (player == 0) player = mirror_player_of(entity);
+                        const auto remote = s.remotes_.find(player);
+                        if (player == 0 || remote == s.remotes_.end()) why = "no player";
+                        else if (const auto relayed = remote->second.inputs.find(tick); relayed == remote->second.inputs.end())
+                            why = "not relayed";
+                        else if (!same_frame(relayed->second, frame)) why = "differs from the relayed frame";
+                        if (why) { why_entity = &entity; break; }
+                    }
+                    // The own ball: a substitution notice still missing that
+                    // may name this tick (a datagram of server tick >= tick
+                    // counted more held ticks than have arrived: the
+                    // completeness check's watch, judged kHeldGapTicks
+                    // later), or a resync asked for and not applied yet (its
+                    // re-anchor drops the records it covers, but this one is
+                    // leaving before).
+                    if (!why) {
+                        if (s.resync_pending_) why = "pending: a resync was asked for";
+                        else
+                            for (const auto& [watched, total]: s.held_gap_watch_)
+                                if (static_cast<int32_t>(watched - tick) >= 0
+                                    && total > held_learned_upto(watched) + s.held_gap_credit_) {
+                                    why = "pending: own substitution notices outstanding";
+                                    break;
+                                }
+                        if (why) why_entity = &tracked.own_entity;
+                    }
+                    std::vector<bmmo::session::body_state> out;
+                    out.reserve(bodies.size());
+                    for (const auto& [entity, body]: bodies) {
+                        bmmo::session::body_state state;
+                        state.name = entity;
+                        const bool own = !tracked.own_entity.empty() && entity == tracked.own_entity;
+                        const bool remote = std::find(tracked.remote_entities.begin(), tracked.remote_entities.end(), entity)
+                                            != tracked.remote_entities.end();
+                        state.kind = own || remote ? bmmo::session::body_kind::Ball : bmmo::session::body_kind::Mechanism;
+                        state.owner = 0;
+                        if (own) state.owner = s.own_id_;
+                        else if (remote) {
+                            const auto it = names.find(entity);
+                            if (it != names.end()) state.owner = it->second;
+                        }
+                        for (int k = 0; k < 3; ++k) {
+                            state.position[k] = body.position[k];
+                            state.linear[k] = body.linear[k];
+                            state.angular[k] = body.angular[k];
+                        }
+                        for (int k = 0; k < 4; ++k) state.rotation[k] = body.rotation[k];
+                        state.flags = static_cast<uint8_t>((body.simulated ? bmmo::session::BODY_FLAG_SIMULATED : 0u)
+                            | (body.collision_enabled ? bmmo::session::BODY_FLAG_COLLISION_ENABLED : 0u));
+                        out.push_back(std::move(state));
+                    }
+                    if (journal_.final_checkpoint(tick, out, why == nullptr) && why && unconfirmed_logs < 16) {
+                        ++unconfirmed_logs;
+                        logf("final checkpoint %u unconfirmed: %s's frame %s", tick, why_entity->c_str(), why);
+                    }
+                });
+        } else {
+            s.rollback_.set_retire_observer(nullptr);
+        }
         // Late-player plan step 12: every session starts at the floor with
         // the default history (a previous session's deeper reach is its
         // own), or at the pinned reach.  Set without apply_reach's log line:
@@ -585,6 +678,11 @@ namespace bmmo::session {
         journal_.note(std::string("anchor hold released: ") + why);
     }
 
+    void session_client_core::retire_final_checkpoints(const char* why) {
+        const size_t retired = s.rollback_.retire_remaining();
+        if (retired != 0) logf("final checkpoints: the %zu records still held retired (%s)", retired, why);
+    }
+
     // SessionEnd: drop the mirrors and go idle; a later SessionStart of the
     // same room reloads the level (host restart) through begin.
     void session_client_core::end(const std::string& reason) {
@@ -609,6 +707,7 @@ namespace bmmo::session {
             journal_.note(text);
             s.parked_events_.clear();
         }
+        retire_final_checkpoints("the session ended");
         journal_.close(reason);
         // After the journal closed: the own body guard is lifted (host
         // state; hooks.ended, a back-call until E11), and every mirror's
