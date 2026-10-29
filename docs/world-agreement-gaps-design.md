@@ -4122,3 +4122,62 @@ engine change; shared code `game/proximity_union.hpp`, the server's
   kept. A host meets it with two rewinds in one host frame (RLM-2rw's
   case). Records differ in that bit only; blobs and hashes are equal. Not
   a harness artefact: the fix is the shared ledger's (roadmap §4 item 4).
+
+### As built (step S3, FULL close-out, 2026-10-29): U5 (f), (g); U5 (c) against the code
+
+FULL plan rows WG3-U and WM1-U (`.local-tools/work/FULL/plan.md` §2 S3).
+Tests only; no code under test changed.
+
+- **U5 (g)** `SessionClientCoreMemberLives.AReusedJoinOrderRanksGroupsAndKicksFromIt`:
+  the life holding join order 4 removed at 120, another id added with 4 at
+  122: each ranks 4 in its own ticks, the old life's `until` is 120, the
+  newcomer's spawn is not parked and its mirror is made `P#4` with the kick
+  index of (the session's seed, order 4, the stamp); no mirror outside the
+  lives, no session end. (The existing U5 (a) test passes the player id as
+  the seed argument of `spawn_direction_index`; it equals the fixture's
+  seed there, so it holds.)
+- **U5 (f)** `...ABallLeaveUnphysicalizesAtUAndTheLifeEndsAtR`: a spawned
+  mirror's Unphysicalize at u = 128 and the member removal at R = 129
+  (arriving before u's drain): the mirror is unmade at u while the life is
+  still a member, its life ends at R, nothing is parked or left pending.
+  PLAYER(-) at R in the journal is `JournalWritesEachLifeAtItsTicks`' row.
+- **U5 (c) does not hold as designed - found, not fixed here.** Design:
+  a parked event released with its stamp outside the history asks for a
+  resync and makes no mirror. The code (`rewind_for_lifecycle`,
+  `client_core_lifecycle.cpp` 376-409): a late lifecycle event whose rewind
+  `rewind_world` refuses (anchor outside the history) is applied live (the
+  mirror made at the live tick), counted `life_rewinds_missed_` and logged
+  "the body set disagrees until a snapshot re-anchors it"; no
+  `request_resync` (only a late Sector event beyond the reach asks for one,
+  line 548). `AParkedEventPastItsTickTakesTheLatePath` shows exactly that
+  path. Under "assume no snapshots" the disagreement is never corrected: a
+  gap, pre-existing (since the late path existed). Seen in practice: none -
+  0 of the 36 REF12 client logs (`core_ref_s12/*/client*.log`) contain the
+  line. The design names a fix (request_resync, as the Sector path), but
+  it is NOT a settled item to build: a resync on a late lifecycle event
+  outside the history is exactly the ground of the FULL plan's decision D4
+  (with the user: stamp rule, earlier redundant repeats, or accept the
+  resyncs - which conflicts with the headline's "resyncs 0"). So it is
+  queued under world agreement (roadmap §4 item 5) TIED TO D4: not to be
+  built before the user answers D4, and built in whatever form that answer
+  gives (gate round, review finding 2).
+- **Not built, re-queued (gate round; the orchestrator schedules them - S3
+  was their last planned place, so without a new step they do not run in
+  Stage A).** "A server-code change" is not a rule that forbids any of them
+  (review finding 3); each needs scaffolding first, listed with a rough cost:
+  - U2's full scripted life sequence and U5 (i) (a replay across R using
+    the closed life's entry and relay frames): a tick-driven frame-level
+    fake that feeds lifecycle events through the core tick by tick (the
+    existing `SessionClientCoreProbes` / member-lives fixtures drive single
+    calls) - about 2-3 h, test code only.
+  - U3's script-record round trip with a changed `CurrentLevel[0][1]`
+    inside the window: a SimTool scene (CK, the arena's script record) -
+    about 2 h, SimTool only.
+  - U6 (fake runner and world), the world-less `session_runner` fixture
+    (J-f cancel, failed-add release) and U7 (SimTool's journal reader with
+    PLAYER(+) earlier than the write position): a seam in `session_runner`
+    for its world calls (an interface the runner calls instead of the
+    world directly; server code, no behaviour change, its own wire/server
+    check) or a test target that links `BallanceMMOSim` (the message-test
+    target links neither; WM1's note); U7 needs a crafted journal and a
+    SimTool replay - about half a day for the seam and U6, 2 h for U7.

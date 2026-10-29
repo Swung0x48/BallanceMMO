@@ -3284,3 +3284,197 @@ alive scene FAIL 8/50 on rS2g, `P_Modul_18_Particle Script` flags
   frame that runs several ticks makes two rewinds in one CK frame is for
   RT1's `membership:`-style evidence (the retail host prints no such
   counters).
+
+## As built (step S3, FULL close-out, 2026-10-29): Q-U1 / Q-U2, L-S3, Q-S2, RLM-own
+
+FULL plan rows B7EG-QS, ELS3, RLM-own (`.local-tools/work/FULL/plan.md` §2
+S3). No protocol, record, journal or IVP change; the headless client gains a
+diagnostic switch (off by default). Scratch: `.local-tools/work/S3`.
+
+- **Q-U1 / Q-U2 over a fake queue backend.** The queue section's decisions
+  are now `queue_plan` templates (`physics/callback_queue_plan.hpp`):
+  `recorded_entries` (the capture's filter: never the bridge's own, never
+  an entry without a script, only the recorded scripts', in queue order),
+  `rebuild_scope` and `rebuild_target` (the restore's scope - written roots,
+  selected scripts absent from the record, existing trafo scripts - and the
+  record's entries with each block's owner as it is now; a gone block
+  refuses), and `rebuild` (callbacks_rebuild: every target made first, a
+  refusal frees them and changes nothing, then the scope's entries out and
+  the targets appended in order). `script_replay::capture` / `restore` and
+  the bridge's `callbacks_rebuild` (`physics_savestate_common.cpp`, through a
+  local adapter over the real queue) call them; the behaviour is unchanged.
+  What shows that, path by path (gate round): the wire check below covers
+  the empty-queue path only (REF12's sessions queue no selected entry at a
+  rewind: `cbq: captured=0`); the bridge adapter with REAL entries is
+  covered by B7EG's `--queue-roundtrip` re-run on this build
+  (`.local-tools/work/S3/gate/qrt.sh`: SimTool `--replay work/a4/r0_keys.bmrc
+  --ball-off 1600 1900`, 280 frames holding Gameplay_Ingame's 3 then 6
+  entries - WakeUp 26418 x4, SetPhysicsForce 26414 and 26432 - each held and
+  put back, rebuilt from the queue as it was and an out-of-scope rebuild
+  refused: 0 failures on rS3 and on the previous build rFX2, the roundtrip
+  lines identical between them, and the `--write-record` equal to the same
+  run's without the switch and to rFX2's in all 2400 frames, `EG0/bmrc_hash_cmp.py`
+  0 differing; the run's `summary: matched=0 first_divergence=0` and rc 3
+  are the `--ball-off` divergence B7EG's run shows too). `recorded_entries`
+  and `rebuild_target` on a NON-EMPTY record (script_replay's capture and
+  restore) are covered by Q-U1 / Q-U2 over the fake only: no session or
+  scene that ran feeds them a selected entry (Gameplay_Ingame's are outside
+  the selection), and Q-S1 below, the scene that would, is not built.
+  `rollback_engine_test.cpp` `CallbackQueueRecord` runs
+  the same templates over a vector-backed fake queue: 3 selected + 2
+  outside + 1 bridge entries record the 3 in order; a live queue of 5
+  selected (2 copies) is rebuilt to exactly the 3 in the recorded order with
+  the outside and bridge entries kept in place; a selected script absent
+  from the record loses its entries; a second restore is idempotent; a
+  factory refusal, a gone block, an out-of-scope target and slot 3 each
+  leave the queue unchanged (the made entries freed); Q-U2: a selected
+  script outside `scripts_replayed` (v14) is not rebuilt and its entries are
+  among those `plan_hold` holds. Adapted: the design names
+  `rollback_binding_test.cpp`; the tests sit next to Q-U3/Q-U4's
+  `CallbackQueuePlan` in `rollback_engine_test.cpp` (the binding test has no
+  queue code to reach).
+- **L-S3, adapted.** SimTool cannot run the core's own revive
+  (`restore_lives`' own half is the core's; re-implementing it in the tool
+  would be a second implementation of a core decision, §0 of the core
+  design), so L-S3 runs on the headless client replaying REF12 captures
+  (`core_ref_s12`, binary rS3): the real core, deterministic. New:
+  `--force-rollback-at T:D[,T:D...]` (session_client.cpp) - one forced
+  rewind of depth D right after live tick T (refused for T < D + 2, the
+  core's `force_rewind` floor, and together with `--force-rollback`: one
+  forced-rewind mode per run; gate round); run with
+  `--replay-free-cost-clock` (a forced rewind adds rewind-cost clock reads
+  the capture lacks; `--force-rollback 1:24` instead diverged at a
+  `resync_limiter` read on swing_snapoff c1; that probe was not kept). Tools: `ls3_scan.sh` /
+  `ls3_windows.py` (the own core's `rt:force` spans and own revive windows
+  of all 36 REF12 client captures under `--trace`), `ls3_cells.sh`,
+  `ls3_cmp.py` (FINAL rows of an arm vs its control), `ls3_self.py` (a
+  journal's live LOCAL rows vs its FINAL rows: the straight run vs the
+  record the last rewind left), `ls3_rows.py`.
+  - *Case 1, natural (the design's first replay).* `h1_150` client 3: the
+    own `Ball_Wood` carries Gameplay_Ingame's `rt:force/26432` on its core
+    (live blobs 990..1050, `--dump-savestate`), dies at 1059, and two
+    natural rewinds revive it at 1035 / 1036. The final records of the
+    window lack the controller (`ls3_dumpf/C/final/1050.sav`: no
+    `rt:force`; the live `C/1050.sav`: `rt:force/26432` on `Ball_Wood`) -
+    the controller-list difference of 9.3. Body states: the own ball's and
+    every non-ball body's rows are bit-equal live vs final at all 12
+    checkpoint ticks of 1036..1058 (`ls3_self.py --from 1000 --until 1070`:
+    own 0, bodies 0; the mirrors differ, a mirror's live row being a
+    prediction). Over the whole session 2 own rows differ live vs final,
+    at 862 (0.053 m) and 1224 (0.052 m): the own trafo births, remade by
+    later rewinds at the server's (moved) place ("own body: Ball_Wood made
+    at (-0.000,3.095,43.000) before tick 862 (replay (window life), moved
+    birth)", the same for Ball_Paper at 1224) - the moved own birth, not a
+    controller effect.
+  - *Forced cells on the same capture* (`ls3_h1c3`, `ls3_dumpf`): K1
+    `1062:20` (anchor 1042, inside the controller span 863..1057, across
+    the death), K2 `1020:15` and K3 `1260:15` (both inside a span or after
+    it: no controller change in their windows; K3's span 1234..1252 in the
+    scan is `rt:force/52776`, P_Modul_18's fan force, not Gameplay_Ingame's):
+    FINAL rows bit-equal to the control's over the session (1108 ticks,
+    every body), the final-state blobs (`BMMO_DUMP_FINAL_LAG=70`) render
+    identical to the control's at all 281 ticks 990..1270 (the control's
+    own natural revives already left the same final records).
+  - *Case 2 (the design's second replay), forced* (`ls3_c2`, `solo1`
+    client 0, `--force-rollback-at 665:20`, anchor 645): Gameplay_Ingame
+    swaps its force block at 652 (live: `rt:force/26414` until 651,
+    `rt:force/26432` from 652). The replayed records of 646..651 carry the
+    live-made `rt:force/26432` and lack the deleted `rt:force/26414`
+    (`--savestate-diff` of the final blobs: "core Ball_Stone controllers"
+    is the only line; from 652 on they render identical). FINAL rows of the
+    arm bit-equal to the control's at all 1179 ticks (every body), and the
+    control's live and final rows equal over 630..700.
+  - *A shape 9.3 does not list* (K4, `270:42`, anchor 228): the own birth
+    at 231 lies inside the window, so the core takes the body out at the
+    restore and remakes it (`own birth: ... taken out at the restore, made
+    again at that tick in the replay`); Gameplay_Ingame's controller made
+    live at 266 after that birth is not on the remade core, and the live
+    world lacks it after the rewind until the key's release (the control's
+    `--trace` has it 266..650; K4's from 271 on never; the next press makes
+    a new one). Cause: `PhysicsControllerForce::core_is_going_to_be_deleted_event`
+    (physics_RT `PhysicsForce.cpp`) nulls the controller's core when the
+    body goes and keeps the controller; the block's local 0 still holds it,
+    so the block makes no new one while the key is held and deletes the
+    orphan at the release (memory-safe). Body rows bit-equal (K4 vs control
+    over the session: 0 differ; K4 live vs final 220..300: own 0, bodies 0).
+    Why they stay equal outside the window too: the lost controller is a
+    zero-force one (retail navigation leaves are zeroed, §2.2.4) and
+    the input reaches the ball through the bridge's own `bmmo:force/0`. In
+    K4's `--trace` every one of the 307 force lines with a key held carries
+    `bmmo:force/0/1500` (the 8 lines without it all have `keys=00`), and the
+    summed force is the same with and without `rt:force/26432` on the core
+    (`ls3_h1c3/K4.log`, e.g. `h1_150` c3 at 1225 with it, 1226 without:
+    f=(0.065,0,0) both). So option (b) below is safe outside the window as
+    well, for as long as navigation's leaves stay zeroed.
+    So the controller-list difference is not confined to the window when
+    the window holds a remade own birth. It happens without a forced rewind
+    too: `h1_150` client 3's control makes `rt:force/26432` at 1225, one
+    tick after its own Ball_Paper birth at 1224, and a natural rewind that
+    remakes that birth ("own birth: Ball_Paper made by the scripts at tick
+    1224 taken out at the restore, made again ...") leaves the live core
+    without it from 1226 on (`ls3_dumpf/C.log`).
+  - *Case 1 elsewhere:* only `h1_150` (c0 at 653, c3 at 697 and 1059) has
+    the controller on the own core within 48 ticks before an own death in
+    the 36 REF12 captures (`scan/`, `ls3_windows.py 48`).
+  - **9.3's result: only the controller list differs** - no body state in
+    any measured window. By 9.3's own rule this goes to the user ((a) track
+    outside controllers: a stand-in on a revived or remade core - now also
+    for a remade own birth, where the loss outlives the window - and
+    detach / re-attach for a carried one, a blob version bump and an
+    access-only #20 addition; (b) the identity tools name this one
+    difference). Not decided here.
+- **Q-S2 (outside entries in a replay), partial.** `a6m_snapoff` (the A6
+  drop arm, REF12) replayed with `--trace-restore` on all four clients:
+  every rewind's hold ran (holds 41 / 66 / 69 / 62) and held nothing
+  (`cbq: captured=0 rebuilt=0 removed=0 held=0 ... rebuild_fail=0
+  hold_fail=0 no_record=0`): post-N4 sessions queue no outside entry at a
+  rewind (design 1.1), so the capture cannot show "held > 0". B7EG's
+  `--queue-roundtrip` remains the real-entry evidence. **Not built, re-queued
+  (gate round; the orchestrator schedules it - S3 was the last planned
+  place, so without a new step it does not run in Stage A):** Q-S1
+  (`--queue-block <block>:<from>:<to>` on the arena sector-4
+  `--savestate-check` scene) and Q-S2's SimTool half (`--hold-outside` with
+  `--drop-player-at` + `--ball-off`). What has to exist first, SimTool-only:
+  (1) a module-body re-make at `to` - the `--ball-off` recipe reads
+  `Physicalize_GameBall` and knows balls only; a module body needs its own
+  recipe, e.g. the physics event log's birth recipe of the body
+  (`local_birth`, the hosts' revive path) captured at its scene birth;
+  (2) evidence that P_Modul_34's WakeUp 48462 / P_Modul_08's force 45709
+  actually re-execute while their target has no body in that scene (the
+  edge the switch relies on; not established - P_Modul_08's force may be
+  set once at the activation); (3) `--ball-off` in the savestate-check scene
+  (G0 built it for `--replay` only). Rough cost: half a day with the
+  savestate check's absent-body handling as the risk. Until then the
+  non-empty-record path of `recorded_entries` / `rebuild_target` has the
+  fake-backed Q-U1 / Q-U2 only (above).
+- **RLM-own: no scene exists.** `--list-scripts '*'` after the level load
+  on L1-L12 and the arena (`rlm/L*.txt`, `rlm_scan.py`): the only module
+  owner with two root scripts is `P_Extra_Life_MF` (`P_Extra_Life_MF Script`,
+  `P_Extra_Life Anim Script`; L6, L8-L11, the arena), and collectibles are
+  outside the selection (`script_replay.hpp` 1005, decision D1). The other
+  multi-script owners are global (`All_Gameplay`, `All_Balls`, `All_Menu`,
+  ...): `All_Gameplay` holds the selected Gameplay_SectorManager next to the
+  active, unselected Gameplay_Ingame, which is `owner_keeps`' "a script of
+  the owner outside the selection still active" branch - every session
+  recipe restore reaches it. The two-selected-scripts branch has no owner
+  in any level. A candidate outside the level content: a trafo set's
+  8 scripts (explosions, resets, wind, collision sound) are owned by one
+  inactive `BMMO_TrafoOwner_<p>` (`trafo_sets.hpp`) and every trafo script
+  is written back in a trafo-on restore (every REF12 arm); whether that
+  owner goes through the live-membership ledger at all (it is inactive;
+  the trafo frame runs its scripts) was not established here.
+- **Checks.** x64 BUILD-OK (DEPS-OK), `BallanceMMOMessageTests` 661/661 on
+  MSVC and 661/661 on GCC (the Arch tree's test target built from this
+  tree, `ninja BallanceMMOMessageTests`); GCC `linux_test_syntax.sh` 31/31 ok, `linux_sim_syntax.sh` 6/6 ok (now
+  with `physics_savestate_common.cpp`); x86 CLIENT-BUILD-OK (23 objects,
+  `physics_savestate_common.cpp`, `physics_savestate_restore.cpp`,
+  `core_host.cpp` among them); wire check rFX2 -> rS3 over `core_ref_s12`:
+  ALL SAME (36 journals IDENTICAL, sends SAME). Gate round (the review's
+  fix-ups: the `--force-rollback-at` parse refusals, these notes): x64
+  BUILD-OK (DEPS-OK; only `session_client.cpp` recompiled), 661/661,
+  `linux_sim_syntax.sh` 6/6 ok, rS3 re-copied, wire check rFX2 -> rS3 over
+  `core_ref_s12` again ALL SAME (36 journals IDENTICAL, sends SAME); the
+  parse refuses `21:20`, `22:20,5:4` and `--force-rollback 7:5` with
+  `--force-rollback-at 30:20`, and accepts `22:20,1062:20`; the real-entry
+  `--queue-roundtrip` run above. No x86 rebuild: no shared or retail file
+  changed in the gate round.

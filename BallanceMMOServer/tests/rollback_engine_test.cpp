@@ -4796,6 +4796,202 @@ TEST(CallbackQueuePlan, TheScopedCheckComparesOnlyTheScopesEntriesAndAGoneRecord
     EXPECT_FALSE(qp::compared(&empty, true, 7, true)) << "an empty scope compares nothing that exists";
 }
 
+// Gap Q (rollback-engine-gaps design 7.1 Q-U1 and Q-U2, close-out step S3):
+// the record's queue section and the bridge's rebuild over a fake queue
+// backend - the decisions game/script_replay.hpp (recorded_entries,
+// rebuild_scope, rebuild_target) and callbacks_rebuild (rebuild) make,
+// queue_plan's templates, run on vectors instead of CK and the physics
+// manager.  The selected scripts are 1000 and 2000 (and 3000, selected but
+// absent from the record), the outside one 9000; a block's owner is its
+// thousand (block 1001 belongs to 1000), the bridge's own entries are
+// block 0.
+namespace {
+    struct fake_entry {
+        uint32_t behavior = 0;
+        uint32_t owner_script = 0;
+        uint8_t slot = 0;
+        bool bmmo = false;
+    };
+
+    // The fake queue backend: three slots of blocks, a factory that refuses
+    // the blocks in `no_factory`, and the blocks that are gone.
+    struct fake_queue {
+        using made = int;   // 1-based index into `pending`; 0: no factory
+        struct entry {
+            uint32_t block = 0;
+            bool bmmo = false;
+            bool operator==(const entry& o) const { return block == o.block && bmmo == o.bmmo; }
+        };
+        std::vector<entry> slots[3];
+        std::set<uint32_t> gone, no_factory;
+        std::vector<entry> pending;
+        int released = 0;
+
+        static uint32_t owner_of(uint32_t block) { return block / 1000 * 1000; }
+        bool exists(uint32_t block) const { return !gone.count(block); }
+        uint32_t owner(uint32_t block) const { return owner_of(block); }
+        std::string text(uint32_t block) const { return std::to_string(block); }
+        made make(uint32_t block) {
+            if (no_factory.count(block)) return 0;
+            pending.push_back({block, false});
+            return static_cast<int>(pending.size());
+        }
+        void release(made) { ++released; }
+        int len(int slot) const { return static_cast<int>(slots[slot].size()); }
+        bool kept_at(int slot, int i) const { return slots[slot][static_cast<size_t>(i)].bmmo; }
+        uint32_t owner_at(int slot, int i) const { return owner_of(slots[slot][static_cast<size_t>(i)].block); }
+        void remove(int slot, int i) { slots[slot].erase(slots[slot].begin() + i); }
+        void append(int slot, made m) { slots[slot].push_back(pending[static_cast<size_t>(m - 1)]); }
+
+        // callbacks_get: every entry, slot by slot, in queue order.
+        std::vector<fake_entry> capture() const {
+            std::vector<fake_entry> out;
+            for (int slot = 0; slot < 3; ++slot)
+                for (const entry& e: slots[slot])
+                    out.push_back({e.block, e.bmmo ? 0u : owner_of(e.block), static_cast<uint8_t>(slot), e.bmmo});
+            return out;
+        }
+    };
+
+    std::vector<fake_queue::entry> blocks(std::initializer_list<uint32_t> list) {
+        std::vector<fake_queue::entry> out;
+        for (uint32_t b: list) out.push_back({b, b == 0});
+        return out;
+    }
+
+    // The record's section as script_replay::capture writes it (the kept
+    // entries, in order).
+    std::vector<fake_entry> record_of(const fake_queue& q, const std::vector<uint32_t>& scripts) {
+        const std::vector<fake_entry> all = q.capture();
+        std::vector<fake_entry> out;
+        for (const fake_entry* e: qp::recorded_entries(all, scripts)) out.push_back(*e);
+        return out;
+    }
+
+    // script_replay::restore then callbacks_rebuild: the scope, the target
+    // (each block's owner looked up now), the rebuild.
+    int restore_queue(fake_queue& q, const std::vector<fake_entry>& recorded, const std::vector<uint32_t>& written,
+                      std::string& error, uint32_t* gone_block = nullptr) {
+        const std::vector<uint32_t> scope = qp::rebuild_scope(written);
+        std::vector<fake_entry> target;
+        uint32_t gone = 0;
+        if (!qp::rebuild_target(recorded, scope,
+                                [&q](uint32_t block, uint32_t& owner) {
+                                    if (!q.exists(block)) return false;
+                                    owner = q.owner(block);
+                                    return true;
+                                },
+                                target, gone)) {
+            if (gone_block) *gone_block = gone;
+            error = "a queued block of the record is gone";
+            return -1;
+        }
+        const std::set<uint32_t> in_scope(scope.begin(), scope.end());
+        return qp::rebuild(q, in_scope, target, error);
+    }
+}
+
+// Q-U1: a capture with 3 selected + 2 outside + 1 bridge entries writes the
+// 3 in order; a restore over a live queue of 5 selected entries (2 extra
+// copies) rebuilds exactly the 3 in the recorded order, the outside and the
+// bridge's entries untouched; a selected script absent from the record
+// loses its live entries.
+TEST(CallbackQueueRecord, TheRecordKeepsTheSelectedEntriesAndTheRestoreRebuildsExactlyThem) {
+    fake_queue at_capture;
+    at_capture.slots[2] = blocks({1001, 9001, 2001, 0, 9002, 1002});
+    const std::vector<fake_entry> recorded = record_of(at_capture, {2000, 1000});
+    ASSERT_EQ(recorded.size(), 3u);
+    EXPECT_EQ(recorded[0].behavior, 1001u);
+    EXPECT_EQ(recorded[1].behavior, 2001u);
+    EXPECT_EQ(recorded[2].behavior, 1002u);
+    for (const fake_entry& e: recorded) EXPECT_EQ(e.slot, 2);
+
+    fake_queue live;
+    live.slots[1] = blocks({3001});                                        // selected, absent from the record
+    live.slots[2] = blocks({1001, 1001, 9001, 2001, 2001, 0, 1002, 9002});  // 5 selected (2 copies)
+    std::string error;
+    const int removed = restore_queue(live, recorded, {1000, 2000, 3000, 1000}, error);
+    EXPECT_EQ(removed, 6) << error;   // the five selected entries and 3000's
+    EXPECT_TRUE(live.slots[1].empty()) << "a selected script absent from the record loses its live entries";
+    EXPECT_EQ(live.slots[2], blocks({9001, 0, 9002, 1001, 2001, 1002}))
+        << "the outside and the bridge's entries kept in their order, the record's 3 after them in its order";
+    EXPECT_EQ(live.released, 0);
+
+    // A second restore of the same record finds the queue as the record: no
+    // entry made twice.
+    EXPECT_EQ(restore_queue(live, recorded, {1000, 2000, 3000}, error), 3);
+    EXPECT_EQ(live.slots[2], blocks({9001, 0, 9002, 1001, 2001, 1002}));
+}
+
+// Q-U1: a refusal - a block with no factory, a block of the record gone, a
+// target outside the rebuilt scripts or naming a bad slot - changes nothing.
+TEST(CallbackQueueRecord, ARefusedRebuildLeavesTheQueueUnchanged) {
+    fake_queue at_capture;
+    at_capture.slots[2] = blocks({1001, 2001, 1002});
+    const std::vector<fake_entry> recorded = record_of(at_capture, {1000, 2000});
+    const auto live_slots = blocks({1001, 1001, 9001, 2001});
+
+    fake_queue no_factory;
+    no_factory.slots[2] = live_slots;
+    no_factory.no_factory = {2001};
+    std::string error;
+    EXPECT_EQ(restore_queue(no_factory, recorded, {1000, 2000}, error), -1);
+    EXPECT_NE(error.find("no callback factory for the queued block 2001"), std::string::npos) << error;
+    EXPECT_EQ(no_factory.slots[2], live_slots) << "the queue as it was";
+    EXPECT_EQ(no_factory.released, 1) << "the entry made before the refusal is freed";
+
+    fake_queue gone;
+    gone.slots[2] = live_slots;
+    gone.gone = {1002};
+    uint32_t which = 0;
+    EXPECT_EQ(restore_queue(gone, recorded, {1000, 2000}, error, &which), -1);
+    EXPECT_EQ(which, 1002u);
+    EXPECT_EQ(gone.slots[2], live_slots);
+    EXPECT_EQ(gone.released, 0) << "refused before anything is made";
+
+    // The bridge's own checks: a target whose owner is outside the scope,
+    // a target naming slot 3.
+    fake_queue outside;
+    outside.slots[2] = live_slots;
+    std::vector<fake_entry> target = recorded;
+    EXPECT_EQ(qp::rebuild(outside, std::set<uint32_t>{1000}, target, error), -1);
+    EXPECT_NE(error.find("is outside the rebuilt scripts"), std::string::npos) << error;
+    EXPECT_EQ(outside.slots[2], live_slots);
+    EXPECT_EQ(outside.released, 1);
+    target[0].slot = 3;
+    EXPECT_EQ(qp::rebuild(outside, std::set<uint32_t>{1000, 2000}, target, error), -1);
+    EXPECT_NE(error.find("names slot 3"), std::string::npos) << error;
+    EXPECT_EQ(outside.slots[2], live_slots);
+}
+
+// Q-U2: under the v14 rule a selected script the replay does not run
+// (2000, outside `scripts_replayed`) is not written back: it is outside the
+// rebuild's scope, its live entries are not rebuilt - they are held out of
+// the replay with the outside scripts' (plan_hold over the executed set).
+TEST(CallbackQueueRecord, AScriptOutsideTheReplayedSetIsNotRebuiltAndItsEntriesAreHeld) {
+    fake_queue at_capture;
+    at_capture.slots[2] = blocks({1001, 2001, 1002});
+    const std::vector<fake_entry> recorded = record_of(at_capture, {1000, 2000});
+    ASSERT_EQ(recorded.size(), 3u) << "the record holds every selected script's entries";
+
+    fake_queue live;
+    live.slots[2] = blocks({2001, 1001, 9001, 2001, 0});
+    std::string error;
+    EXPECT_EQ(restore_queue(live, recorded, {1000}, error), 1) << error;   // only 1000 written back
+    EXPECT_EQ(live.slots[2], blocks({2001, 9001, 2001, 0, 1001, 1002}))
+        << "2000's entries kept live, in their places; 1000's from the record";
+
+    // The hold of that replay (the executed scripts = {1000}): 2000's and
+    // 9000's entries leave the queue, 1000's and the bridge's stay.
+    std::vector<qp::entry> slot;
+    for (const auto& e: live.slots[2])
+        slot.push_back({e.block, !e.bmmo && fake_queue::owner_of(e.block) != 1000});
+    const auto places = qp::plan_hold(slot);
+    std::vector<uint32_t> held;
+    for (const auto& p: places) held.push_back(live.slots[2][static_cast<size_t>(p.index)].block);
+    EXPECT_EQ(held, (std::vector<uint32_t>{2001, 9001, 2001}));
+}
+
 // ---------------------------------------------------------------------------
 // Record-format gaps C3 (record-format-gaps design 2.3 and 7.1, step RK1):
 // the physics globals per tick.  The live scripts write the time factor and

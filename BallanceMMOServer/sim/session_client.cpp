@@ -127,6 +127,13 @@ namespace {
         // trying to make the scripts replayable.
         uint32_t force_rollback_every = 0;
         uint32_t force_rollback_depth = 12;
+        // --force-rollback-at T:D[,T:D...] (close-out step S3, rollback-engine
+        // gaps design 7.2 L-S3): a forced rewind of depth D right after live
+        // tick T, at the named ticks only (one each).  Refused together with
+        // --force-rollback, and for T < D + 2 (the core's force_rewind does
+        // nothing before depth + 2 played ticks: the anchor would wrap).  A
+        // diagnostic: off by default.
+        std::map<uint32_t, uint32_t> force_rollback_at;
         // --replay-scripts: step a replayed tick with the WHOLE frame
         // (context_->Process(), i.e. behaviours and managers) instead of the
         // physics alone.
@@ -490,6 +497,7 @@ namespace {
                   "       [--no-savestate] [--savestate-strict]   (the IVP savestate restore; off = the per-body restore)\n"
                   "       [--capture-inbound FILE | --replay-inbound FILE]   (record the inbound messages and clock reads; "
                   "replay them, unpaced, sending nothing)\n"
+                  "       [--force-rollback EVERY:DEPTH | --force-rollback-at T:D[,T:D...]]   (diagnostic forced rewinds; -at: T >= D + 2)\n"
                   "       [--replay-free-cost-clock]   (with --replay-inbound: the rewind cost's clock reads are the replay's own)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
                   "       [--io-flush MODE | log=MODE,journal=MODE,capture=MODE]   (MODE none|batch|record, default batch: the\n"
@@ -549,6 +557,22 @@ namespace {
                 // already holds exactly that state and replay nothing.  A
                 // pure capture->restore round trip, so any difference is the
                 // write path and not the re-simulation.
+            }
+            else if (arg == "--force-rollback-at") {   // close-out step S3 (L-S3)
+                if (!(v = next())) return false;
+                const std::string spec = v;
+                size_t at = 0;
+                while (at < spec.size()) {
+                    const size_t comma = spec.find(',', at);
+                    const std::string item = spec.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+                    const size_t colon = item.find(':');
+                    if (colon == std::string::npos) return false;
+                    const long long t = std::atoll(item.substr(0, colon).c_str()), d = std::atoll(item.substr(colon + 1).c_str());
+                    if (d < 0 || t < d + 2) return false;   // force_rewind's own floor
+                    out.force_rollback_at[static_cast<uint32_t>(t)] = static_cast<uint32_t>(d);
+                    if (comma == std::string::npos) break;
+                    at = comma + 1;
+                }
             }
             else if (arg == "--checkpoint-ticks") {
                 if (!(v = next())) return false;
@@ -734,6 +758,7 @@ namespace {
         }
         if (out.root.empty()) return false;
         if (!out.capture_inbound.empty() && !out.replay_inbound.empty()) return false;
+        if (out.force_rollback_every != 0 && !out.force_rollback_at.empty()) return false;   // one forced-rewind mode
         if (!out.host && !out.join_first && out.room == 0) out.join_first = true;
         return true;
     }
@@ -3751,11 +3776,20 @@ namespace {
         // keeps stay kept until `forced` goes out of scope at the end, after
         // the traces, as before.
         void maybe_force_rollback() {
-            if (!args_.rollback || args_.force_rollback_every == 0) return;
+            if (!args_.rollback || (args_.force_rollback_every == 0 && args_.force_rollback_at.empty())) return;
             const uint32_t now = current_tick();
-            if (now < args_.force_rollback_depth + 2) return;
-            if (now % args_.force_rollback_every != 0) return;
-            const uint32_t anchor = now - args_.force_rollback_depth;
+            uint32_t depth = args_.force_rollback_depth;
+            if (!args_.force_rollback_at.empty()) {   // close-out step S3: --force-rollback-at
+                const auto named = args_.force_rollback_at.find(now);
+                if (named == args_.force_rollback_at.end() || force_rollback_at_done_.count(now)) return;
+                force_rollback_at_done_.insert(now);
+                depth = named->second;
+                logf("forced rewind at %u: depth %u (--force-rollback-at)", now, depth);
+            } else {
+                if (now < depth + 2) return;
+                if (now % args_.force_rollback_every != 0) return;
+            }
+            const uint32_t anchor = now - depth;
             std::string before;
             float factor_before = 0.0f, delta_before = 0.0f, factor_after = 0.0f, delta_after = 0.0f;
             bmmo_physics_clock_state clock_before{}, clock_after{};
@@ -3775,7 +3809,7 @@ namespace {
                 logf("PreSimulate queue before the rewind at %u: %s", now,
                      bmmo::physics::describe_presimulate_queue(engine_->physics()).c_str());
             }
-            const auto forced = core_.force_rewind(args_.force_rollback_depth);
+            const auto forced = core_.force_rewind(depth);
             if (forced.rolled) {
                 for (uint32_t t = anchor + 1; t <= now; ++t) dump_savestate(t, "replayed");
                 if (args_.trace_restore && queue_traces_ < 24) {
@@ -3817,7 +3851,7 @@ namespace {
                 // knowing it.
                 logf("restore trace: forced rewind %u -> %u (depth %u) moved %d cores, "
                      "physics delta %a -> %a (%s, factor %a -> %a):%s",
-                     now, anchor, args_.force_rollback_depth, changed,
+                     now, anchor, depth, changed,
                      static_cast<double>(delta_before), static_cast<double>(delta_after),
                      delta_before == delta_after ? "UNCHANGED" : "MOVED",
                      static_cast<double>(factor_before), static_cast<double>(factor_after),
@@ -4447,6 +4481,7 @@ namespace {
         uint32_t queue_traces_ = 0;                          // --trace-restore PreSimulate queue lines (the first 24)
         std::string compare_scripts_last_;   // the last logged first difference, so only changes are logged
         int contact_traces_ = 0;                            // --trace-restore: contact lines logged around rewinds
+        std::set<uint32_t> force_rollback_at_done_;          // close-out step S3: --force-rollback-at ticks already rewound
         // Step OWNB: the own ball's Physicalize block as own_physicalize_hook
         // saw it before the block ran (the live tick, the entity, and the
         // spawn flag of the entity before the birth cell moved it).

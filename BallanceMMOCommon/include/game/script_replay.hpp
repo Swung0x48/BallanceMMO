@@ -69,6 +69,7 @@
 #include <utility>
 #include <vector>
 
+#include <physics/callback_queue_plan.hpp>
 #include <session/resync_rules.hpp>
 #include <session/trafo_input.hpp>
 
@@ -1321,16 +1322,12 @@ namespace bmmo::game {
                 // v4 / v5: the queued entries of the recorded scripts (gap Q).
                 std::vector<queued_callback> all;
                 if (!queue->capture(all)) return false;
-                std::vector<const queued_callback*> kept;
-                if (!all.empty()) {
-                    std::vector<CK_ID> scripts(sel.scripts.begin(), sel.scripts.end());
-                    if (v3) scripts.insert(scripts.end(), trafo->scripts.begin(), trafo->scripts.end());
-                    std::sort(scripts.begin(), scripts.end());
-                    for (const queued_callback& e: all)
-                        if (!e.bmmo && e.owner_script
-                                && std::binary_search(scripts.begin(), scripts.end(), static_cast<CK_ID>(e.owner_script)))
-                            kept.push_back(&e);
-                }
+                // The filter is queue_plan::recorded_entries (close-out step
+                // S3: Q-U1 runs it over a fake queue).
+                std::vector<uint32_t> scripts(sel.scripts.begin(), sel.scripts.end());
+                if (v3) scripts.insert(scripts.end(), trafo->scripts.begin(), trafo->scripts.end());
+                const std::vector<const queued_callback*> kept =
+                    bmmo::physics::queue_plan::recorded_entries(all, std::move(scripts));
                 put_u16(out, static_cast<uint16_t>(kept.size()));
                 for (const queued_callback* e: kept) {
                     put_u32(out, e->behavior);
@@ -1610,26 +1607,32 @@ namespace bmmo::game {
             // above with no controller and its entry queued comes back with
             // no controller and one entry, which runs when its body appears.
             if ((sections & kSectionQueue) && queue && queue->restore) {
-                std::vector<CK_ID> scope;
-                for (CKBehavior* beh: written) scope.push_back(beh->GetID());
-                scope.insert(scope.end(), unrecorded.begin(), unrecorded.end());
+                // The scope and the target are queue_plan's (close-out step
+                // S3: Q-U1 / Q-U2 run them over a fake queue).
+                std::vector<uint32_t> ids;
+                for (CKBehavior* beh: written) ids.push_back(static_cast<uint32_t>(beh->GetID()));
+                for (CK_ID id: unrecorded) ids.push_back(static_cast<uint32_t>(id));
                 if (trafo)
                     for (CK_ID id: trafo->scripts)
-                        if (CKBehavior::Cast(context->GetObject(id))) scope.push_back(id);
-                std::sort(scope.begin(), scope.end());
-                scope.erase(std::unique(scope.begin(), scope.end()), scope.end());
+                        if (CKBehavior::Cast(context->GetObject(id))) ids.push_back(static_cast<uint32_t>(id));
+                const std::vector<uint32_t> in_scope = bmmo::physics::queue_plan::rebuild_scope(std::move(ids));
                 std::vector<queued_callback> target;
-                for (queued_callback e: queued) {
-                    auto* block = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(e.behavior)));
-                    if (!block) {
-                        ++queue_stats().rebuild_fail;
-                        return fail(error, "a queued block of the record is gone");
-                    }
-                    CKBehavior* owner = block->GetOwnerScript();
-                    e.owner_script = owner ? static_cast<uint32_t>(owner->GetID()) : 0;
-                    if (!std::binary_search(scope.begin(), scope.end(), static_cast<CK_ID>(e.owner_script))) continue;
-                    target.push_back(e);
+                uint32_t gone = 0;
+                const bool found = bmmo::physics::queue_plan::rebuild_target(
+                    queued, in_scope,
+                    [context](uint32_t block_id, uint32_t& owner_id) {
+                        auto* block = CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(block_id)));
+                        if (!block) return false;
+                        CKBehavior* owner = block->GetOwnerScript();
+                        owner_id = owner ? static_cast<uint32_t>(owner->GetID()) : 0;
+                        return true;
+                    },
+                    target, gone);
+                if (!found) {
+                    ++queue_stats().rebuild_fail;
+                    return fail(error, "a queued block of the record is gone");
                 }
+                const std::vector<CK_ID> scope(in_scope.begin(), in_scope.end());
                 std::string why;
                 const int removed = queue->restore(scope, target, why);
                 if (removed < 0) {

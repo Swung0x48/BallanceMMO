@@ -7782,6 +7782,77 @@ namespace {
         EXPECT_EQ(core.session_phase(), client_core_state::phase::idle);
     }
 
+    // U5 (g) (close-out step S3): an order reused - the life holding join
+    // order 4 is removed at 120 and another id is added with order 4 at 122:
+    // each life ranks with 4 in its own ticks, the newcomer's mirror is made
+    // in group P#4 with the kick index of order 4, and the session goes on.
+    TEST(SessionClientCoreMemberLives, AReusedJoinOrderRanksGroupsAndKicksFromIt) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 120));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 14, 1, 4, 122));
+        EXPECT_EQ(steps{core}.join_rank(12, 119), 4u) << "the old life, before its removal";
+        EXPECT_EQ(steps{core}.join_rank(14, 126), 4u) << "the new life takes the order";
+        ASSERT_NE(bmmo::session::find_member_life(core.member_lives(), 12, 1), nullptr);
+        EXPECT_EQ(bmmo::session::find_member_life(core.member_lives(), 12, 1)->until, 120u);
+        auto spawn = event_message(14, bmmo::session::event_type::Physicalize, 126, 126);
+        spawn.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+        core.on_session_event(std::move(spawn));
+        EXPECT_EQ(core.events_parked(), 0u) << "the life is known: not parked";
+        const size_t from = fake.calls.size();
+        steps{core}.drain_due_events(126);
+        steps{core}.apply_held_lifecycle(126);
+        const uint32_t kick = bmmo::session::spawn_direction_index(state_of(core).seed_, 4, 126);   // the session's seed, order 4
+        const auto calls = since(fake.calls, from);
+        std::string listed;
+        for (const std::string& call: calls) listed += call + " | ";
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "make_mirror:Ball_0_BMMO_14:P#4:kick" + std::to_string(kick)),
+                  calls.end()) << listed;
+        EXPECT_EQ(core.mirrors_outside_lives(), 0u);
+        EXPECT_EQ(core.member_life_outside(), 0u);
+        EXPECT_EQ(core.session_phase(), client_core_state::phase::running);
+    }
+
+    // U5 (f) (close-out step S3): a leave with a ball and nothing queued -
+    // the server's Unphysicalize at u (always through the queue, J-e) is
+    // applied at u, the member removal at R = u + 1 drops no event and ends
+    // the life at R.
+    TEST(SessionClientCoreMemberLives, ABallLeaveUnphysicalizesAtUAndTheLifeEndsAtR) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        auto spawn = event_message(12, bmmo::session::event_type::Physicalize, 126, 126);
+        spawn.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
+        core.on_session_event(std::move(spawn));
+        steps{core}.drain_due_events(126);
+        steps{core}.apply_held_lifecycle(126);
+        ASSERT_EQ(state_of(core).remotes_.count(12), 1u);
+        ASSERT_TRUE(state_of(core).remotes_.at(12).physicalized);
+        const std::string entity = state_of(core).remotes_.at(12).entity;
+        // u = 128: the leaver's Unphysicalize; R = 129: its removal, which
+        // the reliable member message may bring before the event's tick.
+        core.on_session_event(event_message(12, bmmo::session::event_type::Unphysicalize, 128, 128));
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 129));
+        EXPECT_EQ(core.events_parked(), 0u);
+        const size_t from = fake.calls.size();
+        steps{core}.drain_due_events(128);
+        steps{core}.apply_held_lifecycle(128);
+        const auto calls = since(fake.calls, from);
+        EXPECT_NE(std::find(calls.begin(), calls.end(), "unmake_mirror:" + entity), calls.end())
+            << "the Unphysicalize applied at u, the life still a member then";
+        EXPECT_FALSE(state_of(core).remotes_.at(12).physicalized);
+        ASSERT_NE(bmmo::session::find_member_life(core.member_lives(), 12, 1), nullptr);
+        EXPECT_EQ(bmmo::session::find_member_life(core.member_lives(), 12, 1)->until, 129u) << "the life ends at R";
+        EXPECT_EQ(steps{core}.join_rank(12, 128), 4u);
+        EXPECT_TRUE(state_of(core).pending_events_.empty()) << "no event left behind";
+        EXPECT_EQ(core.mirrors_outside_lives(), 0u);
+        EXPECT_EQ(core.member_life_outside(), 0u);
+        EXPECT_EQ(core.session_phase(), client_core_state::phase::running);
+    }
+
     // A member message is taken while loading (not dropped like an event),
     // and one of another session is not.
     TEST(SessionClientCoreMemberLives, TakenWhileLoading) {

@@ -1388,53 +1388,32 @@ namespace bmmo::physics {
             error = "no PreSimulate queue";
             return -1;
         }
-        const std::set<uint32_t> in_scope(scope.begin(), scope.end());
-        // Every target first: a refusal changes nothing.
-        std::vector<std::pair<int, void*>> made;
-        made.reserve(target.size());
-        const auto undo = [&made]() {
-            for (auto& m: made) BmmoPhysicsCallbackFree(m.second);
-            made.clear();
-        };
-        for (const bmmo_physics_callback& t: target) {
-            CKBehavior* block = savestate::block_of(physics, t.behavior);
-            if (!block) {
-                undo();
-                error = "the queued block " + std::to_string(t.behavior) + " is gone";
-                return -1;
-            }
-            if (!in_scope.count(savestate::owner_script_of(block))) {
-                undo();
-                error = "the queued block " + savestate::block_text(block, t.behavior) + " is outside the rebuilt scripts";
-                return -1;
-            }
-            if (t.slot > 2) {
-                undo();
-                error = "the queued block " + savestate::block_text(block, t.behavior) + " names slot " + std::to_string(t.slot);
-                return -1;
-            }
-            void* cb = BmmoPhysicsCallbackMake(physics, block);
-            if (!cb) {
-                undo();
-                error = "no callback factory for the queued block " + savestate::block_text(block, t.behavior);
-                return -1;
-            }
-            made.emplace_back(static_cast<int>(t.slot), cb);
-        }
-        int removed = 0;
-        for (int slot = 0; slot < 3; ++slot) {
-            for (int i = queue->m_Callbacks[slot].len() - 1; i >= 0; --i) {
+        // The decisions are queue_plan::rebuild's (close-out step S3: the unit
+        // tests run them over a fake queue); this is the real queue under it.
+        struct bridge_queue {
+            using made = void*;
+            CKIpionManager* physics;
+            PhysicsCallbackContainer* queue;
+            bool exists(uint32_t block) const { return savestate::block_of(physics, block) != nullptr; }
+            uint32_t owner(uint32_t block) const { return savestate::owner_script_of(savestate::block_of(physics, block)); }
+            std::string text(uint32_t block) const { return savestate::block_text(savestate::block_of(physics, block), block); }
+            void* make(uint32_t block) const { return BmmoPhysicsCallbackMake(physics, savestate::block_of(physics, block)); }
+            void release(void* cb) const { BmmoPhysicsCallbackFree(cb); }
+            int len(int slot) const { return queue->m_Callbacks[slot].len(); }
+            bool kept_at(int slot, int i) const {
                 PhysicsCallback* cb = queue->m_Callbacks[slot].element_at(i);
-                if (!cb || savestate::is_bmmo_callback(cb)) continue;
-                if (!in_scope.count(savestate::owner_script_of(cb->GetBehavior()))) continue;
-                BmmoPhysicsCallbackFree(BmmoPhysicsCallbackDetach(physics, slot, i));
-                ++removed;
+                return !cb || savestate::is_bmmo_callback(cb);
             }
-        }
-        for (auto& m: made)
-            BmmoPhysicsCallbackInsert(physics, m.first, queue->m_Callbacks[m.first].len(), m.second);
-        made.clear();
-        return removed;
+            uint32_t owner_at(int slot, int i) const {
+                return savestate::owner_script_of(queue->m_Callbacks[slot].element_at(i)->GetBehavior());
+            }
+            void remove(int slot, int i) const { BmmoPhysicsCallbackFree(BmmoPhysicsCallbackDetach(physics, slot, i)); }
+            void append(int slot, void* cb) const {
+                BmmoPhysicsCallbackInsert(physics, slot, queue->m_Callbacks[slot].len(), cb);
+            }
+        } q{physics, queue};
+        const std::set<uint32_t> in_scope(scope.begin(), scope.end());
+        return queue_plan::rebuild(q, in_scope, target, error);
     }
 
     int callbacks_hold(CKIpionManager* physics, const std::vector<uint32_t>& executed, std::string& error) {
