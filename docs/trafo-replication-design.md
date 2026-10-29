@@ -3395,3 +3395,28 @@ frame number), and one was resolved by the alternative its reviewer offered
   closed. A member without `CAP_TRAFO_INPUTS` is refused by such a session
   (2.14); since the same step every client without the session core is
   refused anyway (the core design's "As built (step B9DX)").
+
+## As built (step S2, FULL close-out, 2026-10-29): H5 on the four-client trafo arm, offline
+
+H5 (deferred since TR3b (d)) ran on the stage's reference capture instead
+of `savestate_check.py --journals`' live solo sessions (S2 is the offline
+batch): each of `core_ref_s12/h1_150`'s four captures replayed by HEAD's
+headless client with `--force-rollback` 13:24, 50:12, 97:24 and 131:47 (16
+replays, 16-169 forced rewinds each). A capture holds the rewind cost's
+clock reads (R12), so the forced arms and their control carry
+`--replay-free-cost-clock` (the control replays IDENTICAL to the live
+journals) and `--final-checkpoints` (D0). Result: all four players' pieces
+and every other non-ball body (153) 0 off at every LOCAL checkpoint, every
+body bit-equal at every confirmed FINAL row, 0 "PreSimulate queue
+differs", the replay-mismatch lines exactly the control's. A mirror's LOCAL
+row may differ for a few ticks after a forced rewind (its hold-last
+prediction made again with a newer frame); FINAL rows are equal. One
+presence residual, gap L's (rollback-engine-gaps-design, As built (step
+S2)): a mirror whose death arrived late is missing from the records a
+later rewind re-captures before its death. SP5 (e): the client journals
+hold every server Trafo event of their span (13/13) and replay with the
+trafo inputs (41 lifecycle snapshots with body rows compared, 0
+mismatches); `TRAFO_SERVER` resets of the FINAL kind are in client
+journals (`f1_live`), a deadline one in none (h1_150's fall after every
+client's last tick): H1 owes an arm. Tools: `.local-tools/work/S2/`
+(`forced.sh`, `forced_judge.sh`, `cmp_bodies.py`, `trafo_events.py`).

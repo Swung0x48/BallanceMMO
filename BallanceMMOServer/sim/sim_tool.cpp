@@ -231,6 +231,15 @@ namespace {
         // event each, players 1 and 2); with --savestate-check it must come
         // before the window (the lead), which no replay re-applies.
         long long drop_kill = -1;
+        // --drop-kill-player ID (stage A close-out step S2, V4b): --drop-kill
+        // unphysicalizes only that player's ball (1 or 2); 0 = both.
+        uint32_t drop_kill_player = 0;
+        // --late-ball TYPE X Y Z TICK (close-out step S2, RO2 deferred (b)):
+        // in a --late-run, player 1's ball of TYPE physicalized at rest at X Y
+        // Z before root+TICK (a tick after A), the same in the control, the
+        // arm and the reference: a ball moving through the late pass's pieces
+        // after the replay.
+        struct late_ball_spec { int type = -1; double at[3] = {}; long long tick = -1; } late_ball;
         // --probe-scramble before|after (step G2's review, V4's hold): each
         // savestate round moves every proximity frame 1000 m along x just
         // before ('before': the restore must put the hold back) or just
@@ -403,6 +412,7 @@ namespace {
         struct beam_write { double at[3] = {}; long long tick = 0; };
         std::vector<beam_write> beams_again;
         std::string list_entities;   // --list-entities PREFIX: as --list-trafos, any name prefix
+        std::string list_group;      // --list-group NAME (close-out step S2): with --list-placement, the group's members
         // --list-placement (sector placement design 7.2 V1, step S1): the
         // PH row plan of --level at its anchor, read-only (sim/placement_tool.hpp).
         bool list_placement = false;
@@ -703,6 +713,7 @@ namespace {
         }
         else if (arg == "--trafo-teardown") { if (!(v = next())) return false; out.trafo.teardown = std::atoll(v); }
         else if (arg == "--list-entities") { if (!(v = next())) return false; out.list_entities = v; }
+        else if (arg == "--list-group") { if (!(v = next())) return false; out.list_group = v; }
         else if (arg == "--list-placement") out.list_placement = true;
         // Every --placement* option goes to parse_placement_arg, which rejects one it does not know:
         // a new one (S3's --placement-trace) is added there.
@@ -778,6 +789,24 @@ namespace {
             if (!(v = next())) return false;
             out.drop_kill = std::atoll(v);
             if (out.drop_kill < 0) return false;
+        }
+        else if (arg == "--drop-kill-player") {   // close-out step S2 (V4b)
+            if (!(v = next())) return false;
+            const long long id = std::atoll(v);
+            if (id < 0 || id > 2) return false;
+            out.drop_kill_player = static_cast<uint32_t>(id);
+        }
+        else if (arg == "--late-ball") {   // close-out step S2 (RO2 (b))
+            if (!(v = next())) return false;
+            {   // a ball type: digits only (std::atoi would read "Stone" as type 0)
+                const std::string type = v;
+                if (type.empty() || type.size() > 3 || type.find_first_not_of("0123456789") != std::string::npos) return false;
+                out.late_ball.type = std::atoi(v);
+            }
+            for (double& k: out.late_ball.at) { if (!(v = next())) return false; k = std::atof(v); }
+            if (!(v = next())) return false;
+            out.late_ball.tick = std::atoll(v);
+            if (out.late_ball.type < 0 || out.late_ball.tick < 1) return false;
         }
         else if (arg == "--probe-scramble") {
             if (!(v = next())) return false;
@@ -2376,6 +2405,7 @@ namespace {
         const uint32_t tick = world.tick_index();
         if (args.drop_kill >= 0 && static_cast<long long>(tick) == args.drop_kill) {   // step G2
             for (uint32_t id: {1u, 2u}) {
+                if (args.drop_kill_player && id != args.drop_kill_player) continue;   // close-out step S2 (V4b)
                 if (!world.player_physicalized(id)) continue;
                 bmmo::sim::lifecycle_event death;
                 death.type = bmmo::session::event_type::Unphysicalize;
@@ -3887,6 +3917,8 @@ namespace {
                     return 1;
                 }
                 if (keep_this) rec.membership = owner_membership();
+                if (keep_this && args.verbose)   // close-out step S2 (V4b's review)
+                    std::printf("  straight t=%u owner membership %s\n", t, rec.membership.c_str());
                 if (!written_cols.empty()) rec.cells = read_written();   // step RK2's review
             }
             bmmo::physics::savestate_report report;
@@ -4077,6 +4109,7 @@ namespace {
         int rearmed_ignored_rounds = 0, rearmed_ignored_bits = 0, follow_ticks = 0, follow_fired = 0;
         CKBehavior* const manager_graph = manager_id ? CKBehavior::Cast(context->GetObject(manager_id)) : nullptr;
         bool dumped = false;
+        bool remade_dumped = false;   // close-out step S2: the premise dump has its own flag
         std::vector<uint8_t> current;
         const auto rounds_started = std::chrono::steady_clock::now();
         for (size_t r = 0; r < schedule.size(); ++r) {
@@ -4217,8 +4250,46 @@ namespace {
                         if (premise.empty())
                             premise = "the re-made live world at " + std::to_string(t0 + static_cast<uint32_t>(e))
                                     + " is not the straight pass's";
+                        // Close-out step S2: --savestate-trace describes both
+                        // worlds of the first such round (the straight pass's
+                        // record of e and the re-made one).
+                        if (!remade_dumped && end_rec.kept && !args.savestate_trace.empty() && !live.empty()) {
+                            remade_dumped = true;
+                            const std::string base = args.savestate_trace + ".remade" + std::to_string(r);
+                            const bool ok = write_text_file(base + ".expected.txt",
+                                                bmmo::physics::describe_savestate(end_rec.blob.data(), end_rec.blob.size()))
+                                         && write_text_file(base + ".actual.txt",
+                                                bmmo::physics::describe_savestate(live.data(), live.size()));
+                            std::printf("  %s both worlds of round %zu's re-made live world: %s.expected.txt / .actual.txt\n",
+                                        ok ? "wrote" : "could not write", r, base.c_str());
+                        }
                     }
                 }
+            }
+            // Close-out step S2 (V4b's review): with --verbose, every selected
+            // script whose owner the live world holds in the behaviour
+            // manager's pending table or list before the rewind (state no
+            // restore writes back).
+            if (args.verbose && frames) {
+                CKBehaviorManager* bm = context->GetBehaviorManager();
+                std::string held;
+                for (CK_ID id: scripts.scripts) {
+                    auto* beh = CKBehavior::Cast(context->GetObject(id));
+                    CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+                    if (!owner || !bm) continue;
+                    int pending = 0;
+                    for (auto it = bm->m_BeObjectNextFrame.Begin(); it != bm->m_BeObjectNextFrame.End(); ++it)
+                        if (it.GetKey() == owner->GetID()) { pending = *it; break; }
+                    bool listed = false;
+                    for (int i = 0; i < bm->m_BeObjects.Size(); ++i)
+                        listed = listed || bm->m_BeObjects[i] == static_cast<CKObject*>(owner);
+                    if (!pending && !listed) continue;
+                    held += std::string(held.empty() ? "" : ", ") + (beh->GetName() ? beh->GetName() : "?") + " pending="
+                          + std::to_string(pending) + " listed=" + (listed ? "1" : "0") + " flags=0x"
+                          + [&] { char b[16]; std::snprintf(b, sizeof(b), "%08lx", static_cast<unsigned long>(beh->GetFlags())); return std::string(b); }();
+                }
+                std::printf("  round %zu: before the rewind to %u: owners held live: %s\n", r, t0 + static_cast<uint32_t>(a),
+                            held.empty() ? "none" : held.c_str());
             }
             // Step B2SX (Q5): a named round says whether the live world it
             // rewinds has a delayed link in flight (the re-arm's two cases).
@@ -6513,11 +6584,45 @@ namespace {
         auto world = create_session_world(unplaced, 0.0f);
         if (!world) return 1;
         const int listed = bmmo::sim::list_placement(world->engine().context(), args.level > 0 ? args.level : 1);
+        // Close-out step S2 (SP8 (g)): a group's members with their world
+        // boxes, after the listing (and after the tool's apply below).
+        const auto list_group = [&](const char* when) {
+            if (args.list_group.empty()) return;
+            CKContext* context = world->engine().context();
+            auto* group = CKGroup::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>(args.list_group.c_str()),
+                                                                         CKCID_GROUP, nullptr));
+            if (!group) {
+                std::printf("group %s (%s): not found\n", args.list_group.c_str(), when);
+                return;
+            }
+            std::printf("group %s (%s): %d member(s)\n", args.list_group.c_str(), when, group->GetObjectCount());
+            for (int i = 0; i < group->GetObjectCount(); ++i) {
+                CKBeObject* o = group->GetObject(i);
+                CK3dEntity* e = CK3dEntity::Cast(o);
+                if (!e) {
+                    std::printf("  #%d %s (class %d, not 3D)\n", i, o && o->GetName() ? o->GetName() : "?",
+                                o ? static_cast<int>(o->GetClassID()) : -1);
+                    continue;
+                }
+                const VxBbox& b = e->GetBoundingBox(FALSE);
+                std::printf("  #%d %s id=%lu visible=%d box min=(%.3f,%.3f,%.3f) max=(%.3f,%.3f,%.3f)\n", i,
+                            e->GetName() ? e->GetName() : "?", static_cast<unsigned long>(e->GetID()), e->IsVisible() ? 1 : 0,
+                            b.Min.x, b.Min.y, b.Min.z, b.Max.x, b.Max.y, b.Max.z);
+                const VxBbox& lb = e->GetBoundingBox(TRUE);
+                const VxMatrix& m = e->GetWorldMatrix();
+                std::printf("     local box min=(%a,%a,%a) max=(%a,%a,%a)\n", lb.Min.x, lb.Min.y, lb.Min.z, lb.Max.x, lb.Max.y, lb.Max.z);
+                for (int row = 0; row < 4; ++row)
+                    std::printf("     world row %d = (%a,%a,%a,%a)\n", row, m[row][0], m[row][1], m[row][2], m[row][3]);
+            }
+            std::fflush(stdout);   // the x64 teardown can crash after the apply (design 12.5): print it first
+        };
+        list_group("unplaced");
         if (!args.placement) return listed;
         std::set<std::string> bodies;
         const bmmo::game::placement_hooks hooks = tool_placement_hooks(world->physics(), args.placement_fail_at, bodies);
         std::printf("anchor bodies: %zu\n", bodies.size());
         const int applied = bmmo::sim::list_placement_apply(world->engine().context(), hooks);
+        list_group("after the tool's apply, release and re-apply");
         return listed ? listed : applied;
     }
 
@@ -8646,6 +8751,27 @@ namespace {
                         return 1;
                     }
                 }
+            // Close-out step S2 (RO2 deferred (b)): --late-ball, the same in
+            // every run, after A (the arm's rewind is behind it).
+            if (args.late_ball.type >= 0 && t == root + static_cast<uint32_t>(args.late_ball.tick)) {
+                if (static_cast<size_t>(args.late_ball.type) >= world->ball_rows().size()) {
+                    std::fprintf(stderr, "--late-ball: type %d out of range\n", args.late_ball.type);
+                    return 1;
+                }
+                bmmo::sim::lifecycle_event birth;
+                birth.type = bmmo::session::event_type::Physicalize;
+                birth.ball_type = static_cast<uint8_t>(args.late_ball.type);
+                for (int i = 0; i < 3; ++i) birth.position[i] = static_cast<float>(args.late_ball.at[i]);
+                birth.tick = t;
+                birth.recipe = world->retail_recipe(birth.ball_type);
+                if (!world->apply_event(pid, birth, error)) {
+                    std::fprintf(stderr, "--late-ball: physicalize failed: %s\n", error.c_str());
+                    return 1;
+                }
+                std::printf("  ball: player %u's %s physicalized at (%.3f,%.3f,%.3f) before tick %u (root+%u)\n", pid,
+                            world->ball_rows()[args.late_ball.type].name.c_str(), args.late_ball.at[0], args.late_ball.at[1],
+                            args.late_ball.at[2], t, t - root);
+            }
             if (!world->tick(error)) {
                 std::fprintf(stderr, "tick %u failed: %s\n", t, error.c_str());
                 return 1;
@@ -8989,6 +9115,11 @@ namespace {
                  && (args.drop_kill < args.drop_settle
                      || (args.savestate_check && args.drop_kill >= static_cast<long long>(args.drop_settle) + args.savestate_lead)))
             why = "--drop-kill: after the drop (--drop-settle), and with --savestate-check before the window (the lead)";
+        else if (args.drop_kill_player && args.drop_kill < 0)
+            why = "--drop-kill-player goes with --drop-kill";
+        else if (args.late_ball.type >= 0
+                 && ((!args.late_sector_check && args.late_run.empty()) || args.late_ball.tick <= args.late_a))
+            why = "--late-ball: with --late-sector-check, its tick after A";
         else if (args.probe_scramble
                  && (!args.savestate_check || args.drop_entity.empty()
                      || !(args.world_options & bmmo::session::WORLD_PROXIMITY_UNION)))
@@ -9379,7 +9510,7 @@ int main(int argc, char** argv) {
             "           [--drop-settle N] [--drop-move SECTOR TICK] [--drop-prop ENTITY]\n"
             "           [--drop-player-at X Y Z] [--cells-trace] (mechanism check in a session world; --cells-trace:\n"
             "            IngameParameter[0][1]/[0][2], the union and the physicalized bodies on every change)\n"
-            "           [--drop-second-ball TYPE X Y Z] [--drop-kill TICK] [--probe-trace] [--probe-scramble before|after] [--world-options PROXIMITY_UNION]\n"
+            "           [--drop-second-ball TYPE X Y Z] [--drop-kill TICK [--drop-kill-player 1|2]] [--probe-trace] [--probe-scramble before|after] [--world-options PROXIMITY_UNION]\n"
             "           (step G2: player 2's ball as a second candidate; the union's frames and identity cells\n"
             "            on every report line; the server's world under the proximity union's rule)\n"
             "       any session world: [--n2-pin on|off]  (step B2SW: the checkpoint and level-reset chains'\n"
@@ -9441,7 +9572,7 @@ int main(int argc, char** argv) {
             "            the straight run start from the same restored root)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --late-sector-check K T A [--late-moved T2]\n"
             "           [--late-also SECTOR TICK]... [--late-after N] [--late-root N] [--late-expect-forgotten N]\n"
-            "           [--late-out PREFIX] [--late-keep] [--late-reference]\n"
+            "           [--late-out PREFIX] [--late-keep] [--late-reference] [--late-ball TYPE X Y Z TICK]\n"
             "           (step B1: sector K stamped at T and delivered at A - the late rewind with the union re-derived -\n"
             "            against an on-time control, each run a child process; every boundary A..A+N compared; exit 0\n"
             "            PASS, 3 FAIL, 4 PASS-EXCEPT-REFERENCE (every difference is one an ordinary rewind across the\n"

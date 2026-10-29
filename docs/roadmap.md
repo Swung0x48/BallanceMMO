@@ -888,6 +888,37 @@ numbers 1-10 are unchanged.
    this item's: SimTool's v14 chain artefact (above, P_Modul_25's flags in
    8 of 50 v14 rounds) and G-c (the worlds break the bridge at different
    ticks: the probe and the identity read run on each client's own ball).
+   **Queued at FULL step S2 (2026-10-29, found by the forced-rollback
+   capture replays of `core_ref_s12`, pre-existing):** gap L's mirror half
+   misses one case - a mirror whose death arrives late (its own rewind at
+   D-1) and a later rewind of the same frame anchored at A < D-1 (a forced
+   one, or an ordinary input correction): the records (D-1, now] the
+   death's own rewind re-captured keep the dead mirror's old generation
+   (`rollback.hpp` copies the record's tracked set and refreshes only the
+   remotes alive in the replay), so `revive_ended_lives` (a life ends only
+   at a generation change) hands no ended life over, no half revives it,
+   the restore skips its blob entry and the replay runs without the body
+   over [A+1, D); the re-captured records lack it (`swing_snapoff` c0
+   900-904, `h1_150` c0 1056-1058). Fix: the death's own re-capture (or
+   the end test) must see the end - e.g. a re-captured record of a remote
+   with no body takes the generation the live death gave it. Check: the
+   S2 forced replays (`.local-tools/work/S2/forced.sh`, FINAL rows
+   `--final-checkpoints`) with no presence difference.
+   **Queued at FULL step S2's gate round (2026-10-29, pre-existing,
+   RLM's family):** a pending add a replayed frame makes
+   (`CKScene::Activate` from a replayed script's activation: +1 in
+   `m_BeObjectNextFrame`) outlives the replay; the RLM ledger takes back
+   only `reregister`'s. A second restore before the next live frame
+   (a host frame with two rewinds, the second anchored before the
+   activation tick; SimTool's chained rounds) admits the owner through
+   `owner_pending_add` in frames where the live frame did not run it and
+   consumes a next-frame flag the live world kept (WGQ7-V4b's alive scene:
+   `P_Modul_18_Particle Script` DEACTIVATENEXTFRAME, 8/50 rounds). Fix:
+   the ledger also records each pending add a replayed frame makes (the
+   owner's count before and after `execute_frame`) and the next restore
+   of the same live frame takes those back with its own. Check: V4b's
+   alive scene (`.local-tools/work/S2/sim_jobs.sh` v4b, seed 1) 50/50 and
+   its `--verbose` "owners held live" line at pending 0.
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03
@@ -1486,6 +1517,134 @@ numbers 1-10 are unchanged.
      seven SDL3 C objects of the x64 tree that really had lost their
      headers (built about 2026-10-19, cause not attributable now,
      skipped by `deps_heal.py`) were rebuilt.
+   - **Run at S2 (2026-10-29, HEAD 3af8aaaf + SimTool-only tooling;
+     SimTool batch B, replays on existing data; `.local-tools/work/S2/`,
+     binary `build-agent-rS2`):** SimTool gained `--drop-kill-player`
+     (V4b), `--late-ball TYPE X Y Z TICK` (RO2 (b)), the SP10-g count in
+     `--list-placement --placement on` (with a whole-level control line),
+     `--list-group NAME`, a `--savestate-trace` dump of a re-made live
+     world that fails its premise (its own flag) and, with `--verbose
+     --frames`, the selected scripts' owners held live before each rewind
+     and the straight pass's membership per kept tick; nothing outside
+     `BallanceMMOServer/sim` (656 tests, Linux SimTool syntax ok; the gate
+     round's build `build-agent-rS2g`). **TR3b-d (H5)**, adapted offline: the four
+     `core_ref_s12/h1_150` captures replayed with `--force-rollback`
+     13:24 / 50:12 / 97:24 / 131:47 (16 replays, 16-169 forced rewinds
+     each; a forced rewind needs `--replay-free-cost-clock`, whose control
+     replays IDENTICAL): the 153 non-ball bodies (every piece of all four
+     sets) 0 off at every LOCAL checkpoint; every body bit-equal at every
+     confirmed FINAL row (D0); 0 "PreSimulate queue differs"; the
+     replay-mismatch lines equal the control's. A mirror's LOCAL row
+     differs over a few ticks after a forced rewind (a hold-last
+     prediction re-made with a newer frame; the FINAL rows are equal).
+     **Found (pre-existing, gap L, item 4):** a mirror whose death arrives
+     late (its own rewind at D-1) is missing from the records of
+     (A, D) re-captured by a later rewind of the same frame anchored at
+     A < D-1 - forced (`swing_snapoff` c0 900-904, `h1_150` c0 1056) and
+     an ordinary input-correction rewind alike (h1_150 1058 in the
+     control too): the records the death's own rewind re-captured keep
+     the old generation (`rollback.hpp` step_tracked copied from the
+     record, only alive remotes refreshed), so `revive_ended_lives`
+     (end = a generation change only) sees the life alive, no half
+     revives it and the restore skips its blob entry: the replay runs
+     without the body in [A+1, D) (no position effect in these runs: the
+     mirrors were falling). **SP5-e:** the `h1_150` client journals hold
+     13/13 of the server's Trafo events in their spans and replay with
+     the trafo inputs, `checkpoint_mismatches=0`; `TRAFO_SERVER` resets
+     of the FINAL kind are in client journals (`f1_live` c0 6, c1 3,
+     replayed alike); a deadline `TRAFO_SERVER` reset falls after every
+     client's last tick in every protocol-22 run (h1_150: 2491-2535 vs
+     2168-2249): H1 owes an arm with one. A late joiner's client journal
+     does not replay (`f1_live` c3 stops at its tick jump). **SP7-b V9:**
+     L11 lead 180 move / no move, default lead (the retail-ball park at
+     204 inside the window) move at 80 / no move, L8 the same: 50/50
+     each, 0 gap F lines. **RO2-b:** L8 K=2 (T 60, A 69) with a wood ball
+     dropped off-centre and a stone ball onto the late `P_Modul_41` row
+     after A (the blocks tilt, the balls roll off), and L11 K=3 with a
+     stone riding the late swinging sack `P_Modul_26_Sack`: every body
+     bit-identical to the on-time control at 301/301 boundaries; the
+     structure differs as RO2 measured (L8: movable 18, hull/collision
+     83-245, OV 301 boundaries; L11: world, units, OV 301). **SP8-c (the 736 death):** the killer is the
+     level depth cube `Quader01` (`DepthTestCubes`, world box y -208.3 ..
+     -87.5) through `Gameplay_Ingame/BallManager`'s Box Box Intersection
+     on `Ball_Wood` (`Deactivate Ball`): a static level object, no PH
+     row, no copy, the same in every world; the copies' `DepthTest`
+     group is the props' reset group, not the ball's death test, so
+     hypothesis (i) (an s3 or copy volume) is refuted and the ball died
+     of its fall through `P_Modul_37_Bridge_R30` (ii). Not explained: the
+     ball was inside Quader01 from about 663 and died only at 736, the
+     tick after `sector +3`; needs a trace of the BallManager iterator in
+     c2's world (a capture replay with the SP8 binary; the server world
+     does not run that test for a clone). **SP10-g:** 0 object-valued
+     attributes naming outside the hierarchy on L1-L13 (23-62 copies a
+     level), and 0 by absence: the filter's control over every
+     behavioural object of each level (1073-1809) finds the six
+     object-valued attribute types registered (Occluder, Pickable,
+     PickableScreen, PhysicsScript, ObjectToReset, RepresentFrame) with 0
+     holders in any level, so step 8's remap has nothing to remap in the
+     retail levels; the value read itself (`GetReadDataPtr(FALSE)`) has
+     no holder to exercise (gate round, `S2/gate/lp_L*.txt`). These lines
+     are printed by the x64 SimTool from S2 on only; S1's platform
+     comparisons read the `tickhash` lines, not whole listings. **RK1-d:**
+     `--resync-check` A2 cases (l11_ER, l11_A5, arena_A4, arena_ER, every
+     arm PASS, RESULT lines identical to B2SW's). **S1b with
+     `--session-recipe`: NOT RUN TO A VERDICT, open.** At the session start
+     (`--drop-settle 0`) every run (L2, L13, seeds 1-5) stops at round
+     3-4 on the harness's premise ("the re-made live world at e is not
+     the straight pass's", then a restore error on a window-born
+     `P_Ball_*_MF`), with C3 replays 0-1, so A18's frame-2 globals write
+     is not tested. Cause (the dumped worlds): the re-made live world
+     (`sim_tool.cpp` 4196-4246; it puts back t0's globals only, 4229, as
+     the trafo re-make at 4156 does) lacks the level start's frame-2 globals
+     write (straight: gravity -20, factor 2; re-made: -9.81, 1) and the
+     outside-the-selection Init Ingame activation of sector 1 (births at
+     7) - a SimTool harness gap, not a client one (a client replay puts
+     back each tick's recorded globals, C3; H1's H4 measures the client
+     case live); the v14 recipe fails there too (A23). The settle-12
+     runs (60/60 on L2 and L13, seeds 1-5) print `globals (C3) set=0`:
+     their windows hold no globals change and do not cover A18. Fix
+     (SimTool): re-make the live world with the straight pass's globals
+     put back per tick and the outside-selection activations re-issued;
+     then rerun S1b. **WG3-V4:** WG2's four scenes on the clients' recipe
+     50/50 each (the 120-tick dead window across the park at 204 and the
+     bridge break both pass now: RLQ, RLC); the `swing_snapoff` 13:24
+     forced replays (the clients' records with the hold) as TR3b-d.
+     **WGQ7-V4b:** two paper balls in the P_Modul_18 box, K = 2, one ball
+     killed in the lead: 50/50 (player 2 killed), 50/50 (player 1). **The
+     alive scene FAILS 8/50** (seed 1, chained rounds; pre-existing: the
+     same 8 rounds with one ball, the bit off, K = 8 and on rRK2 / rRK1 /
+     rRLQ; the schedule as named rounds 50/50): `P_Modul_18_Particle
+     Script` flags 0x400000 (DEACTIVATENEXTFRAME, kept by the straight
+     pass) vs 0, and the RLM witness 0 vs 1, in exactly the rounds whose
+     window lies inside [34, 67]. Cause, root-caused at the gate round
+     (`--verbose` now prints each selected script's owner held live
+     before a rewind: `S2/gate/v4b_alive_diag.txt`): the replayed frame of
+     tick 68 runs a replayed script's activation of the particle
+     script (`CKScene::Activate`: +1 in the behaviour manager's
+     `m_BeObjectNextFrame`); only a live frame's `ManageObjectsActivity`
+     consumes it, and the RLM ledger takes back only the restore's own
+     `reregister` adds (registrations 0 in this run). With no live frame
+     between SimTool's chained rounds the owner's pending count grows by
+     one per round replaying tick 68 (0 at the straight end, 1 after
+     round 0, 3 at round 8, 10 at round 31); a later round anchored
+     before 68 then finds the owner pending, `execute_scripts` admits it
+     (`owner_pending_add`, `script_replay.hpp` 1592-1596) and consumes the
+     DEACTIVATENEXTFRAME the live frame kept until 68. Named rounds re-make
+     the live world with whole frames, which empty the table. A host
+     reaches it with two rewinds in one host frame, the first replaying
+     an activation tick and the second anchored before it (RLM-2rw's
+     case; one rewind per frame is consumed by the next live frame). The
+     records differ in that bit only (blobs and hashes equal); the fix is
+     shared (`script_replay.hpp`): queued in item 4. "Across the death"
+     inside one window needs a
+     lifecycle event replayed in a savestate window (SimTool sets events
+     up before the window): S3. **SPGH-pr:** the REF12 live journals are
+     the pinned replay (the wire check replays them IDENTICAL with the
+     live input records); own ball vs the server's rows over every
+     respawn window: resync_snapoff c0-c2 bit-equal from the respawn to
+     the airship, c3 bit-equal 2692-3163 then a LOCAL-row contact
+     prediction 3164-3206 (FINAL rows bit-equal, D0); swing_snapoff all
+     four bit-equal over both respawn windows.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

@@ -3140,3 +3140,24 @@ The savestate matrix (`scripts/savestate_check.py`) changes with it: its
 `--quick` on rF0: 5/5 as expected, `arena-sector2.frames` PASS 12/12 on the
 session recipe, the physics cells PASS 12/12 on v14, the `--legacy-restore`
 negative control FAILS at round 0 as before.
+
+## As built (step S2, FULL close-out, 2026-10-29): gap L's late-death case, found offline
+
+The forced-rollback capture replays of `core_ref_s12` (`h1_150`,
+`swing_snapoff`; the trafo design's As built (step S2)) are the first
+deterministic offline check of EL7's A < D-1 case. Physics: every body
+bit-equal at every confirmed FINAL row. Presence: a mirror whose death
+arrives late (its own rewind at D-1, "keeps nothing to replay" by design)
+is missing from the records of (A, D) that a later rewind of the same
+frame anchored at A < D-1 re-captures - a forced one (`swing_snapoff` c0,
+D 906, A 899: rows 900-904) or an ordinary input correction (`h1_150` c0,
+D 1059, A 1057: row 1058, in the replay without forced rewinds too). Cause:
+the death's own rewind re-captures (D-1, now] from the old records' tracked
+set (`rollback.hpp`, `step_tracked = recorded->tracked`; only remotes alive
+in the replay get the current generation), so those records keep the dead
+mirror's old generation; `revive_ended_lives` ends a life only at a
+generation change and sees it alive, no half revives it, the restore skips
+its blob entry (no live body) and the replay runs without the body over
+[A+1, D). No position effect in these runs (the mirrors were falling);
+a mirror dying in contact would differ. Pre-existing (S2 changed no session
+code). Queued in roadmap §4 item 4 with its check.

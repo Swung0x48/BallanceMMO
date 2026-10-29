@@ -250,6 +250,78 @@ namespace bmmo::sim {
             std::printf("census row %d %s: %s\n", c.row, c.name.c_str(), c.census.c_str());
             std::printf("fingerprint row %d %s: %s\n", c.row, c.name.c_str(), c.fingerprint.c_str());
         }
+        // Step S2 of the close-out (FULL plan row SP10-g, SP10's review nit
+        // on design step 8): an object-valued attribute of a copy that names
+        // an object the copy did not make.  Step 8 remaps a value naming a
+        // member of the hierarchy to its copy; any other value keeps naming
+        // the original's target (an object outside the hierarchy, shared by
+        // the original and its copies).  Counted after the apply; expected 0.
+        // The positive control (S2's review): the same filter over every
+        // behavioural object of the level, so a 0 for the copies is read
+        // against what the filter finds at all; the value is read without
+        // an update (GetReadDataPtr(FALSE)), the listing stays read-only.
+        {
+            CKParameterManager* pm = context->GetParameterManager();
+            CKAttributeManager* am = context->GetAttributeManager();
+            // The target an object-valued attribute of `o` of `type` names, or null.
+            const auto object_target = [&](CKBeObject* o, CKAttributeType type) -> CKObject* {
+                CKParameterOut* p = o->GetAttributeParameter(type);
+                if (!p || !pm || !pm->IsDerivedFrom(p->GetGUID(), CKPGUID_OBJECT)) return nullptr;
+                const void* data = p->GetReadDataPtr(FALSE);
+                const CK_ID value = data ? *static_cast<const CK_ID*>(data) : 0;
+                return value ? context->GetObject(value) : nullptr;
+            };
+            size_t object_types = 0;
+            std::string type_names;
+            if (am && pm)
+                for (int t = 0; t < am->GetAttributeCount(); ++t)
+                    if (pm->IsDerivedFrom(am->GetAttributeParameterGUID(t), CKPGUID_OBJECT)) {
+                        ++object_types;
+                        const char* n = am->GetAttributeNameByType(t);
+                        type_names += std::string(type_names.empty() ? "" : ", ") + (n ? n : "?") + " ("
+                                    + std::to_string(am->GetAttributeListPtr(t).Size()) + " holder(s))";
+                    }
+            size_t level_holders = 0, level_valued = 0, level_object_attributes = 0;
+            const XObjectPointerArray& all = context->GetObjectListByType(CKCID_BEOBJECT, TRUE);
+            for (int i = 0; i < all.Size(); ++i) {
+                CKBeObject* o = CKBeObject::Cast(all[i]);
+                if (!o) continue;
+                bool holds = false;
+                for (int k = 0; k < o->GetAttributeCount(); ++k) {
+                    CKParameterOut* p = o->GetAttributeParameter(o->GetAttributeType(k));
+                    if (p && pm && pm->IsDerivedFrom(p->GetGUID(), CKPGUID_OBJECT)) ++level_object_attributes;
+                    if (object_target(o, o->GetAttributeType(k))) { ++level_valued; holds = true; }
+                }
+                if (holds) ++level_holders;
+            }
+            size_t object_valued = 0, outside = 0;
+            for (const game::sector_placement::copy_record& c: placement.copies()) {
+                std::set<CK_ID> made;
+                for (const auto& [id, cls]: c.objects) made.insert(id);
+                for (const auto& [id, cls]: c.objects) {
+                    CKBeObject* o = CKBeObject::Cast(context->GetObject(id));
+                    if (!o) continue;
+                    for (int k = 0; k < o->GetAttributeCount(); ++k) {
+                        const CKAttributeType type = o->GetAttributeType(k);
+                        CKObject* target = object_target(o, type);
+                        if (!target) continue;
+                        ++object_valued;
+                        if (made.count(target->GetID())) continue;
+                        ++outside;
+                        const char* an = am ? am->GetAttributeNameByType(type) : nullptr;
+                        std::printf("object attribute outside the hierarchy: row %d %s: %s's %s names %s (id %lu)\n", c.row,
+                                    c.name.c_str(), o->GetName() ? o->GetName() : "?", an ? an : "?",
+                                    target->GetName() ? target->GetName() : "?", static_cast<unsigned long>(target->GetID()));
+                    }
+                }
+            }
+            std::printf("object attributes naming outside the hierarchy: %zu (object-valued attributes with a target: %zu, "
+                        "copies %zu)\n", outside, object_valued, placement.copies().size());
+            std::printf("object attributes, the filter's control over the whole level: %zu object-valued attribute type(s)"
+                        " registered [%s]; %zu object-valued attribute(s) held, %zu of them with a target, on %zu of %d"
+                        " behavioural object(s)\n", object_types, type_names.c_str(), level_object_attributes, level_valued,
+                        level_holders, all.Size());
+        }
         const uint64_t on = placement.signature(context);
         std::printf("signature (placement on): %016llx\n", static_cast<unsigned long long>(on));
         std::string why;

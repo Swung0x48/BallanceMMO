@@ -2617,3 +2617,36 @@ streams (121 lines each) on every level; the same sweep with
 and L9 (0xC0000005 reading 0x00007FF700000008, the S2 signature), rB2SW exits
 0 on all 13 with tick hashes identical to rR12's. §12.5's first point is
 closed.
+
+### 12.7 As built (step S2, FULL close-out, 2026-10-29): c2's death at 736, SP10 (g), V9 on L11
+
+- **The 736 death (SP8 (g)), attributed.** The volume is the level depth
+  cube `Quader01` (group `DepthTestCubes`, world box x -97.7 .. 792.9,
+  y -208.3 .. -87.5, z -388.0 .. 135.5; SimTool `--list-placement
+  --list-group DepthTestCubes`), tested by `Gameplay_Ingame/BallManager`'s
+  Box Box Intersection against `Ball_Wood` and acted on by its
+  `Deactivate Ball`: a static level object, no PH row, no copy, unchanged
+  by the placement and the same in every world. The copies' `DepthTest`
+  group is the props' reset group (`Gameplay_Ingame/DepthTest`), not the
+  ball's death test. So hypothesis (i) (an s3 or copy volume, §1's rule
+  broken) is refuted; the ball died of its fall through
+  `P_Modul_37_Bridge_R30` (ii). Open: the ball was inside Quader01's box
+  from about tick 663 and the test fired only at 736, the tick after
+  `sector +3`; the server world does not run that test for a clone, so the
+  latency needs a trace of BallManager's iterator in c2's own world (a
+  capture replay with the SP8 binary) - H2's SP8 (c) run.
+- **SP10 (g):** `--list-placement --placement on` counts object-valued
+  attributes of copies whose target the copy did not make: 0 on L1-L13
+  (no copy carries an object-valued attribute with a target at all). The
+  0 is by absence, not a blind filter: the same filter over every
+  behavioural object of each level (the control line, gate round) finds
+  the six object-valued attribute types registered (Occluder, Pickable,
+  PickableScreen, PhysicsScript, ObjectToReset, RepresentFrame) and 0
+  holders of any of them in any retail level, so step 8's remap has
+  nothing to remap there. The value is read with `GetReadDataPtr(FALSE)`
+  (the listing stays read-only); with no holder that read is not
+  exercised.
+- **V9 on L11 and the window across the retail-ball park:** L11 and L8,
+  lead 180 with a pass at 260 and without, the default lead (31..230, the
+  park at 204 inside) with a pass at 80 and without: 50/50 each, 0 gap F
+  lines.

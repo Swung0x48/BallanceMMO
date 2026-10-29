@@ -4084,3 +4084,41 @@ engine change; shared code `game/proximity_union.hpp`, the server's
   as WAD-A / G-c / the import's residual in the close-out's H steps.
   `late ball mirror` 0.78 / 1.10 m (clients 0 and 2, not gating) is the
   prediction of a mirror at 150 ms (plan §4 C1).
+
+### As built (step S2, FULL close-out, 2026-10-29): V4 and V4b
+
+- **V4** (WG2's `v4.sh` scenes on the clients' recipe, F0's default): alive,
+  dead (the 120-tick dead window across the park at 204) and the bridge
+  break 50/50 each, the bit-clear control 50/50 - WG2's two refused cases
+  pass now (RLQ's queue hold, RLC's joints). On the clients' own records:
+  `core_ref_s12/swing_snapoff`'s four captures replayed with
+  `--force-rollback 13:24` (253-260 forced rewinds each): every non-ball
+  body 0 off at every LOCAL checkpoint and every body bit-equal at every
+  confirmed FINAL row (the trafo design's As built (step S2) for the method).
+- **V4b, adapted:** SimTool sets every lifecycle event up before a
+  savestate window and no replay re-applies one (as for V4), so "across one
+  ball's death" is a window after it: V7 (a)'s two paper balls in the
+  P_Modul_18 box under the Q7 bit (K = 2), one ball killed in the lead
+  (`--drop-kill 75 --drop-kill-player 1|2`, new): its slot force released,
+  the other's held (`--probe-trace`); 50/50 each. A death inside one window
+  needs SimTool tooling (FULL step S3).
+- **V4b's alive scene FAILS 8/50** seeded chained rounds (seed 1) on
+  `P_Modul_18_Particle Script` flags 0x400000 (DEACTIVATENEXTFRAME, kept by
+  the straight pass) vs 0, with the RLM witness 0 vs 1 - exactly the rounds
+  whose window lies inside [34, 67]; pre-existing (the same 8 with one
+  ball, the bit off, K = 8, on rRK2 / rRK1 / rRLQ); the schedule as named
+  rounds (the live world re-made at e by whole frames) passes 50/50. Cause
+  (gate round, `--verbose`'s new "owners held live" line,
+  `.local-tools/work/S2/gate/v4b_alive_diag.txt`): the replayed frame of
+  tick 68 runs a replayed script's activation of the particle script
+  (`CKScene::Activate`, +1
+  in the behaviour manager's `m_BeObjectNextFrame`), which only a live
+  frame consumes and which the RLM ledger does not take back (it takes
+  back `reregister`'s adds only; registrations 0 here). Between chained
+  rounds no live frame runs, so the owner's pending count grows by one per
+  round replaying 68 (0 at the straight end, 10 by round 31); a round
+  anchored before 68 then admits the owner through `owner_pending_add`
+  (`script_replay.hpp` 1592-1596) and consumes the flag the live frame
+  kept. A host meets it with two rewinds in one host frame (RLM-2rw's
+  case). Records differ in that bit only; blobs and hashes are equal. Not
+  a harness artefact: the fix is the shared ledger's (roadmap §4 item 4).
