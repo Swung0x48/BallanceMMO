@@ -9087,17 +9087,27 @@ namespace {
         for (const auto& p: first.probes) mech += p.mechanism ? 1u : 0u;
         for (const auto& i: first.identities) mech_ids += i.in_mechanism ? 1u : 0u;
         const size_t all = first.probes.size(), ids = first.identities.size();
+        // Step F1 (IDCP): the parameter outputs in the world after a release,
+        // against the count after the first one (the anchor's union gone):
+        // an identity copy's outputs left behind show as a difference (the
+        // objects are nameless, so leftovers() cannot see them).
+        int outputs_released = -1;
         const auto released = [&](const char* label, int restored, size_t expected) {
             const auto r = census();
             const size_t left = leftovers();
+            const int outputs = context->GetObjectsCountByClassID(CKCID_PARAMETEROUT);
+            if (outputs_released < 0) outputs_released = outputs;
+            const int outputs_left = outputs - outputs_released;
             check(label, static_cast<size_t>(restored) == expected && r.unrewired == r.probes.size()
                              && r.probes.size() == all && r.identities_on_original == r.identities.size()
                              && r.identities.size() == ids && left == 0 && world.proximity_probe_count() == 0
+                             && outputs_left == 0
                              && r.signature_mechanism == first.signature_mechanism && r.signature_all == first.signature_all,
                   "restored " + std::to_string(restored) + " of " + std::to_string(expected) + ", on Ball_Pos_Frame "
                       + std::to_string(r.unrewired) + "/" + std::to_string(r.probes.size()) + ", reads on CurrentLevel "
                       + std::to_string(r.identities_on_original) + "/" + std::to_string(r.identities.size())
-                      + ", union objects left " + std::to_string(left));
+                      + ", union objects left " + std::to_string(left) + ", parameter outputs left "
+                      + std::to_string(outputs_left));
         };
         std::printf("release check: the anchor's union %zu blocks, %zu identity reads; mechanism %zu, %zu\n", all, ids,
                     mech, mech_ids);
@@ -9161,16 +9171,54 @@ namespace {
             std::vector<int> before = counts();
             error = world.rewire_proximity(true, bmmo::game::probe_class::mechanism, 0);
             const int base_reads = static_cast<int>(world.proximity().identity_count());
+            // Step F1 (IDCP): what one identity copy owns - the parameter
+            // outputs whose owner it is, and how many of them its own
+            // parameter columns hold (the rest are not reached by its
+            // destruction alone).
+            {
+                CKDataArray* copy = nullptr;
+                const int arrays = context->GetObjectsCountByClassID(CKCID_DATAARRAY);
+                CK_ID* array_ids = context->GetObjectsListByClassID(CKCID_DATAARRAY);
+                for (int i = 0; i < arrays && !copy; ++i) {
+                    CKObject* o = context->GetObject(array_ids[i]);
+                    if (o && o->GetName() && std::string_view(o->GetName()).rfind("CurrentLevel#BMMOId_", 0) == 0)
+                        copy = CKDataArray::Cast(o);
+                }
+                if (copy) {
+                    int owned = 0, in_columns = 0, columns = 0;
+                    std::set<CKObject*> column_outputs;
+                    for (int c = 0; c < copy->GetColumnCount(); ++c) {
+                        if (copy->GetColumnType(c) != CKARRAYTYPE_PARAMETER) continue;
+                        ++columns;
+                        for (int row = 0; row < copy->GetRowCount(); ++row)
+                            if (auto* cell = copy->GetElement(row, c))
+                                if (*cell) column_outputs.insert(reinterpret_cast<CKObject*>(*cell));
+                    }
+                    const int outs = context->GetObjectsCountByClassID(CKCID_PARAMETEROUT);
+                    CK_ID* out_ids = context->GetObjectsListByClassID(CKCID_PARAMETEROUT);
+                    for (int i = 0; i < outs; ++i) {
+                        auto* parameter = static_cast<CKParameterOut*>(context->GetObject(out_ids[i]));
+                        if (!parameter || parameter->GetOwner() != copy) continue;
+                        ++owned;
+                        in_columns += column_outputs.count(parameter) ? 1 : 0;
+                    }
+                    std::printf("identity copy %s: %d rows, %d parameter columns, owns %d parameter outputs, %d of them "
+                                "in its parameter columns\n",
+                                copy->GetName(), copy->GetRowCount(), columns, owned, in_columns);
+                }
+            }
             world.release_proximity();
             const std::vector<int> base = counts();
             const int base_leak = base[5] - before[5];
             bool base_other = true;
             for (size_t i = 0; i < base.size(); ++i) base_other = base_other && (i == 5 || base[i] == before[i]);
             const int per_read = base_reads > 0 ? (base_leak % base_reads == 0 ? base_leak / base_reads : -1) : (base_leak == 0 ? 0 : -1);
-            check("baseline", error.empty() && base_other && per_read >= 0,
+            // Step F1 (IDCP): no parameter output is left (2 per identity
+            // copy before the release took the copy's own outputs with it).
+            check("baseline", error.empty() && base_other && base_leak == 0,
                   "union rules without units: " + std::to_string(base_reads) + " identity reads, objects " + text(before)
                       + " -> " + text(base) + " (" + std::to_string(base_leak) + " parameter outputs left, "
-                      + std::to_string(per_read) + " per identity copy; pre-existing, not the units')");
+                      + std::to_string(per_read) + " per identity copy)");
             before = base;
             uint64_t first_signature = 0;
             for (int round = 1; round <= 2; ++round) {
@@ -9205,6 +9253,61 @@ namespace {
                           + ", expected " + text(expected) + " (the baseline's identity-copy outputs x "
                           + std::to_string(reads) + ")");
                 before = after;
+            }
+            // Step F1 (UGRD, the unit-set guard): the server's copy step (class
+            // all, every identity read's unit; then its selection marks the
+            // class) against a client's (the mechanism class) in this world.
+            // Control: with the world's selection the server copies no unit
+            // outside the class and its signature is the clients' (round 1's).
+            // Fixture: the first unit's root script taken out of the
+            // selection (a level whose identity read lies outside a mechanism
+            // script): the server keeps that unit's copies, a client makes
+            // none.  Without the guard the two signatures are equal (the
+            // divergence went unrefused); with it they differ, and the server
+            // refuses the member (server.cpp: anchor_probes differ -> "probe
+            // mismatch").
+            if (mech_ids > 0) {
+                error = world.rewire_proximity(true, bmmo::game::probe_class::all, slots);
+                const auto& u = world.proximity();
+                world.classify_proximity(sel);
+                const size_t control_outside = u.non_mechanism_unit_count();
+                const uint64_t control_server = u.signature(bmmo::game::probe_class::mechanism);
+                const std::vector<CK_ID> roots = u.unit_roots();
+                check("unit guard control", error.empty() && !roots.empty() && control_outside == 0
+                                                && control_server == first_signature,
+                      error.empty() ? "the server's copy step: units " + std::to_string(u.unit_count()) + ", outside the class "
+                                          + std::to_string(control_outside) + ", signature " + hex(control_server)
+                                          + (control_server == first_signature ? " = " : " != ") + "the clients' "
+                                          + hex(first_signature)
+                                    : error);
+                if (error.empty() && !roots.empty()) {
+                    bmmo::game::script_replay::selection reduced = sel;
+                    reduced.scripts.erase(std::remove(reduced.scripts.begin(), reduced.scripts.end(), roots.front()),
+                                          reduced.scripts.end());
+                    world.classify_proximity(reduced);
+                    const size_t outside = u.non_mechanism_unit_count();
+                    const uint64_t server = u.signature(bmmo::game::probe_class::mechanism);
+                    const uint64_t server_unguarded = u.signature(bmmo::game::probe_class::mechanism, false);
+                    const size_t server_units = u.unit_count();
+                    world.release_proximity();
+                    error = world.rewire_proximity(true, bmmo::game::probe_class::mechanism, slots, &reduced);
+                    const uint64_t client = world.proximity().signature(bmmo::game::probe_class::mechanism);
+                    const size_t client_units = world.proximity().unit_count();
+                    const size_t client_outside = world.proximity().non_mechanism_unit_count();
+                    check("unit guard", error.empty() && outside > 0 && client_outside == 0 && client_units < server_units
+                                            && server_unguarded == client && server != client,
+                          error.empty() ? "a unit's script out of the selection: server units " + std::to_string(server_units)
+                                              + " (" + std::to_string(outside) + " outside the class), client units "
+                                              + std::to_string(client_units) + "; signature server " + hex(server)
+                                              + " (without the guard " + hex(server_unguarded) + "), client " + hex(client)
+                                              + (server != client ? ": the member is refused (probe mismatch)"
+                                                                  : ": NOT refused")
+                                        : error);
+                }
+                world.release_proximity();
+                const std::vector<int> after = counts();
+                check("unit guard release", after == before,
+                      "objects (behaviours/links/IOs/operations/pIn/pOut/locals) " + text(before) + " -> " + text(after));
             }
         }
         std::printf("RELEASE-CHECK: %s\n", pass ? "PASS" : "FAIL");

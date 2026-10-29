@@ -3978,3 +3978,109 @@ trl_live_B2). **Negative controls**: a copy of wgq7_live with client 1's own
 ball moved +1 cm over 300..600 FAILS `own ball 0.0000 in B: 0.0100 m`; the
 same in client 2's rejoin journal over 2000..2200 FAILS `own ball 0.0000 in
 A: 0.0100 m` (`.local-tools/work/F0/doctor.py`, `rev_neg/`).
+
+### As built (step F1, 2026-10-29): the server's unit-set guard (UGRD), the identity copies' outputs (IDCP)
+
+The close-out's FULL plan rows UGRD and IDCP, both queued at step WGQ7
+("Found, pre-existing, queued"). No protocol change, no journal change, no
+engine change; shared code `game/proximity_union.hpp`, the server's
+`physics_world`, SimTool.
+
+- **UGRD, the unit-set guard** (`proximity_union::signature`): under
+  `WORLD_PLAYER_MECHANISMS`, `signature(mechanism)` ends with a u32, the
+  count of the world's units outside the mechanism class, written only when
+  it is not 0. A client copies only its mechanism scripts' units, so its
+  count is 0 by construction and nothing is written: every signature so far
+  is unchanged. The server copies every identity read's unit before its
+  selection exists (WGQ7's adaptation 4); a level whose identity read lies
+  outside a mechanism script now gives it a signature no client has, and its
+  existing branch refuses each member (`server.cpp`, protocol 16's "probe
+  mismatch": out of the session, the room stays). `signature(all)` is left
+  as it was (it hashes every unit already). The server logs the count at its
+  anchor when it is not 0 (`physics_world.cpp`, "N of M per-player units are
+  outside the mechanism class"). **Adapted**: the plan's "a client refuses a
+  mismatch" is the server's refusal of the member - the anchors compare at
+  the server, no client code changed. The orchestrator's choice (a tail
+  count, not a level refusal at the server's anchor) is kept.
+- **IDCP, the identity copies' outputs** (`proximity_union::release`):
+  measured at V6's baseline (SimTool's diagnostic line, every level with an
+  identity read): an identity copy (`CopyObject(CurrentLevel)`, one row, two
+  parameter columns) owns **4** `CKParameterOut`, of which only the 2 in its
+  parameter columns are its own cells; the other 2 are the dependency copy's
+  (`CK_DEPENDENCIES_COPY_DATAARRAY_DATA` prepares the source's owned column
+  parameters, so they are copied as objects of their own and remapped to the
+  copy as owner, beside the cells `CKDataArray::Copy` makes; read in
+  Ballanced's CK2: `CKDataArray::PrepareDependencies` takes the owned
+  column parameters in COPY mode when the class flag 2 is set (:2187),
+  `CKDataArray::RemapDependencies` leaves a cell that is not in the map as
+  it is (:2263), `CKParameter::RemapDependencies` remaps the owner (:518);
+  the count is the measurement). Destroying the
+  copy alone did not reach those 2: they stayed with an owner pointer to a
+  freed object (WGQ7's "2 per copy"). The release now finds every parameter
+  output owned by one of its copies (one pass over the class per release,
+  by owner) and destroys each copy together with them in ONE
+  `DestroyObjects` call - a `CKParameterOut`'s `PreDelete` reads its owner,
+  so the owner must still exist when it runs, which a single batch gives
+  (`CKObjectManager::DeleteObjects` runs every `PreDelete` before any
+  delete). Public CK2 API only; the retail SDK compiles it (x86 build).
+- **Effect on CK ids** (the one way IDCP reaches a live world): CK reuses
+  freed ids, so after a release the next objects a world creates (a
+  rejoin's or a re-anchor's rewire) take the 2-per-copy ids the leak used to
+  keep. Nothing compares CK ids across worlds (the union's names are the
+  portable keys, §2.3; the hold section localizes by name), and the server
+  never releases mid-session. The live smoke's rejoiner (release, then
+  rewire, in one engine) matched the server's journal (below).
+
+**Checks** (about 8 minutes of checks, one live run).
+- Builds: x64 BUILD-OK (DEPS-OK; `session_client.cpp.obj` #deps 499),
+  x86 CLIENT-BUILD-OK (`core_host.cpp` and `physics_session_client.cpp`
+  rebuilt, #deps 1268), ARCH-BUILD-OK
+  `ballanced-36c04e3d24c9+bmmo-b472cae79780-dirty`;
+  `BallanceMMOMessageTests` 645/645; GCC syntax check 30/30 ok.
+- **V6** (`.local-tools/work/WGQ7/v6_all.py`, L1-L13 - L13 is the arena in
+  the agent's game copy - placement off and on, K 2 and 8, 52 runs, rF1 and
+  rRK2): V6-ALL PASS on both; `.local-tools/work/F1/v6_compare.py`: every
+  stdout and stderr line of the 104 files equal (the lines F1 adds or
+  changes on purpose aside: the unit guard checks, the identity copy
+  diagnostic, the release checks' output count, the baseline and pre-copy
+  graph counts), the 752 signatures printed equal in order - **BYTE-EQUAL**.
+- **V5 / V6 outputs** (the new checks): every release check counts the
+  parameter outputs against the first release - 0 left on all 52 runs;
+  V6's baseline now requires 0 (rRK2: 2 per identity copy on 48 runs, 0 on
+  L1's 4, which has no identity read; rF1: 0 everywhere), and the
+  pre-copy graph equals the pre-rewire one exactly (L11 on, K 8:
+  5738/8053/16002/92/19673/4473/18914 before and after two rounds of 88
+  identity copies and 77 unit copies).
+- **UGRD fixture** (V6, every level with units, 48 runs): `unit guard
+  control` - the server's copy step (class all, then its selection) has 0
+  units outside the class and the clients' signature (L11 on, K 8:
+  68db2214ab881bbd, the WGQ7 retail/server value); `unit guard` - the first
+  unit's root script taken out of the selection: the server keeps that
+  unit (L11: 11 units, 1 outside), a client copies 10; without the guard
+  both signatures are `ab33013a7077c06d` (the divergence the census alone
+  let through), with it the server's is `462ab380c37f4d2c`: the server's
+  predicate refuses the member; `unit guard release` - the object counts
+  back. 48/48 PASS. No level breaks the census, so no live refusal can be
+  shown.
+- **Wire check** rF0 vs rF1 over `core_ref_s11` (`EXTRA="--accept-protocol
+  18"`): 12/12 sends SAME, 12/12 journals IDENTICAL - **ALL SAME**; the solo
+  arms replayed with rF1 against rRK2's replays: sends SAME, journals
+  IDENTICAL (2/2).
+- **Headless smoke** (`.local-tools/work/F1/live.sh` = WGQ7's recipe with
+  `--latency-ms 150`: arena, 4 clients 45 s, rejoin 2:1200, late join
+  3:1500, leave 1:1800; the Arch server of this tree, snapshots off,
+  trafo inputs and placement on; `maps/arena-test/f1_live`): **VERDICT
+  PASS**; every client rc 0, mism / hard / mech_hard 0, the server journal
+  3115/3115, `checkpoint_mismatches=0`; own ball 0.0000 m in B/D/A for all;
+  every anchor (the rejoin's and the late join's) signature
+  `c7e224f5cf8c631b` = the server's; client 2's release before its second
+  life "42 inputs back, 14 unit copies destroyed". The `mech` column
+  (4.57 m in A for clients 2 and 3) is `PE_Balloon_*` (exception c); the
+  late joiner's P_Modul_26_Sack 0.144 m / P_Modul_03 0.059 m and the
+  rejoiner's P_Modul_29 plates / P_Ball_Paper_MF 0.04 m right after their
+  imports are pre-existing (trl_live_B2: 0.109 m / 0.0591 m; rlt_live's
+  rejoiner: 0.0354 m on the same bodies) - the late joiner's world never
+  runs a release before its anchor, so F1's code cannot reach it; queued
+  as WAD-A / G-c / the import's residual in the close-out's H steps.
+  `late ball mirror` 0.78 / 1.10 m (clients 0 and 2, not gating) is the
+  prediction of a mirror at 150 ms (plan §4 C1).

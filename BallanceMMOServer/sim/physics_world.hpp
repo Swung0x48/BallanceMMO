@@ -402,8 +402,13 @@ namespace bmmo::sim {
         // `which`; otherwise the anchor's bit-clear rewire of every block).
         int release_proximity();
         // `slots` (step Q7, V6): the per-player units copied that many times
-        // (union rules only; 0 = none).
-        std::string rewire_proximity(bool union_rules, bmmo::game::probe_class which, uint8_t slots = 0);
+        // (union rules only; 0 = none).  `sel` (step F1, the UGRD fixture):
+        // a selection in place of the world's own.
+        std::string rewire_proximity(bool union_rules, bmmo::game::probe_class which, uint8_t slots = 0,
+                                     const bmmo::game::script_replay::selection* sel = nullptr);
+        // Step F1 (UGRD fixture): the union's mechanism class marked again
+        // from `sel` (the server's anchor marks it from its own selection).
+        void classify_proximity(const bmmo::game::script_replay::selection& sel) { proximity_.classify(sel); }
         CK3dEntity* retail_ball() const;
         // Runs in the physics manager's PreSimulate pass of every tick: after
         // the scripts of that tick, before its PSIs.  Parks the retail ball

@@ -308,6 +308,13 @@ namespace bmmo::sim {
                           static_cast<unsigned long long>(proximity_.signature(bmmo::game::probe_class::all)),
                           options_.proximity_union ? "set" : "clear");
             log(text);
+            // Step F1 (UGRD): units copied outside the mechanism class (a
+            // level breaking WG0's census) are counted in the mechanism
+            // signature's tail, which no client has: every member is refused.
+            if (const size_t outside = proximity_.non_mechanism_unit_count())
+                log("world: proximity union: " + std::to_string(outside) + " of " + std::to_string(proximity_.unit_count())
+                    + " per-player units are outside the mechanism class (no client copies them); the signature "
+                      "counts them and every member will be refused (probe mismatch)");
         }
         script_hooks_ = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(manager));   // step HU1: one copy (game/host_backend.hpp)
         // The level's own checkpoint activation, held (game/sector_activation.hpp):
@@ -612,11 +619,12 @@ namespace bmmo::sim {
         return proximity_.release(engine_->context());
     }
 
-    std::string physics_world::rewire_proximity(bool union_rules, bmmo::game::probe_class which, uint8_t slots) {
+    std::string physics_world::rewire_proximity(bool union_rules, bmmo::game::probe_class which, uint8_t slots,
+                                                const bmmo::game::script_replay::selection* sel) {
         auto options = proximity_options();
         options.union_rules = union_rules;
         options.slots = union_rules ? slots : 0;
-        const std::string error = proximity_.rewire(engine_->context(), which, script_selection_, options);
+        const std::string error = proximity_.rewire(engine_->context(), which, sel ? *sel : script_selection_, options);
         for (const std::string& line: proximity_.lines()) log("world: " + line);
         return error;
     }

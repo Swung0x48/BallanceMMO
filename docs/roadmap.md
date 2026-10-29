@@ -949,8 +949,10 @@ numbers 1-10 are unchanged.
    control remain: FULL); a guard for the server's unit set (equal to the
    clients' by WG0's census, not by construction: the compared mechanism
    signature skips a non-mechanism unit, so a level breaking the census
-   would diverge without a refusal); the checks deferred to FULL listed
-   there.
+   would diverge without a refusal; **built, step F1**: the signature's
+   tail counts the server's non-mechanism units, a member is refused; and
+   the identity copies' outputs, **released at F1**: 0 left); the checks
+   deferred to FULL listed there.
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire

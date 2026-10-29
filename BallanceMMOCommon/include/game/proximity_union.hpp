@@ -632,7 +632,9 @@ namespace bmmo::game {
             return true;
         }
 
-        uint64_t signature(probe_class which = probe_class::mechanism) const {
+        // `unit_guard` false gives the signature as it was before step F1
+        // (SimTool's negative fixture compares the two; no world sends it).
+        uint64_t signature(probe_class which = probe_class::mechanism, bool unit_guard = true) const {
             const bool mechanism = which == probe_class::mechanism;
             fnv f;
             for (size_t i: probe_order_) {
@@ -677,6 +679,18 @@ namespace bmmo::game {
                     f.bytes(&kind, 1);
                     for (uint64_t h: u.structure) f.bytes(&h, 8);
                 }
+                // Step F1 (UGRD, the unit-set guard): the units this world
+                // copied outside the mechanism class, counted when there is
+                // one.  A client copies only its mechanism scripts' units (0,
+                // nothing written: every signature so far is unchanged); the
+                // server copies every identity read's unit before its
+                // selection exists (adaptation 4 of step WGQ7), so a level
+                // whose identity read lies outside a mechanism script gives
+                // the server K copies the clients lack - its anchor signature
+                // then differs and the server refuses each member ("probe
+                // mismatch").  signature(all) hashes every unit already.
+                if (mechanism && unit_guard)
+                    if (const uint32_t outside = static_cast<uint32_t>(non_mechanism_unit_count())) f.u32(outside);
             }
             return f.h;
         }
@@ -688,12 +702,17 @@ namespace bmmo::game {
         int release(CKContext* context) {
             int restored = 0;
             if (context) {
+                const std::map<CK_ID, std::vector<CK_ID>> outputs = copy_outputs(context);
                 for (auto it = identities_.rbegin(); it != identities_.rend(); ++it) {
                     if (auto* block = CKBehavior::Cast(context->GetObject(it->block)))
                         if (CKParameterIn* target = block->GetTargetParameter())
                             restored += put_back(context, target, it->prior_direct, it->prior_shared) ? 1 : 0;
                     destroy(context, it->parameter);
-                    destroy(context, it->array);
+                    // Step F1 (IDCP): the copy with the parameter outputs it
+                    // owns, in one call (a CKParameterOut's PreDelete reads
+                    // its owner, so the copy must outlive their PreDelete).
+                    const auto owned = outputs.find(it->array);
+                    destroy_with(context, it->array, owned == outputs.end() ? nullptr : &owned->second);
                 }
                 for (auto it = probes_.rbegin(); it != probes_.rend(); ++it) {
                     if (auto* block = CKBehavior::Cast(context->GetObject(it->block)))
@@ -735,6 +754,20 @@ namespace bmmo::game {
         // slot was outside [0, K) (the server's cap makes it impossible: 0).
         uint8_t slots() const { return slots_; }
         size_t unit_count() const { return units_.size(); }
+        // Step F1 (UGRD): units outside the mechanism class (the server's
+        // class-all copy step on a level breaking WG0's census; 0 on a
+        // client by construction) - the signature's tail.
+        size_t non_mechanism_unit_count() const {
+            size_t n = 0;
+            for (const unit_rec& u: units_) n += u.mechanism ? 0u : 1u;
+            return n;
+        }
+        // The units' root scripts, in unit order (SimTool's UGRD fixture).
+        std::vector<CK_ID> unit_roots() const {
+            std::vector<CK_ID> out;
+            for (const unit_rec& u: units_) out.push_back(u.root);
+            return out;
+        }
         size_t copy_count() const {
             size_t n = 0;
             for (const unit_rec& u: units_) n += u.copies.size();
@@ -897,6 +930,35 @@ namespace bmmo::game {
         }
         static void destroy(CKContext* context, CK_ID id) {
             if (id && context->GetObject(id)) context->DestroyObject(id);
+        }
+        // Step F1 (IDCP, design "As built (step WGQ7)": two CKParameterOut
+        // per identity copy survived its release, their owner pointer left
+        // dangling).  They are owned by the copy but not taken with it when
+        // it is destroyed alone; found here by owner, one pass over the
+        // class for every copy at once.
+        std::map<CK_ID, std::vector<CK_ID>> copy_outputs(CKContext* context) const {
+            std::map<CK_ID, std::vector<CK_ID>> out;
+            std::map<CKObject*, CK_ID> copies;
+            for (const identity& r: identities_)
+                if (CKObject* array = r.array ? context->GetObject(r.array) : nullptr) copies.emplace(array, r.array);
+            if (copies.empty()) return out;
+            const int count = context->GetObjectsCountByClassID(CKCID_PARAMETEROUT);
+            CK_ID* ids = context->GetObjectsListByClassID(CKCID_PARAMETEROUT);
+            for (int i = 0; i < count; ++i) {
+                auto* parameter = static_cast<CKParameterOut*>(context->GetObject(ids[i]));
+                if (!parameter) continue;
+                const auto copy = copies.find(parameter->GetOwner());
+                if (copy != copies.end()) out[copy->second].push_back(ids[i]);
+            }
+            return out;
+        }
+        static void destroy_with(CKContext* context, CK_ID id, const std::vector<CK_ID>* owned) {
+            if (!id || !context->GetObject(id)) return;
+            std::vector<CK_ID> batch{id};
+            if (owned)
+                for (CK_ID o: *owned)
+                    if (context->GetObject(o)) batch.push_back(o);
+            context->DestroyObjects(batch.data(), static_cast<int>(batch.size()));
         }
         static bool put_back(CKContext* context, CKParameterIn* in, CK_ID direct, CK_ID shared) {
             if (shared) {
@@ -1543,11 +1605,12 @@ namespace bmmo::game {
             // identity read's unit, a client only its mechanism scripts'. The
             // sets are equal by WG0's census (every identity read is in a
             // mechanism script; measured: L11 11 = 11 units, the arena 2 = 2),
-            // NOT by construction, and nothing guards it: signature(mechanism),
-            // the one the anchors compare, skips a unit classify() leaves out
-            // of the class, so a level that broke the census would give the
-            // server K copies a client lacks without a refusal (queued, design
-            // "As built (step WGQ7)").
+            // NOT by construction.  signature(mechanism), the one the anchors
+            // compare, skips a unit classify() leaves out of the class; since
+            // step F1 (UGRD) it counts such units in its tail, so a level that
+            // broke the census gives the server a signature no client has and
+            // every member is refused ("probe mismatch") instead of the server
+            // running K copies a client lacks.
             const auto in_class = [&](CKBehavior* root) {
                 if (session::keep_local_script(owner_name(root), root->GetName() ? root->GetName() : "")) return false;
                 return which_ == probe_class::all || mechanism_root(root);
