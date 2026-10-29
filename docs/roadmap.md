@@ -2090,6 +2090,70 @@ numbers 1-10 are unchanged.
      within a few cm). Rewinds 7-15x fewer than RC1c's table (recorded in
      rewind-cost-design.md's RC1c entry, not explained). Tables:
      `H2/rc1c/*.txt`.
+   - **Run at H3 (2026-10-29, the headless client of the tree committed as
+     00082de8, `build-agent-rH2s`, and H2's Arch server built from
+     12ccae76 - the same client and server code; headless
+     batch 3, resync lag; `.local-tools/work/H3/`, `h3_run.sh`; every run
+     snapshots off, trafo inputs and placement on, captures under
+     `maps/arena-test/h3_full/`; 7 live runs (the seventh,
+     `rl1b_waitother`, in the gate round), each judged before the next,
+     host load <= 16.4 %, every server journal N/N: 4036, 4574, 4078, 4083,
+     3673, 3672, 4062; no code change):** RL1 (a), (b), (c), (e) in
+     late-player design 2.8, "As built (step H3)"; F2-a / F2-b in
+     `resync-and-sector-timing-design.md`, "As built (step H3)". RL1-a:
+     the joiner's base on the schedule (deadline 47.3 periods after the
+     step it was computed at = its lead 31 + D 17); "signed schedule tick
+     logged" only partially met - the server logs no such line, the tick
+     is derived from the server journal; its lateness +4.1 and relay lag
+     24 against the start members' 20 - at the "+ 4" bound on the steady
+     windows, + 5 in the first (join-transient) window. RL1-b: the
+     stall-triggered resync with lead_adjust and patience on - re-step 28
+     ticks, apply frame 28 ms, lateness -0.3 of the others', no second
+     resync; both of RL1b's non-stall variants: while the server lagged 26
+     ticks (backlog) own correction 0.532 m, while it waited on a different
+     member at its deadlines (patience and lead_adjust off) own correction
+     0.0000 m, held window 43 = lead + D, re-step 48 ticks; each followed by
+     a pacer slip of the headless host (1.5 / 0.85 tick, every other
+     member's relay lag + 1-2; cause inferred from wall clocks: the
+     headless pacer's origin restarts at the end of the overrunning frame
+     that handled the assignment; retail sets no such hook). RL1-c: D 6,
+     no shortfall, but the resynced LAN member stays 6 ticks ahead of the
+     start members for good (its relay lag 6 against 0): the LAN start
+     members lose their start base (inferred from wall clocks) because the
+     core sends SessionReady
+     before its anchor work (journal, airship zone, spawn ghost, a trafo
+     piece set per member: ~130 ms), which on a LAN outlasts the
+     assignment's round trip. RL1-e: not run, unreachable with these
+     binaries (window 121-409 ms, a joiner's admit -> first frame 216-523
+     ms); the rule is unit-tested, the runner's start path is not. F2-b:
+     PASS (the made-from-row joiner's FINAL rows equal the server's from
+     its apply to its end). F2-a: root-caused on the control (a ~124 ms
+     stall of the joiner process right after its SessionReady ate the 212
+     ms LAN budget; with lead_adjust off nothing re-paces a member whose
+     frames are late), not reproduced on HEAD (also not with a 300 ms
+     runner stall at the join).
+     Queued from H3: **(item 2)** the F2-a re-pacing gap - the user's
+     choice of (a) lead_adjust on by default, (b) a resync after N starved
+     reports, (c) a larger LAN joiner floor, (d) accept; **RL1 LAN excess**
+     (the cause above; options: send SessionReady after the anchor's work -
+     a shared-core change, which also takes that work out of a LAN
+     joiner's budget, F2-a's "normal ~100 ms" - or count the work into the
+     LAN start base); **harness: the resync pacer slip** (the headless
+     host's `numbering_restarted` hook restarts the pacer's origin on an
+     exact resync; fix: keep the old phase as retail does, or take the
+     origin at the assignment's arrival; not a user decision, it does not
+     reach retail; until fixed, headless relay-lag numbers after a resync
+     carry + 1-2); **harness: a pre-booted late joiner** (world anchored
+     and held before its Join, the Join sent at the all-ready moment), then
+     RL1-e's live check; **server: one log line in the re-anchor path**
+     (`session_runner::reanchor_tick`: the signed schedule tick, the floor
+     and the base) for the next step that touches the server; live-only
+     server steps of 0.28-1.07 s inside steps that log (`rl1c_lan_resync`
+     2059, the airship line; `f2_ctrl_B` 1638), not established, the
+     likeliest cause B2SW's 9P class (`server.log` on `/mnt/d`).
+     **(item 5)** P_Modul_37_Bridge on the session's first member, 20 mm at
+     1482 (`f2_rejoin_B` client 0, deterministic in its capture's replay
+     with every build back to rD0), cause not established.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

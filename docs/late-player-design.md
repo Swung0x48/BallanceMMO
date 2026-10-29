@@ -1548,6 +1548,178 @@ revision 3 it had only 14 to give back.
   - Stale comments (late_tick.hpp's header, server.cpp's late-join,
     resync and base-missed comments) now say the base is counted on the
     schedule, floored at the current tick + 2.
+- *As built (step H3, FULL, 2026-10-29): RL1's deferred live checks
+  (a), (b), (c), (e).* No code change. The headless client of the tree
+  committed as 00082de8 (`build-agent-rH2s`; H2's change is SimTool's
+  only), the Arch server built from 12ccae76 (the same server code); every run
+  snapshots off, trafo inputs and placement on, captures and journals under
+  `maps/arena-test/h3_full/<run>`, the tables under `.local-tools/work/H3/`
+  (`lag_*.txt` from TRIAL1's `resync_lag.py`); seven live runs (the
+  seventh, `rl1b_waitother`, in the gate round), one at a time, host load
+  <= 16.4 %; every server journal replays exactly. The plan's "signed
+  schedule tick logged" is **partially met**: the server prints no such
+  line, so the tick is derived here from the server journal - the deadline
+  fitted on a held range, deadline(base) - step(C) against lead + D
+  periods - and the server's S1 lateness q50 (the exact per-member measure)
+  is the evidence. Queued (roadmap section 4 item 2): one log line in the
+  server's re-anchor path (`session_runner::reanchor_tick`: the signed
+  schedule tick, the floor, the base) for the next step that touches the
+  server, so this check need not be fitted again.
+  - **(a) the late joiner** (`rl1a_join150`: 150 ms, D 17, client 3
+    `--join-late 3:1500`, patience and lead_adjust off): base 1659 assigned
+    at runner tick 1612 (stepped at its deadline), deadline(1659) 716 ms =
+    47.3 periods after that step, i.e. on the schedule with the joiner's
+    `late_tick_lead_ticks` 31 + D 17 = 48 (the base computed within a period
+    of the step). Its S1 lateness q50 26.00-26.01 against the start members'
+    21.88-21.93 (+4.1 ticks: 31 against the start base 27, as RL1b said);
+    its relay lag of every remote 24 (25 in its first window) against the
+    start members' 20; the start members' relay lag of the joiner 20.
+    "Joiner relay lag <= start members' + 4": met exactly at the bound on
+    the steady windows (from 1800 on); the first window after the join
+    (1500, the join's transient) reads 25, i.e. + 5.
+  - **(b) lead_adjust and patience on, a stall-triggered resync**
+    (`rl1b_stall_pl`, the resync_snapoff recipe, client 2 paused 1000 ms
+    at 1500): base 1588 at runner tick 1566 (the `L_eff` path, offset 0, no
+    lead decision in the run); client 2's lateness after 21.99-22.00
+    against the others' 22.26-22.29 (-0.3); every relay lag 20 before and
+    after; re-step 1587 -> 1615 = **28 ticks**, waited 0 frames; the frame
+    that applied it took **28 ms** (13 ms over the period, made up by the
+    next frame, +3 ms; t_rest/t_rep 63/696 ms over the whole run); resyncs
+    1/1 on client 2, 0/0 elsewhere, one post-start S1 reset for it: no
+    second resync. The deadline fit is poor with patience on (no held
+    range at the deadline, D0 spread 43 ms), so the lateness, not the
+    fitted deadline, is the measure.
+  - **(b) the resynced member's own correction while the server lags**
+    (`rl1b_lagresync_pl`, the same flags, `BMMO_SESSION_STALL=1490:400`,
+    client 0 `--resync-at 1500`): the request was answered while the
+    runner was 26 ticks behind its deadlines (the steps before the S1
+    reset 26.6 / 25.6 ticks late); base 1522 at runner tick 1491, held
+    window [1491, 1522) = 31 ticks (the client's numbering moved by 1:
+    "delta +1", so its on-time frames of those ticks were discarded and
+    applied held); re-step 1521 -> 1548, 27 ticks. **Own correction 0.532 m**
+    (its live rows 1522-1548 0.532-0.534 m off the server's held trajectory;
+    0.0000 from 1549, the apply, on). And a **1.5-tick shortfall**: client
+    0's lateness 22.0 -> 20.54 for the rest of the run, and, the server now
+    paced by it, every other member's relay lag 20 -> 22. Cause (journal
+    wall clocks): the frame that handled the SessionAssign ran 37 ms (tick
+    1523, 22 ms over the period) and the headless pacer's origin restarts
+    with the numbering after the resync's anchor capture: the exact
+    re-assign runs `anchor_resync(msg.first_tick, old_tick)`
+    (`client_core.cpp` 846) before
+    `hooks.numbering_restarted(clock_site::assign_resync)` (852), whose
+    headless hook sets `origin_ = wall_now(site)` (`session_client.cpp`
+    1797), so that overrun is never made up (the apply's own 22 ms frame
+    at 1549 is made up at 1550, +7 ms): 22 ms = 1.45 periods. The cause is
+    inferred from the journals' wall clocks (no diagnostic line was added);
+    the seventh run below shows it again, smaller (a 13 ms overrun ->
+    0.85 tick). **The headless host's pacer only:** the retail mod sets no
+    `numbering_restarted` hook (`client_platform.hpp` 82-84: "retail:
+    nothing (its fixed tick counts on its own)"; no hook anywhere in
+    `BallanceMMOClient`), so a retail exact resync keeps its fixed tick's
+    phase - whether it then loses or gains any phase live is unverified (no
+    retail resync run in H3). So this is not a user decision but a harness
+    fidelity fix: keep the old phase on an exact resync, as retail does
+    (or take the origin at the assignment's arrival); until then it skews
+    later headless measurements after a resync (every other member's relay
+    lag + 1-2). Queued as a harness item, roadmap section 4 item 2.
+  - **(b) the resynced member's own correction while the server waits on a
+    different member** (`rl1b_waitother`, the gate round's seventh run:
+    the resync_snapoff recipe - client 2 paused 1000 ms at 1500 - plus
+    client 0 `--resync-at 1525`; patience and lead_adjust **off**, so the
+    server waits on client 2 at its deadlines instead of cutting): the
+    request was answered at runner tick 1504 while the runner held client
+    2's ticks at their deadlines (S2 held 1501..1543; the earliness of the
+    four steps before the S1 reset 0.0); base 1547 = C + 43, deadline(1547)
+    651 ms = 43 periods after that step (lead 27 + D 17, on the schedule),
+    held window [1504, 1547) = 43 ticks = lead + D - e(C) with e = 0, as
+    RL1b predicted; client 0's numbering intact ("delta +0"); re-step
+    1546 -> 1594, **48 ticks** (inside `resync_reach()` = history - 1 =
+    95), waited 0 frames; the frame that applied it took 25 ms (+10,
+    made up by the next, +4). **Own correction 0.0000 m** (client 0's own
+    ball equal to the server's at every tick 1500-1600). Client 0's
+    lateness 22.3 -> 21.47 (-0.85) and clients 1 and 3's relay lag of
+    every remote 20 -> 21: the same pacer slip as above, its frame 1547
+    (the one that handled the assignment) took 28 ms (+13 ms, 0.86
+    period) and was never made up. Client 2's own stall-triggered resync
+    (base 1587 at 1544) followed; resyncs 1/1 on clients 0 and 2, 0/0 on
+    the others, no second resync for anyone; server journal 4062/4062
+    (the harness's VERDICT reads FAIL - client 0's and client 2's resyncs,
+    client 2's starvation 43 in its pause - the arm's expected verdict, as
+    for core_ref_s12's resync_snapoff).
+    So both variants of RL1b's deferral ("while the server waits or lags")
+    are run: the wait costs the resynced member nothing on its own ball
+    and puts its re-step at the start's budget plus the path (48), the
+    backlog costs it the held window's correction (0.532 m above).
+  - **(c) the LAN case** (`rl1c_lan_resync`, the resync_snapoff recipe at
+    0 ms): D = 6, start base 8; base 1574 at runner tick 1561 (C + 13, the
+    floor C + 2 not binding); client 2's lateness after 12.08 against the
+    start members' 5.95-6.03: **no shortfall, but a 6-tick excess for the
+    rest of the session** - its relay lag of every remote 6 against the
+    start members' 0, i.e. a LAN player who resyncs once predicts 6 more
+    ticks of every remote ball (more rewinds) until the session ends, and
+    with lead_adjust off nothing lowers it. This contradicts, on a LAN,
+    "every re-anchor gets the start's budget" above: the resync gets the
+    rule's full budget (deadline(base) - now = lead 8 + D 6 = 14 periods,
+    12.08 after a ~2-tick path), but **the LAN start members never get
+    theirs**. Cause (journal wall clocks; `client_core.cpp` 584-641): the
+    core sends SessionReady (584) *before* its anchor work - the journal
+    open (596), the airship zone, the spawn ghost and one trafo piece set
+    per member (`ensure_trafo_set`, 632-640) - and the hold is polled only
+    after it. All four clients opened their journals within 2 ms (utc
+    ...059) and played their first tick (8) 132 ms later (...191), their
+    holds "released after 0 polls": on a LAN the start assignment is
+    already waiting when that work ends. The server's deadline fit puts
+    the all-ready moment at about ...078, so the start members' first
+    frame comes ~113 ms (7.5 periods) after it and eats the start base's 8
+    periods, leaving D. At 150 ms the 300 ms assignment round trip covers
+    the same work (`rl1b_stall_pl`: "released after 110 polls"; journal
+    open -> first tick 346-356 ms, all four first ticks at the same wall
+    instant, i.e. bounded by the round trip, against 132 ms on the LAN,
+    bounded by the work), so the start members keep the budget there
+    (22.3 = 44 - two trips - ~2) and the resync matches them. The
+    attribution to the anchor work is inferred from these wall clocks and
+    the code order (no timestamped line brackets the work itself). Not fixed here; queued (roadmap section 4
+    item 2) as "RL1 LAN excess" with the options: send SessionReady after
+    the anchor's work (a shared-core change; the start members then get
+    the full budget, the resync matches them, and LAN relay lag stays 0),
+    or count the work into the LAN start base. The work grows with the
+    member count (one piece set each). Re-step 1573 -> 1587, 14 ticks;
+    resyncs 1/1, server journal 4574/4574. The same run had a **1.07 s server step at 2059**
+    (`step time ... max 1069616 us`; TICK gap 1084 ms), the step that logs
+    the first "airship: ... a ghost from here": every client then got 69
+    ticks of relayed frames in one burst, 3 of them past the reach (the
+    harness's FAIL; core_ref_s12's resync_snapoff fails its A0 verdict on
+    the resync anyway). Live-only: a SimTool replay of that server journal
+    runs ticks 2050-2070 at its normal pace (2070 ticks in 1.1 s), so the
+    world's simulation is not slow there. Not established; the likeliest
+    cause is B2SW's class (a write through WSL's 9P blocking the step): the
+    server's log is still `server.log` on `/mnt/d` (`arch_server_lp.sh`),
+    and the step logs that line. Queued (roadmap section 4 item 2).
+  - **(e) a late joiner in the first start_base periods after the
+    all-ready moment: not run, unreachable with these binaries.** The
+    window is start_base periods (27 = 409 ms at 150 ms, 8 = 121 ms on a
+    LAN); a joiner is admitted only once the session runs and its
+    SessionReady follows its own world boot - measured on HEAD (LAN,
+    `f2_rejoin_B`): admit -> SessionReady 91-416 ms, -> first frame
+    216-523 ms; at 150 ms two one-way trips (300 ms) come on top. A rejoin
+    leaves at a tick at or after its base, so it is later still. The rule
+    there is unit-tested (`lead_test.cpp`
+    `ReanchorOnSchedule.BeforeTheScheduleStartTheBudgetIsStillTheStarts`,
+    with the rest of `ReanchorOnSchedule*`: 13/13 pass on rH2s). A live
+    check needs a joiner that sends its Join at the all-ready moment with
+    its world already booted (no such harness switch). The runner's own
+    call on that path is not unit-tested (no world-less `session_runner`
+    fixture, RL1b above), so the unit test covers the rule, not the start
+    path. Queued (roadmap section 4 item 2), not dropped: a headless
+    harness switch for a pre-booted joiner (its world anchored and held
+    before it sends Join, the Join sent at the all-ready moment), then
+    this live check.
+  - Also seen: the three start members of `rl1a_join150` were held 10-11
+    ticks together twice (319-329, 633-643), before the join - a hiccup on
+    the harness side (the clients or the latency proxy all three uplinks
+    pass through), not the joiner's. The harness's own A8 criterion
+    "joiner lead == the session's input delay (lead_adjust off)" reads
+    PASS (17 vs 17).
 - The lower's gate is `lead_offset > 0`, which a resync keeps.
 - A SessionLead whose `epoch` is older than the client's base is dropped.
 - A client rebase (more than `33 + |slew|` behind) still asks for a resync.

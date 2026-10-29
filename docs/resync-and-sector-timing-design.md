@@ -3453,6 +3453,91 @@ change; shared core only (`client_core_resync.cpp`).
   wait; a pinned replay / first_divergence.py of f2_live_B client 1
   against the server journal over 1296-1330 would close it).
 
+## As built (step H3, FULL, 2026-10-29): F2's deferred checks (FULL rows F2-a, F2-b)
+
+No code change. The headless client of the tree committed as 00082de8
+(`build-agent-rH2s`; the Arch server built from 12ccae76, the same server
+code), F2's recipe (`live.sh B`: client 1 rejoins
+at 1200 after 1000 ms, client 2 at 1300 after 5000 ms, client 3 joins late
+at 1850, client 1 beamed at 1750; LAN, snapshots off, trafo inputs and
+placement on) through `.local-tools/work/H3/h3_run.sh` with captures and
+`--final-checkpoints`; stores `maps/arena-test/h3_full/f2_rejoin_B` and
+`f2_rejoin_B_stall`.
+
+- **F2-b: a made-from-row join apply equals the server's world - PASS.**
+  `f2_rejoin_B` client 1: "mirror of 485071461 made from its row at S 1300,
+  its death at 1301 applied again in the replay", re-stepped 1300 -> 1322.
+  Its FINAL rows (D0: each tick once no rewind reaches it) agree with the
+  server journal within 1e-6 m on every body from 1323 to its end (2658),
+  PE_Balloon / PE_Box_slide (the keep-local airship set, exception c)
+  excluded; client 2's rejoin (1677 on) and client 3's late join (1909 on)
+  likewise. The live-written LOCAL rows show only remote balls past their
+  newest relayed frame (predictions, plan C1) and the pre-apply tick.
+  (The same comparison on F2's own rF2 journals, LOCAL rows: every joiner
+  off from its apply on - P_Modul_26_Sack 0.12 m, P_Modul_29_Platte04
+  13-21 mm, P_Modul_08_Schaukel 0.09 m - the half-step re-step lag H7X
+  fixed at fccf4f7d; gone on HEAD.)
+- **F2-a: f2_ctrl_B's starved rejoiner - root-caused on the control's
+  data; not reproduced on HEAD.** The control's client 2 (the 5 s rejoiner,
+  rF1) was assigned base 1662 while the server's runner sat in a 277 ms
+  step at 1638 (`step time ... max 276852 us`; TICK gap 291 ms; a SimTool
+  replay of that journal runs 1630-1645 at its normal pace, so live-only).
+  The base is on the schedule: deadline(1662) = the server's step of 1662
+  (it was held to its deadline) = 1793279331203 ms, so with the joiner's
+  lead 8 + D 6 = 14 periods (212 ms) the server computed it at about
+  ...330990. The client opens its journal right after it sends SessionReady
+  (`client_core.cpp` `anchor`: `platform_.send(ready)` then
+  `journal_.open`); in every other join of these runs that moment is
+  within a few ms of the server's base computation (HEAD stall run:
+  journal 712013, base computed ~712015), and the first frame follows
+  95-125 ms later. In the control the journal opened at ...331114 - so,
+  inferred from the journal-open time against the base time derived from
+  the deadline (the two hosts' clocks agree within a few ms in every run
+  checked; not observed directly), the joiner process stalled ~124 ms
+  right after sending SessionReady (its
+  rejoin boot took 382 ms against 170-181 ms elsewhere; client 0 had a
+  41 ms frame at 1633; the server's slow step at the same moment: a
+  host-wide stall). Its first frame came 222 ms after the base was
+  computed, 10 ms past the base's deadline, so every frame after it
+  arrived 0.62 tick late (S1 q50 -0.62 for 1000+ ticks), the server held
+  every tick for it to the deadline (S2) and substituted it, and it was
+  starved 1056/1056. Nothing re-paces such a member with lead_adjust off:
+  the S1 controller only observes, and a client rebase needs more than
+  33 ticks behind. So the cause is a single delay of more than the
+  joiner's margin at its join (on a LAN 212 ms less the normal ~100 ms
+  between SessionReady and the first frame: about 7 ticks), made
+  permanent by the absence of any re-pacing path. That normal ~100 ms is
+  the core's own anchor work, which it does after sending SessionReady
+  (`client_core.cpp` 584-641: the journal, the airship zone, the spawn
+  ghost, a trafo piece set per member); the same work costs the LAN start
+  members their start base (late-player design 2.8, "As built (step
+  H3)", RL1-c), queued as "RL1 LAN excess" in roadmap section 4 item 2.
+  - On HEAD: `f2_rejoin_B` - joiners' lateness 5.86-7.62 against the
+    founders' 8.41-8.83, starved 0 everywhere; `f2_rejoin_B_stall`
+    (`BMMO_SESSION_STALL=1636:300`, the runner held 300 ms just as client
+    2 became ready): the joiner played its base 115 ms before the stalled
+    runner stepped 1637, lateness 7.57, starved 0. A runner-only stall does
+    not take the joiner's budget (the base is counted on the wall-clock
+    schedule and the assignment leaves from the network thread); the
+    trigger needs the delay on the joiner's side.
+  - Options (the user's; not built): (a) lead_adjust on by default, so the
+    S1 controller raises a chronically late member (changes the deployed
+    configuration); (b) the client asks for a resync after N consecutive
+    starved reports (a fresh base with the full budget; one more resync
+    path); (c) a larger joiner floor on a LAN (more relay lag for every
+    joiner); (d) accept (a join inside a host stall is starved for good).
+- **Also found (not F2's): P_Modul_37_Bridge on the session's first
+  member.** `f2_rejoin_B` client 0's FINAL rows: the bridge 1.1e-6 m off
+  the server at 1450, 5.5e-6 at 1470, 20 mm at 1482, back within 1e-6 by
+  about 1530; no ball within 15 m of it, no rewind on client 0 in
+  1350-1459; client 1's world (made from the server's state of 1300) is
+  exact on it. Deterministic and pre-existing: client 0's capture replayed
+  with rD0, rS2, rFX1, rFX2, rS3, rH1, rH7X and HEAD gives the same
+  divergence (HEAD's replay IDENTICAL to the live journal). Most likely a
+  state difference client 0 carries from before 1300, which the rejoiner
+  took from the server's blob instead; cause not established.
+  Queued (roadmap section 4 item 5), with this capture as its repro.
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob
