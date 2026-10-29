@@ -1436,6 +1436,56 @@ numbers 1-10 are unchanged.
      difference); the delayed rejoiner's first state (DRJ, F2); the
      lifecycle-event arrival margin (LCM, F3); the trafo-on retail frame
      time (RCX-x86) and the deployed `config.yml` keys (RCX-cfg, DEP).
+   - **Run at S1 (2026-10-29, HEAD fc1be258; SimTool / compile batch A,
+     no source change):** SP7 (a) = V11 for V7 - the 24 runs (L8 / L11,
+     arms `--perturb-ids 0 / 37 / 1000`, `--free-ids-before-load 20000`)
+     on the x64 (`build-agent-rS1`), x86 (`build/sim-x86-a3`, rebuilt) and
+     Linux (Arch) SimTool give one tick-hash stream per level, 501 lines
+     each, byte-identical across arms and platforms (signatures
+     `91a138e4fd6e7254` / `5d22d3b5a61c38cb`; the L8 20000 arm now exits
+     0 - an observation, SP7's teardown crash there is item 6's and was
+     not root-caused here). WGQ7 V6 - L1-L13 (13 = the arena in the
+     agent's copy), placement off / on, K 2 / 8: V6-ALL PASS on all
+     three; plus the ORIGINAL Level 13 (a scratch root with
+     `Level_13.NMO.orig`, md5 = `original_map_hashes[13]`): every check
+     passes but `table counts` / `table identities`, whose level-13 row is
+     the arena's by construction (`probe_census.hpp` `expected_for`,
+     :357-377), on all three.
+     The 112 listings (24,798 lines, 2,140 signatures) are byte-equal to
+     x64's with block ids NOT masked; only the wall-clock `cktime=`, the
+     anchor line's FPU control word (`fpu=`, x64 0008001f / x86 0009001f /
+     Linux 0) and Linux's VxMath start-up banner differ. SP8 (e)'s SimTool
+     x86 half (§7.6, two repetitions, host load <= 10 %): placement on
+     costs at most 0.19 ms per tick on x86 with every sector active (x64
+     at most 0.14 in the same batch), on-off within the scatter the 0-tick
+     runs' outliers make (about 0.3 ms); the anchor +1.0 to 2.3 s one-off
+     as on x64. SP8 (f), RO1 (f), SIO-lx: the Arch GCC build
+     of SimTool, the headless client and the unit tests (656/656 on
+     Linux and Windows), and the new `.local-tools/linux_sim_syntax.sh`
+     (sim_tool.cpp, session_client.cpp, probe_census.hpp,
+     script_replay.hpp and io_queue.hpp alone: all ok; a deliberate error
+     fails it). BALL-deps - A CAUSE (reproduced, not the only one): a
+     `wsl.exe` running in the same console as a Windows ninja build
+     switches the console to code page 65001; every cl started meanwhile
+     prints its `/showIncludes` prefix in UTF-8, which ninja's GBK
+     `msvc_deps_prefix` does not match, so the object is recorded
+     `#deps 0` (scratch tree: 30-34 of 40 objects in 3 of 3 attempts, 0
+     in 3 controls; a wsl in another tool call does not share the
+     console; a tree configured under 65001 stores a UTF-8 prefix and
+     loses every dep in later GBK builds). It does NOT account for the
+     B6RC loss (x64 and x86 built in parallel, no wsl recorded) nor for
+     the `deps_heal.log` mass heals of 2026-10-29 03:10 / 03:18 (27
+     objects lost again inside the heal's own rebuild): those stay
+     unattributed. So both rules hold - one tree at a time AND no wsl in
+     the same command or script as a Windows build - and `deps_heal.py`
+     (now also in `build_sim_x86.bat`) remains the guard. `ninja -t
+     deps`: no zero-deps object whose source has a quoted include on the
+     x64 and both x86 trees (excluded: the allowlisted
+     `replxx/wcwidth.cpp`, and the 57 .c objects whose headers come
+     through the precompiled header and legitimately record none), after
+     seven SDL3 C objects of the x64 tree that really had lost their
+     headers (built about 2026-10-19, cause not attributable now,
+     skipped by `deps_heal.py`) were rebuilt.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 
