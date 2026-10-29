@@ -611,7 +611,11 @@ numbers 1-10 are unchanged.
    the start window); one live smoke run also showed the respawn window
    bit-equal (not evidence by itself; a pinned replay over the respawns is
    owed); spacing and impulse are no longer needed for determinism -
-   removing them is the user's choice. The review's two findings are
+   removing them is the user's choice - **the user removed both
+   (2026-10-29), built at step SPX** (`rewind-cost-design.md` "As built
+   (step SPX)"; no wire change: SessionStart carries 0 for both while the
+   spawn ghost is on, every ball is born a ghost at the resetpoint itself,
+   unkicked). The review's two findings are
    fixed at step SPGH2 (`rewind-cost-design.md` "As built (step SPGH2)";
    protocol 15, savestate format 3): the per-group ghost state is in the
    IVP savestate, so a rollback, a late join and a resync carry it, and a

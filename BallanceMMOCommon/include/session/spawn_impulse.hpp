@@ -10,13 +10,26 @@
 // the Physicalize event.  The speed comes from SessionStart (spawn_impulse,
 // metres per second, 0 = no kick: a solo session stays bit-exact with a solo
 // recording).
+//
+// Step SPX (the user's decision of 2026-10-29: "启动时如果是幽灵球的话，那就
+// 把间距和出生冲量去掉" - when balls start as spawn ghosts, drop the spacing
+// and the spawn impulse): both existed only to pull coincident spawns apart,
+// and a spawn ghost (below) passes through every other ball and turns solid
+// only at the first PSI its core is outside every spawn area while it
+// overlaps no other ball.  So while the spawn ghost covers
+// every spawn birth the server puts 0 in both SessionStart fields
+// (session_spawn_separation below) and every world spawns each ball at the
+// resetpoint itself with no kick; the spacing table and the kick stay for a
+// build with the ghost off.
 
+#include <cstddef>
 #include <cstdint>
 
 namespace bmmo::session {
     constexpr uint32_t kSpawnDirections = 64;
 
-    // Spawn spacing: where a member's ball is born relative to the resetpoint
+    // Spawn spacing (used only with the spawn ghost off, step SPX): where a
+    // member's ball is born relative to the resetpoint
     // when SessionStart carries a spacing (spawn_spacing, map units; 0 = every
     // ball at the resetpoint, the design 9.10 layout).  Balls born at one
     // point at one tick resolve their overlap by IVP's rescue pushes in an
@@ -143,13 +156,45 @@ namespace bmmo::session {
     // player ball is born a ghost (it passes through every other player
     // ball and is drawn translucent) and turns solid for the rest of its life
     // at the first PSI its core is outside every area while it overlaps no
-    // other ball.  12 m holds every one of the 16 birth cells of the default
-    // spacing (the farthest is sqrt(5) x 4.2 = 9.39 m out) with the ball
-    // (2 m radius) inside.  A binary fraction: the same double everywhere.
+    // other ball.  12 m was sized to hold every one of the 16 birth cells of
+    // the 4.2 spacing (the farthest is sqrt(5) x 4.2 = 9.39 m out) with the
+    // ball (2 m radius) inside; with the ghost on (step SPX) every ball is
+    // born at the resetpoint itself.  A binary fraction: the same double
+    // everywhere.
     constexpr double kSpawnGhostRadius = 12.0;
+    // Whether every world runs the spawn ghost (protocol 15 on: the server's
+    // world and both client hosts install it at the anchor).  A constant like
+    // the switch below: every world runs one build.  false is the ghost-off
+    // build - no rule installed, the configured spacing and impulse sent.
+    constexpr bool kSpawnGhost = true;
     // Whether a respawn at a resetpoint is born a ghost as well (true), or
     // only a ball's first life (false): the one switch the report names for
     // the user (both are built behind it); every world runs one build, so the
     // switch is a constant, not a wire field.
     constexpr bool kSpawnGhostRespawns = true;
+
+    // The spawn separation a session's SessionStart carries (step SPX, the
+    // one rule; the server decides it once per session, every world reads
+    // the two fields).  None when the spawn ghost covers every spawn birth -
+    // the first life and the respawns alike (kSpawnGhostRespawns): the
+    // fields are session-wide, so a build whose respawns are not ghosts keeps
+    // the configured values for every spawn (its respawns at one point need
+    // them).  A solo session has nothing to separate.  `members` is the
+    // session's member count when it starts.
+    // Flipping kSpawnGhostRespawns to false brings the spacing and the kick
+    // back for first spawns too, which are still ghosts - against the user's
+    // decision for them: reopen it with the user before building that.
+    struct spawn_separation {
+        float impulse = 0.0f;   // SessionStart::spawn_impulse, m/s
+        float spacing = 0.0f;   // SessionStart::spawn_spacing, map units
+    };
+    constexpr bool kSpawnGhostCoversSpawns = kSpawnGhost && kSpawnGhostRespawns;
+    inline spawn_separation session_spawn_separation(size_t members, float configured_impulse, float configured_spacing) {
+        spawn_separation out;
+        if (members > 1 && !kSpawnGhostCoversSpawns) {
+            out.impulse = configured_impulse;
+            out.spacing = configured_spacing;
+        }
+        return out;
+    }
 }

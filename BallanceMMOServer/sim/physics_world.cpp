@@ -423,6 +423,10 @@ namespace bmmo::sim {
     // same rule as every client's: a clone is born a ghost and turns solid
     // once it left every spawn area and overlaps no other ball.
     void physics_world::install_spawn_ghost() {
+        if (!bmmo::session::kSpawnGhost) {   // the ghost-off build (step SPX)
+            log("world: spawn ghost off in this build");
+            return;
+        }
         spawn_ghost_resumed_logged_ = spawn_ghost_births_logged_ = 0;   // spawn_ghost_set restarts the counters
         bmmo::physics::spawn_ghost_info info;
         std::string error;

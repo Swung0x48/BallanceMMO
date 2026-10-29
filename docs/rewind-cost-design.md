@@ -2739,7 +2739,8 @@ replay IDENTICAL with the asleep fix (pinned, all four), and the live server
 journal 4119/4119.
 
 **Spawn spacing and the spawn impulse** (removing either is the user's
-choice, not built): with the rule, balls inside a spawn area never touch, so
+choice, not built; the user removed both on 2026-10-29, built at step SPX,
+"As built (step SPX)" below): with the rule, balls inside a spawn area never touch, so
 neither is needed for determinism any more - coincident balls stay ghosts
 until they have separated and left the area. The spacing still decides
 where the balls first meet once solid; the impulse still pushes them apart
@@ -3196,3 +3197,117 @@ manager's whole object table (static bodies too) instead of the movable list,
 so with the spawn ghost listener the table is walked twice per PSI, replayed
 PSIs included; small, but this host runs near the CPU edge (7d11651). If it
 shows, build the ball list once per PSI and share it between the listeners.
+
+## As built (step SPX)
+
+The user's decision of 2026-10-29 (verbatim: "启动时如果是幽灵球的话，那就把间距和出生冲量去掉"
+- when balls start as spawn ghosts, drop the spacing and the spawn impulse):
+both existed only to pull coincident spawns apart (design 9.10; the spacing
+since protocol 4), and a spawn ghost passes through every other ball and
+turns solid only at the first PSI it overlaps none. Base 409e16d (protocol
+18, journal v7), no protocol change, no journal or savestate change, no
+engine change.
+
+**One rule, decided by the server, carried by the wire.**
+`session/spawn_impulse.hpp` gains `kSpawnGhost` (true: every world installs
+the rule at its anchor, as since SPGH; the two installs - `physics_world::
+install_spawn_ghost` and the core's anchor in `client_core.cpp` - are now
+behind it, so `false` is a real ghost-off build that keeps the old
+behaviour) and `session_spawn_separation(members, configured_impulse,
+configured_spacing)`, which `server.cpp start_physics_session` calls in
+place of its two `members > 1 ? config : 0` lines: none while the ghost
+covers every spawn birth (`kSpawnGhost && kSpawnGhostRespawns`), the
+configured values otherwise. The fields are session-wide, so a build whose
+respawns were not ghosts keeps the configured spacing and kick for every
+spawn (its respawns at one point would need them) - said in the header,
+with the warning that such a build brings the spacing and kick back for
+first spawns that are still ghosts, against the user's decision, so it is
+reopened with the user before it is built. The
+hosts did not change: the headless client (`session_client.cpp` birth cell
+and kick), the retail core host (`core_host.cpp`) and the core's replayed
+births all read `SessionStart::spawn_spacing` / `spawn_impulse` and act only
+on a value above 0, so with 0 every world spawns each ball at the resetpoint
+itself and kicks nothing; the server's own world takes its impulse from the
+same value (`physics_world` `options_.spawn_impulse`). Respawns follow the
+same rule (the same fields, the same SPAWN flag). The server's respawn
+validation reach (`server.cpp`, `2.5 + 2.3 x spacing`) falls to 2.5 m. 0 was
+always a legal value of both fields with the same meaning (a solo session
+sends 0), so the wire meaning is unchanged: no protocol bump. The config keys
+`physics.spawn_impulse` / `physics.spawn_spacing` stay (the ghost-off build
+reads them); the config text and `config_manager.hpp` say they are ignored
+while the spawn ghost is on. The legacy retail path's code is untouched (it
+too would read 0/0 from a new server; B9DX refuses it anyway). A new
+journal's header has `spawn_impulse` 0; SimTool replays an old journal with
+its header's value. Unit test `SpawnSeparation.NoneUnderTheSpawnGhost`.
+
+**Measured (quick tier; about 11 minutes of check wall time, two live runs).**
+
+- The start pile, the arena 4-client snapshots-off arm (`core_ref_s10`'s
+  `resync_snapoff` arguments unchanged, Arch server rebuilt from this tree,
+  `maps/arena-test/SPX_live/resync_snapoff`; the control is
+  `core_ref_s10/resync_snapoff`, rWM1 = rREF10's code). Server replay
+  4129/4129; harness verdict FAIL for client 2's pause only, as the control.
+  All four balls born at tick 231 at (-20, 3.65, 15), no kick (no "spawn
+  impulse" line on the server; the control kicked four at 231). Own ball vs
+  the server's rows (`work/SPGH/vs_server.py`, 200-3600): bit-equal from
+  birth to 1788 / 2078 / 1588 / 1156 (c0..c3); control 1168 / 2088 / 676 /
+  712. Every one of those first differences is outside the start window and
+  of a known kind: c2 1588 = its 1000 ms pause (35.7 m, as the control's
+  35.4 m), c1 2078 = the airship zone (BALA), c0 1788 (0.005 m) and c3 1156
+  (0.08 m, 1.69 m in its 1100 window) the mid-lane residual the control has
+  too (control 1100 window 0.003 / 0.78 / 0.75 m). The respawn window
+  2500-3000 is bit-equal on all four own balls (control: three, c3 is in
+  its airship zone there).
+- When each ball turns solid (server, then every client world): join order
+  3 at 352, join order 0 at 681, join orders 1 and 2 together at 1636 (both
+  born at 231: coincident ghosts for 1405 ticks - the harness's drive keys
+  are the same `up` for every player, staggered by 40 ticks, and the
+  keep-lane steer holds every ball on one line, so those two travelled
+  inside each other until the leader's braking split the field; the
+  control's first solid ticks were 382 / 382 / 649 / 985). Every client
+  world logs the same ticks as the server for every ball but one: c1, c2, c3
+  log join order 0's mirror solid at 680, the server and its owner at 681 -
+  a predicted frame's line: the log is frame-observed, once per life, and
+  c1 (likewise c2, c3) then rolled back to 666 and to 670 for that ball's
+  input corrected at 667 and 671 (its brake release, client1.log lines
+  351-355) and re-simulated through 681; the re-decided tick leaves no
+  line, and no tool reads a world's final ghost state per tick (deferred to
+  FULL). The holds were the overlap wait, not the area: join orders 1 and 2
+  were 3.98 m apart at 1634 and 4.31 m at 1636, at x = 662-666 (the nearest
+  resetpoint, x = 700, is 34 m away); the server's log has no overlap-wait
+  counter and the headless logs end without the session-end summary, so
+  this is from the rows. Respawns (deaths
+  at 2512-2692): ghosts at 2512 / 2660 / 2682 / 2692, solid at 2599 / 2747
+  / 2872 / 2872 (join orders 0 and 3, respawned 10 ticks apart at one point,
+  waited as overlapping ghosts until 2872: 3.998 m apart at 2870, 4.018 m at
+  2872, 43 m past the resetpoint), the same ticks in every world. No event
+  was refused (the server's respawn reach is 2.5 m now; every respawn at
+  the resetpoint itself passed).
+- No world starts a contact from an overlap: at every solid tick the
+  nearest other ball is 3.98-9.54 m away at the even checkpoint before it
+  and 4.02-9.66 m at the first one at or after it (`work/SPX/overlap.py`); over
+  the whole session the closest approach of two solid balls (airship ghosts
+  excluded) is 4.011 m (control 4.011 m), no checkpoint under the 4 m
+  diameter in either run.
+- Retail, two copies (`scripts/retail/SPX_retail`, the arena in slot 13,
+  snapshots off, trafo inputs and placement on, `work/SPX/spx_retail.py`):
+  both balls born at tick 212 at (-20, 3.65, 15) in all three worlds, no
+  kick; at rest 0.001 m apart, inside each other (ghosts, no push); copy 1
+  held up+left, copy 2 up+right: 43.8 m apart 1.5 s later; solid at 321
+  (copy 1) and 326 (copy 2) in all three worlds (0 overlap waits); both
+  rolled off the arena's edges under the held keys (deaths 551 / 559 - the
+  driver's keys, not the rule).
+- Wire check `rWM1 rSPX rSPXw` over `core_ref_s10`: ALL SAME (12/12 sends
+  SAME, 12/12 journals IDENTICAL). Not the step's evidence: the captures'
+  SessionStart carries the old 3.0 / 4.2, which the replaying clients
+  follow exactly as before - the change is the server's, so a capture
+  recorded before it cannot show it. Solo arms: sends SAME, journals
+  IDENTICAL (bytes differ only in the header's build id). x64 BUILD-OK, x86
+  CLIENT-BUILD-OK (slot-13 hack, reverted), Arch ARCH-BUILD-OK (clean, hacked
+  for the retail run, clean again); 604 tests pass; GCC syntax check 30/30 ok.
+
+**For the user.** Balls born together with the same keys stay ghosts inside
+each other for as long as they move together (above: 1405 ticks in the
+harness; a human pair separates under its own keys, as the retail run did).
+That is the decision's consequence, reported, not changed. REF11 re-captures
+the reference set (multi-client captures now carry 0 / 0).

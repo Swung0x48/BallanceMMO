@@ -496,7 +496,7 @@ namespace bmmo::session {
         // overlaps no other ball - the physics layer's, in every world alike.
         s.spawn_ghost_active_ = false;
         s.own_spawn_ghost_ = false;
-        if (platform_.spawn_ghost) {
+        if (bmmo::session::kSpawnGhost && platform_.spawn_ghost) {   // step SPX: the ghost-off build skips it
             double info[7] = {};
             std::string error;
             const int r = platform_.spawn_ghost(true, bmmo::session::kSpawnGhostRespawns, bmmo::session::kSpawnGhostRadius,

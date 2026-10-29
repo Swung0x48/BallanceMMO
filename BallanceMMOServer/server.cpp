@@ -32,6 +32,7 @@
 #include <session/lifecycle.hpp>
 #include <session/input_relay.hpp>
 #include <session/member_lives.hpp>
+#include <session/spawn_impulse.hpp>
 #include <cmath>
 #endif
 
@@ -951,8 +952,16 @@ public:
         // world exists, because world_options is frozen at create_session: a
         // member joining or leaving during the world's boot must not be able
         // to move it out from under the clients that were already told.
-        s.spawn_impulse = s.members.size() > 1 ? config_.physics_spawn_impulse : 0.0f;
-        s.spawn_spacing = s.members.size() > 1 ? config_.physics_spawn_spacing : 0.0f;
+        // Step SPX: none while the spawn ghost covers every spawn birth (the
+        // balls are born at the resetpoint itself, unkicked, and pass through
+        // each other until they overlap none); the configured values only in
+        // a build with the ghost off (session/spawn_impulse.hpp).
+        {
+            const auto separation = bmmo::session::session_spawn_separation(
+                s.members.size(), config_.physics_spawn_impulse, config_.physics_spawn_spacing);
+            s.spawn_impulse = separation.impulse;
+            s.spawn_spacing = separation.spacing;
+        }
         // Protocol 11: the world options, fixed here with the rest (the world
         // is built with them, every SessionStart carries them).  The trafo
         // design wanted WORLD_TRAFO_INPUTS "when every member has the

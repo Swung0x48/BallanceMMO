@@ -115,4 +115,20 @@ TEST(SessionEventMsg, PhysicalizeFlagsRoundTrip) {
     EXPECT_FLOAT_EQ(1.9f, parsed.recipe.mass);
 }
 
+// Step SPX: while the spawn ghost covers every spawn birth a session carries
+// no spacing and no kick, whatever the config says; a solo session never does.
+TEST(SpawnSeparation, NoneUnderTheSpawnGhost) {
+    const auto solo = bmmo::session::session_spawn_separation(1, 3.0f, 4.2f);
+    EXPECT_EQ(0.0f, solo.impulse);
+    EXPECT_EQ(0.0f, solo.spacing);
+    const auto four = bmmo::session::session_spawn_separation(4, 3.0f, 4.2f);
+    if (bmmo::session::kSpawnGhostCoversSpawns) {
+        EXPECT_EQ(0.0f, four.impulse);
+        EXPECT_EQ(0.0f, four.spacing);
+    } else {
+        EXPECT_EQ(3.0f, four.impulse);
+        EXPECT_EQ(4.2f, four.spacing);
+    }
+}
+
 } // namespace

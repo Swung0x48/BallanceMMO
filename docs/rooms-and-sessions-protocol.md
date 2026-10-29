@@ -181,7 +181,7 @@ physics:
   game_root: "C:/Ballance"            # base.cmo 所在目录（含 Bin/、3D Entities/ 等）
   snapshot_interval: 2                # tick
   input_delay: 6                      # 输入宽限的**下限**（tick）；每个会话开始时按成员里最差的 RTT 自行决定实际值
-  spawn_impulse: 3.0                  # m/s；每次出生 Physicalize 的踢出速度，0 = 关闭；单人会话强制 0
+  spawn_impulse: 3.0                  # m/s；每次出生 Physicalize 的踢出速度，0 = 关闭；单人会话强制 0；出生幽灵球开启时（协议 15 起每个构建）与 spawn_spacing 一起被忽略，SessionStart 两项都发 0（步骤 SPX）
   maximum_physics_rooms: 1            # M3 只验证过单房间
   debug_trace: false                  # 每 tick 诊断日志（rng/清醒刚体变化、输入沿、精确核心转储）；客户端用自动化命令 session trace on 配对
   event_rate_limit: 20                # 每玩家每秒上报事件数上限，超出部分丢弃；0 = 不限
