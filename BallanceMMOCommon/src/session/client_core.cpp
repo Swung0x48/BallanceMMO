@@ -339,6 +339,7 @@ namespace bmmo::session {
         // Step A3: no exact resync pending, no state, no hold, no logs.
         s.resync_exact_ = false;
         s.resync_base_ = 0;
+        s.state_anchored_ = false;   // step RLT
         s.have_resync_state_ = false;
         s.resync_state_ = bmmo::session_resync_state_msg{};
         s.resync_held_ = false;
@@ -751,6 +752,9 @@ namespace bmmo::session {
                 return;
             }
             s.have_resync_state_ = false;
+            // Step RLT: no server state of base - 1 comes - the full snapshot
+            // is the world - so no relayed frame is the state's any more.
+            s.state_anchored_ = false;
             if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::assign_resync);
             logf("resynced: tick base %u", s.tick_base_);
             journal_.note("resync: tick base " + std::to_string(s.tick_base_));

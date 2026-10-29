@@ -5468,7 +5468,7 @@ namespace {
         h.rebases = 1;
         EXPECT_EQ(core.window_text(60, h),
                   "window: tick=60 inrew=2/5 life=0/0 forced=0/0 snaprb=0/0 snaps=0 resyncs=0/0 rebases=1 relay=0 "
-                  "late=0 subst=3/0/0/0/0/0 substrew=0/0 substco=0/0/0/0 lead_adj=0 lead=-2 slew=0 moved=0 "
+                  "late=0 covered=0 subst=3/0/0/0/0/0 substrew=0/0 substco=0/0/0/0 lead_adj=0 lead=-2 slew=0 moved=0 "
                   "echo=0/0/0/0/0 ownlife=0/0/0 lag[3]=5*2,7*1 lag[6]=1*4 inrew[3]=2");
         EXPECT_TRUE(state_of(core).window_lag_.empty());
         EXPECT_TRUE(state_of(core).window_inrew_src_.empty());
@@ -6354,6 +6354,75 @@ namespace {
             core.on_session_assign(exact_assign(9, 200));
             EXPECT_FALSE(s.resync_window_) << "a new numbering ends it";
         }
+    }
+
+    // Step RLT: a relayed frame for a tick at or before the anchor S of the
+    // exact state this numbering stands on is the state's - counted covered,
+    // never late - while the state is pending and after it is applied; a
+    // frame of a mirror that does not exist yet is parked as before; a frame
+    // after S past the reach is still late; a re-assign without the state
+    // (a full snapshot's) ends the rule.
+    TEST(SessionClientCoreResync, RelayedFramesTheStateCoversAreNotLate) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        auto& s = state_of(core);
+        s.remotes_[4].entity = "Ball_Wood_BMMO_4";   // a mirror's name; no body, not navigated
+        const auto relay = [&](uint32_t player, uint32_t newest, std::vector<uint8_t> keys, uint32_t epoch) {
+            bmmo::session_remote_input_msg msg = relay_message(newest, epoch);
+            bmmo::session_remote_input_msg::entry e;
+            e.player = player;
+            for (const uint8_t k: keys) e.frames.push_back(keys_frame(k));
+            msg.entries = {e};
+            core.on_session_remote_input(msg);
+        };
+        EXPECT_FALSE(s.state_anchored_) << "an ordinary base";
+        core.on_session_assign(exact_assign(9, 140));   // S = 139
+        EXPECT_TRUE(s.state_anchored_);
+        b1_frames(core, 140, 141);   // the base's first frames ran: 139's frames arrive after them
+        ASSERT_EQ(core.current_tick(), 141u);
+        // Pending: ticks 138 and 139 (S itself) are the state's.
+        relay(4, 139, {1, 2}, 140);
+        EXPECT_EQ(s.relay_new_, 2u);
+        EXPECT_EQ(s.relay_covered_, 2u);
+        EXPECT_EQ(s.relay_late_, 0u) << "the server's state of 139 holds them";
+        EXPECT_FALSE(s.input_rewind_pending_);
+        EXPECT_EQ(s.remotes_[4].inputs.count(139), 1u) << "stored in the ring as every frame";
+        // The base's own tick is not the state's: its anchor S is recorded.
+        relay(4, 140, {3}, 140);
+        EXPECT_EQ(s.relay_covered_, 2u);
+        EXPECT_EQ(s.relay_late_, 0u);
+        // No mirror yet: parked as before, neither counter.
+        const uint64_t parked = s.relay_parked_;
+        relay(5, 139, {4}, 140);
+        EXPECT_EQ(s.relay_parked_, parked + 1);
+        EXPECT_EQ(s.relay_covered_, 2u);
+        EXPECT_EQ(s.relay_late_, 0u);
+        // Applied: still the state's.
+        deliver(core, resync_state(140, {1, 2}));
+        ASSERT_FALSE(s.resync_pending_);
+        EXPECT_TRUE(s.state_anchored_) << "the world stands on the state of 139";
+        relay(4, 137, {5}, 140);
+        EXPECT_EQ(s.relay_covered_, 3u);
+        EXPECT_EQ(s.relay_late_, 0u);
+        // After S and past the reach: a lost correction, late as before.
+        // (The reach adapts to the relay lag it sees, so the frame is put
+        // past the history too.)
+        b1_frames(core, 142, 300);
+        ASSERT_FALSE(s.rollback_.knows_tick(144));
+        relay(4, 145, {6}, 140);
+        EXPECT_EQ(s.relay_covered_, 3u);
+        EXPECT_EQ(s.relay_late_, 1u);
+        // A re-assign without the state: its full snapshot is the world, and
+        // a frame before its base has no state to be covered by.
+        core.on_session_assign(assign_message(9, 260));
+        EXPECT_FALSE(s.state_anchored_);
+        relay(4, 250, {7}, 260);
+        EXPECT_EQ(s.relay_covered_, 3u);
+        EXPECT_EQ(s.relay_late_, 2u);
+        // The status and window lines carry it.
+        const std::string status = core.status_text(bmmo::session::host_counters{});
+        EXPECT_NE(status.find(" relay=7/0/1/2/3 "), std::string::npos) << status;
     }
 
     // Step A5 (resync design 2.9): a late joiner's first assignment with the

@@ -525,7 +525,12 @@ numbers 1-10 are unchanged.
      shows is the order of the unreliable relay against SessionAssign. Fix:
      count such frames apart in the core, or exempt them in
      `arena_map_test.py`'s criterion. Evidence:
-     `world-agreement-gaps-design.md`, "As built (step WGQ7)".
+     `world-agreement-gaps-design.md`, "As built (step WGQ7)". **Built by
+     step RLT (2026-10-29)**, the user's choice (a): a frame for a tick at
+     or before the anchor of the exact state the client stands on (pending
+     or applied) is counted `relay_covered` (status `relay=.../covered`,
+     window `covered=`), never `relay_late`; `session-client-core-design.md`,
+     "As built (step RLT)".
    - **A delayed rejoiner's first state never finds its bodies** (queued
      by step TRL, 2026-10-29; cause NOT established). Run B
      (`maps/arena-test/trl_live_B`, client 1, `--rejoin-at 1200:1000`):

@@ -464,11 +464,14 @@ def status_metrics(line):
     m = re.search(r'snapshots=(\d+)/(\d+)/(\d+)', line)
     if m:
         out['snapshots'] = int(m.group(1))
-    # relay=new/dup/parked/late lag=max/p99: the relayed frames reassembled,
-    # and how late their first arrivals were (the rollback reaches 48 ticks).
-    m = re.search(r'\brelay=(\d+)/(\d+)/(\d+)/(\d+)', line)
+    # relay=new/dup/parked/late[/covered] lag=max/p99: the relayed frames
+    # reassembled, and how late their first arrivals were (the rollback
+    # reaches 48 ticks); covered (step RLT) = first arrivals for a tick the
+    # exact state this client stands on already contains - not late.
+    m = re.search(r'\brelay=(\d+)/(\d+)/(\d+)/(\d+)(?:/(\d+))?', line)
     if m:
-        out['relay_new'], out['relay_dup'], out['relay_parked'], out['relay_late'] = (int(g) for g in m.groups())
+        out['relay_new'], out['relay_dup'], out['relay_parked'], out['relay_late'] = (int(g) for g in m.groups()[:4])
+        out['relay_covered'] = int(m.group(5) or 0)
     m = re.search(r'\blag=(\d+)/(\d+)', line)
     if m:
         out['relay_lag_max'], out['relay_lag_p99'] = int(m.group(1)), int(m.group(2))
@@ -1145,6 +1148,7 @@ def aggregate(wins, late_ids, index_of):
     ph['lag_src'] = {('c%d' % index_of[src]) if src in index_of else str(src): hist_stats(h)
                      for src, h in sorted(by_src.items())}
     ph['relay_late'] = sum(w.get('late', 0) for w in wins if isinstance(w.get('late'), int))
+    ph['relay_covered'] = sum(w.get('covered', 0) for w in wins if isinstance(w.get('covered'), int))   # step RLT
     ph['snaps'] = sum(w.get('snaps', 0) for w in wins if isinstance(w.get('snaps'), int))
     ph['resyncs'] = sum(w['resyncs'][1] for w in wins if isinstance(w.get('resyncs'), list))
     ph['resync_requests'] = sum(w['resyncs'][0] for w in wins if isinstance(w.get('resyncs'), list))
@@ -1869,7 +1873,7 @@ def format_report(report, crit):
             rb = ph['rb']
             fmt_rb = lambda v: 'n/a' if v is None else ('%d/%.1f' % (v[0], v[1] / v[0]) if v[0] else '0')
             lines.append('  %s %5d-%-5d own %.4f oth %.4f late %.4f mech %.4f | windows %d rb input %s life %s snap %s '
-                         'forced %s subst %s co %s, naming late %d | lag %d/%d (n %d) %s | relay_late %d snaps %d resyncs %d '
+                         'forced %s subst %s co %s, naming late %d | lag %d/%d (n %d) %s | relay_late %d relay_covered %d snaps %d resyncs %d '
                          'rebases %d lead_adj %s moved %s' % (
                              p, ph['ticks'][0], ph['ticks'][1] - 1, ph['own_max'], ph['oth_max'], ph['late_mirror_max'],
                              ph['mech_max'], ph['windows'], fmt_rb(rb['input']), fmt_rb(rb['life']), fmt_rb(rb['snap']),
@@ -1878,7 +1882,7 @@ def format_report(report, crit):
                              ph['inrew_late'], ph['lag']['max'],
                              ph['lag']['p99'], ph['lag']['n'],
                              ' '.join('%s:%d/%d' % (src, st['max'], st['p99']) for src, st in ph['lag_src'].items()),
-                             ph['relay_late'], ph['snaps'], ph['resyncs'], ph['rebases'],
+                             ph['relay_late'], ph.get('relay_covered', 0), ph['snaps'], ph['resyncs'], ph['rebases'],
                              'n/a' if ph['lead_adj'] is None else ph['lead_adj'],
                              'n/a' if ph['moved'] is None else ph['moved']))
         if row['holds'] or row['stalls']:
@@ -1973,9 +1977,12 @@ def verdict(case, event_clients=()):
         # A relayed frame that arrived too late for the rollback to replay it
         # (deeper than its reach, or past the history) left that tick on the
         # prediction for good: the relay's own pass criterion.
+        # Frames the exact state this client stands on already contains
+        # (step RLT: relay=.../covered) are not late and fail nothing.
         if m.get('relay_late'):
             problems.append(f'client{i} relayed frames past the rollback reach: {m["relay_late"]} '
-                            f'(lag max/p99 {m.get("relay_lag_max")}/{m.get("relay_lag_p99")})')
+                            f'(lag max/p99 {m.get("relay_lag_max")}/{m.get("relay_lag_p99")}; '
+                            f'covered by a resync state {m.get("relay_covered", 0)})')
         # The server went without this client's frames for a long run of
         # ticks: the client ran behind the server (a late SessionAssign, a
         # stall), every frame stale, every relayed frame in its future.
@@ -2041,9 +2048,9 @@ def selftest():
             for spec in ('1:1500:step=300:dir=up', '1:1500:step=100', '1:1500:step=300', '1:1500:step=300:dir=up:until=2700')]
     check('infer_arm A5u/A5s/A5/A5d', arms == ['A5U', 'A5S', 'A5', 'A5D'], str(arms))
     w = parse_window('window: tick=1559 inrew=3/41 life=0/0 forced=0/0 snaprb=1/12 snaps=1 resyncs=0/0 rebases=0 '
-                     'relay=180 late=2 lag[11]=23*4,24*50,49*2 lag[12]=30*60 inrew[11]=3 subst=5/4/1/0/1/0 '
+                     'relay=180 late=2 covered=4 lag[11]=23*4,24*50,49*2 lag[12]=30*60 inrew[11]=3 subst=5/4/1/0/1/0 '
                      'substco=7/1/1/9 lead_adj=1 lead=21 slew=-3')
-    check('parse_window', w and w['tick'] == 1559 and w['inrew'] == [3, 41] and w['late'] == 2
+    check('parse_window', w and w['tick'] == 1559 and w['inrew'] == [3, 41] and w['late'] == 2 and w['covered'] == 4
           and w['lag'] == {11: {23: 4, 24: 50, 49: 2}, 12: {30: 60}} and w['inrew_src'] == {11: 3}
           and w['subst'] == [5, 4, 1, 0, 1, 0] and w['substco'] == [7, 1, 1, 9] and w['lead_adj'] == 1
           and w['lead'] == 21 and w['slew'] == -3, str(w))

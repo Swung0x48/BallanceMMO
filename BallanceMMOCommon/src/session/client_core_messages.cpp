@@ -459,9 +459,23 @@ namespace bmmo::session {
         const std::string& entity = remote.entity;
         // The input_rewind switch (design 1.2; E9): off, a relayed frame is
         // stored (by the caller) and no replay is asked for; this returns
-        // before the checks below, so relay_late_, relay_bodiless_ and
-        // relay_birth_frozen_ are not counted either (they stay 0).
+        // before the checks below, so relay_late_, relay_covered_,
+        // relay_bodiless_ and relay_birth_frozen_ are not counted either
+        // (they stay 0).
         if (!config.rollback || !config.input_rewind || entity.empty() || tick == 0) return;
+        // Step RLT: a frame for a tick at or before the anchor S of the exact
+        // state this numbering stands on (a resync's, a rejoin's, a late
+        // join's; pending or applied) is in the server's state of S already -
+        // its inputs are applied there.  The history starts at S, so the
+        // rewind to tick - 1 below would find no record and count it late;
+        // nothing is lost, so it is counted apart (WGQ7's rejoiner: both
+        // remotes' frames for S arriving after the first frame of the base).
+        // Before the "not simulated yet" test: before the first frame of the
+        // base the current tick is S itself.
+        if (s.state_anchored_ && static_cast<int32_t>(tick - s.resync_base_) < 0) {
+            ++s.relay_covered_;
+            return;
+        }
         if (static_cast<int32_t>(tick - current_tick()) > 0) return;   // not simulated yet
         // Deeper than the engine re-simulates (48 ticks), or past the
         // history: nothing to replay from.  Measured at the anchor the

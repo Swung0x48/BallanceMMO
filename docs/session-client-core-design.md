@@ -834,7 +834,7 @@ different order per host; one recipe changes what a world does: Stage C).
 | pacer origin at re-assignment | headless resets `origin_`; retail's `fixed_tick_` counts independently | `hooks.numbering_restarted` |
 | "server has no body for us" re-report | retail only, after 30 snapshots (PSC:2620-2660) | core policy `own_body_backstop` (retail on, headless off: open question 2) |
 | retail resync on 30 unmatched; starvation | retail only | host-side, transitional (§3.2; open question 1); starvation deleted at R4 (part one's notices replace it) |
-| relay counters with no input rewind | headless counts `relay_late`, `bodiless`, `birth_frozen` with rollback on | with `input_rewind` off (retail from R1 to R2) `note_input_correction` returns before them, so they stay 0 (E9 review): no check reads them while the switch is off |
+| relay counters with no input rewind | headless counts `relay_late`, `bodiless`, `birth_frozen` (and from step RLT `relay_covered`) with rollback on | with `input_rewind` off (retail from R1 to R2) `note_input_correction` returns before them, so they stay 0 (E9 review): no check reads them while the switch is off |
 | resync on a frozen clock | retail only (PSC:2084) | a core rule for both hosts from R1: a frozen clock sets the bodies and drops the history with no replay (RB:1031-1042), so a re-anchor is the only recovery. Inert on headless (`frozen=0` in every run; the §5.3 zero rule checks it) |
 
 ### 4.2 Differences that disappear
@@ -1121,8 +1121,11 @@ A step passes an arm when:
   - `inrew` (remote);
   - life rewinds;
   - `far`, `unmatched`.
-- **Relay and inputs.** Relay lag p99, overall and per source; `relay_late`;
-  substituted ticks (`subst=`); inputs sent.
+- **Relay and inputs.** Relay lag p99, overall and per source; `relay_late`
+  (first arrivals past the rollback's reach or history: a correction lost)
+  and, from step RLT, `relay_covered` (first arrivals for a tick at or
+  before the anchor of the exact state the client stands on: not lost,
+  never `relay_late`); substituted ticks (`subst=`); inputs sent.
 - **Lifecycle and lead.** `events=`, `echo=`, `ownlife=`, `overtaken=`, moved
   births, `lead_adj=` / `lead=` / `slew=`.
 - **Resyncs:** `resyncs=` (requested, applied).
@@ -6618,6 +6621,82 @@ v7). No protocol or journal change, no CK2, IVP or physics_RT change.
   (resyncs 0, starved 0, mechanisms 15/15), and client 2 showed "Physics
   session 1 over (ended by the server: this server runs physics sessions
   only for clients with the session core, ...)" and stayed idle.
+
+**As built (step RLT, 2026-10-29): `relay_late` counts only lost
+corrections.** The user's choice (a) of the item WGQ7 queued (roadmap §4
+item 2, "relay_late counts frames the resync state covers"): frames the
+server's state already contains are counted apart in the core, not exempted
+in the harness.
+- **The rule** (`note_input_correction`, `client_core_messages.cpp`): a
+  relayed frame for a tick at or before the anchor S = `resync_base_ - 1`
+  of the exact state this numbering stands on is counted in
+  `relay_covered_` and returns; it is stored in the ring first, as every
+  frame is (the caller's `relay_store`), and never asks for a rewind.
+  "Stands on" is the new flag `state_anchored_`
+  (`client_core.hpp`, beside `resync_base_`): set by `anchor_resync`, i.e.
+  by every assignment with `ASSIGN_FLAG_STATE_FOLLOWS` - an exact resync's
+  re-assign, a late join's and a rejoin's first assignment - so it holds
+  while the state is pending (also during the resync hold and after a
+  refused apply that asks again: the next state covers the same ticks) and
+  after it is applied; cleared by a re-assign without the state (its full
+  snapshot is the world: `client_core.cpp`, the `!exact` branch) and at a
+  new session. "Covered" presumes the pending state (or a later one)
+  eventually applies: a resync that never completes (the queued delayed
+  rejoiner whose first state never finds its bodies) shows in
+  `resyncs=sent/done` and the hold timeouts, not in `relay_covered`.
+  The test sits after the `input_rewind` switch's return and
+  the empty-entity return (so the §4.1 row holds: with the switch off the
+  counter stays 0) and before the "not simulated yet" test - between the
+  assignment and the base's first frame the current tick is S itself, and
+  a frame for S used to fall through to `!knows_tick(S - 1)` and count
+  late. `relay_late` keeps meaning a correction this client needed and
+  could not apply: a frame for a tick after S past the reach or the
+  history is late as before.
+- **Reports.** The status line's `relay=new/dup/parked/late` gains a fifth
+  field, `relay=new/dup/parked/late/covered`; the window: line gains
+  `covered=` after `late=`. No wire or journal change (the counter is
+  not journalled). Both hosts print the core's lines: the retail core
+  host's status line is `core_host_status_text`, which embeds
+  `core.status_text` - **adapted**: the step's text named
+  `physics_session_client.cpp` ~3610, but that is the legacy path's
+  status line and its `late=` is the legacy sector union's late count
+  (`s.sector_union.late()`), not the relay's; the legacy path gets nothing
+  new, so PSC is not changed. `scripts/arena_map_test.py` reads the fifth
+  field (optional: older logs still parse) into `relay_covered`, sums the
+  windows' `covered=` per phase and prints `relay_covered` beside
+  `relay_late` in the event report and in the relay_late problem line;
+  `.local-tools/ab_compare.py` (a local tool, untracked) reads
+  `relay_covered` from the phase lines. The `relay_late 0` criteria are
+  unchanged.
+- **Checks** (quick tier, about 9 minutes of wall clock with the builds):
+  `SessionClientCoreResync.RelayedFramesTheStateCoversAreNotLate` (an
+  exact re-assign at base 140, frames 140-141 stepped: frames for 138 and
+  139 = S covered, not late, no rewind asked, stored in the ring; a frame
+  for the base 140 neither; an unmirrored player's frame for 139 parked as
+  before; after the apply a frame for 137 still covered; a frame for 145
+  once the history no longer holds 144 late; after a re-assign without the
+  state a frame before the new base late; the status line
+  `relay=7/0/1/2/3`) - the late case is put past the history because the
+  adaptive reach grows with the lag it is fed (a frame 86 ticks deep was
+  inside a reach that had become 93); the window-text test carries
+  `covered=0`; 645/645 tests; x64 BUILD-OK, x86 CLIENT-BUILD-OK, GCC 30/30.
+  Wire check `rRK3H -> rRLT` over `core_ref_s11` (`--accept-protocol 18`):
+  ALL SAME, 12 send traces SAME, 12 journals IDENTICAL; the status-line
+  text differs by the fifth field, and two replays show the rule at work:
+  `resync_snapoff` client 2 (resync base 1588 after the stall, old tick
+  1521, delta -66) `relay=.../129` before, `.../0/129` now, and
+  `swing_snapoff` client 0 (base 747, delta +0) 75 -> `.../0/75`: every
+  frame the old binary counted late in the 12 replays was one the state
+  covered. One live run (`maps/arena-test/rlt_live`, WGQ7's recipe:
+  snapshots off, trafo inputs and placement on, client 2 rejoins at 1200 -
+  base 1232, anchor 1231 - client 3 joins late at 1500 - base 1529,
+  anchor 1528 - client 1 leaves at 1800): `relay_late` 0 and
+  `relay_covered` 0 on all four clients - the race did not fire this time
+  (the relay message for the anchor was handled before the assignment);
+  server journal replay 3460/3460, VERDICT PASS; the three criterion
+  FAILs are WGQ7's pre-existing ones (client 0 own 152 m in A = the
+  airship latch; client 2 resyncs 1 = the rejoin; client 3's joiner lead,
+  the A8 criterion for `lead_adjust` on).
 
 ## 7. Open questions
 

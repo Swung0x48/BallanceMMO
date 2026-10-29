@@ -83,7 +83,8 @@ namespace bmmo::session {
         now.forced = s.forced_rollbacks_; now.forced_depth = s.forced_rollback_depth_;
         now.snaprb = s.snapshot_rollbacks_; now.snaprb_depth = s.snapshot_rollback_depth_;
         now.snaps = s.snapshots_applied_; now.resyncs_sent = s.resyncs_sent_; now.resyncs_done = s.resyncs_done_;
-        now.relay_new = s.relay_new_; now.relay_late = s.relay_late_; now.rebases = h.rebases;
+        now.relay_new = s.relay_new_; now.relay_late = s.relay_late_; now.relay_covered = s.relay_covered_;
+        now.rebases = h.rebases;
         now.subst_recv = s.subst_recv_; now.subst_diff = s.subst_diff_; now.subst_same = s.subst_same_;
         now.subst_bodiless = s.subst_bodiless_; now.subst_late = s.subst_late_;
         now.substrew = s.subst_rewinds_; now.substrew_depth = s.subst_rewind_depth_;
@@ -99,6 +100,11 @@ namespace bmmo::session {
         std::string text;
         if (!first) {
             auto d = [](uint64_t a, uint64_t b) { return static_cast<unsigned long long>(a - b); };
+            // relay= the first arrivals of relayed frames in this window,
+            // late= those past the rollback's reach (a correction lost) and
+            // covered= those the server's state this client stands on
+            // already contains (step RLT: a tick at or before an exact
+            // state's anchor; never a late=).
             // After the rollback classes and the relay: the own correction
             // (late-player design 1.3): subst= as on the status line, this
             // window's share, and substrew= the replays it named as
@@ -118,7 +124,7 @@ namespace bmmo::session {
             // (late-player design 3.3): moved inside the history, removed
             // from it, or resynced past the reach.
             text = textf("window: tick=%u inrew=%llu/%llu life=%llu/%llu forced=%llu/%llu snaprb=%llu/%llu snaps=%llu "
-                         "resyncs=%llu/%llu rebases=%d relay=%llu late=%llu"
+                         "resyncs=%llu/%llu rebases=%d relay=%llu late=%llu covered=%llu"
                          " subst=%llu/%llu/%llu/%llu/%llu/%llu substrew=%llu/%llu substco=%llu/%llu/%llu/%llu"
                          " lead_adj=%llu lead=%d slew=%d"
                          " moved=%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu",
@@ -127,6 +133,7 @@ namespace bmmo::session {
                          d(now.snaprb, was.snaprb), d(now.snaprb_depth, was.snaprb_depth), d(now.snaps, was.snaps),
                          d(now.resyncs_sent, was.resyncs_sent), d(now.resyncs_done, was.resyncs_done),
                          now.rebases - was.rebases, d(now.relay_new, was.relay_new), d(now.relay_late, was.relay_late),
+                         d(now.relay_covered, was.relay_covered),
                          d(now.subst_recv, was.subst_recv), d(now.subst_diff, was.subst_diff),
                          d(now.subst_same, was.subst_same), d(now.subst_bodiless, was.subst_bodiless),
                          d(now.substrew, was.substrew), d(now.subst_late, was.subst_late),
@@ -201,7 +208,7 @@ namespace bmmo::session {
             static_cast<unsigned long long>(h.probes_skipped), static_cast<unsigned long long>(h.probes_relatched),
             static_cast<unsigned long long>(s.revived_local_));
         return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
-                     "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
+                     "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                      "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu unmatched_run=%d/%llu far=%llu frozen=%llu globals=%llu/%llu/%llu/%llu/%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu parked=%llu missing=%llu lives=%llu/%llu/%llu/%llu/%llu/%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                      "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
@@ -263,6 +270,10 @@ namespace bmmo::session {
                      s.own_physicalized_ ? 1 : 0, s.remotes_.size(), static_cast<unsigned long long>(s.remote_inputs_received_),
                      static_cast<unsigned long long>(s.relay_new_), static_cast<unsigned long long>(s.relay_dup_),
                      static_cast<unsigned long long>(s.relay_parked_), static_cast<unsigned long long>(s.relay_late_),
+                     // relay=new/dup/parked/late/covered (step RLT: covered
+                     // = first arrivals the exact state of this numbering
+                     // already contains, never counted late).
+                     static_cast<unsigned long long>(s.relay_covered_),
                      s.relay_lag_max_, relay_lag_p99(),
                      // subst=recv/diff/same/bodiless/rew/late (late-player design
                      // 1.3): the notices of our own substituted ticks inside the

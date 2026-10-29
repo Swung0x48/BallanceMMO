@@ -53,6 +53,7 @@ namespace bmmo::session {
     void session_client_core::anchor_resync(uint32_t base, uint32_t old_tick) {
         const uint32_t anchor = base - 1;
         s.resync_base_ = base;
+        s.state_anchored_ = true;   // step RLT: relayed frames for ticks <= anchor are the state's
         s.resync_old_tick_ = old_tick;
         s.resync_delta_ = static_cast<int64_t>(old_tick) - static_cast<int64_t>(anchor);
         s.resync_wait_frames_ = 0;

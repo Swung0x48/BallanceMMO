@@ -504,6 +504,16 @@ namespace bmmo::session {
         // arrivals in ticks (max, and a histogram for the 99th percentile): the
         // numbers that say whether the relay reaches the rollback in time.
         uint64_t relay_late_ = 0;
+        // ...and first arrivals for a tick the server's state this client
+        // stands on (or waits for) already contains (step RLT): a tick at or
+        // before the anchor S = resync_base_ - 1 of an exact resync, a rejoin
+        // or a late join (state_anchored_).  The history starts at S, so the
+        // rewind such a frame would ask for (to tick - 1) has no record - but
+        // nothing was lost: the state of S is the server's, with that tick's
+        // inputs applied.  Stored in the ring like every frame, never a
+        // relay_late_ (which keeps meaning a correction this client needed
+        // and could not apply).
+        uint64_t relay_covered_ = 0;
         // ...and first arrivals for a tick at which the mirror had no body
         // (dead, or not born here yet): stored, not replayed.
         uint64_t relay_bodiless_ = 0;
@@ -540,7 +550,7 @@ namespace bmmo::session {
         struct window_base {
             uint64_t inrew = 0, inrew_depth = 0, life = 0, life_depth = 0, forced = 0, forced_depth = 0;
             uint64_t snaprb = 0, snaprb_depth = 0, snaps = 0, resyncs_sent = 0, resyncs_done = 0;
-            uint64_t relay_new = 0, relay_late = 0;
+            uint64_t relay_new = 0, relay_late = 0, relay_covered = 0;
             uint64_t subst_recv = 0, subst_diff = 0, subst_same = 0, subst_bodiless = 0, subst_late = 0;
             uint64_t substrew = 0, substrew_depth = 0;
             uint64_t subst_deferred = 0, subst_unseen = 0, subst_subsumed = 0, subst_saved = 0;
@@ -742,7 +752,17 @@ namespace bmmo::session {
         // reconcile leaves its mirrors to the resync's own, 2.6.3).
         bool resync_restoring_ = false;
         uint32_t resync_base_ = 0;
-        uint32_t resync_old_tick_ = 0;      // R: the old numbering's tick at the re-assign
+        // Step RLT: this numbering's history was anchored at resync_base_ - 1
+        // for an exact state (a resync, a rejoin, a late join), pending or
+        // applied - the server's state of that tick is the world this client
+        // stands on (or will).  Set by anchor_resync, cleared by a re-assign
+        // without the state (its full snapshot is the world then) and at a
+        // new session.  Read by note_input_correction (relay_covered_).
+        // "Covered" presumes the pending state (or a later one) applies; a
+        // resync that never completes shows in resyncs= and the hold
+        // timeouts, not in relay_covered_.
+        bool state_anchored_ = false;
+        uint32_t resync_old_tick_ = 0;     // R: the old numbering's tick at the re-assign
         int64_t resync_delta_ = 0;          // delta = R - (base - 1)
         // The state, kept while the apply waits for the body set (2.6.4
         // step 2), and when it arrived.
