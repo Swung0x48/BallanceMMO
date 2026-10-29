@@ -948,7 +948,12 @@ numbers 1-10 are unchanged.
    (placement off and on, K 2 and 8), V7 on the arena, and the retail CK2
    copies give the server's signature (Q10). Queued from it (design, As
    built (step WGQ7)): **REF12**, the protocol-19 reference set (every
-   `core_ref_s11` capture is protocol 18); the identity copies' leftover
+   `core_ref_s11` capture is protocol 18; *done at FULL's REF12,
+   2026-10-29: `core_ref_s12`, protocol 22 at HEAD 03e9f4d2, eleven arms
+   with the deployed defaults trafo_inputs and placement on, swing_snapon
+   dropped under the snapshots-off rule; server journals N/N, the wire
+   check ALL SAME 36/36, now `wire_check.sh`'s default; its README is
+   `maps/arena-test/core_ref_s12/README.md`*); the identity copies' leftover
    parameter outputs at a release (pre-existing since G1, 2 per copy, their
    owner pointer dangling); WAD-A's verdict, which the step's runs could not
    give (no fan force held at an import; the one force controller held at
