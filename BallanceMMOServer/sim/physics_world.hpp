@@ -63,7 +63,9 @@ namespace bmmo::sim {
         int seed = 1;
         // Spawn kick speed, m/s (design 9.10); 0 disables (solo sessions and
         // debug/replay worlds that never set it stay bit-exact with a
-        // recording that has no impulse).
+        // recording that has no impulse).  Step SPX: a session's world takes
+        // SessionStart's value, 0 while the spawn ghost covers every spawn
+        // birth (session_spawn_separation); a replay takes its journal's.
         float spawn_impulse = 0.0f;
         int boot_ticks = 400;          // ticks for the composition to reach the main menu
         int anchor_timeout = 3000;     // ticks to wait for Gameplay_Ingame after the level request

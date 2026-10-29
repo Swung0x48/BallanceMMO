@@ -1396,6 +1396,25 @@ left them; a Gameplay_Refresh activation inside frames 9..15 (above;
 queued as RK3F); a Level 1 level reset after the exit (above: the tutorial
 re-activated, the exit not re-fired; queued as RK3R).
 
+### Decided (2026-10-29): RK3R is not handled - a known limit
+
+The user, asked whether a Level 1 level reset inside a session (the tutorial
+re-activated by the next new ball, its chapter `Physic on/off` writes
+freezing each world at its own moment) should be fixed by re-firing the
+exit on every new ball or by holding the chapter writes, answered
+(verbatim, the RK3R part of the message; its first part asked what
+`PH[*][4]` holds): "RK3R那个，看看原来的影子球模式，会处理玩家手动重开那种导致的新手教学触发吗？印象中好像不处理（只会处理ready-go时候的跳过教程），如果是这样的话，这个遗留可以直接不处理" -
+does the old shadow-ball mode handle the tutorial a player's manual
+restart triggers? as I remember it does not (it only skips the tutorial at
+ready-go); if so, leave this one unhandled. Verified: the main branch skips the tutorial only at the
+server's countdown restart (`countdown_restart_`, `BallanceMMOClient.cpp:633`)
+and never after a manual restart, where the tutorial plays again. So RK3R
+is **not handled**: a documented known limit, not a gap to fix. What a
+Level 1 reset does in a session (expected: the tutorial plays in that
+world, its freezes take the frozen-clock path and ask for a resync) is
+recorded once by the close-out (FULL rows RK3R-rec, in H1 headless and RT2
+retail), not judged beyond "as expected". Do not re-ask it.
+
 ## As built (step RK2, 2026-10-29): K2 = C2, the array-read census, and Q4's written cells
 
 C2 as §2.2 and the K2 row of §8 say, with §11 Q4's decision built in it and
@@ -1600,3 +1619,42 @@ window, so a recorded value that differs from the live one was never seen);
 Q4's
 settle arm (waived by the decision's "no check compares it"); S2's pass,
 which waits for the `PH[*][4]` decision.
+
+### Decided (2026-10-29): `PH[*][4]` = option (b), per-world collectible state
+
+The user's rule for collectibles (verbatim):
+"如果PH*4是管加分球的，那么它应该和飞船一样不纳入回滚/物理同步，每个玩家有自己独立的一份。（同理，生命球也是）" -
+if PH column 4
+belongs to the extra points, it should, like the airship, stay out of the
+rollback and the physics sync, each player having their own copy (likewise
+the extra lives). The answer to RK2's three options (verbatim): "选：加检查"
+= option (b), add the check. So `PH[*][4]` is **neither recorded nor rolled
+back**: a census class "per-world collectible state" in `game/array_reads.hpp`,
+granted by a load-time structural check that column 4's in-play writers are
+only `P_Extra_*` scripts writing their own row (plus `Event_handler`'s level
+reset); a map that breaks the rule is reported and its read stays unrecorded
+and logged. No protocol, record or wire change. This is the design already
+(world agreement Q6 / P3: the `P_Extra_*` scripts are out of the replay
+selection, the own-ball sensors run in each client's world; extra points and
+extra lives alike); the roadmap's §2 states the rule beside the airship
+exception. Built by the close-out's step F4 (with S2's pass: `unrecorded=0`
+on L1-L13 with the new class). Do not re-ask it.
+
+## As built (step F0, 2026-10-29): RK3 (e) - the replay log line stays the guard
+
+RK3 (e) asked for a unit test of `physics_world`'s frame count with a
+non-zero `set_tick_index`. **Decision (the FULL plan left it to this step:
+"a test target linking `BallanceMMOSim`, or a recorded decision to keep the
+replay log guard"): keep the replay log line as the guard; no new test
+target.** A `physics_world` exists only over a loaded CK context (the game
+root, a level): a test target linking `BallanceMMOSim` would need the game
+data at test time, which the message-test target (run on every build, and
+GCC-checked for the CI's Linux job) deliberately does not. What stays
+guarded and by what: the timing rule itself is shared and unit-tested
+(`entity/session.hpp` `tutorial_exit_due`, `SessionClientCoreTutorial.ExitDueRule`);
+the server world's count is `tick_ - first_step_tick_` with
+`first_step_tick_` taken at its first step (`physics_world.cpp`, step RK3's
+fix), and every Level 1 server journal with a base != 0 shows it in the
+replay's log line "the Level 1 tutorial's exit activated before frame 10
+(tick base+9)" - which the close-out's H1 Level 1 runs read (RK3R-rec, RK3F)
+with the session runner's start base 8.

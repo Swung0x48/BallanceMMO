@@ -950,6 +950,9 @@ namespace {
 
         int exit_code() const {
             if (inbound_failed_) return 3;
+            // Step F0 (review): a --rejoin-at whose Join the server refused
+            // never had its next life - not a pass.
+            if (rejoin_refused_) return 4;
             const auto& st = core_.own_correction_stats();
             return (st.blended + st.hard + st.unmatched) == 0 ? 0 : 2;
         }
@@ -1180,6 +1183,17 @@ namespace {
                 // Step M1: a member's PLAYER(-) is its SessionMember(removed)'s,
                 // at the server's R (no longer at this room event's tick).
                 if (msg.type == bmmo::room::event_type::RequestDenied && msg.error != bmmo::room::error_code::None) {
+                    // Step F0 (WM0's review nit): the Join of a --rejoin-at
+                    // refused - the rejoin is over; the run ends here instead
+                    // of the room handling joining some other room.
+                    if (rejoin_waiting_ && !in_room_) {
+                        logf("--rejoin-at: the Join of room %u was refused (%s): no next life, the run ends", room_id_,
+                             bmmo::room::error_string(msg.error));
+                        rejoin_waiting_ = false;
+                        rejoin_refused_ = true;
+                        ended_ = true;
+                        return;
+                    }
                     if (join_sent_ && !in_room_) join_sent_ = false;   // retry on the next state
                 }
                 break;
@@ -2197,6 +2211,8 @@ namespace {
         void begin_session(const bmmo::session_start_msg& msg) {
             // The session's parameters and the core's fresh state (shared-core
             // design E3: session_client_core::begin).
+            rejoin_waiting_ = false;   // step F0: the rejoin's next life began (or was refused)
+            switches_checked_ = false;  // step F0: each life compares the switches with its own first tick
             if (core_.begin(msg, make_core_config()).refused) {
                 ended_ = true;
                 return;
@@ -3244,6 +3260,20 @@ namespace {
             // Step T3 (H8): the leave switches.
             if (core_.assigned()) {
                 const uint32_t now = current_tick();
+                // Step F0 (WM0's review nit): a switch whose tick this client
+                // never steps (behind a late joiner's base) fires at once.
+                if (!switches_checked_) {
+                    switches_checked_ = true;
+                    const auto behind = [&](const char* name, uint64_t at) {
+                        if (at != 0 && at < now)
+                            logf("warning: %s %llu is behind this client's first tick %u (a late joiner's base): it "
+                                 "fires at once", name, static_cast<unsigned long long>(at), now);
+                    };
+                    behind("--leave-at", args_.leave_at);
+                    behind("--rejoin-at", args_.rejoin_at);
+                    behind("--leave-room-at", args_.leave_room_at);
+                    if (args_.resync_at >= 0) behind("--resync-at", static_cast<uint64_t>(args_.resync_at));
+                }
                 if (args_.leave_after_unphys >= 0 && !leave_unphys_tick_ && args_.beam && now >= args_.beam_tick
                         && was_physicalized_ && !core_.own_physicalized())
                     leave_unphys_tick_ = now + static_cast<uint32_t>(args_.leave_after_unphys);
@@ -3270,6 +3300,7 @@ namespace {
                          core_.own_physicalized() ? "physicalized" : "without a body");
                     core_.end("--rejoin-at: left the room to rejoin it");
                     ++rejoins_;
+                    rejoin_waiting_ = true;
                     room_request(bmmo::room::action::Leave, room_id_);
                     // join_sent_ also keeps the room state handler from
                     // joining a room on its own while the delay runs.
@@ -4293,6 +4324,14 @@ namespace {
         // rejoin (names the next journal).
         bool rejoin_done_ = false;
         uint32_t rejoins_ = 0;
+        // Step F0: a rejoin's Join is out and no SessionStart came yet (a
+        // RequestDenied then ends the run).
+        bool rejoin_waiting_ = false;
+        // Step F0: that Join was refused - exit code 4.
+        bool rejoin_refused_ = false;
+        // Step F0: the switches were compared with this life's first
+        // assigned tick (reset by begin_session).
+        bool switches_checked_ = false;
         // --rejoin-at TICK:MS (step TRL): the Join waits until this time.
         bool rejoin_join_pending_ = false;
         clock_type::time_point rejoin_join_due_{};

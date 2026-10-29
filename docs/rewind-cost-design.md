@@ -3369,3 +3369,34 @@ No source changed; protocol 18 and journal v7 as before.
   equal the live ones (12/12). solo1 / solo2 replay to their end markers,
   sends SAME, journals byte-identical. `REF=core_ref_s10 wire_check.sh -
   rREF11`: ALL SAME. 611 tests pass.
+
+### As built (step F0, 2026-10-29): SPX's tools and review nits
+
+- **The ghost-state reader and the per-world contact check**
+  (`scripts/ghost_state.py`, FULL row SPX-ct's tool half; the per-world read
+  is H6's): from a journal pair (the server's FULL checkpoints, one client's
+  LOCAL ones) and the two logs, one line per ball per common checkpoint tick
+  - both positions, each world's logged state (ghost / solid / airship),
+  the nearest other ball in each world, the distance and agree/DIFFER - then
+  per world the nearest other ball at every solid transition (T-2..T+2) and
+  the closest approach of two balls both solid in that world (a checkpoint
+  under the 4 m diameter is a contact from an overlap: exit 3).
+  **Limit:** the ghost bit is not in the journal (a body's checkpoint flags
+  carry SIMULATED and COLLISION_ENABLED only, and a spawn ghost keeps its
+  collision on - only ball-to-ball pairs are off), so the states come from
+  the logs, and a client's line is frame-observed once per life (a ghost ->
+  solid decided again by a later rewind leaves no line). A verified final
+  state per tick would need the bit in the record: a journal format change,
+  outside this step. On `core_ref_s11/resync_snapoff` (clients 1 and 3):
+  both worlds PASS, closest approach of two solid balls 4.0114 m (server and
+  each client), the clients' 680 vs the server's 681 visible as SPX
+  described.
+- **The review nits** (SPX's commit message): the session-end
+  `spawn_ghost(false)` is gated on `kSpawnGhost` as its install is
+  (`client_core.cpp`; it was reachable only through `spawn_ghost_active_`,
+  which only the install sets - no behaviour change); the "own body ...
+  made" log line says ", spawn kick" only when a kick was applied
+  (`client_core_lifecycle.cpp`, `spec.kick`); `session_start_msg.hpp`'s
+  `spawn_impulse` / `spawn_spacing` and `physics_world.hpp`'s
+  `spawn_impulse` comments say they are 0 under the spawn ghost. Wire check
+  rRK2 -> rF0 over `core_ref_s11`: ALL SAME.

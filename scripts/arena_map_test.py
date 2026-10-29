@@ -996,6 +996,21 @@ def distance(a, b):
 
 
 RE_INPUT_DELAY = re.compile(r'^session \d+ starting: .*\binput delay (\d+)')
+# Step F0: a member's lives in one client log (a --rejoin-at begins the next
+# with a new 'session N starting:' line), a join's import of the server's
+# state (the late joiner's and the rejoiner's first state: a resync from tick
+# 0 - not a resync of a running client) and where its re-step ended.
+RE_SESSION_LIFE = re.compile(r'^session \d+ starting: ')
+RE_ASSIGNED = re.compile(r'^tick base (\d+) assigned')
+RE_JOIN_IMPORT = re.compile(r'^resynced: tick base (\d+) \(old tick 0\b')
+RE_RESTEP = re.compile(r"^resync: re-stepped from the server's tick (\d+) to (\d+)")
+# Step F0: the airship (BALA; the balloon is the design's one exception, never
+# compared): a ball is out of the comparison from the tick the server's world
+# says it entered the zone to its next birth (a spawn ghost line).
+RE_AIRSHIP_ZONE = re.compile(r"player (\d+)'s ball \S+ is in the airship zone at tick (\d+)")
+RE_SPAWN_BIRTH = re.compile(r"player (\d+)'s ball \S+ is a spawn ghost at tick (\d+)")
+# Step F0: the server's lead adjust mode (A8's joiner lead rule depends on it).
+RE_LEAD_MODE = re.compile(r'Physics sessions enabled \(.*\blead adjust (on|off)\b')
 RE_STATUS_LEAD = re.compile(r'\bworst=\d+ lead=([0-9.]+)')
 # A join-late episode's D: the joiner's first four windows (5.2 A8).
 JOIN_WINDOWS = 4
@@ -1006,17 +1021,41 @@ def read_client_log(path):
     """What the report needs from one client log."""
     out = {'own_id': 0, 'bases': [], 'windows': [], 'subst': None, 'lead_adj': None, 'holds': [], 'stalls': [],
            'last_tick': 0, 'input_delays': [], 'status_lead': None, 'exists': path.exists(),
-           'echo': None, 'ownlife': None, 'own_moves': []}
+           'echo': None, 'ownlife': None, 'own_moves': [],
+           # step F0: one entry per life (a --rejoin-at's next life is the
+           # second): its assigned base, its join import (the server's first
+           # state, not a resync), where that import's re-step ended, and the
+           # life's real resync bases
+           'lives': []}
     if not path.exists():
         return out
+    life = None
     for line in path.read_text(errors='replace').replace('\x00', '').splitlines():
         if not out['own_id']:
             m = RE_OWN_ID.search(line)
             if m:
                 out['own_id'] = int(m.group(1))
+        if RE_SESSION_LIFE.match(line) or (life is None and RE_BASE.search(line)):
+            life = {'base': None, 'import': None, 'import_end': None, 'import_applied': False, 'resyncs': []}
+            out['lives'].append(life)
         m = RE_BASE.search(line)
         if m:
             out['bases'].append(int(m.group(1) or m.group(2)))
+            ma, mj = RE_ASSIGNED.match(line), RE_JOIN_IMPORT.match(line)
+            if ma and life['base'] is None:
+                life['base'] = int(ma.group(1))
+            elif mj and life['import'] is None and not life['resyncs']:
+                life['import'] = int(mj.group(1))
+            elif not ma:
+                life['resyncs'].append(int(m.group(1) or m.group(2)))
+        # The first re-step after the import ends the span the world is not
+        # yet the session's (a state that never applied - a later resync
+        # took its place - ends it at that resync's re-step); the import is
+        # a counted resync only when its own state applied.
+        m = RE_RESTEP.match(line)
+        if m and life is not None and life['import'] is not None and life['import_end'] is None:
+            life['import_end'] = int(m.group(2))
+            life['import_applied'] = not life['resyncs']
         w = parse_window(line)
         if w:
             out['windows'].append(w)
@@ -1074,6 +1113,17 @@ def read_client_log(path):
     for w in out['windows']:
         w['lo'] = prev + 1 if prev is not None and prev < w['tick'] else w['tick'] - WINDOW_TICKS + 1
         prev = w['tick']
+    # Step F0: a join import is not a resync - its count comes off the first
+    # window at or after it that has one done.
+    out['join_resyncs_removed'] = 0
+    for lf in out['lives']:
+        if lf['import'] is None or not lf['import_applied']:
+            continue
+        for w in out['windows']:
+            if w['tick'] >= lf['import'] and isinstance(w.get('resyncs'), list) and w['resyncs'][1] > 0:
+                w['resyncs'] = [w['resyncs'][0], w['resyncs'][1] - 1]
+                out['join_resyncs_removed'] += 1
+                break
     return out
 
 
@@ -1212,6 +1262,55 @@ def s5_summary(lines):
     return out
 
 
+def server_log_text(case_dir):
+    """The run's server log (the case directory's, else the run's)."""
+    for cand in (case_dir / 'server.log', case_dir.parent / 'server.log'):
+        if cand.exists():
+            return cand.read_text(errors='replace').replace('\x00', '')
+    return ''
+
+
+def airship_spans(text):
+    """Step F0: player -> [(zone tick, next birth tick)) from the server log:
+    a ball in its airship span is per-world (BALA) and never compared."""
+    zones, births = collections.defaultdict(list), collections.defaultdict(list)
+    for m in RE_AIRSHIP_ZONE.finditer(text):
+        zones[int(m.group(1))].append(int(m.group(2)))
+    for m in RE_SPAWN_BIRTH.finditer(text):
+        births[int(m.group(1))].append(int(m.group(2)))
+    out = {}
+    for player, ticks in zones.items():
+        out[player] = [(z, min([b for b in births[player] if b > z] or [1 << 31])) for z in sorted(set(ticks))]
+    return out
+
+
+def in_spans(spans, tick):
+    return any(lo <= tick < hi for lo, hi in spans)
+
+
+def lead_mode(text):
+    """Step F0: 'on' / 'off' from the server's start line, None unknown."""
+    m = RE_LEAD_MODE.search(text)
+    return m.group(1) if m else None
+
+
+def life_journals(case_dir, i, lives):
+    """Step F0: (journal, from tick, to tick) per life of client i: the first
+    life's client{i}.bmjr up to the second life's base, a rejoin's next life
+    client{i}.rejoin{k}.bmjr from its own base on."""
+    bases = [lf['base'] for lf in lives[1:]]
+    out = []
+    first = case_dir / f'client{i}.bmjr'
+    if first.exists():
+        out.append((first, -(1 << 31), bases[0] if bases and bases[0] is not None else 1 << 31))
+    for k, base in enumerate(bases, start=1):
+        nxt = bases[k] if k < len(bases) and bases[k] is not None else 1 << 31
+        path = case_dir / f'client{i}.rejoin{k}.bmjr'
+        if path.exists() and base is not None:
+            out.append((path, base, nxt))
+    return out
+
+
 def event_report(args, case, case_dir):
     """H6.  None when the run had no episode to report on."""
     import first_divergence as fd
@@ -1327,12 +1426,21 @@ def event_report(args, case, case_dir):
                         'gaps30': sorted([s, v] for s, v in gaps30.items())}
 
     server_world = fd.worlds(server, want_local=False)
+    # Step F0: the airship spans per player (server log): never compared.
+    airship = airship_spans(server_log_text(case_dir))
+    report['lead_adjust'] = lead_mode(server_log_text(case_dir))
     for i in range(args.players):
         log = logs[i]
         pid = id_of.get(i, 0)
         path = case_dir / f'client{i}.bmjr'
+        lives = log.get('lives') or []
         row = {'index': i, 'id': pid, 'base': log['bases'][0] if log['bases'] else None,
-               'resync_bases': log['bases'][1:], 'subst_client': log['subst'], 'lead_adj': log['lead_adj'],
+               # step F0: a join import (a late joiner's or a rejoin's first
+               # state) is not a resync; a later life's base is a rejoin base
+               'resync_bases': [b for lf in lives for b in lf['resyncs']] if lives else log['bases'][1:],
+               'rejoin_bases': [lf['base'] for lf in lives[1:] if lf['base'] is not None],
+               'join_resyncs_removed': log.get('join_resyncs_removed', 0),
+               'subst_client': log['subst'], 'lead_adj': log['lead_adj'],
                'holds': log['holds'], 'stalls': log['stalls'], 'input_delays': log['input_delays'],
                'echo': log['echo'], 'ownlife': log['ownlife'], 'own_moves': log['own_moves'],
                'status_lead': log['status_lead'], 'never_started': not log['exists'], 'phases': {}}
@@ -1369,16 +1477,38 @@ def event_report(args, case, case_dir):
         per_tick = {}
         presence = {}   # tick -> (server has the own ball, client has it)
         received = []
-        if path.exists():
-            journal = jt.read_journal(str(path))
-            local = fd.worlds(journal, want_local=True)
-            received = [cp['tick'] for cp in journal.checkpoints() if cp['flags'] & 4]
+        # Step F0: every life's journal (a rejoin's next life writes
+        # client{i}.rejoin{k}.bmjr), each from its own base to the next
+        # life's; the ticks before a join's import are not compared (the
+        # joiner's world is not yet the session's), nor a ball in its
+        # airship span.
+        local = {}
+        excluded = {'pre_import': [], 'airship': []}
+        for k, (jpath, lo, hi) in enumerate(life_journals(case_dir, i, lives)):
+            journal = jt.read_journal(str(jpath))
+            world = fd.worlds(journal, want_local=True)
+            received += [cp['tick'] for cp in journal.checkpoints() if cp['flags'] & 4 and lo <= cp['tick'] < hi]
+            for tick, bodies in world.items():
+                if lo <= tick < hi:
+                    local[tick] = bodies
+        for lf in lives:
+            if lf['import'] is not None and lf['import_end'] is not None:
+                lo_imp = lf['base'] if lf['base'] is not None else lf['import']
+                dropped = [tk for tk in local if lo_imp <= tk <= lf['import_end']]
+                for tk in dropped:
+                    del local[tk]
+                excluded['pre_import'].append([lo_imp, lf['import_end'], len(dropped)])
+        air_counted = collections.Counter()
+        if path.exists() or local:
             for tick in sorted(set(server_world) & set(local)):
                 a, b = server_world[tick], local[tick]
                 presence[tick] = (('ball', pid) in a, ('ball', pid) in b)
                 own = oth = late = mech = 0.0
                 have_own = False
                 for key in set(a) & set(b):
+                    if key[0] == 'ball' and in_spans(airship.get(key[1], ()), tick):
+                        air_counted[key[1]] += 1
+                        continue
                     err = distance(a[key], b[key])
                     if key[0] == 'ball':
                         if key[1] == pid:
@@ -1390,6 +1520,12 @@ def event_report(args, case, case_dir):
                     else:
                         mech = max(mech, err)
                 per_tick[tick] = (own if have_own else None, oth, late, mech)
+        for owner, spans in sorted(airship.items()):
+            if air_counted.get(owner):
+                excluded['airship'].append(['own' if owner == pid else 'c%s' % index_of.get(owner, owner),
+                                            [[lo, hi if hi < 1 << 31 else None] for lo, hi in spans],
+                                            air_counted[owner]])
+        row['excluded'] = excluded
         window_lo, window_hi = t_on - 60, t_off + REACH + 180
         windows30 = []
         for start in range(window_lo - window_lo % 30, window_hi, 30):
@@ -1624,7 +1760,7 @@ def criteria(report, case, controls):
             add(who, 'relay_late 0', sum(row['phases'][p]['relay_late'] for p in PHASES) == 0,
                 'B/D/A %s' % '/'.join(str(row['phases'][p]['relay_late']) for p in PHASES))
             add(who, 'resyncs 0', sum(row['phases'][p]['resyncs'] for p in PHASES) == 0 and not row['resync_bases'],
-                '%d' % sum(row['phases'][p]['resyncs'] for p in PHASES))
+                '%d (bases %s)' % (sum(row['phases'][p]['resyncs'] for p in PHASES), row['resync_bases']))
             add(who, 'lead_adj 0', None if lead_none else sum(v or 0 for v in lead) == 0, no_lead if lead_none else str(lead))
             if late:
                 add(who, 'late ball mirror <= 0.001 m from T_off+60', row['late_mirror_after'] <= 0.001,
@@ -1824,15 +1960,28 @@ def criteria(report, case, controls):
                         '%.4f m from tick %d' % (row['own_after_resync'][1], row['own_after_resync'][0]))
         elif family == 'join':
             info = next((j for j in report.get('join', []) if j['client'] == row['index']), None)
-            if info and row['input_delays']:
+            # Step F0 (WGQ7's re-read): D + ceil(rtt) + 2 is the joiner's
+            # lead with physics.lead_adjust ON; with it off (the default) a
+            # joiner runs at the session's input delay, as every member.
+            mode = report.get('lead_adjust')
+            founders = [r['input_delays'][0] for r in report['clients']
+                        if r['index'] not in late and r.get('input_delays')]
+            session_d = founders[0] if founders else report.get('input_delay', 0)
+            if info and row['input_delays'] and mode == 'off':
+                add(who, "joiner lead == the session's input delay (lead_adjust off)",
+                    row['input_delays'][0] == session_d,
+                    'printed input delay %d vs the founders\' %d (status lead %s; asked tick %d, base %s)' % (
+                        row['input_delays'][0], session_d, row['status_lead'], info['asked'], info['base']))
+            elif info and row['input_delays']:
                 rtt = int(math.ceil(2.0 * info['latency_ms'] / 1000.0 / TICK_S))
                 want = report.get('input_delay', 0) + rtt + 2
-                add(who, 'joiner lead == D + ceil(rtt) + 2', row['input_delays'][0] == want,
+                add(who, 'joiner lead == D + ceil(rtt) + 2 (lead_adjust %s)' % (mode or 'unknown: the on rule'),
+                    row['input_delays'][0] == want,
                     'printed input delay %d vs %d + %d + 2 = %d (status lead %s; asked tick %d, base %s)' % (
                         row['input_delays'][0], report.get('input_delay', 0), rtt, want, row['status_lead'],
                         info['asked'], info['base']))
             else:
-                add(who, 'joiner lead == D + ceil(rtt) + 2', None, 'no session line or no --join-late for it')
+                add(who, 'joiner lead', None, 'no session line or no --join-late for it')
             add(who, 'subst late 0 after the first four windows', None if not parts or len(parts) < 6 else parts[5] == 0,
                 no_subst if row['subst_client'] is None else 'subst=%s' % row['subst_client'])
         elif family == 'stall':
@@ -1863,7 +2012,8 @@ def format_report(report, crit):
                      'late mirror after T_off+60 %.4f (next 300 ticks %.4f); '
                      'RECEIVED in the episode %d; input delay %s' % (
                          row['index'], row['id'], row['base'],
-                         (', resynced to ' + ','.join(map(str, row['resync_bases']))) if row['resync_bases'] else '',
+                         ((', resynced to ' + ','.join(map(str, row['resync_bases']))) if row['resync_bases'] else '')
+                         + ((', rejoined at ' + ','.join(map(str, row['rejoin_bases']))) if row.get('rejoin_bases') else ''),
                          '/'.join(str(row['subst_server'][p]) for p in PHASES), row['subst_runs'] or '-',
                          row['subst_client'] or 'n/a', row['own_zero_from'], row['own_after'], row['own_after_300'],
                          row['late_mirror_after'], row['late_mirror_after_300'], row['received_in_event'],
@@ -1885,6 +2035,16 @@ def format_report(report, crit):
                              ph['relay_late'], ph.get('relay_covered', 0), ph['snaps'], ph['resyncs'], ph['rebases'],
                              'n/a' if ph['lead_adj'] is None else ph['lead_adj'],
                              'n/a' if ph['moved'] is None else ph['moved']))
+        ex = row.get('excluded') or {}
+        if ex.get('pre_import') or ex.get('airship') or row.get('join_resyncs_removed'):
+            lines.append('  not compared (step F0): %s%s%s' % (
+                '; '.join('before the join import %d..%d (%d checkpoints)' % tuple(e) for e in ex.get('pre_import', [])),
+                ('; ' if ex.get('pre_import') else '') + '; '.join(
+                    '%s ball in its airship span %s (%d checkpoints)' % (
+                        who_, ','.join('%d..%s' % (lo, 'end' if hi is None else hi - 1) for lo, hi in spans), n)
+                    for who_, spans, n in ex.get('airship', [])),
+                '; join imports not counted as resyncs %d' % row['join_resyncs_removed']
+                if row.get('join_resyncs_removed') else ''))
         if row['holds'] or row['stalls']:
             lines.append('  holds %s stalls %s' % (row['holds'], row['stalls']))
         if row.get('own_never'):
@@ -2158,6 +2318,51 @@ def selftest():
           rj2 == {1: 1200, 2: 1300} and dl == {1: 1000}
           and member_args(MB, 1) == ['--rejoin-at', '1200:1000'] and member_args(MB, 2) == ['--rejoin-at', '1300']
           and all(bad), '%s %s %s' % (rj2, dl, bad))
+
+    # Step F0: a rejoiner's log - two lives, the second's join import is
+    # not a resync (nor its window's count), a real resync in the second life
+    # is; the import's re-step end; the airship spans; the lead mode.
+    import tempfile
+    life_log = [b'session 1 starting: level 13, 3 players, join order 2, life 1, seed 1, input delay 6\n',
+                b'tick base 8 assigned (0 frames since anchor)\n',
+                b'window: tick=67 inrew=0/0 resyncs=0/0 late=0\n',
+                b'session 1 starting: level 13, 3 players, join order 3, life 2, seed 1, input delay 6\n',
+                b'tick base 1297 assigned (0 frames since anchor)\n',
+                b'resynced: tick base 1297 (old tick 0, delta -1296): anchored at 1296, the server\'s state follows\n',
+                b"resync: re-stepped from the server's tick 1296 to 1310 (14 ticks)\n",
+                b'window: tick=1319 inrew=0/0 resyncs=0/1 late=0\n',
+                b'resynced: tick base 1530 (old tick 1392, delta -137): anchored at 1529\n',
+                b"resync: re-stepped from the server's tick 1529 to 1540 (11 ticks)\n",
+                b'window: tick=1559 inrew=0/0 resyncs=1/1 late=0\n']
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / 'client.log'
+        path.write_bytes(b''.join(life_log))
+        lv = read_client_log(path)
+        lives_got = [(lf['base'], lf['import'], lf['import_end'], lf['resyncs']) for lf in lv['lives']]
+        check('read_client_log: lives, join import, re-step end (step F0)',
+              lives_got == [(8, None, None, []), (1297, 1297, 1310, [1530])] and lv['lives'][1]['import_applied']
+              and [w['resyncs'] for w in lv['windows']] == [[0, 0], [0, 0], [1, 1]] and lv['join_resyncs_removed'] == 1,
+              str((lives_got, [w['resyncs'] for w in lv['windows']])))
+        path.write_bytes(b''.join(life_log[:6] + life_log[8:]))   # the import's state never applied (DRJ)
+        lv2 = read_client_log(path)
+        got2 = [(lf['base'], lf['import'], lf['import_end'], lf['import_applied'], lf['resyncs']) for lf in lv2['lives']]
+        check('read_client_log: an import that never applied is not a counted resync (step F0)',
+              got2 == [(8, None, None, False, []), (1297, 1297, 1540, False, [1530])]
+              and [w['resyncs'] for w in lv2['windows']] == [[0, 0], [1, 1]] and lv2['join_resyncs_removed'] == 0,
+              str((got2, [w['resyncs'] for w in lv2['windows']])))
+        (pathlib.Path(tmp) / 'client2.bmjr').write_bytes(b'x')
+        (pathlib.Path(tmp) / 'client2.rejoin1.bmjr').write_bytes(b'x')
+        lj = [(p_.name, lo, hi) for p_, lo, hi in life_journals(pathlib.Path(tmp), 2, lv['lives'])]
+        check('life_journals (step F0)', lj == [('client2.bmjr', -(1 << 31), 1297), ('client2.rejoin1.bmjr', 1297, 1 << 31)],
+              str(lj))
+    spans = airship_spans("world: airship: player 7's ball Ball_Stone_BMMO_8 is in the airship zone at tick 2233 (a ghost)\n"
+                          "world: spawn ghost: player 7's ball Ball_Stone_BMMO_8 is a spawn ghost at tick 212\n"
+                          "world: spawn ghost: player 7's ball Ball_Stone_BMMO_8 is a spawn ghost at tick 2673\n"
+                          "world: airship: player 7's ball Ball_Stone_BMMO_8 is in the airship zone at tick 3186 (a ghost)\n")
+    check('airship_spans (step F0)', spans == {7: [(2233, 2673), (3186, 1 << 31)]}
+          and in_spans(spans[7], 2233) and not in_spans(spans[7], 2673) and in_spans(spans[7], 9000), str(spans))
+    check('lead_mode (step F0)', lead_mode('[x] Physics sessions enabled (game root /a, patience off, lead adjust off).') == 'off'
+          and lead_mode('nothing') is None)
 
     # A proxy in front of a loopback "server": a client sends one datagram
     # every 5 ms for 1.2 s, an up blackout covers 0.3-0.6 s, a spike of 200 ms

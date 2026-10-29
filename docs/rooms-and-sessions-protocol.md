@@ -4,8 +4,10 @@
 
 ```
 RoomRequest, RoomState, RoomEvent,
-SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign, SessionRemoteInput, SessionLead, SessionLeadAck
+SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign, SessionRemoteInput, SessionLead, SessionLeadAck, SessionResyncState, SessionMember
 ```
+
+（协议 22 的完整列表，步骤 F0 补齐。`SessionResyncState` 自协议 10 起（重同步设计，步骤 A3）；协议 14-16 在它之后还有 `SessionGhostPose`，协议 17 删除；`SessionMember`（协议 18）取了它的值，其余 opcode 的值从未变过。）
 
 所有新消息都是 `serializable_message`（显式小端编码，`std::stringstream raw`），读取端必须检查长度、数量上限和枚举范围；字符串编码为 `u16 长度 + UTF-8 字节`，上限见各字段。
 
@@ -70,8 +72,10 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 影子球会话不需要下面的消息：`SessionStarting` 后各客户端继续走旧逻辑。物理会话的实施设计见 `docs/collision-overhaul-design.md` 第 8 节；本节只定义线上格式。新 opcode 顺序（追加在 `RoomEvent` 之后）：
 
 ```
-SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign, SessionRemoteInput, SessionLead, SessionLeadAck
+SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionResync, SessionEvent, SessionAssign, SessionRemoteInput, SessionLead, SessionLeadAck, SessionResyncState, SessionMember
 ```
+
+（协议 22 的会话 opcode 全部在此，顺序即值的顺序；`SessionResyncState` 见协议 10，`SessionMember` 见协议 18，协议 14-16 的 `SessionGhostPose` 见下文协议 14 与 17。）
 
 ### 2.1 时间线
 
@@ -125,7 +129,11 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 
 协议 12 的各端（步骤 S6、S10 之后）：服务端世界、无头客户端与零售 Mod 的核心宿主（session core on）都在锚点建副本（选项开时）并声明 `CAP_PLACEMENT`、上报签名；是否建副本由客户端内核决定（能力 + 会话的 `WORLD_PLACEMENT_CLONES`），宿主不自己读位。选项关而关卡里还留着副本时，宿主先释放，释放不掉就不锚定、在本地结束会话；建副本失败（全有或全无）同样在发 SessionReady 之前本地结束。旧的零售路径（session core off）不声明该能力：会话带 `WORLD_PLACEMENT_CLONES` 时，它照常先发一条 caps 为 0 的 SessionReady，再在开始倒计时之前本地结束会话（"the placement needs the session core (session core on)"），服务端因此在同一秒就把它移出会话，其他成员不必等 8 s 的起始屏障。各关卡的签名、副本数与实测见 `docs/sector-placement-design.md` §12。
 
-**协议 14、15（步骤 BALA、SPGH2，用户 2026-10-28 的飞船规则与出生规则）**：本文尚未展开，以 `entity/session.hpp` 中 `PHYSICS_PROTOCOL_VERSION` 的注释为准——14 加了飞船区的配对规则与`SessionGhostPose`（opcode 追加在 `SessionResyncState` 之后，`message/session_ghost_pose_msg.hpp`；协议 17 起退役，见下文），15 加了出生区的配对规则（`PHYSICALIZE_FLAG_SPAWN`）与 savestate 格式 3，消息布局不变。
+**协议 14（步骤 BALA，用户 2026-10-28 的飞船规则）：飞船区。** 每个世界在锚点装上飞船区的配对规则（`physics_state.hpp` `airship_zone_set`）：本人的球进入飞船的位置区（平台有刚体后取的包围盒）即在该世界里变为幽灵并冻结（不再参与球与球的碰撞，也不再同步），直到它下一次出生。飞船本身与它的球不比较（例外 c）。新消息 `SessionGhostPose`（client → server，unreliable；opcode 紧跟 `SessionResyncState`；`message/session_ghost_pose_msg.hpp`，协议 17 删除）：session u32、player u32（客户端发 0，服务端转发时填来源）、tick u32（主人的 tick）、position f32×3、rotation f32×4（x,y,z,w；读取端拒绝非有限值）；本人的球在飞船区内时每隔固定 tick 发一次，服务端转发给其他成员，只用于显示，任何模拟都不读它，服务端世界也不应用。
+
+**协议 15（步骤 SPGH、SPGH2，用户 2026-10-28 的出生规则）：出生幽灵。** 每个世界运行出生区的配对规则（`physics_state.hpp` `spawn_ghost_set`；出生区是关卡起点与每个重生点周围半径 `kSpawnGhostRadius` = 12 m 的球）：`flags` 带 `PHYSICALIZE_FLAG_SPAWN`（bit 0）的 Physicalize 让该球在每个世界里同一 tick 开始一段幽灵生命（与其他玩家球互相穿过），在它的核心离开所有出生区且不与任何球重叠的第一个 PSI 变为实体，此后整段生命为实体；重生同样适用。`SessionResyncState` 携带的 IVP savestate 升为格式 3，包含该规则的每组状态，迟到加入者与重同步成员取服务端的。消息布局不变。步骤 SPX（无协议变化）起，出生幽灵覆盖每次出生时 `SessionStart` 的 spawn_spacing 与 spawn_impulse 为 0（`session_spawn_separation`）。
+
+（原注，步骤 F0 之前：）协议 14、15 本文尚未展开，以 `entity/session.hpp` 中 `PHYSICS_PROTOCOL_VERSION` 的注释为准——14 加了飞船区的配对规则与`SessionGhostPose`（opcode 追加在 `SessionResyncState` 之后，`message/session_ghost_pose_msg.hpp`；协议 17 起退役，见下文），15 加了出生区的配对规则（`PHYSICALIZE_FLAG_SPAWN`）与 savestate 格式 3，消息布局不变。
 
 **协议 16（世界一致设计 2.2-2.6、5，步骤 G3 与 G5，同一版本）：邻近并集与 BodyRevived 退役。** 世界选项 bit 2 `WORLD_PROXIMITY_UNION`（服务端配置 `physics.proximity_union`，G3 起默认开）打开时，每个世界——服务端世界与每个客户端——都在锚点把机关脚本里 ObjectA 为 `Ball_Pos_Frame` 的每个 `TT Scaleable Proximity` 改接到私有 frame `BMMO_Prox_<owner>_<n>`，把同一脚本里读 `CurrentLevel[0,ActiveBall]` 的 `Get Cell` 改接到私有副本 `CurrentLevel#BMMOId_<owner>_<n>`（`game/proximity_union.hpp`，n 是块在根脚本先序遍历中的位置，名字在每个世界相同；服务端改接全部类，客户端只改机关类）；每个 tick 在生命周期变化之前（服务端：离开者与事件之前；客户端：内核的第 7b 步，实时 tick 与每个回放 tick 都一样）按块自己的度量把 frame 放到最近的有刚体的球上（本人的球或镜像球，`session/proximity_rules.hpp`，距离相同取玩家 id 小的），没有候选时 frame 原地保持；身份副本跟随它的门控探针的选择。客户端的脚本记录升到 v6（hold 段，bit 2），重同步的可移植记录带 hold 段（版本 3），服务端的 hold 按名字随 `SessionResyncState` 到达。`session_ready_msg` 在 anchor_placement 之后加 anchor_probes u64（协议 ≥ 16 才读，总是写）：客户端世界在锚点的机关类探针签名（`proximity_union::signature`，选项关时为 0）；服务端（选项开时）在摆放签名之后把它与自己世界的机关类签名比较，迟到加入者也比，不一致即把该成员移出会话（不移出房间，其他成员继续）："probe mismatch (client …, server …)"。同一选项下客户端不再发 BodyRevived（每个世界自己唤醒自己的机关）；服务端收到的 BodyRevived 在去重之后直接丢弃——不提交、不转发，按成员计数，第一条记日志并写一条 journal NOTE——服务端世界与 SimTool `--replay-session` 也不应用它。journal 布局不变（HEADER 的 world_options 带这一位）。选项关时一切照旧（反向对照与旧 journal 的重放）。各关卡的签名与实测见 `docs/world-agreement-gaps-design.md` §12。
 
@@ -134,6 +142,12 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 **协议 17（步骤 BALL，用户 2026-10-28 的决定“改用旧链路”）：SessionGhostPose 退役。** 飞船区里的幽灵球（其主人已离开同步的镜像球）不再靠会话转发的位姿显示：客户端不再发送 `SessionGhostPose`，服务端不再转发，该 opcode 删除（它是最后一个，其他 opcode 的值不变；`message/session_ghost_pose_msg.hpp` 删除）。零售 Mod 把幽灵的灵魂球交还给旧的显示路径（`game_objects::update` 按主人的旧版球状态流 `OwnedCompressedBallState` 插值/外推移动它，半透明），刚体仍由飞船区在每个世界里同样冻结；死亡、重生、关卡结束时镜像照旧从生命周期恢复。已知限制：无头客户端不发旧版球状态流（它的飞船幽灵在别的世界不动，仅测试）；服务端 `ghost_mode` 下旧版位置只发给幽灵观察者，飞船幽灵与其他旧版位置一样不动。消息布局、journal 与 savestate 不变。实测见 `docs/rewind-cost-design.md` “As built (step BALL)”。
 
 **协议 18（世界一致设计 2.7、2.8、5，步骤 M1）：成员生命期（member lives）。** 一个玩家在服务端世界里从加入（J）到移除（R）的区间叫一个生命期（life）；同一 id 在一个会话里可以有多个生命期（同一连接离开房间再加入），互不重叠，编号是服务端对该 id 的加入次数（从 1 起）。`player_entry` 末尾加 `life u16`（SessionStart 自协议 18 起写入每个成员当前的生命期），`session_event_msg` 的尾部在 state 之后加 `life u16`（服务端转发时填入接受该事件时的生命期，客户端发 0）。新消息 `SessionMember`（server → client，opcode 追加在 `SessionResyncState` 之后，取已退役的 SessionGhostPose 的值）：session u32、kind u8（1 加入、2 移除）、tick u32（加入为 J，移除为 R）、player_entry（含 life）；ReliableNoNagle，并像生命周期事件一样不可靠重发；发给每个已收到 SessionStart 的成员（不含该玩家本人）；解析时拒绝 kind 不在 {1,2}、加入顺序 ≥ 64、id 0、life 0。客户端按 (id, life) 记录，副本与乱序无害；尚未得知其生命期的成员的事件先暂存，等 SessionMember 到达后再按其加入顺序施加（不再用占位加入顺序 63 生成镜像）；迟到加入者补发的、其编号起点之前的扇区戳例外（它不认识的、已离开成员的扇区照常生效）。同一生命期被宣告了另一个加入顺序时客户端在本地结束会话。服务端：带球离开一律走队列（死亡在 next 施加，next + 1 移除）；加入顺序在其生命期从服务端世界移除之前不得复用；迟到加入者的 SessionStart 在其被加入世界之后才发出，其起点不早于任何仍在离开中的生命期的 R；同一 id 在旧生命期离开期间重新加入时，新生命期在旧生命期移除的同一 tick 加入。客户端 journal 的 PLAYER 记录来自生命期（J 处加入、R 处移除，不再有 join=255）。journal 布局不变。实测见 `docs/world-agreement-gaps-design.md` “As built (step WM1)”。
+
+**协议 20（记录格式设计 8 行 K3 = C4，11 Q1 选项 (c)，步骤 RK3）：Level 1 的教程关掉。** 世界选项 bit 3 `WORLD_SESSION_CLOCK`（服务端配置 `physics.session_clock`）打开时，Level 1 会话的每个世界在其锚点后的第 `kTutorialExitFrame`（10）帧之前激活教程的出口（`game/tutorial_exit.hpp`）。消息布局不变；journal 头部的 world_options 带这一位（没有自己的 journal 版本）。实测见 `docs/record-format-gaps-design.md` “As built (step RK3)”。
+
+**协议 21（步骤 TRL，用户 2026-10-29：“Key by life, no resume”）：变球碎片按 (玩家, 生命期) 分套。** 每个世界为成员的每个生命期建一套碎片（重新加入的新生命期不继承旧生命期的套；旧套照常淡出、退役），名字由 `session/trafo_input.hpp` `trafo_life_label` 给出（生命期 1 为 "<p>"，与以前相同；之后的生命期为 "<p>L<n>"）；`Trafo` 事件作用于它所带 `life` 的那一套（`session_event_msg` 的 `life`）；`SessionResyncState` 的变球台账在台账之后为每项加一个尾随的 life u16（没有它的状态按生命期 1 读）；服务端的变球受理按 (玩家, 生命期, 类型) 记账。journal 升到 v9。
+
+**协议 22（步骤 RK3H，用户 2026-10-29：“Hold frame-9 write”）：Level 1 教程第 9 帧的冻结被扣住。** 在 `WORLD_SESSION_CLOCK` 下，Level 1 的每个世界从锚点起把教程的第一次时间因子写入（Gameplay_Tutorial / Init 的 Set Physics Globals，第 9 帧写 0）扣在游戏中的 2.0（`game/tutorial_exit.hpp` `tutorial_factor_hold`），因此第 9..15 帧不再有世界冻结；没有这一扣留的世界仍会冻结，所以升了版本号。消息布局不变，没有 journal 版本（头部的 world_options 带这一位；协议 20/21 的 Level 1 journal 按此重放时在第 9 帧按构造分叉）。已知限制（用户 2026-10-29 决定不处理，RK3R）：会话中 Level 1 的关卡重置会让教程在那个世界重新播放，其章节的冻结走冻结时钟的路径（见 `docs/record-format-gaps-design.md` RK3H 之后的决定）。
 
 **协议 11（变球复制设计 2.2、2.14，步骤 T2）：变球是锁步输入。** 世界选项 `WORLD_TRAFO_INPUTS` 打开时，每个成员在每个世界里都有自己的一套碎片（`BMMO_TrafoOwner_<id>` 拥有的 8 个脚本），变球的爆炸与重置作为 `Trafo` 事件经服务端按 (玩家, 碎片类型) 的台账（`session/trafo_input.hpp` `trafo_acceptance`）接受：同一类型的爆炸与重置不在同一 tick，下一次爆炸至少在上次重置后 140 tick；仍有碎片的类型再次爆炸时服务端先插入自己的重置；比最新爆炸的 origin 更旧的重置被取代（只回 SUPERSEDED 给发送者）；爆炸后 1320 tick（20 s）内没有重置的，服务端在下一个 tick + sector_lead 够到期限时排入自己的重置（`TRAFO_SERVER`）；离开者每种类型都得到一个 `TRAFO_RESET|TRAFO_SERVER|TRAFO_FINAL`。校验只用静态关卡数据：爆炸位置距关卡 PH 表中每个 `P_Trafo_*` 行（以及当前的 `P_Trafo_*` 实体）都超过 `kTrafoReach`（4.5 m）即拒绝——不应用、只给发送者回 REJECTED、日志按“可能作弊或数据损坏”记下玩家、tick、位置、最近的变球器及距离、球型与会话。`SessionReady` 的 caps 必须带 `CAP_TRAFO_INPUTS`（bit 2），否则该成员被移出会话（不移出房间）。`SessionResyncState` 末尾带台账列表 `trafo_ledger`：服务端世界在 S 时持有的每一套碎片的三种类型各一项（从未爆炸过的成员的套、离开者在最终重置之后到退役之前的套都在内）（u16 个数，每项 player u32、type u8、位 u8（有爆炸/有碎片/有重置/已最终重置）、explode_applied u32、position f32×3、reset_applied u32、final_applied u32）。加入者与重同步成员随状态还会重收应用 tick ≥ 基准的 `Trafo` 事件（台账只覆盖 ≤ S）。超过速率上限的 `Trafo` 事件也回 REJECTED；重置的 position 在接收时清零后再转发。服务端 journal 升到 v5：HEADER 末尾加 world_options u32，`Trafo` 事件用现有的 ball_type/flags/position 字段。
 

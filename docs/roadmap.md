@@ -28,6 +28,15 @@ of what the code does.
   inputs. No owner-only physics script.
 - A player entering the next sector changes nothing in the previous sector.
 - Exception: the level-end balloon and its airship are local to each player.
+- **Collectibles are per-world like the airship** (the user, 2026-10-29,
+  verbatim:
+  "如果PH*4是管加分球的，那么它应该和飞船一样不纳入回滚/物理同步，每个玩家有自己独立的一份。（同理，生命球也是）" -
+  extra points and extra lives stay out
+  of the rollback and the physics sync, each player has their own copy):
+  the `P_Extra_*` scripts are outside the replay selection, and their
+  `PH[*][4]` column is neither recorded nor rolled back - a census class
+  "per-world collectible state" with a load-time writer check (answer to
+  RK2's options, verbatim "选：加检查" = option (b); built by FULL step F4).
 - Every gap found is fixed, none is ignored. A failed check or a gap is
   investigated to its root cause first, then reported as symptom, cause and
   options; the user decides.
@@ -961,7 +970,12 @@ numbers 1-10 are unchanged.
    joiner's own ball and every mechanism exact against the server from its
    import on (the design's "As built (step RK3H)"). **Open, queued by
    RK3H** (two writers the narrow hold leaves, both read from the graph
-   dumps, neither run): **RK3R**, a Level 1 level reset after the exit
+   dumps, neither run): **RK3R** (**decided 2026-10-29: not handled**, a
+   known limit - the user, verbatim:
+   "RK3R那个，看看原来的影子球模式，会处理玩家手动重开那种导致的新手教学触发吗？印象中好像不处理（只会处理ready-go时候的跳过教程），如果是这样的话，这个遗留可以直接不处理"; the main branch skips the tutorial only at the countdown
+   restart, `BallanceMMOClient.cpp:633`, and replays it after a manual
+   restart; FULL records what a reset does, row RK3R-rec; the design's
+   "Decided (2026-10-29): RK3R"), a Level 1 level reset after the exit
    (9.28's mid-session reset): `Init Ingame` sets `IngameParameter[0][3]`
    again, the next new ball's `activate Tutorial?` (#27646) re-activates
    Gameplay_Tutorial, RK3's exit fires once per anchor and does not fire
@@ -984,9 +998,11 @@ numbers 1-10 are unchanged.
    section and come back at the anchor, never compared; no wire or journal
    change. S2: `unrecorded = 2` on L1-L13, both the sector manager's
    `PH[*][4]` read (written in play only by the extra points' own rows,
-   outside the replay); **its decision waits for the user** (options in the
-   design's "As built (step RK2)": record it with N02R-style bookkeeping,
-   a structurally proven census class - recommended - or leave it logged).
+   outside the replay); **decided 2026-10-29: option (b)** (the user,
+   verbatim: "选：加检查"; the collectible rule in §2): a census class
+   "per-world collectible state" with a load-time check of column 4's
+   writers, not recorded, not rolled back - built by FULL step F4 (the
+   design's "Decided (2026-10-29): `PH[*][4]` = option (b)").
 7. **Stage close-out (the one FULL verification):** four clients, 150 ms,
    10 % loss, snapshots off: the spawn pile and every mechanism
    bit-identical to the server at every checkpoint; and every check below.
@@ -1339,6 +1355,69 @@ numbers 1-10 are unchanged.
      exit fires once per anchor - its Init write stays held, its chapters
      could freeze that world (RK3's, read from the dumps, not run; queued
      as RK3R in item 6).
+
+   **The close-out's verdicts on this list** (FULL plan, 2026-10-29,
+   `.local-tools/work/FULL/plan.md` §1 and §4, written down at its step F0;
+   the plan's row ids in brackets). Every item not named here stays OPEN
+   and is run by the step the plan names.
+   - DROP (already satisfied): RC1 (d) [RC1-d], TR3b (g), SP5 (b), HU1 (a)
+     and REACH+R12 (f) (every later step ran retail on a newer build; the
+     close-out's RET-HEAD session closes them); TR3b (c) (B2SW ran H3b);
+     SP5 (a) (SP6 ran it); SP7 (d) (the Arch build of `physics_world.cpp`
+     ran since); RO1 (c) (fixed by engine change #21 at B2SW); RO1 (d)
+     (done at RO2); HU1 (b) (solo1 / solo2 IDENTICAL in every wire check
+     since); REACH+R12 (a) (B2SW: a 56-deep notice taken by a rewind
+     live); RK3 (a) (RK3H ran it); RK3H (c) (by construction, not a check);
+     item 2's B2SW step P pair (moot), T1 (a) (BodyRevived retired at
+     WG3), the RK3 harness gap TUTH (moot since RK3H), relay_late's
+     covered frames (built at RLT), the session I/O writer (built at
+     SIO / IOF), SFD (2) (answered and built at BALA).
+   - MERGE (run inside another row): TR3b (f), SP6 (b), SP10 (c), REACH+R12
+     (d), RK3 (c) and the BALA / BALL / WG3 re-captures -> REF12 (the
+     protocol-22 reference set at the deployed defaults); RC1 (b), TR4 (h),
+     SP10 (d) -> CPU-1 (HEAD-only CPU parity); REACH+R12 (c) -> RL1 (b).
+   - STALE (replaced): RTX (c) (no verb stops the retail clock) -> RK3R-rec,
+     a Level 1 reset's tutorial freeze taking the frozen-clock path; RC1
+     (a) and B2SW's T4 (c) contrast (a pre-protocol-22 binary cannot join
+     or replay: old-vs-new A/Bs become HEAD-only axes or absolute figures,
+     plan §4 C2); RK1 (a) (no world freezes since RK3H) -> a forced rewind
+     anchored at frame <= 9 across the exit at frame 16.
+   - BLOCKED: RTX (a) (the retail `hold-event` verb, Stage C item 9; its
+     headless half runs as B7EG's Q-H1 / Q-H2).
+   - PARTIAL: TR3b (e) (TRL run B covered the trafo-on late joiner; H7's
+     own criteria read from TRL's journals). TR4 (e): the tool is unclear
+     (the retail mod cannot replay headless captures; plan §4 C11).
+   - DECIDED at F0: RK3 (e) - the replay log line stays the guard
+     (`record-format-gaps-design.md` "As built (step F0)").
+   - **Not on this list before F0** (plan §4 C3: the deferrals of B5RX..RK2
+     live in the design As-built notes and queue.md; the close-out runs
+     them as these rows): EL6-EL9 (ELH: L-H1..L-H6 with same-batch
+     controls; ELR: L-R2 retail; ELS3: a SimTool own-revive scene); B7EG
+     (B7EG-QS: Q-U1/Q-U2 tests, Q-S1/Q-S2 scenes; B7EG-QH: Q-H1/Q-H2); B8EG
+     (B8EG-R1: B-R1's control comparison, retail); RLM (RLM-2rw: two
+     rewinds in one host frame; RLM-own: a multi-script owner scene;
+     RLM-v14 built at F0); RLC (RLC-r: a retail rewind across a bridge
+     break; RLC-o: the order pass live); WG3 (WG3-U, WG3-V4, WG3-H,
+     WG3-dr, WG3-cr); WG4 (WG4-R1 arena retail + headless, WG4-R2, WG4-R4,
+     WG4-rs); WG6 (the protocol doc, built at F0); WM0 / WM1 (the harness
+     nits, built at F0; WM1-R3 retail late joiner; WM1-J3 with the
+     launcher's server flags built at F0; WM1-J: J1b, J2, J4; WM1-U: U5, U6,
+     U7 and the world-less `session_runner` fixture; WG2-Je); WGQ7 (V6
+     x86 / Linux listings, V4b, H2b / H2c / H3b / H3c / J6, U9 live, the
+     smoke's same-batch control, WAD-A; UGRD the server's unit-set guard
+     and IDCP the identity copies' leftover outputs, built at F1; its
+     harness criteria, built at F0); BALA / BALL / SPGH / SPGH2 / OWG /
+     ASL / SPX (BALA-end, BALA-tr, BALA-F2, SPGH-tr, SPGH-a3, SPGH-pr,
+     OWG-cell, OWG-dr, ASL-r, ASL-pl, ASL-cpu, BALL-pm, BALL-gp, BALL-deps,
+     SPX-ct: its tools built at F0, the per-world read at H6; the SPX
+     nits, fixed at F0); SIO / IOF (SIO-st, SIO-lx, IOF-c); TRL
+     (`trafo_life_mismatches` 0 in every trafo-on run); RLT (RLT-c: a
+     live `covered` > 0 and its retail field); RK2 (RK2-fan: a rewind
+     across a fan slot claim; RK2-PH / RK2-S2: the decided option (b),
+     built at F4); N01R (c) (the retail control of c1's tick-728
+     difference); the delayed rejoiner's first state (DRJ, F2); the
+     lifecycle-event arrival margin (LCM, F3); the trafo-on retail frame
+     time (RCX-x86) and the deployed `config.yml` keys (RCX-cfg, DEP).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

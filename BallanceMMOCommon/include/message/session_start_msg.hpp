@@ -27,12 +27,16 @@ namespace bmmo {
         int32_t seed = 0;
         // Kick speed (m/s) applied to every spawn Physicalize of the session;
         // 0 = none (design 9.10).  The same value goes to every member,
-        // late joiners included.
+        // late joiners included.  Step SPX: 0 while the spawn ghost covers
+        // every spawn birth (session/spawn_impulse.hpp
+        // session_spawn_separation) - the server sends a configured value
+        // only from a ghost-off build.
         float spawn_impulse = 0.0f;
         // Spawn spacing (map units) between the members' birth cells around
         // the resetpoint; 0 = all at the resetpoint (session/spawn_impulse.hpp,
         // spawn_offset).  Applied by each owner to its own ball before the
-        // kick and carried in its Physicalize pose.
+        // kick and carried in its Physicalize pose.  Step SPX: 0 under the
+        // spawn ghost, as spawn_impulse (every ball born at the resetpoint).
         float spawn_spacing = 0.0f;
         std::vector<session::player_entry> players;   // <= MAX_PLAYERS_PER_SESSION; spawn_* = the retail resetpoint
         // session::PHYSICS_PROTOCOL_VERSION of the server.  Required: a build

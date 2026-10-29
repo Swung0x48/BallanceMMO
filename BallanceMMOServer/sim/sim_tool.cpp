@@ -190,7 +190,13 @@ namespace {
         int drop_move_sector = 0;      // --drop-move SECTOR TICK: the player moves on at that tick
         int drop_move_tick = 0;
         bool n2_pin = true;            // --n2-pin on|off (step B2SW): the chains' deactivate cell pinned at the anchor
-        bool session_recipe = false;   // --session-recipe (step B2SW, Q5): savestate-check binds the clients' recipe
+        // --session-recipe (step B2SW, Q5): savestate-check binds the clients'
+        // recipe.  Step F0 (RLM's queued harness item, option (a)): the
+        // default when the scene can bind it (--frames, no --legacy-restore,
+        // no trafo inputs) - every core host binds it, so a chained round on
+        // the old v14 recipe could keep a script state no host holds (WG2's
+        // 144:4 / 87:9); --v14 asks for the old recipe.  -1 = the default.
+        int session_recipe = -1;
         // --savestate-rounds T:D[:F],... (step B2SX, Q5): these rounds instead
         // of the seeded schedule - anchor tick T, depth D, then F live frames
         // past the round's end compared with the straight pass (the follow).
@@ -751,6 +757,8 @@ namespace {
             for (float& k: out.drop_second_at) { if (!(v = next())) return false; k = static_cast<float>(std::atof(v)); }
         }
         else if (arg == "--probe-trace") out.probe_trace = true;
+        // Step F0: the v14 recipe (SimTool's old default; parse()'s chain is full).
+        else if (arg == "--v14") out.session_recipe = 0;
         else if (arg == "--player-mechanisms") {   // step Q7
             if (!(v = next())) return false;
             out.mechanism_slots = std::atoi(v);
@@ -918,7 +926,7 @@ namespace {
                 out.n2_cell = mode == "on";
             }
             else if (arg == "--cells-trace") out.cells_trace = true;
-            else if (arg == "--session-recipe") out.session_recipe = true;
+            else if (arg == "--session-recipe") out.session_recipe = 1;
             else if (arg == "--savestate-rounds") {   // step B2SX: T:D[:F],...
                 if (!(v = next())) return false;
                 std::string list = v;
@@ -3407,7 +3415,21 @@ namespace {
         // script written back - without a --second-move too: the window that
         // starts at the session start holds Init Ingame's sector-1 activation
         // and its births, which a client's history holds with this recipe.
-        const bool passes = !window_moves.empty() || args.session_recipe;
+        // Step F0: the clients' recipe by default where the scene can bind it.
+        const bool recipe_possible = frames && !legacy && args.trafo.players.empty();
+        bool session_recipe = args.session_recipe < 0 ? recipe_possible : args.session_recipe != 0;
+        if (args.session_recipe < 0 && session_recipe
+                && !bmmo::game::find_root_script(context, "Gameplay_SectorManager")) {
+            session_recipe = false;   // a default the level cannot bind falls back, said here
+            std::printf("savestate-check: recipe v14 (default: the level has no Gameplay_SectorManager to bind the "
+                        "clients' recipe)\n");
+        }
+        else
+            std::printf("savestate-check: recipe %s (%s)\n", session_recipe ? "session (the clients')" : "v14",
+                        args.session_recipe > 0 ? "--session-recipe" : args.session_recipe == 0 ? "--v14"
+                        : session_recipe ? "default" : "default: the scene cannot bind the clients' recipe (no --frames, "
+                                                       "--legacy-restore or trafo inputs)");
+        const bool passes = !window_moves.empty() || session_recipe;
         if (passes && (!frames || legacy || !args.trafo.players.empty())) {
             std::fprintf(stderr, "savestate-check: a --second-move inside the window needs --frames (the pass runs the module"
                                  " scripts), and is not built with --legacy-restore or trafo inputs\n");
@@ -9252,8 +9274,10 @@ int main(int argc, char** argv) {
             "           [--drop-at X Y Z] [--drop-prop ENTITY] ... | --drop-sector N] [--ticks N] [--rounds R] [--max-depth D]\n"
             "           [--seed S] [--savestate-every K] [--savestate-lead L] [--frames] [--legacy-restore]\n"
             "           [--savestate-trace PATH] [--stop-on-divergence] [--verbose] [--savestate-inert-from-birth]\n"
-            "           [--session-recipe]  (step B2SW: the clients' recipe - births, activations, every script written\n"
-            "            back - without a --second-move, for a window that starts at the session start)\n"
+            "           [--session-recipe | --v14]  (step B2SW: the clients' recipe - births, activations, every script\n"
+            "            written back - without a --second-move; step F0: the default with --frames and without\n"
+            "            --legacy-restore or trafo inputs, --v14 the old recipe; a line says which one ran;\n"
+            "            --v14 means something to --savestate-check only, other modes ignore it)\n"
             "           [--savestate-rounds T:D[:F],...]  (step B2SX: these rounds - anchor tick T, depth D - instead of\n"
             "            the seeded ones, each followed by F live frames compared with the straight pass; needs --frames)\n"
             "           (IVP savestate robustness check: chained seeded rollbacks must reproduce the straight run's\n"

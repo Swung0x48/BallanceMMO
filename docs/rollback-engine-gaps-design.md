@@ -3109,3 +3109,34 @@ and the restore only matches recorded controllers to live ones.
   under GCC instead); a live run of the fix-up (the order pass runs in a
   live rewind only when a place differs; the step's two live runs were
   spent).
+
+## As built (step F0, 2026-10-29): SimTool's chained rounds default to the clients' recipe (RLM-v14)
+
+RLM queued it (harness only, the orchestrator's call: option (a)): WG2's
+measured failures 144:4 and 87:9 were SimTool's default v14 recipe chaining
+its rounds without a live frame, a state no core host holds. Now
+`--savestate-check` binds the clients' recipe (`--session-recipe`) **by
+default wherever the scene can bind it** - `--frames`, no
+`--legacy-restore`, no trafo inputs (the recipe's own preconditions, which
+already returned 2 when `--session-recipe` was asked without them) - and a
+level without `Gameplay_SectorManager` falls back to v14 with a line;
+`--v14` asks for the old recipe (parsed in `parse_union_arg`: `parse()`'s
+else-if chain is at MSVC's nesting limit, C1061, as WG0/WG1 found). The
+first output line says which recipe ran and why
+(`savestate-check: recipe session (the clients') (default)`). The
+physics-only matrix (`scripts/savestate_check.py`, no `--frames`) keeps v14
+by that rule.
+
+Measured on rF0's SimTool (`.local-tools/work/F0/rlm.sh`, WG2 V4's alive
+scene of RLM's `v1.sh`: level 13, P_Modul_01 with its Pusher's probe, two
+balls, `PROXIMITY_UNION`, `--frames --ticks 120 --max-depth 48`, 50 rounds,
+seed 1): default **PASS 50/50**; `--session-recipe` PASS 50/50; `--v14`
+**FAIL 2/50 - round 28 (anchor 144, depth 4) and round 45 (anchor 87,
+depth 9)**, `P_Modul_01_MF Script flags 2147483648 vs 2147483649`, exactly
+RLM's; a scene without `--frames` (`--spawn-test 4`) stays v14 and PASS
+10/10.
+The savestate matrix (`scripts/savestate_check.py`) changes with it: its
+`frames` cells now run the clients' recipe (their physics cells stay v14);
+`--quick` on rF0: 5/5 as expected, `arena-sector2.frames` PASS 12/12 on the
+session recipe, the physics cells PASS 12/12 on v14, the `--legacy-restore`
+negative control FAILS at round 0 as before.

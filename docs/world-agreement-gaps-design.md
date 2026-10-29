@@ -3900,3 +3900,81 @@ controller" at the import; under the bit only force blocks outside units
 are at stake); **REF12**, the
 protocol-19 reference set (every `core_ref_s11` capture is protocol 18:
 `--accept-protocol 18` replays them, above).
+
+### As built (step F0, 2026-10-29): WM0's harness nits, WGQ7's re-read, J3's launcher
+
+The close-out's tooling pass (FULL plan rows WM0-n, WGQ7-hn, WM1-J3's
+launcher half). Harness `scripts/arena_map_test.py`, the headless client,
+`.local-tools/arch_server_lp.sh`; no protocol, no shared simulation code.
+
+- **A member's lives** (WM0's nit 1). `read_client_log` splits a client log
+  into lives at each `session N starting:` line (a `--rejoin-at` begins the
+  next): each life's assigned base, its **join import** (the late joiner's or
+  the rejoiner's first state, `resynced: tick base N (old tick 0` - not a
+  resync of a running client), where that import's re-step ended, and the
+  life's real resyncs. The report reads **every life's journal**
+  (`client{i}.bmjr` up to the next life's base, `client{i}.rejoin{k}.bmjr`
+  from its own base on), so a rejoiner's next life is judged; its base is
+  printed as `rejoined at`, not among the resync bases, and the import's
+  count comes off its window's `resyncs=` (only when the import's own state
+  applied: a state that never applied, superseded by a later resync, leaves
+  the real one counted - TRL run B's client 1).
+- **Before the import** (WGQ7's re-read, "client3 `oth` 530-728 m"): a
+  joiner's world is not the session's until its import re-stepped, so the
+  checkpoints from the life's base to the re-step's end are not compared
+  (wgq7_live client 3: 1530..1551, 11 checkpoints; its `oth` in D 649.55 m ->
+  0.0060 m). The mechanism error the joiner showed after it (421 m / 4402 m,
+  the pre-TRL trafo-set refusal) stays visible.
+- **The airship span** (WGQ7's re-read, "client0 own 152 m in A"): a ball is
+  out of the comparison from the server log's `is in the airship zone at
+  tick T` to its next `is a spawn ghost` birth (BALA; the balloon is the
+  design's exception) - for its own ball and for every mirror of it.
+- **A8's joiner lead** (WGQ7's re-read): `D + ceil(rtt) + 2` is the joiner's
+  lead with `physics.lead_adjust` ON; the rule is now taken from the server
+  log's start line (`lead adjust on|off`): off (the default) -> the joiner's
+  printed input delay must equal the founders' (the session's).
+- Every exclusion is printed per client (`not compared (step F0): before the
+  join import 1530..1551 (11 checkpoints); c0 ball in its airship span
+  2233..2672 (121 checkpoints); join imports not counted as resyncs 1`).
+  Selftest: five new checks (two lives with an import, an import that never
+  applied, the life journals, the airship spans, the lead mode).
+- **The headless client** (WM0's nits 2 and 3, `session_client.cpp`): a
+  refused Join of a `--rejoin-at` ends the run with
+  `--rejoin-at: the Join of room R was refused (...): no next life, the run
+  ends` instead of letting the room handling join another room, and the
+  client exits with code 4 (the review: an exit 0 would let a run whose
+  rejoin never happened pass; the harness fails every non-zero client exit);
+  a switch (`--leave-at`, `--rejoin-at`, `--leave-room-at`, `--resync-at`)
+  whose tick is behind the life's first assigned tick (a late joiner's or a
+  rejoiner's base; `begin_session` re-arms the check for every life) logs
+  `warning: ... fires at once` once. Neither fires in a reference capture
+  (the wire check is ALL SAME).
+- **J3's launcher** (WM1 deferred: `arch_server_lp.sh` started the server
+  with `--port` alone): every argument after the 9th now goes to the
+  server's command line (`... true true --hold-member-ms 300`; the Arch tree
+  is built with `BMMO_SERVER_TEST_FLAGS=ON`). Dry start: the server log's
+  `Test flag: --hold-member-ms 300 (the SessionMember messages leave 300 ms
+  late).` (`.local-tools/work/F0/dry_start_server.log`). The launcher lives
+  outside git, like every `.local-tools` script (`.git/info/exclude`): the
+  change is in the working copy of this machine only.
+
+**Re-verdict** (`.local-tools/work/F0/reverdict.sh`, copies of the runs
+under `.local-tools/work/F0/rev`, each run's own arguments): wgq7_live
+FAIL 4 -> 1, wm1_live 3 -> 0, trl_live_B 5 -> 2. Gone: A8's lead (three
+runs), client 0's own ball in A (152.09 / 149.67 / 152.09 m, the airship
+span), the rejoiners' `resyncs 0` (the join import). Judged now: the
+rejoin lives (wgq7_live client 2 from 1233, wm1_live client 2 from 1238,
+trl_live_B clients 1 and 2 from 1297 / 1655: own ball 0.0000 m in every
+phase). Left, each attributed and pre-existing: wgq7_live client 2
+`relay_late 2` (the anchor-tick frames RLT reclassified as covered; this
+run's binary predates RLT's field), trl_live_B client 1 `relay_late 13` and
+`resyncs 1 (bases [1530])` (the delayed rejoiner's first state, the
+close-out's DRJ, F2). The rejoin lives also show the balloon module
+(`PE_Balloon_*`, `PE_Box_slide` 6.7 mm above the platform; exception c) in
+the `mech` column, in every late-joined world only, and trl_live_B client
+1's life shows P_Modul_26_Sack / Rope falling after its resync refused the
+server's script state (the TRL bug, fixed at 7913d90b: gone in
+trl_live_B2). **Negative controls**: a copy of wgq7_live with client 1's own
+ball moved +1 cm over 300..600 FAILS `own ball 0.0000 in B: 0.0100 m`; the
+same in client 2's rejoin journal over 2000..2200 FAILS `own ball 0.0000 in
+A: 0.0100 m` (`.local-tools/work/F0/doctor.py`, `rev_neg/`).

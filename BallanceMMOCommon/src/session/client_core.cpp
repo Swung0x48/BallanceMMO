@@ -622,8 +622,10 @@ namespace bmmo::session {
             if (remote.physicalized) platform_.unmake_mirror(remote.entity);
         }
         s.remotes_.clear();
-        // Step SPGH: the rule off with the session, every ball shown as itself.
-        if (s.spawn_ghost_active_) {
+        // Step SPGH: the rule off with the session, every ball shown as itself
+        // (step F0, SPX's review nit: gated on kSpawnGhost as the install is -
+        // spawn_ghost_active_ is only ever set by that install).
+        if (bmmo::session::kSpawnGhost && s.spawn_ghost_active_) {
             if (s.own_spawn_ghost_shown_ && platform_.show_spawn_ghost)
                 platform_.show_spawn_ghost(s.own_spawn_ghost_entity_, true, false);
             s.own_spawn_ghost_shown_ = false;

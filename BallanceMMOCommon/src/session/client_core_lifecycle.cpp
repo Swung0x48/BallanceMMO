@@ -2026,7 +2026,8 @@ namespace bmmo::session {
             logf("own body: %s made at (%.3f,%.3f,%.3f) before tick %u (%s, %s%s)", life.entity.c_str(),
                  static_cast<double>(life.position[0]), static_cast<double>(life.position[1]),
                  static_cast<double>(life.position[2]), tick, where,
-                 life.what == own_life::kind::beam ? "beam" : "moved birth", life.spawn ? ", spawn kick" : "");
+                 life.what == own_life::kind::beam ? "beam" : "moved birth",
+                 spec.kick ? ", spawn kick" : "");   // step F0 (SPX nit): the label only with a kick
         return true;
     }
 
