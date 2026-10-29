@@ -1442,7 +1442,15 @@ numbers 1-10 are unchanged.
 8. Late-player design revision 3, R0-R5 (arrival ring, baseline, quorum
    patience, the lead decision), plus plan steps 12 (per-client reach; see
    item 2's first entry), 21 (events on the input datagram), 22 (own death
-   move).
+   move). With step 22 (found at F3, late-player-design.md 3.1 "As built
+   (step F3)"): a lone own Unphysicalize the server re-stamps late is only
+   logged "kept where we stamped it" (`client_core_lifecycle.cpp`, the
+   `own ... echoed` branch of the lifecycle echo; only a moved pair
+   resyncs, through `own_moved_unphysicalize_`), so the own world removes
+   its ball up to 2 ticks before the server and every mirror, and contacts
+   in those ticks differ with no correction (snapshots off). About 1 % of
+   lone events at 10 % loss; how much of it remains depends on the D4
+   answer (the stamp rule / repeat schedule).
 
 **Stage C - close the core (goal 1).**
 

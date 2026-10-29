@@ -125,7 +125,8 @@ class DelayProxy:
     link.  Loss applies per datagram in both directions; `dropped` counts them.
     """
 
-    def __init__(self, listen_port, server_addr, latency_ms, loss_pct=0.0, jitter_ms=0.0, loss_burst=1):
+    def __init__(self, listen_port, server_addr, latency_ms, loss_pct=0.0, jitter_ms=0.0, loss_burst=1,
+                 loss_seed=0, log_path=None):
         self.front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.front.bind(('127.0.0.1', listen_port))
         self.back = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -146,7 +147,16 @@ class DelayProxy:
         # drops p*b of every 1 + p*(b-1); p is solved so that is the loss rate.
         self.burst_left = {}
         self.burst_start = self.loss / (self.burst - self.loss * (self.burst - 1)) if self.loss > 0.0 else 0.0
-        self.rng = random.Random(0x10CC + listen_port)
+        # --loss-seed (step F3): 0 keeps every earlier run's draws; another
+        # value gives the same recipe a different loss pattern.
+        self.rng = random.Random(0x10CC + listen_port + (loss_seed << 20))
+        # --proxy-log (step F3, the lifecycle-event arrival margin): one line
+        # per datagram - time.monotonic() at receipt, direction, size, the
+        # verdict (pass / loss / burst / blackout) and, for a passed one, the
+        # time it is due out.  Off by default.
+        self.log = open(log_path, 'w', encoding='ascii', newline='\n') if log_path else None
+        if self.log:
+            self.log.write('# t_recv dir size verdict t_due\n')
         self.dropped = 0
         self.passed = 0
         self.bytes_up = 0      # client -> server, after the loss
@@ -202,10 +212,14 @@ class DelayProxy:
                 if self.burst_left.get(sock, 0) > 0:
                     self.burst_left[sock] -= 1
                     self.dropped += 1
+                    if self.log:
+                        self.log.write('%.6f %s %d burst -\n' % (time.monotonic(), 'up' if sock is self.front else 'down', len(data)))
                     continue
                 if self.loss > 0.0 and self.rng.random() < self.burst_start:
                     self.burst_left[sock] = self.burst - 1
                     self.dropped += 1
+                    if self.log:
+                        self.log.write('%.6f %s %d loss -\n' % (time.monotonic(), 'up' if sock is self.front else 'down', len(data)))
                     continue
                 # The jitter draw comes before the event's verdict, so a
                 # datagram an event drops still takes its draw and the rest of
@@ -218,6 +232,8 @@ class DelayProxy:
                     blackout, added = self.link_effect(direction, now)
                     if blackout:
                         self.blacked[direction] += 1
+                        if self.log:
+                            self.log.write('%.6f %s %d blackout -\n' % (now, direction, len(data)))
                         continue
                     if added > 0.0:
                         self.delayed[direction] += 1
@@ -231,7 +247,10 @@ class DelayProxy:
                 else:
                     self.bytes_down += len(data)
                 seq += 1
-                heapq.heappush(queue, (due if due is not None else now + self.delay + extra, seq, out, dest, data))
+                due_at = due if due is not None else now + self.delay + extra
+                if self.log:
+                    self.log.write('%.6f %s %d pass %.6f\n' % (now, direction, len(data), due_at))
+                heapq.heappush(queue, (due_at, seq, out, dest, data))
             while queue and queue[0][0] <= time.monotonic():
                 _, _, out, dest, data = heapq.heappop(queue)
                 out.sendto(data, dest)
@@ -241,6 +260,9 @@ class DelayProxy:
         self.thread.join(timeout=1)
         self.front.close()
         self.back.close()
+        if self.log:
+            self.log.close()
+            self.log = None
 
 
 # The session's tick (headless_engine.hpp kTickRate = 66) and the rollback's
@@ -666,7 +688,8 @@ def run_case(args, sector, case_dir):
             if link['latency_ms'] > 0 or link['loss_pct'] > 0 or link['jitter_ms'] > 0 or link_events:
                 pport = args.port + 400 + i
                 proxy = DelayProxy(pport, server_addr, link['latency_ms'], link['loss_pct'], link['jitter_ms'],
-                                   link['loss_burst'])
+                                   link['loss_burst'], args.loss_seed,
+                                   str(case_dir / f'proxy{i}.log') if args.proxy_log else None)
                 proxy.events = link_events
                 proxy.index = i
                 proxies.append(proxy)
@@ -2533,6 +2556,12 @@ def main():
                     help='extra delay, uniform in [0, this), per datagram: datagrams overtake each other')
     ap.add_argument('--loss-burst', type=int, default=1,
                     help='a dropped datagram takes this many in a row with it (the loss rate is kept)')
+    ap.add_argument('--loss-seed', type=int, default=0,
+                    help='another loss pattern for the same recipe (0 = the draws every earlier run made)')
+    ap.add_argument('--proxy-log', action='store_true',
+                    help='each proxy writes proxy<i>.log: one line per datagram (receipt time, direction, '
+                         'size, pass/loss/burst/blackout, due time); for measurement runs only - the write '
+                         'happens on the forwarding thread and delays forwarding slightly')
     ap.add_argument('--latency-clients', default='',
                     help='client indices to put behind the delay proxy; empty = all')
     ap.add_argument('--stall-client', type=int, default=-1,

@@ -1784,6 +1784,73 @@ S-line), and plan step 17 is closed only if its p99 is at most 2 ticks. If it
 is not, on-time events keep the intake relay, and only re-stamped events
 relay from the simulation thread.
 
+*As built (step F3, the stage A close-out's lifecycle-event arrival margin,
+LCM, 2026-10-29; diagnostic only, no protocol or simulation change):* the
+S5 line ends with ` margin=M slack=S` for a member's event: `M` = origin -
+the session's next tick `N` when the runner took it (>= 0 in time, the
+exact quantity `applied = max(stamp, N)` acts on), `S` = (deadline(origin) -
+arrival) in ticks (`lateness_slack_ticks`). The harness got `--proxy-log`
+(one line per datagram) and `--loss-seed` (0 = the old draws). Measured on
+REF12's `swing_snapoff` recipe (150 ms, 10 % loss, input delay 17) at seeds
+0, 1 and 2 (`maps/arena-test/f3_lcm`, `.local-tools/work/F3/lcm_analyze.py`):
+the events stamped local + 1 (Physicalize, Unphysicalize) arrive with
+**M = 0..1 tick for whichever member paces the server** - per member per
+run: seed 0 c0 / c1 / c3 0..1, c2 0..3; seed 1 c0 / c1 / c3 0..1, c2 -2..1;
+seed 2 c2 0..1, c1 1..4, c0 3, c3 3..4 (seeds 0 and 1 have no single
+pacing member: every member's events sit at 0..1; in seed 2 c2's uplink
+paced the others) - while S is
+about 22 ticks (one exception: seed 0 c3's Physicalize at 3385, M = 21, at
+the session's end, the other members gone and the server back on its
+deadline); Sector and Trafo (stamped with the 35-tick lead) arrive with
+M = 33..40. S does not govern lateness: with patience off the runner steps a
+tick as soon as every member's frame is in ("every buffer has its frame, or
+the deadline passed", the step loop of `session_runner.cpp`), so the server
+runs about 22 ticks ahead of its deadlines, paced by the slowest uplink, and
+an event sent with frame L for stamp L + 1 is taken just before the server
+could step L + 1. (`core_ref_s11`'s README inferred "about 6 ticks" from the
+input slack; that is S's frame of reference, not M's.) One lost copy is
+covered: the first unreliable repeat goes out in the next tick's input
+datagram (GNS coalesces it with the frame: the 510-536-byte datagrams of the
+proxy log), and the server cannot step L + 1 before that frame arrives. Two
+losses in a row - the reliable copy (for a beam pair, either reliable
+message: consistent with GNS's in-order reliable stream, a lost
+Unphysicalize holds the Physicalize behind it - in seed 1 the passed
+Physicalize was applied with the Unphysicalize at L + 3, and both went out
+again together in one 207-byte retransmit 11 ticks later) and the L + 1
+datagram - let frame L + 1 arrive in
+the L + 2 datagram, which carries no repeat (spacing 2), so the next copy, at
+L + 3, is taken at N = L + 3: late by 2. Seed 1 shows exactly that for c2's
+beam pair (proxy2: the 66-byte Unphysicalize datagram lost, the 187-byte
+Physicalize datagram passed, the 536-byte L + 1 datagram lost, the L + 2
+input datagram passed; S5 `margin=-2`), then "own beam moved 701 -> 703 ...
+resync": the signature of `core_ref_s11`'s c0. A lone late own Unphysicalize
+is "kept where we stamped it" (the own world ends the ball up to 2 ticks
+before the server does; with no resync and no correction - queued as its
+own item with plan step 22 in roadmap section 4 item 8). Changing any of
+this is plan section 3 D4, the user's decision. The options and what each
+costs: (a) stamp own events at local + k: k = input delay (17) gives a
+margin of about 17 but the own world must hold its own births and deaths
+back 17 ticks (258 ms; own-body control, retail only at R6); a small k
+gives a margin of about k for a k-tick hold-back; either is a stamp-rule
+change. (b) repeats every tick instead of every other tick: the copy rides
+every input datagram until frame L + 1 is in, same bytes, no protocol
+change - but it was measured and rejected before (`lifecycle.hpp`'s
+`kLifecycleEventRepeatSpacing`: six copies one tick apart all fell inside a
+dozen-datagram burst and the reliable copy carried the event late again;
+six copies span 6 ticks instead of 12), and F3 ran with `--loss-burst 1`,
+which hides that cost; the server's relay shares the constants unless they
+are split, and the wire check shows the send-trace difference by design.
+(b') the hybrid ("earlier redundant repeats"): first copies at L + 1 and
+L + 2, the rest at spacing 2 - closes the two-in-a-row gap measured here and
+keeps the 12-tick burst span; one more copy per event, no protocol change.
+(c) events on the input datagram (plan step 21) and / or a moved own pair
+handled without a resync (plan step 22): Stage B item 8, protocol and core
+work, retail's own death cannot move before R6. (d) accept it: about 1 % of
+lone events and 2 % of beam pairs late at 10 % loss (2 late pairs in 5
+measured runs, both resynced), far fewer at realistic loss; it conflicts
+with the headline's resyncs 0 for the 10 %-loss arm and leaves the 2-tick
+own-death gap.
+
 ### 3.2 Removals and the other server-side fixes
 
 The barrier itself is deleted: `waiting_for_lifecycle` and its call

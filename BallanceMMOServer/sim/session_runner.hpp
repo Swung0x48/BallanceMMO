@@ -114,6 +114,17 @@ namespace bmmo::sim {
         // when it accepted it (a leaver's Unphysicalize and final resets:
         // the leaving life's).  The server relays it in the message.
         uint16_t life = 0;
+        // Step F3 (the lifecycle-event arrival margin, LCM; diagnostic only,
+        // the S5 log line): for a member's event taken by submit_event,
+        // `margin` = origin - the session's next tick when the runner took
+        // it (>= 0: in time; < 0: re-stamped that much late), and `slack` =
+        // (deadline(origin) - arrival) in ticks, the input meter's measure
+        // (lateness.hpp) applied to the event's stamp.  `timed` false: not
+        // measured (the server's own events, a dropped one, a stamp before
+        // the scheduler's first tick).
+        bool timed = false;
+        int32_t margin = 0;
+        double slack = 0.0;
     };
 
     // Step M1 (world-agreement-gaps-design.md 2.7): a life of a player

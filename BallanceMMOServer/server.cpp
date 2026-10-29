@@ -2631,12 +2631,19 @@ public:
         s.event_repeats.push(bytes, std::move(to));
         const auto delay_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - a.intake).count();
+        // Step F3 (LCM): the arrival margin goes last, after the flag word,
+        // so the existing readers' pattern (arena_map_test.py RE_S5) still
+        // matches the line as it was.
+        char timing[64] = "";
+        if (a.timed)
+            std::snprintf(timing, sizeof(timing), " margin=%d slack=%.2f", static_cast<int>(a.margin), a.slack);
         Printf("Physics session %u: S5 event player=%u type=%s origin=%u applied=%u late=%d delay_us=%lld delay_ticks=%.2f "
-               "to=%zu%s", s.id, a.player, session_event_type_name(msg.type), a.origin, a.applied,
+               "to=%zu%s%s", s.id, a.player, session_event_type_name(msg.type), a.origin, a.applied,
                static_cast<int>(static_cast<int32_t>(a.applied - a.origin)), static_cast<long long>(delay_us),
                static_cast<double>(delay_us) / 15000.0, recipients,
                a.rejected ? " rejected" : a.superseded ? " superseded"
-                   : (a.token == 0 ? (a.type == bmmo::session::event_type::Trafo ? " server" : " leaver") : ""));
+                   : (a.token == 0 ? (a.type == bmmo::session::event_type::Trafo ? " server" : " leaver") : ""),
+               timing);
     }
 
     static const char* session_event_type_name(bmmo::session::event_type type) {

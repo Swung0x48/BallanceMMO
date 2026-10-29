@@ -837,6 +837,14 @@ namespace bmmo::sim {
             // its player is superseded: not queued, not relayed to the others.
             const uint32_t next = s.world->tick_index();
             const auto type = event.type;
+            // Step F3 (LCM, diagnostic only): how far ahead of the session
+            // the event got here, for the S5 line.  deadline() is defined
+            // from the scheduler's first tick on (a stamp below it wraps).
+            const auto timing = [&](accepted_event& a) {
+                a.margin = static_cast<int32_t>(tick - next);
+                a.timed = s.scheduler.started() && static_cast<int32_t>(tick - s.scheduler.first_tick()) >= 0;
+                if (a.timed) a.slack = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), arrival);
+            };
             if (type == bmmo::session::event_type::Trafo) {
                 // Trafo-replication design 2.2: through the ledger per
                 // (player, piece type), not the lifecycle acceptance.
@@ -856,6 +864,7 @@ namespace bmmo::sim {
                     a.token = token;
                     a.intake = arrival;
                     a.life = life_of(s, player);
+                    timing(a);
                     callbacks_.on_event_accepted(a);
                 };
                 if (!s.trafo_on() || event.ball_type >= bmmo::session::kTrafoTypes) {
@@ -910,6 +919,7 @@ namespace bmmo::sim {
                 a.token = token;
                 a.intake = arrival;
                 a.life = life_of(s, player);
+                timing(a);
                 callbacks_.on_event_accepted(a);
             };
             if (verdict.superseded) {
