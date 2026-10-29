@@ -426,6 +426,12 @@ namespace {
         // and at the end (V4/V5: trafos, extras, the player's ball).
         bool placement = false;
         int placement_fail_at = -1;
+        // --placement-policy-check (FULL close-out step H2, plan row SP6-c):
+        // with --list-placement --placement on, after the release check, the
+        // shared option-off policy (game::prepare_unplaced) on a level that
+        // holds copies - both of its branches - and apply's scene refusal
+        // (placement_tool.hpp list_placement_policy_check).
+        bool placement_policy_check = false;
         bool tick_hashes = false;
         std::vector<std::string> watch_entities;
         // The invariant check I1 (design 7.3, step S3), in the drop scene:
@@ -551,6 +557,7 @@ namespace {
             out.placement_given = true;   // step K0
         }
         else if (arg == "--placement-fail-at") { if (!(v = next())) return false; out.placement_fail_at = std::atoi(v); }
+        else if (arg == "--placement-policy-check") out.placement_policy_check = true;   // step H2
         else if (arg == "--tick-hashes") out.tick_hashes = true;
         else if (arg == "--watch-entity") { if (!(v = next())) return false; out.watch_entities.emplace_back(v); }
         else if (arg == "--placement-trace") {
@@ -2491,6 +2498,11 @@ namespace {
 
     // The S3 switches belong to the drop scene alone; 0 = fine.
     int check_scene_switches(const arguments& args) {
+        // Step H2: the option-off policy check belongs to --list-placement --placement on.
+        if (args.placement_policy_check && (!args.list_placement || !args.placement || args.placement_fail_at >= 0)) {
+            std::fprintf(stderr, "--placement-policy-check: needs --list-placement --placement on (no --placement-fail-at)\n");
+            return 2;
+        }
         // Step SP8: the networked invariant's switches belong to --replay-session.
         if ((args.placement_trace_player != 0 || args.drop_sectors_above >= 0) && args.replay_session.empty()) {
             std::fprintf(stderr, "--placement-trace-player / --drop-sectors-above: need --replay-session\n");
@@ -6743,8 +6755,10 @@ namespace {
         std::set<std::string> bodies;
         const bmmo::game::placement_hooks hooks = tool_placement_hooks(world->physics(), args.placement_fail_at, bodies);
         std::printf("anchor bodies: %zu\n", bodies.size());
-        const int applied = bmmo::sim::list_placement_apply(world->engine().context(), hooks);
-        list_group("after the tool's apply, release and re-apply");
+        const int applied = bmmo::sim::list_placement_apply(world->engine().context(), hooks, args.placement_policy_check);
+        // Step H2: the policy check ends on the unplaced world (its release branch).
+        list_group(args.placement_policy_check ? "after the tool's apply, release, re-apply and the policy check (unplaced)"
+                                               : "after the tool's apply, release and re-apply");
         return listed ? listed : applied;
     }
 

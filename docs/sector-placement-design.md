@@ -2650,3 +2650,49 @@ closed.
   lead 180 with a pass at 260 and without, the default lead (31..230, the
   park at 204 inside) with a pass at 80 and without: 50/50 each, 0 gap F
   lines.
+
+### 12.8 As built (step H2, FULL close-out, 2026-10-29): the deferred live arms
+
+Headless batch 2 (roadmap §4 item 7, "Run at H2", has every number;
+`maps/arena-test/h2_full/`, snapshots off). §12.5's "never exercised
+live" item and the §7.4 arms the quick tiers deferred:
+
+- **The option-off release branch and the scene refusal (§12.5): no
+  headless or server path reaches them.** The headless client releases at
+  `begin_session`, before a reboot and in its destructor; the server's
+  world is fresh per session. New SimTool `--placement-policy-check`
+  (`placement_tool.hpp` `list_placement_policy_check`) runs the shared
+  `prepare_unplaced` on a level holding copies - the registry that made
+  them releases them to the unplaced world, a registry that made none is
+  refused ("row 15 names P_Modul_30_MF_R15") - and `apply` with another
+  scene current (refused, world unchanged; the test scene launched and
+  left with `CK_SCENEOBJECTACTIVITY_DONOTHING`, then removed from the
+  level and destroyed): PASS on L8 and L11, x64 and Linux. It calls
+  `prepare_unplaced` directly; the host-facing `place_at_anchor(active =
+  false)` reaches it through a one-line else-branch, not exercised here. The retail natural path (a level that ran a session with the
+  option on, then one with it off, `session reload off`) stays RT2's.
+- **A mismatch at the start ends the session for every member**
+  (`server.cpp` `handle_session_ready`), as §5 specifies ("the same as a
+  late joiner"); the room is kept: PASS as designed (the FULL plan's
+  "refuses that member" contradicts §5, plan C15). The probe signature
+  and the session core refuse the member instead (WG3, B9DX). Not changed
+  here; refusing the member the same way is a proposal for the user
+  (today one misbuilt client ends everyone's session).
+- **L8 late** (§7.4): walk 1008 before the owed `+2` 1014 / `+3` 1021,
+  signature equal, 45/45, the joiner exact after its apply.
+- **L8 cross at 150 ms and the L11 cross's control**: signatures, walk
+  and sector ticks equal on five sides; per body, L11 placement on is
+  worse than off for none of the 40 shared bodies; the networked
+  invariant identical on both crosses.
+- **L11 at 0 ms with a ball on the sack copy** (friction contacts with
+  `P_Modul_26_Sack001_R35` at 1122, 1125, 1134): 54/54 bodies 0.0000 m on
+  every client. **c2's death at 736 (12.7's open latency)**: a ball in a
+  free fall with no sector event near dies ~70 ticks after entering
+  `Quader01` (660 -> 729), as sp8's did (666 -> 736) at another depth and
+  speed. The delay is the BallManager's own: `Box Box Intersection`
+  (26972) True -> `Deactivate Ball` -> a Send Message chain (a `delay 2`
+  link) -> `Test` -> `reset Ballpieces` -> `Überblendung` -> `Delayer`
+  27109 (1000 ms = 66 ticks) -> `Physicalize` (27103) Unphysicalize
+  (SimTool `--describe-script Gameplay_Ingame`, L11). An unphysicalize at
+  736 therefore started with a depth-test hit at ~667, 68 ticks before
+  the `+3` at 735: not the sector pass. SP8 (g) is closed.

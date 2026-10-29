@@ -830,6 +830,41 @@ the Arch server rebuilt from this tree, journal build id
     this measurement: done for the bot with dwells 15 / 30 / 60; what it
     cannot say without a human record is where real players' holds fall
     relative to the 15-30-tick crossover.
+  - **As built (step H2, FULL close-out, 2026-10-29): RC1 (c)'s repeated
+    drift sessions on HEAD.** The old arm is impossible (protocol 22
+    refuses older binaries, plan C2), so the "O2 / N2" pairs became two
+    HEAD sessions per arm at dwell 30 (`cliff`, `resync_at150`; RC1c's
+    recipes plus `--keep-lane-dwell 30`; `maps/arena-test/h2_full/rc1c_*`,
+    HEAD 12ccae76's headless client, snapshots off). Not like for like with
+    the table above: the server ran the deployed defaults (trafo inputs and
+    placement ON; RC1c ran both off) on a build after RC2..RK2. Per client
+    (c0..c3), session a / b; RC1c's `new` row at dwell 30 for comparison:
+    - `cliff`: rebases 0, resyncs 0, far 0; input rewinds 20/41/40/38 and
+      20/41/41/38 (RC1c 282/289/299/293); replayed ticks 1034-1728 (RC1c
+      10218-10873); rb 32-53 (RC1c 306-320); t_rep 638-1051 ms (RC1c
+      12942-13582); pace lag 3.4-3.9 (RC1c 9.5-13.9); starved c2 21 / 22
+      (the raised client; RC1c 513).
+    - `resync_at150`: rebases 0; resyncs 0 except client 0's `--resync-at`
+      (the arm's); input rewinds 19/46/46/41 and 18/47/47/41 (RC1c
+      291/317/303/299); replayed ticks 700-1272 (RC1c 6893-7980); pace lag
+      2.0-2.6 (RC1c 6.0-9.5).
+    - Drift (`.local-tools/work/H2/summarize_az.py` = RC1's summarize.py
+      with the airship exception: ball rows with x >= 905.25 and
+      `PE_Box_slide` not compared; one-sided - a row is dropped when
+      either side is in the zone, so a ball that reached it in one world
+      only is hidden from that tick on): own ball 0.0000 m but `cliff` c3 3.52 m
+      and `resync_at150` c3 1.06-1.15 m and c0 0.52 m (the forced resync's
+      892..920 window) - each a span of live-written rows that heals to 0;
+      mechanisms 0.0000 m outside that window (RC1c 2.742 m on three
+      clients); remote prediction mean 0.014-0.113 m, p99 0.13-2.92 m (RC1c
+      mean 1.68-1.94 m at `cliff` 30). Unfiltered every own ball shows
+      110-115 m at the far end: the airship exception (the owner's world
+      lets its ball fall past the platform, the server and every mirror
+      hold it at x 905.3), not drift.
+    - The 7-15x fewer rewinds and the 3x lower pace lag are recorded, not
+      explained here: whether they come from the work since RC1c (RC2..RK2,
+      the relay and lead changes) or from a change of what `inrew` counts
+      was not established.
 - **Measurement RC1d (2026-10-26; fix-up round 2026-10-27)** - the tail
   prediction rules under the cases the user made required (§11,
   2026-10-25/26: 1-tick taps, rapid-trigger alternation, fast switches,

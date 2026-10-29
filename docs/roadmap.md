@@ -1971,6 +1971,125 @@ numbers 1-10 are unchanged.
      (12 used). Post-N4 no session queues a selected entry naturally
      (B7EG), so the #20 hold of selected entries is exercised only by the
      SimTool scenes (Q-S1) until then.
+   - **Run at H2 (2026-10-29, HEAD 12ccae76 + a SimTool-only switch;
+     headless batch 2, sectors and placement; `.local-tools/work/H2/`,
+     x64 `build-agent-rH2s` (the headless client is HEAD's, `rH2` without
+     the switch), the Arch server rebuilt from the tree
+     `ballanced-36c04e3d24c9+bmmo-12ccae76aabc-dirty` (no maphack; the
+     dirt is SimTool's, which the server does not compile), every run
+     snapshots off, trafo inputs on, placement on unless named, captures
+     under `maps/arena-test/h2_full/`; 10 live runs, each judged before the
+     next, host load <= 19.8 %):** new SimTool `--placement-policy-check`
+     (with `--list-placement --placement on`; `placement_tool.hpp`
+     `list_placement_policy_check`, refused elsewhere; the default listing
+     byte-identical to rH2's; it calls `prepare_unplaced` directly, not the
+     host-facing `place_at_anchor(active = false)`, whose option-off branch
+     is a one-line call of it; gate round: the test scene is launched and
+     left with `CK_SCENEOBJECTACTIVITY_DONOTHING`, then removed from the
+     level and destroyed, and the listing after it is labelled as the
+     unplaced world - PASS again on L8 / L11 x64 and L8 Linux, the default
+     listing still byte-identical; a wire check `rH7X` -> `rH2` over
+     core_ref_s12 certifies the x64 headless binary rebuilt after an
+     LNK1163 corrupt object: WIRE-CHECK: ALL SAME, 36/36 journals
+     IDENTICAL). **SP6-c (headless + server): PASS offline;
+     no live path reaches it** - the headless client releases its copies
+     at `begin_session`, before an engine reboot and in its destructor, and
+     the server's world is made fresh per session and releases in its
+     destructor, so `prepare_unplaced` always meets a level without copies
+     there; the shared helper was exercised in SimTool on L8 (39 copies)
+     and L11 (53), x64 and the Linux SimTool (GCC, Arch tree): the registry
+     that made the copies releases them (inventory equal to the unplaced
+     world, signature `629f6128b4fc8389` / `4f444149dc156465`, holds_copies
+     no, 0 objects of a copy's name left), a registry that made none is
+     refused with "the level still holds placement copies (row 15 names
+     P_Modul_30_MF_R15)" and leaves the placed world as it was, and an
+     apply with a non-level scene current is refused ("the current scene
+     is not the level scene ...") with the world unchanged. The retail half
+     stays RT2's. **SP5-f** (`sp5f_mismatch`, arena, client 3
+     `--placement-signature 0000000000000001` at the start): the server
+     logs "placement mismatch for Arena3 (client 0000000000000001, server
+     ecfbfd9b63a330b5)" right after the world is ready and **ends the whole
+     physics session** (`server.cpp:2065-2069`, `end_physics_session`): no
+     member reaches tick 1, room 1 is kept (reset) and the server runs on.
+     That is design 5 / 7.4's "ends the session ... the same as a late
+     joiner": **PASS as designed** (the design settles it). The plan's
+     wording "refuses that member, the room runs" contradicts the design
+     (plan §4 C15); the server refuses a member (out of the session, the
+     rest go on) only for the session core and the probe signature (WG3's
+     review), not for the placement. Not changed. A proposal for the user,
+     blocking nothing: refuse the member like the WG3 probe check
+     (`send_session_end` to it + `physics_session_member_left`, a few
+     server lines, no protocol change) - today one misbuilt client ends
+     everyone's session, at the start or as a late joiner. **SP6-a** L8 late (`sp6a_l8_late`,
+     0 ms, client 3 `--join-late 3:900`, then its own `+4`): c3 joins with
+     the state of 1004, `level walk seen at tick 1008` before its owed
+     `+2` (1014) and `+3` (1021), its own `+4` at 1109 on all five sides,
+     signature `91a138e4fd6e7254` (39 copies) everywhere, `mechanisms=45/45`
+     on all four; after its apply (1026) the joiner is exact on all 45
+     bodies; server journal 3154/3154. **SP8-a** L8 cross at 150 ms
+     (`sp8a_l8_cross150`): five sides 39 copies / `91a138e4fd6e7254`, walk
+     30, `+2` 335 / `+4` 342 / `+3` 735, 45/45, 0 rebases / resyncs / far /
+     starved, journal 2585/2585; every residual over 1 mm is a single
+     checkpoint at a remote beam (R48 0.126 m, R15 0.033 m, the s2 bridge
+     0.014 m at 420/520/580), exact at the end; the networked invariant
+     (`SP8/inv.sh`, rH2s) **TRACE IDENTICAL** (31020 lines, 4 Sector events
+     dropped). **SP8-b** L11 cross at 150 ms, on / off control
+     (`sp8b_l11_150_on` / `_off`, the same recipe): on - five sides 53
+     copies / `5d22d3b5a61c38cb`, walk 30, `+2` 335 / `+3` 735, 54/54;
+     off - `4f444149dc156465`, 0 copies, the same ticks, 40/40; both
+     journals matched; per body present in both (40): **on worse than off
+     for none** (on: worst `P_Modul_34_Schiebestein001` 0.0138 m, one
+     checkpoint; off: `P_Modul_25_Bridge` 0.303 m, `P_Modul_37_Bridge`
+     0.228 m, `P_Modul_25_Bridge001` 0.074 m, and `Schiebestein001` /
+     `Kiste001` 0.3 mm at the end); the networked invariant on the on run
+     TRACE IDENTICAL (45900 lines, 5 dropped). **SP8-c** L11 at 0 ms
+     (`sp8c_l11_0_sack`): client 2 beamed onto the s3 sack copy at 1101,
+     its ball in friction contact with `P_Modul_26_Sack001_R35` at 1122,
+     1125 and 1134 (client2.log's ball contacts; the copy swings from 1092),
+     all 54 bodies 0.0000 m on all four clients at every LOCAL checkpoint,
+     the sack copy and its rope included; **c2's death at 736 (SP8 (g),
+     S2's open latency) explained**: client 1's ball, beamed into a free
+     fall in s2 at 601 with no sector event near (`--sector-at 3:1000`,
+     entered at 1009), enters `Quader01`'s box at about 660 and dies at
+     729 - the same ~70 ticks as sp8's c2 (box ~666, death 736) at another
+     depth and speed. The delaying block (gate round, SimTool
+     `--describe-script Gameplay_Ingame` on L11): the BallManager's
+     `Box Box Intersection` (id 26972) True -> `Deactivate Ball` (27282) ->
+     a Send Message chain (one link `delay 2`) -> `Get Cell` -> `Test` ->
+     `reset Ballpieces` -> `Überblendung` (its out through a Nop at once)
+     -> **`Delayer` 27109, Time to Wait 1000 ms = 66 ticks** ->
+     `Physicalize` (27103) Unphysicalize, the "own ball unphysicalized"
+     line. So an unphysicalize at 736 needs the depth test to have fired
+     at about 736 - 66 - the link delays = ~667, some 68 ticks before the
+     `+3` at 735; the sector pass cannot have started it. Not the sector
+     pass; SP8 (g) closed. (The plan row's method, the server journal
+     replayed with and without the s3 Sector event, cannot show it: the
+     server world does not run the depth test for a clone, §12.7.)
+     **RC1-c** (4 drift sessions, arena, 150 ms, dwell 30, the deployed
+     server defaults - RC1c ran trafo and placement off; old-vs-new is
+     impossible, plan C2): `cliff` x2 and `resync_at150` x2: 0 rebases, 0
+     resyncs but `resync_at150`'s client 0 (`--resync-at`, its arm), far 0,
+     journals matched. Drift (`H2/summarize_az.py` = RC1's summarize.py
+     with the airship exception: ball rows with x >= 905.25 and the
+     `PE_Box_slide` are not compared, as BALN decided; the filter is
+     one-sided - a row is dropped when EITHER side is at x >= 905.25, so a
+     ball that reached the zone in one world only is hidden from that tick
+     on, not from when the airship takes it): own ball 0.0000 m
+     on every client but cliff c3 3.52 m (98 checkpoints) and resync c3
+     1.06-1.15 m / c0 0.52 m (the forced resync's 892..920 window), each a
+     span that heals to 0 (live-written rows before the confirming rewind,
+     plan C1); mechanisms 0.0000 m outside c0's resync window; remote
+     prediction mean 0.014-0.113 m, p99 0.13-2.92 m. Unfiltered, every
+     own ball shows 110-115 m: the drive ends at the far end, where the
+     owner's world (the "out of the sync from here" log line) lets its own
+     ball fall past the airship platform while the server and every mirror
+     hold it at x 905.29-905.36 - the decided airship exception, not a
+     drift. On clients 0 and 3 (the ones compared) both cliff sessions
+     reproduce REF12's `cliff` own-ball error spans tick for tick (first
+     and last tick of every span; the maxima of the live-written rows
+     within a few cm). Rewinds 7-15x fewer than RC1c's table (recorded in
+     rewind-cost-design.md's RC1c entry, not explained). Tables:
+     `H2/rc1c/*.txt`.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

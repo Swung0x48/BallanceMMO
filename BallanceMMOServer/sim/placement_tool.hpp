@@ -224,7 +224,129 @@ namespace bmmo::sim {
     // --list-placement --placement on: the placement applied in the tool on
     // the listed (unplaced) world.  Exit 0, or 3 when the apply refused
     // without a --placement-fail-at, V12 failed, or a name is not unique.
-    inline int list_placement_apply(CKContext* context, const game::placement_hooks& hooks) {
+    // --placement-policy-check (FULL close-out step H2, plan row SP6-c; design
+    // 2.4 "Option off", As built S6/S10): no live session reaches the option-off
+    // release branch or the scene refusal - the headless client releases its
+    // copies at begin_session, before an engine reboot and in its destructor,
+    // and the server's world is made fresh per session and releases in its
+    // destructor, so prepare_unplaced always meets a level without copies there.
+    // This exercises the shared code on a level that holds copies, in the tool:
+    //   policy   the registry that made the copies: prepare_unplaced releases
+    //            them and returns true; the world equals the unplaced one
+    //            (inventory, signature, holds_copies no, no object of a copy's
+    //            name left - "--list-placement after");
+    //   refuse   another registry (a level whose copies this process did not
+    //            record, e.g. a retail level not reloaded): holds_copies by the
+    //            PH rows' "_R<digits>" names, its release cannot clear them, so
+    //            prepare_unplaced returns false with the error the hosts log
+    //            ("the level still holds placement copies (row N names ...)");
+    //            the placed world is left as it was;
+    //   scene    apply with a scene other than the level scene current: the
+    //            refusal "the current scene is not the level scene", nothing made.
+    // `placement` holds the re-applied copies on entry; the world is unplaced
+    // on exit.  Returns true when all three PASS.
+    inline bool list_placement_policy_check(CKContext* context, const game::placement_hooks& hooks,
+                                            game::sector_placement& placement, const placement_inventory& before,
+                                            uint64_t off, uint64_t on) {
+        const game::placement_log log = [](const std::string& line) { std::printf("policy log: %s\n", line.c_str()); };
+        std::vector<std::string> copy_names;
+        for (const game::sector_placement::copy_record& c: placement.copies()) copy_names.push_back(c.name);
+        const auto copies_left = [&]() {
+            size_t left = 0;
+            for (const std::string& n: copy_names)
+                if (context->GetObjectByName(const_cast<CKSTRING>(n.c_str()))) ++left;
+            return left;
+        };
+        std::string why;
+        bool all = true;
+
+        // refuse: a registry that did not make the copies.
+        {
+            const size_t held = copy_names.size(), present = copies_left();
+            game::sector_placement other;
+            std::string error;
+            const bool ok = game::prepare_unplaced(other, context, log, error);
+            const uint64_t after = placement.signature(context);
+            why.clear();
+            const bool holds = placement.holds_copies(context, &why);
+            const bool pass = !ok && error.rfind("the level still holds placement copies (row ", 0) == 0 && after == on
+                           && holds && copies_left() == present && present == held && held > 0;
+            std::printf("policy refuse: a registry that made none, the level holding %zu copies (%zu present): returned %s, "
+                        "error '%s', signature %016llx (%s), holds_copies %s, copies present %zu: %s\n", held, present,
+                        ok ? "true" : "false", error.c_str(), static_cast<unsigned long long>(after),
+                        after == on ? "the placed table's" : "DIFFERS", holds ? "yes" : "no", copies_left(),
+                        pass ? "PASS" : "FAIL");
+            all = all && pass;
+        }
+        // policy: the registry that made them.
+        {
+            std::string error;
+            const bool ok = game::prepare_unplaced(placement, context, log, error);
+            const bool same = compare_placement_inventory(before, capture_placement_inventory(context), "policy");
+            const uint64_t after = placement.signature(context);
+            why.clear();
+            const bool holds = placement.holds_copies(context, &why);
+            const size_t left = copies_left();
+            const bool pass = ok && error.empty() && same && after == off && !holds && left == 0;
+            std::printf("policy release: the registry that made %zu copies: returned %s%s%s, inventory %s, signature "
+                        "%016llx (%s), holds_copies %s%s%s, objects of a copy's name left %zu: %s\n", copy_names.size(),
+                        ok ? "true" : "false", error.empty() ? "" : " - ", error.c_str(), same ? "equal" : "DIFFERS",
+                        static_cast<unsigned long long>(after), after == off ? "unplaced" : "DIFFERS", holds ? "yes" : "no",
+                        why.empty() ? "" : " - ", why.c_str(), left, pass ? "PASS" : "FAIL");
+            all = all && pass;
+        }
+        // scene: a scene other than the level scene is current.
+        {
+            CKLevel* level = context->GetCurrentLevel();
+            CKScene* level_scene = level ? level->GetLevelScene() : nullptr;
+            CKScene* current = context->GetCurrentScene();
+            auto* other = static_cast<CKScene*>(context->CreateObject(CKCID_SCENE, const_cast<CKSTRING>("BMMO_H2_policy_scene")));
+            bool pass = false;
+            if (level && level_scene && current == level_scene && other) {
+                level->AddScene(other);
+                // DONOTHING both ways: the switch must not touch any object's activity.
+                level->LaunchScene(other, CK_SCENEOBJECTACTIVITY_DONOTHING, CK_SCENEOBJECTRESET_DONOTHING);
+                const bool switched = context->GetCurrentScene() == other;
+                const placement_inventory at = capture_placement_inventory(context);
+                game::sector_placement fresh;
+                const std::string refused = fresh.apply(context, hooks);
+                const bool same = compare_placement_inventory(at, capture_placement_inventory(context), "scene");
+                const uint64_t after = fresh.signature(context);
+                why.clear();
+                const bool holds = fresh.holds_copies(context, &why);
+                pass = switched && refused.rfind("the current scene is not the level scene", 0) == 0 && same && after == off
+                    && !holds && fresh.copies().empty() && copies_left() == 0;
+                std::printf("policy scene: current scene %s (the level scene: %s), apply refused '%s', inventory %s, "
+                            "signature %016llx (%s), holds_copies %s, copies made %zu: %s\n",
+                            game::placement_detail::name_of(context->GetCurrentScene()).c_str(), switched ? "no" : "STILL",
+                            refused.c_str(), same ? "equal" : "DIFFERS", static_cast<unsigned long long>(after),
+                            after == off ? "unplaced" : "DIFFERS", holds ? "yes" : "no", fresh.copies().size(),
+                            pass ? "PASS" : "FAIL");
+                level->LaunchScene(level_scene, CK_SCENEOBJECTACTIVITY_DONOTHING, CK_SCENEOBJECTRESET_DONOTHING);
+                const bool back = context->GetCurrentScene() == level_scene;
+                // Leave no residue: the test scene out of the level and destroyed.
+                const CKERROR removed = level->RemoveScene(other);
+                const CKERROR destroyed = context->DestroyObject(other);
+                const bool gone = !context->GetObjectByName(const_cast<CKSTRING>("BMMO_H2_policy_scene"));
+                std::printf("policy scene: the level scene current again: %s; the test scene removed %d, destroyed %d, "
+                            "gone %s\n", back ? "yes" : "NO", static_cast<int>(removed), static_cast<int>(destroyed),
+                            gone ? "yes" : "NO");
+                pass = pass && back && removed == CK_OK && destroyed == CK_OK && gone;
+                std::printf("policy scene (with the clean-up): %s\n", pass ? "PASS" : "FAIL");
+            } else {
+                if (other) context->DestroyObject(other);
+                std::printf("policy scene: no level scene to leave (level %p, level scene %p, current %p, made %p): FAIL\n",
+                            static_cast<void*>(level), static_cast<void*>(level_scene), static_cast<void*>(current),
+                            static_cast<void*>(other));
+            }
+            all = all && pass;
+        }
+        std::printf("placement policy check: %s\n", all ? "PASS" : "FAIL");
+        std::fflush(stdout);
+        return all;
+    }
+
+    inline int list_placement_apply(CKContext* context, const game::placement_hooks& hooks, bool policy_check = false) {
         game::sector_placement placement;
         std::string signature_error;
         const uint64_t off = placement.signature(context, &signature_error);
@@ -346,6 +468,8 @@ namespace bmmo::sim {
                     after_release == off ? "unplaced" : "DIFFERS", again.empty() ? "ok" : again.c_str(),
                     static_cast<unsigned long long>(reapplied), reapplied == on ? "same" : "DIFFERS", release_ok ? "PASS" : "FAIL");
         std::fflush(stdout);
-        return duplicates || !release_ok ? 3 : 0;
+        // Step H2: the option-off policy and the scene refusal on the re-applied world.
+        const bool policy_ok = !policy_check || (again.empty() && list_placement_policy_check(context, hooks, placement, before, off, on));
+        return duplicates || !release_ok || !policy_ok ? 3 : 0;
     }
 }
