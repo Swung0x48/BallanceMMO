@@ -3266,6 +3266,7 @@ namespace {
         std::vector<uint8_t> scripts;    // kept ticks, --frames: script_replay::capture
         std::string membership;          // kept ticks, --frames: each selected script's owner in the next frame (step RLM)
         std::vector<std::string> bodies; // a pass inside the window (step S7): the movable bodies, sorted
+        std::vector<uint32_t> cells;     // the written-cell columns (step RK2's review): per column rows, then the values
         bmmo::physics::world_hash hash;
         bmmo::sim::physics_world::step_state counters;
     };
@@ -3650,6 +3651,29 @@ namespace {
         script_options.live_orders_applied = &live_orders_applied;
         script_options.resize_strings = true;
         script_options.live_membership = true;   // step B2SW (G1, F): the core hosts' rule
+        script_options.written_cells = passes;   // step RK2 (record-format Q4): the core hosts' written-cell section
+        // Step RK2's review: the binding's columns, for the round check below
+        // (every row of each is set to a sentinel before the rewind; at the
+        // round's end it must hold the straight pass's values at e - one
+        // world restoring itself, not a compare between worlds).
+        std::vector<bmmo::game::written_column> written_cols;
+        script_options.written_columns = &written_cols;
+        const auto read_written = [context, &written_cols]() {
+            std::vector<uint32_t> out;
+            for (const bmmo::game::written_column& w: written_cols) {
+                auto* arr = CKDataArray::Cast(context->GetObject(w.array));
+                const int rows = arr && w.column >= 0 && w.column < arr->GetColumnCount() ? arr->GetRowCount() : 0;
+                out.push_back(static_cast<uint32_t>(rows));
+                for (int row = 0; row < rows; ++row) {
+                    uint32_t value = 0;
+                    arr->GetElementValue(row, w.column, &value);
+                    out.push_back(value);
+                }
+            }
+            return out;
+        };
+        uint64_t cells_sentinel_rows = 0;
+        int cells_checked_rounds = 0, cells_differ_rounds = 0;
         // Step RLQ (gap Q's hold, rollback-engine-gaps design 2.2.4): the
         // clients' PreSimulate queue binding.  With the clients' recipe
         // (replay_activation) the queue section and the hold, as both core
@@ -3827,6 +3851,7 @@ namespace {
                     return 1;
                 }
                 if (keep_this) rec.membership = owner_membership();
+                if (!written_cols.empty()) rec.cells = read_written();   // step RK2's review
             }
             bmmo::physics::savestate_report report;
             if (!bmmo::physics::get_savestate(physics, blob, error, &report)) {
@@ -4199,6 +4224,18 @@ namespace {
                                                     : bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics)));
                 std::printf("  round %zu: --joint-shuffle made %d constraint(s) again before the rewind\n", r, shuffled);
             }
+            // Step RK2's review: every row of the written-cell columns set to a
+            // sentinel (distinct per row) - a restore that skips a column, or
+            // writes another one, leaves it there for the round-end check.
+            for (const bmmo::game::written_column& w: written_cols) {
+                auto* arr = CKDataArray::Cast(context->GetObject(w.array));
+                const int rows = arr && w.column >= 0 && w.column < arr->GetColumnCount() ? arr->GetRowCount() : 0;
+                for (int row = 0; row < rows; ++row) {
+                    uint32_t sentinel = 0x5EB7C300u + static_cast<uint32_t>(row);
+                    arr->SetElementValue(row, w.column, &sentinel, sizeof(sentinel));
+                    ++cells_sentinel_rows;
+                }
+            }
             const bmmo::session::rollback_stats globals_before = engine.stats();   // C3 (step RK1)
             const bool rewound = engine.rewind_to(binding, t0 + static_cast<uint32_t>(a), t0 + static_cast<uint32_t>(e),
                                                   no_input, "savestate-check");
@@ -4331,6 +4368,21 @@ namespace {
                             for (const auto& [block, bits]: masks)
                                 for (uint32_t m = bits; m; m &= m - 1) ++rearmed_ignored_bits;
                         }
+                    }
+                }
+                // Step RK2's review: the written-cell columns at e are the
+                // straight pass's (the sentinel set before the rewind is gone).
+                if (failure.empty() && !written_cols.empty()) {
+                    ++cells_checked_rounds;
+                    const std::vector<uint32_t> now = read_written();
+                    if (now != expected.cells) {
+                        ++cells_differ_rounds;
+                        size_t k = 0;
+                        while (k < now.size() && k < expected.cells.size() && now[k] == expected.cells[k]) ++k;
+                        char text[160];
+                        std::snprintf(text, sizeof(text), "written cells (step RK2): word %zu is 0x%08x, the straight pass's 0x%08x",
+                                      k, k < now.size() ? now[k] : 0u, k < expected.cells.size() ? expected.cells[k] : 0u);
+                        failure = text;
                     }
                 }
                 // Step RLM: the owners' membership at e, the witness.
@@ -4573,6 +4625,17 @@ namespace {
             // Step RLQ: the PreSimulate queue binding's counters (the clients'
             // cbq line).
             const auto& q = bmmo::game::script_replay::queue_stats();
+            {
+                const auto& w = bmmo::game::script_replay::written_cells_stats();   // step RK2
+                std::printf("savestate-check: cells (step RK2): captured=%llu columns=%llu rows=%llu restores=%llu "
+                            "restored_rows=%llu skipped=%llu\n",
+                            static_cast<unsigned long long>(w.captured), static_cast<unsigned long long>(w.captured_columns),
+                            static_cast<unsigned long long>(w.captured_rows), static_cast<unsigned long long>(w.restores),
+                            static_cast<unsigned long long>(w.rows), static_cast<unsigned long long>(w.skipped));
+                std::printf("savestate-check: cells round check (step RK2's review): %zu column(s), %d round(s) checked,"
+                            " %d differ, sentinel rows %llu\n", written_cols.size(), cells_checked_rounds,
+                            cells_differ_rounds, static_cast<unsigned long long>(cells_sentinel_rows));
+            }
             std::printf("savestate-check: cbq (step RLQ, hold %s): straight ticks with outside entries=%d (at most %d)"
                         " captured=%llu rebuilt=%llu removed=%llu held=%llu holds=%llu"
                         " unhold_clamped=%llu rebuild_fail=%llu hold_fail=%llu no_record=%llu\n",
@@ -8376,6 +8439,7 @@ namespace {
             so.live_order = &late_live_order;   // step RO1
             so.resize_strings = true;
             so.live_membership = true;   // step B2SW (G1, F): the core hosts' rule
+            so.written_cells = true;     // step RK2 (record-format Q4): the core hosts' written-cell section
             bmmo::session::bind_script_replay(bound, backend, so);
         };
         bmmo::session::rollback_world binding = bmmo::session::bind_session_world(backend, core_hooks, w);

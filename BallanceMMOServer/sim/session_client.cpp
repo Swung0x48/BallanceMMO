@@ -38,6 +38,7 @@
 
 #include <entity/version.hpp>
 #include <game/menu_driver.hpp>
+#include <game/array_reads.hpp>
 #include <game/checkpoint_phase.hpp>
 #include <game/tutorial_exit.hpp>
 #include <game/sector_activation.hpp>
@@ -2365,6 +2366,11 @@ namespace {
             // as a refused placement does.
             uint64_t probe_signature = 0;
             if (core_.proximity_union_active() && !rewire_proximity(probe_signature)) { ended_ = true; return; }
+            // Step RK2 (record-format-gaps design 2.2): the array-read
+            // census after the rewire and the placement, one log line per
+            // unrecorded read; its counts go into the status line.
+            array_reads_ = bmmo::game::array_reads::anchor_log(engine_->context(), scripts_, args_.level,
+                                                               [this](const std::string& line) { logf("%s", line.c_str()); });
             if (!scripts_.empty()) {
                 const auto st = bmmo::game::script_replay::describe(engine_->context(), scripts_);
                 logf("script replay: %d scripts (%d active) + %d satellite blocks, %d blocks, %d parameters, %d force blocks, %d opaque: %s",
@@ -3661,8 +3667,11 @@ namespace {
             if (compare_scripts_ticks_++ == 0)
                 logf("--compare-scripts: first tick %u compared with %s", tick, args_.compare_scripts_dir.c_str());
             std::string key;
-            if (mine != theirs) {
-                const auto d = bmmo::game::script_replay::diff(engine_->context(), scripts_, theirs, mine);
+            // (step RK2: records equal but for the written-cell section are
+            // equal - decision Q4, never compared)
+            const auto d = mine != theirs ? bmmo::game::script_replay::diff(engine_->context(), scripts_, theirs, mine)
+                                          : bmmo::game::script_replay::difference{};
+            if (d.any) {
                 // Keyed on every logical difference the diff lists, not the
                 // first alone: a standing difference in one script must not
                 // hide a new one in a script after it.
@@ -4093,6 +4102,10 @@ namespace {
                 so.live_membership = true;
                 // Step B7EG (gap Q): the PreSimulate queue with the records.
                 so.callback_queue = true;
+                // Step RK2 (record-format decision Q4): the written-cell
+                // section with every record, back at the anchor.
+                so.written_cells = true;
+                so.written_columns = &written_columns_;   // the columns the records carry (status line)
                 // Step G3 (world agreement 4.2): the proximity union's hold
                 // section with every record (v6), back at the anchor.
                 if (core_.proximity_union_active()) {
@@ -4208,6 +4221,10 @@ namespace {
             h.script_reset_skips = script_reset_skips_;
             h.probes_skipped = proximity_.skipped();
             h.probes_relatched = proximity_.relatched();
+            h.unrecorded_array_reads = array_reads_.unrecorded;   // step RK2
+            // (the binding's columns - the ones the records carry - not the
+            // census's: the two are found apart; step RK2's review)
+            h.written_cell_columns = written_columns_.size();
             return h;
         }
         void report() {
@@ -4236,6 +4253,14 @@ namespace {
                      static_cast<unsigned long long>(q.holds), static_cast<unsigned long long>(q.unhold_clamped),
                      static_cast<unsigned long long>(q.rebuild_fail), static_cast<unsigned long long>(q.hold_fail),
                      static_cast<unsigned long long>(q.no_record));
+            }
+            // Step RK2: the records' written-cell section in this process.
+            {
+                const auto& w = bmmo::game::script_replay::written_cells_stats();
+                logf("cells: captured=%llu columns=%llu rows=%llu restores=%llu restored_rows=%llu skipped=%llu",
+                     static_cast<unsigned long long>(w.captured), static_cast<unsigned long long>(w.captured_columns),
+                     static_cast<unsigned long long>(w.captured_rows), static_cast<unsigned long long>(w.restores),
+                     static_cast<unsigned long long>(w.rows), static_cast<unsigned long long>(w.skipped));
             }
             // Step RLC: the joint ledger - constraints named by their image in
             // the records, made again or replaced at a restore, in this process.
@@ -4308,6 +4333,8 @@ namespace {
         std::vector<CK_ID> scripts_replayed_;                // the scripts the last restore wrote: active at its anchor
         bmmo::game::script_replay_hooks script_hooks_;
         bmmo::game::checkpoint_phase_split checkpoint_phase_;  // the chain's own phase cell (game/checkpoint_phase.hpp)
+        bmmo::game::array_reads::anchor_summary array_reads_;   // step RK2: the anchor's array-read census
+        std::vector<bmmo::game::written_column> written_columns_;   // step RK2: the script binding's written-cell columns
         bmmo::game::sector_reset_guard reset_guard_;         // the retail sector resets, neutralized (game/sector_reset_guard.hpp)
         std::vector<bmmo::game::deactivate_pin> deactivate_pins_;   // N2's pins (game/sector_deactivate_pin.hpp)
         bmmo::game::sector_cell_split chain_cell_split_;     // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)

@@ -2,8 +2,9 @@
 
 Status: design, revision 2 (after two reviews; §10 lists every finding and
 what became of it). Steps K0 (49e2cc8), K1 (C3, step RK1) and K3 (C4 as
-option (c), step RK3, with the frame-9 hold of step RK3H) are built ("As
-built" notes at the end); K2 is not. Track C of the post-audit designs. It
+option (c), step RK3, with the frame-9 hold of step RK3H) and K2 (C2 with
+§11 Q4's written cells, step RK2; its `PH[*][4]` read waits for the user)
+are built ("As built" notes at the end). Track C of the post-audit designs. It
 covers audit items #13 and #14 of the rollback-coverage audit
 (`scratchpad/audit/rollback-coverage-audit.md` §1, §2 F9/F10; the user's order
 in §5 calls them F13/F14), and the gaps found while checking them, reported per
@@ -1394,3 +1395,208 @@ frames played; the server journal replays 1764/1764 with this SimTool.
 left them; a Gameplay_Refresh activation inside frames 9..15 (above;
 queued as RK3F); a Level 1 level reset after the exit (above: the tutorial
 re-activated, the exit not re-fired; queued as RK3R).
+
+## As built (step RK2, 2026-10-29): K2 = C2, the array-read census, and Q4's written cells
+
+C2 as §2.2 and the K2 row of §8 say, with §11 Q4's decision built in it and
+the adaptations below. No protocol, journal or portable-record change; no
+engine change, no IVP change. One item is open for the user: the sector
+manager's `PH[*][4]` read (below).
+
+- **Where the census lives.** `BallanceMMOCommon/include/game/array_reads.hpp`
+  (new), class `bmmo::game::array_reads`: K0's census moved out of SimTool
+  unchanged in its rules, its report as lines (`lines`) instead of
+  `printf`, and `anchor_log` - the one function every world calls at its
+  anchor. Adaptation: not `script_replay::array_reads` in SRP (the census
+  needs `script_replay::cell_of`, so a member there would make the two
+  headers include each other); `sim/array_census.hpp` is now a thin wrapper
+  that prints `lines` for `--array-reads`.
+- **Placement (§2.2).** After the selection, the world-agreement rewire and
+  the placement: the server next to the checkpoint splits
+  (`physics_world.cpp`, after the sector-cell split, a log only: that world
+  keeps no records), the headless client right after `rewire_proximity`
+  (`session_client.cpp`), the retail core host right after
+  `proximity_rewire` (`core_host.cpp`; the census uses the public CK API
+  only and ran under the retail Virtools `CK2.dll`). One log line per
+  unrecorded (and sound) entry, the written-cell columns, the grouped
+  unrecorded entries, and the closing `ARRAY-READS:` line.
+- **The counter (§2.2).** The core makes no CK call, so the census's counts
+  reach the status line as host counters (`client_platform.hpp`
+  `host_counters::unrecorded_array_reads`, `written_cell_columns`; -1 = no
+  census ran), printed as the status line's last section
+  `array_reads: unrecorded=N written_columns=M` only from a host that ran one
+  (every other status line is the text it was).
+- **§11 Q4 built: the written cells recorded with the other cells.** The
+  body's "C2 no longer changes the record" (§2.1, §3, §5, §6) predates the
+  decision of 2026-10-24; Q4 (a) is built here, in the local record only:
+  - `script_replay.hpp`: record v6's sections word gets **bit 3,
+    `kSectionCells`**, after the hold section - per column u32 array id,
+    u32 column, u32 rows, then every row's 4 bytes. Q4's "the next free
+    script record version" is adapted to a section bit (v6's word is how
+    content is added since G3). A record with the section is v6 even
+    without the hold section; a record without it is the record it was.
+  - **Which cells**: `array_reads::written_cells` - every (array, constant
+    column) a selected, not keep-local, script writes with a
+    column-confined writer (Set Cell, Column Transform, Column Operation),
+    of an int or float column, that is neither a private copy nor one of the
+    three recorded cells; all rows (the fan's slot row is found by Row
+    Search, not a constant). On L1-L13 that is exactly
+    `P_Modul18_ActiveSounds[*][1]` (4 rows) on every level with a fan, none
+    on L1. Derived by the same walk the census classifies with, once at
+    every binding (`rollback_binding_scripts.hpp`
+    `script_binding_options::written_cells`), so the census and the record
+    cannot disagree.
+  - **Bound by the core hosts only** (the headless client, the retail core
+    host, SimTool's session recipe and late-sector check); the legacy
+    retail path binds nothing new.
+  - **Restore**: the three cells' rule (`replay_activation`); a column
+    whose array is gone or whose row count or type changed is left alone
+    and counted (`last_restore().written_cells_skipped`;
+    `written_cells_rows` counts the rows written).
+  - **Never compared** (Q4: "no check compares it"): `diff` skips the
+    section, its header compare ignores bit 3 (and the version word it
+    changes), and two records equal but for the section are equal (`any`
+    false); the rollback binding answers such a pair with an empty string,
+    which `rollback.hpp` (the end-of-replay script check) no longer counts
+    as a mismatch (`--compare-scripts` likewise). A divergence inside the
+    slot column is therefore masked, by the decision.
+  - **Counters**: `script_replay::written_cells_stats()` (records captured
+    with the section, their columns and rows; restores, rows written,
+    columns skipped), printed in the headless client's end-of-session
+    `cells:` line and in SimTool's savestate-check summary.
+  - **Local only.** The portable record (the resync state on the wire, the
+    journals) carries no section, so a localized record has none and a
+    resync import keeps its own slot column (non-physics). Forward
+    compatibility is unchanged: no protocol or journal number.
+  - Census class: the slot blocks (`Row Search` column 1, both `Set Cell`
+    column 1) are now `recorded`, note "(written-cell section)"; `sound` is
+    0 on every level (the class and its walk stay as the census's report of
+    such a read). S2's "sound lists P_Modul_18's slot blocks" therefore
+    reads "sound = 0, recorded includes them" since this step.
+- **`unwritten` confirmed (K0's open point).** No source in the repository
+  (BallanceMMO; the Ballanced submodule's CK2, physics_RT and TT) names
+  `Physicalize_Convex` or `Physicalize_Balls`, the two arrays the class
+  holds today, so no native code writes them: the class stays separate
+  from load-time as K0 built it, counted, not a gap.
+
+**S2 (`.local-tools/work/RK2/s2/`, SimTool rRK2, L1-L13).** Server scope
+(the clients' scope since G3 / WG4: every world rewires under the bit):
+`unrecorded = 2` on every level - the sector manager's two `Iterator If` on
+`PH` (below) - `sound = 0`, `written_columns = 1` on L2-L13 and 0 on L1,
+`unwritten = 2`. Control (`--client-scope`, the bit clear): unrecorded = 2 +
+exactly A1's `CurrentLevel[0][1]` counts per level (L2 10, L3 4, L4 4, L5 2,
+L6 10, L7 6, L8 3, L9 6, L10 7, L11 6, L12 11, L13 2, L1 0). S2's pass
+(`unrecorded = 0`) therefore waits for the `PH[*][4]` decision alone.
+
+**Open for the user: the sector manager's `PH[*][4]` read** (K0's finding,
+"queued for K2"; not built either way).
+- Symptom: the census's 2 unrecorded entries on every level, in every
+  world (server, headless, retail: the same `unrecorded=2`).
+  Gameplay_SectorManager's `Deactivate Sector` and `Activate Sector`
+  `Iterator If` output whole `PH` rows; every `activate Type 1/2/3` starts
+  with `Test(Set? == TRUE)` on column 4. A replayed sector pass reads the
+  live column, not the column the live frame read.
+- Cause (measured on L1-L13 with the census's writer list): column 4's only
+  in-play writers are `P_Extra_Point_MF Script`'s `Update Array` (its own
+  row, `Iterator If` on column 3 = its object, `Set Cell` FALSE at the
+  pickup; 1-7 per level) and Event_handler's `Reset PH-Array` (every row
+  TRUE, the level reset); neither is in the selection on any level, so no
+  replayed frame writes the column, and the record does not carry it. Every
+  other writer is `Levelinit_build` (load). `PH_Groups` (L2) gives
+  `P_Extra_Point` activation 1 (Set World Matrix, Show, Activate Script of
+  the extra), so only extra-point rows change in play; the physics rows
+  (types 2 and 3, and the type-1 modules) read a column no in-play writer
+  touches.
+- When it matters: a rewind window that holds both a pass of sector k (the
+  read) and a pickup of one of k's extra points after it (the write) - a
+  boundary case under the sector union (the window is input_delay + a
+  trip, a pickup needs the sector already shown); no run here met one.
+- Options (their consequences are read from the graph dumps and the
+  census, not run):
+  - (a) Record the column (the written-cell section, or the three cells'
+    table). Its writer is outside the replay, so restoring the anchor's
+    value alone leaves a picked extra's row TRUE after a rewind across the
+    pickup (the next pass of that sector would show and re-activate a picked
+    extra); a faithful version needs N02R's bookkeeping too (the live
+    writes recorded per tick, re-written in the replay, the live value kept
+    across the rewind) - and then a replayed pass before the pickup
+    re-runs Show / Activate Script on an extra the live world has already
+    picked, an object outside the replay, so the extra comes back after the
+    replay. Cost: 4 bytes per PH row per record (62 rows on L2), the
+    bookkeeping.
+  - (b) A census class for it, proven structurally at the anchor: every
+    in-play writer of the read column is outside the selection and writes
+    only its own object's row, whose group activation is type 1 and whose
+    object is not physicalized. The replay keeps reading the live value,
+    which is the right one for objects outside the replay (today's
+    behaviour); `unrecorded` goes to 0 by classification. It softens §2.2's
+    rule ("record the cell or rewire the read"). Cost: the writer analysis
+    in `array_reads.hpp`.
+  - (c) Accept it as logged (unrecorded = 2, S2 stays failing on it).
+  - §11 Q4 does not settle it: Q4 is about cells a selected script writes;
+    this column is written by scripts outside the selection.
+- Recommendation: (b).
+
+**Checks (QUICK tier: implement round 07:04-07:11, about 7 minutes; gate
+round after the counters 07:15-07:18, about 3 minutes; one live run).** x64
+BUILD-OK and x86 CLIENT-BUILD-OK, DEPS-OK on both; ARCH-BUILD-OK
+(`ballanced-36c04e3d24c9+bmmo-a1ee0218161a-dirty`; GCC compiles
+`array_reads.hpp` through `physics_world.cpp`); BallanceMMOMessageTests
+645/645; GCC syntax 30/30. Wire check rRLT -> rRK2 over core_ref_s11 with
+`EXTRA="--accept-protocol 18"` (a protocol-22 binary refuses the protocol-18
+set without it, as RK3H and TRL ran it): 12/12 send traces SAME, 12/12
+journals IDENTICAL; every replay's `scr=` counters equal old vs new; solo1 /
+solo2 (`LABELS="solo1 solo2"`): c0 SAME and IDENTICAL (the script's
+c1-c3 lines are its four-client assumption). SimTool L2
+`--savestate-check --frames --session-recipe --drop P_Ball_Wood_MF 0
+--drop-settle 3 --ticks 40 --rounds 60 --max-depth 1 --seed 1`: 60/60 PASS on
+rRLT and rRK2, the outputs equal but for the census lines; with the counters
+(rRK2b): `cells: captured=69 columns=69 rows=276 restores=72
+restored_rows=288 skipped=0` - the records carry the section and every
+rewind wrote its 4 rows back. Wire check rRLT -> rRK2b on l8_cross and
+resync_snapoff (`--accept-protocol 18`): 8/8 sends SAME, 8/8 journals
+IDENTICAL; every client's `cells:` line shows the section in every record
+(l8_cross 2172-2251 records, resync_snapoff 4425-4899) and restored at
+every rewind (restores = the `scr=` rollbacks: 9/7/9/7 and 44/57/56/62,
+4 rows each), `skipped=0`. The journals are identical with the section
+because a journal's checkpoint stores nothing of the local record; the wire
+check cannot see the section, the counters do. One live run, retail two copies on
+L11 (`scripts/retail/rk2_retail`, `.local-tools/work/CD1/cd1_gate.py`, the
+Arch server of this tree, snapshots off, placement on): both assigned, the
+census in both hosts and the server identical (`selected=64 ... recorded=87
+private=88 ... unrecorded=2`, `written_columns=1`), the status lines
+`array_reads: unrecorded=2 written_columns=1`, three rollbacks each, no
+restore failed.
+
+**Review fix-ups (gate round).** (1) The written-cell restore had no check
+that saw a value come back: savestate-check (`--session-recipe`) now records
+the binding's columns with every straight tick, sets every row of each
+column to a per-row sentinel before each rewind, and fails a round whose
+columns at e are not the straight pass's (`savestate-check: cells round
+check`, one world restoring itself, not a compare between worlds, so Q4's
+"no check compares it" holds). L2's recipe (`--ticks 40 --rounds 60
+--max-depth 1`): 60 rounds checked, 0 differ, 240 sentinel rows overwritten
+by the restore. (2) The headless `--compare-scripts` ran `diff` twice per
+differing tick; once now. (3) The status line's `written_columns` came from
+the anchor's census, found apart from the binding's columns; both hosts now
+pass `written_columns` to the binding and report its count (the columns the
+records really carry; the census's own count stays in its log line).
+Gate round (07:24-07:29, about 4.5 minutes): x64 BUILD-OK, x86
+CLIENT-BUILD-OK, DEPS-OK on both; BallanceMMOMessageTests 645/645; GCC
+syntax 30/30; L2's recipe at `--max-depth 1` (above) and `--rounds 40
+--max-depth 12` (40 rounds checked, 0 differ, 160 sentinel rows), both
+PASS; wire check rRLT -> rRK2c on l8_cross and resync_snapoff
+(`--accept-protocol 18`): 8/8 sends SAME, 8/8 journals IDENTICAL; the
+step's second live run, retail two copies on L11 with this build
+(`scripts/retail/rk2_retail2`): both assigned, the census identical in
+both hosts and the server (`unrecorded=2 ... written_columns=1`), the
+status lines `array_reads: unrecorded=2 written_columns=1` now from the
+binding, four rollbacks each, no restore failed.
+
+**Deferred** (the final verification): a rewind across a fan's slot claim
+showing a changed column restored (the sentinel check shows every row
+written back from the record, but no run here claimed a slot inside a
+window, so a recorded value that differs from the live one was never seen);
+Q4's
+settle arm (waived by the decision's "no check compares it"); S2's pass,
+which waits for the `PH[*][4]` decision.

@@ -2275,7 +2275,13 @@ namespace bmmo::session {
                 if (t == current_tick && scripts_replayed && have_live_scripts && state.have_scripts && !rs
                         && state.scripts != live_scripts) {
                     script_differs = true;
-                    if (world.diff_scripts) script_where = world.diff_scripts(live_scripts, state.scripts, script_logical);
+                    if (world.diff_scripts) {
+                        script_where = world.diff_scripts(live_scripts, state.scripts, script_logical);
+                        // An empty answer: the bytes differ only in what the
+                        // hook does not compare (step RK2: the record's
+                        // written-cell section) - not a mismatch.
+                        if (script_where.empty()) script_differs = false;
+                    }
                 }
                 if (t == current_tick) timer.cost_ends();
                 if (t == current_tick && have_live_savestate && state.have_savestate && world.log

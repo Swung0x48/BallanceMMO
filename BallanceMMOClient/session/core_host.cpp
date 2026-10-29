@@ -57,6 +57,7 @@
 #include <float.h>
 #endif
 
+#include <game/array_reads.hpp>
 #include <game/host_backend.hpp>
 #include <game/proximity_union.hpp>
 #include <game/sector_activation.hpp>
@@ -906,6 +907,14 @@ namespace {
         uint64_t anchors = 0, refused = 0, releases = 0, restored = 0;
     };
     proximity_host_state proximity_host;
+
+    // Step RK2 (record-format-gaps design 2.2): the last anchor's array-read
+    // census (game/array_reads.hpp anchor_log), for the status line.
+    // File-scope (BallanceMMOClient takes no member).
+    bmmo::game::array_reads::anchor_summary array_reads_host;
+    // ... and the script binding's written-cell columns (the ones the
+    // records carry; the status line's written_columns).
+    std::vector<bmmo::game::written_column> written_columns_host;
 
     int32_t controller_alias_cb(void* user, const char* name, char* out, uint32_t out_size);
 
@@ -1904,6 +1913,11 @@ void BallanceMMOClient::core_host_anchor() {
         }
         probe_signature = proximity_host.signature;
     }
+    // Step RK2 (record-format-gaps design 2.2): the array-read census after
+    // the rewire and the placement, as the headless anchor runs it.
+    array_reads_host = bmmo::game::array_reads::anchor_log(
+        m_bml->GetCKContext(), host.script_ids, static_cast<int>(core.config.level),
+        [this](const std::string& line) { logger_->Info("Physics session: %s", line.c_str()); });
     {
         const auto st = bmmo::game::script_replay::describe(m_bml->GetCKContext(), host.script_ids);
         logger_->Info("Physics session: script replay: %d scripts (%d active) + %d satellite blocks, %d blocks, %d parameters, "
@@ -3022,6 +3036,10 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             so.live_membership = true;
             // Step B7EG (gap Q): the PreSimulate queue with the records.
             so.callback_queue = true;
+            // Step RK2 (record-format decision Q4): the written-cell
+            // section with every record, back at the anchor.
+            so.written_cells = true;
+            so.written_columns = &written_columns_host;
             // Step WG4 (world agreement 4.2): the proximity union's hold
             // section with every record (v6), back at the anchor.
             if (proximity_host.active) {
@@ -3150,6 +3168,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         h.script_reset_skips = host.script_reset_skips;
         h.probes_skipped = proximity_host.union_.skipped();     // step WG4
         h.probes_relatched = proximity_host.union_.relatched();
+        h.unrecorded_array_reads = array_reads_host.unrecorded;   // step RK2
+        h.written_cell_columns = written_columns_host.size();   // the binding's (step RK2's review)
         return h;
     };
     // Step WG4 (world agreement 2.5): the proximity union's place, live
@@ -3835,6 +3855,8 @@ std::string BallanceMMOClient::core_host_status_text() {
     h.script_reset_skips = host.script_reset_skips;
     h.probes_skipped = proximity_host.union_.skipped();     // step WG4
     h.probes_relatched = proximity_host.union_.relatched();
+    h.unrecorded_array_reads = array_reads_host.unrecorded;   // step RK2
+    h.written_cell_columns = written_columns_host.size();   // the binding's (step RK2's review)
     // Gap Q (step B7EG): the PreSimulate queue's part of the records and
     // of every replay: rebuilt/removed/held/unhold_clamped/rebuild_fail/
     // hold_fail/no_record.

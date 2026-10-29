@@ -4,6 +4,7 @@
 #include "CKIpionManager.h"
 #include "PhysicsCallback.h"
 
+#include <game/array_reads.hpp>
 #include <game/sector_deactivate_pin.hpp>
 #include <game/session_host_support.hpp>
 #include <physics/physics_direct.hpp>
@@ -371,6 +372,12 @@ namespace bmmo::sim {
             log(std::string("world: the checkpoint chain's sector cell is NOT split (")
                 + (held ? "--n2-cell off" : "the activation is not held") + ")");
         }
+        // Step RK2 (record-format-gaps-design.md 2.2 "Placement"): the
+        // array-read census of the selection the clients replay, after the
+        // rewire, the placement and the checkpoint splits - a log only
+        // (this world keeps no records).
+        bmmo::game::array_reads::anchor_log(engine_->context(), script_selection_, options_.level,
+                                            [this](const std::string& line) { log("world: " + line); });
         // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)):
         // the Level 1 tutorial's exit event, found now and activated by
         // tick() right before frame tutorial_exit_frame.

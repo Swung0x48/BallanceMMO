@@ -975,10 +975,18 @@ numbers 1-10 are unchanged.
    (#29832) while the tutorial's freeze flag is set, freezing that world
    alone - a known limit of the user's 'Hold frame-9 write' (it predates
    RK3H: before it every world was at 0 in those frames), to be measured
-   with R1's ESC and put to the user if it shows; K2, the ActiveBall
-   census, after world agreement's G3 / G4 (it must also decide the sector
-   manager's `PH[*][4]` read that K0 found, written in play only on
-   extra-point rows).
+   with R1's ESC and put to the user if it shows; **K2, the ActiveBall
+   census, is built (step RK2)**: every world (server, headless, retail core
+   host) runs the array-read census at its anchor (`game/array_reads.hpp`,
+   one log line per unrecorded read, the status line's `array_reads:`
+   section), and §11 Q4's decision is built with it - the cells a selected
+   script writes (the fans' sound-slot column) travel in a local record
+   section and come back at the anchor, never compared; no wire or journal
+   change. S2: `unrecorded = 2` on L1-L13, both the sector manager's
+   `PH[*][4]` read (written in play only by the extra points' own rows,
+   outside the replay); **its decision waits for the user** (options in the
+   design's "As built (step RK2)": record it with N02R-style bookkeeping,
+   a structurally proven census class - recommended - or leave it logged).
 7. **Stage close-out (the one FULL verification):** four clients, 150 ms,
    10 % loss, snapshots off: the spawn pile and every mechanism
    bit-identical to the server at every checkpoint; and every check below.

@@ -7,6 +7,7 @@
 // session/rollback_binding.hpp because it needs the CK headers; the core
 // binding does not, so the unit tests can bind a fake backend.
 
+#include <game/array_reads.hpp>
 #include <game/script_replay.hpp>
 #include <session/rollback_binding.hpp>
 #include <session/script_order.hpp>
@@ -91,6 +92,17 @@ namespace bmmo::session {
         // a client host under WORLD_PROXIMITY_UNION only; empty: no section,
         // the records stay v2-v5 byte for byte.
         bmmo::game::hold_hooks hold;
+        // Step RK2 (record-format-gaps design 11 Q4, the user's decision:
+        // "the written cells are recorded with the other cells"): the
+        // record's written-cell section - every row of each int / float
+        // column a selected script writes (game/array_reads.hpp
+        // written_cells, found here once from the selection), captured with
+        // every record and written back at the anchor with the three cells'
+        // rule (replay_activation).  Off: no section, the records as before
+        // (the legacy path).  `written_columns`, when given, receives the
+        // columns found (the host's report).
+        bool written_cells = false;
+        std::vector<bmmo::game::written_column>* written_columns = nullptr;
     };
 
     // Gap Q4's executed scripts (rollback-engine gaps design 2.2.4): every
@@ -195,8 +207,17 @@ namespace bmmo::session {
         std::shared_ptr<bmmo::game::hold_hooks> hold;
         if (o.hold.capture && o.hold.restore) hold = std::make_shared<bmmo::game::hold_hooks>(o.hold);
         const bmmo::game::hold_hooks* hold_ptr = hold.get();
-        world.capture_scripts = [context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr](std::vector<uint8_t>& out) {
-            return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo, queue_ptr, hold_ptr);
+        // Step RK2: the written-cell section's columns, from the selection.
+        std::shared_ptr<std::vector<bmmo::game::written_column>> cells;
+        if (o.written_cells) {
+            cells = std::make_shared<std::vector<bmmo::game::written_column>>(
+                bmmo::game::array_reads::written_cells(context, *selection));
+            if (o.written_columns) *o.written_columns = *cells;
+        }
+        const std::vector<bmmo::game::written_column>* cells_ptr = cells && !cells->empty() ? cells.get() : nullptr;
+        world.capture_scripts = [context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr, cells, cells_ptr](
+                                    std::vector<uint8_t>& out) {
+            return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo, queue_ptr, hold_ptr, cells_ptr);
         };
         world.restore_scripts = [o, context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr](
                                     const std::vector<uint8_t>& bytes, uint32_t anchor) {
@@ -220,6 +241,9 @@ namespace bmmo::session {
         world.diff_scripts = [o, context, selection](const std::vector<uint8_t>& a, const std::vector<uint8_t>& c, bool& logical) {
             const auto d = bmmo::game::script_replay::diff(context, *selection, a, c);
             logical = d.logical;
+            // Step RK2: equal but for the written-cell section (decision Q4,
+            // never compared): the empty answer, not a mismatch (rollback.hpp).
+            if (!d.any) return std::string();
             return d.where + " (" + std::to_string(d.logical_count) + " logical, " + std::to_string(d.float_count) + " float)"
                  + (d.logical && o.diff_detail ? " :: " + d.detail : std::string());
         };

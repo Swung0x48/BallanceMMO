@@ -127,6 +127,15 @@ namespace bmmo::game {
         std::function<void(std::vector<uint8_t>& out)> capture;
         std::function<bool(const uint8_t* data, size_t size, std::string& error)> restore;
     };
+    // Step RK2 (docs/record-format-gaps-design.md 11 Q4, the user's decision
+    // of 2026-10-24: "the written cells are recorded with the other cells"):
+    // one column of the record's written-cell section - every row of a
+    // constant int / float column a selected script writes
+    // (game/array_reads.hpp written_cells decides which).
+    struct written_column {
+        CK_ID array = 0;
+        int column = -1;
+    };
 
     class script_replay {
     public:
@@ -178,11 +187,25 @@ namespace bmmo::game {
         // Written only when the binding passes the hold hooks (a world
         // under WORLD_PROXIMITY_UNION), so every other record stays v2-v5
         // byte for byte.  A v6 word with an unknown bit is refused.
+        // Bit 3 (step RK2, record-format-gaps design 11 Q4): the written-cell
+        // section, after the hold section - every row of each column the
+        // binding names (game/array_reads.hpp written_cells: the int / float
+        // columns a selected script writes, today the fans' sound-slot
+        // column P_Modul18_ActiveSounds[*][1]):
+        //   u16 columns, per column: u32 array id (this process's), u32
+        //   column, u32 rows, rows x u32 value (the element's bytes)
+        // Written only when the binding passes the columns (a core host), so
+        // a record without them is the record it was; a record with them is
+        // v6 even without the hold section.  Local only: the portable record
+        // (the wire, the journals) carries no such section, so a localized
+        // record has none and its restore keeps the live column.  The diff
+        // does not compare it (the decision: "no check compares it").
         static constexpr uint32_t kVersionSections = 6;
         static constexpr uint32_t kSectionTrafo = 1u << 0;
         static constexpr uint32_t kSectionQueue = 1u << 1;
         static constexpr uint32_t kSectionHold = 1u << 2;
-        static constexpr uint32_t kSectionsKnown = kSectionTrafo | kSectionQueue | kSectionHold;
+        static constexpr uint32_t kSectionCells = 1u << 3;
+        static constexpr uint32_t kSectionsKnown = kSectionTrafo | kSectionQueue | kSectionHold | kSectionCells;
         static bool known_version(uint32_t v) { return v >= kVersion && v <= kVersionSections; }
         static bool has_trafo(uint32_t v) { return v == kVersionTrafo || v == kVersionTrafoQueue; }
         static bool has_queue(uint32_t v) { return v == kVersionQueue || v == kVersionTrafoQueue; }
@@ -207,6 +230,87 @@ namespace bmmo::game {
             pos += static_cast<size_t>(frames) * 12;
             if (!get_u16(in, pos, names) || pos + static_cast<size_t>(names) * 4 > in.size()) return false;
             pos += static_cast<size_t>(names) * 4;
+            return true;
+        }
+        // The written-cell section in this process (step RK2), diagnostic
+        // only (as queue_stats): records captured with it and the columns
+        // and rows they carried; restores that wrote it back, the rows
+        // written and the columns left alone.  The headless client prints
+        // them in its cells: line, SimTool in its savestate-check summary.
+        struct written_cells_counters {
+            uint64_t captured = 0, captured_columns = 0, captured_rows = 0, restores = 0, rows = 0, skipped = 0;
+        };
+        static written_cells_counters& written_cells_stats() {
+            static written_cells_counters counters;
+            return counters;
+        }
+        // The written-cell section's extent (step RK2).
+        static bool skip_written(const std::vector<uint8_t>& in, size_t& pos) {
+            uint16_t columns = 0;
+            if (!get_u16(in, pos, columns)) return false;
+            for (uint16_t i = 0; i < columns; ++i) {
+                uint32_t array = 0, column = 0, rows = 0;
+                if (!get_u32(in, pos, array) || !get_u32(in, pos, column) || !get_u32(in, pos, rows)
+                        || pos + static_cast<size_t>(rows) * 4 > in.size())
+                    return false;
+                pos += static_cast<size_t>(rows) * 4;
+            }
+            return true;
+        }
+        // The written-cell section of the columns `cells` names, as they
+        // stand.  A column that is gone, or no longer int / float, is written
+        // with 0 rows (the restore then leaves it alone and counts it).
+        static void put_written(CKContext* context, const std::vector<written_column>& cells, std::vector<uint8_t>& out) {
+            put_u16(out, static_cast<uint16_t>(cells.size()));
+            ++written_cells_stats().captured;
+            written_cells_stats().captured_columns += cells.size();
+            for (const written_column& w: cells) {
+                auto* a = CKDataArray::Cast(context->GetObject(w.array));
+                const bool ok = a && w.column >= 0 && w.column < a->GetColumnCount()
+                             && (a->GetColumnType(w.column) == CKARRAYTYPE_INT || a->GetColumnType(w.column) == CKARRAYTYPE_FLOAT);
+                const int rows = ok ? a->GetRowCount() : 0;
+                put_u32(out, static_cast<uint32_t>(w.array));
+                put_u32(out, static_cast<uint32_t>(w.column));
+                put_u32(out, static_cast<uint32_t>(rows));
+                written_cells_stats().captured_rows += static_cast<uint64_t>(rows);
+                for (int r = 0; r < rows; ++r) {
+                    uint32_t value = 0;
+                    a->GetElementValue(r, w.column, &value);
+                    put_u32(out, value);
+                }
+            }
+        }
+        // The section back into the world (step RK2): a column whose array
+        // is gone, whose type changed or whose row count differs from the
+        // record's is left as it stands and counted (written_cells_skipped).
+        static bool restore_written(CKContext* context, const std::vector<uint8_t>& in, size_t pos, size_t end) {
+            uint16_t columns = 0;
+            if (!get_u16(in, pos, columns)) return false;
+            ++written_cells_stats().restores;
+            for (uint16_t i = 0; i < columns; ++i) {
+                uint32_t array = 0, column = 0, rows = 0;
+                if (!get_u32(in, pos, array) || !get_u32(in, pos, column) || !get_u32(in, pos, rows)
+                        || pos + static_cast<size_t>(rows) * 4 > end)
+                    return false;
+                auto* a = CKDataArray::Cast(context->GetObject(static_cast<CK_ID>(array)));
+                const int c = static_cast<int>(column);
+                const bool ok = a && c >= 0 && c < a->GetColumnCount() && rows > 0
+                             && (a->GetColumnType(c) == CKARRAYTYPE_INT || a->GetColumnType(c) == CKARRAYTYPE_FLOAT)
+                             && a->GetRowCount() == static_cast<int>(rows);
+                if (!ok) {
+                    ++last_restore().written_cells_skipped;
+                    ++written_cells_stats().skipped;
+                    pos += static_cast<size_t>(rows) * 4;
+                    continue;
+                }
+                for (uint32_t r = 0; r < rows; ++r) {
+                    uint32_t value = 0;
+                    get_u32(in, pos, value);
+                    a->SetElementValue(static_cast<int>(r), c, &value, sizeof(value));
+                }
+                last_restore().written_cells_rows += rows;
+                written_cells_stats().rows += rows;
+            }
             return true;
         }
         // The queue section's counters (the core report's cbq field).
@@ -332,6 +436,9 @@ namespace bmmo::game {
         struct restore_counters {
             uint32_t joints_reset = 0, joints_missing = 0, links_rearmed = 0, links_unrestorable = 0, links_live_pending = 0;
             uint32_t cells_written = 0;
+            // Step RK2: the written-cell section's rows written back, and its
+            // columns left alone (array gone, type or row count changed).
+            uint32_t written_cells_rows = 0, written_cells_skipped = 0;
             uint32_t joints_released = 0;   // handles nulled because the rollback destroyed their body (release_joints)
             uint32_t trafo_built = 0;       // trafo scripts the record did not list, put to their set's built state (v3)
             uint32_t strings_resized = 0;   // string parameters written back at another length (step RO1, resize_strings)
@@ -1003,7 +1110,7 @@ namespace bmmo::game {
         // byte for byte.
         static bool capture(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
                             std::vector<uint8_t>& out, const trafo_part* trafo = nullptr, const queue_hooks* queue = nullptr,
-                            const hold_hooks* hold = nullptr) {
+                            const hold_hooks* hold = nullptr, const std::vector<written_column>* cells = nullptr) {
             out.clear();
             if (!context) return false;
             // Sized like this thread's previous record (a tick's scripts are
@@ -1019,10 +1126,12 @@ namespace bmmo::game {
             const bool v3 = trafo && !trafo->empty();
             const bool with_queue = queue && queue->capture;
             const bool with_hold = hold && hold->capture;   // step G3: record v6
+            const bool with_cells = cells && !cells->empty();   // step RK2: record v6
             put_u32(out, kMagic);
-            if (with_hold) {
+            if (with_hold || with_cells) {
                 put_u32(out, kVersionSections);
-                put_u32(out, (v3 ? kSectionTrafo : 0u) | (with_queue ? kSectionQueue : 0u) | kSectionHold);
+                put_u32(out, (v3 ? kSectionTrafo : 0u) | (with_queue ? kSectionQueue : 0u) | (with_hold ? kSectionHold : 0u)
+                                 | (with_cells ? kSectionCells : 0u));
             } else {
                 put_u32(out, with_queue ? (v3 ? kVersionTrafoQueue : kVersionQueue) : (v3 ? kVersionTrafo : kVersion));
             }
@@ -1113,6 +1222,8 @@ namespace bmmo::game {
                 if (!skip_hold(section, check) || check != section.size()) return false;
                 out.insert(out.end(), section.begin(), section.end());
             }
+            // Step RK2: the written-cell section (decision Q4).
+            if (with_cells) put_written(context, *cells, out);
             return true;
         }
 
@@ -1308,6 +1419,10 @@ namespace bmmo::game {
             const size_t hold_at = pos;
             if ((sections & kSectionHold) && !skip_hold(in, pos)) return fail(error, "truncated proximity hold section");
             const size_t hold_end = pos;
+            // Step RK2: the written-cell section (decision Q4), written back
+            // below with the three cells' rule (replay_activation).
+            const size_t written_at = pos;
+            if ((sections & kSectionCells) && !skip_written(in, pos)) return fail(error, "truncated written-cell section");
             if (pos != in.size()) return fail(error, "trailing bytes");
             // The frames and the by-name cells back at the anchor (design
             // 4.2): a tick of the window without a candidate reads the hold.
@@ -1316,6 +1431,8 @@ namespace bmmo::game {
                 if (!hold->restore(in.data() + hold_at, hold_end - hold_at, why))
                     return fail(error, ("proximity hold: " + why).c_str());
             }
+            if ((sections & kSectionCells) && replay_activation && !restore_written(context, in, written_at, pos))
+                return fail(error, "written-cell section");
             if (trafo && !trafo->empty()) {
                 std::vector<uint32_t> selected;
                 for (CK_ID id: trafo->scripts) selected.push_back(static_cast<uint32_t>(id));
@@ -1528,6 +1645,9 @@ namespace bmmo::game {
             std::string where;   // first difference: "<script> / <block>: <field>"
             std::string detail;  // every logical difference, up to a dozen, for a trace
             int logical_count = 0, float_count = 0;
+            // Step RK2: where each record's body starts (after its header)
+            // and its written-cell section starts (its size when it has none).
+            size_t body_a = 0, body_b = 0, cells_a = 0, cells_b = 0;
             void note(const std::string& what) {
                 if (logical_count > 12) return;
                 detail += (detail.empty() ? "" : "; ") + what;
@@ -1544,6 +1664,14 @@ namespace bmmo::game {
             bool complete = false;
             difference d = diff_walk(context, sel, a, b, masks, complete);
             if (masks && complete && d.logical_count == 0 && d.float_count == 0 && d.where.empty()) d.any = false;
+            // Step RK2 (decision Q4, "no check compares it"): two records
+            // equal but for their written-cell sections (and the header words
+            // the section changes) are equal.
+            if (d.any && complete && d.logical_count == 0 && d.float_count == 0 && d.where.empty()
+                    && d.cells_a - d.body_a == d.cells_b - d.body_b
+                    && std::equal(a.begin() + static_cast<std::ptrdiff_t>(d.body_a), a.begin() + static_cast<std::ptrdiff_t>(d.cells_a),
+                                  b.begin() + static_cast<std::ptrdiff_t>(d.body_b)))
+                d.any = false;
             return d;
         }
         static difference diff_walk(CKContext* context, const selection& sel, const std::vector<uint8_t>& a,
@@ -1557,10 +1685,17 @@ namespace bmmo::game {
             uint32_t ma = 0, mb = 0, va = 0, vb = 0;
             uint32_t sa = 0, sb = 0;
             if (!get_u32(a, pa, ma) || !get_u32(b, pb, mb) || !get_u32(a, pa, va) || !get_u32(b, pb, vb)
-                    || ma != mb || va != vb || !read_sections(a, pa, va, sa) || !read_sections(b, pb, vb, sb) || sa != sb) {
+                    || !read_sections(a, pa, va, sa) || !read_sections(b, pb, vb, sb) || ma != mb
+                    || (sa & ~kSectionCells) != (sb & ~kSectionCells)
+                    || (va != vb && !(sa & kSectionCells) == !(sb & kSectionCells))) {
+                // Step RK2: the written-cell section alone may differ (a
+                // localized record has none; a record with it is v6 where
+                // the other may be v2-v5): not a header difference.
                 d.logical = true; ++d.logical_count; d.where = "header";
                 return d;
             }
+            d.body_a = pa;
+            d.body_b = pb;
             const bool v3 = (sa & kSectionTrafo) != 0;
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 uint32_t ca = 0, cb = 0;
@@ -1689,6 +1824,12 @@ namespace bmmo::game {
                     if (d.where.empty()) d.where = what;
                 }
             }
+            // Step RK2: the written-cell section is skipped, never compared
+            // (decision Q4: "no check compares it").
+            d.cells_a = pa;
+            d.cells_b = pb;
+            if ((sa & kSectionCells) && !skip_written(a, pa)) return d;
+            if ((sb & kSectionCells) && !skip_written(b, pb)) return d;
             complete = pa == a.size() && pb == b.size();
             return d;
         }

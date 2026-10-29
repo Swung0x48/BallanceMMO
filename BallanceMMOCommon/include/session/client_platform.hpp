@@ -136,6 +136,12 @@ namespace bmmo::session {
         // skipped / relatched), printed in the status line's probes section.
         uint64_t probes_skipped = 0;
         uint64_t probes_relatched = 0;
+        // Step RK2 (record-format-gaps design 2.2): the anchor's array-read
+        // census (game/array_reads.hpp anchor_log) - the unrecorded reads
+        // (-1: no census ran) and the record's written-cell columns -
+        // printed in the status line's array_reads section.
+        int unrecorded_array_reads = -1;
+        uint64_t written_cell_columns = 0;
     };
 
     // What a host's localize_scripts met (step A3; game/script_replay.hpp
