@@ -402,7 +402,7 @@ namespace bmmo::session {
         if (msg.world_options & WORLD_SESSION_CLOCK)
             logf("session %u: the Level 1 tutorial is switched off (world option session clock)%s", s.session_,
                  s.level_ != SESSION_CLOCK_TUTORIAL_LEVEL ? " - not Level 1: no tutorial to switch off"
-                 : platform_.tutorial_exit ? ": its exit is activated before frame 10 (frozen in frames 9..15 still)"
+                 : platform_.tutorial_exit ? ": its exit is activated before frame 10, its frame-9 freeze held by the host"
                  : ": Level 1, but this host cannot switch the tutorial off (no tutorial_exit) - it freezes this world at its own moments");
         s.world_frames_ = -1;
         s.tutorial_exit_pending_ = false;

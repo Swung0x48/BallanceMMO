@@ -377,7 +377,7 @@ namespace bmmo::sim {
         tutorial_exit_.clear();
         tutorial_exit_done_ = false;
         first_step_tick_ = -1;
-        if (options_.session_clock && options_.level == bmmo::game::kTutorialLevel) {
+        if (bmmo::session::session_clock_tutorial_off(options_.session_clock, options_.level)) {
             const std::string trouble = tutorial_exit_.resolve(context);
             if (trouble.empty())
                 log("world: the Level 1 tutorial is switched off at frame " + std::to_string(options_.tutorial_exit_frame)
@@ -385,6 +385,17 @@ namespace bmmo::sim {
             else
                 log("world: the Level 1 tutorial's exit was NOT found (" + trouble
                     + "): the tutorial freezes this world at its own moments");
+            // Step RK3H (the user, 2026-10-29: 'Hold frame-9 write'): the
+            // tutorial's first write (0, frame 9) held at the in-play factor
+            // from the anchor on, so this world never freezes before the exit
+            // takes in frame 16.  Once: nothing here hands it back.
+            const std::string hold_trouble = tutorial_hold_.apply(context);
+            if (hold_trouble.empty())
+                log("world: the Level 1 tutorial's frame-" + std::to_string(bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME)
+                    + " freeze is held: " + tutorial_hold_.where);
+            else
+                log("world: the Level 1 tutorial's frame-" + std::to_string(bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME)
+                    + " freeze was NOT held (" + hold_trouble + "): this world freezes from that frame until the exit takes");
         }
         {
             // Hex, like every other place these two are printed (the client's

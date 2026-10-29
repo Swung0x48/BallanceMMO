@@ -1741,6 +1741,9 @@ namespace {
                 // The chain's own [0][1] kept (step B2SX).
                 if (chain_cell_split_.keep(engine_->context()))
                     logf("the checkpoint chain's sector cell: its Set Cell handed back to IngameParameter was moved to the copy again");
+                // The tutorial's frame-9 hold kept (step RK3H).
+                if (tutorial_hold_.keep(engine_->context()))
+                    logf("the Level 1 tutorial's frame-9 hold: its input handed back was moved to the constant again");
             };
             p.hooks.after_rewinds = [this](uint32_t) { maybe_force_rollback(); };
             p.drive = [this](const std::string& entity, const bmmo::session::input_frame& frame, std::string& error) {
@@ -2237,6 +2240,10 @@ namespace {
             // The chain's own [0][1] the same way (step B2SX).
             if (!chain_cell_split_.restore(engine_->context()))
                 logf("the checkpoint chain's sector cell could not be handed back to IngameParameter; the copy stays");
+            // The tutorial's frame-9 hold the same way (step RK3H): base.cmo's
+            // Gameplay_Tutorial survives a level exit.
+            if (!tutorial_hold_.restore(engine_->context()))
+                logf("the Level 1 tutorial's frame-9 hold could not be handed back; its constant stays");
             sector_manager_id_ = 0;
             // Step T3: the previous session's sets went at its end; the
             // registry and its level reference start over (a reboot below
@@ -2430,6 +2437,20 @@ namespace {
                 else
                     logf("the Level 1 tutorial's exit was NOT found (%s): the tutorial freezes this world at its own moments",
                          trouble.c_str());
+                // Step RK3H (the user, 2026-10-29: 'Hold frame-9 write'): the
+                // tutorial's first write (0, frame 9) held at the in-play
+                // factor from this anchor on, so this world never freezes
+                // before the exit takes in frame 16.  Handed back at the next
+                // session's start (above), kept by the frame guard.
+                if (!tutorial_hold_.restore(engine_->context()))
+                    logf("the Level 1 tutorial's previous frame-9 hold could not be handed back; its constant stays");
+                const std::string hold_trouble = tutorial_hold_.apply(engine_->context());
+                if (hold_trouble.empty())
+                    logf("the Level 1 tutorial's frame-%d freeze is held: %s", bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME,
+                         tutorial_hold_.where.c_str());
+                else
+                    logf("the Level 1 tutorial's frame-%d freeze was NOT held (%s): this world freezes from that frame until "
+                         "the exit takes", bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME, hold_trouble.c_str());
             }
             if (args_.start_sector > 0) {
                 // Before the assignment: pending until the first assigned
@@ -4291,6 +4312,7 @@ namespace {
         std::vector<bmmo::game::deactivate_pin> deactivate_pins_;   // N2's pins (game/sector_deactivate_pin.hpp)
         bmmo::game::sector_cell_split chain_cell_split_;     // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)
         bmmo::game::tutorial_exit tutorial_exit_;            // step RK3: the Level 1 tutorial's exit event (found at the anchor)
+        bmmo::game::tutorial_factor_hold tutorial_hold_;     // step RK3H: its frame-9 write held (made at the anchor)
         uint32_t script_restore_logs_ = 0;
         uint32_t script_reset_logs_ = 0;
         std::map<CK_ID, uint32_t> script_reset_ticks_;        // the tick each script was last told to reset

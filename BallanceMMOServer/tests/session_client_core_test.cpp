@@ -7796,6 +7796,41 @@ namespace {
         static_assert(bmmo::session::tutorial_exit_due(bmmo::session::SESSION_CLOCK_TUTORIAL_EXIT_FRAME - 1));
     }
 
+    // Step RK3H (the user, 2026-10-29: 'Hold frame-9 write'): the one
+    // statement of the decision every world takes - the server's
+    // physics_world from its option, the client core's tutorial_off() from
+    // SessionStart - to switch the tutorial off (the exit) and hold its
+    // frame-9 write (tutorial_factor_hold, made at the anchor, so before the
+    // frame of the write and of the exit); the core's answer is the rule's
+    // on every level with and without the bit; and the protocol that carries
+    // the hold.
+    TEST(SessionClientCoreTutorial, TheFrameNineHoldRule) {
+        using bmmo::session::session_clock_tutorial_off;
+        EXPECT_TRUE(session_clock_tutorial_off(true, 1));
+        EXPECT_FALSE(session_clock_tutorial_off(false, 1));
+        for (int level = 2; level <= 13; ++level) EXPECT_FALSE(session_clock_tutorial_off(true, level)) << level;
+        static_assert(bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME == 9, "K0's --globals-trace: tick 8, frame 9");
+        static_assert(bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME < bmmo::session::SESSION_CLOCK_TUTORIAL_EXIT_FRAME);
+        // The hold is made at the anchor: no frame before the write's is a
+        // frame the exit is due in, so the exit never runs before it.
+        for (int64_t stepped = 0; stepped + 1 < bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME; ++stepped)
+            EXPECT_FALSE(bmmo::session::tutorial_exit_due(stepped)) << stepped;
+        static_assert(bmmo::session::PHYSICS_PROTOCOL_VERSION >= 22, "protocol 22 carries the hold");
+        for (const int level: {1, 2, 13})
+            for (const bool bit: {false, true}) {
+                flow_fake fake;
+                session_platform p = frame_platform(fake, false);
+                p.tutorial_exit = [](uint32_t, std::string&) { return true; };
+                session_client_core core(std::move(p), session_capabilities{});
+                state_of(core).own_id_ = 3;
+                auto start = start_message(9, 3);
+                start.map.level = level;
+                start.world_options = bit ? bmmo::session::WORLD_SESSION_CLOCK : 0u;
+                ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
+                EXPECT_EQ(core.tutorial_off(), session_clock_tutorial_off(bit, level)) << level << " " << bit;
+            }
+    }
+
     // U6 at the rules' level (session/member_lives.hpp): the server's join
     // order skips a retiring order; the late base is not before the leaving
     // horizon; a leave with a ball always stays through the queue.

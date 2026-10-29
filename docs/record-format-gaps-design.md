@@ -2,7 +2,8 @@
 
 Status: design, revision 2 (after two reviews; §10 lists every finding and
 what became of it). Steps K0 (49e2cc8), K1 (C3, step RK1) and K3 (C4 as
-option (c), step RK3) are built ("As built" notes at the end); K2 is not. Track C of the post-audit designs. It
+option (c), step RK3, with the frame-9 hold of step RK3H) are built ("As
+built" notes at the end); K2 is not. Track C of the post-audit designs. It
 covers audit items #13 and #14 of the rollback-coverage audit
 (`scratchpad/audit/rollback-coverage-audit.md` §1, §2 F9/F10; the user's order
 in §5 calls them F13/F14), and the gaps found while checking them, reported per
@@ -1182,8 +1183,9 @@ the headless client (base 27: 0 at 35, 2.0 at 42). What follows:
   of 901..907 at factor 0, so its world stays 7 ticks of physics behind the
   server's from then on. The size of that divergence was not measured: that
   run's server had the frame-numbering bug above, so the joiner imported a
-  frozen world. **This is the decision handed to the user** (the step's
-  report): accept it; or add to (c) a hold of the tutorial's factor writes
+  frozen world. **This was the decision handed to the user** (the step's
+  report; **closed 2026-10-29: the user chose 'Hold frame-9 write', built
+  as step RK3H below**): accept it; or add to (c) a hold of the tutorial's factor writes
   (§2.4's (a), or only the frame-9 0 write), so no world ever freezes; both
   depart from nothing built here. The review named one more, not
   investigated: stop Gameplay_Tutorial before its Init writes the frame-9
@@ -1241,3 +1243,154 @@ joiner's divergence, measured), H5 (the arena recipes with the bit: the
 wire check covers the bit-clear path; the bit is a no-op off L1, not run),
 R1's ESC during a chapter (no chapter runs), and a live run of the fixed
 server.
+
+## As built (step RK3H, 2026-10-29): the tutorial's frame-9 write held
+
+The user's answer to RK3's gate (2026-10-29, verbatim: 'Hold frame-9
+write'): keep RK3's exit at frame 10 as built and hold ONLY the tutorial's
+frame-9 time-factor 0 write, so no world ever freezes - not §2.4's hold of
+every tutorial write, not stopping Gameplay_Tutorial. Protocol **22** (the
+next free number after TRL's 21; a world without the hold would freeze),
+no journal version (the header's `world_options` carries the bit), no
+engine change (a CK parameter redirect: IVP and physics_RT untouched, no
+number taken; #22 stays free), no wire layout change.
+
+- **The block held.** `Gameplay_Tutorial / Init / Set Physics Globals`,
+  found the way RK3 finds the exit: the root script by name, its direct
+  child `Init` (the tutorial's start graph, `Gameplay_Tutorial.in0 ->
+  Init.in0`), and the one direct child of that graph whose prototype is
+  `Set Physics Globals` (refused when there are none or several) - #31475
+  in the headless level, #31783 retail. Its input 1 ("Physic Time Factor")
+  reads Init's local "Physic Time Factor" (0); the hold refuses unless that
+  value is 0 (so it names the freeze write and nothing else). That block is
+  the frame-9 writer: with only it held, the physics_RT writer trace
+  (`BMMO_TRACE_TIMEFACTOR`) shows Gameplay_Tutorial writing 2 in tick 8
+  where it wrote 0, and nothing else changes (S3 below).
+- **How.** `game/tutorial_exit.hpp` `tutorial_factor_hold` (CK API only,
+  next to RK3's `tutorial_exit`): input 1 is fed a fresh private
+  `CKParameterLocal` `BMMO_TutorialFactorHold` with `SetDirectSource`,
+  holding the in-play factor read (`GetValue(..., FALSE)`, no operation
+  run) from `Gameplay_Ingame / Init Ingame`'s one Set Physics Globals
+  (#25679 headless, #25987 retail; 2.0, the frame-2 write; refused when
+  missing or not positive). The original local is never written (the
+  propagation trap). Gravity (input 0) is untouched (`0,-20,0` there as in
+  play). The block still runs in frame 9 and its output still fires, so the
+  tutorial's flow up to the exit is unchanged: it writes 2.0 over 2.0
+  (`CKIpionManager::SetTimeFactor` / `SetGravity` only store the values).
+  `keep` re-holds an input handed back to its old source; `restore` hands it
+  back (`ShareSourceWith` or `SetDirectSource` of the remembered source) and
+  destroys the constant, only when the object under that id still carries
+  the constant's name (the pattern of `sector_deactivate_pin.hpp`).
+- **When, and who decides.** The decision is stated once,
+  `entity/session.hpp` `session_clock_tutorial_off(bit, level)` (the core's
+  `tutorial_off()` and `physics_world` both call it; unit-tested). The hold
+  is made at the world's anchor, i.e. before its frame 1 counted as RK3
+  counts frames, in every world: the server's (`physics_world` beside the
+  exit's resolve, once - the world dies with its session), the headless
+  client's and the retail core host's (`session_client.cpp`, and
+  `core_host.cpp`'s file-scope `core_tutorial_hold`, beside the exit's
+  resolve, under `core.tutorial_off()`), a late joiner's at its own anchor.
+  Adapted from "the same frame everywhere": a redirect is state, not an
+  event, so it is made at the anchor rather than right before frame 9; it
+  is in force in every frame the write could run in, in every world.
+  `SESSION_CLOCK_TUTORIAL_FREEZE_FRAME = 9` names the frame of the write (a
+  static_assert keeps it before the exit frame). The client hosts keep it in
+  their frame guard (`script_guards`) and hand it back before the next
+  anchor's hold and at the session's end (retail `core_host_end_local`;
+  headless at the next session's start), since base.cmo's Gameplay_Tutorial
+  outlives a session. The legacy path gets nothing (refused since B9DX); no
+  BallanceMMOClient data member.
+- **Nothing else writes the factor later on Level 1 under the bit.** S3
+  (1800 ticks): the writers are Gameplay_Ingame (2, tick 1), Gameplay_
+  Refresh (2, tick 2), Gameplay_Tutorial / Init (2, held, tick 8) and the
+  exit's `Tut continue/exit` (2, tick 15) - one change after the anchor in
+  all (0.001 -> 0.002 at tick 1). Gameplay_Tutorial is no longer an active
+  root after the exit, so no chapter's `Physic on/off` can run.
+  Gameplay_Refresh's `Tutorial freeze/unfreeze` (#29832) writes only on
+  Level 1 (its `Test` on cell [0][0] == 1) when its column-12 cell is set,
+  0 or 2.0 by the Boolean its `Binary Switch` (#29809) reads (the
+  tutorial's freeze flag, which the tutorial's Init sets and the exit path
+  clears before its Set Cell `IngameParameter[0][3] = FALSE` and its
+  Deactivate Script - read from the graph dumps, not traced), so a Refresh
+  after frame 16 writes 2.0 or nothing. **Residual, a known limit of the
+  user's narrow choice ('Hold frame-9 write'):** a Gameplay_Refresh
+  activation inside frames 9..15 (a respawn or a pause resume within 7
+  frames of the level start; a retail ESC is host-local) would still write
+  0 in that world alone while the flag is set; no run triggers one (none
+  that early), not exercised. It predates RK3H (before it every world was
+  at 0 in those frames anyway). Queued as **RK3F** in `docs/roadmap.md` §4
+  item 6, to be measured with R1's ESC and put to the user if it shows -
+  not a re-decision here.
+- **A level reset (read from the graph dumps, not run; RK3's, not new).**
+  Gameplay_Tutorial is (re)activated by `Gameplay_Ingame / BallManager /
+  New Ball / activate Tutorial?` (#27646) on every new ball when
+  `CurrentLevel[0][0] == 1`, `CurrentLevel[0][12]` and
+  `IngameParameter[0][3]` are set. The exit path clears `[0][3]`, so a
+  respawn after the exit does not bring the tutorial back; `Init Ingame`
+  sets `[0][3]` again, so after a mid-session level reset (9.28) the next
+  new ball re-activates it. RK3's exit is once per anchor and would not
+  fire again (unless that reset re-anchors the core, not checked); the
+  hold persists (a redirect, kept by the frame guard), so that run's Init
+  writes 2.0, but its chapters' `Physic on/off` writes are not held (the
+  user's narrow choice) and could freeze that world - each world when its
+  own ball reaches a chapter point, so the worlds diverge. This contradicts
+  "nothing else writes the factor later on Level 1 under the bit" for a
+  session with a level reset; queued as its own step **RK3R** in
+  `docs/roadmap.md` §4 item 6 (re-fire the exit on every new ball under the
+  bit, or hold the chapter writes).
+- **Old journals.** A protocol-20/21 Level 1 journal under the bit, replayed
+  with this binary, gets the hold and diverges at its frame 9 by
+  construction (the RK3 runs' server journals; they are no longer a
+  pre-RK3H control). Left so on purpose: forward compatibility is
+  deliberately broken and server and clients are rebuilt together, so the
+  hold is not gated on the journal's protocol.
+
+**Checks (quick tier).** `BallanceMMOMessageTests` 644/644
+(`SessionClientCoreTutorial.TheFrameNineHoldRule`: the rule on L1 / L2-L13
+with and without the bit, the core's `tutorial_off()` equal to it on L1 /
+L2 / L13, the freeze frame before the exit frame and no exit due before
+it, protocol >= 22; `SessionStartMsg.SessionClockBitRoundTrips` at 22;
+`tutorial_factor_hold`'s `apply` / `keep` / `restore` have no unit test of
+their own - they need a CK context, which the message-test target does not
+have - and are covered by S3, S4 and the two live runs below);
+GCC 30/30; x64 BUILD-OK, x86 CLIENT-BUILD-OK, Arch ARCH-BUILD-OK. Wire
+check rTRL -> rRK3H on `core_ref_s11` (`--accept-protocol 18`): every send
+equal but SessionReady (tick 0, 75 bytes; its protocol field 21 -> 22, the
+send RK3 attributed the same way) in all 12 clients, 12/12 journals
+IDENTICAL (the arena and L8 recipes have no tutorial). SimTool S3
+(`--level 1 --drop P_Ball_Wood_MF 0 --globals-trace`,
+`BMMO_TRACE_TIMEFACTOR=1`, `.local-tools/work/RK3H/s3s4.sh`): the bit with
+the hold, exit at frame 10 (default), 16 and 20: one change after the
+anchor (tick 1), no factor 0 in 1800 ticks, the exit's 2.0 still in frame
+16 (tick 15; tick 19 for 20), Gameplay_Tutorial not an active root after
+it; controls: rTRL's binary with the bit 0 at tick 8 -> 2.0 at 15, the bit
+clear 0 at 8 -> 2.0 at 1664. S4 across the former freeze (`--savestate-check
+--frames --drop-settle 3 --ticks 30 --rounds 40 --max-depth 12
+--session-recipe`, window ticks 4..33, frames 8..17 inside it): seed 1
+40/40, seed 2 40/40 (RK3: 38/40, the harness's re-made world skipping the
+freeze - moot now). Live headless L1 (`maps/arena-test/rk3h_h3`, the Arch
+server of this tree, snapshots off, 4 clients, client 3 joining with base
+898, 150 ms each way, `.local-tools/work/RK3H/live_h3.sh`): every client and
+the server log the hold and the exit at base + 9; the only factor change in
+the first 64 frames of every client is 0.001 -> 0.002 at frame 2 (the
+joiner included, at 899); the server's replay 3396/3396; VERDICT PASS. The
+joiner is not behind: its import re-steps 897 -> 927 from the server's
+state, and from tick 928 on every mechanism and prop body equals the
+server's at all 720 compared checkpoints (0.0000 m), and so does its own
+ball (331 checkpoints, 0.0000 m) - as on the founders (their mechanisms
+0.0000 m too); what differs are mirror balls from 1028 / 1032 on (2-8 m),
+the queued snapshots-off mirror residual, the same on every founder
+(`.local-tools/work/RK3H/mech_max.py`, `ball_max.py`). Before the import
+(904..926) the joiner's own level props settle locally (P_Ball_Paper_MF*
+1.2 m), which the import replaces. Retail L1 (`scripts/retail/rk3h_retail`,
+two copies, core on, snapshots off, `.local-tools/work/RK3/rk3_retail.py`):
+both hosts held #31783 and activated the exit at tick 17 (base 8 + 9);
+their only core factor change 0.001 -> 0.002 at frame 2; the writer trace
+of the session shows Gameplay_Tutorial writing 2 twice (frame 9 held, frame
+16 the exit) where RK3's run wrote 0 then 2; `frozen=0`, `resyncs=0`, 1764
+frames played; the server journal replays 1764/1764 with this SimTool.
+
+**Deferred** (the final verification): H2, H5, R1's ESC and RK3's (e) as RK3
+left them; a Gameplay_Refresh activation inside frames 9..15 (above;
+queued as RK3F); a Level 1 level reset after the exit (above: the tutorial
+re-activated, the exit not re-fired; queued as RK3R).

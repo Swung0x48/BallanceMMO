@@ -1455,12 +1455,14 @@ namespace bmmo::session {
         }
         // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)):
         // whether this session switches the Level 1 tutorial off - the
-        // world option WORLD_SESSION_CLOCK on Level 1.  The host finds the
-        // tutorial's exit at its anchor when it is set; the core activates it
-        // (platform tutorial_exit) before frame
+        // world option WORLD_SESSION_CLOCK on Level 1 (the shared rule,
+        // entity/session.hpp session_clock_tutorial_off).  The host finds the
+        // tutorial's exit at its anchor when it is set, and holds the
+        // tutorial's frame-9 write there (step RK3H, tutorial_factor_hold);
+        // the core activates the exit (platform tutorial_exit) before frame
         // SESSION_CLOCK_TUTORIAL_EXIT_FRAME.
         bool tutorial_off() const {
-            return (s.world_options_ & WORLD_SESSION_CLOCK) != 0 && s.level_ == SESSION_CLOCK_TUTORIAL_LEVEL;
+            return session_clock_tutorial_off((s.world_options_ & WORLD_SESSION_CLOCK) != 0, s.level_);
         }
         uint64_t probe_two_bodies() const { return s.probe_two_bodies_; }
         uint64_t revived_local() const { return s.revived_local_; }

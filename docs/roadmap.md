@@ -299,7 +299,10 @@ numbers 1-10 are unchanged.
      fails its premise (L1 `--drop-settle 3 --session-recipe`, seed 2:
      rounds e = 6 chained and e = 16, named round 9:7 too). Fix: the
      re-make puts each re-run frame's recorded globals (C3), or the harness
-     rewinds Gameplay_Tutorial with the selection.
+     rewinds Gameplay_Tutorial with the selection. **Moot since step RK3H**
+     (the frame-9 freeze is held, no world freezes): the same command, seed
+     2, passes 40/40 (seed 1 40/40); the harness gap stays for any other
+     script-driven globals write a re-made world re-runs, none known.
    - **Resync T2**: the trafo scripts out of `keep_local`
      (`resync-and-sector-timing-design.md` §8), unless TR3b's deferred H3b
      and a forced resync during a piece life show T3 covers it.
@@ -943,10 +946,31 @@ numbers 1-10 are unchanged.
    switched off** (**built, step RK3**, protocol 20, world option
    `WORLD_SESSION_CLOCK`: every world activates the tutorial's exit before
    frame 10 after its anchor; measured: the exit lands in frame 16, so every
-   world is frozen at frames 9..15 - founders and the server at the same
+   world was frozen at frames 9..15 - founders and the server at the same
    ticks, a late joiner alone (its import re-steps its own frozen ticks);
-   whether to close that with a hold of the tutorial's factor writes waits
-   for the user; the design's "As built (step RK3)"); K2, the ActiveBall
+   the design's "As built (step RK3)"), **closed by step RK3H** (the user,
+   2026-10-29: 'Hold frame-9 write'; protocol 22): every world holds the
+   tutorial's frame-9 factor-0 write (Gameplay_Tutorial / Init's Set
+   Physics Globals) at the in-play 2.0 from its anchor on, so no world
+   freezes; live L1 with a late joiner at 150 ms: no factor-0 anywhere, the
+   joiner's own ball and every mechanism exact against the server from its
+   import on (the design's "As built (step RK3H)"). **Open, queued by
+   RK3H** (two writers the narrow hold leaves, both read from the graph
+   dumps, neither run): **RK3R**, a Level 1 level reset after the exit
+   (9.28's mid-session reset): `Init Ingame` sets `IngameParameter[0][3]`
+   again, the next new ball's `activate Tutorial?` (#27646) re-activates
+   Gameplay_Tutorial, RK3's exit fires once per anchor and does not fire
+   again, so the tutorial's chapter `Physic on/off` writes run and freeze
+   each world when its own ball reaches a chapter point - the worlds
+   diverge (RK3's gap; options: re-fire the exit on every new ball under
+   the bit, or hold the chapter writes - a choice for the user if the
+   design does not settle it); **RK3F**, a Gameplay_Refresh activation
+   (a respawn or a pause resume; a retail ESC is host-local) inside frames
+   9..15 after the anchor writes 0 through `Tutorial freeze/unfreeze`
+   (#29832) while the tutorial's freeze flag is set, freezing that world
+   alone - a known limit of the user's 'Hold frame-9 write' (it predates
+   RK3H: before it every world was at 0 in those frames), to be measured
+   with R1's ESC and put to the user if it shows; K2, the ActiveBall
    census, after world agreement's G3 / G4 (it must also decide the sector
    manager's `PH[*][4]` read that K0 found, written in play only on
    extra-point rows).
@@ -1281,6 +1305,27 @@ numbers 1-10 are unchanged.
      `BallanceMMOSim`; the shared rule `tutorial_exit_due` is unit-tested,
      the server's count is guarded by the replay log line "exit activated
      before frame 10 (tick base+9)" of a Level 1 journal with base != 0).
+     RK3H (below) ran (a).
+   - RK3H (the Level 1 tutorial's frame-9 freeze held, the user's 'Hold
+     frame-9 write', quick tier, 2026-10-29; ran: x64, x86, Arch, tests
+     644/644, GCC 30/30, the wire check rTRL -> rRK3H on `core_ref_s11`
+     (SessionReady's protocol field only, journals IDENTICAL), SimTool S3
+     (no factor-0 write in 1800 ticks, exit at frame 16 / 20, the tutorial
+     inactive after it) and S4 (seeds 1 and 2, 40/40 each), one headless L1
+     run (4 clients, a joiner, 150 ms, snapshots off) and one retail L1 run
+     (two copies, core on, snapshots off)): (a) H2, H5, R1's ESC, RK3's (e)
+     as RK3 left them; (b) a Gameplay_Refresh activation inside frames
+     9..15 (a respawn or a pause resume that early) still writes 0 while
+     the tutorial's freeze flag is set - the narrow hold does not cover it,
+     not exercised (no trigger that early in any run; queued as RK3F in
+     item 6); (c) the old
+     (protocol 20/21) Level 1 journals replay with the hold and diverge at
+     their frame 9 by construction; (d) a Level 1 level reset after the
+     exit: `Init Ingame` sets `IngameParameter[0][3]` again and the next new
+     ball's `activate Tutorial?` re-activates Gameplay_Tutorial, while RK3's
+     exit fires once per anchor - its Init write stays held, its chapters
+     could freeze that world (RK3's, read from the dumps, not run; queued
+     as RK3R in item 6).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

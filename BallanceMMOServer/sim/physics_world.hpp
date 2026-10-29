@@ -544,6 +544,10 @@ namespace bmmo::sim {
         // WORLD_SESSION_CLOCK), and whether tick() activated it - once, never
         // again after a step-state restore (the exit is live-only).
         bmmo::game::tutorial_exit tutorial_exit_;
+        // Step RK3H: the tutorial's frame-9 write held at the in-play factor
+        // (made at the anchor; this world dies with its session and never
+        // hands it back).
+        bmmo::game::tutorial_factor_hold tutorial_hold_;
         bool tutorial_exit_done_ = false;
         // The tick index of the world's first step after its anchor (-1:
         // none yet): the frame count is tick_ - first_step_tick_ + 1, so a

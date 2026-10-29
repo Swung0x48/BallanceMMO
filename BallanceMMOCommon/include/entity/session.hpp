@@ -141,9 +141,9 @@ namespace bmmo::session {
     //      take before frame 16: every world is still frozen in its frames
     //      9..15 (the tutorial's first 0), at the same session ticks for the
     //      founders, at its own for a late joiner (record-format-gaps-
-    //      design.md, As built (step RK3); a decision with the user).  No message
-    //      layout changed; the journal header's world_options carries the
-    //      bit (no journal version of its own).
+    //      design.md, As built (step RK3); a decision with the user, closed
+    //      by protocol 22).  No message layout changed; the journal header's
+    //      world_options carries the bit (no journal version of its own).
     //  21  trafo piece sets keyed by (player, life) (step TRL; the user,
     //      2026-10-29: 'Key by life, no resume'): every world builds a set
     //      per life of a member (a rejoin's new life never inherits its old
@@ -155,7 +155,18 @@ namespace bmmo::session {
     //      trailing u16 per entry after the ledger: a state without it reads
     //      as life 1); the server's trafo acceptance is per (player, life,
     //      type).  Journal v9.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 21;
+    //  22  the Level 1 tutorial's frame-9 freeze held (step RK3H; the user,
+    //      2026-10-29: 'Hold frame-9 write'): under WORLD_SESSION_CLOCK on
+    //      Level 1 every world also holds the tutorial's first time-factor
+    //      write (Gameplay_Tutorial / Init's Set Physics Globals, 0 in frame
+    //      9) at the in-play 2.0 from its anchor on
+    //      (game/tutorial_exit.hpp tutorial_factor_hold), so no world
+    //      freezes in its frames 9..15 any more; a world without the hold
+    //      would, hence the number.  No message layout changed; no journal
+    //      version (the header's world_options carries the bit; a journal
+    //      of protocol 20/21 under the bit replays with the hold and
+    //      diverges at its frame 9 by construction).
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 22;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -228,21 +239,21 @@ namespace bmmo::session {
     // config physics.player_mechanisms (default on).
     constexpr uint32_t WORLD_PLAYER_MECHANISMS = 1u << 4;
     // WORLD_SESSION_CLOCK (docs/record-format-gaps-design.md 2.4, 5, 8 row
-    // K3 = C4; step RK3, protocol 20): the Level 1 tutorial switched off in
-    // every world.  The design meant the bit to make the time factor of
-    // every world a function of the session's inputs alone; as built it is
-    // not quite: the exit takes only in frame 16, so every world is frozen
-    // in its frames 9..15 after its anchor - the founders and the server at
-    // the same session ticks, a late joiner at its own (its world ends 7
-    // ticks of physics behind the server's; a decision with the user, see
-    // the design's As built (step RK3)).  Built as option (c) of the
-    // design's 11 Q1 (the user's decision of 2026-10-24), not 2.4's hold:
-    // on Level 1 every world - the server's, the headless client's, the
-    // retail core host's - activates the tutorial's exit event right before
-    // frame 10 after its own anchor, counted in world steps
+    // K3 = C4; step RK3, protocol 20; step RK3H, protocol 22): the Level 1
+    // tutorial switched off in every world, and the time factor of every
+    // world a function of the session's inputs alone.  Built as option (c)
+    // of the design's 11 Q1 (the user's decision of 2026-10-24), not 2.4's
+    // hold: on Level 1 every world - the server's, the headless client's,
+    // the retail core host's - activates the tutorial's exit event right
+    // before frame 10 after its own anchor, counted in world steps
     // (game/tutorial_exit.hpp: the main branch's edit_Gameplay_Tutorial), so
-    // the tutorial is off in sessions.  Other levels: no effect.  The
-    // server's config physics.session_clock (default on).
+    // the tutorial is off in sessions.  The exit takes only in frame 16, and
+    // the tutorial's own first write (0, frame 9) froze every world in its
+    // frames 9..15 (RK3's gate); since step RK3H (the user, 2026-10-29:
+    // 'Hold frame-9 write') that one write is held at the in-play 2.0 from
+    // each world's anchor on (tutorial_factor_hold), so no world freezes.
+    // Other levels: no effect.  The server's config physics.session_clock
+    // (default on).
     constexpr uint32_t WORLD_SESSION_CLOCK = 1u << 3;
     // The level the tutorial runs on, and the frame (1-based: world steps
     // since the anchor, the first step after it is frame 1) right before
@@ -253,6 +264,23 @@ namespace bmmo::session {
     // (the server's) decide when, from these.
     constexpr int SESSION_CLOCK_TUTORIAL_LEVEL = 1;
     constexpr int SESSION_CLOCK_TUTORIAL_EXIT_FRAME = 10;
+    // Step RK3H: the frame whose behaviour pass runs the tutorial's first
+    // time-factor write (Gameplay_Tutorial / Init, 0; K0's --globals-trace,
+    // tick 8) - the write every world holds at the in-play factor from its
+    // anchor on (game/tutorial_exit.hpp tutorial_factor_hold), before the
+    // exit, which takes in frame 16.
+    constexpr int SESSION_CLOCK_TUTORIAL_FREEZE_FRAME = 9;
+    static_assert(SESSION_CLOCK_TUTORIAL_FREEZE_FRAME >= 1
+                  && SESSION_CLOCK_TUTORIAL_FREEZE_FRAME < SESSION_CLOCK_TUTORIAL_EXIT_FRAME,
+                  "the hold is made at the anchor, before frame 1, and covers the write the exit cannot pre-empt");
+    // The one statement of the decision, for every world (the client core's
+    // tutorial_off() and the server's physics_world): a world switches the
+    // Level 1 tutorial off - its exit before frame 10, its frame-9 write
+    // held from the anchor - when the session carries WORLD_SESSION_CLOCK
+    // and plays Level 1.
+    constexpr bool session_clock_tutorial_off(bool session_clock, int level) {
+        return session_clock && level == SESSION_CLOCK_TUTORIAL_LEVEL;
+    }
     // The one statement of the timing rule, for every world (the client
     // core's pre_step and the server's physics_world::tick): the exit is due
     // in the frame whose world has stepped `frames_stepped` times since its

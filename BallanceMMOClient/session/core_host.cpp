@@ -86,6 +86,12 @@ namespace {
     // Level 1 tutorial's exit event, found at the core session's anchor and
     // activated by the core before frame 10 (platform tutorial_exit).
     bmmo::game::tutorial_exit core_tutorial_exit;
+    // Step RK3H (the user, 2026-10-29: 'Hold frame-9 write'): the tutorial's
+    // first time-factor write (0, frame 9) held at the in-play factor from
+    // the anchor on; kept by the frame guard, handed back at the session's
+    // end and before the next anchor's hold (base.cmo's Gameplay_Tutorial
+    // outlives the session).  File scope: BallanceMMOClient keeps its layout.
+    bmmo::game::tutorial_factor_hold core_tutorial_hold;
 }
 
 
@@ -1797,6 +1803,9 @@ void BallanceMMOClient::core_host_anchor() {
     // Level 1 tutorial's exit event, found now; the core activates it before
     // frame 10 (platform tutorial_exit).
     core_tutorial_exit.clear();
+    if (!core_tutorial_hold.restore(m_bml->GetCKContext()))   // step RK3H: a previous anchor's hold
+        logger_->Warn("Physics session: the Level 1 tutorial's previous frame-9 hold could not be handed back; its "
+                      "constant stays");
     if (core.tutorial_off()) {
         const std::string trouble = core_tutorial_exit.resolve(m_bml->GetCKContext());
         if (trouble.empty())
@@ -1805,6 +1814,18 @@ void BallanceMMOClient::core_host_anchor() {
         else
             logger_->Error("Physics session: the Level 1 tutorial's exit was NOT found (%s): the tutorial freezes this "
                            "world at its own moments", trouble.c_str());
+        // Step RK3H (the user, 2026-10-29: 'Hold frame-9 write'): the
+        // tutorial's first write (0, frame 9) held at the in-play factor from
+        // this anchor on, so this world never freezes before the exit takes
+        // in frame 16.
+        const std::string hold_trouble = core_tutorial_hold.apply(m_bml->GetCKContext());
+        if (hold_trouble.empty())
+            logger_->Info("Physics session: the Level 1 tutorial's frame-%d freeze is held: %s",
+                          bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME, core_tutorial_hold.where.c_str());
+        else
+            logger_->Error("Physics session: the Level 1 tutorial's frame-%d freeze was NOT held (%s): this world "
+                           "freezes from that frame until the exit takes", bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME,
+                           hold_trouble.c_str());
     }
     {
         const int restored = level_sequencers_.restore(m_bml->GetCKContext());
@@ -2064,6 +2085,8 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     if (!core_chain_cell.restore(m_bml->GetCKContext()))   // step B2SX
         logger_->Warn("Physics session: the checkpoint chain's sector cell could not be handed back to IngameParameter; "
                       "the session's copy is left in place");
+    if (!core_tutorial_hold.restore(m_bml->GetCKContext()))   // step RK3H
+        logger_->Warn("Physics session: the Level 1 tutorial's frame-9 hold could not be handed back; its constant stays");
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
     const uint32_t session = host.session;
     logger_->Info("Physics session: record sources (R2): %llu frame(s) whose NAV_ACTIVE (the leaves) differs from the BML "
@@ -2439,6 +2462,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         if (core_chain_cell.keep(m_bml->GetCKContext()))   // step B2SX
             logger_->Info("Physics session: the checkpoint chain's sector cell: its Set Cell handed back to "
                           "IngameParameter was moved to the copy again");
+        if (core_tutorial_hold.keep(m_bml->GetCKContext()))   // step RK3H
+            logger_->Info("Physics session: the Level 1 tutorial's frame-9 hold: its input handed back was moved to the "
+                          "constant again");
     };
 
     // ---- writing the world ----
