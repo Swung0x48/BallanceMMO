@@ -3670,11 +3670,38 @@ namespace {
         binding_options.savestate = !legacy;
         binding_options.savestate_flags = bmmo::physics::SAVESTATE_STRICT;
         binding_options.physics_globals = true;   // C3 (step RK1): the clients' rule, as bind_session_world sets it
+        // Every selected script whose owner the behaviour manager holds in its
+        // pending table or list (state no restore writes back): S2's
+        // "owners held live" reading, and step FX1's after the restore.
+        const auto owners_held = [&]() {
+            CKBehaviorManager* bm = context->GetBehaviorManager();
+            std::string held;
+            for (CK_ID id: scripts.scripts) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+                if (!owner || !bm) continue;
+                int pending = 0;
+                for (auto it = bm->m_BeObjectNextFrame.Begin(); it != bm->m_BeObjectNextFrame.End(); ++it)
+                    if (it.GetKey() == owner->GetID()) { pending = *it; break; }
+                bool listed = false;
+                for (int i = 0; i < bm->m_BeObjects.Size(); ++i)
+                    listed = listed || bm->m_BeObjects[i] == static_cast<CKObject*>(owner);
+                if (!pending && !listed) continue;
+                held += std::string(held.empty() ? "" : ", ") + (beh->GetName() ? beh->GetName() : "?") + " pending="
+                      + std::to_string(pending) + " listed=" + (listed ? "1" : "0") + " flags=0x"
+                      + [&] { char b[16]; std::snprintf(b, sizeof(b), "%08lx", static_cast<unsigned long>(beh->GetFlags())); return std::string(b); }();
+            }
+            return held.empty() ? std::string("none") : held;
+        };
         binding_options.before_replayed_tick = [&](uint32_t tick) {
-            if (args.savestate_no_ledger) bmmo::game::script_replay::registrations().entries.clear();   // step RLM's control
+            if (args.savestate_no_ledger) bmmo::game::script_replay::registrations().clear();   // step RLM's control (FX1: its replayed adds too)
             if (tick == probe_tick) {
                 std::string probe_error;
                 if (!bmmo::physics::get_savestate(physics, restored_blob, probe_error)) capture_error = probe_error;
+                // Step FX1: the table as the restore left it (the earlier
+                // replays' pending adds taken back, its own registrations made).
+                if (args.verbose && frames)
+                    std::printf("  after the restore, before tick %u: owners held live: %s\n", tick, owners_held().c_str());
             }
             if (trafo) trafo->apply_inputs(tick, true);
             // Step S7: the server world's own pre-script work of a tick
@@ -4270,27 +4297,9 @@ namespace {
             // script whose owner the live world holds in the behaviour
             // manager's pending table or list before the rewind (state no
             // restore writes back).
-            if (args.verbose && frames) {
-                CKBehaviorManager* bm = context->GetBehaviorManager();
-                std::string held;
-                for (CK_ID id: scripts.scripts) {
-                    auto* beh = CKBehavior::Cast(context->GetObject(id));
-                    CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
-                    if (!owner || !bm) continue;
-                    int pending = 0;
-                    for (auto it = bm->m_BeObjectNextFrame.Begin(); it != bm->m_BeObjectNextFrame.End(); ++it)
-                        if (it.GetKey() == owner->GetID()) { pending = *it; break; }
-                    bool listed = false;
-                    for (int i = 0; i < bm->m_BeObjects.Size(); ++i)
-                        listed = listed || bm->m_BeObjects[i] == static_cast<CKObject*>(owner);
-                    if (!pending && !listed) continue;
-                    held += std::string(held.empty() ? "" : ", ") + (beh->GetName() ? beh->GetName() : "?") + " pending="
-                          + std::to_string(pending) + " listed=" + (listed ? "1" : "0") + " flags=0x"
-                          + [&] { char b[16]; std::snprintf(b, sizeof(b), "%08lx", static_cast<unsigned long>(beh->GetFlags())); return std::string(b); }();
-                }
+            if (args.verbose && frames)
                 std::printf("  round %zu: before the rewind to %u: owners held live: %s\n", r, t0 + static_cast<uint32_t>(a),
-                            held.empty() ? "none" : held.c_str());
-            }
+                            owners_held().c_str());
             // Step B2SX (Q5): a named round says whether the live world it
             // rewinds has a delayed link in flight (the re-arm's two cases).
             if (!args.savestate_explicit.empty() && manager_graph) {
@@ -4325,7 +4334,7 @@ namespace {
             // the end of the replay must not clamp one, nor its hold fail.
             const uint64_t clamped_before = bmmo::game::script_replay::queue_stats().unhold_clamped;
             const uint64_t hold_fail_before = bmmo::game::script_replay::queue_stats().hold_fail;
-            if (args.savestate_no_ledger) bmmo::game::script_replay::registrations().entries.clear();   // step RLM's control
+            if (args.savestate_no_ledger) bmmo::game::script_replay::registrations().clear();   // step RLM's control (FX1: its replayed adds too)
             if (args.joint_shuffle) {
                 const int shuffled = shuffle_joints(context, hooks.capture_joint ? hooks
                                                     : bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics)));
@@ -4723,6 +4732,15 @@ namespace {
                         static_cast<unsigned long long>(m.reregistered - membership_before.reregistered),
                         static_cast<unsigned long long>(m.unregistered - membership_before.unregistered),
                         static_cast<unsigned long long>(m.settled - membership_before.settled));
+            // Step FX1: the replayed frames' pending adds and the restores
+            // that took them back.
+            std::printf("savestate-check: replayed frames' pending adds (step FX1): made %llu (removes %llu), taken back by a"
+                        " restore %llu, kept %llu, not takeable %llu\n",
+                        static_cast<unsigned long long>(m.replayed_adds - membership_before.replayed_adds),
+                        static_cast<unsigned long long>(m.replayed_removes - membership_before.replayed_removes),
+                        static_cast<unsigned long long>(m.replayed_taken_back - membership_before.replayed_taken_back),
+                        static_cast<unsigned long long>(m.replayed_kept - membership_before.replayed_kept),
+                        static_cast<unsigned long long>(m.replayed_unrecoverable - membership_before.replayed_unrecoverable));
         }
         if (frames)
             std::printf("savestate-check: live script order (step RO1): %zu change(s) recorded, %llu replayed frame(s) ran"

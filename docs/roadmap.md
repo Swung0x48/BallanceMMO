@@ -918,7 +918,12 @@ numbers 1-10 are unchanged.
    owner's count before and after `execute_frame`) and the next restore
    of the same live frame takes those back with its own. Check: V4b's
    alive scene (`.local-tools/work/S2/sim_jobs.sh` v4b, seed 1) 50/50 and
-   its `--verbose` "owners held live" line at pending 0.
+   its `--verbose` "owners held live" line at pending 0. **Fixed at FULL
+   step FX1** (rollback-engine-gaps-design.md "As built (step FX1)"): the
+   ledger's `replayed` list, taken back by the next restore of the same
+   live frame; V4b alive 50/50, the after-restore reading at pending 0 in
+   50/50 rounds (the before-the-rewind line shows the last replay's adds,
+   left for the next live frame by RLM's rule).
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03

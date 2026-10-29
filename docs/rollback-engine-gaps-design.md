@@ -3161,3 +3161,126 @@ its blob entry (no live body) and the replay runs without the body over
 [A+1, D). No position effect in these runs (the mirrors were falling);
 a mirror dying in contact would differ. Pre-existing (S2 changed no session
 code). Queued in roadmap §4 item 4 with its check.
+
+## As built (step FX1, FULL close-out, 2026-10-29): the replayed frames' pending adds
+
+Roadmap §4 item 4, queued at S2's gate round (RLM's family; WGQ7-V4b's
+alive scene FAIL 8/50 on rS2g, `P_Modul_18_Particle Script` flags
+`4194304 vs 0`, i.e. DEACTIVATENEXTFRAME).
+
+- **Cause, confirmed.** A replayed frame's script activation
+  (`CKScene::Activate` from a replayed graph: +1 for the owner in
+  `m_BeObjectNextFrame`) is consumed only by a live frame's
+  `ManageObjectsActivity`; RLM's ledger took back only `reregister`'s
+  adds. A second restore of the same live frame (SimTool's chained rounds:
+  no live frame between rounds; a host frame with two rewinds) found the
+  earlier replays' adds in the table, so `owner_pending_add` admitted the
+  owner in replayed frames the live world ran without it, and
+  `execute_scripts` consumed a next-frame flag the live world kept. On rS2g
+  the owner's pending count before each rewind grows round after round
+  (0, 1, 1, 1, 2, 3 ... 16 by round 49); the 8 failing rounds are anchored
+  before the activation.
+- **The fix (`game/script_replay.hpp`, one copy for every world, all under
+  `live_membership`):** the registration ledger gets a second list,
+  `replayed` (owner, signed net). `execute_frame` reads the pending count of
+  every selected script's owner before the frame (`owner_pending_counts`,
+  one entry per owner) and, after `execute_scripts` and before
+  `settle_registrations` (so neither the restore's re-registrations nor
+  RLM's settle are counted), enters every change into the owner's net
+  (`note_replayed_adds`): a rise (`CKScene::Activate`) and a fall (a
+  replayed `CKScene::ActivateObject(FALSE)` -> `RemoveObjectNextFrame`,
+  CKScene.cpp:263) alike. `restore` takes the net back first
+  (`take_back_replayed_adds`, before `take_back_registrations` and
+  `reregister`, which judges the table): the owner's count is written as it
+  is minus the net (`pending_set`, no floor), except for an owner with a
+  script this restore does not write still active or to be activated
+  (`owner_keeps(..., &written)`: the v14 rule's kept live state or a script
+  outside the selection keeps the earlier replay's state, so the live frame
+  must run its owner - RLM's rule). The list belongs to the live frame like
+  RLM's entries (`registration_ledger::clear()` when the main tick count
+  moved), so no `ManageObjectsActivity` consumed the table between the
+  changes and their take-back, and a count at or below 0 is still the live
+  frame's own plus ours. The last replay before the next live frame is not
+  taken back at all: its adds reach that live frame. Taking them back at
+  the end of a replay would lose an activation a divergent replay made that
+  the live run did not (the owner would never join the list), and would
+  change every single-rewind replay. This is not the same as RLM's own
+  entries: `settle_registrations` gives back a restore's registration once
+  its script finished inside the replay, while a replayed activation's add
+  is never settled, so a script activated and finished inside the last
+  replay still lists its owner in the next live frame (which then executes
+  nothing for it and drops it - `CKBeObject::ExecuteBehaviors` ->
+  `RemoveObjectNextFrame` - one frame later). That is unchanged from before
+  FX1 and no check has shown an effect of it. Counters
+  `membership().replayed_adds`, `replayed_removes` (the rises and falls),
+  `replayed_taken_back`, `replayed_kept`, `replayed_unrecoverable` (the
+  last three in units of the net; not takeable = the owner's entry left the
+  table, its object deleted). SimTool prints them on a new line after RLM's
+  (`replayed frames' pending adds (step FX1): made (removes), taken back by
+  a restore, kept, not takeable`) and
+  `--savestate-no-ledger` (RLM's control) now empties both lists; the
+  headless client logs them in its periodic report (`membership: ...`, log
+  only - no wire, journal or protocol change). No IVP change, no
+  `BallanceMMOClient` data member.
+- **Adaptation of the plan's check.** The `--verbose` "owners held live"
+  line is printed before the rewind, i.e. before the restore that takes the
+  previous round's adds back, so it still shows the last replay's own adds
+  (by the rule above they are the next live frame's): pending 0 or 1 on
+  rFX1 (34 and 16 rounds) against 0..16 on rS2g. The reading the plan meant
+  - the table the replay starts from - is a new `--verbose` line at the
+  round's first replayed tick, `after the restore, before tick N: owners
+  held live`: **pending 0 in 50 of 50 rounds**.
+- **Measured (`.local-tools/work/FX1/sim.sh rS2g rFX1 sim1`, rS2g = HEAD
+  39bfa7f6's x64 build, rFX1 = this tree):** V4b alive (seed 1, chained,
+  clients' recipe) **PASS 50/50** (rS2g FAIL 8/50); adds made 17, taken
+  back by a restore 16, kept 0, not takeable 0 (the 17th is the last
+  round's, left for the live frame). Control `--savestate-no-ledger` on
+  rFX1: FAIL 8/50, the same rounds as rS2g. V4b kill arms (player 2, player
+  1): PASS 50/50 on both builds, 0 adds. RLM's witness cases (WG2 V4's
+  alive scene): clients' recipe seeds 1/2/3 PASS 50/50 with 0/50 rounds
+  differing and the same counters as RLM (registrations 25/20/17, taken
+  back 8/6/6, settled 17/14/11); control 42/44/41 of 50 differ; the pair
+  54:8,144:4 PASS 2/2; `--v14` seed 1 FAIL 2/50 (rounds 28 and 45, RLM's
+  harness artefact) - identical on both builds, 0 replayed adds. RLM's
+  round-end membership witness on the V4b alive scene still reports 8 of 50
+  rounds (`P_Modul_18_Particle Script 0 vs 1`, the straight pass's owner
+  out of the list at e, the replay's in it), identical on rS2g: the
+  behaviour manager's list itself (`m_BeObjects`, every round's
+  after-restore line shows the owner `listed=1`, the list of the straight
+  pass's end) is not restored - gap F, "reported, not judged" since RLM;
+  not this step's.
+- **Checks (QUICK):** x64 BUILD-OK (`ninja -t deps` of
+  session_client.cpp.obj VALID, 500 deps), x86 CLIENT-BUILD-OK (core_host
+  and physics_session_client rebuilt), unit tests 656/656, GCC syntax
+  check 31/31 ok. Wire check rS2g -> rFX1 over `core_ref_s12`: 36/36 sends
+  SAME, 36/36 journals IDENTICAL, `WIRE-CHECK: ALL SAME`. The replays'
+  `membership:` lines: replayed adds made in h1_150 (2-4 per client),
+  resync_at150_down c0 (3) and swing_snapoff c1-c3 (6-7), **taken back 0
+  in every one** - none of the 36 replayed sessions has two rewinds in one
+  live frame, so the change does not act there (hence identical). The
+  server never binds `live_membership` (only the client binding and
+  SimTool do): unchanged.
+- **Gate round (review of FX1).** The review found that the first version
+  counted only rises and refused a count at or below 0, so a replay that
+  activated and then deactivated an owner (net 0) would still have taken 1
+  from the live frame's own add, and a live -1 under a replayed +1 would
+  have stayed at 0. The ledger now keeps the signed net and writes the
+  count minus it (above). Rerun on the fixed tree (`.local-tools/work/FX1/
+  gate`): x64 BUILD-OK and x86 CLIENT-BUILD-OK (`ninja -t deps` VALID:
+  session_client.cpp.obj 500, core_host.cpp.obj 1269 incl.
+  script_replay.hpp), unit tests 656/656, GCC syntax check 31/31 ok;
+  `sim.sh rS2g rFX1 gate/sim`: V4b alive PASS 50/50 (made 17, removes 0,
+  taken back 16, kept 0, not takeable 0; the after-restore line pending 0
+  in 50/50 rounds), the no-ledger control FAIL 8/50 as rS2g, kill arms
+  50/50, RLM's cases with the counters above; wire check rS2g -> rFX1 over
+  `core_ref_s12` `WIRE-CHECK: ALL SAME` (36/36 sends SAME, 36/36 journals
+  IDENTICAL; replayed removes 0 and taken back 0 in every replay); solo1 /
+  solo2 snapshots-off replays SAME and IDENTICAL. No run has made a removal
+  yet, so the signed path is covered by reading only.
+- **Not run, deferred to FULL's batches:** a live 4-client headless smoke
+  session and a two-copy retail run (the change acts only on a second
+  rewind in one live frame, which none of the 36 live-captured sessions
+  has; the retail core host compiles the same header). Whether a retail
+  frame that runs several ticks makes two rewinds in one CK frame is for
+  RT1's `membership:`-style evidence (the retail host prints no such
+  counters).

@@ -601,6 +601,19 @@ namespace bmmo::game {
             uint64_t flags_kept = 0;     // next-frame flags a replayed frame left as the live frame does (F)
             uint64_t unregistered = 0;   // step RLM: a registration taken back by a later restore that wrote its script
             uint64_t settled = 0;        // step RLM: a registration taken back once its script finished in the replay
+            // Step FX1: the replayed frames' changes to an owner's pending
+            // count (after the frame's scripts minus before): rises (adds) and
+            // falls (removes, CKScene::ActivateObject(FALSE) ->
+            // RemoveObjectNextFrame).  Their net per owner is taken back by
+            // the next restore of the same live frame, kept (a script of the
+            // owner that restore does not write is still active), or not
+            // takeable (the owner's entry left the table); those three are
+            // counted in units of the net.
+            uint64_t replayed_adds = 0;
+            uint64_t replayed_removes = 0;
+            uint64_t replayed_taken_back = 0;
+            uint64_t replayed_kept = 0;
+            uint64_t replayed_unrecoverable = 0;
         };
         static membership_counters& membership() {
             static membership_counters counters;
@@ -658,9 +671,30 @@ namespace bmmo::game {
             bool scene_flag = false;   // the script's scene flag was set by it
             bool ran = false;          // the script ran in the current replayed frame
         };
+        // Step FX1: the net change the replayed frames of this live frame
+        // made to an owner's pending count (CKScene::Activate of a script a
+        // replayed graph activated: +1 in m_BeObjectNextFrame; a replayed
+        // deactivation of the object, CKScene::ActivateObject(FALSE): -1).
+        // Only a live frame's ManageObjectsActivity consumes the table, so a
+        // second restore of the same live frame found the first replay's adds
+        // still there and owner_pending_add admitted the owner in replayed
+        // frames the live world had run without it (S2's V4b alive scene: a
+        // next-frame flag of P_Modul_18_Particle Script consumed that the
+        // live world kept).  Signed (review of step FX1): a replay that both
+        // activated and deactivated an owner left the table where it found
+        // it, and nothing may then be taken from the live frame's own count.
+        struct replayed_add {
+            CK_ID owner = 0;
+            int adds = 0;   // the net change (in owner_pending_counts: the count itself)
+        };
         struct registration_ledger {
             CKDWORD frame = 0;   // the live frame the entries belong to
             std::vector<registration> entries;
+            std::vector<replayed_add> replayed;   // step FX1
+            void clear() {
+                entries.clear();
+                replayed.clear();
+            }
         };
         static registration_ledger& registrations() {
             static registration_ledger ledger;
@@ -676,7 +710,7 @@ namespace bmmo::game {
             registration_ledger& ledger = registrations();
             const CKDWORD frame = live_frame_id(context);
             if (ledger.frame != frame) {
-                ledger.entries.clear();
+                ledger.clear();
                 ledger.frame = frame;
             }
             return ledger;
@@ -686,6 +720,18 @@ namespace bmmo::game {
             for (auto it = manager->m_BeObjectNextFrame.Begin(); it != manager->m_BeObjectNextFrame.End(); ++it)
                 if (it.GetKey() == id) return *it;
             return 0;
+        }
+        // Step FX1: writes `id`'s pending count (an entry already in the
+        // table; walked, not hashed, as above).  False when the owner has no
+        // entry (its object was deleted: SequenceDeleted removes it).
+        static bool pending_set(CKBehaviorManager* manager, CK_ID id, int count) {
+            if (!manager) return false;
+            for (auto it = manager->m_BeObjectNextFrame.Begin(); it != manager->m_BeObjectNextFrame.End(); ++it)
+                if (it.GetKey() == id) {
+                    *it = count;
+                    return true;
+                }
+            return false;
         }
         // Takes one pending add of `id` back (RemoveObjectNextFrame's count,
         // written through the public table: a count of 0 is no change).  Only
@@ -791,6 +837,84 @@ namespace bmmo::game {
             const CK_ID owner_id = owner ? owner->GetID() : 0;
             for (registration& r: registrations().entries)
                 if (r.script == script || (r.pending && owner_id && r.owner == owner_id)) r.ran = true;
+        }
+        // Step FX1: the pending count of every selected script's owner, read
+        // before a replayed frame's scripts run (one entry per owner).
+        static std::vector<replayed_add> owner_pending_counts(CKContext* context, const selection& sel) {
+            std::vector<replayed_add> counts;
+            CKBehaviorManager* manager = context ? context->GetBehaviorManager() : nullptr;
+            if (!manager) return counts;
+            for (CK_ID id: sel.scripts) {
+                auto* beh = CKBehavior::Cast(context->GetObject(id));
+                CKBeObject* owner = beh ? beh->GetOwner() : nullptr;
+                if (!owner) continue;
+                const CK_ID owner_id = owner->GetID();
+                if (std::any_of(counts.begin(), counts.end(), [&](const replayed_add& c) { return c.owner == owner_id; })) continue;
+                counts.push_back(replayed_add{owner_id, pending_count(manager, owner_id)});
+            }
+            return counts;
+        }
+        // Step FX1: after the replayed frame's scripts, every owner whose
+        // pending count changed enters the change, rise or fall, in the
+        // ledger's net (the restore's own re-registrations happen before the
+        // frame and settle_registrations after this, so neither is counted
+        // here).
+        static void note_replayed_adds(CKContext* context, const std::vector<replayed_add>& before) {
+            CKBehaviorManager* manager = context ? context->GetBehaviorManager() : nullptr;
+            if (!manager || before.empty()) return;
+            registration_ledger& ledger = current_registrations(context);
+            for (const replayed_add& b: before) {
+                const int delta = pending_count(manager, b.owner) - b.adds;
+                if (delta == 0) continue;
+                auto it = std::find_if(ledger.replayed.begin(), ledger.replayed.end(),
+                                       [&](const replayed_add& r) { return r.owner == b.owner; });
+                if (it == ledger.replayed.end()) ledger.replayed.push_back(replayed_add{b.owner, delta});
+                else it->adds += delta;
+                if (delta > 0) membership().replayed_adds += static_cast<uint64_t>(delta);
+                else membership().replayed_removes += static_cast<uint64_t>(-delta);
+            }
+        }
+        // Step FX1: a restore of the same live frame takes the earlier
+        // replays' net change back before it registers anything (reregister
+        // judges the table), so its replay starts from the live frame's
+        // table.  The count is written as it is minus the net, with no floor
+        // (review of step FX1): the ledger is emptied whenever a live frame
+        // ran (current_registrations), so no ManageObjectsActivity consumed
+        // the table since the changes were made, and a count at or below 0
+        // is still the live frame's own (a removal it made) plus ours.  An
+        // owner with a script this restore does not write still active (the
+        // v14 rule's kept live state, a script outside the selection) keeps
+        // its net: that script's state is the earlier replay's, and the live
+        // frame must run its owner (RLM's rule for a registration's pending
+        // add).  The last replay before the next live frame is not taken back
+        // at all: its adds reach that live frame, the add of a script that
+        // finished inside the replay included (RLM's settle_registrations
+        // gives back only a restore's own registrations, not a replayed
+        // activation's add; unchanged from before FX1).
+        static uint32_t take_back_replayed_adds(CKContext* context, const std::vector<CKBehavior*>& written) {
+            registration_ledger& ledger = current_registrations(context);
+            CKBehaviorManager* manager = context->GetBehaviorManager();
+            uint32_t taken = 0;
+            for (auto it = ledger.replayed.begin(); it != ledger.replayed.end();) {
+                if (it->adds == 0) {
+                    it = ledger.replayed.erase(it);
+                    continue;
+                }
+                const uint64_t units = static_cast<uint64_t>(it->adds < 0 ? -it->adds : it->adds);
+                if (owner_keeps(context, it->owner, &written)) {
+                    membership().replayed_kept += units;
+                    ++it;
+                    continue;
+                }
+                if (pending_set(manager, it->owner, pending_count(manager, it->owner) - it->adds)) {
+                    membership().replayed_taken_back += units;
+                    taken += static_cast<uint32_t>(units);
+                } else {
+                    membership().replayed_unrecoverable += units;
+                }
+                it = ledger.replayed.erase(it);
+            }
+            return taken;
         }
         // G1: a root script the restore wrote back active (or about to be
         // activated) whose owner the live frame would not run.  Returns true
@@ -1522,6 +1646,8 @@ namespace bmmo::game {
             // back first - one written back finished must not find its owner
             // still pending from a rewind of the same live frame.
             if (live_membership()) {
+                // Step FX1: the earlier replays' pending adds first.
+                take_back_replayed_adds(context, written);
                 membership().unregistered += take_back_registrations(context, written);
                 for (CKBehavior* beh: written)
                     if (reregister(context, beh)) ++membership().reregistered;
@@ -1546,6 +1672,9 @@ namespace bmmo::game {
                                  const std::vector<uint32_t>* live_members = nullptr) {
             if (!context) return 0;
             int executed = 0;
+            // Step FX1: the owners' pending counts before the frame's scripts.
+            const std::vector<replayed_add> pending_before =
+                live_membership() ? owner_pending_counts(context, sel) : std::vector<replayed_add>{};
             if (trafo) executed += execute_trafo(context, *trafo, delta_ms);
             // The satellites next, as the live frame runs Gameplay_Ingame
             // before the modules' scripts.  A block is executed the way its
@@ -1558,6 +1687,8 @@ namespace bmmo::game {
                 ++executed;
             }
             executed += execute_scripts(context, replayed ? *replayed : sel.scripts, delta_ms, live_membership(), live_members);
+            // Step FX1: what the frame's scripts added to the pending table.
+            if (live_membership()) note_replayed_adds(context, pending_before);
             // Step RLM: a registered script that finished before this frame
             // gives its owner's pending add back, as the live frame drops it.
             if (live_membership()) membership().settled += settle_registrations(context);

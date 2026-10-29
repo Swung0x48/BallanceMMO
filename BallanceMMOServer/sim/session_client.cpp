@@ -4299,6 +4299,20 @@ namespace {
                      static_cast<unsigned long long>(w.captured_rows), static_cast<unsigned long long>(w.restores),
                      static_cast<unsigned long long>(w.rows), static_cast<unsigned long long>(w.skipped));
             }
+            // Steps RLM / FX1: the restores' membership ledger in this process -
+            // registrations, those taken back, settled, and the replayed
+            // frames' pending adds a later restore of the same live frame took
+            // back (non-zero only with two rewinds in one live frame).
+            {
+                const auto& m = bmmo::game::script_replay::membership();
+                logf("membership: reregistered=%llu flags_kept=%llu unregistered=%llu settled=%llu replayed_adds=%llu"
+                     " replayed_removes=%llu replayed_taken_back=%llu replayed_kept=%llu replayed_unrecoverable=%llu",
+                     static_cast<unsigned long long>(m.reregistered), static_cast<unsigned long long>(m.flags_kept),
+                     static_cast<unsigned long long>(m.unregistered), static_cast<unsigned long long>(m.settled),
+                     static_cast<unsigned long long>(m.replayed_adds), static_cast<unsigned long long>(m.replayed_removes),
+                     static_cast<unsigned long long>(m.replayed_taken_back),
+                     static_cast<unsigned long long>(m.replayed_kept), static_cast<unsigned long long>(m.replayed_unrecoverable));
+            }
             // Step RLC: the joint ledger - constraints named by their image in
             // the records, made again or replaced at a restore, in this process.
             {
