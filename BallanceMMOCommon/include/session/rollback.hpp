@@ -210,6 +210,16 @@ namespace bmmo::session {
         // replaces, which the freeze logic and the event queue both read.
         std::function<bool(bmmo_physics_clock_state& out)> get_clock;
         std::function<bool(const bmmo_physics_clock_state& state)> set_clock;
+        // The physics globals - time factor and gravity - the scripts' Set
+        // Physics Globals blocks write (record-format-gaps design 2.3, C3;
+        // bridge v28).  Optional, both or neither.  Every record carries the
+        // values its tick was stepped with; a rewind puts the anchor's back
+        // before the restore, each replayed tick's before its step, and the
+        // live ones after the replay (a replayed step runs no writer: they
+        // are in Gameplay_* and Event_handler).  The blob still never writes
+        // them (docs/ivp-savestate-design.md "time factor ... left LIVE").
+        std::function<bool(bmmo_physics_globals& out)> get_globals;
+        std::function<bool(const bmmo_physics_globals& in)> set_globals;
         // The IVP savestate (docs/ivp-savestate-design.md,
         // physics/physics_savestate.hpp): the engine's whole collision state -
         // cores, hull managers, the overlap tree, every mindist and its
@@ -805,6 +815,13 @@ namespace bmmo::session {
         uint64_t too_far = 0;          // a snapshot or a rewind deeper than max_resim_ticks: refused, nothing written
         uint64_t resyncs = 0;          // resync re-steps (resync(): the server's state of S restored, S+1..now replayed)
         uint64_t frozen = 0;           // local physics clock stopped: bodies snapped, no re-simulation
+        // The physics globals (C3, step RK1): set_globals calls that wrote,
+        // replays that wrote at least once, those of them anchored before the
+        // history's first globals change (the session-start write, A18),
+        // replayed ticks whose record had no globals (stepped with the
+        // current ones), and set_globals calls the world refused (the history
+        // dropped, as on a frozen clock: the caller re-anchors).
+        uint64_t globals_set = 0, globals_replays = 0, globals_replays_start = 0, globals_unknown = 0, globals_failures = 0;
         double last_error = 0.0, max_error = 0.0;
         std::string last_mismatch;     // entity of the last mismatch
     };
@@ -832,6 +849,7 @@ namespace bmmo::session {
             history_.clear();
             moved_births_.clear();
             awaiting_capture_ = false;
+            first_globals_change_ = 0;
         }
 
         void clear() {
@@ -890,6 +908,7 @@ namespace bmmo::session {
                 // re-recording (resim) or a numbering restart: drop from here
                 while (!history_.empty() && history_.back().tick >= tick) history_.pop_back();
             }
+            if (capture_now) note_globals_change(world, state, history_.empty() ? nullptr : &history_.back());
             history_.push_back(std::move(state));
             while (history_.size() > thresholds_.history_ticks) history_.pop_front();
         }
@@ -932,6 +951,8 @@ namespace bmmo::session {
                     std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
                 stats_.capture_us += took;
                 stats_.capture_us_max = std::max(stats_.capture_us_max, took);
+                note_globals_change(world, *at, history_.size() > 1 && &history_.back() == at ? &history_[history_.size() - 2]
+                                                                                               : nullptr);
                 return true;
             }
             capture(world, *at);
@@ -1196,6 +1217,43 @@ namespace bmmo::session {
                 }
             } timer{stats_, rewind_cost_, cost_clock_};
             const bool frozen = world.simulating && !world.simulating();
+            // C3 (record-format-gaps design 2.3, step RK1): the physics
+            // globals.  `live` is what the world has now, before anything of
+            // the rewind; `current` what it has after the writes below.  Only
+            // a world that can read them now is written: the values a write
+            // would replace must be known to be put back.
+            bmmo_physics_globals live_globals{};
+            const bool globals_live = world.get_globals && world.set_globals && world.get_globals(live_globals);
+            bmmo_physics_globals current_globals = live_globals;
+            bool globals_wrote = false, globals_failed = false;
+            const auto put_globals = [&](const bmmo_physics_globals& g) {
+                if (!globals_differ(g, current_globals)) return true;
+                if (!world.set_globals(g)) {
+                    ++stats_.globals_failures;
+                    globals_failed = true;
+                    return false;
+                }
+                current_globals = g;
+                ++stats_.globals_set;
+                if (!globals_wrote) {
+                    globals_wrote = true;
+                    ++stats_.globals_replays;
+                    if (first_globals_change_ && static_cast<int32_t>(first_globals_change_ - anchor) > 0)
+                        ++stats_.globals_replays_start;
+                }
+                return true;
+            };
+            // A refused write (2.3 step 6; needs a broken environment): the
+            // live values back as far as the world takes them, and the
+            // history dropped as on a frozen clock - the caller sees
+            // globals_failures grow and re-anchors (resync).
+            const auto globals_refused = [&](uint32_t tick) {
+                if (globals_differ(live_globals, current_globals)) world.set_globals(live_globals);
+                if (world.log)
+                    world.log("rollback to tick " + std::to_string(anchor) + " (" + reason + "): the world refused the physics"
+                              " globals of tick " + std::to_string(tick) + "; history dropped");
+                invalidate_history();
+            };
             const auto generation_now = [&](const std::string& entity) -> uint32_t {
                 for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
                     auto found = it->tracked.generations.find(entity);
@@ -1342,6 +1400,16 @@ namespace bmmo::session {
             // Whether a replay follows this restore (the clock, the scripts and
             // the savestate are put back only then).
             const bool replay_follows = !frozen && window <= reach;
+            // C3, 2.3 step 2: the anchor's globals before anything is
+            // restored - the blob compares the gravity (a strict restore
+            // refuses another one) and recomputes the physics delta from the
+            // live factor, and the per-body path's clock write and every
+            // body after it belong to the anchor's world.  Only when a replay
+            // follows: the frozen and too-far paths step nothing.
+            if (replay_follows && globals_live && at->have_globals && !put_globals(at->globals)) {
+                globals_refused(anchor);
+                return true;
+            }
             // Gap Q4: no entry of a script the replay does not run takes
             // part in it; back in place on every exit (after the replay
             // loop, after a failed step).
@@ -1998,6 +2066,17 @@ namespace bmmo::session {
                         }
                     }
                 }
+                // C3, 2.3 step 3: the globals the live step of t ran with,
+                // last before the step (after pre_step's scripts, which run
+                // no writer of them).  A tick with no record or no globals
+                // keeps the current ones.
+                if (globals_live) {
+                    if (recorded && recorded->have_globals) {
+                        if (!put_globals(recorded->globals)) break;
+                    } else {
+                        ++stats_.globals_unknown;
+                    }
+                }
                 if (!world.step()) break;
                 ++stats_.resim_ticks;
                 if (world.after_step) world.after_step(t);   // step N02R
@@ -2236,6 +2315,18 @@ namespace bmmo::session {
                     history_.push_back(std::move(state));
                 }
             }
+            // C3, 2.3 step 4: the live globals back after the loop, a failed
+            // step's break included (a refused write puts them back itself).
+            if (globals_failed) {
+                for (const auto& entity: polled) world.nav_poll(entity, true);
+                globals_refused(current_tick);
+                return true;
+            }
+            if (globals_live && globals_differ(live_globals, current_globals) && !put_globals(live_globals)) {
+                for (const auto& entity: polled) world.nav_poll(entity, true);
+                globals_refused(current_tick);
+                return true;
+            }
             for (const auto& entity: polled) world.nav_poll(entity, true);
             if (world.log)
                 world.log("rollback to tick " + std::to_string(anchor) + " (" + reason + "), re-simulated "
@@ -2279,6 +2370,14 @@ namespace bmmo::session {
             const tick_state* at = find_const(tick);
             return at && at->have_scripts ? &at->scripts : nullptr;
         }
+        // The physics globals the record of `tick` carries (C3), or null.
+        const bmmo_physics_globals* recorded_globals(uint32_t tick) const {
+            const tick_state* at = find_const(tick);
+            return at && at->have_globals ? &at->globals : nullptr;
+        }
+        // The history's first live record whose globals differ from the one
+        // before it (0: none since the history began).
+        uint32_t first_globals_change() const { return first_globals_change_; }
         rollback_thresholds& thresholds() { return thresholds_; }
         // Step R12: this client's rewind cost and the cap it gives, and the
         // clock its samples read (the session core passes the platform's
@@ -2596,6 +2695,9 @@ namespace bmmo::session {
             // provides it.
             bmmo_physics_clock_state clock{};
             bool have_clock = false;
+            // The physics globals this tick was stepped with (C3, step RK1).
+            bmmo_physics_globals globals{};
+            bool have_globals = false;
             // The mechanism scripts' state at the end of this tick (game/script_replay.hpp).
             std::vector<uint8_t> scripts;
             bool have_scripts = false;
@@ -3003,6 +3105,12 @@ namespace bmmo::session {
             bmmo_physics_clock_state clock{};
             state.have_clock = world.get_clock && world.get_clock(clock);
             if (state.have_clock) state.clock = clock;
+            // C3 (step RK1): the globals this tick was stepped with - read
+            // after the frame's scripts and step, and nothing writes them
+            // after a frame's Simulate.
+            bmmo_physics_globals globals{};
+            state.have_globals = world.get_globals && world.set_globals && world.get_globals(globals);
+            state.globals = state.have_globals ? globals : bmmo_physics_globals{};
             state.have_scripts = replay_scripts_ && world.capture_scripts && world.capture_scripts(state.scripts);
             if (!state.have_scripts) state.scripts.clear();
             // Recorded whatever set_exact_restore says, so the switch is an A/B
@@ -3017,6 +3125,32 @@ namespace bmmo::session {
             for (auto it = history_.rbegin(); it != history_.rend(); ++it)
                 if (it->tick == tick) return &*it;
             return nullptr;
+        }
+
+        // C3 (step RK1): two globals differ by bit pattern (a write of the
+        // same values would be a no-op; a NaN factor is not a case).
+        static bool globals_differ(const bmmo_physics_globals& a, const bmmo_physics_globals& b) {
+            if (std::memcmp(&a.time_factor, &b.time_factor, sizeof a.time_factor) != 0) return true;
+            return std::memcmp(a.gravity, b.gravity, sizeof a.gravity) != 0;
+        }
+
+        // The history's first live record whose globals differ from the
+        // record before it (logged once per history): where a rewind
+        // anchored before it has to put other globals back (the
+        // session-start write, A18; the Level 1 tutorial's freeze).
+        void note_globals_change(const rollback_world& world, const tick_state& state, const tick_state* previous) {
+            if (first_globals_change_ || !previous || !state.have_globals || !previous->have_globals) return;
+            if (static_cast<int32_t>(state.tick - previous->tick) <= 0 || !globals_differ(state.globals, previous->globals))
+                return;
+            first_globals_change_ = state.tick;
+            if (world.log) {
+                char text[200];
+                std::snprintf(text, sizeof(text), "globals: first change at tick %u (factor %.6g -> %.6g, gravity y %.6g -> %.6g)",
+                              state.tick, static_cast<double>(previous->globals.time_factor),
+                              static_cast<double>(state.globals.time_factor), previous->globals.gravity[1],
+                              state.globals.gravity[1]);
+                world.log(text);
+            }
         }
 
         struct tolerance {
@@ -3056,6 +3190,7 @@ namespace bmmo::session {
         // capture_now false).
         bool awaiting_capture_ = false;
         uint32_t awaiting_tick_ = 0;
+        uint32_t first_globals_change_ = 0;   // C3: note_globals_change (0: none in this history)
         uint32_t never_made_logs_ = 0;
         uint32_t detailed_logs_ = 0;   // mismatch detail lines logged (capped)
         uint32_t resim_traces_ = 0;    // re-simulation trace lines logged (capped)

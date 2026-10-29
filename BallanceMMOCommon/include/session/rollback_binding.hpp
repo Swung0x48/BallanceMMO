@@ -37,6 +37,12 @@ namespace bmmo::session {
         float delta_ms = 1000.0f / 66.0f;          // one replayed physics step
         bool restore_clock = false;                // install set_clock (the engine's own switch decides whether it runs)
         bool savestate = true;                     // install get_savestate / set_savestate at all
+        // C3 (record-format-gaps design 2.3, step RK1): install get_globals /
+        // set_globals, the time factor and gravity per tick.  The session
+        // core's worlds (bind_session_world) and the SimTool's turn it on;
+        // off, the binding is what it was before (the legacy retail path,
+        // which is refused since step B9DX and gets nothing new).
+        bool physics_globals = false;
         uint32_t savestate_flags = 0;              // bmmo::physics::SAVESTATE_* bits for set_savestate
 
         // Navigation polling of the own ball (the key codes and Key Event
@@ -258,6 +264,21 @@ namespace bmmo::session {
             std::string error;
             return !b->get_clock(factor, delta, error) || (factor > 0.0f && delta > 0.0f);
         };
+        // The physics globals (bridge v28): read with every record, written
+        // by the engine at a rewind's anchor, before each replayed step and
+        // after the replay.  A refused write is reported like a body's.
+        if (o.physics_globals) {
+            world.get_globals = [b](bmmo_physics_globals& out) {
+                std::string error;
+                return b->get_physics_globals(out, error);
+            };
+            world.set_globals = [b, failed](const bmmo_physics_globals& in) {
+                std::string error;
+                if (b->set_physics_globals(in, error)) return true;
+                failed(error);
+                return false;
+            };
+        }
         world.log = o.log;
         world.on_correction = o.on_correction;
         return world;

@@ -59,6 +59,13 @@ namespace bmmo::physics {
         bool get_clock(float& time_factor, float& physics_delta, std::string& error) const {
             return bmmo::physics::get_clock(manager, time_factor, physics_delta, error);
         }
+        // v28 (step RK1): the time factor and the gravity.
+        bool get_physics_globals(bmmo_physics_globals& out, std::string& error) const {
+            return bmmo::physics::get_physics_globals(manager, out, error);
+        }
+        bool set_physics_globals(const bmmo_physics_globals& in, std::string& error) const {
+            return bmmo::physics::set_physics_globals(manager, in, error);
+        }
         int contacts_get(const char* entity, bmmo_physics_contact* out, int max, std::string& error) const {
             return bmmo::physics::get_contacts(manager, entity, out, max, error);
         }

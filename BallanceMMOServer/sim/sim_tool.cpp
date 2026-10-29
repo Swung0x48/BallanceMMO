@@ -3584,6 +3584,7 @@ namespace {
         binding_options.delta_ms = bmmo::sim::kFixedDeltaMs;
         binding_options.savestate = !legacy;
         binding_options.savestate_flags = bmmo::physics::SAVESTATE_STRICT;
+        binding_options.physics_globals = true;   // C3 (step RK1): the clients' rule, as bind_session_world sets it
         binding_options.before_replayed_tick = [&](uint32_t tick) {
             if (args.savestate_no_ledger) bmmo::game::script_replay::registrations().entries.clear();   // step RLM's control
             if (tick == probe_tick) {
@@ -3962,6 +3963,36 @@ namespace {
         // engine restores the anchor from its own record and re-steps a+1..a+d
         // through the binding, re-recording each tick.
         int run = 0, failed = 0;
+        // C3 (step RK1): the rounds' globals writes (set, replays, replays
+        // anchored before the first change, unknown ticks, failures).
+        uint64_t globals_sum[5] = {};
+        // The harness's live world and the globals (C3, step RK1).  A round's
+        // live world stands at its live tick e in a client, so its globals are
+        // e's record's; the chained world here stands wherever the previous
+        // round left it, and the engine puts the globals it had before the
+        // rewind back after the replay (design 2.3 step 4, as a client must:
+        // the retail frame may rewind after its scripts wrote the globals of
+        // its coming step).  So the stand-in enters every round with the
+        // straight pass's end's globals - what every round had before C3, a
+        // running clock - and is given e's record's right after the rewind,
+        // before the witnesses and the follow: the world a client has at e.
+        // (The replay identity already compares every replayed tick's
+        // globals: the blob carries the factor, the physics delta and the
+        // gravity.)  The re-made live worlds get t0's after their restore.
+        bmmo_physics_globals end_globals{};
+        bool have_end_globals = false;
+        {
+            std::string globals_error;
+            have_end_globals = backend.get_physics_globals(end_globals, globals_error);
+        }
+        uint64_t globals_put_failures = 0;
+        const auto put_globals = [&](const bmmo_physics_globals* globals) {
+            std::string globals_error;
+            if (globals && !backend.set_physics_globals(*globals, globals_error)) {
+                ++globals_put_failures;
+                std::printf("  the harness could not put the globals back: %s\n", globals_error.c_str());
+            }
+        };
         // Step B2SX (Q5): depth-0 compares that differed only in outputs the
         // restore re-armed (ignored, option (a)), and the follows run.
         int rearmed_ignored_rounds = 0, rearmed_ignored_bits = 0, follow_ticks = 0, follow_fired = 0;
@@ -4010,6 +4041,7 @@ namespace {
                     std::printf("  round %zu: the restore of t0 for its live world was refused\n", r);
                     premise = "the restore of t0 for the round's live world was refused";
                 }
+                put_globals(pristine.recorded_globals(t0));   // C3: the re-made world at t0
                 for (int i = 0; i < e; ++i) {
                     trafo->apply_inputs(t0 + static_cast<uint32_t>(i) + 1u, true);
                     if (!step(remake_error)) {
@@ -4082,6 +4114,7 @@ namespace {
                     if (!engine.rewind_to(binding, t0, t0, no_input, "savestate-check: the round's live world")
                             && premise.empty())
                         premise = "the restore of t0 for the round's live world was refused";
+                    put_globals(pristine.recorded_globals(t0));   // C3: the re-made world at t0
                     for (int i = 0; i < e; ++i) {
                         moves_before(t0 + static_cast<uint32_t>(i));
                         if (!step(remake_error)) {
@@ -4125,6 +4158,7 @@ namespace {
             const uint64_t hold_failures_before = world->proximity_hold_failures();
             world->restore_step_state(anchor.counters);
             if (args.probe_scramble == 2) world->displace_probe_frames(1000.0f);
+            if (have_end_globals) put_globals(&end_globals);   // C3: the stand-in's running clock
             engine = pristine;
             if (trafo || passes) engine.forget_after(t0 + static_cast<uint32_t>(e));
             probe_tick = t0 + static_cast<uint32_t>(a) + 1u;
@@ -4147,8 +4181,15 @@ namespace {
                                                     : bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics)));
                 std::printf("  round %zu: --joint-shuffle made %d constraint(s) again before the rewind\n", r, shuffled);
             }
+            const bmmo::session::rollback_stats globals_before = engine.stats();   // C3 (step RK1)
             const bool rewound = engine.rewind_to(binding, t0 + static_cast<uint32_t>(a), t0 + static_cast<uint32_t>(e),
                                                   no_input, "savestate-check");
+            globals_sum[0] += engine.stats().globals_set - globals_before.globals_set;
+            globals_sum[1] += engine.stats().globals_replays - globals_before.globals_replays;
+            globals_sum[2] += engine.stats().globals_replays_start - globals_before.globals_replays_start;
+            globals_sum[3] += engine.stats().globals_unknown - globals_before.globals_unknown;
+            globals_sum[4] += engine.stats().globals_failures - globals_before.globals_failures;
+            put_globals(pristine.recorded_globals(t0 + static_cast<uint32_t>(e)));   // C3: the live world at e
             // rewind_to's true says the request was handled, not that a replay
             // ran: the stats say what happened.
             if (!rewound) {
@@ -4441,6 +4482,12 @@ namespace {
         std::fprintf(stderr, "savestate-check: straight pass %.2f s, %d rounds %.2f s\n", straight_seconds, run,
                      rounds_seconds);
         summary(run, failed);
+        std::printf("savestate-check: globals (C3) set=%llu replays=%llu replays_start=%llu unknown=%llu failures=%llu"
+                    " first_change=%u harness_put_failures=%llu\n",
+                    static_cast<unsigned long long>(globals_sum[0]), static_cast<unsigned long long>(globals_sum[1]),
+                    static_cast<unsigned long long>(globals_sum[2]), static_cast<unsigned long long>(globals_sum[3]),
+                    static_cast<unsigned long long>(globals_sum[4]), pristine.first_globals_change(),
+                    static_cast<unsigned long long>(globals_put_failures));
         if (frames)   // step B2SX (Q5)
             std::printf("savestate-check: depth-0 script compares equal but for outputs the restore re-armed (ignored):"
                         " %d round(s), %d bit(s); follow ticks %d, a delayed link's destination on in %d of them\n",
@@ -7101,6 +7148,7 @@ namespace {
         binding_options.delta_ms = bmmo::sim::kFixedDeltaMs;
         binding_options.savestate = true;
         binding_options.savestate_flags = 0u;
+        binding_options.physics_globals = true;   // C3 (step RK1): the clients' rule, as bind_session_world sets it
         std::string blob_refusal;   // the last set_savestate's error (empty when it was taken)
         binding_options.on_savestate_restored = [&blob_refusal](bool ok, const std::string& e,
                                                                 const bmmo::session::savestate_outcome&) {

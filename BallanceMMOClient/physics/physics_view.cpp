@@ -815,6 +815,30 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool physics_view::get_physics_globals(bmmo_physics_globals& out, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->get_physics_globals) {
+            error = "the physics_RT bridge lacks get_physics_globals";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->get_physics_globals(manager_, &out, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
+    bool physics_view::set_physics_globals(const bmmo_physics_globals& in, std::string& error) const {
+        error.clear();
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->set_physics_globals) {
+            error = "the physics_RT bridge lacks set_physics_globals";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->set_physics_globals(manager_, &in, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
     bool physics_view::step_physics(float delta_ms, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return false; }

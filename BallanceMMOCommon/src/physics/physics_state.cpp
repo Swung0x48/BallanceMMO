@@ -2499,6 +2499,49 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool get_physics_globals(CKIpionManager* physics, bmmo_physics_globals& out, std::string& error) {
+        error.clear();
+        IVP_Environment* environment = physics ? physics->GetEnvironment() : nullptr;
+        const IVP_U_Point* gravity = environment ? environment->get_gravity() : nullptr;
+        if (!gravity) {
+            error = physics ? "physics environment is unavailable" : "no physics manager";
+            return false;
+        }
+        out = {};
+        out.time_factor = physics->m_PhysicsTimeFactor;
+        for (int k = 0; k < 3; ++k) out.gravity[k] = static_cast<double>(gravity->k[k]);
+        return true;
+    }
+
+    bool set_physics_globals(CKIpionManager* physics, const bmmo_physics_globals& in, std::string& error) {
+        error.clear();
+        IVP_Environment* environment = physics ? physics->GetEnvironment() : nullptr;
+        const IVP_U_Point* gravity = environment ? environment->get_gravity() : nullptr;
+        if (!gravity) {
+            error = physics ? "physics environment is unavailable" : "no physics manager";
+            return false;
+        }
+        // The factor as the engine holds it (CKIpionManager::SetTimeFactor
+        // would scale by 0.001 again and round), and the physics delta of the
+        // next step from it as CKIpionManager::SetDeltaTime computes it -
+        // without its averaging of m_DeltaTime, which only a frame's Simulate
+        // may advance.
+        physics->m_PhysicsTimeFactor = in.time_factor;
+        physics->m_PhysicsDeltaTime = physics->m_DeltaTime * physics->m_PhysicsTimeFactor;
+        // The gravity through IVP_Environment::set_gravity, the call
+        // CKIpionManager::SetGravity (the live Set Physics Globals block's)
+        // makes: the vector, its length and the standard gravity controller's
+        // vector.  Only when it differs, so a write of the same globals leaves
+        // the environment untouched.
+        bool same = true;
+        for (int k = 0; k < 3; ++k) same = same && static_cast<double>(gravity->k[k]) == in.gravity[k];
+        if (!same) {
+            IVP_U_Point g(in.gravity[0], in.gravity[1], in.gravity[2]);
+            environment->set_gravity(&g);
+        }
+        return true;
+    }
+
     std::string describe_core(CKIpionManager* physics, const char* entity_name) {
         CK3dEntity* entity = find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE));
         PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;

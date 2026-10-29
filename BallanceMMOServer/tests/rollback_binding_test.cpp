@@ -105,6 +105,24 @@ namespace {
             delta = physics_delta;
             return true;
         }
+        // Bridge v28 (step RK1): the physics globals.
+        bmmo_physics_globals globals{0.002f, {0.0, -20.0, 0.0}};
+        bmmo_physics_globals last_globals{};
+        bool get_physics_globals(bmmo_physics_globals& out, std::string&) {
+            calls.push_back("get_physics_globals");
+            out = globals;
+            return true;
+        }
+        bool set_physics_globals(const bmmo_physics_globals& in, std::string& error) {
+            calls.push_back("set_physics_globals");
+            last_globals = in;
+            if (refuse_writes) {
+                error = "globals refused";
+                return false;
+            }
+            globals = in;
+            return true;
+        }
         int contacts_get(const char* entity, bmmo_physics_contact* out, int max, std::string&) {
             calls.push_back(std::string("contacts_get ") + entity);
             for (int i = 0; i < contact_count && i < max; ++i) {
@@ -408,6 +426,38 @@ TEST(RollbackBinding, SimulatingFollowsTheLocalClock) {
     EXPECT_FALSE(world.simulating());
     backend.clock_readable = false;
     EXPECT_TRUE(world.simulating()) << "a world without a readable clock is taken as running";
+}
+
+// Record-format gaps C3, U6 (step RK1): get_globals / set_globals map to the
+// backend's bridge v28 methods; the option is off by default (the legacy
+// retail binding gets nothing new) and on in every session-core world.
+TEST(RollbackBinding, ThePhysicsGlobalsMapToTheBackend) {
+    fake_backend backend;
+    EXPECT_FALSE(bind_rollback_world(backend, rollback_binding_options{}).get_globals) << "off unless asked";
+    EXPECT_FALSE(bind_rollback_world(backend, rollback_binding_options{}).set_globals);
+    rollback_binding_options o;
+    o.physics_globals = true;
+    std::vector<std::string> failures;
+    o.on_write_failed = [&](const std::string& error) { failures.push_back(error); };
+    rollback_world world = bind_rollback_world(backend, o);
+    ASSERT_TRUE(world.get_globals && world.set_globals);
+    bmmo_physics_globals read{};
+    EXPECT_TRUE(world.get_globals(read));
+    EXPECT_FLOAT_EQ(read.time_factor, 0.002f);
+    EXPECT_DOUBLE_EQ(read.gravity[1], -20.0);
+    const bmmo_physics_globals start{0.001f, {0.0, -9.81, 0.0}};
+    EXPECT_TRUE(world.set_globals(start));
+    EXPECT_FLOAT_EQ(backend.globals.time_factor, 0.001f);
+    EXPECT_DOUBLE_EQ(backend.globals.gravity[1], -9.81) << "the gravity crosses as IVP's double";
+    backend.refuse_writes = true;
+    EXPECT_FALSE(world.set_globals(read));
+    ASSERT_EQ(failures.size(), 1u);
+    EXPECT_EQ(failures[0], "globals refused");
+    EXPECT_EQ(count_calls(backend, "get_physics_globals"), 1);
+    EXPECT_EQ(count_calls(backend, "set_physics_globals"), 2);
+    // SimulatingFollowsTheLocalClock's rule is unchanged: the clock, not the globals.
+    backend.time_factor = 0.0f;
+    EXPECT_FALSE(world.simulating());
 }
 
 TEST(RollbackBinding, ContactsAreCappedAtTheBufferAndTheirRestoreIsReported) {
@@ -1224,4 +1274,16 @@ TEST(RollbackBinding, KeepsParkedIsDestroyBodysTestsWithoutItsSideEffects) {
     const rollback_world plain = bmmo::session::bind_session_world(backend, hooks, parked);
     EXPECT_FALSE(plain.keeps_parked);
     EXPECT_FALSE(plain.destroy_body);
+}
+
+// C3, U6 (step RK1): the world the session core binds (bind_session_world)
+// has the physics globals whatever the host's binding options say.
+TEST(RollbackBinding, TheSessionCoresWorldHasThePhysicsGlobals) {
+    session_backend backend;
+    bmmo::session::core_world_hooks hooks;
+    const rollback_world world = bmmo::session::bind_session_world(backend, hooks, bmmo::session::session_world_options{});
+    ASSERT_TRUE(world.get_globals && world.set_globals);
+    bmmo_physics_globals read{};
+    EXPECT_TRUE(world.get_globals(read));
+    EXPECT_DOUBLE_EQ(read.gravity[1], -20.0);
 }

@@ -825,8 +825,12 @@ namespace bmmo::session {
                                                                     bmmo::session::input_frame& out)>& input_at,
                                            const std::string& reason, uint32_t reach) {
         const uint64_t frozen_before = s.rollback_.stats().frozen;
+        const uint64_t globals_before = s.rollback_.stats().globals_failures;
         const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason, reach);
         if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen", true);
+        // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused
+        // write of the physics globals dropped the history the same way.
+        else if (s.rollback_.stats().globals_failures != globals_before) request_resync("physics globals refused", true);
         // Step EL7: what the reconcile queued and no replay applied.
         settle_unreplayed_lives(now);
         settle_own_due();   // step EL8: the own ball's

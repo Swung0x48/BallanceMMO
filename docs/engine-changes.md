@@ -1292,6 +1292,28 @@ savestate matches a core's controllers by priority and name only); the image
 carries the CK ids of the block's two bodies, and a handle none of its
 bodies' cores holds is never dereferenced (no image).
 
+## Bridge notes: the physics globals per tick (bridge API v28, no engine change)
+
+Step RK1 (record-format-gaps design C3, As built (step RK1)). Not an engine
+change: nothing under `submodule/Ballanced` moved. A rewind whose window
+crosses a Set Physics Globals write (the session-start write of every level
+in frame 2, the Level 1 tutorial's freeze) used to replay every tick at the
+live time factor and gravity, because the blob compares them and never
+writes them (`docs/ivp-savestate-design.md`, "time factor ... left LIVE").
+`get_physics_globals` reads `CKIpionManager::m_PhysicsTimeFactor` (public)
+and the environment's gravity vector (`IVP_Environment::get_gravity`, as
+IVP's doubles: the start value (0, -9.81, 0) is not a float);
+`set_physics_globals` writes the factor directly (not through
+`SetTimeFactor`, whose x0.001 would round), recomputes `m_PhysicsDeltaTime =
+m_DeltaTime * m_PhysicsTimeFactor` as `SetDeltaTime` does without its
+averaging, and calls `IVP_Environment::set_gravity` - what
+`CKIpionManager::SetGravity`, the live block's call, makes - only when the
+vector differs. Both live in `BallanceMMOCommon/src/physics/physics_state.cpp`
+over public members; the rollback engine calls them only inside a rewind
+(the anchor's globals before the restore, a replayed tick's before its step,
+the live ones after the replay), so no live step, record or journal byte
+changes.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

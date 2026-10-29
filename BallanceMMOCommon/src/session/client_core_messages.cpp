@@ -177,6 +177,7 @@ namespace bmmo::session {
             };
             const scope_guard keep_cells = platform_.keep_live_cells(*this);
             const uint64_t frozen_before = s.rollback_.stats().frozen;
+            const uint64_t globals_before = s.rollback_.stats().globals_failures;   // C3, step RK1
             const uint64_t unmatched_before = s.rollback_.stats().unmatched;
             // Step T3: the trafo pieces are inputs' bodies here, exact by
             // the replay; a row of one is a restore source only when it
@@ -193,6 +194,7 @@ namespace bmmo::session {
             // back together (design 4.1, 7 Q1: a core rule for both hosts
             // from R1; retail is the host whose clock can freeze).
             if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen");
+            else if (s.rollback_.stats().globals_failures != globals_before) request_resync("physics globals refused");
             // Session-core design 7.1 decision 1 (step B2SW; the retail host's
             // transitional trigger until then, core_host.cpp): snapshots in a
             // row with no record of their tick are a numbering desync, which

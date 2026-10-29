@@ -477,6 +477,10 @@ namespace bmmo::session {
     rollback_world bind_session_world(Backend& backend, const core_world_hooks& hooks, const session_world_options& o) {
         Backend* b = &backend;
         rollback_binding_options binding = o.binding;
+        // C3 (record-format-gaps design 2.3, step RK1): the core's worlds
+        // replay their own history at the time factor and gravity each tick
+        // was stepped with - always on, nothing on the wire.
+        binding.physics_globals = true;
         // (Step P: no savestate flag of the core's own.  The deterministic
         // Random block's cursor is restored with the blob: the trafo
         // explosion scripts that draw from it are in the replay's selection,

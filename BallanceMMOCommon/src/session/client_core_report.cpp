@@ -201,7 +201,7 @@ namespace bmmo::session {
         return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
-                     "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu unmatched_run=%d/%llu far=%llu frozen=%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu parked=%llu missing=%llu lives=%llu/%llu/%llu/%llu/%llu/%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
+                     "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu unmatched_run=%d/%llu far=%llu frozen=%llu globals=%llu/%llu/%llu/%llu/%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu parked=%llu missing=%llu lives=%llu/%llu/%llu/%llu/%llu/%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
                      "corrections: compared=%llu ignored=%llu blended=%llu hard=%llu unmatched=%llu last_err=%.4f max_err=%.4f "
                      "sectors: rew=%llu/%llu depth=%llu forgot=%llu births_moved=%llu phase_misses=%llu walk_timeouts=%llu "
                      "resync: restepped=%llu/%llu depth=%llu states=%llu stale=%llu refused=%llu deferred=%llu/%llu "
@@ -319,6 +319,10 @@ namespace bmmo::session {
                      // asked for (design 7.1 decision 1).
                      s.consecutive_unmatched_, static_cast<unsigned long long>(s.unmatched_resyncs_),
                      static_cast<unsigned long long>(rs.too_far), static_cast<unsigned long long>(rs.frozen),
+                     // globals=set/replays/start/unknown/failures (C3, step RK1)
+                     static_cast<unsigned long long>(rs.globals_set), static_cast<unsigned long long>(rs.globals_replays),
+                     static_cast<unsigned long long>(rs.globals_replays_start), static_cast<unsigned long long>(rs.globals_unknown),
+                     static_cast<unsigned long long>(rs.globals_failures),
                      static_cast<unsigned long long>(rs.impulses_restored),
                      static_cast<unsigned long long>(rs.contacts_restored), static_cast<unsigned long long>(rs.contact_restore_failures),
                      static_cast<unsigned long long>(rs.savestates_restored), static_cast<unsigned long long>(rs.savestate_failures),

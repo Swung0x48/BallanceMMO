@@ -302,6 +302,33 @@ namespace {
         return 1;
     }
 
+    // v28 (step RK1): the physics globals.
+    int32_t api_get_physics_globals(void* manager, bmmo_physics_globals* out, char* error, uint32_t error_size) {
+        if (!manager || !out) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::get_physics_globals(static_cast<CKIpionManager*>(manager), *out, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
+    int32_t api_set_physics_globals(void* manager, const bmmo_physics_globals* in, char* error, uint32_t error_size) {
+        if (!manager || !in) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::set_physics_globals(static_cast<CKIpionManager*>(manager), *in, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     int32_t api_step_physics(void* manager, float delta_ms, char* error, uint32_t error_size) {
         if (!manager) {
             set_error(error, error_size, "null argument");
@@ -1026,6 +1053,8 @@ namespace {
         api_joint_block_get,
         api_joint_block_set,
         api_joint_blocks_order,
+        api_get_physics_globals,
+        api_set_physics_globals,
     };
 }
 

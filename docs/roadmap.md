@@ -907,7 +907,11 @@ numbers 1-10 are unchanged.
    would diverge without a refusal); the checks deferred to FULL listed
    there.
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
-   the time factor and gravity per tick; **K3 = the Level 1 tutorial
+   the time factor and gravity per tick (**built, step RK1**: bridge v28,
+   the engine puts each tick's factor and gravity back in a rewind, no wire
+   change; S1 failed rounds 23/30 -> 0/30 (seed 7), 0/1500 (seeds 1-5 x
+   300); the design's "As built
+   (step RK1)"); **K3 = the Level 1 tutorial
    switched off** right after K1 (decision (c): every world activates the
    tutorial's exit 10 frames after the level start, counted in frames, the
    delay the main branch uses and the user requires); K2, the ActiveBall
@@ -1220,6 +1224,17 @@ numbers 1-10 are unchanged.
      reproduces the cap exactly; (f) a retail run with the review round's
      x86 build (its retail behaviour is unchanged: retail's `now` is its
      clock).
+   - RK1 (record-format K1 = C3, the physics globals per tick, quick tier,
+     2026-10-29; ran: x64, x86, tests 629/629, GCC 30/30, the wire check
+     rWGQ7 -> rRK1 on `core_ref_s11` with `--accept-protocol 18` ALL SAME,
+     solo1 / solo2 IDENTICAL, SimTool S1 (seed 7 and seeds 1-5 x 300) and
+     S1b (L2, L13, seeds 1-3)): (a) H1, a live L1 forced rewind anchored
+     inside the tutorial's freeze (headless; until K3 switches the tutorial
+     off); (b) H4, a live forced rewind anchored at the first record (the
+     frame-2 write lands at base+1 in every headless client, measured in
+     the 14 replays); (c) R2, H4 on a retail core host (the x86 build is
+     CLIENT-BUILD-OK, not run); (d) S1b with `--session-recipe` (the
+     re-made live world gets t0's globals since RK1, not measured).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 27u  /* v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) */
+#define BMMO_PHYSICS_API_VERSION 28u  /* v28: the physics globals - time factor and gravity - read and written for a rollback (record-format-gaps design C3, step RK1) (v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) ) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -282,6 +282,17 @@ typedef struct bmmo_physics_nav_state {
     uint8_t create_pending_mask;       /* leaves whose Create waits for the body */
     float force[8][3];
 } bmmo_physics_nav_state;
+
+/* The physics globals a Set Physics Globals block writes (v28, step RK1):
+ * the manager's time factor in the engine's unit (seconds per behaviour
+ * millisecond: 0.002 in play, 0 while the scripts freeze physics) and the
+ * environment's gravity.  The gravity is IVP's own double vector: the
+ * start value (0, -9.81, 0) is not a float, and a round trip through
+ * floats would put a different vector back. */
+typedef struct bmmo_physics_globals {
+    float time_factor;
+    double gravity[3];
+} bmmo_physics_globals;
 
 typedef struct bmmo_physics_api_v2 {
     uint32_t struct_size;
@@ -759,6 +770,19 @@ typedef struct bmmo_physics_api_v2 {
                                char* error, uint32_t error_size);
     int32_t (*joint_blocks_order)(void* ipion_manager, const uint32_t* behavior_ids, const int16_t* orders,
                                   uint32_t count, uint32_t* moved, char* error, uint32_t error_size);
+
+    /* ---- v28: the physics globals (record-format-gaps design 2.3, C3; step
+     * RK1; physics_state.hpp get_physics_globals / set_physics_globals) ----
+     * get: the manager's m_PhysicsTimeFactor and the environment's gravity
+     * vector.  set: m_PhysicsTimeFactor = in->time_factor directly (not
+     * through SetTimeFactor, whose x0.001 would round), m_PhysicsDeltaTime
+     * recomputed from it as SetDeltaTime does (m_DeltaTime untouched), and
+     * the gravity written through IVP_Environment::set_gravity - what the
+     * live Set Physics Globals block's CKIpionManager::SetGravity calls -
+     * only when it differs.  Both 0 with a message without a manager or an
+     * environment.  BMMO bridge code over public members: no engine change. */
+    int32_t (*get_physics_globals)(void* ipion_manager, bmmo_physics_globals* out, char* error, uint32_t error_size);
+    int32_t (*set_physics_globals)(void* ipion_manager, const bmmo_physics_globals* in, char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

@@ -92,6 +92,13 @@ namespace bmmo::physics {
     // physics: Level 1 tutorial, pause menu) and the next step's physics
     // delta in seconds.
     bool get_clock(CKIpionManager* physics, float& time_factor, float& physics_delta, std::string& error);
+    // The physics globals (bridge v28, record-format-gaps design 2.3, step
+    // RK1): the time factor and the gravity, read, and written back for a
+    // rollback - the factor directly with the physics delta recomputed from
+    // it, the gravity only when it differs.  False with a message without a
+    // manager or an environment (nothing written).
+    bool get_physics_globals(CKIpionManager* physics, bmmo_physics_globals& out, std::string& error);
+    bool set_physics_globals(CKIpionManager* physics, const bmmo_physics_globals& in, std::string& error);
     // "name[state];name[state];..." for every entry of m_MovableObjects, in
     // list order (diagnostics: which bodies the world simulates).
     std::string describe_movable_objects(CKIpionManager* physics);

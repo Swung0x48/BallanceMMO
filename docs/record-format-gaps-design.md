@@ -1,8 +1,8 @@
 # Record-format gaps: the ActiveBall cell (F13), the physics globals per tick (F14), the tutorial's clock (G-T)
 
 Status: design, revision 2 (after two reviews; §10 lists every finding and
-what became of it). Step K0 is built (49e2cc8, "As built (step K0)" at the
-end); K1-K3 are not. Track C of the post-audit designs. It
+what became of it). Steps K0 (49e2cc8) and K1 (C3, step RK1) are built
+("As built" notes at the end); K2 and K3 are not. Track C of the post-audit designs. It
 covers audit items #13 and #14 of the rollback-coverage audit
 (`scratchpad/audit/rollback-coverage-audit.md` §1, §2 F9/F10; the user's order
 in §5 calls them F13/F14), and the gaps found while checking them, reported per
@@ -982,3 +982,116 @@ them), in the modes without a session world, and a number above 32 bits.
   salvaged world, as before); the depth-0 compares equal but for the
   re-armed bit: 3, 2, 2, 1 rounds - exactly B2SW's residual rounds.
   `--drop-settle 0` keeps A18 (C3).
+
+## As built (step RK1, 2026-10-29): K1 = C3, the physics globals per tick
+
+C3 as §2.3 and the K1 row of §8 say, with the adaptations below. No
+protocol, journal or script-record change; no engine change, no IVP change.
+
+- **Bridge v28, not v22** (the header's §0 note: v20-v27 went to A3, T1,
+  T4, B7EG, BALA, SPGH, OWG, RLC). `bmmo_physics_globals` and the two
+  entries are appended at the end of `bmmo_physics_api_v2`
+  (`physics_rt_api.h`); `physics_state.cpp` `get_physics_globals` /
+  `set_physics_globals` (the factor written directly, `m_PhysicsDeltaTime =
+  m_DeltaTime * m_PhysicsTimeFactor` without `SetDeltaTime`'s averaging,
+  `IVP_Environment::set_gravity` only when the vector differs);
+  `physics_rt_bridge.cpp`, `physics_direct.hpp`, `physics_view.hpp/.cpp`.
+  Bridge note in `docs/engine-changes.md` (no number).
+- **The gravity is IVP's double vector, not `float gravity[3]`.** The start
+  gravity (0, -9.81, 0) is set from doubles (PRT `CKIpionManager.cpp:698-699`)
+  and is not a float; a float round trip would put another vector back at an
+  anchor before the session-start write. Doubles are exact for both the start
+  value and every SPG value (floats). The blob still compares it as float
+  (PSR:954-959), which the double write satisfies.
+- **The binding's switch.** `rollback_binding_options::physics_globals`,
+  default off; `bind_session_world` (`session_host_world.hpp`) turns it on
+  for every session-core world (H, RC) and SimTool's `--savestate-check` and
+  resync-check bindings turn it on. Off, the binding is what it was: the
+  legacy retail binding (PSC) gets nothing, which is how §4.4's "RL gets C3"
+  is dropped (the legacy path is refused since B9DX and gets nothing new).
+- **Engine** (`rollback.hpp`): `rollback_world::get_globals / set_globals`;
+  `tick_state::globals / have_globals`, filled by `capture()` next to the
+  clock; `recorded_globals(tick)` and `first_globals_change()` (the first live
+  record whose globals differ from the one before it; logged once per
+  history, "globals: first change at tick T ..."; cleared by
+  `invalidate_history`). In `restore_and_replay`: the live globals read next
+  to the frozen decision (unchanged); the anchor's written right after
+  `replay_follows` is known - before the outside-callback hold, the clock
+  rewind, the scripts and the blob; each replayed tick's after
+  `replay_remotes` and before `step()` (a tick without globals counts
+  `globals_unknown`); the live ones back after the loop, a failed step's
+  break included. Step 4 is literal: the values the world had before the
+  rewind, not the record of the live tick's - the same in a session, and the
+  only safe choice where a frame may rewind after its scripts wrote the
+  globals of its coming step. Writes compare by bit pattern and only differing
+  values are written. Stats: `globals_set`, `globals_replays`,
+  `globals_replays_start`, `globals_unknown`, `globals_failures`.
+- **A refused write** (step 6): the live values put back as far as the world
+  takes them, the history dropped, `return true` with no report code (the
+  journal's CORRECTION numbering has none for it; the frozen code would
+  misname it). The core watches `globals_failures` where it watches
+  `frozen`: `rewind_world` (client_core.cpp) and `on_snapshot`
+  (client_core_messages.cpp) ask for a resync ("physics globals refused"),
+  and the resync re-step (client_core_resync.cpp) counts as not applied (it
+  asks again). Status line: `globals=set/replays/start/unknown/failures`
+  after `frozen=`.
+- **Measured, H4's question:** in all 14 replays of `core_ref_s11` the
+  headless client logs "globals: first change at tick base+1" (tick 28 at
+  base 27, tick 9 at base 8): the frame-2 write lands in the record after
+  the first one, so a rewind anchored at the first record crosses it. No
+  capture rewinds there: `globals=0/0/0/0/0` in every replay (§6, A20).
+
+**Checks (quick tier).** `BallanceMMOMessageTests` 630/630 (U1-U5 as
+`RollbackEngineGlobals.*`, U1's control with a no-op setter: the clock 8 kDt
+ahead; U7, added at the review, `TheLiveGlobalsComeBackAfterTheReplay`: the
+world's live factor (3) differs from the last record's (2), as after a retail
+frame's scripts wrote the next tick's globals; the anchor write puts 2, the
+replay runs at 2, and 3 comes back after the last step, also after a step
+that fails mid-replay - the one check of 2.3 step 4, since in U1-U5 and S1
+the live values equal the last record's (S1's harness writes e's record over
+whatever the engine put back); U6 as `RollbackBinding.ThePhysicsGlobalsMapToTheBackend` and
+`TheSessionCoresWorldHasThePhysicsGlobals`); GCC 30/30; x64 BUILD-OK, x86
+CLIENT-BUILD-OK. Wire check rWGQ7 -> rRK1 on `core_ref_s11` (protocol-18
+captures, `EXTRA="--accept-protocol 18"`): ALL SAME, 12/12 journals
+IDENTICAL; solo1 / solo2 sends SAME and journals IDENTICAL.
+
+- **S1** (`--level 1 ... --drop-settle 1600 --ticks 100 --rounds 30
+  --max-depth 40 --seed 7`): rWGQ7 23/30 FAIL ("restore identity: clock -
+  physics_delta_time"); rRK1 30/30 (C3 set 46, replays 23, all anchored
+  before the first change at 1665 = U); seeds 1-5 with 300 rounds 0/1500
+  failed; the 1700 control 30/30 with no write.
+- **The harness's live world (SimTool, `run_savestate_check`).** Before the
+  correction below, 19 of the 30 rounds failed at the end witness only,
+  "world hash: physics_delta_time 0 vs 0x1.f07c2p-6": every round with its
+  live tick e inside the freeze (e < 1665). Restore identity and every
+  replayed tick's blob (which carries the factor, the physics delta and the
+  gravity) were equal; the four rounds anchored in the freeze with e after
+  it (10: 1661+34, 19: 1652+21, 27: 1637+39, 28: 1652+24), the A15 / H1 case,
+  passed without it. Cause: the chained rounds' stand-in live world enters
+  every round with the straight pass's end's globals (factor 2), not e's, and
+  step 4 rightly puts those back. In a client the live world is at e. So the
+  harness, as B2SX made a named round's live world stand at e: puts the
+  straight end's globals on the stand-in before each round (what every round
+  had before C3: a running clock) and e's record's right after the rewind,
+  before the witnesses and the follow; a re-made live world gets t0's after
+  its `rewind_to(t0, t0)` (not exercised by S1). The witness rule is
+  unchanged; the per-tick replay identity already verifies the globals of
+  every replayed tick, e's included. The summary prints
+  `savestate-check: globals (C3) set= replays= replays_start= unknown=
+  failures= first_change= harness_put_failures=`.
+- **S1b** (`--drop-settle 0 --ticks 40 --rounds 60 --max-depth 1`, L2 and
+  L13, seeds 1-3, globals and clock kinds only): rWGQ7 "the environment's
+  gravity differs" in 4 of 6 runs (L2 s1-s3, L13 s2), each stopping the run
+  on the damaged world (14, 3, 41 and 3 rounds); rRK1 none and no clock
+  failure, those runs reaching 58, 60, 60 and 37 rounds. What fails is
+  A23's family without `--session-recipe` (the world's object count, the
+  sector manager's and module scripts' flags, a script reset in the window)
+  and four restore errors of window-born bodies (a joint's 'sys:unknown'
+  controller, a paper ball the world no longer has), the same kinds as in
+  rWGQ7.
+
+**Deferred to the final verification** (over the 15-minute budget, or a live
+check where the deterministic ones above cover the change): H1 (L1, a
+forced rewind inside the freeze, live); H4 (2 clients, a forced rewind to
+the first record, live - the case exists, measured above); R2 (the retail
+H4); the 16 captures of §7.5 are now `core_ref_s11` (done above).

@@ -151,6 +151,9 @@ namespace bmmo::physics {
         // ---- bridge API v5 (engine change #6): body guard ----
         bool set_body_guard(bool enable, const char* except_entity, std::string& error) const;
         bool get_clock(float& time_factor, float& physics_delta, std::string& error) const;
+        // ---- bridge API v28 (step RK1): the time factor and the gravity ----
+        bool get_physics_globals(bmmo_physics_globals& out, std::string& error) const;
+        bool set_physics_globals(const bmmo_physics_globals& in, std::string& error) const;
 
         // ---- bridge API v6 (design 9.10): spawn impulse, deterministic Random block ----
         // Impulse direction_ws * speed * mass at the body's mass centre; applied

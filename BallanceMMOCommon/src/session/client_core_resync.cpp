@@ -532,8 +532,12 @@ namespace bmmo::session {
             // Step EL7: the mirrors are this apply's own reconcile (2.6.3,
             // the deaths after S above), not the ended-life reconcile's.
             s.resync_restoring_ = true;
+            const uint64_t globals_before = s.rollback_.stats().globals_failures;
             ok = s.rollback_.resync(world(), anchor, now, spec, input_at, restored,
                                     "resync from the server's tick " + std::to_string(anchor));
+            // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused
+            // write of the physics globals dropped the history: not applied.
+            if (s.rollback_.stats().globals_failures != globals_before) ok = false;
             s.resync_restoring_ = false;
             rd.active = false;
             if (!ok) s.last_rewind_rederived_ = false;
