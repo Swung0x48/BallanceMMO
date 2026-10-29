@@ -3311,3 +3311,61 @@ each other for as long as they move together (above: 1405 ticks in the
 harness; a human pair separates under its own keys, as the retail run did).
 That is the decision's consequence, reported, not changed. REF11 re-captures
 the reference set (multi-client captures now carry 0 / 0).
+
+### As built (step REF11, 2026-10-29): core_ref_s11, the reference set after SPX
+
+SPX's server sends `spawn_spacing` 0 / `spawn_impulse` 0 under the spawn
+ghost, so every multi-client arm of `core_ref_s10` differs from its first
+spawn tick. `maps/arena-test/core_ref_s11` holds `core_ref_s10`'s five arms
+(`resync_snapoff`, `swing_snapoff`, `l8_cross`, `solo1`, `solo2`) with their
+arguments unchanged (WORLD_PROXIMITY_UNION set, the server's default),
+captured by HEAD 532ccb58's x64 build rebuilt from the clean tree
+(`build-agent-rREF11`, journal id `ballanced-36c04e3d24c9+bmmo-532ccb58abee`)
+against the Arch server built from the same tree with that clean id,
+snapshots off, `cpu_sampler.ps1` running (total 5.4-18.1 %, no pass voided);
+its README.md has the binaries, the numbers and the comparison with
+`core_ref_s10`, and `.local-tools/wire_check.sh` now defaults to it
+(`core_ref_s10` stays as the older set; a HEAD binary replays it exactly).
+No source changed; protocol 18 and journal v7 as before.
+
+- **Not `build-agent-rSIO`.** That copy was made before SIO's last
+  `io_queue.hpp` edit and its commit, so it is not HEAD's code; the x64 tree
+  was rebuilt (46 objects, `deps_heal.py` DEPS-OK) and the capture used the
+  clean build.
+- **The start pile.** No spawn impulse in any server log (`core_ref_s10`:
+  9 / 8 / 4). The own ball against the server's rows first differs at 1788 /
+  2078 / 1588 / 1156 in `resync_snapoff` (`core_ref_s10` 1168 / 2088 / 676 /
+  712; SPX's live run measured the same four ticks), none of them in the start
+  window; the mirrors' worst per 100 ticks fall from 1.210 / 1.086 / 0.853 m
+  (200 / 300 / 400) to 0.964 / 0.080 / 0 m, and `swing_snapoff`'s c2
+  start-window 1.200 m is gone. The 0.964 m left at 252 is mirror prediction
+  at the start of the drive (no ball is solid before 352). Closest approach of
+  two solid balls: 4.011 m in every arm, no checkpoint under 4 m
+  (`core_ref_s10` `swing_snapoff`: 3.001 m, 41 checkpoints).
+- **Rewinds.** `resync_snapoff` rewinds 44-62 times a client against 128-206:
+  the server's INPUT records change keys 19 times against 227, because balls
+  born together share one lane and the keep-lane steer barely corrects
+  (c0's "input corrected" rollbacks 187 -> 31). `l8_cross` 7-9 against 5:
+  the two beam pairs at 501 reached the clients after they had stepped 501
+  (arrival timing at 0 ms).
+- **swing_snapoff resyncs c0 once.** Its sector-4 beam pair, sent at its local
+  tick 700 for 701 like the other three clients', reached the server at 703
+  (re-stamped, late by 2; the other three arrived at 701). Why it was late is
+  inferred, not shown (no per-datagram proxy log): input delay 17 against an
+  input arrival margin of about 22 ticks (server.log q50 22.30) leaves an
+  event stamped local+1 about 6 ticks of margin, and a GNS reliable
+  retransmit would cost about a round trip (316 ms, about 20 ticks), more than
+  the 2 observed, so proxy jitter on that thin margin fits as well as a loss.
+  The core's rule for a moved own pair (plan step 22) resyncs (at 746). A
+  designed path, not a fault (the thin lifecycle-event margin predates REF11);
+  the harness verdict is FAIL for that resync (PASS in `core_ref_s10`), and
+  the set now covers the own-pair resync path in replay.
+- **SIO's unflushed log** does not touch this set: no arm has a late join and
+  the one link event (`2:1500:none`) does nothing on the proxy.
+- **Checks.** Each server journal replays matched (4144, 3982, 3175, 2875,
+  2921 ticks). `REF=core_ref_s11 wire_check.sh - rREF11` (replays against the
+  live traces): no COVERAGE-SHORT, 12/12 sends SAME, 12/12 journals
+  IDENTICAL, ALL SAME; the replays' final status fields and `reach:` lines
+  equal the live ones (12/12). solo1 / solo2 replay to their end markers,
+  sends SAME, journals byte-identical. `REF=core_ref_s10 wire_check.sh -
+  rREF11`: ALL SAME. 611 tests pass.
