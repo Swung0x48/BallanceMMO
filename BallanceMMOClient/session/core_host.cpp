@@ -2549,44 +2549,46 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         out.first_leak = effect.first;
         return out;
     };
-    p.make_trafo_set = [this](uint32_t player, std::string& error) {
+    p.make_trafo_set = [this](uint32_t player, uint16_t life, std::string& error) {
         if (!trafo_host.on) {
             error = "the trafo is not an input in this world";
             return false;
         }
         CKContext* context = m_bml->GetCKContext();
-        const auto r = bmmo::game::ensure_trafo_set(context, trafo_host.registry, player, trafo_host.hooks);
+        const std::string label = bs::trafo_life_label(player, life);
+        const auto r = bmmo::game::ensure_trafo_set(context, trafo_host.registry, player, life, trafo_host.hooks);
         if (!r.ok) {
-            for (const auto& line: r.lines) logger_->Warn("Physics session: trafo build %u: %s", player, line.c_str());
+            for (const auto& line: r.lines) logger_->Warn("Physics session: trafo build %s: %s", label.c_str(), line.c_str());
             error = r.error;
             return false;
         }
         if (r.how == bmmo::game::trafo_ensure::reselected)
-            for (const auto& line: r.lines) logger_->Info("Physics session: trafo: set %u %s", player, line.c_str());
+            for (const auto& line: r.lines) logger_->Info("Physics session: trafo: set %s %s", label.c_str(), line.c_str());
         if (r.how == bmmo::game::trafo_ensure::built) {
             // Design 9.1's settlement on the retail CK2.dll: the builder's
             // lines (I0-I7) and the digests, comparable with the headless.
-            for (const auto& line: r.lines) logger_->Info("Physics session: trafo build %u: %s", player, line.c_str());
-            if (const auto* set = trafo_host.registry.find(player))
-                logger_->Info("Physics session: trafo: set %u built: %zu objects, %zu scripts, digest %s, value digest %s", player,
-                              set->objects.size(), set->scripts.size(), set->digest.c_str(), set->value_digest.c_str());
+            for (const auto& line: r.lines) logger_->Info("Physics session: trafo build %s: %s", label.c_str(), line.c_str());
+            if (const auto* set = trafo_host.registry.find(player, life))
+                logger_->Info("Physics session: trafo: set %s built: %zu objects, %zu scripts, digest %s, value digest %s",
+                              label.c_str(), set->objects.size(), set->scripts.size(), set->digest.c_str(),
+                              set->value_digest.c_str());
         }
         bmmo::game::add_trafo_set_pieces(context, trafo_host.registry, host.explosion_pieces);
         return true;
     };
     p.run_trafo = [this](const bs::trafo_input& in, std::string& error) {
-        return bmmo::game::run_trafo(m_bml->GetCKContext(), trafo_host.registry, trafo_host.hooks, in.player, in.flags, in.type,
-                                     in.position, in.seed, error);
+        return bmmo::game::run_trafo(m_bml->GetCKContext(), trafo_host.registry, trafo_host.hooks, in.player, in.life, in.flags,
+                                     in.type, in.position, in.seed, error);
     };
-    p.trafo_final = [](uint32_t player, uint8_t type, uint32_t tick) {
-        bmmo::game::trafo_set_final(trafo_host.registry, player, type, tick);
+    p.trafo_final = [](uint32_t player, uint16_t life, uint8_t type, uint32_t tick) {
+        bmmo::game::trafo_set_final(trafo_host.registry, player, life, type, tick);
     };
     p.trafo_frame = [this](uint32_t) {
         if (trafo_host.on) bmmo::game::trafo_frame(m_bml->GetCKContext(), trafo_host.registry, 1000.0f / 66.0f);
     };
-    p.trafo_type_set = [this](uint32_t player, uint8_t type) {
+    p.trafo_type_set = [this](uint32_t player, uint16_t life, uint8_t type) {
         bs::trafo_type_view view;
-        const bmmo::game::trafo_set* set = trafo_host.registry.find(player);
+        const bmmo::game::trafo_set* set = trafo_host.registry.find(player, life);
         if (!set || type >= bs::kTrafoTypes) return view;
         view.exists = true;
         CKContext* context = m_bml->GetCKContext();
@@ -2602,8 +2604,16 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         bs::trafo_reconcile_result r;
         CKContext* context = m_bml->GetCKContext();
         if (spec.action == bs::trafo_reconcile_action::unmake) {
-            r.ok = bmmo::game::unmake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.type,
+            r.ok = bmmo::game::unmake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.life, spec.type,
                                                r.bodies_removed, r.error);
+            return r;
+        }
+        if (spec.action == bs::trafo_reconcile_action::retire) {   // step TRL
+            r.ok = bmmo::game::retire_trafo_set_now(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.life,
+                                                    spec.birth_tick, r.bodies_removed, r.error);
+            if (r.ok)
+                logger_->Info("Physics session: trafo: set %s retired at once (tick %u)",
+                              bs::trafo_life_label(spec.player, spec.life).c_str(), spec.birth_tick);
             return r;
         }
         // The remake, inside the core's mute: the pieces' Physicalize
@@ -2611,18 +2621,18 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         // tick (the headless host takes them from the muted event log).
         trafo_host.birth_tick = spec.birth_tick;
         trafo_host.if_absent = false;
-        r.ok = bmmo::game::remake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.type, spec.position,
-                                           spec.seed, 1000.0f / 66.0f, r.error);
+        r.ok = bmmo::game::remake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.life, spec.type,
+                                           spec.position, spec.seed, 1000.0f / 66.0f, r.error);
         trafo_host.birth_tick = 0;
         return r;
     };
     p.retire_trafo_sets = [this](uint32_t now, uint32_t history) {
-        std::vector<uint32_t> deselected;
+        std::vector<bs::trafo_key> deselected;
         if (!trafo_host.on) return deselected;
         CKContext* context = m_bml->GetCKContext();
-        std::set<uint32_t> before;
+        std::set<bs::trafo_key> before;
         for (const auto& set: trafo_host.registry.sets())
-            if (set.selected) before.insert(set.player);
+            if (set.selected) before.insert({set.player, set.life});
         const size_t sets_before = trafo_host.registry.sets().size();
         for (const auto& line: bmmo::game::retire_trafo_sets(context, trafo_host.registry, trafo_host.hooks, now, history, false))
             logger_->Info("Physics session: trafo: %s", line.c_str());
@@ -2632,9 +2642,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             host.explosion_pieces = bmmo::game::explosion_pieces(context);
             bmmo::game::add_trafo_set_pieces(context, trafo_host.registry, host.explosion_pieces);
         }
-        for (uint32_t player: before) {
-            const auto* set = trafo_host.registry.find(player);
-            if (!set || !set->selected) deselected.push_back(player);
+        for (const auto& key: before) {
+            const auto* set = trafo_host.registry.find(key.player, key.life);
+            if (!set || !set->selected) deselected.push_back(key);
         }
         return deselected;
     };

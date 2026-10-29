@@ -63,14 +63,33 @@ namespace bmmo::session {
             return;
         }
         // Step T3 (trafo-replication design 2.4): a member first seen in a
-        // message gets its piece set now, outside any replay.
-        if (s.trafo_active_ && msg.player != 0 && msg.player != s.own_id_) ensure_trafo_set(msg.player, "its first event");
+        // message gets its piece set now, outside any replay.  Step TRL: the
+        // set of the life the event names, and only for a life this client
+        // knows (an unknown one is parked below; its member message makes
+        // the set) and for an event at or after this numbering's base (the
+        // state names the sets before it: a catch-up of a life that left
+        // before this client joined makes none).  A Trafo event's set is
+        // on_trafo_event's.
+        if (s.trafo_active_ && msg.player != 0 && msg.player != s.own_id_
+                && msg.type != bmmo::session::event_type::Trafo
+                && !(s.assigned_ && static_cast<int32_t>(msg.tick - s.tick_base_) < 0)) {
+            if (msg.life == 0) {
+                const uint16_t life = trafo_life_at(msg.player, msg.tick);
+                ensure_trafo_set(msg.player, life ? life : uint16_t{1}, "its first event");
+            } else if (bmmo::session::find_member_life(s.lives_, msg.player, msg.life)) {
+                ensure_trafo_set(msg.player, msg.life, "its first event");
+            }
+        }
         // A Trafo event (protocol 11) is an input of the trafo log, not a
         // body change of the drain: our own (not server-stamped) is an echo
         // for the frame; another member's, and a server-stamped reset of
         // our own set, are logged at their applied tick now (design 4.6).
+        // Step TRL: one of our own id's earlier life in this session (a
+        // rejoin on the same connection) is no echo of ours - it acts on
+        // that life's set, like another member's input.
         if (msg.type == bmmo::session::event_type::Trafo) {
-            if (msg.player == s.own_id_ && s.own_id_ != 0 && !(msg.flags & bmmo::session::TRAFO_SERVER)) {
+            const bool other_life = msg.life != 0 && s.own_member_life_ != 0 && msg.life != s.own_member_life_;
+            if (msg.player == s.own_id_ && s.own_id_ != 0 && !(msg.flags & bmmo::session::TRAFO_SERVER) && !other_life) {
                 s.own_echoes_.push_back(std::move(msg));
                 return;
             }
@@ -262,7 +281,7 @@ namespace bmmo::session {
             if (s.phase_ != client_core_state::phase::running) return;
             // Step T3 (trafo-replication design 2.4): its piece set, outside
             // any replay ("a player first seen in a message").
-            if (s.trafo_active_) ensure_trafo_set(entry.id, "its member message");
+            if (s.trafo_active_) ensure_trafo_set(entry.id, entry.life ? entry.life : uint16_t{1}, "its member message");
             // Its parked events go to the drain, each at its tick; one whose
             // tick has passed takes the late path there (a rewind to its
             // stamp, or a resync beyond the reach), now with its life's join

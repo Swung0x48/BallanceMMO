@@ -393,6 +393,12 @@ namespace bmmo::sim {
             // patience line, an event patience made late from one that was
             // late anyway.
             std::chrono::steady_clock::time_point arrival{};
+            // Step TRL (review 3): a Trafo event's life as the runner decided
+            // it (trafo_decision::life; 0 for every other type).  The world
+            // runs it on the set of the id's newest life (physics_world::
+            // apply_trafo: the EVENT record carries no life, so a replay
+            // could not route by this); the apply checks the two agree.
+            uint16_t life = 0;
         };
         struct session_state {
             uint32_t id = 0;
@@ -507,6 +513,7 @@ namespace bmmo::sim {
             uint32_t sector_lead = 0;
             bmmo::session::trafo_acceptance trafo;
             uint64_t trafo_server_resets = 0, trafo_superseded = 0, trafo_rejected = 0;
+            uint64_t trafo_life_mismatches = 0;   // step TRL: a Trafo event applied while the id's newest life is another
             bool trafo_on() const { return (world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0; }
             // Step G2 (world-agreement-gaps-design.md §2.2, §2.4), under
             // WORLD_PROXIMITY_UNION: the candidate set (player ids) after the

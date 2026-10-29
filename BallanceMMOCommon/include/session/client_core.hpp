@@ -899,13 +899,18 @@ namespace bmmo::session {
         // and server-stamped (design 2.5): the live tick's applied before the
         // union pass, a replayed tick's re-applied in the replay.
         bmmo::session::trafo_input_log trafo_log_;
-        // The players this world holds a selected set for (first sight,
-        // design 2.4): a player without one gets make_trafo_set.
-        std::set<uint32_t> trafo_sets_;
-        // Their pieces' entities and players (the host's trafo_type_set at
-        // the make): a snapshot row of one restores it only on a breach
+        // The sets (player, life) this world holds selected (design 2.4;
+        // step TRL: keyed by life): a life without one gets make_trafo_set.
+        std::set<bmmo::session::trafo_key> trafo_sets_;
+        // Step TRL: the sets this world retired.  No sight (a member
+        // message, an event, a relayed input, the anchor) makes one again:
+        // a retired life is gone ('no resume'); only a resync ledger that
+        // still names it does (the server's state at S holds it).
+        std::set<bmmo::session::trafo_key> trafo_retired_sets_;
+        // Their pieces' entities and sets (the host's trafo_type_set at the
+        // make): a snapshot row of one restores it only on a breach
         // (rollback_world::row_on_breach_only).
-        std::map<std::string, uint32_t> trafo_pieces_;
+        std::map<std::string, bmmo::session::trafo_key> trafo_pieces_;
         // The hold's reports made before the assignment: stamped on the
         // first assigned frame (design 2.3, hold_pending_trafo).
         std::vector<trafo_report> trafo_pending_;
@@ -924,6 +929,9 @@ namespace bmmo::session {
         uint64_t trafo_echo_moved_ = 0, trafo_echo_dropped_ = 0;
         uint64_t trafo_sets_made_ = 0, trafo_set_failures_ = 0, trafo_run_failures_ = 0;
         uint64_t trafo_unmade_ = 0, trafo_remade_ = 0, trafo_retired_ = 0;
+        // Step TRL: sights of a retired set (not made again) and of a
+        // player whose life this client cannot name (no set made).
+        uint64_t trafo_retired_sights_ = 0, trafo_unnamed_lives_ = 0;
         uint32_t trafo_leak_logs_ = 0;
     };
 
@@ -1460,6 +1468,10 @@ namespace bmmo::session {
         uint64_t trafo_sent() const { return s.trafo_sent_; }
         uint64_t trafo_original_leaks() const { return s.trafo_leaks_; }
         const bmmo::session::trafo_input_log& trafo_log() const { return s.trafo_log_; }
+        // Step TRL: the sets this world holds selected, "p,pLn,..." in
+        // (player, life) order (the anchor's, the reconcile's and the status
+        // line's logs).
+        std::string trafo_set_list() const;
 
         // ---- reports (E10, client_core_report.cpp; design 1.3) ----
         // The status line (the headless 5 s report and the session's end;
@@ -1824,9 +1836,16 @@ namespace bmmo::session {
 
         // The trafo as an input (step T3, client_core_trafo.cpp;
         // trafo-replication design 2.3-2.9, 4.6-4.8).
-        // A set for `player` on first sight (make_trafo_set), outside any
-        // replay; true when the world holds one.
-        bool ensure_trafo_set(uint32_t player, const char* why);
+        // The set of (player, life) on first sight (make_trafo_set),
+        // outside any replay; true when the world holds one.  A set this
+        // world retired is made again only `from_ledger` (step TRL).
+        bool ensure_trafo_set(uint32_t player, uint16_t life, const char* why, bool from_ledger = false);
+        // Step TRL: the life of `player` a sight at `tick` names - the
+        // member life covering it (member_life_at), 0 when none is known.
+        uint16_t trafo_life_at(uint32_t player, uint32_t tick) const;
+        // The own player's life (SessionStart's own entry; 1 before
+        // protocol 18).
+        uint16_t own_trafo_life() const { return s.own_member_life_ ? s.own_member_life_ : uint16_t{1}; }
         // The hold's report of an own activation, stamped for `due` (sent,
         // logged as an own input); before the assignment it waits.
         void hold_trafo(const trafo_report& report, uint32_t due, const char* why);
@@ -1843,7 +1862,7 @@ namespace bmmo::session {
         void apply_trafo_inputs(uint32_t tick, bool replayed);
         // A trafo input applied at `tick` <= the current tick: the pending
         // input rewind from it, or a resync past the reach (design 4.7).
-        void trafo_rewind(uint32_t tick, uint32_t player, const char* why);
+        void trafo_rewind(uint32_t tick, uint32_t player, uint16_t life, const char* why);
         // An own Trafo event's echo (design 4.6).
         void process_trafo_echo(const bmmo::session_event_msg& msg, bool stale);
         // The reconcile (design 4.7), at a resync's apply before its

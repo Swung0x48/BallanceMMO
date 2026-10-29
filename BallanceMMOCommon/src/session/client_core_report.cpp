@@ -176,7 +176,8 @@ namespace bmmo::session {
         // unmakes and remakes, sets retired, inputs in the log.
         const std::string trafo = !s.trafo_active_ ? std::string() : textf(
             " trafo: sets=%zu sent=%llu recv=%llu applied=%llu replayed=%llu late=%llu trafo_missed=%llu covered=%llu "
-            "trafo_original_leaks=%llu echo=%llu/%llu made=%llu/%llu run_failures=%llu reconcile=%llu/%llu retired=%llu log=%zu",
+            "trafo_original_leaks=%llu echo=%llu/%llu made=%llu/%llu run_failures=%llu reconcile=%llu/%llu retired=%llu log=%zu "
+            "set_list=%s retired_sights=%llu unnamed_lives=%llu",
             s.trafo_sets_.size(), static_cast<unsigned long long>(s.trafo_sent_),
             static_cast<unsigned long long>(s.trafo_received_), static_cast<unsigned long long>(s.trafo_applied_),
             static_cast<unsigned long long>(s.trafo_replayed_), static_cast<unsigned long long>(s.trafo_late_),
@@ -185,7 +186,8 @@ namespace bmmo::session {
             static_cast<unsigned long long>(s.trafo_echo_dropped_), static_cast<unsigned long long>(s.trafo_sets_made_),
             static_cast<unsigned long long>(s.trafo_set_failures_), static_cast<unsigned long long>(s.trafo_run_failures_),
             static_cast<unsigned long long>(s.trafo_unmade_), static_cast<unsigned long long>(s.trafo_remade_),
-            static_cast<unsigned long long>(s.trafo_retired_), s.trafo_log_.size());
+            static_cast<unsigned long long>(s.trafo_retired_), s.trafo_log_.size(), trafo_set_list().c_str(),
+            static_cast<unsigned long long>(s.trafo_retired_sights_), static_cast<unsigned long long>(s.trafo_unnamed_lives_));
         // Step G3/G5 (world-agreement-gaps-design.md 2.5, 2.6): the
         // proximity union's section, only in a session under its world
         // option (every other status line is the text it was): place calls

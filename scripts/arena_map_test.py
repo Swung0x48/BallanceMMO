@@ -43,10 +43,11 @@ The late-player additions (docs/late-player-design.md 5.1, H1-H8):
                                        --leave-room-at: the server removes it at
                                        its next tick, not after a connection
                                        timeout as with --leave-at)
-  --rejoin N:T                         client N leaves the room at its tick T and
+  --rejoin N:T[:MS]                    client N leaves the room at its tick T and
                                        joins it again on the same connection, in
-                                       the same tick (the client's --rejoin-at);
-                                       its second life's journal is
+                                       the same tick or MS milliseconds later
+                                       (the client's --rejoin-at T[:MS], step
+                                       TRL); its second life's journal is
                                        client{N}.rejoin1.bmjr
   --server-log PATH                    an external server's log, copied and read
   --control DIR                        a control run (repeatable): the band the
@@ -533,13 +534,24 @@ def journal_events(args, journal):
             'distinct_sectors_entered': sorted(set(sectors))}
 
 
-def parse_client_ticks(specs, players, what):
+def parse_client_ticks(specs, players, what, delays=None):
     """--leave / --rejoin N:T specs -> {N: T}.  N must be a client of the
     run, T a tick > 0, and each client named once per option; both are
-    refused for client 0, the host (its leave would hand the room over)."""
+    refused for client 0, the host (its leave would hand the room over).
+    With `delays` (a dict, --rejoin; step TRL) a spec may be N:T:MS, the
+    rejoin's Join sent MS milliseconds after the Leave: delays[N] = MS."""
     out = {}
     for spec in specs:
         a, sep, b = spec.partition(':')
+        ms = None
+        if delays is not None and ':' in b:
+            b, _, c = b.partition(':')
+            try:
+                ms = int(c)
+            except ValueError:
+                raise ValueError('%s %r: N:T:MS expected' % (what, spec))
+            if ms < 0:
+                raise ValueError('%s %r: a delay >= 0 expected' % (what, spec))
         try:
             index, tick = int(a), int(b)
         except ValueError:
@@ -551,6 +563,8 @@ def parse_client_ticks(specs, players, what):
         if index == 0:
             raise ValueError('%s of client 0: the host cannot leave its room and keep it' % what)
         out[index] = tick
+        if ms:
+            delays[index] = ms
     return out
 
 
@@ -559,7 +573,8 @@ def member_args(args, i):
     step M0), from --leave and --rejoin."""
     cmd = []
     if i in getattr(args, 'rejoin', {}):
-        cmd += ['--rejoin-at', str(args.rejoin[i])]
+        delay = getattr(args, 'rejoin_delay', {}).get(i, 0)
+        cmd += ['--rejoin-at', str(args.rejoin[i]) + (':%d' % delay if delay else '')]
     if i in getattr(args, 'leave', {}):
         cmd += ['--leave-room-at', str(args.leave[i])]
     return cmd
@@ -2120,6 +2135,22 @@ def selftest():
             refused.append(False)
     check('--leave / --rejoin: bad specs refused (out of range, tick 0, no tick, not a number, twice, rejoin or leave of the host)',
           all(refused), str(refused))
+    # Step TRL: a delayed rejoin N:T:MS.
+    dl = {}
+    rj2 = parse_client_ticks(['1:1200:1000', '2:1300'], 5, '--rejoin', dl)
+    MB = type('MB', (), {'rejoin': rj2, 'rejoin_delay': dl})
+    bad = []
+    for spec in ('1:1200:x', '1:1200:-5'):
+        try:
+            parse_client_ticks([spec], 5, '--rejoin', {})
+        except ValueError:
+            bad.append(True)
+        else:
+            bad.append(False)
+    check('--rejoin N:T:MS: a delayed rejoin (step TRL)',
+          rj2 == {1: 1200, 2: 1300} and dl == {1: 1000}
+          and member_args(MB, 1) == ['--rejoin-at', '1200:1000'] and member_args(MB, 2) == ['--rejoin-at', '1300']
+          and all(bad), '%s %s %s' % (rj2, dl, bad))
 
     # A proxy in front of a loopback "server": a client sends one datagram
     # every 5 ms for 1.2 s, an up blackout covers 0.3-0.6 s, a spike of 200 ms
@@ -2338,9 +2369,9 @@ def main():
                     help='H4: client N starts when the host reaches tick T')
     ap.add_argument('--leave', action='append', default=[], metavar='N:T',
                     help='world agreement J2/J4: client N leaves the room at its tick T and exits (--leave-room-at)')
-    ap.add_argument('--rejoin', action='append', default=[], metavar='N:T',
+    ap.add_argument('--rejoin', action='append', default=[], metavar='N:T[:MS]',
                     help='world agreement J5: client N leaves the room at its tick T and joins it again '
-                         'on the same connection (--rejoin-at; not client 0)')
+                         'on the same connection, MS ms later when given (--rejoin-at; not client 0)')
     ap.add_argument('--server-log', default='', help='H5: an external server\'s log, copied into the case')
     ap.add_argument('--control', action='append', default=[],
                     help='H8: a control run (its directory or summary.json) whose event report is the band; repeatable')
@@ -2384,7 +2415,8 @@ def main():
     args.join_late = dict((int(a), int(b)) for a, _, b in (s.partition(':') for s in args.join_late))
     try:
         args.leave = parse_client_ticks(args.leave, args.players, '--leave')
-        args.rejoin = parse_client_ticks(args.rejoin, args.players, '--rejoin')
+        args.rejoin_delay = {}
+        args.rejoin = parse_client_ticks(args.rejoin, args.players, '--rejoin', args.rejoin_delay)
     except ValueError as e:
         ap.error(str(e))
     for i in sorted(set(args.leave) & set(args.rejoin)):

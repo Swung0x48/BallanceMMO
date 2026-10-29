@@ -2993,6 +2993,180 @@ recreate failures (1 / 1 in `_1`, 1 / 5 in `_2`) are the pre-existing count of
 ball births inside a window (1 / 1 in `cd1_gate1` and `r3_spawn_1`); a
 same-recipe run of the previous build was not made (the contrast is deferred).
 
+**As built (step TRL, 2026-10-29; HEAD 2c15a9d + the working tree, not
+committed): the piece sets keyed by (player, life).** The user's decision
+(2026-10-29, verbatim: 'Key by life, no resume'): a rejoin on the same id is a
+new life with a set of its own; nothing of the old life's set is reused.
+World-agreement design R2.1 / J-g / 2.8 asked for it; the code had keyed every
+set by the id alone, so a same-connection rejoin (`--rejoin-at`) kept the old
+life's final set at its add (`ensure_trafo_set` "kept"), every world retired
+it at about R + 229, and the worlds parted: the server never built one again
+(it ensured only at `add_player` and `apply_trafo`), the members re-made it at
+the rejoiner's next relayed input, the rejoiner had none, a late joiner built
+one for every member - the server's portable record then lacked
+`BMMO_TrafoOwner_<p>`'s scripts, the joiner refused the server's script state
+and its savestate restore found no live controller for the sandbag, the rope,
+the Dreharme and the bridge, and the sandbag fell for ever (wgq7_live client3
+mech 421 m in D, 4402 m in A).
+
+- **The key and the names.** `session/trafo_input.hpp` `trafo_key {player,
+  life}` and `trafo_life_label(p, l)`: "<p>" for life 1, "<p>L<n>" for a later
+  life. Every name and alias of a set derives from the label - copies
+  `<original>_Trafo<label>`, `BMMO_TrafoOwner_<label>`, `BMMO_TrafoRef_<T>_<label>`,
+  the savestate controller alias `trafo:<label>/<k>` - so two lives' sets of
+  one id coexist under different names, the same in every world (the life is
+  the server's numbering, protocol 18). Life 1 keeps the names it had: a
+  session without a rejoin builds, records and journals exactly what it did
+  before (the wire check below: only SessionReady's protocol number moved).
+  "L" is not a digit, so no label spells another's ("3L2" is not "32"); the
+  longest name is 44 characters (MAX_NAME 64); `_Trafo` stays in every copy's
+  name (`resync_rules.hpp` selects the sets' scripts by it). The digest's
+  `normalized` strips the label, so every life's digest is the one value.
+- **Every consumer by (player, life).** `trafo_registry::find / remove`,
+  `rebuild_part` (the trafo list in (player, life) order), `build / ensure /
+  reselect / run_trafo / unmake / remake / trafo_set_final / retire` in
+  `game/trafo_sets.hpp`; the platform's `make_trafo_set`, `trafo_final`,
+  `trafo_type_set`, `trafo_reconcile_spec.life`, `retire_trafo_sets` (returns
+  keys); `trafo_input.life`, the input log's key (player, life, type, kind,
+  origin) and its order; the server's `trafo_acceptance` per (player, life,
+  type) - a rejoin's new life starts with no live type set, no reset span and
+  no final mark of the old one; `trafo_decision.life`, which the relay carries
+  (`session_event_msg.life`: the leaver's final resets the old life's, set in
+  `queue_trafo` from the decision, no longer from the player's current life);
+  `physics_world`'s `trafo_applied_` and ledger. The seed does not read the
+  life (two lives never explode one type at one tick).
+- **The bridge.** Bridge API v21's `trafo_set_register(player, ...)` refuses a
+  second registration of one key, and the old life's set must stay registered
+  while it fades (the body guard's exemptions, the filter's pieces). Its
+  `player` argument is now an opaque per-world key, `trafo_set::bridge`
+  (`trafo_registry::bridge_key_for`: the id for life 1 - every set of a
+  session without a rejoin - and the id mixed with the life for a later life,
+  either moved on to the next value while it is 0 or a set this world still
+  holds uses it; a per-world handle, which need not be equal across worlds
+  because that move depends on what the world holds). No bridge or engine
+  code changed: the bridge uses the key only as its map key and in its texts.
+- **Where sets are made.** The server: at `add_player` of each life
+  (`physics_world::add_player(id, order, error, life)`; the life is the
+  runner's, and the journal's PLAYER record carries it for a later life; a
+  replay of an older journal numbers the lives by counting the adds of an id).
+  `apply_trafo` never builds a set any more: it runs on the set of the id's
+  newest life added in that world (J3 puts every event of a life inside it, a
+  leaver's final resets before a rejoin's add), and a missing set is a logged,
+  counted bug (`trafo_missing_sets`), not a reason to build one - which
+  settles finding (3): wm0_live's server built a fresh set at 3662 only to
+  apply the finals of a later life whose set it had destroyed at 1430. A
+  client core: at the anchor for every open life (SessionStart's) and the own
+  one (`own_member_life_`); at a member message for that life (design 2.8); at
+  an event for the life it carries, only when that life is known and the event
+  is not before this numbering's base (a catch-up event of a life that left
+  before this client joined makes no set: the state names the sets there); at
+  a relayed input for the member life covering its first frame, none when the
+  client cannot name one (`unnamed_lives`; a guessed life could be one the
+  server never held); at a resync ledger for the life each entry names.
+- **No resume; the reselect.** A set this world retired is never made again by
+  a sight (`trafo_retired_sets_`, `retired_sights`). The reselect stays, for
+  the same life only: a resync ledger may still name a set this world
+  deselected but has not destroyed (a client's retirement and the server's
+  run a few ticks apart; the server destroys at the deselect, a client
+  history_ticks later), and only the ledger path may bring a retired set back.
+  It never serves another life.
+- **Found by run B and fixed in this step: a set of an ended life the ledger
+  no longer names.** Client 1 rejoined 1 s after its leave; its join state
+  (S 1296) named its old life's fading set, which it built from that ledger;
+  the state waited for bodies and timed out, so its reconcile never ran and
+  the set never got its final marks; the server retired it at 1431, and the
+  next state (S 1529) did not name it - the client still held it, the
+  portable record had no `BMMO_TrafoOwner_1006159052` scripts, the script
+  state was refused (once; client 1's later trafos and pieces were exact).
+  Two changes: the resync's step 1b applies the ledger's final marks to the
+  sets it makes (a set made for a state that is then not applied still
+  retires by the rule), and the reconcile retires at once every held set of an
+  ended life (not the own current life, not a member life without a removal)
+  that the ledger does not name (`trafo_reconcile_action::retire`,
+  `game/trafo_sets.hpp retire_trafo_set_now`: every type set unmade, then
+  deselected; destroyed history_ticks later). A held set of an open life that
+  the ledger does not name is left alone and logged (`(DIFFERENT)`).
+- **Wire and files.** Protocol 21: SessionResyncState's trafo ledger gives
+  each entry its life, one u16 per entry after the ledger (a state that ends
+  after the ledger - protocol 20 - reads as life 1, so the protocol-18/20
+  captures still decode); journal v9: the PLAYER record's trailing life (a
+  later life only) and the RESYNC record's trailing lives of its trafo
+  entries (only when one is not 1) - both absent in a session without a
+  rejoin. The portable record (v3) carries no life field: its trafo list is
+  keyed by owner and script names, which carry the label.
+- **Logs for the judges.** "trafo sets at the anchor: <list>", "trafo sets at
+  S <S>: server <list> here <list>" (`(DIFFERENT)` when they differ), the
+  status line's `set_list=`, `retired_sights=`, `unnamed_lives=`; the
+  server's world `describe()` gives `trafo_set_list=` and
+  `trafo_missing_sets=`.
+- **The headless delayed rejoin.** `--rejoin-at TICK:MS` sends the Join MS ms
+  after the Leave, on the same connection (`join_sent_` keeps the room-state
+  handler from joining on its own meanwhile); `scripts/arena_map_test.py
+  --rejoin N:T:MS` passes it (selftest case added).
+- **The retail mod.** Through the shared core only; `core_host.cpp`'s trafo
+  hooks take the life (no new `BallanceMMOClient` data member). The retail
+  actions that leave and rejoin a room on the same connection are the console
+  commands `/mmo room leave` and `/mmo room join <id>`
+  (`BallanceMMOClient.cpp` 1105-1128; the automation command file reaches them
+  through its `mmo` verb), and the core host's own Leave when a session starts
+  while the player is not in the level (`core_host.cpp` 1378-1386) followed by
+  a manual `/mmo room join`. A retail session ends at its leave and its host
+  tears its sets down, so its next SessionStart is a late join with fresh sets,
+  as the headless client's is.
+- **Evidence.** Unit tests (643 pass): two lives' sets coexisting, the old
+  life's finals on its own set, the new life's input on its own; per-life
+  retirement, no sight of a retired set making it again; a late-join ledger
+  while an old life's set still fades (the joiner holds exactly the server's
+  list, J4); an own earlier life's relayed input is no echo; the reconcile's
+  retire of an ended life's unnamed set (run B's sequence); the ledger's
+  per-life acceptance and log; the label; the ledger's lives on the wire (and
+  the protocol-20 layout read as life 1); journal v9 round trips. Wire check
+  over core_ref_s11 (`--accept-protocol 18`, rRK3 vs rTRL): 12/12 journals
+  IDENTICAL, every send the same but SessionReady's protocol number (one send
+  per client, 20 -> 21). Live (Arch server rebuilt from the tree, snapshots
+  off, trafo inputs and placement on): run A (`trl_live_A`, wgq7_live's recipe)
+  - no "script state was refused" and no "no live controller" anywhere (wgq7:
+  1 and 8 in client3), client3's list at S 1530 equal to the server's, every
+  world's final list `1627089489L2,2574739882,4004314805` (the leaver's and
+  the old life's sets retired), the server built the new life's set at its add
+  and never a set at an apply; client3 mech 2.90 m in D (P_Ball_Paper_MF, a
+  join transient), 4.57 m in A (the balloon, exception c) against wgq7's 421 /
+  4402 m - the refusal was the cause of the fall (removed, the fall is gone).
+  The beam of the rejoiner at 1400 found no own body (its new life's ball
+  spawns at 1436). Run B (`trl_live_B`, Joins 1000 ms and 5000 ms after the
+  Leaves, a late joiner at 1850, the 1 s rejoiner beamed onto the stone trafo
+  at 1750): the 5 s rejoiner and the late joiner equal to the server at their
+  S (1654, 1880); the rejoiner's life-2 explosions (stone 1915, wood 2277):
+  all 33 pieces `*_Trafo1006159052L2` 0.0000 m from the server at every
+  checkpoint in all four clients; the 1 s rejoiner's refusal above, fixed
+  after the run (its rerun is deferred: the step's two live runs were spent).
+  Either half of the fix covers run B's sequence on its own: the final marks
+  of step 1b (finals at 1202) retire the old set by the rule at 1431, before
+  S 1529; the reconcile's retire is the backstop for a retirement running
+  behind.
+- **Review round.** (1) The server still runs a Trafo event on the set of
+  the id's newest life (`physics_world::apply_trafo`, `life_of(id)`): the
+  EVENT journal record carries no life, so routing by the event's life
+  would make a replay route differently from the live server the moment
+  they differed. The runner keeps the life it decided
+  (`session_runner::pending_event::life`) and, at the apply, logs and notes
+  a Trafo event whose life is not the id's newest (`trafo_life_mismatches`;
+  J3 makes them equal today). Routing by the event's life needs the EVENT
+  record to carry it (a journal change, not made here). (2) The reconcile's
+  retire-at-once marks each of the set's type entries in the RESYNC record
+  with `JOURNAL_TRAFO_RETIRED` (8; format unchanged, v9). (3) Step 1b's final
+  marks are in the numbering of the assign before the state; a state dropped
+  after a re-assign with a non-zero delta leaves a mark that far off until
+  the next state's reconcile (it re-marks the named sets, retires the
+  others). (4) A trafo-on wire check is not possible: every trafo-on capture
+  is protocol 11-17 (`core_ref_t3`, `core_ref_rc1`, `tr3b_*`, `rcx_*`), which
+  a protocol-21 binary cannot replay (WM1's event life trailer, R12's relay
+  header, S5); the trafo path's deterministic evidence is the two server
+  journal replays (3463/3463, 3673/3673) and the pieces' 0.0000 m; a
+  trafo-on re-capture is a live run. (5) The delayed rejoiner's first state
+  that never found its 20 bodies is queued in `roadmap.md` §4 item 2 (cause
+  not established); the wait now logs its whole list at 60 frames.
+
 ## 9. Open questions
 
 **9.1 CK copy semantics on the retail CK2.dll.** The open points are:

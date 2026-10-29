@@ -144,7 +144,7 @@ namespace bmmo::sim {
             std::sort(order.begin(), order.end());
             if (o_.reverse) std::reverse(order.begin(), order.end());
             for (uint32_t p: order) {
-                const auto r = bmmo::game::build_trafo_set(context_, registry_, p, hooks_);
+                const auto r = bmmo::game::build_trafo_set(context_, registry_, p, 1, hooks_);
                 for (const auto& l: r.lines)
                     if (o_.describe || !r.ok) std::printf("  %s\n", l.c_str());
                 if (!r.ok) {
@@ -152,7 +152,7 @@ namespace bmmo::sim {
                     ++failures_;
                     return false;
                 }
-                const auto* set = registry_.find(p);
+                const auto* set = registry_.find(p, 1);
                 std::printf("trafo set %u built: %zu objects, %zu scripts, digest %s, value digest %s\n", p,
                             set->objects.size(), set->scripts.size(), set->digest.c_str(), set->value_digest.c_str());
                 if (o_.built_params) built_params(*set);
@@ -212,11 +212,11 @@ namespace bmmo::sim {
             if (frame && !remade) run_frame();
         }
         void ensure(uint32_t player, long long tick) {
-            const auto r = bmmo::game::ensure_trafo_set(context_, registry_, player, hooks_);
+            const auto r = bmmo::game::ensure_trafo_set(context_, registry_, player, 1, hooks_);
             const char* how = r.how == bmmo::game::trafo_ensure::kept ? "kept"
                             : r.how == bmmo::game::trafo_ensure::reselected ? "reselected" : "built";
-            const auto* set = registry_.find(player);
-            const std::string now = set ? bmmo::game::trafo_value_digest(context_, set->scripts, player) : std::string("-");
+            const auto* set = registry_.find(player, 1);
+            const std::string now = set ? bmmo::game::trafo_value_digest(context_, set->scripts, player, 1) : std::string("-");
             const bool same = set && now == set->value_digest;
             std::printf("trafo ensure t=%lld player %u: %s %s; value digest now %s, built %s: %s%s\n", tick, player,
                         r.ok ? "ok" : "FAILED", how, now.c_str(), set ? set->value_digest.c_str() : "-",
@@ -229,17 +229,17 @@ namespace bmmo::sim {
             std::string error;
             if (!u.remake) {
                 int removed = 0;
-                const bool ok = bmmo::game::unmake_type_set(context_, registry_, hooks_, u.player, u.type, removed, error);
+                const bool ok = bmmo::game::unmake_type_set(context_, registry_, hooks_, u.player, 1, u.type, removed, error);
                 std::printf("trafo unmake t=%lld player %u %s: %s, %d bodies removed%s\n", tick, u.player,
                             bmmo::session::trafo_type_name(u.type), ok ? "ok" : "FAILED", removed, error.empty() ? "" : (" (" + error + ")").c_str());
                 if (!ok) ++failures_;
                 return;
             }
             const int32_t s = bmmo::session::trafo_seed(o_.session_seed, u.player, static_cast<uint32_t>(u.seed_tick), u.type);
-            const bool ok = bmmo::game::remake_type_set(context_, registry_, hooks_, u.player, u.type, u.position, s,
+            const bool ok = bmmo::game::remake_type_set(context_, registry_, hooks_, u.player, 1, u.type, u.position, s,
                                                         bmmo::sim::kFixedDeltaMs, error);
             int bodies = 0;
-            if (const auto* set = registry_.find(u.player))
+            if (const auto* set = registry_.find(u.player, 1))
                 for (CK_ID id: set->types[u.type].pieces)
                     if (hooks_.has_body(name(id))) ++bodies;
             std::printf("trafo remake t=%lld player %u %s seed %d: %s, %d bodies%s\n", tick, u.player,
@@ -264,12 +264,12 @@ namespace bmmo::sim {
         void apply_inputs(uint32_t tick, bool quiet = false) {
             for (const auto& in: log_.at(tick)) {
                 std::string error;
-                if (!bmmo::game::run_trafo(context_, registry_, hooks_, in.player, in.flags, in.type, in.position, in.seed, error)) {
+                if (!bmmo::game::run_trafo(context_, registry_, hooks_, in.player, in.life, in.flags, in.type, in.position, in.seed, error)) {
                     std::printf("trafo input FAILED at %u: %s\n", tick, error.c_str());
                     ++failures_;
                     continue;
                 }
-                if (in.flags & bmmo::session::TRAFO_FINAL) bmmo::game::trafo_set_final(registry_, in.player, in.type, tick);
+                if (in.flags & bmmo::session::TRAFO_FINAL) bmmo::game::trafo_set_final(registry_, in.player, in.life, in.type, tick);
                 if (quiet) continue;
                 std::printf("trafo input t=%u player %u %s %s at (%.3f,%.3f,%.3f) seed %d\n", tick, in.player,
                             bmmo::session::trafo_type_name(in.type), bmmo::session::trafo_is_reset(in.flags) ? "reset" : "explode",
@@ -342,7 +342,7 @@ namespace bmmo::sim {
             std::printf("trafo describe: %s\n", bmmo::physics::describe_trafo_sets(physics_).c_str());
             for (const auto& set: registry_.sets()) {
                 std::printf("  set %u owner %s selected=%d scripts:", set.player,
-                            bmmo::game::trafo_owner_name(set.player).c_str(), set.selected ? 1 : 0);
+                            bmmo::game::trafo_owner_name(set.player, set.life).c_str(), set.selected ? 1 : 0);
                 for (CK_ID id: set.scripts) {
                     CKBehavior* s = CKBehavior::Cast(context_->GetObject(id));
                     std::printf(" %s%s", s && s->GetName() ? s->GetName() : "?", s && s->IsActive() ? "*" : "");
@@ -435,11 +435,11 @@ namespace bmmo::sim {
                         for (CK3dEntity* c = frame->HierarchyParser(nullptr); c; c = frame->HierarchyParser(c))
                             pieces.emplace_back(c->GetName(), "orig/" + std::string(c->GetName()));
                 } else {
-                    const auto* set = registry_.find(static_cast<uint32_t>(std::strtoul(who.c_str(), nullptr, 10)));
+                    const auto* set = registry_.find(static_cast<uint32_t>(std::strtoul(who.c_str(), nullptr, 10)), 1);
                     if (set)
                         for (CK_ID id: set->types[type].pieces) {
                             std::string n = name(id), printed = n;
-                            const std::string suffix = bmmo::game::trafo_copy_suffix(set->player);
+                            const std::string suffix = bmmo::game::trafo_copy_suffix(set->player, set->life);
                             if (printed.size() > suffix.size() && printed.compare(printed.size() - suffix.size(), suffix.size(), suffix) == 0)
                                 printed.resize(printed.size() - suffix.size());
                             pieces.emplace_back(n, who + "/" + printed);
@@ -552,7 +552,7 @@ namespace bmmo::sim {
         // target has no body.  The sampler (--trafo-presim) must count it as
         // a _Trafo entry from this tick on.
         void poke_create(uint32_t player, long long tick) {
-            const auto* set = registry_.find(player);
+            const auto* set = registry_.find(player, 1);
             CKBehavior* script = set ? CKBehavior::Cast(context_->GetObject(set->collsound)) : nullptr;
             CKBehavior* chosen = nullptr;
             bmmo::game::trafo_detail::walk(script, [&](CKBehavior* beh) {
@@ -581,11 +581,11 @@ namespace bmmo::sim {
             CKParameterManager* pm = context_->GetParameterManager();
             for (CK_ID id: set.scripts) {
                 CKBehavior* script = CKBehavior::Cast(context_->GetObject(id));
-                const std::string sname = bmmo::game::trafo_detail::normalized(bmmo::game::trafo_detail::name_of(script), set.player);
+                const std::string sname = bmmo::game::trafo_detail::normalized(bmmo::game::trafo_detail::name_of(script), set.player, set.life);
                 int k = 0;
                 bmmo::game::trafo_detail::walk(script, [&](CKBehavior* beh) {
                     const std::string place = sname + "/" + std::to_string(k++) + ":"
-                                            + bmmo::game::trafo_detail::normalized(bmmo::game::trafo_detail::name_of(beh), set.player);
+                                            + bmmo::game::trafo_detail::normalized(bmmo::game::trafo_detail::name_of(beh), set.player, set.life);
                     const auto value = [&](CKParameter* p) -> std::string {
                         if (!p) return "-";
                         const int size = p->GetDataSize();
@@ -594,7 +594,7 @@ namespace bmmo::sim {
                             CK_ID ref = 0;
                             std::memcpy(&ref, data, sizeof(ref));
                             CKObject* o = ref ? context_->GetObject(ref) : nullptr;
-                            return "obj:" + (o ? bmmo::game::trafo_detail::normalized(bmmo::game::trafo_detail::name_of(o), set.player)
+                            return "obj:" + (o ? bmmo::game::trafo_detail::normalized(bmmo::game::trafo_detail::name_of(o), set.player, set.life)
                                                : std::string(ref ? "?" : "0"));
                         }
                         std::string hex;
@@ -844,9 +844,9 @@ namespace bmmo::sim {
             // perturbed; restored with every set selected.
             const uint32_t first = registry_.sets().front().player;
             script_replay::trafo_part only_first;
-            for (CK_ID id: registry_.find(first)->scripts) {
+            for (CK_ID id: registry_.find(first, 1)->scripts) {
                 only_first.scripts.push_back(id);
-                only_first.built[id] = registry_.find(first)->built.at(id);
+                only_first.built[id] = registry_.find(first, 1)->built.at(id);
             }
             std::vector<uint8_t> r1;
             script_replay::capture(context_, sel, forces, r1, &only_first);
@@ -881,17 +881,17 @@ namespace bmmo::sim {
                       + std::to_string(registry_.part().scripts.size()) + " scripts put to built" + (error.empty() ? "" : " (" + error + ")"));
             // (3): a record naming a set that is then destroyed.
             const uint32_t doomed = 999999u;
-            const auto r = bmmo::game::build_trafo_set(context_, registry_, doomed, hooks_);
+            const auto r = bmmo::game::build_trafo_set(context_, registry_, doomed, 1, hooks_);
             if (!r.ok) {
                 check(false, "(3) the extra set for the vanished-id check did not build: " + r.error);
                 return;
             }
             std::vector<uint8_t> r3;
             script_replay::capture(context_, sel, forces, r3, &registry_.part());
-            const bmmo::game::trafo_set gone = *registry_.find(doomed);
-            hooks_.unregister_set(doomed, error);
+            const bmmo::game::trafo_set gone = *registry_.find(doomed, 1);
+            hooks_.unregister_set(gone.bridge, error);
             bmmo::game::destroy_trafo_set_objects(context_, gone);
-            registry_.remove(doomed);
+            registry_.remove(doomed, 1);
             const bool refused = !script_replay::restore(context_, sel, forces, r3, &error, nullptr, nullptr, true, &registry_.part());
             check(refused && error == "a recorded trafo script is gone",
                   "(3) a record naming a destroyed set is refused (" + error + ")");

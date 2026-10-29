@@ -331,7 +331,7 @@ namespace bmmo::sim {
             for (size_t i = 0; i < players.size(); ++i) {
                 const auto [player, join_order] = players[i];
                 std::string add_error;
-                if (!s->world->add_player(player, join_order, add_error)) {
+                if (!s->world->add_player(player, join_order, add_error, 1)) {
                     log("[session " + std::to_string(session) + "] add_player failed: " + add_error);
                     if (s->world->trafo_failed()) {
                         // Fail closed (trafo-replication design 2.4): a set
@@ -444,7 +444,7 @@ namespace bmmo::sim {
         change.join_order = join_order;
         change.tick = s.world->tick_index();
         std::string error;
-        if (!s.world->add_player(player, join_order, error)) {
+        if (!s.world->add_player(player, join_order, error, life)) {
             log("[session " + std::to_string(s.id) + "] add_player failed: " + error);
             change.in_world = false;
             if (s.world->trafo_failed()) {
@@ -463,7 +463,7 @@ namespace bmmo::sim {
         s.lives[player] = life;
         s.inputs[player].reset(s.world->tick_index());
         s.cadence.force_full();
-        s.journal.player(s.world->tick_index(), player, join_order, true, name);
+        s.journal.player(s.world->tick_index(), player, join_order, true, name, life);
         if (callbacks_.on_player_added) callbacks_.on_player_added(change);
     }
 
@@ -595,7 +595,10 @@ namespace bmmo::sim {
                     // inputs for this set: every world retires it).
                     const uint32_t F = bmmo::session::lifecycle_leaver_removal_tick(s.events, player, next);
                     const float none[3] = {};
-                    for (const auto& d: s.trafo.leaver(player, F)) queue_trafo(s, d, none, clock::now(), 0, "leaver");
+                    // Step TRL: the leaving life's set (a rejoin, added at
+                    // this life's removal, is another life with its own).
+                    for (const auto& d: s.trafo.leaver(player, life_of(s, player), F))
+                        queue_trafo(s, d, none, clock::now(), 0, "leaver");
                 }
                 if (bmmo::session::leaver_stays(has_ball, queued)) {
                     auto& leaving = s.leaving[player];
@@ -865,7 +868,7 @@ namespace bmmo::sim {
                 }
                 const uint8_t piece = event.ball_type;
                 if (bmmo::session::trafo_is_reset(event.flags)) {
-                    const auto d = s.trafo.reset(player, piece, tick, next);
+                    const auto d = s.trafo.reset(player, life_of(s, player), piece, tick, next);
                     if (d.superseded) {
                         ++s.trafo_superseded;
                         log("[session " + std::to_string(s.id) + "] Trafo reset of " + bmmo::session::trafo_type_name(piece)
@@ -882,7 +885,7 @@ namespace bmmo::sim {
                     handed(d.applied, false, false);
                     return;
                 }
-                for (const auto& d: s.trafo.explode(player, piece, tick, next)) {
+                for (const auto& d: s.trafo.explode(player, life_of(s, player), piece, tick, next)) {
                     if (d.flags & bmmo::session::TRAFO_SERVER) {
                         const float none[3] = {};
                         queue_trafo(s, d, none, arrival, 0, "re-explosion of a live type set");
@@ -958,6 +961,7 @@ namespace bmmo::sim {
             for (int k = 0; k < 3; ++k) event.position[k] = position[k];
         event.tick = d.applied;
         pending_event pe{d.player, d.origin, d.applied, std::move(event), arrival};
+        pe.life = d.life;
         auto pos = std::upper_bound(s.events.begin(), s.events.end(), d.applied,
             [](uint32_t t, const pending_event& e) { return static_cast<int32_t>(t - e.applied) < 0; });
         s.events.insert(pos, std::move(pe));
@@ -967,7 +971,7 @@ namespace bmmo::sim {
         ++s.trafo_server_resets;
         const uint32_t next = s.world ? s.world->tick_index() : 0;
         const std::string text = std::string("trafo: server ") + bmmo::session::trafo_type_name(d.type) + " reset of p"
-            + std::to_string(d.player) + " for tick " + std::to_string(d.applied) + " (" + (why ? why : "?") + ")"
+            + bmmo::session::trafo_life_label(d.player, d.life) + " for tick " + std::to_string(d.applied) + " (" + (why ? why : "?") + ")"
             + ((d.flags & bmmo::session::TRAFO_FINAL) ? ", final" : "");
         log("[session " + std::to_string(s.id) + "] " + text + " (next tick " + std::to_string(next) + ")");
         if (s.journal.is_open() && !s.journal.capped()) s.journal.note(next, text);
@@ -981,7 +985,7 @@ namespace bmmo::sim {
             a.ball_type = d.type;
             a.flags = d.flags;
             a.intake = arrival;
-            a.life = life_of(s, d.player);
+            a.life = d.life;   // step TRL: the life whose set it acts on (a leaver's: the old one)
             callbacks_.on_event_accepted(a);
         }
     }
@@ -1317,6 +1321,21 @@ namespace bmmo::sim {
             // the origin beside it.
             e.event.tick = e.applied;
             if (recording) s.journal.event(to_journal_event(e.player, e.event, tick, e.origin));
+            // Step TRL (review 3): the world runs a Trafo event on the set of
+            // the id's newest life; the runner decided it for d.life (the
+            // relay tells the clients that one).  J3 makes them equal (a
+            // leaver's final resets are applied before its rejoin's add); a
+            // path that broke it would act on another set here than on the
+            // clients, so it is logged and noted, never silently run.
+            if (e.event.type == bmmo::session::event_type::Trafo && e.life != 0 && e.life != s.world->life_of(e.player)) {
+                ++s.trafo_life_mismatches;
+                const std::string text = "trafo: event of p" + bmmo::session::trafo_life_label(e.player, e.life)
+                    + " applied at tick " + std::to_string(tick) + " while the id's newest life here is "
+                    + std::to_string(s.world->life_of(e.player)) + ": the world runs it on that life's set ("
+                    + std::to_string(s.trafo_life_mismatches) + " so far)";
+                log("[session " + std::to_string(s.id) + "] " + text);
+                if (recording) s.journal.note(tick, text);
+            }
             std::string error;
             if (!s.world->apply_event(e.player, e.event, error)) {
                 log("[session " + std::to_string(s.id) + "] event from " + std::to_string(e.player)

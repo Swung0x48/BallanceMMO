@@ -18,7 +18,8 @@
 //     (trafo_rewind): a snapshot cannot make, reset or blow pieces;
 //   * the own echoes: MOVED re-keyed and replayed, REJECTED / SUPERSEDED
 //     dropped and replayed (process_trafo_echo);
-//   * sets on first sight, never inside a replay (ensure_trafo_set);
+//   * sets on first sight, never inside a replay (ensure_trafo_set), one
+//     per life of a player (step TRL: (player, life), never by id alone);
 //   * the reconcile at a resync's apply (reconcile_trafo);
 //   * retirement and the log's pruning after the live frame (retire_trafo).
 
@@ -30,6 +31,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -54,22 +56,50 @@ namespace bmmo::session {
     // a resync's ledger names - outside any replay, before any of the
     // player's inputs is applied (the first sight of a player whose input
     // arrives is that input's arrival).
-    bool session_client_core::ensure_trafo_set(uint32_t player, const char* why) {
+    //
+    // Step TRL (the user, 2026-10-29: 'Key by life, no resume'): a set is
+    // (player, life)'s.  A rejoin's new life gets its own set at its member
+    // message; the old life's set fades and retires beside it.  A set this
+    // world retired is never made again by a sight (no resume); a resync
+    // ledger that still names it does (from_ledger: the server's world holds
+    // it at S - a client's retirement may run a few ticks before the
+    // server's - and the host reselects it while it is not destroyed).
+    bool session_client_core::ensure_trafo_set(uint32_t player, uint16_t life, const char* why, bool from_ledger) {
         if (!s.trafo_active_ || player == 0) return false;
-        if (s.trafo_sets_.count(player)) return true;
-        std::string error;
-        if (!platform_.make_trafo_set(player, error)) {
-            if (s.trafo_set_failures_++ < 8)
-                logf("trafo: no piece set for player %u (%s): %s - its trafo inputs cannot run in this world", player, why,
-                     error.c_str());
+        if (life == 0) life = 1;
+        const trafo_key key{player, life};
+        if (s.trafo_sets_.count(key)) return true;
+        if (!from_ledger && s.trafo_retired_sets_.count(key)) {
+            if (s.trafo_retired_sights_++ < 8)
+                logf("trafo: the set of player %u life %u was retired here: not made again (%s)", player,
+                     static_cast<unsigned>(life), why);
             return false;
         }
-        s.trafo_sets_.insert(player);
+        std::string error;
+        if (!platform_.make_trafo_set(player, life, error)) {
+            if (s.trafo_set_failures_++ < 8)
+                logf("trafo: no piece set for player %u life %u (%s): %s - its trafo inputs cannot run in this world", player,
+                     static_cast<unsigned>(life), why, error.c_str());
+            return false;
+        }
+        s.trafo_sets_.insert(key);
+        s.trafo_retired_sets_.erase(key);
         for (uint8_t type = 0; type < kTrafoTypes; ++type)
-            for (const auto& piece: platform_.trafo_type_set(player, type).pieces) s.trafo_pieces_[piece] = player;
+            for (const auto& piece: platform_.trafo_type_set(player, life, type).pieces) s.trafo_pieces_[piece] = key;
         ++s.trafo_sets_made_;
-        logf("trafo: piece set of player %u ready (%s)", player, why);
+        logf("trafo: piece set of player %u ready (life %u, %s)", player, static_cast<unsigned>(life), why);
         return true;
+    }
+
+    std::string session_client_core::trafo_set_list() const {
+        std::string out;
+        for (const auto& k: s.trafo_sets_) out += (out.empty() ? "" : ",") + trafo_life_label(k.player, k.life);
+        return out.empty() ? std::string("-") : out;
+    }
+
+    uint16_t session_client_core::trafo_life_at(uint32_t player, uint32_t tick) const {
+        const auto* life = bmmo::session::member_life_at(s.lives_, player, tick);
+        return life ? (life->entry.life ? life->entry.life : uint16_t{1}) : uint16_t{0};
     }
 
     // ------------------------------------------------------------- hold
@@ -95,6 +125,7 @@ namespace bmmo::session {
         for (int k = 0; k < 3; ++k) in.position[k] = event.position[k];
         in.seed = seed_of(s.seed_, s.own_id_, due, r.type, in.flags);
         in.own = true;
+        in.life = own_trafo_life();
         s.trafo_log_.add(in);
         ++s.trafo_sent_;
         if (reset)
@@ -165,9 +196,34 @@ namespace bmmo::session {
                  static_cast<unsigned>(msg.ball_type));
             return;
         }
-        ensure_trafo_set(msg.player, "its trafo input");
+        // Step TRL: the set of the life the event carries (the server fills
+        // it on relay; a leaver's final resets carry the old life); an
+        // event without one (before protocol 18) takes the member life
+        // covering its tick, else the first.
+        uint16_t life = msg.life;
+        if (life == 0) life = trafo_life_at(msg.player, msg.tick);
+        if (life == 0) life = 1;
+        const bool stepped = s.frames_since_anchor_ >= 1;
+        const bool late = stepped && static_cast<int32_t>(msg.tick - current_tick()) <= 0;
+        // Before this numbering's first tick (a late joiner's catch-up, a
+        // resync's base): no record of this numbering reaches it, and the
+        // server's state the numbering started from has it - and the set:
+        // a set the state did not name is not made for it (step TRL).
+        const bool covered = late && static_cast<int32_t>(msg.tick - s.tick_base_) < 0;
+        if (covered && !s.trafo_sets_.count({msg.player, life})) {
+            ++s.trafo_covered_;
+            logf("trafo: input of %u life %u at tick %u precedes this numbering's base %u and its set is not held: the "
+                 "server's state covers it", msg.player, static_cast<unsigned>(life), msg.tick, s.tick_base_);
+            return;
+        }
+        if (!ensure_trafo_set(msg.player, life, "its trafo input") && s.trafo_retired_sets_.count({msg.player, life})) {
+            logf("trafo: player %u life %u %s %s for tick %u: its set was retired here, the input is not logged", msg.player,
+                 static_cast<unsigned>(life), trafo_type_name(msg.ball_type), trafo_kind(msg.flags), msg.tick);
+            return;
+        }
         trafo_input in;
         in.player = msg.player;
+        in.life = life;
         in.type = msg.ball_type;
         in.flags = msg.flags;
         in.origin = msg.origin_tick;
@@ -175,22 +231,18 @@ namespace bmmo::session {
         for (int k = 0; k < 3; ++k) in.position[k] = trafo_is_reset(msg.flags) ? 0.0f : msg.position[k];
         in.seed = seed_of(s.seed_, msg.player, msg.tick, msg.ball_type, msg.flags);
         s.trafo_log_.add(in);
-        const bool stepped = s.frames_since_anchor_ >= 1;
-        const bool late = stepped && static_cast<int32_t>(msg.tick - current_tick()) <= 0;
-        logf("trafo: player %u %s %s for tick %u (stamped %u%s) received at local tick %u%s", msg.player,
+        logf("trafo: player %u %s %s for tick %u (stamped %u%s%s) received at local tick %u%s", msg.player,
              trafo_type_name(msg.ball_type), trafo_kind(msg.flags), msg.tick, msg.origin_tick,
-             trafo_flags_text(msg.flags).c_str(), current_tick(), late ? ", late" : "");
+             trafo_flags_text(msg.flags).c_str(), life > 1 ? (", life " + std::to_string(life)).c_str() : "", current_tick(),
+             late ? ", late" : "");
         if (!late) return;
-        // Before this numbering's first tick (a late joiner's catch-up, a
-        // resync's base): no record of this numbering reaches it, and the
-        // server's state the numbering started from has it.
-        if (static_cast<int32_t>(msg.tick - s.tick_base_) < 0) {
+        if (covered) {
             ++s.trafo_covered_;
             logf("trafo: input of %u at tick %u precedes this numbering's base %u: the server's state covers it", msg.player,
                  msg.tick, s.tick_base_);
             return;
         }
-        trafo_rewind(msg.tick, msg.player, "late");
+        trafo_rewind(msg.tick, msg.player, life, "late");
     }
 
     // A trafo input whose tick is stepped already: never applied at the live
@@ -200,7 +252,7 @@ namespace bmmo::session {
     // missed input"); a late input before a pending exact resync's anchor is
     // the state's.  Gated like the relay's corrections (rollback and
     // input_rewind, design 4.6), never by own_echoes or lifecycle_rewind.
-    void session_client_core::trafo_rewind(uint32_t tick, uint32_t player, const char* why) {
+    void session_client_core::trafo_rewind(uint32_t tick, uint32_t player, uint16_t life, const char* why) {
         const uint32_t now = current_tick();
         if (!config.rollback || !config.input_rewind) {
             ++s.trafo_missed_;
@@ -225,7 +277,7 @@ namespace bmmo::session {
             return;
         }
         ++s.trafo_late_;
-        const std::string entity = "trafo of " + std::to_string(player);
+        const std::string entity = "trafo of " + trafo_life_label(player, life);
         if (!s.input_rewind_pending_ || static_cast<int32_t>(tick - s.input_rewind_tick_) < 0) {
             s.input_rewind_pending_ = true;
             s.input_rewind_tick_ = tick;
@@ -256,14 +308,15 @@ namespace bmmo::session {
                          replayed ? " (replay)" : "", error.c_str());
                 continue;
             }
-            if (in.flags & TRAFO_FINAL) platform_.trafo_final(in.player, in.type, in.applied);
+            if (in.flags & TRAFO_FINAL) platform_.trafo_final(in.player, in.life, in.type, in.applied);
             if (replayed) {
                 ++s.trafo_replayed_;
                 continue;
             }
             ++s.trafo_applied_;
-            logf("trafo: %s %s of player %u applied at tick %u%s%s", trafo_type_name(in.type), trafo_kind(in.flags), in.player,
-                 tick, in.own ? " (own)" : "", trafo_flags_text(in.flags).c_str());
+            logf("trafo: %s %s of player %u applied at tick %u%s%s%s", trafo_type_name(in.type), trafo_kind(in.flags), in.player,
+                 tick, in.own ? " (own)" : "", trafo_flags_text(in.flags).c_str(),
+                 in.life > 1 ? (" (life " + std::to_string(in.life) + ")").c_str() : "");
         }
     }
 
@@ -296,13 +349,14 @@ namespace bmmo::session {
             return;
         }
         const uint32_t own = s.own_id_;
+        const uint16_t own_life = own_trafo_life();
         const bool stepped = s.frames_since_anchor_ >= 1;
         const uint32_t now = current_tick();
         const auto reached = [&](uint32_t tick) { return stepped && static_cast<int32_t>(tick - now) <= 0; };
         if (moved) {
             ++s.trafo_echo_moved_;
             const int32_t seed = seed_of(s.seed_, own, msg.tick, msg.ball_type, msg.flags);
-            if (!s.trafo_log_.move(own, msg.ball_type, msg.flags, msg.origin_tick, msg.tick, seed)) {
+            if (!s.trafo_log_.move(own, own_life, msg.ball_type, msg.flags, msg.origin_tick, msg.tick, seed)) {
                 // Not logged (sent before a resync's renumbering pruned it,
                 // or never logged): the server's input all the same.
                 trafo_input in;
@@ -314,21 +368,22 @@ namespace bmmo::session {
                 for (int k = 0; k < 3; ++k) in.position[k] = trafo_is_reset(msg.flags) ? 0.0f : msg.position[k];
                 in.seed = seed;
                 in.own = true;
+                in.life = own_life;
                 s.trafo_log_.add(in);
             }
             const uint32_t from = static_cast<int32_t>(msg.tick - msg.origin_tick) < 0 ? msg.tick : msg.origin_tick;
             logf("own trafo %s %s stamped tick %u echoed moved by the server (applied %u) at local tick %u%s: %s",
                  trafo_type_name(msg.ball_type), trafo_kind(msg.flags), msg.origin_tick, msg.tick, now, stale ? " (stale)" : "",
                  reached(from) ? "rewound for" : "re-keyed before its tick");
-            if (reached(from)) trafo_rewind(from, own, "own echo moved");
+            if (reached(from)) trafo_rewind(from, own, own_life, "own echo moved");
             return;
         }
         ++s.trafo_echo_dropped_;
-        const bool logged = s.trafo_log_.drop(own, msg.ball_type, msg.flags, msg.origin_tick);
+        const bool logged = s.trafo_log_.drop(own, own_life, msg.ball_type, msg.flags, msg.origin_tick);
         logf("own trafo %s %s stamped tick %u echoed %s by the server at local tick %u%s: dropped%s",
              trafo_type_name(msg.ball_type), trafo_kind(msg.flags), msg.origin_tick, verdict, now, stale ? " (stale)" : "",
              !logged ? " (not logged)" : reached(msg.origin_tick) ? ", rewound for" : " before its tick");
-        if (logged && reached(msg.origin_tick)) trafo_rewind(msg.origin_tick, own, verdict);
+        if (logged && reached(msg.origin_tick)) trafo_rewind(msg.origin_tick, own, own_life, verdict);
     }
 
     // --------------------------------------------------------- reconcile
@@ -356,24 +411,28 @@ namespace bmmo::session {
     // its row does).
     void session_client_core::reconcile_trafo(const bmmo::session_resync_state_msg& st, uint32_t anchor,
                                               std::set<std::string>& gone, std::vector<journal_trafo_entry>& journal) {
-        std::map<std::pair<uint32_t, uint8_t>, const trafo_ledger_entry*> ledger;
+        // Step TRL: keyed by (player, life, type).
+        using type_key = std::tuple<uint32_t, uint16_t, uint8_t>;
+        std::map<type_key, const trafo_ledger_entry*> ledger;
         for (const auto& e: st.trafo_ledger) {
             if (e.type >= kTrafoTypes) continue;
-            ensure_trafo_set(e.player, "the resync ledger");
-            ledger[{e.player, e.type}] = &e;
+            const uint16_t life = e.life ? e.life : uint16_t{1};
+            ensure_trafo_set(e.player, life, "the resync ledger", true);
+            ledger[{e.player, life, e.type}] = &e;
         }
-        std::set<std::pair<uint32_t, uint8_t>> keys;
-        for (uint32_t player: s.trafo_sets_)
-            for (uint8_t type = 0; type < kTrafoTypes; ++type) keys.insert({player, type});
+        std::set<type_key> keys;
+        for (const auto& set: s.trafo_sets_)
+            for (uint8_t type = 0; type < kTrafoTypes; ++type) keys.insert({set.player, set.life, type});
         for (const auto& [key, e]: ledger) keys.insert(key);
         const uint32_t now = current_tick();
         uint32_t kept = 0, unmade = 0, remade = 0, failed = 0;
         const event_log_mute mute(*this);
-        for (const auto& [player, type]: keys) {
-            const auto it = ledger.find({player, type});
+        for (const auto& [player, life, type]: keys) {
+            const auto it = ledger.find({player, life, type});
             const trafo_ledger_entry* e = it == ledger.end() ? nullptr : it->second;
             journal_trafo_entry j;
             j.player = player;
+            j.life = life;
             j.type = type;
             if (e) {
                 j.bits = static_cast<uint8_t>((e->has_explosion ? 1 : 0) | (e->has_bodies ? 2 : 0) | (e->has_reset ? 4 : 0)
@@ -386,16 +445,17 @@ namespace bmmo::session {
                 j.bits = 16;
             }
             // This world's generation: its newest explosion applied by now.
-            const trafo_input* mine = s.trafo_log_.newest_explosion(player, type, now);
+            const trafo_input* mine = s.trafo_log_.newest_explosion(player, life, type, now);
             const uint32_t mine_applied = mine ? mine->applied : 0;
             const bool mine_known = mine != nullptr;
             if (e) {
-                if (e->final) platform_.trafo_final(player, type, e->final_applied);
+                if (e->final) platform_.trafo_final(player, life, type, e->final_applied);
                 const auto learn = [&](uint8_t flags, uint32_t applied) {
-                    const trafo_input* had = s.trafo_log_.newest(player, type, trafo_is_reset(flags), applied);
+                    const trafo_input* had = s.trafo_log_.newest(player, life, type, trafo_is_reset(flags), applied);
                     if (had && had->applied == applied) return;
                     trafo_input in;
                     in.player = player;
+                    in.life = life;
                     in.type = type;
                     in.flags = flags;
                     in.origin = applied;
@@ -403,20 +463,20 @@ namespace bmmo::session {
                     if (!trafo_is_reset(flags))
                         for (int k = 0; k < 3; ++k) in.position[k] = e->position[k];
                     in.seed = seed_of(s.seed_, player, applied, type, flags);
-                    in.own = player == s.own_id_;
+                    in.own = player == s.own_id_ && life == own_trafo_life();
                     s.trafo_log_.add(in);
                 };
                 if (e->has_explosion) learn(TRAFO_EXPLODE, e->explode_applied);
                 if (e->has_reset) learn(TRAFO_RESET, e->reset_applied);
             }
-            const trafo_type_view view = platform_.trafo_type_set(player, type);
+            const trafo_type_view view = platform_.trafo_type_set(player, life, type);
             const bool want = e && e->has_bodies;
             if (!view.exists) {
                 if (want) {
                     j.action = JOURNAL_TRAFO_FAILED;
                     ++failed;
-                    logf("trafo reconcile at S %u: player %u %s has bodies at the server and no set here", anchor, player,
-                         trafo_type_name(type));
+                    logf("trafo reconcile at S %u: player %u life %u %s has bodies at the server and no set here", anchor,
+                         player, static_cast<unsigned>(life), trafo_type_name(type));
                 }
                 journal.push_back(j);
                 continue;
@@ -427,6 +487,7 @@ namespace bmmo::session {
                 trafo_reconcile_spec spec;
                 spec.action = trafo_reconcile_action::unmake;
                 spec.player = player;
+                spec.life = life;
                 spec.type = type;
                 const trafo_reconcile_result r = platform_.trafo_reconcile(spec);
                 if (!r.ok) {
@@ -459,6 +520,7 @@ namespace bmmo::session {
             trafo_reconcile_spec spec;
             spec.action = trafo_reconcile_action::remake;
             spec.player = player;
+            spec.life = life;
             spec.type = type;
             for (int k = 0; k < 3; ++k) spec.position[k] = e->position[k];
             spec.seed = seed_of(s.seed_, player, e->explode_applied, type, TRAFO_EXPLODE);
@@ -481,23 +543,68 @@ namespace bmmo::session {
         }
         logf("trafo reconcile at S %u: %zu type sets (%zu in the ledger): kept %u, unmade %u, remade %u, failed %u; %zu pieces "
              "kept out of the restore", anchor, keys.size(), ledger.size(), kept, unmade, remade, failed, gone.size());
+        // Step TRL: the server's set list at S beside this world's.
+        std::set<trafo_key> named;
+        for (const auto& e: st.trafo_ledger) named.insert({e.player, e.life ? e.life : uint16_t{1}});
+        // A set of an ended life the ledger does not name: the server
+        // retired it before S (this world made it from an earlier state's
+        // ledger, or its own retirement runs behind) - the portable record
+        // of S does not list it, so it is retired here at once.  A set of an
+        // open life (a member's current life, the own one) is left alone.
+        const auto open = [this](const trafo_key& k) {
+            if (k.player == s.own_id_ && k.life == own_trafo_life()) return true;
+            for (const auto& l: s.lives_)
+                if (l.entry.id == k.player && (l.entry.life ? l.entry.life : uint16_t{1}) == k.life && l.until == 0) return true;
+            return false;
+        };
+        std::vector<trafo_key> stale;
+        for (const auto& k: s.trafo_sets_)
+            if (!named.count(k) && !open(k)) stale.push_back(k);
+        for (const auto& k: stale) {
+            trafo_reconcile_spec spec;
+            spec.action = trafo_reconcile_action::retire;
+            spec.player = k.player;
+            spec.life = k.life;
+            spec.birth_tick = now;
+            const trafo_reconcile_result r = platform_.trafo_reconcile(spec);
+            if (!r.ok) {
+                logf("trafo reconcile at S %u: the set %s of an ended life, not in the ledger, could not be retired: %s", anchor,
+                     trafo_life_label(k.player, k.life).c_str(), r.error.c_str());
+                continue;
+            }
+            s.trafo_sets_.erase(k);
+            s.trafo_retired_sets_.insert(k);
+            for (auto& j: journal)
+                if (j.player == k.player && j.life == k.life) j.action |= JOURNAL_TRAFO_RETIRED;
+            for (auto it = s.trafo_pieces_.begin(); it != s.trafo_pieces_.end();)
+                it = it->second == k ? s.trafo_pieces_.erase(it) : std::next(it);
+            ++s.trafo_retired_;
+            logf("trafo reconcile at S %u: the set %s of an ended life is not in the ledger: retired at once (%d bodies)", anchor,
+                 trafo_life_label(k.player, k.life).c_str(), r.bodies_removed);
+        }
+        std::string server;
+        for (const auto& k: named) server += (server.empty() ? "" : ",") + trafo_life_label(k.player, k.life);
+        const std::string here = trafo_set_list();
+        logf("trafo sets at S %u: server %s here %s%s", anchor, server.empty() ? "-" : server.c_str(), here.c_str(),
+             (server.empty() ? std::string("-") : server) == here ? "" : " (DIFFERENT)");
     }
 
     // --------------------------------------------------------- retirement
     // After the live frame (design 2.4 "When sets go"): the host's
     // retirement (deselect, then destroy history_ticks later), whose
-    // deselected players get a set again at their next sight; the log's
+    // deselected sets no sight makes again (step TRL); the log's
     // entries older than the history dropped but each type set's newest
     // explosion and reset.
     void session_client_core::retire_trafo(uint32_t tick) {
         if (!s.trafo_active_) return;
         const uint32_t history = static_cast<uint32_t>(s.rollback_.thresholds().history_ticks);
-        for (uint32_t player: platform_.retire_trafo_sets(tick, history)) {
-            s.trafo_sets_.erase(player);
+        for (const trafo_key& key: platform_.retire_trafo_sets(tick, history)) {
+            s.trafo_sets_.erase(key);
+            s.trafo_retired_sets_.insert(key);   // step TRL: gone for good (no sight makes it again)
             for (auto it = s.trafo_pieces_.begin(); it != s.trafo_pieces_.end();)
-                it = it->second == player ? s.trafo_pieces_.erase(it) : std::next(it);
+                it = it->second == key ? s.trafo_pieces_.erase(it) : std::next(it);
             ++s.trafo_retired_;
-            logf("trafo: set of player %u retired at tick %u", player, tick);
+            logf("trafo: set of player %u retired at tick %u (life %u)", key.player, tick, static_cast<unsigned>(key.life));
         }
         if (tick > history) s.trafo_log_.prune(tick - history);
     }

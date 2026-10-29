@@ -52,6 +52,10 @@ namespace bmmo {
     //               set of each type set equal to it before the rows and
     //               the portable record are written.  Empty unless the
     //               session has WORLD_TRAFO_INPUTS.
+    //   ledger lives (protocol 21, step TRL) after the ledger: one u16 per
+    //               ledger entry, the life of the set it describes (a set
+    //               is (player, life)'s).  A state that ends after the
+    //               ledger (protocol 20 and older) reads as life 1.
     struct session_resync_state_msg : public serializable_message {
         static constexpr uint32_t kMaxBytesField = 4u << 20;   // a forged length is refused, never allocated
 
@@ -128,6 +132,8 @@ namespace bmmo {
                 raw.write(reinterpret_cast<const char*>(&e.reset_applied), sizeof(e.reset_applied));
                 raw.write(reinterpret_cast<const char*>(&e.final_applied), sizeof(e.final_applied));
             }
+            for (uint16_t i = 0; i < ledger_count; ++i)
+                raw.write(reinterpret_cast<const char*>(&trafo_ledger[i].life), sizeof(trafo_ledger[i].life));
             return raw.good();
         }
 
@@ -204,6 +210,13 @@ namespace bmmo {
                 e.has_reset = (bits & 4u) != 0;
                 e.final = (bits & 8u) != 0;
                 trafo_ledger.push_back(e);
+            }
+            // Protocol 21: the entries' lives, when the state carries them.
+            if (ledger_count > 0 && raw.peek() != std::char_traits<char>::eof()) {
+                for (auto& e: trafo_ledger)
+                    if (!message_utils::read_variable(raw, &e.life) || e.life == 0) return false;
+            } else {
+                raw.clear();
             }
             return true;
         }

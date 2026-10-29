@@ -48,7 +48,7 @@ import sys
 import tempfile
 
 MAGIC = b"BMMOJRNL"
-VERSION = 8   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9); 4: RESYNC (protocol 10); 5: HEADER world_options, Trafo EVENT (protocol 11); 6: HEADER anchor_placement (protocol 12); 7: WAIT (protocol 13); 8: HEADER mechanism_slots (protocol 19)
+VERSION = 9   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9); 4: RESYNC (protocol 10); 5: HEADER world_options, Trafo EVENT (protocol 11); 6: HEADER anchor_placement (protocol 12); 7: WAIT (protocol 13); 8: HEADER mechanism_slots (protocol 19); 9: PLAYER life and RESYNC trafo lives, trailing (protocol 21, step TRL)
 OLDEST_READABLE = 2   # a version 2 file has no event origin: its stamp is the origin
 
 TAG_HEADER = 0
@@ -282,6 +282,9 @@ class JournalWriter(object):
         buf += _U8.pack(record["join_order"])
         buf += _U8.pack(1 if record["added"] else 0)
         _put_str(buf, record.get("name", ""))
+        # Version 9 (step TRL): a later life's add carries its life, trailing.
+        if record["added"] and record.get("life", 0) > 1:
+            buf += struct.pack("<H", record["life"])
         self._record(TAG_PLAYER, bytes(buf))
 
     def input(self, record):
@@ -738,8 +741,11 @@ class JournalReader(object):
 
     @staticmethod
     def _player(cursor):
-        return {"tick": cursor.u32(), "id": cursor.u32(), "join_order": cursor.u8(),
-                "added": cursor.u8() != 0, "name": cursor.string()}
+        record = {"tick": cursor.u32(), "id": cursor.u32(), "join_order": cursor.u8(),
+                  "added": cursor.u8() != 0, "name": cursor.string()}
+        # Version 9 (step TRL): a later life's add carries its life (0: not written).
+        record["life"] = cursor.u16() if cursor.remaining() >= 2 else 0
+        return record
 
     @staticmethod
     def _input(cursor, last_frame):
@@ -881,6 +887,10 @@ class JournalReader(object):
                 entries.append({"player": cursor.u32(), "type": cursor.u8(), "bits": cursor.u8(),
                                 "explode_applied": cursor.u32(), "position": [cursor.f32() for _ in range(3)],
                                 "reset_applied": cursor.u32(), "final_applied": cursor.u32(), "action": cursor.u8()})
+            # Version 9 (step TRL): the entries' lives, trailing, when one is not 1.
+            lives = cursor.remaining() >= 2 * len(entries)
+            for e in entries:
+                e["life"] = cursor.u16() if lives else 1
             record["trafo"] = entries
         return record
 
@@ -1193,8 +1203,9 @@ def _fmt_correction(record):
 
 
 def _fmt_player(record):
-    return "player %sp%d join=%d%s" % ("+" if record["added"] else "-", record["id"], record["join_order"],
-                                       ' "%s"' % record["name"] if record["name"] else "")
+    return "player %sp%d join=%d%s%s" % ("+" if record["added"] else "-", record["id"], record["join_order"],
+                                         " life=%d" % record["life"] if record.get("life", 0) > 1 else "",
+                                         ' "%s"' % record["name"] if record["name"] else "")
 
 
 def _group_lines(group):

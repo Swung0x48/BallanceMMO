@@ -424,8 +424,12 @@ namespace {
         // lane), keeping its player id; the server late-joins it as a new
         // life.  Once per run.  The journal of the second life is written
         // beside the first, as <stem>.rejoin1<ext>.  Not for the --host
-        // (its leave would hand the room over).
+        // (its leave would hand the room over).  --rejoin-at TICK:MS (step
+        // TRL): the Join goes MS milliseconds after the Leave instead, on the
+        // same connection - the old life gone from the server's world first
+        // when MS is long enough (a real reconnect, J > R).
         uint32_t rejoin_at = 0;
+        uint32_t rejoin_delay_ms = 0;
         // --leave-room-at TICK (world-agreement design 7.3 J2/J4, step M0):
         // at TICK the client leaves the room (room Leave), ends its session
         // and exits once the server has taken it out of the room (2 s at
@@ -487,7 +491,8 @@ namespace {
                   "       [--io-flush MODE | log=MODE,journal=MODE,capture=MODE]   (MODE none|batch|record, default batch: the\n"
                   "         I/O thread's fflush - never, once per written batch, or per log line / journal record / capture pass)\n"
                   "       [--ignore-snapshots] [--no-trafo-cap] [--trafo-no-resets] [--leave-at TICK | --leave-after-unphys D | --leave-after-trafo D]\n"
-                  "       [--rejoin-at TICK]   (leave the room at TICK and join it again on the same connection, once)\n"
+                  "       [--rejoin-at TICK[:MS]]   (leave the room at TICK and join it again on the same connection, once;\n"
+                  "                                  MS: the Join MS milliseconds after the Leave)\n"
                   "       [--leave-room-at TICK]   (leave the room at TICK, end the session and exit once out of the room)\n"
                   "       [--sector-at SECTOR:TICK]...   (enter SECTOR at TICK, an own Sector input; repeatable; --beam is too)\n"
                   "       [--placement-signature HEX]   (test: report HEX as the anchor's placement signature instead of the world's)");
@@ -676,7 +681,12 @@ namespace {
             else if (arg == "--accept-protocol") { if (!(v = next())) return false; out.accept_protocol = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--trafo-no-resets") out.trafo_no_resets = true;
             else if (arg == "--leave-at") { if (!(v = next())) return false; out.leave_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
-            else if (arg == "--rejoin-at") { if (!(v = next())) return false; out.rejoin_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+            else if (arg == "--rejoin-at") {
+                if (!(v = next())) return false;
+                char* end = nullptr;
+                out.rejoin_at = static_cast<uint32_t>(std::strtoul(v, &end, 10));
+                if (end && *end == ':') out.rejoin_delay_ms = static_cast<uint32_t>(std::strtoul(end + 1, nullptr, 10));
+            }
             else if (arg == "--leave-room-at") { if (!(v = next())) return false; out.leave_room_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--leave-after-unphys") { if (!(v = next())) return false; out.leave_after_unphys = std::atoll(v); }
             else if (arg == "--leave-after-trafo") { if (!(v = next())) return false; out.leave_after_trafo = std::atoll(v); }
@@ -958,6 +968,12 @@ namespace {
                                                     > std::chrono::seconds(2))) {
                     logf("--leave-room-at: %s; exiting", in_room_ ? "no room state within 2 s" : "out of the room");
                     ended_ = true;
+                }
+                // --rejoin-at TICK:MS (step TRL): the delayed Join.
+                if (rejoin_join_pending_ && wall_now(bmmo::sim::wall_site::run_report) >= rejoin_join_due_) {
+                    rejoin_join_pending_ = false;
+                    logf("--rejoin-at: joining room %u again (%u ms after the Leave)", room_id_, args_.rejoin_delay_ms);
+                    room_request(bmmo::room::action::Join, room_id_);
                 }
                 if (ended_) { stopped = "the client ended the session"; break; }
                 if (std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::run_limit) - started).count() > args_.seconds) {
@@ -1343,39 +1359,40 @@ namespace {
                 out.first_leak = effect.first;
                 return out;
             };
-            p.make_trafo_set = [this](uint32_t player, std::string& error) {
+            p.make_trafo_set = [this](uint32_t player, uint16_t life, std::string& error) {
                 if (!trafo_on_) {
                     error = "the trafo is not an input in this world";
                     return false;
                 }
-                const auto r = bmmo::game::ensure_trafo_set(engine_->context(), trafo_registry_, player, trafo_hooks_);
+                const std::string label = bmmo::session::trafo_life_label(player, life);
+                const auto r = bmmo::game::ensure_trafo_set(engine_->context(), trafo_registry_, player, life, trafo_hooks_);
                 if (!r.ok) {
-                    for (const auto& line: r.lines) logf("trafo build %u: %s", player, line.c_str());
+                    for (const auto& line: r.lines) logf("trafo build %s: %s", label.c_str(), line.c_str());
                     error = r.error;
                     return false;
                 }
                 if (r.how == bmmo::game::trafo_ensure::reselected)
-                    for (const auto& line: r.lines) logf("trafo: set %u %s", player, line.c_str());
+                    for (const auto& line: r.lines) logf("trafo: set %s %s", label.c_str(), line.c_str());
                 if (r.how == bmmo::game::trafo_ensure::built)
-                    if (const auto* set = trafo_registry_.find(player))
-                        logf("trafo: set %u built: %zu objects, %zu scripts, digest %s, value digest %s", player,
+                    if (const auto* set = trafo_registry_.find(player, life))
+                        logf("trafo: set %s built: %zu objects, %zu scripts, digest %s, value digest %s", label.c_str(),
                              set->objects.size(), set->scripts.size(), set->digest.c_str(), set->value_digest.c_str());
                 note_trafo_pieces(player);
                 return true;
             };
             p.run_trafo = [this](const bmmo::session::trafo_input& in, std::string& error) {
-                return bmmo::game::run_trafo(engine_->context(), trafo_registry_, trafo_hooks_, in.player, in.flags, in.type,
-                                             in.position, in.seed, error);
+                return bmmo::game::run_trafo(engine_->context(), trafo_registry_, trafo_hooks_, in.player, in.life, in.flags,
+                                             in.type, in.position, in.seed, error);
             };
-            p.trafo_final = [this](uint32_t player, uint8_t type, uint32_t tick) {
-                bmmo::game::trafo_set_final(trafo_registry_, player, type, tick);
+            p.trafo_final = [this](uint32_t player, uint16_t life, uint8_t type, uint32_t tick) {
+                bmmo::game::trafo_set_final(trafo_registry_, player, life, type, tick);
             };
             p.trafo_frame = [this](uint32_t) {
                 if (trafo_on_) bmmo::game::trafo_frame(engine_->context(), trafo_registry_, 1000.0f / 66.0f);
             };
-            p.trafo_type_set = [this](uint32_t player, uint8_t type) {
+            p.trafo_type_set = [this](uint32_t player, uint16_t life, uint8_t type) {
                 bmmo::session::trafo_type_view view;
-                const bmmo::game::trafo_set* set = trafo_registry_.find(player);
+                const bmmo::game::trafo_set* set = trafo_registry_.find(player, life);
                 if (!set || type >= bmmo::session::kTrafoTypes) return view;
                 view.exists = true;
                 for (CK_ID id: set->types[type].pieces) {
@@ -1390,8 +1407,15 @@ namespace {
                 bmmo::session::trafo_reconcile_result r;
                 CKContext* context = engine_->context();
                 if (spec.action == bmmo::session::trafo_reconcile_action::unmake) {
-                    r.ok = bmmo::game::unmake_type_set(context, trafo_registry_, trafo_hooks_, spec.player, spec.type,
+                    r.ok = bmmo::game::unmake_type_set(context, trafo_registry_, trafo_hooks_, spec.player, spec.life, spec.type,
                                                        r.bodies_removed, r.error);
+                    return r;
+                }
+                if (spec.action == bmmo::session::trafo_reconcile_action::retire) {
+                    r.ok = bmmo::game::retire_trafo_set_now(context, trafo_registry_, trafo_hooks_, spec.player, spec.life,
+                                                            spec.birth_tick, r.bodies_removed, r.error);
+                    if (r.ok) logf("trafo: set %s retired at once (tick %u)",
+                                   bmmo::session::trafo_life_label(spec.player, spec.life).c_str(), spec.birth_tick);
                     return r;
                 }
                 // The remake, inside the core's mute of the event log: the
@@ -1399,8 +1423,8 @@ namespace {
                 // revive of a later rewind remakes them from these recipes,
                 // the event's draws), as a replayed tick's births do.
                 bmmo::physics::set_event_log_keep_muted_recipes(true);
-                r.ok = bmmo::game::remake_type_set(context, trafo_registry_, trafo_hooks_, spec.player, spec.type, spec.position,
-                                                   spec.seed, 1000.0f / 66.0f, r.error);
+                r.ok = bmmo::game::remake_type_set(context, trafo_registry_, trafo_hooks_, spec.player, spec.life, spec.type,
+                                                   spec.position, spec.seed, 1000.0f / 66.0f, r.error);
                 bmmo::physics::set_event_log_keep_muted_recipes(false);
                 const std::string recipes = bmmo::physics::drain_muted_recipes();
                 bmmo::session::parse_event_log(recipes, [&](const std::string& kind, const std::string& text) {
@@ -1412,11 +1436,11 @@ namespace {
                 return r;
             };
             p.retire_trafo_sets = [this](uint32_t now, uint32_t history) {
-                std::vector<uint32_t> deselected;
+                std::vector<bmmo::session::trafo_key> deselected;
                 if (!trafo_on_) return deselected;
-                std::set<uint32_t> before;
+                std::set<bmmo::session::trafo_key> before;
                 for (const auto& set: trafo_registry_.sets())
-                    if (set.selected) before.insert(set.player);
+                    if (set.selected) before.insert({set.player, set.life});
                 const size_t sets_before = trafo_registry_.sets().size();
                 for (const auto& line: bmmo::game::retire_trafo_sets(engine_->context(), trafo_registry_, trafo_hooks_, now,
                                                                      history, false))
@@ -1428,9 +1452,9 @@ namespace {
                     explosion_pieces_ = bmmo::game::explosion_pieces(engine_->context());
                     bmmo::game::add_trafo_set_pieces(engine_->context(), trafo_registry_, explosion_pieces_);
                 }
-                for (uint32_t player: before) {
-                    const auto* set = trafo_registry_.find(player);
-                    if (!set || !set->selected) deselected.push_back(player);
+                for (const auto& key: before) {
+                    const auto* set = trafo_registry_.find(key.player, key.life);
+                    if (!set || !set->selected) deselected.push_back(key);
                 }
                 return deselected;
             };
@@ -3220,9 +3244,18 @@ namespace {
                     core_.end("--rejoin-at: left the room to rejoin it");
                     ++rejoins_;
                     room_request(bmmo::room::action::Leave, room_id_);
-                    room_request(bmmo::room::action::Join, room_id_);
+                    // join_sent_ also keeps the room state handler from
+                    // joining a room on its own while the delay runs.
                     join_sent_ = true;
                     ready_sent_ = false;
+                    if (args_.rejoin_delay_ms == 0) {
+                        room_request(bmmo::room::action::Join, room_id_);
+                    } else {
+                        rejoin_join_due_ = wall_now(bmmo::sim::wall_site::run_report)
+                                         + std::chrono::milliseconds(args_.rejoin_delay_ms);
+                        rejoin_join_pending_ = true;
+                        logf("--rejoin-at: the Join goes %u ms after the Leave", args_.rejoin_delay_ms);
+                    }
                     return;
                 }
                 // --leave-room-at (step M0): the room left at this tick; the
@@ -4214,6 +4247,9 @@ namespace {
         // rejoin (names the next journal).
         bool rejoin_done_ = false;
         uint32_t rejoins_ = 0;
+        // --rejoin-at TICK:MS (step TRL): the Join waits until this time.
+        bool rejoin_join_pending_ = false;
+        clock_type::time_point rejoin_join_due_{};
         // --leave-room-at (step M0): the Leave sent, and when.
         bool room_left_ = false;
         clock_type::time_point room_left_at_{};

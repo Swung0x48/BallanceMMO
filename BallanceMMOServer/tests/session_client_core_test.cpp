@@ -6807,7 +6807,9 @@ namespace {
         bmmo::session::trafo_poll next_poll;                       // what poll_trafo answers (once)
         std::map<std::pair<uint32_t, uint8_t>, int> bodies;        // (player, type) -> bodies trafo_type_set reports
         bool reconcile_ok = true;
-        std::vector<uint32_t> retire_answer;                       // what retire_trafo_sets answers (once)
+        std::vector<bmmo::session::trafo_key> retire_answer;      // what retire_trafo_sets answers (once)
+        // A set's label in the calls: "<player>" for life 1, "<player>L<life>" later (step TRL).
+        static std::string label(uint32_t player, uint16_t life) { return bmmo::session::trafo_life_label(player, life); }
 
         void install(session_platform& p) {
             p.poll_trafo = [this](uint32_t tick, bool option_e) {
@@ -6816,32 +6818,38 @@ namespace {
                 std::swap(out, next_poll);
                 return out;
             };
-            p.make_trafo_set = [this](uint32_t player, std::string&) {
-                calls->push_back("make_trafo_set:" + std::to_string(player));
+            p.make_trafo_set = [this](uint32_t player, uint16_t life, std::string&) {
+                calls->push_back("make_trafo_set:" + label(player, life));
                 return true;
             };
             p.run_trafo = [this](const bmmo::session::trafo_input& in, std::string&) {
-                calls->push_back("run_trafo:" + std::to_string(in.player) + ":" + std::to_string(in.type) + ":"
+                calls->push_back("run_trafo:" + label(in.player, in.life) + ":" + std::to_string(in.type) + ":"
                                  + std::to_string(in.flags) + ":" + std::to_string(in.applied) + ":" + std::to_string(in.seed));
                 return true;
             };
-            p.trafo_final = [this](uint32_t player, uint8_t type, uint32_t tick) {
-                calls->push_back("trafo_final:" + std::to_string(player) + ":" + std::to_string(type) + ":" + std::to_string(tick));
+            p.trafo_final = [this](uint32_t player, uint16_t life, uint8_t type, uint32_t tick) {
+                calls->push_back("trafo_final:" + label(player, life) + ":" + std::to_string(type) + ":" + std::to_string(tick));
             };
             p.trafo_frame = [this](uint32_t tick) { calls->push_back("trafo_frame:" + std::to_string(tick)); };
-            p.trafo_type_set = [this](uint32_t player, uint8_t type) {
-                calls->push_back("trafo_type_set:" + std::to_string(player) + ":" + std::to_string(type));
+            p.trafo_type_set = [this](uint32_t player, uint16_t life, uint8_t type) {
+                calls->push_back("trafo_type_set:" + label(player, life) + ":" + std::to_string(type));
                 bmmo::session::trafo_type_view view;
                 view.exists = true;
                 for (int k = 1; k <= 3; ++k)
-                    view.pieces.push_back("piece" + std::to_string(k) + "_" + std::to_string(type) + "_" + std::to_string(player));
+                    view.pieces.push_back("piece" + std::to_string(k) + "_" + std::to_string(type) + "_" + label(player, life));
                 const auto it = bodies.find({player, type});
                 view.bodies = it == bodies.end() ? 0 : it->second;
                 return view;
             };
             p.trafo_reconcile = [this](const bmmo::session::trafo_reconcile_spec& spec) {
                 const bool remake = spec.action == bmmo::session::trafo_reconcile_action::remake;
-                calls->push_back(std::string("trafo_reconcile:") + (remake ? "remake" : "unmake") + ":" + std::to_string(spec.player)
+                if (spec.action == bmmo::session::trafo_reconcile_action::retire) {
+                    calls->push_back("trafo_reconcile:retire:" + label(spec.player, spec.life) + ":" + std::to_string(spec.birth_tick));
+                    bmmo::session::trafo_reconcile_result r;
+                    r.ok = reconcile_ok;
+                    return r;
+                }
+                calls->push_back(std::string("trafo_reconcile:") + (remake ? "remake" : "unmake") + ":" + label(spec.player, spec.life)
                                  + ":" + std::to_string(spec.type) + (remake ? ":" + std::to_string(spec.seed) + ":"
                                                                                  + std::to_string(spec.birth_tick) : std::string()));
                 bmmo::session::trafo_reconcile_result r;
@@ -6851,7 +6859,7 @@ namespace {
             };
             p.retire_trafo_sets = [this](uint32_t now, uint32_t history) {
                 calls->push_back("retire_trafo_sets:" + std::to_string(now) + ":" + std::to_string(history));
-                std::vector<uint32_t> out;
+                std::vector<bmmo::session::trafo_key> out;
                 std::swap(out, retire_answer);
                 return out;
             };
@@ -7004,10 +7012,16 @@ namespace {
         core.on_session_assign(assign_message(9, 120));
         state_of(core).frames_since_anchor_ = 6;
         size_t from = fake.calls.size();
+        // Step TRL: an event of a life not announced yet makes no set (it is
+        // parked; a guessed life could be one the server never held) - its
+        // member message does.
         core.on_session_event(event_message(7, bmmo::session::event_type::Sector, 130, 130));
+        EXPECT_TRUE(only(since(fake.calls, from), "make_trafo_set").empty()) << "an unannounced life: none";
+        set_test_life(core, 7, 5);
         core.on_session_event(event_message(7, bmmo::session::event_type::Physicalize, 131, 131));
+        core.on_session_event(event_message(7, bmmo::session::event_type::Sector, 132, 132));
         EXPECT_EQ(only(since(fake.calls, from), "make_trafo_set"), std::vector<std::string>{"make_trafo_set:7"})
-            << "once, at the player's first message";
+            << "once, at the player's first message of a known life";
         bmmo::session_remote_input_msg relay;
         relay.session = 9;
         relay.tick = 124;
@@ -7017,6 +7031,10 @@ namespace {
         entry.frames.resize(1);
         relay.entries.push_back(entry);
         from = fake.calls.size();
+        core.on_session_remote_input(relay);
+        EXPECT_TRUE(only(since(fake.calls, from), "make_trafo_set").empty()) << "step TRL: no life to name, no set";
+        EXPECT_EQ(state_of(core).trafo_unnamed_lives_, 1u);
+        set_test_life(core, 8, 6);
         core.on_session_remote_input(relay);
         EXPECT_EQ(only(since(fake.calls, from), "make_trafo_set"), std::vector<std::string>{"make_trafo_set:8"});
         // A replayed tick applies inputs and never builds a set.
@@ -7325,10 +7343,10 @@ namespace {
         EXPECT_EQ(s.trafo_unmade_, 2u);
         EXPECT_EQ(s.trafo_remade_, 2u);
         // The log learned the server's explosions.
-        ASSERT_NE(s.trafo_log_.newest_explosion(4, 0, 119), nullptr);
-        EXPECT_EQ(s.trafo_log_.newest_explosion(4, 0, 119)->applied, 115u);
-        ASSERT_NE(s.trafo_log_.newest_explosion(4, 2, 119), nullptr);
-        EXPECT_EQ(s.trafo_log_.newest_explosion(4, 2, 119)->applied, 117u);
+        ASSERT_NE(s.trafo_log_.newest_explosion(4, 1, 0, 119), nullptr);
+        EXPECT_EQ(s.trafo_log_.newest_explosion(4, 1, 0, 119)->applied, 115u);
+        ASSERT_NE(s.trafo_log_.newest_explosion(4, 1, 2, 119), nullptr);
+        EXPECT_EQ(s.trafo_log_.newest_explosion(4, 1, 2, 119)->applied, 117u);
         // The journal's section: one entry per type set, in key order.
         ASSERT_EQ(journal.size(), 9u) << "players 3, 4, 5 x three types";
         const auto find = [&](uint32_t player, uint8_t type) {
@@ -7359,18 +7377,21 @@ namespace {
         EXPECT_EQ(s.trafo_pieces_.count("piece2_1_4"), 1u);
         EXPECT_EQ(s.trafo_pieces_.count("piece1_0_3"), 1u);
         const size_t pieces = s.trafo_pieces_.size();
-        t.retire_answer = {4};
+        t.retire_answer = {bmmo::session::trafo_key{4, 1}};
         steps{core}.retire_trafo(300);
         EXPECT_EQ(only(fake.calls, "retire_trafo_sets"), std::vector<std::string>{"retire_trafo_sets:300:96"});
-        EXPECT_EQ(s.trafo_sets_.count(4), 0u);
+        EXPECT_EQ(s.trafo_sets_.count(bmmo::session::trafo_key{4, 1}), 0u);
         EXPECT_EQ(s.trafo_pieces_.count("piece2_1_4"), 0u) << "the retired set's pieces are forgotten";
         EXPECT_EQ(s.trafo_pieces_.count("piece1_0_3"), 1u) << "the others' stay";
         EXPECT_EQ(s.trafo_pieces_.size(), pieces - 9u);
         EXPECT_EQ(s.trafo_log_.size(), 1u) << "the newest explosion stays";
-        // The next sight of player 4 builds (or reselects) its set again.
+        // Step TRL ('Key by life, no resume'): a retired set is gone for
+        // good - the next sight of the life makes nothing.
         const size_t from = fake.calls.size();
         core.on_session_event(event_message(4, bmmo::session::event_type::Sector, 301, 301));
-        EXPECT_EQ(only(since(fake.calls, from), "make_trafo_set"), std::vector<std::string>{"make_trafo_set:4"});
+        EXPECT_TRUE(only(since(fake.calls, from), "make_trafo_set").empty());
+        EXPECT_EQ(s.trafo_retired_sights_, 1u);
+        EXPECT_EQ(s.trafo_retired_sets_.count(bmmo::session::trafo_key{4, 1}), 1u);
     }
 
     // A frame runs the trafo inputs before the union's pass and the trafo
@@ -7794,5 +7815,266 @@ namespace {
         EXPECT_EQ(bmmo::session::member_life_at(lives, 5, 149)->entry.life, 1);
         EXPECT_EQ(bmmo::session::member_life_at(lives, 5, 150)->entry.life, 2);
         EXPECT_EQ(bmmo::session::member_life_at(lives, 6, 150), nullptr);
+    }
+
+    // ------------------------------------------- step TRL: sets per life
+    // The user, 2026-10-29: 'Key by life, no resume'.  A rejoin on the same
+    // id is a new life with its own set; the old life's set fades and
+    // retires beside it; nothing of one life serves another.
+
+    // Two lives' sets of one id coexist: the anchor's (4, life 1), then the
+    // rejoin's member message (4, life 2) builds 4L2 while 4 is held; the
+    // old life's final resets run on its own set, the new life's input on
+    // its own.
+    TEST(SessionClientCoreTrafoLives, TwoLivesOfOneIdHoldTwoSets) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        auto& s = state_of(core);
+        ASSERT_EQ(s.trafo_sets_.count(bmmo::session::trafo_key{4, 1}), 1u);
+        size_t from = fake.calls.size();
+        // The old life's final resets (server-stamped, life 1) and its removal.
+        for (uint8_t type = 0; type < bmmo::session::kTrafoTypes; ++type) {
+            auto reset = trafo_message(4, type, bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER
+                                                    | bmmo::session::TRAFO_FINAL, 130, 130);
+            reset.life = 1;
+            core.on_session_event(std::move(reset));
+        }
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 4, 1, 0, 131));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 4, 2, 0, 131));
+        EXPECT_EQ(only(since(fake.calls, from), "make_trafo_set"), std::vector<std::string>{"make_trafo_set:4L2"})
+            << "the new life's own set; the old one is not reused";
+        EXPECT_EQ(s.trafo_sets_.count(bmmo::session::trafo_key{4, 1}), 1u) << "the old life's set still fades";
+        EXPECT_EQ(s.trafo_sets_.count(bmmo::session::trafo_key{4, 2}), 1u);
+        EXPECT_EQ(core.trafo_set_list(), "3,4,4L2");
+        // The new life's explosion, at the same type and a later tick.
+        auto boom = trafo_message(4, 0, bmmo::session::TRAFO_EXPLODE, 140, 140);
+        boom.life = 2;
+        core.on_session_event(std::move(boom));
+        from = fake.calls.size();
+        steps{core}.apply_trafo_inputs(130, false);
+        steps{core}.apply_trafo_inputs(140, false);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(only(calls, "trafo_final"),
+                  (std::vector<std::string>{"trafo_final:4:0:130", "trafo_final:4:1:130", "trafo_final:4:2:130"}))
+            << "the finals mark the old life's set only";
+        const auto runs = only(calls, "run_trafo");
+        ASSERT_EQ(runs.size(), 4u);
+        EXPECT_EQ(runs[3].rfind("run_trafo:4L2:0:0:140:", 0), 0u) << runs[3];
+        // The log keeps the two lives apart.
+        EXPECT_EQ(s.trafo_log_.newest_explosion(4, 1, 0, 200), nullptr);
+        ASSERT_NE(s.trafo_log_.newest_explosion(4, 2, 0, 200), nullptr);
+        EXPECT_EQ(s.trafo_log_.newest_explosion(4, 2, 0, 200)->applied, 140u);
+    }
+
+    // Per-life retirement: the old life's set retires, the new life's stays;
+    // no sight makes the retired one again, the live one is kept.
+    TEST(SessionClientCoreTrafoLives, RetirementIsPerLifeAndFinal) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        auto& s = state_of(core);
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 4, 1, 0, 131));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 4, 2, 0, 131));
+        EXPECT_EQ(s.trafo_pieces_.count("piece1_0_4"), 1u);
+        EXPECT_EQ(s.trafo_pieces_.count("piece1_0_4L2"), 1u);
+        t.retire_answer = {bmmo::session::trafo_key{4, 1}};
+        steps{core}.retire_trafo(400);
+        EXPECT_EQ(s.trafo_sets_.count(bmmo::session::trafo_key{4, 1}), 0u);
+        EXPECT_EQ(s.trafo_sets_.count(bmmo::session::trafo_key{4, 2}), 1u);
+        EXPECT_EQ(s.trafo_pieces_.count("piece1_0_4"), 0u);
+        EXPECT_EQ(s.trafo_pieces_.count("piece1_0_4L2"), 1u) << "the live life's pieces stay";
+        const size_t from = fake.calls.size();
+        auto old = event_message(4, bmmo::session::event_type::Sector, 401, 401);
+        old.life = 1;
+        core.on_session_event(std::move(old));
+        auto now = event_message(4, bmmo::session::event_type::Sector, 402, 402);
+        now.life = 2;
+        core.on_session_event(std::move(now));
+        auto relay_tick = trafo_message(4, 0, bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER, 403, 403);
+        relay_tick.life = 1;
+        core.on_session_event(std::move(relay_tick));
+        EXPECT_TRUE(only(since(fake.calls, from), "make_trafo_set").empty())
+            << "the retired life is not made again, the live one is held";
+        EXPECT_EQ(s.trafo_retired_sights_, 2u);
+        EXPECT_EQ(s.trafo_log_.at(403).size(), 0u) << "an input of a retired set is not logged";
+        EXPECT_EQ(core.trafo_set_list(), "3,4L2");
+    }
+
+    // A late joiner's state while an old life's set still fades (J4: the
+    // joiner was never told of that life, its SessionStart lists the new
+    // one): the anchor builds the open lives, the ledger names the old
+    // life's set too - built from the ledger with its final marks, so the
+    // joiner holds exactly the server's set list and the portable record's
+    // trafo list (keyed by the per-life names) matches.  A ledger naming a
+    // set this world retired brings it back (the server's state at S holds
+    // it): the one path that may.
+    TEST(SessionClientCoreTrafoLives, ALateJoinLedgerWithAFadingOldLife) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        state_of(core).own_id_ = 3;
+        auto start = start_message(9, 3);
+        start.world_options = bmmo::session::WORLD_TRAFO_INPUTS;
+        start.players[0].life = 2;   // member 4 is in its second life
+        ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
+        core.level_requested();
+        bmmo::session::anchor_report report;
+        report.build_id = "build-x";
+        report.own_name = "Me";
+        core.anchor(report);
+        EXPECT_EQ(only(fake.calls, "make_trafo_set"), (std::vector<std::string>{"make_trafo_set:3", "make_trafo_set:4L2"}));
+        core.on_session_assign(assign_message(9, 120));
+        state_of(core).frames_since_anchor_ = 6;
+        state_of(core).held_floor_ = 125;
+        auto& s = state_of(core);
+        bmmo::session_resync_state_msg st;
+        for (uint16_t life: {uint16_t{1}, uint16_t{2}})
+            for (uint8_t type = 0; type < bmmo::session::kTrafoTypes; ++type) {
+                bmmo::session::trafo_ledger_entry e;
+                e.player = 4;
+                e.life = life;
+                e.type = type;
+                e.final = life == 1;
+                e.final_applied = life == 1 ? 110 : 0;
+                st.trafo_ledger.push_back(e);
+            }
+        for (uint8_t type = 0; type < bmmo::session::kTrafoTypes; ++type) {
+            bmmo::session::trafo_ledger_entry e;
+            e.player = 3;
+            e.type = type;
+            st.trafo_ledger.push_back(e);
+        }
+        std::set<std::string> gone;
+        std::vector<bmmo::session::journal_trafo_entry> journal;
+        size_t from = fake.calls.size();
+        steps{core}.reconcile_trafo(st, 119u, gone, journal);
+        auto calls = since(fake.calls, from);
+        EXPECT_EQ(only(calls, "make_trafo_set"), std::vector<std::string>{"make_trafo_set:4"}) << "the fading set, from the ledger";
+        EXPECT_EQ(only(calls, "trafo_final"),
+                  (std::vector<std::string>{"trafo_final:4:0:110", "trafo_final:4:1:110", "trafo_final:4:2:110"}));
+        EXPECT_EQ(core.trafo_set_list(), "3,4,4L2") << "the server's list";
+        ASSERT_EQ(journal.size(), 9u);
+        EXPECT_EQ(journal[3].player, 4u);
+        EXPECT_EQ(journal[3].life, 1u);
+        EXPECT_EQ(journal[6].life, 2u);
+        // Retired here, named again by a later ledger: made again (reselected
+        // by the host while not destroyed).
+        t.retire_answer = {bmmo::session::trafo_key{4, 1}};
+        steps{core}.retire_trafo(300);
+        EXPECT_EQ(core.trafo_set_list(), "3,4L2");
+        from = fake.calls.size();
+        steps{core}.reconcile_trafo(st, 119u, gone, journal);
+        calls = since(fake.calls, from);
+        EXPECT_EQ(only(calls, "make_trafo_set"), std::vector<std::string>{"make_trafo_set:4"});
+        EXPECT_EQ(core.trafo_set_list(), "3,4,4L2");
+        EXPECT_EQ(s.trafo_retired_sets_.count(bmmo::session::trafo_key{4, 1}), 0u);
+    }
+
+    // The own id's earlier life: a rejoiner's core sees its old life's
+    // relayed explosion as another life's input, not as an own echo.
+    TEST(SessionClientCoreTrafoLives, AnOwnEarlierLifeIsNoEcho) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        state_of(core).own_id_ = 3;
+        auto start = start_message(9, 3);
+        start.world_options = bmmo::session::WORLD_TRAFO_INPUTS;
+        start.players[1].life = 2;   // our own entry: the second life
+        ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
+        core.level_requested();
+        bmmo::session::anchor_report report;
+        report.build_id = "build-x";
+        report.own_name = "Me";
+        core.anchor(report);
+        core.on_session_assign(assign_message(9, 120));
+        state_of(core).frames_since_anchor_ = 6;
+        state_of(core).held_floor_ = 125;
+        EXPECT_EQ(core.trafo_set_list(), "3L2,4");
+        auto old = trafo_message(3, 1, bmmo::session::TRAFO_EXPLODE, 130, 130);
+        old.life = 1;
+        core.on_session_event(std::move(old));
+        auto& s = state_of(core);
+        EXPECT_TRUE(s.own_echoes_.empty());
+        ASSERT_EQ(s.trafo_log_.at(130).size(), 1u);
+        EXPECT_EQ(s.trafo_log_.at(130)[0].life, 1u);
+        EXPECT_FALSE(s.trafo_log_.at(130)[0].own);
+        EXPECT_EQ(core.trafo_set_list(), "3,3L2,4");
+    }
+
+    // Run B of step TRL (a rejoin on the same connection 1 s after the
+    // leave): the rejoiner's first state (S 1296) named its old life's
+    // fading set, which it built from that ledger; the state was never
+    // applied (a wait, then a timeout), and the server retired the set at
+    // 1431; the next state (S 1529) does not name it.  Its reconcile retires
+    // the set of the ended life at once, so the local list is the ledger's
+    // and the portable record is taken; a set of an open life the ledger
+    // does not name is left alone.
+    TEST(SessionClientCoreTrafoLives, AReconcileRetiresAnEndedLifesSetTheLedgerNoLongerNames) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        state_of(core).own_id_ = 3;
+        auto start = start_message(9, 3);
+        start.world_options = bmmo::session::WORLD_TRAFO_INPUTS;
+        start.players[1].life = 2;   // our own entry: the second life
+        ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
+        core.level_requested();
+        bmmo::session::anchor_report report;
+        report.build_id = "build-x";
+        report.own_name = "Me";
+        core.anchor(report);
+        core.on_session_assign(assign_message(9, 120));
+        state_of(core).frames_since_anchor_ = 6;
+        state_of(core).held_floor_ = 125;
+        auto& s = state_of(core);
+        // The first state's ledger: our old life's set, final.
+        bmmo::session_resync_state_msg first;
+        for (uint8_t type = 0; type < bmmo::session::kTrafoTypes; ++type) {
+            bmmo::session::trafo_ledger_entry e;
+            e.player = 3;
+            e.life = 1;
+            e.type = type;
+            e.final = true;
+            e.final_applied = 101;
+            first.trafo_ledger.push_back(e);
+        }
+        std::set<std::string> gone;
+        std::vector<bmmo::session::journal_trafo_entry> journal;
+        steps{core}.reconcile_trafo(first, 119u, gone, journal);
+        ASSERT_EQ(core.trafo_set_list(), "3,3L2,4") << "made from the ledger";
+        // The next state names only the open lives' sets (and not even 4's).
+        bmmo::session_resync_state_msg next;
+        for (uint8_t type = 0; type < bmmo::session::kTrafoTypes; ++type) {
+            bmmo::session::trafo_ledger_entry e;
+            e.player = 3;
+            e.life = 2;
+            e.type = type;
+            next.trafo_ledger.push_back(e);
+        }
+        const size_t from = fake.calls.size();
+        gone.clear();
+        journal.clear();
+        steps{core}.reconcile_trafo(next, 124u, gone, journal);
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(only(calls, "trafo_reconcile:retire"), std::vector<std::string>{"trafo_reconcile:retire:3:125"});
+        EXPECT_EQ(core.trafo_set_list(), "3L2,4") << "the ended life's set retired; member 4's open life kept";
+        EXPECT_EQ(s.trafo_retired_sets_.count(bmmo::session::trafo_key{3, 1}), 1u);
+        EXPECT_EQ(s.trafo_pieces_.count("piece1_0_3"), 0u);
+        EXPECT_EQ(gone.count("piece1_0_3"), 1u) << "its pieces are kept out of the restore";
+        // Review 6: the retirement is in the journal (each of its type
+        // entries, not in the ledger), and nothing else is marked.
+        size_t retired_entries = 0;
+        for (const auto& j: journal) {
+            const bool ended = j.player == 3 && j.life == 1;
+            EXPECT_EQ((j.action & bmmo::session::JOURNAL_TRAFO_RETIRED) != 0, ended) << j.player << "L" << j.life;
+            if (ended) {
+                EXPECT_EQ(j.bits & 16, 16) << "not in the ledger";
+                ++retired_entries;
+            }
+        }
+        EXPECT_EQ(retired_entries, static_cast<size_t>(bmmo::session::kTrafoTypes));
     }
 }

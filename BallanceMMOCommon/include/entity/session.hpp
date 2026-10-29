@@ -144,7 +144,18 @@ namespace bmmo::session {
     //      design.md, As built (step RK3); a decision with the user).  No message
     //      layout changed; the journal header's world_options carries the
     //      bit (no journal version of its own).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 20;
+    //  21  trafo piece sets keyed by (player, life) (step TRL; the user,
+    //      2026-10-29: 'Key by life, no resume'): every world builds a set
+    //      per life of a member (a rejoin's new life never inherits its old
+    //      life's set; the old one fades and retires beside it), named by
+    //      session/trafo_input.hpp trafo_life_label ("<p>" for life 1 - the
+    //      names before - "<p>L<n>" for a later life); a Trafo event acts on
+    //      the set of the life it carries (session_event_msg `life`); the
+    //      SessionResyncState trafo ledger gives each entry its life (a
+    //      trailing u16 per entry after the ledger: a state without it reads
+    //      as life 1); the server's trafo acceptance is per (player, life,
+    //      type).  Journal v9.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 21;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -336,6 +347,7 @@ namespace bmmo::session {
     // seed, player, explode_applied, type).
     struct trafo_ledger_entry {
         uint32_t player = 0;
+        uint16_t life = 1;            // protocol 21 (step TRL): the life whose set this is
         uint8_t type = 0;             // 0 wood, 1 stone, 2 paper
         bool has_explosion = false;   // an explosion applied at or before S (explode_applied, position valid)
         uint32_t explode_applied = 0;

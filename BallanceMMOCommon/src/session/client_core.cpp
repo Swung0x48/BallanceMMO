@@ -361,6 +361,7 @@ namespace bmmo::session {
         s.trafo_active_ = caps_.trafo_inputs && (msg.world_options & WORLD_TRAFO_INPUTS) != 0;
         s.trafo_log_.clear();
         s.trafo_sets_.clear();
+        s.trafo_retired_sets_.clear();
         s.trafo_pieces_.clear();
         s.trafo_pending_.clear();
         s.input_rewind_trafo_ = false;
@@ -369,6 +370,7 @@ namespace bmmo::session {
         s.trafo_echo_moved_ = s.trafo_echo_dropped_ = 0;
         s.trafo_sets_made_ = s.trafo_set_failures_ = s.trafo_run_failures_ = 0;
         s.trafo_unmade_ = s.trafo_remade_ = s.trafo_retired_ = 0;
+        s.trafo_retired_sights_ = s.trafo_unnamed_lives_ = 0;
         s.trafo_leak_logs_ = 0;
         if (msg.world_options & WORLD_TRAFO_INPUTS)
             logf("session %u: the trafo is an input (world option trafo inputs)%s", s.session_,
@@ -532,11 +534,16 @@ namespace bmmo::session {
         // Step T3 (design 2.4): every member's piece set and the own one, by
         // player id, after the host's quiesce (its anchor work): the server
         // built the same at add_player.
+        // Step TRL: per life - every open life (SessionStart's: the
+        // members' current lives) and the own one; an ended life's set,
+        // still fading at the server, comes from a resync ledger.
         if (s.trafo_active_) {
-            std::set<uint32_t> members;
-            for (const auto& l: s.lives_) members.insert(l.entry.id);
-            members.insert(s.own_id_);
-            for (uint32_t player: members) ensure_trafo_set(player, "the anchor");
+            std::set<bmmo::session::trafo_key> members;
+            for (const auto& l: s.lives_)
+                if (l.until == 0) members.insert({l.entry.id, l.entry.life ? l.entry.life : uint16_t{1}});
+            members.insert({s.own_id_, own_trafo_life()});
+            for (const auto& k: members) ensure_trafo_set(k.player, k.life, "the anchor");
+            logf("trafo sets at the anchor: %s", trafo_set_list().c_str());
         }
     }
 

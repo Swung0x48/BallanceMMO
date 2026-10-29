@@ -218,8 +218,19 @@ namespace bmmo::session {
         std::set<std::string> trafo_rows;
         if (s.trafo_active_)
             for (const auto& e: st.trafo_ledger) {
-                if (e.type >= kTrafoTypes || !ensure_trafo_set(e.player, "the resync ledger") || !e.has_bodies) continue;
-                for (auto& piece: platform_.trafo_type_set(e.player, e.type).pieces) trafo_rows.insert(std::move(piece));
+                const uint16_t life = e.life ? e.life : uint16_t{1};   // step TRL: the set is (player, life)'s
+                if (e.type >= kTrafoTypes || !ensure_trafo_set(e.player, life, "the resync ledger", true)) continue;
+                // Step TRL: the final marks with the set, so a set made for
+                // a state that is then not applied (a wait, a timeout) still
+                // retires by the rule (the reconcile marks them again).
+                // final_applied is in the numbering of the assign before
+                // this state; a state dropped after a re-assign with a
+                // non-zero delta leaves the mark that far off until the next
+                // state's reconcile marks the named sets again and retires
+                // the ones it does not name (review 7).
+                if (e.final) platform_.trafo_final(e.player, life, e.type, e.final_applied);
+                if (!e.has_bodies) continue;
+                for (auto& piece: platform_.trafo_type_set(e.player, life, e.type).pieces) trafo_rows.insert(std::move(piece));
             }
         // 2. The rows onto this world's bodies.  The registry starts over
         // from the state's dictionary (the re-assign cleared it).
@@ -304,6 +315,15 @@ namespace bmmo::session {
                 ++s.resync_deferred_;
                 logf("resync: the state of tick %u waits at tick %u for %zu bod%s this world does not have yet (%s first)",
                      anchor, now, waiting.size(), waiting.size() == 1 ? "y" : "ies", waiting.front().c_str());
+            }
+            // Step TRL (review 4): a wait still open after 60 frames names
+            // what it waits for (run B's 1 s rejoiner waited until the hold
+            // timed out, and only the first body was logged).
+            if (s.resync_wait_frames_ == 60) {
+                std::string names;
+                for (size_t i = 0; i < waiting.size() && i < 24; ++i) names += (i ? ", " : "") + waiting[i];
+                logf("resync: the state of tick %u still waits at tick %u for %zu bod%s: %s%s", anchor, now, waiting.size(),
+                     waiting.size() == 1 ? "y" : "ies", names.c_str(), waiting.size() > 24 ? ", ..." : "");
             }
             ++s.resync_deferred_ticks_;
             return false;

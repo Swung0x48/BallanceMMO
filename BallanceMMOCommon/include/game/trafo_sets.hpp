@@ -80,11 +80,22 @@ namespace bmmo::game {
     constexpr const char* kTrafoWindName = "Ball_PaperWind";
     constexpr const char* kTrafoCollSoundName = "Ball_CollSound_Pieces";
     constexpr const char* kTrafoScriptOwnerName = "All_Balls";
-    // A copy's name: the original's, then "_Trafo<player>".
-    inline std::string trafo_copy_suffix(uint32_t player) { return "_Trafo" + std::to_string(player); }
-    inline std::string trafo_owner_name(uint32_t player) { return "BMMO_TrafoOwner_" + std::to_string(player); }
-    inline std::string trafo_ref_name(uint8_t type, uint32_t player) {
-        return std::string("BMMO_TrafoRef_") + bmmo::session::trafo_type_name(type) + "_" + std::to_string(player);
+    // A copy's name: the original's, then "_Trafo<label>", the label
+    // session/trafo_input.hpp trafo_life_label: "<player>" for life 1 (the
+    // names before step TRL), "<player>L<life>" for a later life (step TRL:
+    // two lives' sets of one id coexist while the old one fades, so their
+    // names differ; the label is the server's numbering, the same in every
+    // world).  The longest, Ball_PaperPieces_Frame_Trafo4294967295L65535,
+    // is 44 characters (MAX_NAME 64).
+    inline std::string trafo_copy_suffix(uint32_t player, uint16_t life) {
+        return "_Trafo" + bmmo::session::trafo_life_label(player, life);
+    }
+    inline std::string trafo_owner_name(uint32_t player, uint16_t life) {
+        return "BMMO_TrafoOwner_" + bmmo::session::trafo_life_label(player, life);
+    }
+    inline std::string trafo_ref_name(uint8_t type, uint32_t player, uint16_t life) {
+        return std::string("BMMO_TrafoRef_") + bmmo::session::trafo_type_name(type) + "_"
+             + bmmo::session::trafo_life_label(player, life);
     }
 
     // The bridge's side (physics_state.hpp trafo_set_*, bridge API v21) and
@@ -94,9 +105,12 @@ namespace bmmo::game {
         std::function<bool(const std::string& entity, std::string& error)> unphysicalize;
         // The originals' restore (physics_state.hpp restore_explosion_pieces).
         std::function<void()> restore_originals;
-        std::function<bool(uint32_t player, const uint32_t frames[3], const std::vector<uint32_t>& explosions,
+        // `key`: the set's bridge key (trafo_set::bridge) - the bridge's
+        // registry is keyed by it (bridge API v21's `player` argument, an
+        // opaque key there: step TRL).
+        std::function<bool(uint32_t key, const uint32_t frames[3], const std::vector<uint32_t>& explosions,
                            bmmo_physics_trafo_set_report& out, std::string& error)> register_set;
-        std::function<bool(uint32_t player, std::string& error)> unregister_set;
+        std::function<bool(uint32_t key, std::string& error)> unregister_set;
         std::function<void(uint32_t frame, int32_t seed)> seed;
         std::function<int(uint32_t frame, std::string& error)> unmake;
         // The force blocks' controllers (capture_force / restore_force).
@@ -112,12 +126,19 @@ namespace bmmo::game {
     };
     struct trafo_set {
         uint32_t player = 0;
+        uint16_t life = 1;             // step TRL: the set is (player, life)'s
+        // This world's key of the set in the bridge's registry (the bridge
+        // allows one registration per key): the player id for the first set
+        // of an id this registry holds, another free value when an older
+        // life's set of the id is still held (trafo_registry::bridge_key_for).
+        // Local to this world, never compared with another's.
+        uint32_t bridge = 0;
         CK_ID owner = 0;
         trafo_type_set types[bmmo::session::kTrafoTypes];
         CK_ID wind = 0, collsound = 0;
         std::vector<CK_ID> scripts;    // the 8, in All_Balls' order
         // Every force block of the scripts, in their order and walk order:
-        // the k-th names its controller "trafo:<player>/<k>" in a savestate
+        // the k-th names its controller "trafo:<label>/<k>" in a savestate
         // (trafo_controller_alias), the same in every world.
         std::vector<CK_ID> force_blocks;
         std::vector<CK_ID> objects;    // every object the builder made: what destroy removes
@@ -176,13 +197,33 @@ namespace bmmo::game {
     public:
         std::vector<trafo_set>& sets() { return sets_; }
         const std::vector<trafo_set>& sets() const { return sets_; }
-        trafo_set* find(uint32_t player) {
-            for (auto& s: sets_) if (s.player == player) return &s;
+        // Step TRL: a set is found by (player, life) only - never by the
+        // id alone (world-agreement design J-g).
+        trafo_set* find(uint32_t player, uint16_t life) {
+            for (auto& s: sets_) if (s.player == player && s.life == life) return &s;
             return nullptr;
         }
-        const trafo_set* find(uint32_t player) const {
-            for (const auto& s: sets_) if (s.player == player) return &s;
+        const trafo_set* find(uint32_t player, uint16_t life) const {
+            for (const auto& s: sets_) if (s.player == player && s.life == life) return &s;
             return nullptr;
+        }
+        // The bridge key a new set of (player, life) registers under: the
+        // player id for life 1 (every set of a session without a rejoin), the
+        // id mixed with the life for a later life; either moved on to the
+        // next value while it is 0 or a set this world still holds uses it.
+        // A per-world handle: that move depends on what this world holds,
+        // so the key is equal across worlds only while no move happens (a
+        // mixed key equal to a held set's key or 0 - not met so far); the
+        // names and the frame order come from (player, life), not from it.
+        uint32_t bridge_key_for(uint32_t player, uint16_t life) const {
+            const auto used = [this](uint32_t key) {
+                for (const auto& s: sets_) if (s.bridge == key) return true;
+                return false;
+            };
+            uint32_t key = player;
+            if (life > 1) key = player ^ (static_cast<uint32_t>(life) * 0x9e3779b1u);
+            while (key == 0 || used(key)) ++key;
+            return key;
         }
         const script_replay::trafo_part& part() const { return part_; }
         // The selected sets' scripts in player-id order; the built states of
@@ -195,12 +236,17 @@ namespace bmmo::game {
         // else: what the trafo frame runs and the capture writes is
         // `scripts`.
         void rebuild_part() {
-            std::sort(sets_.begin(), sets_.end(), [](const trafo_set& a, const trafo_set& b) { return a.player < b.player; });
+            // (player, life) order (step TRL): two lives of one id may both
+            // be held, and every world must list them in one order.
+            std::sort(sets_.begin(), sets_.end(), [](const trafo_set& a, const trafo_set& b) {
+                return a.player != b.player ? a.player < b.player : a.life < b.life;
+            });
             part_ = {};
             force_names_.clear();
             for (const auto& s: sets_)
                 for (size_t k = 0; k < s.force_blocks.size(); ++k)
-                    force_names_[s.force_blocks[k]] = "trafo:" + std::to_string(s.player) + "/" + std::to_string(k);
+                    force_names_[s.force_blocks[k]] = "trafo:" + bmmo::session::trafo_life_label(s.player, s.life) + "/"
+                                                    + std::to_string(k);
             for (const auto& s: sets_) {
                 for (CK_ID id: s.scripts) {
                     if (s.selected) part_.scripts.push_back(id);
@@ -213,8 +259,9 @@ namespace bmmo::game {
             sets_.push_back(std::move(set));
             rebuild_part();
         }
-        void remove(uint32_t player) {
-            sets_.erase(std::remove_if(sets_.begin(), sets_.end(), [player](const trafo_set& s) { return s.player == player; }),
+        void remove(uint32_t player, uint16_t life) {
+            sets_.erase(std::remove_if(sets_.begin(), sets_.end(),
+                                       [player, life](const trafo_set& s) { return s.player == player && s.life == life; }),
                         sets_.end());
             rebuild_part();
         }
@@ -244,7 +291,8 @@ namespace bmmo::game {
     // The savestate's controller alias over a registry (physics_savestate.hpp
     // set_controller_alias; step T3's fix-up): a set's force controller,
     // "rt:force/<block id>" in this world, is "trafo:<player>/<k>" in every
-    // world - the k-th force block of that player's copies.  Every other
+    // world - the k-th force block of that player's copies ("trafo:<p>L<n>/<k>"
+    // for a later life, step TRL).  Every other
     // name is kept.
     inline bool trafo_controller_alias(const trafo_registry& registry, const char* name, std::string& alias) {
         static constexpr char kPrefix[] = "rt:force/";
@@ -362,12 +410,13 @@ namespace bmmo::game {
             }
             return h;
         }
-        // A name with this player's suffixes taken out, for the digest.
-        inline std::string normalized(const std::string& name, uint32_t player) {
+        // A name with this set's suffixes taken out, for the digest (the
+        // same digest for every life of every player).
+        inline std::string normalized(const std::string& name, uint32_t player, uint16_t life) {
             std::string out = name;
-            const std::string suffix = trafo_copy_suffix(player);
+            const std::string suffix = trafo_copy_suffix(player, life);
             for (size_t at; (at = out.find(suffix)) != std::string::npos;) out.replace(at, suffix.size(), "_Trafo#");
-            const std::string tail = "_" + std::to_string(player);
+            const std::string tail = "_" + bmmo::session::trafo_life_label(player, life);
             if (out.rfind("BMMO_Trafo", 0) == 0 && out.size() > tail.size()
                     && out.compare(out.size() - tail.size(), tail.size(), tail) == 0)
                 out.replace(out.size() - tail.size(), tail.size(), "_#");
@@ -671,15 +720,16 @@ namespace bmmo::game {
     }
 
     // Below the builder.
-    inline std::vector<std::string> trafo_reference_map(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player);
-    inline std::string trafo_value_digest(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player);
+    inline std::vector<std::string> trafo_reference_map(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player,
+                                                        uint16_t life);
+    inline std::string trafo_value_digest(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player, uint16_t life);
     inline std::string trafo_reference_digest(const std::vector<std::string>& lines);
 
     // One member's set (design 2.4 steps 0-8, invariants I0-I7).  Call it
     // after quiesce_originals, outside any replay.  Fail closed: on a failed
     // invariant every object the call made is destroyed again and the result
     // names the invariant and the object.
-    inline trafo_build_result build_trafo_set(CKContext* context, trafo_registry& registry, uint32_t player,
+    inline trafo_build_result build_trafo_set(CKContext* context, trafo_registry& registry, uint32_t player, uint16_t life,
                                               const trafo_set_hooks& hooks) {
         using namespace trafo_detail;
         trafo_build_result result;
@@ -691,13 +741,14 @@ namespace bmmo::game {
             return result;
         };
         if (!context) return failed("no context");
-        if (registry.find(player)) return failed("player " + std::to_string(player) + " has a set already");
+        const std::string label = bmmo::session::trafo_life_label(player, life);
+        if (registry.find(player, life)) return failed("set " + label + " is held already");
         if (registry.reference().empty())
             return failed("no level reference of the trafo scripts (capture_trafo_reference when the level is loaded)");
         CKScene* scene = context->GetCurrentScene();
         CKLevel* level = context->GetCurrentLevel();
         if (!scene) return failed("no current scene");
-        const std::string suffix = trafo_copy_suffix(player);
+        const std::string suffix = trafo_copy_suffix(player, life);
 
         // ---- the list
         struct type_list { CK3dEntity* frame = nullptr; CKGroup* group = nullptr; std::vector<CKMaterial*> materials; std::vector<CK3dEntity*> pieces; };
@@ -736,7 +787,7 @@ namespace bmmo::game {
         {
             std::string kinds;
             for (const auto& [k, n]: listed_kinds) kinds += " " + k + "=" + std::to_string(n);
-            line("trafo set " + std::to_string(player) + ": list of " + std::to_string(list.size()) + ":" + kinds);
+            line("trafo set " + label + ": list of " + std::to_string(list.size()) + ":" + kinds);
         }
         // I7 (before the copy: what the copy inherits)
         for (uint8_t t = 0; t < bmmo::session::kTrafoTypes; ++t)
@@ -786,6 +837,8 @@ namespace bmmo::game {
         const auto copy = [&](CKObject* original) { return original ? context->GetObject(copy_of[original->GetID()]) : nullptr; };
         trafo_set set;
         set.player = player;
+        set.life = life;
+        set.bridge = registry.bridge_key_for(player, life);
         std::set<CK_ID> mine;   // every copy of the list
         for (const auto& [o, c]: copy_of) mine.insert(c);
         // Step 5 first (before any owner change, whose DETACH callbacks would
@@ -858,15 +911,15 @@ namespace bmmo::game {
         }
 
         // Step 1-2: the scripts' owner, inactive, and the referentials.
-        auto* owner = CK3dEntity::Cast(context->CreateObject(CKCID_3DENTITY, const_cast<CKSTRING>(trafo_owner_name(player).c_str())));
-        if (!owner) return abort("cannot create " + trafo_owner_name(player));
+        auto* owner = CK3dEntity::Cast(context->CreateObject(CKCID_3DENTITY, const_cast<CKSTRING>(trafo_owner_name(player, life).c_str())));
+        if (!owner) return abort("cannot create " + trafo_owner_name(player, life));
         set.owner = owner->GetID();
         if (level) level->AddObject(owner);
         scene->AddObjectToScene(owner, FALSE);
         if (scene->IsObjectActive(owner)) scene->DeActivate(owner);
         for (uint8_t t = 0; t < bmmo::session::kTrafoTypes; ++t) {
-            auto* ref = CK3dEntity::Cast(context->CreateObject(CKCID_3DENTITY, const_cast<CKSTRING>(trafo_ref_name(t, player).c_str())));
-            if (!ref) return abort("cannot create " + trafo_ref_name(t, player));
+            auto* ref = CK3dEntity::Cast(context->CreateObject(CKCID_3DENTITY, const_cast<CKSTRING>(trafo_ref_name(t, player, life).c_str())));
+            if (!ref) return abort("cannot create " + trafo_ref_name(t, player, life));
             set.types[t].ref = ref->GetID();
             if (level) level->AddObject(ref);
             scene->AddObjectToScene(ref, FALSE);
@@ -942,7 +995,7 @@ namespace bmmo::game {
             for (const auto& ts: set.types) explosions.push_back(ts.explosion);
             bmmo_physics_trafo_set_report bridge{};
             std::string error;
-            if (!hooks.register_set || !hooks.register_set(player, frames, explosions, bridge, error))
+            if (!hooks.register_set || !hooks.register_set(set.bridge, frames, explosions, bridge, error))
                 return abort("I5: the bridge refused the set: " + error);
             size_t pieces = 0;
             for (const auto& ts: set.types) pieces += ts.pieces.size();
@@ -951,7 +1004,7 @@ namespace bmmo::game {
             if (bridge.randoms != 5 || bridge.set_positions != 3 || bridge.exempt != static_cast<int>(3 + pieces)
                     || bridge.pieces != static_cast<int>(pieces)) {
                 std::string ignored;
-                if (hooks.unregister_set) hooks.unregister_set(player, ignored);
+                if (hooks.unregister_set) hooks.unregister_set(set.bridge, ignored);
                 return abort("I5: the bridge reports " + std::to_string(bridge.randoms) + " Random, " + std::to_string(bridge.set_positions)
                              + " Set Position, " + std::to_string(bridge.exempt) + " exempt, " + std::to_string(bridge.pieces)
                              + " pieces (expected 5, 3, " + std::to_string(3 + pieces) + ", " + std::to_string(pieces) + ")");
@@ -959,7 +1012,7 @@ namespace bmmo::game {
         }
         const auto unregister_and_abort = [&](const std::string& why) {
             std::string ignored;
-            if (hooks.unregister_set) hooks.unregister_set(player, ignored);
+            if (hooks.unregister_set) hooks.unregister_set(set.bridge, ignored);
             return abort(why);
         };
 
@@ -985,7 +1038,7 @@ namespace bmmo::game {
             return unregister_and_abort("I1: the owner is active in the current scene");
         for (CK_ID id: set.scripts) {
             CKBehavior* c = CKBehavior::Cast(context->GetObject(id));
-            if (c->GetOwner() != owner) return unregister_and_abort("I1: " + name_of(c) + " is not owned by " + trafo_owner_name(player));
+            if (c->GetOwner() != owner) return unregister_and_abort("I1: " + name_of(c) + " is not owned by " + trafo_owner_name(player, life));
         }
         // I2: every object reference resolves inside the set or to the
         // allow-list; every parameter link stays inside the set's scripts.
@@ -1094,9 +1147,9 @@ namespace bmmo::game {
         // The digest of the reference map (names, not ids, structure, not
         // runtime values): the same in every world that built the same set,
         // retail or headless (design 7.4).
-        set.digest = trafo_reference_digest(trafo_reference_map(context, set.scripts, player));
+        set.digest = trafo_reference_digest(trafo_reference_map(context, set.scripts, player, life));
         line("reference map digest " + set.digest);
-        set.value_digest = trafo_value_digest(context, set.scripts, player);
+        set.value_digest = trafo_value_digest(context, set.scripts, player, life);
         line("built value digest " + set.value_digest);
 
         // Step 6's built script state, after everything above.
@@ -1122,7 +1175,8 @@ namespace bmmo::game {
     // no output writes).  The same in every world that built the same set
     // from the same level file, whatever the originals ran before the
     // anchor (an output's or a fed local's value is the last run's).
-    inline std::vector<std::string> trafo_reference_map(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player) {
+    inline std::vector<std::string> trafo_reference_map(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player,
+                                                        uint16_t life) {
         using namespace trafo_detail;
         std::vector<std::string> out;
         std::map<CK_ID, std::string> place_of;
@@ -1132,7 +1186,8 @@ namespace bmmo::game {
             CKBehavior* script = CKBehavior::Cast(context->GetObject(id));
             int k = 0;
             walk(script, [&](CKBehavior* beh) {
-                const std::string place = normalized(name_of(script), player) + "/" + std::to_string(k++) + ":" + normalized(name_of(beh), player);
+                const std::string place = normalized(name_of(script), player, life) + "/" + std::to_string(k++) + ":"
+                                        + normalized(name_of(beh), player, life);
                 blocks.emplace_back(beh, place);
                 for (int i = 0; i < beh->GetLocalParameterCount(); ++i)
                     if (CKParameterLocal* p = beh->GetLocalParameter(i)) place_of[p->GetID()] = place + ":local" + std::to_string(i);
@@ -1170,7 +1225,7 @@ namespace bmmo::game {
             if (it != place_of.end()) return it->second;
             CKBehavior* root = root_of(p);
             const std::string by_place = operation_place(p, root);
-            return "outside:" + normalized(name_of(root), player) + ":" + (by_place.empty() ? name_of(p) : by_place);
+            return "outside:" + normalized(name_of(root), player, life) + ":" + (by_place.empty() ? name_of(p) : by_place);
         };
         const auto object_of = [&](CKParameter* p) -> CKObject* {
             if (!p || !p->GetParameterClassID() || p->GetDataSize() != static_cast<int>(sizeof(CK_ID))) return nullptr;
@@ -1182,7 +1237,7 @@ namespace bmmo::game {
             for (int i = 0; i < beh->GetLocalParameterCount(); ++i) {
                 CKParameterLocal* p = beh->GetLocalParameter(i);
                 if (!p || fed.count(p->GetID())) continue;
-                if (CKObject* o = object_of(p)) out.push_back(place + ":local" + std::to_string(i) + " = " + normalized(name_of(o), player));
+                if (CKObject* o = object_of(p)) out.push_back(place + ":local" + std::to_string(i) + " = " + normalized(name_of(o), player, life));
             }
             for (int i = 0; i < beh->GetOutputParameterCount(); ++i) {
                 CKParameterOut* p = beh->GetOutputParameter(i);
@@ -1197,7 +1252,7 @@ namespace bmmo::game {
                 std::string line = at + " <- " + where(source);
                 const bool constant = source->GetClassID() == CKCID_PARAMETERLOCAL && !fed.count(source->GetID());
                 if (CKObject* o = constant ? object_of(source) : nullptr)
-                    line += " = " + normalized(name_of(o), player);
+                    line += " = " + normalized(name_of(o), player, life);
                 out.push_back(line);
             };
             for (int i = 0; i < beh->GetInputParameterCount(); ++i) input(beh->GetInputParameter(i), place + ":in" + std::to_string(i));
@@ -1207,7 +1262,7 @@ namespace bmmo::game {
         return out;
     }
     inline std::vector<std::string> trafo_reference_map(CKContext* context, const trafo_set& set) {
-        return trafo_reference_map(context, set.scripts, set.player);
+        return trafo_reference_map(context, set.scripts, set.player, set.life);
     }
     inline std::string trafo_reference_digest(const std::vector<std::string>& lines) {
         uint64_t h = 1469598103934665603ull;
@@ -1220,21 +1275,22 @@ namespace bmmo::game {
     // non-opaque local and output - an object reference by its normalized
     // name - and the IO flags): the same in every world that built the set
     // from the same level reference, whatever its originals ran before.
-    inline std::vector<std::string> trafo_value_lines(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player) {
+    inline std::vector<std::string> trafo_value_lines(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player,
+                                                      uint16_t life) {
         using namespace trafo_detail;
         std::vector<std::string> out;
         for (CK_ID id: scripts) {
             CKBehavior* script = CKBehavior::Cast(context->GetObject(id));
-            const std::string sname = normalized(name_of(script), player);
+            const std::string sname = normalized(name_of(script), player, life);
             int k = 0;
             walk(script, [&](CKBehavior* beh) {
-                const std::string place = sname + "/" + std::to_string(k++) + ":" + normalized(name_of(beh), player);
+                const std::string place = sname + "/" + std::to_string(k++) + ":" + normalized(name_of(beh), player, life);
                 const auto value = [&](CKParameter* p) -> std::string {
                     const trafo_reference::value v = reference_value(p);
                     if (v.kind == 0) return "-";
                     if (v.kind == 2) {
                         CKObject* o = v.object ? context->GetObject(v.object) : nullptr;
-                        return "obj:" + (o ? normalized(name_of(o), player) : std::string(v.object ? "?" : "0"));
+                        return "obj:" + (o ? normalized(name_of(o), player, life) : std::string(v.object ? "?" : "0"));
                     }
                     std::string hex;
                     char b[4];
@@ -1253,8 +1309,8 @@ namespace bmmo::game {
         }
         return out;
     }
-    inline std::string trafo_value_digest(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player) {
-        return trafo_reference_digest(trafo_value_lines(context, scripts, player));
+    inline std::string trafo_value_digest(CKContext* context, const std::vector<CK_ID>& scripts, uint32_t player, uint16_t life) {
+        return trafo_reference_digest(trafo_value_lines(context, scripts, player, life));
     }
 
     // ---- running an input (design 2.5)
@@ -1265,11 +1321,12 @@ namespace bmmo::game {
     // next-frame flags (vanilla's Activate Script with Reset); a reset sets
     // the reset's.  Nothing runs here: the trafo frame does.
     inline bool run_trafo(CKContext* context, const trafo_registry& registry, const trafo_set_hooks& hooks, uint32_t player,
-                          uint8_t flags, uint8_t type, const float position[3], int32_t seed, std::string& error) {
+                          uint16_t life, uint8_t flags, uint8_t type, const float position[3], int32_t seed, std::string& error) {
         error.clear();
-        const trafo_set* set = registry.find(player);
+        const trafo_set* set = registry.find(player, life);
         if (!set || type >= bmmo::session::kTrafoTypes) {
-            error = set ? "piece type " + std::to_string(type) : "no trafo set for player " + std::to_string(player);
+            error = set ? "piece type " + std::to_string(type)
+                        : "no trafo set " + bmmo::session::trafo_life_label(player, life);
             return false;
         }
         const trafo_type_set& ts = set->types[type];
@@ -1555,12 +1612,12 @@ namespace bmmo::game {
     // its explosion and reset (and for paper the wind and the collision
     // sound) put to their built script state.  Never physicalizes anything.
     inline bool unmake_type_set(CKContext* context, const trafo_registry& registry, const trafo_set_hooks& hooks, uint32_t player,
-                                uint8_t type, int& bodies_removed, std::string& error) {
+                                uint16_t life, uint8_t type, int& bodies_removed, std::string& error) {
         error.clear();
         bodies_removed = 0;
-        const trafo_set* set = registry.find(player);
+        const trafo_set* set = registry.find(player, life);
         if (!set || type >= bmmo::session::kTrafoTypes) {
-            error = "no trafo set for player " + std::to_string(player);
+            error = "no trafo set " + bmmo::session::trafo_life_label(player, life);
             return false;
         }
         const trafo_type_set& ts = set->types[type];
@@ -1599,9 +1656,11 @@ namespace bmmo::game {
     // event's draws (mass, friction); what the explosion queued is
     // overwritten by the rows the caller writes next.
     inline bool remake_type_set(CKContext* context, const trafo_registry& registry, const trafo_set_hooks& hooks, uint32_t player,
-                                uint8_t type, const float position[3], int32_t seed, float delta_ms, std::string& error) {
-        if (!run_trafo(context, registry, hooks, player, bmmo::session::TRAFO_EXPLODE, type, position, seed, error)) return false;
-        const trafo_set* set = registry.find(player);
+                                uint16_t life, uint8_t type, const float position[3], int32_t seed, float delta_ms,
+                                std::string& error) {
+        if (!run_trafo(context, registry, hooks, player, life, bmmo::session::TRAFO_EXPLODE, type, position, seed, error))
+            return false;
+        const trafo_set* set = registry.find(player, life);
         script_replay::execute_scripts(context, {set->types[type].explosion}, delta_ms);
         registry.part().touch(set->types[type].explosion);   // RC4
         return true;
@@ -1640,9 +1699,9 @@ namespace bmmo::game {
         return true;
     }
 
-    // A TRAFO_FINAL reset of (player, type) applied at `tick`.
-    inline void trafo_set_final(trafo_registry& registry, uint32_t player, uint8_t type, uint32_t tick) {
-        trafo_set* set = registry.find(player);
+    // A TRAFO_FINAL reset of (player, life, type) applied at `tick`.
+    inline void trafo_set_final(trafo_registry& registry, uint32_t player, uint16_t life, uint8_t type, uint32_t tick) {
+        trafo_set* set = registry.find(player, life);
         if (!set || type >= bmmo::session::kTrafoTypes) return;
         set->types[type].final = true;
         set->final_tick = bmmo::session::trafo_tick_max(set->final_tick, tick);
@@ -1694,40 +1753,86 @@ namespace bmmo::game {
             if (static_cast<int32_t>(now - (set.final_tick + history)) < 0) continue;
             if (static_cast<int32_t>(now - (set.inert_since + history)) < 0) continue;
             std::string error;
-            if (hooks.unregister_set) hooks.unregister_set(set.player, error);
+            if (hooks.unregister_set) hooks.unregister_set(set.bridge, error);
             set.selected = false;
             set.deselected = true;
             set.deselected_at = now;
             changed = true;
-            lines.push_back("trafo set " + std::to_string(set.player) + " deselected at " + std::to_string(now));
+            lines.push_back("trafo set " + bmmo::session::trafo_life_label(set.player, set.life) + " deselected at "
+                            + std::to_string(now));
         }
-        std::vector<uint32_t> gone;
+        std::vector<bmmo::session::trafo_key> gone;
         for (const trafo_set& set: registry.sets()) {
             if (!set.deselected) continue;
             if (!destroy_at_deselect && static_cast<int32_t>(now - (set.deselected_at + history)) < 0) continue;
             destroy_trafo_set_objects(context, set);
-            gone.push_back(set.player);
-            lines.push_back("trafo set " + std::to_string(set.player) + " destroyed at " + std::to_string(now));
+            gone.push_back({set.player, set.life});
+            lines.push_back("trafo set " + bmmo::session::trafo_life_label(set.player, set.life) + " destroyed at "
+                            + std::to_string(now));
         }
-        for (uint32_t p: gone) registry.remove(p);
+        for (const auto& k: gone) registry.remove(k.player, k.life);
         if (changed && gone.empty()) registry.rebuild_part();
         return lines;
     }
 
-    // A player seen again before its retired set was destroyed: the set is
-    // selected again (design 2.4).  False when there is no such set.
-    inline bool reselect_trafo_set(trafo_registry& registry, const trafo_set_hooks& hooks, uint32_t player, std::string& error) {
-        trafo_set* set = registry.find(player);
+    // A set of (player, life) needed again before its retired self was
+    // destroyed: selected again (design 2.4).  False when there is no such
+    // set.  Step TRL: only ever the same life's set - a client whose
+    // retirement ran a few ticks before the server's, met by a resync
+    // ledger that still names the set (the client core asks for a retired
+    // set through the ledger only); a rejoin is another life, with a set of
+    // its own.
+    inline bool reselect_trafo_set(trafo_registry& registry, const trafo_set_hooks& hooks, uint32_t player, uint16_t life,
+                                   std::string& error) {
+        trafo_set* set = registry.find(player, life);
         if (!set || set->selected) return false;
         uint32_t frames[3] = {set->types[0].frame, set->types[1].frame, set->types[2].frame};
         std::vector<uint32_t> explosions;
         for (const auto& ts: set->types) explosions.push_back(ts.explosion);
         bmmo_physics_trafo_set_report report{};
-        if (hooks.register_set && !hooks.register_set(player, frames, explosions, report, error)) return false;
+        if (hooks.register_set && !hooks.register_set(set->bridge, frames, explosions, report, error)) return false;
         set->selected = true;
         set->deselected = false;
         set->inert = false;
         for (auto& ts: set->types) ts.final = false;
+        registry.rebuild_part();
+        return true;
+    }
+
+    // Step TRL: a set retired at once - a resync's reconcile meets a set of
+    // an ended life that the server's ledger no longer names (the server
+    // retired and destroyed it before S; this world built it from an earlier
+    // ledger, or its own retirement is behind).  Every type set is unmade
+    // (no body, the scripts at their built state: inert), then the set is
+    // deselected as retire_trafo_sets deselects one - out of the trafo list,
+    // the filter registry and the exemption list - and destroyed `history`
+    // ticks later by retire_trafo_sets.  False when it is not held selected.
+    inline bool retire_trafo_set_now(CKContext* context, trafo_registry& registry, const trafo_set_hooks& hooks, uint32_t player,
+                                     uint16_t life, uint32_t now, int& bodies_removed, std::string& error) {
+        error.clear();
+        bodies_removed = 0;
+        trafo_set* set = registry.find(player, life);
+        if (!context || !set || !set->selected) {
+            error = "no selected trafo set " + bmmo::session::trafo_life_label(player, life);
+            return false;
+        }
+        for (uint8_t t = 0; t < bmmo::session::kTrafoTypes; ++t) {
+            int removed = 0;
+            if (!unmake_type_set(context, registry, hooks, player, life, t, removed, error)) return false;
+            bodies_removed += removed;
+        }
+        set = registry.find(player, life);
+        if (!trafo_set_inert(context, *set, hooks)) {
+            error = "the set " + bmmo::session::trafo_life_label(player, life) + " is not inert after its unmake";
+            return false;
+        }
+        std::string ignored;
+        if (hooks.unregister_set) hooks.unregister_set(set->bridge, ignored);
+        set->selected = false;
+        set->deselected = true;
+        set->deselected_at = now;
+        set->inert = true;
+        set->inert_since = now;
         registry.rebuild_part();
         return true;
     }
@@ -1757,14 +1862,15 @@ namespace bmmo::game {
         std::string error;
         std::vector<std::string> lines;   // a build's lines (build_trafo_set), or what a reselect did
     };
-    inline trafo_ensure_result ensure_trafo_set(CKContext* context, trafo_registry& registry, uint32_t player,
+    inline trafo_ensure_result ensure_trafo_set(CKContext* context, trafo_registry& registry, uint32_t player, uint16_t life,
                                                 const trafo_set_hooks& hooks) {
         trafo_ensure_result r;
         if (!context) {
             r.error = "no context";
             return r;
         }
-        if (trafo_set* held = registry.find(player)) {
+        const std::string label = bmmo::session::trafo_life_label(player, life);
+        if (trafo_set* held = registry.find(player, life)) {
             if (held->selected) {
                 r.ok = true;
                 r.how = trafo_ensure::kept;
@@ -1772,17 +1878,17 @@ namespace bmmo::game {
             }
             r.how = trafo_ensure::reselected;
             if (!trafo_set_inert(context, *held, hooks)) {
-                r.error = "the retired set of player " + std::to_string(player) + " is not inert";
+                r.error = "the retired set " + label + " is not inert";
                 return r;
             }
-            if (!reselect_trafo_set(registry, hooks, player, r.error)) {
-                if (r.error.empty()) r.error = "the set of player " + std::to_string(player) + " was not selected again";
+            if (!reselect_trafo_set(registry, hooks, player, life, r.error)) {
+                if (r.error.empty()) r.error = "the set " + label + " was not selected again";
                 return r;
             }
             int removed = 0;
             for (uint8_t t = 0; t < bmmo::session::kTrafoTypes; ++t)
-                if (!unmake_type_set(context, registry, hooks, player, t, removed, r.error)) return r;
-            trafo_set* set = registry.find(player);
+                if (!unmake_type_set(context, registry, hooks, player, life, t, removed, r.error)) return r;
+            trafo_set* set = registry.find(player, life);
             int ics = 0;
             if (CKScene* scene = context->GetCurrentScene())
                 for (CK_ID id: set->objects) {
@@ -1800,7 +1906,7 @@ namespace bmmo::game {
             r.ok = true;
             return r;
         }
-        auto built = build_trafo_set(context, registry, player, hooks);
+        auto built = build_trafo_set(context, registry, player, life, hooks);
         r.how = trafo_ensure::built;
         r.ok = built.ok;
         r.error = std::move(built.error);
@@ -1845,7 +1951,7 @@ namespace bmmo::game {
                     }
                 }
                 std::string error;
-                if (hooks.unregister_set && set.selected) hooks.unregister_set(set.player, error);
+                if (hooks.unregister_set && set.selected) hooks.unregister_set(set.bridge, error);
                 destroy_trafo_set_objects(context, set);
             }
         registry.clear();

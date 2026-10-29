@@ -383,9 +383,17 @@ namespace bmmo::session {
         note_held_section(msg);
         for (const auto& entry: msg.entries) {
             // Step T3 (trafo-replication design 2.4): a member first seen in
-            // the relay gets its piece set now, outside any replay.
-            if (s.trafo_active_ && s.phase_ == client_core_state::phase::running && entry.player != s.own_id_)
-                ensure_trafo_set(entry.player, "its first relayed input");
+            // the relay gets its piece set now, outside any replay.  Step TRL:
+            // the set of the member life covering the entry's first frame; a
+            // player whose life this client cannot name yet gets none here
+            // (its member message makes it - a guessed life could be one the
+            // server never held).
+            if (s.trafo_active_ && s.phase_ == client_core_state::phase::running && entry.player != s.own_id_) {
+                if (const uint16_t life = trafo_life_at(entry.player, msg.frame_tick(entry, 0)))
+                    ensure_trafo_set(entry.player, life, "its first relayed input");
+                else
+                    ++s.trafo_unnamed_lives_;
+            }
             auto it = s.remotes_.find(entry.player);
             // The journal's PLAYER record goes in at the oldest tick this
             // entry covers, so no INPUT record of the player can precede

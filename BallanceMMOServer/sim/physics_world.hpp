@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <tuple>
 #include <memory>
 #include <set>
 #include <string>
@@ -264,7 +265,19 @@ namespace bmmo::sim {
         // is also the nocoll group index and the spawn direction table's
         // per-player offset, design 9.10); a taken slot falls back to the
         // lowest free one and logs it.
-        bool add_player(uint32_t id, uint8_t join_order, std::string& error);
+        // `life` (step TRL): the life this add begins (the runner's number,
+        // the journal's PLAYER record); 0 numbers it here - the n-th add of
+        // the id in this world (a replay of a journal without lives).  The
+        // id's trafo set is that life's: every Trafo event of the id acts on
+        // the set of the id's newest life added (J3: a life's events are
+        // applied inside it, and the leaver's final resets before a rejoin's
+        // add).
+        bool add_player(uint32_t id, uint8_t join_order, std::string& error, uint16_t life = 0);
+        // The id's newest life added in this world (0: never added).
+        uint16_t life_of(uint32_t id) const {
+            const auto it = lives_.find(id);
+            return it == lives_.end() ? 0 : it->second;
+        }
         // Step M1: how many adds found their join order taken (J2: 0).
         uint64_t join_orders_taken() const { return join_orders_taken_; }
         void remove_player(uint32_t id);
@@ -420,6 +433,13 @@ namespace bmmo::sim {
         bool trafo_inputs() const { return options_.trafo_inputs; }
         const std::vector<bmmo::session::trafo_point>& trafo_points() const { return trafo_points_; }
         const bmmo::game::trafo_registry& trafo_registry() const { return trafo_registry_; }
+        // Step TRL: the sets held, "p,pLn,..." in (player, life) order.
+        std::string trafo_set_list() const {
+            std::string out;
+            for (const auto& s: trafo_registry_.sets())
+                out += (out.empty() ? "" : ",") + bmmo::session::trafo_life_label(s.player, s.life);
+            return out.empty() ? std::string("-") : out;
+        }
         // A set's build failed its invariants at add_player (fail closed:
         // the session cannot run that member's trafo, the runner ends it).
         bool trafo_failed() const { return trafo_failed_; }
@@ -453,7 +473,7 @@ namespace bmmo::sim {
         // trafo list at the anchor; a member's set at add_player; the hold,
         // the effect checks and retirement after every tick.
         bool anchor_trafo(std::string& error);
-        bool make_trafo_set(uint32_t id, std::string& error);
+        bool make_trafo_set(uint32_t id, uint16_t life, std::string& error);
         bool apply_trafo(uint32_t id, const lifecycle_event& event, std::string& error);
         void after_trafo_tick();
         void capture_trafo_ledger(std::vector<bmmo::session::trafo_ledger_entry>& out) const;
@@ -573,7 +593,12 @@ namespace bmmo::sim {
             uint32_t explode_applied = 0, reset_applied = 0;
             float position[3] = {};
         };
-        std::map<std::pair<uint32_t, uint8_t>, trafo_applied> trafo_applied_;
+        std::map<std::tuple<uint32_t, uint16_t, uint8_t>, trafo_applied> trafo_applied_;   // (player, life, type)
+        // Step TRL: each id's newest life added here, and how many adds (a
+        // life numbered here when add_player is not told one).
+        std::map<uint32_t, uint16_t> lives_;
+        std::map<uint32_t, uint16_t> adds_;
+        uint64_t trafo_missing_sets_ = 0;   // Trafo events whose life had no set here (never built for one)
         bool trafo_failed_ = false;
         uint64_t trafo_hold_reports_ = 0, trafo_leaks_ = 0;
         uint64_t trafo_after_us_ = 0, trafo_after_ticks_ = 0;   // what the hold and the checks cost (describe)

@@ -18,32 +18,32 @@ using namespace bmmo::session;
 
 TEST(TrafoAcceptance, NormalExplodeAndResetMoveNothing) {
     trafo_acceptance ledger;
-    const auto x = ledger.explode(1, 0, 808, 780);
+    const auto x = ledger.explode(1, 1, 0, 808, 780);
     ASSERT_EQ(1u, x.size());
     EXPECT_EQ(808u, x[0].applied);
     EXPECT_EQ(808u, x[0].origin);
     EXPECT_EQ(TRAFO_EXPLODE, x[0].flags);
     // The owner's Fadeout reset about 1164 ticks later.
-    const auto r = ledger.reset(1, 0, 1972, 1950);
+    const auto r = ledger.reset(1, 1, 0, 1972, 1950);
     EXPECT_FALSE(r.superseded);
     EXPECT_EQ(1972u, r.applied);
     EXPECT_EQ(TRAFO_RESET, r.flags);
     // The next same-type explosion 156 ticks after the reset: >= 140.
-    const auto y = ledger.explode(1, 0, 2128, 2100);
+    const auto y = ledger.explode(1, 1, 0, 2128, 2100);
     ASSERT_EQ(1u, y.size());
     EXPECT_EQ(2128u, y[0].applied);
     // Late arrivals are applied at the next tick.
-    const auto z = ledger.explode(2, 1, 500, 530);
+    const auto z = ledger.explode(2, 1, 1, 500, 530);
     EXPECT_EQ(530u, z.back().applied);
 }
 
 TEST(TrafoAcceptance, AResetAndTheNextExplosionInOneTickKeepTheSpan) {
     trafo_acceptance ledger;
-    ledger.explode(1, 2, 100, 100);
-    const auto r = ledger.reset(1, 2, 300, 300);
+    ledger.explode(1, 1, 2, 100, 100);
+    const auto r = ledger.reset(1, 1, 2, 300, 300);
     EXPECT_EQ(300u, r.applied);
     // An outage delivers the re-explosion stamped right behind the reset.
-    const auto x = ledger.explode(1, 2, 305, 300);
+    const auto x = ledger.explode(1, 1, 2, 305, 300);
     ASSERT_EQ(1u, x.size());
     EXPECT_EQ(300u + kTrafoResetSpan, x[0].applied);
     EXPECT_EQ(305u, x[0].origin);
@@ -51,9 +51,9 @@ TEST(TrafoAcceptance, AResetAndTheNextExplosionInOneTickKeepTheSpan) {
 
 TEST(TrafoAcceptance, AnExplosionOfALiveTypeSetInsertsTheServersReset) {
     trafo_acceptance ledger;
-    ledger.explode(4, 0, 1000, 990);
+    ledger.explode(4, 1, 0, 1000, 990);
     // The owner's reset was lost; the next explosion of the same type comes.
-    const auto x = ledger.explode(4, 0, 1200, 1180);
+    const auto x = ledger.explode(4, 1, 0, 1200, 1180);
     ASSERT_EQ(2u, x.size());
     EXPECT_EQ(TRAFO_RESET | TRAFO_SERVER, x[0].flags);
     EXPECT_EQ(1180u, x[0].applied);   // max(N, live.applied + 1)
@@ -62,45 +62,45 @@ TEST(TrafoAcceptance, AnExplosionOfALiveTypeSetInsertsTheServersReset) {
     EXPECT_EQ(1180u + kTrafoResetSpan, x[1].applied);
     // live.applied + 1 when the next tick is earlier than that.
     trafo_acceptance l2;
-    l2.explode(4, 0, 1000, 990);
-    const auto y = l2.explode(4, 0, 995, 995);
+    l2.explode(4, 1, 0, 1000, 990);
+    const auto y = l2.explode(4, 1, 0, 995, 995);
     EXPECT_EQ(1001u, y[0].applied);
     EXPECT_EQ(1001u + kTrafoResetSpan, y[1].applied);
 }
 
 TEST(TrafoAcceptance, AResetOlderThanTheNewestExplosionIsSuperseded) {
     trafo_acceptance ledger;
-    ledger.explode(3, 1, 1000, 1000);
+    ledger.explode(3, 1, 1, 1000, 1000);
     // The re-explosion arrives before the reset made before it.
-    const auto x = ledger.explode(3, 1, 1300, 1300);
+    const auto x = ledger.explode(3, 1, 1, 1300, 1300);
     ASSERT_EQ(2u, x.size());   // the server reset the earlier life itself
-    const auto r = ledger.reset(3, 1, 1250, 1310);
+    const auto r = ledger.reset(3, 1, 1, 1250, 1310);
     EXPECT_TRUE(r.superseded);
     // The live explosion is untouched: a later reset resets it.
-    const auto* e = ledger.find(3, 1);
+    const auto* e = ledger.find(3, 1, 1);
     ASSERT_NE(nullptr, e);
     EXPECT_TRUE(e->live);
-    const auto later = ledger.reset(3, 1, 1400, 1400);
+    const auto later = ledger.reset(3, 1, 1, 1400, 1400);
     EXPECT_FALSE(later.superseded);
-    EXPECT_FALSE(ledger.find(3, 1)->live);
+    EXPECT_FALSE(ledger.find(3, 1, 1)->live);
 }
 
 TEST(TrafoAcceptance, AResetNeverComesBeforeItsExplosion) {
     trafo_acceptance ledger;
     // The explosion moved to reset + 140; the owner's reset stamped earlier
     // than that applied tick (but after the explosion's origin).
-    ledger.explode(1, 0, 100, 100);
-    ledger.reset(1, 0, 200, 200);
-    const auto x = ledger.explode(1, 0, 210, 210);
+    ledger.explode(1, 1, 0, 100, 100);
+    ledger.reset(1, 1, 0, 200, 200);
+    const auto x = ledger.explode(1, 1, 0, 210, 210);
     ASSERT_EQ(340u, x.back().applied);
-    const auto r = ledger.reset(1, 0, 300, 300);
+    const auto r = ledger.reset(1, 1, 0, 300, 300);
     EXPECT_FALSE(r.superseded);
     EXPECT_EQ(341u, r.applied);
 }
 
 TEST(TrafoAcceptance, TheDeadlineFiresAtLifeEndOnceTheLeadReachesIt) {
     trafo_acceptance ledger;
-    ledger.explode(2, 2, 500, 500);
+    ledger.explode(2, 1, 2, 500, 500);
     const uint32_t lead = 35;
     // Not yet: 500 + 1320 > N + L.
     EXPECT_TRUE(ledger.deadline(500 + kTrafoLife - lead - 1, lead).empty());
@@ -114,18 +114,18 @@ TEST(TrafoAcceptance, TheDeadlineFiresAtLifeEndOnceTheLeadReachesIt) {
     // Once.
     EXPECT_TRUE(ledger.deadline(500 + kTrafoLife + 10, lead).empty());
     // A late owner reset after the deadline: accepted, a reset of nothing.
-    const auto late = ledger.reset(2, 2, 1900, 1900);
+    const auto late = ledger.reset(2, 1, 2, 1900, 1900);
     EXPECT_FALSE(late.superseded);
     EXPECT_EQ(1900u, late.applied);
     // The next explosion keeps the span from the latest reset.
-    const auto x = ledger.explode(2, 2, 1950, 1950);
+    const auto x = ledger.explode(2, 1, 2, 1950, 1950);
     EXPECT_EQ(1900u + kTrafoResetSpan, x.back().applied);
 }
 
 TEST(TrafoAcceptance, TheDeadlineDoesNotFireWhenAResetCameFirst) {
     trafo_acceptance ledger;
-    ledger.explode(2, 0, 500, 500);
-    ledger.reset(2, 0, 1664, 1664);
+    ledger.explode(2, 1, 0, 500, 500);
+    ledger.reset(2, 1, 0, 1664, 1664);
     EXPECT_TRUE(ledger.deadline(500 + kTrafoLife, 35).empty());
     EXPECT_TRUE(ledger.deadline(5000, 35).empty());
 }
@@ -133,8 +133,8 @@ TEST(TrafoAcceptance, TheDeadlineDoesNotFireWhenAResetCameFirst) {
 TEST(TrafoAcceptance, LeaversGetAFinalResetOfEveryType) {
     // With a ball and a live paper set.
     trafo_acceptance ledger;
-    ledger.explode(9, 2, 700, 700);
-    auto f = ledger.leaver(9, 900);
+    ledger.explode(9, 1, 2, 700, 700);
+    auto f = ledger.leaver(9, 1, 900);
     ASSERT_EQ(3u, f.size());
     uint32_t last = 0;
     for (const auto& d: f) {
@@ -142,15 +142,15 @@ TEST(TrafoAcceptance, LeaversGetAFinalResetOfEveryType) {
         EXPECT_EQ(d.applied, d.origin);
         EXPECT_GE(d.applied, 900u);
         last = std::max(last, d.applied);
-        EXPECT_TRUE(ledger.find(9, d.type)->final);
+        EXPECT_TRUE(ledger.find(9, 1, d.type)->final);
     }
     EXPECT_EQ(900u, last);
     // Without a ball and with an explosion accepted ahead of the removal tick
     // (review 1 S4): the live type set is reset at >= live.applied + 1.
     trafo_acceptance l2;
-    const auto x = l2.explode(5, 0, 1200, 1100);
+    const auto x = l2.explode(5, 1, 0, 1200, 1100);
     ASSERT_EQ(1200u, x.back().applied);
-    f = l2.leaver(5, 1150);
+    f = l2.leaver(5, 1, 1150);
     ASSERT_EQ(3u, f.size());
     EXPECT_EQ(0, f[0].type);
     EXPECT_EQ(1201u, f[0].applied);
@@ -192,19 +192,19 @@ TEST(TrafoInputLog, OrdersByTickAndAnswersTheNewestExplosion) {
     ASSERT_EQ(2u, at800.size());
     EXPECT_EQ(1u, at800[0].player);   // by player inside one tick
     EXPECT_EQ(2u, at800[1].player);
-    EXPECT_EQ(nullptr, log.newest_explosion(2, 0, 799));
-    ASSERT_NE(nullptr, log.newest_explosion(2, 0, 800));
-    EXPECT_EQ(800u, log.newest_explosion(2, 0, 2099)->applied);
-    EXPECT_EQ(2100u, log.newest_explosion(2, 0, 5000)->applied);
-    EXPECT_EQ(1900u, log.newest(2, 0, true, 2000)->applied);
+    EXPECT_EQ(nullptr, log.newest_explosion(2, 1, 0, 799));
+    ASSERT_NE(nullptr, log.newest_explosion(2, 1, 0, 800));
+    EXPECT_EQ(800u, log.newest_explosion(2, 1, 0, 2099)->applied);
+    EXPECT_EQ(2100u, log.newest_explosion(2, 1, 0, 5000)->applied);
+    EXPECT_EQ(1900u, log.newest(2, 1, 0, true, 2000)->applied);
     // MOVED: re-keyed; REJECTED: dropped.
-    EXPECT_TRUE(log.move(2, 0, TRAFO_EXPLODE, 2100, 2240, 77));
+    EXPECT_TRUE(log.move(2, 1, 0, TRAFO_EXPLODE, 2100, 2240, 77));
     EXPECT_TRUE(log.at(2100).empty());
     ASSERT_EQ(1u, log.at(2240).size());
     EXPECT_EQ(77, log.at(2240)[0].seed);
     EXPECT_EQ(2100u, log.at(2240)[0].origin);
-    EXPECT_TRUE(log.drop(1, 0, TRAFO_EXPLODE, 800));
-    EXPECT_FALSE(log.drop(1, 0, TRAFO_EXPLODE, 800));
+    EXPECT_TRUE(log.drop(1, 1, 0, TRAFO_EXPLODE, 800));
+    EXPECT_FALSE(log.drop(1, 1, 0, TRAFO_EXPLODE, 800));
     EXPECT_EQ(3u, log.size());
 }
 
@@ -224,9 +224,9 @@ TEST(TrafoInputLog, PruningKeepsEachTypeSetsNewestExplosionAndReset) {
     // Everything before 1000 goes except (1,2)'s 500/550 and (2,0)'s 120.
     EXPECT_EQ(4u, log.prune(1000));
     EXPECT_EQ(3u, log.size());
-    EXPECT_EQ(500u, log.newest_explosion(1, 2, 999)->applied);
-    EXPECT_EQ(550u, log.newest(1, 2, true, 999)->applied);
-    EXPECT_EQ(120u, log.newest_explosion(2, 0, 999)->applied);
+    EXPECT_EQ(500u, log.newest_explosion(1, 1, 2, 999)->applied);
+    EXPECT_EQ(550u, log.newest(1, 1, 2, true, 999)->applied);
+    EXPECT_EQ(120u, log.newest_explosion(2, 1, 0, 999)->applied);
 }
 
 TEST(TrafoInputLog, PruningKeepsTheLiveExplosionWhenALaterOneIsPending) {
@@ -245,13 +245,13 @@ TEST(TrafoInputLog, PruningKeepsTheLiveExplosionWhenALaterOneIsPending) {
     log.add(e2);
     EXPECT_EQ(0u, log.prune(234));
     EXPECT_EQ(3u, log.size());
-    ASSERT_NE(nullptr, log.newest_explosion(1, 0, 300));
-    EXPECT_EQ(0u, log.newest_explosion(1, 0, 300)->applied);
-    EXPECT_EQ(340u, log.newest_explosion(1, 0, 340)->applied);
+    ASSERT_NE(nullptr, log.newest_explosion(1, 1, 0, 300));
+    EXPECT_EQ(0u, log.newest_explosion(1, 1, 0, 300)->applied);
+    EXPECT_EQ(340u, log.newest_explosion(1, 1, 0, 340)->applied);
     // Once the history passes 340, the explosion at 0 goes.
     EXPECT_EQ(1u, log.prune(400));
-    EXPECT_EQ(340u, log.newest_explosion(1, 0, 400)->applied);
-    EXPECT_EQ(200u, log.newest(1, 0, true, 400)->applied);
+    EXPECT_EQ(340u, log.newest_explosion(1, 1, 0, 400)->applied);
+    EXPECT_EQ(200u, log.newest(1, 1, 0, true, 400)->applied);
 }
 
 TEST(TrafoInputLog, AnExplodeAndAResetAtOneOriginAreTwoInputs) {
@@ -346,3 +346,68 @@ TEST(TrafoValidation, AcceptRejectTable) {
     for (int c = 0; c <= static_cast<int>(trafo_check::too_far); ++c)
         EXPECT_STRNE("?", trafo_check_name(static_cast<trafo_check>(c)));
 }
+
+// Step TRL ('Key by life, no resume'): the server's ledger and the input
+// log are per (player, life); the names' label.
+TEST(TrafoLives, TheLabelKeepsLifeOneAndNeverCollides) {
+    EXPECT_EQ("3920120238", trafo_life_label(3920120238u, 1));
+    EXPECT_EQ("3920120238", trafo_life_label(3920120238u, 0));
+    EXPECT_EQ("3L2", trafo_life_label(3, 2));
+    EXPECT_NE(trafo_life_label(3, 2), trafo_life_label(32, 1));
+    EXPECT_EQ("4294967295L65535", trafo_life_label(4294967295u, 65535));
+    EXPECT_TRUE((trafo_key{3, 1} < trafo_key{3, 2}) && (trafo_key{3, 2} < trafo_key{4, 1}));
+}
+
+TEST(TrafoLives, ARejoinsLedgerStartsFromNothing) {
+    trafo_acceptance ledger;
+    // Life 1 explodes wood at 100, then leaves: its finals at 200.
+    ledger.explode(9, 1, 0, 100, 100);
+    const auto finals = ledger.leaver(9, 1, 200);
+    ASSERT_EQ(3u, finals.size());
+    for (const auto& d: finals) {
+        EXPECT_EQ(1u, d.life);
+        EXPECT_TRUE(d.flags & TRAFO_FINAL);
+    }
+    // Life 2 explodes wood at 205: no reset of life 1 before it, and not held
+    // back by life 1's reset span (another set of pieces).
+    const auto x = ledger.explode(9, 2, 0, 205, 205);
+    ASSERT_EQ(1u, x.size());
+    EXPECT_EQ(2u, x[0].life);
+    EXPECT_EQ(205u, x[0].applied);
+    EXPECT_TRUE(ledger.find(9, 1, 0)->final);
+    EXPECT_FALSE(ledger.find(9, 2, 0)->final);
+    EXPECT_TRUE(ledger.find(9, 2, 0)->live);
+    // The deadline resets life 2's type set, carrying its life.
+    const auto d = ledger.deadline(205 + kTrafoLife, 0);
+    ASSERT_EQ(1u, d.size());
+    EXPECT_EQ(2u, d[0].life);
+    // A reset of life 2 is judged against life 2's explosion only.
+    trafo_acceptance l2;
+    l2.explode(9, 1, 1, 500, 500);
+    const auto r = l2.reset(9, 2, 1, 400, 600);
+    EXPECT_FALSE(r.superseded) << "life 1's explosion supersedes nothing of life 2";
+}
+
+TEST(TrafoLives, TheLogKeepsTwoLivesApart) {
+    trafo_input_log log;
+    trafo_input a;
+    a.player = 9;
+    a.life = 1;
+    a.flags = TRAFO_RESET | TRAFO_SERVER | TRAFO_FINAL;
+    a.origin = a.applied = 200;
+    trafo_input b = a;
+    b.life = 2;
+    b.flags = TRAFO_RESET | TRAFO_SERVER;
+    log.add(a);
+    log.add(b);
+    ASSERT_EQ(2u, log.at(200).size()) << "same player, type, kind and origin: two lives, two inputs";
+    EXPECT_EQ(1u, log.at(200)[0].life);
+    EXPECT_EQ(2u, log.at(200)[1].life);
+    EXPECT_EQ(1u, log.newest(9, 1, 0, true, 300)->life);
+    EXPECT_EQ(2u, log.newest(9, 2, 0, true, 300)->life);
+    EXPECT_TRUE(log.drop(9, 1, 0, a.flags, 200));
+    ASSERT_EQ(1u, log.at(200).size());
+    EXPECT_EQ(2u, log.at(200)[0].life);
+    EXPECT_EQ(nullptr, log.newest(9, 1, 0, true, 300));
+}
+

@@ -523,6 +523,25 @@ numbers 1-10 are unchanged.
      count such frames apart in the core, or exempt them in
      `arena_map_test.py`'s criterion. Evidence:
      `world-agreement-gaps-design.md`, "As built (step WGQ7)".
+   - **A delayed rejoiner's first state never finds its bodies** (queued
+     by step TRL, 2026-10-29; cause NOT established). Run B
+     (`maps/arena-test/trl_live_B`, client 1, `--rejoin-at 1200:1000`):
+     the join state of S 1296 waited from tick 1306 for 20 bodies
+     (`P_Ball_Paper_MF` first; only the first is logged) and never applied:
+     the pacer brought sectors 2 and 3 in at 1306 / 1313 (no member had
+     entered sector 4 before 1814), yet the wait ran until the resync hold
+     timed out at 1391 and the client asked again (re-anchored at 1529,
+     delta -137). The same wait resolved in 6 frames for run A's 0 ms
+     rejoiner (14 bodies, same first name), 17 for run B's 5 s rejoiner
+     and 21 for the late joiner, so it is particular to this rejoin; which
+     of the 20 never came is not known. Consequences in that run: the
+     second resync's numbering jump gave the server 157 substituted
+     inputs of client 1 in B and the client 125 starved reports (0 at the
+     status of 1346, 125 at 1680, worst 125: one episode), and 13 relayed
+     frames counted past the reach (the relay_late item above). Next: rerun
+     the case; step TRL's fix-up logs the whole waiting list once a wait
+     reaches 60 frames (`client_core_resync.cpp`), which names the missing
+     bodies.
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

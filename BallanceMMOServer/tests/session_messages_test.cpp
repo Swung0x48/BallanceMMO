@@ -145,7 +145,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(20u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(21u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -1522,6 +1522,7 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
     b.reset_applied = 900;
     b.final = true;            // a leaver's set between its final resets and its retirement
     b.final_applied = 900;
+    a.life = 2;                // protocol 21 (step TRL): the set is (player, life)'s
     msg.trafo_ledger = {a, b};
     ASSERT_TRUE(msg.serialize());
     const std::string bytes = msg.raw.str();
@@ -1542,12 +1543,33 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
     EXPECT_FALSE(parsed.trafo_ledger[0].final);
     EXPECT_TRUE(parsed.trafo_ledger[1].final);
     EXPECT_EQ(900u, parsed.trafo_ledger[1].final_applied);
-    msg.clear();
-    expect_rejects_every_truncation(msg);
+    EXPECT_EQ(2u, parsed.trafo_ledger[0].life);
+    EXPECT_EQ(1u, parsed.trafo_ledger[1].life);
+    // Every truncation is refused but one: the state cut right after the
+    // ledger is a protocol-20 state (no lives), read as life 1 throughout.
+    const std::string payload = stream_payload(msg.raw);
+    for (size_t len = 0; len < payload.size(); ++len) {
+        bmmo::session_resync_state_msg cut{};
+        cut.raw.write(payload.data(), static_cast<std::streamsize>(len));
+        if (len == payload.size() - 2 * 2) {
+            ASSERT_TRUE(cut.deserialize()) << "the protocol-20 layout";
+            EXPECT_EQ(1u, cut.trafo_ledger[0].life);
+            EXPECT_EQ(1u, cut.trafo_ledger[1].life);
+            continue;
+        }
+        EXPECT_FALSE(cut.deserialize()) << "accepted a payload truncated to " << len << " bytes";
+    }
+    // A life 0 is refused.
+    std::string zero = bytes;
+    zero[zero.size() - 4] = 0;
+    zero[zero.size() - 3] = 0;
+    bmmo::session_resync_state_msg zeroed;
+    zeroed.raw.write(zero.data(), static_cast<std::streamsize>(zero.size()));
+    EXPECT_FALSE(zeroed.deserialize());
     // A forged count past the cap, an unknown piece type and an unknown
     // bit are refused.
     std::string forged = bytes;
-    const size_t count_at = bytes.size() - 2 * (4 + 1 + 1 + 4 + 12 + 4 + 4) - 2;
+    const size_t count_at = bytes.size() - 2 * 2 - 2 * (4 + 1 + 1 + 4 + 12 + 4 + 4) - 2;
     const uint16_t too_many = static_cast<uint16_t>(bmmo::session_resync_state_msg::kMaxTrafoLedger + 1);
     std::memcpy(&forged[count_at], &too_many, sizeof(too_many));
     bmmo::session_resync_state_msg capped;

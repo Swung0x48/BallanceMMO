@@ -105,7 +105,14 @@ namespace bmmo::session {
     // 6: the HEADER's anchor_placement (protocol 12, sector placement step S5).
     // 7: the WAIT record (protocol 13, late-player step R12).
     // 8: the HEADER's mechanism_slots (protocol 19, world agreement step Q7).
-    constexpr uint32_t kJournalVersion = 8;
+    // 9: lives (protocol 21, step TRL): the PLAYER record's trailing u16
+    //    `life` (written for a life after the first only: an add without it
+    //    is life 1 in a version 9 file; a replay of an older file numbers
+    //    the lives by counting the adds of an id), and the RESYNC record's
+    //    trailing lives of its trafo reconcile entries (one u16 each, after
+    //    the entries; written only when an entry's life is not 1).  Old
+    //    readers stop before both.
+    constexpr uint32_t kJournalVersion = 9;
     // The oldest version this reader still takes (see the format note above).
     constexpr uint32_t kJournalOldestReadable = 2;
     constexpr char kJournalMagic[8] = {'B', 'M', 'M', 'O', 'J', 'R', 'N', 'L'};
@@ -173,6 +180,7 @@ namespace bmmo::session {
         uint8_t join_order = 0;
         bool added = true;
         std::string name;   // display name, may be empty
+        uint16_t life = 0;  // version 9 (step TRL): an add's life when written (> 1); 0 = not in the record
     };
 
     struct journal_input {
@@ -571,15 +579,20 @@ namespace bmmo::session {
     constexpr uint8_t JOURNAL_TRAFO_UNMADE = 1;
     constexpr uint8_t JOURNAL_TRAFO_REMADE = 2;
     constexpr uint8_t JOURNAL_TRAFO_FAILED = 4;
+    // Step TRL (review 6): a held set of an ended life the ledger does not
+    // name, retired at once by the reconcile (on each of its type entries;
+    // the bits say 16, not in the ledger).  The format is unchanged.
+    constexpr uint8_t JOURNAL_TRAFO_RETIRED = 8;
     struct journal_trafo_entry {
         uint32_t player = 0;
+        uint16_t life = 1;           // version 9 (step TRL): the set's life
         uint8_t type = 0;
         uint8_t bits = 0;            // 1 has_explosion, 2 has_bodies, 4 has_reset, 8 final, 16 not in the ledger
         uint32_t explode_applied = 0;
         float position[3] = {};
         uint32_t reset_applied = 0;
         uint32_t final_applied = 0;
-        uint8_t action = 0;          // JOURNAL_TRAFO_* (UNMADE | REMADE: both)
+        uint8_t action = 0;          // JOURNAL_TRAFO_* (UNMADE | REMADE: both; RETIRED: step TRL)
     };
     struct journal_resync {
         uint32_t tick = 0;          // S
@@ -668,7 +681,10 @@ namespace bmmo::session {
         uint64_t peak_queued() const { return sink_.peak_queued(); }
         bool asynchronous() const { return sink_.async(); }
 
-        void player(uint32_t tick, uint32_t id, uint8_t join_order, bool added, const std::string& name) {
+        // `life` (version 9, step TRL): an add's life, written only when it
+        // is a later life (> 1), so a session without a rejoin writes the
+        // bytes it wrote before.
+        void player(uint32_t tick, uint32_t id, uint8_t join_order, bool added, const std::string& name, uint16_t life = 0) {
             if (!writable()) return;
             last_tick_ = tick;
             std::string payload;
@@ -677,6 +693,7 @@ namespace bmmo::session {
             journal_detail::write_u8(payload, join_order);
             journal_detail::write_u8(payload, added ? 1 : 0);
             journal_detail::write_str(payload, name);
+            if (added && life > 1) journal_detail::write_u16(payload, life);
             record(journal_tag::player, payload);
         }
 
@@ -803,6 +820,9 @@ namespace bmmo::session {
                     journal_detail::write_u32(payload, e.final_applied);
                     journal_detail::write_u8(payload, e.action);
                 }
+                // Version 9: the entries' lives, only when one is not 1.
+                if (std::any_of(r.trafo.begin(), r.trafo.end(), [](const journal_trafo_entry& e) { return e.life != 1; }))
+                    for (const auto& e: r.trafo) journal_detail::write_u16(payload, e.life);
             }
             record(journal_tag::resync, payload);
         }
@@ -1054,6 +1074,8 @@ namespace bmmo::session {
                     p.added = in.u8() != 0;
                     p.name = in.str();
                     if (!in.ok) break;
+                    if (in.size - in.pos >= 2) p.life = in.u16();   // version 9
+                    if (!in.ok) break;
                     // founding members only: a removal before the first TICK
                     // (somebody quit while the room was still loading) is in
                     // its tick group, not in the member list
@@ -1223,6 +1245,9 @@ namespace bmmo::session {
                             e.action = in.u8();
                             if (in.ok) r.trafo.push_back(e);
                         }
+                        // Version 9: the entries' lives, when written.
+                        if (in.ok && in.size - in.pos >= 2 * r.trafo.size())
+                            for (auto& e: r.trafo) e.life = in.u16();
                     }
                     if (!in.ok) break;
                     auto& group = groups[r.tick];

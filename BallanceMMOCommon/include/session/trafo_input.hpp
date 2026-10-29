@@ -101,7 +101,29 @@ namespace bmmo::session {
         uint32_t origin = 0;       // the stamp; a server-stamped event has origin = applied
         uint32_t applied = 0;
         bool superseded = false;   // a reset older than a newer explosion: never queued or relayed
+        uint16_t life = 1;         // step TRL: the life of `player` whose set it acts on
     };
+
+    // Step TRL (the user, 2026-10-29: 'Key by life, no resume'): a trafo
+    // piece set belongs to one life of a player - (player, life), life the
+    // server's numbering (session.hpp protocol 18: the n-th add of an id in
+    // the session, from 1), the same in every world.  A rejoin is a new life
+    // with a new set; the old life's set fades and retires by its own rule
+    // beside it, and nothing of it is ever reused by another life.
+    struct trafo_key {
+        uint32_t player = 0;
+        uint16_t life = 1;
+        bool operator==(const trafo_key& o) const { return player == o.player && life == o.life; }
+        bool operator!=(const trafo_key& o) const { return !(*this == o); }
+        bool operator<(const trafo_key& o) const { return player != o.player ? player < o.player : life < o.life; }
+    };
+    // "<player>" for life 1 (every name and alias of a session without a
+    // rejoin stays what it was before step TRL, byte for byte), "<player>L<life>"
+    // for a later life: never a digit after the id, so no (player, life)
+    // spells another's ("3L2" is not "32"), and no '_' or "BMMO" in it.
+    inline std::string trafo_life_label(uint32_t player, uint16_t life) {
+        return life <= 1 ? std::to_string(player) : std::to_string(player) + "L" + std::to_string(life);
+    }
 
     // ---- the server's ledger (design 2.2), the twin of lifecycle_acceptance.
     //
@@ -112,7 +134,9 @@ namespace bmmo::session {
     // explosion it resets; an explosion never lands while that type set's
     // previous bodies exist (it lands >= 140 ticks after the reset); no type
     // set has bodies for longer than kTrafoLife + 133 ticks after its
-    // explosion.
+    // explosion.  Step TRL: per (player, life, type) - a rejoin's new life
+    // starts from nothing (no live type set, no reset span, no final mark of
+    // the old life's set: they are other pieces).
     class trafo_acceptance {
     public:
         struct entry {
@@ -128,12 +152,13 @@ namespace bmmo::session {
         // An explosion of (player, type) stamped `origin`, taken at the next
         // tick `next`.  Returns the decisions in queue order: the server's
         // reset of a type set still live (rule 1), then the explosion.
-        std::vector<trafo_decision> explode(uint32_t player, uint8_t type, uint32_t origin, uint32_t next) {
+        std::vector<trafo_decision> explode(uint32_t player, uint16_t life, uint8_t type, uint32_t origin, uint32_t next) {
             std::vector<trafo_decision> out;
-            entry& e = at(player, type);
+            entry& e = at(player, life, type);
             if (e.live) {
                 trafo_decision r;
                 r.player = player;
+                r.life = life;
                 r.type = type;
                 r.flags = TRAFO_RESET | TRAFO_SERVER;
                 r.applied = trafo_tick_max(next, e.live_applied + 1);
@@ -145,6 +170,7 @@ namespace bmmo::session {
             }
             trafo_decision x;
             x.player = player;
+            x.life = life;
             x.type = type;
             x.flags = TRAFO_EXPLODE;
             x.origin = origin;
@@ -163,10 +189,12 @@ namespace bmmo::session {
         // older than the newest explosion's origin is superseded (the
         // explosion's rule 1 reset the earlier life already): returned with
         // `superseded` set and nothing changed.
-        trafo_decision reset(uint32_t player, uint8_t type, uint32_t origin, uint32_t next, uint8_t extra_flags = 0) {
-            entry& e = at(player, type);
+        trafo_decision reset(uint32_t player, uint16_t life, uint8_t type, uint32_t origin, uint32_t next,
+                             uint8_t extra_flags = 0) {
+            entry& e = at(player, life, type);
             trafo_decision r;
             r.player = player;
+            r.life = life;
             r.type = type;
             r.flags = static_cast<uint8_t>(TRAFO_RESET | extra_flags);
             r.origin = origin;
@@ -193,8 +221,9 @@ namespace bmmo::session {
                 const uint32_t due = e.live_applied + kTrafoLife;
                 if (static_cast<int32_t>(due - (next + lead)) > 0) continue;
                 trafo_decision r;
-                r.player = key.first;
-                r.type = key.second;
+                r.player = std::get<0>(key);
+                r.life = std::get<1>(key);
+                r.type = std::get<2>(key);
                 r.flags = TRAFO_RESET | TRAFO_SERVER;
                 r.applied = trafo_tick_max(next, due);
                 r.origin = r.applied;
@@ -213,12 +242,13 @@ namespace bmmo::session {
         // nothing live gets a final reset at `removal`.  All three carry
         // TRAFO_RESET | TRAFO_SERVER | TRAFO_FINAL, origin = applied.  The
         // caller sets the leaver's remove_at to 1 + the last applied tick.
-        std::vector<trafo_decision> leaver(uint32_t player, uint32_t removal) {
+        std::vector<trafo_decision> leaver(uint32_t player, uint16_t life, uint32_t removal) {
             std::vector<trafo_decision> out;
             for (uint8_t type = 0; type < kTrafoTypes; ++type) {
-                entry& e = at(player, type);
+                entry& e = at(player, life, type);
                 trafo_decision r;
                 r.player = player;
+                r.life = life;
                 r.type = type;
                 r.flags = TRAFO_RESET | TRAFO_SERVER | TRAFO_FINAL;
                 r.applied = removal;
@@ -233,20 +263,20 @@ namespace bmmo::session {
             return out;
         }
 
-        const entry* find(uint32_t player, uint8_t type) const {
-            const auto it = entries_.find({player, type});
+        const entry* find(uint32_t player, uint16_t life, uint8_t type) const {
+            const auto it = entries_.find({player, life, type});
             return it == entries_.end() ? nullptr : &it->second;
         }
         void forget(uint32_t player) {
             for (auto it = entries_.begin(); it != entries_.end();)
-                it = it->first.first == player ? entries_.erase(it) : std::next(it);
+                it = std::get<0>(it->first) == player ? entries_.erase(it) : std::next(it);
         }
         void clear() { entries_.clear(); }
         size_t size() const { return entries_.size(); }
 
     private:
-        entry& at(uint32_t player, uint8_t type) { return entries_[{player, type}]; }
-        std::map<std::pair<uint32_t, uint8_t>, entry> entries_;
+        entry& at(uint32_t player, uint16_t life, uint8_t type) { return entries_[{player, life, type}]; }
+        std::map<std::tuple<uint32_t, uint16_t, uint8_t>, entry> entries_;
     };
 
     // ---- the trafo input log (design 2.5)
@@ -259,29 +289,31 @@ namespace bmmo::session {
         float position[3] = {};   // explode: the referential's translation; reset: zeros
         int32_t seed = 0;         // explode: trafo_seed(session seed, player, applied, type)
         bool own = false;         // the owner's own input (stamped here)
+        uint16_t life = 1;        // step TRL: the life whose set it runs on (the seed does not read it)
     };
 
-    // The key that tells two inputs apart: (player, type, kind, origin) -
-    // an explode and a reset of one type at one origin are two inputs, and a
-    // server-stamped one (origin = applied) never collides with an owner's.
-    inline bool trafo_same_input(const trafo_input& a, uint32_t player, uint8_t type, uint8_t flags, uint32_t origin) {
-        return a.player == player && a.type == type && trafo_is_reset(a.flags) == trafo_is_reset(flags) && a.origin == origin
-            && (a.flags & TRAFO_SERVER) == (flags & TRAFO_SERVER);
+    // The key that tells two inputs apart: (player, life, type, kind, origin)
+    // - an explode and a reset of one type at one origin are two inputs, and
+    // a server-stamped one (origin = applied) never collides with an owner's.
+    inline bool trafo_same_input(const trafo_input& a, uint32_t player, uint16_t life, uint8_t type, uint8_t flags,
+                                 uint32_t origin) {
+        return a.player == player && a.life == life && a.type == type && trafo_is_reset(a.flags) == trafo_is_reset(flags)
+            && a.origin == origin && (a.flags & TRAFO_SERVER) == (flags & TRAFO_SERVER);
     }
 
     class trafo_input_log {
     public:
-        // Inserted by applied tick; inside one tick in (player, type, kind)
-        // order - inputs only set flags on distinct type sets (the ledger
+        // Inserted by applied tick; inside one tick in (player, life, type,
+        // kind) order - inputs only set flags on distinct type sets (the ledger
         // never puts two inputs of one type set into one tick), so the order
         // only has to be the same everywhere.  An input already logged (same
         // key) is replaced.
         void add(const trafo_input& in) {
-            drop(in.player, in.type, in.flags, in.origin);
+            drop(in.player, in.life, in.type, in.flags, in.origin);
             auto& tick = by_tick_[in.applied];
             const auto pos = std::find_if(tick.begin(), tick.end(), [&in](const trafo_input& x) {
-                return std::make_tuple(x.player, x.type, trafo_is_reset(x.flags), x.origin)
-                     > std::make_tuple(in.player, in.type, trafo_is_reset(in.flags), in.origin);
+                return std::make_tuple(x.player, x.life, x.type, trafo_is_reset(x.flags), x.origin)
+                     > std::make_tuple(in.player, in.life, in.type, trafo_is_reset(in.flags), in.origin);
             });
             tick.insert(pos, in);
         }
@@ -290,33 +322,35 @@ namespace bmmo::session {
             const auto it = by_tick_.find(tick);
             return it == by_tick_.end() ? std::vector<trafo_input>{} : it->second;
         }
-        // The newest explosion (or reset) of (player, type) applied at or
-        // before `tick`; null when none.
-        const trafo_input* newest(uint32_t player, uint8_t type, bool reset, uint32_t tick) const {
+        // The newest explosion (or reset) of (player, life, type) applied at
+        // or before `tick`; null when none.
+        const trafo_input* newest(uint32_t player, uint16_t life, uint8_t type, bool reset, uint32_t tick) const {
             for (auto it = by_tick_.upper_bound(tick); it != by_tick_.begin();) {
                 --it;
                 for (auto e = it->second.rbegin(); e != it->second.rend(); ++e)
-                    if (e->player == player && e->type == type && trafo_is_reset(e->flags) == reset) return &*e;
+                    if (e->player == player && e->life == life && e->type == type && trafo_is_reset(e->flags) == reset)
+                        return &*e;
             }
             return nullptr;
         }
-        const trafo_input* newest_explosion(uint32_t player, uint8_t type, uint32_t tick) const {
-            return newest(player, type, false, tick);
+        const trafo_input* newest_explosion(uint32_t player, uint16_t life, uint8_t type, uint32_t tick) const {
+            return newest(player, life, type, false, tick);
         }
         // An input re-keyed to another applied tick (an own input the server
         // MOVED).  False when it is not logged.
-        bool move(uint32_t player, uint8_t type, uint8_t flags, uint32_t origin, uint32_t applied, int32_t seed) {
+        bool move(uint32_t player, uint16_t life, uint8_t type, uint8_t flags, uint32_t origin, uint32_t applied,
+                  int32_t seed) {
             trafo_input found;
-            if (!take(player, type, flags, origin, found)) return false;
+            if (!take(player, life, type, flags, origin, found)) return false;
             found.applied = applied;
             found.seed = seed;
             add(found);
             return true;
         }
         // An input dropped (REJECTED, SUPERSEDED).  False when it is not logged.
-        bool drop(uint32_t player, uint8_t type, uint8_t flags, uint32_t origin) {
+        bool drop(uint32_t player, uint16_t life, uint8_t type, uint8_t flags, uint32_t origin) {
             trafo_input ignored;
-            return take(player, type, flags, origin, ignored);
+            return take(player, life, type, flags, origin, ignored);
         }
         // Entries applied before `tick` dropped, except each type set's newest
         // explosion and newest reset among them (design 2.5: "the newest
@@ -326,17 +360,17 @@ namespace bmmo::session {
         // must not displace the one that is still the newest at or before
         // every t in [tick, its applied tick).  Returns how many.
         size_t prune(uint32_t tick) {
-            std::map<std::tuple<uint32_t, uint8_t, bool>, std::pair<uint32_t, uint32_t>> newest;   // key -> (applied, origin)
+            std::map<std::tuple<uint32_t, uint16_t, uint8_t, bool>, std::pair<uint32_t, uint32_t>> newest;   // key -> (applied, origin)
             for (const auto& [t, inputs]: by_tick_) {
                 if (!trafo_tick_before(t, tick)) break;
-                for (const auto& e: inputs) newest[{e.player, e.type, trafo_is_reset(e.flags)}] = {e.applied, e.origin};
+                for (const auto& e: inputs) newest[{e.player, e.life, e.type, trafo_is_reset(e.flags)}] = {e.applied, e.origin};
             }
             size_t n = 0;
             for (auto it = by_tick_.begin(); it != by_tick_.end() && trafo_tick_before(it->first, tick);) {
                 auto& inputs = it->second;
                 const size_t before = inputs.size();
                 inputs.erase(std::remove_if(inputs.begin(), inputs.end(), [&](const trafo_input& e) {
-                    const auto k = newest.find({e.player, e.type, trafo_is_reset(e.flags)});
+                    const auto k = newest.find({e.player, e.life, e.type, trafo_is_reset(e.flags)});
                     return k == newest.end() || k->second != std::make_pair(e.applied, e.origin);
                 }), inputs.end());
                 n += before - inputs.size();
@@ -356,11 +390,11 @@ namespace bmmo::session {
         }
 
     private:
-        bool take(uint32_t player, uint8_t type, uint8_t flags, uint32_t origin, trafo_input& out) {
+        bool take(uint32_t player, uint16_t life, uint8_t type, uint8_t flags, uint32_t origin, trafo_input& out) {
             for (auto it = by_tick_.begin(); it != by_tick_.end(); ++it) {
                 auto& inputs = it->second;
                 const auto e = std::find_if(inputs.begin(), inputs.end(), [&](const trafo_input& x) {
-                    return trafo_same_input(x, player, type, flags, origin);
+                    return trafo_same_input(x, player, life, type, flags, origin);
                 });
                 if (e == inputs.end()) continue;
                 out = *e;

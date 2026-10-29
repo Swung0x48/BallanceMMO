@@ -5853,7 +5853,7 @@ namespace {
             if (options.proximity_union && !anchor_era) world->place_probes();
             for (const auto& p: group.players) {
                 if (p.added) {
-                    if (!world->add_player(p.id, p.join_order, error))
+                    if (!world->add_player(p.id, p.join_order, error, p.life))
                         std::printf("tick %u: add_player %u failed: %s\n", p.tick, p.id, error.c_str());
                     else
                         replay_players[p.id] = p.join_order;
@@ -5861,7 +5861,7 @@ namespace {
                     world->remove_player(p.id);
                     replay_players.erase(p.id);
                 }
-                if (out.is_open()) out.player(p.tick, p.id, p.join_order, p.added, p.name);
+                if (out.is_open()) out.player(p.tick, p.id, p.join_order, p.added, p.name, p.life);
             }
             // Resync finding T1 (b) (step B2SW): a group before the world's
             // first simulated one carries only notes and PLAYER records - a

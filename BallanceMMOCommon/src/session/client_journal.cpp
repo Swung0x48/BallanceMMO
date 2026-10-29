@@ -137,7 +137,7 @@ namespace bmmo::session::core {
                               ? core_.s.tick_base_ : first_tick_;
         const uint32_t tick = from == 0 ? first_tick_ : static_cast<int32_t>(from - lowest) < 0 ? lowest : from;
         const std::string name = entry.id == core_.s.own_id_ ? own_name_ : std::to_string(entry.id);
-        journal_.player(tick, entry.id, entry.join_order, true, name);
+        journal_.player(tick, entry.id, entry.join_order, true, name, entry.life);
     }
 
     void client_journal::leave_player(uint32_t player, uint32_t tick) {

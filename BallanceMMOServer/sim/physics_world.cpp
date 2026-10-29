@@ -728,7 +728,7 @@ namespace bmmo::sim {
         return clone;
     }
 
-    bool physics_world::add_player(uint32_t id, uint8_t join_order, std::string& error) {
+    bool physics_world::add_player(uint32_t id, uint8_t join_order, std::string& error, uint16_t life) {
         if (players_.count(id)) return true;
         player p;
         p.id = id;
@@ -766,9 +766,14 @@ namespace bmmo::sim {
         used_slots_.insert(slot);
         players_.emplace(id, std::move(p));
         log("world: player " + std::to_string(id) + " added");
+        // Step TRL: the life this add begins.
+        const uint16_t adds = ++adds_[id];
+        if (life == 0) life = adds;
+        lives_[id] = life;
         // Trafo-replication design 2.4: every member's own piece set, built
-        // at its add (a set kept from an earlier stay is selected again).
-        if (options_.trafo_inputs && !make_trafo_set(id, error)) {
+        // at its add - per life (step TRL): a rejoin's new life gets a set of
+        // its own beside the old life's, which fades and retires.
+        if (options_.trafo_inputs && !make_trafo_set(id, life, error)) {
             const std::string why = error;
             remove_player(id);
             error = why;
@@ -1352,27 +1357,28 @@ namespace bmmo::sim {
         return true;
     }
 
-    // The player's set, by the rule every world runs (game/trafo_sets.hpp
-    // ensure_trafo_set): kept when selected (still fading from an earlier
-    // stay), otherwise built - the server destroys a set at its deselect, so
-    // the reselect branch never runs here.
-    bool physics_world::make_trafo_set(uint32_t id, std::string& error) {
-        const auto r = bmmo::game::ensure_trafo_set(engine_->context(), trafo_registry_, id, trafo_hooks_);
+    // The set of (id, life), by the rule every world runs (game/trafo_sets.hpp
+    // ensure_trafo_set).  Step TRL: called at add_player only, with the life
+    // the add begins - a life is added once, so it always builds (the server
+    // destroys a set at its deselect, and no life is added twice).
+    bool physics_world::make_trafo_set(uint32_t id, uint16_t life, std::string& error) {
+        const std::string label = bmmo::session::trafo_life_label(id, life);
+        const auto r = bmmo::game::ensure_trafo_set(engine_->context(), trafo_registry_, id, life, trafo_hooks_);
         if (!r.ok) {
             // Fail closed (design 2.4): the session cannot run this member's
             // trafo; the runner ends it.
-            for (const auto& line: r.lines) log("world: trafo build " + std::to_string(id) + ": " + line);
+            for (const auto& line: r.lines) log("world: trafo build " + label + ": " + line);
             trafo_failed_ = true;
-            error = "trafo set of player " + std::to_string(id) + " failed: " + r.error;
+            error = "trafo set of player " + label + " failed: " + r.error;
             return false;
         }
         if (r.how == bmmo::game::trafo_ensure::kept) return true;
         if (r.how == bmmo::game::trafo_ensure::reselected) {
-            for (const auto& line: r.lines) log("world: trafo set " + std::to_string(id) + " " + line);
+            for (const auto& line: r.lines) log("world: trafo set " + label + " " + line);
             return true;
         }
-        const auto* set = trafo_registry_.find(id);
-        log("world: trafo set " + std::to_string(id) + " built: " + std::to_string(set->objects.size()) + " objects, "
+        const auto* set = trafo_registry_.find(id, life);
+        log("world: trafo set " + label + " built: " + std::to_string(set->objects.size()) + " objects, "
             + std::to_string(set->scripts.size()) + " scripts, digest " + set->digest + ", value digest " + set->value_digest);
         return true;
     }
@@ -1390,15 +1396,27 @@ namespace bmmo::sim {
             error = "trafo piece type " + std::to_string(type);
             return false;
         }
-        // A set before the player's input (design 2.4), by the shared rule:
-        // a set retired since the player's add_player is built afresh.
-        if (!make_trafo_set(id, error)) return false;
+        // Step TRL: the set of the id's newest life (built at its add_player;
+        // J3 puts every event of a life inside it, a leaver's final resets
+        // before a rejoin's add).  No set is ever built here: before step TRL
+        // a set retired since the add was built afresh only to take a later
+        // life's final resets (wm0_live's server, tick 3662) - now a missing
+        // set is a bug, logged and counted, and the input does not run.
+        const uint16_t life = life_of(id);
+        if (!trafo_registry_.find(id, life)) {
+            ++trafo_missing_sets_;
+            log("world: trafo " + std::string(bmmo::session::trafo_type_name(type)) + " input of player "
+                + bmmo::session::trafo_life_label(id, life) + " at tick " + std::to_string(event.tick)
+                + ": no set held for that life - not run (" + std::to_string(trafo_missing_sets_) + " so far)");
+            return true;
+        }
         const bool reset = bmmo::session::trafo_is_reset(event.flags);
         const int32_t seed = reset ? 0 : bmmo::session::trafo_seed(static_cast<uint32_t>(options_.seed), id, event.tick, type);
-        if (!bmmo::game::run_trafo(engine_->context(), trafo_registry_, trafo_hooks_, id, event.flags, type, event.position, seed, error))
+        if (!bmmo::game::run_trafo(engine_->context(), trafo_registry_, trafo_hooks_, id, life, event.flags, type, event.position,
+                                   seed, error))
             return false;
-        if (event.flags & bmmo::session::TRAFO_FINAL) bmmo::game::trafo_set_final(trafo_registry_, id, type, event.tick);
-        auto& a = trafo_applied_[{id, type}];
+        if (event.flags & bmmo::session::TRAFO_FINAL) bmmo::game::trafo_set_final(trafo_registry_, id, life, type, event.tick);
+        auto& a = trafo_applied_[{id, life, type}];
         if (reset) {
             a.reset = true;
             a.reset_applied = event.tick;
@@ -1411,8 +1429,9 @@ namespace bmmo::sim {
             body_set_changed_ = true;   // the trafo frame of this tick physicalizes the pieces
         }
         char text[256];
-        std::snprintf(text, sizeof(text), "world: trafo %s %s of player %u at tick %u%s%s pos=%a,%a,%a seed=%d",
-                      bmmo::session::trafo_type_name(type), reset ? "reset" : "explode", id, event.tick,
+        std::snprintf(text, sizeof(text), "world: trafo %s %s of player %s at tick %u%s%s pos=%a,%a,%a seed=%d",
+                      bmmo::session::trafo_type_name(type), reset ? "reset" : "explode",
+                      bmmo::session::trafo_life_label(id, life).c_str(), event.tick,
                       (event.flags & bmmo::session::TRAFO_SERVER) ? " (server)" : "",
                       (event.flags & bmmo::session::TRAFO_FINAL) ? " (final)" : "",
                       static_cast<double>(event.position[0]), static_cast<double>(event.position[1]),
@@ -1471,6 +1490,7 @@ namespace bmmo::sim {
             for (uint8_t type = 0; type < bmmo::session::kTrafoTypes; ++type) {
                 bmmo::session::trafo_ledger_entry e;
                 e.player = set.player;
+                e.life = set.life;
                 e.type = type;
                 for (CK_ID piece: set.types[type].pieces) {
                     CKObject* o = context->GetObject(piece);
@@ -1479,7 +1499,7 @@ namespace bmmo::sim {
                         break;
                     }
                 }
-                if (const auto a = trafo_applied_.find({set.player, type}); a != trafo_applied_.end()) {
+                if (const auto a = trafo_applied_.find({set.player, set.life, type}); a != trafo_applied_.end()) {
                     e.has_explosion = a->second.explosion;
                     e.explode_applied = a->second.explode_applied;
                     for (int k = 0; k < 3; ++k) e.position[k] = a->second.position[k];
@@ -1639,7 +1659,8 @@ namespace bmmo::sim {
         std::string text = "tick=" + std::to_string(tick_) + " players=" + std::to_string(players_.size())
             + " parked=" + (retail_parked_ ? "1" : "0");
         if (options_.trafo_inputs)
-            text += " trafo_sets=" + std::to_string(trafo_registry_.sets().size()) + " trafo_hold=" + std::to_string(trafo_hold_reports_)
+            text += " trafo_sets=" + std::to_string(trafo_registry_.sets().size()) + " trafo_set_list=" + trafo_set_list()
+                  + " trafo_missing_sets=" + std::to_string(trafo_missing_sets_) + " trafo_hold=" + std::to_string(trafo_hold_reports_)
                   + " trafo_leaks=" + std::to_string(trafo_leaks_) + " trafo_after_us="
                   + std::to_string(trafo_after_ticks_ ? trafo_after_us_ / trafo_after_ticks_ : 0) + "/tick";
         text += " sectors=";

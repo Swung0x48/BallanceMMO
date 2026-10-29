@@ -408,10 +408,15 @@ namespace bmmo::session {
     // type set back to its built state (bodies, wind, scripts); remake runs
     // the explosion of (position, seed) once, and the host's birth log takes
     // the pieces' births at `birth_tick` (the resync's S).
-    enum class trafo_reconcile_action : uint8_t { unmake, remake };
+    // Step TRL: `retire` - the set (player, life) unmade whole and retired
+    // at once (game/trafo_sets.hpp retire_trafo_set_now; `type` unused,
+    // `birth_tick` = now): a set of an ended life the server's ledger no
+    // longer names.
+    enum class trafo_reconcile_action : uint8_t { unmake, remake, retire };
     struct trafo_reconcile_spec {
         trafo_reconcile_action action = trafo_reconcile_action::unmake;
         uint32_t player = 0;
+        uint16_t life = 1;   // step TRL: the set is (player, life)'s
         uint8_t type = 0;
         float position[3] = {};
         int32_t seed = 0;
@@ -790,30 +795,33 @@ namespace bmmo::session {
         // and the effect checks.  `option_e`: the session's lead allows the
         // Delayer's prediction (decision 9.5).
         std::function<trafo_poll(uint32_t tick, bool option_e)> poll_trafo;
-        // `player`'s piece set, by the rule every world runs (game/
-        // trafo_sets.hpp ensure_trafo_set): kept when selected, a retired one
-        // selected again, otherwise built.  Never inside a replay.  False and
-        // `error`: no set (the builder failed closed).
-        std::function<bool(uint32_t player, std::string& error)> make_trafo_set;
+        // The piece set of (`player`, `life`), by the rule every world runs
+        // (game/trafo_sets.hpp ensure_trafo_set): kept when selected, a
+        // retired one of the same life selected again, otherwise built
+        // (step TRL: sets are keyed by life; a set never serves another
+        // life).  Never inside a replay.  False and `error`: no set (the
+        // builder failed closed).
+        std::function<bool(uint32_t player, uint16_t life, std::string& error)> make_trafo_set;
         // One input applied (game/trafo_sets.hpp run_trafo): an explosion's
         // referential and seed, the explosion's or the reset's next-frame
         // flags.  Live and in every replayed tick.
         std::function<bool(const trafo_input& input, std::string& error)> run_trafo;
-        // A TRAFO_FINAL reset of (player, type) applied at `tick`
+        // A TRAFO_FINAL reset of (player, life, type) applied at `tick`
         // (trafo_set_final): the set's retirement counts from it.
-        std::function<void(uint32_t player, uint8_t type, uint32_t tick)> trafo_final;
+        std::function<void(uint32_t player, uint16_t life, uint8_t type, uint32_t tick)> trafo_final;
         // The trafo frame of `tick` (game/trafo_sets.hpp trafo_frame): every
         // selected set's scripts, by player id, with the fixed delta - after
         // the tick's inputs and the union's pass, before the step.  A
         // replayed tick runs the same list inside the script replay's frame.
         std::function<void(uint32_t tick)> trafo_frame;
         // The reconcile's view and halves (design 4.7, above).
-        std::function<trafo_type_view(uint32_t player, uint8_t type)> trafo_type_set;
+        std::function<trafo_type_view(uint32_t player, uint16_t life, uint8_t type)> trafo_type_set;
         std::function<trafo_reconcile_result(const trafo_reconcile_spec& spec)> trafo_reconcile;
-        // Retirement after the live frame of `now` (design 2.4): the players
-        // whose sets this call deselected (the next sight of one gets a set
-        // by make_trafo_set again).  `history`: the rollback history.
-        std::function<std::vector<uint32_t>(uint32_t now, uint32_t history)> retire_trafo_sets;
+        // Retirement after the live frame of `now` (design 2.4): the sets
+        // (player, life) this call deselected - gone for good (step TRL: no
+        // sight makes one again; only a resync ledger that still names it).
+        // `history`: the rollback history.
+        std::function<std::vector<trafo_key>(uint32_t now, uint32_t history)> retire_trafo_sets;
 
         // ---- reports (E10), optional ----
         // The host's counters for the text the core reports (host_counters):

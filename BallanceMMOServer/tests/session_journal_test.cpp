@@ -458,8 +458,76 @@ TEST(SessionJournal, ResyncRecordRoundTrip) {
     EXPECT_EQ(300u, r.scripts.size());
     EXPECT_EQ(70003u, r.savestate.size());
     EXPECT_EQ("end", r.savestate.substr(70000));
-    EXPECT_EQ(8u, kJournalVersion) << "8: the HEADER's mechanism_slots (protocol 19)";
+    EXPECT_EQ(9u, kJournalVersion) << "9: lives in PLAYER and RESYNC (protocol 21, step TRL)";
     EXPECT_EQ(2u, kJournalOldestReadable) << "version 2, 3 and 4 files still read";
+}
+
+// Step TRL (version 9): an add's life in the PLAYER record (written for a
+// later life only), and the lives of a RESYNC record's trafo entries
+// (written only when one is not 1) - a session without a rejoin writes the
+// bytes it wrote before.
+TEST(SessionJournal, V9LivesInPlayerAndResync) {
+    const temp_dir dir("lives");
+    const auto path = dir.file("session.bmjr");
+    const auto plain = dir.file("plain.bmjr");
+    {
+        journal_writer writer;
+        std::string error;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        writer.player(100, 7, 1, true, "a");          // life 1: not written
+        writer.player(150, 7, 0, false, {});
+        writer.player(150, 7, 2, true, "a", 2);       // the rejoin: life 2
+        journal_resync r;
+        r.tick = 160;
+        r.base = 161;
+        r.has_trafo = true;
+        journal_trafo_entry old_life, new_life;
+        old_life.player = new_life.player = 7;
+        old_life.life = 1;
+        old_life.bits = 8;
+        new_life.life = 2;
+        r.trafo = {old_life, new_life};
+        writer.resync(r);
+        writer.close();
+        journal_writer before;
+        ASSERT_TRUE(before.open(plain, make_header(), 0, error)) << error;
+        before.player(100, 7, 1, true, "a", 1);
+        journal_resync q;
+        q.tick = 160;
+        q.base = 161;
+        q.has_trafo = true;
+        q.trafo = {old_life};
+        before.resync(q);
+        before.close();
+    }
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_EQ(0u, out.unknown_records);
+    std::vector<journal_player> players;
+    journal_resync resync;
+    for (const auto& g: out.ticks) {
+        for (const auto& p: g.players) players.push_back(p);
+        for (const auto& x: g.resyncs) resync = x;
+    }
+    ASSERT_EQ(3u, players.size());
+    EXPECT_EQ(0u, players[0].life) << "life 1 is not written";
+    EXPECT_EQ(0u, players[1].life);
+    EXPECT_EQ(2u, players[2].life);
+    ASSERT_EQ(2u, resync.trafo.size());
+    EXPECT_EQ(1u, resync.trafo[0].life);
+    EXPECT_EQ(2u, resync.trafo[1].life);
+    EXPECT_EQ(8u, resync.trafo[0].bits);
+    // Life 1 throughout: the bytes before version 9 (no trailing field).
+    journal plain_out;
+    ASSERT_TRUE(read_journal(plain, plain_out, error)) << error;
+    for (const auto& g: plain_out.ticks) {
+        for (const auto& p: g.players) EXPECT_EQ(0u, p.life);
+        for (const auto& x: g.resyncs) {
+            ASSERT_EQ(1u, x.trafo.size());
+            EXPECT_EQ(1u, x.trafo[0].life);
+        }
+    }
 }
 
 TEST(SessionJournal, TruncatedTailKeepsTheTicksBeforeIt) {
