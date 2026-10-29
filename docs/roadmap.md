@@ -962,6 +962,63 @@ numbers 1-10 are unchanged.
    above and `--force-rollback 10:24` on all four l8_cross_150 captures:
    FINAL rows equal to the free-clock control (now: bodies 0, one ball
    off from 758). Tools: `.local-tools/work/H1/h1_forced.sh`.
+   **Measured at FULL step SPX (2026-10-29, offline; the choice waits for
+   the user):** each option prototyped as an uncommitted patch on HEAD
+   fccf4f7d (`.local-tools/work/SPX/deferral/option_{a,b,c}.diff`, x64
+   copies `build-agent-rSPXa/b/c`, judges `judge.sh` / `extras.sh` there).
+   Why RO1 kept P_Dome_MF on the deferral: its guard's script half -
+   `owned_by_selection` is false (P_Dome_MF is a level object of the s4
+   pass, no selected script is owned by it or a parent); the CK-free half
+   (fixed recipe, no lifetime at the anchor) passes. Every option PASSES
+   the entry's check: pair 350:24,360:24 and `--force-rollback 10:24` on
+   all four captures, LOCAL and FINAL rows equal to the option's own
+   free-clock control at every checkpoint (balls 0, bodies 0 off; the
+   4-8 FINAL presence gaps of the forced arms at 498/500 are the same
+   without any option), no "hull P_Dome_MF" line; each option's control
+   IDENTICAL to H1's; wire check `rH7X -> rSPX{a,b,c}` over
+   `core_ref_s12` ALL SAME, 36/36 journals IDENTICAL (none of its
+   captures reaches the changed paths: no SPX line in any of the 36
+   replays of any option);
+   `ro1g_l8` (resync, "0+3 deferred") and `rlm2rw` replays IDENTICAL to
+   the live journals, `h1_150_on` c0 844:29,862:30 equal to its control;
+   662 tests pass on each. `rlm2rw` (L8, live `--force-rollback 5:12`)
+   shows the same leak live at 75 (P_Dome_MF, born 66): every option
+   removes it, journal unchanged (no ball touched the dome); no natural
+   (unforced) rewind in `h1_full` or `core_ref_s12` shows it. Rewind cost:
+   one pair sample per option, no HEAD baseline and no noise measured
+   (t_rest 14-15 ms, t_rep 239-262 ms): not distinguishable from one run
+   each; (b) adds one destroy + Physicalize per crossing restore. (a) marks, in each record a replay captures before a
+   deferred body's birth tick, that body (`tick_state::unborn`, in memory:
+   no record, blob, journal or protocol change; rollback.hpp only, ~30
+   lines); a non-travelling restore from such a record defers it again.
+   Explicit, no new inference (the birth tick is the one RO1 already used
+   at the first restore); by construction it also marks a resync's
+   re-step records (same capture loop; not measured). (b)
+   destroys such a body at every crossing restore like RO1's module parts
+   (rollback_binding_scripts.hpp guard, ~10 lines, + a diagnostic log in
+   rollback.hpp that is not part of the option): it changes the FIRST
+   restore too, the records never hold an inert body, and the body is the
+   replay's own; P_Dome_MF came back every time - but the prototype's
+   guard only trusts the replayed activation: a product guard needs the
+   body's maker (the script running at its Physicalize: a birth-log field
+   fed by both hosts) or a destroyed body whose maker is not replayed is
+   lost for good. (c) infers it at the restore: an untracked body the blob
+   knows whose birth-log tick is in the window and that has no lifetime
+   at the anchor (a new CK-free hook `unborn_at` in session_host_world.hpp
+   plus ~30 lines in rollback.hpp) is deferred again; no state, but it
+   relies on the birth log and would recheck a known in-tree body if the
+   log were ever wrong. All three skip a travelling blob. (a) and (c)
+   leave RO1's deferral as it is (the inert body is the anchor's live
+   object, kept out of the tree while the replayed activation runs its
+   Physicalize over it: exact in every arm here, as the single rewind
+   already was); only the second restore changes. Landing: (a) changes
+   `tick_state` (an element of `history_`, a deque: `rollback_engine`'s
+   size and so `BallanceMMOClient`'s do not move) and (c) adds a hook to
+   `rollback_world` (rebuilt per call) - both header layout changes, so
+   the x86 objects are deleted before that build; (b) changes no struct;
+   any log cap stays a function-local static (no engine member until R7).
+   Recommended:
+   (a) (smallest, explicit, no new trust in the birth log or in a maker).
    **Found at FULL step H1 (2026-10-29, H7 at 150 ms); FIXED at FULL
    step H7X (2026-10-29) - the cause and the fix after the original text,
    which named a candidate that was wrong:**
