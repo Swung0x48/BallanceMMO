@@ -1658,3 +1658,102 @@ fix), and every Level 1 server journal with a base != 0 shows it in the
 replay's log line "the Level 1 tutorial's exit activated before frame 10
 (tick base+9)" - which the close-out's H1 Level 1 runs read (RK3R-rec, RK3F)
 with the session runner's start base 8.
+
+## As built (step F4, 2026-10-29): `PH[*][4]` as per-world collectible state
+
+The user's option (b) (above, "Decided (2026-10-29)"), built as the FULL
+plan's F4 row says. No protocol, journal, record or wire change; no engine
+or IVP change; no world changes (the census only reads the graph).
+
+- **The rule** (`BallanceMMOCommon/include/session/collectible_rules.hpp`,
+  CK-free so the unit tests can feed it maps that break it): a read is
+  `collectible` when every in-play writer (every writer outside
+  `Levelinit_*` / `*_Init`) of what it reads is a `Set Cell` of one
+  constant column C, the same C for all, in a root script outside the
+  replay selection, and is either a `P_Extra_*` script writing its own
+  row or `Event_handler`'s level reset; and at least one is a `P_Extra_*`
+  script. "Its own row": the Set Cell's Row Index is output 0 (Index) of
+  an `Iterator If` of the same root script on the same array whose Column
+  is a constant key column other than C, whose Operator is the constant
+  `CKEQUAL` and whose Reference Value is a constant local holding the
+  root script's owner (compared by value, `GetValue`, not by the
+  myself-parameter flag). "The level reset": the Row Index is output 0 of
+  an `Iterator` of the same root over the same array with Starting Row 0
+  and Ending Row -1 (every row). The reset writes every row TRUE, the
+  physics rows' too: accepted as the plan's text states it (it is a level
+  reset; on the shipped levels and the arena the value it writes, TRUE, is
+  the level file's). The rule does NOT check that value: it is an
+  assumption of the rule, true of every level it was run on. A custom map
+  whose Event_handler reset writes anything else to a row the sector
+  manager tests would still be granted, and a reset in one world would then
+  change that row there alone; checking the Set Cell's value against the
+  column's load-time value is the fix if such a map appears.
+  A collectible read is also no sound read: the "sound, reads first" pass
+  counts it as an unsound read of its array (as it was while unrecorded),
+  so the class cannot turn another column's unrecorded write into `sound`.
+- **The class** (`game/array_reads.hpp`): `kind::collectible`, decided only
+  in `run()`'s level-table pass on reads still unrecorded, after
+  `table_of`: the written-cell section (and so the local record) is the
+  first pass's and cannot change by the class. `array_writers` now keeps
+  each writer's root id and, for a Set Cell, where its row index comes
+  from (`row_source_of`; `constant_word` reads a 4-byte local - an enum or
+  an object id - by `constant_int`'s rule without the int type). The
+  report prints `collectible=N` in the `array-reads level=` line and at the
+  end of the `ARRAY-READS:` line, and every collectible entry by name with
+  its note ("per-world collectible state: column 4 written in play only by
+  P_Extra_* scripts on their own rows and Event_handler's level reset, all
+  outside the selection"); a read with in-play writers that fails the rule
+  stays `unrecorded`, its note "(not per-world collectible state: <why>)".
+  The status line's section is unchanged (`array_reads: unrecorded=N
+  written_columns=M`; `host_counters` and `anchor_summary` keep their
+  layout).
+- **The negative fixture.** No level breaks the rule, so it has two
+  forms: the unit tests (`BallanceMMOServer/tests/collectible_rules_test.cpp`,
+  8 tests: L2's writer set granted, an extra life's writer granted, and
+  a non-`P_Extra` writer of column 4, a `P_Extra` writer of a constant /
+  unproven / all-rows row or keyed on the column it writes, a second
+  column, a row-moving in-play writer, a selected writer, a reset that is
+  not every row, no `P_Extra` writer, no in-play writer - each refused
+  with its reason), and SimTool `--collectible-fixture other-writer|other-row`
+  (with `--array-reads`): before the census, the first `P_Extra_*` Set Cell
+  (by id) whose row is an `Iterator If` output gets its root script
+  renamed (`F4_Fixture_Writer Script`, a non-`P_Extra` writer) or its Row
+  Index fed from a new constant local (a `P_Extra` writer of another row),
+  in the loaded level only.
+- **S2** (`.local-tools/work/F4/s2/`, SimTool rF4, server scope). The
+  game copy `Ballance-Agent` (and both retail copies) hold the arena in
+  the Level 13 slot (md5 c58a76b9...); RK2's "L13" row was the arena. The
+  original Level 13 (`Level_13.NMO.orig`, 9b5be1ca...) ran with the
+  file swapped in for that run only and the arena put back (md5
+  checked). L1-L12, L13 (original) and the arena: `unrecorded=0`,
+  `collectible=2` on every one (the sector manager's two `Iterator If` on
+  `PH`), every other class's count equal to RK2's; the writer lists
+  `P_Extra_Point_MF Script [Set Cell] col 4` x1..x7 plus `Event_handler`
+  x1 (no `P_Extra_Life` script writes `PH`). Client scope (the bit
+  clear): `collectible=2` and `unrecorded` = exactly A1's
+  `CurrentLevel[0][1]` counts (L2 10, L3 4, L4 4, L5 2, L6 10, L7 6, L8 3,
+  L9 6, L10 7, L11 6, L12 11, arena 2, L1 0). Fixtures on L2, the arena
+  and the original L13: `collectible=0 unrecorded=2`, both notes naming the
+  broken writer ("F4_Fixture_Writer Script [Set Cell] col 4 is neither a
+  P_Extra_* script's own row nor Event_handler's level reset";
+  "P_Extra_Point_MF Script [Set Cell] col 4 does not write its own row
+  (row index: a constant)").
+- **Checks** (implement round 09:29-09:37, about 8 minutes, one live
+  run): x64 BUILD-OK, x86 CLIENT-BUILD-OK (core_host.cpp recompiled),
+  DEPS-OK on both, `ninja -t deps` of physics_world.cpp.obj VALID with the
+  header; ARCH-BUILD-OK (`ballanced-36c04e3d24c9+bmmo-21125462ff68-dirty`);
+  BallanceMMOMessageTests 654/654; GCC syntax 31/31. Wire check rF2 ->
+  rF4 over core_ref_s11 (`EXTRA="--accept-protocol 18"`): 12/12 send
+  traces SAME, 12/12 journals IDENTICAL; solo1 / solo2 c0 SAME and
+  IDENTICAL (c1-c3 "missing" is the script's four-client assumption, as
+  at RK2); the replays' logs differ only in the census lines and the
+  status lines' `array_reads: unrecorded=2` -> `unrecorded=0`. The live
+  smoke (`.local-tools/work/F4/live.sh`, four headless clients on the
+  arena, 60 s, the Arch server of this tree, snapshots off, trafo inputs
+  and placement on): VERDICT PASS, the server journal 4618/4618 ticks
+  matched, 2309 checkpoints, 0 mismatches; every world's census
+  `unrecorded=0 ... collectible=2` (the server and the four clients) and
+  every client status line `array_reads: unrecorded=0 written_columns=1`.
+- **Not run here:** a retail run (the retail core host runs the same
+  `anchor_log`; its status line is read by the close-out's retail batches,
+  RT1-RT3).

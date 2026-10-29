@@ -1013,7 +1013,9 @@ numbers 1-10 are unchanged.
    verbatim: "选：加检查"; the collectible rule in §2): a census class
    "per-world collectible state" with a load-time check of column 4's
    writers, not recorded, not rolled back - built by FULL step F4 (the
-   design's "Decided (2026-10-29): `PH[*][4]` = option (b)").
+   design's "Decided (2026-10-29): `PH[*][4]` = option (b)"); built
+   2026-10-29, the design's "As built (step F4)": S2 `unrecorded = 0`,
+   `collectible = 2` on L1-L13 and the arena).
 7. **Stage close-out (the one FULL verification):** four clients, 150 ms,
    10 % loss, snapshots off: the spawn pile and every mechanism
    bit-identical to the server at every checkpoint; and every check below.

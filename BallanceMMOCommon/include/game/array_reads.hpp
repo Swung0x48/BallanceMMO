@@ -58,6 +58,15 @@
 //               that array in the census is sound too (since RK2 the fan's
 //               sound-slot blocks are recorded, so this class is empty on
 //               L1-L13; it stays as the census's report of such a read);
+//   collectible (step F4, the user's decision of 2026-10-29: collectibles are
+//               per-world like the airship, neither recorded nor rolled back)
+//               a read whose every in-play writer is a Set Cell of one
+//               constant column in a script outside the selection: a
+//               P_Extra_* script writing its own row, or Event_handler's level
+//               reset - proven from the graph at the anchor
+//               (session/collectible_rules.hpp; the sector manager's
+//               PH[*][4] "Set?" read on L1-L13 and the arena).  A map that
+//               breaks the rule keeps the read unrecorded, the note says why;
 //   unrecorded  anything else.
 //
 // Scope.  Every world rewires its mechanism ball identity reads to private
@@ -83,13 +92,14 @@
 #include "CKAll.h"
 
 #include <game/script_replay.hpp>
+#include <session/collectible_rules.hpp>
 #include <session/resync_rules.hpp>
 
 namespace bmmo::game {
     class array_reads {
     public:
         enum class access { read, write, both };
-        enum class kind { recorded, private_copy, load_time, unwritten, sound, unrecorded };
+        enum class kind { recorded, private_copy, load_time, unwritten, sound, collectible, unrecorded };
 
         struct entry {
             CK_ID block = 0;
@@ -123,6 +133,7 @@ namespace bmmo::game {
                 case kind::load_time: return "load-time";
                 case kind::unwritten: return "unwritten";
                 case kind::sound: return "sound";
+                case kind::collectible: return "collectible";
                 default: return "unrecorded";
             }
         }
@@ -171,17 +182,33 @@ namespace bmmo::game {
             // census cannot see writes it).  Column-aware: a writer of
             // another constant column does not count (array_writers gives
             // every row-moving writer column "*").
+            //
+            // Step F4: a read whose in-play writers are only per-world
+            // collectible state (session/collectible_rules.hpp) is
+            // `collectible`.  Only here, on reads, after table_of: the
+            // written-cell section (and with it the record) is the first
+            // pass's and cannot change by this class.
             const std::map<std::string, std::vector<writer>> writers = array_writers(context);
             for (entry& e: out.entries) {
                 if (e.what != kind::unrecorded || e.how != access::read) continue;
                 auto it = writers.find(e.array);
                 std::map<std::string, int> relevant;
+                std::vector<bmmo::session::collectible_writer> described;
                 bool load_only = true;
                 if (it != writers.end())
                     for (const writer& w: it->second) {
                         if (e.column >= 0 && w.column >= 0 && w.column != e.column) continue;
                         ++relevant[w.root + " [" + w.prototype + "] col " + (w.column < 0 ? std::string("*") : std::to_string(w.column))];
                         load_only = load_only && load_time_script(w.root);
+                        bmmo::session::collectible_writer d;
+                        d.root = w.root;
+                        d.prototype = w.prototype;
+                        d.column = w.column;
+                        d.load_time = load_time_script(w.root);
+                        d.selected = std::find(sel.scripts.begin(), sel.scripts.end(), w.root_id) != sel.scripts.end();
+                        d.row = w.row;
+                        d.key_column = w.key_column;
+                        described.push_back(d);
                     }
                 std::string roots;
                 for (const auto& [what, n]: relevant) roots += (roots.empty() ? "" : ", ") + what + " x" + std::to_string(n);
@@ -193,12 +220,29 @@ namespace bmmo::game {
                     e.note += std::string(e.note.empty() ? "" : " ") + "(table; writers: " + roots + ")";
                 } else {
                     e.note += std::string(e.note.empty() ? "" : " ") + "(writers: " + roots + ")";
+                    int column = -1;
+                    const std::string why = bmmo::session::collectible_verdict(described, column);
+                    if (why.empty()) {
+                        e.what = kind::collectible;
+                        e.note += " (per-world collectible state: column " + std::to_string(column)
+                                  + " written in play only by P_Extra_* scripts on their own rows and Event_handler's"
+                                    " level reset, all outside the selection)";
+                    } else {
+                        e.note += " (not per-world collectible state: " + why + ")";
+                    }
                 }
             }
             // Sound, reads first: a write is sound only if every read of its
             // array is.  Arrays whose reads are all sound:
             std::map<std::string, bool> sound_array;
             for (entry& e: out.entries) {
+                // A per-world collectible read is not a sound read: it keeps
+                // its array's writes out of `sound`, as it did while it was
+                // still counted unrecorded (before step F4).
+                if (e.what == kind::collectible && e.how != access::write) {
+                    sound_array.emplace(e.array, false).first->second = false;
+                    continue;
+                }
                 if (e.what != kind::unrecorded || e.how == access::write) continue;
                 const bool s = sound_flow(context, e.block, true);
                 if (s) e.what = kind::sound;
@@ -220,8 +264,8 @@ namespace bmmo::game {
         }
 
         // The report, one line per element: the count per class, the
-        // keep-local scripts, one line per entry (unrecorded and sound
-        // always, the rest with `all`), the written-cell section, the
+        // keep-local scripts, one line per entry (unrecorded, sound and
+        // collectible always, the rest with `all`), the written-cell section, the
         // unrecorded entries grouped by script, prototype and cell, and the
         // closing ARRAY-READS line.  SimTool prints it (sim/array_census.hpp);
         // the hosts log it at their anchor.
@@ -229,13 +273,14 @@ namespace bmmo::game {
             std::vector<std::string> out;
             const char* scope = client_scope ? "client" : "server";
             out.push_back(textf("array-reads level=%d scope=%s selected=%d keep_local=%d blocks=%d entries=%zu"
-                                " recorded=%d private=%d load-time=%d unwritten=%d sound=%d unrecorded=%d",
+                                " recorded=%d private=%d load-time=%d unwritten=%d sound=%d collectible=%d unrecorded=%d",
                                 level, scope, r.selected, r.keep_local, r.blocks, r.entries.size(),
                                 r.count(kind::recorded), r.count(kind::private_copy), r.count(kind::load_time),
-                                r.count(kind::unwritten), r.count(kind::sound), r.count(kind::unrecorded)));
+                                r.count(kind::unwritten), r.count(kind::sound), r.count(kind::collectible),
+                                r.count(kind::unrecorded)));
             for (const std::string& k: r.kept) out.push_back("array-reads keep-local " + k);
             for (const entry& e: r.entries) {
-                if (!all && e.what != kind::unrecorded && e.what != kind::sound) continue;
+                if (!all && e.what != kind::unrecorded && e.what != kind::sound && e.what != kind::collectible) continue;
                 out.push_back(std::string("array-read ") + name_of(e.what) + " " + name_of(e.how) + " " + e.owner + "/"
                               + e.script + " #" + std::to_string(e.walk) + " [" + e.prototype + "] " + cell_text(e)
                               + " id=" + std::to_string(static_cast<unsigned>(e.block)) + " path=" + e.path
@@ -248,15 +293,16 @@ namespace bmmo::game {
                 ++groups[script_family(e.script) + " " + e.prototype + " " + name_of(e.how) + " " + cell_text(e)];
             }
             for (const auto& [what, n]: groups) out.push_back("array-reads unrecorded " + what + " x" + std::to_string(n));
-            out.push_back(textf("ARRAY-READS: level=%d scope=%s unrecorded=%d sound=%d unwritten=%d written_columns=%zu",
+            out.push_back(textf("ARRAY-READS: level=%d scope=%s unrecorded=%d sound=%d unwritten=%d written_columns=%zu"
+                                " collectible=%d",
                                 level, scope, r.count(kind::unrecorded), r.count(kind::sound), r.count(kind::unwritten),
-                                r.written.size()));
+                                r.written.size(), r.count(kind::collectible)));
             return out;
         }
 
         // The anchor's census in a world (design 2.2 "Placement", step RK2):
         // after the world's rewire and placement, the report's lines
-        // (unrecorded and sound entries by name, the written-cell section,
+        // (unrecorded, sound and collectible entries by name, the written-cell section,
         // the closing line) to `log`, and the counts the host's status line
         // carries.  Every world calls this one function: the server
         // (physics_world), the headless client (session_client), the retail
@@ -501,7 +547,15 @@ namespace bmmo::game {
         static bool column_confined(const std::string& p) {
             return p == "Set Cell" || p == "Column Transform" || p == "Column Operation";
         }
-        struct writer { std::string root, prototype; int column = -1; };
+        // Step F4: a Set Cell also carries where its row index comes from
+        // (row_source_of), for the collectible rule.
+        struct writer {
+            std::string root, prototype;
+            int column = -1;
+            CK_ID root_id = 0;
+            bmmo::session::collectible_row_source row = bmmo::session::collectible_row_source::other;
+            int key_column = -1;
+        };
         static std::map<std::string, std::vector<writer>> array_writers(CKContext* context) {
             std::map<std::string, std::vector<writer>> out;
             const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
@@ -516,11 +570,89 @@ namespace bmmo::game {
                 while (root->GetParent()) root = root->GetParent();
                 writer w;
                 w.root = root->GetName() ? root->GetName() : "?";
+                w.root_id = root->GetID();
                 w.prototype = prototype_of(block);
                 if (column_confined(w.prototype)) constant_int(block, column_pin(block), w.column);
-                for (CKDataArray* a: arrays) out[a->GetName() ? a->GetName() : "?"].push_back(w);
+                for (CKDataArray* a: arrays) {
+                    writer x = w;
+                    if (x.prototype == "Set Cell") row_source_of(context, block, root, a, x.row, x.key_column);
+                    out[a->GetName() ? a->GetName() : "?"].push_back(x);
+                }
             }
             return out;
+        }
+
+        // Where a Set Cell's row index comes from (step F4, the collectible
+        // rule): a constant local; the Row Index output of an `Iterator` of
+        // the same root script over every row (Starting Row 0, Ending Row -1)
+        // of `array`; or the Index output of an `Iterator If` of the same
+        // root on `array` whose Column is a constant (`key_column`), whose
+        // Operator is a constant `equal` and whose Reference Value is a
+        // constant local holding the root script's owner.  Anything else is
+        // `other`.
+        static void row_source_of(CKContext* context, CKBehavior* block, CKBehavior* root, CKDataArray* array,
+                                  bmmo::session::collectible_row_source& row, int& key_column) {
+            using rs = bmmo::session::collectible_row_source;
+            row = rs::other;
+            key_column = -1;
+            const int pin = row_pin(block);
+            if (pin < 0) return;
+            CKParameterIn* in = block->GetInputParameter(pin);
+            CKParameter* source = in ? in->GetRealSource() : nullptr;
+            if (!source) return;
+            int value = -1;
+            if (source->GetClassID() == CKCID_PARAMETERLOCAL) {
+                if (constant_int(block, pin, value)) row = rs::constant;
+                return;
+            }
+            if (source->GetClassID() != CKCID_PARAMETEROUT) return;
+            CKBehavior* it = CKBehavior::Cast(source->GetOwner());
+            if (!it || !it->IsUsingFunction() || it->GetOutputParameterCount() < 1
+                || it->GetOutputParameter(0) != source)
+                return;
+            CKBehavior* it_root = it;
+            while (it_root->GetParent()) it_root = it_root->GetParent();
+            if (it_root != root) return;
+            const std::vector<CKDataArray*> on = arrays_of(context, it);
+            if (std::find(on.begin(), on.end(), array) == on.end()) return;
+            const std::string p = prototype_of(it);
+            if (p == "Iterator") {
+                int first = -1, last = 0;
+                if (constant_int(it, pin_named(it, {"Starting Row"}), first) && first == 0
+                    && constant_int(it, pin_named(it, {"Ending Row"}), last) && last == -1)
+                    row = rs::iterator_all_rows;
+                return;
+            }
+            if (p != "Iterator If") return;
+            int key = -1, op = 0;
+            if (!constant_int(it, pin_named(it, {"Column"}), key) || key < 0) return;
+            if (!constant_word(it, pin_named(it, {"Operator"}), op) || op != CKEQUAL) return;
+            CKObject* owner = root->GetOwner();
+            CK_ID reference = 0;
+            if (!owner || !constant_word(it, pin_named(it, {"Reference Value"}), reference)
+                || reference != owner->GetID())
+                return;
+            row = rs::iterator_if_owner;
+            key_column = key;
+        }
+
+        // A pin whose source is a 4-byte local (any type: an enum, an object
+        // id) that no output parameter of the block's root script writes:
+        // its value.  constant_int's rule without the int type.
+        template <typename T> static bool constant_word(CKBehavior* block, int pin, T& value) {
+            static_assert(sizeof(T) == 4, "a 4-byte value");
+            if (pin < 0) return false;
+            CKParameterIn* in = block->GetInputParameter(pin);
+            CKParameter* source = in ? in->GetRealSource() : nullptr;
+            if (!source || source->GetClassID() != CKCID_PARAMETERLOCAL) return false;
+            if (source->GetDataSize() != 4) return false;
+            CKBehavior* root = block;
+            while (root->GetParent()) root = root->GetParent();
+            if (written(root, source)) return false;
+            T v{};
+            if (source->GetValue(&v, FALSE) != CK_OK) return false;
+            value = v;
+            return true;
         }
 
         static kind classify(entry& e, bool client_scope) {

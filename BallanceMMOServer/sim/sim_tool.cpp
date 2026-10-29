@@ -508,6 +508,15 @@ namespace {
         bool array_reads = false;
         bool array_reads_client = false;
         bool array_reads_all = false;
+        // Step F4: --collectible-fixture other-writer|other-row (with
+        // --array-reads): the negative fixture of the per-world collectible
+        // rule (session/collectible_rules.hpp).  Before the census, the first
+        // P_Extra_* Set Cell whose row is an Iterator If's output is made to
+        // break the rule in the loaded level only: other-writer renames its
+        // root script (a non-P_Extra writer of the column), other-row feeds
+        // its Row Index from a new constant local (a P_Extra writer of
+        // another row).  The read must stay unrecorded, its note saying why.
+        std::string collectible_fixture;
         bool globals_trace = false;
         bool world_options_given = false;
         uint32_t world_options = 0;
@@ -786,6 +795,11 @@ namespace {
         if (arg == "--array-reads") out.array_reads = true;
         else if (arg == "--client-scope") out.array_reads_client = true;
         else if (arg == "--array-reads-all") out.array_reads_all = true;
+        else if (arg == "--collectible-fixture") {
+            if (!(v = next())) return false;
+            out.collectible_fixture = v;
+            if (out.collectible_fixture != "other-writer" && out.collectible_fixture != "other-row") return false;
+        }
         else if (arg == "--globals-trace") out.globals_trace = true;
         else if (arg == "--world-options") {
             if (!(v = next()) || !parse_world_options_value(v, out.world_options)) return false;
@@ -8929,8 +8943,8 @@ namespace {
             || !args.nav_mode.empty() || !args.savestate_diff[0].empty() || !args.savestate_describe.empty()
             || !args.describe_script.empty();
         const char* why = nullptr;
-        if ((args.array_reads_client || args.array_reads_all) && !args.array_reads)
-            why = "--client-scope and --array-reads-all go with --array-reads";
+        if ((args.array_reads_client || args.array_reads_all || !args.collectible_fixture.empty()) && !args.array_reads)
+            why = "--client-scope, --array-reads-all and --collectible-fixture go with --array-reads";
         else if (args.array_reads && (file_mode || scene || args.spawn_test > 0 || args.savestate_check
                                       || args.portable_scripts_check || args.list_placement || args.resync_check
                                       || args.late_sector_check || !args.late_run.empty()))
@@ -9013,6 +9027,11 @@ namespace {
         CKContext* context = world->engine().context();
         const bool trafo = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;
         const auto sel = bmmo::game::session_script_selection(context, trafo);
+        if (!args.collectible_fixture.empty()) {   // step F4: the rule's negative fixture
+            const std::string done = bmmo::sim::array_census::break_collectible_rule(context, args.collectible_fixture);
+            std::printf("collectible fixture %s: %s\n", args.collectible_fixture.c_str(), done.c_str());
+            if (done.rfind("no ", 0) == 0) { std::fflush(stdout); return 1; }
+        }
         const auto census = bmmo::sim::array_census::run(context, sel, args.array_reads_client);
         bmmo::sim::array_census::print(census, world->level(), args.array_reads_client, args.array_reads_all);
         std::fflush(stdout);   // before the world goes: the engine's shutdown may not return through main
