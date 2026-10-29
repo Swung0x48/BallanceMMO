@@ -220,6 +220,11 @@ namespace bmmo::session {
         // them (docs/ivp-savestate-design.md "time factor ... left LIVE").
         std::function<bool(bmmo_physics_globals& out)> get_globals;
         std::function<bool(const bmmo_physics_globals& in)> set_globals;
+        // Step H7X (bridge v29): the globals a blob was captured with, read
+        // without touching the world.  Optional.  A resync re-step whose
+        // server blob has them runs at the server's globals of S, not at the
+        // anchor world's (record-format-gaps design 4.2, A17).
+        std::function<bool(const std::vector<uint8_t>& blob, bmmo_physics_globals& out)> blob_globals;
         // The IVP savestate (docs/ivp-savestate-design.md,
         // physics/physics_savestate.hpp): the engine's whole collision state -
         // cores, hull managers, the overlap tree, every mindist and its
@@ -822,6 +827,9 @@ namespace bmmo::session {
         // current ones), and set_globals calls the world refused (the history
         // dropped, as on a frozen clock: the caller re-anchors).
         uint64_t globals_set = 0, globals_replays = 0, globals_replays_start = 0, globals_unknown = 0, globals_failures = 0;
+        // Step H7X: resync re-steps whose server blob's globals differed from
+        // the anchor record's (a late joiner's anchor is its level start).
+        uint64_t globals_server = 0;
         double last_error = 0.0, max_error = 0.0;
         std::string last_mismatch;     // entity of the last mismatch
     };
@@ -1435,7 +1443,56 @@ namespace bmmo::session {
             // live factor, and the per-body path's clock write and every
             // body after it belong to the anchor's world.  Only when a replay
             // follows: the frozen and too-far paths step nothing.
-            if (replay_follows && globals_live && at->have_globals && !put_globals(at->globals)) {
+            //
+            // Step H7X (record-format-gaps design 4.2, A17): a resync's anchor
+            // takes its globals from the server's blob of S.  The anchor's
+            // record is this world's own, and a late joiner's is its level
+            // start (factor 0.001, gravity -9.81 until Init Ingame's write in
+            // its frame 2), which the live records of base..arrival carry on
+            // until that write: replayed at them, the joiner's first replayed
+            // tick stepped half a server step, every moving body half a step
+            // behind for good.  A replayed tick whose record still equals the
+            // anchor's own (nothing in this world changed them since the
+            // anchor) keeps the server's; from the first record that differs,
+            // the records (2.3 step 3).  The gravity is the blob's float: the
+            // anchor's double is kept when it is the same float.
+            bmmo_physics_globals server_globals{}, anchor_recorded{};
+            bool server_hold = false, server_followed = false;
+            if (rs && replay_follows && globals_live && at->have_globals && world.blob_globals && rs->blob.blob
+                    && !rs->blob.blob->empty()) {
+                bmmo_physics_globals blob{};
+                if (world.blob_globals(*rs->blob.blob, blob)) {
+                    anchor_recorded = at->globals;
+                    server_globals = at->globals;
+                    server_globals.time_factor = blob.time_factor;
+                    bool same_gravity = true;
+                    for (int k = 0; k < 3; ++k)
+                        same_gravity = same_gravity
+                            && static_cast<float>(at->globals.gravity[k]) == static_cast<float>(blob.gravity[k]);
+                    if (!same_gravity)
+                        for (int k = 0; k < 3; ++k) server_globals.gravity[k] = blob.gravity[k];
+                    server_hold = true;
+                    if (globals_differ(server_globals, anchor_recorded)) {
+                        ++stats_.globals_server;
+                        if (world.log) {
+                            char text[240];
+                            std::snprintf(text, sizeof(text), "rollback to tick %u (%s): the re-step runs at the server's"
+                                          " physics globals of S (factor %.6g, gravity y %.6g), not the anchor record's"
+                                          " (factor %.6g, gravity y %.6g)", anchor, reason.c_str(),
+                                          static_cast<double>(server_globals.time_factor), server_globals.gravity[1],
+                                          static_cast<double>(anchor_recorded.time_factor), anchor_recorded.gravity[1]);
+                            world.log(text);
+                        }
+                    }
+                } else if (world.log) {
+                    char text[200];
+                    std::snprintf(text, sizeof(text), "rollback to tick %u (%s): the server blob's physics globals"
+                                  " are unreadable; the anchor record's are used", anchor, reason.c_str());
+                    world.log(text);
+                }
+            }
+            if (replay_follows && globals_live && at->have_globals
+                    && !put_globals(server_hold ? server_globals : at->globals)) {
                 globals_refused(anchor);
                 return true;
             }
@@ -2101,7 +2158,12 @@ namespace bmmo::session {
                 // keeps the current ones.
                 if (globals_live) {
                     if (recorded && recorded->have_globals) {
-                        if (!put_globals(recorded->globals)) break;
+                        // Step H7X: a resync keeps the server's globals of S
+                        // while this world's records have not changed them.
+                        const bool hold = server_hold && !server_followed
+                            && !globals_differ(recorded->globals, anchor_recorded);
+                        if (server_hold && !hold) server_followed = true;
+                        if (!put_globals(hold ? server_globals : recorded->globals)) break;
                     } else {
                         ++stats_.globals_unknown;
                     }

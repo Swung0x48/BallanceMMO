@@ -1918,3 +1918,80 @@ session_client.cpp); the full numbers are in `docs/roadmap.md` §4 item 7,
   replay of those two captures needs the same switch and still diverges
   wherever a rewind crosses the action, by construction; RK3F and RK3R-rec
   were read from the live journals and logs, not from replays.
+
+## As built (step H7X, FULL close-out, 2026-10-29): a resync re-step at the server's globals of S (§4.2, A17)
+
+**The symptom** (FULL H1, `h1_full/h7_join`, roadmap §4 item 4): a late
+joiner's remade trafo pieces matched 73/102, every moving one a constant
+fraction of a tick behind with bit-equal velocities.
+
+**The cause.** §4.2 says a resync's re-step replays "from a synthetic anchor
+whose ticks have no local records: they keep the current globals", and that
+the anchor takes its globals from the server's blob of S (A17). As built at
+RK1 neither holds: the synthetic anchor (`base - 1`) and the live records of
+`base..arrival` are local records of this world, and the engine wrote the
+anchor record's globals before the restore and each replayed tick's before
+its step. For a running member those equal the server's (C4), so nothing
+showed; for a late joiner they are its own level start - factor 0.001,
+gravity -9.81 until its scripts' frame-2 write (tick base+1) - while the
+server stepped S+1 at 0.002 / -20. The joiner's re-step ran its first tick
+at half the server's step (and the start gravity): every moving body of its
+world ended exactly one half step behind (offset / velocity = -1/66 s in x
+and z for every falling paper piece, the Stone mirror 0.270 m behind at
+17.858 m/s; 121 of 154 bodies equal at the first checkpoint after the
+re-step). A regression of RK1 (982370d8): before it a replay wrote no
+globals and ran at the live ones, which by the arrival were 0.002.
+
+**The fix** (no protocol, journal, record or engine change):
+
+- `physics_savestate.hpp` / `physics_savestate_common.cpp`
+  `savestate_globals(data, size, factor, gravity, error)`: the blob's
+  factor and gravity, parsed with the savestate's reader, no world touched.
+  Bridge v29 (`physics_rt_api.h` appends `savestate_globals`;
+  `physics_rt_bridge.cpp`, `physics_direct.hpp`, retail `physics_view`);
+  bridge note in `docs/engine-changes.md` (no engine number).
+- `rollback.hpp`: `rollback_world::blob_globals` (optional; installed by
+  `bind_rollback_world` for a backend with the entry, so every session-core
+  world and SimTool's bindings, never a test backend without it).
+  `restore_and_replay`, when called by `resync()` with a non-empty server
+  blob whose globals read: the anchor's write is the server's globals
+  instead of the anchor record's (the factor from the blob; the gravity
+  from the blob unless the anchor record's double is the same float, in
+  which case that double is kept - the blob stores floats and the start
+  gravity is not one); each replayed tick whose record still equals the
+  anchor record's keeps the server's; from the first record that differs
+  the records are written, as C3 (the joiner's own frame-2 write at
+  base+1 then writes the server's values again: no change). A re-step whose
+  server globals differ from the anchor record's counts
+  `rollback_stats::globals_server` and logs "rollback to tick S (...): the
+  re-step runs at the server's physics globals of S (...), not the anchor
+  record's (...)". The live globals still come back after the loop (2.3
+  step 4). The re-recorded ticks and the re-captured anchor then hold the
+  server's values, so a later rewind into the window replays them.
+- **Adaptation of §4.2.** The design's two premises are replaced by the
+  rule above: the window's records are applied as changes made after the
+  anchor, not ignored, so a re-step anchored before a session-start write
+  (§4.2's "S <= 2" case, where the server's S still has the start values)
+  still crosses that write at its recorded tick. What this rule does not
+  cover: a write in the joiner's own level start after its frame 2 that the
+  server's world does not have (the Level 1 tutorial is off in every world
+  since RK3; D5 / RK3F's one-world freeze is the user's open decision).
+
+**Checks.** Unit tests 662/662 with the new
+`RollbackEngineGlobals.AResyncReStepRunsAtTheServerBlobsGlobals` (U8: a
+joiner's records at 1 / -9.81 until tick 3, the server's blob at 2 / -20:
+no write at all, every re-record at 2, the clock nine server steps on; its
+control without the hook writes 1 at the anchor and 2 before tick 3 and
+ends one half step short). GCC syntax 31/31. x64 BUILD-OK, x86
+CLIENT-BUILD-OK (plugin and mod rebuilt with v29). Wire check rH1 -> rH7X
+over `core_ref_s12`: ALL SAME, 36/36 journals IDENTICAL (the running
+members' resyncs in `resync_snapoff`, `resync_at150*` unchanged: their
+blob's globals equal their records'). Live H7 (`h7x_full/h7_join`, Arch
+server rebuilt from this tree, 150 ms, snapshots off, trafo on, placement
+on): VERDICT PASS, server journal replay 3329/3329; the joiner's re-step S
+1707 -> 1764 logs the line above with `globals=0/0/0/0/0`; pieces 102/102
+bit-equal on all four (`tr3fix/pieces.py`); at 1766 the joiner has 153 of
+154 bodies equal to the server, the Stone mirror 0.0000 m (H1: 0.270), the
+one left `P_Ball_Wood_MF` 0.021 m, off on c1/c2 too (0.008 m), a body the
+predicted paper mirrors push. No retail run (the retail host gets the hook
+through the same binding; a retail late join is RT2's item).

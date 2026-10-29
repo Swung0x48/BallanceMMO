@@ -962,9 +962,9 @@ numbers 1-10 are unchanged.
    above and `--force-rollback 10:24` on all four l8_cross_150 captures:
    FINAL rows equal to the free-clock control (now: bodies 0, one ball
    off from 758). Tools: `.local-tools/work/H1/h1_forced.sh`.
-   **Found at FULL step H1 (2026-10-29, H7 at 150 ms; cause NOT
-   established and NOT shown pre-existing - deferred, see the end of this
-   entry):**
+   **Found at FULL step H1 (2026-10-29, H7 at 150 ms); FIXED at FULL
+   step H7X (2026-10-29) - the cause and the fix after the original text,
+   which named a candidate that was wrong:**
    a late joiner's trafo pieces remade by the join's reconcile run a
    fraction of a tick behind the server's. `h1_full/h7_join` (client 3
    joins at 1550, S 1705, re-stepped to 1761; the reconcile remade 6 type
@@ -994,6 +994,44 @@ numbers 1-10 are unchanged.
    (`client_core_trafo.cpp` `reconcile_trafo`, the remake branch) makes the
    pieces fresh with `birth_tick = anchor` and leaves their state to the
    rows and the blob of S, which is where the trace must look first.
+   **H7X: the cause** (read from H1's own `h7_join` logs and journals, no
+   new trace needed): not the remade cores. The joiner's re-step stepped
+   its first replayed tick (S+1 = 1706) at the physics globals of its own
+   level start - factor 0.001, gravity -9.81, the values every world has
+   until Init Ingame's frame-2 write, which the joiner made at 1707 - while
+   the server stepped 1706 at 0.002 / -20. Since RK1 (982370d8, C3) a
+   rewind writes the anchor record's globals before the restore and each
+   replayed tick's record before its step; a resync's anchor is the
+   synthetic record at base-1 and its window records are the joiner's live
+   ones, i.e. the joiner's level start, not the server's world (design
+   §4.2 assumed a re-step's ticks had no local records). Evidence:
+   `client3.log` "globals: time factor 0.001 -> 0.002 at tick 1707 (frame
+   2 after the anchor)", the restore's "the physics time factor is 0.001
+   live and 0.002 in the savestate (kept live)", the first replayed step's
+   "factor=0.0010 phys_dt=0.015152" and the second's 0.0020 / 0.030303;
+   every moving body of the joiner's world is then behind by exactly one
+   half step: offset / velocity = -0.01515 s in x and z for every falling
+   paper piece (-0.02287 s in y, the gravity of that tick), the Stone
+   mirror cruising at 17.858 m/s 0.270 m behind, P_Modul_26 -0.011 s -
+   at 1762 121 of 154 bodies equal. A regression of RK1, which predates
+   H1's HEAD (before RK1 a replay wrote no globals and ran at the live
+   0.002); TR3/TR3m's H7 had no moving body at the join. **The fix** (one,
+   as design §4.2 / A17 states it: "the synthetic anchor takes its globals
+   from [the server's blob]"): bridge v29 `savestate_globals` reads the
+   blob's factor and gravity; `rollback_engine::restore_and_replay` writes
+   them at a resync's anchor and keeps them for every replayed tick whose
+   record still equals the anchor record's (from the first record that
+   differs, the records, as C3). No protocol, journal, record or engine
+   change. **Measured** (`h7x_full/h7_join`, the same recipe at 150 ms,
+   snapshots off): the joiner logs "the re-step runs at the server's
+   physics globals of S (factor 0.002, gravity y -20), not the anchor
+   record's (factor 0.001, gravity y -9.81)", `globals=0/0/0/0/0` (nothing
+   written: the live world already had the server's); pieces 102/102
+   bit-equal on all four clients (H1: 73/102 on the joiner); at the first
+   checkpoint after the re-step 153 of 154 bodies equal on the joiner, the
+   one left `P_Ball_Wood_MF` (0.021 m), a ball-pushed body that is off on
+   the founders too (0.008 m on c1/c2 at the same tick: pushed by the
+   predicted paper mirrors). Record-format design "As built (step H7X)".
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03

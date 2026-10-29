@@ -1258,6 +1258,20 @@ namespace bmmo::physics {
         return savestate::read_world(r, world, error);
     }
 
+    bool savestate_globals(const uint8_t* data, size_t size, float& time_factor, float gravity[3], std::string& error) {
+        error.clear();
+        if (!data || !size) {
+            error = "no savestate data";
+            return false;
+        }
+        savestate::reader r(data, size);
+        savestate::world_record world;
+        if (!savestate::read_world(r, world, error)) return false;
+        time_factor = world.time_factor;
+        for (int k = 0; k < 3; ++k) gravity[k] = world.gravity[k];
+        return true;
+    }
+
     std::string describe_savestate(const uint8_t* data, size_t size) {
         static const uint8_t empty = 0;
         savestate::reader r(data ? data : &empty, data ? size : 0);

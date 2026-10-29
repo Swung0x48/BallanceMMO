@@ -5264,3 +5264,80 @@ TEST(RollbackEngineGlobals, TheLiveGlobalsComeBackAfterTheReplay) {
         }
     }
 }
+
+// U8 (step H7X, design 4.2 / A17): a late joiner's resync.  Its records from
+// the anchor on are its own level start - factor 1 and gravity -9.81 until
+// its scripts write 2 / -20 at tick 3 - while the server's state of S (the
+// blob) was captured at 2 / -20.  The re-step runs at the server's globals
+// from the anchor on: the live world has them already (its scripts wrote them
+// at 3), so nothing is written at all (the record of 2 equals the anchor's own
+// and keeps the server's; from 3 the records, which equal them).  Without the
+// blob's globals (the control: a backend without the entry) the anchor's
+// 1 / -9.81 is written before the blob and tick 2 steps half a step - the
+// late joiner's half-step of FULL H1's h7_join.
+namespace {
+    void joiner_start_write_at_3(fake_world& world, uint32_t tick) {
+        world.factor = tick >= 3 ? 2.0f : 1.0f;
+        world.gravity_y = tick >= 3 ? -20.0 : -9.81;
+    }
+}
+
+TEST(RollbackEngineGlobals, AResyncReStepRunsAtTheServerBlobsGlobals) {
+    double clocks[2] = {};
+    for (const bool server: {true, false}) {
+        SCOPED_TRACE(server ? "the blob's globals" : "control: no blob_globals hook");
+        fake_world arm;
+        seed_globals_world(arm);
+        rollback_engine engine;
+        auto w = arm.adapter();
+        int blob_reads = 0;
+        if (server)
+            w.blob_globals = [&blob_reads](const std::vector<uint8_t>& blob, bmmo_physics_globals& out) {
+                ++blob_reads;
+                if (blob.size() != 3) return false;
+                out = {};
+                out.time_factor = 2.0f;
+                out.gravity[1] = static_cast<double>(-20.0f);
+                return true;
+            };
+        w.set_travelling_savestate = [&arm](const bmmo::session::travelling_blob&, bmmo::session::savestate_outcome&) {
+            arm.calls.push_back("set_travelling_savestate");
+            return true;
+        };
+        step_globals(arm, w, &engine, 1, 10, joiner_start_write_at_3);
+        ASSERT_EQ(engine.first_globals_change(), 3u);
+        arm.calls.clear();
+        arm.steps = 0;
+        const double clock_at_1 = arm.clock;   // the travelling blob carries the clock: the fake's is not rewound
+        const std::vector<uint8_t> server_blob{1, 2, 3};
+        bmmo::session::resync_spec spec;
+        spec.blob.blob = &server_blob;
+        bmmo::session::resync_outcome out;
+        ASSERT_TRUE(engine.resync(w, 1, 10, spec, no_input, out, "U8"));
+        EXPECT_EQ(arm.steps, 9);
+        const std::vector<size_t> sets = call_indices(arm, "set_globals");
+        if (server) {
+            EXPECT_EQ(blob_reads, 1);
+            EXPECT_TRUE(arm.globals_set.empty()) << "the server's are the live ones: no write";
+            EXPECT_EQ(engine.stats().globals_server, 1u);
+            EXPECT_EQ(arm.count("log rollback to tick 1 (U8): the re-step runs at the server's physics globals"), 1);
+            for (uint32_t t = 1; t <= 10; ++t) {
+                const bmmo_physics_globals* g = engine.recorded_globals(t);
+                ASSERT_NE(g, nullptr) << "tick " << t;
+                EXPECT_EQ(g->time_factor, 2.0f) << "the re-record of " << t << " is the server's world";
+            }
+        } else {
+            ASSERT_EQ(arm.globals_set.size(), 2u) << "the anchor record's, then the record of 3's";
+            EXPECT_EQ(arm.globals_set[0].first, 1.0f);
+            EXPECT_EQ(arm.globals_set[1].first, 2.0f);
+            ASSERT_EQ(sets.size(), 2u);
+            EXPECT_LT(sets[0], arm.first("set_travelling_savestate")) << "the anchor's before the blob";
+            EXPECT_EQ(engine.stats().globals_server, 0u);
+        }
+        EXPECT_EQ(arm.factor, 2.0f);
+        EXPECT_EQ(arm.gravity_y, -20.0);
+        clocks[server ? 0 : 1] = arm.clock - clock_at_1;
+    }
+    EXPECT_NEAR(clocks[0], 9.0 * 2.0 * kDt, 1e-12) << "nine server steps (the clock advanced by the re-step alone)";
+    EXPECT_NEAR(clocks[0] - clocks[1], kDt, 1e-12) << "the control steps tick 2 at half the server's step";
+}

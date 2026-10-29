@@ -120,6 +120,13 @@ namespace bmmo::physics {
     // Validate a blob's framing without touching any world.
     bool check_savestate(const uint8_t* data, size_t size, std::string& error);
 
+    // The physics globals a blob was captured with (step H7X): the manager's
+    // time factor and the environment's gravity as the blob records them
+    // (floats), read without touching any world.  A restore writes neither
+    // (the factor stays live, the gravity is compared); a resync re-step
+    // runs at the server's (record-format-gaps design 4.2, A17).
+    bool savestate_globals(const uint8_t* data, size_t size, float& time_factor, float gravity[3], std::string& error);
+
     // A deterministic, line-per-record text rendering of a blob (names, not
     // indices, wherever a record refers to an object), for traces and for
     // `diff_savestate`.  Floats are printed as hex so a one-ulp change shows.

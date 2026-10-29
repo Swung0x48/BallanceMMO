@@ -1314,6 +1314,22 @@ over public members; the rollback engine calls them only inside a rewind
 the live ones after the replay), so no live step, record or journal byte
 changes.
 
+## Bridge notes: a savestate blob's physics globals (bridge API v29, no engine change)
+
+Step H7X (record-format-gaps design 4.2 / A17, As built (step H7X)). Not an
+engine change: nothing under `submodule/Ballanced` moved. `savestate_globals`
+(`physics_savestate.hpp`, `physics_savestate_common.cpp`) parses a blob with
+the savestate's own reader and returns the time factor and the gravity it
+was captured with (floats; the bridge widens the gravity to double), without
+touching any world. The rollback engine reads it once per resync re-step
+from the server's blob of S; the restore's rule is unchanged (it still
+writes neither the factor nor the gravity). Bridge v29 appends the entry to
+`bmmo_physics_api_v2`; `physics_direct.hpp` and the retail `physics_view`
+expose it, and `rollback_binding.hpp` installs `rollback_world::blob_globals`
+for a backend that has it (a test backend without it keeps the RK1
+behaviour). No format change (wire, record, journal); a late joiner's
+re-step results change, by design.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

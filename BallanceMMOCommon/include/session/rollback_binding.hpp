@@ -278,6 +278,17 @@ namespace bmmo::session {
                 failed(error);
                 return false;
             };
+            // Step H7X (bridge v29): a resync blob's globals.  A backend
+            // without the entry (a test's) leaves the hook empty: the re-step
+            // then runs at the anchor record's, as before.
+            if constexpr (requires(Backend& x, bmmo_physics_globals& g, std::string& s) {
+                              x.savestate_globals(static_cast<const uint8_t*>(nullptr), size_t{0}, g, s);
+                          }) {
+                world.blob_globals = [b](const std::vector<uint8_t>& blob, bmmo_physics_globals& out) {
+                    std::string error;
+                    return b->savestate_globals(blob.data(), blob.size(), out, error);
+                };
+            }
         }
         world.log = o.log;
         world.on_correction = o.on_correction;

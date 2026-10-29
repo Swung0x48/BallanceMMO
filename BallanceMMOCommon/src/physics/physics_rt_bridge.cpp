@@ -329,6 +329,24 @@ namespace {
         return 1;
     }
 
+    // v29 (step H7X): a blob's physics globals.
+    int32_t api_savestate_globals(const uint8_t* data, uint32_t size, bmmo_physics_globals* out, char* error,
+                                  uint32_t error_size) {
+        if (!data || !out) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        float factor = 0.0f, gravity[3] = {};
+        if (!bmmo::physics::savestate_globals(data, size, factor, gravity, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        out->time_factor = factor;
+        for (int k = 0; k < 3; ++k) out->gravity[k] = static_cast<double>(gravity[k]);
+        return 1;
+    }
+
     int32_t api_step_physics(void* manager, float delta_ms, char* error, uint32_t error_size) {
         if (!manager) {
             set_error(error, error_size, "null argument");
@@ -1055,6 +1073,7 @@ namespace {
         api_joint_blocks_order,
         api_get_physics_globals,
         api_set_physics_globals,
+        api_savestate_globals,
     };
 }
 

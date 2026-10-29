@@ -154,6 +154,8 @@ namespace bmmo::physics {
         // ---- bridge API v28 (step RK1): the time factor and the gravity ----
         bool get_physics_globals(bmmo_physics_globals& out, std::string& error) const;
         bool set_physics_globals(const bmmo_physics_globals& in, std::string& error) const;
+        // ---- bridge API v29 (step H7X): the physics globals a savestate blob was captured with ----
+        bool savestate_globals(const uint8_t* data, size_t size, bmmo_physics_globals& out, std::string& error) const;
 
         // ---- bridge API v6 (design 9.10): spawn impulse, deterministic Random block ----
         // Impulse direction_ws * speed * mass at the body's mass centre; applied

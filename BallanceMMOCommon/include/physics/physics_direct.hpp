@@ -66,6 +66,14 @@ namespace bmmo::physics {
         bool set_physics_globals(const bmmo_physics_globals& in, std::string& error) const {
             return bmmo::physics::set_physics_globals(manager, in, error);
         }
+        // v29 (step H7X): the physics globals a blob was captured with.
+        bool savestate_globals(const uint8_t* data, size_t size, bmmo_physics_globals& out, std::string& error) const {
+            float factor = 0.0f, gravity[3] = {};
+            if (!bmmo::physics::savestate_globals(data, size, factor, gravity, error)) return false;
+            out.time_factor = factor;
+            for (int k = 0; k < 3; ++k) out.gravity[k] = static_cast<double>(gravity[k]);
+            return true;
+        }
         int contacts_get(const char* entity, bmmo_physics_contact* out, int max, std::string& error) const {
             return bmmo::physics::get_contacts(manager, entity, out, max, error);
         }
