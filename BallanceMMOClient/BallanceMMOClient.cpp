@@ -812,9 +812,17 @@ void BallanceMMOClient::OnExitGame()
     config_manager_.check_and_save_name_change_time();
     cleanup(true);
     client::destroy();
+    // Step SIO: last, after cleanup ended a running session (its journal's
+    // close is posted to thread_pool_): what the session journal's writer
+    // still holds goes to the file now, while thread_pool_ still exists
+    // (bounded wait).
+    bmmo::session::io::drain_all(std::chrono::milliseconds(2000));
 }
 
 inline void BallanceMMOClient::on_fatal_error(char* extra_text) {
+    // Step SIO: the crash handler's callback - the session journal's queue
+    // is written out (best effort, bounded) before the process dies.
+    bmmo::session::io::drain_all(std::chrono::milliseconds(1000));
     if (!connected())
         return;
 

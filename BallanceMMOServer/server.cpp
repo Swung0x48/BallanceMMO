@@ -27,6 +27,7 @@
 #if BMMO_BUILD_SIM
 #include "sim/session_runner.hpp"
 #include "sim/crash_report.hpp"
+#include <session/io_pool.hpp>
 #include "sim/late_tick.hpp"
 #include <physics/physics_state.hpp>
 #include <session/lifecycle.hpp>
@@ -819,6 +820,10 @@ public:
             rc.journal_dir = config_manager::resolve_path(config_.physics_journal_dir.c_str());
         rc.journal_max_bytes = static_cast<uint64_t>(config_.physics_journal_max_mb) << 20;
         rc.journal_checkpoint_ticks = config_.physics_journal_checkpoint_ticks;
+        // Step SIO: the journals are written by the server's own one-thread
+        // I/O pool (no flush), never on the runner thread.
+        io_pool_ = std::make_unique<bmmo::session::io_pool>(1);
+        rc.io_strand = [pool = io_pool_.get()] { return pool->strand(); };
         physics_seed_ = rc.seed;
         bmmo::sim::session_callbacks callbacks;
         callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
@@ -3990,6 +3995,10 @@ protected:
     // and trafo seeds derive from it, so SessionStart carries this value.
     int physics_seed_ = 1;
     std::chrono::steady_clock::time_point next_rtt_post_{};   // post_player_rtts, once a second
+    // Step SIO: the session journals' I/O pool.  Before the runner, so it is
+    // destroyed after it: the runner's posted closes run (the pool joins)
+    // once the runner is gone.
+    std::unique_ptr<bmmo::session::io_pool> io_pool_;
     // Declared last so it is destroyed first: its thread calls back into
     // the members above.
     std::unique_ptr<bmmo::sim::session_runner> runner_;
@@ -4102,6 +4111,9 @@ int main(int argc, char** argv) {
 
 #if BMMO_BUILD_SIM
     bmmo::sim::install_crash_reporter();   // backtraces from the simulation thread
+    // Step SIO: a crash writes out what the journals' writer still holds
+    // (best effort, bounded).
+    bmmo::sim::set_crash_drain([] { bmmo::session::io::drain_all(std::chrono::milliseconds(1000)); });
 #endif
     printf("Initializing sockets...\n");
     server::init_socket();

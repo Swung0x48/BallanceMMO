@@ -68,6 +68,7 @@
 #include <session/client_core.hpp>
 #include <session/spawn_impulse.hpp>
 #include <session/client_platform.hpp>
+#include <session/io_pool.hpp>
 #include <session/rollback_binding_scripts.hpp>
 #include <session/session_host_world.hpp>
 
@@ -3031,6 +3032,10 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // ---- journal: ModLoader/BMMOJournals, the newest 10 kept, and only
     // with the SessionJournal property on (read once per session, as the
     // legacy path does) ----
+    // Step SIO (session I/O off the tick thread): the journal is written by
+    // a strand of the mod's existing asio thread pool (thread_pool_), with no
+    // flush; the game thread only appends the records.
+    p.io_strand = [this] { return bs::strand_poster(thread_pool_.get_executor()); };
     p.journal_path = [this](const bs::journal_header& header) -> std::filesystem::path {
         if (!config_manager_["session_journal"]->GetBoolean()) return {};
         const auto directory = bs::client_journal::directory();

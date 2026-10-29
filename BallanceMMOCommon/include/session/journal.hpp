@@ -91,6 +91,7 @@
 #include "../entity/session.hpp"
 #include "../physics/physics_rt_api.h"
 #include "../physics/world_hash.hpp"
+#include "io_queue.hpp"
 
 namespace bmmo::session {
     enum class journal_tag : uint8_t {
@@ -590,16 +591,31 @@ namespace bmmo::session {
         uint8_t wait = 0;
     };
 
+    // The most bytes a journal's writer queue may hold (step SIO): past it
+    // the journal stops with a note instead of growing or blocking the tick
+    // (a disk gone for minutes).  32 MiB is many minutes of a session's
+    // records (the As-built note has the measured rate); the retail mod is a
+    // 32-bit process.
+    constexpr uint64_t kJournalMaxQueued = 32ull << 20;
+
+    // Writes a journal.  Step SIO: the records go to an io_queue
+    // (session/io_queue.hpp).  With an io_poster (the host's I/O strand) the
+    // tick thread only appends finished bytes and the strand writes them, in
+    // order, with no flush - the user's decision (2026-10-29): a writer
+    // thread and no proactive flush.  Without one (the SimTool, the tests,
+    // the retail legacy path) it writes on the caller's thread with the
+    // per-record flushes it always had.  The bytes are the same either way.
     class journal_writer {
     public:
         journal_writer() = default;
-        ~journal_writer() { close(); }
+        ~journal_writer() = default;   // an open queue closes synchronously (bounded wait)
         journal_writer(const journal_writer&) = delete;
         journal_writer& operator=(const journal_writer&) = delete;
 
         // `max_bytes` == 0 means no limit.  The directory must exist.
+        // `poster` (step SIO): the host's I/O strand; empty = synchronous.
         bool open(const std::filesystem::path& path, const journal_header& header, uint64_t max_bytes,
-                  std::string& error) {
+                  std::string& error, io_poster poster = {}, uint64_t max_queued = kJournalMaxQueued) {
             close();
             last_input_.clear();
             capped_ = false;
@@ -607,34 +623,37 @@ namespace bmmo::session {
             last_tick_ = header.first_tick;
             max_bytes_ = max_bytes;
             path_ = path;
-            stream_.open(path, std::ios::binary | std::ios::trunc);
-            if (!stream_) {
-                error = "cannot create " + path.string();
+            if (!sink_.open(path, std::move(poster), max_queued, error)) {
                 path_.clear();
                 return false;
             }
-            stream_.write(kJournalMagic, sizeof(kJournalMagic));
-            std::string version;
-            journal_detail::write_u32(version, kJournalVersion);
-            stream_.write(version.data(), static_cast<std::streamsize>(version.size()));
-            bytes_ += sizeof(kJournalMagic) + version.size();
+            std::string start(kJournalMagic, sizeof(kJournalMagic));
+            journal_detail::write_u32(start, kJournalVersion);
             std::string payload;
             journal_detail::write_header_payload(payload, header);
-            write_record(journal_tag::header, payload);
-            stream_.flush();
-            if (!stream_) {
-                error = "cannot write " + path.string();
-                close();
-                path_.clear();
-                return false;
+            append_record(start, journal_tag::header, payload);
+            bytes_ += start.size();
+            sink_.append(std::move(start), true);
+            if (!sink_.async()) {
+                sink_.flush();
+                if (sink_.failed()) {
+                    error = "cannot write " + path.string();
+                    close();
+                    path_.clear();
+                    return false;
+                }
             }
             return true;
         }
 
-        bool is_open() const { return stream_.is_open(); }
+        bool is_open() const { return sink_.is_open(); }
         bool capped() const { return capped_; }
         uint64_t bytes() const { return bytes_; }
         const std::filesystem::path& path() const { return path_; }
+        // Step SIO: the most bytes this file's writer queue held, and whether
+        // a writer thread writes it.
+        uint64_t peak_queued() const { return sink_.peak_queued(); }
+        bool asynchronous() const { return sink_.async(); }
 
         void player(uint32_t tick, uint32_t id, uint8_t join_order, bool added, const std::string& name) {
             if (!writable()) return;
@@ -785,18 +804,16 @@ namespace bmmo::session {
             record(journal_tag::wait, payload);
         }
 
-        void flush() {
-            if (stream_.is_open()) stream_.flush();
-        }
+        // Explicit and blocking: everything queued is written and handed to
+        // the OS.  No session path calls it (step SIO).
+        void flush() { sink_.flush(); }
 
-        void close() {
-            if (!stream_.is_open()) return;
-            stream_.flush();
-            stream_.close();
-        }
+        // With a writer thread the close is posted (the strand writes what is
+        // queued, then closes the file) and this returns at once.
+        void close() { sink_.close(); }
 
     private:
-        bool writable() const { return stream_.is_open() && !capped_; }
+        bool writable() const { return sink_.is_open() && !capped_; }
 
         static std::string note_payload(uint32_t tick, const std::string& text) {
             std::string payload;
@@ -805,13 +822,20 @@ namespace bmmo::session {
             return payload;
         }
 
-        void write_record(journal_tag tag, const std::string& payload) {
-            std::string head;
-            journal_detail::write_u8(head, static_cast<uint8_t>(tag));
-            journal_detail::write_u32(head, static_cast<uint32_t>(payload.size()));
-            stream_.write(head.data(), static_cast<std::streamsize>(head.size()));
-            stream_.write(payload.data(), static_cast<std::streamsize>(payload.size()));
-            bytes_ += head.size() + payload.size();
+        static void append_record(std::string& out, journal_tag tag, const std::string& payload) {
+            journal_detail::write_u8(out, static_cast<uint8_t>(tag));
+            journal_detail::write_u32(out, static_cast<uint32_t>(payload.size()));
+            out += payload;
+        }
+
+        // One record to the queue; `force`: past its bound (a stop note).
+        bool write_record(journal_tag tag, const std::string& payload, bool force = false) {
+            std::string bytes;
+            bytes.reserve(5 + payload.size());
+            append_record(bytes, tag, payload);
+            if (!sink_.append(std::move(bytes), force)) return false;
+            bytes_ += 5 + payload.size();
+            return true;
         }
 
         void record(journal_tag tag, const std::string& payload) {
@@ -822,13 +846,28 @@ namespace bmmo::session {
                 // truncated in the middle of a session.
                 capped_ = true;
                 write_record(journal_tag::note,
-                             note_payload(last_tick_, "cap: journal_max_bytes reached, recording stopped"));
-                stream_.flush();
+                             note_payload(last_tick_, "cap: journal_max_bytes reached, recording stopped"), true);
+                if (!sink_.async()) sink_.flush();
                 return;
             }
-            write_record(tag, payload);
-            // A crash must not cost more than the ticks since the last thing
-            // that happened; TICK and INPUT ride along with the next flush.
+            if (!write_record(tag, payload)) {
+                // Step SIO: the writer queue is full - the disk has taken no
+                // write for a long time.  Stop like the size cap and never
+                // block the tick: the file is a valid prefix that says why.
+                capped_ = true;
+                write_record(journal_tag::note,
+                             note_payload(last_tick_, "cap: writer queue full ("
+                                          + std::to_string(sink_.peak_queued())
+                                          + " bytes waiting for the disk), recording stopped"), true);
+                return;
+            }
+            // Step SIO: with a writer thread nothing is flushed (the user's
+            // decision); a crash loses what the queue and the stdio buffer
+            // hold (world-agreement-gaps-design.md, As built (step SIO)).
+            // Synchronous, as before: a crash must not cost more than the
+            // ticks since the last thing that happened; TICK and INPUT ride
+            // along with the next flush.
+            if (sink_.async()) return;
             switch (tag) {
                 case journal_tag::player:
                 case journal_tag::event:
@@ -836,14 +875,14 @@ namespace bmmo::session {
                 case journal_tag::note:
                 case journal_tag::correction:
                 case journal_tag::resync:
-                    stream_.flush();
+                    sink_.flush();
                     break;
                 default:
                     break;
             }
         }
 
-        std::ofstream stream_;
+        io_queue sink_;   // step SIO (was a std::ofstream)
         std::filesystem::path path_;
         std::map<uint32_t, input_frame> last_input_;   // per player, for the repeat flag
         uint64_t max_bytes_ = 0;

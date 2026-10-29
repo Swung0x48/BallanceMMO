@@ -66,6 +66,7 @@
 #include <session/input_relay.hpp>
 #include <session/lifecycle.hpp>
 #include <session/journal.hpp>
+#include <session/io_pool.hpp>
 #include <session/bridge_recipe.hpp>
 #include <session/lead_slew.hpp>
 #include <session/mechanism_tracking.hpp>
@@ -87,6 +88,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <set>
 #include <sstream>
@@ -710,21 +712,93 @@ namespace {
         return true;
     }
 
+    // Step SIO (session I/O off the tick thread; world-agreement-gaps-design.md,
+    // "As built (step SIO)"): the client's one-thread I/O pool, which writes
+    // the journal, the capture and this log, and the log's writer.  The log
+    // goes to stdout in the order it was logged, written by the pool's strand
+    // with no fflush at all (the user's decision: no proactive flush; stdout's
+    // stdio buffer reaches the file when it fills, at the close and in the
+    // exit / crash drains - a live reader such as arena_map_test.py's LogWatch
+    // sees lines in buffer-sized steps; whether to flush per batch for it
+    // waits on the user).  Before start_session_io() and
+    // after the log is closed (static destruction), a line is written and
+    // flushed here as before.  Static, pool first: the log is destroyed (and
+    // drained) first, then the pool runs what is still queued and joins -
+    // also on std::exit.
+    struct session_io {
+        std::unique_ptr<bmmo::session::io_pool> pool;
+        std::mutex log_mutex;
+        bmmo::session::io_queue log;
+        uint64_t log_dropped = 0;   // bytes of lines refused by a full log queue
+    };
+    session_io& session_io_state() {
+        static session_io instance;
+        return instance;
+    }
+    // A stdout that takes nothing for minutes must not grow without bound.
+    constexpr uint64_t kLogMaxQueued = 16ull << 20;
+
+    void start_session_io() {
+        auto& io = session_io_state();
+        io.pool = std::make_unique<bmmo::session::io_pool>(1);
+        std::lock_guard lk(io.log_mutex);
+        io.log.open_stream(stdout, io.pool->strand(), kLogMaxQueued);
+    }
+
+    // A new strand of the client's I/O pool for one file (empty before
+    // start_session_io: that file is written on the calling thread).
+    bmmo::session::io_poster session_io_strand() {
+        auto& io = session_io_state();
+        return io.pool ? io.pool->strand() : bmmo::session::io_poster{};
+    }
+
+    // The crash handlers' drain (crash_report.hpp set_crash_drain).
+    void drain_session_io() { bmmo::session::io::drain_all(std::chrono::milliseconds(1000)); }
+
+    void write_log_line(std::string line) {
+        auto& io = session_io_state();
+        std::lock_guard lk(io.log_mutex);
+        if (!io.log.is_open()) {
+            std::fputs(line.c_str(), stdout);
+            std::fflush(stdout);
+            return;
+        }
+        if (io.log_dropped != 0) {
+            const std::string notice = "[log] " + std::to_string(io.log_dropped)
+                                     + " bytes of log lines dropped: the log writer's queue was full\n";
+            if (io.log.append(notice)) io.log_dropped = 0;
+        }
+        const size_t size = line.size();
+        if (!io.log.append(std::move(line))) io.log_dropped += size;
+    }
+
     void logf(const char* format, ...) {
+        char stack[1024];
         va_list args;
         va_start(args, format);
-        std::vprintf(format, args);
+        va_list copy;
+        va_copy(copy, args);
+        const int n = std::vsnprintf(stack, sizeof(stack), format, args);
         va_end(args);
-        std::putchar('\n');
-        std::fflush(stdout);
+        std::string line;
+        if (n < 0) {
+            line = format;
+        } else if (static_cast<size_t>(n) < sizeof(stack)) {
+            line.assign(stack, static_cast<size_t>(n));
+        } else {
+            line.resize(static_cast<size_t>(n) + 1);
+            std::vsnprintf(line.data(), line.size(), format, copy);
+            line.resize(static_cast<size_t>(n));
+        }
+        va_end(copy);
+        line += '\n';
+        write_log_line(std::move(line));
     }
 
     // One line written as it is, as logf writes a formatted one: the shared
     // core's log operation (it formats the text itself).
     void log_line(const std::string& text) {
-        std::fputs(text.c_str(), stdout);
-        std::putchar('\n');
-        std::fflush(stdout);
+        write_log_line(text + '\n');
     }
 
     // The wire recipe in the bridge's shape: shared with the core's journal
@@ -903,7 +977,7 @@ namespace {
             std::string error;
             const int64_t den = static_cast<int64_t>(clock_type::period::den / clock_type::period::num);
             if (!args_.capture_inbound.empty()) {
-                if (!inbound_.open_capture(args_.capture_inbound, command_line, den, error)) {
+                if (!inbound_.open_capture(args_.capture_inbound, command_line, den, error, session_io_strand())) {
                     logf("capture-inbound: %s", error.c_str());
                     return false;
                 }
@@ -1386,6 +1460,8 @@ namespace {
             };
             // After a --rejoin-at the next life's journal goes beside the
             // first one (<stem>.rejoin<N><ext>) instead of over it.
+            // Step SIO: the journal is written by the client's I/O pool.
+            p.io_strand = [] { return session_io_strand(); };
             p.journal_path = [this](const bmmo::session::journal_header&) {
                 std::filesystem::path path(args_.journal);
                 if (rejoins_ > 0 && !path.empty())
@@ -1926,6 +2002,9 @@ namespace {
                  static_cast<unsigned long long>(flow_pass_ ? flow_pass_ - 1 : 0),
                  static_cast<unsigned long long>(flow_steps_), inbound_.where().c_str(), why.c_str());
             core_.journal().close("the inbound replay diverged");
+            // Step SIO: the journal's posted close and the log are written
+            // before the exit (std::exit runs no destructor of this client).
+            bmmo::session::io::drain_all(std::chrono::milliseconds(10000));
             std::fflush(stdout);
             std::exit(3);
         }
@@ -1936,6 +2015,7 @@ namespace {
                      static_cast<unsigned long long>(flow_pass_), static_cast<unsigned long long>(flow_steps_),
                      static_cast<unsigned long long>(inbound_.messages()));
                 inbound_.close();
+                logf("capture-inbound: writer queue peak %llu bytes", static_cast<unsigned long long>(inbound_.peak_queued()));
                 if (inbound_.write_failed())
                     logf("capture-inbound: WRITE FAILED: %s is incomplete (no end marker); do not replay it",
                          args_.capture_inbound.c_str());
@@ -4276,6 +4356,10 @@ int main(int argc, char** argv) {
     // harness with no stack at all.
     bmmo::sim::install_crash_reporter();
     bmmo::sim::opt_out_of_power_throttling();
+    // Step SIO: the journal, the capture and the log are written by one I/O
+    // thread from here on; a crash drains them (best effort, bounded).
+    start_session_io();
+    bmmo::sim::set_crash_drain(drain_session_io);
     arguments args;
     if (!parse(argc, argv, args)) { usage(); return 1; }
     // The engine changes the working directory to the game's Bin while it

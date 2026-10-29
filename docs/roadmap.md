@@ -487,7 +487,17 @@ numbers 1-10 are unchanged.
      not the tick; a crash then loses the writer's queue, which the
      journal's flush-per-event rule was written to bound (choose the
      bound when it is built). Evidence and numbers:
-     `world-agreement-gaps-design.md`, "As built (step SMK)".
+     `world-agreement-gaps-design.md`, "As built (step SMK)". **Built by
+     step SIO (2026-10-29)**: one writer (`session/io_queue.hpp`) on an asio
+     strand of the host's pool (retail `thread_pool_`, the server's and the
+     headless client's own one-thread pool), no proactive flush, bounded
+     queues, crash drains; the crash-loss bound and the checks in
+     `world-agreement-gaps-design.md`, "As built (step SIO)". **Waiting on
+     the user:** whether the headless client's stdout log is flushed once
+     per written batch on the writer thread, for `arena_map_test.py`'s
+     `LogWatch` (it arms link events and late joins from the live log; with
+     no flush they fire up to about 3 s late) - built without; the
+     alternative is `.local-tools/work/SIO/sio_log_flush_per_batch.patch`.
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

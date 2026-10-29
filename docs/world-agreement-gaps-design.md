@@ -3373,3 +3373,146 @@ changed.
   journals IDENTICAL, ALL SAME; the replays' final status fields and `reach:`
   lines equal the live ones. solo1 / solo2 replay to their end markers, sends
   SAME, journals byte-identical with rWM1. 603 tests pass, GCC check all ok.
+
+### As built (step SIO, 2026-10-29): session I/O off the tick thread
+
+The item SMK queued (roadmap section 4 item 2, "Session I/O on the tick thread"),
+built as the user decided (2026-10-29: "开独立写盘线程，然后不要主动flush" - a
+separate writer thread and no proactive flush; and, since asio is already
+there, an asio strand of a pool instead of a dedicated thread).
+
+- **One writer for every host** (`BallanceMMOCommon/include/session/io_queue.hpp`,
+  asio-free, so the SimTool's sim-only builds still include the journal):
+  `io_queue::append` moves finished bytes into an in-memory queue under a short
+  lock (no syscall, no lock held across I/O) and, when no write task is
+  pending, posts one through the host's `io_poster`; the task (`run_batch`)
+  takes the whole queue and `fwrite`s it in order, **with no flush**. One
+  strand per file keeps the order. `close()` is posted too (the strand writes
+  what is queued, then `fclose`s) and returns at once; a destructor of a
+  still-open queue closes synchronously (drain + close, waits at most 2 s for
+  the file). The asio half is `session/io_pool.hpp`: `strand_poster(executor)`
+  (`asio::make_strand` + `asio::post`) and `io_pool`, a one-thread
+  `asio::thread_pool` whose destructor `join()`s (every queued write and close
+  runs) - included only where asio is on the path.
+- **The journal** (`journal.hpp` `journal_writer`): its `std::ofstream` is an
+  `io_queue`; `open(path, header, max_bytes, error, poster = {}, max_queued =
+  kJournalMaxQueued)`. The bytes are built and counted exactly as before (the
+  size cap and its note included, `bytes_` counts what was queued), so the file
+  is byte for byte the old writer's. With a poster nothing is flushed; without
+  one (the SimTool, the tests, the retail legacy path's
+  `session_journal_client`) it writes on the caller's thread with the same
+  per-tag flushes as before (adaptation: the BAR keeps the legacy path as it
+  was; only its buffer is a `FILE*` now, same bytes, same flush points).
+- **Where the strand comes from.** The core asks its platform: a new
+  `session_platform::io_strand` (`client_platform.hpp`, beside `journal_path`;
+  empty = the tick thread writes, the fallback) that `client_journal::open`
+  calls once per file. Headless (`sim/session_client.cpp`): one static
+  `session_io` holding a one-thread `io_pool` and the log's queue, started at
+  the top of `main`; the journal, the inbound capture and the log each get a
+  strand of it. Retail (`session/core_host.cpp`): `strand_poster(thread_pool_.get_executor())`
+  - the mod's existing `asio::thread_pool`, no new data member. Server:
+  **adaptation** - the pool is the server's (`server::io_pool_`, declared
+  before `runner_` so it outlives it; made once, in `init_physics_runner`,
+  which only `setup()` calls) and reaches the runner as
+  `runner_config::io_strand`, because `session_runner` lives in `BallanceMMOSim`,
+  which is also built sim-only without the asio include path.
+- **The log** (headless `logf` / `log_line`): formatted on the caller's thread,
+  appended to the stdout queue under one mutex (the order is the call order)
+  and written with **no flush** (the user's decision taken literally: stdout's
+  stdio buffer reaches the file when it fills, at the close and in the exit /
+  crash drains). **Pending the user's decision:** `arena_map_test.py`'s
+  `LogWatch` follows a client's log live and arms the proxy link events and
+  the late joins (`--join-late`) from the moment it reads `tick base N
+  assigned`; without a flush that line is only visible once the 4 KiB buffer
+  it sits in fills - measured on the `sio_stall` client logs, 0 s for two
+  clients and about 2.6-3.1 s (ticks 200 / 231 against base 27) for the other
+  two - so those events fire late by that much until the user decides
+  between (a) an `fflush` per written batch on the writer thread (never on
+  the tick thread; the implement round had it), (b) no flush (built), (c)
+  a per-process opt-in the harness sets (the server's `auto_flush_log` is
+  the precedent). Native code writing to stdout directly (an engine DLL's
+  `printf`) can now land ahead of queued lines; cosmetic. Before
+  `start_session_io()` and after static destruction a line is written and
+  flushed directly, as before. **The capture** (`sim/inbound_capture.hpp`): the records of a main-loop
+  pass are collected in memory and handed over once per pass (or at 256 KiB);
+  its close stays synchronous at the run's end (bounded 60 s) so
+  `write_failed()` is final when the client logs it.
+- **What still runs on the tick thread:** opening a file (`fopen`, once per
+  session; its failure is still reported there), and on retail
+  `journal_path`'s `create_directories` / prune. Nothing per record. One
+  exception to "opened there": a reopen of the path a queue's posted close
+  still holds (the headless client's journal for a second SessionStart:
+  `client_core.cpp` closes it and opens `args_.journal` again) is **deferred to
+  the writer** - its first write task (or a drain) writes the old file's queue
+  out, closes it, then truncates the path - so the tick thread neither
+  truncates under the open handle (the review's finding: the old strand's tail
+  would land at its old offset inside the new journal) nor waits for a stalled
+  disk; such an open's failure shows as the queue's `failed()`. The queue
+  mutex is timed: the crash drains only try it (bounded), so a fault inside
+  `append`'s critical section cannot hang the handler.
+- **Memory bound, never blocking:** a journal's queue holds at most
+  `kJournalMaxQueued` = 32 MiB; past it the journal stops like the size cap
+  with the note `cap: writer queue full (N bytes waiting for the disk),
+  recording stopped` (the file stays a valid prefix). The log's queue: 16 MiB,
+  then lines are dropped and counted, and the next line that fits is preceded
+  by `[log] N bytes of log lines dropped: ...`. The capture's: 64 MiB, then the
+  capture stops as a failed write does (no end marker, logged). The heaviest
+  journal measured (checkpoint every 2 ticks, the smoke below) is about 135
+  KB/s, so 32 MiB is about 4 minutes of a disk that takes nothing; at the
+  default cadence much longer.
+- **Crash-loss bound.** A hard kill (TerminateProcess, SIGKILL, the harness's
+  10-minute kill) loses what is still in the queue plus the stdio buffer: in a
+  healthy run the queue is taken as soon as it is posted (peaks 2.7-6.2 KB on
+  the retail and server journals below), so about one stdio buffer (the CRT's
+  4 KiB on MSVC, BUFSIZ-sized on glibc; the capture keeps its 1 MiB buffer);
+  under a disk stall, up to the stall's records (at most the 32 MiB bound).
+  Before SIO a kill lost only the TICK and INPUT records since the last
+  flushed record (player, event, checkpoint, note, correction, resync). A
+  crash the handlers see drains every queue first (best effort, 1 s per file):
+  `bmmo::sim::set_crash_drain` (new, `sim/crash_report.cpp`: the unhandled
+  exception filter, abort, the Linux fatal signals) for the headless client
+  and the server, and on retail the `CrashCallback` of `dumpfile.cpp`'s
+  `UnhandledExceptionFilterEx` (`on_fatal_error`) - the retail mod has no
+  `BMMO_CRASH_DUMP` handler, that variable is the sim's. `OnExitGame` drains
+  too, last (after `cleanup` ended a running session and posted its close;
+  bounded 2 s), while `thread_pool_` still exists; a write task a stopped pool
+  abandons unrun is caught by the queue state's destructor, which writes what
+  is queued and closes the file; the inbound replay's divergence exit drains
+  before `std::exit`. A process that never had a queue with a writer thread
+  (the retail legacy path) never builds the drain's registry: its crash
+  handler allocates nothing new. Power loss: the OS cache, as
+  before (no fsync anywhere, before or after).
+- **Test switch:** `BMMO_IO_TEST_DELAY_MS` (environment, read once): every
+  write task sleeps that long holding its file before writing, as a stalled
+  `WriteFile` would. Never applies to a synchronous queue.
+- **Checks (QUICK).** `BallanceMMOMessageTests` 610/610 (six new
+  `SessionIo.*`: the strand's bytes equal the synchronous writer's for the
+  synthetic session, through a real pool and through a stalled poster released
+  later, with nothing written before the release; a destroyed writer drains its
+  queue; the size-cap note with a writer thread is byte for byte the
+  synchronous file; a full queue stops the journal with its note and blocks
+  nothing; `io::drain_all` writes a stalled queue; the stdout shape keeps 2000
+  lines in order and leaves the stream open). GCC syntax check all ok; the
+  Arch server built (`ballanced-36c04e3d24c9+bmmo-04d93c012c00-dirty`). Wire
+  check `rSPX` vs `rSIO` over `core_ref_s10`: 12/12 sends SAME, 12/12 journals
+  IDENTICAL, ALL SAME. Live smoke (`work/SIO/live.sh sio_stall 2000`: 4
+  clients, 60 s, LANE arm, snapshots off, the clients with
+  `BMMO_IO_TEST_DELAY_MS=2000`, i.e. each of the three files of a client got a
+  write every ~6 s): starved 0, rebases 0, resyncs 0 on all four, frame t_max
+  19-23 ms; the server journal replays matched 4601/4601 (checkpoint
+  mismatches 0); each client's captured stream replayed with the same binary
+  and no delay writes a journal byte-identical to the one the stalled writer
+  wrote (4/4), and every capture reached its end marker; journal queue peaks
+  1.24-1.26 MB, capture 168-177 KB, the server's 6.2 KB. Its window A's
+  `own 147.7-153.9` is not this step's: wm1_live (WM1, before SIO) shows the
+  same 149.67. Retail (`work/CD1/cd1_gate.py sio_retail`, L11, two copies,
+  core on, snapshots off, placement on): both client journals written by the
+  `thread_pool_` strand (queue peak 2690 bytes), read to their end with no
+  trailing bytes and `end: room closed` last; the game exited cleanly.
+  Gate round (the reopen deferral, the timed queue mutex, the log flush
+  removed): one more `SessionIo` test (a reopen of the same path under two
+  stalled strands, run in either order and through `drain_all`, ends as the
+  second session's journal alone, byte for byte), the builds, the tests, the
+  GCC check and the wire check rerun (numbers in the commit message); the
+  live smoke and the retail run were not rerun (the live paths' bytes are
+  unchanged and the step had used its two live runs).

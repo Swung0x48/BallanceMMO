@@ -239,7 +239,8 @@ namespace bmmo::sim {
         const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
         s.journal_start = clock::now();
         std::string error;
-        if (!s.journal.open(path, header, config_.journal_max_bytes, error)) {
+        if (!s.journal.open(path, header, config_.journal_max_bytes, error,
+                            config_.io_strand ? config_.io_strand() : bmmo::session::io_poster{})) {
             log(prefix + error);
             return;
         }
@@ -389,6 +390,9 @@ namespace bmmo::sim {
                 }
                 s.journal.note(s.world ? s.world->tick_index() : 0,
                                "end: " + (reason.empty() ? std::string("session destroyed") : reason));
+                if (s.journal.asynchronous())   // step SIO: the writer queue's high-water mark
+                    log("[session " + std::to_string(s.id) + "] journal writer queue peak "
+                        + std::to_string(s.journal.peak_queued()) + " bytes");
                 s.journal.close();
             }
             sessions_.erase(session);

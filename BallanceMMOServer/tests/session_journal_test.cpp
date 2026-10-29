@@ -13,6 +13,7 @@
 #include <system_error>
 #include <vector>
 
+#include <session/io_pool.hpp>
 #include <session/journal.hpp>
 #include <session/trafo_input.hpp>
 
@@ -193,10 +194,12 @@ namespace {
     // ticks 100..103, with repeated and fresh inputs for two players, both
     // event shapes, a mixed checkpoint, notes and corrections.  Returns the
     // offset the closing NOTE starts at, so a test can cut the file inside it.
-    uint64_t write_synthetic(const std::filesystem::path& path) {
+    // `poster` (step SIO): the writer thread the journal is written by
+    // (empty: synchronous, as before).
+    uint64_t write_synthetic(const std::filesystem::path& path, io_poster poster = {}) {
         journal_writer writer;
         std::string error;
-        EXPECT_TRUE(writer.open(path, make_header(), 0, error)) << error;
+        EXPECT_TRUE(writer.open(path, make_header(), 0, error, std::move(poster))) << error;
 
         writer.note(100, "start: room 1 \"test room\"");
         writer.player(100, 42, 1, true, "alice");
@@ -1277,4 +1280,256 @@ TEST(SessionJournal, V5WorldOptionsAndTheTrafoEvent) {
     EXPECT_EQ(120u, e.origin_tick);
     EXPECT_EQ(948.74127f, e.position[0]);
     EXPECT_EQ(-56.514111f, e.position[2]);
+}
+
+// ---------------------------------------------------------------------------
+// Step SIO: session I/O off the tick thread (session/io_queue.hpp).
+
+namespace {
+    // A writer thread that is stalled for as long as the test likes: the
+    // posted tasks wait here until run() (single threaded: the test posts
+    // and runs).
+    struct held_poster {
+        std::shared_ptr<std::vector<io_task>> tasks = std::make_shared<std::vector<io_task>>();
+        io_poster poster() const {
+            auto t = tasks;
+            return [t](io_task task) { t->push_back(std::move(task)); };
+        }
+        size_t run() {
+            size_t n = 0;
+            while (!tasks->empty()) {
+                auto batch = std::move(*tasks);
+                tasks->clear();
+                for (auto& task: batch) {
+                    task();
+                    ++n;
+                }
+            }
+            return n;
+        }
+    };
+
+    void write_notes(journal_writer& writer, int count) {
+        for (int i = 0; i < count; ++i) writer.note(static_cast<uint32_t>(100 + i), "note " + std::to_string(i));
+    }
+}
+
+// The bytes and their order are the synchronous writer's, whether a real
+// strand writes them or a stalled one is released later; the close drains.
+TEST(SessionIo, WriterThreadWritesTheSameBytesInOrder) {
+    const temp_dir dir("sio_same_bytes");
+    const auto sync_path = dir.file("sync.bmjr");
+    const auto pool_path = dir.file("pool.bmjr");
+    const auto held_path = dir.file("held.bmjr");
+    write_synthetic(sync_path);
+    {
+        io_pool pool(1);
+        write_synthetic(pool_path, pool.strand());
+    }   // the pool runs the posted close before it joins
+    held_poster held;
+    write_synthetic(held_path, held.poster());
+    // nothing was written on the "tick thread": the file exists (opened
+    // there) but every record still waits for the writer
+    EXPECT_EQ(0u, std::filesystem::file_size(held_path));
+    EXPECT_EQ(1u, held.tasks->size());   // one task for the whole session, the close included
+    EXPECT_GT(held.run(), 0u);
+    const std::string expected = read_file(sync_path);
+    ASSERT_FALSE(expected.empty());
+    EXPECT_EQ(expected, read_file(pool_path));
+    EXPECT_EQ(expected, read_file(held_path));
+    journal out;
+    std::string error;
+    ASSERT_TRUE(read_journal(held_path, out, error)) << error;
+    EXPECT_EQ(0u, out.bytes_dropped);
+}
+
+// A writer destroyed while its strand is stalled closes synchronously: what
+// was queued is in the file.
+TEST(SessionIo, DestroyedWriterDrainsItsQueue) {
+    const temp_dir dir("sio_destroy");
+    const auto sync_path = dir.file("sync.bmjr");
+    const auto held_path = dir.file("held.bmjr");
+    std::string error;
+    {
+        journal_writer writer;
+        ASSERT_TRUE(writer.open(sync_path, make_header(), 0, error)) << error;
+        write_notes(writer, 50);
+    }
+    held_poster held;
+    {
+        journal_writer writer;
+        ASSERT_TRUE(writer.open(held_path, make_header(), 0, error, held.poster())) << error;
+        EXPECT_TRUE(writer.asynchronous());
+        write_notes(writer, 50);
+        EXPECT_EQ(0u, std::filesystem::file_size(held_path));
+        EXPECT_EQ(writer.bytes(), writer.peak_queued());
+    }
+    EXPECT_EQ(read_file(sync_path), read_file(held_path));
+    held.run();   // the stale task finds the file closed: nothing changes
+    EXPECT_EQ(read_file(sync_path), read_file(held_path));
+}
+
+// The size cap's note is the last record with a writer thread too, and the
+// file is byte for byte the synchronous one.
+TEST(SessionIo, SizeCapNoteWithAWriterThread) {
+    const temp_dir dir("sio_size_cap");
+    const auto sync_path = dir.file("sync.bmjr");
+    const auto pool_path = dir.file("pool.bmjr");
+    std::string error;
+    {
+        journal_writer writer;
+        ASSERT_TRUE(writer.open(sync_path, make_header(), 200, error)) << error;
+        write_notes(writer, 20);
+        EXPECT_TRUE(writer.capped());
+        writer.close();
+    }
+    {
+        io_pool pool(1);
+        journal_writer writer;
+        ASSERT_TRUE(writer.open(pool_path, make_header(), 200, error, pool.strand())) << error;
+        write_notes(writer, 20);
+        EXPECT_TRUE(writer.capped());
+        writer.close();
+    }
+    EXPECT_EQ(read_file(sync_path), read_file(pool_path));
+    journal out;
+    ASSERT_TRUE(read_journal(pool_path, out, error)) << error;
+    ASSERT_FALSE(out.notes.empty());
+    EXPECT_EQ("cap: journal_max_bytes reached, recording stopped", out.notes.back().text);
+}
+
+// A disk that takes nothing for long: past the queue bound the journal stops
+// with a note of its own; nothing blocks, and the file is a valid prefix.
+TEST(SessionIo, AFullWriterQueueStopsTheJournalWithANote) {
+    const temp_dir dir("sio_queue_full");
+    const auto path = dir.file("held.bmjr");
+    held_poster held;
+    journal_writer writer;
+    std::string error;
+    ASSERT_TRUE(writer.open(path, make_header(), 0, error, held.poster(), 400)) << error;
+    int written = 0;
+    for (int i = 0; i < 100 && !writer.capped(); ++i) {
+        writer.note(static_cast<uint32_t>(100 + i), "note " + std::to_string(i));
+        if (!writer.capped()) ++written;
+    }
+    EXPECT_TRUE(writer.capped());
+    EXPECT_GT(written, 0);
+    const uint64_t bytes = writer.bytes();
+    writer.note(300, "after the stop");
+    EXPECT_EQ(bytes, writer.bytes());
+    writer.close();
+    held.run();
+    EXPECT_EQ(bytes, std::filesystem::file_size(path));
+    journal out;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    ASSERT_EQ(static_cast<size_t>(written) + 1, out.notes.size());
+    for (int i = 0; i < written; ++i) EXPECT_EQ("note " + std::to_string(i), out.notes[static_cast<size_t>(i)].text);
+    EXPECT_EQ(0u, out.notes.back().text.find("cap: writer queue full ("));
+    EXPECT_EQ(static_cast<uint32_t>(100 + written), out.notes.back().tick);
+    EXPECT_EQ(0u, out.bytes_dropped);
+}
+
+// The exit / crash drain writes a stalled queue out without its strand.
+TEST(SessionIo, DrainAllWritesAStalledQueue) {
+    const temp_dir dir("sio_drain_all");
+    const auto path = dir.file("held.bmjr");
+    held_poster held;
+    journal_writer writer;
+    std::string error;
+    ASSERT_TRUE(writer.open(path, make_header(), 0, error, held.poster())) << error;
+    write_notes(writer, 30);
+    EXPECT_EQ(0u, std::filesystem::file_size(path));
+    io::drain_all(std::chrono::milliseconds(1000));
+    EXPECT_EQ(writer.bytes(), std::filesystem::file_size(path));
+    write_notes(writer, 5);
+    writer.close();
+    held.run();
+    EXPECT_EQ(writer.bytes(), std::filesystem::file_size(path));
+    journal out;
+    ASSERT_TRUE(read_journal(path, out, error)) << error;
+    EXPECT_EQ(35u, out.notes.size());
+}
+
+// A second session's journal on the same path while the first one's posted
+// close has not run (the headless client's new SessionStart under a stalled
+// disk): the file is never truncated under the open handle; it ends as the
+// second session's journal alone, whichever strand runs first.
+TEST(SessionIo, ReopenOfTheSamePathWaitsForThePreviousFile) {
+    const temp_dir dir("sio_reopen");
+    const auto sync_path = dir.file("sync.bmjr");
+    std::string error;
+    {
+        journal_writer writer;
+        ASSERT_TRUE(writer.open(sync_path, make_header(), 0, error)) << error;
+        write_notes(writer, 7);
+        writer.close();
+    }
+    const std::string expected = read_file(sync_path);
+    ASSERT_FALSE(expected.empty());
+    for (const bool second_first: {false, true}) {
+        const auto path = dir.file(second_first ? "b_first.bmjr" : "a_first.bmjr");
+        held_poster first, second;
+        journal_writer writer;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error, first.poster())) << error;
+        write_notes(writer, 40);   // longer than the second session: a leftover tail would show
+        writer.close();
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error, second.poster())) << error;
+        EXPECT_TRUE(writer.asynchronous());
+        write_notes(writer, 7);
+        writer.close();
+        if (second_first) {
+            second.run();
+            EXPECT_EQ(expected, read_file(path));
+            first.run();   // finds its file closed by the second's writer
+        } else {
+            first.run();
+            second.run();
+        }
+        EXPECT_EQ(expected, read_file(path)) << (second_first ? "second strand first" : "first strand first");
+        journal out;
+        ASSERT_TRUE(read_journal(path, out, error)) << error;
+        EXPECT_EQ(0u, out.bytes_dropped);
+        EXPECT_EQ(7u, out.notes.size());
+    }
+    // The exit / crash drain does the deferred open too.
+    {
+        const auto path = dir.file("drained.bmjr");
+        held_poster first, second;
+        journal_writer writer;
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error, first.poster())) << error;
+        write_notes(writer, 40);
+        writer.close();
+        ASSERT_TRUE(writer.open(path, make_header(), 0, error, second.poster())) << error;
+        write_notes(writer, 7);
+        writer.close();
+        io::drain_all(std::chrono::milliseconds(1000));
+        EXPECT_EQ(expected, read_file(path));
+        first.run();
+        second.run();
+        EXPECT_EQ(expected, read_file(path));
+    }
+}
+
+// The log's shape: a stream someone else owns, many small appends from a
+// real strand, every line in order, the stream left open.
+TEST(SessionIo, StreamQueueKeepsTheOrderAndLeavesTheStreamOpen) {
+    const temp_dir dir("sio_stream");
+    const auto path = dir.file("log.txt");
+    std::FILE* stream = std::fopen(path.string().c_str(), "wb");
+    ASSERT_NE(nullptr, stream);
+    std::string expected;
+    {
+        io_pool pool(1);
+        io_queue log;
+        log.open_stream(stream, pool.strand(), 1 << 20);
+        for (int i = 0; i < 2000; ++i) {
+            std::string line = "line " + std::to_string(i) + "\n";
+            expected += line;
+            EXPECT_TRUE(log.append(std::move(line)));
+        }
+        log.close();
+    }
+    EXPECT_NE(EOF, std::fputs("after\n", stream));   // still open: the queue only flushed it
+    std::fclose(stream);
+    EXPECT_EQ(expected + "after\n", read_file(path));
 }

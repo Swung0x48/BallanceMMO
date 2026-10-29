@@ -64,7 +64,10 @@ namespace bmmo::session::core {
         header.utc_ms = platform.utc_ms(clock_site::journal_utc);
         journal_start_ = platform.now(clock_site::journal_start);
         std::string error;
-        if (!journal_.open(path, header, kJournalMaxBytes, error)) {
+        // Step SIO: the host's I/O strand writes the file (no flush); none:
+        // the tick thread does, as before.
+        if (!journal_.open(path, header, kJournalMaxBytes, error,
+                           platform.io_strand ? platform.io_strand() : bmmo::session::io_poster{})) {
             core_.logf("journal: %s", error.c_str());
             return;
         }
@@ -96,6 +99,10 @@ namespace bmmo::session::core {
     void client_journal::close(const std::string& reason) {
         if (!journal_.is_open()) return;
         journal_.note(core_.current_tick(), "end: " + reason);
+        // Step SIO: the writer queue's high-water mark, in the log (never in
+        // the file: its bytes are what they were before SIO).
+        if (journal_.asynchronous())
+            core_.logf("journal: writer queue peak %llu bytes", static_cast<unsigned long long>(journal_.peak_queued()));
         journal_.close();
     }
 

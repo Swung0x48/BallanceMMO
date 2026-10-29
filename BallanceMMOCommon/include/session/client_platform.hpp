@@ -32,6 +32,7 @@
 // CK-free and header-only.
 
 #include "clock_site.hpp"
+#include "io_queue.hpp"
 #include "rollback.hpp"
 #include "proximity_rules.hpp"
 #include "trafo_input.hpp"
@@ -757,6 +758,14 @@ namespace bmmo::session {
         // journals.  Headless: --journal verbatim; retail (R1): its journal
         // directory and file name, after pruning old files.
         std::function<std::filesystem::path(const journal_header& header)> journal_path;
+        // Step SIO (session I/O off the tick thread): a new strand of the
+        // host's I/O executor for one file (session/io_pool.hpp
+        // strand_poster); the journal's records are written there, in order,
+        // with no flush, and the tick thread only appends them.  Empty: the
+        // journal is written on the tick thread (the fallback).  Headless:
+        // its own one-thread io_pool; retail: BallanceMMOClient's
+        // thread_pool_.
+        std::function<io_poster()> io_strand;
 
         // ---- the trafo as an input (trafo-replication design 2.3-2.5, 2.11,
         // 4.7; step T3), required with session_capabilities::trafo_inputs ----

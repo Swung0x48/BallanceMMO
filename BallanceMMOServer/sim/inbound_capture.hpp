@@ -30,6 +30,7 @@
 #include <vector>
 
 #include <session/clock_site.hpp>
+#include <session/io_queue.hpp>
 
 namespace bmmo::sim {
 
@@ -50,48 +51,57 @@ namespace bmmo::sim {
         inbound_capture& operator=(const inbound_capture&) = delete;
         ~inbound_capture() { close(); }
 
-        bool capturing() const { return file_ != nullptr; }
+        bool capturing() const { return file_.is_open(); }
         bool replaying() const { return replay_; }
 
         // ------------------------------------------------------------ capture
         // `clock_den`: the steady clock's ticks per second, so a replay on a
         // clock of another period refuses the file instead of misreading it.
+        // `poster` (step SIO): the host's I/O strand - the records are
+        // handed to it once per pass (iteration) and written there with no
+        // flush; empty: written on this thread.
         bool open_capture(const std::string& path, const std::string& command_line, int64_t clock_den,
-                          std::string& error) {
-            file_ = std::fopen(path.c_str(), "wb");
-            if (!file_) { error = "cannot write " + path; return false; }
-            std::setvbuf(file_, nullptr, _IOFBF, 1 << 20);
+                          std::string& error, bmmo::session::io_poster poster = {}) {
+            if (!file_.open(path, std::move(poster), kMaxQueued, error, 1 << 20)) {
+                error = "cannot write " + path;
+                return false;
+            }
             put_bytes("BMIC", 4);
             put_u32(kVersion);
             put_i64(clock_den);
             put_string32(command_line);
+            hand_over();
             return true;
         }
 
         void iteration(uint64_t index, uint64_t steps) {
-            if (!file_) return;
+            if (!capturing()) return;
+            // The previous pass's records go to the writer here: one append
+            // per pass, not one per clock read.
+            hand_over();
             put_u8(static_cast<uint8_t>(tag::iteration));
             put_u64(index);
             put_u64(steps);
         }
 
         void message(const void* data, uint32_t size) {
-            if (!file_) return;
+            if (!capturing()) return;
             put_u8(static_cast<uint8_t>(tag::message));
             put_u32(size);
             put_bytes(data, size);
             ++messages_;
+            if (pending_.size() >= kHandOverBytes) hand_over();
         }
 
         void clock(wall_site site, int64_t value) {
-            if (!file_) return;
+            if (!capturing()) return;
             put_u8(static_cast<uint8_t>(tag::clock));
             put_u8(static_cast<uint8_t>(site));
             put_i64(value);
         }
 
         void connection(int32_t state, uint32_t handle, const std::string& end_debug) {
-            if (!file_) return;
+            if (!capturing()) return;
             put_u8(static_cast<uint8_t>(tag::connection));
             put_u32(static_cast<uint32_t>(state));
             put_u32(handle);
@@ -100,17 +110,21 @@ namespace bmmo::sim {
 
         // The end marker: a replay that meets it knows the live run got here
         // (a capture without one was cut short by a crash or a kill).
-        // A capture that failed to write (a full disk) gets no end marker, so
-        // its replay says the live run was cut short; the caller logs it.
+        // A capture that failed to write (a full disk, or step SIO's writer
+        // queue full) gets no end marker, so its replay says the live run was
+        // cut short; the caller logs it.  The close is synchronous (the end
+        // of the run): write_failed() is final after it.
         void close() {
-            if (!file_) return;
+            if (!capturing()) return;
             if (!write_failed_) put_u8(static_cast<uint8_t>(tag::end));
-            if (std::fclose(file_) != 0) write_failed_ = true;
-            file_ = nullptr;
+            hand_over();
+            file_.close_now(std::chrono::milliseconds(60000));
+            if (file_.failed()) write_failed_ = true;
         }
 
         uint64_t messages() const { return messages_; }
-        bool write_failed() const { return write_failed_; }
+        bool write_failed() const { return write_failed_ || file_.failed(); }
+        uint64_t peak_queued() const { return file_.peak_queued(); }
 
         // ------------------------------------------------------------- replay
         bool open_replay(const std::string& path, int64_t clock_den, std::string& error) {
@@ -267,7 +281,14 @@ namespace bmmo::sim {
         }
 
         void put_bytes(const void* p, size_t n) {
-            if (n && !write_failed_ && std::fwrite(p, 1, n, file_) != n) write_failed_ = true;
+            if (n && !write_failed_) pending_.append(static_cast<const char*>(p), n);
+        }
+        // Step SIO: the records so far to the writer.  A full writer queue
+        // stops the capture as a failed write did (never blocks the tick).
+        void hand_over() {
+            if (pending_.empty()) return;
+            if (!write_failed_ && !file_.append(std::move(pending_))) write_failed_ = true;
+            pending_.clear();
         }
         void put_u8(uint8_t v) { put_bytes(&v, 1); }
         void put_u32(uint32_t v) {
@@ -320,7 +341,12 @@ namespace bmmo::sim {
             return true;
         }
 
-        std::FILE* file_ = nullptr;
+        // Step SIO: the capture's writer (session/io_queue.hpp) and the
+        // records of the current pass not handed to it yet.
+        static constexpr uint64_t kMaxQueued = 64ull << 20;
+        static constexpr size_t kHandOverBytes = 256u << 10;
+        bmmo::session::io_queue file_;
+        std::string pending_;
         bool write_failed_ = false;
         bool replay_ = false;
         std::vector<uint8_t> data_;

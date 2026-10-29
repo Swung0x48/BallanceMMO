@@ -21,6 +21,14 @@
 
 namespace bmmo::sim {
     namespace {
+        // Step SIO: the host's drain of its session writers (set_crash_drain).
+        void (*g_crash_drain)() = nullptr;
+        void run_crash_drain() {
+            if (auto drain = g_crash_drain) {
+                g_crash_drain = nullptr;   // once, even if the drain itself faults
+                drain();
+            }
+        }
 #if defined(_WIN32)
         void print_frame(HANDLE process, DWORD64 address, int index) {
             alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + 512] = {};
@@ -125,6 +133,7 @@ namespace bmmo::sim {
             print_backtrace_from_context(&walked);
             write_minidump(info);
             std::fflush(stderr);
+            run_crash_drain();
             return EXCEPTION_EXECUTE_HANDLER;
         }
 
@@ -132,6 +141,7 @@ namespace bmmo::sim {
             std::fprintf(stderr, "\n[crash] abort() called\n");
             print_backtrace_here();
             std::fflush(stderr);
+            run_crash_drain();
             _exit(134);
         }
 #elif defined(BMMO_HAVE_EXECINFO)
@@ -143,10 +153,13 @@ namespace bmmo::sim {
             void* frames[64];
             const int count = backtrace(frames, 64);
             backtrace_symbols_fd(frames, count, STDERR_FILENO);
+            run_crash_drain();
             _exit(128 + signal_number);
         }
 #endif
     }
+
+    void set_crash_drain(void (*drain)()) { g_crash_drain = drain; }
 
     void install_crash_reporter() {
 #if defined(_WIN32)
