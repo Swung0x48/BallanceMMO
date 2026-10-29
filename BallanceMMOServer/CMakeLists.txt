@@ -198,6 +198,13 @@ endif ()
 
 if (NOT BMMO_BUILD_SIM_ONLY)
 target_compile_definitions(BallanceMMOServer PRIVATE BMMO_INCLUDE_INTERNAL)
+# Test-only command-line flags of the server (step M0: --hold-member-ms, world-
+# agreement design 7.3 J3).  Off in a release build; the agent and test builds
+# turn it on.
+option(BMMO_SERVER_TEST_FLAGS "Build the server's test-only command-line flags" OFF)
+if (BMMO_SERVER_TEST_FLAGS)
+    target_compile_definitions(BallanceMMOServer PRIVATE BMMO_SERVER_TEST_FLAGS=1)
+endif()
 target_compile_definitions(BallanceMMOMockClient PRIVATE BMMO_INCLUDE_INTERNAL)
 target_compile_definitions(BallanceMMORecordParser PRIVATE BMMO_INCLUDE_INTERNAL)
 

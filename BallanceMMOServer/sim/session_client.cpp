@@ -410,6 +410,22 @@ namespace {
         uint32_t leave_at = 0;
         int64_t leave_after_unphys = -1;
         int64_t leave_after_trafo = -1;
+        // --rejoin-at TICK (world-agreement design 7.3 J5, step M0): at TICK
+        // the client leaves the room and joins it again on the same
+        // connection, in the same tick (room Leave then Join, one reliable
+        // lane), keeping its player id; the server late-joins it as a new
+        // life.  Once per run.  The journal of the second life is written
+        // beside the first, as <stem>.rejoin1<ext>.  Not for the --host
+        // (its leave would hand the room over).
+        uint32_t rejoin_at = 0;
+        // --leave-room-at TICK (world-agreement design 7.3 J2/J4, step M0):
+        // at TICK the client leaves the room (room Leave), ends its session
+        // and exits once the server has taken it out of the room (2 s at
+        // most).  Unlike --leave-at, whose process exit leaves the
+        // connection to time out (the server holds the leaver's input for
+        // seconds before it removes it), the server removes the player at
+        // its next tick.
+        uint32_t leave_room_at = 0;
         // --placement-signature HEX (step S5, sector placement design 7.4
         // "mismatch"; a test switch): the host declares the placement
         // capability and reports HEX as its anchor's placement signature.
@@ -461,6 +477,8 @@ namespace {
                   "       [--replay-free-cost-clock]   (with --replay-inbound: the rewind cost's clock reads are the replay's own)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
                   "       [--ignore-snapshots] [--no-trafo-cap] [--trafo-no-resets] [--leave-at TICK | --leave-after-unphys D | --leave-after-trafo D]\n"
+                  "       [--rejoin-at TICK]   (leave the room at TICK and join it again on the same connection, once)\n"
+                  "       [--leave-room-at TICK]   (leave the room at TICK, end the session and exit once out of the room)\n"
                   "       [--sector-at SECTOR:TICK]...   (enter SECTOR at TICK, an own Sector input; repeatable; --beam is too)\n"
                   "       [--placement-signature HEX]   (test: report HEX as the anchor's placement signature instead of the world's)");
     }
@@ -645,6 +663,8 @@ namespace {
             else if (arg == "--accept-protocol") { if (!(v = next())) return false; out.accept_protocol = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--trafo-no-resets") out.trafo_no_resets = true;
             else if (arg == "--leave-at") { if (!(v = next())) return false; out.leave_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+            else if (arg == "--rejoin-at") { if (!(v = next())) return false; out.rejoin_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+            else if (arg == "--leave-room-at") { if (!(v = next())) return false; out.leave_room_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--leave-after-unphys") { if (!(v = next())) return false; out.leave_after_unphys = std::atoll(v); }
             else if (arg == "--leave-after-trafo") { if (!(v = next())) return false; out.leave_after_trafo = std::atoll(v); }
             else if (arg == "--beam2") {
@@ -840,6 +860,12 @@ namespace {
                 if (!inbound_pass()) { stopped = "the inbound capture ended"; break; }
                 update();
                 release_held_events();
+                // --leave-room-at (step M0): out of the room, or 2 s after the Leave.
+                if (room_left_ && (!in_room_ || wall_now(bmmo::sim::wall_site::run_report) - room_left_at_
+                                                    > std::chrono::seconds(2))) {
+                    logf("--leave-room-at: %s; exiting", in_room_ ? "no room state within 2 s" : "out of the room");
+                    ended_ = true;
+                }
                 if (ended_) { stopped = "the client ended the session"; break; }
                 if (std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::run_limit) - started).count() > args_.seconds) {
                     logf("time limit reached");
@@ -1355,7 +1381,14 @@ namespace {
                         &manager_activations_);
                 return bmmo::session::scope_guard([guard]() mutable { guard.reset(); });
             };
-            p.journal_path = [this](const bmmo::session::journal_header&) { return std::filesystem::path(args_.journal); };
+            // After a --rejoin-at the next life's journal goes beside the
+            // first one (<stem>.rejoin<N><ext>) instead of over it.
+            p.journal_path = [this](const bmmo::session::journal_header&) {
+                std::filesystem::path path(args_.journal);
+                if (rejoins_ > 0 && !path.empty())
+                    path.replace_filename(path.stem().string() + ".rejoin" + std::to_string(rejoins_) + path.extension().string());
+                return path;
+            };
             // The mirrors' (E6): the CopyObject clone (remote_entity), its
             // pose, body and spawn kick, its body and navigation taken out,
             // its navigation attached once the graph is known, and the event
@@ -2029,6 +2062,16 @@ namespace {
             }
             // This client's fresh runtime state.
             navigation_known_ = false;
+            // Step M0: the own navigation replica of the previous session is
+            // forgotten with it.  The level is loaded again (on a rebooted
+            // engine when it was still running), so the record named a ball
+            // of the old world; kept, own_body_upkeep took the new ball (the
+            // same name) for already driven and never attached a replica, and
+            // the own ball of the next session ignored its keys (found by the
+            // --rejoin-at smoke run: the rejoiner's own ball 80 m off the
+            // server's clone 270 ticks after its spawn, every mirror of it exact).
+            own_replica_ = bmmo::game::own_replica{};
+            revive_navigations_.clear();
             local_births_.clear();
             manager_activations_.clear();
             script_order_.clear();
@@ -3018,6 +3061,33 @@ namespace {
                     ended_ = true;
                     return;
                 }
+                // --rejoin-at (step M0): the room left and joined again in
+                // this tick, on this connection; the session ends here
+                // locally and the server's late SessionStart begins the next
+                // life (begin_session reboots the engine under the level).
+                if (args_.rejoin_at && !rejoin_done_ && now >= args_.rejoin_at && room_id_ != 0) {
+                    rejoin_done_ = true;
+                    logf("--rejoin-at: leaving room %u at tick %u (own ball %s) and joining it again", room_id_, now,
+                         core_.own_physicalized() ? "physicalized" : "without a body");
+                    core_.end("--rejoin-at: left the room to rejoin it");
+                    ++rejoins_;
+                    room_request(bmmo::room::action::Leave, room_id_);
+                    room_request(bmmo::room::action::Join, room_id_);
+                    join_sent_ = true;
+                    ready_sent_ = false;
+                    return;
+                }
+                // --leave-room-at (step M0): the room left at this tick; the
+                // run loop exits once the server has taken this client out.
+                if (args_.leave_room_at && !room_left_ && now >= args_.leave_room_at && room_id_ != 0) {
+                    room_left_ = true;
+                    room_left_at_ = wall_now(bmmo::sim::wall_site::run_report);
+                    logf("--leave-room-at: leaving room %u at tick %u (own ball %s)", room_id_, now,
+                         core_.own_physicalized() ? "physicalized" : "without a body");
+                    core_.end("--leave-room-at: left the room");
+                    room_request(bmmo::room::action::Leave, room_id_);
+                    return;
+                }
             }
             // --resync-at (step A3): a resync asked for while this client
             // keeps stepping, once.
@@ -3992,6 +4062,13 @@ namespace {
         clock_type::time_point last_ready_sent_{};
         uint32_t room_id_ = 0;
         bool ended_ = false;
+        // --rejoin-at (step M0): done once; the lives this run began after a
+        // rejoin (names the next journal).
+        bool rejoin_done_ = false;
+        uint32_t rejoins_ = 0;
+        // --leave-room-at (step M0): the Leave sent, and when.
+        bool room_left_ = false;
+        clock_type::time_point room_left_at_{};
         clock_type::time_point last_report_ = clock_type::now();
         // --capture-inbound / --replay-inbound (inbound_capture.hpp): the file,
         // the main loop's passes and the steps (load_step() and frame() calls)

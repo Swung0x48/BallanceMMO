@@ -31,7 +31,8 @@ built (WG2, 2026-10-28: the server's world under `WORLD_PROXIMITY_UNION`,
 clients under the bit, BodyRevived retired, protocol 16, §12 "As built (step
 WG3)"), step G4 built (WG4, 2026-10-28: the retail core host, §12 "As built (step
 WG4)"), step G6 done (WG6, 2026-10-28: the documentation pass, §12 "As built
-(step WG6)"), M0, M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
+(step WG6)"), step M0 built (WM0, 2026-10-28: the tools, §12 "As built
+(step WM0)"), M1 and Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
 `session_host_support.hpp`, `session_host_world.hpp`, `session_client.cpp` and
@@ -2958,3 +2959,139 @@ only).
   15"`): 12/12 sends SAME, 12/12 journals IDENTICAL, `WIRE-CHECK: ALL
   SAME`.
 - No live run: nothing that runs changed.
+
+### As built (step WM0, 2026-10-28): M0, the tools
+
+**What exists.**
+- *`scripts/body_series.py`* (new; the design's scratch script of
+  2026-10-23 was gone, `.local-tools/work/a4/body_series.py` was its
+  band-change variant): one body's error, the server journal's FULL
+  checkpoints against each client journal's LOCAL ones
+  (`first_divergence.worlds`, so the keys are the same), the Euclidean
+  distance per tick. `--body NAME` (a name prefix; every match is its own
+  series) or `ball:OWNER` (the own ball in the owner's journal, the mirror
+  in the others: J1/J5's "keyed by owner"); `--ticks`, `--from/--to`,
+  `--changes` (the rows where a band changes: exact, < 1 mm, < 5 cm,
+  beyond), `--summary` (max and its tick, the first and last error tick,
+  the error ticks counted, the first exact tick after). A cell reads `0`
+  for bit-equal, `-` for no checkpoint, `absent` for a checkpoint without
+  the body. `--selftest` (9 checks).
+- *The harness* (`scripts/arena_map_test.py`): `--leave N:T` and
+  `--rejoin N:T`, parsed by `parse_client_ticks` (client in range, tick >
+  0, one spec per client and option; `--leave` and `--rejoin` of client
+  0, the host, refused: its leave would hand the room over; a `--leave` at
+  or before the same client's `--rejoin` refused)
+  and given to client N by `member_args` as the client switches below.
+  Two selftest checks.
+- *The headless client* (SC), two switches. **Adapted:** the row's files
+  are "scripts, SV", but a leave at a given tick and a rejoin on the same
+  connection are things only the client can do, so the harness options
+  drive these:
+  - `--rejoin-at TICK`: after `post_step` of TICK the core's session is
+    ended locally (`core_.end`), and room Leave then room Join are sent in
+    the same tick on the one reliable lane; the server takes the leave
+    (`room_remove_and_notify` -> `physics_session_member_left`) and
+    late-joins the same id (`physics_session_member_joined`), and the
+    late SessionStart begins the next life through the host-restart path
+    of `begin_session` (the engine rebooted under the running level). The
+    second life's journal is `<stem>.rejoin1<ext>` (the journal path op),
+    beside the first one.
+  - `--leave-room-at TICK`: room Leave at TICK, the session ended
+    locally, and the run loop exits once the server's room state no
+    longer has the client in a room (2 s at most). **Adapted:** the
+    existing `--leave-at` (step T3) ends the session and exits without
+    closing the connection, and the server removes the player only at
+    the connection timeout: in the first smoke run client 1 stopped at
+    its tick 1800 and the server held its input (S2) until it dropped
+    the connection at 2322, 522 ticks later. J2/J4 need the leave at the
+    asked tick, so `--leave` maps to the new switch (the second run: the
+    server relayed the leaver's Unphysicalize "for tick 1800 (next tick
+    1800)"). `--leave-at` is unchanged.
+  - **Found and fixed (the smoke run).** `begin_session` kept the
+    previous session's `own_replica_` (the own ball's navigation replica
+    record). After the engine reboot the record still said "active on
+    Ball_Stone", so `own_body_upkeep` took the new world's Ball_Stone for
+    already driven and never attached a replica: the rejoiner's log
+    printed `own navigation rows: no navigation for 'Ball_Stone'` every
+    tick, where the first life printed `own ball Ball_Stone driven by the
+    navigation replica`, and `body_series.py ... --body ball:2489030504`
+    gave the rejoiner's own ball 0.0042 m at 1436 (as every mirror: the
+    spawn) and then 0.029, 0.076 ... 80.6 m at 1700 off the server's
+    clone while client 0's and client 3's mirrors of it were exact from
+    1438 on. The record (and `revive_navigations_`) is now reset there
+    with the rest of the per-session state. Pre-existing: any second
+    session in one headless process (the host-restart path) had it; no
+    reference capture has one, so the wire check cannot reach it.
+- *The server* (SV): `--hold-member-ms MS`, a test flag compiled only
+  with the new CMake option `BMMO_SERVER_TEST_FLAGS` (off by default, so
+  a release build has no such flag; on in `build-agent`'s cache and in
+  the Arch test tree, whose `.local-tools/arch_build_server_dirty.sh`
+  now passes `-DBMMO_SERVER_TEST_FLAGS=ON`). `parse_args` reads it and
+  `server::set_test_hold_member_ms` stores it (the start-up log says so
+  when it is non-zero). **Adapted:** there is no SessionMember message
+  before M1, so M0 carries the value only; M1's send points (the
+  reliable copy and the `event_repeats` copies, §2.7) read
+  `test_hold_member_ms()` and hold the message that long. The guards are
+  `#if defined(BMMO_SERVER_TEST_FLAGS)` and the OFF build marks the unused
+  parameter `(void)` (the review: `#if` on an undefined macro warns C4668
+  under `/Wall`, the parameter `-Wunused-parameter` under `-Wextra`).
+
+**The lp1_join numbers reproduced** (the row's "closes on"):
+`body_series.py maps/arena-test/lp1_join/server.bmjr
+maps/arena-test/lp1_join/sector1/client{0,1,2}.bmjr --body
+P_Modul_01_Pusher --ticks 620,624,632,636,660,688` prints §1.1.3's table
+digit for digit (620: all 0; 624: 0.0897 / 0.0897 / 0; 632: 0.0435 /
+0.0892 / 0; 636: 0.0019 / 0.0888 / 0; 660: 0.0007 / 0.0012 / 0; 688: 0 /
+0.0001 / 0). With `--from 600 --to 720 --summary`: client 0 in error
+from 622 to 684 (max 0.0898 m at 626, the 0.04-0.09 m band 622-632),
+client 1 from 622 to 690 (the band 622-638), client 2 exact at all 61
+checkpoints: H1's negative control "0.0897 m for 10-16 ticks". J1's
+other numbers are log lines the tool does not need: the joiner's kick
+index 60 on the server and the joiner, 56 on clients 0-2
+(client0.log:859).
+
+**What today's code does at a rejoin** (the second smoke run, for M1):
+the server relays the rejoiner's Unphysicalize for 1201, logs "left with
+events queued: it stays in the world until tick 1203", then at once
+"player ... removed" and "player ... added" (J-f: `add_player` runs
+`finish_leave` immediately), and WG2's proximity union warns "the
+candidate set changed between two steps (... at 1201)". The new life got
+join order 2 again, base 1230, its spawn kick index 45 on the server and
+on the rejoiner.
+
+**Checks** (`.local-tools/work/WM0`; QUICK tier, about 11 minutes of
+checks, two live runs).
+- x64 BUILD-OK (59 steps after the CMake option's reconfigure, then 3 and
+  3 for the two client-only fix-ups; `session_client.cpp.obj` #deps 348,
+  VALID), ARCH-BUILD-OK (`ballanced-36c04e3d24c9+bmmo-9f9ec7eacd90-dirty`,
+  test flags on), `BallanceMMOMessageTests` 595/595, GCC syntax check
+  30/30 ok, `arena_map_test.py --selftest` PASS, `body_series.py
+  --selftest` PASS. No x86 build: no shared or retail file changed.
+- Wire check rWG6 vs each of the three headless builds (rWM0, rWM0b,
+  rWM0c = the final one) over `core_ref_s9` (`EXTRA="--accept-protocol
+  15"`): 12/12 sends SAME, 12/12 journals IDENTICAL, `WIRE-CHECK: ALL
+  SAME` each time. (Without the `EXTRA` every replay is refused at
+  SessionStart, protocol 15 against 16, on the old binary as on the new.)
+- Live smoke 1 (`maps/arena-test/wm0_live`, rWM0, Arch server snapshots
+  off, trafo inputs and placement on, 4 clients 45 s, `--rejoin 2:1200
+  --leave 1:1800`): all clients rc 0, the server journal replays 3679/3679,
+  `checkpoint_mismatches=0`, VERDICT PASS; it found the connection-timeout
+  leave and the stale replica above.
+- Live smoke 2 (`maps/arena-test/wm0_live2`, rWM0b, the same recipe):
+  rc 0 everywhere, 3616/3616 matched, PASS; the prompt leave at 1800 and
+  the rejoin at 1200/1201 as described.
+- **Deferred:** a live run of the replica fix (rWM0c): it would be a
+  third live run. The evidence for it is the log line above and the
+  first life's attach; the wire check shows it changes nothing for one
+  session. J5 (M1's row) is its first real use: J5 first checks the
+  rejoiner's own ball against the server's clone (`body_series.py
+  --body ball:OWNER` over `client{N}.rejoin1.bmjr`), before anything of
+  M1's own is judged.
+- **Left for M1** (the review's nits): the harness's verdict reads only
+  `client{i}.bmjr`, so a rejoiner's second life is not judged and its
+  second SessionAssign base would count among the resync bases; M1 reads
+  `client{N}.rejoin*.bmjr` and labels the rejoin base. A refused rejoin
+  Join (`RequestDenied`) lets the client's room handling join some other
+  room and run on; M1 ends the session with a log line instead. A switch
+  whose tick is already behind a late joiner's base fires at once without
+  a warning.

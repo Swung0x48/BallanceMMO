@@ -42,6 +42,15 @@ public:
         port_ = port;
     }
 
+    // --hold-member-ms MS (world-agreement design 7.3 J3, step M0; test
+    // builds only, BMMO_SERVER_TEST_FLAGS): the SessionMember message of
+    // step M1 - its reliable copy and its repeats - leaves MS ms late, so the
+    // clients' parking of events that outrun it is exercised.  Step M0 only
+    // carries the value; M1's send points read it.  0 (the default, and
+    // every build without the flag): sent at once.
+    void set_test_hold_member_ms(uint32_t ms) { test_hold_member_ms_ = ms; }
+    uint32_t test_hold_member_ms() const { return test_hold_member_ms_; }
+
     // Main network loop. Each iteration:
     //   1. update(): drain incoming messages and run connection callbacks;
     //   2. if ticking, wait until SERVER_TICK_DELAY into the iteration and
@@ -3839,6 +3848,8 @@ protected:
     bmmo::map last_countdown_map_{};
 
     config_manager config_;
+    // --hold-member-ms (step M0, test builds): see set_test_hold_member_ms.
+    uint32_t test_hold_member_ms_ = 0;
 
     std::unordered_map<std::string, std::string> map_names_;
     // Bounds on what clients may add to map_names_; the whole map is sent to
@@ -3847,14 +3858,23 @@ protected:
 };
 
 // parse arguments (optional port and help/version/log) with getopt
-static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run) {
-    enum option_values { DryRun = UINT8_MAX + 1 };
+// `hold_member_ms`: the test flag --hold-member-ms (BMMO_SERVER_TEST_FLAGS
+// builds only; step M0).
+static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run,
+                      uint32_t& hold_member_ms) {
+    enum option_values { DryRun = UINT8_MAX + 1, HoldMemberMs };
+#if !defined(BMMO_SERVER_TEST_FLAGS)
+    (void)hold_member_ms;  // the flag exists in test builds only
+#endif
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
         {"log", required_argument, 0, 'l'},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'v'},
         {"dry-run", no_argument, 0, DryRun},
+#if defined(BMMO_SERVER_TEST_FLAGS)
+        {"hold-member-ms", required_argument, 0, HoldMemberMs},
+#endif
         {0, 0, 0, 0}
     };
     int opt, opt_index = 0;
@@ -3874,6 +3894,9 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
                 puts("  -h, --help\t\t Display this help and exit.");
                 puts("  -v, --version\t\t Display version information and exit.");
                 puts("      --dry-run\t\t Test the server by starting it and exiting immediately.");
+#if defined(BMMO_SERVER_TEST_FLAGS)
+                puts("      --hold-member-ms=MS\t (test build) Send the SessionMember messages MS ms late.");
+#endif
                 return -1;
             case 'v':
                 puts("Ballance MMO server by Swung0x48 and BallanceBug.");
@@ -3885,6 +3908,11 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
             case DryRun:
                 dry_run = true;
                 break;
+#if defined(BMMO_SERVER_TEST_FLAGS)
+            case HoldMemberMs:
+                hold_member_ms = static_cast<uint32_t>(std::strtoul(optarg, nullptr, 10));
+                break;
+#endif
         }
     }
     return 0;
@@ -3894,7 +3922,8 @@ int main(int argc, char** argv) {
     uint16_t port = 26676;
     bool dry_run = false;
     std::string log_path;
-    if (parse_args(argc, argv, port, log_path, dry_run) < 0)
+    uint32_t hold_member_ms = 0;
+    if (parse_args(argc, argv, port, log_path, dry_run, hold_member_ms) < 0)
         return 0;
 
     if (port == 0) {
@@ -3919,6 +3948,11 @@ int main(int argc, char** argv) {
 
     printf("Starting server at port %u.\n", port);
     server server(port);
+    if (hold_member_ms) {
+        server.set_test_hold_member_ms(hold_member_ms);
+        printf("Test flag: --hold-member-ms %u (the SessionMember messages leave %u ms late).\n", hold_member_ms,
+               hold_member_ms);
+    }
 
     printf("Bootstrapping server...\n");
     fflush(stdout);
