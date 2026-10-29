@@ -3361,6 +3361,98 @@ N2 on every world, T1's findings.**
   `scr=12/0/0/0/0`). Without this step that window would also have
   carried the stale pass value, as swing_snapoff's later windows did.
 
+## As built (step F2, 2026-10-29): a joiner's mirror dead after S (the delayed rejoiner's first state, DRJ)
+
+The close-out's FULL plan row DRJ (roadmap section 4 item 2, queued by step
+TRL). No protocol change, no journal change, no engine change, no server
+change; shared core only (`client_core_resync.cpp`).
+
+- **The symptom** (trl_live_B / trl_live_B2 client 1, the 1 s rejoiner,
+  `--rejoin 1:1200:1000`): the join state of S 1296 waited from 1306 for 20
+  bodies; 19 (the mechanisms of sectors 2 and 3) came with the pacer at
+  1306 / 1313, and TRL's 60-frame list (B2, `client1.log` "still waits at
+  tick 1364 for 1 body: ball of 1120493372") named the last: the ball of
+  client 2, the 5 s rejoiner, which left at 1300 (its Unphysicalize stamped
+  1301, applied while the state was pending). The wait never ended: the
+  hold timed out at 1391 and the client asked again (re-anchored at 1529,
+  delta -136/-137), with 124-125 starved reports and 13 relayed frames past
+  the reach as the consequences.
+- **The cause.** §2.6.3's row "mirror row at S, absent from the anchor, its
+  Unphysicalize in `life_log_` after S -> made from the row, the death
+  applied again at its tick" was built at A3 behind
+  `remote.birth_known`. A late joiner's or a rejoiner's mirrors born before
+  its anchor are made live at base (`make_remote_birth` cannot rewind to a
+  stamp before the synthetic anchor: "lifecycle event of ... precedes the
+  resync's anchor ...", then `physicalize_remote(..., live_first_tick)`),
+  so `birth_known` (= made at the stamp) is false for every one of them.
+  One whose owner left after S and before the apply was therefore neither
+  physicalized (the rows path) nor "dead after S" (the death path), and
+  stayed in the waiting list for good. Only a join whose wait spans another
+  member's leave shows it: run A, wgq7_live, wm1_live, the 5 s rejoiners
+  and the late joiners had no leave inside their waits.
+- **The fix** (`client_core_resync.cpp`, the ball rows of
+  `try_apply_resync`): the death path takes any recorded birth -
+  `remote.birth.tick != 0` and the birth is that player's - instead of
+  `birth_known`. `remote.birth` is the Physicalize the current (or last)
+  body was made from, set on every make (`physicalize_remote`) and kept by
+  `unphysicalize_remote`; the body is made at the anchor and the blob puts
+  it at S whatever pose it was made at, exactly as for a birth made at its
+  stamp. The retail row start that a birth-less mirror once came from was
+  deleted at R3. Nothing else changes: a mirror whose remote entry or
+  birth is unknown still waits.
+- **Known limit, not changed:** a (death, birth, death) of one player
+  inside (S, apply] still collapses to its newest death (`death_after`
+  reads the newest Unphysicalize after S), as before the step; EL7's window
+  reconcile stays off during the resync's restore
+  (rollback-engine-gaps-design.md, "The resync"). The made mirror still
+  mints its clone on H when `remote.birth.entity` is empty (the same note).
+- **Evidence.** Unit test
+  `SessionClientCoreResync.AJoinersMirrorBornBeforeTheAnchorAndDeadAfterSIsMadeFromItsRow`
+  (late join at base 140, a birth stamped 112 made live at base with
+  `birth_known` false, its death stamped 142, the state of 139 applied at
+  its arrival with no wait and the death applied again in the replay; it
+  waits on the old guard): 646 tests pass. GCC 30 ok. Wire check over
+  core_ref_s11 (`EXTRA=--accept-protocol 18`, rF1 vs rF2): ALL SAME, 12/12
+  journals IDENTICAL; the solo arms' replays IDENTICAL to rF1's. Live (Arch
+  server = F1's tree, snapshots off, trafo inputs and placement on; the
+  recipe of TRL's run B, `.local-tools/work/F2/live.sh`):
+  - `f2_live_B` (rF2): client 1's state of 1296 waited 13 frames, "mirror
+    of 3190858646 made from its row at S 1296, its death at 1300 applied
+    again in the replay", re-stepped to 1318; client 2's state of 1655 16
+    frames, client 3's of 1880 21 frames; holds 0, resyncs sent 0 / done 1
+    on each joiner (restepped 1/1), starved 0, relay_late 0 everywhere,
+    server journal 3673/3673, VERDICT PASS.
+  - `f2_live_C` (rF2, the leaver at 1296): S came out 1297 and the death
+    1297 = S (no row at S, no wait for it): 12 / 17 / 21 frames, the same
+    zeros, 3672/3672, PASS.
+  - `f2_live_D` (rF2, the leaver at 1297): S 1297, the death 1298 = S + 1:
+    "mirror of 1697933050 made from its row at S 1297, its death at 1298
+    applied again in the replay", 12 / 16 / 22 frames, the same zeros,
+    3673/3673, PASS.
+  - `f2_ctrl_B` (rF1, the pre-fix build, same batch): the stall
+    reproduced - "still waits at tick 1364 for 1 body: ball of
+    1660963246" (the 5 s leaver), hold timed out at 1391, re-anchored at
+    1530 (delta -137), client 1 resyncs 1/1, holds 1/1, starved 125,
+    deferred 87 ticks; server journal 3677/3677. The same run's client 2
+    (the 5 s rejoiner, whose own join state applied after 20 frames) was
+    starved on every report from its rejoin (1056 / 1056; the server's S2
+    held every tick, its S1 lateness -0.64 tick against +7.2 in f2_live_B,
+    base 1662 assigned at server tick 1639 against 1656 at 1643); not
+    seen in trl_live_B / B2 (the same pre-fix stall, rTRL) nor in any rF2
+    run, and outside this step's change (client 2's apply had no death in
+    its wait): a joiner's starting lead, the domain of the FULL plan's H3
+    (RL1-a, the joiner's base on the schedule), where it is to be
+    root-caused.
+- The plan's criterion "resyncs=sent/done equal" was replaced: it cannot
+  tell the two cases apart (the stall reads 1/1, a clean join 0/1). The
+  runs were judged instead on sent 0 on every joiner, holds 0/0, no hold
+  timeout, a single `resynced:` line per joiner and the new log line
+  firing; a joiner's 0/1 is the pass reading, not a miss.
+- Not checked here (FULL): that the world after a made-from-row apply
+  equals the server's (no core_ref_s11 capture has a leave inside a join
+  wait; a pinned replay / first_divergence.py of f2_live_B client 1
+  against the server journal over 1296-1330 would close it).
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

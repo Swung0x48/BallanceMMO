@@ -6687,6 +6687,45 @@ namespace {
         EXPECT_TRUE(s.pending_deaths_.empty());
     }
 
+    // Step F2 (DRJ): a late joiner's mirror born before the anchor is made
+    // live at base (its birth not known at its stamp); its owner leaving
+    // after S, before the state arrives, left the state waiting for a body
+    // that never came (trl_live_B client 1) until the hold timed out.  Its
+    // recorded birth makes it from the row, and its death is applied again.
+    TEST(SessionClientCoreResync, AJoinersMirrorBornBeforeTheAnchorAndDeadAfterSIsMadeFromItsRow) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        run_to_anchor(core, fake);
+        core.on_session_assign(exact_assign(9, 140));
+        auto& s = state_of(core);
+        ASSERT_TRUE(s.resync_join_);
+        core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 112, 112));
+        b1_frames(core, 140, 142, [&](uint32_t t) { steps{core}.apply_held_lifecycle(t - 1); });
+        ASSERT_EQ(s.remotes_.count(4), 1u);
+        ASSERT_TRUE(s.remotes_.at(4).physicalized) << "made live at base";
+        ASSERT_FALSE(s.remotes_.at(4).birth_known) << "not at its stamp 112";
+        core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 142, 142));
+        b1_frames(core, 143, 146, [&](uint32_t t) { steps{core}.apply_held_lifecycle(t - 1); });
+        ASSERT_FALSE(s.remotes_.at(4).physicalized) << "its owner left at 142";
+        auto msg = resync_state(140, {1});
+        bmmo::session::body_state ball;
+        ball.kind = bmmo::session::body_kind::Ball;
+        ball.owner = 4;
+        msg.rows.push_back(ball);
+        msg.clones = {{4u, std::string("Ball_Stone_BMMO_4")}};
+        const size_t from = fake.calls.size();
+        deliver(core, std::move(msg));
+        const auto calls = since(fake.calls, from);
+        EXPECT_FALSE(s.resync_pending_) << "applied at its arrival, no wait";
+        EXPECT_EQ(s.resync_deferred_, 0u);
+        EXPECT_EQ(s.resyncs_restepped_, 1u);
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:resync: mirror of 4 made from its row at S 139, its death at 142 applied again in the replay"),
+                  calls.end());
+        EXPECT_FALSE(s.remotes_.at(4).physicalized) << "dead again in the replay";
+        EXPECT_TRUE(s.pending_deaths_.empty());
+    }
+
     // A held notice for a tick of a pending exact resync's epoch amends the
     // own record the apply's re-step feeds the ball from (resync design 2.2),
     // without a rewind of its own; one for a tick not simulated yet is

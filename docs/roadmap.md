@@ -558,7 +558,16 @@ numbers 1-10 are unchanged.
      frames counted past the reach (the relay_late item above). Next: rerun
      the case; step TRL's fix-up logs the whole waiting list once a wait
      reaches 60 frames (`client_core_resync.cpp`), which names the missing
-     bodies.
+     bodies. **Built by FULL step F2 (2026-10-29)**: the missing body was
+     the ball of the 5 s rejoiner, which left at 1300 inside the wait; the
+     dead-after-S path (resync design 2.6.3) required `birth_known`, which
+     is false for every mirror a joiner makes live at base, so the mirror
+     was neither present nor "dead after S". The path now takes any
+     recorded birth; live f2_live_B / D (the death at S + 4 / S + 1): the
+     mirror made from its row and its death applied again in the replay,
+     every join state applied after 12-22 frames, holds 0, starved 0,
+     relay_late 0; the pre-fix control f2_ctrl_B reproduced the stall
+     (`resync-and-sector-timing-design.md`, "As built (step F2)").
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift

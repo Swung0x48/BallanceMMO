@@ -285,8 +285,20 @@ namespace bmmo::session {
                     rows[it->second.entity] = &body;
                     continue;
                 }
+                // Step F2 (DRJ): any recorded birth makes it, not only one
+                // made at its stamp (birth_known).  A late joiner's or a
+                // rejoiner's mirrors born before its anchor are made live at
+                // base (birth_known false); one whose owner left inside the
+                // wait was never found again, and the state waited until the
+                // hold timed out (trl_live_B / B2 client 1, ball of the 5 s
+                // leaver, its death at 1301 after S 1296).  The blob puts
+                // the body at S whatever pose it was made at.  The
+                // birth.player term is a defensive check only: remotes_ is
+                // keyed by player and every write of remote.birth comes from
+                // that player's own event, so it cannot fail today.
                 uint32_t died = 0, died_origin = 0;
-                if (it != s.remotes_.end() && it->second.birth_known && death_after(body.owner, died, died_origin)) {
+                if (it != s.remotes_.end() && it->second.birth.tick != 0 && it->second.birth.player == body.owner
+                        && death_after(body.owner, died, died_origin)) {
                     deaths.emplace_back(body.owner, died, died_origin);
                     continue;
                 }
