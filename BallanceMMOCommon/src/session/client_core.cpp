@@ -387,6 +387,15 @@ namespace bmmo::session {
             logf("session %u: the mechanism proximity blocks follow every ball (world option proximity union)%s",
                  s.session_, s.probes_active_ ? "" : ", which this host cannot place (no place_probes): the server will "
                                                      "refuse its signature");
+        // Step Q7 (world-agreement-gaps-design.md 2.10): the session's
+        // mechanism slot count K; the host copies the per-player units K
+        // times at its anchor when WORLD_PLAYER_MECHANISMS is set (with the
+        // union: the units are placed by its place).
+        s.mechanism_slots_ = (msg.world_options & WORLD_PLAYER_MECHANISMS) ? msg.mechanism_slots : 0;
+        if (msg.world_options & WORLD_PLAYER_MECHANISMS)
+            logf("session %u: one mechanism responds to every player (world option player mechanisms, K = %u slots)%s",
+                 s.session_, static_cast<unsigned>(msg.mechanism_slots),
+                 (msg.world_options & WORLD_PROXIMITY_UNION) ? "" : " - WITHOUT the proximity union: not run");
         frame_ = frame_scratch{};
         return begin_result{};
     }

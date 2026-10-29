@@ -1159,7 +1159,7 @@ namespace bmmo::session {
     // remote.physicalized, which in a replay describe the live state, not
     // the replayed tick's (design 2.5, review).
     std::vector<bmmo::session::probe_candidate> session_client_core::probe_candidates(
-        const std::function<bool(const std::string& entity)>& held_out) {
+        const std::function<bool(const std::string& entity)>& held_out, uint32_t tick) {
         std::map<uint32_t, std::vector<std::string>> bodies;
         const auto take = [&](uint32_t player, const std::string& entity) {
             if (entity.empty() || (held_out && held_out(entity))) return;
@@ -1184,6 +1184,13 @@ namespace bmmo::session {
             bmmo::session::probe_candidate c;
             c.player = player;
             c.entity = entities.front();
+            // Step Q7 (§2.10 "Binding"): the slot is the join order of the
+            // life the placed tick names (the server's number, the same in
+            // every world, J1); no counter is touched - a ball with a body
+            // has a life (its birth was applied inside it, J3).
+            if (s.mechanism_slots_ != 0)
+                if (const auto* life = bmmo::session::member_life_at(s.lives_, player, tick))
+                    c.slot = life->entry.join_order;
             out.push_back(c);
         }
         return out;
@@ -1191,9 +1198,8 @@ namespace bmmo::session {
 
     void session_client_core::place_probes(uint32_t tick, const std::function<bool(const std::string& entity)>& held_out,
                                            bool replayed) {
-        (void)tick;
         if (!platform_.place_probes) return;
-        platform_.place_probes(probe_candidates(held_out));
+        platform_.place_probes(probe_candidates(held_out, tick));
         ++(replayed ? s.probe_places_replayed_ : s.probe_places_live_);
     }
 

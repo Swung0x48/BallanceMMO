@@ -895,18 +895,24 @@ namespace {
     };
     proximity_host_state proximity_host;
 
+    int32_t controller_alias_cb(void* user, const char* name, char* out, uint32_t out_size);
+
     // The anchor's rewire (the headless rewire_proximity): the mechanism
     // class over the session's selection, the level's union options; false
     // with `error` when refused (nothing is rewired then).
     bool proximity_rewire(CKContext* context, const bmmo::physics::physics_view& view,
-                          const bmmo::game::script_replay::selection& sel, logger_wrapper* logger, std::string& error) {
+                          const bmmo::game::script_replay::selection& sel, uint8_t slots, logger_wrapper* logger,
+                          std::string& error) {
         const bmmo::physics::physics_view* v = &view;
         proximity_host.union_.has_body = [v](CK3dEntity* entity) {
             return entity && entity->GetName() && v->has_body(entity->GetName());
         };
         ++proximity_host.anchors;
-        error = proximity_host.union_.rewire(context, bmmo::game::probe_class::mechanism, sel,
-                                             bmmo::game::proximity_union::level_options(context));
+        auto options = bmmo::game::proximity_union::level_options(context);
+        // Step Q7 (world-agreement-gaps-design.md 2.10): the per-player units
+        // copied K times under WORLD_PLAYER_MECHANISMS (the core's K).
+        options.slots = slots;
+        error = proximity_host.union_.rewire(context, bmmo::game::probe_class::mechanism, sel, options);
         for (const std::string& line: proximity_host.union_.lines()) logger->Info("Physics session: %s", line.c_str());
         if (!error.empty()) {
             ++proximity_host.refused;
@@ -917,6 +923,12 @@ namespace {
         }
         proximity_host.active = true;
         proximity_host.signature = proximity_host.union_.signature(bmmo::game::probe_class::mechanism);
+        // §4.3: the units' force blocks by their world-independent names (the
+        // one alias function of the manager, controller_alias_cb).
+        if (proximity_host.union_.slots() && !view.set_controller_alias(&controller_alias_cb, nullptr, error)) {
+            logger->Warn("Physics session: player mechanisms: the controller alias: %s", error.c_str());
+            error.clear();
+        }
         logger->Info("Physics session: proximity union: %zu mechanism blocks, %zu identity reads rewired, signature %016llx",
                      proximity_host.union_.probe_count(), proximity_host.union_.identity_count(),
                      static_cast<unsigned long long>(proximity_host.signature));
@@ -927,12 +939,15 @@ namespace {
     // release_proximity); nothing when nothing is rewired.
     void proximity_release(CKContext* context, logger_wrapper* logger, const char* why) {
         proximity_host.active = false;
-        if (!proximity_host.union_.probe_count() && !proximity_host.union_.identity_count() && !proximity_host.union_.no_ball())
+        if (!proximity_host.union_.probe_count() && !proximity_host.union_.identity_count() && !proximity_host.union_.no_ball()
+            && !proximity_host.union_.unit_count())
             return;
+        const size_t copies = proximity_host.union_.copy_count();
         const int restored = proximity_host.union_.release(context);
         ++proximity_host.releases;
         proximity_host.restored += static_cast<uint64_t>(restored);
-        logger->Info("Physics session: proximity union released (%s): %d inputs back", why, restored);
+        logger->Info("Physics session: proximity union released (%s): %d inputs back, %zu unit copies destroyed", why, restored,
+                     copies);
     }
 
     double seconds_since(clock_type::time_point t) {
@@ -976,11 +991,17 @@ namespace {
     // The savestate's controller alias over the registry (bridge v22, the
     // headless hosts' set_controller_alias lambda): a set's force controller
     // "rt:force/<block id>" is "trafo:<player>/<k>" in every world.
-    int32_t trafo_controller_alias_cb(void* user, const char* name, char* out, uint32_t out_size) {
-        const auto* registry = static_cast<const bmmo::game::trafo_registry*>(user);
+    // Step Q7 (world agreement §4.3): the one alias function of the manager
+    // - the trafo sets' names while the sets run, then the per-player units'
+    // force blocks ("unit:<owner>/<n>/S<k>") while the union holds them,
+    // else the own name.  Both registries are this file's statics (`user`
+    // is unused).
+    int32_t controller_alias_cb(void* user, const char* name, char* out, uint32_t out_size) {
+        (void)user;
         std::string alias;
-        if (!registry || !out || !bmmo::game::trafo_controller_alias(*registry, name, alias) || alias.size() + 1 > out_size)
-            return 0;
+        const bool found = (trafo_host.on && bmmo::game::trafo_controller_alias(trafo_host.registry, name, alias))
+            || proximity_host.union_.controller_alias(name, alias);
+        if (!found || !out || alias.size() + 1 > out_size) return 0;
         std::memcpy(out, alias.c_str(), alias.size() + 1);
         return 1;
     }
@@ -1019,7 +1040,7 @@ namespace {
         if (!core.trafo_active() || trafo_host.on) return;
         trafo_host.hooks = make_retail_trafo_hooks(view, logger);
         std::string error;
-        if (!view.set_controller_alias(&trafo_controller_alias_cb, &trafo_host.registry, error))
+        if (!view.set_controller_alias(&controller_alias_cb, nullptr, error))
             logger->Warn("Physics session: trafo: the controller alias: %s", error.c_str());
         if (trafo_host.loaded_reference.empty()) {
             // Balls.nmo's scripts were not seen loading (or were running
@@ -1060,7 +1081,9 @@ namespace {
         if (!trafo_host.on) return;
         const int bodies = bmmo::game::teardown_trafo_sets(context, trafo_host.registry, trafo_host.hooks);
         std::string error;
-        view.set_controller_alias(nullptr, nullptr, error);
+        // Step Q7: the units' part of the alias stays while the union holds them.
+        if (proximity_host.union_.slots()) view.set_controller_alias(&controller_alias_cb, nullptr, error);
+        else view.set_controller_alias(nullptr, nullptr, error);
         view.trafo_set_filter(false, error);
         trafo_host.hold.disarm();
         trafo_host.registry.clear();
@@ -1829,7 +1852,7 @@ void BallanceMMOClient::core_host_anchor() {
     if (core.proximity_union_active()) {
         const bmmo::game::script_replay::selection sel = host.script_ids.empty()
             ? bmmo::game::session_script_selection(m_bml->GetCKContext(), trafo_host.on) : host.script_ids;
-        if (!proximity_rewire(m_bml->GetCKContext(), physics_view_, sel, logger_, error)) {
+        if (!proximity_rewire(m_bml->GetCKContext(), physics_view_, sel, core.mechanism_slots(), logger_, error)) {
             core_host_end_local(error);
             return;
         }

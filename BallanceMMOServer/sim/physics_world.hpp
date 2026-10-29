@@ -107,6 +107,12 @@ namespace bmmo::sim {
         // nobody did for its tick (SimTool's scenes).  Off: the bit-clear
         // path (place_legacy inside tick(), step G1), bit for bit.
         bool proximity_union = false;
+        // session::WORLD_PLAYER_MECHANISMS (world-agreement-gaps-design.md
+        // §2.10, step Q7): with the union, the slot count K the anchor copies
+        // every per-player unit into (game/proximity_union.hpp's copy step);
+        // place_probes() binds slot k to the clone of the player whose join
+        // order is k.  0: no units (G3's single-ball rules).
+        uint8_t mechanism_slots = 0;
         // Sector placement (docs/sector-placement-design.md 2.4, step S2):
         // at the anchor every PH row whose object an earlier row placed at
         // another matrix gets its own copy (game/sector_placement.hpp).  Off
@@ -370,7 +376,9 @@ namespace bmmo::sim {
         // union, and rewire it again (`union_rules`: §2.3 under the bit, with
         // `which`; otherwise the anchor's bit-clear rewire of every block).
         int release_proximity();
-        std::string rewire_proximity(bool union_rules, bmmo::game::probe_class which);
+        // `slots` (step Q7, V6): the per-player units copied that many times
+        // (union rules only; 0 = none).
+        std::string rewire_proximity(bool union_rules, bmmo::game::probe_class which, uint8_t slots = 0);
         CK3dEntity* retail_ball() const;
         // Runs in the physics manager's PreSimulate pass of every tick: after
         // the scripts of that tick, before its PSIs.  Parks the retail ball

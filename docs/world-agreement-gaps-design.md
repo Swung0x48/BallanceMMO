@@ -33,7 +33,8 @@ WG3)"), step G4 built (WG4, 2026-10-28: the retail core host, §12 "As built (st
 WG4)"), step G6 done (WG6, 2026-10-28: the documentation pass, §12 "As built
 (step WG6)"), step M0 built (WM0, 2026-10-28: the tools, §12 "As built
 (step WM0)"), step M1 built (WM1, 2026-10-28: member lives and J2, protocol 18,
-§12 "As built (step WM1)"), Q7 not built. Base: HEAD 4882ec2 (R2) with step P in the working
+§12 "As built (step WM1)"), step Q7 built (WGQ7, 2026-10-29: per-player
+mechanism units, protocol 19, journal v8, §12 "As built (step WGQ7)"). Base: HEAD 4882ec2 (R2) with step P in the working
 tree. **Every line number is the working tree's of 2026-10-23.** Step P is still
 moving `client_core*.cpp`, `rollback.hpp`, `script_replay.hpp`,
 `session_host_support.hpp`, `session_host_world.hpp`, `session_client.cpp` and
@@ -3616,3 +3617,286 @@ flush option with the modes discussed; the default is flush per batch).
   session logic touched; the wire check's journal identity covers the bytes).
   SIO's `.local-tools/work/SIO/sio_log_flush_per_batch.patch` is superseded
   (not applied).
+
+### As built (step WGQ7, 2026-10-29): Q7, per-player mechanism units (protocol 19)
+
+**Protocol and journal.** P_Q is **19** (`PHYSICS_PROTOCOL_VERSION`;
+`PHYSICS_PROTOCOL_PLAYER_MECHANISMS` names it): `session_start_msg`
+gains `mechanism_slots` (u8) right after `world_options`, written and read
+from protocol 19 on; under the bit the reader refuses 0 and anything above
+`MAX_PLAYERS_PER_SESSION`. The journal takes **v8**: the HEADER's trailing
+`mechanism_slots` (an older file reads 0); the server's and the clients'
+headers carry it, and `scripts/journal_trace.py` reads it.
+
+**What exists.**
+- *The unit rule* (`session/mechanism_units.hpp`, new, CK-free): the
+  abstract graph (blocks with prototype, parent, children, parameters and
+  pre-copy walk position; links with their initial delays; parameter
+  operations), `find_unit` (D, C, U, S, the shape, the refusals), the link
+  classes (inside, fan-out, fan-in), the shared sources, the operations a
+  block unit owns, `describe`, `mechanism_slot_count` (K) and `bind_slots`.
+- *The copy step and slot binding* (`game/proximity_union.hpp`):
+  `rewire_options::slots` (K). With the union rules and K >= 1, `rewire`
+  first runs `copy_units`: the units of every identity read of the class
+  (each read's one gating probe), the abstract graph extracted from CK
+  (`extract_model`), refused on a third shape, an overlap or a hot source
+  (a non-zero Pointer parameter); slot 0 is the original; for k = 1..K-1,
+  unit by unit in (owner, script, walk) order, `CopyObjects` with
+  dependencies that copy names only (a behaviour copies its IO,
+  parameters, sub-behaviours, links and operations with it), the copy added
+  to the unit's graph, the copied inside links and operations added there,
+  and the fan-out and fan-in links created with the original's initial
+  delay. Each copy's structure (blocks, IO and parameter counts, links and
+  delays by walk position, operations; no CK id) must equal its
+  original's, and its locals their values; else the rewire refuses (all or
+  nothing, Q10's check in every world). Then `rewire_probes` /
+  `rewire_identities` name a unit's blocks `BMMO_Prox_<owner>_<n>_S<k>` /
+  `CurrentLevel#BMMOId_<owner>_<n>_S<k>` (n the original's pre-copy
+  walk position; every other probe keeps its G3 name, also by its pre-copy
+  position), and a slot read's gating probe must be its slot's. `place`
+  binds slot k to the candidate whose `slot` is k (`bind_slots`): the
+  frame follows it or holds; the identity cell is its ball entity (by-name:
+  the retail entity of its type) or `BMMO_NoBall`, never the hold (the
+  cells start on `BMMO_NoBall`); the body-kind latch moves an output that
+  does not name the slot's candidate. A candidate outside [0, K) binds
+  nothing (`unslotted`). The hold sections (`capture`, `restore`,
+  `capture_portable`, `localize_hold`) list every frame (K per unit probe)
+  and no slot by-name cell (§2.10). `signature` appends, only with units,
+  K and per unit its owner, script, read position, shape and every slot's
+  structure, so the G3 signatures are unchanged without the bit.
+  `release` destroys the copies with their links and operations after the
+  union's own objects. `controller_alias` gives every unit force block,
+  slot 0 included, `unit:<owner>/<n>/S<k>` (§4.3). `units_summary` is
+  C1's line `player mechanisms: K slots, U units, C copies, +B record
+  bytes` (B: each copy's blocks as the v2 record writes them).
+- *The bit and the config.* `WORLD_PLAYER_MECHANISMS` (`entity/session.hpp`)
+  and `physics.player_mechanisms` (default on, with the union only); K =
+  `maximum_members` clamped to [1, 64].
+- *The server.* SessionStart carries K; `assign_join_order` hands out
+  orders below K (`capped_join_order`, `session/member_lives.hpp`); a
+  joiner that finds every order below K held or retiring waits in
+  `waiting_orders` (first come, first served: `on_player_removed` and
+  `on_player_add_failed` call `admit_waiting`), and one that finds every
+  order below K held by a live life gets SessionEnd "physics session full
+  (K mechanism slots)" and stays in the room; a waiter that leaves is taken
+  off the list, and a session's end tells the waiters as it tells the
+  members. The runner takes K (`create_session`), the world copies
+  the units at its anchor (class `all`) and a clone's slot is its join
+  order (`probe_candidates`), the server journal's header records K.
+- *The core* fills `probe_candidate::slot` from the life the placed tick
+  names (`member_life_at`, the server's join order; live and in every
+  replay), keeps SessionStart's K (`mechanism_slots()`: K under the bit
+  while the union is active) and journals it.
+- *The hosts.* SC and CH pass `core.mechanism_slots()` into the rewire and
+  install one alias function per manager: the trafo sets' names first, then
+  the units', then the own name (SC `install_controller_alias`, CH
+  `controller_alias_cb` over both statics; the trafo teardown keeps the
+  units' part); the server's world installs the same chain at its boot.
+- *SimTool.* `--replay-session` takes K from a v8 header; V6's
+  `--release-check` also counts the CK objects per class around each round
+  and lists a copy's own objects a release left alive (none); the drop scene
+  takes `--player-mechanisms K` with `--world-options PROXIMITY_UNION`
+  (V7) and `--probe-trace` prints each unit force block's slot and whether
+  it holds a force; `--probe-census --release-check --player-mechanisms K`
+  is V6; `--world-options` knows `PLAYER_MECHANISMS` (bit 4).
+- *Tests* (`BallanceMMOMessageTests` 621/621): U8 (`MechanismUnits`: the
+  fan and the bridge fixtures transcribed from L11, the three refusals),
+  U9's CK-free parts (slot binding, the join-order cap, K from 100 members
+  = 64 and the 65th refused), `SessionStartMsg.MechanismSlots`,
+  `SessionJournal.V8MechanismSlots`.
+
+**Adapted (the code is what it is; each within the principles).**
+1. *The bit is 4, not "the next free after bit 2".* Bit 3 is reserved by
+   the record-format design's `WORLD_SESSION_CLOCK` (not built); taking it
+   would collide when K1 lands.
+2. *AddSubBehavior sorts the graph, so the children are put back.* CK's
+   `AddSubBehavior` sorts a graph's children by priority with the CRT's
+   (emulated) qsort, which is not stable: the fan's root graph came out
+   permuted at the first copy, and a graph runs its active children in that
+   order (`CKBehavior::CheckIOsActivation`); the release then left the
+   permuted order (V6 found the second round's walk positions moved). §2.10
+   says each copy goes AFTER the existing sub-behaviours, so the copy step
+   restores the pre-add order with the copy last, through a pointer to the
+   protected `m_GraphData` (both SDKs declare `BehaviorGraphData` the same
+   way); release's `RemoveSubBehavior` then leaves the pre-copy order. The
+   signature does not cover the children's order, which the portable
+   record's post-copy walk keys blocks by; it is the same in every world by
+   construction: the load order every world already shares, with the copies
+   appended in slot and unit order, and no longer a function of the qsort
+   emulation.
+3. *A block unit owns its operations.* The bridge's Test reads the cell
+   through a `Get Name` parameter operation of the root graph (WG0's note);
+   §2.10 does not list operations. A copy without its own would read slot
+   0's cell, so the rule lists the operations between two unit blocks and
+   the copy step copies them with the blocks (the copied Test's source is
+   remapped to the copied operation by CopyObjects).
+4. *The server copies before its selection exists.* The server rewires
+   class `all` before its selection (G1's CK creation order), so its copy
+   step takes every identity read's unit (not keep-local) and `classify`
+   marks the mechanism units afterwards; on every level every identity
+   read is in a mechanism script (WG0), so the server's units are the
+   clients' (the signatures agree, below).
+5. *A copy's local values are checked in the world, not signed.* The
+   structure goes into the signature; the values (and Pointer locals, whose
+   size differs between the x86 and x64 builds) are compared with the
+   original's at the copy step only.
+6. *The census keeps its own CK reading of the unit.* SimTool's
+   `probe_census.hpp` (G0) still measures D, C and S from CK for its listing
+   and its two-shape check; the worlds use `mechanism_units.hpp`. V6
+   compares the two through the unit counts and the census's `unit shapes`
+   check (both PASS on every level).
+7. *`/bigobj` for the headless client* (C1128, as SimTool at RO1 and the
+   tests at M1).
+
+**Checks** (QUICK tier; about 13 minutes of checks, two live runs).
+- Builds: x64 BUILD-OK, x86 CLIENT-BUILD-OK (core_host.cpp and the shared
+  core rebuilt: the copy step compiles against the retail SDK),
+  ARCH-BUILD-OK `ballanced-36c04e3d24c9+bmmo-badfea92e8d2-dirty`;
+  `BallanceMMOMessageTests` 621/621; GCC syntax check 30/30 ok;
+  `journal_trace.py --selftest` OK.
+- **V6** (`.local-tools/work/WGQ7/v6_all.py`; L1-L13, placement off and
+  on, K = 2 and 8, 52 runs): every run `PROBE-CENSUS: PASS` and
+  `RELEASE-CHECK: PASS`; units 71 with the placement off (L2-L12 10, 4, 4,
+  2, 10, 6, 3, 6, 7, 6, 11; the arena 2; L1 0), 132 with it on; copies =
+  units x (K - 1); each copy's structure equal to its original's; two
+  rewire/release rounds give the same signature and leave the CK object
+  counts of the pre-copy graph (behaviours, links, IOs, operations, pIns,
+  locals) - but see the parameter outputs below. The x86 and Linux SimTool
+  listings are deferred (below).
+- **V7** (`.local-tools/work/WGQ7/v7.sh`, the arena): (a) two paper balls
+  in the P_Modul_18 box under the Q7 bit: both slots' forces held
+  (`unit:P_Modul_18_MF/11/S0` and `/S1`, two controllers) and both balls
+  rise (y 8.887 and 8.132 at report 80; each slot's cell names its own
+  clone); under G3's bit alone one frame and one cell serve the nearer
+  ball. (b) a wood ball held on Platte06, a stone ball 2.8 m beside it:
+  the bridge breaks under the Q7 bit (fell 7.093 m; slot 1's cell
+  `Ball_Stone`, slot 0's `Ball_Wood`) and not under G3's bit alone (fell
+  2.461 m, the sag; the one cell names the wood).
+- **Wire check** rIOF vs rWGQ7 over `core_ref_s11` (`NEW_EXTRA="--accept-
+  protocol 18"`: the set is protocol 18 and has no Q7 bit): every replay
+  reaches its end marker; the sends differ in exactly one line per client,
+  SessionReady #5/#6 (75 bytes both: the protocol field 18 -> 19); every
+  journal differs in exactly one record, the HEADER (118 -> 119 bytes: v8's
+  K), with every TICK hash and pose and every checkpoint equal (12/12, e.g.
+  l8_cross c0 11938 records, 2163 ticks, 1095 checkpoints). The bit-clear
+  path is unchanged.
+- **Retail, L11, two copies** (`.local-tools/work/WGQ7/wgq7_gate.py`,
+  `scripts/retail/wgq7_gate1`; the Arch server of this tree: union, placement
+  and player mechanisms on, K = 8, trafo inputs off, snapshots off; client 2
+  forced rollbacks every 25 ticks, 10 deep; client 1 into sector 2): both
+  retail anchors `player mechanisms: 8 slots, 11 units, 77 copies, +39998
+  record bytes` and signature `68db2214ab881bbd` = the server's mechanism
+  signature (the server's line is the same, digit for digit): **Q10 is
+  settled for L11 - retail CK2 copies the units as Ballanced does** (the
+  per-copy structure is in the signature). Both assigned (no "probe
+  mismatch"), `skipped=0 relatched=0 two_bodies=0`; client 2 228 replayed
+  places, 0 logical script differences (one `frame 6 differs [float]`, WG3's
+  classification); the server "candidate set drift 0"; after the room's
+  close "228 inputs back, 77 unit copies destroyed" on both. The server
+  journal replays 705/705 with K = 8 from its v8 header,
+  `checkpoint_mismatches=0`.
+- **Headless smoke** (`.local-tools/work/WGQ7/live.sh`, WM1's recipe:
+  arena, 4 clients 45 s, `--rejoin 2:1200 --join-late 3:1500 --leave
+  1:1800`, `maps/arena-test/wgq7_live`): every client rc 0, `mism`/`hard`/
+  `mech_hard` 0, the server journal 3462/3462 matched,
+  `checkpoint_mismatches=0`; every anchor (the rejoin's and the late join's
+  included) `player mechanisms: 8 slots, 2 units, 14 copies, +4907 record
+  bytes`, signature `c7e224f5cf8c631b` = the server's; the releases "14
+  unit copies destroyed". VERDICT FAIL on "client2 relayed frames past the
+  rollback reach: 2" - client 2 is the rejoiner, both frames in its first
+  window after the rejoin's late-join restore (window tick 1259, `late=2`,
+  lag max 13); WM1's run of the same recipe had 0. **Attributed in the
+  gate round (offline, `arena_map_test.py --report-only` on `wgq7_live` and
+  `wm1_live` with the v8 reader; outputs in `.local-tools/work/WGQ7/fix/`):
+  a counting artefact at the rejoin boundary, in code the step does not
+  change, with no simulation effect.** `note_input_correction`
+  (`client_core_messages.cpp:464-467`) counts a frame late on two
+  conditions only: the rewind depth past `window_rewind_reach`, or
+  `!knows_tick(tick - 1)`. The window's lag is 1..10 per remote (lag max 13
+  over the run) against a reach of 48 (`reach=48/48/96` on every status
+  line), so the depth term cannot fire; both frames took the second branch.
+  The rejoined life's first record is the resync anchor, base - 1 = 1232,
+  written at the assignment (`anchor_resync`,
+  `client_core_resync.cpp:64`), and every later tick is recorded as it is
+  stepped, so the anchor of a late frame lies before 1232: both are first
+  arrivals of relayed frames for ticks <= 1232 handled after the
+  assignment - inputs the server's state of tick 1232 already contains (the
+  re-step uses the frames in (1232, 1247]: "15 relayed frame(s) in (1232,
+  1247], 1233..1247" for both mirrors, complete). One frame per remote (the
+  two remotes' lag histograms are identical: one relay message), so 2.
+  Whether that message is handled before the assignment (then the core's
+  current tick is still 0 and the frame is "not simulated yet", counted
+  nowhere: WM1, wm0_live, wm0_live2) or after it (here) is the order of the
+  unreliable relay against the reliable SessionAssign. Client 2's outcome:
+  own ball 0.0000 m in B/D/A, other balls 0.0139 m, mechanisms 0.0000,
+  `mism` 0; the server journal 3462/3462. The step changes neither branch
+  (`client_core_messages.cpp`, `client_core_resync.cpp` and the relay are
+  not in its diff; the join path gave the rejoiner the same join order 3 at
+  the same tick 1203 as in WM1). Pre-existing by the code; not reproduced on
+  the previous build within the budget (three earlier rejoin runs, WM0's
+  two and WM1's, had 0). Queued (roadmap §4 item 2): a frame whose tick is at or before the
+  last resync's anchor is covered by the state, not past the reach - count
+  it apart (core) or exempt it in the criterion (harness). Late joins of
+  earlier builds count many more (`SPGH2_live_latejoin` 96 at lag 24-34,
+  `a5_join_1` 24); they are not analysed here.
+
+**C1 (§7.6) and Q11.** The copies' v2 record bytes per record at K = 8
+(the anchor line): L11 +20503 (placement off; §2.10 estimated +24 KB) and
++39998 (on, the default since SP10), L12 +42889 (off; estimate +50 KB) and
++101374 (on), the arena +4907. Measured on a real record: the arena late
+joiner's resync script record 67359 bytes (WM1, same recipe) -> 73048
+(+5689, +8.4 %; the copies plus the K-fold hold frames). Capture time: the
+headless clients' `t_cap` per frame 0.470 vs WM1's 0.464 ms (client 0;
+1260 / 2680 against 1222 / 2636). The CPU judgement is the close-out's;
+L12 with the placement on is the case Q11 names.
+
+**Found, pre-existing, queued (roadmap §4 item 5).**
+- *An identity copy leaves two parameter outputs at its release.* V6 counts
+  CK objects per class around a rewire and release: every
+  `CopyObject(CurrentLevel)` copy (step G1's code, union rules or not)
+  leaves 2 `CKParameterOut` behind when it is destroyed, their owner pointer
+  dangling (reading it crashed two diagnostic runs). V5 never counted
+  parameter outputs. The units' copies leave nothing (V6's baseline round
+  measures the per-copy leak, and every round's count is the baseline's
+  times its identity reads). Harmless while nothing reads them; queued.
+- *WAD-A is not decided by these runs.* No fan force was held at any import
+  in the two live runs. The one force controller held at the late joiner's
+  import (`rt:force/47161`, P_Modul_26_Sack, not a unit) found no live
+  controller, but so did the same core's constraint controllers
+  (`sys:unknown`), and the joiner's script state was refused (the
+  rejoiner's trafo set): the module had no live controllers at the import,
+  so the run cannot tell an id mismatch from an absence. WM1's run of the
+  same recipe logged the same lines. Under the bit every unit force block
+  is aliased, slot 0's included (`register_force` in `copy_units` and
+  `copy_unit`, `proximity_union.hpp`), so WAD-A now concerns only the force
+  blocks outside units and the bit-off control; it is deferred to FULL
+  with its recipe (below).
+- *The server's unit set equals the clients' by the census, not by
+  construction, and nothing guards it.* The server copies every identity
+  read's unit (class all, before its selection exists; adaptation 4), a
+  client only its mechanism scripts'. Equal today (L11 11 = 11 units, the
+  arena 2 = 2: the server's and the clients' anchor lines), because WG0's
+  census found every identity read in a mechanism script. But the anchors
+  compare `signature(mechanism)` (`physics_world.hpp:427`,
+  `session_client.cpp`, `core_host.cpp`), whose unit tail skips a unit
+  `classify()` leaves out of the class: a level that broke the census would
+  give the server K copies a client lacks, with no refusal (the review's
+  "the signature catches it" does not hold; the comment at `copy_units`
+  says so). Queued: write the count of the server's non-mechanism units
+  into the tail when it is not 0 (every current signature unchanged), or
+  refuse such a level at the server's anchor.
+
+**Deferred to FULL** (the 15-minute gate ran the builds, the tests, GCC,
+V6, V7, the wire check, one retail and one headless run): V6's x86 and
+Linux SimTool listings; V4b (chained savestate rounds with two slot forces
+across a death); H2b, H2c, H3b, H3c, J6 (driven fan and bridge crossings,
+the resync and late join with a slot force held - the alias's live check);
+R2's driven two-ball fan on retail; U9's runner-level parts (the waiting
+joiner and the refusal in a live session: a room of 9 with K = 8); the
+same-batch control for the headless smoke's relay verdict; **WAD-A** (a
+resync and a late join with a fan force held, headless and retail,
+placement on, the bit on and a bit-off control; pass = no "no live
+controller" at the import; under the bit only force blocks outside units
+are at stake); **REF12**, the
+protocol-19 reference set (every `core_ref_s11` capture is protocol 18:
+`--accept-protocol 18` replays them, above).

@@ -6,6 +6,7 @@
 #endif
 
 #include <vector>
+#include <deque>
 #include <unordered_set>
 #include <condition_variable>
 #include "../BallanceMMOCommon/common.hpp"
@@ -33,6 +34,7 @@
 #include <session/lifecycle.hpp>
 #include <session/input_relay.hpp>
 #include <session/member_lives.hpp>
+#include <session/mechanism_units.hpp>
 #include <session/spawn_impulse.hpp>
 #include <cmath>
 #endif
@@ -721,6 +723,13 @@ public:
         // their SessionStart, which SessionMember goes to.
         std::map<HSteamNetConnection, uint16_t> lives;
         std::map<std::pair<HSteamNetConnection, uint16_t>, uint8_t> retiring_orders;
+        // Step Q7 (world-agreement-gaps-design.md 2.10 "The cap"): the
+        // session's mechanism slot count K (0 without WORLD_PLAYER_MECHANISMS)
+        // - join orders are handed out below K only - and the joiners that
+        // found every order below K held or retiring, in arrival order: each
+        // released order goes to the first of them (admit_waiting).
+        uint8_t mechanism_slots = 0;
+        std::deque<HSteamNetConnection> waiting_orders;
         std::set<HSteamNetConnection> started;
         // --hold-member-ms (test builds): SessionMember messages waiting to
         // leave, the reliable copy and then the repeats.
@@ -883,9 +892,27 @@ public:
         std::set<uint8_t> used, retiring;
         for (const auto& [member, order]: s.join_orders) used.insert(order);
         for (const auto& [life, order]: s.retiring_orders) retiring.insert(order);
-        const uint8_t order = bmmo::session::lowest_free_join_order(used, retiring);
+        // Step Q7: below K when the session has mechanism slots (a joiner
+        // reaches this only once capped_join_order found it an order; a
+        // start member past K - a room of more than 64 - keeps the old rule).
+        uint8_t order = bmmo::session::lowest_free_join_order(used, retiring);
+        if (s.mechanism_slots) {
+            const auto choice = bmmo::session::capped_join_order(used, retiring, s.mechanism_slots);
+            if (choice.verdict == bmmo::session::join_order_verdict::order) order = choice.order;
+            else Printf("Physics session %u: ERROR join order %u assigned at or above the %u mechanism slots.", s.id,
+                        static_cast<unsigned>(order), static_cast<unsigned>(s.mechanism_slots));
+        }
         s.join_orders[c] = order;
         return order;
+    }
+
+    // Step Q7 (2.10 "The cap"): what a joiner gets under the session's K -
+    // an order, a wait for a retiring one, or the refusal.
+    static bmmo::session::join_order_choice joiner_order(const physics_session_state& s) {
+        std::set<uint8_t> used, retiring;
+        for (const auto& [member, order]: s.join_orders) used.insert(order);
+        for (const auto& [life, order]: s.retiring_orders) retiring.insert(order);
+        return bmmo::session::capped_join_order(used, retiring, s.mechanism_slots ? s.mechanism_slots : 256u);
     }
 
     // Step M1: the member's next life in this session (its add's number).
@@ -994,6 +1021,17 @@ public:
             Printf("Room %u: every world places the mechanism proximity probes by the union's rule in this session "
                    "(world option proximity union; BodyRevived retired).", r.id);
         }
+        // Step Q7 (world-agreement-gaps-design.md 2.10, 5): one mechanism
+        // responds to every player - K slot copies of every per-player unit
+        // in every world, K the room capacity clamped to [1, 64], fixed for
+        // the session (SessionStart carries it).  With the union only.
+        if (config_.physics_player_mechanisms && (s.world_options & bmmo::session::WORLD_PROXIMITY_UNION)) {
+            s.world_options |= bmmo::session::WORLD_PLAYER_MECHANISMS;
+            s.mechanism_slots = bmmo::session::units::mechanism_slot_count(
+                config_.maximum_members, static_cast<uint32_t>(bmmo::session::MAX_PLAYERS_PER_SESSION));
+            Printf("Room %u: one mechanism responds to every player in this session (world option player mechanisms, "
+                   "%u slots; join orders below it).", r.id, static_cast<unsigned>(s.mechanism_slots));
+        }
         room_session_[r.id] = s.id;
         const uint32_t id = s.id;
         std::vector<std::pair<uint32_t, uint8_t>> players;
@@ -1015,6 +1053,7 @@ public:
         const float spawn_impulse = s.spawn_impulse;
         const uint32_t sector_lead = s.sector_lead;
         const uint32_t world_options = s.world_options;
+        const uint8_t mechanism_slots = s.mechanism_slots;
         physics_sessions_.emplace(id, std::move(s));
         // The world is numbered from the same base its members are (design 9.25
         // phase alignment): its first simulated tick is `start_base`, so the
@@ -1022,7 +1061,7 @@ public:
         // one tick number instead of the server being `start_base` steps ahead
         // of them at every number for the rest of the session.
         runner_->create_session(id, map.level, players, input_delay, start_base, spawn_impulse, note, std::move(names),
-                                sector_lead, world_options);
+                                sector_lead, world_options, mechanism_slots);
         return id;
     }
 
@@ -1047,6 +1086,13 @@ public:
             send_room_event(m, bmmo::room::event_type::SessionEnded, bmmo::room::error_code::None, s.room,
                     k_HSteamNetConnection_Invalid, k_HSteamNetConnection_Invalid, reason);
         }
+        // Step Q7: the joiners still waiting for a join order are told too.
+        for (const auto w: s.waiting_orders) {
+            client_session_.erase(w);
+            send_session_end(session, w, reason);
+            send_room_event(w, bmmo::room::event_type::SessionEnded, bmmo::room::error_code::None, s.room,
+                    k_HSteamNetConnection_Invalid, k_HSteamNetConnection_Invalid, reason);
+        }
         room_session_.erase(s.room);
         rooms_.reset_session(s.room);
         if (runner_) runner_->destroy_session(session, reason);
@@ -1069,6 +1115,7 @@ public:
         msg.spawn_impulse = s.spawn_impulse;
         msg.spawn_spacing = s.spawn_spacing;
         msg.world_options = s.world_options;
+        msg.mechanism_slots = s.mechanism_slots;   // protocol 19 (step Q7)
         // Every member spawns at the retail resetpoint (design 9.10): the
         // kick set below moves same-tick spawns apart instead of a ring.
         for (size_t i = 0; i < s.members.size() && i < bmmo::session::MAX_PLAYERS_PER_SESSION; ++i) {
@@ -1154,6 +1201,7 @@ public:
         auto& s = it->second;
         s.retiring_orders.erase({static_cast<HSteamNetConnection>(c.player), c.life});
         if (c.in_world) send_session_member(s, bmmo::session::MEMBER_REMOVED, c.tick, member_entry(s, c));
+        admit_waiting(s);   // step Q7: the released order to the first waiting joiner
     }
 
     // Simulation thread (step M1): the world refused the add.  The member
@@ -1175,8 +1223,24 @@ public:
             send_session_end(c.session, member, "could not be added to the world: " + error);
             physics_session_member_left(member);
         }
-        if (auto again = physics_sessions_.find(c.session); again != physics_sessions_.end())
+        if (auto again = physics_sessions_.find(c.session); again != physics_sessions_.end()) {
             again->second.retiring_orders.erase({member, c.life});
+            admit_waiting(again->second);   // step Q7
+        }
+    }
+
+    // Step Q7 (world-agreement-gaps-design.md 2.10 "The cap"): the waiting
+    // joiners, first come first served, while an order below K is free.  A
+    // waiter that left the room meanwhile was taken off the list by
+    // physics_session_member_left.
+    void admit_waiting(physics_session_state& s) {
+        while (!s.waiting_orders.empty()) {
+            if (joiner_order(s).verdict != bmmo::session::join_order_verdict::order) return;
+            const HSteamNetConnection c = s.waiting_orders.front();
+            s.waiting_orders.pop_front();
+            Printf("Physics session %u: %s gets a released join order.", s.id, get_client_name(c));
+            admit_member(s, c);
+        }
     }
 
     // Simulation thread: the world finished booting.
@@ -1502,6 +1566,33 @@ public:
         auto it = physics_sessions_.find(rs->second);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
+        // Step Q7 (world-agreement-gaps-design.md 2.10 "The cap"): with K
+        // mechanism slots a joiner takes an order below K; it waits for a
+        // retiring one, or - every order below K held by a live life - is
+        // refused the physics session and stays in the room.
+        if (s.mechanism_slots) {
+            const auto choice = joiner_order(s);
+            if (choice.verdict == bmmo::session::join_order_verdict::refuse) {
+                Printf("Physics session %u: %s refused: physics session full (%u mechanism slots).", s.id,
+                       get_client_name(c), static_cast<unsigned>(s.mechanism_slots));
+                send_session_end(s.id, c, Sprintf("physics session full (%u mechanism slots)",
+                                                  static_cast<unsigned>(s.mechanism_slots)));
+                return;
+            }
+            if (choice.verdict == bmmo::session::join_order_verdict::wait) {
+                s.waiting_orders.push_back(c);
+                client_session_[c] = s.id;
+                Printf("Physics session %u: %s waits for a join order (every order below the %u mechanism slots is "
+                       "held or retiring).", s.id, get_client_name(c), static_cast<unsigned>(s.mechanism_slots));
+                return;
+            }
+        }
+        admit_member(s, c);
+    }
+
+    // A joiner into the session's world (its order, life and add; step M1's
+    // body of physics_session_member_joined, step Q7 calls it for a waiter).
+    void admit_member(physics_session_state& s, HSteamNetConnection c) {
         s.members.push_back(c);
         client_session_[c] = s.id;
         // Sample this connection's round trip now.  The periodic latency
@@ -1549,6 +1640,11 @@ public:
         auto it = physics_sessions_.find(session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
+        // Step Q7: a joiner still waiting for a join order holds nothing else.
+        if (const auto w = std::find(s.waiting_orders.begin(), s.waiting_orders.end(), c); w != s.waiting_orders.end()) {
+            s.waiting_orders.erase(w);
+            return;
+        }
         s.members.erase(std::remove(s.members.begin(), s.members.end(), c), s.members.end());
         s.assign_repeats.erase(std::remove_if(s.assign_repeats.begin(), s.assign_repeats.end(),
                                               [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),

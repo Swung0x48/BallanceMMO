@@ -59,6 +59,7 @@
 
 #include "CKAll.h"
 
+#include <session/mechanism_units.hpp>
 #include <session/proximity_rules.hpp>
 #include <session/resync_rules.hpp>
 
@@ -115,6 +116,12 @@ namespace bmmo::game {
             // type is the longest of them its entity name starts with (by-name
             // kind, union rules).
             std::vector<std::string> ball_names;
+            // Step Q7 (§2.10, WORLD_PLAYER_MECHANISMS): the session's slot
+            // count K; with the union rules and K >= 1 the rewire first copies
+            // every per-player unit K - 1 times (slot 0 is the original) and
+            // binds slot k's frames, identity cells and latches to the
+            // candidate whose `slot` is k.  0: no units (G3's rules).
+            uint8_t slots = 0;
         };
         // A ball of the bit-clear path, in player id order: the body (the
         // clone) and the retail entity of its type (null when unknown).
@@ -193,14 +200,31 @@ namespace bmmo::game {
             // gives the previous rewire's sources back first - clear() alone
             // would forget them, and the structural test would then find no
             // Ball_Pos_Frame source and rewire nothing.
-            if (!probes_.empty() || !identities_.empty() || no_ball_) release(context);
+            if (!probes_.empty() || !identities_.empty() || no_ball_ || !units_.empty()) release(context);
             clear();
             which_ = which;
             options_ = options;
             lines_.clear();
-            std::string error = rewire_probes(context, sel);
+            context_ = context;
+            // Step Q7 (§2.10 "The copy step"): the units copied before the
+            // rewire, which then gives every slot its own frame and identity
+            // copy (the copies' probes and reads are found by the structural
+            // test like the originals, and named by slot).
+            std::string error;
+            if (options_.union_rules && options_.slots > 0) {
+                error = copy_units(context, sel);
+                lines_.insert(lines_.end(), unit_lines_.begin(), unit_lines_.end());
+            }
+            if (error.empty()) error = rewire_probes(context, sel);
             if (error.empty()) error = rewire_identities(context);
             if (error.empty() && options_.union_rules) error = make_no_ball(context);
+            // §2.10: a slot's identity cell starts on BMMO_NoBall (a Test of a
+            // slot that never had a ball is false).
+            if (error.empty() && slots_)
+                for (const identity& r: identities_)
+                    if (r.slot >= 0)
+                        if (auto* array = CKDataArray::Cast(context->GetObject(r.array)))
+                            array->SetElementObject(0, r.column, context->GetObject(no_ball_));
             order();
             classify(sel);
             if (!error.empty()) {
@@ -222,6 +246,9 @@ namespace bmmo::game {
                 if (p.mechanism) roots.insert(p.root);
             }
             for (identity& r: identities_) r.mechanism = roots.count(r.root) != 0;
+            // Step Q7: a unit is in the class with its root script.
+            for (unit_rec& u: units_)
+                u.mechanism = selected.count(u.root) != 0 && !session::keep_local_script(u.owner, u.script);
         }
 
         // ---- the bit-clear path (the server's today, moved) ----
@@ -306,6 +333,7 @@ namespace bmmo::game {
                              [](const probe_candidate& a, const probe_candidate& b) { return a.player < b.player; });
             std::vector<session::probe_ball> balls;
             std::vector<CK3dEntity*> entities;
+            std::vector<int> slot_of;   // step Q7: each accepted candidate's slot
             for (const probe_candidate& c: sorted) {
                 auto* entity = CK3dEntity::Cast(context->GetObjectByNameAndParentClass(
                     const_cast<CKSTRING>(c.entity.c_str()), CKCID_3DENTITY, nullptr));
@@ -322,11 +350,31 @@ namespace bmmo::game {
                 b.position[2] = v.z;
                 balls.push_back(b);
                 entities.push_back(entity);
+                slot_of.push_back(c.slot);
+                if (slots_ && (c.slot < 0 || c.slot >= static_cast<int>(slots_))) ++unslotted_;
             }
-            // Frames: the nearest under the block's own metric, or the hold.
+            // Step Q7 (§2.10 "Binding"): slot k's candidate, an index into
+            // balls / entities, -1 when slot k has none.
+            const std::vector<int> bound = session::units::bind_slots(slot_of, slots_);
+            const auto slot_ball = [&bound](int slot) {
+                return slot >= 0 && slot < static_cast<int>(bound.size()) ? bound[static_cast<size_t>(slot)] : -1;
+            };
+            // Frames: the nearest under the block's own metric, or the hold;
+            // a unit's frame goes to its slot's candidate, or holds (§2.10
+            // "Frame").
             std::vector<int> choice(probes_.size(), -1);
             for (size_t i = 0; i < probes_.size(); ++i) {
                 const probe& p = probes_[i];
+                if (p.slot >= 0) {
+                    const int k = slot_ball(p.slot);
+                    choice[i] = k;
+                    auto* frame = k < 0 ? nullptr : CK3dEntity::Cast(context->GetObject(p.frame));
+                    if (!frame) continue;
+                    const VxVector position(balls[static_cast<size_t>(k)].position[0], balls[static_cast<size_t>(k)].position[1],
+                                            balls[static_cast<size_t>(k)].position[2]);
+                    frame->SetPosition(&position);
+                    continue;
+                }
                 if (balls.empty()) continue;
                 auto* block = CKBehavior::Cast(context->GetObject(p.block));
                 auto* frame = CK3dEntity::Cast(context->GetObject(p.frame));
@@ -346,6 +394,10 @@ namespace bmmo::game {
             CKObject* no_ball = context->GetObject(no_ball_);
             for (identity& r: identities_) {
                 auto* array = CKDataArray::Cast(context->GetObject(r.array));
+                if (r.slot >= 0) {
+                    if (array) place_slot_identity(context, r, *array, slot_ball(r.slot), entities, no_ball);
+                    continue;
+                }
                 if (!array || r.gating < 0) continue;
                 const int k = choice[static_cast<size_t>(r.gating)];
                 CKObject* value = nullptr;
@@ -409,9 +461,7 @@ namespace bmmo::game {
                 f32(v.y);
                 f32(v.z);
             }
-            std::vector<size_t> by_name;
-            for (size_t i: identity_order_)
-                if (identities_[i].by_name) by_name.push_back(i);
+            const std::vector<size_t> by_name = held_identities();
             u16(static_cast<uint16_t>(by_name.size()));
             for (size_t i: by_name) {
                 CKObject* held = nullptr;
@@ -453,9 +503,7 @@ namespace bmmo::game {
                 f32(v.y);
                 f32(v.z);
             }
-            std::vector<size_t> by_name;
-            for (size_t i: identity_order_)
-                if (identities_[i].by_name) by_name.push_back(i);
+            const std::vector<size_t> by_name = held_identities();
             u16(static_cast<uint16_t>(by_name.size()));
             for (size_t i: by_name) {
                 CKObject* held = nullptr;
@@ -519,9 +567,7 @@ namespace bmmo::game {
                 if (it == frames_at.end()) { error = "the server's hold has no frame " + probes_[i].frame_name; out.clear(); return false; }
                 out.insert(out.end(), data + it->second, data + it->second + 12);
             }
-            std::vector<size_t> by_name;
-            for (size_t i: identity_order_)
-                if (identities_[i].by_name) by_name.push_back(i);
+            const std::vector<size_t> by_name = held_identities();
             put16(static_cast<uint16_t>(by_name.size()));
             for (size_t i: by_name) {
                 const auto it = held_by.find(identities_[i].copy_name);
@@ -566,9 +612,7 @@ namespace bmmo::game {
                 }
                 positions[f] = VxVector(xyz[0], xyz[1], xyz[2]);
             }
-            std::vector<size_t> by_name;
-            for (size_t i: identity_order_)
-                if (identities_[i].by_name) by_name.push_back(i);
+            const std::vector<size_t> by_name = held_identities();
             const uint16_t names = u16();
             if (names != by_name.size() || !need(static_cast<size_t>(names) * 4) || at + names * 4u != size) {
                 error = "proximity hold section: " + std::to_string(names) + " by-name copies, this world has "
@@ -617,6 +661,23 @@ namespace bmmo::game {
             f.f32(options_.reset[0]);
             f.f32(options_.reset[1]);
             f.f32(options_.reset[2]);
+            // Step Q7 (§5): under WORLD_PLAYER_MECHANISMS also K, the units'
+            // shapes and every copy's structure (blocks, IO and parameter
+            // counts, links and their delays by walk position; no CK id), so
+            // a world whose copies differ cannot join.  Nothing is added
+            // without units: G3's signatures are unchanged.
+            if (slots_) {
+                f.u32(slots_);
+                for (const unit_rec& u: units_) {
+                    if (mechanism && !u.mechanism) continue;
+                    f.str(u.owner);
+                    f.str(u.script);
+                    f.i32(u.read_walk);
+                    const uint8_t kind = static_cast<uint8_t>(u.kind);
+                    f.bytes(&kind, 1);
+                    for (uint64_t h: u.structure) f.bytes(&h, 8);
+                }
+            }
             return f.h;
         }
 
@@ -642,6 +703,7 @@ namespace bmmo::game {
                     destroy(context, it->frame);
                 }
                 destroy(context, no_ball_);
+                release_units(context);   // step Q7: the slot copies with their links, after the union's own objects
             }
             clear();
             return restored;
@@ -669,6 +731,48 @@ namespace bmmo::game {
         CK_ID no_ball() const { return no_ball_; }
         uint64_t skipped() const { return skipped_; }
         uint64_t relatched() const { return relatched_; }
+        // Step Q7: K, the units, the copies made and the candidates whose
+        // slot was outside [0, K) (the server's cap makes it impossible: 0).
+        uint8_t slots() const { return slots_; }
+        size_t unit_count() const { return units_.size(); }
+        size_t copy_count() const {
+            size_t n = 0;
+            for (const unit_rec& u: units_) n += u.copies.size();
+            return n;
+        }
+        uint64_t unslotted() const { return unslotted_; }
+        // The record bytes the copies add (each copy's blocks as the v2
+        // record writes them, measured at the copy step; C1).
+        size_t copy_record_bytes() const { return copy_record_bytes_; }
+        // §4.3: a unit force block's controller, "rt:force/<block id>" in
+        // this world, is "unit:<owner>/<n>/S<k>" in every world (slot 0
+        // included).  False for every other name.
+        bool controller_alias(const char* name, std::string& alias) const {
+            static constexpr char kPrefix[] = "rt:force/";
+            if (!name || force_alias_.empty() || std::strncmp(name, kPrefix, sizeof(kPrefix) - 1) != 0) return false;
+            char* end = nullptr;
+            const unsigned long id = std::strtoul(name + sizeof(kPrefix) - 1, &end, 10);
+            if (!end || *end) return false;
+            const auto it = force_alias_.find(static_cast<CK_ID>(id));
+            if (it == force_alias_.end()) return false;
+            alias = it->second;
+            return true;
+        }
+        const std::map<CK_ID, std::string>& force_aliases() const { return force_alias_; }
+        // Every block of every slot copy (V6's diagnostics).
+        std::vector<CK_ID> copied_blocks() const {
+            std::vector<CK_ID> out;
+            for (const auto& [id, ref]: unit_blocks_)
+                if (ref.slot > 0) out.push_back(id);
+            return out;
+        }
+        // The copy step's listing (V6, Q10): one line per unit and per copy.
+        const std::vector<std::string>& unit_lines() const { return unit_lines_; }
+        // "player mechanisms: K slots, U units, C copies, +B record bytes" (C1).
+        std::string units_summary() const {
+            return "player mechanisms: " + std::to_string(slots_) + " slots, " + std::to_string(units_.size()) + " units, "
+                   + std::to_string(copy_count()) + " copies, +" + std::to_string(copy_record_bytes_) + " record bytes";
+        }
 
     private:
         struct probe {
@@ -679,6 +783,7 @@ namespace bmmo::game {
             float distance = 0.0f, exact_min = 0.0f, exact_max = 0.0f;
             int axes = -1, use_outputs = -1, barycenter = -1;
             bool mechanism = false;
+            int slot = -1;   // step Q7: a unit's probe: its slot (walk = the original's pre-copy position)
         };
         struct identity {
             CK_ID block = 0, array = 0, parameter = 0, root = 0;
@@ -692,6 +797,7 @@ namespace bmmo::game {
             std::vector<CK_ID> references;   // the bit-clear path: every ObjectB of the script, in probe order
             std::vector<size_t> gating_all;  // the rewired probes with an output linked to its input
             int gating = -1;                 // union rules: the one gating probe
+            int slot = -1;                   // step Q7: a unit's read: its slot (no hold, §2.10)
         };
 
         struct fnv {
@@ -732,6 +838,13 @@ namespace bmmo::game {
             initial_entity_.clear();
             skipped_ = 0;
             relatched_ = 0;
+            unslotted_ = 0;
+            units_.clear();
+            unit_blocks_.clear();
+            force_alias_.clear();
+            unit_lines_.clear();
+            slots_ = 0;
+            copy_record_bytes_ = 0;
         }
 
         static CKBehavior* root_of(CKBehavior* block) {
@@ -840,6 +953,13 @@ namespace bmmo::game {
                     continue;
                 p.walk = walk_of(root, p.block);
                 p.frame_name = "BMMO_Prox_" + p.owner + "_" + std::to_string(p.walk);
+                if (const auto unit = unit_blocks_.find(p.block); unit != unit_blocks_.end()) {
+                    // Step Q7 (§2.10 "Names"): a unit's probe, slot k, n the
+                    // original's pre-copy walk position.
+                    p.slot = unit->second.slot;
+                    p.walk = unit->second.walk;
+                    p.frame_name = "BMMO_Prox_" + p.owner + "_" + std::to_string(p.walk) + "_S" + std::to_string(p.slot);
+                }
                 if (CKObject* b = block->GetInputParameterCount() > 2
                                       ? object_of(context, block->GetInputParameter(2)->GetRealSource()) : nullptr)
                     p.object_b = b->GetName() ? b->GetName() : "";
@@ -953,6 +1073,11 @@ namespace bmmo::game {
                 r.script = root->GetName() ? root->GetName() : "";
                 r.walk = walk_of(root, r.block);
                 r.copy_name = "CurrentLevel#BMMOId_" + r.owner + "_" + std::to_string(r.walk);
+                if (const auto unit = unit_blocks_.find(r.block); unit != unit_blocks_.end()) {
+                    r.slot = unit->second.slot;
+                    r.walk = unit->second.walk;
+                    r.copy_name = "CurrentLevel#BMMOId_" + r.owner + "_" + std::to_string(r.walk) + "_S" + std::to_string(r.slot);
+                }
                 r.column = ball_column;
                 r.references = watched->second;
                 // Gating probes: a rewired probe with an output linked
@@ -971,7 +1096,12 @@ namespace bmmo::game {
                     }
                 }
                 if (r.gating_all.size() == 1) r.gating = static_cast<int>(r.gating_all.front());
-                else if (options_.union_rules)
+                if (r.gating >= 0 && r.slot != probes_[static_cast<size_t>(r.gating)].slot)
+                    return "identity read " + r.owner + "/" + r.script + " #" + std::to_string(r.walk) + " slot "
+                           + std::to_string(r.slot) + " is gated by a probe of slot "
+                           + std::to_string(probes_[static_cast<size_t>(r.gating)].slot);
+                if (r.gating_all.size() == 1) {
+                } else if (options_.union_rules)
                     return "identity read " + r.owner + "/" + r.script + " #" + std::to_string(r.walk) + " has "
                            + std::to_string(r.gating_all.size()) + " gating probes";
                 // What the block's consumers want out of the cell decides which
@@ -1048,14 +1178,14 @@ namespace bmmo::game {
             probe_order_.resize(probes_.size());
             for (size_t i = 0; i < probes_.size(); ++i) probe_order_[i] = i;
             std::sort(probe_order_.begin(), probe_order_.end(), [this](size_t a, size_t b) {
-                return std::tie(probes_[a].owner, probes_[a].script, probes_[a].walk)
-                       < std::tie(probes_[b].owner, probes_[b].script, probes_[b].walk);
+                return std::tie(probes_[a].owner, probes_[a].script, probes_[a].walk, probes_[a].slot)
+                       < std::tie(probes_[b].owner, probes_[b].script, probes_[b].walk, probes_[b].slot);
             });
             identity_order_.resize(identities_.size());
             for (size_t i = 0; i < identities_.size(); ++i) identity_order_[i] = i;
             std::sort(identity_order_.begin(), identity_order_.end(), [this](size_t a, size_t b) {
-                return std::tie(identities_[a].owner, identities_[a].script, identities_[a].walk)
-                       < std::tie(identities_[b].owner, identities_[b].script, identities_[b].walk);
+                return std::tie(identities_[a].owner, identities_[a].script, identities_[a].walk, identities_[a].slot)
+                       < std::tie(identities_[b].owner, identities_[b].script, identities_[b].walk, identities_[b].slot);
             });
         }
 
@@ -1070,6 +1200,657 @@ namespace bmmo::game {
         std::string initial_entity_;
         std::vector<std::string> lines_;
         uint64_t skipped_ = 0, relatched_ = 0;
+        // ---- step Q7: the per-player units (§2.10, part I) ----
+        struct unit_copy {
+            std::vector<CK_ID> roots;        // the copied graph, or the unit's blocks (walk order)
+            std::vector<CK_ID> links;        // added to the parent graph: the inside copies, the fan-out and fan-in links
+            std::vector<CK_ID> operations;   // a block unit's operations, copied into the parent graph
+        };
+        struct unit_rec {
+            std::string owner, script;
+            CK_ID root = 0, parent = 0;      // the root script; the graph the unit and its copies live in
+            int read_walk = -1;
+            session::units::shape kind = session::units::shape::none;
+            bool mechanism = false;          // the clients' class (the root in the selection, not keep_local)
+            std::vector<uint64_t> structure; // per slot, slot 0 first (the signature's)
+            std::vector<unit_copy> copies;   // slots 1..K-1
+        };
+        struct slot_ref {
+            int slot = -1;
+            int walk = -1;   // the original's pre-copy walk position
+        };
+        // What the copy step plans per unit before it copies anything.
+        struct unit_plan {
+            CK_ID root = 0;
+            std::string owner, script;
+            int read_walk = -1;
+            session::units::unit unit;
+            const session::units::graph_model* model = nullptr;
+            std::vector<uint32_t> blocks;    // every block a copy takes (pre-order per copy root)
+        };
+        std::vector<unit_rec> units_;
+        std::map<CK_ID, slot_ref> unit_blocks_;   // every block of a unit and of its copies
+        std::map<CK_ID, std::string> force_alias_;
+        std::vector<std::string> unit_lines_;
+        uint8_t slots_ = 0;
+        uint64_t unslotted_ = 0;
+        size_t copy_record_bytes_ = 0;
+
+        // The by-name copies with a hold entry (§4.2): a slot's by-name cell
+        // has none (§2.10: it is BMMO_NoBall or the candidate's type, a
+        // function of the tick).
+        std::vector<size_t> held_identities() const {
+            std::vector<size_t> out;
+            for (size_t i: identity_order_)
+                if (identities_[i].by_name && identities_[i].slot < 0) out.push_back(i);
+            return out;
+        }
+
+        // §2.10 "Identity cell" and "Latch, body kind" for one slot read: the
+        // slot's candidate (index k into `entities`, -1 for none) - its ball
+        // entity (body kind) or the retail entity of its type (by-name), or
+        // BMMO_NoBall; never the hold.  A body-kind output that does not name
+        // the slot's candidate is moved to the cell, through the block's own
+        // path; id 0 (the block never ran) is left alone (step G2's rule).
+        void place_slot_identity(CKContext* context, identity& r, CKDataArray& array, int k,
+                                 const std::vector<CK3dEntity*>& entities, CKObject* no_ball) {
+            CK3dEntity* candidate = k >= 0 ? entities[static_cast<size_t>(k)] : nullptr;
+            CKObject* value = no_ball;
+            if (candidate) {
+                if (!r.by_name) value = candidate;
+                else if (CKObject* named = retail_entity_of(context, candidate)) value = named;
+            }
+            array.SetElementObject(0, r.column, value);
+            if (r.by_name) return;
+            auto* block = CKBehavior::Cast(context->GetObject(r.block));
+            CKParameterOut* out = block && block->GetOutputParameterCount() > 0 ? block->GetOutputParameter(0) : nullptr;
+            if (!out) return;
+            CK_ID latched_id = 0;
+            if (out->GetDataSize() != static_cast<int>(sizeof(CK_ID)) || out->GetValue(&latched_id, FALSE) != CK_OK
+                || latched_id == 0)
+                return;
+            CKObject* latched = context->GetObject(latched_id);
+            if (latched && (latched == candidate || latched == value)) return;
+            block->SetOutputParameterObject(0, value);
+            ++relatched_;
+        }
+
+        template <typename T> static T* object_as(CKObject* o, CK_CLASSID cid) {
+            return o && CKIsChildClassOf(o, cid) ? static_cast<T*>(o) : nullptr;
+        }
+
+        // The abstract graph of one root script (session/mechanism_units.hpp):
+        // every behaviour with its prototype, parent, children, parameters and
+        // pre-order walk position; every graph's links (with their initial
+        // delays) and parameter operations.  Read only.
+        session::units::graph_model extract_model(CKContext* context, CKBehavior* root) {
+            namespace mu = session::units;
+            mu::graph_model m;
+            const auto id_of = [](CKObject* o) { return o ? static_cast<uint32_t>(o->GetID()) : 0u; };
+            const auto add_in = [&](CKParameterIn* in) {
+                if (!in) return 0u;
+                mu::param p;
+                p.id = id_of(in);
+                p.source = id_of(in->GetRealSource());
+                m.params[p.id] = p;
+                return p.id;
+            };
+            const auto add_out = [&](CKParameterOut* out) {
+                if (!out) return 0u;
+                mu::param p;
+                p.id = id_of(out);
+                for (int i = 0; i < out->GetDestinationCount(); ++i)
+                    if (CKParameter* d = out->GetDestination(i)) p.destinations.push_back(id_of(d));
+                m.params[p.id] = p;
+                return p.id;
+            };
+            const auto io_of = [](CKBehaviorIO* io) {
+                mu::io_ref r;
+                CKBehavior* owner = io ? io->GetOwner() : nullptr;
+                if (!owner) return r;
+                r.block = static_cast<uint32_t>(owner->GetID());
+                r.input = io->GetType() == CK_BEHAVIORIO_IN;
+                r.index = r.input ? owner->GetInputPosition(io) : owner->GetOutputPosition(io);
+                return r;
+            };
+            walk(root, [&](CKBehavior* b) {
+                mu::block blk;
+                blk.id = id_of(b);
+                blk.prototype = behavior_prototype_name(b);
+                blk.parent = id_of(b->GetParent());
+                blk.walk = walk_of(root, b->GetID());
+                for (int i = 0; i < b->GetInputParameterCount(); ++i) blk.inputs.push_back(add_in(b->GetInputParameter(i)));
+                for (int i = 0; i < b->GetOutputParameterCount(); ++i) blk.outputs.push_back(add_out(b->GetOutputParameter(i)));
+                for (int i = 0; i < b->GetLocalParameterCount(); ++i) {
+                    CKParameterLocal* local = b->GetLocalParameter(i);
+                    if (!local) continue;
+                    mu::param p;
+                    p.id = id_of(local);
+                    m.params[p.id] = p;
+                    blk.locals.push_back(p.id);
+                }
+                blk.target = add_in(b->GetTargetParameter());
+                if (!b->IsUsingFunction()) {
+                    for (int i = 0; i < b->GetSubBehaviorCount(); ++i)
+                        if (CKBehavior* child = b->GetSubBehavior(i)) blk.children.push_back(id_of(child));
+                    for (int i = 0; i < b->GetSubBehaviorLinkCount(); ++i) {
+                        CKBehaviorLink* l = b->GetSubBehaviorLink(i);
+                        if (!l) continue;
+                        mu::link link;
+                        link.id = id_of(l);
+                        link.graph = blk.id;
+                        link.from = io_of(l->GetInBehaviorIO());
+                        link.to = io_of(l->GetOutBehaviorIO());
+                        link.delay = l->GetInitialActivationDelay();
+                        m.links.push_back(link);
+                    }
+                    for (int i = 0; i < b->GetParameterOperationCount(); ++i) {
+                        CKParameterOperation* op = b->GetParameterOperation(i);
+                        if (!op) continue;
+                        mu::operation o;
+                        o.id = id_of(op);
+                        o.graph = blk.id;
+                        o.name = op->GetName() ? op->GetName() : "";
+                        for (CKParameterIn* in: {op->GetInParameter1(), op->GetInParameter2()})
+                            if (in) o.inputs.push_back(add_in(in));
+                        o.output = add_out(op->GetOutParameter());
+                        m.operations[o.id] = o;
+                    }
+                }
+                m.blocks[blk.id] = blk;
+            });
+            return m;
+        }
+
+        // A unit's (or a copy's) structure, world-independent (§5: the
+        // signature covers every copy's structure): per block of the copied
+        // subtrees in pre-order its prototype, IO counts, parameter counts and
+        // child count; then every link between those blocks or into or out of
+        // them (`extra`: the parent graph's links of the unit - inside, fan-out
+        // and fan-in), as (end, end, delay) with an end a position in that
+        // pre-order or, outside it, the owner's pre-copy walk position in the
+        // root (the originals the copies are linked to); sorted, so the order
+        // of a link list does not matter; then the operations' names.
+        uint64_t structure_of(CKContext* context, CK_ID root_id, const std::vector<CK_ID>& roots,
+                              const std::vector<CK_ID>& extra, const std::vector<CK_ID>& operations) {
+            fnv f;
+            CKBehavior* root = CKBehavior::Cast(context->GetObject(root_id));
+            std::map<CK_ID, int> position;
+            std::vector<CKBehavior*> blocks;
+            for (CK_ID id: roots)
+                if (auto* b = CKBehavior::Cast(context->GetObject(id)))
+                    walk(b, [&](CKBehavior* x) {
+                        position[x->GetID()] = static_cast<int>(blocks.size());
+                        blocks.push_back(x);
+                    });
+            for (CKBehavior* b: blocks) {
+                f.str(behavior_prototype_name(b));
+                f.i32(b->GetInputCount());
+                f.i32(b->GetOutputCount());
+                f.i32(b->GetInputParameterCount());
+                f.i32(b->GetOutputParameterCount());
+                f.i32(b->GetLocalParameterCount());
+                f.i32(b->IsUsingFunction() ? -1 : b->GetSubBehaviorCount());
+            }
+            const auto end_of = [&](CKBehaviorIO* io) {
+                CKBehavior* owner = io ? io->GetOwner() : nullptr;
+                if (!owner) return std::tuple<int, int, int, int>(2, -1, 0, 0);
+                const int in = io->GetType() == CK_BEHAVIORIO_IN ? 1 : 0;
+                const int index = in ? owner->GetInputPosition(io) : owner->GetOutputPosition(io);
+                const auto it = position.find(owner->GetID());
+                if (it != position.end()) return std::tuple<int, int, int, int>(0, it->second, in, index);
+                return std::tuple<int, int, int, int>(1, root ? walk_of(root, owner->GetID()) : -1, in, index);
+            };
+            std::vector<std::tuple<int, int, int, int, int, int, int, int, int>> links;
+            const auto take = [&](CKBehaviorLink* l) {
+                if (!l) return;
+                const auto a = end_of(l->GetInBehaviorIO()), b = end_of(l->GetOutBehaviorIO());
+                links.emplace_back(std::get<0>(a), std::get<1>(a), std::get<2>(a), std::get<3>(a), std::get<0>(b),
+                                   std::get<1>(b), std::get<2>(b), std::get<3>(b), l->GetInitialActivationDelay());
+            };
+            for (CKBehavior* b: blocks)
+                if (!b->IsUsingFunction())
+                    for (int i = 0; i < b->GetSubBehaviorLinkCount(); ++i) take(b->GetSubBehaviorLink(i));
+            for (CK_ID id: extra) take(object_as<CKBehaviorLink>(context->GetObject(id), CKCID_BEHAVIORLINK));
+            std::sort(links.begin(), links.end());
+            f.u32(static_cast<uint32_t>(links.size()));
+            for (const auto& t: links) {
+                f.i32(std::get<0>(t)); f.i32(std::get<1>(t)); f.i32(std::get<2>(t)); f.i32(std::get<3>(t));
+                f.i32(std::get<4>(t)); f.i32(std::get<5>(t)); f.i32(std::get<6>(t)); f.i32(std::get<7>(t));
+                f.i32(std::get<8>(t));
+            }
+            std::vector<std::string> names;
+            for (CK_ID id: operations)
+                if (auto* op = object_as<CKParameterOperation>(context->GetObject(id), CKCID_PARAMETEROPERATION))
+                    names.push_back(op->GetName() ? op->GetName() : "");
+            std::sort(names.begin(), names.end());
+            for (const std::string& n: names) f.str(n);
+            return f.h;
+        }
+
+        // A parameter of a unit block that holds a live engine object at the
+        // anchor (a force controller's or a joint's handle): §2.10 step 2's
+        // hot source.  A Pointer parameter whose bytes are not all zero.
+        static bool hot_parameter(CKContext* context, CKParameter* p) {
+            if (!p) return false;
+            CKParameterManager* pm = context->GetParameterManager();
+            if (!pm || p->GetGUID() != CKPGUID_POINTER) return false;
+            const int size = p->GetDataSize();
+            const auto* data = static_cast<const uint8_t*>(p->GetReadDataPtr(FALSE));
+            if (!data || size <= 0) return false;
+            for (int i = 0; i < size; ++i)
+                if (data[i]) return true;
+            return false;
+        }
+
+        // A graph's children in their execution order (BehaviorGraphData::
+        // m_SubBehaviors: the graph runs its active children in this order,
+        // CKBehavior::CheckIOsActivation), read and written through a
+        // pointer to the protected member - the public API has no way to
+        // keep it (AddSubBehavior sorts).  Both SDKs declare the same member.
+        struct graph_access : CKBehavior {
+            static BehaviorGraphData* CKBehavior::*member() { return &graph_access::m_GraphData; }
+        };
+        static std::vector<CKObject*> children_of(CKBehavior* graph) {
+            std::vector<CKObject*> out;
+            BehaviorGraphData* data = graph ? graph->*graph_access::member() : nullptr;
+            if (!data) return out;
+            for (int i = 0; i < data->m_SubBehaviors.Size(); ++i) out.push_back(data->m_SubBehaviors[i]);
+            return out;
+        }
+        // The same objects in `order` (a permutation of the children: false,
+        // and nothing changed, otherwise).
+        static bool set_children(CKBehavior* graph, const std::vector<CKObject*>& order) {
+            BehaviorGraphData* data = graph ? graph->*graph_access::member() : nullptr;
+            if (!data || data->m_SubBehaviors.Size() != static_cast<int>(order.size())) return false;
+            std::vector<CKObject*> now = children_of(graph), sorted = order;
+            std::sort(now.begin(), now.end());
+            std::sort(sorted.begin(), sorted.end());
+            if (now != sorted) return false;
+            for (int i = 0; i < data->m_SubBehaviors.Size(); ++i) data->m_SubBehaviors[i] = order[static_cast<size_t>(i)];
+            return true;
+        }
+
+        // A behaviour and what it owns: its IOs, parameters (inputs, outputs,
+        // locals, target) and, for a graph, its links and operations with
+        // theirs.
+        static void owned_objects(CKBehavior* b, XObjectArray& out) {
+            const auto add = [&out](CKObject* o) { if (o) out.PushBack(o->GetID()); };
+            add(b);
+            for (int i = 0; i < b->GetInputCount(); ++i) add(b->GetInput(i));
+            for (int i = 0; i < b->GetOutputCount(); ++i) add(b->GetOutput(i));
+            for (int i = 0; i < b->GetInputParameterCount(); ++i) add(b->GetInputParameter(i));
+            for (int i = 0; i < b->GetOutputParameterCount(); ++i) add(b->GetOutputParameter(i));
+            for (int i = 0; i < b->GetLocalParameterCount(); ++i) add(b->GetLocalParameter(i));
+            add(b->GetTargetParameter());
+            if (b->IsUsingFunction()) return;
+            for (int i = 0; i < b->GetSubBehaviorLinkCount(); ++i) add(b->GetSubBehaviorLink(i));
+            for (int i = 0; i < b->GetParameterOperationCount(); ++i) {
+                CKParameterOperation* op = b->GetParameterOperation(i);
+                if (!op) continue;
+                add(op);
+                add(op->GetInParameter1());
+                add(op->GetInParameter2());
+                add(op->GetOutParameter());
+            }
+        }
+
+        static bool pair_walk(CKBehavior* a, CKBehavior* b, std::map<CK_ID, CK_ID>& twin) {
+            if (!a || !b) return false;
+            twin[a->GetID()] = b->GetID();
+            if (static_cast<bool>(a->IsUsingFunction()) != static_cast<bool>(b->IsUsingFunction())) return false;
+            if (a->IsUsingFunction()) return true;
+            const int n = a->GetSubBehaviorCount();
+            if (n != b->GetSubBehaviorCount()) return false;
+            for (int i = 0; i < n; ++i)
+                if (!pair_walk(a->GetSubBehavior(i), b->GetSubBehavior(i), twin)) return false;
+            return true;
+        }
+
+        void register_force(CKContext* context, CK_ID id, const std::string& owner, int walk_position, int slot) {
+            auto* b = CKBehavior::Cast(context->GetObject(id));
+            if (!b || !script_replay::is_force_block(b)) return;
+            force_alias_[id] = "unit:" + owner + "/" + std::to_string(walk_position) + "/S" + std::to_string(slot);
+        }
+
+        // §2.10 "The copy step", steps 1-5 (all or nothing: a refusal is
+        // returned and rewire's release destroys what was made).  The units
+        // of every identity read of the class (the server's `all`; a
+        // client's mechanism class), in (owner, script, walk) order; slot 0
+        // is the original; for k = 1..K-1, unit by unit, the copy made with
+        // CopyObjects (a behaviour copies its IO, parameters, sub-behaviours,
+        // links and operations with it), added to the unit's graph, and
+        // linked by the rules (inside, fan-out, fan-in; the original's
+        // initial delay).
+        std::string copy_units(CKContext* context, const script_replay::selection& sel) {
+            namespace mu = session::units;
+            slots_ = options_.slots;
+            CKObject* ball_frame = context->GetObjectByNameAndParentClass(const_cast<CKSTRING>("Ball_Pos_Frame"), CKCID_3DENTITY, nullptr);
+            auto* current_level = CKDataArray::Cast(
+                context->GetObjectByNameAndClass(const_cast<CKSTRING>("CurrentLevel"), CKCID_DATAARRAY, nullptr));
+            if (!ball_frame || !current_level) return "the copy step: Ball_Pos_Frame or CurrentLevel not found";
+            int ball_column = -1;
+            for (int c = 0; c < current_level->GetColumnCount(); ++c) {
+                CKSTRING column = current_level->GetColumnName(c);
+                if (column && std::string_view(column) == "ActiveBall") { ball_column = c; break; }
+            }
+            if (ball_column < 0) return "the copy step: CurrentLevel has no ActiveBall column";
+            const std::set<CK_ID> selected(sel.scripts.begin(), sel.scripts.end());
+            const auto mechanism_root = [&](CKBehavior* root) {
+                return selected.count(root->GetID()) != 0 && !session::keep_local_script(owner_name(root), root->GetName() ? root->GetName() : "");
+            };
+            // The server (class all, before its selection exists) copies every
+            // identity read's unit, a client only its mechanism scripts'. The
+            // sets are equal by WG0's census (every identity read is in a
+            // mechanism script; measured: L11 11 = 11 units, the arena 2 = 2),
+            // NOT by construction, and nothing guards it: signature(mechanism),
+            // the one the anchors compare, skips a unit classify() leaves out
+            // of the class, so a level that broke the census would give the
+            // server K copies a client lacks without a refusal (queued, design
+            // "As built (step WGQ7)").
+            const auto in_class = [&](CKBehavior* root) {
+                if (session::keep_local_script(owner_name(root), root->GetName() ? root->GetName() : "")) return false;
+                return which_ == probe_class::all || mechanism_root(root);
+            };
+            const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
+            CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
+            const std::vector<CK_ID> list(ids, ids + count);
+            // Step 1: the structural probes of the class and the identity
+            // reads of their scripts, each with its one gating probe (read
+            // only: no parameter operation runs).
+            std::set<CK_ID> structural, roots_with_probes;
+            for (CK_ID id: list) {
+                CKBehavior* b = CKBehavior::Cast(context->GetObject(id));
+                if (!b || std::string_view(behavior_prototype_name(b)) != "TT Scaleable Proximity") continue;
+                CKParameterIn* in = b->GetInputParameterCount() > 1 ? b->GetInputParameter(1) : nullptr;
+                CKParameter* source = in ? in->GetRealSource() : nullptr;
+                if (!source || object_of(context, source) != ball_frame) continue;
+                CKBehavior* root = root_of(b);
+                if (!in_class(root)) continue;
+                structural.insert(id);
+                roots_with_probes.insert(root->GetID());
+            }
+            std::vector<unit_plan> plans;
+            for (CK_ID id: list) {
+                CKBehavior* b = CKBehavior::Cast(context->GetObject(id));
+                if (!b || std::string_view(behavior_prototype_name(b)) != "Get Cell") continue;
+                CKParameterIn* target = b->GetTargetParameter();
+                if (!target || object_of(context, target->GetRealSource()) != current_level) continue;
+                CKParameterIn* column_in = b->GetInputParameterCount() > 1 ? b->GetInputParameter(1) : nullptr;
+                CKParameter* column_source = column_in ? column_in->GetRealSource() : nullptr;
+                int column = -1;
+                if (!column_source || column_source->GetDataSize() != static_cast<int>(sizeof(int))
+                    || column_source->GetValue(&column, FALSE) != CK_OK || column != ball_column)
+                    continue;
+                CKBehavior* root = root_of(b);
+                if (!roots_with_probes.count(root->GetID())) continue;
+                std::set<CK_ID> gating;
+                if (CKBehavior* graph = b->GetParent())
+                    for (int i = 0; i < graph->GetSubBehaviorLinkCount(); ++i) {
+                        CKBehaviorLink* link = graph->GetSubBehaviorLink(i);
+                        CKBehaviorIO* from = link ? link->GetInBehaviorIO() : nullptr;
+                        CKBehaviorIO* to = link ? link->GetOutBehaviorIO() : nullptr;
+                        if (!from || !to || to->GetOwner() != b || from->GetType() != CK_BEHAVIORIO_OUT
+                            || to->GetType() != CK_BEHAVIORIO_IN || !from->GetOwner())
+                            continue;
+                        if (structural.count(from->GetOwner()->GetID())) gating.insert(from->GetOwner()->GetID());
+                    }
+                unit_plan p;
+                p.root = root->GetID();
+                p.owner = owner_name(root);
+                p.script = root->GetName() ? root->GetName() : "";
+                p.read_walk = walk_of(root, id);   // caches the root's pre-copy walk
+                if (gating.size() != 1)
+                    return "the copy step: identity read " + p.owner + "/" + p.script + " #" + std::to_string(p.read_walk)
+                           + " has " + std::to_string(gating.size()) + " gating probes";
+                p.unit.read = static_cast<uint32_t>(id);
+                p.unit.probe = static_cast<uint32_t>(*gating.begin());
+                plans.push_back(p);
+            }
+            std::sort(plans.begin(), plans.end(), [](const unit_plan& a, const unit_plan& b) {
+                return std::tie(a.owner, a.script, a.read_walk) < std::tie(b.owner, b.script, b.read_walk);
+            });
+            // Steps 1-2: the units by the rule, refused on a third shape, an
+            // overlap or a hot source.
+            std::map<CK_ID, mu::graph_model> models;
+            std::set<uint32_t> taken;
+            for (unit_plan& p: plans) {
+                CKBehavior* root = CKBehavior::Cast(context->GetObject(p.root));
+                auto model = models.find(p.root);
+                if (model == models.end()) model = models.emplace(p.root, extract_model(context, root)).first;
+                p.model = &model->second;
+                const std::string where = p.owner + "/" + p.script + " #" + std::to_string(p.read_walk);
+                p.unit = mu::find_unit(model->second, p.unit.read, p.unit.probe);
+                unit_lines_.push_back("unit " + where + ": " + mu::describe(model->second, p.unit));
+                if (!p.unit.error.empty()) return "the unit of identity read " + where + " is refused: " + p.unit.error;
+                std::set<uint32_t> copied;
+                for (uint32_t r: p.unit.copy_roots()) {
+                    std::set<uint32_t> sub;
+                    mu::detail::subtree(model->second, r, sub);
+                    copied.insert(sub.begin(), sub.end());
+                }
+                p.blocks.assign(copied.begin(), copied.end());
+                for (uint32_t b: copied) {
+                    if (!taken.insert(b).second) return "the units overlap at " + where;
+                    auto* beh = CKBehavior::Cast(context->GetObject(b));
+                    if (!beh) return "the unit of " + where + ": a block is gone";
+                    for (int i = 0; i < beh->GetLocalParameterCount(); ++i)
+                        if (hot_parameter(context, beh->GetLocalParameter(i)))
+                            return "the unit of " + where + " holds a live engine object (" + behavior_prototype_name(beh) + ")";
+                    for (int i = 0; i < beh->GetOutputParameterCount(); ++i)
+                        if (hot_parameter(context, beh->GetOutputParameter(i)))
+                            return "the unit of " + where + " holds a live engine object (" + behavior_prototype_name(beh) + ")";
+                }
+            }
+            // Slot 0: the originals' names and aliases, their structure.
+            for (const unit_plan& p: plans) {
+                CKBehavior* root = CKBehavior::Cast(context->GetObject(p.root));
+                unit_rec rec;
+                rec.owner = p.owner;
+                rec.script = p.script;
+                rec.root = p.root;
+                rec.read_walk = p.read_walk;
+                rec.kind = p.unit.kind;
+                rec.mechanism = mechanism_root(root);
+                if (p.unit.kind == mu::shape::graph) {
+                    auto* graph = CKBehavior::Cast(context->GetObject(p.unit.graph));
+                    rec.parent = graph && graph->GetParent() ? graph->GetParent()->GetID() : 0;
+                } else {
+                    rec.parent = p.unit.graph;
+                }
+                for (uint32_t b: p.blocks) {
+                    const int n = walk_of(root, b);
+                    unit_blocks_[b] = {0, n};
+                    register_force(context, b, p.owner, n, 0);
+                }
+                const std::vector<uint32_t> unit_roots = p.unit.copy_roots();
+                std::vector<CK_ID> roots(unit_roots.begin(), unit_roots.end());
+                std::vector<CK_ID> extra, ops(p.unit.operations.begin(), p.unit.operations.end());
+                if (p.unit.kind == mu::shape::blocks)
+                    for (size_t i: p.unit.inside) extra.push_back(p.model->links[i].id);
+                for (size_t i: p.unit.fan_out) extra.push_back(p.model->links[i].id);
+                for (size_t i: p.unit.fan_in) extra.push_back(p.model->links[i].id);
+                rec.structure.push_back(structure_of(context, p.root, roots, extra, ops));
+                units_.push_back(rec);
+            }
+            // Step 3: the copies, slot by slot, unit by unit.
+            CKDependencies dependencies;
+            dependencies.Resize(CKCID_MAXCLASSID);
+            dependencies.Fill(0);
+            dependencies.m_Flags = CK_DEPENDENCIES_CUSTOM;
+            dependencies[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME;   // the originals' names, unchanged
+            for (uint8_t k = 1; k < slots_; ++k)
+                for (size_t u = 0; u < plans.size(); ++u) {
+                    const std::string error = copy_unit(context, plans[u], units_[u], k, dependencies);
+                    if (!error.empty()) return error;
+                }
+            lines_.push_back(units_summary());
+            return {};
+        }
+
+        std::string copy_unit(CKContext* context, const unit_plan& p, unit_rec& rec, uint8_t k, CKDependencies& dependencies) {
+            namespace mu = session::units;
+            const mu::graph_model& m = *p.model;
+            const mu::unit& u = p.unit;
+            const std::string where = p.owner + "/" + p.script + " #" + std::to_string(p.read_walk) + " slot " + std::to_string(k);
+            CKBehavior* parent = CKBehavior::Cast(context->GetObject(rec.parent));
+            if (!parent) return "the copy step: no parent graph for " + where;
+            const std::vector<uint32_t> roots = u.copy_roots();
+            XObjectArray sources;
+            for (uint32_t id: roots) sources.PushBack(id);
+            std::vector<size_t> inside;
+            if (u.kind == mu::shape::blocks)
+                for (size_t i: u.inside) {
+                    inside.push_back(i);
+                    sources.PushBack(m.links[i].id);
+                }
+            for (uint32_t id: u.operations) sources.PushBack(id);
+            const XObjectArray copied = context->CopyObjects(sources, &dependencies, CK_OBJECTCREATION_NONAMECHECK, nullptr);
+            rec.copies.emplace_back();
+            unit_copy& c = rec.copies.back();
+            int at = 0;
+            const auto next = [&]() { return at < copied.Size() ? copied[at++] : CK_ID(0); };
+            for (size_t i = 0; i < roots.size(); ++i) c.roots.push_back(next());
+            for (size_t i = 0; i < inside.size(); ++i) c.links.push_back(next());
+            for (size_t i = 0; i < u.operations.size(); ++i) c.operations.push_back(next());
+            for (CK_ID id: c.roots)
+                if (!id) return "CopyObjects failed for " + where;
+            for (CK_ID id: c.links)
+                if (!id) return "CopyObjects failed for a link of " + where;
+            for (CK_ID id: c.operations)
+                if (!id) return "CopyObjects failed for an operation of " + where;
+            // Into the unit's graph: the blocks, the inside links and the
+            // operations.  AddSubBehavior sorts the graph's children by
+            // priority, and CK's qsort is not stable: equal priorities - every
+            // block of these scripts - come out permuted, and a graph runs its
+            // children in that order.  §2.10 adds each copy AFTER the
+            // existing sub-behaviours, so the children are put back in their
+            // order before the add with the copy last (the same in every
+            // world; release's RemoveSubBehavior then leaves the pre-copy
+            // order).
+            for (CK_ID id: c.roots) {
+                const std::vector<CKObject*> order = children_of(parent);
+                CKBehavior* copy = CKBehavior::Cast(context->GetObject(id));
+                if (parent->AddSubBehavior(copy) != CK_OK) return "AddSubBehavior failed for " + where;
+                std::vector<CKObject*> wanted = order;
+                wanted.push_back(copy);
+                if (!set_children(parent, wanted)) return "the copy of " + where + " could not be put after the graph's children";
+            }
+            for (CK_ID id: c.links)
+                if (parent->AddSubBehaviorLink(object_as<CKBehaviorLink>(context->GetObject(id), CKCID_BEHAVIORLINK)) != CK_OK)
+                    return "AddSubBehaviorLink failed for " + where;
+            for (CK_ID id: c.operations)
+                if (parent->AddParameterOperation(object_as<CKParameterOperation>(context->GetObject(id), CKCID_PARAMETEROPERATION))
+                    != CK_OK)
+                    return "AddParameterOperation failed for " + where;
+            // The original -> copy correspondence, block by block.
+            std::map<CK_ID, CK_ID> twin;
+            for (size_t i = 0; i < roots.size(); ++i)
+                if (!pair_walk(CKBehavior::Cast(context->GetObject(roots[i])), CKBehavior::Cast(context->GetObject(c.roots[i])), twin))
+                    return "the copy of " + where + " does not have its original's blocks";
+            // The fan links (§2.10 "Links and sources").
+            const auto add_link = [&](const mu::link& l, CKBehaviorIO* from, CKBehaviorIO* to) -> std::string {
+                auto* original = object_as<CKBehaviorLink>(context->GetObject(l.id), CKCID_BEHAVIORLINK);
+                if (!original || !from || !to) return "a link end of " + where + " not found";
+                auto* link = object_as<CKBehaviorLink>(
+                    context->CreateObject(CKCID_BEHAVIORLINK, original->GetName(), CK_OBJECTCREATION_NONAMECHECK), CKCID_BEHAVIORLINK);
+                if (!link) return "CreateObject failed for a link of " + where;
+                c.links.push_back(link->GetID());
+                link->SetInBehaviorIO(from);
+                link->SetOutBehaviorIO(to);
+                link->SetInitialActivationDelay(original->GetInitialActivationDelay());
+                link->SetActivationDelay(original->GetInitialActivationDelay());
+                if (parent->AddSubBehaviorLink(link) != CK_OK) return "AddSubBehaviorLink failed for " + where;
+                return {};
+            };
+            const auto io = [&](const mu::io_ref& r) -> CKBehaviorIO* {
+                const auto t = twin.find(r.block);
+                auto* b = CKBehavior::Cast(context->GetObject(t == twin.end() ? CK_ID(0) : t->second));
+                if (!b) return nullptr;
+                return r.input ? b->GetInput(r.index) : b->GetOutput(r.index);
+            };
+            for (size_t i: u.fan_out) {
+                const mu::link& l = m.links[i];
+                auto* original = object_as<CKBehaviorLink>(context->GetObject(l.id), CKCID_BEHAVIORLINK);
+                const std::string error = add_link(l, original ? original->GetInBehaviorIO() : nullptr, io(l.to));
+                if (!error.empty()) return error;
+            }
+            for (size_t i: u.fan_in) {
+                const mu::link& l = m.links[i];
+                auto* original = object_as<CKBehaviorLink>(context->GetObject(l.id), CKCID_BEHAVIORLINK);
+                const std::string error = add_link(l, io(l.from), original ? original->GetOutBehaviorIO() : nullptr);
+                if (!error.empty()) return error;
+            }
+            // Names, aliases, and what each copy adds to a record (C1).
+            CKBehavior* root = CKBehavior::Cast(context->GetObject(rec.root));
+            for (const auto& [original, copy]: twin) {
+                const auto it = unit_blocks_.find(original);
+                const int n = it == unit_blocks_.end() ? walk_of(root, original) : it->second.walk;
+                unit_blocks_[copy] = {k, n};
+                register_force(context, copy, p.owner, n, k);
+                // The copy's parameters hold its original's values at the
+                // anchor (a world-local check; values are not in the
+                // signature, whose pointers differ in size between builds).
+                auto* a = CKBehavior::Cast(context->GetObject(original));
+                auto* b = CKBehavior::Cast(context->GetObject(copy));
+                if (!a || !b || a->GetLocalParameterCount() != b->GetLocalParameterCount())
+                    return "the copy of " + where + " lost a block's locals";
+                for (int i = 0; i < a->GetLocalParameterCount(); ++i) {
+                    CKParameterLocal* la = a->GetLocalParameter(i);
+                    CKParameterLocal* lb = b->GetLocalParameter(i);
+                    if (!la || !lb || la->GetDataSize() != lb->GetDataSize()) return "the copy of " + where + " changed a local";
+                    const void* da = la->GetReadDataPtr(FALSE);
+                    const void* db = lb->GetReadDataPtr(FALSE);
+                    if (la->GetDataSize() > 0 && da && db && std::memcmp(da, db, static_cast<size_t>(la->GetDataSize())) != 0
+                        && la->GetGUID() != CKPGUID_POINTER && la->GetParameterClassID() == 0)
+                        return "the copy of " + where + ": local " + std::to_string(i) + " of " + behavior_prototype_name(a)
+                               + " differs from its original's";
+                }
+            }
+            for (CK_ID id: c.roots) {
+                std::vector<uint8_t> bytes;
+                script_replay::capture_script_block(CKBehavior::Cast(context->GetObject(id)), script_replay_hooks{}, bytes);
+                copy_record_bytes_ += bytes.size() + 1;   // + the child's presence byte
+            }
+            std::vector<CK_ID> copy_roots(c.roots.begin(), c.roots.end());
+            const uint64_t structure = structure_of(context, rec.root, copy_roots, c.links, c.operations);
+            rec.structure.push_back(structure);
+            unit_lines_.push_back("copy " + where + ": " + std::to_string(twin.size()) + " blocks, "
+                                  + std::to_string(c.links.size()) + " links, " + std::to_string(c.operations.size())
+                                  + " operations" + (structure == rec.structure.front() ? "" : " - STRUCTURE DIFFERS"));
+            if (structure != rec.structure.front())
+                return "the copy of " + where + " differs from its original in structure (Q10)";
+            return {};
+        }
+
+        // §2.10 step 6: the slot copies with their links and operations out
+        // of the units' graphs and destroyed (after the union's own sources,
+        // frames and identity copies).  Safe on a partial copy step.
+        void release_units(CKContext* context) {
+            for (auto u = units_.rbegin(); u != units_.rend(); ++u) {
+                CKBehavior* parent = CKBehavior::Cast(context->GetObject(u->parent));
+                for (auto c = u->copies.rbegin(); c != u->copies.rend(); ++c) {
+                    for (CK_ID id: c->links) {
+                        auto* link = object_as<CKBehaviorLink>(context->GetObject(id), CKCID_BEHAVIORLINK);
+                        if (link && parent) parent->RemoveSubBehaviorLink(link);
+                        destroy(context, id);
+                    }
+                    for (CK_ID id: c->operations) {
+                        auto* op = object_as<CKParameterOperation>(context->GetObject(id), CKCID_PARAMETEROPERATION);
+                        if (op && parent) parent->RemoveParameterOperation(op);
+                        destroy(context, id);
+                    }
+                    for (CK_ID id: c->roots) {
+                        auto* b = CKBehavior::Cast(context->GetObject(id));
+                        if (b && parent) parent->RemoveSubBehavior(b);
+                        destroy(context, id);
+                    }
+                }
+            }
+            units_.clear();
+            unit_blocks_.clear();
+            force_alias_.clear();
+        }
     };
 
 }

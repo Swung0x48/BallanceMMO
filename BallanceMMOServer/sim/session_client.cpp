@@ -1285,9 +1285,8 @@ namespace {
             // The sets' force controllers by the names every world gives
             // them (physics_savestate.hpp set_controller_alias): a resync's
             // or a join's blob is the server's.
-            bmmo::physics::set_controller_alias(physics, [this](const char* name, std::string& alias) {
-                return bmmo::game::trafo_controller_alias(trafo_registry_, name, alias);
-            });
+            trafo_on_ = true;   // the alias chain below reads it (set again with the rest at the end)
+            install_controller_alias();
             capture_trafo_reference("the anchor");
             const auto quiesce = bmmo::game::quiesce_originals(engine_->context(), trafo_hooks_);
             logf("%s%s", quiesce.text().c_str(),
@@ -1307,9 +1306,9 @@ namespace {
         void end_trafo_sets() {
             if (!trafo_on_) return;
             const int bodies = bmmo::game::teardown_trafo_sets(engine_->context(), trafo_registry_, trafo_hooks_);
-            bmmo::physics::set_controller_alias(engine_->physics(), {});
             trafo_hold_.disarm();
             trafo_on_ = false;
+            install_controller_alias();   // step Q7: the units' part stays while the union holds them
             logf("trafo: the session's sets torn down (%d piece bodies removed)", bodies);
         }
 
@@ -2432,13 +2431,17 @@ namespace {
             };
             const bmmo::game::script_replay::selection sel =
                 scripts_.empty() ? bmmo::game::session_script_selection(context, core_.trafo_active()) : scripts_;
-            const std::string error = proximity_.rewire(context, bmmo::game::probe_class::mechanism, sel,
-                                                        bmmo::game::proximity_union::level_options(context));
+            auto options = bmmo::game::proximity_union::level_options(context);
+            // Step Q7 (world-agreement-gaps-design.md 2.10): the per-player
+            // units copied K times under WORLD_PLAYER_MECHANISMS.
+            options.slots = core_.mechanism_slots();
+            const std::string error = proximity_.rewire(context, bmmo::game::probe_class::mechanism, sel, options);
             for (const std::string& line: proximity_.lines()) logf("%s", line.c_str());
             if (!error.empty()) {
                 logf("the proximity union (world option) refused: %s", error.c_str());
                 return false;
             }
+            install_controller_alias();   // step Q7 (§4.3): the units' force blocks by their world-independent names
             signature = proximity_.signature(bmmo::game::probe_class::mechanism);
             logf("proximity union: %zu mechanism blocks, %zu identity reads rewired, signature %016llx",
                  proximity_.probe_count(), proximity_.identity_count(), static_cast<unsigned long long>(signature));
@@ -2449,9 +2452,27 @@ namespace {
         // that holds them goes or another anchor rewires (step G3; §2.4's
         // session-end release).
         void release_proximity(const char* why) {
-            if (!engine_ || (!proximity_.probe_count() && !proximity_.identity_count())) return;
+            if (!engine_ || (!proximity_.probe_count() && !proximity_.identity_count() && !proximity_.unit_count())) return;
+            const size_t copies = proximity_.copy_count();
             const int restored = proximity_.release(engine_->context());
-            logf("proximity union released (%s): %d inputs back", why, restored);
+            install_controller_alias();
+            logf("proximity union released (%s): %d inputs back, %zu unit copies destroyed", why, restored, copies);
+        }
+
+        // The savestate's controller alias (physics_savestate.hpp, one
+        // function per physics manager; world agreement §4.3, step Q7): the
+        // trafo sets' names while the sets run, then the per-player units'
+        // force blocks while the union holds them, else the own name.
+        void install_controller_alias() {
+            if (!engine_) return;
+            if (!trafo_on_ && !proximity_.slots()) {
+                bmmo::physics::set_controller_alias(engine_->physics(), {});
+                return;
+            }
+            bmmo::physics::set_controller_alias(engine_->physics(), [this](const char* name, std::string& alias) {
+                if (trafo_on_ && bmmo::game::trafo_controller_alias(trafo_registry_, name, alias)) return true;
+                return proximity_.controller_alias(name, alias);
+            });
         }
 
         // The sector placement of this world (docs/sector-placement-design.md

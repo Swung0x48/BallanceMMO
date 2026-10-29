@@ -55,6 +55,7 @@ namespace bmmo::session::core {
         // placement against it.  Before S5 a client header carried no world
         // options (0).
         header.world_options = s.world_options_;
+        header.mechanism_slots = s.mechanism_slots_;   // journal v8 (step Q7)
         header.anchor_placement = anchor_placement;
         const std::filesystem::path path = platform.journal_path ? platform.journal_path(header) : std::filesystem::path();
         if (path.empty()) return;

@@ -236,6 +236,7 @@ namespace bmmo::sim {
         header.build_id = bmmo::physics::build_id();
         header.world_options = s.world_options;
         header.anchor_placement = anchor_placement;   // journal v6 (sector placement step S5)
+        header.mechanism_slots = s.mechanism_slots;   // journal v8 (world agreement step Q7)
         const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
         s.journal_start = clock::now();
         std::string error;
@@ -256,9 +257,9 @@ namespace bmmo::sim {
                                         const std::vector<std::pair<uint32_t, uint8_t>>& players,
                                         uint32_t input_delay, uint32_t start_base, float spawn_impulse,
                                         const std::string& note, std::vector<std::string> names,
-                                        uint32_t sector_lead, uint32_t world_option_bits) {
+                                        uint32_t sector_lead, uint32_t world_option_bits, uint8_t mechanism_slots) {
         post([this, session, level, players, input_delay, start_base, spawn_impulse, note,
-              names = std::move(names), sector_lead, world_option_bits] {
+              names = std::move(names), sector_lead, world_option_bits, mechanism_slots] {
             auto& s = sessions_[session];
             s = std::make_unique<session_state>();
             s->id = session;
@@ -266,6 +267,7 @@ namespace bmmo::sim {
             s->input_delay = input_delay ? input_delay : config_.input_delay;
             s->sector_lead = sector_lead;
             s->world_options = world_option_bits;
+            s->mechanism_slots = (world_option_bits & bmmo::session::WORLD_PLAYER_MECHANISMS) ? mechanism_slots : 0;
             {
                 std::lock_guard lk(view_mutex_);
                 views_[session] = view{};
@@ -282,6 +284,9 @@ namespace bmmo::sim {
             // Step G2 (world-agreement-gaps-design.md §2.4): the proximity
             // union's rules; place_probes() runs first in every step.
             options.proximity_union = (world_option_bits & bmmo::session::WORLD_PROXIMITY_UNION) != 0;
+            // Step Q7 (world-agreement-gaps-design.md §2.10): the units copied
+            // K times at the anchor, under the union only.
+            options.mechanism_slots = options.proximity_union ? s->mechanism_slots : 0;
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };

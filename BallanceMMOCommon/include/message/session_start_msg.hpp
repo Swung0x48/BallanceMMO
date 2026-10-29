@@ -45,6 +45,13 @@ namespace bmmo {
         // design's Q3 settled it), first used by the trafo replication's
         // WORLD_TRAFO_INPUTS.  Required.
         uint32_t world_options = 0;
+        // Protocol 19 (world-agreement-gaps-design.md 2.10, 5; step Q7): the
+        // session's mechanism slot count K, fixed for the session (the
+        // server's room capacity clamped to [1, MAX_PLAYERS_PER_SESSION]);
+        // written and read from protocol 19 on, after `world_options`.
+        // Under WORLD_PLAYER_MECHANISMS the reader refuses 0 and anything
+        // above MAX_PLAYERS_PER_SESSION.
+        uint8_t mechanism_slots = 0;
 
         session_start_msg() : serializable_message(bmmo::SessionStart) {}
 
@@ -70,6 +77,8 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&spawn_spacing), sizeof(spawn_spacing));
             raw.write(reinterpret_cast<const char*>(&protocol), sizeof(protocol));
             raw.write(reinterpret_cast<const char*>(&world_options), sizeof(world_options));
+            if (protocol >= session::PHYSICS_PROTOCOL_PLAYER_MECHANISMS)
+                raw.write(reinterpret_cast<const char*>(&mechanism_slots), sizeof(mechanism_slots));
 
             const uint8_t player_count = static_cast<uint8_t>(std::min<size_t>(players.size(), session::MAX_PLAYERS_PER_SESSION));
             raw.write(reinterpret_cast<const char*>(&player_count), sizeof(player_count));
@@ -112,6 +121,13 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &spawn_spacing)) return false;
             if (!message_utils::read_variable(raw, &protocol)) return false;
             if (!message_utils::read_variable(raw, &world_options)) return false;
+            mechanism_slots = 0;
+            if (protocol >= session::PHYSICS_PROTOCOL_PLAYER_MECHANISMS) {
+                if (!message_utils::read_variable(raw, &mechanism_slots)) return false;
+                if ((world_options & session::WORLD_PLAYER_MECHANISMS)
+                        && (mechanism_slots == 0 || mechanism_slots > session::MAX_PLAYERS_PER_SESSION))
+                    return false;
+            }
 
             uint8_t player_count = 0;
             if (!message_utils::read_variable(raw, &player_count)) return false;

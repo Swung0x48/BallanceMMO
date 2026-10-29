@@ -174,6 +174,11 @@ if (BMMO_BUILD_SIM)
                 ${BMMO_COMMON_SRC} ${BMMO_SESSION_CORE_SRC} ${YA_GETOPT_SRC})
         target_link_libraries(BallanceMMOSessionClient PRIVATE BallanceMMOSim GameNetworkingSockets::shared replxx)
         target_compile_definitions(BallanceMMOSessionClient PRIVATE BMMO_INCLUDE_INTERNAL)
+        if (MSVC)
+            # Past MSVC's default section limit since step Q7 (C1128: the
+            # proximity union's copy step in game/proximity_union.hpp).
+            target_compile_options(BallanceMMOSessionClient PRIVATE /bigobj)
+        endif ()
         if (WIN32)
             target_link_libraries(BallanceMMOSessionClient PRIVATE dbghelp)
             target_compile_definitions(BallanceMMOSessionClient PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

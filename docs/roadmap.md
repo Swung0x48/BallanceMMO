@@ -500,6 +500,20 @@ numbers 1-10 are unchanged.
      `session_io.journal`, retail `Gameplay/SessionJournalFlush`);
      `arena_map_test.py`'s `LogWatch` sees each line within one batch
      again; `world-agreement-gaps-design.md`, "As built (step IOF)".
+   - **relay_late counts frames the resync state covers** (queued by step
+     WGQ7, 2026-10-29): `note_input_correction`
+     (`client_core_messages.cpp:464-467`) counts a relayed frame "past the
+     rollback reach" when its anchor tick is not in the history; after a
+     rejoin or late join the history starts at the resync anchor S (written
+     at the assignment, `client_core_resync.cpp:64`), so a frame for a tick
+     <= S first handled after the assignment is counted, though the
+     server's state of S already contains it. WGQ7's smoke failed on it
+     (client 2, the rejoiner, 2 frames = one relay message after
+     SessionAssign; own ball 0.0000 m, server journal matched); whether it
+     shows is the order of the unreliable relay against SessionAssign. Fix:
+     count such frames apart in the core, or exempt them in
+     `arena_map_test.py`'s criterion. Evidence:
+     `world-agreement-gaps-design.md`, "As built (step WGQ7)".
 3. **The rewind-cost optimization** (`rewind-cost-design.md`; RC1 built):
    RC2 an incremental capture for sleeping bodies (ceiling 22-24 %), RC3 no
    body-set full snapshot while snapshots are off (9-11 %, its own drift
@@ -875,6 +889,23 @@ numbers 1-10 are unchanged.
    doc, `collision-overhaul-design.md` 9.31). The checks deferred to FULL
    are listed in the design's "As built (step WG3)" and "(step WG4)".
    Next: M0, M1, then Q7.
+   **Q7 is built (step WGQ7, protocol 19, journal v8):** the per-player
+   units, K = the room capacity, the join-order cap; V6 passes on L1-L13
+   (placement off and on, K 2 and 8), V7 on the arena, and the retail CK2
+   copies give the server's signature (Q10). Queued from it (design, As
+   built (step WGQ7)): **REF12**, the protocol-19 reference set (every
+   `core_ref_s11` capture is protocol 18); the identity copies' leftover
+   parameter outputs at a release (pre-existing since G1, 2 per copy, their
+   owner pointer dangling); WAD-A's verdict, which the step's runs could not
+   give (no fan force held at an import; the one force controller held at
+   the late join's import, P_Modul_26_Sack's, belonged to a core whose
+   constraint controllers were missing too; under the bit every unit force
+   block is aliased, so only force blocks outside units and the bit-off
+   control remain: FULL); a guard for the server's unit set (equal to the
+   clients' by WG0's census, not by construction: the compared mechanism
+   signature skips a non-mechanism unit, so a level breaking the census
+   would diverge without a refusal); the checks deferred to FULL listed
+   there.
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick; **K3 = the Level 1 tutorial
    switched off** right after K1 (decision (c): every world activates the

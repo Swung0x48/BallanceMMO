@@ -104,7 +104,8 @@ namespace bmmo::session {
     // 5: the HEADER's world_options and the Trafo EVENT (protocol 11, step T2).
     // 6: the HEADER's anchor_placement (protocol 12, sector placement step S5).
     // 7: the WAIT record (protocol 13, late-player step R12).
-    constexpr uint32_t kJournalVersion = 7;
+    // 8: the HEADER's mechanism_slots (protocol 19, world agreement step Q7).
+    constexpr uint32_t kJournalVersion = 8;
     // The oldest version this reader still takes (see the format note above).
     constexpr uint32_t kJournalOldestReadable = 2;
     constexpr char kJournalMagic[8] = {'B', 'M', 'M', 'O', 'J', 'R', 'N', 'L'};
@@ -159,6 +160,11 @@ namespace bmmo::session {
         // it (CAP_PLACEMENT), else 0.  0 in an older file: unknown, not
         // compared.
         uint64_t anchor_placement = 0;
+        // Version 8 (world agreement step Q7): the session's mechanism slot
+        // count K (SessionStart's mechanism_slots); 0 in an older file or a
+        // session without WORLD_PLAYER_MECHANISMS.  A replay builds K slot
+        // copies from it.
+        uint8_t mechanism_slots = 0;
     };
 
     struct journal_player {
@@ -520,6 +526,7 @@ namespace bmmo::session {
             write_u8(out, h.own_join_order);
             write_u32(out, h.world_options);
             write_u64(out, h.anchor_placement);
+            write_u8(out, h.mechanism_slots);
         }
 
         inline bool read_header_payload(const std::string& payload, journal_header& h) {
@@ -544,6 +551,8 @@ namespace bmmo::session {
             h.world_options = in.ok && in.size - in.pos >= 4 ? in.u32() : 0;
             // Version 6: trailing after it, so an older file reads as 0.
             h.anchor_placement = in.ok && in.size - in.pos >= 8 ? in.u64() : 0;
+            // Version 8: trailing after it, so an older file reads as 0.
+            h.mechanism_slots = in.ok && in.size - in.pos >= 1 ? in.u8() : 0;
             return in.ok;
         }
     }

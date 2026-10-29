@@ -122,9 +122,22 @@ namespace bmmo::session {
     //      `next + 1`); a join order is free again only after its life was
     //      removed from the server's world (J2); a late joiner's base is at
     //      or after every leaving life's removal.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 18;
+    //  19  per-player mechanism units (docs/world-agreement-gaps-design.md
+    //      2.10, 5; step Q7): under WORLD_PLAYER_MECHANISMS every world
+    //      copies, once per mechanism slot, the sub-graph of a mechanism
+    //      script that acts on the ball whose identity it reads (the fan's
+    //      force, the rope bridge's stone test); slot k serves the ball of
+    //      the life holding join order k.  SessionStart carries the slot
+    //      count K (`mechanism_slots`, u8 after `world_options`); the server
+    //      hands out join orders below K only (a joiner waits for a
+    //      retiring order, or is refused the physics session when every
+    //      order below K is held); SessionReady's anchor_probes covers the
+    //      units, K and every copy's structure.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 19;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
+    // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
+    constexpr uint32_t PHYSICS_PROTOCOL_PLAYER_MECHANISMS = 19;
 
     // session_ready_msg::caps bits: what the client can do beyond the
     // protocol's baseline.  CAP_LEAD: it applies a SessionLead (slews its
@@ -159,7 +172,7 @@ namespace bmmo::session {
     // session_start_msg::world_options bits (protocol 11): what every world
     // of the session runs, fixed by the server for the session's life (never
     // a per-client choice).  Bit 3 is the record-format design's (not built
-    // yet).
+    // yet); bit 4 is WORLD_PLAYER_MECHANISMS (step Q7).
     // WORLD_PLACEMENT_CLONES (protocol 12, sector placement design 2.4, step
     // S5): every PH row whose object another row already places at another
     // matrix gets its own copy at the anchor (game/sector_placement.hpp), so
@@ -182,6 +195,16 @@ namespace bmmo::session {
     // SessionReady's anchor_probes), and the server's default turned on with
     // it; under the bit BodyRevived is retired (step G5).
     constexpr uint32_t WORLD_PROXIMITY_UNION = 1u << 2;
+    // WORLD_PLAYER_MECHANISMS (docs/world-agreement-gaps-design.md 2.10, 5;
+    // step Q7, protocol 19): one mechanism responds to every player - every
+    // world copies the per-player units (session/mechanism_units.hpp) K
+    // times at its anchor (game/proximity_union.hpp) and binds slot k to the
+    // ball of the life holding join order k.  Only with
+    // WORLD_PROXIMITY_UNION (the units are placed by the union's place).
+    // Bit 4: bit 3 is reserved by the record-format design's
+    // WORLD_SESSION_CLOCK (docs/record-format-gaps-design.md).  The server's
+    // config physics.player_mechanisms (default on).
+    constexpr uint32_t WORLD_PLAYER_MECHANISMS = 1u << 4;
 
     // Who a session admits (the server's SessionReady handling; step B9DX,
     // the user's answer 7 of 2026-10-28, quoted in docs/roadmap.md 2: refuse

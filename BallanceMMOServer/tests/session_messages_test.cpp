@@ -108,6 +108,39 @@ TEST(SessionStartMsg, SerializeDeserializeRoundTrip) {
     EXPECT_FLOAT_EQ(0.9f, parsed.players[1].spawn_rotation[3]);
 }
 
+// Protocol 19 (world agreement step Q7): the mechanism slot count after the
+// world options; under WORLD_PLAYER_MECHANISMS a count of 0 or above
+// MAX_PLAYERS_PER_SESSION does not parse.
+TEST(SessionStartMsg, MechanismSlots) {
+    const auto fill = [](bmmo::session_start_msg& msg, uint32_t options, uint8_t slots) {
+        msg.mode = bmmo::room::mode::Physics;
+        msg.world_options = options;
+        msg.mechanism_slots = slots;
+        bmmo::session::player_entry p{};
+        p.id = 5; p.join_order = 3; p.life = 2;
+        msg.players = {p};
+    };
+    const uint32_t on = bmmo::session::WORLD_PROXIMITY_UNION | bmmo::session::WORLD_PLAYER_MECHANISMS;
+    bmmo::session_start_msg msg{};
+    fill(msg, on, 8);
+    auto parsed = round_trip(msg);
+    EXPECT_EQ(8u, parsed.mechanism_slots);
+    ASSERT_EQ(1u, parsed.players.size());
+    EXPECT_EQ(3, parsed.players[0].join_order);
+    EXPECT_EQ(2u, parsed.players[0].life);
+    for (const uint8_t bad: {uint8_t(0), uint8_t(65)}) {
+        bmmo::session_start_msg b{};
+        fill(b, on, bad);
+        ASSERT_TRUE(b.serialize());
+        bmmo::session_start_msg out{};
+        out.raw.write(stream_payload(b.raw).data(), static_cast<std::streamsize>(b.size()));
+        EXPECT_FALSE(out.deserialize()) << static_cast<unsigned>(bad);
+    }
+    bmmo::session_start_msg off{};
+    fill(off, bmmo::session::WORLD_PROXIMITY_UNION, 0);
+    EXPECT_EQ(0u, round_trip(off).mechanism_slots) << "without the bit a 0 parses";
+}
+
 TEST(SessionStartMsg, DeserializeRejectsEveryTruncation) {
     bmmo::session_start_msg msg{};
     msg.room = 1; msg.session = 1;

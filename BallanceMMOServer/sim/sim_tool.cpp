@@ -212,6 +212,12 @@ namespace {
         // drop scene also prints the proximity union's frames and identity
         // copies whose names contain the --drop name.
         int drop_second_ball = -1;
+        // Step Q7 (world-agreement-gaps-design.md §7.2 V6, V7):
+        // --player-mechanisms K - the drop scene's world copies the
+        // per-player units K times (with --world-options PROXIMITY_UNION;
+        // the bit WORLD_PLAYER_MECHANISMS is implied), and --probe-census
+        // --release-check rewires the clients' class with K slots (V6).
+        int mechanism_slots = 0;
         float drop_second_at[3] = {};
         bool probe_trace = false;
         // --drop-kill TICK (step G2, V4's no-candidate interval): before world
@@ -719,6 +725,7 @@ namespace {
             if (name == "PLACEMENT_CLONES") out |= bmmo::session::WORLD_PLACEMENT_CLONES;   // step S5's constant
             else if (name == "TRAFO_INPUTS") out |= bmmo::session::WORLD_TRAFO_INPUTS;
             else if (name == "PROXIMITY_UNION") out |= bmmo::session::WORLD_PROXIMITY_UNION;   // step G2
+            else if (name == "PLAYER_MECHANISMS") out |= bmmo::session::WORLD_PLAYER_MECHANISMS;   // step Q7
             else return false;
             if (stop == std::string::npos) break;
             start = stop + 1;
@@ -737,6 +744,12 @@ namespace {
             for (float& k: out.drop_second_at) { if (!(v = next())) return false; k = static_cast<float>(std::atof(v)); }
         }
         else if (arg == "--probe-trace") out.probe_trace = true;
+        else if (arg == "--player-mechanisms") {   // step Q7
+            if (!(v = next())) return false;
+            out.mechanism_slots = std::atoi(v);
+            if (out.mechanism_slots < 1 || out.mechanism_slots > static_cast<int>(bmmo::session::MAX_PLAYERS_PER_SESSION))
+                return false;
+        }
         else if (arg == "--drop-kill") {
             if (!(v = next())) return false;
             out.drop_kill = std::atoll(v);
@@ -2132,6 +2145,8 @@ namespace {
         options.placement_fail_at = args.placement_fail_at;
         options.trafo_inputs = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;   // step K0
         options.proximity_union = (args.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;   // step G2
+        // Step Q7: the per-player units under the union (the drop scene, V7).
+        options.mechanism_slots = options.proximity_union ? static_cast<uint8_t>(args.mechanism_slots) : 0;
         options.pin_checkpoint_deactivation = args.n2_pin;   // step B2SW: --n2-pin off is the A/B
         options.split_sector_cell = args.n2_cell;            // step B2SX: --n2-cell off is the A/B
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
@@ -2653,6 +2668,21 @@ namespace {
             CKObject* cell = column >= 0 && array->GetRowCount() > 0 ? array->GetElementObject(0, column) : nullptr;
             lines[name] = "  identity tick=" + std::to_string(tick) + " " + name + " = "
                           + (cell && cell->GetName() ? cell->GetName() : "(none)") + "\n";
+        }
+        // Step Q7 (V7): each unit force block whose alias names the filter -
+        // its slot and whether it holds a force (SetPhysicsForce's local 0,
+        // the IVP handle, non-zero).
+        for (const auto& [id, alias]: world.proximity().force_aliases()) {
+            if (alias.find(filter) == std::string::npos) continue;
+            auto* block = CKBehavior::Cast(context->GetObject(id));
+            CKParameterLocal* handle = block && block->GetLocalParameterCount() > 0 ? block->GetLocalParameter(0) : nullptr;
+            bool held = false;
+            if (handle) {
+                const auto* bytes = static_cast<const uint8_t*>(handle->GetReadDataPtr(FALSE));
+                for (int k = 0; bytes && k < handle->GetDataSize(); ++k) held = held || bytes[k] != 0;
+            }
+            lines["~" + alias] = "  force tick=" + std::to_string(tick) + " " + alias + " rt:force/" + std::to_string(id)
+                                 + (held ? " HELD" : " none") + "\n";
         }
         for (const auto& [name, line]: lines) text += line;
         const auto& u = world.proximity();
@@ -5539,10 +5569,16 @@ namespace {
         // world options, client_journal.cpp).  Under the bit a BodyRevived
         // record is not applied (step G5, physics_world::apply_event).
         options.proximity_union = (header.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;
-        if (header.world_options != 0) std::printf("journal world options %08x%s%s%s\n", header.world_options,
+        // Journal v8 (step Q7, world-agreement-gaps-design.md 5): K slot
+        // copies of every per-player unit, bound per tick by join order.
+        options.mechanism_slots = options.proximity_union && (header.world_options & bmmo::session::WORLD_PLAYER_MECHANISMS)
+            ? header.mechanism_slots : 0;
+        if (header.world_options != 0) std::printf("journal world options %08x%s%s%s%s\n", header.world_options,
                                                    options.trafo_inputs ? " (trafo inputs)" : "",
                                                    options.placement_clones ? " (placement clones)" : "",
-                                                   options.proximity_union ? " (proximity union)" : "");
+                                                   options.proximity_union ? " (proximity union)" : "",
+                                                   options.mechanism_slots ? " (player mechanisms)" : "");
+        if (options.mechanism_slots) std::printf("journal mechanism slots %u\n", static_cast<unsigned>(options.mechanism_slots));
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         auto world = bmmo::sim::physics_world::create(options, error);
         if (!world) {
@@ -8756,9 +8792,13 @@ namespace {
                   "header)";
         else if (args.world_options_given
                  && (args.world_options & ~(bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_TRAFO_INPUTS
-                                            | bmmo::session::WORLD_PROXIMITY_UNION)))
-            why = "--world-options: only bit 0 (PLACEMENT_CLONES), bit 1 (TRAFO_INPUTS) and bit 2 (PROXIMITY_UNION) "
-                  "exist; bit 3 is the record-format design's (step K3), not built";
+                                            | bmmo::session::WORLD_PROXIMITY_UNION | bmmo::session::WORLD_PLAYER_MECHANISMS)))
+            why = "--world-options: only bit 0 (PLACEMENT_CLONES), bit 1 (TRAFO_INPUTS), bit 2 (PROXIMITY_UNION) and bit 4 "
+                  "(PLAYER_MECHANISMS, with --player-mechanisms K) exist; bit 3 is the record-format design's (step K3), not built";
+        else if (args.mechanism_slots && !(args.probe_census && args.probe_release_check)
+                 && !(!args.drop_entity.empty() && (args.world_options & bmmo::session::WORLD_PROXIMITY_UNION)))
+            why = "--player-mechanisms K: with --probe-census --release-check (V6), or the drop scene under --world-options "
+                  "PROXIMITY_UNION (V7)";
         else if ((args.world_options & bmmo::session::WORLD_PROXIMITY_UNION)
                  && (args.drop_entity.empty() || args.array_reads || args.probe_census || args.late_sector_check
                      || !args.late_run.empty() || args.resync_check || args.portable_scripts_check
@@ -8825,7 +8865,7 @@ namespace {
     // with the world's trafo bit).  Exit 0 PASS, 3 FAIL, 1 when the world
     // fails.
     int probe_release_check(bmmo::sim::physics_world& world, const bmmo::game::script_replay::selection& sel,
-                            const bmmo::sim::probe_census::result& first);   // step WG1, below
+                            const bmmo::sim::probe_census::result& first, uint8_t slots);   // step WG1, below
 
     int run_probe_census(const arguments& args) {
         auto world = create_session_world(args, 0.0f);
@@ -8841,7 +8881,7 @@ namespace {
         census.union_all = world->proximity().signature(bmmo::game::probe_class::all);
         int code = bmmo::sim::probe_census::print(census, world->level(), args.placement);
         if (args.probe_release_check) {
-            const int v5 = probe_release_check(*world, sel, census);
+            const int v5 = probe_release_check(*world, sel, census, static_cast<uint8_t>(args.mechanism_slots));
             if (code == 0) code = v5;
         }
         std::fflush(stdout);   // before the world goes: the engine's shutdown may not return through main
@@ -8850,7 +8890,7 @@ namespace {
 
     // --probe-census --release-check (§7.2 V5, step WG1).  0 PASS, 3 FAIL.
     int probe_release_check(bmmo::sim::physics_world& world, const bmmo::game::script_replay::selection& sel,
-                            const bmmo::sim::probe_census::result& first) {
+                            const bmmo::sim::probe_census::result& first, uint8_t slots) {
         CKContext* context = world.engine().context();
         bool pass = true;
         const auto check = [&pass](const char* name, bool ok, const std::string& detail) {
@@ -8934,6 +8974,78 @@ namespace {
                                 : error);
         }
         released("release 3", world.release_proximity(), mech + mech_ids);
+        // Step Q7 (§7.2 V6, --player-mechanisms K): the clients' rewire with
+        // K mechanism slots - the copy step on every unit (its listing, the
+        // force aliases, the signature) - then the release back to the
+        // pre-copy graph (the CK object counts per class), twice, with the
+        // same signature both times.
+        if (slots) {
+            const auto counts = [context]() {
+                std::vector<int> c;
+                for (CK_CLASSID cid: {CKCID_BEHAVIOR, CKCID_BEHAVIORLINK, CKCID_BEHAVIORIO, CKCID_PARAMETEROPERATION,
+                                      CKCID_PARAMETERIN, CKCID_PARAMETEROUT, CKCID_PARAMETERLOCAL})
+                    c.push_back(context->GetObjectsCountByClassID(cid));
+                return c;
+            };
+            const auto text = [](const std::vector<int>& c) {
+                std::string t;
+                for (int v: c) t += (t.empty() ? "" : "/") + std::to_string(v);
+                return t;
+            };
+            // The baseline: the union-rules rewire without units, released.
+            // An identity copy (CopyObject(CurrentLevel), step G1's code)
+            // leaves parameter outputs behind at its release; measured per
+            // identity read here, so the rounds below tell the unit copies'
+            // own objects (which must all go) from that.
+            std::vector<int> before = counts();
+            error = world.rewire_proximity(true, bmmo::game::probe_class::mechanism, 0);
+            const int base_reads = static_cast<int>(world.proximity().identity_count());
+            world.release_proximity();
+            const std::vector<int> base = counts();
+            const int base_leak = base[5] - before[5];
+            bool base_other = true;
+            for (size_t i = 0; i < base.size(); ++i) base_other = base_other && (i == 5 || base[i] == before[i]);
+            const int per_read = base_reads > 0 ? (base_leak % base_reads == 0 ? base_leak / base_reads : -1) : (base_leak == 0 ? 0 : -1);
+            check("baseline", error.empty() && base_other && per_read >= 0,
+                  "union rules without units: " + std::to_string(base_reads) + " identity reads, objects " + text(before)
+                      + " -> " + text(base) + " (" + std::to_string(base_leak) + " parameter outputs left, "
+                      + std::to_string(per_read) + " per identity copy; pre-existing, not the units')");
+            before = base;
+            uint64_t first_signature = 0;
+            for (int round = 1; round <= 2; ++round) {
+                error = world.rewire_proximity(true, bmmo::game::probe_class::mechanism, slots);
+                const auto& u = world.proximity();
+                if (round == 1) {
+                    for (const std::string& line: u.unit_lines()) std::printf("  %s\n", line.c_str());
+                    for (const auto& [id, alias]: u.force_aliases()) std::printf("  force alias %s\n", alias.c_str());
+                    std::printf("%s\n", u.units_summary().c_str());
+                }
+                const size_t units = u.unit_count(), copies = u.copy_count();
+                const size_t probes = world.proximity_probe_count(), reads = u.identity_count();
+                const uint64_t signature = u.signature(bmmo::game::probe_class::mechanism);
+                if (round == 1) first_signature = signature;
+                const std::string label = "player mechanisms " + std::to_string(round);
+                check(label.c_str(),
+                      error.empty() && units == mech_ids && copies == units * (slots - 1u) && probes == mech + copies
+                          && reads == mech_ids * slots && signature == first_signature
+                          && (slots == 1 || signature != first.signature_mechanism),
+                      error.empty() ? "K " + std::to_string(slots) + ", units " + std::to_string(units) + ", copies "
+                                          + std::to_string(copies) + ", blocks " + std::to_string(probes) + ", reads "
+                                          + std::to_string(reads) + ", signature " + hex(signature)
+                                    : error);
+                const std::string release_label = "release " + std::to_string(3 + round);
+                released(release_label.c_str(), world.release_proximity(), probes + reads);
+                std::vector<int> expected = before;
+                expected[5] += per_read * static_cast<int>(reads);
+                const std::vector<int> after = counts();
+                const std::string graph_label = "pre-copy graph " + std::to_string(round);
+                check(graph_label.c_str(), after == expected,
+                      "objects (behaviours/links/IOs/operations/pIn/pOut/locals) " + text(before) + " -> " + text(after)
+                          + ", expected " + text(expected) + " (the baseline's identity-copy outputs x "
+                          + std::to_string(reads) + ")");
+                before = after;
+            }
+        }
         std::printf("RELEASE-CHECK: %s\n", pass ? "PASS" : "FAIL");
         return pass ? 0 : 3;
     }

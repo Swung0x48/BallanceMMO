@@ -881,6 +881,8 @@ namespace bmmo::session {
         // trafo as an input here (WORLD_TRAFO_INPUTS and the host's
         // trafo_inputs capability).
         uint32_t world_options_ = 0;
+        // Step Q7: SessionStart's mechanism_slots under WORLD_PLAYER_MECHANISMS, else 0.
+        uint8_t mechanism_slots_ = 0;
         bool trafo_active_ = false;
         // Every applied or pending trafo input by applied tick, own, remote
         // and server-stamped (design 2.5): the live tick's applied before the
@@ -1424,6 +1426,14 @@ namespace bmmo::session {
         bool proximity_union_active() const {
             return (s.world_options_ & WORLD_PROXIMITY_UNION) != 0 && static_cast<bool>(platform_.place_probes);
         }
+        // Step Q7 (world-agreement-gaps-design.md 2.10): the number of slots
+        // the host copies the per-player mechanism units into at its anchor
+        // (proximity_union's rewire_options::slots) - SessionStart's K under
+        // WORLD_PLAYER_MECHANISMS while the union is active, else 0 (no
+        // copies: G3's single-ball rules).
+        uint8_t mechanism_slots() const {
+            return (s.world_options_ & WORLD_PLAYER_MECHANISMS) && proximity_union_active() ? s.mechanism_slots_ : 0;
+        }
         uint64_t probe_two_bodies() const { return s.probe_two_bodies_; }
         uint64_t revived_local() const { return s.revived_local_; }
         uint64_t trafo_missed() const { return s.trafo_missed_; }
@@ -1746,8 +1756,10 @@ namespace bmmo::session {
         // entity with a body and every mirror entity with a body, one per
         // player, by player id, minus the bodies `held_out` names (a
         // replay's); and the place itself (the platform's place_probes).
+        // Step Q7: each candidate's `slot` is the join order of the life
+        // its player has at `tick` (the placed tick), -1 when none.
         std::vector<bmmo::session::probe_candidate> probe_candidates(
-            const std::function<bool(const std::string& entity)>& held_out);
+            const std::function<bool(const std::string& entity)>& held_out, uint32_t tick = 0);
         void place_probes(uint32_t tick, const std::function<bool(const std::string& entity)>& held_out, bool replayed);
         // How deep the correction rewind of `tick` (its anchor tick - 1) may
         // go: max_resim_ticks, or the resync reach inside the last exact

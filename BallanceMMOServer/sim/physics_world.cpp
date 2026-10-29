@@ -120,9 +120,15 @@ namespace bmmo::sim {
         // The sets' force controllers in the savestate by the names every
         // world gives them (step T3's fix-up): the resync and join states'
         // blobs travel to clients that built their sets at other moments.
-        if (options_.trafo_inputs)
-            bmmo::physics::set_controller_alias(engine_->physics(), [this](const char* name, std::string& alias) {
-                return bmmo::game::trafo_controller_alias(trafo_registry_, name, alias);
+        // Step Q7 (world-agreement-gaps-design.md §4.3): one alias function
+        // per physics manager - the trafo sets' names first, then the
+        // per-player units' force blocks ("unit:<owner>/<n>/S<k>", slot 0
+        // included), then the own name.
+        const bool unit_alias = options_.proximity_union && options_.mechanism_slots != 0;
+        if (options_.trafo_inputs || unit_alias)
+            bmmo::physics::set_controller_alias(engine_->physics(), [this, unit_alias](const char* name, std::string& alias) {
+                if (options_.trafo_inputs && bmmo::game::trafo_controller_alias(trafo_registry_, name, alias)) return true;
+                return unit_alias && proximity_.controller_alias(name, alias);
             });
         // Trafo-replication design 2.4 step 6 (T1's level reference): the 8
         // original trafo scripts' values as Balls.nmo has them, captured on
@@ -499,6 +505,7 @@ namespace bmmo::sim {
             o.reset[2] = resetpoints_.front().z;
         }
         for (const ball_row& row: ball_rows_) o.ball_names.push_back(row.name);
+        o.slots = options_.proximity_union ? options_.mechanism_slots : 0;   // step Q7
         return o;
     }
 
@@ -521,7 +528,16 @@ namespace bmmo::sim {
     std::vector<bmmo::session::probe_candidate> physics_world::probe_candidates() const {
         std::vector<bmmo::session::probe_candidate> candidates;
         for (const auto& [id, p]: players_)
-            if (p.physicalized && p.ball && p.ball->GetName()) candidates.push_back({id, p.ball->GetName()});
+            if (p.physicalized && p.ball && p.ball->GetName()) {
+                bmmo::session::probe_candidate c;
+                c.player = id;
+                c.entity = p.ball->GetName();
+                // Step Q7 (§2.10 "Binding"): the clone's slot is its join
+                // order (add_player's, the server's J2 number; never a
+                // fallback slot under the cap).
+                if (options_.mechanism_slots) c.slot = p.slot;
+                candidates.push_back(std::move(c));
+            }
         return candidates;
     }
 
@@ -563,9 +579,10 @@ namespace bmmo::sim {
         return proximity_.release(engine_->context());
     }
 
-    std::string physics_world::rewire_proximity(bool union_rules, bmmo::game::probe_class which) {
+    std::string physics_world::rewire_proximity(bool union_rules, bmmo::game::probe_class which, uint8_t slots) {
         auto options = proximity_options();
         options.union_rules = union_rules;
+        options.slots = union_rules ? slots : 0;
         const std::string error = proximity_.rewire(engine_->context(), which, script_selection_, options);
         for (const std::string& line: proximity_.lines()) log("world: " + line);
         return error;

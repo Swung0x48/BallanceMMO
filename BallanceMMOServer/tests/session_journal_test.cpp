@@ -458,7 +458,7 @@ TEST(SessionJournal, ResyncRecordRoundTrip) {
     EXPECT_EQ(300u, r.scripts.size());
     EXPECT_EQ(70003u, r.savestate.size());
     EXPECT_EQ("end", r.savestate.substr(70000));
-    EXPECT_EQ(7u, kJournalVersion) << "7: the WAIT record (protocol 13)";
+    EXPECT_EQ(8u, kJournalVersion) << "8: the HEADER's mechanism_slots (protocol 19)";
     EXPECT_EQ(2u, kJournalOldestReadable) << "version 2, 3 and 4 files still read";
 }
 
@@ -1212,7 +1212,8 @@ TEST(SessionJournal, V6AnchorPlacement) {
     EXPECT_EQ(WORLD_PLACEMENT_CLONES, back.world_options);
     EXPECT_EQ(0x629f6128b4fc8389ULL, back.anchor_placement);
     journal_header v5;
-    ASSERT_TRUE(journal_detail::read_header_payload(payload.substr(0, payload.size() - 8), v5)) << "a v5 header";
+    // Minus the v8 slot count (1 byte) and the placement (8).
+    ASSERT_TRUE(journal_detail::read_header_payload(payload.substr(0, payload.size() - 9), v5)) << "a v5 header";
     EXPECT_EQ(WORLD_PLACEMENT_CLONES, v5.world_options);
     EXPECT_EQ(0u, v5.anchor_placement);
 
@@ -1231,6 +1232,24 @@ TEST(SessionJournal, V6AnchorPlacement) {
     EXPECT_EQ(WORLD_PLACEMENT_CLONES, out.header.world_options);
 }
 
+// Journal v8 (protocol 19, world agreement step Q7): the session's mechanism
+// slot count trails the placement signature; a v7 header reads as 0.
+TEST(SessionJournal, V8MechanismSlots) {
+    journal_header h = make_header();
+    h.world_options = WORLD_PROXIMITY_UNION | WORLD_PLAYER_MECHANISMS;
+    h.mechanism_slots = 8;
+    std::string payload;
+    journal_detail::write_header_payload(payload, h);
+    journal_header back;
+    ASSERT_TRUE(journal_detail::read_header_payload(payload, back));
+    EXPECT_EQ(8u, back.mechanism_slots);
+    EXPECT_EQ(h.anchor_placement, back.anchor_placement);
+    journal_header v7;
+    ASSERT_TRUE(journal_detail::read_header_payload(payload.substr(0, payload.size() - 1), v7)) << "a v7 header";
+    EXPECT_EQ(0u, v7.mechanism_slots);
+    EXPECT_EQ(h.anchor_placement, v7.anchor_placement);
+}
+
 // Journal v5 (protocol 11, trafo-replication design 5, step T2): a header
 // without the trailing world options (every older file) reads as 0, and a
 // Trafo EVENT record keeps its piece type, flags and position.
@@ -1242,7 +1261,7 @@ TEST(SessionJournal, V5WorldOptionsAndTheTrafoEvent) {
     ASSERT_TRUE(journal_detail::read_header_payload(payload, back));
     EXPECT_EQ(WORLD_TRAFO_INPUTS, back.world_options);
     journal_header old;
-    ASSERT_TRUE(journal_detail::read_header_payload(payload.substr(0, payload.size() - 12), old)) << "a v4 header";
+    ASSERT_TRUE(journal_detail::read_header_payload(payload.substr(0, payload.size() - 13), old)) << "a v4 header";
     EXPECT_EQ(0u, old.world_options);
     EXPECT_EQ(0u, old.anchor_placement);
     EXPECT_EQ(h.own_join_order, old.own_join_order);

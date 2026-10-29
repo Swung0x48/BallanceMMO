@@ -276,7 +276,7 @@ namespace bmmo::sim {
         void create_session(uint32_t session, int level, const std::vector<std::pair<uint32_t, uint8_t>>& players,
                             uint32_t input_delay, uint32_t start_base, float spawn_impulse,
                             const std::string& note = {}, std::vector<std::string> names = {},
-                            uint32_t sector_lead = 0, uint32_t world_options = 0);
+                            uint32_t sector_lead = 0, uint32_t world_options = 0, uint8_t mechanism_slots = 0);
         // `reason` goes into the journal as `end: <reason>` before it closes.
         void destroy_session(uint32_t session, const std::string& reason = {});
         // `name` is the player's display name for the journal's PLAYER record.
@@ -500,6 +500,10 @@ namespace bmmo::sim {
             // final resets are in it): a rejoin's first explosion keeps the
             // span after them.
             uint32_t world_options = 0;
+            // Step Q7: SessionStart's K under WORLD_PLAYER_MECHANISMS (0
+            // without the bit): the world copies its units K times, the
+            // journal's header records it.
+            uint8_t mechanism_slots = 0;
             uint32_t sector_lead = 0;
             bmmo::session::trafo_acceptance trafo;
             uint64_t trafo_server_resets = 0, trafo_superseded = 0, trafo_rejected = 0;

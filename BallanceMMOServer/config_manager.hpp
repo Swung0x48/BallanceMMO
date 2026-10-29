@@ -110,6 +110,13 @@ public:
     // probe signature, protocol 16); off is the negative control and what
     // old journals replay with.
     bool physics_proximity_union = true;
+    // physics.player_mechanisms (world-agreement-gaps-design.md 2.10, 5;
+    // step Q7): session::WORLD_PLAYER_MECHANISMS - every world copies the
+    // per-player mechanism units K times (K = maximum_members clamped to
+    // [1, 64]) and the server hands out join orders below K only.  Default
+    // on (with the union only: the units are placed by its rule); off is
+    // the negative control and G3's single-ball rules.
+    bool physics_player_mechanisms = true;
     // Session black box (design 9.15): where the journals go (relative to the
     // server's own directory; empty = record nothing), the cap per session
     // file and how often a full body checkpoint is written.

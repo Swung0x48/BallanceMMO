@@ -31,6 +31,11 @@ namespace bmmo::session {
     struct probe_candidate {
         uint32_t player = 0;
         std::string entity;
+        // Step Q7 (§2.10 "Binding"): the join order of the life of `player`
+        // that the placed tick names - the mechanism slot this ball serves
+        // under WORLD_PLAYER_MECHANISMS; -1 when unknown (no life holds the
+        // tick) or when the world runs without the bit.
+        int slot = -1;
     };
 
     // The Check Axis bits of TT Scaleable Proximity (SPX: A_X 1, A_Y 2, A_Z 4).

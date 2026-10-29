@@ -95,6 +95,33 @@ namespace bmmo::session {
         return static_cast<uint8_t>(order);
     }
 
+    // Step Q7 (§2.10 "The cap"): a joiner's order under the session's K
+    // mechanism slots - the lowest order below `limit` that no life holds or
+    // retires; when every order below K is held or retiring and at least one
+    // of them is retiring, the joiner waits for its release; when every one
+    // is held by a live life, it is refused the physics session.
+    enum class join_order_verdict : uint8_t { order, wait, refuse };
+    struct join_order_choice {
+        join_order_verdict verdict = join_order_verdict::refuse;
+        uint8_t order = 0;
+    };
+    inline join_order_choice capped_join_order(const std::set<uint8_t>& held, const std::set<uint8_t>& retiring,
+                                               uint32_t limit) {
+        join_order_choice c;
+        bool any_retiring = false;
+        for (uint32_t order = 0; order < limit && order < 256; ++order) {
+            const auto o = static_cast<uint8_t>(order);
+            if (!held.count(o) && !retiring.count(o)) {
+                c.verdict = join_order_verdict::order;
+                c.order = o;
+                return c;
+            }
+            any_retiring = any_retiring || (retiring.count(o) && !held.count(o));
+        }
+        c.verdict = any_retiring ? join_order_verdict::wait : join_order_verdict::refuse;
+        return c;
+    }
+
     // J4: a late joiner's base is not before the removal of any life it
     // was not told about (`horizon`: the largest removal tick of the
     // runner's leaving lives, 0 when none).
