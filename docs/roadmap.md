@@ -2471,6 +2471,52 @@ numbers 1-10 are unchanged.
      starved 0 on all eight clients in all four sectors, S1 lateness
      12.5 for every member (the 4-member level), ~35 ms a piece set
      (derived; late-player-design.md 2.8 "As built (step DX5)").
+   - **Run at CPU (2026-10-30, FULL check batch, HEAD 16ba27a5's code:
+     clients `build-agent-rRSX`, the Arch server built from the clean HEAD;
+     8 live runs, snapshots off, 150 ms, `cpu_sampler.ps1` beside each, host
+     max <= 27.7 %; `maps/arena-test/cpu_full/`, `.local-tools/work/CPU/`; no
+     code change):** rewind-cost-design.md and sector-placement-design.md
+     §12.10 "As built (step CPU)". PASS: server window p99 within 15.15 ms in
+     every arm (worst 5357 us), starved / rebases / resyncs / far 0 on all 32
+     client results, every server journal N/N; TR4-g under the RCX ruling
+     (trafo on 1.5-2.7x off on every client metric; the h1_on client frame
+     p99 15.0-22.9 ms, 3 of 4 over the tick, recorded as RT1's RCX-x86
+     baseline - not one of RCX's limits); R12-b (cap 48, restore 2.49-2.84
+     ms, replay 0.89-0.92 ms per tick, below REF12's); ASL-cpu (~7-8 us per
+     tick, 0.05 %; the airship walk bounded at ~13 us); RC1-a / RC1-b /
+     TR4-h / SP10-d in their HEAD-only form (plan §4 C2). **Waiting on the
+     user: SP8-d's band** - placement and the union (with the per-player
+     mechanisms it switches) are 23-74 % outside the plan's off-arm band +
+     10 % (L8 capture per frame +36 %, replay per tick +63 %; L12 +68 % /
+     +63 %, reach pinned at 48), while §7.6's own limits hold (frame p99 <=
+     12.2 ms, no extra rebase or resync); options (a) judge them by the
+     absolute limits as RCX did for trafo, (b) build RC2 (b) / RC5 (b) first
+     (reopens their 2026-10-28 "not built") and measure again (§12.10).
+     Pre-existing, recorded: 3 relayed frames past the reach on h1_on client
+     3, all in 2161-2205, after client 0 stopped at 2134 - the session tail
+     (the time-limit exit sends no Leave; the server holds the departed
+     member's frames until the connection drops, the survivors' lag climbs
+     to 41-48 in every arm, and only trafo-on's reach 48 is met by it).
+     **Queued (item 2, tooling; cause shown, instance not caught): the
+     server's log over 9P** - `l12x_on` 243 late frames on every client from
+     a ~1.2 s runner stall after tick 915 (not in `l12x_on2`); the
+     simulation's log is printf + `fflush(stdout)` on the runner thread
+     (`misc.cpp:94-126`, `server.cpp:840`) into `server.log` under `/mnt/d`
+     (`arch_server_lp.sh:32,45`), and the runner was sampled in
+     `p9_client_rpc` in `l12x_on2`; B2SW's journal class (B2SX, 75103f2).
+     Options: (a) the start script writes `server.log` to ext4 and mirrors it
+     back (config only, B2SX's shape for the journal; the orchestrator's
+     default by that analogy), (b) the server's console output through SIO's
+     writer thread (code). Confirming experiment before HL: (a)'s script, or
+     the thread sampler (`work/CPU/srv_tasks.sh`) beside HL's runs until it
+     recurs; also explains, if confirmed, H3's live-only 0.28-1.07 s steps
+     above. **Queued (tools):** `cpu_parity.sh:31`'s `rm -rf` (retire the
+     script, C2 replaced it, or route it through `clean.sh`); the L12 cross's
+     beam targets unvalidated (clients 1 and 3 die at 702 / 717 in every
+     L12 arm) before the recipe is reused. Deferred: the union axis on h1 and
+     L12, a placement-only pair with the per-player mechanisms off on both
+     sides, the L9 / L10 crosses, a second h1 pair, the decode of the three
+     tail frames' member, the retail halves (RCX-x86 RT1, SP8-e RT2).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

@@ -2762,3 +2762,85 @@ change it, and echo a reason to the player when it is put out) replaces §5's
   read above). Its length (about 265 characters through
   `SendIngameMessage`) was not seen on BML's message board: deferred to
   the retail runs (RT2 / RT3).
+
+### 12.10 As built (step CPU, FULL close-out, 2026-10-30): §7.6 on HEAD, the placement and union axes
+
+FULL plan step CPU (check batch; no product code changed; result: **blocked on
+the user** for this section's band ruling only). Clients `build-agent-rRSX`
+(HEAD 16ba27a5's code), the Arch server built from the clean HEAD
+(`ballanced-36c04e3d24c9+bmmo-16ba27a56d44`), every run snapshots off, 150 ms,
+4 headless clients, `cpu_sampler.ps1` beside each run (host max 14.5-27.7 %,
+worst outside process 2.9 %: no run void), one run at a time; stores
+`maps/arena-test/cpu_full/<arm>/`, runner and judges `.local-tools/work/CPU/`
+(`cpu_run.sh`, `cpu_judge.py`, `cpu_table.py`; the full table with the band
+computation is `cpu_table.txt`). Every server journal replayed N/N with 0
+checkpoint mismatches; starved, rebases, resyncs and far 0 on all 32 client
+results; the server's window p99 at most 5357 us (L12 on) against 15.15 ms.
+
+Arms. L8: `core_ref_s12`'s `l8_cross` recipe plus `--latency-ms 150` (§7.6 asks
+for 150 ms): `l8x_on` (placement + union, the defaults), `l8x_poff` (placement
+off), `l8x_puoff` (union off - which also turns the per-player mechanisms off,
+`BallanceMMOServer/server.cpp:1028`: this arm measures union + per-player
+mechanisms together, not the union alone). L12, a new cross (the level with the
+largest placement growth, 8 sectors, 62 copies): beam targets = PH row
+positions + 4 m from SimTool's dump (`work/CPU/lp12.txt` via `ph_pos.py`),
+client arguments `'0:--beam 378.061 24.413 89.479 400'`, `'1:--sector-at 3:300
+--beam 449.510 6.463 -309.201 500'`, `'2:--sector-at 4:300 --beam 792.090
+-28.522 -300.815 500 --sector-at 6:700 --beam 794.170 -167.132 684.303 760'`,
+`'3:--sector-at 8:300 --beam 212.003 -144.330 706.474 500'`, all `--latency-ms
+150 --sectors 1`, 40 s; arms `l12x_on`, `l12x_on2` (an instrumented rerun,
+`--proxy-log` + a server thread sampler) and `l12x_poff`. **The L12 targets are
+not validated** (`--list-bodies-at` printed nothing): clients 1 and 3 die at
+702 / 717 and respawn at 900 / 915 identically in every L12 arm, so the A/B is
+symmetric and stands, but a reference-quality L12 cross needs targets that keep
+the balls alive. Copies: L8 on 39 placement copies + 9 mechanism units (63
+copies), L8 placement off 0 + 3 units (21), L8 union off 39 + per-player
+mechanisms off; L12 on 62 + 26 units (182), L12 off 0 + 11 units (77).
+
+Results (on arm's worst client against the off arm's maximum; per-unit figures
+are the comparators, since the totals depend on how many rewinds an arm had -
+L8 on 11-13 rewinds per client, 42 birth + 8 input-correction rewinds over the
+four clients, against 23-29 per client, 54 + 46, with the placement off):
+
+| pair | t_cap | t_cap per frame | t_rep per resim tick | t_max | frame p99 |
+|---|---|---|---|---|---|
+| L8 placement: `l8x_on` vs `l8x_poff` | +27 % | 0.70 vs 0.51 ms (+36 %) | 0.92-0.94 vs 0.55-0.57 ms (+63 %) | 29-34 vs 22 | 5.4 vs 4.4 ms (+23 %) |
+| L12 placement: `l12x_on2` vs `l12x_poff` | +46 % | 1.28-1.30 vs 0.76-0.77 ms (+68 %) | 1.38-1.42 vs 0.82-0.87 ms (+63 %) | 37-40 vs 25-28 | 11.4-12.2 vs 8.0-8.2 ms (+49 %) |
+| L8 union (+ per-player mechanisms): `l8x_on` vs `l8x_puoff` | +28 % | +24 % | +30 % | +42 % | +26 % |
+
+`l12x_on` agrees with `l12x_on2` (t_cap +51 %; the run-to-run spread of t_cap is
+about 4 % L12-on vs L12-on, 3 % `l8x_poff` vs `l8x_puoff`): this is the axis,
+not noise. On L12 the reach cap sits at its floor of 48 in the on arm (restore
+1.44-1.53 ms, replay 1.25-1.39 ms per tick) against 59-62 off; L8 on 63-68
+against 94-98 off.
+
+**Verdict.** §7.6's own criterion holds (no rebase or resync the control lacks;
+frame p99 at most 12.2 ms, under 15.15 ms). The FULL plan's pass rule for this
+step is the on arm within the off arm's band + 10 %, with the absolute-limits
+exception named for trafo only (the RCX ruling), and the placement and union
+arms are 23-74 % outside it on every per-unit metric: **OUT by the plan's rule;
+the ruling is the user's**, as RCX's was for trafo.
+
+**Cause: more bodies recorded, captured and restored per world.** The dominant
+term is the per-player mechanism copies, which the placement multiplies (each
+placed row is its own unit, copied once per member). L8 capture per frame: 0.70
+ms with 39 placement copies + 63 per-player copies, 0.55 ms with 39 + 0, 0.51 ms
+with 0 + 21.
+
+**Options (for the user):**
+- **(a)** Judge placement and the union by §7.6's absolute limits (met), as RCX
+  ruled for trafo. Trade-off: more client CPU - L8 capture +36 % per frame, L12
+  replay about 1.7x per tick, L12's reach pinned at 48 (less margin against lag
+  spikes).
+- **(b)** Build per-body cuts first and measure again: RC2 (b) (a read cache
+  for sleeping bodies) and RC5 (b) (skip unchanged sleeping bodies on restore).
+  This reopens the user's 2026-10-28 rulings that left RC2 and RC5 unbuilt
+  (rewind-cost-design.md §8); the capture share they can reach is bounded by
+  the per-frame figures above (0.51 -> 0.70 ms on L8), not measured.
+- Turning either default off is not a deployable option: the union carries
+  world agreement, and the per-player mechanisms are the user's Q7 (b).
+
+Deferred (the step's two-run arithmetic, or less relevant than what ran): the
+union axis on h1 and on L12; a placement-only pair with the per-player
+mechanisms off on both sides; the L9 and L10 crosses (L12 taken as the largest
+growth); retail SP8-e (RT2).

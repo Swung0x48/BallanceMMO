@@ -3516,3 +3516,84 @@ bit against the server's FULL checkpoints).
   Its FINAL rows are exact, but the ghost bit is not in the record (F0's limit), so the
   rows do not prove the final ghost -> solid tick of those 6 per world.
 - `trafo_life_mismatches`: no such line in any H6 server log (0).
+
+### As built (step CPU, FULL close-out, 2026-10-30): rewind cost on HEAD, the trafo axis, ASL-cpu
+
+FULL plan step CPU (check batch; no product code changed). Clients
+`build-agent-rRSX` (HEAD 16ba27a5's code), the Arch server built from the clean
+HEAD (`ballanced-36c04e3d24c9+bmmo-16ba27a56d44`), snapshots off, 150 ms, 4
+headless clients, `cpu_sampler.ps1` beside each run, one run at a time
+(8 live runs, host max 14.5-27.7 %); stores `maps/arena-test/cpu_full/<arm>/`,
+tools and the full table `.local-tools/work/CPU/` (`cpu_table.txt`). Starved,
+rebases, resyncs and far 0 on all 32 client results; every server journal N/N, 0
+checkpoint mismatches; server window p99 at most 5357 us. The placement and
+union axes are sector-placement-design.md §12.10 (blocked on the user's band
+ruling).
+
+- **RC1-a, RC1-b, TR4-h, SP10-d (plan §4 C2):** old-vs-new CPU parity cannot be
+  run - no pre-protocol-22 binary joins or replays at protocol 22 - so they are
+  replaced by the HEAD-only A/Bs and the absolute figures here and in §12.10.
+  `cpu_parity.sh` was not run (it also has an `rm -rf` at line 31, against the
+  deletion rule: retire it or route it through `clean.sh`, queued as a tools
+  item).
+- **TR4-g, trafo inputs on vs off** (`h1_on` / `h1_off`, `core_ref_s12`'s
+  h1_150 recipe): PASS under the RCX ruling (§8 close-out: H6 judged by its
+  absolute limits - starved and the server's p99): starved 0, server window p99
+  at most 3650 us, `trafo_missed` 0, leaks 0, trafo late 0. The on arm is 1.5-2.7x
+  the off arm on every client metric (t_rest 85-101 vs 37-48, t_rep 675-830 vs
+  448-545, t_cap 1502-1554 vs 883-965, t_max 44-46 vs 15-17), the known RCX
+  trade-off.
+- **The h1_on client frame time, stated on its own (not one of RCX's limits):**
+  frame p99 15.0 / 21.7 / 22.9 / 21.5 ms - 3 of 4 clients over the 15.15 ms tick
+  - p999 44.5-45.7, max 48.4-60.1 ms; h1_off 12.3-13.7 / 21.9-28.0 / 39.3-41.7
+  ms. This is the headless baseline RT1's RCX-x86 retail check is read against.
+- **R12-b** (the cap estimator, trafo on): status `cap=48/2.74-3.04/0.946-0.984/
+  42-50`; the last `reach:` lines 48 ticks, cap 48 from 39-44 rewinds, restore
+  2.49-2.84 ms, replay 0.893-0.921 ms per tick - slightly cheaper than REF12's
+  3.14-3.56 / 1.007-1.057. Off: cap 90-99.
+- **Relayed frames past the reach in `h1_on` client 3 (3 frames): the session
+  tail, pre-existing.** Every `window:` line of client 3 up to tick 2160 has
+  `late=0`; its status at 2205 has `late=3`, so all three arrived in 2161-2205.
+  Client 0's last tick is 2134, client 1's 2161: the headless client's time-limit
+  exit sends no room Leave (`session_client.cpp` ~1137-1164), so the server holds
+  a departed member's frames (`S2 held player=2145353179 ticks=2135..2200
+  src=2134 delay=1*1,2*1,...`, then on until the connection drops ~8 s later) and
+  the survivors' relay lag climbs: the clients still running at the end see a lag
+  max of 41-48 in every arm of the batch (h1_off 42, L8 41-42, L12 41-42) against
+  24-34 on the clients that stopped first. Only h1_on's reach (48, the trafo cap)
+  is met by it (lag max 48); h1_off's reach 90-99 covers its 42. Seen before (H5b
+  `h8_h1_150_off`, 18 late at lag 50; `core_ref_s12h` h1_150 lag 44). Not a
+  mid-session miss: no `window:` line of any arm before the first member stops
+  has a late frame except `l12x_on`'s stall (below). Which member's frames the
+  three were is not decoded (the client logs no per-frame line and its last
+  window line is 2160).
+- **`l12x_on`: 243 late frames on every client (lag max 103), not reproduced in
+  `l12x_on2`** - in client windows 1020 (12) and 1080 (231): the server's runner
+  stalled about 1.2 s right after its log line for tick 915 (every client the same
+  late count and the same per-member lag histograms; the server's lateness meter
+  shows no new misses 660-1320 because arrivals are stamped on the network thread,
+  `session_runner.cpp:833`). Mechanism present, instance not caught: the
+  simulation's log goes through `Printf` (`server.cpp:840`) to `DebugOutput`,
+  printf + `fflush(stdout)` on the calling thread (`misc.cpp:94-126`), and
+  `arch_server_lp.sh` (lines 32, 45) writes `server.log` under `/mnt/d` (WSL 9P);
+  in `l12x_on2` the busiest runner-like thread was sampled in `p9_client_rpc`
+  (`work/CPU/srv_tasks_l12x_on2.txt`; the threads carry no names). The class of
+  B2SW's journal stall (fixed for the journal at B2SX, 75103f2). Queued (roadmap
+  §4 item 7, "Run at CPU"). The single-step maxima of 26.8 ms (h1_off) and 31.4
+  ms (l12x_on) fall in the session tail 2007-2666, where the leave lines burst;
+  l8x_puoff's 29.6 ms falls at 27-686 - none tied to this cause yet.
+- **ASL-cpu** (absolute listener cost; no flag to A/B, no old build): a
+  temporary diagnostic build (`work/CPU/asl_diag.hpp` + `patch_asl.py`, applied,
+  built, reverted, rebuilt: BUILD-OK, deps OK) timed each listener over replays
+  of `cpu_full/l8x_on` (L8, ~81 table entries walked) and H2's
+  `h2_full/sp8b_l11_150_on` (L11, ~95; a pre-H1X capture replayed on HEAD's
+  code): spawn-ghost listener mean 3.4-3.6 us (L8) / 3.9-4.1 us (L11), p99
+  7.2-8.5 / 8.7-10.4 us, max ~0.33 ms once; `player_balls_in_detection` mean
+  2.1-2.2 / 2.5-2.7 us; airship listener 0.18-0.20 us - it returned before its
+  scan in every call (its box never ready here), so the table was walked once
+  per call. About 1.9 calls per stepped or replayed tick: ~7-8 us per tick, 0.05 %
+  of 15.15 ms. The airship listener's walking case is not measured; bounded by
+  the spawn-ghost walk, 2 x 3.5 us x 1.9 = ~13 us per tick (~0.1 %). Sharing the
+  ball list between the listeners is not needed. The diagnostic build changed no
+  output: its journals IDENTICAL to rRSX's 8 of 8, the L8 live journals
+  IDENTICAL to their replays 4 of 4.
