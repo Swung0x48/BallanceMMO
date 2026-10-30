@@ -8102,9 +8102,10 @@ namespace {
                 CK3dEntity* parent = entity->GetParent();
                 char line[400];
                 int same_name = 0;
-                {
-                    const int count = context->GetObjectsCountByClassID(CKCID_3DENTITY);
-                    CK_ID* ids = context->GetObjectsListByClassID(CKCID_3DENTITY);
+                // (one class exactly each: a CK3dObject - a ball, BMMO_NoBall - too.)
+                for (CK_CLASSID cid: {CKCID_3DENTITY, CKCID_3DOBJECT}) {
+                    const int count = context->GetObjectsCountByClassID(cid);
+                    CK_ID* ids = context->GetObjectsListByClassID(cid);
                     for (int i = 0; i < count; ++i) {
                         CKObject* o = context->GetObject(ids[i]);
                         if (o && o->GetName() && name == o->GetName()) ++same_name;
@@ -9589,7 +9590,8 @@ namespace {
         // Objects of the union still in the world (frames, copies, their locals, BMMO_NoBall).
         const auto leftovers = [context]() {
             size_t n = 0;
-            for (CK_CLASSID cid: {CKCID_3DENTITY, CKCID_DATAARRAY, CKCID_PARAMETERLOCAL}) {
+            // (one class exactly each: BMMO_NoBall is a CK3dObject, step FANX.)
+            for (CK_CLASSID cid: {CKCID_3DENTITY, CKCID_3DOBJECT, CKCID_DATAARRAY, CKCID_PARAMETERLOCAL}) {
                 const int count = context->GetObjectsCountByClassID(cid);
                 CK_ID* ids = context->GetObjectsListByClassID(cid);
                 for (int i = 0; i < count; ++i) {

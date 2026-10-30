@@ -5378,3 +5378,139 @@ FINAL row (659 / 669 / 746 / 477 ticks), the server's journal replays exactly, s
 the replay). The harness's own VERDICT line (FAIL: "client0 resyncs; client1 resyncs", the
 forced resyncs' own-ball and late-mirror criteria) is the recipe's, identical in LJ1's runs.
 Unit tests 681/681, GCC syntax 31/31, x64 BUILD-OK and x86 CLIENT-BUILD-OK (DEPS-OK).
+
+### As built (step FANX, FULL close-out, 2026-10-30): the fan's dead slot fixed - BMMO_NoBall created as a CK3dObject
+
+The user's decision on H5's dead fan slot ("As built (step H5)", WGQ7-H):
+"Option (a)" of FANP. FANP's prototype `.local-tools/work/FANP/fanp_a.patch`
+landed on HEAD 9e122e2b unchanged in substance, plus FANP's finding 2.
+No rule of §2.10 or G2 changes, no wire, journal or IVP change.
+- `proximity_union.hpp` `make_no_ball`: `CreateObject(CKCID_3DOBJECT,
+  "BMMO_NoBall")` (was `CKCID_3DENTITY`). A Get Cell's `Cell Value` output
+  is a 3D Object parameter: an Out Range edge of a slot unit's inner probe
+  while the slot's body-kind cell holds BMMO_NoBall (its ball unphysicalized
+  by a trafo, a death) now writes BMMO_NoBall instead of leaving id 0, so the
+  existing latch (§2.2, G2's "id 0 = the block never ran" untouched) moves
+  the output to the slot's candidate as soon as it has one. The same object
+  is what the non-slot latch writes (`proximity_union.hpp` ~410), and a 3D
+  Object reference to it now resolves by name (`script_replay.hpp`
+  `find_by_name` looks a parameter's class up with
+  `GetObjectByNameAndParentClass`; `localize_hold`'s `CKCID_3DOBJECT` lookup,
+  "As built (step WG6)"'s adaptation, would find it too). The sentences
+  above that call BMMO_NoBall "a plain 3D entity" ("As built (step WG6)",
+  H5's trace item 3) describe the state before this step.
+- `GetObjectsListByClassID` lists one class exactly, so the three
+  enumerations that looked for BMMO_NoBall under `CKCID_3DENTITY` also list
+  `CKCID_3DOBJECT`: the release check's leftovers (`sim_tool.cpp`, FANP),
+  the retail `objects` verb (`client_automation.cpp`, plain entities first,
+  then the 3D objects - it now lists the balls too) and the `--resync-watch`
+  diagnostic's "N of the name" count (`sim_tool.cpp`). `--probe-trace`
+  (`BMMO_Prox_*` frames, still CK3dEntity) and the class loop of the
+  savestate's hierarchy capture (already every 3D class) need nothing.
+
+**Checks** (`.local-tools/work/FANX/`, x64 build `build-agent-rFANX`, Arch
+server rebuilt from the tree).
+- Builds: x64 BUILD-OK (DEPS-OK, `physics_world.cpp.obj` #deps 277 with
+  `proximity_union.hpp`), x86 CLIENT-BUILD-OK; tests 681/681; GCC 31/31.
+- Wire check rLJ2 -> rFANX over `core_ref_s12` (EXTRA
+  `--pacer-restart-on-resync`): ALL SAME, 36/36 journals IDENTICAL.
+- FANP's offline checks on rFANX: the drop scenes `diag_nb` / `diag_e2` print
+  the same physics as FANP's (a) build (only its diagnostic lines and the
+  load clock differ); `fan_order`'s server journal re-simulated: all four
+  balls pushed (each hovers at y 16.8-19.4 from +40 after its drop, row for
+  row FANP's); `fan_q7b` re-simulated and c0-c3 replayed: c1 / c2 0 differing
+  keys (c0 the resync, c3 the joiner import H5's live server state - not
+  verifiable offline, as FANP said).
+- `--probe-census --release-check --placement on --player-mechanisms 8` on
+  L11 / L12: RELEASE-CHECK PASS, every check line identical to FANP's (the
+  K = 8 part, V6, needs `--player-mechanisms 8`).
+- Live (`maps/arena-test/fanx_full/fan_q7b_r1`, H5's `fan_q7b` recipe:
+  4 clients, client 0 `--resync-at 1050`, client 3 `--join-late 3:1150`,
+  snapshots off, trafo inputs and placement clones on, K = 8): server journal
+  replays exactly (3300/3300); FINAL rows of all four replays vs the server:
+  58 keys, 0 keys with a differing field on every client, the resynced
+  client 0 and the joiner 3 included (H5: 17.6 m / 17.4 m mirrors, Pusher
+  0.046 m); all three beamed balls pushed (the joiner's from 1601). The
+  harness's live "late ball mirror" criterion: 0.0996 / 0.0335 / 0 m
+  (H5: 23.6 / 17.4 / 0.92 m). Both imports localized every object reference
+  (`0 unportable`); whether one of them held BMMO_NoBall at S is not shown by
+  any log (no slot was bodiless at 1052 or 1181), and SimTool's
+  `--resync-check` refuses the union's bit (only the drop scene takes it), so
+  an offline import of a slot output holding BMMO_NoBall was not run.
+- Retail (`scripts/retail/fanx_r1`, two copies on the arena, slot-13 hack
+  for the x86 mod and the Arch server, reverted afterwards): each copy beams
+  its ball into the paper trafo at (74, 4, 43), then into the column. No
+  crash (both answer at the end, core on), `objects BMMO_NoBall` lists it on
+  both copies, `session probes` relatched 3 / 1 (server 1), and the fan
+  pushes in every world. The evidence for the push is the journal rows
+  (`own_rows.py`): copy 1's paper ball stays in the column, y 16.7-19.9,
+  from 640 to the end on the server and on the copy; copy 2's paper ball is
+  pushed again (server 1380 v_y +5.54, the copy's own rows at 1590 y 18.97).
+  The driver's `JUDGE c1 / c2 column min y 3.095` line in `retail_r1.log` is
+  void: `fanx_retail.py` sampled `own` after the trafo, which still names the
+  parked Ball_Stone at (74, 3.095, 43), not the paper ball in the column.
+  Copy 2's `relatched` went 0 -> 1 across its own trafo window and copy 1's
+  stayed 0 through its sequence. That copy 2's increment is the NoBall read
+  (an output carrying BMMO_NoBall moved to its paper ball) is an inference:
+  `place_slot_identity` (`proximity_union.hpp` ~1322-1342) counts any
+  non-zero output that names neither the candidate nor the cell's value, so
+  a stale ball would count the same.
+- The row's "physics_RT's SetPhysicsForce takes the bodiless target" is
+  **partially met**. The fan wires In Range -> Box Box Intersection ->
+  `SetPhysicsForce` Create *or Shutdown* on the same Get Cell output
+  (§ "What they drive", P_Modul_18), so a slot output holding BMMO_NoBall
+  while its inner probe is In Range sends Shutdown (the intersection is
+  false at y -100000) with the bodiless target, in every world. No run
+  crashed (the headless runs, whose physics_RT is the same source, and the
+  retail session), but no log shows that a Shutdown with BMMO_NoBall
+  actually ran: the existing verbs cannot read it.
+- The retail `objects` verb now lists the 3D objects after the plain
+  entities under one 500-name cap; on a large level an unfiltered listing
+  can drop 3D objects past the cap (a filtered query, as used here, is
+  unaffected). Diagnostic only.
+
+**Found, pre-existing (not this step's): the retail beam's in-place write.**
+The retail copies' LIVE own rows leave the server's at a beam of a ball that
+was rolling (`.local-tools/work/FANX/own_comp.py`, `beam_scan.py`). Two
+signatures:
+1. At the stamp the server's ball is at rest (linear and angular 0); the
+   retail ball carries a small impulse that is not its pre-beam velocity
+   (stamp 586: dv (+1.97e-3, +4.6e-4, +6.1e-4), dw (-4.8e-4, +1.69e-3,
+   +2.95e-3), where the pre-beam angular was (0.0033, -0.0060, -0.0048)),
+   decaying with the ball's damping.
+2. In the six ticks after the stamp the retail ball gains an extra upward
+   dv_y (+6.5e-3 at 588, +1.8e-2 at 590, +2.95e-2 at 592), which then decays
+   as damping would; copy 1 is 1.7 cm off by 620, and copy 2's ball later
+   falls out of the column in the server's world only (17.5 m).
+Both copies show it bit-identically (copy 1's 586-604 against copy 2's
+1216-1234: the server rows identical, max |diff| 0.000e+00 between the two
+copies' differences), though only copy 2's slot took a read that may be the
+NoBall read; it ends before the fan acts (the server's v_y turns at
+616-618, the same tick on both sides) and is about 1/200 of the fan's
+per-tick push. The beams from the spawn plate (240 / 870, ball at rest)
+are exact to 1e-12. Signature 1 is reproduced before FANX: `rtx_3`
+(2026-10-28, L11): a ball moving at (-0.024, 0.003, 0.065) beamed, the
+client dv (-1.07e-2, -8e-4, -6.0e-3), dw (+9.5e-3, -4.1e-3, -3.1e-3),
+decaying; no earlier retail run beams a ball off a rolling contact on a
+trafo plate, so signature 2 is shown independent of FANX's change by the
+bit-identity above, not reproduced on 9e122e2b. (`OWG_retail` /
+`SPGH_retail`, cited in the first draft of this note, show a constant
+dv_y offset from the first tick - a different pattern.) **Cause, by
+design:** the retail host has no own body control (`core_host.cpp` ~1288,
+`caps.own_body_control = false`, design §2.3), so the core applies a beam's
+stamp as an in-place `write_beam` (`client_core_lifecycle.cpp` ~2155-2158,
+~1891-1901: pose, zero velocity, wake) on the existing body, while the
+server rebuilds a fresh body from the Unphysicalize + Physicalize pair. The
+core design §2.3 (the `own_body_control` row) already says it: "The
+in-place body keeps its floor contact, which the server's fresh body
+lacks"; the contact the moved core keeps with the trafo plate acts for a
+few PSIs after the write. Queued where it already was: roadmap §4 item 9
+(R6, retail own-body control, which removes the retail beam's own residual);
+the host-platform audit (AUD) lists it.
+
+**Deferred**: "BMMO_NoBall imported by name" is shown by the code path only
+(`script_replay.hpp` `find_by_name` with the parent class): no import held
+it at its anchor (1052 / 1181) and SimTool's `--resync-check` refuses the
+union's bit; and the SetPhysicsForce Shutdown with the bodiless target (not
+observable with the existing verbs). The Arch server was rebuilt without
+the slot-13 hack after the retail session.

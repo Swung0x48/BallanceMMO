@@ -388,18 +388,22 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     }
     if (verb == "objects") {
         auto* context = m_bml->GetCKContext();
-        const int count = context->GetObjectsCountByClassID(CKCID_3DENTITY);
-        CK_ID* ids = context->GetObjectsListByClassID(CKCID_3DENTITY);
         std::string out;
         int listed = 0;
-        for (int i = 0; i < count && listed < 500; ++i) {
-            auto* object = context->GetObject(ids[i]);
-            if (!object || !object->GetName()) continue;
-            if (!rest.empty()
-                    && std::string_view(object->GetName()).find(rest) == std::string_view::npos)
-                continue;
-            if (listed++) out += "; ";
-            out += object->GetName();
+        // GetObjectsListByClassID lists one class exactly: the CK3dObjects too
+        // (the balls, BMMO_NoBall since step FANX), after the plain entities.
+        for (CK_CLASSID cid: {CKCID_3DENTITY, CKCID_3DOBJECT}) {
+            const int count = context->GetObjectsCountByClassID(cid);
+            CK_ID* ids = context->GetObjectsListByClassID(cid);
+            for (int i = 0; i < count && listed < 500; ++i) {
+                auto* object = context->GetObject(ids[i]);
+                if (!object || !object->GetName()) continue;
+                if (!rest.empty()
+                        && std::string_view(object->GetName()).find(rest) == std::string_view::npos)
+                    continue;
+                if (listed++) out += "; ";
+                out += object->GetName();
+            }
         }
         return "ok " + std::to_string(listed) + ": " + out;
     }

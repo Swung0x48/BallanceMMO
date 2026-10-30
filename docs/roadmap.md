@@ -2410,6 +2410,12 @@ numbers 1-10 are unchanged.
    `r0_keys.bmrc` is 8.6 mm / 0.879 m/s off the server, over the ball's
    0.5 m/s tolerance, so with snapshots off the beam stamp's full snapshot
    corrects it (9.7 mm / 0.319 m/s with r2's keys, under it, since R3).
+   Measured again at FULL step FANX (world-agreement-gaps-design.md "As
+   built (step FANX)"): a ball beamed off a rolling contact on the paper
+   trafo plate leaves the server's at the stamp (dv 2e-3, dw 3.4e-3) and
+   gains an extra upward 0.03 m/s in the six ticks after (the contact the
+   in-place body keeps), 1.7 cm off by 620 in the fan column; the stamp
+   impulse is in the pre-FANX `rtx_3` too.
 
 **Stage D - the original levels.**
 

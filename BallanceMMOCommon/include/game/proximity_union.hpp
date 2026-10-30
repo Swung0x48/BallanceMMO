@@ -1227,7 +1227,11 @@ namespace bmmo::game {
         }
 
         std::string make_no_ball(CKContext* context) {
-            auto* entity = CK3dEntity::Cast(context->CreateObject(CKCID_3DENTITY, const_cast<CKSTRING>("BMMO_NoBall")));
+            // A CK3dObject (step FANX, the user's option (a) of FANP): the class
+            // a Get Cell's 3D Object output takes, so a body-kind read of a cell
+            // holding BMMO_NoBall carries it instead of staying id 0 (H5's dead
+            // fan slot), and a 3D Object reference to it resolves by name.
+            auto* entity = CK3dEntity::Cast(context->CreateObject(CKCID_3DOBJECT, const_cast<CKSTRING>("BMMO_NoBall")));
             if (!entity) return "CreateObject failed for BMMO_NoBall";
             const VxVector far_below(0.0f, -100000.0f, 0.0f);
             entity->SetPosition(&far_below);
