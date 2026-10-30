@@ -32,6 +32,7 @@
 #include "../message/message_utils.hpp"
 #include "../message/session_snapshot_msg.hpp"
 #include "../physics/physics_rt_api.h"
+#include "../physics/outside_controllers.hpp"
 
 namespace bmmo::session {
     // What the engine did about an authoritative snapshot, for the session
@@ -159,6 +160,12 @@ namespace bmmo::session {
     struct life_outcome {
         uint32_t revived_until = 0;
         uint32_t remade_at = 0;
+    };
+
+    // What rollback_world::diff_savestate answers (FULL step DX3).
+    struct savestate_replay_difference {
+        std::string where;   // the difference, the named one set aside ("" = none)
+        std::string named;   // design 9.3 (b)'s named difference ("" = none)
     };
 
     struct rollback_world {
@@ -353,8 +360,18 @@ namespace bmmo::session {
         // blobs differ (bmmo::physics::diff_savestate).  With it installed,
         // a replay whose last re-simulated tick does not reproduce the live
         // record's blob byte for byte is logged with that field - the
-        // in-session form of the SimTool's replay identity.
-        std::function<std::string(const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed)> diff_savestate;
+        // in-session form of the SimTool's replay identity.  FULL step DX3
+        // (rollback-engine-gaps design 9.3 (b)): `named` is the one
+        // difference 9.3 names, set aside from `where`
+        // (physics/outside_controllers.hpp; bmmo::physics::
+        // diff_savestate_named): counted and logged as itself, not as a
+        // mismatch.  An empty `where` and `named`: no difference.  The check
+        // runs as before, on every rewind until 8 mismatches are logged (a
+        // blob diff reads both blobs whole: milliseconds per rewind, kept off
+        // the rest of the session); a replay that differs only by the named
+        // difference does not use up those 8.
+        std::function<savestate_replay_difference(const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed)>
+            diff_savestate;
         // Optional, as a pair: a body born inside the window is re-created
         // inside the replay the way the live frame created it, instead of
         // being parked at its birth pose and re-posed after its birth tick.
@@ -774,6 +791,12 @@ namespace bmmo::session {
         uint64_t script_restore_failures = 0;
         uint64_t script_mismatches = 0;        // logical: flags, IOs, controllers, counters
         uint64_t savestate_replay_mismatches = 0;   // the last replayed tick's blob != the live record's (diagnostic; counted while logged, the first 8)
+        // FULL step DX3: replays whose last tick differs from the live record
+        // only by the named outside zero-force controller on the own core
+        // (design 9.3 (b)); every one the check compares is counted (it
+        // compares until 8 mismatches are logged; these do not count
+        // towards the 8), not mismatches.
+        uint64_t savestate_replay_outside_controllers = 0;
         uint64_t unknown_rechecks_deferred = 0;     // untracked window-born bodies rechecked into the tree at their birth tick, not at the restore
         uint64_t births_inserted = 0;               // window-born bodies put where their Physicalize made them before their birth tick's step
         uint64_t births_inserted_exact = 0;         // ...and found at exactly their birth record after that step
@@ -2415,12 +2438,21 @@ namespace bmmo::session {
                         // An empty answer from the hook means the bytes differ
                         // only in what it was told to ignore (the order
                         // bookkeeping): not a mismatch.
-                        const std::string where = world.diff_savestate(live_savestate, state.savestate);
-                        if (!where.empty()) {
+                        const savestate_replay_difference d = world.diff_savestate(live_savestate, state.savestate);
+                        if (!d.where.empty()) {
                             ++stats_.savestate_replay_mismatches;
                             ++savestate_replay_logs_;
                             world.log("savestate replay: the world re-simulated to tick " + std::to_string(t)
-                                      + " differs from the live record: " + where);
+                                      + " differs from the live record: " + d.where
+                                      + (d.named.empty() ? std::string() : " (and the named difference: " + d.named + ")"));
+                        } else if (!d.named.empty()) {
+                            // Design 9.3 (b): the one difference named, not a
+                            // mismatch; its own log cap.
+                            ++stats_.savestate_replay_outside_controllers;
+                            if (savestate_named_logs_++ < 8)
+                                world.log("savestate replay: the world re-simulated to tick " + std::to_string(t)
+                                          + " differs from the live record only by the named difference ("
+                                          + std::string(bmmo::physics::outside_controllers::kind_name) + "): " + d.named);
                         }
                     }
                 }
@@ -3345,6 +3377,7 @@ namespace bmmo::session {
         uint32_t too_far_logs_ = 0;
         uint32_t script_log_cap_ = 8;   // set_script_log_cap: a diagnostic run raises it to name every differing script
         uint32_t savestate_replay_logs_ = 0;
+        uint32_t savestate_named_logs_ = 0;   // step DX3: the named difference's lines, capped apart
         uint32_t recreate_logs_ = 0;
         uint32_t replay_mechanism_logs_ = 0;
         uint32_t unborn_logs_ = 0;   // step DX1: 'deferral:' lines (a body unborn in a record), capped

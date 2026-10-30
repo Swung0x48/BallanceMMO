@@ -125,6 +125,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(note_own_death)
         BMMO_CORE_STEP(keep_live_cells)
         BMMO_CORE_STEP(join_rank)
+        BMMO_CORE_STEP(check_outside_forces)
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -2584,6 +2585,49 @@ namespace {
     size_t count_prefix(const std::vector<std::string>& calls, const std::string& prefix) {
         return static_cast<size_t>(std::count_if(calls.begin(), calls.end(),
                                                  [&prefix](const std::string& c) { return c.rfind(prefix, 0) == 0; }));
+    }
+
+    // FULL step DX3 (rollback-engine-gaps design 9.3 (b)): the core checks
+    // the precondition of the named difference on the host's readings - an
+    // outside force controller with a non-zero force is a warning (counted,
+    // the first 8 logged at warn level); a zero force or no controller is
+    // not; a host without the operation is not checked.
+    TEST(SessionClientCore, AnOutsideForceControllerWithAForceIsAWarning) {
+        using bmmo::physics::outside_controllers::force_reading;
+        {
+            fake_platform fake;
+            session_client_core core(fake.make(), session_capabilities{});
+            steps{core}.check_outside_forces(5u);
+            EXPECT_EQ(state_of(core).outside_force_checks_, 0u) << "no outside_forces: nothing checked";
+        }
+        fake_platform fake;
+        session_platform platform = fake.make();
+        std::vector<force_reading> readings(3);
+        readings[0].block = 26414;
+        readings[0].exists = true;           // zeroed leaf: fine
+        readings[1].block = 26432;
+        readings[1].exists = true;
+        readings[1].force[0] = 0.065;        // the synthetic non-zero force
+        readings[2].block = 26447;
+        readings[2].force[2] = 1.0;          // no controller: fine
+        platform.outside_forces = [&readings](std::vector<force_reading>& out) { out = readings; };
+        session_client_core core(std::move(platform), session_capabilities{});
+        steps access{core};
+        const size_t from = fake.calls.size();
+        access.check_outside_forces(7u);
+        EXPECT_EQ(access.s().outside_force_checks_, 1u);
+        EXPECT_EQ(access.s().outside_force_warnings_, 1u);
+        const auto calls = since(fake.calls, from);
+        ASSERT_EQ(calls.size(), 1u);
+        EXPECT_EQ(calls[0].rfind("log:1:outside force: block 26432 holds a controller with force (0.065,0,0) at tick 7", 0), 0u)
+            << calls[0];
+        for (uint32_t t = 8; t < 20; ++t) access.check_outside_forces(t);
+        EXPECT_EQ(access.s().outside_force_warnings_, 13u) << "every one counted";
+        EXPECT_EQ(count_prefix(since(fake.calls, from), "log:1:outside force:"), 8u) << "the first 8 logged";
+        readings[1].force[0] = 0.0;
+        access.check_outside_forces(20u);
+        EXPECT_EQ(access.s().outside_force_warnings_, 13u);
+        EXPECT_NE(core.status_text({}).find(" outside: named=0 checked=14 nonzero_force=13"), std::string::npos);
     }
 
     // L-U3, H naming (one clone per life; the fake's mirror_entity mints a

@@ -314,6 +314,10 @@ namespace {
         // the body guard (engine change #6).
         bmmo::game::navigation_graph navigation;
         bool navigation_known = false;
+        // Step DX3 (rollback-engine-gaps design 9.3 (b)): Gameplay_Ingame's
+        // SetPhysicsForce blocks, read with the graph, for the core's check
+        // that their controllers push nothing.
+        std::vector<uint32_t> outside_force_blocks;
         bmmo::game::own_replica own_replica;
         // Step EL8 (gap L, L3): the navigations made for revived own lives
         // (the trafo's old ball), destroyed with the body at the replayed
@@ -716,6 +720,7 @@ namespace {
     void reset_session_state() {
         host.navigation = {};
         host.navigation_known = false;
+        host.outside_force_blocks.clear();   // step DX3: read again with the graph
         host.own_replica = {};
         host.revive_navigations.clear();
         host.own_group_set = false;
@@ -2363,6 +2368,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         if (!graph.valid() || graph.leaves.size() < 4) return false;
         host.navigation = graph;
         host.navigation_known = true;
+        host.outside_force_blocks.clear();
+        for (CK_ID id: bmmo::game::outside_force_blocks(m_bml->GetCKContext()))
+            host.outside_force_blocks.push_back(static_cast<uint32_t>(id));
         logger_->Info("Physics session: %zu navigation leaves at tick %u, keys %d/%d/%d/%d", graph.leaves.size(), tick,
                       graph.leaves[0].key, graph.leaves[1].key, graph.leaves[2].key, graph.leaves[3].key);
         return true;
@@ -2449,6 +2457,12 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         if (!physics_view_.navigation_input(host.own_replica.entity.c_str(), 0, basis[0], basis[1], basis[2], false, error))
             logger_->Warn("Physics session: own navigation rows: %s", error.c_str());
         core_host_zero_retail_forces();
+    };
+    // Step DX3 (design 9.3 (b)): the outside force producers' controllers,
+    // read through the plugin (force_block_get, API v14).
+    p.outside_forces = [this](std::vector<bmmo::physics::outside_controllers::force_reading>& out) {
+        bmmo::physics::outside_controllers::read_forces<bmmo::physics::physics_view, bmmo_physics_force_block>(
+                physics_view_, host.outside_force_blocks, out);
     };
     // Every movable body (step P): the core leaves the balls out by what they
     // are, not by the "Ball_" prefix the trafo explosion pieces share.

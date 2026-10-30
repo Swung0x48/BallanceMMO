@@ -133,4 +133,27 @@ namespace bmmo::game {
         for (size_t i = 0; i < out.leaves.size(); ++i) out.leaves[i].index = static_cast<int>(i);
         return out;
     }
+
+    // Every SetPhysicsForce block of Gameplay_Ingame, at any depth: the four
+    // keyed navigation leaves, the debug leaf (no Key Event, so not in the
+    // graph above) and any other - the outside force producers of
+    // rollback-engine-gaps design 1.1 (26354, 26392, 26414, 26432, 26447 in
+    // every level), whose controllers on the own core 9.3 (b) names and whose
+    // force the core checks (physics/outside_controllers.hpp, step DX3).  In
+    // block order (depth first).  Empty when the script is absent.
+    inline std::vector<CK_ID> outside_force_blocks(CKContext* context) {
+        std::vector<CK_ID> out;
+        CKBehavior* ingame = find_root_script(context, "Gameplay_Ingame");
+        if (!ingame) return out;
+        std::vector<CKBehavior*> stack{ingame};
+        while (!stack.empty()) {
+            CKBehavior* behavior = stack.back();
+            stack.pop_back();
+            if (behavior != ingame && behavior_prototype_name(behavior) == std::string("SetPhysicsForce"))
+                out.push_back(behavior->GetID());
+            for (int i = behavior->GetSubBehaviorCount(); i-- > 0;)
+                if (CKBehavior* sub = behavior->GetSubBehavior(i)) stack.push_back(sub);
+        }
+        return out;
+    }
 }

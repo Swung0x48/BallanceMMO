@@ -1888,6 +1888,11 @@ namespace {
                 if (!complete) return false;
                 navigation_ = graph;
                 navigation_known_ = true;
+                // Step DX3: the outside force producers, for the core's
+                // precondition check and the replay diff's named kind.
+                outside_force_blocks_.clear();
+                for (CK_ID id: bmmo::game::outside_force_blocks(engine_->context()))
+                    outside_force_blocks_.push_back(static_cast<uint32_t>(id));
                 logf("navigation keys known at tick %u (%zu leaves)", tick, graph.leaves.size());
                 install_physicalize_hook();
                 return true;
@@ -1925,6 +1930,12 @@ namespace {
                 zero_retail_forces();
             };
             p.movable_bodies = [this]() { return movable_body_names(); };
+            // Step DX3 (rollback-engine-gaps design 9.3 (b)): the outside
+            // force producers' controllers, for the core's precondition check.
+            p.outside_forces = [this](std::vector<bmmo::physics::outside_controllers::force_reading>& out) {
+                bmmo::physics::outside_controllers::read_forces<bmmo::physics::physics_direct, bmmo_physics_force_block>(
+                        bmmo::physics::physics_direct(engine_->physics()), outside_force_blocks_, out);
+            };
             p.note_script_resets = [this](uint32_t tick) {
                 for (CK_ID id: bmmo::game::script_replay::resets_pending(engine_->context(), scripts_)) {
                     script_reset_ticks_[id] = tick;
@@ -2283,6 +2294,7 @@ namespace {
             }
             // This client's fresh runtime state.
             navigation_known_ = false;
+            outside_force_blocks_.clear();   // step DX3: read again with the graph
             // Step M0: the own navigation replica of the previous session is
             // forgotten with it.  The level is loaded again (on a rebooted
             // engine when it was still running), so the record named a ball
@@ -4280,14 +4292,26 @@ namespace {
             // Diagnostic (headless only: the mod has no blob diff): a replay
             // that does not reproduce the live record's blob is logged with
             // the first three differing fields, the overlap tree aside.
-            world.diff_savestate = [](const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed) {
+            world.diff_savestate = [this](const std::vector<uint8_t>& live, const std::vector<uint8_t>& replayed) {
                 // The overlap tree's layout, the cache ring and the unit
                 // numbering are left out: a replay that destroys and re-makes a
                 // body orders them differently without any value differing (the
                 // 7:5 arm is exact with them shifted), and they would hide the
-                // physical field this check is for.
-                const std::string where = bmmo::physics::diff_savestate(live.data(), live.size(), replayed.data(), replayed.size(), true, 3, true);
-                return where.rfind("no difference", 0) == 0 ? std::string() : where;   // bookkeeping only: not a mismatch
+                // physical field this check is for.  Bookkeeping only: not a
+                // mismatch (an empty `where`).  Step DX3: an outside force
+                // controller missing from or carried onto an own core - the
+                // retail ball entities, which only this player's lives use (a
+                // mirror is "<ball>_BMMO_<player>") - is design 9.3 (b)'s
+                // named difference, set aside - only the controllers of
+                // Gameplay_Ingame's own SetPhysicsForce blocks (read with the
+                // navigation graph; none known: nothing is named), never a
+                // level block's force controller on the own ball.
+                std::vector<std::string> own;
+                for (const ball_row& row: ball_rows_) own.push_back(row.name);
+                const bmmo::physics::savestate_named_difference d = bmmo::physics::diff_savestate_named(
+                        live.data(), live.size(), replayed.data(), replayed.size(), own,
+                        bmmo::physics::outside_controllers::controller_names(outside_force_blocks_), true, 3, true);
+                return bmmo::session::savestate_replay_difference{d.where, d.named};
             };
             // The clock before a restore, for the report line above (--trace).
             if (args_.trace && world.set_savestate) {
@@ -4613,6 +4637,7 @@ namespace {
         int lane_tap_phase_ = 0;                             // --keep-lane-tap: frames into its N + M cycle
         bmmo::game::navigation_graph navigation_;
         bool navigation_known_ = false;
+        std::vector<uint32_t> outside_force_blocks_;         // step DX3: Gameplay_Ingame's SetPhysicsForce blocks
         std::vector<ball_row> ball_rows_;
         // The keys frame() set for the step (post_step's observe_input).
         const unsigned char* frame_keyboard_ = nullptr;

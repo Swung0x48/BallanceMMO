@@ -12,6 +12,7 @@
 #include "physics_savestate_internal.hpp"
 #include <physics/physics_state.hpp>
 #include <physics/callback_queue_plan.hpp>
+#include <physics/outside_controllers.hpp>
 
 #include "ivp_surface_manager.hxx"
 #include "ivp_surman_polygon.hxx"
@@ -1298,6 +1299,94 @@ namespace bmmo::physics {
             d = std::string(ignore_ov || ignore_order ? "no difference outside the ignored bookkeeping" : "bytes differ but every field renders the same")
               + " (sizes " + std::to_string(a_size) + " and " + std::to_string(b_size) + ")";
         return d;
+    }
+
+    savestate_named_difference diff_savestate_named(const uint8_t* a, size_t a_size, const uint8_t* b, size_t b_size,
+                                                    const std::vector<std::string>& own_cores,
+                                                    const std::vector<std::string>& outside_names, bool ignore_ov,
+                                                    int max_differences, bool ignore_order) {
+        savestate_named_difference out;
+        static const uint8_t empty = 0;
+        if (!a) a_size = 0;
+        if (!b) b_size = 0;
+        if (a_size == b_size && (a_size == 0 || std::memcmp(a, b, a_size) == 0)) return out;
+        savestate::world_record wa, wb;
+        std::string error;
+        savestate::reader ra(a ? a : &empty, a_size);
+        if (!savestate::read_world(ra, wa, error)) { out.where = "savestate a unreadable: " + error; return out; }
+        savestate::reader rb(b ? b : &empty, b_size);
+        if (!savestate::read_world(rb, wb, error)) { out.where = "savestate b unreadable: " + error; return out; }
+
+        const auto same = [](const savestate::controller_ref& x, const savestate::controller_ref& y) {
+            return x.kind == y.kind && x.system == y.system && x.part == y.part && x.priority == y.priority && x.name == y.name;
+        };
+        const auto list = [](const std::vector<std::string>& names) {
+            std::string text = "[";
+            for (size_t i = 0; i < names.size(); ++i) text += (i ? "," : "") + names[i];
+            return text + "]";
+        };
+        // Step 1: the own cores whose controller lists differ only by the
+        // outside blocks' force controllers (`outside_names`; any other
+        // "rt:force/" - a fan's, an explosion's - pushes for real and is
+        // never named).  Each is set to b's list in a's record, so the diff
+        // below sees what else differs.
+        std::vector<std::string> named_names;   // every force controller name found on one side only
+        std::map<std::string, size_t> b_index;
+        for (size_t i = 0; i < wb.objects.size(); ++i) b_index[wb.objects[i].name] = i;
+        for (savestate::object_record& o: wa.objects) {
+            bool own = false;
+            for (const std::string& name: own_cores) own = own || name == o.name;
+            if (!own) continue;
+            const auto it = b_index.find(o.name);
+            if (it == b_index.end()) continue;
+            const savestate::object_record& other = wb.objects[it->second];
+            std::vector<std::string> only_a, only_b;
+            if (!outside_controllers::force_only_delta(o.core.controllers, other.core.controllers, same, only_a, only_b,
+                                                       &outside_names))
+                continue;
+            out.named += std::string(out.named.empty() ? "" : "; ") + "core " + o.name + " a+" + list(only_a) + " b+" + list(only_b);
+            ++out.named_cores;
+            named_names.insert(named_names.end(), only_a.begin(), only_a.end());
+            named_names.insert(named_names.end(), only_b.begin(), only_b.end());
+            o.core.controllers = other.core.controllers;
+        }
+        // Step 2: a unit's controller_cores holds the same controllers; a
+        // unit (by index - the numbering is the order bookkeeping) whose list
+        // differs only by those names is set to b's too.
+        if (out.named_cores)
+            for (size_t k = 0; k < wa.units.size() && k < wb.units.size(); ++k) {
+                std::vector<std::string> only_a, only_b;
+                if (outside_controllers::force_only_delta(wa.units[k].controllers, wb.units[k].controllers, same, only_a, only_b,
+                                                          &named_names))
+                    wa.units[k].controllers = wb.units[k].controllers;
+            }
+        out.where = savestate::diff_world(wa, wb, ignore_ov, max_differences, ignore_order);
+        if (!out.where.empty()) return out;
+        // Nothing rendered differs (outside the ignored bookkeeping).  Do the
+        // bytes?  Without the named difference they do (the memcmp above);
+        // with it, a's record re-written with the named lists set aside is
+        // compared with b's re-written: what still differs there was not
+        // rendered or was ignored, and is not the named difference.  The
+        // environment identity is left out, as diff_world leaves it out: a
+        // guard for the restore, never the same in two processes' blobs (a
+        // control's and an arm's dumps).
+        bool rest = !out.named_cores;
+        if (!rest) {
+            wa.environment_id = wb.environment_id;
+            savestate::writer wra(a_size), wrb(b_size);
+            savestate::write_world(wra, wa);
+            wra.finish();
+            savestate::write_world(wrb, wb);
+            wrb.finish();
+            rest = wra.bytes != wrb.bytes;
+        }
+        if (!rest) return out;
+        const std::string sizes = " (sizes " + std::to_string(a_size) + " and " + std::to_string(b_size) + ")";
+        if (ignore_ov || ignore_order)
+            out.residual = "no difference outside the ignored bookkeeping" + sizes;
+        else
+            out.where = "bytes differ but every field renders the same" + sizes;
+        return out;
     }
 
     uint64_t hash_savestate(const uint8_t* data, size_t size) {

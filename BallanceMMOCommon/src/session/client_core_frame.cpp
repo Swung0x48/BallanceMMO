@@ -892,6 +892,7 @@ namespace bmmo::session {
                 s.union_records_.erase(std::prev(s.union_records_.end()));
             s.union_records_[tick] = s.sectors_.state();
             record_own_matrices(tick);   // step EL8 (design 9.7 (a))
+            check_outside_forces(tick);  // step DX3 (design 9.3 (b))
             {
                 const uint32_t keep = static_cast<uint32_t>(s.rollback_.thresholds().history_ticks);
                 while (!s.union_records_.empty()
@@ -1000,6 +1001,32 @@ namespace bmmo::session {
             if (platform_.hooks.after_journal) platform_.hooks.after_journal(tick);
         }
         return true;
+    }
+
+    // Step DX3 (rollback-engine-gaps design 9.3, option (b)): the identity
+    // tools name an outside force controller missing from, or carried onto,
+    // the own core after a replay instead of failing on it, because such a
+    // controller pushes nothing - the retail navigation leaves are zeroed and
+    // the input reaches the ball through the bridge's own "bmmo:force/<leaf>".
+    // The blob records no force, so the precondition is checked here, on the
+    // live world after every recorded tick: a Gameplay_Ingame SetPhysicsForce
+    // block holding a controller built with a non-zero force is a warning
+    // (counted, the first 8 logged) - from then on (b)'s premise is false and
+    // the named difference may hide a real one.
+    void session_client_core::check_outside_forces(uint32_t tick) {
+        if (!platform_.outside_forces) return;
+        std::vector<bmmo::physics::outside_controllers::force_reading> readings;
+        platform_.outside_forces(readings);
+        ++s.outside_force_checks_;
+        for (const auto& r: readings) {
+            if (!bmmo::physics::outside_controllers::carries_force(r)) continue;
+            if (s.outside_force_warnings_++ < 8)
+                platform_.log(log_level::warn,
+                              textf("outside force: block %u holds a controller with force (%.6g,%.6g,%.6g) at tick %u - "
+                                    "design 9.3 (b) assumes zero (the named difference '%s' may hide a real one)",
+                                    r.block, r.force[0], r.force[1], r.force[2], tick,
+                                    bmmo::physics::outside_controllers::kind_name));
+        }
     }
 
     // One step of a legacy blend in flight (the ladder's frame half): the

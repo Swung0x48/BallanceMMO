@@ -38,6 +38,7 @@
 #include "trafo_input.hpp"
 #include "../entity/session.hpp"
 #include "../physics/physics_rt_api.h"
+#include "../physics/outside_controllers.hpp"
 #include "../physics/world_hash.hpp"
 
 #include <chrono>
@@ -514,6 +515,15 @@ namespace bmmo::session {
         // frame's camera reference), and the retail forces zeroed (E9; step
         // 21).  Nothing without an own replica.
         std::function<void(const float (*basis)[3])> own_camera_rows;
+        // Optional (FULL step DX3, rollback-engine-gaps design 9.3 (b)): the
+        // outside force producers as they stand now - every SetPhysicsForce
+        // block of Gameplay_Ingame (game/navigation_graph.hpp
+        // outside_force_blocks), whether it holds an IVP controller and the
+        // force that controller was built with (the bridge's force_block_get).
+        // Their controllers act on the current ball, the own core; the core
+        // warns when one exists with a non-zero force, the precondition of
+        // (b).  A host without it is not checked.
+        std::function<void(std::vector<bmmo::physics::outside_controllers::force_reading>& out)> outside_forces;
         // Every movable body this world has, in the engine's table order (E9;
         // step 23).  The core tracks all of them as mechanisms but the balls,
         // which it knows by what they are (session_client_core::is_ball: the

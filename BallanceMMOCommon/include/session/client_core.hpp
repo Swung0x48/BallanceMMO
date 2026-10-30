@@ -291,6 +291,11 @@ namespace bmmo::session {
         // (poll_own_sector: the checkpoint chain's race, or any writer like it).
         std::pair<uint32_t, int> recent_passes_[2] = {};
         uint64_t phase_misses_ = 0;
+        // Step DX3 (rollback-engine-gaps design 9.3 (b)): the ticks the
+        // outside force producers were read, and the readings of a controller
+        // with a non-zero force (the precondition of (b) broken: a warning
+        // each, the first 8 logged).
+        uint64_t outside_force_checks_ = 0, outside_force_warnings_ = 0;
         // Step B1 (resync design 2.5, 2.7, 2.8): the union as rollback state.
         // The stamp log: one entry per (player, sector), the tick the server
         // applies it at (a MOVED own echo rewrites it) and its arrival order;
@@ -1942,6 +1947,9 @@ namespace bmmo::session {
         // replayed tick, and the queued own changes of a replayed tick.
         void note_own_death(const std::string& entity, uint32_t tick, uint32_t generation);
         void record_own_matrices(uint32_t tick);
+        // Step DX3: design 9.3 (b)'s precondition, every recorded tick (the
+        // host's outside_forces; nothing without it).
+        void check_outside_forces(uint32_t tick);
         void write_own_matrices(uint32_t tick);
         void apply_own_due(uint32_t tick);
         void retire_own_deaths();

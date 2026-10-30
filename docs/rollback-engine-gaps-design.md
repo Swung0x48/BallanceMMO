@@ -1455,6 +1455,10 @@ shows only the controller-list difference.**
   tools learn to name this one difference instead of failing on it.
 - *Settle:* L-S3's result. If any body state differs, (a) is required
   without asking.
+- *Decided (the user, 2026-10-29):* (b), with the difference recorded -
+  L-S3 ("As built (step S3)") found only the controller list differing.
+  Built at FULL step DX3 ("As built (step DX3)"): the named kind, its
+  counters and log lines, and the run-time check of its precondition.
 
 **9.4 RC births at their stamps before R3.**
 
@@ -3550,3 +3554,195 @@ prototype on fccf4f7d); the user chose (a) on 2026-10-29 ("SP7-c: a").
   P_Dome_MF, record of 63, born at 66). Wire check rH2s -> rDX1 over
   `core_ref_s12`: ALL SAME, 36 sends SAME, 36 journals IDENTICAL (no
   capture reaches the path: no `deferral:` line in any of the 36 replays).
+
+## As built (step DX3, FULL close-out, 2026-10-29): 9.3 option (b), the outside-controller difference named and recorded
+
+FULL plan step DX3 (`.local-tools/work/FULL/plan.md` §2). The user decided
+9.3 on 2026-10-29: "先选b，但是记录下这个差异" - option (b), and the
+difference stays recorded. No protocol, record, journal, blob or IVP change;
+no new bridge API (the force is read with v14's `force_block_get`).
+
+- **The named kind.** "outside zero-force controller on the own core"
+  (`physics/outside_controllers.hpp`, header-only, no IVP or CK). Exactly:
+  the two blobs differ, among the cores whose name the caller lists as own,
+  in a core's controller list such that the controllers present on one side
+  only (by name, counted) are all kind 1 with an `rt:force/<id>` name
+  (engine change #18: a physics_RT `PhysicsControllerForce`) whose `<id>` is
+  one of Gameplay_Ingame's own SetPhysicsForce blocks (the caller's
+  `outside_names`, `outside_controllers::controller_names`: the headless
+  client's from the script, read with the navigation graph - none before
+  `discover_navigation` ran, so a named difference before then is a
+  mismatch, the safe direction; SimTool's from `--outside-blocks
+  ID[,ID...]`, default the design's five, 26354, 26392, 26414, 26432,
+  26447). Any other block's `rt:force/` on the own core - P_Modul_18's fan
+  46475, an explosion's force - pushes for real, the run-time check below
+  does not read it, and it is never named (review fix-up). With those
+  taken out the two lists are identical in order and every field
+  (`force_only_delta`); a simulation unit's `controller_cores` list that
+  differs only by those same names goes with it. Anything else - another
+  field, another core's list, the bridge's own `bmmo:force/<leaf>`, a
+  friction handle, a reorder, a priority - is not the kind and stays a
+  difference. `bmmo::physics::diff_savestate_named` (physics_savestate.hpp)
+  sets each such core's (and unit's) list to the other side's and runs the
+  ordinary `diff_world` on the rest: `where` is what is left, `named` the
+  cores and names ("core Ball_Stone a+[rt:force/26414] b+[rt:force/26432]").
+  The plain `diff_savestate` is unchanged (every other caller).
+- **The own cores.** The headless client passes its retail ball entities
+  (`ball_rows_`: Ball_Wood, Ball_Stone, Ball_Paper); only this player's lives
+  use them, a mirror is `<ball>_BMMO_<player>`, so a revived or remade own
+  life of any ball type is covered. SimTool takes them with `--own-core
+  NAME[,NAME...]` (adaptation: the design names no switch; a blob does not
+  say which core is the own one).
+- **Where it applies.**
+  - The replay's in-session check (`rollback.hpp`, "savestate replay: the
+    world re-simulated to tick T differs from the live record"): the
+    `diff_savestate` hook now returns `savestate_replay_difference {where,
+    named}`. Only the named kind: counted in
+    `stats().savestate_replay_outside_controllers`, logged as "... differs
+    from the live record only by the named difference (outside zero-force
+    controller on the own core): <named>" (its own cap of 8 lines), not a
+    mismatch. Named plus anything else: a mismatch as before, its line ending
+    "(and the named difference: <named>)". Every occurrence the check
+    compares is counted: it compares, as before, every rewind until 8
+    mismatches are logged, and a named-only replay does not use up those 8
+    (adaptation: "every occurrence" is every compared replay). Not past the
+    cap: a blob diff reads both blobs whole, and on h1_150 c3's blobs
+    (82-89 KB) SimTool measures about 7 ms for one named diff and 15.5 ms for
+    an unnamed one (30 runs each, minus an identical pair's run; an offline
+    upper bound with the field flattening) - kept past the cap (the gate
+    round's rDX3b did) that is milliseconds on most rewinds of a session,
+    which the review flagged as new per-rewind CPU on the batch host and
+    the FULL CPU parity would show; the cap keeps rDX2's cost profile. A
+    difference only in the ignored bookkeeping besides the named one stays
+    named-only in-session (bookkeeping was never a mismatch there). The
+    check compares the replay's LAST tick only, so a named
+    difference confined to the window's interior (case 1 below: the revived
+    life ends before the replay does) is not seen in-session; SimTool's
+    blob diff is the tool for those. The core's status line gains
+    " outside: named=N checked=C nonzero_force=W" only when N or W is
+    non-zero (every other status line is the text it was). Headless only, as
+    before (the mod has no blob diff).
+  - SimTool `--savestate-diff A B --own-core ... [--outside-blocks ...]`:
+    prints "named: ..." when the kind is there; rc 0 with "identical but for
+    the named difference" only when nothing else differs - a's record
+    re-written with the named lists set aside is byte-identical to b's
+    re-written, the environment identity aside (a restore guard no field
+    diff renders, never equal in two processes' dumps); rc 3 with "differ:
+    ..." otherwise, also when what is left is only in what `--ignore-ov` /
+    `--ignore-order` leave out ("no difference outside the ignored
+    bookkeeping", `savestate_named_difference::residual`) or renders the same
+    in every field ("bytes differ but every field renders the same") - one
+    rule with or without the named difference, as the plain path (review
+    fix-ups). Blind spot: a byte difference that neither the field rendering
+    nor `write_world` carries is invisible only when the named difference is
+    there. Without `--own-core` the behaviour is unchanged.
+  - `savestate_check.py` / SimTool `--savestate-check`: not changed. Its
+    scenes have no own core driven by Gameplay_Ingame (S3: SimTool cannot
+    run the core's own revive) and no outside force controller is made in
+    them, so the kind cannot arise there; its FAIL parsing needs nothing.
+  - The `ls3_*` tools of step S3 compare journal rows (body states), not
+    blobs: unaffected.
+- **The precondition, checked at run time.** The blob records a
+  controller's name and priority, not its force, so (b)'s premise - the
+  outside controllers push nothing - is checked live, not from a blob
+  (adaptation of the plan's "a non-zero force still fails" for the tools):
+  the new optional platform operation `outside_forces` reads every
+  SetPhysicsForce block of Gameplay_Ingame (`game/navigation_graph.hpp`
+  `outside_force_blocks`, depth first: the four keyed leaves, the debug leaf
+  `zero_retail_forces` does not zero, and any other - 26354, 26392, 26414,
+  26432, 26447 in REF12's levels) through the backend's `force_block_get`
+  (`outside_controllers::read_forces`, one template for `physics_direct` and
+  the mod's `physics_view`). Both hosts read the block list with the
+  navigation graph (headless `discover_navigation`; retail the same, kept in
+  `core_host.cpp`'s file-scope `host`, no `BallanceMMOClient` member) and
+  forget it where they forget the graph (a new session). The
+  core's `check_outside_forces` runs after every recorded tick: a block
+  holding a controller built with a force that is not exactly zero
+  (`carries_force`) is a warning - counted (`outside_force_warnings_`) and
+  logged at warn level, the first 8 ("outside force: block B holds a
+  controller with force (x,y,z) at tick T - design 9.3 (b) assumes zero
+  ..."). A warning means the named difference may hide a real one from then
+  on; it changes no decision of the session.
+- **Results (rDX3 = this tree's x64 build; scratch `.local-tools/work/DX3`).**
+  L-S3's cases re-run on REF12 captures with savestate dumps
+  (`ls3_dumps.sh`, `BMMO_DUMP_FINAL_LAG=70`) and compared with `ls3_diffs.sh`:
+  - *case 2* (`solo1` c0, `--force-rollback-at 665:20`): the arm's final
+    records of 646, 648, 651 vs the control's: without `--own-core` "core
+    Ball_Stone controllers ... | unit #1 controllers ..." (rc 3); with it
+    "named: ... core Ball_Stone a+[rt:force/26414] b+[rt:force/26432]",
+    "identical but for the named difference", rc 0. 652: "bytes differ but
+    every field renders the same" (the environment identity), rc 3 both
+    ways - no controller difference left. `--own-core Ball_Wood` (the wrong
+    core): rc 3.
+  - *K4* (`h1_150` c3, `270:42`, the remade own birth): control vs arm at
+    280, 300 (live) and final 260, 265: named (Ball_Stone a+[rt:force/26432]
+    b+[]), identical otherwise, rc 0. At 271, the first live tick after the
+    rewind, the named kind AND a hull-entry difference on A_Floor_001 (the
+    balls' mindist entries; the in-session check logs the same line at 270
+    on the previous build rDX2 too): rc 3, not hidden.
+  - *case 1 natural* (`h1_150` c3, the death at 1059): the live record of
+    1040 / 1050 vs its final record: named (Ball_Wood a+[rt:force/26432]
+    b+[]) plus differences that all belong to a remote's mirror
+    (Ball_Wood_BMMO_2686360689, present in the live record, born at 1037 in
+    the corrected one - a live prediction, as S3 found for the mirrors' rows),
+    its spawn ghost (`ghost P#2 present 1 0`) and the collision renumbering it
+    causes: rc 3. Method: the object lists of both blobs (`--savestate-describe`,
+    one object more in the live one: that mirror) and the whole listing
+    (`--max-diff 400 --ignore-ov --ignore-order`, 45 lines up to "records no
+    longer line up": world counts, the ghost, the trafo pieces' and the floors'
+    collision indices, `lists Ball_Wood exact [#32...] [#26...]` - an index,
+    not a value). The own core's only value difference is the named one; a
+    networked live-vs-final blob pair cannot be identical (S3's body-row
+    evidence stands). Not seen in-session (the replays end at 1058 / 1059,
+    past the controller's span 863..1057).
+  - Negative control: two ticks of one run (1050 vs 1051) differ in the
+    clock and the hulls and are never named.
+  - In the wire check's 36 REF12 replays: the named kind occurred 24 times
+    within the 8 logged mismatches, always with other differences (the start
+    pile's object counts on clients 0-2), so it annotated 24 mismatch lines;
+    even with the check running past the cap (the gate round's rDX3b, since
+    put back under the cap) no replay ended on a named-only difference (0
+    lines, no " outside:" status section); the mismatch lines are 275 on
+    rDX2, rDX3 and rDX3b. So the in-session
+    named-only branch is covered by the unit tests only; the capture
+    evidence is SimTool's above. The precondition held: no "outside force:"
+    warning in any of the 36 sessions or the 5 L-S3 replays.
+- **Checks.** x64 BUILD-OK (DEPS-OK; `client_core_resync.cpp.obj` #deps 43
+  VALID), `BallanceMMOMessageTests` 668/668 (new:
+  `RollbackEngine.TheNamedOutsideControllerDifferenceIsNotAMismatch`,
+  `RollbackEngine.TheNamedDifferenceIsCountedPastTheMismatchCap` (replaced
+  at the review, below),
+  `OutsideControllers.OnlyAForceControllerPresentOnOneSideIsNamed`,
+  `OutsideControllers.ANonZeroForceControllerIsFlagged` - the synthetic
+  non-zero-force controller - and
+  `SessionClientCore.AnOutsideForceControllerWithAForceIsAWarning`); GCC
+  `linux_test_syntax.sh` 31/31 ok, `linux_sim_syntax.sh` 6/6 ok (with
+  `physics_savestate_common.cpp`, `session_client.cpp`, `sim_tool.cpp`); x86
+  CLIENT-BUILD-OK (DEPS-OK); wire checks over `core_ref_s12`: rDX2 -> rDX3
+  and rDX3 -> rDX3b (the past-the-cap mode, since removed) both ALL SAME, 36
+  sends SAME, 36 journals IDENTICAL. The h1_150 c3 replays' frame time
+  (offline, beside a concurrent wire check): p50 3.0-3.1 ms and p99 31-35 ms
+  on rDX3 and rDX3b alike.
+- **Review fix-ups (gate round; rDX3c, then rDX3d, then the final tree).**
+  (1) Only the outside blocks' controllers are named (above); new test
+  `OutsideControllers.OnlyTheOutsideBlocksControllersAreNamed` (46475 on an
+  own core, alone or beside 26432, is a difference; an empty list names
+  nothing). (2) The in-session check is back under its 8-mismatch cap (the
+  cost above; `RollbackEngine.TheNamedDifferenceDoesNotUseUpTheMismatchCap`
+  replaces the past-the-cap test: 2 named-only rewinds, then 8 mismatches,
+  the 11th rewind not compared); the hook has no `named_only` mode any
+  more. (3) SimTool's rc rule and the residual (above). (4) A comment put
+  back above `apply_blend`. Checks: x64 BUILD-OK and x86 CLIENT-BUILD-OK
+  (DEPS-OK) after each fix-up, `BallanceMMOMessageTests` 669/669, GCC
+  `linux_test_syntax.sh` 31/31 and `linux_sim_syntax.sh` 6/6 ok; wire check
+  rDX3b -> rDX3c over `core_ref_s12` ALL SAME (36 sends SAME, 36 journals
+  IDENTICAL) - the later fix-ups change only the diagnostic's log lines and
+  counters and SimTool, never a send or a journal, so it was not re-run;
+  L-S3 on rDX3d: `ls3_diffs.sh` output identical to rDX3b's (case 2 and K4
+  named, rc 0; K4 271 and case 1 rc 3 as above), and with
+  `--outside-blocks` leaving out the block the controller came from (26414
+  for case 2, 46475 alone for K4) rc 3 with the controller lists named as a
+  difference.
+- **Not run (deferred to the retail batches):** a retail session exercising
+  `outside_forces` through the plugin (retail code changed by one platform
+  operation that reads; compile only here).

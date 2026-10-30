@@ -63,6 +63,7 @@
 #include <game/script_replay.hpp>
 #include <game/session_host_support.hpp>
 #include <physics/physics_savestate.hpp>
+#include <physics/outside_controllers.hpp>
 #include <physics/physics_state.hpp>
 #include <session/journal.hpp>
 #include <session/lifecycle.hpp>
@@ -357,6 +358,16 @@ namespace {
         bool ignore_ov = false;           // --ignore-ov: --savestate-diff leaves the overlap tree out
         bool ignore_order = false;        // --ignore-order: ...and the cache ring and unit numbering
         int max_diff = 1;                 // --max-diff N: --savestate-diff lists up to N differing fields
+        // --own-core NAME[,NAME...] (step DX3, rollback-engine-gaps design 9.3
+        // (b)): --savestate-diff names an outside force controller missing
+        // from or carried onto one of these cores (the headless client's
+        // own ball entities) instead of failing on it.
+        std::vector<std::string> own_cores;
+        // --outside-blocks ID[,ID...] (step DX3): the SetPhysicsForce blocks
+        // whose "rt:force/<id>" controllers the named difference may cover;
+        // default Gameplay_Ingame's five (design §1.1: the same ids in every
+        // level).  Any other block's force controller is never named.
+        std::vector<std::string> outside_blocks;
         int savestate_rounds = 50;
         int savestate_max_depth = 48;
         unsigned long long savestate_seed = 1;
@@ -1084,7 +1095,11 @@ namespace {
             else if (arg == "--late-out") { if (!(v = next())) return false; out.late_out = v; }
             else if (arg == "--ignore-ov") out.ignore_ov = true;
             else if (arg == "--ignore-order") out.ignore_order = true;
-            else if (arg == "--max-diff") { if (!(v = next())) return false; out.max_diff = std::atoi(v); }
+            else if (arg == "--max-diff" || arg == "--own-core" || arg == "--outside-blocks") {   // step DX3 (one branch: C1061)
+                if (!(v = next())) return false;
+                if (arg == "--max-diff") out.max_diff = std::atoi(v);
+                else (arg == "--own-core" ? out.own_cores : out.outside_blocks).push_back(v);   // comma lists, split by run_savestate_files
+            }
             else if (arg == "--rounds") { if (!(v = next())) return false; out.savestate_rounds = std::atoi(v); }
             else if (arg == "--max-depth") { if (!(v = next())) return false; out.savestate_max_depth = std::atoi(v); }
             else if (arg == "--seed") { if (!(v = next())) return false; out.savestate_seed = std::strtoull(v, nullptr, 0); }
@@ -3383,6 +3398,43 @@ namespace {
                 std::fprintf(stderr, "%s: %s\n", args.savestate_diff[k].c_str(), error.c_str());
                 return 1;
             }
+        }
+        if (!args.own_cores.empty()) {
+            // Step DX3 (design 9.3 (b)): the named difference set aside.
+            // rc 0 only when nothing but the named difference differs (the
+            // ignored bookkeeping included, as the plain path's rc 3 for it).
+            const auto split = [](const std::vector<std::string>& given_lists) {
+                std::vector<std::string> items;
+                for (const std::string& given: given_lists)
+                    for (size_t at = 0; at <= given.size();) {
+                        const size_t comma = std::min(given.find(',', at), given.size());
+                        if (comma > at) items.push_back(given.substr(at, comma - at));
+                        at = comma + 1;
+                    }
+                return items;
+            };
+            const std::vector<std::string> own = split(args.own_cores);
+            std::vector<uint32_t> blocks;
+            for (const std::string& id: split(args.outside_blocks))
+                blocks.push_back(static_cast<uint32_t>(std::strtoul(id.c_str(), nullptr, 10)));
+            if (args.outside_blocks.empty()) blocks = bmmo::physics::outside_controllers::default_outside_force_blocks();
+            const bmmo::physics::savestate_named_difference d = bmmo::physics::diff_savestate_named(
+                    blobs[0].data(), blobs[0].size(), blobs[1].data(), blobs[1].size(), own,
+                    bmmo::physics::outside_controllers::controller_names(blocks), args.ignore_ov, args.max_diff,
+                    args.ignore_order);
+            if (!d.named.empty())
+                std::printf("named: %s (%d core(s)): %s\n", bmmo::physics::outside_controllers::kind_name, d.named_cores,
+                            d.named.c_str());
+            if (!d.where.empty() || !d.residual.empty()) {
+                std::printf("differ: %s\n", (d.where.empty() ? d.residual : d.where).c_str());
+                return 3;
+            }
+            if (!d.named.empty()) {
+                std::printf("identical but for the named difference (%zu and %zu bytes)\n", blobs[0].size(), blobs[1].size());
+                return 0;
+            }
+            std::printf("identical (%zu bytes)\n", blobs[0].size());
+            return 0;
         }
         const std::string difference = bmmo::physics::diff_savestate(blobs[0].data(), blobs[0].size(), blobs[1].data(),
                                                                      blobs[1].size(), args.ignore_ov, args.max_diff, args.ignore_order);

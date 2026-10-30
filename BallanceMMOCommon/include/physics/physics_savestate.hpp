@@ -146,6 +146,39 @@ namespace bmmo::physics {
     std::string diff_savestate(const uint8_t* a, size_t a_size, const uint8_t* b, size_t b_size, bool ignore_ov = false,
                                int max_differences = 1, bool ignore_order = false);
 
+    // diff_savestate with the one difference rollback-engine-gaps design 9.3
+    // names (option (b), FULL step DX3; physics/outside_controllers.hpp): a
+    // core of `own_cores` whose controller list differs only by controllers
+    // named in `outside_names` (outside_controllers::controller_names of
+    // Gameplay_Ingame's SetPhysicsForce blocks - never any other block's
+    // "rt:force/", whose force is real) present on one side (and every
+    // simulation unit's list by the same names) is "outside zero-force
+    // controller on the own core".  An empty `outside_names` names nothing.
+    // `named` lists those cores and names ("core Ball_Wood a+[rt:force/26432]
+    // b+[]"), `named_cores` counts them; `where` is diff_savestate's answer
+    // once they are set aside - "" when nothing else differs.  Any other
+    // difference - another field, another core's controllers, another
+    // controller, an order - stays in `where`; with neither switch, bytes
+    // that still differ once the named difference is set aside ("bytes
+    // differ but every field renders the same") stay there too, as in
+    // diff_savestate.  With a switch, a difference only in the ignored
+    // bookkeeping is not in `where` (the in-session check: not a mismatch,
+    // as before) but in `residual` ("no difference outside the ignored
+    // bookkeeping"; also without the named one), which SimTool fails on as
+    // its plain path does.
+    // The blob holds no force: that half of 9.3's precondition is the run
+    // time check's (outside_controllers::carries_force).
+    struct savestate_named_difference {
+        std::string where;
+        std::string named;
+        std::string residual;
+        int named_cores = 0;
+    };
+    savestate_named_difference diff_savestate_named(const uint8_t* a, size_t a_size, const uint8_t* b, size_t b_size,
+                                                    const std::vector<std::string>& own_cores,
+                                                    const std::vector<std::string>& outside_names, bool ignore_ov = false,
+                                                    int max_differences = 1, bool ignore_order = false);
+
     // FNV-1a over the blob bytes.
     uint64_t hash_savestate(const uint8_t* data, size_t size);
 

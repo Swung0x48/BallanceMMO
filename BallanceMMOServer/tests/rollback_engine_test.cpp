@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <physics/callback_queue_plan.hpp>
+#include <physics/outside_controllers.hpp>
 #include <session/correction.hpp>
 #include <session/input_relay.hpp>
 #include <session/rollback.hpp>
@@ -4192,7 +4193,7 @@ TEST(RollbackEngine, TheSavestateDiffIsLeftOutOfTheRewindCost) {
         ++diffs;
         now += std::chrono::milliseconds(10);
         world.calls.push_back("diff_savestate");
-        return std::string("a field");
+        return bmmo::session::savestate_replay_difference{"a field", ""};
     };
     rollback_tracked tracked;
     tracked.remote_entities = {"Remote"};
@@ -4223,6 +4224,245 @@ TEST(RollbackEngine, TheSavestateDiffIsLeftOutOfTheRewindCost) {
     EXPECT_LT(diff_at, line_at);
     EXPECT_LT(line_at, rollback_at) << "logged before the rewind's own line, as before";
     EXPECT_LT(rollback_at, world.calls.size());
+}
+
+// FULL step DX3 (rollback-engine-gaps design 9.3, option (b)): a replay
+// whose last tick differs from the live record only by the named difference
+// (an outside zero-force controller on the own core) is counted and logged as
+// that, not as a mismatch; one that differs in anything else as well stays a
+// mismatch, its line naming both.
+TEST(RollbackEngine, TheNamedOutsideControllerDifferenceIsNotAMismatch) {
+    for (const bool also_else: {false, true}) {
+        SCOPED_TRACE(also_else ? "named and another field" : "named only");
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Remote"];
+        rollback_engine engine;
+        auto w = world.adapter();
+        w.diff_savestate = [also_else](const std::vector<uint8_t>&, const std::vector<uint8_t>&) {
+            return bmmo::session::savestate_replay_difference{also_else ? "core Ball_Wood speed 1 2" : "",
+                                                              "core Ball_Wood a+[rt:force/26432] b+[]"};
+        };
+        rollback_tracked tracked;
+        tracked.remote_entities = {"Remote"};
+        input_frame predicted{};
+        predicted.keys = 1;
+        for (uint32_t tick = 1; tick <= 10; ++tick) {
+            world.pending_keys["Remote"] = predicted.keys;
+            w.step();
+            engine.record(w, tick, tracked, {{"Remote", predicted}});
+        }
+        const auto input_at = [](const std::string& entity, uint32_t, input_frame& out) {
+            if (entity != "Remote") return false;
+            out = input_frame{};
+            return true;
+        };
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 6, 10, input_at, "Remote input corrected at tick 7"));
+        const size_t named_line = world.first("log savestate replay: the world re-simulated to tick 10 differs from the "
+                                              "live record only by the named difference (outside zero-force controller "
+                                              "on the own core): core Ball_Wood a+[rt:force/26432] b+[]");
+        const size_t mismatch_line = world.first("log savestate replay: the world re-simulated to tick 10 differs from the "
+                                                 "live record: core Ball_Wood speed 1 2 (and the named difference: core "
+                                                 "Ball_Wood a+[rt:force/26432] b+[])");
+        if (also_else) {
+            EXPECT_EQ(engine.stats().savestate_replay_mismatches, 1u);
+            EXPECT_EQ(engine.stats().savestate_replay_outside_controllers, 0u);
+            EXPECT_LT(mismatch_line, world.calls.size());
+            EXPECT_EQ(named_line, world.calls.size());
+        } else {
+            EXPECT_EQ(engine.stats().savestate_replay_mismatches, 0u);
+            EXPECT_EQ(engine.stats().savestate_replay_outside_controllers, 1u);
+            EXPECT_LT(named_line, world.calls.size());
+            EXPECT_EQ(mismatch_line, world.calls.size());
+        }
+    }
+}
+
+// FULL step DX3: a replay that differs only by the named difference does not
+// use up the check's 8 mismatch lines - the check still compares the next 8
+// mismatching rewinds - and, as before, the check stops comparing once 8
+// mismatches are logged (a blob diff costs milliseconds per rewind).
+TEST(RollbackEngine, TheNamedDifferenceDoesNotUseUpTheMismatchCap) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Remote"];
+    rollback_engine engine;
+    auto w = world.adapter();
+    int rewinds = 0;
+    std::vector<int> compared;
+    // Rewinds 1-2: named only; 3-10: another field differs (the cap's 8
+    // lines); 11: another field again, not compared any more.
+    w.diff_savestate = [&rewinds, &compared](const std::vector<uint8_t>&, const std::vector<uint8_t>&) {
+        compared.push_back(rewinds);
+        const bool named = rewinds == 1 || rewinds == 2;
+        return bmmo::session::savestate_replay_difference{named ? "" : "core Ball_Wood speed 1 2",
+                                                          named ? "core Ball_Wood a+[rt:force/26432] b+[]" : ""};
+    };
+    rollback_tracked tracked;
+    tracked.remote_entities = {"Remote"};
+    input_frame predicted{};
+    predicted.keys = 1;
+    const auto input_at = [](const std::string& entity, uint32_t, input_frame& out) {
+        if (entity != "Remote") return false;
+        out = input_frame{};
+        return true;
+    };
+    uint32_t tick = 0;
+    for (rewinds = 1; rewinds <= 11; ++rewinds) {
+        for (int k = 0; k < 10; ++k) {
+            ++tick;
+            world.pending_keys["Remote"] = predicted.keys;
+            w.step();
+            engine.record(w, tick, tracked, {{"Remote", predicted}});
+        }
+        ASSERT_TRUE(engine.rewind_to(w, tick - 4, tick, input_at, "Remote input corrected"));
+    }
+    EXPECT_EQ(compared, (std::vector<int>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}));
+    EXPECT_EQ(engine.stats().savestate_replay_mismatches, 8u);
+    EXPECT_EQ(engine.stats().savestate_replay_outside_controllers, 2u);
+}
+
+// FULL step DX3: the controller-list rule of the named difference
+// (physics/outside_controllers.hpp force_only_delta), over entries shaped
+// like the savestate's controller_ref.
+namespace {
+    struct ctl {
+        uint8_t kind = 1;
+        int32_t system = -1;
+        uint8_t part = 0;
+        int32_t priority = 0;
+        std::string name;
+    };
+    ctl handle(int32_t system, uint8_t part) { return ctl{0, system, part, 0, "sys:unknown"}; }
+    ctl named(const std::string& name, int32_t priority = 100) { return ctl{1, -1, 0, priority, name}; }
+    bool same_ctl(const ctl& x, const ctl& y) {
+        return x.kind == y.kind && x.system == y.system && x.part == y.part && x.priority == y.priority && x.name == y.name;
+    }
+    bool force_only(const std::vector<ctl>& a, const std::vector<ctl>& b, std::vector<std::string>* only_a = nullptr,
+                    std::vector<std::string>* only_b = nullptr, const std::vector<std::string>* allowed = nullptr) {
+        std::vector<std::string> x, y;
+        const bool r = bmmo::physics::outside_controllers::force_only_delta(a, b, same_ctl, x, y, allowed);
+        if (only_a) *only_a = x;
+        if (only_b) *only_b = y;
+        return r;
+    }
+}
+
+TEST(OutsideControllers, OnlyAForceControllerPresentOnOneSideIsNamed) {
+    using bmmo::physics::outside_controllers::is_force_controller_name;
+    EXPECT_TRUE(is_force_controller_name("rt:force/26432"));
+    EXPECT_FALSE(is_force_controller_name("rt:force/"));
+    EXPECT_FALSE(is_force_controller_name("bmmo:force/0"));
+    EXPECT_FALSE(is_force_controller_name("sys:unknown"));
+
+    const std::vector<ctl> base = {handle(0, 0), named("bmmo:force/0"), handle(0, 1), handle(0, 2)};
+    std::vector<ctl> live = base;
+    live.insert(live.begin() + 2, named("rt:force/26432"));
+    std::vector<std::string> only_a, only_b;
+    // Case 1 (a revived core lacks it) and the carried case, both ways.
+    EXPECT_TRUE(force_only(live, base, &only_a, &only_b));
+    EXPECT_EQ(only_a, (std::vector<std::string>{"rt:force/26432"}));
+    EXPECT_TRUE(only_b.empty());
+    EXPECT_TRUE(force_only(base, live, &only_a, &only_b));
+    EXPECT_EQ(only_b, (std::vector<std::string>{"rt:force/26432"}));
+    // Case 2: one swapped for another (solo1 665:20: 26414 live, 26432 replayed).
+    std::vector<ctl> swapped = base;
+    swapped.insert(swapped.begin() + 2, named("rt:force/26414"));
+    EXPECT_TRUE(force_only(swapped, live, &only_a, &only_b));
+    EXPECT_EQ(only_a, (std::vector<std::string>{"rt:force/26414"}));
+    EXPECT_EQ(only_b, (std::vector<std::string>{"rt:force/26432"}));
+    // Restricted to the names found on the core (a unit's list).
+    const std::vector<std::string> allowed = {"rt:force/26414"};
+    EXPECT_FALSE(force_only(swapped, live, nullptr, nullptr, &allowed));
+
+    // Not the named kind: equal lists; another controller missing; the
+    // bridge's own navigation leaf; a reorder; a field; a handle.
+    EXPECT_FALSE(force_only(base, base));
+    std::vector<ctl> no_leaf = base;
+    no_leaf.erase(no_leaf.begin() + 1);
+    EXPECT_FALSE(force_only(base, no_leaf)) << "a bmmo:force leaf missing";
+    std::vector<ctl> plus_leaf = live;
+    plus_leaf.push_back(named("bmmo:force/1"));
+    EXPECT_FALSE(force_only(plus_leaf, base)) << "a force controller AND a navigation leaf";
+    std::vector<ctl> moved = live;
+    std::swap(moved[0], moved[3]);
+    EXPECT_FALSE(force_only(moved, base)) << "the rest reordered";
+    std::vector<ctl> field = live;
+    field[1].priority = 7;
+    EXPECT_FALSE(force_only(field, base)) << "another field of a kept controller";
+    std::vector<ctl> as_handle = base;
+    as_handle.insert(as_handle.begin(), ctl{0, 3, 1, 0, "rt:force/26432"});
+    EXPECT_FALSE(force_only(as_handle, base)) << "a friction handle is never named";
+    // The same force controller present twice on one side, once on the other.
+    std::vector<ctl> twice = live;
+    twice.push_back(named("rt:force/26432"));
+    EXPECT_TRUE(force_only(twice, live, &only_a, &only_b));
+    EXPECT_EQ(only_a, (std::vector<std::string>{"rt:force/26432"}));
+}
+
+// FULL step DX3 (review): the savestate diff names only the controllers of
+// Gameplay_Ingame's outside SetPhysicsForce blocks on an own core.  Any other
+// block's "rt:force/" controller - P_Modul_18's fan 46475, an explosion's
+// force - pushes for real, the run-time check does not read it, and its
+// presence on one side stays a difference.
+TEST(OutsideControllers, OnlyTheOutsideBlocksControllersAreNamed) {
+    const std::vector<std::string> outside = bmmo::physics::outside_controllers::controller_names(
+            bmmo::physics::outside_controllers::default_outside_force_blocks());
+    EXPECT_EQ(outside, (std::vector<std::string>{"rt:force/26354", "rt:force/26392", "rt:force/26414", "rt:force/26432",
+                                                 "rt:force/26447"}));
+    const std::vector<ctl> base = {handle(0, 0), named("bmmo:force/0"), handle(0, 1)};
+    std::vector<ctl> navigation = base;
+    navigation.insert(navigation.begin() + 2, named("rt:force/26432"));
+    EXPECT_TRUE(force_only(navigation, base, nullptr, nullptr, &outside));
+    std::vector<ctl> fan = base;
+    fan.insert(fan.begin() + 2, named("rt:force/46475"));
+    EXPECT_FALSE(force_only(fan, base, nullptr, nullptr, &outside)) << "a level block's force controller";
+    EXPECT_FALSE(force_only(base, fan, nullptr, nullptr, &outside)) << "...missing on the other side";
+    std::vector<ctl> both = navigation;
+    both.push_back(named("rt:force/46475"));
+    EXPECT_FALSE(force_only(both, base, nullptr, nullptr, &outside)) << "a navigation one AND a level one";
+    const std::vector<std::string> none;
+    EXPECT_FALSE(force_only(navigation, base, nullptr, nullptr, &none)) << "no outside block known: nothing named";
+}
+
+// FULL step DX3: the precondition of (b) read through a backend with
+// force_block_get: a block holding a controller built with any non-zero
+// force is flagged, an absent controller or a zero force is not, and a
+// block the backend cannot read is left out.
+TEST(OutsideControllers, ANonZeroForceControllerIsFlagged) {
+    struct fake_backend {
+        std::map<uint32_t, bmmo_physics_force_block> blocks;
+        bool force_block_get(uint32_t id, bmmo_physics_force_block& out, std::string& error) const {
+            const auto it = blocks.find(id);
+            if (it == blocks.end()) {
+                error = "no block";
+                return false;
+            }
+            out = it->second;
+            return true;
+        }
+    };
+    fake_backend backend;
+    bmmo_physics_force_block zero{};
+    zero.exists = 1;
+    bmmo_physics_force_block pushing = zero;
+    pushing.force[0] = 0.065;
+    bmmo_physics_force_block none{};
+    none.force[1] = 9.0;   // no controller: whatever the block's inputs say
+    backend.blocks = {{26414, zero}, {26432, pushing}, {26447, none}};
+    std::vector<bmmo::physics::outside_controllers::force_reading> out;
+    bmmo::physics::outside_controllers::read_forces<fake_backend, bmmo_physics_force_block>(
+            backend, {26414, 26432, 26447, 99999}, out);
+    ASSERT_EQ(out.size(), 3u) << "the unreadable block is left out";
+    EXPECT_FALSE(bmmo::physics::outside_controllers::carries_force(out[0]));
+    EXPECT_TRUE(bmmo::physics::outside_controllers::carries_force(out[1]));
+    EXPECT_EQ(out[1].block, 26432u);
+    EXPECT_FALSE(bmmo::physics::outside_controllers::carries_force(out[2]));
+    bmmo::physics::outside_controllers::force_reading tiny;
+    tiny.exists = true;
+    tiny.force[2] = -1e-30;
+    EXPECT_TRUE(bmmo::physics::outside_controllers::carries_force(tiny)) << "zeroed means zero, not small";
 }
 
 // Late-player design 3.3: the owner's own birth, made live at tick 5, was
