@@ -2343,7 +2343,13 @@ numbers 1-10 are unchanged.
      ~471-472 / ~510-546, engine change #10), and a rotated float matrix's
      row lengths round by rotation: c2 built it from its own paper birth
      (y scale 0x1.000012), c0/c1/c3 and the server from mirror
-     3035006883's pose (0x1.00000e); first differing state 1180 (the
+     3035006883's pose (0x1.00000e) - every world's first paper ball in
+     tick order is player 3035006883's at 1180, but c2, running ahead,
+     simulated its own 1202 trafo live before that birth reached it
+     (`h1c2/t5/client2.log` 1319 vs 1531: the mirror clone is made after),
+     and the rollback to 1180 does not undo the hull cache (not in the
+     savestate); each new paper ball inherits the rotation of the ball it
+     replaces, so c2's differs; first differing state 1180 (the
      newborn mirror's radius 1 ulp larger). Forcing c2's build to the
      shared scale: 157 keys, 0 differing on all four (`maps/arena-test/
      h1c2/t6`). Not SFD (A) (stone and wood are plain spheres), not
