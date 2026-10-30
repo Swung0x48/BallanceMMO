@@ -3354,6 +3354,18 @@ namespace {
         std::vector<std::pair<CK_ID, bool>> pending;
         int manager_cells[2] = {0, 0};
         bool have_manager_cells = false;
+        // Close-out step DX4 (FX2's form (i)): kept ticks, --frames: the
+        // countdown of every delayed link of the selected scripts (the
+        // order of run_savestate_check's delayed_links) - what a round's
+        // live world takes of its e where neither it nor this record has the
+        // link in flight.
+        std::vector<int> link_countdowns;
+        // Close-out step DX4 (FX2-ii): kept ticks with the clients' recipe:
+        // the three cells live_cells_guard keeps (CurrentLevel[0][4],
+        // IngameParameter[0][1] / [0][2]) - what a client's live world at e
+        // holds when its guard reads them.
+        int guard_cells[3] = {0, 0, 0};
+        bool guard_have[3] = {false, false, false};
         bmmo::physics::world_hash hash;
         bmmo::sim::physics_world::step_state counters;
     };
@@ -3996,6 +4008,148 @@ namespace {
             }
         };
 
+        // Close-out step DX4 (FX2's form (i)): a client's live world at its
+        // live tick e holds e's countdowns of the delayed links that are not
+        // in flight (0: fired, the initial: never queued or reset) - the
+        // restore writes a countdown only where the anchor's record has the
+        // link in flight (script_replay.hpp restore_behavior), so the rest
+        // is the live world's own.  The harness's stand-in (chained from
+        // another round's end, or re-made: the t0 restore leaves them too)
+        // has its own history's; it takes e's before the round, where
+        // neither it nor e's record has the link in flight.  A link in
+        // flight in the stand-in is left alone (restore_behavior's
+        // links_live_pending case, counted).  The links are the same set
+        // restore_behavior walks (initial delay above one frame, the graph's
+        // links and its sub-behaviours'; the order here is links first, which
+        // only has to agree between note and take - both index this vector).
+        std::vector<CKBehaviorLink*> delayed_links;
+        if (frames) {
+            std::function<void(CKBehavior*)> walk_links = [&](CKBehavior* beh) {
+                if (!beh || beh->IsUsingFunction()) return;
+                for (int i = 0; i < beh->GetSubBehaviorLinkCount(); ++i)
+                    if (CKBehaviorLink* link = beh->GetSubBehaviorLink(i); link && link->GetInitialActivationDelay() > 1)
+                        delayed_links.push_back(link);
+                for (int i = 0; i < beh->GetSubBehaviorCount(); ++i) walk_links(beh->GetSubBehavior(i));
+            };
+            for (CK_ID id: scripts.scripts) walk_links(CKBehavior::Cast(context->GetObject(id)));
+        }
+        const auto note_countdowns = [&](straight_tick& rec) {
+            rec.link_countdowns.clear();
+            for (CKBehaviorLink* link: delayed_links) rec.link_countdowns.push_back(link->GetActivationDelay());
+        };
+        uint64_t countdowns_put = 0, countdowns_live_in_flight = 0;
+        int countdown_rounds = 0;
+        const auto take_countdowns = [&](const straight_tick& rec, size_t r) {
+            if (rec.link_countdowns.size() != delayed_links.size()) return;
+            bool any = false;
+            for (size_t k = 0; k < delayed_links.size(); ++k) {
+                CKBehaviorLink* link = delayed_links[k];
+                const int initial = link->GetInitialActivationDelay(), live = link->GetActivationDelay(),
+                          recorded = rec.link_countdowns[k];
+                if (recorded > 0 && recorded < initial) continue;   // in flight at e: the restore's or the replay's
+                if (live > 0 && live < initial) {
+                    ++countdowns_live_in_flight;
+                    if (args.verbose)
+                        std::printf("  round %zu: delayed link %zu in flight in the live world (%d of %d), e's record %d:"
+                                    " left\n", r, k, live, initial, recorded);
+                    continue;
+                }
+                if (live == recorded) continue;
+                link->SetActivationDelay(recorded);
+                ++countdowns_put;
+                any = true;
+                if (args.verbose)
+                    std::printf("  round %zu: delayed link %zu countdown %d -> %d (e's, not in flight)\n", r, k, live, recorded);
+            }
+            if (any) ++countdown_rounds;
+        };
+
+        // Close-out step DX4 (FX2-ii, option (b)): a round's compare at e runs
+        // after what a client does at a rewind's end - host support's
+        // live_cells_guard: the three live cells read before the rewind and
+        // written back after it (an ordinary rewind; the harness's never
+        // re-derives the union), the activation recorded for the live frame
+        // about to run re-issued through manager_activations::replay (the
+        // headless client's replay_manager_activation(tick) with inside =
+        // false) when a rollback ran, then note_cells.  The guard itself
+        // takes a session_client_core (its rollback counter, current tick,
+        // re-derivation), which the harness has not: its steps are made in
+        // its order here, as the late-sector check makes them.  The pass
+        // slot of e+1 the straight pass recorded is the coming frame's own
+        // (its update_sectors makes it, as the follow's re-stepped frame
+        // does): a client has not recorded it at its rewind's end, so the
+        // re-issue leaves it out.
+        // The write-back is a client's only with a client's live cells: the
+        // stand-in takes e's before the guard's read (the straight pass
+        // notes them at each kept tick), as it takes e's countdowns (form
+        // (i)) - a re-made world never repeats a one-shot write of a script
+        // outside the selection (Init Ingame's CurrentLevel[0][4] = 1 in
+        // frame 1, which the manager overwrites with 0 in frame 2), and a
+        // chained one holds the previous round's e's.
+        const char* const guard_array[3] = {"CurrentLevel", "IngameParameter", "IngameParameter"};
+        const int guard_column[3] = {4, 1, 2};
+        const auto read_guard_cells = [&](int (&values)[3], bool (&have)[3]) {
+            for (int i = 0; i < 3; ++i) {
+                values[i] = 0;
+                CKDataArray* cells = bmmo::game::session_data_array(context, guard_array[i]);
+                have[i] = cells && cells->GetElementValue(0, guard_column[i], &values[i]);
+            }
+        };
+        uint64_t guard_cells_taken = 0;
+        int guard_cells_rounds = 0;
+        const auto take_guard_cells = [&](const straight_tick& rec, size_t r) {
+            bool any = false;
+            for (int i = 0; i < 3; ++i) {
+                CKDataArray* cells = rec.guard_have[i] ? bmmo::game::session_data_array(context, guard_array[i]) : nullptr;
+                int now = 0;
+                if (!cells || (cells->GetElementValue(0, guard_column[i], &now) && now == rec.guard_cells[i])) continue;
+                int value = rec.guard_cells[i];
+                cells->SetElementValue(0, guard_column[i], &value, sizeof(int));
+                ++guard_cells_taken;
+                any = true;
+                if (args.verbose)
+                    std::printf("  round %zu: the live world takes e's %s[0][%d] %d -> %d\n", r, guard_array[i],
+                                guard_column[i], now, value);
+            }
+            if (any) ++guard_cells_rounds;
+        };
+        uint64_t end_rounds = 0, end_cells_changed = 0, end_manager_reissued = 0, end_scripts_reissued = 0,
+                 end_passes_left = 0;
+        const auto end_of_rewind = [&](const int (&values)[3], const bool (&have)[3], bool rolled, uint32_t live_tick,
+                                       size_t r) {
+            ++end_rounds;
+            activations.end_override(context);
+            for (int i = 0; i < 3; ++i) {
+                if (!have[i]) continue;
+                CKDataArray* cells = bmmo::game::session_data_array(context, guard_array[i]);
+                int now = 0;
+                if (!cells) continue;
+                if (cells->GetElementValue(0, guard_column[i], &now) && now != values[i]) {
+                    ++end_cells_changed;
+                    if (args.verbose)
+                        std::printf("  round %zu: end of the rewind: %s[0][%d] %d -> %d (the live cell written back)\n", r,
+                                    guard_array[i], guard_column[i], now, values[i]);
+                }
+                int value = values[i];
+                cells->SetElementValue(0, guard_column[i], &value, sizeof(int));
+            }
+            if (rolled) {
+                bmmo::game::manager_activations live = activations;
+                if (live.forget_pass(live_tick + 1u)) ++end_passes_left;
+                const uint64_t scripts_before = live.scripts_reissued();
+                const bmmo::game::manager_activation* a = live.replay(context, manager_id, live_tick + 1u, false);
+                end_scripts_reissued += live.scripts_reissued() - scripts_before;
+                if (a) {
+                    ++end_manager_reissued;
+                    if (args.verbose)
+                        std::printf("  round %zu: end of the rewind: Gameplay_SectorManager's activation for the live frame"
+                                    " (%u) re-issued (activate %d, deactivate %d%s)\n", r, live_tick + 1u, a->activate,
+                                    a->deactivate, a->reset ? ", reset" : "");
+                }
+            }
+            activations.note_cells(context);
+        };
+
         // ---- the straight pass
         // Step RLQ: --queue-trace, the PreSimulate queue after each straight
         // step whenever it changes (frame = the tick the step leads to), each
@@ -4081,6 +4235,8 @@ namespace {
                     return 1;
                 }
                 if (keep_this) rec.membership = owner_membership();
+                if (keep_this) note_countdowns(rec);   // close-out step DX4
+                if (keep_this && passes) read_guard_cells(rec.guard_cells, rec.guard_have);   // close-out step DX4
                 if (keep_this && args.verbose)   // close-out step S2 (V4b's review)
                     std::printf("  straight t=%u owner membership %s\n", t, rec.membership.c_str());
                 if (!written_cols.empty()) rec.cells = read_written();   // step RK2's review
@@ -4454,6 +4610,18 @@ namespace {
                     }
                 }
             }
+            // Close-out step DX4 (FX2's form (i)): the live world - re-made
+            // above or chained - takes e's not-in-flight countdowns.
+            if (frames) take_countdowns(straight[static_cast<size_t>(e)], r);
+            // Close-out step DX4 (FX2-ii): the live cells as the client's
+            // guard reads them before its rewind (before the RK2 sentinels),
+            // the stand-in's made e's first.
+            int guard_cells[3] = {};
+            bool guard_have[3] = {};
+            if (passes) {
+                take_guard_cells(straight[static_cast<size_t>(e)], r);
+                read_guard_cells(guard_cells, guard_have);
+            }
             // Close-out step S2 (V4b's review): with --verbose, every selected
             // script whose owner the live world holds in the behaviour
             // manager's pending table or list before the rewind (state no
@@ -4513,7 +4681,7 @@ namespace {
                     ++cells_sentinel_rows;
                 }
             }
-            const bmmo::session::rollback_stats globals_before = engine.stats();   // C3 (step RK1)
+            const bmmo::session::rollback_stats globals_before = engine.stats();   // C3 (step RK1); DX4: its rollbacks
             const bool rewound = engine.rewind_to(binding, t0 + static_cast<uint32_t>(a), t0 + static_cast<uint32_t>(e),
                                                   no_input, "savestate-check");
             globals_sum[0] += engine.stats().globals_set - globals_before.globals_set;
@@ -4605,6 +4773,12 @@ namespace {
                     failure = text;
                 }
             }
+            // Close-out step DX4 (FX2-ii, option (b)): the client's end of the
+            // rewind (live_cells_guard's destructor) before the compare at e;
+            // the re-issue only when a rollback ran, as the guard's.
+            if (passes)
+                end_of_rewind(guard_cells, guard_have, engine.stats().rollbacks != globals_before.rollbacks,
+                              t0 + static_cast<uint32_t>(e), r);
             // The independent witnesses at the end of the round.
             bmmo::physics::world_hash end_hash;
             if (failure.empty()) {
@@ -4710,11 +4884,10 @@ namespace {
                     fail_index = i;
                     if (passes) moves_before(t);
                     // What a client does for the live frame a rewind ends
-                    // before (live_cells_guard, step B1): the activations the
-                    // straight pass had pending for this frame re-issued - a
-                    // restore writes back the scripts, not the live world's
-                    // pending activations of another tick.
-                    if (passes && k == 1) activations.replay(context, manager_id, t + 1u, false);
+                    // before (live_cells_guard, step B1) - the activations the
+                    // straight pass had pending for this frame re-issued - ran
+                    // at the rewind's end (end_of_rewind, close-out step DX4),
+                    // before the compare at e; not again here.
                     std::string follow_error;
                     if (!step(follow_error)) { failure = "follow: the step at " + std::to_string(t) + " failed: " + follow_error; break; }
                     bmmo::physics::drain_event_log(physics);
@@ -4839,6 +5012,11 @@ namespace {
             std::printf("savestate-check: depth-0 script compares equal but for outputs the restore re-armed (ignored):"
                         " %d round(s), %d bit(s); follow ticks %d, a delayed link's destination on in %d of them\n",
                         rearmed_ignored_rounds, rearmed_ignored_bits, follow_ticks, follow_fired);
+        if (frames)   // close-out step DX4 (FX2's form (i))
+            std::printf("savestate-check: live worlds given e's not-in-flight delayed-link countdowns (step DX4): links %zu,"
+                        " rounds %d, countdowns put %llu, in flight in the live world (left) %llu\n", delayed_links.size(),
+                        countdown_rounds, static_cast<unsigned long long>(countdowns_put),
+                        static_cast<unsigned long long>(countdowns_live_in_flight));
         if (trafo) {
             std::printf("savestate-check: trafo births logged %zu, lifetimes changed %zu, inputs %zu, sets %zu\n",
                         trafo_birth_count, trafo_generations.size(), trafo->log().size(), trafo->registry().sets().size());
@@ -4869,6 +5047,14 @@ namespace {
                         static_cast<unsigned long long>(remake_steps), static_cast<unsigned long long>(remake_reissued),
                         static_cast<unsigned long long>(remake_extra_pending),
                         static_cast<unsigned long long>(remake_globals_written));
+            std::printf("savestate-check: end of the rewind as a client's (step DX4): rounds %llu, live worlds given e's"
+                        " guard cells %d (cells %llu), live cells written back changed %llu, manager activations re-issued"
+                        " for the live frame %llu, script activations %llu, the coming frame's own pass left out %llu\n",
+                        static_cast<unsigned long long>(end_rounds), guard_cells_rounds,
+                        static_cast<unsigned long long>(guard_cells_taken), static_cast<unsigned long long>(end_cells_changed),
+                        static_cast<unsigned long long>(end_manager_reissued),
+                        static_cast<unsigned long long>(end_scripts_reissued),
+                        static_cast<unsigned long long>(end_passes_left));
             std::printf("savestate-check: fixed window births destroyed at a restore for the replayed scripts (step RO1): back"
                         " after their birth tick %llu, missing %llu\n", static_cast<unsigned long long>(fixed_births_back),
                         static_cast<unsigned long long>(fixed_births_missing));

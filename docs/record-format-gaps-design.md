@@ -2104,3 +2104,95 @@ the failure paths changed, which the headless level does not reach).
 **Deferred** (FULL's retail batch RT2): a retail Level 1 run with a
 respawn or a pause resume inside frames 9..15 (the retail host gets the
 hold through the same struct; only its compile was checked here).
+
+## As built (step DX4, FULL close-out, 2026-10-29): FX2-ii option (b) and FX2's form (i) - the round compares after the client's end of the rewind, its live world takes e's countdowns and guard cells
+
+FULL step DX4 (`.local-tools/work/FULL/plan.md` DX4; FX2-ii: the user "你决定",
+the orchestrator chose (b); form (i): the harness item FX2 queued). SimTool
+only (`BallanceMMOServer/sim/sim_tool.cpp`, `run_savestate_check`); no shared,
+client, server, protocol, journal, bridge or IVP change.
+
+- **(ii), option (b): the compare at e after the client's end of the rewind.**
+  `end_of_rewind` runs, with the clients' recipe (`passes`), after the
+  replay-identity checks and before the witnesses at e: host support's
+  `live_cells_guard` destructor in its order - `activations.end_override`,
+  the three cells (CurrentLevel[0][4], IngameParameter[0][1] / [0][2]) read
+  before the rewind written back (an ordinary rewind: the harness never
+  re-derives the union), the activation recorded for the live frame about to
+  run re-issued through `manager_activations::replay(context, manager, e+1,
+  false)` - the headless client's `replay_manager_activation(tick)` - when the
+  engine's rollback counter moved, then `note_cells`. **Adaptation:** the
+  guard itself takes a `session_client_core` (its rollback counter, current
+  tick and re-derivation), which the harness has not, so its steps are made in
+  its order in SimTool, as the late-sector check already makes them (not a
+  shared change). **Adaptation:** the re-issue leaves out the pass slot of
+  e+1: the straight pass recorded it in advance, but it is the coming frame's
+  own (its update_sectors makes it); a client has not recorded it at its
+  rewind's end (counted: "the coming frame's own pass left out", 0 in every
+  arm run). The follow's own k = 1 re-issue (B2SX) is removed - it was the
+  same tick's, and `CKScene::Activate` counts in `m_BeObjectNextFrame` (FX1).
+- **(i): the live world takes e's not-in-flight countdowns.** The straight
+  pass notes, at each kept tick, the countdown of every delayed link of the
+  selected scripts (the same links `restore_behavior` walks: initial delay
+  above one frame, the graph's links and its sub-behaviours'); before every
+  round (after a re-make, or chained) the live world takes e's where neither
+  e's record nor the live world has the link in flight (0 or the initial). A
+  link in flight live is left (restore_behavior's `links_live_pending` case;
+  counted, 0 in every arm run).
+- **Adaptation (found by this step's run): the live world takes e's three
+  guard cells too.** With (ii) and (i) alone S1b went 20 -> 16 failures, every
+  one `cell CurrentLevel[0][4] 1 vs 0` at e = 2 (anchor 1 depth 1, anchor 2
+  depth 0): the write-back wrote the stand-in's 0, because a re-made world
+  never repeats Init Ingame's one-shot frame-1 write of 1 (outside the
+  selection; the manager overwrites it with 0 in frame 2), and a chained world
+  holds the previous round's e's. A client's live world at its live tick 2
+  holds 1. The straight pass notes the three cells at each kept tick and the
+  stand-in takes e's before the guard's read - the same premise as (i) ("the
+  live world at e is the straight pass's"), not a change of what a round is
+  judged by.
+- **S1b** (`FX2/s1b.sh`: `--session-recipe --drop-settle 0`, L2 and L13,
+  seeds 1-5; `.local-tools/work/DX4/final_run/`, binary `build-agent-rDX4`):
+  **600/600** (rDX3, the control, the same day: 20/600, FX2's 12 + 8). Per
+  level: countdowns put in 10 rounds (every failing round of FX2 had the
+  countdown), guard cells taken in 8, the live cell written back changed in
+  4, the manager's activation re-issued for the live frame in 8; C3 replays
+  and re-made worlds as FX2's.
+- **Regressions** (`FX2/regress.sh`, `final_regress/`; S1b at
+  `--drop-settle 12`, `final_settle12/`): V4b alive 50/50, V9 L11 move 50/50,
+  V9 L8 move (lead 180) 50/50, EL9 L-S1 160/160, settle 12 10 x 60/60 - every
+  verdict, round line and summary line as FX2's (diffed), with 0 countdowns
+  put, 0 cells taken, 0 written back changed, 0 re-issued.
+- **Named rounds with follows** (`DX4/named.sh`, L2 and L13, `final_named/`):
+  FX2's ten (1:2:2 .. 3:1:2, 1:12:2, 2:12:2) and 3:12:2 pass as on rDX3, and
+  the residual forms with a follow now pass: 1:1:3 (form (ii)) and 2:0:2
+  (form (i)), every follow tick's blob and scripts as the straight pass's.
+  **Harness limit found (not fixed, not a client gap):** 1:0:2 (depth 0 at
+  e = 1, then the follow) gets past the compare at 1 (on rDX3 it failed
+  there on the countdown) and fails in the follow's frame 1: `clock -
+  current_time` 0.04545 vs 0.0303 at record 2 - the follow's whole frame
+  steps at record 1's globals (factor 1) where the straight step at 1 ran at
+  Init Ingame's frame-1 factor 2 (A18). A follow stands in for live frames,
+  and frame 1 is Init Ingame's one-shot work (the globals, its Execute Script
+  of the manager, CurrentLevel[0][4] = 1, a flag of P_Modul_18_Particle
+  Script on L13): giving the follow FX2's per-tick globals and the straight
+  pass's pending after each frame (built and measured, then taken out) only
+  moved the failure to the next of them (L2: the cell; L13: the particle
+  script's flag 0x400000). A client's live frame 1 runs Init Ingame itself.
+  So a follow across frame 1 is outside what the follow can stand in for; no
+  S1b or regression round has a follow.
+- Tests 669/669; GCC `linux_sim_syntax.sh` 6/6 ok; `ninja -t deps` of
+  sim_tool.cpp.obj 291 VALID. No wire check: nothing the headless client or
+  the shared code compiles changed.
+- **Review follow-ups.** (1) The end-of-rewind steps are a copy of
+  `live_cells_guard::~live_cells_guard`, not a call: a comment at the guard
+  now names the copy, and moving its body into a free function both call is
+  queued (roadmap §4 item 7, FX2 block). (2) Coverage: `forget_pass(e+1)`
+  (passes left out) and "in flight in the live world, left" never ran in
+  any arm (0 / 0), and every re-issue ran with the pass outside the
+  explosion override (`end_override` had nothing to end). (3) With the
+  write-back the three guard cells at e can no longer fail the compare at
+  e: option (b) stops judging them there; the only witness of the replay's
+  own value is the `cells written back changed` counter (4 rounds per
+  level in S1b), counted, not judged. (4) A round whose e was not kept
+  (`--savestate-every` > 1) takes neither the countdowns nor the cells,
+  silently; no run here uses it.

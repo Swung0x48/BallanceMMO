@@ -1874,7 +1874,23 @@ numbers 1-10 are unchanged.
      (a) leave it, S1b counted on its own kinds (globals and clock,
      §7.2); (b) the round's compare at e runs after the client's
      end-of-rewind steps (a change of the rule the round is judged by,
-     as B2SX's option (a) was).
+     as B2SX's option (a) was). **Both BUILT at FULL step DX4
+     (2026-10-29; the user "你决定" -> (b)):** SimTool's round compares at
+     e after the client's end of the rewind (live_cells_guard's steps in
+     its order: the cells written back, the live frame's activation
+     re-issued through manager_activations::replay), its live world takes
+     e's not-in-flight countdowns and e's three guard cells (the cells: an
+     adaptation the run found); S1b 600/600, FX2's regressions unchanged;
+     a follow across frame 1 (named 1:0:2) is a harness limit, not a
+     client gap (record-format-gaps-design.md "As built (step DX4)").
+     **Queued (DX4's review, one implementation):** SimTool's
+     end_of_rewind is a copy of live_cells_guard's destructor
+     (game/session_host_support.hpp; SimTool has no
+     session_client_core). The next step that touches that header (or
+     R7) moves the destructor's body into a free function taking the
+     context, the activations, the kept cells, `rederived`, `rolled` and
+     a re-issue callback, which the guard and SimTool both call; until
+     then a comment at the guard names the copy.
    - **Run at H1 (2026-10-29, HEAD 193c9a5b + two test switches of the
      headless client; headless batch 1; `.local-tools/work/H1/`, x64
      `build-agent-rH1`, the Arch server `ballanced-36c04e3d24c9+bmmo-193c9a5b3878`

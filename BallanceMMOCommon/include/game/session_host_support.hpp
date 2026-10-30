@@ -616,6 +616,12 @@ namespace bmmo::game {
             for (int i = 0; i < 3; ++i) have_[i] = read_cell(i, values_[i]);
         }
         ~live_cells_guard() {
+            // NOTE (FULL step DX4): SimTool's --savestate-check copies these
+            // steps, in this order, into its round's end_of_rewind
+            // (BallanceMMOServer/sim/sim_tool.cpp; it has no
+            // session_client_core).  A change here must be made there too
+            // until the body moves into a free function both call (queued in
+            // docs/roadmap.md §4 item 7, FX2 block).
             // A replayed explosion's referential, if the window ended on its
             // tick (manager_activations::end_override).
             if (activations_) activations_->end_override(context_);
