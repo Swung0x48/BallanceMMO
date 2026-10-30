@@ -4181,3 +4181,244 @@ Tests only; no code under test changed.
     check) or a test target that links `BallanceMMOSim` (the message-test
     target links neither; WM1's note); U7 needs a crafted journal and a
     SimTool replay - about half a day for the seam and U6, 2 h for U7.
+
+### As built (step H4, FULL close-out, 2026-10-29): members, rejoins, I/O (live)
+
+FULL plan rows WM1-J (J1b x5, J2, J4), WM1-J3, WG2-Je, WGQ7-U9, WGQ7-ctl,
+RLT-c, SIO-st, IOF-c (`.local-tools/work/FULL/plan.md` §2 H4). No code
+changed: HEAD's x64 build (`build-agent-rH2s`, nothing it builds changed
+since 12ccae76) and the Arch server `bmmo-12ccae76aabc-dirty` (test flags
+on). Every run snapshots off, trafo inputs and placement on, captures kept
+(`maps/arena-test/h4_full/<run>`); the clients' journals were judged on
+their FINAL rows (D0's `--final-checkpoints`, from each capture's replay)
+with the design's exceptions out (a ball in its airship span, the balloon
+module) - `.local-tools/work/H4/final_cmp.py`; the harness's live-row
+criteria ("late ball mirror", "own ball in A") read predictions (D0) and
+are not the verdict. 17 live runs (`work/H4/h4_run.sh`), 1 Arch start-up
+check.
+
+- **IOF-c**: a fresh directory without `config.yml` and the test config with
+  its `session_io` block stripped: the server writes `session_io:` /
+  `journal: batch` back in both (`work/H4/iof_fresh`). A link event with a
+  visible effect (`iof_link`: a 300 ms spike for 1 s on client 1 at tick
+  600, both ways): armed from tick base 27 (the watcher saw every client's
+  base line within 11 ms of the others, tick lines 0.003-0.03 s after due),
+  66 up / 47 down datagrams delayed, client 1's relay lag 23 -> 60 ticks in
+  the episode, the others' lag of client 1's frames 23 -> 41; starved 0,
+  resyncs 0, server journal 4081/4081; FINAL rows of all four exact. PASS.
+- **RLT-c**: `relay_covered` > 0 with `relay_late` 0 - the late joiner's
+  first state covers the anchor-tick frames in every join run: j1 90, j3 84,
+  j3b 90, j1b seeds 1-5 96 / 81 / 24 / 96 / 90, j2 90 (0 % and 10 % loss).
+  PASS.
+- **WGQ7-ctl** (the WGQ7 smoke's recipe - rejoin 2 at 1200, join 3 at 1500,
+  leave 1 at 1800, 0 ms - bit on and off in one batch): `relay_late` 0 and
+  covered 0 on all four in both arms, VERDICT PASS both, FINAL rows exact
+  in every life's journal (rejoin lives included). The smoke's `relay_late
+  2` was the anchor-tick frames RLT reclassified; the bit changes nothing
+  in the relay verdict. PASS.
+- **J1** (lp1_join's recipe with `--drive`, 150 ms): PLAYER `+p join=3` at
+  the server's J (1601) in clients 0-2, no `join=255`, no "falling back to
+  slot", FINAL rows exact in all four worlds (the joiner's mirror among
+  them). The spawn-impulse-index criterion is stale (spawn ghost since
+  protocol 15: no kick). PASS.
+- **J1b** (J1 at 10 % loss, seeds 1-5): seeds 1, 4, 5 PASS on every
+  criterion. **Seeds 2 and 3 FAIL: the late joiner's mirror of client 0**
+  is off the server from the joiner's import (seed 3: 0.874 m at 1670,
+  13.8 m at 2218; seed 2: 0.051 m at 1662, 2.1 m) - clients 0-2 exact,
+  the joiner's own ball exact, no resync, relay_late 0. Cause (seed 3,
+  traced on the capture's replay with `--trace-body`): the input stream is
+  identical (client 0 brakes, keys 2, 1646-1670, in the server journal and
+  in the joiner's); the server's state of S = 1655 is restored exactly
+  (v 15.147 m/s), but the re-step leaves the mirror undriven from 1656 to
+  1668 (v rises 15.147 -> 15.395 m/s, no brake) and drives it from 1669 on.
+  1669 is the mirror's `driven_from`: its catch-up birth (stamped 231,
+  lost and repeated under the loss) was made live at 1669
+  (`client_core_lifecycle.cpp` ~805, `driven_from = first_tick`), and a
+  replayed tick drives a remote only from its `driven_from`
+  (`client_core.cpp` 68-74 `replay_remotes`) or when its live record names
+  it (a live record names a mirror only while it is physicalized AND
+  navigated, `client_core_frame.cpp` ~854) - the records 1656-1668 predate
+  the mirror. The server's state at S drives that mirror, so the import's
+  re-step must too. **Seed 2 and j1 (gate round, settled): one cause, the
+  second writer of `driven_from`.** In both, the joiner made the mirrors
+  live at S+1 (j1 1656, seed 2 1659; "spawn ghost ... at tick" lines) and
+  learned the navigation keys at S+3 (j1 1658, seed 2 1661), so
+  `discover_navigation` (`client_core_frame.cpp` 692-697) moved
+  `driven_from` to S+3 in both; the import came after that (j1 at local
+  1688, seed 2 at local 1735), and in both re-steps the resim list names
+  the mirror only from S+3 (j1's `resim tick` lines start at 1658). An
+  undriven mirror is not idle: its navigation controller keeps the keys of
+  the live prediction at the import (hold-last of the newest relayed
+  frame). j1's newest frame at its import was 1663 = keys 02 (brake), the
+  true keys of 1656-1657, so its two undriven ticks braked exactly (v
+  15.147 -> 14.904 -> 14.664, the same 0.24 m/s per tick as the driven
+  ticks) - j1 did not escape the gap, it hit it with the right stale keys.
+  Seed 2's newest frame (1709) and seed 3's (1685) were keys 01, so their
+  undriven ticks pushed forward (+0.025 / +0.019 m/s per tick) while the
+  leader braked (`.local-tools/work/H4/keys_at.py` on the server journals).
+  Never corrected without snapshots. Pre-existing (no code changed); a
+  fidelity gap of the one state transfer (late join, and any resync whose
+  S precedes a mirror's `driven_from`). **Fix shape** (queued, roadmap item
+  4): key it on the import's rows, not on the local birth - at the import
+  (and every exact resync), `driven_from` = min(`driven_from`, S + 1) for
+  every mirror the server's state at S holds (a row at S:
+  `rows.count(remote.entity)`, `client_core_resync.cpp` ~497; seed 3's
+  mirror has `born_tick` 1669 > S, so a rule on `born_tick` <= S would
+  miss it), and the discovery rule (692-697) must not move it past S + 1
+  again for a discovery after the import (the server's state drove those
+  ticks). Two holes the fix step must close or name: a mirror not yet
+  navigated at the import is skipped by `replay_remotes` whatever its
+  `driven_from` (`!remote.navigation`), and a replayed tick with no relayed
+  frame in (S, t] (seed 2's relay ring starts at 1660, S + 2) takes
+  `input_at`'s nearest earlier frame, if the ring still has one at or
+  before S.
+- **J3** (`--hold-member-ms`): with 300 ms (the row's value) `events_parked`
+  0 everywhere - the joiner's first event (its Physicalize, 1860) comes
+  ~258 ticks after the member message (1602), so a 300 ms hold never parks
+  it. Adapted to 4500 ms (`j3b`): the Physicalize parked on clients 0-2
+  (1 each), released when the member message came, its stamp 1861 then
+  outside the history at local 1919: applied live ("the body set disagrees
+  until a snapshot re-anchors it"), no resync, `far` 1 on each; the
+  joiner's mirror 2.0 m off from 1920, 12.7 m at the end. That is S3's U5
+  (c) finding (above) - tied to D4, now plan step DX8 (the user's "你决定":
+  the orchestrator's (b') with U5 (c) built there) - observed live for
+  the first time (S3 had found it in the code, "seen in practice: none");
+  not a new failure. **Adapted to 4150 ms (`j3c`), which keeps the release
+  inside the history**: the Physicalize (1859) parked on clients 0-2 (1
+  each), released by the member message and applied by a rewind to 1858
+  (38-39 ticks deep), no resync, `far` 0; FINAL rows exact in all four
+  worlds, the joiner's mirror included - J3 PASS (parked > 0, journals
+  exact as J1's). The 300 ms arm's journals are exact as J1's too (FINAL
+  rows), with nothing parked.
+- **J2** (5 clients, no drive: client 1 leaves at 900, client 4 joins at
+  1500 and gets join order 1, no fallback; client 2 beamed to (60, 4, 15)
+  at 1300, client 4 to (60, 7.5, 15) at 1950): ball 4 lands on ball 2 at
+  1964 (2 pressed down 0.04 m), rests on it to ~2050 and rolls off; both
+  balls bit-equal in all five worlds' FINAL rows through 2250. The row's
+  P#63-vs-P#2 negative control needs a pre-M1 binary (plan §4 C2). PASS.
+- **J4**: a rejoin at once (`--rejoin 2:1200`) is a join inside the old
+  life's leaving interval: old life order 2 leaves at 1201 and stays to
+  R = 1203, the new life gets order 1 (released by client 1's leave at
+  1083) - different from the retiring 2 - and is added at R; its base 1275
+  >= R; no fallback. PASS. **The probe half FAILs**: client 1 beamed next
+  to P_Modul_01 at 1000 (the Pusher wakes ~1010) and leaves at 1080 in
+  contact with the moving Pusher; Unphysicalize at 1081 in every world,
+  its trafo resets at 1082, R = 1083; the Pusher is bit-equal through 1080
+  and then off in clients 0, 2, 3 (identically): 0.0085 m at 1082, 0.0267 m
+  at 1090, 0.025 m at rest for good (velocity 0.958 vs 0.815 m/s at 1082).
+  Localized: a SimTool straight replay of client 0's own journal (its
+  inputs and events, server-style) gives the server's Pusher exactly
+  (1080-1200), and a forced rewind of the same capture across the contact
+  period without the leave (anchor 1056, depth 10) replays exactly; the
+  clients applied the leave late (stamped at the server's next tick, ~20
+  ticks behind their lead) by two rewinds at local 1101 (restore 1080 for
+  the Unphysicalize, then restore 1081 for the trafo input). Not G-c's
+  signature (no leader-only wake; every non-leaver agrees). Pre-existing.
+  **Root cause (gate round, capture0 replayed with `--trace-body
+  P_Modul_01_Pusher --trace-ticks 1078 1104`, `h4_full/j4/trace/`):**
+  (1) *Which restore: the first (anchor 1080).* The second rewind's replay
+  is bit-identical to the first's (the Pusher's 20 "before replayed tick
+  1082..1101" lines of the two replays diff empty, and no "differs from the
+  live record" line follows the second restore), so the restore of 1081
+  adds nothing; the Pusher before replayed 1081 is the live (= server's)
+  1080 state exactly (v 1.203502, 0.445455, 0.221997), and the error is
+  made in the replayed step 1081 (server 162.746 at 1082, client 162.754).
+  (2) *Mechanism.* The leave is applied live before the rewind: the
+  drain unphysicalizes the leaver's mirror Ball_Stone_BMMO_30484126 at local
+  1101 (`unphysicalize_remote`, `client_core_lifecycle.cpp` ~413-425), then
+  `rewind_for_lifecycle` (~376-409, "a body that went away is simply
+  absent from the replay") restores 1080 into a world without it. That
+  record holds the ball in one friction system with the Pusher's two
+  contacts on P_Modul_01_Rinne; the restore drops a friction system with a
+  missing core *whole* (`physics_savestate_restore.cpp` 626-660: every
+  dist of the system skipped, its present cores named in
+  `contacts_dropped`) - the log: "object 'Ball_Stone_BMMO_30484126' is in
+  the savestate but not in the world", `contacts=4 systems=4 dropped=3
+  skipped=64` against the intact second restore's 5 / 5 / 0 / 0 (the
+  per-system warning line is past the log's cap here; the leave at 1001
+  prints it: "friction system 2: core 'Ball_Stone_BMMO_30484125' is
+  missing") - and the engine re-creates the contacts of every body named in
+  `contacts_dropped` (`rollback.hpp` ~1733) fresh from its per-body record
+  (`set_contacts` -> `try_to_generate_managed_friction`,
+  `physics_state.cpp` ~1440-1500): "contact restore of P_Modul_01_Pusher
+  at tick 1101: 2 re-created of 3 recorded (Ball_Stone_BMMO_30484126,
+  P_Modul_01_Rinne, P_Modul_01_Rinne)"; the Pusher's unit goes 1/2 -> 1/1.
+  The server never restores: `remove_player` (`physics_world.cpp` 811-834,
+  applied at 1081 before its step) unphysicalizes and destroys the ball,
+  and IVP deletes only the ball's contact points
+  (`IVP_Friction_System::delete_friction_distance`, `ivp_friction.cxx`
+  1001-1025: `remove_dist_from_system` unlinks that one dist, the pair
+  info is updated and a union-find split may follow; both cores' freeze
+  check values are reset) - the Pusher-Rinne points survive with their
+  accumulated state. So the client's step 1081 runs on two fresh
+  Pusher-Rinne points (and the Pusher's unreset freeze values) where the
+  server's runs on the kept ones: 0.0085 m at 1082, 0.025 m at rest. Which
+  of these field differences carries the 8.5 mm is not separated (no
+  server-side contact dump exists); they are all effects of the one
+  mechanism. The discriminating control: the forced rewind across the
+  contact without the leave (anchor 1056) goes through the same restore
+  path with the system intact and replays exactly. The same family as the
+  known "a friction contact a beam cannot carry, re-created narrowly"
+  residual (bridge v15). It needs a removal in a rewind's window of a body
+  that shares a friction system with another movable body (the leave at
+  1001 in the same run dropped a system of the ball and the floor only:
+  no other movable body, no error). **Fix shapes** (queued, roadmap item
+  4; not chosen here): (a) the restore salvages a system with a missing
+  core instead of dropping it - restore the system minus the missing
+  core's dists, pair and info, as IVP's deletion leaves it (the record
+  holds the data; the union-find split and the freeze-value resets must
+  then be reproduced too, or run by IVP); (b) keep the leaver's body until
+  the rewind, restore the anchor with it present (exact) and remove it in
+  the replay's own pre-step at its stamp, so IVP deletes it as on the
+  server (the births' made-inside-the-replay pattern, step LB / EL7's
+  drain order) - no new restore logic, but the live drain must hold the
+  removal of a late Unphysicalize until its rewind, and a stamp outside the
+  history then needs its own path (U5 (c), DX8).
+- **WG2-Je**: `candidate set drift` 0 in every run (every leave arm: j2,
+  j4, u9, the ctl arms); `trafo_life_mismatches` never logged.
+- **U9** (a room of 9 with K = 8: the server starts with `maximum_members:
+  9`, so the room is made with capacity 9, and as soon as it is created the
+  test config goes back to 8 and the console gets `reload` - before the
+  session start, which takes K; `work/H4/arch_server_ctl.sh` is the
+  launcher with a FIFO console). **Adapted (design and code disagree):**
+  §2.10 says a capacity raised by a reload *after the session started*
+  leads to the refusal; it cannot - a room's capacity is fixed when the
+  room is made (`room_manager.hpp:84`, `join` checks `r->capacity`), so a
+  room larger than K only comes from a reload between the room's creation
+  and the session start (or `maximum_members` above 64). Server: "8 slots"; client 2's immediate
+  rejoin "waits for a join order (every order below the 8 mechanism slots
+  is held or retiring)", then "gets a released join order" at R (life 2,
+  order 2); client 8, joining late with 8 live lives, "refused: physics
+  session full (8 mechanism slots)" and stays in the room (its log:
+  `session 1 ended: physics session full (8 mechanism slots)`); the room
+  runs to the end, server journal 3315/3315, drift 0. The designed
+  behaviour holds. **But every client starved** (starved = 2155..2342 of
+  ~2200 ticks, every own frame substituted, `lead 0.0`), and so did the
+  control without the FIFO and the reload (`u9ctl`, 8 clients): the
+  server's S1 lateness q50 is -2.6..-4.5 ticks for all eight members from
+  the first window (4-client 0 ms runs: +7.1..+7.4, e.g. h1_0_on), the
+  server's step p50 0.6 ms, all eight assigned tick 8 together. With
+  lead_adjust off (the default) nothing corrects a constant lateness. Not
+  U9's; pre-existing. **Measured (gate round, the journals' TICK wall
+  times, `.local-tools/work/H4/tick_clock.py`):** in u9ctl every client
+  steps tick T 39-69 ms (2.6-4.5 ticks) after the server does, the same
+  from its first tick (8) through +1000 - exactly the server's S1
+  lateness; in h1_0_on (4 members) 5-18 ms before it (after a -103 ms dip
+  at +1). From the journal's header to the first tick: 280-300 ms with 8
+  members, 124-128 ms with 4 - 165 ms more, which is ~11 ticks. The header
+  is written at `journal_.open` right after the SessionReady send
+  (`client_core.cpp` 587-596), before the airship zone, the spawn ghost
+  and the trafo piece sets (one per open life; 597-641), so the header ->
+  first-tick span holds that anchor work plus the wait for SessionAssign.
+  That is H3's RL1 LAN excess (roadmap item 7, "Run at H3"; plan step
+  DX5, the user's "选1": send SessionReady after the anchor work) with
+  twice the piece sets; what share of the 165 ms the piece sets take is
+  for DX5 to measure, and u9ctl (8 members, 0 ms, starved 0 expected) is
+  a recipe for DX5's check. No drive in these runs, so the substitution
+  (hold-last of keys 0) cannot have moved a ball; not replayed - the u9
+  runs took no captures.
+- **SIO-st** (`BMMO_IO_TEST_DELAY_MS=2000` on the server, LANE arm, 150
+  ms): the server's journal writer queue peaked at 408,269 bytes (5,964
+  without the delay), step time max 3.5 ms, starved 0, resyncs 0, server
+  journal 4081/4081, the four clients' captures replayed byte-identical to
+  their live journals. PASS.

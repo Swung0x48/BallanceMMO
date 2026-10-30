@@ -2154,6 +2154,85 @@ numbers 1-10 are unchanged.
      **(item 5)** P_Modul_37_Bridge on the session's first member, 20 mm at
      1482 (`f2_rejoin_B` client 0, deterministic in its capture's replay
      with every build back to rD0), cause not established.
+   - **Run at H4 (2026-10-29, the same client and server code as H3:
+     `build-agent-rH2s`, the Arch server built from 12ccae76 with the test
+     flags; headless batch 4, members, rejoins, I/O; `.local-tools/work/H4/`,
+     `h4_run.sh`; every run snapshots off, trafo inputs and placement on,
+     captures under `maps/arena-test/h4_full/`; 17 live runs, each judged
+     before the next, host load <= 24.8 %, every server journal N/N; the
+     clients judged on their FINAL rows from each capture's replay, the
+     airship spans and the balloon out; no code change):**
+     `world-agreement-gaps-design.md`, "As built (step H4)". PASS: IOF-c (a
+     fresh / stripped config gets `session_io` written back; a 300 ms spike
+     armed from the base line, its lag visible), RLT-c (covered 24-96 with
+     late 0 in every join run), WGQ7-ctl (bit on / off: late 0, covered 0,
+     FINAL rows exact in both), J1, J1b seeds 1 / 4 / 5, J2 (order 1
+     reused, the dropped ball bit-equal on the resting one in all five
+     worlds), J3 (adapted hold 4150 ms: parked 1 on each member, released
+     inside the history, FINAL rows exact; 300 ms parks nothing - the
+     joiner's first event comes ~258 ticks after its member message), J4's
+     join half, U9 (the rejoin waits for a released order, the 9th member
+     is refused "physics session full (8 mechanism slots)" and stays in the
+     room - reached by a reload between the room's creation and the start:
+     a reload after the start cannot raise a room's capacity, design §2.10
+     corrected in the note), SIO-st (server writer delay 2 s: queue peak
+     408 KB, starved 0, resyncs 0, 4/4 capture replays byte-identical),
+     WG2-Je (candidate set drift 0 in every leave arm). Known residual seen
+     live for the first time: S3's U5 (c), tied to D4 (plan step DX8: the
+     user's "你决定", the orchestrator's (b') with U5 (c)) - J3 at a 4500 ms
+     hold releases the parked birth outside the history, applied live, no
+     resync, the joiner's mirror 12.7 m off for good.
+     Queued from H4 (each pre-existing - no code changed - root-caused at
+     the gate round, and none a user decision): **(item 4) the import
+     re-step leaves a mirror undriven before its `driven_from`** - J1b
+     seeds 2 and 3, the late joiner's mirror of the braking leader
+     0.05-0.87 m off from the import and up to 13.8 m later (clients 0-2
+     exact, inputs identical): the re-step from S drives a remote only from
+     its `driven_from` (`client_core.cpp` 68-74 `replay_remotes`) or where a
+     live record names it (physicalized and navigated only), and the
+     joiner's live world set `driven_from` after S by either writer - seed
+     3: the mirror's catch-up birth, repeated under the loss, made live at
+     1669 (S 1655, `client_core_lifecycle.cpp` ~805), undriven 1656-1668;
+     seed 2 and j1 alike: mirrors made at S+1, keys learned at S+3,
+     `discover_navigation` (`client_core_frame.cpp` 692-697) moved
+     `driven_from` to S+3 before the import. An undriven mirror keeps the
+     live prediction's keys (hold-last of the newest relayed frame at the
+     import): j1's was a brake (1663, the true keys of S+1..S+2), so j1 hit
+     the same gap with the right stale keys; seeds 2 / 3 held forward
+     (1709 / 1685). The fix shape: at an import (and every exact resync),
+     `driven_from` = min(`driven_from`, S + 1) for every mirror with a row
+     at S (`client_core_resync.cpp` ~497 `rows`) - not keyed on the local
+     `born_tick`, which is 1669 > S for seed 3's mirror - and the discovery
+     rule must not move it past S + 1 for a discovery after the import;
+     the fix step also handles a mirror not navigated at the import
+     (`replay_remotes` skips it) and a replayed tick with no relayed frame
+     in (S, t] (seed 2's ring starts at S + 2); then j1b seeds 2 / 3 on
+     their captures. **(item 4) a removal in a rewind's window drops the
+     friction system the removed body shared** - J4's probe half: client 1
+     leaves in contact with the moving P_Modul_01 Pusher; the Pusher
+     bit-equal through 1080, then 0.0085 m at 1082 and 0.025 m for good on
+     every non-leaver (identically). The first rewind (anchor 1080) lets it
+     in - the second's replay is bit-identical to the first's: the leave is
+     applied live (the mirror destroyed) before `rewind_for_lifecycle`
+     restores 1080, the record's friction system of the ball and the
+     Pusher's two Rinne contacts has a missing core and is dropped whole
+     (`physics_savestate_restore.cpp` 626-660), and the Pusher's contacts
+     are re-created fresh (`physics_state.cpp` ~1440-1500, "2 re-created of
+     3 recorded"); the server's `remove_player` at 1081 lets IVP delete only
+     the ball's points (`ivp_friction.cxx` 1001-1025), the Rinne points keep
+     their state. Fix shapes (a) salvage the system minus the missing core
+     in the restore, (b) keep the body to the rewind and remove it in the
+     replay's pre-step at its stamp, as IVP does on the server - for the fix
+     step (design note "As built (step H4)"). **(item 2) 8 members at 0 ms
+     start late, measured**: U9 and its control without the FIFO and the
+     reload (`u9ctl`) starve - every client steps tick T 2.6-4.5 ticks after
+     the server from its first tick to the end (4 members, h1_0_on: 0.3-1.2
+     ticks before it), and its journal header -> first tick takes 280-300
+     ms against 124-128 ms with 4 members (header written right after the
+     SessionReady send, before the anchor work: one trafo piece set per
+     open life, 8 here). Joins H3's RL1 LAN excess above (plan step DX5, the
+     user's "选1"); DX5 measures the piece sets' share and takes u9ctl as a
+     check recipe (starved 0 expected).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 
