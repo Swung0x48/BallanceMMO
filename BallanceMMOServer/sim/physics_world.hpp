@@ -39,6 +39,7 @@
 #include <game/script_replay.hpp>
 #include <game/script_state.hpp>
 #include <game/checkpoint_phase.hpp>
+#include <game/force_block_alias.hpp>
 #include <game/tutorial_exit.hpp>
 #include <game/depth_test.hpp>
 #include <game/mirror_clones.hpp>
@@ -404,6 +405,9 @@ namespace bmmo::sim {
         void displace_probe_frames(float dx);
         size_t proximity_probe_count() const { return proximity_.probe_count(); }
         const bmmo::game::proximity_union& proximity() const { return proximity_; }
+        // FULL step WFA: the force blocks outside units and trafo sets by
+        // their world-independent names (game/force_block_alias.hpp).
+        const bmmo::physics::force_alias::table& force_aliases() const { return force_aliases_; }
         // SimTool's --probe-census --release-check (§7.2 V5): release the
         // union, and rewire it again (`union_rules`: §2.3 under the bit, with
         // `which`; otherwise the anchor's bit-clear rewire of every block).
@@ -579,6 +583,7 @@ namespace bmmo::sim {
         std::set<int> used_slots_;
         uint64_t join_orders_taken_ = 0;   // step M1: add_player's slot fallbacks (J2 says 0)
         bmmo::game::proximity_union proximity_;   // step G1 (game/proximity_union.hpp)
+        bmmo::physics::force_alias::table force_aliases_;   // FULL step WFA (built at the anchor)
         bmmo::game::proximity_union::rewire_options proximity_options() const;
         // Step G2: the tick place_probes() last placed for (tick() places
         // itself when this is not its tick).

@@ -40,6 +40,7 @@
 #include <game/menu_driver.hpp>
 #include <game/array_reads.hpp>
 #include <game/checkpoint_phase.hpp>
+#include <game/force_block_alias.hpp>
 #include <game/tutorial_exit.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_deactivate_pin.hpp>
@@ -2623,6 +2624,14 @@ namespace {
             // as a refused placement does.
             uint64_t probe_signature = 0;
             if (core_.proximity_union_active() && !rewire_proximity(probe_signature)) { ended_ = true; return; }
+            // FULL step WFA (world-agreement-gaps-design.md §4.3, "As built
+            // (step WFA)"): every other force block by its world-independent
+            // name, after the placement and the union's copy step, before the
+            // first capture (game/force_block_alias.hpp, one copy for every
+            // host).
+            bmmo::game::build_force_alias_table(force_aliases_, engine_->context(), proximity_.copied_blocks());
+            logf("%s", force_aliases_.summary().c_str());
+            install_controller_alias();
             // Step RK2 (record-format-gaps design 2.2): the array-read
             // census after the rewire and the placement, one log line per
             // unrecorded read; its counts go into the status line.
@@ -2804,16 +2813,18 @@ namespace {
         // The savestate's controller alias (physics_savestate.hpp, one
         // function per physics manager; world agreement §4.3, step Q7): the
         // trafo sets' names while the sets run, then the per-player units'
-        // force blocks while the union holds them, else the own name.
+        // force blocks while the union holds them, then (FULL step WFA)
+        // every other force block of the anchor's table, else the own name.
         void install_controller_alias() {
             if (!engine_) return;
-            if (!trafo_on_ && !proximity_.slots()) {
+            if (!trafo_on_ && !proximity_.slots() && !force_aliases_.built()) {
                 bmmo::physics::set_controller_alias(engine_->physics(), {});
                 return;
             }
             bmmo::physics::set_controller_alias(engine_->physics(), [this](const char* name, std::string& alias) {
                 if (trafo_on_ && bmmo::game::trafo_controller_alias(trafo_registry_, name, alias)) return true;
-                return proximity_.controller_alias(name, alias);
+                if (proximity_.controller_alias(name, alias)) return true;
+                return force_aliases_.alias(name, alias);
             });
         }
 
@@ -4881,6 +4892,7 @@ namespace {
         bmmo::game::navigation_graph navigation_;
         bool navigation_known_ = false;
         std::vector<uint32_t> outside_force_blocks_;         // step DX3: Gameplay_Ingame's SetPhysicsForce blocks
+        bmmo::physics::force_alias::table force_aliases_;    // FULL step WFA: built at the anchor
         std::vector<ball_row> ball_rows_;
         // The keys frame() set for the step (post_step's observe_input).
         const unsigned char* frame_keyboard_ = nullptr;

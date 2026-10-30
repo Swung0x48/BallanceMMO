@@ -52,7 +52,10 @@ namespace bmmo::physics::outside_controllers {
     // The controller names those blocks give their controllers: the only
     // names the named difference may cover.  An "rt:force/" controller of
     // any other block (a level's fan, P_Modul_18's 46475; an explosion's
-    // force) carries a real force and is never named.
+    // force) carries a real force and is never named (since FULL step WFA a
+    // blob records every other block's controller under its alias,
+    // "force:<owner>/<n>", physics/force_alias_table.hpp; these blocks keep
+    // their own names for this rule).
     inline std::vector<std::string> controller_names(const std::vector<uint32_t>& blocks) {
         std::vector<std::string> names;
         for (uint32_t id: blocks) names.push_back("rt:force/" + std::to_string(id));

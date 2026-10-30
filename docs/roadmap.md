@@ -1222,7 +1222,33 @@ numbers 1-10 are unchanged.
    70463). No row differed in these runs; a held force of another value
    would be lost. As the WAD-A entry above says, the §4.3 alias moves
    forward to every mechanism force block (design §2.9's SPD row): its own
-   step.
+   step. *Built at FULL step WFA (protocol 23): every force block outside
+   the Gameplay_Ingame five is named `force:<owner>/<n>` in every world;
+   retail L11 resync 0 "no live controller", 57 rows 0 written (design,
+   As built (step WFA)).*
+   **Queued (FULL step WFA, pre-existing): the bit-off fan target.** With
+   `proximity_union` clear the server's world runs `place_legacy`
+   (`proximity_union.hpp:14-21`; the fan's identity copy names the player
+   nearest to its script's ObjectBs) while a client rewires nothing and its
+   fan reads its own ActiveBall: two balls in the fan get the force on
+   different cores in different worlds (WFA's `wfa_stall_off`: client 1's
+   ball in the server's, client 2's own in client 2's; the restore logs 2
+   "no live controller" + 1 "not in the savestate" under matching names).
+   Shown on the previous build: its SimTool replays the run's server
+   journal 1833/1833 matched (the server's world, the force on client 1's
+   ball included, is the previous build's), and WFA's diff touches neither
+   placing path; H5b's WADA bit-off arm saw the worlds disagree (RT1's off
+   run had the force on one core in both worlds: only the name gap). The
+   union bit (the deployed default) is the
+   design's remedy; no bit-clear fix is designed, and whether the bit-clear
+   world path is kept at all is open for the close-out (with R7's legacy
+   removal). Also from WFA, recorded: the retail-only force block
+   `Level/Level_Init` walk 41 (the headless Level_Init holds parameter Ops
+   only; most likely BMLPlus's ExecuteBB helper block - the DLL names
+   `Level_Init` and exports `CreateSetPhysicsForce` - and the mod's only
+   `ExecuteBB::SetPhysicsForce` calls are commented out,
+   `BallanceMMOClient.h` ~1382, `BallanceMMOClient.cpp:905`) is never in a
+   server blob; the bit-on retail resync wrote 0 of 57 rows.
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire

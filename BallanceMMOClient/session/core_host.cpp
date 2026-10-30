@@ -59,6 +59,7 @@
 
 #include <game/array_reads.hpp>
 #include <game/depth_test.hpp>
+#include <game/force_block_alias.hpp>
 #include <game/host_backend.hpp>
 #include <game/hull_template.hpp>
 #include <game/mirror_clones.hpp>
@@ -947,6 +948,15 @@ namespace {
     };
     proximity_host_state proximity_host;
 
+    // FULL step WFA (world-agreement-gaps-design.md §4.3, "As built (step
+    // WFA)"): every force block outside the units and the trafo sets by its
+    // world-independent name ("force:<owner>/<n>"), built at the anchor after
+    // the union's copy step, cleared at the session's end.  This process
+    // allocates a level's CK_IDs later than the server's world (RT1: +1062 on
+    // Level 11), so the controllers' own names ("rt:force/<block id>") never
+    // matched a resync's blob.  File-scope (BallanceMMOClient takes no member).
+    bmmo::physics::force_alias::table force_alias_host;
+
     // Step RK2 (record-format-gaps design 2.2): the last anchor's array-read
     // census (game/array_reads.hpp anchor_log), for the status line.
     // File-scope (BallanceMMOClient takes no member).
@@ -1060,7 +1070,7 @@ namespace {
         (void)user;
         std::string alias;
         const bool found = (trafo_host.on && bmmo::game::trafo_controller_alias(trafo_host.registry, name, alias))
-            || proximity_host.union_.controller_alias(name, alias);
+            || proximity_host.union_.controller_alias(name, alias) || force_alias_host.alias(name, alias);
         if (!found || !out || alias.size() + 1 > out_size) return 0;
         std::memcpy(out, alias.c_str(), alias.size() + 1);
         return 1;
@@ -1141,8 +1151,9 @@ namespace {
         if (!trafo_host.on) return;
         const int bodies = bmmo::game::teardown_trafo_sets(context, trafo_host.registry, trafo_host.hooks);
         std::string error;
-        // Step Q7: the units' part of the alias stays while the union holds them.
-        if (proximity_host.union_.slots()) view.set_controller_alias(&controller_alias_cb, nullptr, error);
+        // Step Q7: the units' part of the alias stays while the union holds
+        // them; step WFA: the force blocks' table while the session runs.
+        if (proximity_host.union_.slots() || force_alias_host.built()) view.set_controller_alias(&controller_alias_cb, nullptr, error);
         else view.set_controller_alias(nullptr, nullptr, error);
         view.trafo_set_filter(false, error);
         trafo_host.hold.disarm();
@@ -2051,6 +2062,23 @@ void BallanceMMOClient::core_host_anchor() {
         }
         probe_signature = proximity_host.signature;
     }
+    // FULL step WFA: the force blocks outside the units and the trafo sets
+    // by their world-independent names (game/force_block_alias.hpp, the
+    // headless anchor's call), installed for the whole session.
+    {
+        // BMMO_FORCE_ALIAS_LIST=1: one line per force block (the census
+        // SimTool --probe-census --force-census prints for a headless world).
+        const char* list = std::getenv("BMMO_FORCE_ALIAS_LIST");
+        std::vector<std::string> lines;
+        bmmo::game::build_force_alias_table(force_alias_host, m_bml->GetCKContext(), proximity_host.union_.copied_blocks(),
+                                            list && *list == '1' ? &lines : nullptr);
+        for (const std::string& line: lines) logger_->Info("Physics session: %s", line.c_str());
+    }
+    logger_->Info("Physics session: %s", force_alias_host.summary().c_str());
+    if (!physics_view_.set_controller_alias(&controller_alias_cb, nullptr, error)) {
+        logger_->Warn("Physics session: the controller alias: %s", error.c_str());
+        error.clear();
+    }
     // Step RK2 (record-format-gaps design 2.2): the array-read census after
     // the rewire and the placement, as the headless anchor runs it.
     array_reads_host = bmmo::game::array_reads::anchor_log(
@@ -2292,6 +2320,13 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     // Step T4: the sets go with the session (hooks.ended did it when the core
     // still ran; a core that ended first - a SessionEnd - did too).
     trafo_teardown(physics_view_, m_bml->GetCKContext(), logger_);
+    // Step WFA: the force blocks' table and the alias go with the session
+    // (the union's units went with its release above).
+    if (force_alias_host.built()) {
+        force_alias_host.clear();
+        if (physics_view_.available() && !proximity_host.union_.slots() && !trafo_host.on)
+            physics_view_.set_controller_alias(nullptr, nullptr, error);
+    }
     if (host.own_replica.active && physics_view_.available())
         physics_view_.navigation_destroy(host.own_replica.entity.c_str(), error);
     if (host.body_guard && physics_view_.available()) {

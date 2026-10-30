@@ -171,7 +171,15 @@ namespace bmmo::session {
     //      (a Refresh in frames 9..15 wrote 0 in its world alone); no number
     //      taken (the step names none; server and clients are rebuilt
     //      together).
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 22;
+    //  23  every force block outside the units and the trafo sets named in
+    //      the savestate by its world-independent alias (FULL step WFA;
+    //      world-agreement-gaps-design.md §4.3, "As built (step WFA)";
+    //      physics/force_alias_table.hpp): a controller the blob carried as
+    //      "rt:force/<block id>" (this world's CK_ID) is "force:<owner>/<n>"
+    //      in every world, so the server's resync and join blobs name
+    //      controllers a client of another number would not match.  No
+    //      message layout changed; no journal version.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 23;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

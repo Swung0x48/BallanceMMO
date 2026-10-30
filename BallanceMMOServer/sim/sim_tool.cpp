@@ -524,6 +524,10 @@ namespace {
         // for the mechanism class (the clients' rewire, §2.3) and released
         // again; each state is checked against the first census.
         bool probe_release_check = false;
+        // FULL step WFA: --force-census with --probe-census: every force
+        // block of the world's scene (game/force_block_alias.hpp) with the
+        // name the controller alias gives it, and the table's summary.
+        bool force_census = false;
         // Step K0 (record-format-gaps-design.md §8, read-only tools):
         // --array-reads [--client-scope] [--array-reads-all]: the array-read
         // census of --level's session world at its anchor (design 2.2, S2;
@@ -1132,8 +1136,9 @@ namespace {
             else if (arg == "--ball-off-wake-only") out.ball_off_wake_only = true;      // step EG0
             else if (arg == "--ball-off-drop-all") out.ball_off_drop_all = true;        // step EG0
             else if (arg == "--queue-roundtrip") out.queue_roundtrip = true;            // step B7EG
-            else if (arg == "--probe-census" || arg == "--release-check")               // steps WG0, WG1 (one branch: C1061)
-                (arg == "--probe-census" ? out.probe_census : out.probe_release_check) = true;
+            else if (arg == "--probe-census" || arg == "--release-check" || arg == "--force-census")   // WG0, WG1, WFA (one branch: C1061)
+                (arg == "--probe-census" ? out.probe_census
+                 : arg == "--release-check" ? out.probe_release_check : out.force_census) = true;
             else if (!parse_trafo_arg(arg, next, out) && !parse_record_format_arg(arg, next, out)
                      && !parse_union_arg(arg, next, out)) return false;
         }
@@ -9493,8 +9498,8 @@ namespace {
                                        || args.portable_scripts_check || args.list_placement || args.resync_check
                                        || args.late_sector_check || !args.late_run.empty()))
             why = "--probe-census is a mode of its own (--level N [--world-options B] [--placement on])";   // step WG0
-        else if (args.probe_release_check && !args.probe_census)
-            why = "--release-check goes with --probe-census";   // step WG1
+        else if ((args.probe_release_check || args.force_census) && !args.probe_census)
+            why = "--release-check and --force-census go with --probe-census";   // steps WG1, WFA
         else if (args.globals_trace && (file_mode || !scene || args.late_sector_check || !args.late_run.empty()
                                         || args.resync_check || args.portable_scripts_check || args.list_placement))
             why = "--globals-trace is for the drop scene (--drop) and the sector scene (--savestate-check without "
@@ -9605,9 +9610,66 @@ namespace {
         census.union_mechanism = world->proximity().signature(bmmo::game::probe_class::mechanism);
         census.union_all = world->proximity().signature(bmmo::game::probe_class::all);
         int code = bmmo::sim::probe_census::print(census, world->level(), args.placement);
+        if (args.force_census) {
+            // Step WFA: the census again (the world's table was built at its
+            // anchor from the same scene) with each block's alias.
+            std::vector<std::string> lines;
+            bmmo::physics::force_alias::table again;
+            again.build(bmmo::game::force_block_census(context, world->proximity().copied_blocks(), &lines));
+            const auto& table = world->force_aliases();
+            const auto blocks = bmmo::game::force_block_census(context, world->proximity().copied_blocks());
+            for (size_t i = 0; i < blocks.size() && i < lines.size(); ++i) {
+                std::string alias;
+                const std::string raw = "rt:force/" + std::to_string(blocks[i].id);
+                if (!table.alias(raw.c_str(), alias)) alias = "(own name)";
+                std::string unit;
+                if (world->proximity().controller_alias(raw.c_str(), unit)) alias += " [unit alias " + unit + "]";
+                std::printf("wfa %s -> %s\n", lines[i].c_str(), alias.c_str());
+            }
+            std::printf("wfa level %d: world %s\n", world->level(), table.summary().c_str());
+            const bool same = again.names() == table.names();
+            std::printf("wfa level %d: census again %s\n", world->level(), same ? "SAME as the anchor's table" : "DIFFERS from the anchor's table");
+            if (!same && code == 0) code = 3;
+            if (table.duplicates() && code == 0) code = 3;
+        }
         if (args.probe_release_check) {
             const int v5 = probe_release_check(*world, sel, census, static_cast<uint8_t>(args.mechanism_slots));
             if (code == 0) code = v5;
+        }
+        if (args.force_census && args.mechanism_slots > 0) {
+            // Step WFA: the units copied K times under the union rules (the
+            // clients' rewire, §2.10): every force block the units do not
+            // alias keeps the anchor table's name (the copies are left out of
+            // the walk), and no copy is in the census.
+            world->release_proximity();
+            const std::string error = world->rewire_proximity(true, bmmo::game::probe_class::mechanism,
+                                                              static_cast<uint8_t>(args.mechanism_slots), &sel);
+            const auto copies = world->proximity().copied_blocks();
+            bmmo::physics::force_alias::table slotted;
+            slotted.build(bmmo::game::force_block_census(context, copies));
+            size_t unit = 0, same = 0, differ = 0, copied = 0;
+            const std::set<CK_ID> copy_set(copies.begin(), copies.end());
+            for (const auto& [id, name]: slotted.names()) {
+                const std::string raw = "rt:force/" + std::to_string(id);
+                std::string by_unit, by_anchor;
+                if (copy_set.count(static_cast<CK_ID>(id))) ++copied;
+                if (world->proximity().controller_alias(raw.c_str(), by_unit)) {
+                    ++unit;
+                    continue;
+                }
+                if (world->force_aliases().alias(raw.c_str(), by_anchor) && by_anchor == name) ++same;
+                else {
+                    ++differ;
+                    std::printf("wfa level %d: K %d: %s -> %s, the anchor's %s\n", world->level(), args.mechanism_slots,
+                                raw.c_str(), name.c_str(), by_anchor.empty() ? "(none)" : by_anchor.c_str());
+                }
+            }
+            std::printf("wfa level %d: K %d (%s, %zu copied blocks): %zu named, %zu unit-aliased, %zu same as the anchor's, "
+                        "%zu differ, %zu copies in the census, %zu duplicated\n", world->level(), args.mechanism_slots,
+                        error.empty() ? "rewired" : error.c_str(), copies.size(), slotted.named(), unit, same, differ, copied,
+                        slotted.duplicates());
+            if ((!error.empty() || differ || copied || slotted.duplicates()) && code == 0) code = 3;
+            world->release_proximity();
         }
         std::fflush(stdout);   // before the world goes: the engine's shutdown may not return through main
         return code;

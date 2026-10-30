@@ -10,10 +10,12 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
 #include <physics/callback_queue_plan.hpp>
+#include <physics/force_alias_table.hpp>
 #include <physics/outside_controllers.hpp>
 #include <session/correction.hpp>
 #include <session/input_relay.hpp>
@@ -5991,4 +5993,75 @@ TEST(RollbackEngineGlobals, AResyncReStepRunsAtTheServerBlobsGlobals) {
     }
     EXPECT_NEAR(clocks[0], 9.0 * 2.0 * kDt, 1e-12) << "nine server steps (the clock advanced by the re-step alone)";
     EXPECT_NEAR(clocks[0] - clocks[1], kDt, 1e-12) << "the control steps tick 2 at half the server's step";
+}
+
+// FULL step WFA (world-agreement-gaps-design.md §4.3, "As built (step WFA)";
+// physics/force_alias_table.hpp): the force blocks outside the units and the
+// trafo sets by "force:<owner>/<n>".  Two worlds of one level whose CK_IDs
+// differ by RT1's measured offset (the retail process allocates Level 11's
+// 1062 ids later than the server's world): every controller name one world's
+// capture records is the name the other world's restore matches its own
+// controller of the same block under.
+TEST(ForceAliasTable, RoundTripAcrossAnIdOffset) {
+    using bmmo::physics::force_alias::block;
+    using bmmo::physics::force_alias::table;
+    constexpr uint32_t kOffset = 1062;
+    const std::vector<block> server = {
+        {46734, "P_Modul_26_Sack", 41, false},
+        {57329, "P_Modul_26_Sack001", 41, false},
+        {45497, "P_Modul_08_Schaukel", 17, false},
+        {45498, "P_Modul_08_Schaukel", 23, false},
+        {26432, "Gameplay_Ingame", 12, true},   // an outside block: 9.3 (b) names it by its own name
+    };
+    std::vector<block> retail = server;
+    for (block& b: retail) b.id += b.outside ? 0 : kOffset;
+    table a, b;
+    a.build(server);
+    b.build(retail);
+    EXPECT_EQ(a.named(), 4u);
+    EXPECT_EQ(a.outside(), 1u);
+    EXPECT_EQ(a.duplicates(), 0u);
+    for (const block& s: server) {
+        if (s.outside) continue;
+        const std::string raw_a = "rt:force/" + std::to_string(s.id);
+        const std::string raw_b = "rt:force/" + std::to_string(s.id + kOffset);
+        std::string alias_a, alias_b, missing;
+        ASSERT_TRUE(a.alias(raw_a.c_str(), alias_a)) << raw_a;
+        ASSERT_TRUE(b.alias(raw_b.c_str(), alias_b)) << raw_b;
+        EXPECT_EQ(alias_a, alias_b) << raw_a << " / " << raw_b;
+        EXPECT_EQ(alias_a, "force:" + s.owner + "/" + std::to_string(s.walk));
+        // The raw id of one world names nothing (or another block) in the other.
+        if (b.alias(raw_a.c_str(), missing)) EXPECT_NE(missing, alias_a) << raw_a;
+    }
+    // Every alias names one block (the restore matches by name).
+    std::set<std::string> distinct;
+    for (const auto& [id, name]: a.names()) EXPECT_TRUE(distinct.insert(name).second) << name;
+    // Kept names: an outside block, another controller, a malformed name.
+    std::string out;
+    EXPECT_FALSE(a.alias("rt:force/26432", out)) << "Gameplay_Ingame's blocks keep their own names (DX3)";
+    EXPECT_FALSE(a.alias("bmmo:force/1", out));
+    EXPECT_FALSE(a.alias("sys:unknown", out));
+    EXPECT_FALSE(a.alias("rt:force/", out));
+    EXPECT_FALSE(a.alias("rt:force/46734x", out));
+    EXPECT_FALSE(a.alias("rt:force/-46734", out));
+    EXPECT_FALSE(a.alias(nullptr, out));
+    EXPECT_FALSE(a.alias("rt:force/99999", out)) << "a block the table does not hold";
+    // Fail closed: two blocks that would share a name get none.
+    table dup;
+    dup.build({{100, "Owner", 3, false}, {200, "Owner", 3, false}, {300, "Owner", 4, false}, {400, "", 5, false}});
+    EXPECT_EQ(dup.named(), 1u);
+    EXPECT_EQ(dup.duplicates(), 2u);
+    EXPECT_EQ(dup.unnamed(), 1u);
+    EXPECT_FALSE(dup.alias("rt:force/100", out));
+    EXPECT_FALSE(dup.alias("rt:force/200", out));
+    EXPECT_TRUE(dup.alias("rt:force/300", out));
+    EXPECT_EQ(out, "force:Owner/4");
+    EXPECT_NE(dup.summary().find("[dup force:Owner/3]"), std::string::npos) << dup.summary();
+    // An empty table keeps every name.
+    table empty;
+    EXPECT_FALSE(empty.built());
+    EXPECT_FALSE(empty.alias("rt:force/46734", out));
+    a.clear();
+    EXPECT_FALSE(a.built());
+    EXPECT_FALSE(a.alias("rt:force/46734", out));
 }

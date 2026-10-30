@@ -6110,3 +6110,135 @@ control") is therefore shown on 3 of the 9 `core_ref_s12` arms. H5b is
 the FULL close-out, so no later step absorbs them: they are recorded as
 an OPEN FULL item for the orchestrator (`.local-tools/work/CHAIN3/queue.md`,
 "Chain FULL - H5b"), not deferred to a step.
+
+### As built (step WFA, FULL close-out, 2026-10-30): every force block outside a unit by the §4.3 alias
+
+RT1 (run 9, `e504776c`) measured WAD-A on retail: every resync import logged
+"no live controller 'rt:force/<id>'" for the force blocks outside the units -
+`P_Modul_26_Sack` (server 46734, retail 47796), `P_Modul_08_Schaukel` (45497 /
+46559) - and the fan's force on a ball matched only under the bit (69905 /
+70463 with it off). Cause: physics_RT names a force controller after its block
+(`PhysicsForce.cpp:120`, engine change #18) and the retail process allocates
+Level 11's CK_IDs 1062 later than the server's world. The §2.9 SPD row settles
+the fix (bring §4.3's alias forward to every mechanism force block); built:
+
+- **Census.** `rt:force/<block id>` is the only controller name that carries a
+  CK_ID: IVP's own controllers are `sys:unknown` (`ivp_controller.hxx:117`),
+  the bridge's navigation leaves `bmmo:force/<leaf>` (`ball_navigation.cpp:27`),
+  and the PreSimulate queue, which names blocks by id, never travels (the
+  portable record has no queue section; the travelling restore keeps the live
+  queue). SimTool `--probe-census --force-census [--player-mechanisms K
+  --release-check]` (`.local-tools/work/WFA/census.py`, 39 runs: L1-L13, the
+  arena as 13, placement on with K 0 and 4, placement off): 27-61 named force
+  blocks per level, 5 outside (Gameplay_Ingame), **0 duplicated, 0 unnamed** on
+  every level; placement off's names a subset of on's with 0 differing; under
+  the union with K = 4 (36-702 copied blocks) every block the units do not
+  alias keeps the anchor's name (0 differ) and no copy enters the census.
+  WFA-CENSUS: PASS.
+- **The name.** `force:<owner>/<n>`: the root script's owner and the block's
+  position in the pre-order walk of its root (the root is 0) - the units'
+  shape (§4.3) without the slot. The slot copies are left out of the walk
+  (with their whole sub-trees), so n is the pre-copy position whether or not
+  a world copied units (the server copies class `all`, a client `mechanism`).
+  A name two blocks would share is given to neither (fail closed; none on
+  L1-L13). Gameplay_Ingame's blocks (`navigation_graph.hpp`
+  `outside_force_blocks`) keep their own names: DX3's named difference (9.3
+  (b), `outside_controllers.hpp`) matches them by `rt:force/<id>` in the same
+  process. `physics/force_alias_table.hpp` (CK-free: the table, the parse,
+  the summary) and `game/force_block_alias.hpp` (the scene census, one copy
+  for every host).
+- **One alias chain, installed always.** The trafo sets, then the units, then
+  this table, then the own name - in `physics_world::boot` (installed
+  unconditionally now; it was installed only with trafo_inputs or the units),
+  the headless `install_controller_alias` (removed only when nothing is
+  aliased) and the retail `controller_alias_cb` (core_host.cpp, file-scope
+  `force_alias_host`; installed at every anchor, removed at the session's
+  end). Each host builds the table at its anchor after the placement's apply
+  and the union's copy step, before the first capture (server: end of
+  `physics_world::anchor`'s union block; headless: after `rewire_proximity`;
+  retail: after `proximity_rewire`), and logs "force block aliases: N named,
+  D duplicated, 5 outside (Gameplay_Ingame), U unnamed"
+  (`BMMO_FORCE_ALIAS_LIST=1` lists every block on retail).
+- **Protocol 23** (adaptation: the plan expected a bump only if the blob's
+  names change on the wire, and they do - the server's resync and join blobs
+  carry the new names). No message layout, no blob format, no journal
+  version. No IVP or physics_RT change; no BallanceMMOClient member.
+- **Retail differs by one block, harmlessly.** The retail scene has a force
+  block the headless one lacks, `Level/Level_Init` walk 41 (48 named vs the
+  server's 47 on L11); its controller can never be in a server blob, so at
+  worst it is "live ... not in the savestate", as with its raw name before.
+
+Results: unit test `ForceAliasTable.RoundTripAcrossAnIdOffset` (two tables
+1062 ids apart: every alias equal; outside, malformed and absent names kept;
+duplicates fail closed); 685/685 tests; GCC syntax 31 ok and the Arch server
+build of the tree; x86 CLIENT-BUILD-OK. Wire check `rRSX` vs `rWFA` over
+`core_ref_s12` (+ `core_ref_s12h`'s h1_150) with `--accept-protocol 22`: every
+send equal except the two type-8 messages that carry the protocol (2 per
+client), journals IDENTICAL on all 36; `resync_snapoff` c2's replay now logs
+"no live controller 'rt:force/47099'" (the old server's raw name for the
+Sack's held force against the live `force:P_Modul_26_MF/12`; journal still
+IDENTICAL), so that arm was re-captured with the protocol-23 server as
+`maps/arena-test/core_ref_wfa/resync_snapoff` (its README): client 2's
+resync "27 rows: 0 written, 27 equal", skipped=0, 0 "no live controller", the
+RESYNC record's blob carries `force:P_Modul_26_MF/12`; replayed ALL SAME and
+IDENTICAL (`PACER_AUTO=0`). Retail two-copy L11, RT1's stall recipe
+(`scripts/retail/wfa_stall`): 0 "no live controller" on both clients (RT1's
+stall2: the Sack's), "57 rows: 0 written, 57 equal", skipped=0 (RT1: 4); the
+blob carries `force:P_Modul_26_MF/19` (server 46734, retail 47796),
+`force:P_Modul_26_MF001/19` and the fan's `unit:P_Modul_18_MF002/11/S0`, `/S1`.
+The bit-off control (`wfa_stall_off`): the fan's force carries the same name
+in both worlds (`force:P_Modul_18_MF002/11` in the blob and live; RT1's off
+run: `rt:force/69905` / `rt:force/70463` on one core), but it sits on another
+core - client 1's ball in the server's world, client 2's own ball in client
+2's - so the restore still logs "no live controller" for it (2) and "live
+... not in the savestate" (1); the resync applied 0 written / 57 equal. That
+is the bit-off world disagreement itself, which the union bit - the deployed
+default - removes; not a naming gap. With the bit clear the server's world
+runs `place_legacy` (`proximity_union.hpp:14-21`: the fan's identity copy
+names the player nearest to one of its script's ObjectBs - client 1's ball at
+the fan's -2.2 m side), while a client rewires nothing (`core_host.cpp`'s
+anchor, "With the bit clear nothing is rewired") and its fan reads
+CurrentLevel's ActiveBall, its own ball; RT1's off run had both balls wood
+and the force on one core, so only its name showed. H5b's WADA bit-off arm
+saw the same disagreement ("the worlds disagree").
+
+Gate round (review findings):
+- *The bit-off residual is pre-existing.* WFA changes neither path that
+  places the force (`proximity_union.hpp`'s `place_legacy` and the retail
+  anchor's bit-clear branch are not in the diff). The previous build's
+  SimTool (`rRSX`) replays `wfa_stall_off`'s server journal 1833 / 1833
+  matched, 0 checkpoint mismatches, as WFA's does: the server's world, the
+  fan's force on client 1's ball included, is the previous build's. RT1's
+  off run on the previous build had the force on the resyncing client's own
+  ball in both worlds (`core of 'Ball_Wood_BMMO_1044140481'`: blob
+  'rt:force/69905', live 'rt:force/70463') - only the name gap, which made
+  "no live controller" certain on every bit-off import; the target
+  disagreement's earlier evidence is H5b's WADA bit-off arm (above). The criterion's lines therefore never
+  reached 0 with the bit clear; WFA removes the naming half, the target half
+  is the bit-off disagreement the bit exists to remove. Queued in
+  `roadmap.md` §4 item 5 ("the bit-off fan target"); no bit-clear fix is
+  designed.
+- *Owners with several roots.* The name carries no script, so two roots of
+  one owner (`All_Balls`, `Level`) rely on their force blocks' walk
+  positions never colliding: 0 duplicates on L1-L13 in the server's scene.
+  A world with an extra root of such an owner whose block took the same n
+  would drop both names in that world only (fail closed: "no live
+  controller", never a wrong restore). Kept as the units' shape; the
+  census line counts duplicates on every host's anchor.
+- *The retail-only block's cause.* The headless scene's Level_Init
+  (`--describe-script Level_Init`, L11) holds parameter Ops only, so walk 41
+  is added in the game process at load - most likely BMLPlus's ExecuteBB
+  helper block (the DLL names `Level_Init` and exports
+  `ExecuteBB::CreateSetPhysicsForce`; not traced to the line, the BML
+  sources are not in the tree). Nothing drives it: the mod's only
+  `ExecuteBB::SetPhysicsForce` calls are commented out
+  (`BallanceMMOClient.h` ~1382, `BallanceMMOClient.cpp:905`). A block of
+  one process: never in a server blob; the bit-on retail resync wrote 0 of
+  57 rows.
+- *resync_at150* replays IDENTICAL from its protocol-22 capture, but holds
+  no non-unit force at its import, so it does not exercise the alias; its
+  re-capture with the protocol-23 server is deferred to FULL (the step's
+  live runs were spent: one headless, two retail). `core_ref_s12` stays
+  protocol 22: a wire check over it needs `--accept-protocol 22` and shows
+  `resync_snapoff` c2's "no live controller 'rt:force/47099'" with an
+  IDENTICAL journal (expected; `core_ref_wfa` holds that arm at 23).

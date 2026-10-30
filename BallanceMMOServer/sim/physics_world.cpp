@@ -126,13 +126,17 @@ namespace bmmo::sim {
         // Step Q7 (world-agreement-gaps-design.md §4.3): one alias function
         // per physics manager - the trafo sets' names first, then the
         // per-player units' force blocks ("unit:<owner>/<n>/S<k>", slot 0
-        // included), then the own name.
+        // included), then (FULL step WFA, §4.3 "As built (step WFA)") every
+        // other force block of the scene ("force:<owner>/<n>", the table the
+        // anchor builds), then the own name.  Installed always: the force
+        // blocks outside units are named by CK_ID too, and a retail
+        // process's ids are not this world's.
         const bool unit_alias = options_.proximity_union && options_.mechanism_slots != 0;
-        if (options_.trafo_inputs || unit_alias)
-            bmmo::physics::set_controller_alias(engine_->physics(), [this, unit_alias](const char* name, std::string& alias) {
-                if (options_.trafo_inputs && bmmo::game::trafo_controller_alias(trafo_registry_, name, alias)) return true;
-                return unit_alias && proximity_.controller_alias(name, alias);
-            });
+        bmmo::physics::set_controller_alias(engine_->physics(), [this, unit_alias](const char* name, std::string& alias) {
+            if (options_.trafo_inputs && bmmo::game::trafo_controller_alias(trafo_registry_, name, alias)) return true;
+            if (unit_alias && proximity_.controller_alias(name, alias)) return true;
+            return force_aliases_.alias(name, alias);
+        });
         // Trafo-replication design 2.4 step 6 (T1's level reference): the 8
         // original trafo scripts' values as Balls.nmo has them, captured on
         // the first tick they exist - before any original explosion - and
@@ -332,6 +336,12 @@ namespace bmmo::sim {
                     + " per-player units are outside the mechanism class (no client copies them); the signature "
                       "counts them and every member will be refused (probe mismatch)");
         }
+        // FULL step WFA: every force block outside the units and the trafo
+        // sets by its world-independent name (game/force_block_alias.hpp),
+        // after the placement's apply and the union's copy step, before the
+        // session's first capture.
+        bmmo::game::build_force_alias_table(force_aliases_, context, proximity_.copied_blocks());
+        log("world: " + force_aliases_.summary());
         script_hooks_ = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(manager));   // step HU1: one copy (game/host_backend.hpp)
         // The level's own checkpoint activation, held (game/sector_activation.hpp):
         // update_sectors() is the only path that runs Gameplay_SectorManager in

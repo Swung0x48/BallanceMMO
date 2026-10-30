@@ -191,7 +191,9 @@ namespace bmmo::physics {
     // its own state under the server's rows (TR3's H7: 6.6e-7 m).  A host
     // that knows a name every world gives a controller installs this: the
     // capture records that name, and the restore matches every live
-    // controller under it.  It returns false to keep the name.  Per physics
+    // controller under it (the hosts' chain: the trafo sets, the units,
+    // then every other force block but Gameplay_Ingame's - FULL step WFA,
+    // physics/force_alias_table.hpp).  It returns false to keep the name.  Per physics
     // manager; an empty function removes it.  Not thread-safe against a
     // capture or a restore of the same manager.
     void set_controller_alias(CKIpionManager* physics, std::function<bool(const char* name, std::string& alias)> alias);
