@@ -391,6 +391,7 @@ namespace bmmo::session {
         s.held_stale_seen_.clear();
         s.held_header_known_ = false;
         s.acked_header_known_ = false;
+        s.starved_run_ = 0;   // step DX6: the run is this session's (max and resyncs are counters, as reports=)
         s.held_floor_ = 0;
         s.resync_window_ = false;
         reset_held_epoch("a new session");
@@ -802,6 +803,7 @@ namespace bmmo::session {
         // the limiter still owes: its full snapshot replaces the world.
         s.resync_in_flight_ = false;
         s.resync_owed_ = false;
+        s.starved_run_ = 0;   // step DX6: a new base starts the starved run over
         if (s.assigned_) {
             // Resync (design 9.2): numbering restarts from the server's
             // current tick; the next full snapshot rebuilds every body.

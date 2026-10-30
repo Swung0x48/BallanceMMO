@@ -2160,7 +2160,11 @@ numbers 1-10 are unchanged.
      runner stall at the join).
      Queued from H3: **(item 2)** the F2-a re-pacing gap - the user's
      choice of (a) lead_adjust on by default, (b) a resync after N starved
-     reports, (c) a larger LAN joiner floor, (d) accept; **RL1 LAN excess**
+     reports, (c) a larger LAN joiner floor, (d) accept; **built at step
+     DX6** (option (b), the orchestrator's choice: 330 starved reports in a
+     row ask for a resync; a LAN joiner stalled 300 ms after SessionReady
+     resynced once and was starved 0 after; resync-and-sector-timing-design.md
+     "As built (step DX6)"); **RL1 LAN excess**
      (the cause above; options: send SessionReady after the anchor's work -
      a shared-core change, which also takes that work out of a LAN
      joiner's budget, F2-a's "normal ~100 ms" - or count the work into the

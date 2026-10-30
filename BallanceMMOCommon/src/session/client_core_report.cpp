@@ -233,7 +233,7 @@ namespace bmmo::session {
                      "resync: restepped=%llu/%llu depth=%llu states=%llu stale=%llu refused=%llu deferred=%llu/%llu "
                      "snaps_dropped=%llu scripts_refused=%llu blobs_refused=%llu destroyed=%llu unexplained=%llu "
                      "unattributed=%llu unmapped=%llu unportable=%llu holds=%llu/%llu hold_max=%.0f window_rew=%llu subsumed=%llu amended=%llu resent=%llu join_wakes_withheld=%llu "
-                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f reach=%u/%u/%zu cap=%u/%.2f/%.3f/%llu wait=%u%s%s%s%s",
+                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f reach=%u/%u/%zu cap=%u/%.2f/%.3f/%llu wait=%u starve_run=%u/%u/%llu%s%s%s%s",
                      static_cast<int>(s.phase_), s.session_, current_tick(), s.assigned_ ? 1 : 0, s.held_ ? 1 : 0,
                      static_cast<long long>(s.frames_since_anchor_),
                      static_cast<unsigned long long>(s.inputs_sent_), static_cast<unsigned long long>(s.events_sent_),
@@ -438,6 +438,10 @@ namespace bmmo::session {
                      s.rollback_.rewind_cost().replay_ms_per_tick(),
                      static_cast<unsigned long long>(s.rollback_.rewind_cost().samples()),
                      static_cast<unsigned>(s.server_wait_),
+                     // starve_run=run/max/resyncs (step DX6): the consecutive
+                     // starved reports now, the longest run, and the resyncs
+                     // the starved rule asked for.
+                     s.starved_run_, s.starved_run_max_, static_cast<unsigned long long>(s.starved_resyncs_),
                      trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str());
     }
 

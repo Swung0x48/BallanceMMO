@@ -1935,6 +1935,84 @@ namespace {
         EXPECT_EQ(state_of(core).held_header_tick_, 124u);
     }
 
+    // Step DX6 (F2-a, option (b)): kStarvedResyncReports consecutive
+    // starved reports of the current base (acked < tick in the relay
+    // header) ask for one resync; a clean report, a new base and an applied
+    // SessionLead start the run over, a running slew or a pending resync
+    // counts nothing; the run starts over after each request (sent or held
+    // back by the limiter), so another needs as many again.
+    TEST(SessionClientCoreRelay, AClientStarvedOnEveryReportAsksForAResync) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        auto& st = state_of(core);
+        const uint32_t n = bmmo::session::kStarvedResyncReports;
+        ASSERT_EQ(n, 330u);
+        ASSERT_EQ(bmmo::session::core_config{}.starved_resync_reports, n);
+        uint32_t tick = 125;
+        uint32_t epoch = 120;
+        const auto starved = [&](uint32_t t) {
+            bmmo::session_remote_input_msg m = relay_message(t, epoch);
+            m.acked = t - 1;
+            core.on_session_remote_input(m);
+        };
+        const auto fed = [&](uint32_t t) { core.on_session_remote_input(relay_message(t, epoch)); };
+        for (uint32_t i = 0; i + 1 < n; ++i) starved(++tick);
+        fed(++tick);
+        EXPECT_EQ(st.starved_run_, 0u) << "a clean report starts the run over";
+        EXPECT_EQ(st.starved_run_max_, n - 1);
+        for (uint32_t i = 0; i + 1 < n; ++i) starved(++tick);
+        EXPECT_EQ(st.resyncs_sent_, 0u) << "N - 1 in a row: nothing";
+        const size_t sent_before = fake.sent.size();
+        size_t from = fake.calls.size();
+        starved(++tick);
+        EXPECT_EQ(st.resyncs_sent_, 1u);
+        EXPECT_EQ(st.starved_resyncs_, 1u);
+        EXPECT_EQ(st.starved_run_, 0u);
+        ASSERT_EQ(fake.sent.size(), sent_before + 1);
+        EXPECT_EQ(decode<bmmo::session_resync_msg>(fake.sent.back().first).session, 9u);
+        {
+            const std::vector<std::string> expected = {
+                "now:resync_limiter", "send:0",
+                "log:0:resync requested (input starved on 330 reports in a row) at tick 125",
+                "log:0:starved: 330 server ticks in a row without our frame (the server substituted each); resync 1 of "
+                "this rule asked for at tick 125"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_NE(core.status_text({}).find(" starve_run=0/330/1"), std::string::npos);
+        // In flight: another N asks nothing (the limiter), the run starts over.
+        for (uint32_t i = 0; i < n; ++i) starved(++tick);
+        EXPECT_EQ(st.resyncs_sent_, 1u);
+        EXPECT_EQ(st.starved_resyncs_, 1u);
+        EXPECT_EQ(st.starved_run_, 0u);
+        // A slew of a SessionLead or a pending resync: not counted.
+        starved(++tick);
+        EXPECT_EQ(st.starved_run_, 1u);
+        core.on_session_assign(assign_message(9, 2000));
+        epoch = 2000;
+        tick = 2000;
+        EXPECT_EQ(st.starved_run_, 0u) << "a new base starts the run over";
+        ASSERT_TRUE(core.resync_pending());
+        starved(++tick);
+        EXPECT_EQ(st.starved_run_, 0u) << "the answer is pending";
+        st.resync_pending_ = false;
+        st.lead_slew_.start(1, 3);
+        starved(++tick);
+        EXPECT_EQ(st.starved_run_, 0u) << "the server's controller is moving us";
+        st.lead_slew_ = {};
+        // The base's next run of N: one more request (2 s past the first).
+        fake.advance(std::chrono::milliseconds(3000));
+        for (uint32_t i = 0; i < n; ++i) starved(++tick);
+        EXPECT_EQ(st.resyncs_sent_, 2u);
+        EXPECT_EQ(st.starved_resyncs_, 2u);
+        // A new session (here with the rule off: 0).
+        bmmo::session::core_config off;
+        off.starved_resync_reports = 0;
+        ASSERT_FALSE(core.begin(start_message(9, 3), off).refused);
+        EXPECT_EQ(st.starved_run_, 0u) << "a new session starts the run over";
+        EXPECT_EQ(st.starved_resyncs_, 2u) << "a counter, as reports=";
+    }
+
     // Late-player plan step 12 (design 2.5): every first arrival of a server
     // tick's header is a relay lag sample (current - header tick); the reach
     // is clamp(p99 of the last 4 windows + 8, 48, 120), re-derived at each
@@ -5487,7 +5565,7 @@ namespace {
         EXPECT_NE(text.find(" lag=40/30 "), std::string::npos) << "the 99th percentile: " << text;
         EXPECT_NE(text.find(" amend_failures=0 rebases=7 resyncs=0/0 "), std::string::npos) << text;
         EXPECT_NE(text.find(" deferred=0 activations=8 scr=0/0/0/0/9 t_rest="), std::string::npos) << text;
-        const std::string tail_text = "input: reports=4 starved=1 (25%) worst=0 lead=0.0 reach=48/48/96 cap=48/0.00/0.000/0 wait=0";
+        const std::string tail_text = "input: reports=4 starved=1 (25%) worst=0 lead=0.0 reach=48/48/96 cap=48/0.00/0.000/0 wait=0 starve_run=0/0/0";
         ASSERT_GE(text.size(), tail_text.size());
         EXPECT_EQ(text.substr(text.size() - tail_text.size()), tail_text) << "the last field, not cut off";
         EXPECT_GT(text.size(), 256u) << "past the first buffer, whole";

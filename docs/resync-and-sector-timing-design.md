@@ -3538,6 +3538,121 @@ placement on) through `.local-tools/work/H3/h3_run.sh` with captures and
   took from the server's blob instead; cause not established.
   Queued (roadmap section 4 item 5), with this capture as its repro.
 
+## As built (step DX6, FULL, 2026-10-30): F2-a - a client that stays starved asks for a resync
+
+The orchestrator's choice for F2-a (the user, 2026-10-29: "你决定"): option
+(b) of the H3 note above. One rule in the shared core, so the headless client
+and the retail mod (session core on) run it alike; no protocol change, no
+server change, the legacy path untouched.
+
+- **The rule** (`client_core_held.cpp` `note_starved_report`, called from
+  `note_held_section` where the starved report was already counted): a report
+  is starved when the relay header's `acked` is below its `tick` (the server
+  had no frame of ours for the tick it simulated and substituted one), counted
+  once per server tick of the current base, as `input: starved=` always was.
+  `starved_run_` counts them in a row; a clean report, a new base
+  (`on_session_assign`, start or resync), a new session (`begin`) and an
+  applied SessionLead (`on_session_lead`: the server's lead controller has
+  taken the lateness over) start it over, and nothing is counted while a
+  SessionLead's slew runs or a resync waits for its state. At
+  `core_config::starved_resync_reports` in a row (default
+  `kStarvedResyncReports` = 330, 5 s at 66 Hz; 0 = never; headless
+  `--starved-resync-reports N`) it calls `request_resync("input starved on N
+  reports in a row", owed = false)` - the existing path: the server answers
+  with a fresh base on its schedule and the full budget (an exact resync,
+  protocol 10), which re-paces the client - and starts the run over whether
+  the limiter sent the request or held it back. That is the rate limit: the
+  next request needs another 330 starved reports of the new base (the 2 s /
+  10 s limiter of `request_resync` still applies on top). The only journal
+  trace is `request_resync`'s own "resync: requested (...)" note; the log
+  adds "starved: N server ticks in a row ...". Status: `starve_run=run/max/
+  resyncs` after `wait=` (the longest run of the process and the resyncs this
+  rule asked for; counters across sessions, as `reports=`).
+- **N from the data** (`.local-tools/work/DX6/starve_runs.py`: an upper bound
+  from the 5 s status lines' cumulative counters, and the exact maximum from
+  `starve_run=` where a DX6 binary wrote the log):
+  - core_ref_s12, the HEAD binary's replays of the 36 captures (exact): the
+    longest run 185 (a5u_lead client 2, the +300 ms latency step that the
+    server's lead controller answers with SessionLead 1; the live log's 249
+    starved reports include the slew, which the rule does not count), every
+    other capture at most 44 (resync_snapoff client 2's 1 s pause); 0
+    triggers. solo1 / solo2's live logs: starved 0.
+  - H3's runs (h3_full, bound): at most 65 (rl1b_stall_pl's 1 s pause); DX5's
+    (dx5_full): at most 54; H4's (h4_full): j4 / sio_st 0.
+  - The retail trial (TRIAL1 round1-holdlast, two human clients, ~9 min,
+    bound): at most 108.
+  - f2_ctrl_B client 2 (the case to catch): 1056 of 1056; it would have
+    asked at its 330th report.
+  - H4's `u9` / `u9ctl` (8 members, before DX5): every report of every member
+    starved (1594-2342) - the rule would have resynced each of them, which is
+    what it is for; on DX5's tree (`dx5_full/u9ctl`) every member reads 0.
+  - 330 = 1.78 x the longest run seen on a session that needs no re-pacing.
+    **Limitation:** the client cannot tell whether the server runs
+    lead_adjust; under lead_adjust on, a latency step larger than a5u_lead's
+    whose SessionLead comes later than 330 starved reports would be answered
+    by this resync first (a redundant re-pace, not a wrong one); 330 clears
+    the one measured point (185). **The cost of N:** with patience off the
+    server holds every tick to its deadline for a member that stays late, so
+    until the rule fires the whole session runs at the late member's pace
+    (stall300_lan below: every founder's relay lag 0 -> 12 for the 330
+    reports); N could sit anywhere above ~200, and a lower N shortens that.
+- **The headless test switch** `--stall-after-ready MS` (`session_client.cpp`
+  `make_platform`'s send): right after the core's SessionReady is handed to
+  the network it is flushed (`FlushMessagesOnConnection`: a reliable send may
+  otherwise wait for Nagle, and the server's base would just move with the
+  stall), logged ("test stall: ...") and the process sleeps MS ms
+  (`wall_sleep`: nothing in a replay). Since DX5 the anchor work precedes the
+  SessionReady, so the stall is the whole delay between the server's base and
+  the joiner's first frame - the trigger F2-a needs (a runner stall does not
+  take the joiner's budget, H3).
+- **Checks** (quick tier, `build-agent-rDX6`, the Arch server of 87558800's
+  tree - no server code changed since): unit tests 670/670
+  (`SessionClientCoreRelay.AClientStarvedOnEveryReportAsksForAResync`: nothing
+  at 329, one SessionResync at 330 with the log lines, the run over after a
+  clean report, a new base, a pending resync and a slew, nothing while the
+  first is in flight, a second after 330 more of the new base; the status
+  tail); GCC syntax 31/31 ok; x86 client CLIENT-BUILD-OK (the core objects and
+  `core_host.cpp` rebuilt, DEPS-OK); wire check `- rDX6 rDX6w rDX5w_new` over
+  core_ref_s12: **ALL SAME** (36 send traces SAME, 36 journals IDENTICAL - no
+  new resync in any capture).
+  - `dx6_full/stall300_lan` (LAN, 4 clients 60 s, client 3 `--join-late
+    3:1500 --stall-after-ready 300`, patience and lead_adjust off, snapshots
+    off): the joiner's base 1534 was played 307 ms after the server stepped
+    1521, its deadline 210 ms after it; every report starved (286 / 286 at
+    1813, the server held every tick 1534..1892 to its deadline, and every
+    founder's relay lag of every remote went 0 -> 12 meanwhile); at its 330th
+    report (tick 1885) "resync requested (input starved on 330 reports in a
+    row)", one resync (base 1907, played 26 ms after the server's step of
+    1893), then starved 0 to the end (359 in all: 330 + 29 while the request
+    was answered; `starve_run=0/330/1`); its S1 lateness q50 12.31-12.33
+    against the founders' 12.51-12.56 (the -0.2 is the headless pacer's
+    resync slip, DX5's note); every relay lag back to 0, server earliness
+    11.6-11.9 again; founders starved 0, resyncs 0, `starve_run=0/0/0`;
+    server journal 4603/4603.
+  - `dx6_full/stall300_150` (the same at `--latency-ms 150`): the stall is
+    absorbed - base 1668 played 170 ms after the server's step of 1621, its
+    deadline 712 ms after it - so starved 0 on all four, no resync,
+    `starve_run=0/0/0` everywhere (a stalled joiner whose budget covers the
+    stall is left alone); joiner lateness 25.8 against the founders'
+    22.2-22.3 (RL1-a's +4 of a joiner's larger lead, unchanged); VERDICT
+    PASS, server journal 4084/4084. The 150 ms budget is (31 + 17) periods
+    = 727 ms, so starving a joiner there takes a stall near 850 ms or more.
+- **Difference from the plan's row:** the row asks for one resync at 0 ms
+  and at 150 ms with a 150-300 ms stall; its range assumed the LAN budget
+  (210 ms). At 150 ms the budget is 727 ms, so `stall300_150` is a
+  no-trigger control, not the row's trigger check.
+- **No backoff (review nit, left):** each request only starts the run over;
+  a member whose starvation a resync cannot cure (one that sustains fewer
+  than 66 ticks/s) would ask again every ~5-10 s for the rest of the session,
+  each a state transfer and a rewind. No current case was found (a resync
+  re-anchors with the full budget); a growing N after a repeated rule resync
+  is the fix if one appears.
+- Deferred to the FULL batch: the trigger at 150 ms (`--stall-after-ready
+  900`); a separate no-stall control run (the founders of both runs, the
+  absorbed 150 ms joiner and the 36 REF12 replays stand in for it); the retail
+  two-copy run (the core's change reaches retail through the shared objects;
+  the host is unchanged).
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

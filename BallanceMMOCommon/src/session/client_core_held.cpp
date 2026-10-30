@@ -81,6 +81,9 @@ namespace bmmo::session {
                 const uint32_t behind = msg.tick - msg.acked;
                 ++s.input_starved_;
                 if (behind > s.worst_starved_) s.worst_starved_ = behind;
+                note_starved_report();
+            } else {
+                s.starved_run_ = 0;
             }
             const uint32_t lag = static_cast<int32_t>(current_tick() - msg.tick) > 0 ? current_tick() - msg.tick : 0;
             s.lead_sum_ += lag;
@@ -120,6 +123,42 @@ namespace bmmo::session {
             settle_held_tick(tick, frame);
         }
         check_held_complete(msg);
+    }
+
+    // Step DX6 (F2-a, option (b)): one more report of this base on which the
+    // server had no frame of ours for the tick it simulated.  A member whose
+    // frames start late - a joiner stalled between its SessionReady and its
+    // first frame by more than its base's budget (H3, f2_ctrl_B: starved
+    // 1056 / 1056) - stays late for good with the server's lead_adjust off:
+    // the S1 controller only observes, and our own rebase needs more than
+    // 33 ticks behind.  After config.starved_resync_reports in a row it asks
+    // for a resync: the answer is a fresh base on the server's schedule,
+    // with the full budget, which re-paces this client.  Not counted while
+    // a slew of a SessionLead runs (the server's controller is moving us
+    // already) or while a resync waits for its state (the answer is here).
+    // The run starts over after the request - whether sent or held back by
+    // the limiter - so the next one needs as many starved reports again
+    // (the rate limit); a new base or an applied SessionLead starts it over
+    // too.  The only journal trace is request_resync's note.
+    void session_client_core::note_starved_report() {
+        if (s.lead_slew_.active() || s.resync_pending_) {
+            s.starved_run_ = 0;
+            return;
+        }
+        ++s.starved_run_;
+        if (s.starved_run_ > s.starved_run_max_) s.starved_run_max_ = s.starved_run_;
+        if (config.starved_resync_reports == 0 || s.starved_run_ < config.starved_resync_reports) return;
+        const uint64_t before = s.resyncs_sent_;
+        const uint32_t run = s.starved_run_;
+        s.starved_run_ = 0;
+        const std::string reason = "input starved on " + std::to_string(run) + " reports in a row";
+        request_resync(reason.c_str(), false);
+        if (s.resyncs_sent_ != before) {
+            ++s.starved_resyncs_;
+            logf("starved: %u server ticks in a row without our frame (the server substituted each); resync %llu "
+                 "of this rule asked for at tick %u",
+                 run, static_cast<unsigned long long>(s.starved_resyncs_), current_tick());
+        }
     }
 
     // A held tick no rewind could ever reach (the base rule of
@@ -228,6 +267,9 @@ namespace bmmo::session {
             return;
         }
         s.lead_seen_.insert(msg.seq);
+        // Step DX6: the server's controller has taken this lateness over;
+        // the starved run starts over (and is not counted while the slew runs).
+        s.starved_run_ = 0;
         // A slew still running (the server never overlaps two, so this is
         // defensive): it ends here with what it moved, acknowledged.
         if (s.lead_slew_.active()) finish_lead_slew("superseded by SessionLead " + std::to_string(msg.seq));

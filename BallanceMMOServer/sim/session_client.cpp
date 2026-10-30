@@ -289,6 +289,13 @@ namespace {
         // --own-births-parked (step OWNB's control arm): an own birth the
         // scripts made inside a rewind's window keeps the parking path.
         bool own_births_parked = false;
+        // Step DX6 (F2-a): --starved-resync-reports N (the core's
+        // starved_resync_reports, 0 = never) and --stall-after-ready MS (a
+        // test knob: the process sleeps MS ms right after it sent its
+        // SessionReady - the joiner-side stall that takes a base's budget,
+        // which a stall of the server's runner does not).
+        uint32_t starved_resync_reports = bmmo::session::kStarvedResyncReports;
+        int stall_after_ready_ms = 0;
         bool correct = true;
         bool rollback = true;         // design 9.6; --no-rollback falls back to blending
         int boot_ticks = 400;
@@ -503,6 +510,8 @@ namespace {
                   "       [--hold-event TYPE:N:MS|TYPE:N:drop]   (the N-th own event of TYPE leaves MS ms late, or never)\n"
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
                   "       [--reach N]   (the rollback's reach pinned at N ticks, 48..120; default: per client, from the relay lag)\n"
+                  "       [--starved-resync-reports N]   (N starved input reports in a row ask for a resync; 0 = never; default 330)\n"
+                  "       [--stall-after-ready MS]   (test: sleep MS ms right after sending SessionReady)\n"
                   "       [--body-set-corrections]   (snapshots off: a body-set change's full snapshot still corrects, as before RC3; the control arm)\n"
                   "       [--accept-protocol N]      (test only: also take a SessionStart of physics protocol N - a reference capture's replay)\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--beam2 X Y Z TICK] [--keep-lane Z] [--keep-lane-dwell N]\n"
@@ -688,6 +697,14 @@ namespace {
             else if (arg == "--trace-plan") out.trace_plan = true;
             else if (arg == "--remote-births-parked") out.remote_births_parked = true;
             else if (arg == "--own-births-parked") out.own_births_parked = true;
+            else if (arg == "--starved-resync-reports") {
+                if (!(v = next())) return false;
+                out.starved_resync_reports = static_cast<uint32_t>(std::max(0, std::atoi(v)));
+            }
+            else if (arg == "--stall-after-ready") {
+                if (!(v = next())) return false;
+                out.stall_after_ready_ms = std::max(0, std::atoi(v));
+            }
             else if (arg == "--no-correct") out.correct = false;
             else if (arg == "--no-rollback") out.rollback = false;
             else if (arg == "--boot-ticks") { if (!(v = next())) return false; out.boot_ticks = std::atoi(v); }
@@ -1554,6 +1571,20 @@ namespace {
                 if (mode == bmmo::session::send_mode::reliable_no_nagle) flags = k_nSteamNetworkingSend_ReliableNoNagle;
                 else if (mode == bmmo::session::send_mode::unreliable_no_delay) flags = k_nSteamNetworkingSend_UnreliableNoDelay;
                 send_bytes(bytes, flags);
+                // Step DX6: --stall-after-ready - the SessionReady is
+                // flushed out first (a reliable send may wait for Nagle),
+                // so the server's base is computed while this process
+                // sleeps; a replay sleeps nothing (wall_sleep).
+                if (args_.stall_after_ready_ms > 0 && bytes.size() >= sizeof(bmmo::opcode)) {
+                    bmmo::opcode code{};
+                    std::memcpy(&code, bytes.data(), sizeof(code));
+                    if (code == bmmo::SessionReady) {
+                        if (!inbound_.replaying()) interface_->FlushMessagesOnConnection(connection_);
+                        logf("test stall: %d ms right after SessionReady at tick %u", args_.stall_after_ready_ms,
+                             core_.current_tick());
+                        wall_sleep(std::chrono::milliseconds(args_.stall_after_ready_ms));
+                    }
+                }
             };
             p.now = [this](bmmo::session::clock_site site) { return wall_now(site); };
             p.log = [](bmmo::session::log_level, const std::string& text) { log_line(text); };
@@ -2035,6 +2066,7 @@ namespace {
             c.trace_plan = args_.trace_plan;
             c.remote_births_parked = args_.remote_births_parked;
             c.own_births_parked = args_.own_births_parked;
+            c.starved_resync_reports = args_.starved_resync_reports;
             c.rollback = args_.rollback;
             c.correct = args_.correct;
             c.trace = args_.trace;

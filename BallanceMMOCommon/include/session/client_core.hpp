@@ -125,6 +125,21 @@ namespace bmmo::session {
     // a schedule: a server that never answers must not freeze the client.
     constexpr std::chrono::seconds kAnchorHoldTimeout{10};
 
+    // Step DX6 (F2-a, option (b); resync-and-sector-timing design "As built
+    // (step DX6)"): a member whose every input report says the server
+    // substituted its frame (relay header acked < tick) for this many
+    // consecutive server ticks asks for a resync - a fresh base on the
+    // schedule with its full budget.  Nothing else re-paces a member whose
+    // frames start late with the server's lead_adjust off (H3: a joiner
+    // stalled right after SessionReady was starved on every report for good).
+    // 330 = 5 s at 66 Hz: above every run seen on a session that needs no
+    // re-pacing - core_ref_s12 at most 185 counted (249 with the slew the rule
+    // skips; a5u_lead client 2, a latency step the server's lead controller
+    // answers), H3 / DX5 at most 65, the retail
+    // trial at most 108 - and the counter starts over after each request, so
+    // one more needs another 330 starved reports.  0 = off.
+    constexpr uint32_t kStarvedResyncReports = 330;
+
     // An own birth as the host reports it (design 1.3 own_physicalized; E7):
     // the ball's entity and its row in the level's ball table (-1: none, sent
     // as type 0), the tick whose step it was made before, the pose and spawn
@@ -430,6 +445,13 @@ namespace bmmo::session {
         // Input freshness as the server saw it (session_snapshot_msg.acked_input_tick).
         uint64_t input_reports_ = 0, input_starved_ = 0;
         uint32_t worst_starved_ = 0;
+        // Step DX6: the consecutive starved reports of the current base (0
+        // after a clean report, a new base, an applied SessionLead or a
+        // request), the longest such run of the process (begin resets only
+        // the run), and the resyncs this rule asked for (status
+        // starve_run=run/max/resyncs).
+        uint32_t starved_run_ = 0, starved_run_max_ = 0;
+        uint64_t starved_resyncs_ = 0;
         uint64_t lead_sum_ = 0, lead_count_ = 0;
         bmmo::session::body_corrector corrector_;
         std::map<std::string, bmmo::session::body_corrector> mechanism_correctors_;
@@ -1053,6 +1075,10 @@ namespace bmmo::session {
         // player's newest snapshot row, the 9.17 workaround - was deleted at
         // R3 with the retail lifecycle rewind on, design 4.2.)
         bool own_body_backstop = false;
+        // Step DX6: consecutive starved input reports that ask for a resync
+        // (kStarvedResyncReports; 0 = never).  Headless
+        // --starved-resync-reports N.
+        uint32_t starved_resync_reports = kStarvedResyncReports;
         // Retail policy (R1, while input_rewind is off): a predicted mirror's
         // frame for the step of T is chosen at pre_step(T), from the relay
         // as the messages between the frames left it (the legacy retail
@@ -1394,6 +1420,9 @@ namespace bmmo::session {
         // `owed`: the own correction needs this resync; one the limiter
         // holds back is asked again by the frame (retry_owed_resync).
         void request_resync(const char* reason, bool owed = false);
+        // Step DX6: a starved input report counted; the run of
+        // config.starved_resync_reports asks for a resync.
+        void note_starved_report();
 
         // ---- sending ----
         // An own lifecycle event: stamped, counted, journaled, then on the
