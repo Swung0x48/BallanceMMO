@@ -2354,7 +2354,15 @@ numbers 1-10 are unchanged.
      anchor's blob holds (it changes a rule every rewind reads and collides
      with DX1's `unborn` marks). Evidence for LJ1's own fix is the capture
      replays and the unit test: neither live run had a rewind land on S
-     after the import.
+     after the import. **Fixed at FULL step LJ2**: between the server's blob
+     and the replay the engine hands the core's import hook
+     (`rollback_world::forget_births_after`) every window birth of a body
+     the server's blob knew and no plan item covers; the core forwards it
+     to the platform's `forget_births_after` (the rowed bodies keep the
+     core's after-the-re-step call). The capture replayed: the joiner's
+     Pusher exact, all four clients 0.000 m at every FINAL row; a3_pair2,
+     J1b seeds 1-5 and j1 still exact (world-agreement-gaps-design.md "As
+     built (step LJ2)").
      **(item 2) 8 members at 0 ms
      start late, measured**: U9 and its control without the FIFO and the
      reload (`u9ctl`) starve - every client steps tick T 2.6-4.5 ticks after

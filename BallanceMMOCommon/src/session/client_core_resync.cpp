@@ -656,7 +656,16 @@ namespace bmmo::session {
             // the deaths after S above), not the ended-life reconcile's.
             s.resync_restoring_ = true;
             const uint64_t globals_before = s.rollback_.stats().globals_failures;
-            ok = s.rollback_.resync(world(), anchor, now, spec, input_at, restored,
+            // Step LJ2: the bodies the server's blob knew whose births after
+            // S the live frames logged (rollback_world::forget_births_after)
+            // are forgotten between the restore and the replay - the platform
+            // contract's "bodies the server's state has at S", not only the
+            // rowed ones below.
+            rollback_world resync_world = world();
+            resync_world.forget_births_after = [this](uint32_t tick, const std::vector<std::string>& entities) {
+                platform_.forget_births_after(tick, entities);
+            };
+            ok = s.rollback_.resync(resync_world, anchor, now, spec, input_at, restored,
                                     "resync from the server's tick " + std::to_string(anchor));
             // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused
             // write of the physics globals dropped the history: not applied.
@@ -704,6 +713,8 @@ namespace bmmo::session {
         }
         // The old numbering's births after S of the bodies the server's state
         // has at S are no births of this history (2.6.3 "the host logs").
+        // The rowed ones here, after the re-step (as before step LJ2); the
+        // others the server's blob knew went before the replay (above).
         {
             std::vector<std::string> present;
             for (const auto& [entity, row]: spec.rows) present.push_back(entity);
@@ -747,13 +758,15 @@ namespace bmmo::session {
         logf("resync: re-stepped from the server's tick %u to %u (%u ticks, delta %+lld, waited %u frame(s); %u navs; %zu rows: %u "
              "written, %u equal, %u unmapped; %zu script bytes (%s, %u unportable, %u kept local); blob %zu bytes %s (%s); "
              "keep-local %u, local-only %u, destroyed %u/%u, remade %u, from record %u, rechecked %u+%u deferred, "
-             "unexplained %u, unattributed %u; %u mirror(s) driven from S + 1, %u added to its record; union {%s}; renames:%s) [%s]",
+             "unexplained %u, unattributed %u; %u mirror(s) driven from S + 1, %u added to its record; %u known birth(s) forgotten; "
+             "union {%s}; renames:%s) [%s]",
              anchor, now, depth, static_cast<long long>(s.resync_delta_), s.resync_wait_frames_, navs, st.rows.size(),
              restored.rows_written, restored.rows_equal, unmapped, st.scripts.size(), scripts_ok ? "localized" : "REFUSED",
              script_report.unportable, script_report.kept_local, st.savestate.size(),
              restored.blob_applied ? "restored" : restored.anchor_blob ? "REFUSED, the anchor's own" : "REFUSED",
              restored.blob_summary.c_str(), keep_local, local_only, restored.destroyed, destroy, restored.remade,
-             restored.from_record, restored.rechecked, restored.deferred, unexplained, unattributed, driven_moved, restored.mirrors_tracked, active.c_str(),
+             restored.from_record, restored.rechecked, restored.deferred, unexplained, unattributed, driven_moved, restored.mirrors_tracked,
+             restored.births_forgotten, active.c_str(),
              renamed.empty() ? " none" : renamed.c_str(), why);
         if (journal_.journalling()) {
             journal_resync r;

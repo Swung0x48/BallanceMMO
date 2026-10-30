@@ -5088,6 +5088,123 @@ TEST(RollbackEngine, AnUntrackedFixedBirthTheReplayedScriptsMakeIsDestroyedAtThe
     }
 }
 
+// Step LJ2 (world-agreement gaps "As built (step LJ1)", found there): a late
+// joiner's live frames made an untracked FIXED body (a module part, "Rail")
+// at 4, after the import's S = 2; the server's blob at S knows it (not one of
+// its unknown bodies), and the replayed server scripts never make it again.
+// The import hands its name to rollback_world::forget_births_after between
+// the blob and the replay, the host's birth log drops the live birth, and a
+// later rewind anchored at S restores Rail from the record of S like any
+// body the blob holds.  The control (no hook, the behaviour before LJ2) keeps
+// the birth at 4: that rewind takes Rail for a window birth the replay makes
+// (RO1), destroys it before the blob, and it never comes back.
+TEST(RollbackEngine, AFixedBodyTheServersBlobKnowsBornLiveAfterSIsKeptAcrossARewindToS) {
+    constexpr uint32_t kS = 2, kBorn = 4, kNow = 6;
+    for (const bool hook: {true, false}) {
+        SCOPED_TRACE(hook ? "forget_births_after" : "no hook (control)");
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Plate"].position[0] = 40.0;
+        rollback_engine engine;
+        auto w = world.adapter();
+        rollback_tracked tracked;
+        tracked.mechanisms = {"Plate"};
+        std::map<uint32_t, std::vector<std::string>> births;   // the host's birth log
+        w.capture_scripts = [](std::vector<uint8_t>& out) { out = {7}; return true; };
+        w.restore_scripts = [&](const std::vector<uint8_t>&, uint32_t) { world.calls.push_back("restore_scripts"); return true; };
+        w.birth_order = [&births](uint32_t tick) {
+            const auto it = births.find(tick);
+            return it == births.end() ? std::vector<std::string>{} : it->second;
+        };
+        w.birth_tick_of = [&births](const std::string& entity) {
+            for (auto it = births.rbegin(); it != births.rend(); ++it)
+                for (const auto& name: it->second) if (name == entity) return it->first;
+            return 0u;
+        };
+        w.recheck_body = [&](const std::string& entity) { world.calls.push_back("recheck " + entity); return true; };
+        w.remade_by_replay = [&](const std::string& entity, uint32_t birth, uint32_t anchor) {
+            world.calls.push_back("guard " + entity + "@" + std::to_string(birth) + "/" + std::to_string(anchor));
+            return true;   // a fixed module part of a script the replay runs
+        };
+        std::vector<std::string> outcomes;
+        w.fixed_birth_remade = [&](const std::string& entity, uint32_t tick, bool back) {
+            outcomes.push_back(entity + "@" + std::to_string(tick) + (back ? " back" : " missing"));
+        };
+        w.destroy_body = [&](const std::string& entity, uint32_t tick) {
+            world.calls.push_back("destroy " + entity + "@" + std::to_string(tick));
+            return world.bodies.erase(entity) > 0;
+        };
+        // The server's blob at S knows every body alive now (Rail included).
+        w.set_travelling_savestate = [&world](const bmmo::session::travelling_blob&, bmmo::session::savestate_outcome&) {
+            world.calls.push_back("set_travelling_savestate");
+            return true;
+        };
+        w.pre_step = [&](uint32_t tick) { world.calls.push_back("pre_step " + std::to_string(tick)); };
+        fake_body rail;
+        rail.position[0] = 7.0;
+        rail.simulated = false;
+        for (uint32_t tick = 1; tick <= kNow; ++tick) {
+            if (tick == kBorn) {   // the live Physicalize, logged at its tick
+                world.bodies["Rail"] = rail;
+                births[kBorn].push_back("Rail");
+            }
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        if (hook) {
+            w.forget_births_after = [&](uint32_t tick, const std::vector<std::string>& entities) {
+                std::string names;
+                for (const auto& name: entities) names += " " + name;
+                world.calls.push_back("forget_births_after " + std::to_string(tick) + names);
+                for (auto it = births.upper_bound(tick); it != births.end(); ++it)
+                    it->second.erase(std::remove_if(it->second.begin(), it->second.end(), [&](const std::string& name) {
+                        return std::find(entities.begin(), entities.end(), name) != entities.end();
+                    }), it->second.end());
+            };
+        }
+
+        // The import: the server's blob at S.
+        world.calls.clear();
+        const std::vector<uint8_t> server_blob{1, 2, 3};
+        bmmo::session::resync_spec spec;
+        spec.blob.blob = &server_blob;
+        bmmo::session::resync_outcome out;
+        ASSERT_TRUE(engine.resync(w, kS, kNow, spec, no_input, out, "import"));
+        ASSERT_TRUE(out.blob_applied);
+        EXPECT_EQ(world.count("destroy Rail"), 0) << "a travelling blob never takes the RO1 path";
+        if (hook) {
+            EXPECT_EQ(out.births_forgotten, 1u);
+            ASSERT_EQ(world.count("forget_births_after 2 Rail"), 1);
+            EXPECT_EQ(world.count("forget_births_after"), 1) << "only Rail: the tracked Plate has no window birth";
+            EXPECT_LT(world.first("set_travelling_savestate"), world.first("forget_births_after"));
+            EXPECT_LT(world.first("forget_births_after"), world.first("pre_step 3")) << "before the replay";
+            EXPECT_TRUE(births[kBorn].empty());
+        } else {
+            EXPECT_EQ(out.births_forgotten, 0u);
+            EXPECT_EQ(births[kBorn], std::vector<std::string>{"Rail"});
+        }
+        ASSERT_TRUE(world.bodies.contains("Rail"));
+        EXPECT_TRUE(engine.recorded_body("Plate", kS));
+
+        // A later rewind anchored at S (an input of S + 1 corrected).
+        world.calls.clear();
+        world.bodies["Rail"].position[0] = 99.0;   // anything the restore must put back
+        ASSERT_TRUE(engine.rewind_to(w, kS, kNow, no_input, "input corrected at tick 3"));
+        if (hook) {
+            EXPECT_EQ(world.count("guard Rail"), 0) << "no window birth any more";
+            EXPECT_EQ(world.count("destroy Rail"), 0);
+            EXPECT_TRUE(outcomes.empty());
+            ASSERT_TRUE(world.bodies.contains("Rail")) << "kept across the rewind";
+            EXPECT_DOUBLE_EQ(world.bodies["Rail"].position[0], 7.0) << "from the record of S";
+        } else {
+            EXPECT_EQ(world.count("guard Rail@4/2"), 1);
+            EXPECT_EQ(world.count("destroy Rail@4"), 1);
+            EXPECT_EQ(outcomes, std::vector<std::string>({"Rail@4 missing"}));
+            EXPECT_FALSE(world.bodies.contains("Rail")) << "the old behaviour: destroyed, never made again";
+        }
+    }
+}
+
 // Step DX1 (SP7-c, option (a)): a deferred body (untracked, born inside the
 // window, unknown to the anchor's blob) is kept in the world by the replay,
 // so the records the replay captures before its birth tick hold it and their

@@ -140,6 +140,7 @@ namespace bmmo::session {
         uint32_t rechecked = 0;           // live bodies the blob did not know and no plan covers, rechecked at the restore
         uint32_t deferred = 0;            // ...or at their birth tick
         uint32_t mirrors_tracked = 0;     // step LJ1: mirrors added to the anchor record's tracked set
+        uint32_t births_forgotten = 0;    // step LJ2: bodies the server's blob knew whose live births after S were handed over
     };
 
     // Gap L, L1 (rollback-engine gaps design 2.3.1, step EL6): a life of a
@@ -537,6 +538,20 @@ namespace bmmo::session {
         // The caller counts (no engine counter: the engine's layout is the
         // legacy retail state's until R7).
         std::function<void(const std::string& entity, uint32_t birth_tick, bool back)> fixed_birth_remade;
+        // Optional (step LJ2, world-agreement gaps "As built (step LJ1)"): a
+        // resync whose SERVER blob was restored hands over, between the
+        // restore and the replay, the names its window's births (birth_order,
+        // anchor+1 .. now) list that the blob knew - alive after it, not one
+        // of its unknown bodies, no plan item of the restore (a row's, a
+        // rebirth's, a parked or re-posed birth's: those keep the rules they
+        // have), not `gone`.  The server's state has them at S, so their live
+        // births after S are no births of this history (the platform's
+        // forget_births_after); a later rewind anchored at S would otherwise
+        // take one for a window birth (RO1 above) and destroy a body the
+        // replayed scripts never make again.  Handed over before the replay,
+        // so a birth the replay makes is logged after it and stays.  The
+        // core sets it for its import (client_core_resync.cpp).
+        std::function<void(uint32_t anchor, const std::vector<std::string>& entities)> forget_births_after;
         // Step RR of the session-core design: a snapshot row the engine wrote
         // at tick t is the server's state of that body after t's step, and
         // every later replay that crosses t writes it again after stepping t
@@ -1823,6 +1838,44 @@ namespace bmmo::session {
                             if (world.log && unborn_logs_++ < 16)
                                 world.log("deferral: " + name + " is unborn in the record of " + std::to_string(anchor)
                                           + " (born at " + std::to_string(born) + "): its recheck deferred to its birth tick");
+                        }
+                    }
+                    // Step LJ2 (rollback_world::forget_births_after): the
+                    // window's births of the bodies the SERVER's blob knew -
+                    // a fixed part the live frames made after S that the
+                    // server's state at S already has (a late joiner's catch-up
+                    // module births) - are no births of this history: handed
+                    // to the host now, before the replay, which logs its own.
+                    // Only the server's blob (a refused one's fallback is the
+                    // anchor's, whose unknown set says nothing about S); a
+                    // body with a plan item keeps that item's rules (the core
+                    // forgets a row's births after the re-step, as before).
+                    if (rs && travelling && ro && ro->blob_applied && world.forget_births_after && world.birth_order
+                            && world.get_body) {
+                        const std::set<std::string> unknown_set(outcome.unknown_bodies.begin(), outcome.unknown_bodies.end());
+                        std::set<std::string> seen;
+                        std::vector<std::string> known;
+                        for (uint32_t t = anchor + 1; static_cast<int32_t>(t - current_tick) <= 0; ++t) {
+                            for (const std::string& name: world.birth_order(t)) {
+                                if (name.empty() || !seen.insert(name).second) continue;
+                                if (plan.find(name) != plan.end() || unknown_set.count(name) || rs->gone.count(name)
+                                        || rs->destroy.count(name))
+                                    continue;
+                                bmmo_physics_body_state live{};
+                                if (!world.get_body(name, live)) continue;
+                                known.push_back(name);
+                            }
+                        }
+                        if (!known.empty()) {
+                            world.forget_births_after(anchor, known);
+                            ro->births_forgotten = static_cast<uint32_t>(known.size());
+                            if (world.log) {
+                                std::string names;
+                                for (size_t i = 0; i < known.size() && i < 8; ++i) names += (i ? ", " : "") + known[i];
+                                if (known.size() > 8) names += ", ...";
+                                world.log("resync: " + std::to_string(known.size()) + " body(ies) the server's blob knows born live after "
+                                          + std::to_string(anchor) + ": their births forgotten (" + names + ")");
+                            }
                         }
                     }
                 } else {

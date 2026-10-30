@@ -5311,3 +5311,70 @@ the window is a real birth and must keep its replayed entry), i.e. a hook or a
 anchor's blob holds the body - a rule every rewind reads, which collides with DX1's `unborn`
 marks (records a replay captured before a deferred body's birth hold it in their blob too).
 Queued in roadmap §4 item 4 as a bug fix.
+
+### As built (step LJ2, FULL close-out, 2026-10-30): the import forgets the live births after S of every body the server's blob knows
+
+Fixes the finding LJ1 queued (above) as the design settles it: the core brought to
+`forget_births_after`'s platform contract ("the bodies the server's state has at S").
+
+**What changed.** `rollback_world::forget_births_after(anchor, entities)` (`rollback.hpp`,
+after `fixed_birth_remade`), optional, and `resync_outcome::births_forgotten`. In the resync
+branch of `restore_and_replay`, right after the server's blob is applied and its unknown
+bodies are handled (after DX1's `unborn` block, before the anchor's re-capture and the
+replay), the engine walks the window's births (`birth_order(t)`, t = S + 1 .. now) and hands
+over every name the blob knew: alive after it (`get_body`), not one of its
+`unknown_bodies`, no plan item of the restore, not in `gone` or `destroy`. Only when the
+SERVER's blob was applied (`ro->blob_applied`): a refused one's fallback is the anchor's own
+blob, whose unknown set says nothing about S. The core sets the hook on the world it hands
+`resync()` in `try_apply_resync` (`client_core_resync.cpp`, a local `resync_world` =
+`world()` + the hook calling `platform_.forget_births_after`), so neither host and no
+binding changed and the retail core (core_host.cpp's `host.births.forget_after`) gets it
+the same way. Handed over before the replay, so a birth the replay makes is logged after it
+and stays; the replay's birth ordering (`birth_order` ranks inside one tick) only loses
+names that are no plan item and no deferred recheck. One order CAN change (review, not
+measured): when the replayed scripts re-make a forgotten name at the same tick t where a
+body the blob does not know keeps its live entry, the replay's entry is appended after it
+(before LJ2 the replay skipped that birth and the live entry kept its rank), so a later
+rewind's `birth_order(t)` lists the two in a different order; no measured run hits it (in
+the step's case the replay never re-makes Rinne or Filler). The unit test covers only the
+forgotten case; an arm asserting the exclusions (an unknown body, a rowed body, a refused
+blob: none forgotten) is a follow-up for the test suite. The
+engine logs "resync: N body(ies) the server's blob knows born live after S: their births
+forgotten (names)"; the re-stepped line gains "N known birth(s) forgotten".
+
+**Adapted (recorded here).** (1) A body with a plan item keeps that item's rules: a rowed
+body's births after S are still forgotten by the core's existing call AFTER the re-step
+(unchanged, so rows behave byte for byte as before; the new pass makes that call redundant
+for a rowed body the server's blob knew, but it is the only forget on the refused-blob
+path); a rebirth / parked / re-posed birth needs its log entry for `insert_birth` in the
+replay; a tracked body from its record with a live birth after S is gap L's (an ended life:
+`restore_lives`). The step's case - untracked fixed module parts - has no plan item. (2) The
+hook is an engine-world member set by the core, not a `core_world_hooks` field copied by
+the shared binder: only the import needs it, and the world the core builds for it is local
+to `try_apply_resync`. No protocol, journal, layout of a persisted record, IVP,
+engine-change or `BallanceMMOClient` change; the server does not compile it (no Arch
+rebuild).
+
+**Verified.** `h6_full/a3_trans` replayed with `rLJ2` and `--final-checkpoints`
+(`work/LJ2/final_replay.sh`, into `final_lj2/`): all four clients agree with the server
+within 0.000 m at every FINAL row (c0 659, c1 669, c2 747, c3 476 ticks) - the joiner's
+`P_Modul_01_Pusher` included (rLJ1: off from 634, 0.075 m); its log: "2 body(ies) the
+server's blob knows born live after 501: their births forgotten (P_Modul_01_Rinne,
+P_Modul_01_Filler)", no "is not back after its birth tick". `a3_pair2` (c0-c3) exact; DX10's
+J1b seeds 1-5 and H4's j1 (client 3, `work/LJ2/rep.sh` into `maps/arena-test/lj2/lj2`):
+own, mirror and body 0.0000 m, each import forgetting 2-3 such bodies (P_Modul_01_Rinne,
+_Filler, and in three seeds P_Dome_MF). Unit test `RollbackEngine.AFixedBodyTheServersBlob
+KnowsBornLiveAfterSIsKeptAcrossARewindToS` (control arm without the hook: the rewind
+anchored at S destroys the body through RO1 and it is missing; with it: no guard asked, no
+destroy, the body restored from the record of S). The wire check (`rLJ1` vs `rLJ2`,
+core_ref_s12, `EXTRA=--pacer-restart-on-resync`): ALL SAME - 36 send traces, 36 journals
+identical (its three resyncs forget no known birth: "0 known birth(s) forgotten"). One live
+run of the recipe (`h6_run.sh lj2_a3_trans 4 30 13 -- --sectors 1 --drive --latency-ms 150
+--join-late 3:340 --client-arg-for "0:--resync-at 335" --client-arg-for "1:--resync-at
+350"`, snapshots off, the deployed server options): its captures replayed with
+`--final-checkpoints` (`final_lj2/`) - all four clients own / mirror / body 0.0000 m at every
+FINAL row (659 / 669 / 746 / 477 ticks), the server's journal replays exactly, starved 0, far
+0; the joiner's import "2 known birth(s) forgotten" (P_Modul_01_Rinne, _Filler, live and in
+the replay). The harness's own VERDICT line (FAIL: "client0 resyncs; client1 resyncs", the
+forced resyncs' own-ball and late-mirror criteria) is the recipe's, identical in LJ1's runs.
+Unit tests 681/681, GCC syntax 31/31, x64 BUILD-OK and x86 CLIENT-BUILD-OK (DEPS-OK).
