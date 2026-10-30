@@ -45,6 +45,7 @@ RE_PLAYER = re.compile(r"player (\d+)'s ball \S+ is (a spawn ghost|solid|in the 
 RE_OWN = re.compile(r"the own ball \S+ is (a spawn ghost|solid|in the airship zone) at tick (\d+)")
 RE_OWN_ID = re.compile(r'own id (\d+)')
 STATE = {'a spawn ghost': 'ghost', 'solid': 'solid', 'in the airship zone': 'airship'}
+RANK = {'ghost': 0, 'solid': 1, 'airship': 2}  # the last state of one ball at one tick wins
 
 
 def transitions(text, own_id=0):
@@ -59,7 +60,15 @@ def transitions(text, own_id=0):
         m = RE_OWN.search(line)
         if m and own_id:
             out.append((int(m.group(2)), own_id, STATE[m.group(1)]))
-    out.sort()
+    # FULL step H6: two lines of one ball at one tick are ordered by a
+    # fixed state rank, not by the log's line order: ghost < solid (as the
+    # old alphabetical tuple sort had it) < airship.  An airship entry and a
+    # spawn-ghost solid line at one tick (a beam out of the spawn area into
+    # the airship zone) are orthogonal states and the airship one wins; the
+    # plain tuple sort put 'solid' after 'airship' and counted a frozen
+    # collision-free airship ghost as a solid ball (asl_planks: a false
+    # "contact from an overlap").
+    out.sort(key=lambda x: (x[0], x[1], RANK[x[2]]))
     return out
 
 
@@ -137,6 +146,19 @@ def selftest():
             324: {7: (0.0, 0.0, 0.0), 9: (5.0, 0.0, 0.0)}}
     _, under = contact_check('t', rows, tr)
     ok = ok and under == 1
+    # H6: the log prints an airship entry before a solid line of the same tick
+    tie = transitions("airship: player 7's ball B is in the airship zone at tick 321: a ghost from here\n"
+                      "spawn ghost: player 7's ball B is solid at tick 321\n")
+    ok = ok and state_at(tie, 7, 321) == 'airship'
+    # ... and in the other line order, so the rank, not the order, decides
+    tie = transitions("spawn ghost: player 7's ball B is solid at tick 321\n"
+                      "airship: player 7's ball B is in the airship zone at tick 321: a ghost from here\n")
+    ok = ok and state_at(tie, 7, 321) == 'airship'
+    # a ghost line after a solid line of one tick still reads solid (the old sort's order)
+    for a, b in (('solid', 'a spawn ghost'), ('a spawn ghost', 'solid')):
+        tie = transitions("spawn ghost: player 7's ball B is %s at tick 321\n"
+                          "spawn ghost: player 7's ball B is %s at tick 321\n" % (a, b))
+        ok = ok and state_at(tie, 7, 321) == 'solid'
     print('selftest: %s' % ('PASS' if ok else 'FAIL %s %d' % (tr, under)))
     return 0 if ok else 1
 

@@ -5174,3 +5174,64 @@ by the code only the headless host shows it.**
       on that stand-in. Every recipe has to obey the rule.
   - **Recommendation: (a1)**, verified by the wire check with name
     mapping, the solo exactness replay and a re-run of H5's `fan_q7`.
+
+### As built (step H6, FULL close-out, 2026-10-30): a late joiner's mirror birth kept after the import - a rewind to S parks it over S + 1
+
+Found by FULL step H6 (SPGH-a3's live run `maps/arena-test/h6_full/a3_trans`: drive, 150 ms,
+clients 0 / 1 resynced, client 3 joining late at 340, import S = 501). Pre-existing: the
+joiner's capture replayed by `rDX11` gives the same rows; `rDX9` (before DX10) is worse.
+
+**Symptom.** The joiner's FINAL rows are off the server from S + 1 for good: client 0's
+mirror 0.006 m at 502, 0.08 m at 512, 1.08 m later (its velocity 0.573 vs the server's
+0.835 at 502, the gap constant from 503 on); the Pusher, which that ball reaches, 3149 m
+from 634. Clients 0-2 (two of them resynced) exact. The mirror's key at 502 is 01 in the
+server's journal and in the joiner's (live and FINAL); its key at 501 was 02 (brake).
+
+**Cause** (the capture replayed with `--trace`, `--trace-restore`, and the records of
+501-503 dumped with `BMMO_DUMP_FINAL_LAG`, `old/` under the run).
+- At the import no relayed frame of the three mirrors lay in (501, 530] ("0 relayed
+  frame(s)"), so the re-step drove client 0's mirror at 502 with the server's navigation of
+  S (02, brake) - DX10's hole 2, the server's own hold-last. Correct so far; the frame for
+  502 (01) came later and asked for a rewind: "rollback to tick 501 (... input corrected at
+  tick 502)".
+- That rewind does not re-simulate 502 for any mirror. Its restore skipped 6 objects
+  (`savestate restore at tick 531: ... skipped=6`; the import's own restore: 0), the status
+  shows `births=...+0/0/0/3` (three birth re-creations failed), and every mirror stands
+  still across replayed tick 502 - client 2's at x 62.962 "before replayed tick 502" and
+  again "before 503" (62.962 is the server's 502). Client 0's mirror holds the re-step's
+  braked 502 state (0.5726); from 503 it is driven (01) and keeps the 0.26 m/s deficit. The
+  blob of record 501 has the server's S (that ball's core speed 0.70897, the server's).
+- Why: the anchor record has no body row for the three mirrors. The joiner's record 501
+  was made live before any mirror existed (they were born live at 503, the catch-up
+  births: DX10's line "driven from 502 (was 504, born 503)"), so its
+  `tracked.remote_entities` is empty of them. The import re-captures the anchor as the
+  server's state (`rollback.hpp` ~1983-2006: `at->tracked.mechanisms` is rebuilt from
+  `replay_mechanisms`, rebirths are removed from `remote_entities`, then
+  `capture(world, *at)`), but nothing ADDS the mirrors the server's state brought, and
+  `capture` (~3310) grabs bodies by the tracked set only. A later rewind anchored at S then
+  finds no `recorded` body for them (~1398) and takes `birth_record` (~3270: the first
+  record holding the body, 502 > S) as their birth: the item is parked with record 502's
+  state, `repose_tick` 502 (~1428), `destroy_body` refuses (the core keeps them, ~1663-1690:
+  the three `birth_recreate_failures`), the blob restore skips them, and they are released
+  at 502 with that state - so tick 502 is not simulated for them with any input.
+  DX10's note reasoned that `born_tick` = S keeps `remakes_birth` false at a later restore
+  anchored at S; the core's hook does, but the engine's plan never asks it - its item comes
+  from the records.
+
+**Reach.** Every exact import (late join, A3 resync) with a mirror the anchor record does
+not track (born live after S, or made from its row at the import), when a later rewind is
+anchored at S: tick S + 1 is replayed without that mirror, and an input of S + 1 learned
+after the import never acts. Without snapshots nothing repairs it. Not in this step's
+scope (a check batch; nothing built). Fix shapes for the fix step: (i) the import adds
+every mirror it drives from S + 1 (DX10's moved set, with its generation) to the anchor
+record's `tracked.remote_entities` before `capture(world, *at)`, so record S holds its
+row and a rewind to S restores it and drives it from S + 1 - the design's own rule
+("the server's state at S drives every mirror alive at S") carried into the record;
+(ii) `birth_record` / the plan treat a body the anchor's blob holds as present at the
+anchor (restore it from the blob, no parked item). (i) is local to the import; (ii)
+changes every restore's birth rule. Queued in roadmap §4 item 4.
+
+Also seen (not a physics difference): the FINAL row of a member's own resync anchor can
+lack a mirror re-made by a beam pair stamped before S but applied after the request
+(`a3_pair2` client 2, S 512, client 1's beam at 501: one row, from 513 present and exact) -
+the same per-life mirror naming as BMX.

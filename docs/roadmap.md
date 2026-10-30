@@ -2315,7 +2315,21 @@ numbers 1-10 are unchanged.
      INV's finding 2 on its face; possibly the own-ball birth residual (A)
      of SFD, not shown. Next: first divergence of client 2 against the
      server before 1186 (rollback-engine-gaps-design.md "As built (step
-     GL1)"). **(item 2) 8 members at 0 ms
+     GL1)"). **Found at FULL step H6, queued (item 4, pre-existing,
+     cause established): an import's anchor record does not track the
+     mirrors the server's state brought** - `h6_full/a3_trans`'s late
+     joiner (S 501; its mirrors born live at 503): a rewind anchored at S
+     (an input of 502 relayed after the import) parks the three mirrors as
+     born at 502 with the re-step's record of 502 and never simulates 502
+     for them, so client 0's mirror keeps the hold-last brake of 502
+     (0.26 m/s, 1.08 m; the Pusher it reaches 3149 m); identical on rDX11.
+     `rollback.hpp` ~1983-2006 re-captures the anchor with the old tracked
+     set (`capture` ~3310 grabs by it), ~1398 finds no `recorded` body and
+     `birth_record` (~3270) returns 502. Fix shapes: (i) add DX10's moved
+     mirrors to the anchor's `tracked.remote_entities` before the
+     re-capture, (ii) a body the anchor's blob holds is present at the
+     anchor (world-agreement-gaps-design.md "As built (step H6)").
+     **(item 2) 8 members at 0 ms
      start late, measured**: U9 and its control without the FIFO and the
      reload (`u9ctl`) starve - every client steps tick T 2.6-4.5 ticks after
      the server from its first tick to the end (4 members, h1_0_on: 0.3-1.2

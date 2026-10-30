@@ -3863,3 +3863,51 @@ IVP, engine-change, server or host change, no `BallanceMMOClient` member.
   bit against the server).
 - **Not run:** a retail session (the retail core runs the same shared
   code; compile only), CPU parity.
+
+## As built (step H6, FULL close-out, 2026-10-30): ELH - gap L's L-H rows
+
+FULL plan step H6 (check batch; nothing built). HEAD 30e63ffd's x64 build (`rGL1`), the
+Arch server of INV (no server source changed since). FINAL rows (`--final-checkpoints`
+replays of the captures by the same build) against the server's FULL checkpoints, every
+field bit for bit (`work/H5/rows_cmp.py`); rewinds across deaths counted from the logs
+(`.local-tools/work/H6/cross_death.py`, the audit's `cross_death.py` rebuilt: a rewind
+"rollback to tick A ..., re-simulated N" crosses a death D when A < D <= A + N).
+
+- **A capture replay carries forced rewinds** (`--force-rollback E:D --replay-free-cost-clock`,
+  as GL1 used it), so the A < D-1 case is judged offline, arm and control from one capture -
+  the same batch by construction; EL7's "a capture replay cannot add forced rewinds" is stale.
+- **L-H1 / L-H2** (`core_ref_s12/swing_snapoff`: 150 ms, 10 % loss, sector 4, death-zone
+  deaths; `maps/arena-test/h6_full/lh12/`): arm `--force-rollback 13:40` on all four
+  (286-308 rewinds; remote deaths crossed with A < D-1 22-27 per client, A = D-1 12-14; own
+  A < D-1 3-11), control unforced (40-65 rewinds; A < D-1 8-10). Both: 38 keys, 0 differing,
+  on all four clients. Unrevivable 0, no ball in a restore's skip lines, `mlives` 19-25 / 0
+  failed / 0 settled; distinct `_BMMO_` clones = distinct remote births (9 / 9 / 10 / 11) in
+  the arm as in the control (no clone minted by a rewind). PASS.
+- The same arm on `h5_full/gl1_h123_150` (GL1's live rerun): every key exact but one row -
+  c2's mirror at 602 on c0 / c1 / c3, 0.0097 m (x and its velocity: the server's clone has
+  the fan's push, 0.18 m/s, the client's re-made mirror none), the tick after c2's beam pair
+  at 601 and the tick before its trafo at 603. That is INV's finding 2 (a same-tick
+  Unphysicalize + Physicalize pair: the headless host makes a new mirror per life, the slot
+  cell names the old one for a tick), reached here by a forced rewind across the pair; the
+  unforced replay is exact. Queued as BMX; not a gap-L row.
+- **L-H3** (own deaths in forced windows): offline `--force-rollback 13:24` on all four
+  swing_snapoff captures, and one live run (`h6_full/lh3`, the swing recipe, 50 s,
+  `--force-rollback 13:24` on client 1 only). Own deaths crossed with A < D-1: 2-8 per
+  client offline, 3 on the live client 1; `olives` revived 2-8 / 3, 0 failed; no "differs
+  from the live record" line within any own death's window (the 8-9 such lines per client
+  are the start pile and the beam, 234-299 and 667-671, present in the unforced control
+  too); FINAL rows exact, 38 keys, all four clients, offline and live. PASS.
+- **L-H4** (an own same-name rebirth < 48 ticks): no recipe makes one any more. The
+  shortest own death -> rebirth over 2695 pairs in every client log of `h*_full` and
+  `core_ref_s12` is 165 ticks (a trafo; a different name), a death -> spawn 198 ticks, longer
+  than the 128-tick history; the cov_e9 6-tick pattern predates the current death chain.
+  The only same-name pair inside a window is the beam, which is a move within one life
+  (B8EG EGB), not a rebirth. Not run; STALE as written.
+- **L-H6** (`h6_full/lh6`: start pile + drive, 150 ms, clients 2 / 3
+  `--remote-births-parked`): the remade arm `births` recreated 6 / exact 6 / mismatches 0 /
+  failures 0 on clients 0 and 1, `parked` (own balls) 0; the parked arm recreated 3 / exact
+  3 / failures 3 (the reconcile's counted failures of that arm, EL7). Live host error of the
+  mirrors in the start pile identical in both arms (0.964 / 1.713 / 0.854 m, the same
+  remote players on every client); FINAL rows exact on all four. Under the spawn ghost the
+  start pile is four coincident ghosts, so the "pile" is the ghost -> solid transitions of
+  the drive. PASS.

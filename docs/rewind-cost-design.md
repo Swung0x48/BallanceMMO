@@ -3435,3 +3435,84 @@ No source changed; protocol 18 and journal v7 as before.
   `spawn_impulse` / `spawn_spacing` and `physics_world.hpp`'s
   `spawn_impulse` comments say they are 0 under the spawn ghost. Wire check
   rRK2 -> rF0 over `core_ref_s11`: ALL SAME.
+
+### As built (step H6, FULL close-out, 2026-10-30): the spawn ghost, the airship and SPX-ct, live
+
+FULL plan step H6 (check batch; no product code changed). HEAD 30e63ffd's x64 build
+(`build-agent-rGL1`), the Arch server `ballanced-36c04e3d24c9+bmmo-5cf7c826d8d8-dirty`
+(no server object includes a file GL1 changed), snapshots off, trafo inputs and
+placement on, 150 ms, 4 headless clients; runs under `maps/arena-test/h6_full/<label>`
+(`.local-tools/work/H6/h6_run.sh`, judged on the FINAL rows of each capture replayed by
+the same build, `work/H6/final_replay.sh` + `work/H5/rows_cmp.py`: every field bit for
+bit against the server's FULL checkpoints).
+
+- **OWG-cell** (`owg_cell`, `owg_touch`). A remote ball resting 4.5 m from the Wood trafo
+  point (0.5 m gap) and 5.0 m on the other side; then a remote Wood ball resting 3.5-4.0 m
+  from it, so the new ball lands in contact (centre distance 4.140 at the birth 968, 4.019
+  at 976, both balls pushed apart to 4.84 m by 1060). Own ball and every body bit-equal to
+  the server on all four clients from the trafo on (owg_cell 64 ticks after the 768 birth,
+  owg_touch 209-239 ticks from 940; 24 / 41 keys, 0 differing). **The row's literal pass
+  line `player pairs 0 -> N, N > 0` is unreachable:** at a trafo birth the group had no body
+  at the last PSI (the trafo takes the old ball at 603 / 803, the new one comes at 768 /
+  968), so `spawn_ghost_is_ghost` (`physics_state.cpp` ~3773) reads the new body as a ghost
+  and the player filter refuses its ball pairs at the adoption's recheck - every trafo
+  adoption logs `(player pairs 0 -> 0), a spawn ghost` (here, and in every H1 trafo log);
+  the pairs are made by the listener's `resumed` recheck at the next PSI (~3866), which the
+  server's clone takes at the same PSI (server: "spawn ghost at tick 968: ... 2 resumed
+  solid, ... 2 rechecks"). A spawn birth is a ghost by design and a beam is made in the
+  group directly (no adoption), so OWG's "unverified branch" (`pairs_after > 0`) has no
+  birth that reaches it on either host.
+- **OWG-dr** (a death and a respawn between two PSIs): unreachable. 2114 own death ->
+  spawn-rebirth pairs in every client log of `h*_full` and `core_ref_s12`: shortest 198
+  ticks (`work/H6/rebirth_gap.py`); the only same-tick Unphysicalize + Physicalize pair is
+  the beam, which never carries `PHYSICALIZE_FLAG_SPAWN` (`client_core_lifecycle.cpp`
+  `beam_own_ball`, `client_core_messages.cpp` ~370).
+- **SPGH-tr** (a trafo near a resetpoint): no level has one. Trafos vs `ResetPoints` rows,
+  L1-L13 (SimTool `--dump-array ResetPoints --list-trafos`, `work/H6/lst/near.py`): the
+  nearest is 27.5 m (L2), the arena's ~34 m, against the 12 m spawn areas. The `resumed`
+  branch itself reads no position and runs at every trafo (above).
+- **SPGH-a3**: `a3_trans3` - client 0's A3 resync at S 596 re-stepped 596 -> 620 across
+  its own and a mirror's ghost -> solid at 601 (beams out of the start area): FINAL rows
+  exact on all four. `a3_pair2` - two solid balls beamed 4.0012 m apart beside resetpoint
+  2 (x 220), in contact 502-~515; transfers at S 507 (a member), 508 (a late joiner) and
+  512 (a member of the pair): exact on all four. `a3_trans`, `a3_trans2`, `a3_pair`
+  (transfers before / after the transitions, a resting pair 4.196 m apart): the resynced
+  members exact. The late joiner of `a3_trans` is not: see the finding in
+  world-agreement-gaps-design.md "As built (step H6)".
+- **BALA-F2** (`airship`, `--sectors 4`): both own balls beamed into the zone, latched at
+  301 and asleep in the latch at clock 9.47 ("the latch holds"); a resync while latched
+  and asleep (client 0 S 671, client 1 S 1622) logged "kept as this world has it", no
+  "back in the sync", the own pose unchanged (926, 2.016, 15 before and after). PASS.
+- **ASL-pl** (an own ball asleep on the airship's movable planks): not producible on the
+  arena. Beamed above the planks (`asl_planks`, x 915 / 911) the balls rest at y 1.31 and
+  fall asleep in the latch (clock 19.77 / 20.03, the latch holds), but the record's only
+  friction partner of the own ball is the static `A_Floor_035`, as at x 926 (`airship`,
+  record 640): the balloon's `PE_Balloon_Platte01-08` (y -1.0 .. -3.8) and
+  `PE_Balloon_Platform` (y -1.8) sit below the reachable floor of the arena's balloon
+  recess. The latch-at-rest half holds; the movable-plank half needs a retail level's
+  balloon (with ASL-r, retail). Deferred.
+- **BALL-gp** (`airship`): sector 4 active on every side (the server rows carry
+  P_Modul_03 / 08 / 19 / 41, the Pusher and P_Ball_Wood); with the other two balls at the
+  level start (x -20) the nearest candidate of the sector-4 probes (P_Modul_03, P_Modul_19)
+  is a frozen airship ghost, but >= 100 m away, outside every probe's range: no probe
+  fired from a ghost. Every non-airship key (18) bit-equal on all four clients over the
+  ghost span; the balloon bodies differ per world, as designed. A ghost inside a
+  mechanism probe's range is not producible on the arena (the zone box x 905-941 against
+  the last probe unit at x 800); the world comparison of an in-range ghost-nearest probe
+  stays open (retail: BALL-pm).
+- **SPX-ct** (per world, every run, `scripts/ghost_state.py --contacts-only`): 44/44
+  (server, client) pairs PASS after one tool fix: `transitions` sorted (tick, player,
+  state) tuples, so a spawn-ghost `solid` line and an airship entry of one ball at one tick
+  (a beam out of the start area into the zone) ended as `solid`, and `asl_planks` c0/c1
+  reported a frozen collision-free airship ghost 3.69 m from the latched own ball as "a
+  contact from an overlap" (581 / 594 checkpoints). Two lines of one ball at one tick are
+  now ordered by a fixed rank (ghost < solid < airship: the airship state wins, and a
+  ghost/solid tie still reads solid as the old sort had it), whatever the log's line order
+  (selftest cases in both orders); `core_ref_s11/resync_snapoff`'s F0 reading (4.0114 m)
+  unchanged. So SPX-ct's "no contact from an overlap" is PASSED (44/44). Its other
+  criterion, "ghost -> solid at the same tick in every world", is only PARTIALLY MET:
+  the evidence is the frame-observed logs, where 81 of 87 owner lines equal a server line
+  and the 6 others are the owner's live states before a late beam event's rewind (`lh3`).
+  Its FINAL rows are exact, but the ghost bit is not in the record (F0's limit), so the
+  rows do not prove the final ghost -> solid tick of those 6 per world.
+- `trafo_life_mismatches`: no such line in any H6 server log (0).
