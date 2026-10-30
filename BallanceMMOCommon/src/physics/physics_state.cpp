@@ -1818,6 +1818,127 @@ namespace bmmo::physics {
         return true;
     }
 
+    // ---- bridge v30 (FULL step H1X): a named hull from a template body
+    namespace {
+        // FNV-1a 64 over a hull's compiled compact surface (0 for a hull
+        // that is not a compiled polygon surface).
+        uint64_t hull_signature(IVP_SurfaceManager* manager, uint32_t& size) {
+            size = 0;
+            if (!manager || manager->get_type() != IVP_SURMAN_POLYGON) return 0;
+            const IVP_Compact_Surface* surface = static_cast<IVP_SurfaceManager_Polygon*>(manager)->get_compact_surface();
+            if (!surface) return 0;
+            size = static_cast<uint32_t>(surface->get_size());
+            fnv1a64 blob;
+            blob.feed(surface, static_cast<size_t>(size));
+            return blob.value;
+        }
+
+        bool hull_in_use(CKIpionManager* physics, IVP_SurfaceManager* manager) {
+            for (auto it = physics->m_PhysicsObjects.Begin(); it != physics->m_PhysicsObjects.End(); ++it)
+                if (IVP_Real_Object* real = (*it).m_RealObject)
+                    if (real->get_surface_manager() == manager) return true;
+            return false;
+        }
+
+        // The template body: compiles `surface` (a cache miss) from `mesh`,
+        // reads the compiled hull, and leaves nothing behind but the cache
+        // entry.  The entity is made here and destroyed here: an identity
+        // rotation and unit scale (PhysicsScaleFromMatrix reads rows 0-2:
+        // exactly 1, 1, 1 on every host), far below every level.
+        bool build_from_template(CKIpionManager* physics, const char* surface, CKMesh* mesh, uint64_t& signature,
+                                 uint32_t& size, std::string& error) {
+            CKContext* context = physics->m_Context;
+            auto* entity = CK3dEntity::Cast(context->CreateObject(CKCID_3DENTITY, const_cast<CKSTRING>("BMMO_HullTemplate"),
+                                                                  CK_OBJECTCREATION_DYNAMIC));
+            if (!entity) {
+                error = "the template entity could not be made";
+                return false;
+            }
+            VxMatrix canonical = VxMatrix::Identity();
+            canonical[3][1] = -10000.0f;
+            entity->SetWorldMatrix(canonical);
+            // No event-log entry: a created / deleted pair or a birth recipe
+            // under the template's name would reach the hosts' lifecycle
+            // readers (drain_event_log, drain_muted_recipes).
+            const bool was_muted = g_event_log.muted, was_keeping = g_event_log.keep_muted_recipes;
+            g_event_log.muted = true;
+            g_event_log.keep_muted_recipes = false;
+            std::vector<char> surface_buffer(surface, surface + std::strlen(surface) + 1);
+            CKMesh* convexes[1] = {mesh};
+            VxVector shift(0.0f, 0.0f, 0.0f);
+            IVP_Material* material = new IVP_Material_Simple(0.5f, 0.5f);
+            // fixed, frozen, no collision: an IVP_MT_STATIC object that never
+            // enters m_MovableObjects, a simulation unit or the overlap tree.
+            const int result = physics->CreatePhysicsObjectOnParameters(
+                entity, 1, convexes, 0, nullptr, nullptr, 0, nullptr, 1.0f, surface_buffer.data(), &shift, TRUE,
+                material, 1.0f, nullptr, TRUE, FALSE, FALSE, 0.0f, 0.0f);
+            bool ok = result == CK_OK;
+            if (ok) {
+                PhysicsObject* object = physics->GetPhysicsObject(entity);
+                IVP_Real_Object* real = object ? object->m_RealObject : nullptr;
+                signature = real ? hull_signature(real->get_surface_manager(), size) : 0;
+                // Fires the deleted event: physics_RT's listener takes the
+                // entry out of m_PhysicsObjects.
+                if (real) real->delete_silently();
+                if (physics->GetPhysicsObject(entity)) {
+                    physics->RemovePhysicsObject(entity);
+                    error = "the template body's entry outlived its body";
+                    ok = false;
+                } else if (!real) {
+                    error = "the template body was not made";
+                    ok = false;
+                }
+            } else {
+                error = "CreatePhysicsObjectOnParameters failed for the template (" + std::to_string(result) + ")";
+            }
+            delete material;
+            g_event_log.muted = was_muted;
+            g_event_log.keep_muted_recipes = was_keeping;
+            CK_ID id = entity->GetID();
+            CKDependencies none;
+            context->DestroyObjects(&id, 1, CK_DESTROY_FREEID, &none);
+            return ok;
+        }
+    }
+
+    bool hull_template(CKIpionManager* physics, const char* surface, const char* mesh_name,
+                       bmmo_physics_hull_template& out, std::string& error) {
+        error.clear();
+        out = {};
+        if (!physics || !physics->GetEnvironment() || !physics->m_Context) {
+            error = "physics environment is unavailable";
+            return false;
+        }
+        if (!surface || !*surface) {
+            error = "no hull name";
+            return false;
+        }
+        CKMesh* mesh = find_mesh(physics, bounded(mesh_name, BMMO_PHYSICS_NAME_SIZE));
+        if (!mesh) {
+            error = std::string("no mesh named '") + (mesh_name ? mesh_name : "") + "'";
+            return false;
+        }
+        if (IVP_SurfaceManager* cached = physics->GetCollisionSurface(surface)) {
+            uint32_t previous_size = 0;
+            out.previous = hull_signature(cached, previous_size);
+            if (hull_in_use(physics, cached)) {
+                // Kept; the template's own hull compiled under a private name
+                // for the comparison, and forgotten again.
+                const std::string probe = std::string(surface) + "#BMMO_HullTemplate";
+                physics->RemoveCollisionSurface(probe.c_str());
+                const bool ok = build_from_template(physics, probe.c_str(), mesh, out.signature, out.size, error);
+                physics->RemoveCollisionSurface(probe.c_str());
+                out.outcome = BMMO_HULL_TEMPLATE_KEPT;
+                return ok;
+            }
+            physics->RemoveCollisionSurface(surface);
+            out.outcome = BMMO_HULL_TEMPLATE_REBUILT;
+        } else {
+            out.outcome = BMMO_HULL_TEMPLATE_BUILT;
+        }
+        return build_from_template(physics, surface, mesh, out.signature, out.size, error);
+    }
+
     bool set_body_guard(CKIpionManager* physics, bool enable, const char* except_entity, std::string& error) {
         error.clear();
         if (!physics) {

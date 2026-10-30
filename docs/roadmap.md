@@ -2358,7 +2358,24 @@ numbers 1-10 are unchanged.
      (engine change #22) / (A2) a template body at load and after each
      reset / (B) per-player mirror hull names / (C) a rotation-free cached
      scale (engine) / (D) accept; HL's h1_150 c2 own-ball criterion waits
-     on it. **Found at FULL step H6, queued (item 4, pre-existing,
+     on it. **Fixed at FULL step H1X** (the user's (A2), 2026-10-30: "建个模板
+     纸球好像是最简单而且最彻底的办法"): every world (the server's world,
+     the headless and the retail core hosts, SimTool) compiles
+     `Ball_Paper_Mesh` from a template body at its anchor - a fresh dynamic
+     entity at an identity rotation and unit scale, physicalized and removed
+     again inside one call, a cached hull no body uses forgotten first
+     (bridge v30 `hull_template`, game/hull_template.hpp; no engine change,
+     no protocol change). Census: no level 1-13 script clears the cache
+     (no Physics Reset block, no link into Set Physics Globals' reset
+     input), so a session's clears are engine (re)boots, each followed by an
+     anchor; the hull signature is the same on the Linux server, the
+     Windows headless clients and both retail copies (`bbd5631496ea2326`,
+     7564 bytes). `core_ref_s12/h1_150` replayed against the re-simulated
+     server: c1 / c2 / c3 157 keys, 0 differing (c2 had 7); c0 cannot (its
+     captured own trafo at 1705 is not reached under the new hull), so the
+     arm is re-captured as `core_ref_s12h/h1_150` (the H1C2 shape again,
+     139 keys, 0 differing on all four); the other ten arms are unchanged
+     (rollback-engine-gaps-design.md "As built (step H1X)"). **Found at FULL step H6, queued (item 4, pre-existing,
      cause established): an import's anchor record does not track the
      mirrors the server's state brought** - `h6_full/a3_trans`'s late
      joiner (S 501; its mirrors born live at 503): a rewind anchored at S

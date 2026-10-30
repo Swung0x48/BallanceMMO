@@ -60,6 +60,7 @@
 #include "array_census.hpp"   // step K0
 #include "probe_census.hpp"   // step WG0
 #include <entity/session.hpp>
+#include <game/hull_template.hpp>
 #include <game/script_replay.hpp>
 #include <game/session_host_support.hpp>
 #include <physics/physics_savestate.hpp>
@@ -1981,6 +1982,12 @@ namespace {
         }
         std::fprintf(stderr, "anchor reached after %d ticks (engine tick %llu)\n", waited,
             static_cast<unsigned long long>(engine.ticks()));
+        // FULL step H1X: the paper hull from the template body, as every session world's anchor does.
+        if (bmmo::game::build_hull_templates(bmmo::physics::physics_direct(engine.physics()), "the anchor",
+                                             [](const std::string& line, bool failed) {
+                                                 std::fprintf(stderr, "%s%s\n", failed ? "ERROR: " : "", line.c_str());
+                                             }) < bmmo::game::kTemplatedHullCount)
+            return 1;
         if (!bmmo::physics::reset_session_clock(engine.physics(), 1, error)) {
             std::fprintf(stderr, "session reset failed: %s\n", error.c_str());
             return 1;

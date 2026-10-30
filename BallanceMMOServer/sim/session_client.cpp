@@ -44,6 +44,7 @@
 #include <game/sector_activation.hpp>
 #include <game/sector_deactivate_pin.hpp>
 #include <game/depth_test.hpp>
+#include <game/hull_template.hpp>
 #include <game/mirror_clones.hpp>
 #include <game/sector_cell_split.hpp>
 #include <game/sector_placement.hpp>
@@ -2553,6 +2554,18 @@ namespace {
         void anchor() {
             std::string error;
             CKIpionManager* physics = engine_->physics();
+            // FULL step H1X: the paper hull compiled from the template body
+            // before anything can physicalize a paper ball (game/hull_template.hpp).
+            // A hull that does not hold the template's build ends the session,
+            // as a failed clock reset does (this world would differ).
+            if (bmmo::game::build_hull_templates(bmmo::physics::physics_direct(physics), "the anchor",
+                                                 [](const std::string& line, bool failed) {
+                                                     logf("%s%s", failed ? "ERROR: " : "", line.c_str());
+                                                 }) < bmmo::game::kTemplatedHullCount) {
+                logf("anchor: a templated hull does not hold the template's build; session ended");
+                ended_ = true;
+                return;
+            }
             if (!bmmo::physics::reset_session_clock(physics, core_.seed(), error)) { logf("clock reset: %s", error.c_str()); ended_ = true; return; }
             // Design 9.26 / step Q: the mechanisms' Sequencer counters and the
             // proximity blocks' countdown phase are the level file's on every

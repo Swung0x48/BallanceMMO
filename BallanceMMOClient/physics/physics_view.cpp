@@ -853,6 +853,20 @@ namespace bmmo::physics {
         return true;
     }
 
+    bool physics_view::hull_template(const char* surface, const char* mesh, bmmo_physics_hull_template& out,
+                                     std::string& error) const {
+        error.clear();
+        out = {};
+        if (!available()) { error = "physics bridge is not initialized"; return false; }
+        if (api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->hull_template) {
+            error = "the physics_RT bridge lacks hull_template";
+            return false;
+        }
+        char text[256] = {};
+        if (!api_->hull_template(manager_, surface, mesh, &out, text, sizeof(text))) { error = text; return false; }
+        return true;
+    }
+
     bool physics_view::step_physics(float delta_ms, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return false; }

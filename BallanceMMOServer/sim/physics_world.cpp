@@ -5,6 +5,7 @@
 #include "PhysicsCallback.h"
 
 #include <game/array_reads.hpp>
+#include <game/hull_template.hpp>
 #include <game/sector_deactivate_pin.hpp>
 #include <game/session_host_support.hpp>
 #include <physics/physics_direct.hpp>
@@ -181,6 +182,20 @@ namespace bmmo::sim {
         CKContext* context = engine_->context();
         CKIpionManager* manager = engine_->physics();
         if (options_.before_anchor) options_.before_anchor(context);   // SimTool only (step S7)
+        // FULL step H1X: the paper hull compiled from the template body before
+        // anything can physicalize a paper ball (game/hull_template.hpp).
+        // A hull that does not hold the template's build fails the anchor (the
+        // world would compile it from a runtime pose and differ from the
+        // clients'), as a failed clock reset does.
+        std::string hull_failure;
+        if (bmmo::game::build_hull_templates(bmmo::physics::physics_direct(manager), "the anchor",
+                                             [this, &hull_failure](const std::string& line, bool failed) {
+                                                 log("world: " + line);
+                                                 if (failed && hull_failure.empty()) hull_failure = line;
+                                             }) < bmmo::game::kTemplatedHullCount) {
+            error = hull_failure;
+            return false;
+        }
         if (!bmmo::physics::reset_session_clock(manager, options_.seed, error)) return false;
         // Design 9.26: the mechanisms start from the level file's Sequencer
         // counters on every side (the boot's own first play advanced them).

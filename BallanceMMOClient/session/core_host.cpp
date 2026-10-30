@@ -60,6 +60,7 @@
 #include <game/array_reads.hpp>
 #include <game/depth_test.hpp>
 #include <game/host_backend.hpp>
+#include <game/hull_template.hpp>
 #include <game/mirror_clones.hpp>
 #include <game/proximity_union.hpp>
 #include <game/sector_activation.hpp>
@@ -1795,6 +1796,26 @@ void BallanceMMOClient::core_host_anchor() {
     }
     if (fixed_tick_.enabled()) fixed_tick_.disable(m_bml);
     fixed_tick_.enable(m_bml);
+    // FULL step H1X: the paper hull compiled from the template body before
+    // the game's own first paper physicalization (Init Ingame's "physicalize
+    // new Ball" runs after this frame's anchor); this process's cache keeps
+    // whatever an earlier level or single-player play built, which the call
+    // forgets while no body uses it (game/hull_template.hpp).
+    // A hull that does not hold the template's build (NOT built, or a cached
+    // one still in use that DIFFERS) would make this world differ from the
+    // server's: logged as an error and the session ended here, as a failed
+    // clock reset does (H1X review).
+    if (bmmo::game::build_hull_templates(physics_view_, "the anchor", [this](const std::string& line, bool failed) {
+            if (failed)
+                logger_->Error("Physics session: %s (frame %d)", line.c_str(), m_bml->GetTimeManager()->GetMainTickCount());
+            else
+                logger_->Info("Physics session: %s (frame %d)", line.c_str(), m_bml->GetTimeManager()->GetMainTickCount());
+        }) < bmmo::game::kTemplatedHullCount) {
+        SendIngameMessage("Physics session ended: the paper ball's collision hull could not be built from the template "
+                          "(see the log).", bmmo::ansi::BrightRed);
+        core_host_end_local("the hull template did not hold");
+        return;
+    }
     // Step T4: with the trafo as an input, the originals quiesced and held
     // (trafo_anchor), right before the session clock reset, whose
     // restore_explosion_pieces is the quiesce's last step.

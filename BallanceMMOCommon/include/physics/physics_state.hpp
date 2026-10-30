@@ -263,6 +263,24 @@ namespace bmmo::physics {
                      const char* collision_group, std::string& error);
     // The block's Unphysicalize branch.  Not an error when nothing is there.
     bool unphysicalize(CKIpionManager* physics, const char* entity_name, std::string& error);
+    // Bridge v30 (FULL step H1X, the user's option (A2) of 2026-10-30): the
+    // named hull `surface` compiled from a template body.  physics_RT caches
+    // a named hull per manager with the scale of the FIRST body that uses the
+    // name (engine change #10's PhysicsScaleFromMatrix of its local matrix,
+    // whose row lengths round by the rotation), and a paper ball inherits the
+    // rotation of the ball it replaces - so which ball builds it first, and
+    // in what pose, would decide the hull per world.  Here a fresh dynamic
+    // entity at an identity rotation and unit scale (scale exactly 1,1,1),
+    // `mesh` its one convex, fixed, frozen and without collision, is
+    // physicalized under `surface` and removed again with its entity, inside
+    // this call: no body, no event-log entry (muted, the muted-recipe buffer
+    // too), no collision pair, no CK id (destroyed with CK_DESTROY_FREEID: the
+    // next object made gets the id back), no physicalize count.  A cached
+    // hull that no body uses is forgotten first (engine change #9's
+    // RemoveCollisionSurface); one a body uses is kept and compared with the
+    // template's, compiled under a private name (BMMO_HULL_TEMPLATE_KEPT).
+    bool hull_template(CKIpionManager* physics, const char* surface, const char* mesh,
+                       bmmo_physics_hull_template& out, std::string& error);
     // Add the BMMO player filter to the environment's IVP_Meta_Collision_Filter
     // (design 8.2): player balls (nocoll group ident starting with
     // `player_group_prefix`) collide with each other but not with the level's

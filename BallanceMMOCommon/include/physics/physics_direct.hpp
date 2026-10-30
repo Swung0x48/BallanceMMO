@@ -201,6 +201,10 @@ namespace bmmo::physics {
         bool unphysicalize(const char* entity_name, std::string& error) const {
             return bmmo::physics::unphysicalize(manager, entity_name, error);
         }
+        // v30 (FULL step H1X): a named hull compiled from a template body.
+        bool hull_template(const char* surface, const char* mesh, bmmo_physics_hull_template& out, std::string& error) const {
+            return bmmo::physics::hull_template(manager, surface, mesh, out, error);
+        }
         bool set_body_group(const char* entity_name, const char* collision_group, std::string& error) const {
             return bmmo::physics::set_body_group(manager, entity_name, collision_group, error);
         }

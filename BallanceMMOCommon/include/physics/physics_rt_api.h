@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 29u  /* v29: a savestate blob's physics globals read for a resync re-step (step H7X) (v28: the physics globals - time factor and gravity - read and written for a rollback (record-format-gaps design C3, step RK1) (v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) ) ) */
+#define BMMO_PHYSICS_API_VERSION 30u  /* v30: a named hull compiled from a template body (FULL step H1X) (v29: a savestate blob's physics globals read for a resync re-step (step H7X) (v28: the physics globals - time factor and gravity - read and written for a rollback (record-format-gaps design C3, step RK1) (v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) ) ) ) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -293,6 +293,21 @@ typedef struct bmmo_physics_globals {
     float time_factor;
     double gravity[3];
 } bmmo_physics_globals;
+
+/* A named collision hull compiled from a template body (v30, FULL step H1X;
+ * physics_state.hpp hull_template).  outcome: BMMO_HULL_TEMPLATE_*.
+ * signature: FNV-1a 64 over the template's compiled compact surface (its
+ * bytes, `size` of them); previous: the same over the hull the name held
+ * before (0 when none was cached). */
+typedef struct bmmo_physics_hull_template {
+    int32_t outcome;
+    uint32_t size;
+    uint64_t signature;
+    uint64_t previous;
+} bmmo_physics_hull_template;
+#define BMMO_HULL_TEMPLATE_BUILT   1  /* nothing was cached under the name: built from the template */
+#define BMMO_HULL_TEMPLATE_REBUILT 2  /* a cached hull no body used was forgotten, then built from the template */
+#define BMMO_HULL_TEMPLATE_KEPT    3  /* a body uses the cached hull: kept; signature = the template's, compiled under a private name */
 
 typedef struct bmmo_physics_api_v2 {
     uint32_t struct_size;
@@ -792,6 +807,20 @@ typedef struct bmmo_physics_api_v2 {
      * anchor world's.  0 with a message for an unreadable blob. */
     int32_t (*savestate_globals)(const uint8_t* data, uint32_t size, bmmo_physics_globals* out, char* error,
                                  uint32_t error_size);
+
+    /* ---- v30: a named hull compiled from a template body (FULL step H1X;
+     * physics_state.hpp hull_template) ----
+     * physics_RT caches a named hull per manager, compiled with the scale
+     * of the first body that uses the name; a template body - a fresh
+     * dynamic entity at an identity rotation and unit scale, `mesh` its one
+     * convex, fixed, frozen, no collision - is physicalized under `surface`
+     * and removed again with its entity (the event log muted), so the
+     * cache holds the template's hull.  A cached hull no body uses is
+     * forgotten first (engine change #9's RemoveCollisionSurface); one a
+     * body uses is kept.  1 with `out` filled, 0 with a message (no
+     * environment, no mesh of that name, the body not made). */
+    int32_t (*hull_template)(void* ipion_manager, const char* surface, const char* mesh, bmmo_physics_hull_template* out,
+                             char* error, uint32_t error_size);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

@@ -3911,3 +3911,106 @@ field bit for bit (`work/H5/rows_cmp.py`); rewinds across deaths counted from th
   remote players on every client); FINAL rows exact on all four. Under the spawn ghost the
   start pile is four coincident ghosts, so the "pile" is the ghost -> solid transitions of
   the drive. PASS.
+
+## As built (step H1X, FULL close-out, 2026-10-30): the paper hull built from a template body
+
+The user's decision (2026-10-30, H1C2's option (A2)): "建个模板纸球好像是最简单而且最彻底的办法，
+要不用这个？". The cause (roadmap section 4 item 4, "Cause established at FULL step H1C2"):
+physics_RT caches a named hull per manager, compiled with the scale of the first body that
+uses the name (engine change #10's `PhysicsScaleFromMatrix` of the local matrix, whose row
+lengths round by the rotation); every paper ball shares `Ball_Paper_Mesh` and inherits the
+rotation of the ball it replaces, so a client whose own paper trafo ran ahead of an earlier
+remote one built a hull one ulp off the other worlds', and no rollback undoes the cache.
+
+- **Built** (no engine change, no protocol or journal change): `physics_state.cpp`
+  `hull_template(surface, mesh)` (bridge API v30, `bmmo_physics_api_v2::hull_template`;
+  `physics_direct` / `physics_view` wrappers) and the host side written once,
+  `game/hull_template.hpp` `build_hull_templates` (the templated list, the log line).
+  Each host calls it first thing at its anchor: `physics_world::anchor` (the server's world
+  and SimTool's session replays), the headless `session_client::anchor`, SimTool's level /
+  record anchor, the retail `core_host_anchor` (core on only; the legacy path is untouched).
+- **The template**: a fresh `CK3dEntity` "BMMO_HullTemplate" (`CK_OBJECTCREATION_DYNAMIC`,
+  in no scene) at an identity matrix moved to y = -10000 - rows 0-2 exact, so the scale is
+  exactly 1, 1, 1 on every host - physicalized under `Ball_Paper_Mesh` with the level's mesh
+  as its one convex, fixed, frozen, collision off (an `IVP_MT_STATIC` object: never in
+  `m_MovableObjects`, a simulation unit or the overlap tree), its body deleted
+  (`delete_silently`: physics_RT's listener drops the table entry and the material is freed)
+  and the entity destroyed with `CK_DESTROY_FREEID`, all inside the call. No trace a world
+  can see: no body after the call; the event log muted and the muted-recipe buffer off for
+  the call (both restored), so no created / deleted / recipe entry; no collision pair; the
+  CK id goes back to the free list (LIFO in the reimplementation, CKObjectManager.cpp ~344 /
+  ~383: the server's and the headless worlds), so the next object made gets it and the id
+  sequence is the one without the template there; retail's CK2.dll was not read - its
+  post-anchor CK ids are compared with no other world's, so nothing depends on it;
+  `m_PhysicalizeCalls` untouched
+  (CreatePhysicsObjectOnParameters is called directly). The scale: the plan's canonical
+  matrix "at an identity rotation" taken as unit scale, so the paper hull is the raw mesh
+  where every world used to scale it by about 1.00003 / 1.000001 / 1.000004 (the level ball's
+  rotation-rounded row lengths): a uniform change in every world, which changes every journal
+  from the first paper body on.
+- **A cached hull** under the name: forgotten first when no body uses it (engine change #9's
+  `RemoveCollisionSurface`, as `restore_explosion_pieces` does for the piece hulls) - the
+  retail process keeps its cache across levels, sessions and single-player play; kept when a
+  body uses it, and then compared with the template's own build under a private name
+  (`BMMO_HULL_TEMPLATE_KEPT`, logged "equal to" / "DIFFERS from").
+- **When the cache is cleared** (the census, `.local-tools/work/H1X/census/`): only
+  `OnCKPostReset`, `PostClearAll` and `CKIpionManager::Reset`. No root script of levels 1-13
+  (the arena is 13 in the agent game dir; 78-106 root scripts each, the base composition's
+  included) holds a Physics Reset block or links into Set Physics Globals' second (reset)
+  input - all 12 Set Physics Globals blocks per level are driven through "Set Values". So in a
+  session the cache is cleared only by an engine (re)boot, which every host follows with an
+  anchor; a level reset ("Reset Level") keeps it. Adapted from the plan's "rebuilt after each
+  reset": no reset clears it, so nothing is rebuilt; the reset world's rows are the check.
+- **The census of named hulls** whose first build can come from a runtime pose (the dumps'
+  Physicalize blocks with their Collision Surface sources): `Ball_Paper_Mesh` ("physicalize
+  new Ball": the trafo's and the respawn's ball; the mirrors) - templated; Ball_Wood /
+  Ball_Stone are spheres (the ball branch, no named hull); the explosion pieces'
+  `Ball_*_piece*_Mesh` are forgotten at every anchor and compiled from the squared, restored
+  hierarchy (engine change #9); a trafo set's `..._Trafo<label>` copies from the copy's saved
+  initial conditions (game/trafo_sets.hpp build step 6), copied from the originals restored
+  at the anchor - the same lines on the server and all four clients in `h1c2/t5`; the
+  Physicalize blocks with an empty Collision Surface (De Physicalize, DepthTest, reset Level,
+  Deactivate Ball ...) take the ball branch or unphysicalize. Every other named hull (floors,
+  modules, placeholders `FixCube_Mesh`, props) is compiled by the level's scripts at the load
+  or a sector's activation from the level file's pose, at one tick in every world. Not
+  templated and not measured: a module hull shared by instances in several sectors is
+  compiled from the first instance activated; that order is every world's sector order, but
+  a late joiner that activates several sectors at once could start from another instance if
+  the instances' row lengths differ - a SimTool census over shared hulls' instances is the
+  check (deferred). No shared hull was found that the template cannot cover.
+- **Results** (build `rH1X`; Arch server of the same tree): unit tests 682/682; GCC syntax 31
+  ok; x86 client and plugin built. Wire check `rAUD` vs `rH1X` over `core_ref_s12`: ten arms
+  ALL SAME / IDENTICAL (a5u_lead, a6m_snapoff, cliff, l8_cross, resync_at150,
+  resync_at150_down, resync_snapoff, swing_snapoff; the arena's paper prop P_Ball_Paper_MF in
+  resync_at150_down unchanged); `h1_150` DIFFERENT (c0's sends from 1704, all four journals).
+  `core_ref_s12/h1_150` with the server re-simulated by the same build: c1 / c2 / c3 157 keys,
+  0 differing (c2 had 7 before: H1C2's signature gone); c0 differs from 1704 - its captured own
+  trafo at 1705 (Unphysicalize, applied by the re-simulated server) is not reached by its
+  ball under the new hull, a capture made under the old physics; so the arm is re-captured
+  (`maps/arena-test/core_ref_s12h/h1_150`, its README). Live 1 (the h1_150 recipe at 150 ms,
+  the re-capture): client 2's own paper birth at 1202 ran ahead of 1180's mirror (log lines
+  1310 / 1470), client 1's 1186 ahead of it (1165 / 1689); FINAL rows 139 keys, 0 differing on
+  all four; replayed: ALL SAME, journals IDENTICAL. Live 2 (`maps/arena-test/h1x/reset600`,
+  client 3 `--reset-level-at 600`, then three remote paper births at 1180-1202): FINAL rows 162
+  keys, 0 differing on all four (client 3 replayed with the same switch: 0 differing). Retail
+  (`scripts/retail/h1x_retail1`, two copies, arena in slot 13, snapshots off): "hull template:
+  Ball_Paper_Mesh built from the template at the anchor (hull bbd5631496ea2326, 7564 bytes)"
+  on both copies (frames 8124 / 7909), before copy 1's own paper birth at 403 and copy 2's at
+  743. The same signature on the Linux server, every Windows headless client and both x86
+  retail copies.
+- **Review fix-up**: a hull that does not hold the template's build - NOT built (the mesh not
+  found, the create failed) or a cached hull still in use that DIFFERS from the template's -
+  means this world compiles it from a runtime pose (H1C2's divergence). `build_hull_templates`
+  passes `failed` with that line and every host treats it as a failed anchor, as a failed clock
+  reset is: the server's world fails `physics_world::anchor` (the room's physics session does
+  not start), the headless client logs "ERROR:" and ends its session, SimTool returns 1, the
+  retail core host logs it at Error, says so in the chat and ends the session locally
+  (`core_host_end_local`). The helper's count and flag per outcome are unit-tested with a fake
+  backend (`world_hash_test.cpp` HullTemplate.OutcomesCountAndFlag: BUILT / REBUILT / KEPT
+  equal held, KEPT DIFFERS / NOT built failed); no host's failure branch ran live (every run took BUILT); the REBUILT
+  path (a retail process that played paper offline before the room start) and KEPT are on
+  FULL's deferred list. `hull_signature` hashes the compact surface's bytes as IVP wrote them,
+  padding included: equal on the three platforms today; a future IVP struct with uninitialised
+  padding would make KEPT report DIFFERS for equal hulls (and so end the session) - a false
+  alarm, never a silent difference. `core_ref_s12/h1_150` is marked superseded in that set's
+  README and `.local-tools/wire_check.sh` replays h1_150 from `core_ref_s12h` when REF is unset.

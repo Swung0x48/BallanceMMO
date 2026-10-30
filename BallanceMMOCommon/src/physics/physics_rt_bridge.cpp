@@ -347,6 +347,21 @@ namespace {
         return 1;
     }
 
+    // v30 (FULL step H1X): a named hull compiled from a template body.
+    int32_t api_hull_template(void* manager, const char* surface, const char* mesh, bmmo_physics_hull_template* out,
+                              char* error, uint32_t error_size) {
+        if (!out) {
+            set_error(error, error_size, "null argument");
+            return 0;
+        }
+        std::string text;
+        if (!bmmo::physics::hull_template(static_cast<CKIpionManager*>(manager), surface, mesh, *out, text)) {
+            set_error(error, error_size, text);
+            return 0;
+        }
+        return 1;
+    }
+
     int32_t api_step_physics(void* manager, float delta_ms, char* error, uint32_t error_size) {
         if (!manager) {
             set_error(error, error_size, "null argument");
@@ -1074,6 +1089,7 @@ namespace {
         api_get_physics_globals,
         api_set_physics_globals,
         api_savestate_globals,
+        api_hull_template,
     };
 }
 
