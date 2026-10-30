@@ -600,6 +600,11 @@ namespace bmmo::session {
         // id - after the pass and before the behaviour pass and the step,
         // where the server's tick() runs it.
         if (s.trafo_active_) platform_.trafo_frame(frame_tick);
+        // FULL step PRX (game/depth_test.hpp): the fall handler for free
+        // props, where the server's tick() runs it - after the trafo frame,
+        // before the behaviour pass and the step.  The replay runs it at
+        // the end of before_replayed_tick (client_core.cpp).
+        if (platform_.depth_test) platform_.depth_test(frame_tick);
         // A rewind above replayed up to the previous tick and left every
         // mirror's navigation input at the frame it last fed there; this
         // tick's step is driven by the frame recorded as applied for it

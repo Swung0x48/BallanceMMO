@@ -191,6 +191,7 @@ namespace {
         int drop_move_sector = 0;      // --drop-move SECTOR TICK: the player moves on at that tick
         int drop_move_tick = 0;
         bool n2_pin = true;            // --n2-pin on|off (step B2SW): the chains' deactivate cell pinned at the anchor
+        bool depth_test_rule = true;   // --depth-test-rule on|off (FULL step PRX): Gameplay_Ingame/DepthTest as a rule
         // --session-recipe (step B2SW, Q5): savestate-check binds the clients'
         // recipe.  Step F0 (RLM's queued harness item, option (a)): the
         // default when the scene can bind it (--frames, no --legacy-restore,
@@ -795,6 +796,12 @@ namespace {
             for (float& k: out.drop_second_at) { if (!(v = next())) return false; k = static_cast<float>(std::atof(v)); }
         }
         else if (arg == "--probe-trace") out.probe_trace = true;
+        else if (arg == "--depth-test-rule") {   // FULL step PRX (parse()'s chain is full: C1061)
+            if (!(v = next())) return false;
+            const std::string mode = v;
+            if (mode != "on" && mode != "off") return false;
+            out.depth_test_rule = mode == "on";
+        }
         // Step F0: the v14 recipe (SimTool's old default; parse()'s chain is full).
         else if (arg == "--v14") out.session_recipe = 0;
         else if (arg == "--player-mechanisms") {   // step Q7
@@ -2239,6 +2246,7 @@ namespace {
         options.session_clock = (args.world_options & bmmo::session::WORLD_SESSION_CLOCK) != 0;
         options.tutorial_exit_frame = args.tutorial_exit_frame;
         options.pin_checkpoint_deactivation = args.n2_pin;   // step B2SW: --n2-pin off is the A/B
+        options.depth_test_rule = args.depth_test_rule;   // FULL step PRX: --depth-test-rule off is the A/B
         options.split_sector_cell = args.n2_cell;            // step B2SX: --n2-cell off is the A/B
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         // Step S7: the id layout (--free-ids-before-load, --perturb-ids).
@@ -6156,6 +6164,7 @@ namespace {
         options.seed = header.seed;
         options.spawn_impulse = header.spawn_impulse;
         options.trace = args.journal_trace;
+        options.depth_test_rule = args.depth_test_rule;   // FULL step PRX: --depth-test-rule off is the A/B
         options.boot_ticks = args.boot_ticks;
         options.anchor_timeout = args.anchor_timeout;
         // Journal v5 (protocol 11): the session's world options.  The trafo
@@ -9891,6 +9900,8 @@ int main(int argc, char** argv) {
             "            on every report line; the server's world under the proximity union's rule)\n"
             "       any session world: [--n2-pin on|off]  (step B2SW: the checkpoint and level-reset chains'\n"
             "            IngameParameter[0][2] Set Cell pinned to 0 at the anchor, default on; off is the A/B)\n"
+            "           [--depth-test-rule on|off]  (FULL step PRX: Gameplay_Ingame/DepthTest's Test pinned and its rule\n"
+            "            run at one point of every tick, default on; off is the A/B: the level's block as it is)\n"
             "           [--n2-cell on|off]  (step B2SX: the checkpoint chain's IngameParameter[0][1] Set Cell writes a\n"
             "            private copy of the cell, default on; off is the A/B)\n"
             "       BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S]\n"

@@ -1096,6 +1096,26 @@ numbers 1-10 are unchanged.
    one left `P_Ball_Wood_MF` (0.021 m), a ball-pushed body that is off on
    the founders too (0.008 m on c1/c2 at the same tick: pushed by the
    predicted paper mirrors). Record-format design "As built (step H7X)".
+   **Queued (gap L, found by step PRX's review, pre-existing in the revive
+   path): a life whose birth this world's birth log does not hold cannot be
+   revived.** `revive_body` (`session_host_world.hpp`, step P / EL9) makes a
+   life again only from `births->lifetime_at`; the log starts empty at the
+   anchor (both hosts drain and discard the event log's history there,
+   `session_client.cpp` / `core_host.cpp` "install the listener, discard
+   history"; retail's OnPhysicalize records only while a core session runs)
+   and keeps the last 4096 ticks (`local_birth_log::add`). So a mechanism or
+   prop alive at the anchor (sector 1's), or born more than 4096 ticks before
+   the rewind, that the window destroys is "unrevivable": the replay runs
+   without it from S until the tick that destroys it again, and those ticks'
+   re-captured records lack it. Measured for the DepthTest props
+   (`h123_150f` server journal): `P_Ball_Wood_MF` has a row from the first
+   checkpoint (34, alive at the anchor), the other three from 630 (sector 2).
+   A fallen prop's window lies 200 m below the level's lowest DepthTest cube,
+   so only that prop's own rows differ, and only inside the window; before
+   PRX the clients never removed it at all. The fix (an anchor birth for
+   every body alive at the anchor, from a recipe the host can read without
+   the event log, and a log that keeps each name's latest birth past 4096
+   ticks) is its own step; world-agreement design "As built (step PRX)".
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03

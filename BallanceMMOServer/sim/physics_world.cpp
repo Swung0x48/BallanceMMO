@@ -350,6 +350,21 @@ namespace bmmo::sim {
         } else {
             log("world: the chains' sector deactivation is NOT pinned (--n2-pin off)");
         }
+        // FULL step PRX (game/depth_test.hpp): Gameplay_Ingame/DepthTest's
+        // Test pinned; tick() runs its rule at one point of every tick, as
+        // every client world does (the clients' body guard refused the
+        // block, so only this world removed a fallen prop, at its iterator's
+        // phase).  Pinned once, like N2: this world dies with its session.
+        if (options_.depth_test_rule) {
+            const std::string trouble = depth_test_.apply(engine_->context());
+            if (trouble.empty())
+                log("world: the depth test runs as a rule at one tick in every world: " + depth_test_.where());
+            else
+                log("world: the depth test was NOT pinned (" + trouble + "): the level's block removes a fallen prop here "
+                    "at its own phase");
+        } else {
+            log("world: the depth test is NOT pinned (--depth-test-rule off)");
+        }
         // The chain behind the hold keeps writing CurrentLevel[0][4], the cell
         // the modules of a pass branch on in their first frame; a clone's
         // crossing three ticks after a pass would cancel that pass's
@@ -1062,6 +1077,13 @@ namespace bmmo::sim {
         // union's pass, before the behaviour pass and the step - every
         // selected set's scripts, sets by player id, with the fixed delta.
         if (options_.trafo_inputs) bmmo::game::trafo_frame(context, trafo_registry_, kFixedDeltaMs);
+        // FULL step PRX (game/depth_test.hpp): the fall handler for free
+        // props, after the trafo frame and before the behaviour pass, where
+        // every client's core runs it (live pre_step, replayed
+        // before_replayed_tick).
+        if (depth_test_.pinned())
+            depth_test_.step(context, bmmo::physics::physics_direct(physics()), tick_,
+                             [this](const std::string& line) { log("world: " + line); });
         // Step RK3: the tutorial's exit right before frame
         // tutorial_exit_frame after the anchor, once.  The frame is counted
         // from the world's first step: on the server tick_ is the session's

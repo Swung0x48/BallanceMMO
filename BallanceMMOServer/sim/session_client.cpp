@@ -43,6 +43,7 @@
 #include <game/tutorial_exit.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_deactivate_pin.hpp>
+#include <game/depth_test.hpp>
 #include <game/sector_cell_split.hpp>
 #include <game/sector_placement.hpp>
 #include <game/proximity_union.hpp>
@@ -1557,6 +1558,14 @@ namespace {
             p.trafo_frame = [this](uint32_t) {
                 if (trafo_on_) bmmo::game::trafo_frame(engine_->context(), trafo_registry_, 1000.0f / 66.0f);
             };
+            // FULL step PRX (game/depth_test.hpp): the level's fall handler
+            // for free props, live and in every replayed tick, where the
+            // server's world runs it.
+            p.depth_test = [this](uint32_t tick) {
+                if (!depth_test_.pinned()) return;
+                depth_test_.step(engine_->context(), bmmo::physics::physics_direct(engine_->physics()), tick,
+                                 [this](const std::string& line) { logf("%s", line.c_str()); });
+            };
             p.trafo_type_set = [this](uint32_t player, uint16_t life, uint8_t type) {
                 bmmo::session::trafo_type_view view;
                 const bmmo::game::trafo_set* set = trafo_registry_.find(player, life);
@@ -1936,6 +1945,9 @@ namespace {
                 // The tutorial's frame-9 hold kept (step RK3H).
                 if (tutorial_hold_.keep(engine_->context()))
                     logf("the Level 1 tutorial's frame-9 hold: its input handed back was moved to the constant again");
+                // The depth test's pin kept (FULL step PRX).
+                if (depth_test_.keep(engine_->context()))
+                    logf("the depth test: its Test's threshold input handed back was moved to the constant again");
             };
             p.hooks.after_rewinds = [this](uint32_t) { maybe_force_rollback(); };
             p.drive = [this](const std::string& entity, const bmmo::session::input_frame& frame, std::string& error) {
@@ -2459,6 +2471,10 @@ namespace {
             // Gameplay_Tutorial survives a level exit.
             if (!tutorial_hold_.restore(engine_->context()))
                 logf("the Level 1 tutorial's frame-9 hold could not be handed back; its constant stays");
+            // The depth test's pin the same way (FULL step PRX): base.cmo's
+            // Gameplay_Ingame survives a level exit.
+            if (!depth_test_.restore(engine_->context()))
+                logf("the depth test's Test could not be handed back; its constant stays");
             sector_manager_id_ = 0;
             // Step T3: the previous session's sets went at its end; the
             // registry and its level reference start over (a reboot below
@@ -2640,6 +2656,21 @@ namespace {
                 const int pinned = bmmo::game::pin_checkpoint_deactivation(engine_->context(), report, &deactivate_pins_);
                 logf("the chains' sector deactivation (IngameParameter[0][2]) pinned to 0 in %d of 2 (%s)", pinned,
                      report.c_str());
+            }
+            {
+                // FULL step PRX (game/depth_test.hpp): Gameplay_Ingame/
+                // DepthTest's Test pinned; the core runs its rule at one point
+                // of every live and replayed tick (platform depth_test), as
+                // the server's world does.  Handed back at the next session's
+                // start (above), kept by the frame guard.
+                if (!depth_test_.restore(engine_->context()))
+                    logf("the depth test's previous pin could not be handed back; its constant stays");
+                const std::string trouble = depth_test_.apply(engine_->context());
+                if (trouble.empty())
+                    logf("the depth test runs as a rule at one tick in every world: %s", depth_test_.where().c_str());
+                else
+                    logf("the depth test was NOT pinned (%s): the level's block runs here, refused by the body guard",
+                         trouble.c_str());
             }
             {
                 // The chain's own phase cell (game/checkpoint_phase.hpp): its
@@ -4421,7 +4452,12 @@ namespace {
             // restore (the replayed reset takes them away again); T3: every
             // set's too.  Gap L, L4 (step EL9): bind_script_replay adds every
             // body of a selected module (rollback_world::revivable).
-            w.revivable = [this](const std::string& entity) { return explosion_pieces_.count(entity) != 0; };
+            // FULL step PRX: and the depth test's props (game/depth_test.hpp):
+            // one the rule removed inside the window is made again at the
+            // restore and removed again by the replayed rule at its tick.
+            w.revivable = [this](const std::string& entity) {
+                return explosion_pieces_.count(entity) != 0 || depth_test_.member(entity);
+            };
             w.park_births = args_.park_births;
             w.insert_births = args_.insert_births;
             w.put_back = [this](const std::string& entity, const bmmo::session::local_birth& birth) {
@@ -4727,6 +4763,7 @@ namespace {
         std::vector<bmmo::game::written_column> written_columns_;   // step RK2: the script binding's written-cell columns
         bmmo::game::sector_reset_guard reset_guard_;         // the retail sector resets, neutralized (game/sector_reset_guard.hpp)
         std::vector<bmmo::game::deactivate_pin> deactivate_pins_;   // N2's pins (game/sector_deactivate_pin.hpp)
+        bmmo::game::depth_test_rule depth_test_;             // FULL step PRX: Gameplay_Ingame/DepthTest as a rule (game/depth_test.hpp)
         bmmo::game::sector_cell_split chain_cell_split_;     // the chain's own [0][1] (game/sector_cell_split.hpp, step B2SX)
         bmmo::game::tutorial_exit tutorial_exit_;            // step RK3: the Level 1 tutorial's exit event (found at the anchor)
         bmmo::game::tutorial_factor_hold tutorial_hold_;     // step RK3H: its frame-9 write held (made at the anchor)

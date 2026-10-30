@@ -5514,3 +5514,190 @@ it at its anchor (1052 / 1181) and SimTool's `--resync-check` refuses the
 union's bit; and the SetPhysicsForce Shutdown with the bodiless target (not
 observable with the existing verbs). The Arch server was rebuilt without
 the slot-13 hack after the retail session.
+
+### As built (step PRX, FULL close-out, 2026-10-30): a fallen prop removed by Gameplay_Ingame/DepthTest's rule in every world, at one tick
+
+The user's decision on INV finding 1: "(b)", every world removes a fallen
+prop by the original logic. No wire, journal or IVP change, no engine change
+(the removal does not go through the guarded Physicalize block), no
+BallanceMMOClient member.
+
+**The rule** (`BallanceMMOCommon/include/game/depth_test.hpp`,
+`depth_test_rule`, one copy for every host).
+- At each world's anchor the block's Test is pinned the N2 way: its threshold
+  operand (B, compared "less than") is fed a session constant `-FLT_MAX`
+  (`BMMO_DepthTestOff`), so the block's True branch (Unphysicalize, Hide,
+  Set Position) never fires; its iterator keeps looping. The pin checks the
+  graph's shape (one Test, Physicalize, Group Iterator; Test.True ->
+  Physicalize.Unphysicalize; the Op its input starts is the threshold, read
+  by Test directly or through a local it is copied into - the level's Test
+  reads the local `res`, an output destination of Op 26674) and refuses
+  anything else (the block then runs as the level has it).
+- Every world runs the block's own predicate and actions at ONE point of
+  each tick: after the tick's births, the union's pass and the trafo frame,
+  before the behaviour pass and the step.
+  - The server: `physics_world::tick` right after `trafo_frame`.
+  - The clients: a new optional platform hook `depth_test(tick)`
+    (`client_platform.hpp`), called by the core live at the end of the trafo
+    part of `pre_step` (`client_core_frame.cpp`, after `trafo_frame`) and in
+    every replayed tick at the end of the core's `before_replayed_tick`
+    (`client_core.cpp`, after `drain_pending_lives`, `apply_trafo_inputs`,
+    `rederive_union_tick`). Both hosts install it over the shared rule
+    (`session_client.cpp`, `core_host.cpp`). Two asymmetries: in a replayed
+    tick the core's hook (ending in the rule) runs before the host's
+    `replay_activation` (the pass's cell writes and the manager's
+    activation) and before the trafo list `script_replay::execute_frame`
+    runs inside the replayed frame, while live the union's pass and
+    `trafo_frame` precede the rule. Neither matters for the rule: the pass
+    only writes cells and next-frame flags, the manager it starts runs in
+    the behaviour pass, after both, and no trafo script touches a DepthTest
+    member before the step; the forced-rewind run below (every key
+    bit-equal) is the measured backing. The unit test pins the core's half
+    of the order only (the hook last in `before_replayed_tick`, after
+    `trafo_frame` live), not the host's composition.
+  - For every member of the block's group (the iterator's Group input; the
+    group named "DepthTest" while its Op has not run) with a body: the body's
+    y (`get_body_state`; the entity's y, written from the same pose after
+    each step, only pre-filters at threshold + 50 m) below the threshold
+    (the block's own Op output, read without running it, while the graph
+    is active; latched after the first reading, see the gate round below)
+    -> `unphysicalize` (delete_silently, not through the
+    block, so the guard does not see it), `Show(CKHIDE)`, `SetPosition(0,0,0)`
+    (no referential, children moved: the block's Hide and Set Position).
+- Why this rule (the plan asked for a deterministic one): the decision is a
+  function of the world's state at the start of the tick, which lockstep
+  makes equal in every world, so every world removes at the same tick, and a
+  replay that re-steps that tick removes it again by itself - the state is
+  the record. The two alternatives the plan named: a server-stamped
+  lifecycle event needs a new message (a protocol change), arrives late on
+  every client (a rewind per removal) and still needs the clients' block
+  neutralized; making the iterator's state identical needs Gameplay_Ingame
+  in the replay (the iterator advances per live frame, a rewind leaves it
+  ahead, a late joiner starts it elsewhere). What changes from the retail
+  block: one member per frame (a removal up to N-1 frames after the
+  crossing) becomes every member every tick (the first tick after it) - in
+  H5's run the server's removal moves from 1560 to 1556 (crossing after the
+  step of 1555, y -325.329).
+- A rewind across a removal: both hosts' `revivable` now also names the
+  group's members, so gap L's mechanism half (EL9) makes the prop again at
+  the restore from its birth, and the replayed rule removes it at its tick.
+  An entity the rule hid is shown again when it has a body again (a revived
+  prop whose corrected history no longer crosses).
+- Pinned at the anchor and kept by the frame guard on both client hosts,
+  handed back at the session's end / the next anchor (base.cmo's
+  Gameplay_Ingame survives a level exit); pinned once on the server's world.
+  SimTool: `--depth-test-rule on|off` (default on; off = the level's block,
+  the A/B), parsed in `parse_union_arg` (the main chain hit C1061).
+
+**Checks** (`.local-tools/work/PRX/`; x64 `build-agent-rPRX2`; Arch server
+rebuilt from the tree).
+- Builds: x64 BUILD-OK (DEPS-OK; `client_core_messages.cpp.obj` #deps 42
+  VALID), x86 CLIENT-BUILD-OK, Arch ARCH-BUILD-OK (GCC compiles
+  `depth_test.hpp` through `physics_world.cpp`). Tests 682/682 (new:
+  `SessionClientCoreTrafo.TheDepthTestRunsAfterTheTrafoFrameLiveAndReplayed`).
+  GCC syntax 31/31.
+- Wire check rFANX -> rPRX2 over `core_ref_s12`: ALL SAME BUT BODY ORDER -
+  36/36 sends SAME, 36/36 journals IDENTICAL order-free (byte-different:
+  the anchor's one new CK parameter shifts the later object ids, and
+  `list_bodies` walks the id-hashed physics table; no capture has a prop
+  past its depth).
+- Levels 1-13 (`levels.sh`, SimTool `--list-placement --list-group
+  DepthTest`): pinned on 13/13; members L1 14, L2 8, L3 10, L4 22, L5 5,
+  L6 5, L7 3, L8 13, L9 7, L10 13, L11 8, L12 8, arena 4 - INV's census.
+- Offline, H5's `gl1_h123_150`: the server journal re-simulated by the new
+  SimTool removes P_Ball_Paper_MF at 1556 (the live journal: last row 1558,
+  gone from 1560); the four captures replayed by the new client remove it
+  at 1556, and against the re-simulated server journal the body set and the
+  four props are bit-equal at every common checkpoint 1500..end on all four.
+  Control (the live server journal vs GL1's FINAL replay of client 1): the
+  body sets differ from 1560 to the end (the client keeps the prop). That
+  journal no longer replays exactly on HEAD with the rule on or off
+  (first divergence 788 either way: FANX's fan), so this compare is
+  new-against-new.
+- Live (`maps/arena-test/prx_full/h123_150f`, the h123_150 recipe at 150 ms,
+  snapshots off, client 1 with `--force-rollback-at 1560:8,1570:18,1590:38`):
+  the server and all four clients remove the prop at 1556 (y -325.329);
+  each of client 1's three forced rewinds revived it at the restore of 1552
+  ("revive: P_Ball_Paper_MF (destroyed inside the window) made again") and
+  its replay removed it again at 1556. Server journal replay 2563/2563. The
+  four captures' FINAL replays vs the server: within 0.000 m throughout, 44
+  keys with 0 differing fields on every client (client 1 included), body
+  sets equal at every common checkpoint 34..end.
+- Retail (`scripts/retail/prx_r1`, two copies on the arena, slot-13 hack for
+  the x86 mod and the Arch server, reverted and the server rebuilt clean
+  afterwards): copy 1 enters sector 2, beams onto the broken bridge at
+  (342, 4, 43) and drives (H5's h123 client 3); the bridge breaks and the
+  paper prop falls. Both copies pinned (threshold `-0x1.45p+8`, the
+  server's) and removed it; afterwards its entity stands at (0,0,0) on both
+  and `physobjs all` lists no body for it.
+  - Copy 2 at 1243 = the server's tick, y -325.239 = the server's, and its
+    live P_Ball_Paper_MF rows bit-equal to the server's at every common
+    checkpoint.
+  - Copy 1 at 1238 (y -325.339): its world had left the server's long
+    before, at 296, the first tick after its own beam - beam events and key
+    frames identical in both journals, own ball linear x 0.1574 vs the
+    server's 0.1836 (0.8 mm) - and the bridge plates and the prop from 380.
+    That is FANX's "Found, pre-existing" signature (a retail own ball's step
+    after a beam differs from the server's; queued for the host-platform
+    audit, AUD), reproduced on the previous build: in FANX's `fanx_r1`
+    (pre-PRX x86) copy 1's own ball first differs from the server at 242,
+    the tick after its beam stamped 241. Not this step's: at 296 the rule
+    only reads (four entity positions, none within 50 m of -325, so no body
+    read and no write) and cannot touch the own ball; it removed the prop
+    where that copy's own world had it cross.
+
+**Not checked here** (H5b / retail batches): a late joiner or an exact
+resync whose S lies after a removal (the import and a prop the joiner's
+world still holds - unchanged by this step); a retail forced rewind across a
+removal (no retail verb forces one); a retail session whose beaming copy
+agrees with the server (blocked by the beam residual above); a prop whose
+birth predates this world's birth log (revive answers "no birth known": the
+replay runs without it until its removal tick - the end state is the same,
+the window's re-captured records lack it; only P_Ball_Paper_MF's revive was
+observed); the retail entity's hidden flag after the removal (its
+`Show(CKHIDE)` is not printed by any verb; renderer only).
+
+**Gate round (the review's findings).**
+- The rule was gated on `graph->IsActive()` at the tick it ran. Gameplay_Ingame
+  is not replayed, so a replayed tick read today's activity, and a retail
+  Level Reset (Menu_Dead / the ESC menu's restart re-activate
+  Gameplay_Ingame; Init Ingame restarts DepthTest some frames later) leaves
+  the graph inactive in that world only, for some frames, while the others
+  run the rule: a crossing in that gap removed late there, a rewind landing
+  in it revived the prop and never removed it again. Now latched: once the
+  graph has been active and its threshold read, the rule runs until
+  `restore()` / the next `apply()` whatever the graph's activity, with the
+  last threshold read (the Op's value for the level; re-read and re-logged
+  whenever the graph is active and it differs). Before its first activation
+  nothing runs, as before. No world in this step's checks ever had the
+  graph inactive after its start, so no measured result changes.
+- A rewind across the removal of a prop whose birth the birth log does not
+  hold - measured, not only named: in `h123_150f`'s server journal
+  `P_Ball_Wood_MF` has a row from the first checkpoint (34: alive at the
+  anchor, sector 1), the other three props from 630 (sector 2, in the log).
+  The log starts empty at the anchor on both hosts (the event log's history
+  drained and discarded; retail's OnPhysicalize records only inside a core
+  session) and keeps 4096 ticks, so every DepthTest member alive at the
+  anchor (each level's sector-1 props) or removed more than 4096 ticks after
+  its birth is unrevivable: `revive_body` answers "no birth known", the
+  replay runs without the prop from S until its removal tick and those
+  ticks' re-captured rows lack it (the prop is then over 200 m below the
+  level's lowest DepthTest cube: nothing else differs, and from the removal
+  tick the body sets are equal again). This is the revive path's limitation
+  for every mechanism (step P / EL9), pre-existing; before PRX a client never
+  removed the prop at all. Queued as its own gap L item in roadmap §4 item 4
+  (an anchor birth for every body alive at the anchor, and a log that keeps
+  each name's latest birth past 4096 ticks).
+- `apply` / the rule now name a member name two entities share (the
+  physics API resolves a body by name; the rule would act on that name's
+  body for both) in the pin's line and the threshold's log line. The census
+  of levels 1-13 lists none.
+- Reruns (code changed in `depth_test.hpp` only, plus these notes; about
+  5 minutes): x64 BUILD-OK (DEPS-OK; physics_world, session_client,
+  sim_tool, server, session_runner rebuilt), x86 CLIENT-BUILD-OK (core_host
+  rebuilt), Arch ARCH-BUILD-OK (GCC recompiled `physics_world.cpp.o`), GCC
+  syntax 31/31, tests 682/682, wire check rFANX -> rPRX3 over `core_ref_s12`
+  ALL SAME BUT BODY ORDER (36/36 sends SAME, 36/36 journals IDENTICAL
+  order-free). No live rerun: the latch differs from the old gate only when
+  the graph is inactive after its first activation, which no headless world
+  reaches; a retail Level Reset across a fall is left to the retail batches.

@@ -49,6 +49,10 @@ namespace bmmo::session {
             drain_pending_lives(tick);
             apply_trafo_inputs(tick, true);
             rederive_union_tick(tick);
+            // FULL step PRX: the fall handler for free props of the
+            // replayed tick, after its births, as the live pre_step runs it
+            // after them (game/depth_test.hpp).
+            if (platform_.depth_test) platform_.depth_test(tick);
         };
         // Step B1: a window-born body of a live pass the re-derivation moved
         // or forgot is not made at its live birth tick: no missing birth.

@@ -8015,6 +8015,46 @@ namespace {
         EXPECT_LT(at("poll_trafo:126"), at("retire_trafo_sets:126"));
     }
 
+    // FULL step PRX (game/depth_test.hpp): the fall handler for free props
+    // runs once per live frame, after the trafo frame and before the step
+    // (where the server's tick() runs it), and once per replayed tick at the
+    // end of the core's before_replayed_tick (after that tick's inputs and
+    // births); a host without the hook is simply not asked.
+    TEST(SessionClientCoreTrafo, TheDepthTestRunsAfterTheTrafoFrameLiveAndReplayed) {
+        flow_fake fake;
+        trafo_fake t;
+        session_platform p = fake.make_flow();
+        t.calls = &fake.calls;
+        t.install(p);
+        auto* calls = &fake.calls;
+        p.depth_test = [calls](uint32_t tick) { calls->push_back("depth_test:" + std::to_string(tick)); };
+        session_client_core core(std::move(p), trafo_caps());
+        trafo_tick_125(core, fake);
+        state_of(core).trafo_log_.add(bmmo::session::trafo_input{4, 1, 0, 126, 126, {}, 9, false});
+        size_t from = fake.calls.size();
+        core.pre_step();
+        const auto live = since(fake.calls, from);
+        EXPECT_TRUE(core.post_step(true));
+        const auto at = [](const std::vector<std::string>& calls, const std::string& prefix) {
+            for (size_t i = 0; i < calls.size(); ++i)
+                if (calls[i].rfind(prefix, 0) == 0) return static_cast<long>(i);
+            return -1L;
+        };
+        EXPECT_EQ(only(live, "depth_test"), std::vector<std::string>{"depth_test:126"}) << "once, for the frame's tick";
+        ASSERT_GE(at(live, "trafo_frame:126"), 0);
+        EXPECT_LT(at(live, "run_trafo:4:1:0:126:9"), at(live, "depth_test:126")) << "after the tick's inputs";
+        EXPECT_LT(at(live, "trafo_frame:126"), at(live, "depth_test:126")) << "after the trafo frame";
+        // A replayed tick: after its trafo inputs, at the end of the core's hook.
+        state_of(core).trafo_log_.add(bmmo::session::trafo_input{9, 0, 0, 122, 122, {}, 5, false});
+        from = fake.calls.size();
+        steps{core}.world_hooks().before_replayed_tick(122);
+        const auto replayed = since(fake.calls, from);
+        EXPECT_EQ(only(replayed, "depth_test"), std::vector<std::string>{"depth_test:122"});
+        ASSERT_GE(at(replayed, "run_trafo:9:0:0:122:5"), 0);
+        EXPECT_LT(at(replayed, "run_trafo:9:0:0:122:5"), at(replayed, "depth_test:122"));
+        EXPECT_EQ(replayed.back(), "depth_test:122") << "last in the core's half of the replayed tick";
+    }
+
     // Step G3 (world-agreement-gaps-design.md 2.2, 2.5, U2): the candidates
     // of the place point are the balls with a body in this world, one per
     // player, by player id - the own ball's entity with a body, every mirror

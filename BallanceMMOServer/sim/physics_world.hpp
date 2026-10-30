@@ -40,6 +40,7 @@
 #include <game/script_state.hpp>
 #include <game/checkpoint_phase.hpp>
 #include <game/tutorial_exit.hpp>
+#include <game/depth_test.hpp>
 #include <game/sector_cell_split.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_placement.hpp>
@@ -145,6 +146,11 @@ namespace bmmo::sim {
         // cannot make the manager activate the crossed one.  Every world
         // splits; false only for SimTool's A/B (--n2-cell off).
         bool split_sector_cell = true;
+        // FULL step PRX (game/depth_test.hpp): Gameplay_Ingame/DepthTest's
+        // Test pinned at the anchor and its rule run by tick() for every
+        // member at every tick, as every client world runs it.  Every world
+        // does; false only for SimTool's A/B (--depth-test-rule off).
+        bool depth_test_rule = true;
         // SimTool's id-layout test hooks (sector placement design 7.2 V7/V9,
         // step S7: --free-ids-before-load, --perturb-ids), unset in every
         // other world: before_level_load runs after the boot, right before
@@ -555,6 +561,10 @@ namespace bmmo::sim {
         // (made at the anchor; this world dies with its session and never
         // hands it back).
         bmmo::game::tutorial_factor_hold tutorial_hold_;
+        // FULL step PRX: the level's fall handler for free props (pinned at
+        // the anchor; this world dies with its session and never hands it
+        // back).
+        bmmo::game::depth_test_rule depth_test_;
         bool tutorial_exit_done_ = false;
         // The tick index of the world's first step after its anchor (-1:
         // none yet): the frame count is tick_ - first_step_tick_ + 1, so a

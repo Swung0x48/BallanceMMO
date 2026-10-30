@@ -833,6 +833,14 @@ namespace bmmo::session {
         // the tick's inputs and the union's pass, before the step.  A
         // replayed tick runs the same list inside the script replay's frame.
         std::function<void(uint32_t tick)> trafo_frame;
+        // Optional (FULL step PRX; game/depth_test.hpp): the level's fall
+        // handler for free props (Gameplay_Ingame/DepthTest's rule, its Test
+        // pinned at the anchor) for `tick` - after the tick's births, the
+        // union's pass and the trafo frame, before the behaviour pass and
+        // the step, where the server's physics_world::tick runs it; live
+        // (pre_step) and in every replayed tick (before_replayed_tick).  A
+        // host without it leaves the block as the level has it.
+        std::function<void(uint32_t tick)> depth_test;
         // The reconcile's view and halves (design 4.7, above).
         std::function<trafo_type_view(uint32_t player, uint16_t life, uint8_t type)> trafo_type_set;
         std::function<trafo_reconcile_result(const trafo_reconcile_spec& spec)> trafo_reconcile;

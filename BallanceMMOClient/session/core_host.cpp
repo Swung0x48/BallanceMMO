@@ -58,6 +58,7 @@
 #endif
 
 #include <game/array_reads.hpp>
+#include <game/depth_test.hpp>
 #include <game/host_backend.hpp>
 #include <game/proximity_union.hpp>
 #include <game/sector_activation.hpp>
@@ -93,6 +94,14 @@ namespace {
     // end and before the next anchor's hold (base.cmo's Gameplay_Tutorial
     // outlives the session).  File scope: BallanceMMOClient keeps its layout.
     bmmo::game::tutorial_factor_hold core_tutorial_hold;
+    // FULL step PRX (game/depth_test.hpp): Gameplay_Ingame/DepthTest's Test
+    // pinned at the core session's anchor; the core runs its rule at one
+    // point of every live and replayed tick (platform depth_test), as the
+    // server's and the headless worlds do.  Kept by the frame guard, handed
+    // back at the session's end and before the next anchor's pin (base.cmo's
+    // Gameplay_Ingame outlives the session).  File scope: BallanceMMOClient
+    // keeps its layout.
+    bmmo::game::depth_test_rule core_depth_test;
 }
 
 
@@ -1841,6 +1850,20 @@ void BallanceMMOClient::core_host_anchor() {
                            "freezes from that frame until the exit takes", bmmo::session::SESSION_CLOCK_TUTORIAL_FREEZE_FRAME,
                            hold_trouble.c_str());
     }
+    // FULL step PRX (game/depth_test.hpp): the level's fall handler for free
+    // props as a rule at one tick in every world (the body guard refused the
+    // block here, so only the server's world removed a fallen prop).
+    if (!core_depth_test.restore(m_bml->GetCKContext()))
+        logger_->Warn("Physics session: the depth test's previous pin could not be handed back; its constant stays");
+    {
+        const std::string trouble = core_depth_test.apply(m_bml->GetCKContext());
+        if (trouble.empty())
+            logger_->Info("Physics session: the depth test runs as a rule at one tick in every world: %s",
+                          core_depth_test.where().c_str());
+        else
+            logger_->Error("Physics session: the depth test was NOT pinned (%s): the level's block runs here, refused by "
+                           "the body guard", trouble.c_str());
+    }
     {
         const int restored = level_sequencers_.restore(m_bml->GetCKContext());
         logger_->Info("Physics session: %d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)",
@@ -2106,6 +2129,12 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                       "the session's copy is left in place");
     if (!core_tutorial_hold.restore(m_bml->GetCKContext()))   // step RK3H
         logger_->Warn("Physics session: the Level 1 tutorial's frame-9 hold could not be handed back; its constant stays");
+    if (core_depth_test.pinned())   // FULL step PRX
+        logger_->Info("Physics session: the depth test removed %llu prop(s) and showed %llu again this session",
+                      static_cast<unsigned long long>(core_depth_test.removals()),
+                      static_cast<unsigned long long>(core_depth_test.shown_again()));
+    if (!core_depth_test.restore(m_bml->GetCKContext()))   // FULL step PRX
+        logger_->Warn("Physics session: the depth test's Test could not be handed back; its constant stays");
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
     const uint32_t session = host.session;
     logger_->Info("Physics session: record sources (R2): %llu frame(s) whose NAV_ACTIVE (the leaves) differs from the BML "
@@ -2493,6 +2522,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         if (core_tutorial_hold.keep(m_bml->GetCKContext()))   // step RK3H
             logger_->Info("Physics session: the Level 1 tutorial's frame-9 hold: its input handed back was moved to the "
                           "constant again");
+        if (core_depth_test.keep(m_bml->GetCKContext()))   // FULL step PRX
+            logger_->Info("Physics session: the depth test: its Test's threshold input handed back was moved to the "
+                          "constant again");
     };
 
     // ---- writing the world ----
@@ -2639,6 +2671,13 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     };
     p.trafo_frame = [this](uint32_t) {
         if (trafo_host.on) bmmo::game::trafo_frame(m_bml->GetCKContext(), trafo_host.registry, 1000.0f / 66.0f);
+    };
+    // FULL step PRX (game/depth_test.hpp): the level's fall handler for free
+    // props, live and in every replayed tick, where the server's world runs it.
+    p.depth_test = [this](uint32_t tick) {
+        if (!core_depth_test.pinned()) return;
+        core_depth_test.step(m_bml->GetCKContext(), static_cast<const bmmo::physics::physics_view*>(&physics_view_), tick,
+                             [this](const std::string& line) { logger_->Info("Physics session: %s", line.c_str()); });
     };
     p.trafo_type_set = [this](uint32_t player, uint16_t life, uint8_t type) {
         bs::trafo_type_view view;
@@ -3015,7 +3054,12 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         // (the replayed reset takes them away again); T3: every set's too.
         // Gap L, L4 (step EL9): bind_script_replay adds every body of a
         // selected module (rollback_world::revivable).
-        w.revivable = [](const std::string& entity) { return host.explosion_pieces.count(entity) != 0; };
+        // FULL step PRX: and the depth test's props (game/depth_test.hpp):
+        // one the rule removed inside the window is made again at the
+        // restore and removed again by the replayed rule at its tick.
+        w.revivable = [](const std::string& entity) {
+            return host.explosion_pieces.count(entity) != 0 || core_depth_test.member(entity);
+        };
         w.park_births = false;
         w.insert_births = false;
         w.put_back = [this](const std::string& entity, const bs::local_birth& birth) {
