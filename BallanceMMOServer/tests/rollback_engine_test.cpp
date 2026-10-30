@@ -4647,6 +4647,99 @@ TEST(RollbackEngine, AnUntrackedFixedBirthTheReplayedScriptsMakeIsDestroyedAtThe
     }
 }
 
+// Step DX1 (SP7-c, option (a)): a deferred body (untracked, born inside the
+// window, unknown to the anchor's blob) is kept in the world by the replay,
+// so the records the replay captures before its birth tick hold it and their
+// blobs know it.  Those records mark it unborn (tick_state::unborn): a SECOND
+// restore anchored on one of them defers its recheck to the birth tick again
+// although the blob knows it - and marks the records it captures in turn.  A
+// record captured at or after the birth tick has no mark, and a resync's
+// travelling blob (not this world's record) never consults one.
+TEST(RollbackEngine, ADeferredBodyIsMarkedUnbornInTheRecordsCapturedBeforeItsBirth) {
+    // 0: the second restore anchored at 3 (before the birth), then a third
+    //    one at 3 again; 1: anchored at 5 (its birth tick: no mark); 2: a resync at 3
+    for (const int arm: {0, 1, 2}) {
+        SCOPED_TRACE(arm);
+        fake_world world;
+        world.savestates = true;
+        world.bodies["Plate"].position[0] = 40.0;
+        rollback_engine engine;
+        auto w = world.adapter();
+        rollback_tracked tracked;
+        tracked.mechanisms = {"Plate"};
+        w.birth_tick_of = [](const std::string& entity) { return entity == "Dome" ? 5u : 0u; };
+        w.recheck_body = [&](const std::string& entity) { world.calls.push_back("recheck " + entity); return true; };
+        w.after_step = [&](uint32_t tick) { world.calls.push_back("after_step " + std::to_string(tick)); };
+        // The blob knows a body exactly when it was alive at the blob's capture.
+        const auto knows = [](const std::vector<uint8_t>& blob, const std::string& name) {
+            return std::search(blob.begin(), blob.end(), name.begin(), name.end()) != blob.end();
+        };
+        const auto inner = w.set_savestate;
+        w.set_savestate = [&world, inner, knows](const std::vector<uint8_t>& blob, bmmo::session::savestate_outcome& outcome) {
+            const bool unknown = world.bodies.contains("Dome") && !knows(blob, "Dome");
+            const bool ok = inner(blob, outcome);
+            if (unknown) {
+                outcome.unknown_bodies.push_back("Dome");
+                world.calls.push_back("unknown Dome");
+            }
+            return ok;
+        };
+        w.set_travelling_savestate = [&world](const bmmo::session::travelling_blob&, bmmo::session::savestate_outcome&) {
+            world.calls.push_back("set_travelling_savestate");   // the server's blob knows the dome
+            return true;
+        };
+        fake_body dome;
+        dome.position[0] = 7.0;
+        for (uint32_t tick = 1; tick <= 6; ++tick) {
+            if (tick == 5) world.bodies["Dome"] = dome;   // the live Physicalize
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        // The first restore: the blob of 2 does not know the dome - RO1's
+        // deferral; the replay keeps it inert and records 3 and 4 with it.
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 2, 6, no_input, "first"));
+        EXPECT_EQ(world.count("unknown Dome"), 1);
+        EXPECT_EQ(world.count("recheck Dome"), 1);
+        EXPECT_EQ(engine.stats().unknown_rechecks_deferred, 1u);
+        EXPECT_EQ(world.count("log deferral:"), 0) << "the first restore defers it as an unknown body";
+
+        world.calls.clear();
+        if (arm == 2) {
+            const std::vector<uint8_t> server_blob{1, 2, 3};
+            bmmo::session::resync_spec spec;
+            spec.blob.blob = &server_blob;
+            bmmo::session::resync_outcome out;
+            ASSERT_TRUE(engine.resync(w, 3, 6, spec, no_input, out, "test"));
+            EXPECT_EQ(world.count("set_travelling_savestate"), 1);
+            EXPECT_EQ(world.count("recheck Dome"), 0) << "a travelling blob: the mark is not consulted";
+            EXPECT_EQ(world.count("log deferral:"), 0);
+            EXPECT_EQ(engine.stats().unknown_rechecks_deferred, 1u);
+            continue;
+        }
+        const uint32_t anchor = arm == 0 ? 3u : 5u;
+        ASSERT_TRUE(engine.rewind_to(w, anchor, 6, no_input, "second"));
+        EXPECT_EQ(world.count("unknown Dome"), 0) << "the blob of the replay's record knows the dome";
+        if (arm == 1) {
+            EXPECT_EQ(world.count("recheck Dome"), 0) << "the record of the birth tick: no mark";
+            EXPECT_EQ(world.count("log deferral:"), 0);
+            EXPECT_EQ(engine.stats().unknown_rechecks_deferred, 1u);
+            continue;
+        }
+        ASSERT_EQ(world.count("recheck Dome"), 1) << "deferred again by the mark";
+        EXPECT_GT(world.first("recheck Dome"), world.first("after_step 4")) << "not at the restore";
+        EXPECT_LT(world.first("recheck Dome"), world.first("after_step 5")) << "rechecked in at its birth tick, before its step";
+        EXPECT_EQ(world.count("log deferral: Dome is unborn in the record of 3 (born at 5)"), 1);
+        EXPECT_EQ(engine.stats().unknown_rechecks_deferred, 2u);
+        // The second replay marked the record of 3 it captured again.
+        world.calls.clear();
+        ASSERT_TRUE(engine.rewind_to(w, 3, 6, no_input, "third"));
+        EXPECT_EQ(world.count("unknown Dome"), 0);
+        EXPECT_EQ(world.count("recheck Dome"), 1);
+        EXPECT_EQ(engine.stats().unknown_rechecks_deferred, 3u);
+    }
+}
+
 // Step B7EG (rollback-engine gaps design 2.2.4, gap Q4): the PreSimulate
 // entries of scripts the replay does not run are held from before anything
 // is restored - the scripts, the savestate - to the end of the replay, and

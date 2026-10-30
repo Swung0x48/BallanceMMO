@@ -3478,3 +3478,75 @@ diagnostic switch (off by default). Scratch: `.local-tools/work/S3`.
   `--force-rollback-at 30:20`, and accepts `22:20,1062:20`; the real-entry
   `--queue-roundtrip` run above. No x86 rebuild: no shared or retail file
   changed in the gate round.
+
+## As built (step DX1, FULL close-out, 2026-10-29): SP7-c, a deferred body marked unborn in the records captured before its birth
+
+Roadmap §4 item 4, queued at FULL step H1 (the deferral of an untracked
+window-born fixed body leaking into the records a replay captures before its
+birth tick), measured at FULL step SPX (options (a), (b), (c), each a
+prototype on fccf4f7d); the user chose (a) on 2026-10-29 ("SP7-c: a").
+
+- **Cause (H1 / SPX).** RO1's restore keeps an untracked fixed body born
+  inside the window, which the anchor's blob does not know and RO1's
+  destroy-and-remake guard refuses (P_Dome_MF: a level object of the s4
+  pass, `owned_by_selection` false), inert and rechecks it into the overlap
+  tree at its birth tick (`deferred_rechecks`, built from
+  `savestate_outcome::unknown_bodies`). The replay keeps that live object, so
+  the records it re-captures between the anchor and the birth tick hold it,
+  inert, and their blobs know it. A second restore anchored on one of them
+  finds no unknown body, runs no recheck, and the body stays out of the tree
+  for good (l8_cross_150 c2, the pair 350:24,360:24: 3 overlap-tree nodes
+  fewer from 360 on, client 2's own ball 8.1 m off by 942; rlm2rw c1 live
+  at 75).
+- **The fix (`session/rollback.hpp` only, SPX's option (a) re-based on
+  HEAD f9775b82 unchanged in logic).** `tick_state::unborn` (name -> birth
+  tick, in memory: no record, blob, journal or protocol field) - the replay's
+  capture loop marks, in each record it captures at tick t, every body of this
+  restore's `deferred_rechecks` whose birth tick is after t. A restore whose
+  savestate was applied and is not a travelling blob (a resync's blob is the
+  server's, not this world's record) adds, after the unknown-body loop, each
+  marked body with anchor < birth <= current tick that has no plan item, is
+  not already unknown and is alive now, to `deferred_rechecks[birth]`
+  (counted in `unknown_rechecks_deferred` and the rewind's `deferred`); its
+  replay then marks the records it captures again, so a chain of restores
+  keeps the deferral. A live record never has a mark (the body did not exist
+  yet). Log: `deferral: <name> is unborn in the record of <anchor> (born at
+  <birth>): its recheck deferred to its birth tick` (capped at 16).
+- **Adaptations (recorded).** The prototype's log prefix `SPX(a):` became
+  `deferral:` (the SPX judge `extras.sh` counted `SPX(a)`; DX1's copy
+  `.local-tools/work/DX1/extras.sh` counts `deferral: `). The log cap is an
+  engine member `unborn_logs_` next to `recreate_logs_`, not SPX's
+  function-local static (one process-wide counter: a test binary's earlier
+  engines, or a retail reconnect, would use it up). It grows
+  `rollback_engine` by 4 bytes and so `BallanceMMOClient`, as `lives_logs_`,
+  REACH, R12's `rewind_cost_` and RK1's `first_globals_change_` did before
+  it (the retail runs after them did not hang; BML's rule is about the
+  class's own members). `tick_state` is an element of `history_` (a deque).
+  The x86 objects that include `rollback.hpp` (from the tree's own
+  `ninja -t deps`) were rebuilt and checked newer than the header instead of
+  being deleted (no deletion outside `clean.sh`'s roots). The mark keeps the
+  birth tick the replay recorded and does not ask `birth_tick_of` again:
+  every replay of a tick re-writes its marks from its own deferrals, and a
+  body whose life restarts inside the window has a plan item and is skipped.
+- **Checks.** x64 BUILD-OK (DEPS-OK); `BallanceMMOMessageTests` 663/663 with
+  the new `RollbackEngine.ADeferredBodyIsMarkedUnbornInTheRecordsCapturedBeforeItsBirth`
+  (a body born at 5 deferred by a restore at 2; a second restore at 3, whose
+  record's blob knows it, rechecks it after tick 4's step and before tick 5's,
+  and a third at 3 again does too; a restore at 5 has no mark; a resync at 3
+  never consults one) - and the test FAILS with the fix stashed (negative
+  control); GCC `linux_test_syntax.sh` 31/31 ok; x86 CLIENT-BUILD-OK (the 14
+  includers rebuilt, none stale). Rebuilt copy `build-agent-rDX1`. SPX's
+  checks on `maps/arena-test/h1_full`: the pair 350:24,360:24 on
+  l8_cross_150 c2 and `--force-rollback 10:24` on c0-c3, LOCAL and FINAL
+  balls 0 / bodies 0 off against the free-clock control `dx1_ctl` (FINAL
+  presence gaps 8/6/4/6 on the forced arms at 498/500, as without the fix);
+  no "hull P_Dome_MF" line; one `deferral:` line per arm (pair c2: P_Dome_MF,
+  record of 336, born at 346); `dx1_ctl` IDENTICAL to H1's control and to
+  SPX(a)'s on c0-c3, `dx1_pair` / `dx1_fr` IDENTICAL to SPX(a)'s arms;
+  `ro1g_l8` c0/c1 (resync, "0+3 deferred") and `rlm2rw` c1 plain replays
+  IDENTICAL to the live journals; `h1_150_on` c0 844:29,862:30 equal to its
+  control (LOCAL / FINAL 0 / 0); `rlm2rw` c1's tick-75 leak gone (H1's
+  plain replay logs "hull P_Dome_MF" once, DX1's none, one `deferral:` line:
+  P_Dome_MF, record of 63, born at 66). Wire check rH2s -> rDX1 over
+  `core_ref_s12`: ALL SAME, 36 sends SAME, 36 journals IDENTICAL (no
+  capture reaches the path: no `deferral:` line in any of the 36 replays).

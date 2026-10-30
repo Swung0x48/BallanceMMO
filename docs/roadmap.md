@@ -1019,6 +1019,13 @@ numbers 1-10 are unchanged.
    any log cap stays a function-local static (no engine member until R7).
    Recommended:
    (a) (smallest, explicit, no new trust in the birth log or in a maker).
+   **BUILT at FULL step DX1 (2026-10-29, the user's choice "SP7-c: a"):**
+   option (a) re-based on f9775b82 unchanged in logic (rollback.hpp only;
+   log `deferral: <name> is unborn in the record of <anchor> ...`); the pair
+   and `--force-rollback 10:24` arms balls 0 / bodies 0 off against the
+   control, the H1/RO1 replays unchanged, rlm2rw c1's tick-75 leak gone,
+   663 tests (one new), wire check rH2s -> rDX1 over `core_ref_s12` ALL
+   SAME: rollback-engine-gaps-design.md "As built (step DX1)".
    **Found at FULL step H1 (2026-10-29, H7 at 150 ms); FIXED at FULL
    step H7X (2026-10-29) - the cause and the fix after the original text,
    which named a candidate that was wrong:**

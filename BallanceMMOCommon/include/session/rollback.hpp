@@ -1751,6 +1751,30 @@ namespace bmmo::session {
                             if (ro) ++ro->rechecked;
                         }
                     }
+                    // Step DX1 (SP7-c, option (a)): a body this record holds
+                    // only as a deferred, inert one - an earlier replay
+                    // captured it before its birth tick (tick_state::unborn)
+                    // - is known to the blob, so the loop above never sees
+                    // it; it stays deferred to its birth tick here, or its
+                    // overlap-tree membership would stay wrong for good.
+                    // Never under a travelling blob (not this world's record).
+                    if (!travelling && !at->unborn.empty() && world.recheck_body && world.get_body) {
+                        const std::set<std::string> unknown_set(outcome.unknown_bodies.begin(), outcome.unknown_bodies.end());
+                        for (const auto& [name, born]: at->unborn) {
+                            if (static_cast<int32_t>(born - anchor) <= 0 || static_cast<int32_t>(born - current_tick) > 0) continue;
+                            if (plan.find(name) != plan.end() || unknown_set.count(name)) continue;
+                            bmmo_physics_body_state live{};
+                            if (!world.get_body(name, live)) continue;
+                            auto& due = deferred_rechecks[born];
+                            if (std::find(due.begin(), due.end(), name) != due.end()) continue;
+                            due.push_back(name);
+                            ++stats_.unknown_rechecks_deferred;
+                            if (ro) ++ro->deferred;
+                            if (world.log && unborn_logs_++ < 16)
+                                world.log("deferral: " + name + " is unborn in the record of " + std::to_string(anchor)
+                                          + " (born at " + std::to_string(born) + "): its recheck deferred to its birth tick");
+                        }
+                    }
                 } else {
                     ++stats_.savestate_failures;
                     // Gap L, L1 (2.3.1 step 7): the bodies restore_lives
@@ -2342,6 +2366,11 @@ namespace bmmo::session {
                 state.tracked = std::move(step_tracked);
                 state.inputs = std::move(inputs);
                 capture(world, state);
+                // Step DX1: the deferred bodies not yet born at this tick are
+                // marked in its record (tick_state::unborn).
+                for (const auto& [born, names]: deferred_rechecks)
+                    if (static_cast<int32_t>(born - t) > 0)
+                        for (const std::string& name: names) state.unborn[name] = born;
                 // The last replayed tick: do the re-executed scripts stand where
                 // the live frames left them?  A difference is state the
                 // snapshot does not carry (solo), or a sensor that decided
@@ -2816,6 +2845,13 @@ namespace bmmo::session {
             // snapshot of the same tick writes rows again (the newer row
             // wins).  Not touched by capture(), so an amendment keeps them.
             std::map<std::string, applied_row> rows;
+            // Step DX1 (SP7-c, option (a)): the untracked bodies a replay
+            // kept inert (deferred, rollback_world::birth_tick_of) when it
+            // captured this record before their birth tick, by name -> birth
+            // tick.  A later restore from this record defers them again.  In
+            // memory only: no record, blob, journal or protocol field; a
+            // live record never has any (the body did not exist yet).
+            std::map<std::string, uint32_t> unborn;
         };
 
 
@@ -3311,6 +3347,7 @@ namespace bmmo::session {
         uint32_t savestate_replay_logs_ = 0;
         uint32_t recreate_logs_ = 0;
         uint32_t replay_mechanism_logs_ = 0;
+        uint32_t unborn_logs_ = 0;   // step DX1: 'deferral:' lines (a body unborn in a record), capped
         uint32_t lives_logs_ = 0;   // gap L: unrevivable and inconsistent answers logged (capped)
         uint32_t script_float_logs_ = 0;
         bool trace_plan_ = false;
