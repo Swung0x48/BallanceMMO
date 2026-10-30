@@ -1900,7 +1900,8 @@ session_client.cpp); the full numbers are in `docs/roadmap.md` §4 item 7,
   input too, with RK3H's redirect (its other writes are 2.0 already);
   (b) accept it as a known limit (exposure: a respawn or a pause resume
   within frames 9..15 of the level start, about 106 ms; it is not
-  detected).
+  detected). Decided (the user, 2026-10-29: "D5: a"): built as step DX2
+  below.
 - **RK3R-rec**: "Reset Level" sent at 1500: the own ball unphysicalized,
   the trafo resets and the sector manager's reset as in a death, the
   tutorial's Init re-runs (its held write 2.0); no new own ball within 940
@@ -1975,7 +1976,8 @@ globals and ran at the live ones, which by the arrival were 0.002.
   still crosses that write at its recorded tick. What this rule does not
   cover: a write in the joiner's own level start after its frame 2 that the
   server's world does not have (the Level 1 tutorial is off in every world
-  since RK3; D5 / RK3F's one-world freeze is the user's open decision).
+  since RK3; D5 / RK3F's one-world freeze is the user's open decision)
+  (decided "D5: a" and built at step DX2 below).
 
 **Checks.** Unit tests 662/662 with the new
 `RollbackEngineGlobals.AResyncReStepRunsAtTheServerBlobsGlobals` (U8: a
@@ -1995,3 +1997,110 @@ bit-equal on all four (`tr3fix/pieces.py`); at 1766 the joiner has 153 of
 one left `P_Ball_Wood_MF` 0.021 m, off on c1/c2 too (0.008 m), a body the
 predicted paper mirrors push. No retail run (the retail host gets the hook
 through the same binding; a retail late join is RT2's item).
+
+## As built (step DX2, FULL close-out, 2026-10-29): D5 / RK3F - Gameplay_Refresh's tutorial freeze write held with RK3H's
+
+The user's decision (2026-10-29, verbatim: "D5: a") on H1's RK3F finding:
+hold `Gameplay_Refresh / Tutorial freeze/unfreeze`'s factor write with
+RK3H's redirect. No protocol number, no journal version, no engine change,
+no wire layout change.
+
+- **The block held.** `Tutorial freeze/unfreeze` (#29832 headless; the
+  level names it with a trailing space, so it is found as the one direct
+  child of `Gameplay_Refresh` whose name is that once trailing spaces are
+  dropped) runs `Test` (`CurrentLevel[0][0] == 1`) -> `Get Cell` column 12
+  -> `Binary Switch` #29777 -> `Binary Switch` #29809 (the tutorial's
+  freeze flag) -> `Parameter Selector` #29771 (`pIn 0` = 0, `pIn 1` = 2)
+  -> `Set Physics Globals` #29784. That block's Physic Time Factor input
+  (1), which reads the selector's output, is fed the same private constant
+  `BMMO_TutorialFactorHold` (the in-play factor read from Init Ingame,
+  2.0) with `SetDirectSource`: both branches now write 2.0 (the False
+  branch wrote it already). Gravity (input 0) untouched; the selector and
+  the switches still run; nothing is written into the graph's locals.
+- **Adapted from RK3H's guard.** RK3H refuses unless the input reads 0;
+  here the input reads the selector's output, which keeps whatever the
+  last run selected (0 on a fresh load, 2.0 after a Refresh that took the
+  False branch; base.cmo outlives a session), so the guard is structural:
+  the input's real source must be the output of a `Parameter Selector`
+  whose every input is a float that is 0 or the in-play factor, one of
+  them 0 (otherwise the Refresh write is not held and the reason is
+  logged; RK3H's Init hold stays, see below).
+- **How (one place, every world).** `game/tutorial_exit.hpp`
+  `tutorial_factor_hold` now carries two redirects (`init`, RK3H's;
+  `refresh`, DX2's) onto its one constant. `apply` makes RK3H's Init hold
+  exactly as before (nothing changed when it cannot), then adds the
+  Refresh hold on top: a Refresh block that is missing, wired otherwise
+  (the structural guard) or refuses the constant leaves `refresh` empty and
+  the Init hold in place, `apply` still succeeds and the logged `where`
+  says "Gameplay_Refresh's tutorial write is NOT held (reason)" - a world
+  is never worse off than at RK3H (the review's should-fix: the first
+  version was all-or-nothing, so a retail Refresh graph edited by another
+  mod would also have dropped RK3H's hold; in the success case the two
+  versions make the same redirects in the same order). `keep` re-holds
+  either input handed back to
+  its old source, `restore` hands both back and destroys the constant only
+  when neither still reads it. The hosts call the same three functions as
+  at RK3H, so the server's world (`physics_world`), the headless client
+  (`session_client.cpp`) and the retail core host (`core_host.cpp`'s
+  file-scope `core_tutorial_hold`) all hold it at the anchor, keep it in
+  their frame guard and hand it back where RK3H's is handed back - no call
+  site changed, no `BallanceMMOClient` data member. Their log line names
+  both blocks: "... Gameplay_Tutorial / Init / Set Physics Globals (#31475)
+  writes 2 instead of 0, Gameplay_Refresh / Tutorial freeze/unfreeze / Set
+  Physics Globals (#29784, by Parameter Selector #29771) writes 2 instead
+  of 0 or 2 ...". Adapted: the server's world is included although the
+  step names the headless client and retail - the hold lives in the one
+  shared struct every world calls, and every world must agree (a Refresh
+  in the server's world inside frames 9..15 would otherwise freeze it
+  alone).
+- **No protocol number.** The step names none and server and clients are
+  rebuilt together (forward compatibility is deliberately broken).
+  Difference from RK3H, recorded for the orchestrator: RK3H took 22 because
+  a world without its hold freezes in every Level 1 session; a pre-DX2
+  world differs from a DX2 world only when Gameplay_Refresh runs inside
+  frames 9..15 of a Level 1 session, and the reference journals replay
+  IDENTICAL.
+- **A control that stops being one.** `h1_full/l1_reset` client 2's
+  world wrote 0 live at tick 38 (frame 12). A DX2 binary that re-makes
+  that live world (SimTool's `--session-recipe`) or replays it from an
+  anchor before frame 12 now holds the write and diverges there by
+  construction - not a regression. This step used that capture only as
+  a journal-against-journal control (`mech_max.py` reads the recorded
+  journals, no replay), which stays valid.
+- **Not covered (unchanged, by the user's decisions):** RK3R (a Level 1
+  reset re-activating the tutorial; its chapter `Physic on/off` writes are
+  not held - decided not handled).
+
+**Checks (quick tier, 2026-10-29, about 12 min of checks).**
+`BallanceMMOMessageTests` 663/663 (`tutorial_factor_hold` has no unit test
+of its own: it needs a CK context, as at RK3H); GCC syntax 31/31 ok; x64
+BUILD-OK / DEPS-OK, x86 CLIENT-BUILD-OK / DEPS-OK (`core_host.cpp`
+recompiled), Arch ARCH-BUILD-OK `ballanced-36c04e3d24c9+bmmo-2f2c737a0b47-dirty`.
+Wire check rDX1 -> rDX2 over `core_ref_s12`: WIRE-CHECK: ALL SAME, 36/36
+journals IDENTICAL (no Level 1 arm in the set: it shows nothing else moved,
+not that the hold works). Live (the one run, `maps/arena-test/dx2/rk3f`
+and `maps/arena-test/dx2x_rk3f/sector1..4`, `.local-tools/work/DX2/dx2_run.sh
+rk3f true 4 45 1 -- --client-arg-for "2:--activate-script
+Gameplay_Refresh:b+10"`, `BMMO_TRACE_TIMEFACTOR=1`, the Arch server of
+this tree, snapshots off, trafo inputs and placement on; the harness ran
+Level 1's four sectors as four sessions): in all four sessions client 2's
+Gameplay_Refresh, activated after tick 18 (base 8, frame 12), writes **2**
+(H1: 0 at frame 12 until frame 16); no factor 0 in any client log; every
+client's only globals change is 0.001 -> 0.002 at frame 2 (tick 9); the
+tutorial's Init still writes 2 (RK3H's hold) and the exit is activated
+before frame 10 (tick 17), as at RK3H; frozen 0, resyncs 0, starved /
+rebases / far / unmatched 0, the server journals replay 3540/3540 and
+3594/3594 matched, VERDICT PASS; the server logs the hold in every
+session. Level props against the server (`.local-tools/work/RK3H/
+mech_max.py` from tick 0, every non-ball body): 0.0000 m on all four
+clients in all four sessions (no tick over 1 mm); the same tool on H1's
+`l1_reset` (the control) shows client 2's P_Ball_Paper_MF001 0.5616 m
+from tick 38. Client 2's first restore is at tick 221/222, after the
+activation (the switch is live-only, H1's rule), so the run measures it.
+Gate round after the review fix-up (the independent Refresh hold, about
+6.5 min): x64 BUILD-OK / DEPS-OK, x86 CLIENT-BUILD-OK, Arch ARCH-BUILD-OK,
+663/663, GCC 31/31, wire check ALL SAME 36/36; no second live run (only
+the failure paths changed, which the headless level does not reach).
+**Deferred** (FULL's retail batch RT2): a retail Level 1 run with a
+respawn or a pause resume inside frames 9..15 (the retail host gets the
+hold through the same struct; only its compile was checked here).

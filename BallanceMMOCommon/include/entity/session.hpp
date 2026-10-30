@@ -165,7 +165,12 @@ namespace bmmo::session {
     //      would, hence the number.  No message layout changed; no journal
     //      version (the header's world_options carries the bit; a journal
     //      of protocol 20/21 under the bit replays with the hold and
-    //      diverges at its frame 9 by construction).
+    //      diverges at its frame 9 by construction).  Step DX2 (FULL
+    //      close-out, D5 / RK3F, 'D5: a') holds Gameplay_Refresh's
+    //      'Tutorial freeze/unfreeze' factor write onto the same constant
+    //      (a Refresh in frames 9..15 wrote 0 in its world alone); no number
+    //      taken (the step names none; server and clients are rebuilt
+    //      together).
     constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 22;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
@@ -251,7 +256,8 @@ namespace bmmo::session {
     // the tutorial's own first write (0, frame 9) froze every world in its
     // frames 9..15 (RK3's gate); since step RK3H (the user, 2026-10-29:
     // 'Hold frame-9 write') that one write is held at the in-play 2.0 from
-    // each world's anchor on (tutorial_factor_hold), so no world freezes.
+    // each world's anchor on (tutorial_factor_hold), so no world freezes;
+    // since step DX2 Gameplay_Refresh's tutorial freeze write is held with it.
     // Other levels: no effect.  The server's config physics.session_clock
     // (default on).
     constexpr uint32_t WORLD_SESSION_CLOCK = 1u << 3;
@@ -268,7 +274,8 @@ namespace bmmo::session {
     // time-factor write (Gameplay_Tutorial / Init, 0; K0's --globals-trace,
     // tick 8) - the write every world holds at the in-play factor from its
     // anchor on (game/tutorial_exit.hpp tutorial_factor_hold), before the
-    // exit, which takes in frame 16.
+    // exit, which takes in frame 16.  (Step DX2: the same hold also covers
+    // Gameplay_Refresh's tutorial freeze write, whatever frame it runs in.)
     constexpr int SESSION_CLOCK_TUTORIAL_FREEZE_FRAME = 9;
     static_assert(SESSION_CLOCK_TUTORIAL_FREEZE_FRAME >= 1
                   && SESSION_CLOCK_TUTORIAL_FREEZE_FRAME < SESSION_CLOCK_TUTORIAL_EXIT_FRAME,

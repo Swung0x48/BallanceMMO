@@ -1487,7 +1487,8 @@ namespace bmmo::session {
         // world option WORLD_SESSION_CLOCK on Level 1 (the shared rule,
         // entity/session.hpp session_clock_tutorial_off).  The host finds the
         // tutorial's exit at its anchor when it is set, and holds the
-        // tutorial's frame-9 write there (step RK3H, tutorial_factor_hold);
+        // tutorial's frame-9 write there (step RK3H, tutorial_factor_hold;
+        // with Gameplay_Refresh's tutorial freeze write since step DX2);
         // the core activates the exit (platform tutorial_exit) before frame
         // SESSION_CLOCK_TUTORIAL_EXIT_FRAME.
         bool tutorial_off() const {

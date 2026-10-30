@@ -1213,7 +1213,10 @@ numbers 1-10 are unchanged.
    (#29832) while the tutorial's freeze flag is set, freezing that world
    alone - a known limit of the user's 'Hold frame-9 write' (it predates
    RK3H: before it every world was at 0 in those frames), to be measured
-   with R1's ESC and put to the user if it shows; **K2, the ActiveBall
+   with R1's ESC and put to the user if it shows (shown at FULL H1; the
+   user, 2026-10-29: "D5: a"; **built at FULL step DX2**: #29832's Set
+   Physics Globals #29784 held onto RK3H's constant in every world,
+   `record-format-gaps-design.md` "As built (step DX2)"); **K2, the ActiveBall
    census, is built (step RK2)**: every world (server, headless, retail core
    host) runs the array-read census at its anchor (`game/array_reads.hpp`,
    one log line per unrecorded read, the status line's `array_reads:`
@@ -1573,7 +1576,7 @@ numbers 1-10 are unchanged.
      9..15 (a respawn or a pause resume that early) still writes 0 while
      the tutorial's freeze flag is set - the narrow hold does not cover it,
      not exercised (no trigger that early in any run; queued as RK3F in
-     item 6); (c) the old
+     item 6; shown at FULL H1, built at FULL DX2); (c) the old
      (protocol 20/21) Level 1 journals replay with the hold and diverge at
      their frame 9 by construction; (d) a Level 1 level reset after the
      exit: `Init Ingame` sets `IngameParameter[0][3]` again and the next new
