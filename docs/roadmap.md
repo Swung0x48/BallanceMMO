@@ -2436,6 +2436,19 @@ numbers 1-10 are unchanged.
    gains an extra upward 0.03 m/s in the six ticks after (the contact the
    in-place body keeps), 1.7 cm off by 620 in the fan column; the stamp
    impulse is in the pre-FANX `rtx_3` too.
+   - **The host platform audit (FULL step AUD, 2026-10-30, the user's
+     "Shared helper + audit")**: `docs/host-platform-audit.md` lists every
+     platform operation and host-side rule of the server's world, the
+     headless host and the retail core host, and ranks the differences
+     (§9). Its candidates for this stage: **AUD-1** a leaver's spawn-ghost
+     group dropped in every world (the server's `spawn_ghost_forget`; no
+     client does it - D2); **AUD-2** one checkpoint-hold (N3) helper with
+     a per-frame keep for both clients, retail's N1 onto
+     `sector_reset_guard` at R7 (D3); **AUD-3** one birth-log feed rule
+     (`add` vs `put`, event log vs OnPhysicalize), decided with R6 (D4).
+     D1 is R6 above; D5 / D6 are HU1's queued (d) / (a). None breaks the
+     FULL headline; D3 needs a diagnostic line (none today) before the
+     FULL batch that runs `--reset-level-at` can check it.
 
 **Stage D - the original levels.**
 

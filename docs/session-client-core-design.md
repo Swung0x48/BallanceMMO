@@ -681,6 +681,20 @@ What each host still writes itself, and why, is the HU1 inventory's queue
 (shared with the legacy path until R7), and the anchor sequence itself (a
 different order per host; one recipe changes what a world does: Stage C).
 
+**As built (step AUD, FULL, 2026-10-30).** The host platform audit
+(`docs/host-platform-audit.md`) walks every `session_platform` field,
+`session_hooks` field and `session_capabilities` flag through the three
+hosts, plus the host rules outside the struct (anchor sequence, own birth
+feed, birth log, guards N1-N4, leave, trafo hooks, mirror entities). Beyond
+the queue above (D1, D5, D6, already queued) it found three differences that
+can change a world, ranked
+in its §9 and queued in `docs/roadmap.md` Stage C as AUD-1 (a leaver's
+spawn-ghost group: only the server forgets it), AUD-2 (the N3 checkpoint
+hold kept per frame on retail only; retail's N1-N3 are its own copies) and
+AUD-3 (the birth log fed by the event log and `add` on headless, by
+OnPhysicalize and `put` on retail). No code changed; no disagreement between
+this design's text and the code was found.
+
 ## 3. What stays in each host
 
 ### 3.1 Headless host (SC shrinks to this)
