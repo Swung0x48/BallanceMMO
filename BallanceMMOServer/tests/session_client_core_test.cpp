@@ -6916,7 +6916,15 @@ namespace {
             return c.rfind("log:0:resync: re-stepped from the server's tick 139 to 150", 0) == 0;
         });
         ASSERT_NE(line, calls.end());
-        EXPECT_NE(line->find("; 2 mirror(s) driven from S + 1;"), std::string::npos) << *line;
+        // Step LJ1: the record of S tracks every mirror with a row (all three
+        // were made after the anchor's record), so a later rewind to S
+        // restores them from it; the one without a row is not added.
+        EXPECT_NE(line->find("; 2 mirror(s) driven from S + 1, 3 added to its record;"), std::string::npos) << *line;
+        const bmmo::session::rollback_tracked* at_s = s.rollback_.recorded_tracked(139);
+        ASSERT_NE(at_s, nullptr);
+        for (const char* name: {"Ball_0_BMMO_4", "Ball_0_BMMO_5", "Ball_0_BMMO_6"})
+            EXPECT_EQ(std::count(at_s->remote_entities.begin(), at_s->remote_entities.end(), name), 1) << name;
+        EXPECT_EQ(std::count(at_s->remote_entities.begin(), at_s->remote_entities.end(), "Ball_0_BMMO_7"), 0);
     }
 
     // Step DX10: a mirror with a row at S that the host could not navigate

@@ -120,6 +120,14 @@ namespace bmmo::session {
         // for): no plan item, no revive - the anchor's record of them is the
         // world this resync replaces.
         std::set<std::string> gone;
+        // Step LJ1 (world-agreement gaps "As built (step H6)", shape (i)):
+        // the mirrors the server's state at S drives from S + 1 (navigated,
+        // with a row at S; the core's DX10 set).  The re-captured anchor
+        // record tracks each of them under the generation it has now, so a
+        // later rewind anchored at S restores it from that record instead of
+        // parking it at the first later record that holds it (a mirror born
+        // live after S, which the anchor record made before it never had).
+        std::vector<std::string> mirrors;
     };
     // What the restore of a resync did (the core's log line and counters).
     struct resync_outcome {
@@ -131,6 +139,7 @@ namespace bmmo::session {
         uint32_t destroyed = 0, destroy_failed = 0, remade = 0;
         uint32_t rechecked = 0;           // live bodies the blob did not know and no plan covers, rechecked at the restore
         uint32_t deferred = 0;            // ...or at their birth tick
+        uint32_t mirrors_tracked = 0;     // step LJ1: mirrors added to the anchor record's tracked set
     };
 
     // Gap L, L1 (rollback-engine gaps design 2.3.1, step EL6): a life of a
@@ -2002,6 +2011,26 @@ namespace bmmo::session {
                     const auto p = plan.find(name);
                     return p != plan.end() && p->second.rebirth;
                 }), remotes.end());
+                // Step LJ1: every mirror the server's state at S drives from
+                // S + 1 is in the record of S, as the body the restore just
+                // wrote from its row - a mirror this world made after S (a
+                // late joiner's catch-up birth) is otherwise left out of the
+                // capture below, and a later rewind to S finds no record of
+                // it there: it parks it at its first later record and never
+                // re-simulates S + 1 for it.  Its generation is the one it
+                // has now (record_at compares it).  Only a body planned from
+                // its row: a rebirth or a parked item is not the server's
+                // body at S.  A name the record already tracks is left as it
+                // is.
+                for (const std::string& name: rs->mirrors) {
+                    if (name.empty() || rs->gone.count(name)) continue;
+                    if (std::find(remotes.begin(), remotes.end(), name) != remotes.end()) continue;
+                    const auto p = plan.find(name);
+                    if (p == plan.end() || !p->second.from_row) continue;
+                    remotes.push_back(name);
+                    at->tracked.generations[name] = generation_now(name);
+                    if (ro) ++ro->mirrors_tracked;
+                }
                 at->rows.clear();
                 capture(world, *at);
             } else if (rows_written && at->have_savestate) {

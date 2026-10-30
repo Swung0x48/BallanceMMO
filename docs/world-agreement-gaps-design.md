@@ -5235,3 +5235,79 @@ Also seen (not a physics difference): the FINAL row of a member's own resync anc
 lack a mirror re-made by a beam pair stamped before S but applied after the request
 (`a3_pair2` client 2, S 512, client 1's beam at 501: one row, from 513 present and exact) -
 the same per-life mirror naming as BMX.
+
+### As built (step LJ1, FULL close-out, 2026-10-30): the import's anchor record tracks the mirrors the server's state drives from S + 1
+
+Fixes H6's finding above with shape (i); shape (ii) (the birth-planning rule) is unchanged.
+
+**What changed.** `resync_spec::mirrors` (`rollback.hpp`, the struct after `gone`): the
+mirrors the server's state at S drives from S + 1. The core fills it in `try_apply_resync`
+(`client_core_resync.cpp`, right after `spec.gone`) with every mirror that is physicalized,
+navigated (the replay drives only a navigated one: `replay_remotes`' rule) and has a row at
+S - DX10's set, not only the ones DX10 moved (a mirror made before S but navigated only by
+DX10's wait is missing from the anchor's `tracked_now` set too). In the resync branch of
+`restore_and_replay` (`rollback.hpp`, after the rebirths are removed from
+`tracked.remote_entities`, before `capture(world, *at)`), each name the record does not
+track yet, planned from its row (not a rebirth, not parked, not in `gone`), is added to
+`tracked.remote_entities` with `tracked.generations[name] = generation_now(name)` - written,
+not only-if-absent as the mechanisms' line above it does, since `record_at` compares it and
+a stale entry would park the body again. `capture` then records its body, extra, contacts
+and navigation at S. A name already tracked is left as it was - including one tracked
+under an earlier life of the same name (its generation is what gap L's ended-life search
+compares against), so a same-name relive at the anchor is not covered; per-life mirror
+naming makes it unlikely, and it belongs to BMX if it shows. `resync_outcome::
+mirrors_tracked` counts the additions; the re-stepped log line says "N mirror(s) driven
+from S + 1, M added to its record". No protocol, journal, layout, IVP, engine-change or
+`BallanceMMOClient` change; the server does not compile this code (no Arch rebuild).
+
+**Verified.** `h6_full/a3_trans`'s captures replayed with `rLJ1` and `--final-checkpoints`
+(`work/LJ1/final_replay.sh`, into `final_lj1/`): clients 0-2 exact as before; the joiner's
+own ball and all three mirrors 0.0000 m (rGL1: client 0's mirror 0.006 m at 502, 1.08 m
+later); "3 mirror(s) driven from S + 1, 3 added to its record". The joiner's map bodies are
+exact except `P_Modul_01_Pusher` from 634 (below: a second, pre-existing cause H6 had put
+on the mirror). H6's side note is covered: `a3_pair2` client 2's FINAL row at its own
+resync anchor (S 512) now has the beam pair's re-made mirror ("1 added to its record";
+final_cmp's "keys on one side only" gone), all four clients exact. DX10's seeds (H4's
+`j1b_s1`-`s5`, `j1`, client 3) 0.0000 m on own, mirrors and bodies. Two live runs of the
+recipe (`h6_run.sh LABEL 4 30 13 -- --sectors 1 --drive --latency-ms 150 --join-late 3:340
+--client-arg-for "0:--resync-at 335" --client-arg-for "1:--resync-at 350"`; the first,
+`lj1_a3_trans`, ran without `--sectors 1`, i.e. all four sectors, the store holding sector
+4): FINAL rows exact on all four clients in both, starved 0, far 0, the joiner's import
+adding 3 mirrors; in neither did a rewind land on S after the import, so the capture replay
+is the evidence for the path. Unit tests: `RollbackEngine.AnImportedMirrorBornAfterSIs
+RecordedAtSSoARewindToSRestoresItNotParksIt` (a control arm without `mirrors` shows the old
+parking: two writes, S + 1's key lost) and DX10's core test now also asserts the record of
+S tracks the three rowed mirrors and not the unrowed one.
+
+**Found (pre-existing, cause established, not this step's): the import keeps the live
+births of untracked fixed bodies the server's state already has at S.** In the same
+capture the joiner's live frames (renumbered, before the state arrived) ran sector 1's
+P_Modul_01 script ("told to reset at tick 504 / 508") and made `P_Modul_01_Rinne` and
+`P_Modul_01_Filler` at 509; the host's birth log has them at 509. The import is right about
+them: the server's blob knows them (`rechecked 0+0`, unknown 0), so they stay, and the
+re-step's scripts (the server's of S, where the module's parts exist since long before S)
+do not make them again. But `forget_births_after(S, present)` (`client_core_resync.cpp`
+~707-711, "the bodies the server's state has at S") passes only the ROW bodies (the "6
+birth(s) ... forgotten" are the six rows); a fixed body has no row, so 509 stays. The
+later rewind anchored at S (client 0's input of 502) takes them as untracked fixed births
+the replayed scripts make again (RO1, `rollback.hpp` ~1704-1720: `birth_tick_of` 509 > 501,
+`remade_by_replay` yes), destroys them before the blob ("object 'P_Modul_01_Rinne' is in
+the savestate but not in the world", skipped=6), and the replayed server scripts never make
+them: "birth: the fixed body P_Modul_01_Rinne was destroyed at the restore and is not back
+after its birth tick 509". From then on the joiner has no channel under the Pusher: the
+server's Pusher, released at 632, stops at y -1.5747 at 634 (x / z jitter of an impact, no
+ball within 44 m); the joiner's falls freely (0.075 m at 634, 3149 m by 1452). Every other
+body of the joiner is exact (first_divergence with the Pusher excluded: 0.000 m). Identical
+on rDX9, rDX11 and rGL1 (`old/`, `final/`): not LJ1's. Reach: an import whose window's live
+frames made an untracked fixed body the server's state at S already has, then a rewind
+anchored at S. The fix is settled by the design, not a user choice: the platform contract of
+`forget_births_after` (`client_platform.hpp` ~603-607) already says "the bodies the server's
+state has at S", and the core passes only the rowed ones, so the queued step brings the core
+to the contract: the import forgets the births after S of every body the server's blob knew
+(alive at the restore, not unknown), not only the rowed ones. This has to happen between the
+restore and the re-step's replay (a body the replayed scripts destroy and make again inside
+the window is a real birth and must keep its replayed entry), i.e. a hook or a
+`resync_outcome` list from the engine. Not taken: RO1's guard refusing the destroy when the
+anchor's blob holds the body - a rule every rewind reads, which collides with DX1's `unborn`
+marks (records a replay captured before a deferred body's birth hold it in their blob too).
+Queued in roadmap §4 item 4 as a bug fix.

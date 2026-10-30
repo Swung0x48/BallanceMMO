@@ -2329,6 +2329,32 @@ numbers 1-10 are unchanged.
      mirrors to the anchor's `tracked.remote_entities` before the
      re-capture, (ii) a body the anchor's blob holds is present at the
      anchor (world-agreement-gaps-design.md "As built (step H6)").
+     **Fixed at FULL step LJ1** (shape (i)): the core names the navigated
+     mirrors with a row at S (`resync_spec::mirrors`) and the import's
+     re-capture tracks them under their current generation; the capture
+     replayed: own ball and mirrors 0.0000 m on the joiner, a3_pair2 c2's
+     missing anchor row (H6's side note) covered, DX10's seeds exact
+     (world-agreement-gaps-design.md "As built (step LJ1)"). **Found at FULL
+     step LJ1, queued (item 4, pre-existing, cause established): an import
+     keeps the live births of untracked fixed bodies the server's state has
+     at S** - the same joiner's live frames made `P_Modul_01_Rinne` /
+     `_Filler` at 509; the server's blob knows them, but
+     `forget_births_after` (`client_core_resync.cpp` ~707-711) forgets only
+     the rowed bodies' births, so the rewind anchored at S destroys them
+     (RO1, `rollback.hpp` ~1708) for replayed scripts that never make them:
+     the Pusher falls through from 634 (3149 m by 1452), every other body
+     exact; identical on rDX9 / rDX11 / rGL1. The fix is settled by the
+     design, not a user choice: `forget_births_after`'s platform contract
+     (`client_platform.hpp` ~603-607) already names "the bodies the
+     server's state has at S"; the core passes only the rowed ones. So the
+     queued step is a bug fix bringing the core to the contract: the import
+     forgets the births after S of every body the server's blob knew,
+     between the restore and the replay (an engine hook or a
+     `resync_outcome` list). Not taken: RO1's guard sparing a body the
+     anchor's blob holds (it changes a rule every rewind reads and collides
+     with DX1's `unborn` marks). Evidence for LJ1's own fix is the capture
+     replays and the unit test: neither live run had a rewind land on S
+     after the import.
      **(item 2) 8 members at 0 ms
      start late, measured**: U9 and its control without the FIFO and the
      reload (`u9ctl`) starve - every client steps tick T 2.6-4.5 ticks after

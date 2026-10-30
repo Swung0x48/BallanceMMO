@@ -3356,6 +3356,84 @@ TEST(RollbackEngine, ARemoteBornInsideTheReplayIsDrivenAndRecordedFromItsBirthTi
     EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], live.linear[0]);
 }
 
+// Step LJ1 (world-agreement gaps "As built (step H6)", shape (i)): a late
+// joiner's mirror born live after the import's S (the catch-up birth at 4 for
+// S = 2) is written from its row at S by the import, and the import names it
+// in resync_spec::mirrors.  The re-captured record of S then tracks it - body
+// row, generation - so a later rewind anchored at S (an input of S + 1 relayed
+// after the import) restores it from that record and re-simulates S + 1 for
+// it with the relayed key.  The control (no `mirrors`, the behaviour before
+// LJ1) has no record of it at S: the rewind parks it at its first later
+// record (S + 1) and re-poses it there, so tick S + 1 never runs its key.
+TEST(RollbackEngine, AnImportedMirrorBornAfterSIsRecordedAtSSoARewindToSRestoresItNotParksIt) {
+    constexpr uint32_t kS = 2, kBorn = 4, kNow = 6;
+    double final_x[2] = {}, final_v[2] = {};
+    for (const int arm: {0, 1}) {   // 0: the control (no mirrors), 1: LJ1
+        SCOPED_TRACE(arm);
+        fake_world world;
+        world.bodies["Own"];
+        rollback_engine engine;
+        auto w = world.adapter();
+        rollback_tracked before;   // the live tracked set before the birth
+        before.own_entity = "Own";
+        before.generations = {{"Own", 1}};
+        rollback_tracked after = before;   // ...and from the live birth on
+        after.remote_entities = {"Remote"};
+        after.generations["Remote"] = 1;
+        for (uint32_t tick = 1; tick <= kNow; ++tick) {
+            if (tick == kBorn) world.bodies["Remote"].position[0] = 50.0;   // the live catch-up birth
+            w.step();
+            engine.record(w, tick, tick >= kBorn ? after : before, {{"Own", input_frame{}}});
+        }
+        ASSERT_FALSE(engine.recorded_body("Remote", kS));
+
+        // The core drives the mirror from S + 1 (DX10).
+        w.replay_remotes = [&](uint32_t tick, std::map<std::string, uint32_t>& out) {
+            if (tick >= kS + 1 && world.bodies.count("Remote")) out["Remote"] = 1;
+        };
+        // The import: the server's state at S has the mirror at x 30, at rest.
+        fake_body server;
+        server.position[0] = 30.0;
+        const body_state row = ball_body(2, server);
+        bmmo::session::resync_spec spec;
+        spec.rows["Remote"] = &row;
+        if (arm == 1) spec.mirrors = {"Remote"};
+        bmmo::session::resync_outcome out;
+        ASSERT_TRUE(engine.resync(w, kS, kNow, spec, no_input, out, "import"));
+        EXPECT_EQ(out.mirrors_tracked, arm == 1 ? 1u : 0u);
+        EXPECT_EQ(engine.recorded_body("Remote", kS), arm == 1) << "the record of S holds the mirror only with LJ1";
+        EXPECT_TRUE(engine.recorded_body("Remote", kS + 1)) << "the import's replay drives and records it from S + 1";
+        EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], 30.0) << "no key relayed yet: at rest where the row put it";
+
+        // Its owner's frames from S + 1 on (key 0 held) arrive after the import.
+        input_frame held{};
+        held.keys = 1;
+        held.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+        const auto relayed = [&](const std::string& entity, uint32_t tick, input_frame& frame) {
+            if (entity != "Remote" || tick < kS + 1) return false;
+            frame = held;
+            return true;
+        };
+        world.calls.clear();
+        const uint64_t failures = engine.stats().birth_recreate_failures;
+        ASSERT_TRUE(engine.rewind_to(w, kS, kNow, relayed, "input corrected at tick 3"));
+        EXPECT_EQ(engine.stats().birth_recreate_failures, failures);
+        if (arm == 1) {
+            EXPECT_EQ(world.count("set_body Remote"), 1) << "restored from the record of S: one write, no re-pose";
+            EXPECT_EQ(world.count("nav_input Remote keys=1"), 4) << "driven on S + 1 .. now";
+            EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], 4.0f);
+            EXPECT_DOUBLE_EQ(world.bodies["Remote"].position[0], 30.0 + (1.0 + 2.0 + 3.0 + 4.0) * kDt);
+        } else {
+            EXPECT_EQ(world.count("set_body Remote"), 2) << "parked at the record of S + 1 and re-posed after its step";
+            EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], 3.0f) << "S + 1's key never acts";
+        }
+        final_x[arm] = world.bodies["Remote"].position[0];
+        final_v[arm] = world.bodies["Remote"].linear[0];
+    }
+    EXPECT_NE(final_x[0], final_x[1]);
+    EXPECT_NE(final_v[0], final_v[1]);
+}
+
 // Step GL1 (gap L's late death; rollback-engine gaps design "As built (step
 // S2)" / "(step GL1)"): a remote's death stamped 5 arrives late and its own
 // rewind (anchor 4) removes the body in the replayed pre-step of 5, where the

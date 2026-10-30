@@ -523,6 +523,13 @@ namespace bmmo::session {
         spec.scripts = std::move(localized);
         spec.rows = rows;
         spec.gone = trafo_gone;   // step T3
+        // Step LJ1 (world-agreement gaps "As built (step H6)", shape (i)):
+        // the mirrors the server's state drives from S + 1 (the block
+        // above: physicalized, a row at S) that a replay drives
+        // (replay_remotes: navigated) go into the re-captured anchor
+        // record, so a later rewind to S restores them from it.
+        for (const auto& [player, remote]: s.remotes_)
+            if (remote.physicalized && remote.navigation && rows.count(remote.entity)) spec.mirrors.push_back(remote.entity);
         spec.blob.blob = &st.savestate;
         spec.blob.excluded_prefixes = keep_local_body_prefixes();
         {
@@ -740,13 +747,13 @@ namespace bmmo::session {
         logf("resync: re-stepped from the server's tick %u to %u (%u ticks, delta %+lld, waited %u frame(s); %u navs; %zu rows: %u "
              "written, %u equal, %u unmapped; %zu script bytes (%s, %u unportable, %u kept local); blob %zu bytes %s (%s); "
              "keep-local %u, local-only %u, destroyed %u/%u, remade %u, from record %u, rechecked %u+%u deferred, "
-             "unexplained %u, unattributed %u; %u mirror(s) driven from S + 1; union {%s}; renames:%s) [%s]",
+             "unexplained %u, unattributed %u; %u mirror(s) driven from S + 1, %u added to its record; union {%s}; renames:%s) [%s]",
              anchor, now, depth, static_cast<long long>(s.resync_delta_), s.resync_wait_frames_, navs, st.rows.size(),
              restored.rows_written, restored.rows_equal, unmapped, st.scripts.size(), scripts_ok ? "localized" : "REFUSED",
              script_report.unportable, script_report.kept_local, st.savestate.size(),
              restored.blob_applied ? "restored" : restored.anchor_blob ? "REFUSED, the anchor's own" : "REFUSED",
              restored.blob_summary.c_str(), keep_local, local_only, restored.destroyed, destroy, restored.remade,
-             restored.from_record, restored.rechecked, restored.deferred, unexplained, unattributed, driven_moved, active.c_str(),
+             restored.from_record, restored.rechecked, restored.deferred, unexplained, unattributed, driven_moved, restored.mirrors_tracked, active.c_str(),
              renamed.empty() ? " none" : renamed.c_str(), why);
         if (journal_.journalling()) {
             journal_resync r;
