@@ -3859,6 +3859,11 @@ namespace {
         };
         uint64_t cells_sentinel_rows = 0;
         int cells_checked_rounds = 0, cells_differ_rounds = 0;
+        // FULL step H5b (RK2's deferred claim): rounds whose window changed a
+        // written column in the straight pass (its values at a differ from
+        // those at e), so the round's restore had a value to bring back.
+        int cells_changed_rounds = 0, cells_changed_differ = 0;
+        int cells_change_lines = 0;
         // Step RLQ (gap Q's hold, rollback-engine-gaps design 2.2.4): the
         // clients' PreSimulate queue binding.  With the clients' recipe
         // (replay_activation) the queue section and the hold, as both core
@@ -4247,7 +4252,19 @@ namespace {
                 if (keep_this && passes) read_guard_cells(rec.guard_cells, rec.guard_have);   // close-out step DX4
                 if (keep_this && args.verbose)   // close-out step S2 (V4b's review)
                     std::printf("  straight t=%u owner membership %s\n", t, rec.membership.c_str());
-                if (!written_cols.empty()) rec.cells = read_written();   // step RK2's review
+                if (!written_cols.empty()) {
+                    rec.cells = read_written();   // step RK2's review
+                    // FULL step H5b: the straight pass's column changes, for the
+                    // cells round check's "changed in the window" count.
+                    if (i > 0 && rec.cells != straight[static_cast<size_t>(i - 1)].cells && cells_change_lines++ < 8) {
+                        const std::vector<uint32_t>& was = straight[static_cast<size_t>(i - 1)].cells;
+                        size_t k = 0;
+                        while (k < rec.cells.size() && k < was.size() && rec.cells[k] == was[k]) ++k;
+                        std::printf("savestate-check: written cells change in the straight pass at tick %u (window %d):"
+                                    " word %zu 0x%08x -> 0x%08x\n", t, i, k, k < was.size() ? was[k] : 0u,
+                                    k < rec.cells.size() ? rec.cells[k] : 0u);
+                    }
+                }
             }
             bmmo::physics::savestate_report report;
             if (!bmmo::physics::get_savestate(physics, blob, error, &report)) {
@@ -4834,8 +4851,11 @@ namespace {
                 if (failure.empty() && !written_cols.empty()) {
                     ++cells_checked_rounds;
                     const std::vector<uint32_t> now = read_written();
+                    const bool changed_in_window = anchor.cells != expected.cells;   // FULL step H5b
+                    if (changed_in_window) ++cells_changed_rounds;
                     if (now != expected.cells) {
                         ++cells_differ_rounds;
+                        if (changed_in_window) ++cells_changed_differ;
                         size_t k = 0;
                         while (k < now.size() && k < expected.cells.size() && now[k] == expected.cells[k]) ++k;
                         char text[160];
@@ -5122,6 +5142,9 @@ namespace {
                 std::printf("savestate-check: cells round check (step RK2's review): %zu column(s), %d round(s) checked,"
                             " %d differ, sentinel rows %llu\n", written_cols.size(), cells_checked_rounds,
                             cells_differ_rounds, static_cast<unsigned long long>(cells_sentinel_rows));
+                std::printf("savestate-check: cells changed inside the window (FULL step H5b, RK2's deferred claim):"
+                            " %d round(s) whose straight pass changed a written column between a and e, %d of them"
+                            " differ at e\n", cells_changed_rounds, cells_changed_differ);
             }
             std::printf("savestate-check: cbq (step RLQ, hold %s): straight ticks with outside entries=%d (at most %d)"
                         " captured=%llu rebuilt=%llu removed=%llu held=%llu holds=%llu"

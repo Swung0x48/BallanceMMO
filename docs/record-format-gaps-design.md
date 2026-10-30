@@ -2196,3 +2196,40 @@ client, server, protocol, journal, bridge or IVP change.
   level in S1b), counted, not judged. (4) A round whose e was not kept
   (`--savestate-every` > 1) takes neither the countdowns nor the cells,
   silently; no run here uses it.
+
+## As built (step H5b, FULL close-out, 2026-10-30): RK2-fan - a rewind across a fan's sound-slot claim restores the changed column
+
+RK2's deferral ("a rewind across a fan's slot claim showing a changed
+column restored", "As built (step RK2)" above). No recipe had a round
+whose window contains the claim, and the cells round check could not say
+whether a window changed the column at all, so SimTool's savestate-check
+gained two report lines (`sim_tool.cpp`, the straight pass and the round
+check; no verdict changed): "written cells change in the straight pass at
+tick T (window i): word k old -> new" (the first 8), and "cells changed
+inside the window: N round(s) whose straight pass changed a written column
+between a and e, M of them differ at e".
+
+The recipe (`.local-tools/work/H5b/rk2/`, the tree's x64 SimTool): the arena,
+a paper ball dropped from (80, 60, 43) into the P_Modul_18 column, the
+clients' recipe (`--frames`, session recipe), `--world-options
+PROXIMITY_UNION --player-mechanisms 2` (and 8), `--ticks 160`. The binding
+carries `P_Modul18_ActiveSounds[*][1]` (4 rows); the straight pass writes
+row 0 from 0 to 1 at tick 150 (window 119), the fan's outer In Range.
+(The cells are read before a tick's step, so "tick 150" is the state at
+150, made by the step of tick 149: a named round that is to span the claim
+anchors at 149 or earlier, as `149:1` does; one anchored at 150 spans
+nothing.)
+- seed 1, 40 rounds, max depth 48: PASS 40/40; 9 rounds span the claim,
+  0 of them differ at e; sentinel rows 160 (`try2.txt`).
+- K = 8, seed 2, 60 rounds: PASS 60/60; 7 span it, 0 differ (`k8_s2.txt`).
+- named rounds `149:1:4, 148:2:4, 140:12:4, 120:48:6, 103:48:6` and the
+  control `150:30:4` (anchored after the claim): PASS 6/6; the five span it
+  (149:1 restores the anchor just before the claim's tick and re-makes it
+  in its one replayed frame), 0 differ, and every follow tick's blob and
+  scripts equal the straight pass's (`named2.txt`). (Named anchors are
+  absolute ticks: `named.txt`'s window-relative ones spanned nothing.)
+
+Also reported (not judged, gap F since RLM): the owner-membership witness
+names `P_Modul_18_Particle Script 0 vs 1` in 3 of 40 and 5 of 60 seeded
+rounds. Checks for the diagnostic: x64 BUILD-OK, `msys_simtool_syntax.sh`
+ok (GCC 13.3), `linux_test_syntax.sh` 31/31 ok.

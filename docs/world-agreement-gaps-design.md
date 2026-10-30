@@ -5925,3 +5925,183 @@ rebuilt from the tree, `ballanced-36c04e3d24c9+bmmo-426f9c7ebf10-dirty`).
     sends 36/36 SAME, journals 36/36 byte-identical. The check passes on
     every use, so nothing a world does changed, and no live run was
     repeated.
+
+### As built (step H5b, FULL close-out, 2026-10-30): world agreement under the bit, the rows H5 could not run
+
+FULL plan §2 H5b, after FANX, PRX, BMX and GL1. A check batch: no client,
+server or shared code changed; one SimTool diagnostic (below, RK2-fan).
+Clients `build-agent-rH5b` = the x64 build of HEAD 77c1d166 (AUD, docs
+only since BMX; BUILD-OK, a relink, `physics_world.cpp.obj` #deps 279
+VALID; BallanceMMOMessageTests 682/682). The Arch server is BMX's tree
+build (`ballanced-36c04e3d24c9+bmmo-426f9c7ebf10-dirty`, 10:35, the
+journals' header): no server or shared code changed after it. Every live
+run snapshots off, trafo inputs, placement clones, union, player
+mechanisms (K = 8) and session clock on unless it says `PU=false` (the
+bit-off control: `physics.proximity_union: false`, which also drops the
+player mechanisms, `server.cpp` ~1019-1034, and makes the server apply
+BodyRevived again). Driver `.local-tools/work/H5b/h5b_run.sh` (H5's with
+the store `maps/arena-test/h5b_full/<run>`), FINAL replays
+`work/H5b/final_replay.sh`, judged by H5's `rows_cmp.py` (server FULL rows
+against each client's FINAL rows, every field bit for bit, the design's
+exceptions: a ball in its airship span, the balloon). New tools:
+`fan_push.py` (which ball the fan held when, from the server's rows),
+`ball_presence.py`, `bodies_at.py`, `event_types.py`, `s12_final.sh`
+(`core_ref_s12` arms replayed with `--final-checkpoints` and judged the
+same way). 10 live runs (plus one that stopped at the harness's argument
+parser before any session), each judged before the next.
+
+**Passed.**
+- *H1-H3 at 150 ms* (`h123_150`, H5's recipe, the gap L order GL1 fixed):
+  server journal 2564/2564; all four clients 0 keys with a differing
+  field (895-924 ticks); the Pusher wakes at 612 and the bridge plates
+  move at 632 in all five worlds.
+- *the fan_q7b recipe live with a joiner and a resync* (`fan_q7b_r`, H5's
+  recipe; client 3's `--keep-lane 80` belongs inside its own arguments):
+  3314/3314; 58 keys, 0 differing on all four clients, the resynced
+  client 0 (base 1052) and the joiner 3 (base 1182) included; the Pusher
+  wakes at 1918 in every world that ran then. The harness's FAIL lines are
+  the arm's own events (client 0's resync; its live "late ball mirror"
+  23.6 m is the live prediction of a beam not yet relayed - the LOCAL
+  rows, FINAL 0.000).
+- *H2b* (the same run): A (player 2343211047) held in the column
+  702-1470, B (2971839574) 922-1698; A leaves the box at ~1470 (its key
+  record), B stays; both pushed while both are in the box, every world
+  bit-equal at every FINAL row.
+- *H2c, the leave arm* (the same run): B's client leaves at 1700 while B
+  is held and the joiner's ball is in the box (1602-1798, pushed); every
+  world bit-equal; the server releases the leaver's clone (BMX) with no
+  warning or error, and its journal replays exactly.
+- *H2c, the death arm* (`fan_dr`): A held 702-1300, then beamed into the
+  death zone at 1300 while B is held; A's death at 1369 and respawn at
+  1567, B pushed throughout; 41 keys, 0 differing on every client
+  (client 0: no differing field, but its own ball's rows at 1462-1468
+  are missing - WG3-dr, the same run, below).
+- *J6, the rejoin arm* (`bridge_rejoin`): client 0's paper ball held in
+  the column 702-2802; client 3 rejoins at 900 - the server removes its
+  life 1 (order 3) and adds life 2 at 903 with order 2 (client 2's order,
+  released at 747; clients 0 and 1 log "member +3796650401 life 2 join 2
+  (server tick 903)", client 2 had left); its import of the server's state
+  of 935 localizes the
+  proximity hold, 0 unportable, no "no live controller" in any log; its
+  new paper ball is pushed 1452-1612 and 1688-2880 beside client 0's;
+  every client 0 keys differing, client 3's second journal (from 936)
+  included. (`fan_dr`'s first try of this arm beamed the rejoiner before
+  its new body - born 1240 - so its ball entered the column as Ball_Stone
+  and fell; identical in every world, not a test of the arm.)
+- *H3b, as far as a live session reaches it* (`bridge_rejoin`): a wood
+  ball (client 1) rests on the bridge at (363.3, -0.75, 44.19) from ~648
+  with no break; client 2's stone ball is beamed beside it at 701
+  (365.46, 0.95, 43.21) and the plates part at 714 in all five worlds;
+  every plate row bit-equal. The stone's client leaves at 745 (its ball
+  already ~9 m down). **The reset clause is unreachable live**: a session
+  never resets a bridge - `game/sector_reset_guard.hpp` (lines 3-28) empties
+  the death's and the level reset's Execute Script targets for the
+  session, and the server's world never resets
+  (`physics_world::update_sectors`); the re-arm case stays U9's (offline).
+- *H6* (`h6_on`, 180 s, 4 clients, `--drive --latency-ms 150 --sectors 3
+  --beam-bays 15,15,18,18`, clients 2-3 `--sector-at 4:690`: the Sack bay
+  15 and the Schaukel bay 18): 12167/12167; the server journal holds no
+  BodyRevived EVENT (Physicalize 20, Sector 12, Trafo 45, Unphysicalize 19);
+  38 keys, 0 differing on all four clients (5673-5702 ticks, the sleep
+  flag included); the Schaukel wakes at 732 in all five worlds.
+  **Same-batch control** (`h6_off`, `PU=false`, the server applying
+  BodyRevived): 624 BodyRevived EVENTs; 14 / 14 / 23 / 25 keys differ
+  (P_Modul_34 2.74 m, P_Modul_03 1.37 m, P_Modul_30 0.36 m, the P_Modul_29
+  plates 2.6 cm, the Pusher 9 cm, P_Modul_25 2.6 mm) - G-c3's measured
+  cost, the leader-only wakes.
+- *WG3-dr* (`fan_dr`, client 0: beamed into the death zone at 1400, a
+  resync requested at 1460, S 1461, base 1462, its death at 1470, respawn
+  1668): the respawn is at 1668 in every world and every key is bit-equal
+  from 1470, but the own ball's rows of 1462-1468 are missing on the
+  resynced client - a gap, below.
+- *WADA, both arms* (`fan_q7b_r` and `fan_q7b_off`): no "no live
+  controller" at client 0's resync import (S 1052) or the joiner's
+  (S 1182), 0 unportable, with A's fan force held at both, bit on and bit
+  off. The bit-off arm's worlds disagree (FINAL 3 / 3 / 2 / 1 keys: A's
+  mirror up to 316 m, B 5.2 m, the Pusher 9.5 cm); the bit-on arm 0.
+- *H8's bit-off control arms* (three of `core_ref_s12`'s recipes rerun
+  with `PU=false`; the bit-on arm is `core_ref_s12` replayed by rH5b with
+  `--final-checkpoints`): `l8_cross` on 0 / 0 / 0 / 0 keys, off 14 / 6 /
+  15 / 11 (the P_Modul_29 plates 3.6 m, the Pusher 9.5 cm, the bridges
+  2 cm); `swing_snapoff` on 0 on all, off 14 / 13 / 17 / 15; `h1_150` on
+  0 / 0 / 7 / 0 (client 2 = H1C2's paper-hull signature, the user's
+  decision), off 7 on every client. Mechanism errors with the bit <= the
+  control in every arm. Sector ticks unchanged and equal on every client
+  in both arms: l8 +2 at 309, +4 at 316, +3 at 709 (the server's Sector
+  EVENTs 309, 309, 309, 709 in both journals), swing +4 at 62, +2 at 1674,
+  +3 at 2120. (`h8_h1_150_off`'s harness verdict FAIL - client 3 relayed
+  frames past the reach, 18, lag max 50 - is one bit-off run's timing.)
+- *solo1 / solo2* (`work/REF12/solo_replay.sh rH5b`): both reach the end
+  marker; journals IDENTICAL to the live ones (2364 TICK common, 1182 LOCAL
+  0 differ; bytes differ in the header's build id); the sends +4 each
+  (sends 214-218, type 5, 146 bytes: DX8's lifecycle repeats, as H5 saw);
+  FINAL rows against the server 0 differing (35 keys).
+- *RK2-fan* (record-format-gaps-design.md "As built (step H5b)"): a rewind
+  across the fan's sound-slot claim restores the changed column.
+
+**Criterion replaced: H2c's "relatched equal".** The `relatched` counters
+differ by world (`fan_q7b_r`: server 6, clients 11 / 8 / 4 / 4) and cannot
+be compared: `place_slot_identity` counts every move it makes on every
+executed tick, replayed ticks included (`proximity_union.hpp` ~1341), the
+count is cleared only at a session's start (~873), and the worlds' spans
+differ (a resync, a join, a leave). The latch's tick is not logged per
+tick on a session client (`--probe-trace` is the SimTool drop scene's
+only), so the evidence is the FINAL rows: every ball in and beside the
+box bit-equal in every world through each leave, death and rejoin.
+
+**Found, pre-existing, queued (roadmap §4 item 4): an own life that ends
+inside a resync's re-step window is not made again.**
+- *Symptom* (`fan_dr` client 0, the WG3-dr arm): the server's row of
+  client 0's ball exists at 1462-1468 (falling, y -59.8 to -65.2), the
+  resynced client's FINAL rows lack it there ("ball of 259594595 missing
+  on the client at 4 ticks"); from its death at 1470 on, every key is
+  bit-equal. No other body differs: the ball was 35 m under the death
+  plane, so nothing could touch it.
+- *Cause.* The resync was requested at 1460 and its state (S 1461)
+  applied at local 1472, after the client's own death at 1470. The
+  engine's ended-life pass finds the own ball's life (alive at S, ended
+  at 1470) and no half answers for it: the core's own half,
+  `reconcile_own_lives`, returns at once while a resync's restore runs
+  (`client_core_lifecycle.cpp` ~1558, `if (!caps_.own_body_in_replay ||
+  s.resync_restoring_) return;`; set at `client_core_resync.cpp` ~657), and
+  the resync's own reconcile handles mirrors only. The log: "lives:
+  Ball_Stone (alive at tick 1461, generation 1) ended at tick 1470 inside
+  the window and was revived by no half" (`rollback.hpp` ~3305), the
+  restore then skips the server blob's entry for it ("object
+  'Ball_Stone_BMMO_259594596' (here 'Ball_Stone') is in the travelling
+  savestate but not in the world", skipped=29) and the re-step runs
+  without the body until its death.
+- *Pre-existing:* `rGL1` (before LJ1, LJ2, FANX, PRX and BMX) replays
+  client 0's capture with the same four rows missing
+  (`h5b_full/fan_dr/final_rGL1`).
+- *The design settles the fix* (not a user choice): resync design §2.6.3's
+  rule, "A body exists at S if and only if the server has a row for it at
+  S", holds the own ball here (the server's row at 1461), its table restores
+  the own ball "always" from "the server's own row when it has one", and
+  the rewind's own-event rule (2.3.4, own events inside the window) applies
+  its death at its stamp D. The fix
+  makes the own A-life again before the resync's restore when the server
+  has its row at S and it has no body now (the own half's make, then the
+  row lands on it), and queues its death at its logged stamp - the own
+  half's logic, enabled for the resync's restore. Headless only:
+  retail has no `own_body_in_replay` (its own revive never runs, R6).
+
+**Observed, known (gap F, "reported, not judged" since RLM):** RK2-fan's
+savestate rounds report `P_Modul_18_Particle Script 0 vs 1` in the owner
+membership witness in 3 of 40 (K = 2) and 5 of 60 (K = 8) rounds - the
+behaviour manager's own list is not restored (rollback-engine-gaps-design.md
+"As built (step FX1)"); every such round passes on blobs and scripts.
+
+**Not run / open:** H3b's reset clause (unreachable live, above);
+H2c's per-tick latch comparison (no session-client trace; the FINAL rows
+stand in); H8's other six `core_ref_s12` arms with the bit off
+(a5u_lead, resync_at150, resync_at150_down, a6m_snapoff, resync_snapoff,
+cliff): not run. The batch made 10 live runs (the plan allows 10-12), so
+two more arms would have fitted; the three that ran cover sector passes
+1-4, the trafos and the Pusher, and the six arms' bit-on halves are
+`core_ref_s12` itself (H5's wire check, journals identical since REF12).
+H5's H8 criterion ("sector ticks unchanged and mechanism errors <= the
+control") is therefore shown on 3 of the 9 `core_ref_s12` arms. H5b is
+the FULL close-out, so no later step absorbs them: they are recorded as
+an OPEN FULL item for the orchestrator (`.local-tools/work/CHAIN3/queue.md`,
+"Chain FULL - H5b"), not deferred to a step.

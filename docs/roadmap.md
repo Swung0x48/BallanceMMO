@@ -2406,6 +2406,30 @@ numbers 1-10 are unchanged.
      Pusher exact, all four clients 0.000 m at every FINAL row; a3_pair2,
      J1b seeds 1-5 and j1 still exact (world-agreement-gaps-design.md "As
      built (step LJ2)").
+     **Found at FULL step H5b, queued (item 4, pre-existing on rGL1, cause
+     established): an own life that ends inside a resync's re-step window
+     is not made again** - `h5b_full/fan_dr` client 0 (WG3-dr: beamed into
+     the death zone at 1400, resync requested at 1460, S 1461, applied at
+     local 1472 after its death at 1470): the own ball's rows of 1462-1468
+     are missing on the client (35 m under the death plane: no other body
+     differs). The engine finds the life ended in the window and "revived
+     by no half": `reconcile_own_lives` returns while a resync's restore
+     runs (`client_core_lifecycle.cpp` ~1558, `s.resync_restoring_`), the
+     resync's reconcile handles mirrors only, and the restore skips the
+     server blob's own-ball entry. Settled by the design (resync design
+     §2.6.3: "A body exists at S if and only if the server has a row for
+     it at S" - the server has the own ball's row at 1461 - and its table
+     restores the own ball from that row; its death applies at its stamp
+     as every own event inside a window), so a bug fix, not a user choice: make the own A-life
+     again before the resync's restore and queue its death at its stamp
+     (headless; retail has no own body in the replay, R6)
+     (world-agreement-gaps-design.md "As built (step H5b)"). This is the
+     resync variant of gap L, not GL1's: GL1 fixed a life ending inside a
+     REWIND's window (the dead mirror kept in the records a later rewind
+     re-captures); here EL7's `resync_restoring_` guard (set on purpose:
+     "the mirrors are this apply's own reconcile") leaves the OWN life of
+     a RESYNC's window to no half - a separate fix on the resync path, not
+     to be merged into gap L's.
      **(item 2) 8 members at 0 ms
      start late, measured**: U9 and its control without the FIFO and the
      reload (`u9ctl`) starve - every client steps tick T 2.6-4.5 ticks after
