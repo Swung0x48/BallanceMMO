@@ -1695,6 +1695,98 @@ revision 3 it had only 14 to give back.
     cause is B2SW's class (a write through WSL's 9P blocking the step): the
     server's log is still `server.log` on `/mnt/d` (`arch_server_lp.sh`),
     and the step logs that line. Queued (roadmap section 4 item 2).
+  - **As built (step DX5, 2026-10-29): RL1-LAN fixed, the user's option 1
+    ("选1": SessionReady after the anchor work).** `session_client_core::anchor`
+    (`client_core.cpp` 511-656) now sends SessionReady last: the phase, the
+    pacer's origin hook, the hold (its 10 s fault deadline still read here,
+    `anchor_hold`), the "anchored" line, the journal open, the airship zone,
+    the spawn ghost, one trafo piece set per open life, and only then the
+    message (built and sent at 605-655; its fields and caps unchanged). Shared
+    core, so headless and retail alike; no protocol or journal change.
+    **Adapted:** the hold's deadline is not moved after the work - the
+    headless inbound capture replays clock reads strictly in order by site
+    (`inbound_capture.hpp` `take_clock`), so moving `anchor_hold` past
+    `journal_utc` / `journal_start` would make every reference capture
+    refuse; 10 s against ~0.1-0.3 s of work changes nothing. The journal
+    still opens before the work (it holds what it held: header, start note,
+    PLAYER records; nothing in the work writes to it or sends or polls), so
+    a journal's header -> first tick span still contains the work and is not
+    the measure of the fix (4 members 142 ms, 8 members 299-313 ms after,
+    against 132 and 280-300 before). Unit test
+    `SessionClientCoreFlow.AnchorSendsReadyAndArmsTheHold` pins the new call
+    order (an airship zone call before `send:0`). Wire check over
+    `core_ref_s12`, rDX4 vs rDX5: **ALL SAME** (36 send traces SAME, 36
+    replayed journals IDENTICAL) - no send moved relative to another (no
+    send between the old and the new place) and no clock read moved, so the
+    plan's expected "send-order differences where SessionReady moved" do
+    not occur. One consequence: the anchor work now counts against the
+    server's start barrier (`kStartBarrierTimeout` = 8 s, armed when
+    SessionStart is sent, `server.cpp` 1278-1281; `check_start_barriers`
+    1964-1994 drops a member that has not reported ready by then), which
+    before covered the level load only - a machine whose load ends near
+    8 s and then builds its piece sets (headless ~35 ms each, retail
+    unmeasured) can now miss it and is dropped with "did not report
+    ready" (it stays in the room and can late-join); the FULL retail run
+    is to log the retail work time. Live (Arch server rebuilt from this tree, snapshots off,
+    patience and lead_adjust off, `.local-tools/work/DX5/`, stores
+    `maps/arena-test/dx5_full/`):
+    - `rl1c_lan_resync` (this section's (c) recipe at 0 ms, D = 6, start
+      base 8): the start members' S1 lateness q50 **12.49-12.53** (H3:
+      5.95-6.05) = lead 8 + D 6 less the ~1.5-tick path; the hold now waits
+      ("released after 8-9 polls", H3: 0 polls - the assignment is no
+      longer waiting when the work ends); client 2 (paused 1000 ms at 1500)
+      resynced to base 1568 at runner tick 1555 (C + 13), lateness after
+      **11.92-11.94** against the start members' 12.5 (H3: 12.08 against
+      6.0); its relay lag of every remote **0** after the resync and the
+      start members' relay lag of every remote 1 (H3: client 2's 6, the
+      start members' 0), i.e. **no 6-tick excess**; the remaining ~0.6 tick
+      is the headless pacer's resync slip (H3's harness item: the frame
+      that handles the assignment restarts the origin), not the LAN start.
+      That slip is also why the start members' lag of every remote went
+      0 -> 1 from the 1500 window (server earliness 12.0 -> 11.4): with
+      patience and lead_adjust off the server steps when its latest
+      member's frame is in, which is now client 2 (11.9 against 12.5), so
+      every relayed frame comes ~0.6 tick later; in H3 the start members
+      (6.0) were the latest and the slip did not show. Clients step a
+      tick 4-8 ms before the server does (H3: 10-16). Resyncs 1/1 on client
+      2, 0 elsewhere; server journal 4585/4585; the harness's FAIL is the
+      arm's designed event (client 2's resync and its 54 starved ticks in
+      the pause), as for `core_ref_s12/resync_snapoff`.
+    - `u9ctl` (H4's 8-member 0 ms control, 30 s, client 2 `--rejoin-at
+      900`, no captures): **starved 0 on all eight clients in all four
+      sectors** (H4: 1487-1514 of ~1500, every own frame substituted, and
+      the harness stopped after sector 1 - whether H4's invocation also
+      passed `--sectors 1` is not recorded; this one ran all four arena
+      sectors, four 30 s sessions, 4.3 min; the client journals and
+      `server.bmjr` in the store are sector 4's, `server.log` holds all
+      four); every member's S1 lateness q50
+      **12.49-12.52** (H4: -2.6..-4.5), the 4-member level of the run
+      above; the clients step tick T 0.5-1.6 ticks *before* the server
+      (H4: 2.6-4.5 ticks after); holds released after 8-31 polls (H4: 0).
+      Every sector's server journal replays N/N; harness VERDICT PASS in
+      all four. The 0 ms late joiner of the step's pass list is this run's
+      rejoin (client 2's second life, a late join at 0 ms): base 945
+      assigned at server tick 932 (C + 13), its first frame played 8 ms
+      before the server stepped 945, lateness after 11.84 against the
+      members' 12.5 (the same pacer slip) - inside its budget.
+    - The piece sets' share (H4's question), derived, no new clock read
+      (a new clock site would break every capture): before the move both
+      runs were work-bound (holds released after 0 polls), header -> first
+      tick 132 ms with 4 sets and 280-300 ms with 8, so ~35 ms a piece set
+      and the airship zone plus spawn ghost a few ms. After the move the
+      excess is gone in both (lateness 6.0 -> 12.5 with 4 members, -3.4 ->
+      12.5 with 8), so the work, whatever its size, no longer eats the
+      start base on a LAN.
+    Deferred (live-run cap of the quick tier: two runs): `rl1b_stall_pl`
+    (the 150 ms resync recipe, "not worse") - at 150 ms the assignment's
+    round trip already covered the work (H3: "released after 110 polls"),
+    and the move only delays the all-ready moment by the work, which every
+    member's schedule follows; to be run in the FULL batch. The retail
+    two-copy run (the x86 mod compiles with the change; the retail host
+    calls `core.anchor` as before and holds after it, `core_host.cpp`
+    1956-1975, so nothing host-side changed). F2-a's joiner budget (a
+    joiner's own anchor work no longer counts against its base's budget)
+    is DX6's to measure.
   - **(e) a late joiner in the first start_base periods after the
     all-ready moment: not run, unreachable with these binaries.** The
     window is start_base periods (27 = 409 ms at 150 ms, 8 = 121 ms on a

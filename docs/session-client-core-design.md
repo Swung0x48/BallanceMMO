@@ -235,7 +235,7 @@ public:
 
     // --- session lifecycle (game thread) ---
     begin_result begin(const session_start_msg& msg, const core_config& config);  // SessionStart; refused on a protocol mismatch
-    void anchor(const anchor_report& report);   // the level is up: SessionReady, journal open, hold armed
+    void anchor(const anchor_report& report);   // the level is up: hold armed, journal open, the core's anchor work, SessionReady last (step DX5)
     hold_state poll_hold();                     // {held, released_now, timed_out}; journals the timeout note
     void release_hold(const char* why);         // retail: the connection was lost
     void end(const std::string& reason);

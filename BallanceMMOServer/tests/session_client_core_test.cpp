@@ -1107,12 +1107,19 @@ namespace {
 
     // SessionReady carries the anchor hash, the host's strings and CAP_LEAD
     // iff the host can slew (design 2.3); the hold is armed 10 s ahead.
+    // Step DX5 (RL1-LAN, option 1): SessionReady is the anchor's last call,
+    // after the core's anchor work (here the airship zone).
     TEST(SessionClientCoreFlow, AnchorSendsReadyAndArmsTheHold) {
         for (bool slew: {false, true}) {
             flow_fake fake;
             session_capabilities caps;
             caps.slew = slew;
-            session_client_core core(fake.make_flow(), caps);
+            bmmo::session::session_platform platform = fake.make_flow();
+            platform.airship_zone = [&fake](bool enable, const std::string& group, double*, std::string&) {
+                fake.calls.push_back(std::string("airship_zone:") + (enable ? "on:" : "off:") + group);
+                return 0;
+            };
+            session_client_core core(std::move(platform), caps);
             state_of(core).resync_in_flight_ = true;
             state_of(core).resync_owed_ = true;
             state_of(core).window_index_ = 3;
@@ -1121,8 +1128,10 @@ namespace {
                 "log:0:session 9 starting: level 13, 2 players, join order 2, life 1, seed 11, input delay 4, sector lead 7",
                 "hook:numbering_restarted:anchor_origin",
                 "now:anchor_hold",
-                "send:0",
-                "log:0:anchored after 12 load ticks: pose 0000000000000051 surfaces 0000000000000052 cores=0 factor=0.000000"};
+                "log:0:anchored after 12 load ticks: pose 0000000000000051 surfaces 0000000000000052 cores=0 factor=0.000000",
+                "airship_zone:on:P#2",
+                "log:0:airship zone: the level has no airship",
+                "send:0"};
             EXPECT_EQ(fake.calls, expected);
             EXPECT_EQ(state_of(core).phase_, client_core_state::phase::running);
             EXPECT_EQ(state_of(core).frames_since_anchor_, 0);

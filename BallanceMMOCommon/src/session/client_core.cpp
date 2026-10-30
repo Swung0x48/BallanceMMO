@@ -509,7 +509,9 @@ namespace bmmo::session {
     }
 
     // The anchor's SessionReady half (session_client.cpp anchor(), from the
-    // phase change on); the host's anchor work comes before it.
+    // phase change on); the host's anchor work comes before it, the core's
+    // own (the journal, the airship zone, the spawn ghost, the piece sets)
+    // before the send (step DX5).
     void session_client_core::anchor(const anchor_report& report) {
         // Sectors are inputs to the whole session (session/sector_union.hpp):
         // sector 1 is the level's own on every side, and the cell is what
@@ -546,51 +548,12 @@ namespace bmmo::session {
         s.held_ = true;
         s.hold_polls_ = 0;
         s.hold_deadline_ = platform_.now(clock_site::anchor_hold) + kAnchorHoldTimeout;
-        bmmo::session_ready_msg ready;
-        ready.session = s.session_;
-        ready.first_tick = 0;
-        ready.anchor_hash = report.hash.pose;
-        ready.anchor_surfaces = report.hash.surfaces;
-        ready.physics_sha256 = report.physics_sha256;
-        ready.build_id = report.build_id;
-        // A client that applies a SessionLead (late-player design 2.4:
-        // amend, force, slew, acknowledge) says so, and the server may send
-        // it one and anchor its late join and resyncs at its own lead
-        // (design 2.3: CAP_LEAD iff the host can slew).
-        // Protocol 10 (step A3): a core that can apply the resync state says
-        // so - with rollback on, since the apply is a re-step of the history
-        // (on_session_assign takes the exact path only then).  A core with
-        // rollback off gets the legacy answer, a full snapshot, which the
-        // server sends only to a member without the cap.
-        const bool resync_state = config.rollback;
-        // Protocol 11 (trafo-replication design 2.14, step T3): a host that
-        // builds the piece sets and runs the trafo inputs says so; a session
-        // with the world option refuses a member without it.
-        ready.caps = (caps_.slew ? bmmo::session::CAP_LEAD : 0u) | (resync_state ? bmmo::session::CAP_RESYNC_STATE : 0u)
-                   | (caps_.trafo_inputs ? bmmo::session::CAP_TRAFO_INPUTS : 0u);
-        // Protocol 12 (sector placement design 2.4, step S5): a host that
-        // computes the placement signature says so and sends it; the server
-        // compares it with its own world's (late joiners too).  Without the
-        // capability: 0, not compared.
+        // The anchor signature this world reports (step S5; 0 without the
+        // capability: not compared) - the journal header holds it too.
         const uint64_t placement = caps_.placement ? report.placement : 0;
-        if (caps_.placement) ready.caps |= bmmo::session::CAP_PLACEMENT;
-        ready.anchor_placement = placement;
-        // Protocol 16 (world agreement 2.3, 5; step G3): the mechanism-class
-        // probe signature of this world's rewire, always filled (0 when the
-        // session does not run the union); the server compares it under
-        // WORLD_PROXIMITY_UNION, late joiners included.
-        ready.anchor_probes = s.probes_active_ ? report.probes : 0;
-        ready.serialize();
-        platform_.send(ready.raw.str(), send_mode::reliable);
         logf("anchored after %d load ticks: pose %016llx surfaces %016llx cores=%d factor=%.6f", report.load_ticks,
              static_cast<unsigned long long>(report.hash.pose), static_cast<unsigned long long>(report.hash.surfaces),
              report.hash.cores, report.hash.time_factor);
-        if (caps_.placement)
-            logf("anchor placement signature %016llx (world option placement clones %s)",
-                 static_cast<unsigned long long>(placement), (s.world_options_ & WORLD_PLACEMENT_CLONES) ? "on" : "off");
-        if (s.world_options_ & WORLD_PROXIMITY_UNION)
-            logf("anchor probe signature %016llx (world option proximity union)",
-                 static_cast<unsigned long long>(ready.anchor_probes));
         // The box starts where the session does: at the anchor the server
         // has to agree with, before the tick base is known.
         journal_.open(report.hash, report.build_id, report.own_name, placement);
@@ -639,6 +602,57 @@ namespace bmmo::session {
             for (const auto& k: members) ensure_trafo_set(k.player, k.life, "the anchor");
             logf("trafo sets at the anchor: %s", trafo_set_list().c_str());
         }
+        // Step DX5 (RL1-LAN, the user's option 1 of 2026-10-29): SessionReady
+        // goes out after this core's anchor work above.  The server assigns
+        // the start base from the moment every member is ready, so a member
+        // still busy here when its assignment came played its first frame
+        // that much late (on a LAN ~113 ms with four members, 7.5 periods of
+        // the start base's 8; ~11 ticks more with eight - one piece set per
+        // member).  Nothing above sends or polls the network, and the clock
+        // reads (anchor_origin, anchor_hold, journal_utc, journal_start)
+        // keep their order: the hold's 10 s fault deadline is still taken
+        // before the work, the journal holds what it held.
+        bmmo::session_ready_msg ready;
+        ready.session = s.session_;
+        ready.first_tick = 0;
+        ready.anchor_hash = report.hash.pose;
+        ready.anchor_surfaces = report.hash.surfaces;
+        ready.physics_sha256 = report.physics_sha256;
+        ready.build_id = report.build_id;
+        // A client that applies a SessionLead (late-player design 2.4:
+        // amend, force, slew, acknowledge) says so, and the server may send
+        // it one and anchor its late join and resyncs at its own lead
+        // (design 2.3: CAP_LEAD iff the host can slew).
+        // Protocol 10 (step A3): a core that can apply the resync state says
+        // so - with rollback on, since the apply is a re-step of the history
+        // (on_session_assign takes the exact path only then).  A core with
+        // rollback off gets the legacy answer, a full snapshot, which the
+        // server sends only to a member without the cap.
+        const bool resync_state = config.rollback;
+        // Protocol 11 (trafo-replication design 2.14, step T3): a host that
+        // builds the piece sets and runs the trafo inputs says so; a session
+        // with the world option refuses a member without it.
+        ready.caps = (caps_.slew ? bmmo::session::CAP_LEAD : 0u) | (resync_state ? bmmo::session::CAP_RESYNC_STATE : 0u)
+                   | (caps_.trafo_inputs ? bmmo::session::CAP_TRAFO_INPUTS : 0u);
+        // Protocol 12 (sector placement design 2.4, step S5): a host that
+        // computes the placement signature says so and sends it; the server
+        // compares it with its own world's (late joiners too).  Without the
+        // capability: 0, not compared.
+        if (caps_.placement) ready.caps |= bmmo::session::CAP_PLACEMENT;
+        ready.anchor_placement = placement;
+        // Protocol 16 (world agreement 2.3, 5; step G3): the mechanism-class
+        // probe signature of this world's rewire, always filled (0 when the
+        // session does not run the union); the server compares it under
+        // WORLD_PROXIMITY_UNION, late joiners included.
+        ready.anchor_probes = s.probes_active_ ? report.probes : 0;
+        if (caps_.placement)
+            logf("anchor placement signature %016llx (world option placement clones %s)",
+                 static_cast<unsigned long long>(placement), (s.world_options_ & WORLD_PLACEMENT_CLONES) ? "on" : "off");
+        if (s.world_options_ & WORLD_PROXIMITY_UNION)
+            logf("anchor probe signature %016llx (world option proximity union)",
+                 static_cast<unsigned long long>(ready.anchor_probes));
+        ready.serialize();
+        platform_.send(ready.raw.str(), send_mode::reliable);
     }
 
     // Design 9.25 phase alignment: the world stands at the anchor until

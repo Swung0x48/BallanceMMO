@@ -2164,12 +2164,15 @@ numbers 1-10 are unchanged.
      (the cause above; options: send SessionReady after the anchor's work -
      a shared-core change, which also takes that work out of a LAN
      joiner's budget, F2-a's "normal ~100 ms" - or count the work into the
-     LAN start base); **harness: the resync pacer slip** (the headless
+     LAN start base; **fixed at step DX5**, the user's option 1: LAN start
+     lateness 6.0 -> 12.5, the resynced member's relay lag excess 6 -> 0,
+     late-player-design.md 2.8 "As built (step DX5)"); **harness: the resync pacer slip** (the headless
      host's `numbering_restarted` hook restarts the pacer's origin on an
      exact resync; fix: keep the old phase as retail does, or take the
      origin at the assignment's arrival; not a user decision, it does not
      reach retail; until fixed, headless relay-lag numbers after a resync
-     carry + 1-2); **harness: a pre-booted late joiner** (world anchored
+     carry + 1-2; since DX5 on a LAN the resynced member is the latest one,
+     so the slip costs every member + 1 relay lag after any resync); **harness: a pre-booted late joiner** (world anchored
      and held before its Join, the Join sent at the all-ready moment), then
      RL1-e's live check; **server: one log line in the re-anchor path**
      (`session_runner::reanchor_tick`: the signed schedule tick, the floor
@@ -2258,7 +2261,10 @@ numbers 1-10 are unchanged.
      SessionReady send, before the anchor work: one trafo piece set per
      open life, 8 here). Joins H3's RL1 LAN excess above (plan step DX5, the
      user's "选1"); DX5 measures the piece sets' share and takes u9ctl as a
-     check recipe (starved 0 expected).
+     check recipe (starved 0 expected). **Fixed at step DX5**: u9ctl
+     starved 0 on all eight clients in all four sectors, S1 lateness
+     12.5 for every member (the 4-member level), ~35 ms a piece set
+     (derived; late-player-design.md 2.8 "As built (step DX5)").
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

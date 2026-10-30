@@ -1215,8 +1215,10 @@ namespace bmmo::session {
         begin_result begin(const bmmo::session_start_msg& msg, const core_config& config);
         // The level is requested: the host loads it until its anchor.
         void level_requested();
-        // The level is up and the host's anchor work done: SessionReady, the
-        // journal opened, the hold armed until the tick base arrives.
+        // The level is up and the host's anchor work done: the hold armed
+        // until the tick base arrives, the journal opened, the core's anchor
+        // work (airship zone, spawn ghost, piece sets), then SessionReady
+        // (step DX5: sent last).
         void anchor(const anchor_report& report);
         // The anchor hold, once per host loop pass while it holds.
         hold_state poll_hold();
