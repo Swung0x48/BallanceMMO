@@ -4726,3 +4726,224 @@ its replays keep no client log).
   which `rewind_for_lifecycle` also gives a death, is pre-existing too; it
   is left as it is because the analysis tools classify rewinds by it
   (`.local-tools/work/CPUPROF/reasons.py`).
+
+### As built (step H5, FULL close-out, 2026-10-30): world agreement under the bit, live - PARTIAL, stopped on a Q7 finding
+
+FULL plan §2 H5 (rows WG3-H, WGQ7-H, WADA, WG3-dr, WG3-cr, RK2-fan, RLC-o). No
+code changed. Clients `build-agent-rDX11` (HEAD 1b2485b8's x64 build), Arch
+server rebuilt at HEAD (`ballanced-36c04e3d24c9+bmmo-1b2485b81cea`, the
+journals' header). Every run snapshots off, trafo inputs, placement, union,
+player mechanisms (K = 8) and session clock on (the deployed defaults),
+captures kept (`maps/arena-test/h5_full/<run>`); judged on the clients'
+FINAL rows (`--final-checkpoints` replays of the captures) against the
+server's FULL rows, every field bit for bit (position, rotation, linear,
+angular, the flag byte) - `.local-tools/work/H5/rows_cmp.py`; driver
+`work/H5/h5_run.sh` (H4's with a `PU=` switch), key records
+`work/H5/mkrec.py`. 6 live runs in the implement round, 1 in the gate round.
+
+**Passed.**
+- *H1 / H2 / H3 at 0 ms* (`h123_0`: client 1 beamed short of the Pusher at
+  600, client 2 through the paper trafo and the fan with the drive, client 3
+  onto P_Modul_29 in sector 2): all 55 keys of all four clients bit-equal
+  at every common checkpoint (976-1001 ticks); the Pusher wakes at 602 in
+  all five worlds; the bridge breaks (client 3's stone falls from 690)
+  identically everywhere; the paper mirror crosses the fan bit-equal.
+- *H7* (`h7_loss`, the same at 150 ms and 10 % loss): all keys of all four
+  clients bit-equal; Pusher wake 612 everywhere.
+- *H4* (offline, `h123_0`'s captures c0/c2/c3, `--force-rollback-at` anchored
+  at 597 / 602 / 607 around the mirror-triggered wake 602,
+  `--replay-free-cost-clock`): FINAL rows bit-equal to the server's and to
+  the unforced arm; `probes: skipped=0` in all nine replays.
+- *H5* (offline: H4's `j1` captures, its server journal, replayed with HEAD):
+  the joiner's (base 1656) P_Modul_01/03/29 rows and every ball bit-equal
+  from its base; sectors 2-4 active.
+- *H3c / WG3-cr / WADA (resync and late join, bit on)* (`fan_q7`,
+  `fan_q7b`): client 0's `--resync-at 1050` with two slot forces held -
+  "the server's proximity hold at 1051 localized ... 1 clone reference(s)
+  renamed", 0 unportable, and client 0 bit-equal on every key from the
+  import to 1600; the late joiner (base 1183, join order 3 on the server)
+  bit-equal on every key from its import to the end in both runs; no
+  "no live controller" in any log (the joiner's slot was taken as its
+  server join order; its anchor line's slot was not checked).
+
+**Partially met.**
+- *H8* - the row's criterion ("sector ticks unchanged and mechanism errors
+  <= control", the control = the same recipes with the bit off by server
+  config) is NOT met as written; what was run is a deterministic
+  substitute: `wire_check.sh rREF12 rDX11` over `core_ref_s12` - 36/36
+  journals IDENTICAL (sends differ by DX8's repeats, as expected), so
+  `core_ref_s12`'s nine 4-client arms keep their sector ticks and mechanism
+  rows since REF12; in every H5 live run the `sector +N` ticks are the same
+  on the server and every client. Not covered: the bit-off control arm
+  (live, by server config - not run) and solo1 / solo2 (not in the wire
+  check's set); both deferred (below).
+- *RLC-o* (counted): `joints: ... reordered=0 order_failed=0` in every
+  client log - no live order pass occurred, so the order path itself is
+  unexercised by H5.
+- *H1-H3 at 150 ms* (`h123_150`): fail on S2's gap L late-death order
+  (below, pre-existing); `h7_loss` passed by arrival order.
+- *WADA*: bit on only (resync and late join above); the bit-off control
+  arm not run.
+
+**Failed, the step stops: a fan slot whose Get Cell fires while its ball
+has no body is dead (WGQ7-H).** The implement round's wording ("slots 2
+and above push nothing") was wrong; the gate round's discriminator and
+trace (below) replace it.
+- *Symptom.* In the arena, of several paper balls brought one after
+  another into the P_Modul_18 column, only the first is pushed. `fan_order`
+  (gate round, the 7th live run; slot 2 dropped first at 701, then slot 1
+  at 951, slot 3 at 1201, slot 0 - the original, uncopied script - at
+  1451): slot 2's ball hovers at y 18.5-19.5 (force held from 733), and
+  the other three fall through the column with bit-identical free-fall rows
+  (y 22.143 / 16.144 / 8.894 at +20 / +40 / +60, v_y -12.49) to the floor,
+  the same in every world. So the slot number is irrelevant (slot 0 fails
+  too); `fan_slots`' "slot 1 pushed, 2 and 3 not" was its arrival order.
+- *Cause (traced).* A per-tick dump of each slot unit's blocks in a SimTool
+  replay of `fan_order`'s server journal (bit-exact, 2460/2460 ticks;
+  diagnostic build only, patch `.local-tools/work/H5/gate/h5_diag_sim_tool.patch`,
+  not committed):
+  1. The unit's Get Cell (the body-kind identity read) runs only on its
+     inner TT Scaleable Proximity's Out Range output; the Box Box
+     Intersection and SetPhysicsForce take its output as their ball.
+  2. In this recipe every ball first goes through the paper trafo at
+     (74, 4, 43), 6 m from the fan - inside the inner probe's near band.
+     Slot 1's ball is physicalized there at 721, unphysicalized by the
+     trafo at 723 (the paper ball comes back at 888); from 723 slot 1 has
+     no candidate, so `place_slot_identity` writes BMMO_NoBall into its
+     cell (`proximity_union.hpp:1317-1325`), and its frame holds at
+     (74, 3.954, 43).
+  3. The far-mode countdown of slot 1's probe (started at the activation,
+     675, 10 ticks per check while the ball was 104 m away) next evaluates
+     at 725: the band changes (state 0 -> 1, d 10783 -> 36), the edge on
+     which the probe fires Out Range, and the Get Cell's output stays
+     **id 0**. The same edge with a ball in the cell writes the ball (drop
+     scene, `--drop-again` into the band with the body kept: output = the
+     ball at that very tick), and with the body removed two ticks after the
+     move (`--drop-kill 202 --drop-kill-player 1`) the output stays 0 - so
+     the trigger is reproduced offline in one world. BMMO_NoBall is a plain
+     CK3dEntity (`proximity_union.hpp:1230`, CKCID_3DENTITY) while Get Cell's
+     `Cell Value` output is a 3D Object parameter: the likely reason the
+     value does not land (not confirmed inside the closed-source block).
+  4. The latch then never repairs it: `place_slot_identity` leaves an id-0
+     output alone (`proximity_union.hpp:1330-1333`, G2's rule "id 0 = the
+     block never ran"). At 952 slot 1's ball is in range (d 0), the Box Box
+     Intersection has no Entity 0, the intersection is false, and Create is
+     never reached; the Get Cell runs again only on the next Out Range edge
+     (the ball leaving the inner range), which a ball falling straight down
+     the column never produces.
+  5. The first ball is unaffected because the fan's outer probe activates
+     the units only once that ball has its paper body (668 -> 675): its
+     slot's first check after the activation fires Out Range with a ball in
+     the cell (output = `Ball_Paper_BMMO_637529042`). Every slot that was
+     far at the activation depends instead on its countdown landing outside
+     a bodiless window (a trafo, a death / respawn) - all three did not
+     here, and in `fan_slots` / `fan_q7` / `fan_q7b` (every recipe parked
+     the balls on that trafo).
+  6. Not a copy fault: every copy's 12 links, its Get Cell target
+     (`CurrentLevel#BMMOId_P_Modul_18_MF_6_S<k>`) and its frame are right
+     (dumped for S0-S7 at tick 724); with K = 2, 3 and 8 in the drop scene
+     a second ball entering with a body is pushed (d1/e1/e2/e3/k8/k3).
+  The pre-existing status: the rules are Q7's and G2's as built (no step
+  of this chain touched them). Also seen, NOT traced: in `fan_q7b` the
+  worlds disagree on such a slot (client 1 pushes slot 2's ball from 962,
+  17.6 m off the server; clients 0-2 push the joiner's from 1634; Pusher
+  0.046 m at 1920; `relatched` server 1 vs clients 8 / 7 / 3 / 0; c1's
+  capture replays the same with `rDX7`) - presumably the same edge landing
+  on either side of the bodiless window in a world that rolled back, but
+  which state differs per world was not traced.
+- *Options (the user's: each changes a §2.10 / G2 rule).* (a) Make
+  BMMO_NoBall a CK3dObject so a Get Cell can carry it; the existing latch
+  then moves it to the slot's candidate as soon as there is one (it names
+  no candidate) - the smallest change, the script's own Get Cell still
+  decides when the ball is read; it also covers the non-slot latch, which
+  writes the same object into the same kind of output
+  (`proximity_union.hpp:410-427`, not measured). (b) For slot reads, the
+  latch also moves an id-0 output to the slot's candidate (drop the id-0
+  exemption at 1330-1333 for `r.slot >= 0`) - always repairs a dead slot,
+  but feeds a Get Cell output the script has not produced yet (a state
+  retail never shows; G2's reason for the rule). (c) A body-kind slot cell
+  holds its last candidate while the slot has none (no BMMO_NoBall) -
+  contradicts §2.10's "never the hold" and keeps a stale entity in the
+  cell across a trafo or death. Each is a shared-code change every world
+  takes at once (no wire change; the server and the clients are rebuilt
+  together) and re-runs V7 plus this step's fan rows.
+- *Blocks:* H2b, H2c (both arms), H3b and J6's rejoin arm (each needs a
+  second slot that pushes); not run.
+
+**Found, pre-existing, for the user.**
+- *A beam into a probe's range reaches the mirrors one tick late*
+  (`fan_q7`): every remote ball beamed into the fan column gets the fan
+  force a tick later in the other clients than on the server and on its
+  owner (A at 701: server v_y +0.761, client 0's mirror -0.183 at 702; B at
+  921, the joiner at 1601 the same). Cause: the server re-physicalizes the
+  same clone (`physicalize Ball_Paper_BMMO_2737916712 at tick 701`), a
+  client makes a new mirror entity (`Ball_Paper_BMMO_2737916713`); the
+  place point runs before the tick's lifecycle events in every world, so
+  the slot's cell names the clone that the beam then moves into the box on
+  the server, and the old mirror that the beam destroys on a client. Only a
+  same-tick Unphysicalize + Physicalize pair does this (a respawn and a
+  trafo are separate ticks), i.e. the harness and automation beam - which
+  is also how every ball of `fan_slots`, `fan_q7b` and `fan_order` entered
+  the column (the implement round's "enters by physics, alone" was wrong;
+  each exit from the column was the run's key record, not physics). The
+  per-world agreement of those runs' push / no-push holds regardless.
+  Options:
+  (a) a mirror keeps its entity across a same-tick pair, as the own ball's
+  in-place beam does (2.4 B1); (b) every world places again after the
+  tick's lifecycle events when a candidate has one; (c) a harness rule:
+  never beam into a probe's range.
+- *S2's gap L late-death case has a position effect* (`h123_150`, 150 ms):
+  clients 0 and 3 lack client 2's stone mirror in their FINAL row 602 (its
+  death stamped 603 arrived late - the death's own rewind at 602 - and a
+  later input correction rewound to 601 < D-1; client 1 got the two in the
+  other order and is exact). The only state difference before 788; from
+  788 the paper ball's fan crossing differs (30 m), then client 1's mirror
+  (39.7 m), the Pusher (9.4 mm at 1118) and the prop P_Ball_Wood_MF's flags
+  (900) on those two clients; the path 602 -> 788 is not traced. Pre-
+  existing (`rH2s`, `rDX7`, `rDX10` replays identical); the queued fix of
+  `rollback-engine-gaps-design.md` "As built (step S2)".
+- *A falling prop is unphysicalized in the server's world only*
+  (`lockstep-without-snapshots.md`'s "once disappeared" item, reproduced):
+  the broken bridge's `P_Ball_Paper_MF` falls to y -326.59, then a script
+  hides it and moves it to (0, 0, 0) and its body leaves the server's rows
+  (live 1546; SimTool drop scene tick 887); every client keeps it falling.
+  Cause: the clients' body guard (engine change #6, `session_client.cpp`
+  3627) refuses the script's Unphysicalize of a level body; the server's
+  world never sets the guard (the only callers of `set_body_guard` are
+  the headless client, `sim_tool.cpp:1815` and the bridge). Why the guard
+  exists (`engine-changes.md` 6): a client's own death runs the retail
+  sector reset (Unphysicalize of every mechanism of the sector, then
+  Physicalize at the initial matrices), which must not reset the shared
+  mechanisms the server keeps. Half traced: the script block that
+  unphysicalizes the fallen prop is not named, so whether it is that reset
+  path or a prop-specific "fell out of the level" script is open. 300 m
+  below the death zone: no contact possible. Options: (a) the guard in the
+  server's world too - only right if no server-side script legitimately
+  unphysicalizes a level body (the server has no own death, but this
+  prop's script would then be refused there as well); (b) let that
+  Unphysicalize through on the clients (as #13 does for trafo pieces),
+  which needs the block named first; (c) accept. Queued as its own item
+  (world agreement, roadmap section 4 item 5): name the block, then choose.
+
+**Not run** (blocked by the Q7 finding): H2b, H2c (both arms), H3b, J6's
+rejoin arm, WGQ7-H's rows needing a second slot that pushes. **Deferred**
+(the implement round ran far past the plan's 2 h; the step stops on the
+finding above in any case): H6 (3 min, and its server-application
+control); WG3-dr; WADA's bit-off control arm; H8's bit-off control arm and
+solo1 / solo2; RK2-fan - not a physics-visible check (the written column
+`P_Modul18_ActiveSounds[*][1]` only feeds PlaySound), so a forced-rewind
+replay of a capture cannot show it; it needs the savestate-check's cells
+round check (`--session-recipe`, record-format-gaps-design.md "As built
+(step RK2)" gate round) on a recipe whose rounds contain a fan's outer In
+Range (the sound-slot claim), which no existing recipe does.
+
+**Gate round (2026-10-30).** One live run (`fan_order`, 36 s, VERDICT
+PASS, 0 mismatches; the step's 7th of the plan's 12-14), the offline drop
+scenes `.local-tools/work/H5/gate/{d1_q7,d2_q7,d1_g3,e1,e2,e3,k8_e2,k8_e3,k3_e2,diag_e2,diag_nb}.txt`
+(SimTool `--drop P_Modul_18 --probe-trace --player-mechanisms K`), and the
+diagnostic replays `diag*_fan_order.txt` (a SimTool built with
+`h5_diag_sim_tool.patch` on HEAD 1b2485b8: the dump of every P_Modul_18
+slot unit's blocks per tick - Get Cell output id, Box Box Intersection's
+Entity 0, the probe's distance / state / countdown, the switches, the
+links; reverted afterwards and build-agent rebuilt at HEAD, BUILD-OK).
+Tools: `gate/pt.py`, `gate/diag_sum.py`.
