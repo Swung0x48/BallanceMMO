@@ -519,7 +519,7 @@ value, as the free functions do today.
 | **host hooks** (all optional, H) | | | |
 | hooks.after_rewinds / after_record / after_amend / after_journal | `void(uint32_t tick)` | `maybe_force_rollback`, `dump_savestate`, traces, `report_queued_impulses` | a forced-rollback verb (R0/R2), nothing else |
 | hooks.filter_event | `event_send_verdict(const session_event_msg&)`: send / hold / drop | `--hold-event` (SC:2662-2703); the host later calls `core.release_event` | empty |
-| hooks.numbering_restarted | `void(clock_site)`: `anchor_origin`, `hold_timeout`, `assign_resync`, `assign_renumber` or `assign_release` (the five sites that reset the pacer's origin, E3) | `origin_ = wall_now(site)` | empty |
+| hooks.numbering_restarted | `void(clock_site)`: `anchor_origin`, `hold_timeout`, `assign_resync`, `assign_renumber` or `assign_release` (the five sites that reset the pacer's origin, E3) | `origin_ = wall_now(site)` (step DX9: headless keeps the phase at `assign_resync`, late-player-design.md 2.8 "As built (step DX9)") | empty |
 | hooks.ending (added at E3) | `void()`: the first thing `end` does | discards the `--hold-event` sends still held, logging each, before the journal closes | empty |
 | hooks.window / hooks.status | `void(const std::string&)`; as built (E10): `window` at step 31 with a line the window's edge produced, `status` at `end` (the headless 5 s report calls `status_text` itself) | `log_line` (one line, the bytes `logf` wrote) | the log, plus the F3 overlay reads `status_text` |
 | counters (added at E10) | `host_counters()`, optional: the host's own counters (`rebases`, `activations_replayed`, `script_reset_skips`) for the text the core prints itself (step 31's `window:` line, `end`'s status line); empty: zeros | `{rebases_, activations_replayed_, script_reset_skips_}` | the retail counterparts (R1) |
@@ -831,7 +831,7 @@ different order per host; one recipe changes what a world does: Stage C).
 | mirror entities | CopyObject vs spirit balls | `make_mirror`, host |
 | journal location and pruning | `--journal <file>` vs `ModLoader/BMMOJournals/<generated>`, 10 files | `journal_path` (the host names the file and prunes) |
 | receive thread | headless same thread; retail network thread | the host mailbox; the core is game-thread only |
-| pacer origin at re-assignment | headless resets `origin_`; retail's `fixed_tick_` counts independently | `hooks.numbering_restarted` |
+| pacer origin at re-assignment | headless resets `origin_` (since step DX9 not at `assign_resync`: the phase is kept, late-player-design.md 2.8 "As built (step DX9)"); retail's `fixed_tick_` counts independently | `hooks.numbering_restarted` |
 | "server has no body for us" re-report | retail only, after 30 snapshots (PSC:2620-2660) | core policy `own_body_backstop` (retail on, headless off: open question 2) |
 | retail resync on 30 unmatched; starvation | retail only | host-side, transitional (§3.2; open question 1); starvation deleted at R4 (part one's notices replace it) |
 | relay counters with no input rewind | headless counts `relay_late`, `bodiless`, `birth_frozen` (and from step RLT `relay_covered`) with rollback on | with `input_rewind` off (retail from R1 to R2) `note_input_correction` returns before them, so they stay 0 (E9 review): no check reads them while the switch is off |

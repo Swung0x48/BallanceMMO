@@ -1733,7 +1733,8 @@ public:
     uint32_t resync_tick_base(const physics_session_state& s, HSteamNetConnection c, bool resync_state) const {
         const auto it = clients_.find(c);
         const uint32_t rtt_ms = it == clients_.end() ? 0u : it->second.ping_peak_ms;
-        return runner_->reanchor_tick(s.id, bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms), resync_state);
+        return runner_->reanchor_tick(s.id, bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms), resync_state,
+                                      (it == clients_.end() ? std::string("?") : std::string(it->second.name)) + " (resync)");
     }
 
     // The lead a late joiner is anchored at.  On the per-player path
@@ -2127,7 +2128,9 @@ public:
         // built (step RL1b)").
         const uint32_t join_lead = s.late.count(c) ? late_join_lead(s, c, msg.caps) : 0;
         const bool join_state = (msg.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
-        uint32_t assigned = s.late.count(c) ? runner_->reanchor_tick(s.id, join_lead, join_state) : s.start_tick_base;
+        uint32_t assigned = s.late.count(c)
+                ? runner_->reanchor_tick(s.id, join_lead, join_state, std::string(client_it->second.name) + " (late join)")
+                : s.start_tick_base;
         // Step M1 (J4, J-h): not before the removal of any life the server
         // still holds - the joiner was never told of a life that left before
         // it joined, and from its base on its world never needs one.
@@ -2223,10 +2226,13 @@ public:
         // base-missed re-answer; step RL1b).
         const auto lead = s.leads.find(c);
         const bool state = lead != s.leads.end() && (lead->second.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
-        uint32_t assigned = resync_tick_base(s, c, state);
-        if (lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps))
-            assigned = runner_->reanchor_tick(s.id,
-                    bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset), state);
+        // One rule call (step DX9: each logs its line; the per-player
+        // lead's replaced the default one's, unread, before).
+        const uint32_t assigned =
+            lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps)
+                ? runner_->reanchor_tick(s.id, bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset),
+                                         state, std::string(get_client_name(c)) + " (resync, L_eff)")
+                : resync_tick_base(s, c, state);
         // The newest tick whose held frames were counted: the old epoch's
         // held_total stops here, and the ticks after it up to the base are
         // applied held under no numbering the client has (its notices never

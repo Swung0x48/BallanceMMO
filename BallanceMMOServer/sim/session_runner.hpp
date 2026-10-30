@@ -378,7 +378,10 @@ namespace bmmo::sim {
         // never in the runner's past.  A session not yet started (no
         // schedule; unreachable from the server, which re-anchors only a
         // running session): current_tick + lead, the rule it replaced.
-        uint32_t reanchor_tick(uint32_t session, uint32_t lead, bool resync_state) const;
+        // Step DX9: logs one line with the rule's parts (the time from the
+        // schedule's start, the signed schedule tick, the floor, the base),
+        // naming `who` (the member and the path) when given.
+        uint32_t reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who = "") const;
         // Tick to assign to a late joiner anchoring now.
         uint32_t late_join_tick(uint32_t session) const;
         // Step M1 (J4): the largest removal tick of the session's leaving

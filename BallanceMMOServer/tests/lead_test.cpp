@@ -1303,3 +1303,35 @@ TEST(ReanchorOnSchedule, AMemberWithoutTheResyncStateKeepsAThreeTickFloor) {
     const uint32_t on = sched.tick_at(now, 0) - 6;
     EXPECT_EQ(reanchor_tick_on_schedule(t0, 9, now, 9, on, 2), reanchor_tick_on_schedule(t0, 9, now, 9, on, 3));
 }
+
+// Step DX9 (H3's harness item): the server's re-anchor log line prints the
+// rule's parts (reanchor_on_schedule_parts); its base is the rule's, the
+// schedule tick is signed and carries no lead, the floor is current + margin.
+TEST(ReanchorOnSchedule, TheLogLinesPartsAreTheRules) {
+    using namespace std::chrono;
+    using bmmo::sim::reanchor_on_schedule_parts;
+    using bmmo::sim::reanchor_tick_on_schedule;
+    const auto start = tick_scheduler::clock::time_point(seconds(100));
+    for (int64_t us = -1000000; us < 2000000; us += 3331)
+        for (const uint32_t lead: {9u, 31u})
+            for (const uint32_t margin: {2u, 3u})
+                for (const int e: {-40, 0, 40}) {
+                    const auto now = start + microseconds(us);
+                    const uint32_t C = static_cast<uint32_t>(27 + us * 66 / 1000000 + e);
+                    const auto p = reanchor_on_schedule_parts(start, 27, now, lead, C, margin);
+                    ASSERT_EQ(p.base, reanchor_tick_on_schedule(start, 27, now, lead, C, margin)) << us;
+                    ASSERT_EQ(p.elapsed_us, us);
+                    ASSERT_EQ(static_cast<uint32_t>(p.schedule_tick + lead), p.scheduled) << us;
+                    ASSERT_EQ(p.floor, C + margin);
+                    ASSERT_EQ(p.floored(), p.base != p.scheduled);
+                    ASSERT_EQ(p.schedule_tick < 27, us < 0) << us;   // signed: below the first tick before the start
+                }
+    // 100 ms before the start: 6.6 periods, floored to 7 below the first tick
+    const auto p = reanchor_on_schedule_parts(start, 27, start - milliseconds(100), 31, 27, 2);
+    EXPECT_EQ(p.elapsed_us, -100000);
+    EXPECT_EQ(p.schedule_tick, 20);
+    EXPECT_EQ(p.scheduled, 51u);
+    EXPECT_EQ(p.floor, 29u);
+    EXPECT_EQ(p.base, 51u);
+    EXPECT_FALSE(p.floored());
+}

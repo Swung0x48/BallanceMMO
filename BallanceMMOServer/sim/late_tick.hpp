@@ -235,4 +235,32 @@ namespace bmmo::sim {
         const int64_t elapsed_us = std::chrono::floor<std::chrono::microseconds>(now - schedule_start).count();
         return reanchor_base_tick(schedule_tick_at(elapsed_us, first_tick, lead), current_tick, margin);
     }
+
+    // Step DX9 (H3's harness item): the parts of that rule, for the server's
+    // re-anchor log line - the time from the schedule's start (negative
+    // before it: RL1-e's window), the SIGNED schedule tick (first_tick plus
+    // the floored periods, without the lead; below first_tick before the
+    // start), the floor (current_tick + margin) and the base, which is
+    // exactly reanchor_tick_on_schedule's.
+    struct reanchor_parts {
+        int64_t elapsed_us = 0;
+        int64_t schedule_tick = 0;
+        uint32_t scheduled = 0;   // schedule_tick + lead (as uint32, schedule_tick_at)
+        uint32_t floor = 0;
+        uint32_t base = 0;
+        bool floored() const { return base != scheduled; }
+    };
+
+    inline reanchor_parts reanchor_on_schedule_parts(std::chrono::steady_clock::time_point schedule_start, uint32_t first_tick,
+                                                     std::chrono::steady_clock::time_point now, uint32_t lead,
+                                                     uint32_t current_tick, uint32_t margin) {
+        reanchor_parts p;
+        p.elapsed_us = std::chrono::floor<std::chrono::microseconds>(now - schedule_start).count();
+        const uint32_t unled = schedule_tick_at(p.elapsed_us, first_tick, 0);
+        p.schedule_tick = static_cast<int64_t>(first_tick) + static_cast<int32_t>(unled - first_tick);
+        p.scheduled = schedule_tick_at(p.elapsed_us, first_tick, lead);
+        p.floor = current_tick + margin;
+        p.base = reanchor_base_tick(p.scheduled, current_tick, margin);
+        return p;
+    }
 }

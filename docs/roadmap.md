@@ -2181,11 +2181,17 @@ numbers 1-10 are unchanged.
      origin at the assignment's arrival; not a user decision, it does not
      reach retail; until fixed, headless relay-lag numbers after a resync
      carry + 1-2; since DX5 on a LAN the resynced member is the latest one,
-     so the slip costs every member + 1 relay lag after any resync); **harness: a pre-booted late joiner** (world anchored
+     so the slip costs every member + 1 relay lag after any resync; **built
+     at step DX9**: the phase kept, the others' relay lag 20 -> 20 after a
+     resync, H3's 20 -> 21 gone); **harness: a pre-booted late joiner** (world anchored
      and held before its Join, the Join sent at the all-ready moment), then
-     RL1-e's live check; **server: one log line in the re-anchor path**
+     RL1-e's live check (**built and run at step DX9**: `--join-cue` /
+     `--join-late N:cue`; RL1-e PASS - the joiner re-anchored 228 ms before
+     the schedule's start at base 30, the signed rule, against 46 under
+     RL1's clamp; FINAL rows exact); **server: one log line in the re-anchor path**
      (`session_runner::reanchor_tick`: the signed schedule tick, the floor
-     and the base) for the next step that touches the server; live-only
+     and the base; **built at step DX9**; all three: late-player-design.md
+     2.8 "As built (step DX9)"); live-only
      server steps of 0.28-1.07 s inside steps that log (`rl1c_lan_resync`
      2059, the airship line; `f2_ctrl_B` 1638), not established, the
      likeliest cause B2SW's 9P class (`server.log` on `/mnt/d`).

@@ -38,6 +38,11 @@ The late-player additions (docs/late-player-design.md 5.1, H1-H8):
   --event-ms/--event-until             the same, one event, in the design's spelling
   --client-arg-for N:"..."             arguments for client N alone
   --join-late N:T                      client N starts at tick T of the host
+  --join-late N:cue                    client N is a pre-booted late joiner (step
+                                       DX9, RL1-e): it starts with the others,
+                                       loads the level and holds it, and sends its
+                                       Join when the server's log says every start
+                                       member is ready (the client's --join-cue)
   --leave N:T                          client N leaves the room at its tick T, ends
                                        its session and exits (the client's
                                        --leave-room-at: the server removes it at
@@ -362,6 +367,50 @@ def parse_event(spec):
 RE_BASE = re.compile(r'(?:^tick base (\d+) assigned|^resynced: tick base (\d+))')
 
 
+class ServerReadyCue(object):
+    """Step DX9 (RL1-e): follows the server's log from `offset` (its size when
+    the case began) and, at the first "[session N] all K players ready" line,
+    creates every cue file - the moment the pre-booted joiners send their Join
+    (--join-cue).  The line is the runner's, printed right after the schedule
+    started, so a Join it cues comes into the running session (a late join)."""
+
+    MARK = b'players ready, ticking from'
+
+    def __init__(self, path, offset, cue_files):
+        self.path = path
+        self.offset = offset
+        self.cue_files = cue_files
+        self.fired_at = None
+        self.running = True
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def run(self):
+        offset, pending = self.offset, b''
+        while self.running and self.fired_at is None:
+            try:
+                with open(self.path, 'rb') as log:
+                    log.seek(offset)
+                    data = log.read()
+            except OSError:
+                data = b''
+            if data:
+                offset += len(data)
+                pending += data
+                *lines, pending = pending.split(b'\n')
+                if any(self.MARK in raw for raw in lines):
+                    for f in self.cue_files:
+                        pathlib.Path(f).write_text('cue\n', encoding='utf8')
+                    self.fired_at = time.monotonic()
+                    print('  join cue: the server\'s all-ready line seen; cue written for %d joiner(s)'
+                          % len(self.cue_files), flush=True)
+                    return
+            time.sleep(0.002)
+
+    def close(self):
+        self.running = False
+
+
 class LogWatch(object):
     """Follows a client's log as the client writes it and reports every tick
     base it is given (`tick base N assigned` / `resynced: tick base N`) with
@@ -671,8 +720,17 @@ def run_case(args, sector, case_dir):
             children.append(server)
             time.sleep(1.5)
 
-        late = dict(args.join_late)
+        # Step DX9: a cue joiner (--join-late N:cue) starts with the others.
+        late = {i: tick for i, tick in args.join_late.items() if i not in args.join_cue}
         host_bases = []
+        cue_files = {i: str(case_dir / ('join_cue%d' % i)) for i in sorted(args.join_cue)}
+        if cue_files:
+            cue_log = pathlib.Path(args.server_log) if args.external_server and args.server_log else case_dir / 'server.log'
+            try:
+                cue_offset = cue_log.stat().st_size
+            except OSError:
+                cue_offset = 0
+            watches.append(ServerReadyCue(cue_log, cue_offset, list(cue_files.values())))
 
         def launch(i, seconds):
             client_dir = case_dir / f'client{i}'
@@ -764,9 +822,11 @@ def run_case(args, sector, case_dir):
                 cmd += ['--window-origin', str(args.window_origin)]
             cmd += member_args(args, i)
             cmd.extend(args.client_arg_for.get(i, []))
+            if i in cue_files:
+                cmd += ['--join-cue', cue_files[i]]
             # The host waits for the members that start with it; a late joiner
-            # comes into the running session.
-            cmd += ['--host', '--expect', str(args.players - len(late))] if i == 0 else ['--join-first']
+            # (a cue joiner too) comes into the running session.
+            cmd += ['--host', '--expect', str(args.players - len(args.join_late))] if i == 0 else ['--join-first']
             p = subprocess.Popen(cmd, cwd=client_dir, stdin=subprocess.DEVNULL,
                                  stdout=cf, stderr=subprocess.STDOUT, creationflags=FLAGS)
             clients[i] = p
@@ -2672,7 +2732,8 @@ def main():
     ap.add_argument('--client-arg-for', action='append', default=[], metavar='N:"ARGS"', dest='client_arg_for_specs',
                     help='H3: extra arguments for client N alone; repeatable')
     ap.add_argument('--join-late', action='append', default=[], metavar='N:T',
-                    help='H4: client N starts when the host reaches tick T')
+                    help='H4: client N starts when the host reaches tick T; N:cue (step DX9): a pre-booted joiner '
+                         'whose Join the server\'s all-ready line cues')
     ap.add_argument('--expect-refused', action='append', default=[], metavar='N[:TEXT]',
                     help='DX7: the server must refuse client N (its log holds "session S ended: ...TEXT..."; '
                          'default TEXT "%s"); the verdict is the other clients\' ' % DEFAULT_REFUSAL),
@@ -2717,13 +2778,19 @@ def main():
         if ev.kind == 'stall' and args.stall_client == ev.client and args.stall_ms > 0:
             ap.error('client %d has both --stall-client and a stall --event: one stall knob per client' % ev.client)
     if args.window_origin < 0:
-        ticks = [ev.tick for ev in args.events] or [int(b) for _, _, b in (s.partition(':') for s in args.join_late)]
+        ticks = [ev.tick for ev in args.events] or [int(b) for _, _, b in (s.partition(':') for s in args.join_late)
+                                                     if b != 'cue']
         args.window_origin = min(ticks) if ticks else 0
     args.client_arg_for = {}
     for spec in args.client_arg_for_specs:
         index, _, rest = spec.partition(':')
         args.client_arg_for.setdefault(int(index), []).extend(shlex.split(rest))
-    args.join_late = dict((int(a), int(b)) for a, _, b in (s.partition(':') for s in args.join_late))
+    # Step DX9: N:cue - asked at tick 0 in the report, cued by the server's log.
+    specs = [(int(a), b) for a, _, b in (s.partition(':') for s in args.join_late)]
+    args.join_cue = set(i for i, b in specs if b == 'cue')
+    args.join_late = dict((i, 0 if b == 'cue' else int(b)) for i, b in specs)
+    if 0 in args.join_late:
+        ap.error('--join-late: not the host (client 0)')
     try:
         args.leave = parse_client_ticks(args.leave, args.players, '--leave')
         args.rejoin_delay = {}

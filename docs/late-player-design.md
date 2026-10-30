@@ -1806,6 +1806,152 @@ revision 3 it had only 14 to give back.
     harness switch for a pre-booted joiner (its world anchored and held
     before it sends Join, the Join sent at the all-ready moment), then
     this live check.
+  - **As built (step DX9, FULL, 2026-10-30): H3's three harness items -
+    the headless pacer's phase on a resync, a pre-booted late joiner and
+    RL1-e live, the server's re-anchor log line.** Headless client, harness
+    and server only; no shared (`BallanceMMOCommon`) file, no protocol or
+    journal change, the retail mod untouched.
+    - **The pacer keeps its phase over a resync's renumbering**
+      (`session_client.cpp` `pacer_resync_renumbered`, called from the
+      `numbering_restarted` hook at `clock_site::assign_resync`): frame k
+      of the new numbering is due where frame `paced_frames_` + k of the
+      old one was (`origin_ += paced_frames_` periods, `paced_frames_` = the
+      last frame the origin's schedule ran), so the frame that handled the
+      assignment no longer loses its overrun; the other four sites still
+      restart the origin. The clock is still read at the site (the
+      inbound capture takes reads in order), and the client logs what a
+      restart would have cost ("pacer: the resync's renumbering keeps the
+      frame phase (N frames on the old origin; restarting the origin here
+      would have moved every later frame +x ticks)"). Both resync paths
+      share the site, so the full-snapshot answer keeps the phase too (as
+      the retail mod's fixed tick does for both); with no frame on the old
+      origin it restarts as before - except when that origin is itself a
+      kept one (the review's case: a newer SessionAssign arriving while
+      the first resync's A3 hold still holds the world - RL1b's
+      base-missed re-answer, or "resync hold ended by a newer
+      assignment", `client_core.cpp` ~856, which calls no
+      `resync_hold_ended`): the kept grid stays, and the origin moves by
+      the whole periods that came due meanwhile (held slots, not owed,
+      A3's rule), so frame 1 is the first slot of that grid after the
+      assignment ("pacer: a newer resync assignment before any frame on
+      the kept origin keeps that phase (N held slots not owed)"); a
+      restart there would bring H3's 0.85-1.5 tick slip back. Host-only
+      (no core change). Not met in any run or capture so far (no log of
+      it in `dx9_full` or the reference replays). `client_platform.hpp`'s comment on the
+      hook ("Headless: origin_ = wall_now(site)") is left as it was: a
+      shared header, and the headless host's behaviour is this note's.
+      **`--pacer-restart-on-resync`** brings back the old rule, for
+      replaying a capture taken before DX9 (its pacer decisions after a
+      resync are then the capture's; the replay's argument check passes
+      it over, like `--replay-free-cost-clock`).
+      Live, `rl1b_waitother` (this section's (b) recipe, the gate round's
+      seventh run of H3: patience and lead_adjust off, client 2 paused
+      1000 ms at 1500, client 0 `--resync-at 1525`; `maps/arena-test/
+      dx9_full/rl1b_waitother`, `.local-tools/work/DX9/lag_rl1b_waitother.txt`):
+      the two resyncs logged slips avoided of +0.96 (client 0, base 1548)
+      and +0.49 ticks (client 2, base 1589). The resynced members' S1
+      lateness q50 21.87-21.89 before, **22.85-22.86 and 22.53-22.56 after**
+      (H3: 22.3 -> 21.47, a 0.85-tick shortfall); the others' 21.86 before
+      and after; **clients 1 and 3's relay lag of every remote 20 before
+      and after** (H3: 20 -> 21); server earliness 21.3-21.4 before and
+      after (H3: 21.8 -> 20.9). So no slip. What remains is the other
+      way: a resynced member now plays its frames 0.7-1.0 tick earlier
+      than the start members, and its own relay lag of every remote is 21
+      against their 20 (it alone predicts one more tick; nobody else
+      pays). Cause (the rule, not the pacer): the base gives lead + D
+      periods less the floor's fraction from the server's handling
+      instant, and with the phase kept the base is played at the client's
+      next slot after the assignment's arrival, so lateness after =
+      lead + D - (path) - (fraction + slot wait), and fraction + slot wait
+      is a constant of the client's phase (~0.33 or 1.33 periods here),
+      while the start members also lose the start path's hold release.
+      Not a slip and not this step's to change (the plan's fix is the
+      retail-equivalent phase); recorded for the FULL batch's resync lag
+      readings. Server journal 4061/4061; resyncs 1/1 on clients 0 and 2
+      (the arm's designed events, VERDICT FAIL as in H3 and
+      `core_ref_s12/resync_snapoff`).
+    - **A pre-booted late joiner** (`session_client.cpp` `--join-cue
+      FILE`; `scripts/arena_map_test.py` `--join-late N:cue`): the client
+      loads `--level` right after its engine boots - `begin_session`'s
+      level request and `load_step`'s loading ticks with the level-file
+      counters recorded on first sight, up to where `load_step` would
+      anchor (Gameplay_Ingame active) - and holds it (nothing ticks an
+      idle client); connected, it remembers the room and sends its Join
+      only once FILE exists; the SessionStart that follows takes the
+      loaded level (`begin_session`: no reboot, no load; once only, a
+      later life loads as usual; another level is loaded again), so the
+      anchor is its first load step (the trafo reference is the anchor's
+      own capture: no tick runs between). In a replay the cue counts as
+      given (the capture's Join is its next send either way): the joiner's
+      capture replays to its end marker. The harness starts a cue joiner
+      with the others (outside the host's `--expect`), follows the
+      server's log from its size at the case's start, and writes the cue
+      at the runner's "all K players ready, ticking from" line (printed
+      right after `start_ticking`, so the Join meets a running session: a
+      late join, not a start member). Adapted from H3's wording ("its
+      world anchored and held before it sends Join"): a world cannot
+      anchor before its SessionStart (the seed, the options and the
+      placement come in it); what is held is the loaded level, which is
+      the boot's cost (admit -> SessionReady 91-416 ms on HEAD).
+    - **RL1-e live** (`rl1e_cue`: clients 0-2 at 150 ms, D 17, start base
+      27 = a 409 ms window, client 3 `--join-late 3:cue` on a 0 ms link -
+      at 150 ms for the joiner too, Join + SessionStart + SessionReady are
+      three one-way trips, 450 ms, past the window whatever the boot;
+      patience and lead_adjust off, 40 s, sector 1;
+      `maps/arena-test/dx9_full/rl1e_cue`): the server's line "re-anchor
+      of Arena3 (late join): **-227.8 ms from the schedule start (before
+      it), signed schedule tick 11 (first 27 -16)**, lead 19 -> 30, floor
+      29 (next tick 27 + margin 2), base 30 (the schedule)" - RL1-e's
+      window reached, and the signed rule gave base 30 where RL1's clamp
+      (`tick_at`) would have given first + lead = 46, 16 ticks more. The
+      joiner's S1 lateness q50 **32.95-33.35** = lead 19 + D 17 less ~3
+      (the fraction, its own path and processing), against 49 the clamp
+      would have left; the start members' 21.65-22.37; every start
+      member's relay lag of the joiner 20, as of each other (the joiner
+      does not pace the server); the joiner's relay lag of the 150 ms
+      members 11 (one trip). FINAL rows (`.local-tools/work/DX9/
+      final_replay.sh`, H4's `final_cmp.py`, the airship span and the
+      balloon out): own, mirrors and bodies 0.0000 m on all four clients,
+      the joiner included; server journal 3168/3168; resyncs 0; starved 0;
+      VERDICT PASS (the harness's live-row "late ball mirror" 0.78-1.15 m
+      on the start members is the prediction of a mirror at 150 ms, plan
+      section 4 C1, as in H3's `rl1a_join150`, 0.85 m). **RL1-e: PASS.**
+      The runner's start path is now exercised live as well (the unit
+      tests cover the rule).
+    - **The server's re-anchor line** (`session_runner::reanchor_tick`,
+      parts from `sim/late_tick.hpp` `reanchor_on_schedule_parts`, whose
+      base is `reanchor_tick_on_schedule`'s): "[session S] re-anchor of
+      NAME (resync | resync, L_eff | late join): +-ms from the schedule
+      start (before|after it), signed schedule tick T (first F +-k), lead
+      L -> T+L, floor C+m (next tick C + margin m), base B (the schedule |
+      the floor)". The resync path called the rule twice when the
+      per-player lead applied (the first result was overwritten unread);
+      it now calls it once (same base). Unit test
+      `ReanchorOnSchedule.TheLogLinesPartsAreTheRules`.
+    - **Checks** (quick tier, ~12 min of checks): x64 build BUILD-OK /
+      DEPS-OK; unit tests 672/672; GCC syntax 31/31 (`server.cpp` and
+      `session_runner.cpp` compile in the Arch server build, ARCH-BUILD-OK);
+      the wire check over `core_ref_s12`, rDX8 vs rDX9: with
+      `NEW_EXTRA=--pacer-restart-on-resync` **ALL SAME** (36 sends SAME, 36
+      journals IDENTICAL); without it 33 SAME / IDENTICAL and the three
+      resynced captures (`resync_snapoff` c2, `resync_at150` c0,
+      `resync_at150_down` c0) diverge at the first pacer read after their
+      resync's assignment ("expected a clock read at journal_ms, the
+      capture has one at pace_due": the kept phase runs the frame the old
+      origin made wait), their sends identical up to the new base - by
+      design; those replays log the slips the reference runs took, +1.20,
+      +0.41 and +0.81 ticks. Two live runs (above). Not run: the x86
+      build (no shared or retail file changed). **From DX9 on, a wire
+      check over `core_ref_s12` (or an older set) whose binaries keep the
+      phase passes `--pacer-restart-on-resync` to them** -
+      `EXTRA=--pacer-restart-on-resync` when both are DX9 or later,
+      `NEW_EXTRA=` only when the old one predates DX9 (it has no such
+      flag) - until a later REF step re-captures the set; noted in
+      `wire_check.sh`'s header and the set's README. Gate round: the
+      review's two should-fix items - that tooling note, and the newer
+      assignment before any frame (above) - built; x64 build, unit
+      tests, GCC syntax and the wire check re-run (the live runs not:
+      the new branch is not reached by them).
   - Also seen: the three start members of `rl1a_join150` were held 10-11
     ticks together twice (319-329, 633-643), before the join - a hiccup on
     the harness side (the clients or the latency proxy all three uplinks

@@ -165,14 +165,38 @@ namespace bmmo::sim {
         return it->second.first_tick + static_cast<uint32_t>(elapsed * 66 / 1000000) + 66;
     }
 
-    uint32_t session_runner::reanchor_tick(uint32_t session, uint32_t lead, bool resync_state) const {
-        std::lock_guard lk(view_mutex_);
-        auto it = views_.find(session);
-        if (it == views_.end()) return lead;
-        const auto& v = it->second;
-        if (!v.scheduled) return v.next_tick + lead;
-        return bmmo::sim::reanchor_tick_on_schedule(v.schedule_start, v.first_tick, clock::now(), lead, v.next_tick,
-                                                    bmmo::sim::reanchor_margin_ticks(resync_state));
+    uint32_t session_runner::reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who) const {
+        bmmo::sim::reanchor_parts p;
+        uint32_t first_tick = 0, next_tick = 0;
+        const uint32_t margin = bmmo::sim::reanchor_margin_ticks(resync_state);
+        {
+            std::lock_guard lk(view_mutex_);
+            auto it = views_.find(session);
+            if (it == views_.end()) return lead;
+            const auto& v = it->second;
+            if (!v.scheduled) return v.next_tick + lead;
+            first_tick = v.first_tick;
+            next_tick = v.next_tick;
+            p = bmmo::sim::reanchor_on_schedule_parts(v.schedule_start, v.first_tick, clock::now(), lead, v.next_tick,
+                                                      margin);
+        }
+        // Step DX9 (H3's harness item): the rule's parts in the server's log,
+        // so a re-anchor's budget is read, not fitted from the journal - the
+        // time from the schedule's start (negative before it: the first
+        // start_base periods after the all-ready moment, RL1-e), the signed
+        // schedule tick, the floor and the base.
+        if (callbacks_.log) {
+            char line[512];
+            std::snprintf(line, sizeof(line),
+                          "[session %u] re-anchor%s%s: %+.1f ms from the schedule start (%s it), signed schedule tick %lld "
+                          "(first %u %+lld), lead %u -> %u, floor %u (next tick %u + margin %u), base %u (%s)",
+                          session, who.empty() ? "" : " of ", who.c_str(), static_cast<double>(p.elapsed_us) / 1000.0,
+                          p.elapsed_us < 0 ? "before" : "after", static_cast<long long>(p.schedule_tick), first_tick,
+                          static_cast<long long>(p.schedule_tick - first_tick), lead, p.scheduled, p.floor, next_tick, margin,
+                          p.base, p.floored() ? "the floor" : "the schedule");
+            callbacks_.log(line);
+        }
+        return p.base;
     }
 
     // Both start paths (the last unready member left, the last member became

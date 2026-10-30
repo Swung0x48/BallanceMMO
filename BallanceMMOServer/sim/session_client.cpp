@@ -421,6 +421,25 @@ namespace {
         // reach's cap: a replay whose cap does not bind keeps the journal
         // of a strict one.  Off: every read is the capture's, in order.
         bool replay_free_cost_clock = false;
+        // --pacer-restart-on-resync (step DX9): the pacer's rule before DX9 -
+        // a resync's SessionAssign restarts the pacer's origin where the
+        // assignment is handled - for replaying a capture taken by an older
+        // build (core_ref_s12 and before): the pacer's clock decisions after
+        // a resync are then the capture's.  Off: the phase is kept (as the
+        // retail mod's fixed tick keeps it).
+        bool pacer_restart_on_resync = false;
+        // --join-cue FILE (step DX9, RL1-e's harness: a pre-booted late
+        // joiner): the client loads --level right after its engine boots,
+        // runs the level's load ticks up to the point a session's anchor
+        // starts from, and holds it there; connected, it finds the room but
+        // sends its Join only once FILE exists (the harness creates it at the
+        // server's all-ready moment), and the SessionStart that follows takes
+        // the level already loaded (no reboot, no load: the anchor is the
+        // first load step).  So the joiner's SessionReady can reach the
+        // server inside the first start_base periods after the all-ready
+        // moment.  In a replay the cue counts as there (its Join is the
+        // capture's next send either way).  Not with --host.
+        std::string join_cue;
         // --trace-sends FILE: one line per payload the session flow sends
         // (tick, Steam flags, size, FNV-1a 64), written in a replay too, where
         // nothing reaches the wire: the replay's check of the sends.  Off by
@@ -525,6 +544,10 @@ namespace {
                   "       [--reset-level-at T|b+N] [--activate-script NAME:T|NAME:b+N]   (test: once after live tick T or tick base+N,\n"
                   "         send \"Reset Level\" / activate the root script NAME; live only)\n"
                   "       [--replay-free-cost-clock]   (with --replay-inbound: the rewind cost's clock reads are the replay's own)\n"
+                  "       [--pacer-restart-on-resync]   (the pre-DX9 pacer: a resync's assignment restarts the pacer's origin;\n"
+                  "         to replay a capture of an older build)\n"
+                  "       [--join-cue FILE]   (a pre-booted late joiner: --level loaded and held after the boot; the Join\n"
+                  "         waits until FILE exists)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
                   "       [--io-flush MODE | log=MODE,journal=MODE,capture=MODE]   (MODE none|batch|record, default batch: the\n"
                   "         I/O thread's fflush - never, once per written batch, or per log line / journal record / capture pass)\n"
@@ -749,6 +772,8 @@ namespace {
             else if (arg == "--capture-inbound") { if (!(v = next())) return false; out.capture_inbound = v; }
             else if (arg == "--replay-inbound") { if (!(v = next())) return false; out.replay_inbound = v; }
             else if (arg == "--replay-free-cost-clock") out.replay_free_cost_clock = true;
+            else if (arg == "--pacer-restart-on-resync") out.pacer_restart_on_resync = true;
+            else if (arg == "--join-cue") { if (!(v = next())) return false; out.join_cue = v; }
             else if (arg == "--trace-sends") { if (!(v = next())) return false; out.trace_sends = v; }
             else if (arg == "--io-flush") {
                 if (!(v = next()) || !bmmo::session::parse_io_flush_config(v, out.io_flush)) return false;
@@ -809,6 +834,7 @@ namespace {
         if (out.root.empty()) return false;
         if (!out.capture_inbound.empty() && !out.replay_inbound.empty()) return false;
         if (out.force_rollback_every != 0 && !out.force_rollback_at.empty()) return false;   // one forced-rewind mode
+        if (!out.join_cue.empty() && out.host) return false;   // step DX9: the host makes the room
         if (!out.host && !out.join_first && out.room == 0) out.join_first = true;
         return true;
     }
@@ -1008,7 +1034,46 @@ namespace {
                 logf("record: level=%d frames=%zu", record_.header.level, record_.frames.size());
             }
             logf("engine booted (%llu ticks)", static_cast<unsigned long long>(engine_->ticks()));
+            if (!args_.join_cue.empty() && !preload_level()) return false;
             return true;
+        }
+
+        // --join-cue (step DX9): begin_session's level request and load_step's
+        // loading ticks, before any session - the level-file counters
+        // recorded on first sight the same way - stopping where load_step
+        // would anchor (Gameplay_Ingame active).  Nothing ticks the engine
+        // while the client is idle, so the level stands there until the
+        // SessionStart takes it (begin_session).  The trafo reference is the
+        // anchor's capture (capture_trafo_reference("the anchor")): no tick
+        // runs between.
+        bool preload_level() {
+            std::string error;
+            engine_->clear_keys();
+            engine_->request_level(args_.level);
+            level_sequencers_.clear();
+            level_proximities_.clear();
+            int waited = 0;
+            while (!bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
+                if (!engine_->level_request().error.empty()) {
+                    logf("--join-cue: level request failed: %s", engine_->level_request().error.c_str());
+                    return false;
+                }
+                bmmo::game::capture_level_file_counters(engine_->context(), level_sequencers_, level_proximities_,
+                                                        [](const std::string& line) { logf("%s", line.c_str()); });
+                if (++waited > args_.anchor_timeout) { logf("--join-cue: Gameplay_Ingame never activated"); return false; }
+                if (!engine_->tick(error)) { logf("--join-cue: tick failed: %s", error.c_str()); return false; }
+            }
+            preloaded_level_ = args_.level;
+            logf("--join-cue: level %d loaded ahead (%d load ticks) and held; the Join waits for %s", args_.level, waited,
+                 args_.join_cue.c_str());
+            return true;
+        }
+
+        // --join-cue (step DX9): the cue file is there (always, in a replay).
+        bool join_cue_given() const {
+            if (inbound_.replaying()) return true;
+            std::error_code ec;
+            return std::filesystem::exists(args_.join_cue, ec);
         }
 
         bool connect() {
@@ -1057,6 +1122,13 @@ namespace {
                     rejoin_join_pending_ = false;
                     logf("--rejoin-at: joining room %u again (%u ms after the Leave)", room_id_, args_.rejoin_delay_ms);
                     room_request(bmmo::room::action::Join, room_id_);
+                }
+                // --join-cue (step DX9): the pre-booted joiner's Join, on the cue.
+                if (!args_.join_cue.empty() && !cue_joined_ && cue_room_ != 0 && !in_room_ && join_cue_given()) {
+                    cue_joined_ = true;
+                    join_sent_ = true;
+                    logf("--join-cue: the cue is there: joining room %u", cue_room_);
+                    room_request(bmmo::room::action::Join, cue_room_);
                 }
                 if (ended_) { stopped = "the client ended the session"; break; }
                 if (std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::run_limit) - started).count() > args_.seconds) {
@@ -1156,7 +1228,7 @@ namespace {
                     }
                     // A replay switch with no value (step B5RX): the
                     // harness's clock choice, not the capture's.
-                    if (w == "--replay-free-cost-clock") continue;
+                    if (w == "--replay-free-cost-clock" || w == "--pacer-restart-on-resync") continue;
                     kept.push_back(w);
                     if (w == "--record") { kept.push_back("<path>"); ++i; }
                 }
@@ -1825,7 +1897,18 @@ namespace {
             add_trafo_operations(p);
             // The host hooks (E3): the pacer's origin restarts with the
             // numbering, --hold-event, and its discards at the session's end.
-            p.hooks.numbering_restarted = [this](bmmo::session::clock_site site) { origin_ = wall_now(site); };
+            // Step DX9 (H3's harness item): except at a resync's assignment,
+            // which keeps the phase (pacer_resync_renumbered).
+            p.hooks.numbering_restarted = [this](bmmo::session::clock_site site) {
+                const auto now = wall_now(site);
+                if (site == bmmo::session::clock_site::assign_resync && !args_.pacer_restart_on_resync) {
+                    pacer_resync_renumbered(now);
+                } else {
+                    origin_ = now;
+                    phase_kept_unrun_ = false;
+                }
+                paced_frames_ = 0;
+            };
             // Step A3: the frames a resync hold did not run are not owed.
             p.hooks.resync_hold_ended = [this](std::chrono::steady_clock::duration held) { origin_ += held; };
             p.hooks.filter_event = [this](const bmmo::session_event_msg& event) {
@@ -2282,6 +2365,13 @@ namespace {
                     room_request(bmmo::room::action::List, 0);
                     return;
                 }
+                // --join-cue (step DX9): the room is known; the Join waits for
+                // the cue (the run loop).
+                if (!args_.join_cue.empty() && !cue_joined_) {
+                    if (cue_room_ != target) logf("--join-cue: room %u found; the Join waits for the cue", target);
+                    cue_room_ = target;
+                    return;
+                }
                 logf("joining room %u", target);
                 join_sent_ = true;
                 room_request(bmmo::room::action::Join, target);
@@ -2384,6 +2474,24 @@ namespace {
             // a copy's blocks), as the server's world releases it.
             release_proximity("a new session begins");
             release_placement("a new session begins");
+            // --join-cue (step DX9): the level loaded ahead and held is this
+            // session's - no reboot, no load (its counters were recorded while
+            // it loaded); load_step anchors at once.  Once only: a later
+            // session (a rejoin) loads as usual.
+            if (preloaded_level_ >= 0) {
+                const int preloaded = preloaded_level_;
+                preloaded_level_ = -1;
+                if (preloaded == core_.level() && bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
+                    logf("--join-cue: session %u takes level %d as loaded ahead: no reboot, no load", core_.session_id(),
+                         preloaded);
+                    engine_->clear_keys();
+                    load_waited_ = 0;
+                    core_.level_requested();
+                    return;
+                }
+                logf("--join-cue: the level loaded ahead (%d) is not session %u's (%d): loaded again", preloaded,
+                     core_.session_id(), core_.level());
+            }
             if (bmmo::game::script_active(engine_->context(), "Gameplay_Ingame")) {
                 // Restart (host started the room again): reboot to the menu.
                 // (The mirrors and the relay's bookkeeping were cleared here
@@ -3154,6 +3262,54 @@ namespace {
             const auto frame_started = std::chrono::steady_clock::now();
             frame();
             note_frame_time(std::chrono::steady_clock::now() - frame_started);
+            paced_frames_ = static_cast<int64_t>(next_frame);   // step DX9: the frame the origin's schedule ran
+            phase_kept_unrun_ = false;
+        }
+
+        // Step DX9 (H3's harness item, late-player-design 2.8 "As built (step
+        // H3)"): a resync's SessionAssign renumbers the frames from 1 again.
+        // The pacer's origin used to restart there (origin_ = the moment the
+        // assignment was handled), so a frame that overran before it - the
+        // one that handled the assignment, 13-22 ms in H3's runs - was never
+        // made up: 0.85-1.5 ticks of every later frame, and, the server paced
+        // by the latest member, + 1-2 relay lag for every other member.  The
+        // retail mod sets no such hook (its fixed tick counts on its own), so
+        // the headless pacer now keeps the phase the same way: frame k of
+        // the new numbering is due where frame paced_frames_ + k of the old
+        // one was.  The log says what a restart would have cost.
+        void pacer_resync_renumbered(clock_type::time_point now) {
+            if (paced_frames_ <= 0 && phase_kept_unrun_) {
+                // A newer assignment before any frame ran on an origin a
+                // resync's renumbering kept (a resync superseded while its A3
+                // hold held the world, "resync hold ended by a newer
+                // assignment", which calls no resync_hold_ended): keep that
+                // phase too.  The slots that came due meanwhile were held, so
+                // they are not owed (A3's rule): the origin moves by whole
+                // periods only, and frame 1 falls on the first slot of the
+                // kept grid after now - as retail's fixed tick would run it.
+                const double due = std::chrono::duration<double>(now - origin_).count() * bmmo::sim::kTickRate;
+                const int64_t unrun = due > 0.0 ? static_cast<int64_t>(std::floor(due)) : 0;
+                origin_ += std::chrono::duration_cast<clock_type::duration>(
+                    std::chrono::duration<double>(static_cast<double>(unrun) / bmmo::sim::kTickRate));
+                ++pacer_phases_kept_;
+                logf("pacer: a newer resync assignment before any frame on the kept origin keeps that phase "
+                     "(%lld held slots not owed)", static_cast<long long>(unrun));
+                return;
+            }
+            if (paced_frames_ <= 0) {
+                origin_ = now;   // nothing ran on the old origin: nothing to keep
+                logf("pacer: resync renumbering with no frame on the old origin: the origin restarts here");
+                return;
+            }
+            const auto kept = origin_ + std::chrono::duration_cast<clock_type::duration>(
+                std::chrono::duration<double>(static_cast<double>(paced_frames_) / bmmo::sim::kTickRate));
+            const double slip = std::chrono::duration<double>(now - kept).count() * bmmo::sim::kTickRate;
+            origin_ = kept;
+            phase_kept_unrun_ = true;
+            ++pacer_phases_kept_;
+            logf("pacer: the resync's renumbering keeps the frame phase (%lld frames on the old origin; restarting "
+                 "the origin here would have moved every later frame %+.2f ticks)",
+                 static_cast<long long>(paced_frames_), slip);
         }
 
         // Open question 1 (late-player plan step 12): the CPU time of every
@@ -4659,6 +4815,20 @@ namespace {
         bmmo::game::proximity_countdown_state level_proximities_;   // step Q, as the server's
         clock_type::time_point origin_;
         int rebases_ = 0;
+        // Step DX9: the frames run on the pacer's origin since it last
+        // (re)started - the old numbering's count when a resync renumbers -
+        // and the resyncs whose renumbering kept the phase.
+        int64_t paced_frames_ = 0;
+        int pacer_phases_kept_ = 0;
+        // True from a kept-phase renumbering until the next frame runs (or
+        // another numbering restarts the origin): a newer resync assignment
+        // meanwhile keeps that phase as well (step DX9's gate round).
+        bool phase_kept_unrun_ = false;
+        // --join-cue (step DX9): the level loaded ahead (-1 none, or taken by
+        // a session), the room found before the cue, and the Join sent.
+        int preloaded_level_ = -1;
+        uint32_t cue_room_ = 0;
+        bool cue_joined_ = false;
         unsigned char lane_keys_[256] = {};                  // --keep-lane: this frame's keys with the steer added
         int lane_steers_ = 0;
         int lane_dwell_key_ = -1;                            // --keep-lane-dwell: the steer's held key, -1 none
