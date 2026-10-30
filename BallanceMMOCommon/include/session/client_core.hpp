@@ -1602,6 +1602,16 @@ namespace bmmo::session {
         // out and remade at their stamp.  Only with own_body_in_replay.
         void reconcile_own_lives(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended,
                                  std::map<std::string, life_outcome>& out);
+        // Step RSX (resync design 2.6.3, the own ball's row): the own entity
+        // an exact resync's restore makes again from the server's row at
+        // `anchor` (S) - the life the record of S tracked, with no body now
+        // and its own death logged in (S, now]; empty otherwise (no
+        // own_body_in_replay, no rollback, the own ball out of the sync at S,
+        // a body of that name now - a respawn inside the window keeps
+        // today's path - or no death logged in the current numbering).  The
+        // apply maps the server's own row and navigation onto it, and
+        // reconcile_own_lives revives it under the resync's restore.
+        std::string resync_own_revive_entity(uint32_t anchor, uint32_t now);
         // The own changes reconcile_own_lives queued that no replay applied:
         // made live after the rewind (olives=.../settled).
         void settle_own_due();

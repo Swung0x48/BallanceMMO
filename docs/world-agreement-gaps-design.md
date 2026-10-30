@@ -6085,6 +6085,11 @@ inside a resync's re-step window is not made again.**
   row lands on it), and queues its death at its logged stamp - the own
   half's logic, enabled for the resync's restore. Headless only:
   retail has no `own_body_in_replay` (its own revive never runs, R6).
+  **Built at FULL step RSX** (resync-and-sector-timing-design.md "As built
+  (step RSX)"): the live rerun `h5b_full/rsx_fan_dr` is 0 keys differing on
+  all four clients with no missing row. The retail sentence above was wrong:
+  the retail host declares `own_body_in_replay` since EL8, so the core's fix
+  reaches it too (checked there by the x86 compile only; RT1-RT3).
 
 **Observed, known (gap F, "reported, not judged" since RLM):** RK2-fan's
 savestate rounds report `P_Modul_18_Particle Script 0 vs 1` in the owner

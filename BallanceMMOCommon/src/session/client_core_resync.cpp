@@ -262,6 +262,13 @@ namespace bmmo::session {
         // entry after S is re-stepped from the server's state of S, where the
         // ball was still in the sync.
         const bool own_kept = !own_entity.empty() && own_out_of_sync_at(anchor);
+        // Step RSX (2.6.3, the own ball's row "always"): an own life alive at
+        // S that ended inside the window has no body now; the server's row
+        // at S is its, and lands on it once reconcile_own_lives has made it
+        // again under the restore (its death queued at its stamp).  Before
+        // the step the row was unmapped and the re-step ran without the
+        // ball until its death (fan_dr client 0, WG3-dr).
+        const std::string own_revive = own_entity.empty() ? resync_own_revive_entity(anchor, now) : std::string();
         // The deaths after S this world applied already (2.6.3: a mirror
         // row at S whose Unphysicalize came after S): made from the row,
         // killed again at its tick in the replay.
@@ -284,6 +291,7 @@ namespace bmmo::session {
                 if (body.owner == s.own_id_) {
                     if (own_kept) continue;
                     if (!own_entity.empty()) rows[own_entity] = &body;
+                    else if (!own_revive.empty()) rows[own_revive] = &body;   // step RSX
                     else ++unmapped;   // the own lifecycle is ours: the anchor's own ball stands
                     continue;
                 }
@@ -550,7 +558,7 @@ namespace bmmo::session {
         uint32_t navs = 0;
         for (const auto& [player, nav]: st.navs) {
             std::string entity;
-            if (player == s.own_id_) entity = s.own_physicalized_ && !own_kept ? platform_.own_driven_entity() : std::string();
+            if (player == s.own_id_) entity = s.own_physicalized_ && !own_kept ? platform_.own_driven_entity() : own_revive;
             else if (const auto it = s.remotes_.find(player); it != s.remotes_.end() && it->second.navigation)
                 entity = it->second.entity;
             if (entity.empty()) continue;
@@ -649,7 +657,11 @@ namespace bmmo::session {
         resync_outcome restored;
         bool ok = false;
         {
-            const scope_guard keep_cells = platform_.keep_live_cells(*this);
+            // Step RSX: the core's scope, as every rewind's (step EL8): the
+            // host's, and the matrices of the own entities without a body
+            // put back at the end - an own life revived under the restore
+            // is removed at its replayed death with the death's matrix.
+            const scope_guard keep_cells = keep_live_cells();
             rd.active = true;
             s.last_rewind_rederived_ = true;
             // Step EL7: the mirrors are this apply's own reconcile (2.6.3,
@@ -671,6 +683,9 @@ namespace bmmo::session {
             // write of the physics globals dropped the history: not applied.
             if (s.rollback_.stats().globals_failures != globals_before) ok = false;
             s.resync_restoring_ = false;
+            // Step RSX: an own death the revive queued that no replay applied
+            // (a re-step stopped before it), made live as after a rewind.
+            settle_own_due();
             rd.active = false;
             if (!ok) s.last_rewind_rederived_ = false;
         }
@@ -742,7 +757,8 @@ namespace bmmo::session {
         s.resync_restep_depth_ += depth;
         bool own_row = false;
         for (const auto& body: st.rows)
-            if (body.kind == body_kind::Ball && body.owner == s.own_id_ && !own_entity.empty() && !own_kept) own_row = true;
+            if (body.kind == body_kind::Ball && body.owner == s.own_id_ && (!own_entity.empty() || !own_revive.empty()) && !own_kept)
+                own_row = true;   // step RSX: a revived own life's row too
         drop_carried_own_replay(anchor, own_row);
         // Every correction noted before the apply - a relayed frame or an
         // own amendment stored while the resync was pending - is in the

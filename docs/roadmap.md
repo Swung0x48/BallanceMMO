@@ -2447,6 +2447,17 @@ numbers 1-10 are unchanged.
      "the mirrors are this apply's own reconcile") leaves the OWN life of
      a RESYNC's window to no half - a separate fix on the resync path, not
      to be merged into gap L's.
+     **Built at FULL step RSX** (resync-and-sector-timing-design.md "As
+     built (step RSX)"): the own life the record of S tracked is made again
+     under the resync's restore (the own half, for that life only; the
+     mirrors keep EL7's guard), the server's own row and navigation land on
+     it, its death is replayed at its stamp; live rerun `rsx_fan_dr` 0 keys
+     differing on all four. Retail declares `own_body_in_replay` (EL8), so
+     the fix reaches it as well (not "headless only"); its run is RT1-RT3's.
+     Queued from it: re-capture `h5b_full/fan_dr` and `h5_full/h123_150`
+     with post-H1X binaries (FULL / REF12) - captured before H1X's paper
+     hull, their paper mirror (fan_dr c2 4.81 m, h123_150 c2 DIVERGED at
+     pass 11057) cannot match a same-build server on any build.
      **(item 2) 8 members at 0 ms
      start late, measured**: U9 and its control without the FIFO and the
      reload (`u9ctl`) starve - every client steps tick T 2.6-4.5 ticks after

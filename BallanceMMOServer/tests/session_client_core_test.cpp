@@ -7209,6 +7209,170 @@ namespace {
         EXPECT_TRUE(s.pending_deaths_.empty());
     }
 
+    // Step RSX (WG3-dr, resync design 2.6.3: the own ball's row "always"
+    // when the server has one; its death at its stamp): the own ball alive at
+    // S = 120 dies at 124 (the own death logged in the new numbering), the
+    // state is applied at 126 with no own body.  The server's own row lands
+    // on the life the record of S tracked: the own half revives it under the
+    // restore (make_own at S, muted), nothing is unmapped or unrevivable, the
+    // replay removes it at 124 (a replayed death), and no body is left.
+    // Without own_body_in_replay the row stays unmapped and the engine counts
+    // the life unrevivable, as before the step.
+    session_platform rsx_platform(flow_fake& fake, own_matrices& matrices) {
+        session_platform platform = fake.make_flow();
+        matrices.install(platform, fake.calls);
+        platform.make_own = [&fake](const bmmo::session::own_body_spec& spec) {
+            fake.calls.push_back("make_own:" + spec.entity + ":" + spec.group + ":" + std::to_string(spec.tick));
+            fake.own_specs.push_back(spec);
+            fake.bodies_there.push_back(spec.entity);
+            bmmo::session::own_body_made made;
+            made.found = made.made = true;
+            return made;
+        };
+        platform.unmake_own = [&fake](const std::string& entity, const float*, const float*, uint32_t tick, bool death,
+                                      std::string&) {
+            fake.calls.push_back("unmake_own:" + entity + ":" + std::to_string(tick) + (death ? ":death" : ""));
+            fake.bodies_there.erase(std::remove(fake.bodies_there.begin(), fake.bodies_there.end(), entity),
+                                    fake.bodies_there.end());
+            return true;
+        };
+        platform.bind_world = [&fake](const bmmo::session::core_world_hooks& hooks) {
+            fake.calls.push_back("bind_world");
+            bmmo::session::rollback_world world;
+            world.get_body = [&fake](const std::string& name, bmmo_physics_body_state& out) {
+                if (std::find(fake.bodies_there.begin(), fake.bodies_there.end(), name) == fake.bodies_there.end()) return false;
+                out = bmmo_physics_body_state{};
+                out.movable = out.simulated = true;
+                out.rotation[3] = 1.0;
+                return true;
+            };
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.set_body = [&fake](const std::string& entity, const bmmo_physics_body_state& state,
+                                     bmmo::session::wake_mode, bool) {
+                fake.calls.push_back("set_body:" + entity + ":" + std::to_string(static_cast<int>(state.position[0])));
+                return true;
+            };
+            world.step = []() { return true; };
+            world.simulating = []() { return true; };
+            const auto before = hooks.before_replayed_tick;
+            world.pre_step = [&fake, before](uint32_t tick) {
+                fake.calls.push_back("replayed:" + std::to_string(tick));
+                if (before) before(tick);
+            };
+            world.birth_moved = hooks.birth_moved;
+            world.restore_lives = hooks.restore_lives;
+            return world;
+        };
+        return platform;
+    }
+
+    void rsx_case(std::vector<std::string>& calls_out, flow_fake& fake, own_matrices& matrices, session_client_core& core,
+                  uint32_t death_generation = 1) {
+        run_to_anchor(core, fake);
+        core.config.rollback = true;
+        core.on_session_assign(assign_message(9, 110));
+        b1_frames(core, 110, 118);
+        core.on_session_assign(exact_assign(9, 121));
+        auto& s = state_of(core);
+        ASSERT_TRUE(s.resync_pending_);
+        b1_frames(core, 121, 126);
+        ASSERT_EQ(core.current_tick(), 126u);
+        // The own ball's records over the window: alive (generation 1) at
+        // S..123, bodiless (generation 2) from its death at 124.
+        const std::string wood = "Ball_Wood";
+        own_span(core, 120, 123, wood, true, 7.0, 1);
+        own_span(core, 124, 126, wood, false, 0.0, 2);
+        s.own_ball_entities_ = {wood};
+        s.own_body_entity_.clear();
+        s.own_physicalized_ = false;
+        s.generations_ = {{wood, 2}};
+        matrices.m[wood] = own_matrices::at(31.0f);   // after frame 124: the death sequence's
+        steps{core}.note_own_death(wood, 124, death_generation);
+        ASSERT_EQ(s.own_deaths_.size(), 1u);
+        matrices.m[wood] = own_matrices::at(-20.0f);   // live, by now: the resetpoint
+        auto msg = resync_state(121, {1});
+        bmmo::session::body_state ball;
+        ball.kind = bmmo::session::body_kind::Ball;
+        ball.owner = s.own_id_;
+        ball.position[0] = 9.0;
+        msg.rows.push_back(ball);
+        msg.clones = {{s.own_id_, std::string("Ball_Wood_BMMO_3")}};
+        const size_t from = fake.calls.size();
+        deliver(core, std::move(msg));
+        calls_out = since(fake.calls, from);
+        EXPECT_FALSE(s.resync_pending_);
+        EXPECT_EQ(s.resyncs_restepped_, 1u);
+    }
+
+    TEST(SessionClientCoreResync, AnOwnLifeEndingInsideTheReStepIsMadeFromTheServersRow) {
+        const std::string wood = "Ball_Wood";
+        {
+            flow_fake fake;
+            own_matrices matrices;
+            session_client_core core(rsx_platform(fake, matrices), own_replay_caps());
+            std::vector<std::string> calls;
+            rsx_case(calls, fake, matrices, core);
+            auto& s = state_of(core);
+            const auto made = std::find(calls.begin(), calls.end(), "make_own:" + wood + ":" + s.own_group_ + ":120");
+            ASSERT_NE(made, calls.end()) << "the A-life made again at S";
+            EXPECT_EQ(*std::prev(made), "mute_event_log:on") << "muted";
+            ASSERT_EQ(fake.own_specs.size(), 1u);
+            EXPECT_FALSE(fake.own_specs[0].kick);
+            EXPECT_TRUE(fake.own_specs[0].with_replica);
+            const auto written = std::find(calls.begin(), calls.end(), "set_body:" + wood + ":9");
+            ASSERT_NE(written, calls.end()) << "the server's row (x 9), not the A record's pose (x 7)";
+            EXPECT_TRUE(made < written) << "made first, then the row lands on it";
+            EXPECT_EQ(b1_count(calls, "set_body:" + wood + ":7"), 0u);
+            const auto replayed = std::find(calls.begin(), calls.end(), "replayed:124");
+            const auto died = std::find(calls.begin(), calls.end(), "unmake_own:" + wood + ":124:death");
+            ASSERT_NE(replayed, calls.end());
+            ASSERT_NE(died, calls.end()) << "its death replayed at its stamp";
+            EXPECT_TRUE(replayed < died);
+            EXPECT_EQ(b1_count(calls, "unmake_own:"), 1u);
+            EXPECT_EQ(s.own_revives_, 1u);
+            EXPECT_EQ(s.resync_rows_unmapped_, 0u) << "the row landed on the revived life";
+            EXPECT_EQ(core.rollback_stats().lives_unrevivable, 0u);
+            EXPECT_EQ(core.rollback_stats().lives_revived_own, 1u);
+            EXPECT_EQ(b1_count(calls, "log:0:lives: " + wood + " (alive at tick 120"), 0u) << "no 'revived by no half'";
+            EXPECT_TRUE(s.own_due_.empty());
+            EXPECT_TRUE(fake.bodies_there.empty()) << "no body left after the re-step";
+            EXPECT_EQ(matrices.m[wood][12], -20.0f) << "the core's scope put the pre-apply matrix back";
+            const auto line = std::find_if(calls.begin(), calls.end(), [](const std::string& c) {
+                return c.rfind("log:0:resync: re-stepped from the server's tick 120 to 126", 0) == 0;
+            });
+            ASSERT_NE(line, calls.end());
+            EXPECT_NE(line->find("0 unmapped"), std::string::npos) << *line;
+        }
+        {
+            flow_fake fake;
+            own_matrices matrices;
+            session_client_core core(rsx_platform(fake, matrices), session_capabilities{});
+            std::vector<std::string> calls;
+            rsx_case(calls, fake, matrices, core);
+            auto& s = state_of(core);
+            EXPECT_EQ(b1_count(calls, "make_own:"), 0u);
+            EXPECT_EQ(s.resync_rows_unmapped_, 1u) << "as before the step";
+            EXPECT_EQ(core.rollback_stats().lives_unrevivable, 1u);
+            EXPECT_EQ(s.own_revives_, 0u);
+        }
+        {
+            // The death logged in the window is not the S-life's (generation
+            // 2, a later life of the name): the row is not mapped onto the
+            // S-life the reconcile would refuse; it stays unmapped and
+            // counted, as before the step.
+            flow_fake fake;
+            own_matrices matrices;
+            session_client_core core(rsx_platform(fake, matrices), own_replay_caps());
+            std::vector<std::string> calls;
+            rsx_case(calls, fake, matrices, core, 2);
+            auto& s = state_of(core);
+            EXPECT_EQ(b1_count(calls, "make_own:"), 0u);
+            EXPECT_EQ(b1_count(calls, "set_body:" + wood + ":9"), 0u);
+            EXPECT_EQ(s.resync_rows_unmapped_, 1u) << "counted, not skipped silently";
+            EXPECT_EQ(s.own_revives_, 0u);
+        }
+    }
+
     // A held notice for a tick of a pending exact resync's epoch amends the
     // own record the apply's re-step feeds the ball from (resync design 2.2),
     // without a rewind of its own; one for a tick not simulated yet is

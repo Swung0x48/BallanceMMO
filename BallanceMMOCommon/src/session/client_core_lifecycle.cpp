@@ -1555,7 +1555,20 @@ namespace bmmo::session {
     // the live records' generations, and the muted changes bump nothing.
     void session_client_core::reconcile_own_lives(uint32_t anchor, uint32_t now, const std::vector<ended_life>& ended,
                                                   std::map<std::string, life_outcome>& out) {
-        if (!caps_.own_body_in_replay || s.resync_restoring_) return;
+        if (!caps_.own_body_in_replay) return;
+        // Step RSX: under an exact resync's restore the own half answers for
+        // one life only - the A-life the apply mapped the server's own row
+        // onto (resync_own_revive_entity: no body now, its death logged in
+        // the window).  The row outranks the A record's pose (rollback.hpp,
+        // revive_ended_lives keeps a from_row item's state), its death is
+        // queued at its stamp like a rewind's.  The rest stays as before the
+        // step: a same-name life born again inside the window, and an own
+        // life born and ended inside it, are not reconciled by a resync
+        // (the resync design's table gives them no rule beyond "applied at
+        // their stamps", and no run has shown one).  The mirrors keep EL7's
+        // guard (reconcile_remote_lives): they are the apply's own reconcile.
+        const std::string resync_only = s.resync_restoring_ ? resync_own_revive_entity(anchor, now) : std::string();
+        if (s.resync_restoring_ && resync_only.empty()) return;
         const auto stamp_in = [](uint32_t stamp, uint32_t after, uint32_t upto) {
             return static_cast<int32_t>(stamp - after) > 0 && static_cast<int32_t>(stamp - upto) <= 0;
         };
@@ -1623,6 +1636,7 @@ namespace bmmo::session {
         };
         for (const ended_life& life: ended) {
             if (life.kind != life_kind::own || out.count(life.name)) continue;
+            if (s.resync_restoring_ && life.name != resync_only) continue;   // step RSX: as before the step
             const auto* death = death_of(life.name, life.generation, anchor);
             if (!death) {
                 fail(life.name, "no own death of generation " + std::to_string(life.generation) + " logged in ("
@@ -1701,8 +1715,10 @@ namespace bmmo::session {
                      death_copy.has_matrix ? "" : " (no death matrix: the record's pose)");
             }
         }
-        // Own lives born and ended inside the window (no body now).
+        // Own lives born and ended inside the window (no body now).  Not
+        // under a resync's restore (step RSX: above).
         for (const auto& life: s.own_life_) {
+            if (s.resync_restoring_) break;
             if (life.what != own_life::kind::birth || !life.made || life.moved() || out.count(life.entity)) continue;
             if (!stamp_in(life.applied, anchor, now)) continue;
             const auto* death = death_of(life.entity, life.generation, life.applied);
@@ -1724,6 +1740,36 @@ namespace bmmo::session {
                              if (a.tick != b.tick) return static_cast<int32_t>(a.tick - b.tick) < 0;
                              return a.death && !b.death;
                          });
+    }
+
+    // Step RSX (resync design 2.6.3: "A body exists at S if and only if the
+    // server has a row for it at S"; the own ball's row "always" when the
+    // server has one; its death at its stamp like every own event inside a
+    // window).  The caller has the server's own row at S; this names the
+    // body it lands on when the own ball has none now: the life the record
+    // of S tracked, revived by reconcile_own_lives under the restore.  The
+    // own deaths of the old numbering are gone at the re-assign
+    // (clear_own_window_state): a death before it is not found here, and
+    // the row stays unmapped as before the step.
+    std::string session_client_core::resync_own_revive_entity(uint32_t anchor, uint32_t now) {
+        if (!caps_.own_body_in_replay || !config.rollback || own_out_of_sync_at(anchor)) return {};
+        std::string entity = s.rollback_.recorded_own_entity(anchor);
+        if (entity.empty()) return {};
+        bmmo_physics_body_state there{};
+        if (platform_.body_state(entity, there)) return {};
+        // The death must be the S-life's (its generation in the record of S,
+        // the one revive_ended_lives hands reconcile_own_lives): a death of
+        // a later life of the name (the S-life's own death cleared at the
+        // re-assign, a respawn dead before the apply) would map the row onto
+        // a life the reconcile then refuses, and the row would be skipped
+        // silently instead of counted unmapped.
+        uint32_t generation = 0;
+        if (!s.rollback_.generation_at(entity, anchor, generation)) return {};
+        for (const auto& d: s.own_deaths_)
+            if (d.entity == entity && d.generation == generation && static_cast<int32_t>(d.tick - anchor) > 0
+                    && static_cast<int32_t>(d.tick - now) <= 0)
+                return entity;
+        return {};
     }
 
     // The own changes queued for a replayed `tick` (the end of

@@ -3653,6 +3653,116 @@ server change, the legacy path untouched.
   two-copy run (the core's change reaches retail through the shared objects;
   the host is unchanged).
 
+## As built (step RSX, FULL, 2026-10-30): an own life that ends inside a resync's re-step window, made again from the server's row
+
+The close-out's FULL plan row RSX (roadmap section 4 item 4, "Found at FULL
+step H5b"; world-agreement-gaps-design.md "As built (step H5b)", WG3-dr). No
+protocol, journal, blob, engine (IVP / physics_RT) or server change; shared
+core only (`client_core.hpp`, `client_core_resync.cpp`,
+`client_core_lifecycle.cpp`) and one unit test.
+
+- **The symptom** (`h5b_full/fan_dr` client 0: beamed into the death zone at
+  1400, a resync requested at 1460, S 1461, applied at local 1472 after its
+  own death at 1470): the own ball's FINAL rows of 1462-1468 were missing
+  on the client (35 m under the death plane; no other body differed).
+- **The cause.** At the apply the own ball had no body, so
+  `try_apply_resync` named no own entity (`own_entity` is read only while
+  `own_physicalized_`): the server's own row at S was counted unmapped ("the
+  own lifecycle is ours"), its navigation was dropped, and the blob's own
+  entry found no object ("is in the travelling savestate but not in the
+  world"). The engine's ended-life pass (`rollback.hpp`
+  `revive_ended_lives`) found the life alive at S and ended at 1470 and
+  asked the halves; the own half (`reconcile_own_lives`) returned at once
+  while a resync's restore ran (`s.resync_restoring_`, EL7's guard), so the
+  life was "revived by no half" and the re-step ran without the ball until
+  its death.
+- **The fix** (this section's 2.6.3: "A body exists at S if and only if the
+  server has a row for it at S", the own ball's row "always", its death at
+  its stamp as every own event inside a window):
+  - `resync_own_revive_entity(S, now)` (`client_core_lifecycle.cpp`) names
+    the own entity the record of S tracked when the host declares
+    `own_body_in_replay`, rollback is on, the own ball was in the sync at S
+    (BALA), that entity has no body now, and an own death of it is logged in
+    `(S, now]` under the generation the record of S holds for it (the one
+    `revive_ended_lives` hands the own half; the review's finding: without
+    the generation a later life's death would map the row onto a life the
+    reconcile refuses, and the row would be skipped silently instead of
+    counted unmapped); empty otherwise. It is evaluated twice, by the apply
+    and inside the restore; the two agree because nothing makes a body of
+    that name between them (`revive_ended_lives` runs before the scripts,
+    the blob and the births' re-posing) - a later edit that makes a body
+    ahead of `restore_lives` must pass the apply's answer down instead.
+  - `try_apply_resync` maps the server's own row and the server's own
+    navigation onto that entity when the ball has no body now (the airship
+    exclusion `own_kept` is unchanged; `own_row` for
+    `drop_carried_own_replay` counts it).
+  - `reconcile_own_lives` runs under a resync's restore for that one life
+    only: made again (make_own at S, muted, with the replica, no kick)
+    before the scripts and the blob, the row lands on it (`from_row`
+    outranks the A record's pose in `revive_ended_lives`), the blob's own
+    entry applies, and its logged death is queued at its stamp (removed by
+    the replayed drain, `apply_own_due`). The mirrors keep EL7's guard
+    (`reconcile_remote_lives`): they are the apply's own reconcile.
+  - The resync's re-step now runs inside the core's scope
+    (`keep_live_cells()`, as every rewind since EL8) instead of the host's
+    alone, so the bodiless own entity's pre-apply CK matrix is put back
+    after the replayed death; `settle_own_due()` after the re-step makes
+    live what a stopped re-step did not apply. This reaches every resync,
+    not only this case: the bodiless own entities' matrices (the own ball's
+    other types) are put back after every re-step, as on the rewind path
+    (EL8, `client_core_frame.cpp`); the wire check is ALL SAME.
+- **Left as before (not reconciled by a resync):** a same-name own life
+  born again inside the window (a respawn in `(S, now]`: the ball has a
+  body now, its row lands on the respawned body as before the step) and an
+  own life born and ended inside the window. Neither has been seen in a
+  run; the rewind path's handling of the first would replace the from-row
+  item by the birth record's (rollback.hpp `revive_ended_lives`, the
+  `remade_at` branch), so the server's row would be lost there - a design
+  question of its own if one appears. An own death logged before the
+  resync's re-assign (Δ > 0) is forgotten at the renumbering
+  (`clear_own_window_state`), so its row stays unmapped as before. A
+  restore with no replay after it (a frozen clock) never asks the halves,
+  so the row mapped onto the dead own entity finds no body and is not
+  written; the own ball stays dead as it is live, and the frozen-clock
+  path asks for a resync anyway (no code for it).
+- **Adapted - retail.** The plan says retail has no own body in the replay
+  (R6) and is unchanged. The code says otherwise: the retail host declares
+  `own_body_in_replay = true` since EL8 (`core_host.cpp` ~1327;
+  host-platform-audit.md: true on both hosts), with make_own / unmake_own
+  on the bridge. The fix is the core's, gated by that capability, so a
+  retail client whose own life ends inside a resync's window now takes the
+  same path (revive at S from the server's row, removal at the replayed
+  death). Retail is checked in this step by the x86 compile only; a retail
+  run of the case belongs to the retail batches (RT1-RT3): a stall-triggered
+  resync whose window holds an own death on the arena's death zone, judged
+  on "revived until", "0 unmapped" and no own body left after it. No host was
+  given a special case (one implementation, §0 of the core design).
+- **Verified.** Unit test
+  `SessionClientCoreResync.AnOwnLifeEndingInsideTheReStepIsMadeFromTheServersRow`
+  (the life made at S muted, the server's row written on it - not the A
+  record's pose - its death replayed at 124, 0 unmapped, 0 unrevivable, no
+  body left, the pre-apply matrix put back; without the capability: 1
+  unmapped, 1 unrevivable, nothing made; a logged death of another
+  generation: nothing made, the row 1 unmapped); 684 / 684 tests; GCC syntax 31 ok;
+  x64 BUILD-OK and x86 CLIENT-BUILD-OK (DEPS-OK). The `fan_dr` capture
+  replayed by the new build against the server re-simulated by the same
+  build: client 0's own-ball rows 1462-1468 present and bit-equal (the
+  previous build, rH1X, still misses them at 4 ticks); its one other
+  difference, client 2's paper mirror after client 0's resync (and in
+  client 3's rejoin from its import), is identical on rH1X - the capture
+  predates H1X's paper hull, so the server state it carries is the old
+  hull's (H1X: such captures cannot match from the first paper body).
+  One live rerun of the WG3-dr recipe (`h5b_full/rsx_fan_dr`, rRSX against
+  the Arch server of this tree, snapshots off): client 0's own life alive at
+  S 1460 ended at 1469 inside the re-step, "revived until tick 1469", "23
+  rows: 0 written, 23 equal, 0 unmapped", blob skipped=0; FINAL rows of all
+  four clients and client 3's rejoin: 41 keys, 0 differing, no missing row.
+  a3_trans / a3_pair2 (c2, c3), the J1b seeds 1-5 and j1 (c3): exact;
+  h5_full/h123_150 against the server re-simulated by the same build:
+  c0 / c1 / c3 0 differing, c2 (the paper owner; its capture stops at pass
+  11057 under the H1X hull) identical on rH1X. Wire check rH1X vs rRSX over
+  core_ref_s12 (h1_150 from core_ref_s12h): ALL SAME.
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob
