@@ -4947,3 +4947,230 @@ slot unit's blocks per tick - Get Cell output id, Box Box Intersection's
 Entity 0, the probe's distance / state / countdown, the switches, the
 links; reverted afterwards and build-agent rebuilt at HEAD, BUILD-OK).
 Tools: `gate/pt.py`, `gate/diag_sum.py`.
+
+### As built (step INV, FULL close-out, 2026-10-30): H5's prop removal and one-tick-late beam, to a cause - for the user
+
+Follow-up of the two "Found, pre-existing" items of "As built (step H5)"
+above. Investigation only: no code changed, no build, no live run. Checks:
+H5's SimTool outputs (`.local-tools/work/H5/desc_*.txt`, `drop_paper1.txt`)
+and the lifecycle lines of H5's run logs (`maps/arena-test/h5_full`), plus
+14 SimTool `--list-placement --list-group` runs on HEAD's x64 build
+(`.local-tools/work/INV/group_*.txt`, `dt_L1..L12.txt`).
+
+**(1) The server-only prop removal is Gameplay_Ingame's level-wide depth
+test.**
+- *The block.* `Gameplay_Ingame/DepthTest` (behavior id 26705).
+  `Init Ingame` -> `Identity` -> `get maxDepth` (26594) -> `DepthTest`
+  starts it at level start, and it runs as long as Gameplay_Ingame runs.
+  - `get maxDepth` takes the lowest bounding-box y over the group
+    `DepthTestCubes`. The arena has one member, `DepthCubes_01`, box min
+    y = -125.
+  - `DepthTest` computes Op 26674 (maxDepth, 200) = -325. A Group Iterator
+    (26654) walks the group `DepthTest` one member per frame (delay-1
+    links) and restarts forever. For each member, Test 26682 (comparison
+    operator 3, "less than") checks y < -325. If true, the chain is
+    `Physicalize` 26646 (Unphysicalize input) -> `Hide` 26601 ->
+    `Set Position` 26692 ((0,0,0)).
+  - The arena's `DepthTest` group holds the four free props:
+    P_Ball_Paper_MF, P_Ball_Wood_MF, P_Ball_Stone_MF and P_Box_MF.
+  - So this is a level-wide fall handler for free props. It is not a sector
+    reset and not a death. The player's ball is not in the group.
+- *The tick.* `drop_paper1.txt`:
+  - The prop crosses -325 between ticks 882 (-324.97) and 883 (-325.37).
+  - Its last row is at 886 (-326.59). At 887 it is hidden at (0,0,0) and
+    has no body.
+  - The iterator reaches the prop within one cycle of its four members,
+    which fits the 4-tick delay.
+  - The Op's operation GUID was not decoded. The evidence is the
+    arithmetic: -125 - 200 = -325 is the crossing that is followed.
+- *Every retail level has such props.* The `DepthTest` group's members,
+  levels 1-12: L1 14, L2 8, L3 10, L4 22 (16 P_Ball_Stone_MF), L5 5, L6 5,
+  L7 3, L8 13 (all P_Box_MF), L9 7, L10 13, L11 8, L12 8. All of them are
+  P_Box_MF / P_Ball_*_MF. Any prop a player pushes off the track takes this
+  path 200 m below the level's depth cubes.
+- *The clients refuse it, retail included.*
+  - The guard is armed with the own ball as its only exception, on all
+    three client hosts:
+    - the headless client: `session_client.cpp:3626-3629`;
+    - the retail core: `core_host.cpp:2319-2322` (`own_body_upkeep`);
+    - the legacy retail path: `physics_session_client.cpp:1773-1776`.
+  - The exemption list of #13 holds only the explosion-piece frames and the
+    trafo sets (`physics_state.cpp:3023-3030`, `3097-3116`), so
+    `KeepsBodyOf` is true for the prop.
+  - The guarded branch (`Physicalize.cpp:234-237`) returns without deleting
+    the body, but it still activates Out2. On every client, Hide and
+    Set Position (0,0,0) therefore run while the body keeps falling. By
+    reading, physics_RT's per-frame update of the moving body then puts the
+    entity back at the body's pose.
+  - The next pass of the iterator sees y < -325 again. A client repeats the
+    refused Unphysicalize, Hide and move once per cycle, for as long as the
+    session lasts (`m_DePhysicalizeCalls` grows by one each time).
+  - The server's world never arms the guard (H5).
+- *Options, restated:*
+  - (a) The guard in the server's world too: `set_body_guard(physics, true,
+    nullptr)` at the anchor, so every world keeps the fallen prop's body.
+    - This is one rule for every world, with no knowledge of any script.
+      The server has no own death, so the reason for the guard does not
+      apply there, but its effect matches the clients.
+    - The exemption list is in place on the server already:
+      - the server's anchor calls `reset_session_clock`
+        (`physics_world.cpp:183`), which runs `restore_explosion_pieces`
+        (`physics_state.cpp:928`);
+      - the trafo-set registration appends the sets (`3139`, `3229`).
+    - The server's lifecycle path removes clones through
+      `bmmo::physics::unphysicalize` (`physics_world.cpp:506, 530, 823,
+      926, 974, 1275`). That function calls `delete_silently` directly
+      (`physics_state.cpp:1803-1818`), not through the block, so the guard
+      cannot touch the players' clones.
+    - Expected change on the server: every script Unphysicalize of a
+      non-exempt entity is now refused. Seen in the dumps:
+      - SectorManager 30833 (pinned in a session already);
+      - Gameplay_Events 30363;
+      - Event_handler 2772 (the level teardown) and 3092 (the reset
+        chain);
+      - Gameplay_Ingame 25342 (`dephysic Ball`) and 27103 (Delayer ->
+        Unphysicalize -> Hide). Both act on the retail ball, which the
+        server parks, so by reading they have no effect;
+      - this DepthTest.
+    - For a predicate literally the clients', the exception could be the
+      server's parked retail ball.
+    - Cost: every fallen prop falls forever in every world, about 27 m/s,
+      one simulated body each.
+    - What (a) does not align: the block still fires in every world, and
+      the refused Unphysicalize still runs Hide and Set Position (0,0,0).
+      The Group Iterator's phase comes from the frames each world played
+      since level start, so the tick at which a world first refuses, hides
+      and moves the fallen prop can differ by up to 3 between worlds (4
+      members in the arena, one per frame), and so can each later repeat.
+      This is already the case among the clients today, which all arm the
+      guard.
+      - The body rows agree: a journal row, and so every row compare and
+        resync import, is the IVP body's pose
+        (`physics_state.cpp:1037-1058`, `fill_body_state`), which the
+        refused block does not touch.
+      - What differs is the prop's entity: its hidden flag from a different
+        tick (renderer only), and its matrix at (0,0,0) for the frame until
+        physics_RT writes the body's pose back. By reading, no session code
+        reads either for these props: the probe cells read entity
+        positions only of the player-ball candidates
+        (`proximity_union.hpp:337-350`). Not checked: whether a level
+        script reads a free prop's entity (none was found in this
+        investigation). The only reader found is DepthTest itself, whose
+        next pass reads the restored y, still below -325.
+    - To verify:
+      - a `--replay-session` of H5's server journals with the guard armed
+        (a scratch SimTool flag). Pass = no row difference except the
+        DepthTest removals;
+      - a cross-world compare of the fallen prop's rows after its crossing:
+        that guarded server replay against one client journal of the same
+        H5 run (e.g. `h5_full/h123_150`'s client 1). Pass = the prop's rows
+        bit-equal from the crossing to the session's end. A one-world
+        replay cannot see a per-world difference; this compare can.
+  - (b) Let this Unphysicalize through on the clients, as #13 does for the
+    trafo pieces.
+    - #13's list is per entity, not per block. Exempting the DepthTest
+      props would also expose them to any other script's Unphysicalize on
+      a client, such as the sector reset of a death if a pin ever misses.
+      A narrower version needs a block-level bypass: the DepthTest's
+      Physicalize rewired the way the union rewires blocks, or a new engine
+      change (#22).
+    - A client would also remove the body by a live script that the replay
+      does not run. The script replay's selection
+      (`game/script_replay.hpp:1039-1071`, `select`) takes the mechanism
+      scripts, Gameplay_SectorManager and the trafo scripts, and no
+      satellite block (`// No satellites`, 1067), so DepthTest 26705 is not
+      among the blocks the replay executes (`execute_frame` runs
+      `sel.satellites`, 1686, which stays empty). A rewind anchored before the
+      removal would restore the body, and nothing would remove it again.
+      So (b) also needs a lifecycle record of its own.
+    - The removal tick would also depend on each world's iterator phase.
+  - (c) Accept. The prop is 300 m below the death zone, so no contact is
+    possible, but the body sets differ for the rest of the session. That
+    is noise in every row comparison and every resync import. It also goes
+    against the user's "fix everything except the balloon".
+  - **Recommendation: (a)**, gated by the guarded server replay and the
+    cross-world compare above.
+
+**(2) The one-tick-late beam into a probe: a player path reaches it, but
+by the code only the headless host shows it.**
+- *A player path exists.*
+  - `/mmo auto <verb>` is registered for every player with no gate
+    (`BallanceMMOClient.cpp:1173-1180`). It calls
+    `dispatch_automation_command`, whose `beam` verb is at
+    `client_automation.cpp:553`.
+  - That verb calls `core_host_beam` (`core_host.cpp:3752`), which calls
+    `core.request_beam` (`3782`, or `3808` for `beam ... at`).
+  - Then `beam_own_ball` sends Unphysicalize and Physicalize, both stamped
+    `tick + 1` (`client_core_lifecycle.cpp:1966-1977`).
+  - So a harness rule alone does not keep the pair away from players.
+    Whether that matters is the next point.
+- *No other path sends the pair.*
+  - The retail scripts' own deaths and births reach the server one per
+    event (`report_unphysicalize` / `report_physicalize`,
+    `client_core_frame.cpp:766-769`). They fall many ticks apart in H5's
+    logs: a trafo 603 -> 768 and a death and respawn 815 -> 1013
+    (`h123_0/client1.log`).
+  - The backstop re-reports a Physicalize alone
+    (`client_core_messages.cpp:343-372`).
+  - Not checked in a run: the level end and a menu restart. By reading,
+    the level end sends an Unphysicalize alone. By its chain
+    (Event_handler `reset Level`, delayed links) its Physicalize comes
+    frames later.
+- *Why only the headless host is late: the mirror's entity.*
+  - The server keeps one clone per player and ball type
+    (`physics_world.cpp:728-754`, `p.balls[ball_type]`). Every life of
+    that type uses the same name: fan_q7's server logs
+    `Ball_Paper_BMMO_2737916712` at 668, 701 and 1451.
+  - Retail does the same with one spirit ball per player and type
+    (`game_objects.h:301-306`). Its `mirror_entity` / `make_mirror`
+    (`core_host.cpp:2718-2745`) insist on that name.
+  - The headless host's `remote_entity` (`session_client.cpp:3836-3853`)
+    looks up `<Ball>_BMMO_<player>`. CK's unique-name copy never produces
+    that name (the first copy is already `<player>+1`), so the lookup never
+    hits. Every birth clones a new entity: fan_q7's client 0 has
+    `Ball_Paper_BMMO_2737916712 / ...713 / ...714` at 668 / 701 / 1451, and
+    h123_0's client 1 has `Ball_Stone_BMMO_330143599 / ...600 / ...601`.
+  - At a same-tick pair, the cell (placed before the tick's events,
+    `client_core_frame.cpp:584`) names an entity:
+    - on the server and on retail, the entity that the pair gives a new
+      body in the box;
+    - on a headless client, the old clone that the pair leaves bodiless.
+  - So retail matches the server by the code. Not measured: no retail run
+    beamed into a probe's range.
+  - The other rebirths (death/respawn, a trafo back to a type) also get a
+    new name on headless clients. They do not differ at a probe, because
+    the dead player has no candidate at that tick's place point in any
+    world.
+- *Options, restated:*
+  - (a1) The headless host keeps one clone per player and type, reused
+    across lives, as the server and retail do: a per-(player, type) map in
+    `session_client.cpp` instead of the name lookup.
+    - Host only: the core, the server and retail are untouched, and the
+      headless client becomes a better stand-in for retail.
+    - Blast radius: mirror names in headless journals change for every
+      second and later life of a type. The wire check then needs a
+      name-mapped compare or a re-captured reference set.
+    - It also exercises, on headless, the same-name rebirth that retail
+      has always used (generation-labelled records, EL7's life log). That
+      needs the exact replays and a fan run.
+  - (a2) The plan's narrower variant in the core: a same-tick pair of one
+    player and one type re-makes the mirror under its old entity
+    (`pending_birth.entity`, EL7).
+    - It reaches every host, though retail is a no-op (its names already
+      match). It changes headless names only after a beam.
+  - (b) Every world places the probes again after the tick's lifecycle
+    events when a candidate had one.
+    - This changes §2.5 / G3's place point ("the server's point, before
+      its leavers and its events") in every world, the server included.
+    - It moves the frames of every birth or death near a probe (respawns,
+      trafos), not only beams.
+    - It would need re-captured references. That is a shared rule change
+      for a symptom that, by the code, only the headless host shows.
+  - (c) A harness rule: never beam into a probe's range.
+    - For players it is enough: the beam is reachable from the command
+      bar, but by the code a retail world does not show the symptom.
+    - It leaves the headless stand-in different from retail and from the
+      server at every same-tick pair, and H5-style agreement checks depend
+      on that stand-in. Every recipe has to obey the rule.
+  - **Recommendation: (a1)**, verified by the wire check with name
+    mapping, the solo exactness replay and a re-run of H5's `fan_q7`.
