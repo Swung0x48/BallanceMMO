@@ -41,6 +41,7 @@
 #include <game/checkpoint_phase.hpp>
 #include <game/tutorial_exit.hpp>
 #include <game/depth_test.hpp>
+#include <game/mirror_clones.hpp>
 #include <game/sector_cell_split.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_placement.hpp>
@@ -506,7 +507,6 @@ namespace bmmo::sim {
             uint32_t id = 0;
             int slot = 0;                             // per-world slot, 0..63
             std::string group;                        // nocoll group ident "P#<slot>" (IVP limit: 7 chars)
-            std::map<uint8_t, CK3dEntity*> balls;     // clone entity per ball type
             CK3dEntity* ball = nullptr;               // the physicalized one (or null)
             CK3dEntity* cam_ref = nullptr;
             std::unique_ptr<bmmo::physics::player_navigation> navigation;
@@ -523,7 +523,10 @@ namespace bmmo::sim {
             // Step SPGH: its ball a spawn ghost after the last step.
             bool spawn_ghost = false;
         };
+        // The player's clone of a ball type (step BMX: mirror_clones_, the
+        // shared rule - one clone per player and type, reused across lives).
         CK3dEntity* clone_ball(player& p, uint8_t ball_type, std::string& error);
+        bmmo::game::mirror_clones mirror_clones_;
         std::string ball_name(uint8_t ball_type) const;
         // The retail entity of a ball type ("Ball_Stone"), the object the
         // mechanism scripts compare names against; null if the level has none.

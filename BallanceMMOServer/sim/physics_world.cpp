@@ -34,7 +34,7 @@ namespace bmmo::sim {
         // grouped by a short per-world slot ("P#0".."P#63"); entity names still
         // carry the connection id.
         constexpr const char* kPlayerGroupPrefix = "P#";
-        constexpr const char* kPlayerNameTag = "_BMMO_";
+        constexpr const char* kPlayerNameTag = bmmo::game::kMirrorNameTag;   // step BMX: the shared tag
         constexpr int kMaxSlots = 64;
 
         bool gameplay_ingame_active(CKContext* context) {
@@ -93,6 +93,7 @@ namespace bmmo::sim {
         if (engine_) bmmo::game::release_placement(placement_, engine_->context(), "the world is destroyed", {});
         // Players first: their navigation controllers live in the environment.
         players_.clear();
+        mirror_clones_.clear();   // step BMX: the clones go with the context
         if (engine_) bmmo::physics::set_controller_alias(engine_->physics(), {});
         engine_.reset();
     }
@@ -739,34 +740,19 @@ namespace bmmo::sim {
     }
 
     CK3dEntity* physics_world::clone_ball(player& p, uint8_t ball_type, std::string& error) {
-        auto it = p.balls.find(ball_type);
-        if (it != p.balls.end()) return it->second;
         const std::string name = ball_name(ball_type);
         if (name.empty()) {
             error = "unknown ball type " + std::to_string(ball_type);
             return nullptr;
         }
-        CKContext* context = engine_->context();
-        auto* source = CK3dEntity::Cast(context->GetObjectByNameAndClass(
-            const_cast<CKSTRING>(name.c_str()), CKCID_3DOBJECT, nullptr));
-        if (!source) {
-            error = "ball entity " + name + " not found";
-            return nullptr;
-        }
-        // Share the mesh, copy no scripts: the clone is a bare physics body.
-        CKDependencies dependencies;
-        dependencies.Resize(40);
-        dependencies.Fill(0);
-        dependencies.m_Flags = CK_DEPENDENCIES_CUSTOM;
-        dependencies[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
-        const std::string suffix = kPlayerNameTag + std::to_string(p.id);
-        auto* clone = CK3dEntity::Cast(context->CopyObject(source, &dependencies, const_cast<CKSTRING>(suffix.c_str())));
-        if (!clone) {
-            error = "CopyObject failed for " + name;
-            return nullptr;
-        }
-        p.balls[ball_type] = clone;
-        return clone;
+        // Step BMX: the shared rule (game/mirror_clones.hpp) - the clone made
+        // at the player's first life of this type, the same entity for every
+        // later one, released at remove_player.
+        const auto got = mirror_clones_.get(engine_->context(), p.id, ball_type, name, error);
+        if (got.made)
+            log("world: mirror clone " + std::string(got.entity->GetName() ? got.entity->GetName() : "?") + " made for player "
+                + std::to_string(p.id) + " type " + std::to_string(ball_type) + (got.remade ? " (again: the earlier one was gone)" : ""));
+        return got.entity;
     }
 
     bool physics_world::add_player(uint32_t id, uint8_t join_order, std::string& error, uint16_t life) {
@@ -831,13 +817,11 @@ namespace bmmo::sim {
         p.navigation.reset();
         CKIpionManager* manager = physics();
         CKContext* context = engine_->context();
-        for (auto& [type, entity]: p.balls) {
-            if (!entity) continue;
+        mirror_clones_.release_player(context, id, [manager](CK3dEntity* entity) {
             std::string ignored;
             if (manager && manager->GetPhysicsObject(entity))
                 bmmo::physics::unphysicalize(manager, entity->GetName(), ignored);
-            context->DestroyObject(entity);
-        }
+        });
         if (p.cam_ref) context->DestroyObject(p.cam_ref);
         // Step SPGH2: a leave ends the group's life (physics_state.hpp
         // spawn_ghost_forget): the next member that takes this join order
@@ -1674,7 +1658,7 @@ namespace bmmo::sim {
                 out.push_back(std::move(state));
                 continue;
             }
-            if (name == retail_name || name.find(kPlayerNameTag) != std::string::npos) continue;
+            if (name == retail_name || bmmo::game::is_mirror_name(name)) continue;
             current_set.insert(name);
             current_simulated[name] = body.simulated;
             // A delta snapshot carries the simulated bodies only.  The one

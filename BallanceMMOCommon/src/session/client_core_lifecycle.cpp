@@ -800,7 +800,8 @@ namespace bmmo::session {
     // inside a replay, live_first_tick otherwise).
     // A remake (event.remake, step LB: remake_mirror_birth took the body out
     // at a restore) makes the same body again: the entity it had (no
-    // mirror_entity, which on the headless host clones a new one), its
+    // mirror_entity; every host gives one entity per player and ball type
+    // since step BMX, game/mirror_clones.hpp, so it would name the same), its
     // lifetime kept (no generation bump: the records of the window name
     // it), and nothing of the remote's live state changed but its body and
     // navigation - the predictor, the frame the next live step drives it

@@ -60,6 +60,7 @@
 #include <game/array_reads.hpp>
 #include <game/depth_test.hpp>
 #include <game/host_backend.hpp>
+#include <game/mirror_clones.hpp>
 #include <game/proximity_union.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_cell_split.hpp>
@@ -344,6 +345,11 @@ namespace {
         // (the spirit ball shown, objects_.on_trafo's "from").
         std::map<std::string, uint32_t> mirror_player;
         std::map<uint32_t, uint8_t> mirror_type;
+        // Step BMX: the shared rule's contract (game/mirror_clones.hpp) - the
+        // spirit ball of (player, type) is the one entity of every life of
+        // that player and type in a session; a different one is counted and
+        // logged (game_objects' reload mid-session is the path that would).
+        bmmo::game::mirror_entity_contract mirror_contract;
         // Physicalize_GameBall's "Force" per ball type, read at the anchor
         // (the navigation's force; the legacy ball_forces).
         std::vector<float> ball_forces;
@@ -735,6 +741,7 @@ namespace {
         host.own_group_set = false;
         host.input_muted = false;
         host.mirror_player.clear();
+        host.mirror_contract.clear();   // step BMX
         ghost_pins.clear();   // step BALL
         host.mirror_type.clear();
         host.ball_forces.clear();
@@ -762,6 +769,23 @@ namespace {
         host.beam_in_flight_armed = 0;
         host.nav_source_differs = host.mute_source_differs = 0;
         host.mirror_births.clear();
+    }
+
+    // Step BMX: the shared mirror rule checked on the spirit ball about to
+    // be used for (player, type) - the entity of that player's earlier lives
+    // of the type in this session.  A different one is counted and logged
+    // (the session goes on with it: the core names whatever entity this host
+    // gives it).
+    void check_mirror_contract(logger_wrapper* logger, uint32_t player, uint8_t ball_type, CK3dObject* entity) {
+        CK_ID previous = 0;
+        std::string previous_name;
+        const std::string name = bmmo::game::entity_name(entity);
+        if (host.mirror_contract.check(player, ball_type, entity->GetID(), name, &previous, &previous_name)) return;
+        logger->Warn("Physics session: mirror contract broken #%llu: player %u type %u uses spirit ball %s (id %u), "
+                     "not the entity of its earlier lives (%s, id %u)",
+                     static_cast<unsigned long long>(host.mirror_contract.violations()), player,
+                     static_cast<unsigned>(ball_type), name.c_str(), static_cast<unsigned>(entity->GetID()),
+                     previous_name.c_str(), static_cast<unsigned>(previous));
     }
 
     // The mirror-birth log (R3, a diagnostic; see retail_host::mirror_births):
@@ -2761,6 +2785,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             error = std::format("no spirit ball for player {} type {}", player, ball_type);
             return std::string();
         }
+        check_mirror_contract(logger_, player, ball_type, entity);
         return std::string(entity->GetName());
     };
     p.make_mirror = [this](const bs::mirror_spec& spec) {
@@ -2771,6 +2796,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             made.error = "no spirit ball named '" + spec.entity + "'";
             return made;
         }
+        check_mirror_contract(logger_, spec.player, spec.ball_type, entity);
         made = bmmo::game::make_mirror_body(physics_view_, entity, spec);
         if (!made.made) return made;
         const auto shown = host.mirror_type.find(spec.player);

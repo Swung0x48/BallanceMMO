@@ -44,6 +44,7 @@
 #include <game/sector_activation.hpp>
 #include <game/sector_deactivate_pin.hpp>
 #include <game/depth_test.hpp>
+#include <game/mirror_clones.hpp>
 #include <game/sector_cell_split.hpp>
 #include <game/sector_placement.hpp>
 #include <game/proximity_union.hpp>
@@ -1017,6 +1018,7 @@ namespace {
             std::string error;
             release_proximity("the engine reboots");
             release_placement("the engine reboots");
+            mirror_clones_.clear();   // step BMX: the clones go with the old context
             engine_.reset();
             engine_ = bmmo::sim::headless_engine::create(eo, error);
             if (!engine_) { logf("engine: %s", error.c_str()); return false; }
@@ -1704,31 +1706,25 @@ namespace {
                     path.replace_filename(path.stem().string() + ".rejoin" + std::to_string(rejoins_) + path.extension().string());
                 return path;
             };
-            // The mirrors' (E6): the CopyObject clone (remote_entity), its
-            // pose, body and spawn kick, its body and navigation taken out,
-            // its navigation attached once the graph is known, and the event
-            // log's mute.
+            // The mirrors' (E6): the player's clone of the ball type
+            // (remote_entity: step BMX, the shared mirror_clones rule - one
+            // clone per player and type, reused across lives, as the server
+            // and retail's spirit balls), its pose, body and spawn kick, its
+            // body and navigation taken out, its navigation attached once the
+            // graph is known, and the event log's mute.
             p.mirror_entity = [this](uint32_t player, uint8_t ball_type, std::string& error) {
                 CK3dEntity* entity = remote_entity(player, ball_type, error);
-                mirror_made_entity_ = entity;
                 return std::string(entity && entity->GetName() ? entity->GetName() : "");
             };
             p.make_mirror = [this](const bmmo::session::mirror_spec& spec) {
                 bmmo::session::mirror_made made;
-                // The one mirror_entity found for this spec (the core asks for
-                // it first, in the same frame); else the same lookup again.
-                CK3dEntity* entity = mirror_made_entity_;
-                // A mirror made again inside a replay (step LB) names the
-                // entity it had; remote_entity would clone a new one.
-                if (!entity || !entity->GetName() || spec.entity != entity->GetName())
-                    entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndClass(
-                            const_cast<CKSTRING>(spec.entity.c_str()), CKCID_3DOBJECT, nullptr));
+                // The one clone of (player, type): the entity mirror_entity
+                // named, and the one a mirror made again inside a replay
+                // (step LB) names, as retail's spirit ball.
+                std::string error;
+                CK3dEntity* entity = remote_entity(spec.player, spec.ball_type, error);
                 if (!entity || !entity->GetName() || spec.entity != entity->GetName()) {
-                    std::string error;
-                    entity = remote_entity(spec.player, spec.ball_type, error);
-                }
-                if (!entity || !entity->GetName() || spec.entity != entity->GetName()) {
-                    made.error = "no 3D entity named '" + spec.entity + "'";
+                    made.error = "no 3D entity named '" + spec.entity + "'" + (error.empty() ? "" : " (" + error + ")");
                     return made;
                 }
                 // Posed, physicalized and kicked by host support (E9).
@@ -2043,7 +2039,7 @@ namespace {
             // has the pieces, so their Physicalize's wake-up is nobody's
             // BodyRevived (game/session_host_support.hpp explosion_pieces).
             p.reportable_wakeup = [this](const std::string& name, const std::string& own_ball) {
-                return !core_.is_ball(name) && name != own_ball && name.find("_BMMO_") == std::string::npos
+                return !core_.is_ball(name) && name != own_ball && !bmmo::game::is_mirror_name(name)
                     && !explosion_pieces_.count(name);
             };
             p.observe_input = [this]() { return observe_input(); };
@@ -3864,23 +3860,18 @@ namespace {
         // apply_blend (the legacy blend's frame half, post_step step 27) moved
         // into the shared core at E9 (client_core_frame.cpp).
 
+        // Step BMX: the player's one clone of the ball type
+        // (game/mirror_clones.hpp), made at its first life of that type and
+        // the same entity for every later one.  A client never releases a
+        // leaver's clone (a rewind inside the window can give it its body
+        // back); the clones go with the engine (boot_engine).
         CK3dEntity* remote_entity(uint32_t player, uint8_t ball_type, std::string& error) {
             if (ball_type >= ball_rows_.size()) { error = "unknown ball type"; return nullptr; }
-            const std::string name = ball_rows_[ball_type].name + "_BMMO_" + std::to_string(player);
-            CKContext* context = engine_->context();
-            if (auto* existing = CK3dEntity::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>(name.c_str()), CKCID_3DOBJECT, nullptr)))
-                return existing;
-            auto* source = CK3dEntity::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>(ball_rows_[ball_type].name.c_str()), CKCID_3DOBJECT, nullptr));
-            if (!source) { error = "ball entity " + ball_rows_[ball_type].name + " not found"; return nullptr; }
-            CKDependencies dependencies;
-            dependencies.Resize(40);
-            dependencies.Fill(0);
-            dependencies.m_Flags = CK_DEPENDENCIES_CUSTOM;
-            dependencies[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME | CK_DEPENDENCIES_COPY_OBJECT_UNIQUENAME;
-            const std::string suffix = "_BMMO_" + std::to_string(player);
-            auto* clone = CK3dEntity::Cast(context->CopyObject(source, &dependencies, const_cast<CKSTRING>(suffix.c_str())));
-            if (!clone) { error = "CopyObject failed for " + ball_rows_[ball_type].name; return nullptr; }
-            return clone;
+            const auto got = mirror_clones_.get(engine_->context(), player, ball_type, ball_rows_[ball_type].name, error);
+            if (got.made)
+                logf("mirror clone: %s made for player %u type %u%s", got.entity->GetName() ? got.entity->GetName() : "?",
+                     player, static_cast<unsigned>(ball_type), got.remade ? " (again: the earlier one was gone)" : "");
+            return got.entity;
         }
 
         // --trace-body's line, with the body's row in hex floats after the
@@ -4894,9 +4885,9 @@ namespace {
         bmmo::game::proximity_union proximity_;
         // (kOwnEchoDeadlineTicks, kOwnEchoUplinkSettleTicks and
         // kOwnRecordKeepTicks moved into the core state at E7.)
-        // The entity mirror_entity named last, which make_mirror poses and
-        // physicalizes (the core asks for the two in one birth).
-        CK3dEntity* mirror_made_entity_ = nullptr;
+        // Step BMX: the mirrors' clones, one per player and ball type
+        // (remote_entity), forgotten when the engine reboots.
+        bmmo::game::mirror_clones mirror_clones_;
         // --hold-event: how many own events of the held type were made, and
         // the one held back until its release time.
         struct held_event {

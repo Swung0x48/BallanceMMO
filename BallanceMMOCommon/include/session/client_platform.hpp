@@ -630,13 +630,17 @@ namespace bmmo::session {
         // ---- mirrors (design 2.2; E6) ----
         // The entity that mirrors `player` with a ball of `ball_type`, made
         // when it does not exist yet; "" with `error` when there is none.
+        // One entity per player and ball type, the same for every life of
+        // that player with that type in a session (step BMX: the shared rule
+        // of game/mirror_clones.hpp - the server's and the headless client's
+        // clones, retail's spirit balls checked against it).
         std::function<std::string(uint32_t player, uint8_t ball_type, std::string& error)> mirror_entity;
         // Pose, physicalize and kick a mirror's body (mirror_spec).  The core
         // asks mirror_entity for `spec.entity` first, in the same frame, but
         // the operation stands alone: the spec names the player and the ball
         // type, so a host that keeps nothing from mirror_entity finds the
-        // entity again (headless: the pointer mirror_entity found when it
-        // names spec.entity, else the same lookup).
+        // entity again (headless and retail: the one entity of the player and
+        // type, which must be spec.entity).
         std::function<mirror_made(const mirror_spec& spec)> make_mirror;
         // A mirror's body goes (unphysicalized).  Only the body: the core
         // takes the navigation out first (detach_mirror_navigation) and mutes

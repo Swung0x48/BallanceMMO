@@ -5701,3 +5701,227 @@ observed); the retail entity's hidden flag after the removal (its
   order-free). No live rerun: the latch differs from the old gate only when
   the graph is inactive after its first activation, which no headless world
   reaches; a retail Level Reset across a fall is left to the retail batches.
+
+### As built (step BMX, FULL close-out, 2026-10-30): one shared mirror-clone helper - one clone per player and ball type, reused across lives
+
+The user's decision on INV finding 2: "Shared helper + audit" (BMX builds the
+helper, AUD the audit). No wire, journal-format or IVP change, no engine
+change, no BallanceMMOClient member.
+
+**The rule** (`BallanceMMOCommon/include/game/mirror_clones.hpp`, one copy).
+- `mirror_clones`: a player's ball of one type is mirrored by ONE CK entity,
+  copied once from the level's ball of that type (the CopyObject both hosts
+  used: shared mesh, no scripts, `COPY_OBJECT_NAME | COPY_OBJECT_UNIQUENAME`,
+  suffix `_BMMO_<player>`). Every later life with that type - a respawn, a
+  trafo back to the type, a beam's same-tick Unphysicalize + Physicalize -
+  gives that entity a new body.
+  - Keyed by (player, type), never by name. CK's unique-name copy counts the
+    trailing number up, even across a digit: `..._BMMO_3780994999` ->
+    `..._BMMO_37809941000`.
+  - The CK_ID is kept together with the name the copy came out with, and
+    both are resolved on every use (`find`, `get`, `release_player`). CK
+    gives a freed id to the next object it creates
+    (`CKObjectManager.cpp:344-345` takes from `m_FreeObjectIDs`, `:383`
+    gives back to it), so an id alone could name a level entity once the
+    clone was destroyed behind the helper's back (a level reload in the same
+    context, a script's DestroyObject). An id that resolves to nothing, or
+    to an entity of another name, counts as gone: the clone is copied again
+    and counted (`remade`), and `release_player` destroys nothing it does
+    not own. No path in today's code reaches it (headless reboots its engine
+    whenever a level starts and at `--rejoin-at`); this is hardening from
+    the review, and it costs nothing when the check passes.
+  - `release_player` takes the body out through the host's callback and
+    destroys the entity; `clear` forgets the map when the context goes.
+- `mirror_entity_contract`: the same rule as a check, for a host that owns
+  its entities otherwise. It compares the id and the name, so a destroyed
+  spirit ball whose freed id went to its replacement is still caught.
+- `is_mirror_name` / `kMirrorNameTag` replace the two hard-coded `"_BMMO_"`
+  tests (`physics_world.cpp`'s body-set filter, `session_client.cpp`'s
+  `reportable_wakeup`).
+
+**The hosts.**
+- Server (`physics_world.cpp` `clone_ball`, `remove_player`, destructor;
+  `physics_world.hpp`: `mirror_clones_` replaces `player::balls`).
+  - Same behaviour as before: it always kept one clone per player and type.
+  - New log line per copy: `world: mirror clone <name> made for player P
+    type T`.
+  - Released at `remove_player`, as before (a leave, a rejoin's old life).
+- Headless client (`session_client.cpp` `remote_entity` and the
+  `mirror_entity` / `make_mirror` platform operations; `mirror_made_entity_`
+  deleted).
+  - The name lookup `<ball>_BMMO_<player>`, which never hit, is gone.
+  - `make_mirror` takes the one clone of (player, type) and refuses when it
+    is not `spec.entity` (retail's rule). A remake inside a replay (step LB)
+    names the same entity by construction.
+  - New client-log line per copy: `mirror clone: <name> made for player P
+    type T`.
+- Retail (`core_host.cpp`) keeps game_objects' spirit balls (one per player
+  and type, made at `init_player`).
+  - `check_mirror_contract` checks the entity in `mirror_entity` and
+    `make_mirror` against the first one of (player, type) in the session
+    (`retail_host::mirror_contract`, file scope, cleared in
+    `reset_session_state`).
+  - When another entity would be used, it logs a counted Warn line
+    (`mirror contract broken #n`) and the session goes on with it. By
+    reading, only `objects_.reload()` mid-session (BallanceMMOClient.cpp:1254)
+    can trigger it.
+  - A counted log line, not an assert: an assert would take the game down.
+- Comments: `client_platform.hpp` (`mirror_entity` / `make_mirror` state the
+  contract) and `client_core_lifecycle.cpp` (`physicalize_remote`'s remake
+  note).
+
+**Adaptations.**
+- Only the server releases clones on a player's leave. A client keeps a
+  leaver's clones for the rest of its engine's life:
+  - the core has no leave hook for the host;
+  - records inside the rollback window name the leaver's mirror, and a
+    rewind across the leave gives it its body back, so destroying it
+    mid-session would break the restore.
+  - A rejoin on the same connection keeps the player id, so the other
+    clients reuse the clone for the rejoiner's next life. The rejoiner's own
+    process reboots its engine (`boot_engine`) and `clear()`s the map with
+    the old context.
+- The wire check gets a name-mapped compare instead of a re-capture.
+  - `.local-tools/namemap_compare.py` parses the records and maps every
+    `_BMMO_<digits>` to `_BMMO_#`. Checkpoint bodies are compared
+    order-free, the default exclusions apply, and everything else must be
+    exact. A ball body keeps its owner, so no two balls merge.
+  - `wire_check.sh` gets `NAMEMAP=1`: a journal identical only that way
+    makes the last line `ALL SAME BUT MIRROR NAMES`.
+  - A length-preserving byte mapping was tried first; it fails on the digit
+    carry above.
+- No unit test: the helper needs CK (CKContext / CopyObject) and the test
+  target links none. The live runs below count the copies instead.
+
+**Which journals change and why.**
+- Every headless client journal with a remote ball's second or later life
+  of one type: that mirror is now named as its first life (before: one name
+  per life).
+  - In `core_ref_s12` that is every arm and every client: 12 (owner, type)
+    keys per arm had more than one name in the rPRX replays (3 remote balls
+    x 4 clients), 0 in the rBMX replays.
+  - Byte-wise the checkpoints also reorder: fewer CK objects shift the later
+    ids, and `list_bodies` walks the id-hashed physics table (PRX's "body
+    order" case).
+- Nothing else changes:
+  - the server's journals (the server always reused);
+  - the sends (no own event names a mirror);
+  - any TICK hash or pose, in any capture: no capture holds a same-tick
+    pair whose ball a probe's slot reads at that tick.
+- In these runs the mirror names also equal the server's
+  (`Ball_Paper_BMMO_3050829135` in both). This is observed, not built in:
+  the unique-name copy counted up the same way on every side.
+- A Physicalize of the same type while the mirror still has a body (the
+  backstop's re-report, `client_core_messages.cpp:343-372`) now reaches
+  `make_mirror_body` with the entity that has the body. The core takes the
+  old body out only when the entity differs (`physicalize_remote`). The
+  entity is posed, and `bmmo::physics::physicalize` returns at once when a
+  body exists (`physics_state.cpp:1713`, as the retail block does), so the
+  body is kept (a kick still goes to it). Before BMX the headless host gave
+  that life a new body under a new entity. The server (`apply_event`:
+  `clone->SetWorldMatrix`, then `physicalize`) and retail have always taken
+  the kept-body branch, so the headless client now agrees with them.
+  - What the kept branch means: the event's birth pose is NOT applied to
+    the body. `SetWorldMatrix` moves the CK entity, but the body stays at
+    its old IVP pose and velocity, while the core still counts a new
+    generation and a new life (`client_core_lifecycle.cpp:868`). The
+    server, the headless client and retail now behave the same way, so the
+    worlds agree.
+  - The cost: a lost Unphysicalize, or a remote that a reset path left
+    physicalized, now keeps a stale body at the old pose without a word.
+    Before BMX, the headless host's fresh entity forced a new body at the
+    birth pose (the server and retail never did). Making the kept branch
+    re-pose the body would change every world's result, so it is not done
+    here.
+
+**Checks** (`.local-tools/work/BMX/`; x64 `build-agent-rBMX`; Arch server
+rebuilt from the tree, `ballanced-36c04e3d24c9+bmmo-426f9c7ebf10-dirty`).
+- Builds and tests:
+  - x64 BUILD-OK (DEPS-OK; `sim_tool.cpp.obj` #deps 293 VALID, with
+    `mirror_clones.hpp` and `client_platform.hpp`);
+  - x86 CLIENT-BUILD-OK (no slot-13 hack: no retail run);
+  - Arch ARCH-BUILD-OK (GCC compiles the header through
+    `physics_world.cpp`);
+  - tests 682/682; GCC syntax 31/31.
+- Wire check rPRX -> rBMX over `core_ref_s12` (EXTRA
+  `--pacer-restart-on-resync`, added automatically):
+  - sends 36/36 SAME;
+  - journals 36/36 DIFFERENT byte-wise and order-free (the names), and 36/36
+    IDENTICAL name-mapped (`namemap_compare.py`; every TICK hash/pose equal
+    at every tick).
+- The same with `NAMEMAP=1` against the live references
+  (`NAMEMAP=1 wire_check.sh - rBMX rBMXn rBMXw_old`: the new replays' sends
+  against rPRX's, their journals against REF12's live journals): sends 36/36
+  SAME, journals 36/36 IDENTICAL name-mapped, last line `WIRE-CHECK: ALL
+  SAME BUT MIRROR NAMES`. No re-capture is needed. A later step's wire check
+  between two post-BMX binaries is unaffected; one against `core_ref_s12`'s
+  live journals passes `NAMEMAP=1`.
+- Solo exactness (`work/REF12/solo_replay.sh rBMX`):
+  - solo1 / solo2 journals IDENTICAL to the live ones (2364 common TICK
+    hashes, 0 differ);
+  - rBMX vs rPRX replays: sends SAME (2402 / 2412), journals IDENTICAL.
+  - The replays' sends differ from the live REF12 sends by 4 (a reordered
+    flag-5 send at #214), identically on rPRX: pre-existing, not this
+    step's.
+- Server path: `prx_full/h123_150f/server.bmjr` replayed by rPRX's and
+  rBMX's SimTool: both 2563/2563 ticks, 1281 checkpoints, 0 mismatches.
+- Live 1 (`maps/arena-test/bmx_full/fan_q7`), H5's `fan_q7` recipe: 4
+  clients, client 0 `--resync-at 1050`, client 3 `--join-late 3:1150`,
+  beams into the fan column at 700 / 920 / 1600; snapshots off, trafo inputs
+  and placement clones on.
+  - The server journal replays exactly (2969 ticks).
+  - FINAL rows of all four replays vs the server: 58 keys, 0 keys with a
+    differing field on every client. In H5, client 0's mirror was off by
+    17.6 m and client 1's own ball by 2.2 m.
+  - Each beamed ball gets the fan force at the beam tick in every world:
+    v_y +0.7614 at 702 / 922 / 1602 on the server and in every client's
+    FINAL row. In H5 the server had +0.761 and client 0's mirror -0.183 at
+    702.
+  - Clone lines: one per (player, type) per client (6 / 5 / 5 / 3), and one
+    name per (owner, type) in every journal.
+  - The harness's VERDICT FAIL is its "client0 resyncs" criterion: the
+    recipe's own `--resync-at`, as in H5.
+- Live 2 (`bmx_full/lives`): 4 clients, `--drive`.
+  - Lives: deaths by beams to (342, 4, 43) at 500 / 600 / 1500, respawns at
+    913 / 1003 / 1904; paper trafos at 668 / 1368; beams at 1201 / 1501 /
+    1601; client 2 `--rejoin 2:1100` (server: player removed and added at
+    1103, its clones released and made again); client 3 `--leave 3:1900`.
+  - VERDICT PASS; the server journal replays exactly (3147 ticks).
+  - Every client journal, both of client 2's lives included, names each
+    (owner, type) with ONE entity: 0 keys with more than one name. 21 keys
+    show more than one birth run in the checkpoints; `mirror_lives.py`'s
+    "lives" column counts presence gaps between checkpoints, an over-count.
+    The real life counts are the server's `physicalize` lines per name, up
+    to 5 for `Ball_Stone_BMMO_3189451123`.
+  - Clone lines: one per (player, type) per engine life. Client 2: 3, then
+    3 + 1 after its rejoin's engine reboot.
+  - FINAL rows vs the server: 72 keys (38 in client 2's first life), 0
+    differing on every client and on both of client 2's lives. The balloon
+    is exception (c), as always: `first_divergence` names
+    PE_Balloon_Platte07 0.047 m at 2128 on c1.
+- Rewinds across same-name rebirths (`work/BMX/h123_rewind.sh`): PRX's live
+  `prx_full/h123_150f` (150 ms; deaths, trafos, beams) replayed with
+  `--final-checkpoints` by rPRX and by rBMX.
+  - 24 / 37 / 30 / 26 rollbacks and 18 / 13 / 16 / 12 revivals per client,
+    equal on both binaries. Example: `mirror Ball_Stone_BMMO_3927959836 of
+    3927959835 (alive at tick 600) revived until tick 601`.
+  - Each client's journal names each (owner, type) once (15 keys with more
+    than one birth run).
+  - FINAL rows vs the server: 44 keys, 0 differing on all four clients with
+    both binaries.
+- Not run: a retail session. The row asks only for the x86 compile, so the
+  contract's log line is unexercised live; the retail batches run it.
+- For H1C2: under rBMX and rPRX, `core_ref_s12/h1_150` client 2's replay
+  has every TICK hash equal. So its FINAL-row residual is not the
+  one-tick-late beam BMX fixes.
+- The review round (id + name in `mirror_clones` and in the contract; the
+  kept-body note above) was re-checked on what it can reach:
+  - x64 BUILD-OK (10 objects; `session_client.cpp.obj`, `sim_tool.cpp.obj`,
+    `physics_world.cpp.obj`, `server.cpp.obj` and `session_runner.cpp.obj`
+    list `mirror_clones.hpp`, all VALID); x86 CLIENT-BUILD-OK
+    (`core_host.cpp` rebuilt); Arch ARCH-BUILD-OK; tests 682/682; GCC syntax
+    31/31.
+  - Wire check over `core_ref_s12` against the pre-review rBMX replays:
+    sends 36/36 SAME, journals 36/36 byte-identical. The check passes on
+    every use, so nothing a world does changed, and no live run was
+    repeated.
