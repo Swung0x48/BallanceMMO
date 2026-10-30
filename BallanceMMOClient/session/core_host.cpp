@@ -105,6 +105,15 @@ namespace {
     // Gameplay_Ingame outlives the session).  File scope: BallanceMMOClient
     // keeps its layout.
     bmmo::game::depth_test_rule core_depth_test;
+    // FULL step RT2 (sector-placement-design 7.5 run 5's trace line): the
+    // manager state the union's live pass reads, logged as "sector manager:
+    // tick T active|idle" for the first frames from an anchor (a late
+    // joiner's included).  The pass of tick T reads it right after the
+    // frame's after_rewinds hook, which arms the line, so a re-derivation's
+    // read inside a rewind (no hook before it) is not logged.  File scope.
+    int core_manager_trace_left = 0;
+    uint32_t core_manager_trace_tick = 0;
+    bool core_manager_trace_due = false;
 }
 
 
@@ -389,6 +398,16 @@ namespace {
         // gaps design 7.4 L-R1's one-shot form): one rewind D deep after the
         // frame of live tick L, each once.
         std::vector<std::pair<uint32_t, uint32_t>> force_once;
+
+        // 'session activate <root script> at b+N|<tick>' (FULL step RT2, a
+        // testing tool: RK3F's retail trigger, the headless client's
+        // --activate-script): the scene activates the script once, after the
+        // frame whose live tick reaches the target (b+N: N ticks after this
+        // session's tick base, so it can be armed before the anchor).  Live
+        // only, as the headless switch: no replay re-applies it.
+        std::string activate_script;
+        bool activate_armed = false, activate_relative = false;
+        uint32_t activate_at = 0;
 
         // 'session drop-birth' (a testing tool, R1 (c)): the next own
         // Physicalize the core sends is kept off the wire (hooks.
@@ -762,6 +781,9 @@ namespace {
         host.restore_logs = host.savestate_logs = host.contact_logs = host.destroy_logs = host.line_logs = 0;
         host.forced = 0;
         host.force_once.clear();
+        // (Step RT2's 'session activate' is not cleared here: it is armed
+        // before the anchor, after this reset of the session's begin; the
+        // session's end clears it.)
         host.frames = host.refused = 0;
         host.drop_births_armed = 0;
         host.births_dropped = 0;
@@ -1872,6 +1894,9 @@ void BallanceMMOClient::core_host_anchor() {
     }
     if (fixed_tick_.enabled()) fixed_tick_.disable(m_bml);
     fixed_tick_.enable(m_bml);
+    // FULL step RT2: the manager's state for the first 20 frames from here.
+    core_manager_trace_left = 20;
+    core_manager_trace_due = false;
     // FULL step H1X: the paper hull compiled from the template body before
     // the game's own first paper physicalization (Init Ingame's "physicalize
     // new Ball" runs after this frame's anchor); this process's cache keeps
@@ -2143,6 +2168,7 @@ void BallanceMMOClient::core_host_anchor() {
     if (host.core->session_phase() != bs::client_core_state::phase::running) return;
     // The tick base's frame (design 1.3 "the anchor frame"): today's union
     // tick at the base is its step 9.
+    core_manager_trace_due = false;   // step RT2: only this frame's after_rewinds arms the trace line
     host.core->pre_step();
 }
 
@@ -2260,6 +2286,10 @@ void BallanceMMOClient::core_host_frame() {
         host.last_rebases = fixed_tick_.rebases();
         if (!core_session_running()) return;
     }
+    // Step RT2: a line armed by a frame whose union pass did not read the
+    // manager must not be taken by this frame's re-derivation read (inside
+    // pre_step, before its after_rewinds hook arms the line again).
+    core_manager_trace_due = false;
     host.core->pre_step();
 }
 
@@ -2337,6 +2367,8 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     fixed_tick_.set_hold(false);
     if (fixed_tick_.enabled()) fixed_tick_.disable(m_bml);
     reset_session_state();
+    host.activate_armed = false;   // step RT2: an unfired 'session activate' ends with its session
+    host.activate_script.clear();
     host.phase = retail_host::phase_type::idle;
     host.session = 0;
     SendIngameMessage(std::format("Physics session {} over ({}).", session, reason), bmmo::ansi::BrightYellow);
@@ -2466,7 +2498,15 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         report_precision_53 precision;
         return physics_view_.list_bodies();
     };
-    p.sector_manager_active = [this]() { return physics_session_sector_manager_active(); };
+    p.sector_manager_active = [this]() {
+        const bool active = physics_session_sector_manager_active();
+        if (core_manager_trace_due) {   // step RT2: the live pass's read only
+            core_manager_trace_due = false;
+            logger_->Info("Physics session: sector manager: tick %u %s", core_manager_trace_tick,
+                          active ? "active" : "idle");
+        }
+        return active;
+    };
     // The cell is read only while the checkpoint hold is in force: otherwise
     // the checkpoint hook has reported the crossing after the fact already
     // (design 2.2 poll_sector).  The resetpoint is not watched (the hook
@@ -3418,9 +3458,41 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.hooks.status = [this](const std::string& text) { logger_->Info("%s", text.c_str()); };
     // 'session force-rollback E:D' (design 3.1's --force-rollback, the retail
     // verb): after the frame's own rewinds, every E ticks, D deep.
-    p.hooks.after_rewinds = [this](uint32_t) {
+    p.hooks.after_rewinds = [this](uint32_t frame_tick) {
         if (host.core) log_mirror_births(logger_, *host.core);
         if (!host.core) return;
+        // Step RT2: the union's live pass of frame_tick reads the manager next.
+        core_manager_trace_due = core_manager_trace_left > 0;
+        if (core_manager_trace_due) {
+            --core_manager_trace_left;
+            core_manager_trace_tick = frame_tick;
+        }
+        // Step RT2: 'session activate <script> at ...', once, after the frame
+        // whose live tick reaches the target (the headless --activate-script's
+        // "activated after tick T, frame T - base + 2 next").
+        if (host.activate_armed && host.core->assigned()) {
+            const uint32_t live = host.core->current_tick();
+            const int64_t frames = host.core->frames_since_anchor();
+            const uint32_t base = frames >= 1 ? live - static_cast<uint32_t>(frames - 1) : live;
+            const uint32_t target = host.activate_relative ? base + host.activate_at : host.activate_at;
+            if (static_cast<int32_t>(live - target) >= 0) {
+                host.activate_armed = false;
+                CKContext* context = m_bml->GetCKContext();
+                CKBehavior* script = bmmo::game::find_root_script(context, host.activate_script.c_str());
+                CKScene* scene = context ? context->GetCurrentScene() : nullptr;
+                if (!script || !scene) {
+                    logger_->Warn("Automation: session activate: %s not found (or no scene) at tick %u",
+                                  host.activate_script.c_str(), live);
+                } else {
+                    const bool was_active = script->IsActive() != FALSE;
+                    scene->Activate(script, TRUE);
+                    logger_->Info("Automation: session activate: %s (#%u) activated after tick %u (tick base %u, frame %u "
+                                  "next; it was %s)", host.activate_script.c_str(),
+                                  static_cast<unsigned>(script->GetID()), live, base, live - base + 2,
+                                  was_active ? "active" : "inactive");
+                }
+            }
+        }
         // Step EL8: the one-shot rewinds due after this frame.
         if (!host.force_once.empty()) {
             const uint32_t live = host.core->current_tick();
@@ -3563,6 +3635,25 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         for (const auto& once: parsed) host.force_once.push_back(once);
         return std::format("ok {} one-shot forced rewind(s) armed ({} pending)", parsed.size(), host.force_once.size());
     }
+    if (what == "activate") {
+        // Step RT2: 'session activate <root script> at b+N|<tick>' (the
+        // after_rewinds hook), armed before or during a core session.  Core
+        // off: refused (only a core session fires or clears it).
+        if (!core_on.load()) return "error session activate needs the session core on";
+        std::string at, when;
+        args >> at >> when;
+        const bool relative = when.rfind("b+", 0) == 0;
+        const char* digits = when.c_str() + (relative ? 2 : 0);
+        char* end = nullptr;
+        const unsigned long tick = std::strtoul(digits, &end, 10);
+        if (value.empty() || at != "at" || !*digits || (end && *end) || tick > 1000000)
+            return "error usage: session activate <root script> at b+<ticks>|<tick>";
+        host.activate_script = value;
+        host.activate_relative = relative;
+        host.activate_at = static_cast<uint32_t>(tick);
+        host.activate_armed = true;
+        return std::format("ok {} armed for activation after tick {}{}", value, relative ? "base + " : "", tick);
+    }
     if (what == "force-rollback") {
         const size_t colon = value.find(':');
         const long every = std::strtol(value.c_str(), nullptr, 10);
@@ -3596,7 +3687,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     }
     return "error usage: session core on|off|status | session force-rollback <every>:<depth> | "
            "session force-rollback at <live>:<depth>[,...] | session stall <ms> | "
-           "session drop-birth | session placement | session probes";
+           "session drop-birth | session placement | session probes | session activate <script> at b+<n>|<tick>";
 }
 
 // net lag <ms> [up|down] [at <tick>] | net blackout <ms> [up|down] [at <tick>]

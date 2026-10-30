@@ -2233,3 +2233,75 @@ Also reported (not judged, gap F since RLM): the owner-membership witness
 names `P_Modul_18_Particle Script 0 vs 1` in 3 of 40 and 5 of 60 seeded
 rounds. Checks for the diagnostic: x64 BUILD-OK, `msys_simtool_syntax.sh`
 ok (GCC 13.3), `linux_test_syntax.sh` 31/31 ok.
+
+## As built (step RT2, FULL close-out, 2026-10-30): RK3F, RK3R-rec and R1's ESC on retail
+
+FULL step RT2's Level 1 session (`scripts/retail/rt2_l1`, two retail clients,
+the Arch server of WFA's tree, snapshots off, trafo inputs and placement on,
+`BMMO_TRACE_TIMEFACTOR=1`; driver `.local-tools/work/RT2/rt2_retail.py l1`;
+sector-placement-design §12.11 has the batch's setup). Base 8 on both;
+"the Level 1 tutorial is switched off before frame 10" and "the Level 1
+tutorial's frame-9 freeze is held: ... Gameplay_Refresh / Tutorial
+freeze/unfreeze / Set Physics Globals (#30092, by Parameter Selector #30079)
+writes 2 instead of 0 or 2" logged on both clients; the exit activated before
+frame 10 (tick 17).
+
+- **RK3F (retail, DX2's hold): PASS.** Client 2 armed `session activate
+  Gameplay_Refresh at b+10` (the retail form of H1's `--activate-script
+  Gameplay_Refresh:b+10`, added at this step): "activated after tick 18 (tick
+  base 8, frame 12 next; it was inactive)". Its only globals change in the
+  session is 0.001 -> 0.002 at tick 9 (no factor-0 write after the
+  activation), `frozen=0`, resyncs 0; every body bit-equal to the server on
+  the FINAL rows on both clients (841 common ticks; 8/8 level props) - H1's
+  control froze that world at frame 12 and parted its props by 0.56 m.
+  No rewind in client 2 reached the activation: its first rollback is to
+  tick 220 (the founders' births), after the activation at 18, so the live
+  activation was never restored away (the switch is live-only, as H1's).
+- **RK3R-rec - as D2 expected (gate round, `scripts/retail/rt2_l1trace2`,
+  `.local-tools/work/RT2/rt2_l1trace.py`).** Client 1 alone in an L1
+  session (so no rollback can cross the reset), the menu's `restart` at
+  base + 300: own ball unphysicalized at 359, input live at 369, and
+  Gameplay_Tutorial running again from +1.4 s (`tutorial_script=1` in every
+  0.65 s sample to +6 s; the log prints the tutorial's first text, "continue
+  with RETURN ... or quit with Q"); New Ball waits for its "Tutorial Ready"
+  (`ballnav=0`, the ball at the spawn) - the tutorial plays again, as on
+  the main branch. Enter at +6 s: CamNavActive at once and **the new own
+  ball physicalized at tick 933**, BallNavActive, `own_phys=1`. Time factor
+  0.002 throughout (the replayed Init's frame-9 write is held by RK3H's
+  redirect, which persists), `globals=0/0/0/0/0`, `frozen=0`, resyncs 0,
+  rb 0; no chapter point was reached in the 4 s after Enter, so no chapter
+  freeze was expected yet. Offline control (the same game, no session,
+  `rt2_l1trace2/A*`): the level's own tutorial runs (`tutorial_script=1`,
+  factor 0), a `restart` brings it back within 0.7 s and it stays active -
+  the same flow. **Withdrawn: the implement round's "no new own ball after a
+  Level 1 restart" (`rt2_l1`).** That run's driver pressed no Enter on the
+  replayed tutorial's text and opened the pause menu at +8 s instead; its
+  two `tutorial_script=0` readings were both taken while paused (the retail
+  pause chain stops the tutorial, offline too); the second ESC did not close
+  the menu (below), and its Enter went to the menu. No rollback crossed that
+  reset either (client 1: rb 3, all at 220-224). H1's headless "no new own
+  ball within 940 ticks" is the same wait for RETURN (the headless client
+  has no keyboard), not a gap. D2 stands as decided.
+- **R1's ESC (RK3-d), recorded (gate round, `scripts/retail/rt2_l1esc`,
+  `.local-tools/work/RT2/rt2_l1esc.py`, client 1 alone; offline control
+  first).** ESC during the tutorial's text pauses locally in both
+  (`paused=1`, the tutorial stopped by the pause chain); in the session the
+  world keeps stepping (`ingame_script=1`, input muted from 527, factor
+  0.002, `frozen=0`). Offline the second ESC closes the menu (one
+  UnpauseLevel; the tutorial resumes; Enter -> CamNavActive, CounterActive
+  3 s later). **In the session the second ESC does not close the menu:
+  UnpauseLevel and PauseLevel in the same frame** (19:18:05.781; `rt2_l1`'s
+  second ESC did the same at 28.249), the tutorial stays stopped, and Enter
+  in the menu does nothing - no ball while the player keeps using ESC.
+  Cause (graph, `.local-tools/work/H5/desc_Gameplay_Events.txt` 343-347,
+  177, 167, 156, 158): Gameplay_Events' Key Event #30140 (headless; key 1 =
+  ESC) -> Send Message #30540 (Menu_Click) -> #30292 / #30385 (BallNav
+  deactivate) -> #30146 "Pause Level". Offline the pause chain deactivates Gameplay_Events
+  while the menu is open (`events_script=0` at `A1`), so the menu's ESC only
+  resumes; a session keeps Gameplay_Events and Gameplay_Ingame running while
+  the menu is open (`kSessionWorldScripts`, physics_session_client.cpp 588,
+  shared by the core host; `events_script=1` at `B1`), so the same press is
+  also Gameplay_Events' pause. Pre-existing (the pause neutralization
+  predates the core), on every level, not caused by this step; the menu's
+  own Continue entry was not exercised. Queued as its own item in
+  `docs/roadmap.md` §4 item 6 (**RK3E**); options there.

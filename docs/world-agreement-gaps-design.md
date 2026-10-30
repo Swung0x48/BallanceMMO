@@ -6242,3 +6242,22 @@ Gate round (review findings):
   protocol 22: a wire check over it needs `--accept-protocol 22` and shows
   `resync_snapoff` c2's "no live controller 'rt:force/47099'" with an
   IDENTICAL journal (expected; `core_ref_wfa` holds that arm at 23).
+
+### As built (step RT2, FULL close-out, 2026-10-30): WM1-R3, a retail late joiner and a retail member
+
+§7 row R3 on the retail logs (`scripts/retail/rt2_l8late`, L8, the session
+core on both copies, snapshots off, trafo inputs and placement on, the
+proximity union and per-player mechanisms on; the whole run in
+sector-placement-design §12.11, run 5). Client 1 alone started the session
+(base 8, crossing s2 and s3); client 2 joined the running room at server
+tick 431 (`SessionMember added p3079177008 life 1 join order 1 at tick 431`),
+base 757. J1's criteria: client 1's journal holds `PLAYER +p3079177008
+join=1` at 431, the server's J, and no `join=255` (`work/RT2/players.py`);
+the joiner's mirror in client 1 equals the server's clone on every FINAL row
+from its birth at 961 (82/82, `rt1_judge.py`), and the joiner's own ball,
+its mirror of client 1 and 31/31 mechanisms are exact from its import (185
+common ticks); the import re-stepped 756 -> 778 with 32 rows "0 written, 32
+equal" and no "no live controller" (WFA's alias). The spawn-impulse
+criterion is stale (spawn ghost since protocol 15, H4's note). PASS. Not
+covered by this run: J1b's loss, the 150 ms link (the run is local) - J1b
+stays H4's headless row.

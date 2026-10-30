@@ -2844,3 +2844,149 @@ Deferred (the step's two-run arithmetic, or less relevant than what ran): the
 union axis on h1 and on L12; a placement-only pair with the per-player
 mechanisms off on both sides; the L9 and L10 crosses (L12 taken as the largest
 growth); retail SP8-e (RT2).
+
+### 12.11 As built (step RT2, FULL close-out, 2026-10-30): §7.5 runs 1, 3, 4 and 5 on retail, SP6-c and SP8-e on retail, SP5-d's records
+
+FULL step RT2 (plan §2 RT2), the second retail batch: the x86 mod of HEAD
+0a41b6a1 (WFA) plus the retail-only test tools below, no maphack; the Arch
+server of WFA's tree (`ballanced-36c04e3d24c9+bmmo-e504776cd575-dirty`, the
+same code: the only server or shared files touched after that 17:45 build,
+`physics/outside_controllers.hpp` and `physics/physics_savestate.hpp` at
+17:55, change nothing but comments in 0a41b6a1); every session snapshots off,
+trafo inputs and placement on (the deployed defaults), the session core on,
+both clients `BMMO_JOURNAL_CHECKPOINT_TICKS=2` with the FINAL rows on,
+`cpu_sampler.ps1` beside every run (host total 8.6-26.4 %, no outside process
+over 10 %: every run valid). Runs `scripts/retail/rt2_*`, driver
+`.local-tools/work/RT2/rt2_retail.py`; judged with RT1's `rt1_judge.py` /
+`final_fields.py` and `work/RT2/own_rows.py`, `players.py`. No shared,
+headless or server file changed.
+
+- **Added (retail host only; no `BallanceMMOClient` data member):** the trace
+  line §7.5 run 5 asked for, `Physics session: sector manager: tick T
+  active|idle`, for the first 20 frames from every anchor (a late joiner's
+  included): the manager state the union's live pass reads, armed by the
+  frame's `after_rewinds` hook so a re-derivation's read inside a rewind is
+  not logged (`core_host.cpp`, file-scope `core_manager_trace_*`; the gate
+  round disarms it before every `pre_step`, so a frame whose union pass did
+  not read the manager cannot hand its line to the next frame's
+  re-derivation read); the test verb `session activate <root script> at
+  b+N|<tick>` (H1's `--activate-script` for the retail host, armed before
+  the anchor, fired once in `after_rewinds`, cleared at the session's end,
+  refused with the core off - only a core session fires or clears it; live
+  only like the headless switch; RK3F's trigger,
+  record-format-gaps-design "As built (step RT2)"); the automation verb
+  `exitlevel` (the pause menu's Exit Level without its Yes/No: "Exit Level"
+  to Level and All_Balls, as the countdown reload sends it), for run 3; and
+  (gate round) the `script <name>` dump sizes each input pin's text before
+  copying it - a long string pin (the tutorial's texts) overflowed its
+  128-byte buffer and took the game down (`rt2_l1trace`, the first trace
+  run).
+- **Run 1 (L8, `rt2_l8main`, `_main2`, `_main3`):** placement line,
+  signature `91a138e4fd6e7254` (39 copies, 1 shared) and the anchor hashes
+  equal on both clients and the server; `level walk seen at tick 11` on all
+  three (base 7); `sector +2` / `+3` at the same ticks on all three;
+  `scripts` lists `P_Modul_30_MF Script@P_Modul_30_MF_R15` inactive after
+  the anchor and active (`*`) after the s2 pass, on both clients. Journals:
+  every body bit-equal to the server on the FINAL rows (541-544 common
+  ticks: own, mirror, 31/31 mechanisms on both clients).
+- **Run 4 (row 19's paper trafo copy, `rt2_l8main3`):** `P_Trafo_Paper_MF_R19`
+  stands at (357.289, 17.910, -119.689) in this build's L8 (SP6's trace pose
+  belongs to another numbering; read live with `entity`); client 2's wood
+  ball beamed 4 m above it at 307 (after the session's own birth at 212;
+  `rt2_l8main2`'s beam at 210 found "no own body"): own ball unphysicalized
+  at 309, `Wood explosion ... applied at tick 465 (own)` on both clients and
+  the server, own ball `Ball_Paper` physicalized at 474 - the trafo copy is
+  picked up (**§9 Q4 settled**). The 16 wood pieces are bit-equal to the
+  server on the LIVE rows on both clients (16/16); the FINAL rows differ only
+  in rotation, <= 2.97e-8 (RT1's report-only difference: the records the
+  FINAL rows come from are read at 24-bit x87). Recorded, not this step's:
+  client 2's own ball row at 308 (one tick after the stamped beam) is
+  0.315 mm / 0.005 m/s off the server, then the trafo removes the ball; the
+  same single row follows every retail beam of a ball in a floor contact
+  (RT1's 300, 340 and 750 trafo beams, 1.1-1.9 mm), never a beam of a
+  falling ball (RT1's 520 and 1100, exact) nor a headless beam
+  (`core_ref_s12h/h1_150` c0 651-652, exact): the retail host has no own
+  body control, so the core's beam is an in-place write
+  (`client_core_lifecycle.cpp` `write_beam`) that keeps the moved core's
+  contact for its first step where the server's world makes a fresh body -
+  roadmap §4 item 9's R6 residual (EG0, FANX), on a testing verb's path.
+- **Run 3 (`rt2_l8reload`):** a session (39 copies), room closed,
+  `exitlevel`, `level 8` through the menus: `placement: 0 copies released
+  (the level exit)` with every one of the 39 "is gone already" (§9 Q2 again,
+  on L8: the game's exit destroys them first); after the load no object of
+  a copy's name and no `BMMO_` unit copy is left (`objects _R` 293 -> 25,
+  the level's own `_R` names; `objects _MF0` 86 -> 29); the builder copies
+  (`P_Modul_41_MF001..006`, `P_Box_MF001..012`, ...) keep their names across
+  the reload (sets equal but for the session's copies). The second session
+  on the reloaded level: the apply makes the 39 copies again (same signature,
+  same names, `anchors=2 releases=1`), no clash; both sessions' journals
+  bit-equal to the server (FINAL rows; session 2: 23/23 mechanisms).
+- **Run 5 = WM1-R3 (`rt2_l8late`):** client 1 alone starts the session (base
+  8) and crosses s2 (+2 at 26) and s3 (+3 at 183); client 2 joins the running
+  room at server tick 431 (`SessionMember added ... join order 1 at tick
+  431`), its countdown and anchor follow, base 757 (assigned 5.0 s after the
+  join). Its trace: `sector manager: tick 757..759 idle`, `760..763 active`
+  (`level walk seen at tick 760`: anchor 756 + 4, as the founders' 7 + 4 = 11
+  and a fresh server anchor's), then the owed passes after the walk, `+2` at
+  766 and `+3` at 773 ("held by the pacer"), active again after each. Its
+  import: the state of 756 waited 13 frames for 29 bodies, re-stepped 756 ->
+  778, `32 rows: 0 written, 32 equal`, the level's walk found in the server's
+  state, 0 "no live controller". Signature equal, `mechanisms=31/31` on both.
+  J1 on the retail logs: client 1's journal holds `PLAYER +p3079177008
+  join=1` at 431 (the server's J), no `join=255`; the joiner's mirror in
+  client 1 (born 961) equals the server's clone on every FINAL row (82/82);
+  the joiner's own ball and mirror exact from 756 (185 common ticks, 31/31
+  mechanisms); the spawn-impulse criterion is stale (spawn ghost; WM1's H4
+  note). PASS.
+- **SP6-c retail, the option-off release branch (`rt2_l12` session 2):** a
+  session with the option on (L12, 62 copies), the room closed, the server
+  restarted with `placement_clones` false, both clients reconnected with
+  `session reload off`: at the next anchor "the world option is off and the
+  level holds copies (this process's registry holds 62 copies): releasing
+  them", "62 of 62 PH row(s) put back, 62 of 62 copies destroyed (31253
+  objects)", signature `5e0d5619665941dd` = the server's unplaced one. The
+  session then ends with `world mismatch` (clients `85120b57...` /
+  `fcabef11...` over surfaces `3ae4225f...`, `cores=8`; server
+  `a8c7f832.../9553ee21...`): SP9's gap (1) (§2.5, `sp9_gap_1/2`), which
+  `session reload off` reproduces by design - a level restarted as it is
+  keeps the session's physicalized sectors. The option-off branch is
+  reachable only with the reload off, so no retail session runs past it;
+  the release itself is verified. PASS for the release (the scene refusal
+  stays H2's SimTool check).
+- **SP8-e (§7.6 retail x86, `rt2_l12` session 1):** L12, `net lag 150` on
+  both clients, client 1 crossing s2 (94), s3 (376), s4 (682); 1562 frames.
+  SessionStart -> anchor 5.9 s (inside the 8 s barrier), of which the anchor
+  work (the timing line to `anchored`) 2.14 / 2.16 s with the 62 copies'
+  apply; `frame_interval` p99 16.6 / 16.6 ms (p50 15.1), `core_frame_time`
+  p99 12.8 / 12.4 ms (no live step, RT1's caveat); rebases, resyncs,
+  starved and far 0, relay lag 20-24; status `rb=3 resim=65 t_rest=3
+  t_rep=58 t_cap=1490/1` (client 1); journals: own, mirror and 14/14
+  mechanisms bit-equal to the server (766 common ticks). The verdict on the
+  placement / per-player cost stays the user's (Q-CPU, §12.10). Against
+  §7.6 as written: its retail half has two parts, the p99 frame within
+  15.15 ms and no rebase or resync the control does not have. The second
+  holds (0 / 0); the first is **NOT met as written** (16.6 ms, 1.45 ms over)
+  and **NOT attributed**: no placement-off retail L12 control was run, so
+  nothing here separates placement from the game's frame pacing. What
+  points at pacing: RT1's lighter recipe showed the same 16.6 ms, and the
+  gate round's one-client L1 sessions (`rt2_l1trace2`, `rt2_l1esc`:
+  placement on, 23 copies, `core_frame_time` p99 4.9 / 5.0 ms)
+  show the identical `frame_interval` p50 15.1 / p99 16.6 ms - the
+  fixed-tick driver's frame interval, not load. The rule is not revised
+  here. Deferred to Q-CPU's answer: the off-arm retail L12 control (the
+  same recipe with the server's placement off), which is what would
+  attribute the 1.45 ms.
+- **SP5-d's tick records (for S3):** a record anchors at the first frame
+  with Gameplay_Ingame active after `record start` and needs `fixedtick on`
+  (collision-overhaul design 9.x). `rt2_l8main*`'s and `rt2_rec`'s records
+  were started mid-level and replay `matched=0` (not evidence). The proper
+  ones, `scripts/retail/rt2_rec2/`: `l8_fresh.bmrc` (started at the main
+  menu, then `level 8`; 1044 frames) replays `matched=1044
+  first_divergence=-1` with `--placement off` and with the default on (the
+  copies of sectors 2+ are never physicalized in sector 1);
+  `l8_copies_reset.bmrc` (after a session that left its 39 copies, started
+  with the pause menu open, then the menu's restart; 1143 frames) replays
+  1032/1143 from divergence 16 with placement on and off alike - the
+  P_Modul_30_Wippe the session moved keeps its pose through a vanilla level
+  reset (SP9's gap (1) again: a record started after a session is no fresh
+  level). SimTool x64 `build-agent-rWFA`; outputs `work/RT2/sp5d3_*`.

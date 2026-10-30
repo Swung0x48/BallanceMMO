@@ -1306,6 +1306,32 @@ numbers 1-10 are unchanged.
    design's "Decided (2026-10-29): `PH[*][4]` = option (b)"); built
    2026-10-29, the design's "As built (step F4)": S2 `unrecorded = 0`,
    `collectible = 2` on L1-L13 and the arena).
+   **RK3R-rec at FULL step RT2 (retail): as D2 expected.** A Level 1 menu
+   restart inside a session replays the tutorial as on the main branch: New
+   Ball waits for the tutorial's "Tutorial Ready", Enter on its text makes
+   the ball (`rt2_l1trace2`: unphysicalized 359, `tutorial_script=1` from
+   +1.4 s, Enter at +6 s, own ball at 933, frozen 0, resyncs 0; offline
+   control alike). The implement round's "ballless restart" (`rt2_l1`) was
+   the driver's key sequence (ESC instead of Enter) and is withdrawn
+   (`record-format-gaps-design.md` "As built (step RT2)").
+   **RK3E (found at FULL step RT2, its own item; pre-existing, every
+   level):** in a session ESC does not close the pause menu - the same press
+   resumes (UnpauseLevel) and pauses again (PauseLevel) in one frame
+   (`rt2_l1esc` 19:18:05.781, `rt2_l1` 28.249; offline one UnpauseLevel).
+   Cause: Gameplay_Events' ESC Key Event (#30140 headless -> Menu_Click ->
+   BallNav deactivate -> "Pause Level" #30146) stays live while the menu is
+   open, because a session keeps Gameplay_Events and Gameplay_Ingame running
+   (`kSessionWorldScripts`, physics_session_client.cpp 588; the retail pause
+   chain stops both). On Level 1 the stopped tutorial then never resumes and
+   its ball is not made while the player keeps pressing ESC; elsewhere the
+   player just cannot leave the menu with ESC. Options (the user's): (a)
+   while the menu is open the host switches off that one Key Event (or holds
+   ESC from Gameplay_Events for the resuming frame) - host-local, no wire
+   change, the world scripts keep running; (b) take Gameplay_Events out of
+   the kept set and keep only Gameplay_Ingame running (needs a check of
+   which Gameplay_Events work must run while paused - the level's event
+   scripts were the reason it is kept); (c) leave it, documented (the menu's
+   own Continue entry, not exercised, may still resume).
 7. **Stage close-out (the one FULL verification):** four clients, 150 ms,
    10 % loss, snapshots off: the spawn pile and every mechanism
    bit-identical to the server at every checkpoint; and every check below.
@@ -2571,6 +2597,53 @@ numbers 1-10 are unchanged.
      L12, a placement-only pair with the per-player mechanisms off on both
      sides, the L9 / L10 crosses, a second h1 pair, the decode of the three
      tail frames' member, the retail halves (RCX-x86 RT1, SP8-e RT2).
+   - **Run at RT2 (2026-10-30, FULL retail batch 2, the x86 mod of HEAD
+     0a41b6a1 plus three retail-only test tools - the `sector manager: tick
+     T active|idle` trace, `session activate <script> at b+N`, `exitlevel` -
+     and the `script` dump's buffer fix; the Arch server of WFA's tree (its
+     two later edits, `outside_controllers.hpp` / `physics_savestate.hpp`
+     17:55 after the 17:45 build, are comments only in 0a41b6a1); 9 game
+     runs, 11 sessions in the implement round and 3 single-client L1 runs in
+     the gate round, snapshots
+     off, trafo inputs and placement on, `cpu_sampler.ps1` beside each, host
+     <= 26.4 %; `scripts/retail/rt2_*`, `.local-tools/work/RT2/`):**
+     sector-placement-design.md §12.11, record-format-gaps-design.md and
+     world-agreement-gaps-design.md "As built (step RT2)". PASS: SP10-a
+     run 1 (L8: walk seen at 11 on all three, signature `91a138e4fd6e7254`,
+     `P_Modul_30_MF Script@P_Modul_30_MF_R15` active from the s2 pass,
+     journals bit-equal), run 4 (row 19's paper trafo copy picks the ball up:
+     Wood explosion at 465, Ball_Paper at 474 - §9 Q4 settled; 16/16 pieces
+     bit-equal on the LIVE rows, the FINAL rows' rotation <= 2.97e-8 as RT1),
+     run 3 (the exit destroys the 39 copies first, no copy or unit name left
+     after the menu load, builder copies' names unchanged, the next apply
+     makes them again with no clash, journals exact), run 5 = WM1-R3 (the
+     late retail joiner: walk at anchor + 4 = 760, owed +2 / +3 after it,
+     32 rows 0 written, `mechanisms=31/31`, `PLAYER +p join=1` at the
+     server's J, its mirror 82/82 exact in the member); SP6-c retail (the
+     option-off branch releases 62 of 62 copies, signature = the server's
+     unplaced; the session past it ends on SP9's gap (1), which `session
+     reload off` reproduces by design); SP8-e (L12, `net lag 150`: anchor
+     work 2.14 s, SessionStart -> anchor 5.9 s, `core_frame_time` p99
+     12.4-12.8 ms, `frame_interval` p99 16.6 ms, 0 rebases / resyncs,
+     journals exact - §7.6's retail p99 limit 15.15 ms is NOT met as
+     written and NOT attributed: no placement-off retail L12 control was
+     run, and a one-client L1 session with `core_frame_time` p99 4.9 ms shows
+     the same `frame_interval` p50 15.1 / p99 16.6 ms, i.e. the fixed-tick
+     driver's pacing, not load; the verdict stays Q-CPU's, the off-arm retail
+     control deferred to it); RK3F retail (Refresh activated at frame 12, no
+     factor-0 write, props exact, frozen 0; no rewind reached tick 18); R1's
+     ESC recorded (local pause, the world steps on, frozen 0; the second ESC
+     re-pauses in the same frame: RK3E, item 6); SP5-d's
+     records (`rt2_rec2/l8_fresh.bmrc` replays 1044/1044 with placement on
+     and off; `l8_copies_reset.bmrc` 1032/1143 alike on and off, SP9's gap
+     (1) in the record's world); RK3R-rec as D2 expected (gate round,
+     `rt2_l1trace2`: the replayed tutorial, Enter, the ball at 933; the
+     implement round's "ballless restart" withdrawn - the driver pressed ESC
+     instead of Enter). **Found: RK3E** (item 6: ESC cannot close the pause
+     menu in a session, every level; pre-existing). Recorded,
+     not new: a retail beam of a ball in a floor contact leaves one own row
+     0.3-1.9 mm off the server (item 9's R6 residual; RT1's 300 / 340 / 750
+     too).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

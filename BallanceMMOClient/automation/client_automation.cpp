@@ -46,8 +46,18 @@ namespace {
             for (int i = 0; i < inputs && i < 8; ++i) {
                 auto* input = behavior->GetInputParameter(i);
                 auto* source = input ? input->GetRealSource() : nullptr;
-                char value[128] = {};
-                if (source) source->GetStringValue(value, FALSE);
+                // Sized first (FULL step RT2): a long string pin - the
+                // tutorial's texts - overflowed the old 128-byte buffer and
+                // took the game down.
+                std::string value;
+                if (source) {
+                    const int needed = source->GetStringValue(nullptr, TRUE);
+                    if (needed > 0) {
+                        value.assign(static_cast<size_t>(needed) + 1, '\0');
+                        source->GetStringValue(value.data(), TRUE);
+                        value.resize(std::strlen(value.c_str()));
+                    }
+                }
                 out += i ? "," : ":";
                 out += '[';
                 out += value;
@@ -268,7 +278,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // (session/core_host.cpp, design 6.2).
         if (rest.rfind("core", 0) == 0 || rest.rfind("force-rollback", 0) == 0
                 || rest.rfind("stall", 0) == 0 || rest.rfind("drop-birth", 0) == 0 || rest.rfind("reload", 0) == 0
-                || rest.rfind("placement", 0) == 0 || rest.rfind("probes", 0) == 0)
+                || rest.rfind("placement", 0) == 0 || rest.rfind("probes", 0) == 0
+                || rest.rfind("activate", 0) == 0)   // FULL step RT2
             return core_host_session_verb(rest);
         if (rest == "trace on") { physics_session_.trace = true; physics_session_.rollback.set_verbose(true); return "ok session trace on"; }
         if (rest == "trace off") { physics_session_.trace = false; physics_session_.rollback.set_verbose(false); return "ok session trace off"; }
@@ -519,6 +530,25 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
             return "error " + error;
         if (rest.find("all") != std::string::npos) return "ok " + physics_view_.describe_physics_objects();
         return "ok " + physics_view_.describe_movable_objects();
+    }
+    if (verb == "exitlevel") {
+        // exitlevel (FULL step RT2, sector-placement design 7.5 run 3): the
+        // pause menu's "Exit Level" without its Yes/No - "Exit Level" sent to
+        // Level and to All_Balls, as Menu_Pause does and as the session's
+        // countdown reload does (core_host.cpp) - back to the main menu; a
+        // 'level N' through the menus loads a level again.
+        if (!m_bml->IsIngame()) return "error not ingame";
+        CKContext* context = m_bml->GetCKContext();
+        auto* level_object = static_cast<CKBeObject*>(context->GetObjectByNameAndParentClass(
+            const_cast<CKSTRING>("Level"), CKCID_BEOBJECT, nullptr));
+        auto* all_balls = static_cast<CKBeObject*>(context->GetObjectByNameAndParentClass(
+            const_cast<CKSTRING>("All_Balls"), CKCID_BEOBJECT, nullptr));
+        if (!level_object || !all_balls) return "error no Level / All_Balls object";
+        auto* messages = m_bml->GetMessageManager();
+        const CKMessageType exit_level = messages->AddMessageType(const_cast<CKSTRING>("Exit Level"));
+        messages->SendMessageSingle(exit_level, level_object);
+        messages->SendMessageSingle(exit_level, all_balls);
+        return "ok Exit Level sent to Level and All_Balls";
     }
     if (verb == "restart") {
         // restart: the level reset a player reaches from the ESC menu, or that
