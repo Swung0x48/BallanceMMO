@@ -2335,7 +2335,24 @@ numbers 1-10 are unchanged.
      INV's finding 2 on its face; possibly the own-ball birth residual (A)
      of SFD, not shown. Next: first divergence of client 2 against the
      server before 1186 (rollback-engine-gaps-design.md "As built (step
-     GL1)"). **Found at FULL step H6, queued (item 4, pre-existing,
+     GL1)"). **Cause established at FULL step H1C2 (2026-10-30), fix
+     waiting on the user:** the named-hull first-build scale of
+     `Ball_Paper_Mesh` - physics_RT caches a named hull per world, built
+     with the scale of the first body that uses the name
+     (`PhysicsScaleFromMatrix` of its local matrix, CKIpionManager.cpp
+     ~471-472 / ~510-546, engine change #10), and a rotated float matrix's
+     row lengths round by rotation: c2 built it from its own paper birth
+     (y scale 0x1.000012), c0/c1/c3 and the server from mirror
+     3035006883's pose (0x1.00000e); first differing state 1180 (the
+     newborn mirror's radius 1 ulp larger). Forcing c2's build to the
+     shared scale: 157 keys, 0 differing on all four (`maps/arena-test/
+     h1c2/t6`). Not SFD (A) (stone and wood are plain spheres), not
+     rollback-specific; the cache is cleared by every reset
+     (ClearCollisionSurfaces). Options (A1) a hull pre-build entry point
+     (engine change #22) / (A2) a template body at load and after each
+     reset / (B) per-player mirror hull names / (C) a rotation-free cached
+     scale (engine) / (D) accept; HL's h1_150 c2 own-ball criterion waits
+     on it. **Found at FULL step H6, queued (item 4, pre-existing,
      cause established): an import's anchor record does not track the
      mirrors the server's state brought** - `h6_full/a3_trans`'s late
      joiner (S 501; its mirrors born live at 503): a rewind anchored at S
