@@ -1116,6 +1116,23 @@ numbers 1-10 are unchanged.
    every body alive at the anchor, from a recipe the host can read without
    the event log, and a log that keeps each name's latest birth past 4096
    ticks) is its own step; world-agreement design "As built (step PRX)".
+   **Queued (FULL step RT1, shared core, pre-existing): a relayed frame for
+   the tick about to be stepped is neither driven nor corrected.** A frame
+   for T that arrives between post_step(T - 1) and pre_step(T) finds the
+   drive of T already chosen (`client_core_frame.cpp:953`, hold-last), is
+   "not simulated yet" for `note_input_correction`
+   (`client_core_messages.cpp:479`) and is not re-chosen at pre_step(T)
+   (`drive_from_newest_relay` is off with the input rewind, step R2); T is
+   stepped on the prediction and no rewind ever covers it. Measured on the
+   retail control `rt1_ctl`: client 2 (starving, behind the relay) stepped
+   client 1's navigation-off edge at 1090 navigation on, its mirror 0.107 m
+   off by 1098, the rows after 1090 not flagged UNCONFIRMED (the D0 observer
+   checks each tick's own frame only). Latent on headless (its lead keeps it
+   ahead: 0-3 frames in that slot per `core_ref_s11` client, none
+   differing). Options for the user (core design "As built (FULL step
+   RT1)"): (a) re-choose the drive at pre_step(T) from an exact frame that
+   arrived in the slot; (b) keep such a frame and replay from T - 1 when it
+   differs from the recorded drive; (c) both.
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03
@@ -1195,6 +1212,17 @@ numbers 1-10 are unchanged.
    tail counts the server's non-mechanism units, a member is refused; and
    the identity copies' outputs, **released at F1**: 0 left); the checks
    deferred to FULL listed there.
+   **WAD-A's retail verdict (FULL step RT1): unmatched.** Every retail
+   resync import logs "no live controller 'rt:force/<id>'" for the force
+   blocks outside units, `P_Modul_26_Sack` (server 46734, retail 47796) and
+   `P_Modul_08_Schaukel` (45497 / 46559): the retail process allocates the
+   level's CK_IDs 1062 later than the server's world (the mod's and BML's
+   own objects), the headless worlds agree (H5b). The fan's force on a ball
+   is aliased under the union's bit (matched) and not with it off (69905 /
+   70463). No row differed in these runs; a held force of another value
+   would be lost. As the WAD-A entry above says, the §4.3 alias moves
+   forward to every mechanism force block (design §2.9's SPD row): its own
+   step.
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire

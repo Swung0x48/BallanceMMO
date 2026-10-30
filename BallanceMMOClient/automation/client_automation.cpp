@@ -660,11 +660,26 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     if (verb == "explode") {
         // explode <wood|paper|stone>: activates the retail trafo explosion
         // script directly, for the SimTool --explode determinism check.
-        std::string type = rest;
+        // 'explode <type> next' (FULL step RT1, TR4-f): the activation the
+        // Trafo Manager's Activate Script makes - the scene activates the
+        // script next frame (CKBEHAVIOR_ACTIVATENEXTFRAME) - so a session's
+        // trafo hold sees it as a game trafo wherever the ball is (an
+        // out-of-reach explosion for the server's intake check).
+        std::istringstream words(rest);
+        std::string type, mode;
+        words >> type >> mode;
         if (!type.empty()) type[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(type[0])));
-        if (type != "Wood" && type != "Paper" && type != "Stone") return "error usage: explode <wood|paper|stone>";
+        if ((type != "Wood" && type != "Paper" && type != "Stone") || (!mode.empty() && mode != "next"))
+            return "error usage: explode <wood|paper|stone> [next]";
         CKBehavior* script = bmmo::game::find_root_script(m_bml->GetCKContext(), ("Ball_Explosion_" + type).c_str());
         if (!script) return "error no Ball_Explosion_" + type + " script";
+        if (mode == "next") {
+            CKScene* scene = m_bml->GetCKContext()->GetCurrentScene();
+            if (!scene) return "error no current scene";
+            scene->Activate(script, TRUE);
+            return std::format("ok explode {} next frame (flags {:08x}) at frame {}", type,
+                               static_cast<unsigned>(script->GetFlags()), record_frames_);
+        }
         script->Activate(TRUE, TRUE);
         return "ok explode " + type + " at frame " + std::to_string(record_frames_);
     }

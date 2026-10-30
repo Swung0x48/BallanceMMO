@@ -1153,6 +1153,63 @@ namespace {
         logger->Info("Physics session: trafo: the session's sets torn down (%d piece bodies removed)", bodies);
     }
 
+    // ------------------------------------------- diagnostics (FULL step RT1)
+    // BMMO_JOURNAL_FINAL_CHECKPOINTS=1: the core also journals each checkpoint
+    // tick's FINAL rows (core_config::journal_final_checkpoints, step D0, the
+    // headless --final-checkpoints), so a retail journal is judged on the
+    // post-rewind state as the headless batches are.  Off by default.
+    bool diag_final_checkpoints() {
+        const char* v = std::getenv("BMMO_JOURNAL_FINAL_CHECKPOINTS");
+        return v && *v && std::strcmp(v, "0") != 0;
+    }
+    // The frame times of a core session (RCX-x86), in the headless client's
+    // frame_time line format but NOT its quantity: 'core_frame_time' =
+    // core_host_frame's own duration, i.e. post_step(T) + pre_step(T + 1)
+    // (rollbacks and resims included) WITHOUT the tick's live IVP step, which
+    // CKContext::Process runs outside it - the headless frame() times
+    // pre_step + step + post_step, so the two are not comparable; the only
+    // whole-frame figure is 'frame_interval' = OnProcess to OnProcess while
+    // the session runs (the game's frame period: render, live step, host).
+    // 0.1 ms buckets up to 1 s; reset when a session starts
+    // (core_host_session_start) and logged when the host's session ends.
+    // Measures only; decides nothing.
+    struct frame_time_stats {
+        static constexpr size_t kBuckets = 10000;
+        std::vector<uint32_t> hist = std::vector<uint32_t>(kBuckets, 0);
+        uint64_t count = 0;
+        double max_ms = 0.0;
+        void reset() {
+            std::fill(hist.begin(), hist.end(), 0u);
+            count = 0;
+            max_ms = 0.0;
+        }
+        void note(double ms) {
+            const size_t bucket = std::min(kBuckets - 1, static_cast<size_t>(std::max(0.0, ms) * 10.0));
+            ++hist[bucket];
+            ++count;
+            max_ms = std::max(max_ms, ms);
+        }
+        double quantile(double q) const {
+            if (!count) return 0.0;
+            uint64_t seen = 0;
+            for (size_t b = 0; b < kBuckets; ++b) {
+                seen += hist[b];
+                if (static_cast<double>(seen) >= q * static_cast<double>(count)) return (b + 1) / 10.0;
+            }
+            return max_ms;
+        }
+        std::string line(const char* what) const {
+            return std::format("{}: frames={} p50={:.1f} p99={:.1f} p999={:.1f} max={:.1f} ms", what, count,
+                               quantile(0.5), quantile(0.99), quantile(0.999), max_ms);
+        }
+    };
+    struct frame_time_host {
+        frame_time_stats frame, interval;
+        uint32_t session = 0;   // the host session the stats belong to
+        bool have_last = false;
+        std::chrono::steady_clock::time_point last;
+    } frame_times;
+
     // ------------------------------------------------- diagnostics (step EG0)
     // Environment switches, all off by default; none changes what the session
     // does, only what it logs (rollback-engine-gaps-design.md, As built EG0):
@@ -1381,6 +1438,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
         if (value >= 1 && value <= static_cast<long>(bs::client_journal::kCheckpointTicks))
             config.journal_checkpoint_ticks = static_cast<uint32_t>(value);
     }
+    config.journal_final_checkpoints = diag_final_checkpoints();   // FULL step RT1 diagnostics, off by default
     config.level = msg.map.level > 0 ? msg.map.level : 1;
     config.verbose = physics_session_.trace;   // 'session trace on|off' (not reset per session)
     config.trace = physics_session_.trace;
@@ -1423,6 +1481,13 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     }
     reset_session_state();
     host.session = msg.session;
+    // FULL step RT1 (RCX-x86): a new session's frame times start empty even
+    // when the server reuses the id (a restarted server's session 1), and its
+    // first interval does not span the idle time between sessions.
+    frame_times.frame.reset();
+    frame_times.interval.reset();
+    frame_times.session = host.session;
+    frame_times.have_last = false;
     std::string error;
     if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error)) {
         SendIngameMessage("Physics session unavailable: " + error, bmmo::ansi::BrightRed);
@@ -2060,6 +2125,26 @@ void BallanceMMOClient::core_host_anchor() {
 // the mailbox, the transitional resync triggers and pre_step(T + 1), which
 // the next CKContext::Process steps.
 void BallanceMMOClient::core_host_frame() {
+    // FULL step RT1 (RCX-x86): this frame's time and the period since the
+    // previous one, measured only.
+    const auto frame_started = std::chrono::steady_clock::now();
+    if (frame_times.session != host.session) {   // a host whose session_start did not reset them
+        frame_times.frame.reset();
+        frame_times.interval.reset();
+        frame_times.session = host.session;
+        frame_times.have_last = false;
+    }
+    if (frame_times.have_last)
+        frame_times.interval.note(std::chrono::duration<double, std::milli>(frame_started - frame_times.last).count());
+    frame_times.last = frame_started;
+    frame_times.have_last = true;
+    struct frame_time_scope {
+        std::chrono::steady_clock::time_point started;
+        ~frame_time_scope() {
+            frame_times.frame.note(
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+        }
+    } frame_time{frame_started};
     std::string error;
     // Step BALL: the airship ghosts' CK matrices are physics_RT's for the
     // whole frame (ghost_pins above), the stream's again after it.
@@ -2193,6 +2278,10 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                   host.script_order.entries(), static_cast<unsigned long long>(report_precision_reads),
                   static_cast<unsigned long long>(report_precision_failed), placement_host.active ? "on" : "off",
                   placement_host.made, static_cast<unsigned long long>(placement_host.signature));
+    if (frame_times.session == session && frame_times.frame.count) {   // FULL step RT1 (RCX-x86)
+        logger_->Info("Physics session: %s", frame_times.frame.line("core_frame_time").c_str());
+        logger_->Info("Physics session: %s", frame_times.interval.line("frame_interval").c_str());
+    }
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     // Step WG4 (world-agreement-gaps design 2.3 "Release"): the level
     // outlives the session, so the union's sources go back now - vanilla play
@@ -3254,6 +3343,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                 mode = bs::io_flush::batch;
             }
         }
+        // FULL step RT1 (IOF-c): the mode the journal's writer runs, logged.
+        logger_->Info("Physics session: journal flush mode %s (SessionJournalFlush)", bs::io_flush_name(mode));
         return mode;
     };
     p.journal_path = [this](const bs::journal_header& header) -> std::filesystem::path {

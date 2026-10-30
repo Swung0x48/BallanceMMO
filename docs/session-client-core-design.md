@@ -6902,3 +6902,141 @@ against the working tree.
 | R2-11 mailbox lifetime | changed: load-time static, `begin` drops other sessions' entries |
 | R2-12 `core.status()` / `request_resync` missing | changed: `acked_input()`, `request_resync(why)` in the API |
 | R2-13 `previous_cam_` in two lists | changed: core state, `core.previous_cam()` for the host |
+
+**As built (FULL step RT1, 2026-10-30): retail batch 1, Level 11 core.** The
+stage close-out's first retail batch (FULL plan §2 RT1). x86 mod of HEAD
+a864df69 plus the three retail-only diagnostics below, no maphack; the Arch
+server rebuilt from HEAD (`ballanced-36c04e3d24c9+bmmo-a864df696664-dirty`);
+every session snapshots off, trafo inputs and placement on, the session core
+on; both clients with `BMMO_JOURNAL_CHECKPOINT_TICKS=2` and the FINAL rows on.
+Runs `scripts/retail/rt1_*`, driver and judges `.local-tools/work/RT1/`
+(`rt1_retail.py`, `rt1_judge.py`, `final_fields.py`, `arm_vs_ctl.py`,
+`input_cmp.py`, `rt1_logs.py`). No shared, headless or server file changed.
+- **Diagnostics added (retail host only, nothing decided from them):**
+  `BMMO_JOURNAL_FINAL_CHECKPOINTS=1` sets `core_config::journal_final_checkpoints`
+  (step D0's FINAL rows; retail had no switch), `core_host.cpp` beside
+  `BMMO_JOURNAL_CHECKPOINT_TICKS`; the session's `core_frame_time:` and
+  `frame_interval:` lines at the host's session end (RCX-x86; file-scope
+  statics, reset in `core_host_session_start`). They use the headless
+  `frame_time` line's format but `core_frame_time` is NOT its quantity: it
+  times `core_host_frame` = post_step(T) + pre_step(T + 1) with their
+  rollbacks and resims, and WITHOUT the tick's live IVP step, which
+  `CKContext::Process` runs outside it (the headless `frame()` times
+  pre_step + step + post_step). The only whole-frame figure is
+  `frame_interval` (OnProcess to OnProcess: render, live step, host). One "journal flush mode" line when the journal opens (IOF-c: a
+  valid `SessionJournalFlush` was silent); the automation verb
+  `explode <type> next` (`client_automation.cpp`): the scene activates the
+  original explosion next frame, as the Trafo Manager's Activate Script does,
+  so the hold reports it wherever the ball is (TR4-f; the old form's
+  `Activate(TRUE, TRUE)` bypasses the hold and leaks - 18 pieces counted by
+  `trafo_original_leaks`, measured).
+- **Adaptations.** R3 ("a second session without a reload") cannot run with
+  placement on: `session reload off` makes the next anchor refuse ("this
+  process already holds 53 placement copies"), the SP9/SP10 reload is the
+  deployed path, so R3 ran with the reload; its quiesce of the single-player
+  pieces was seen in the no-reload attempt (`rt1_main2`: "trafo quiesce: 18
+  bodies"). R2's "R2 config" (lifecycle rewind and own echoes off) no longer
+  exists as switches. The TR4-a / B-R1 arms run on L11 (RT1 is the no-maphack
+  batch; the r2 recipe was the arena's): r0_keys on both clients, client 1
+  trafo 300, checkpoint 520, P_Trafo_Wood (row 26) 750, DepthTestCube 1100,
+  client 2 trafo 340, checkpoint 600; arms 13:24 + 50:12 and 97:24 + 131:47,
+  control unforced. RK1-c's anchor is base + 1 (`force-rollback at 67:59`;
+  anchor = base was "not rolled"). TR4-e is not applicable (C11: the retail
+  mod replays key records, not captures; no shared file changed).
+- **Arm vs control is valid only to the first input difference.** The
+  servers' applied INPUT records differ from 628 (arm2 client 1) / 653 (arm1b
+  client 2) (`input_cmp.py`): there the server held the late client's
+  previous frame (flags 0, keys 1 where the record turned to 2) - the same
+  fall-behind as the resyncs below; `replay session` itself is tick-indexed.
+  Before that every non-piece body of each client is bit-equal to the control
+  (FINAL rows), so the 300 / 340 / 520 / 600 beam windows are compared and
+  the 750 / 1100 windows and the second trafo are not. Pieces are never
+  comparable across runs: their sets carry the per-run player ids and every
+  world's pieces are bit-equal to its own server.
+- **Found (shared core, pre-existing, latent on headless): a relayed frame
+  for the tick about to be stepped is neither driven nor corrected.**
+  Symptom: `rt1_ctl` client 2's FINAL rows of client 1's mirror
+  (`Ball_Wood_Peer_3566228665`) are 0.0102 m off the server at 1090
+  (UNCONFIRMED: "final checkpoint 1090 unconfirmed: ... frame differs from
+  the relayed frame"), then 0.037 / 0.061 / 0.085 / 0.107 m at 1092-1098
+  NOT flagged, until client 1's death beam at 1100 re-poses it. Cause:
+  client 1's frame for 1090 (its navigation off, frame flags 5 -> 1, the
+  death fall) reached client 2 in the drain between post_step(1089) and
+  pre_step(1090) (its INPUT record lies after TICK 1089: `gap6/order.py`).
+  post_step(1089) had already chosen `remote.applied = live_drive(remote,
+  1090)` (`client_core_frame.cpp:953`) - no frame for 1090 yet, so
+  hold-last, navigation on; `note_input_correction` returns at "not
+  simulated yet" (`client_core_messages.cpp:479`, 1090 > current_tick()
+  1089) and remembers nothing; pre_step(1090) re-chooses only under
+  `drive_from_newest_relay` (`client_core_frame.cpp:618`), which this host
+  sets to `!input_rewind` = false (`core_host.cpp`, step R2: "a key edge
+  relayed between the frames replays from its tick" - not for the frame of
+  T + 1). So 1090 was stepped navigation on, against the server's off, and
+  no rewind covered 1090-1099 (window lines 1080 / 1140: inrew 0). The rows
+  after it read CONFIRMED because the D0 observer checks each tick's own
+  frame, not the state it inherits (a method gap of the FINAL judge). The
+  trigger is a client at or behind the relay's cursor (client 2 starving):
+  `gap6/slot.py` counts the frames arriving in that drain and those that
+  differ from the chosen drive: `rt1_ctl` c2 81 / 2 (1090; 1128, keys 1 -> 2
+  with the navigation off, re-run by an own-substitution rewind from 1127),
+  `rt1_ctl2` c2 46 / 2 (759 bodiless; 1090 inside the resync it took at
+  1087), the arms 0-14 / 0, headless `core_ref_s11` l8_cross /
+  resync_snapoff / swing_snapoff 0-3 / 0 (the headless loop polls the
+  network between frames too, `session_client.cpp:1253` / `:3560`, but its
+  lead keeps it ahead). Options (the user's): (a) pre_step(T) re-chooses
+  the drive from the ring's exact frame for T when one arrived after
+  post_step(T - 1) (no replay; narrower than R1's policy); (b) keep such a
+  frame and compare it at post_step(T) with the recorded drive, replaying
+  from T - 1 on a difference (the own held records' shape, late-player
+  design "Adapted in step 4") - a one-tick rewind per hit; (c) both.
+- **FINAL rows' rotation.** The FINAL rows of pieces and balls differ from the
+  server only in rotation, <= 3.3e-8, positions and velocities bit-equal; the
+  LIVE rows of the same bodies are bit-equal. Cause: TR4c's 53-bit read wraps
+  only `p.list_bodies` (`core_host.cpp` ~2417, the live checkpoint), the
+  records the FINAL rows come from are read at the game's 24-bit x87 (TR4's
+  finding (a)). A report difference, not a state one.
+- **Found (WAD-A on retail): force controllers outside units are not matched
+  at a retail import.** Every retail resync with sector 2 or 5 active logs
+  "no live controller 'rt:force/<id>'" for `P_Modul_26_Sack` / `Sack001` (and
+  `P_Modul_08_Schaukel` in sector 5): the server's savestate names 46734, the
+  retail world 47796; 45497 against 46559 - the same +1062 in both. Cause: an
+  outside force controller is named after its block's CK_ID, and the retail
+  process allocates its level's ids 1062 later than the server's Ballanced
+  world (the mod's and BML's own objects); the headless worlds agree (H5b).
+  Under the proximity union's bit the fan's force on a ball is aliased and
+  matched (rt1_stall2, a paper ball held in the fan at the import, no line for
+  it); with the bit off it is not (rt1_stall_off: `rt:force/69905` against
+  70463 on the ball). No row differed in these runs (the live controller's
+  force was equal), but a held force of another value would be lost. Remedy
+  settled by §2.9's SPD row: the alias of §4.3 for every mechanism force block.
+- **Found: x86 retail falls behind the tick in the heavier recipe.** The arm
+  recipe (two sets, a second trafo, sector 2) gave `frame_interval` p99
+  17.1-54.3 ms (S1's two-set recipe 16.6 ms); the forced arms rebased (frames
+  up to 232-374 ms across the sector pass and the explosions) and resynced
+  once each, the control's client 2 slipped 6-33 ticks behind (no rebase),
+  its frames reached the server late 330 times in a row and DX6's starvation
+  rule resynced it at 1238. Every one of these resyncs re-stepped its rows
+  equal (one row written on arm1b client 1, its own ball - D1). The gate
+  round reran the control (`rt1_ctl2`, the relabelled build) under
+  `cpu_sampler.ps1` and a per-process sampler (`work/RT1/gap7`): the host
+  total stayed 8.5-22.1 % of 28 cores, every outside process <= 1.5 % (the
+  run is valid by the guard's rule); each `Player.exe` used 53-62 % of one
+  core through the session but 98-102 % while it slipped and caught up
+  (17:18:17-17:18:22). Client 2 again starved (331 reports) and resynced
+  (at 1087), client 1 again did not; client 2's window 720 -> 780 took
+  1.154 s (19.2 ms a tick, about 16 ticks lost across the sector-2 pass:
+  life 3/23, inrew 1/8), and with renders skipped (the tick driver's
+  catch-up) it then ran 60 ticks in 0.86-0.89 s, 14.4-14.9 ms a tick - under
+  1 ms a tick of margin, too slow for the 330-report rule. So the cause is
+  the client's own per-tick cost on its one game thread, not host
+  contention: retail's half of the CPU verdict pending with the user (the
+  per-player and placement copies' capture / replay cost), plus a catch-up
+  margin under 1 ms a tick. Its server journal replayed 2546/2546, its
+  mechanisms 23/23 on both clients, mirrors without a position difference.
+
+- **RCX-x86 (the frame time of the trafo-on sessions).** `rt1_main4` session
+  1: `frame_interval` p99 16.6 / 16.6 ms (the whole frame), `core_frame_time`
+  p99 11.2 / 11.4 ms (the core's part, no live step); session 2 (client 2 at
+  `net lag 150`): `frame_interval` p99 26.8 / 27.0 ms, `core_frame_time` p99
+  25.8 / 26.2 ms. The arms and the control: `frame_interval` p99 17.0-54.3 ms
+  (`rt1_ctl2` 17.0 / 23.0 ms).
