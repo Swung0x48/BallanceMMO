@@ -1304,8 +1304,10 @@ namespace bmmo::session {
             // of the window shows its end yet - a late death's own rewind
             // (A = D - 1: since step DX11 the body is still there at the
             // restore and the replay removes it at D, remove_remote queued
-            // it) and the late birth's of the same beam pair.  Nothing to
-            // replay here.
+            // it).  Nothing to replay here.  (Since step GL1 that replay
+            // records the end - rollback_world::remote_generation - so a
+            // later rewind of the same frame, the beam pair's birth
+            // rewind included, gets the life handed over as ended above.)
             {
                 const auto first = std::find_if(window.begin(), window.end(),
                                                 [](const entry_t* e) { return !e->entity.empty(); });

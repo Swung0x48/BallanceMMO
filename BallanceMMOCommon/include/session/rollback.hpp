@@ -305,6 +305,21 @@ namespace bmmo::session {
         // body the history has born later in the window is parked until then
         // and is skipped whatever the caller says.
         std::function<void(uint32_t tick, std::map<std::string, uint32_t>& out)> replay_remotes;
+        // Optional (step GL1, gap L's late death): the lifetime generation
+        // the caller holds now for a remote's mirror name - the value its
+        // next live record would carry; false when it knows none.  Asked
+        // during a replay, after pre_step(t) and replay_remotes, for a
+        // remote the record of t names that the replayed world has no body
+        // for and replay_remotes did not list: when the caller's generation
+        // differs from the record's, the life the record names ended inside
+        // this replay (a late death removed at its stamp, or a revived life
+        // the replay ended again), and the re-captured record says so as a
+        // live record would - the name out of remote_entities and its
+        // input, the new generation in.  Without it those records kept the
+        // old generation, revive_ended_lives saw the life alive at a later
+        // rewind of the same frame anchored before the death, and that
+        // replay ran without the body.
+        std::function<bool(const std::string& entity, uint32_t& generation)> remote_generation;
         // Optional (docs/world-agreement-gaps-design.md 2.5, step G3): the
         // proximity union's place point of a replayed tick - before
         // anything of tick `tick`: the window-born re-creations and
@@ -818,6 +833,9 @@ namespace bmmo::session {
         uint64_t lives_revived_own = 0, lives_revived_mirror = 0, lives_revived_mech = 0;
         uint64_t lives_remade = 0;
         uint64_t lives_unrevivable = 0;
+        // Step GL1: replayed ticks' records that took a remote's end inside
+        // the replay (rollback_world::remote_generation).
+        uint64_t replay_lives_ended = 0;
         uint64_t script_float_mismatches = 0;  // float parameters only (sensors, timers)
         uint64_t clock_rewinds = 0;      // restores that put the environment's clock back first
         // The IVP savestate (rollback_world::set_savestate): restores that put
@@ -2043,6 +2061,7 @@ namespace bmmo::session {
             // this replay (carried into the tail the relay has not reached).
             std::map<std::string, uint32_t> alive;
             std::map<std::string, input_frame> carried;
+            std::set<std::string> ended_here;   // step GL1: the remotes whose end this replay recorded (logged once)
             size_t rows_reapplied = 0, row_ticks = 0;   // step RR, for the log line
             uint32_t first_row_tick = 0;
             for (uint32_t t = anchor + 1; t <= current_tick; ++t) {
@@ -2197,6 +2216,58 @@ namespace bmmo::session {
                             world.nav_input(entity, last->second);
                             inputs[entity] = last->second;
                         }
+                    }
+                }
+                // Step GL1 (gap L's late death, rollback-engine gaps design
+                // "As built (step S2)" / "(step GL1)"): a remote the record
+                // names that this replayed tick has no body for and the
+                // caller does not drive, whose generation the caller has
+                // moved on (rollback_world::remote_generation) - its life
+                // ended inside this replay (a late death removed at its stamp
+                // by pre_step, or a revived life the replay ended again).
+                // The re-captured record says so as a live record would: the
+                // name out of the tracked set and its input, the generation
+                // the end gave in.  A later rewind of the same frame anchored
+                // before the end then finds the life ended (revive_ended_
+                // lives) instead of alive with no body.  Not a body the
+                // replay still holds out for a later birth.  The rule does
+                // not check that the body existed earlier in this replay: a
+                // life the core failed to revive (generation moved on, no
+                // body from A + 1) is recorded ended from A + 1, not from
+                // its death - only the logged end tick and the window's
+                // predicted inputs of that name differ (GL1 review, nit 1).
+                if (world.remote_generation) {
+                    auto& remotes = step_tracked.remote_entities;
+                    for (auto it = remotes.begin(); it != remotes.end();) {
+                        const std::string entity = *it;
+                        bool keep = alive.count(entity) > 0;
+                        if (!keep) {
+                            const auto parked = plan.find(entity);
+                            keep = parked != plan.end() && parked->second.repose_tick != 0
+                                && static_cast<int32_t>(parked->second.repose_tick - t) > 0
+                                && !(static_cast<int32_t>(parked->second.revived_until - t) > 0);
+                        }
+                        bmmo_physics_body_state body{};
+                        if (!keep) keep = world.get_body(entity, body);
+                        uint32_t generation = 0;
+                        if (!keep) keep = !world.remote_generation(entity, generation);
+                        const auto recorded_generation = step_tracked.generations.find(entity);
+                        const uint32_t was =
+                            recorded_generation == step_tracked.generations.end() ? 0u : recorded_generation->second;
+                        if (!keep) keep = was == generation;   // generation_in's reading: absent is 0
+                        if (keep) {
+                            ++it;
+                            continue;
+                        }
+                        step_tracked.generations[entity] = generation;
+                        inputs.erase(entity);
+                        carried.erase(entity);
+                        ++stats_.replay_lives_ended;
+                        if (ended_here.insert(entity).second && world.log && replay_life_logs_++ < 8)
+                            world.log("replay: " + entity + " has no body at tick " + std::to_string(t)
+                                      + ": its life ended in this replay (generation " + std::to_string(was) + " -> "
+                                      + std::to_string(generation) + "), recorded so from here on");
+                        it = remotes.erase(it);
                     }
                 }
                 // C3, 2.3 step 3: the globals the live step of t ran with,
@@ -3382,6 +3453,7 @@ namespace bmmo::session {
         uint32_t replay_mechanism_logs_ = 0;
         uint32_t unborn_logs_ = 0;   // step DX1: 'deferral:' lines (a body unborn in a record), capped
         uint32_t lives_logs_ = 0;   // gap L: unrevivable and inconsistent answers logged (capped)
+        uint32_t replay_life_logs_ = 0;   // step GL1: ends taken by a replay's records, logged (capped)
         uint32_t script_float_logs_ = 0;
         bool trace_plan_ = false;
         uint32_t plan_traces_ = 0;

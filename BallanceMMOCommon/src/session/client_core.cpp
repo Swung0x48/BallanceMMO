@@ -72,6 +72,19 @@ namespace bmmo::session {
                 out[remote.entity] = generation == s.generations_.end() ? 0u : generation->second;
             }
         };
+        // Step GL1 (gap L's late death): the generation a mirror's name has
+        // now - what the next live record carries (post_step's
+        // tracked.generations) - so a replayed tick whose world has no body
+        // for a remote its record names, and whose generation moved on
+        // (drain_pending_lives removed it at its stamp, or a revived life
+        // ended again), is re-captured as ended.  By name: the beam's old
+        // clone belongs to no remotes_ entry any more.
+        world_hooks_.remote_generation = [this](const std::string& entity, uint32_t& out) {
+            const auto it = s.generations_.find(entity);
+            if (it == s.generations_.end()) return false;
+            out = it->second;
+            return true;
+        };
         // The mechanism bodies a replayed tick has: the same list the live
         // record takes (tracked.mechanisms in the frame), so a body the
         // replay made before the live frames did is recorded from the

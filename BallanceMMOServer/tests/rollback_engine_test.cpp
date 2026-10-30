@@ -3356,6 +3356,129 @@ TEST(RollbackEngine, ARemoteBornInsideTheReplayIsDrivenAndRecordedFromItsBirthTi
     EXPECT_FLOAT_EQ(world.bodies["Remote"].linear[0], live.linear[0]);
 }
 
+// Step GL1 (gap L's late death; rollback-engine gaps design "As built (step
+// S2)" / "(step GL1)"): a remote's death stamped 5 arrives late and its own
+// rewind (anchor 4) removes the body in the replayed pre-step of 5, where the
+// caller's generation for the name moves on (step DX11).  The records of
+// 5..10 it re-captures were live records of the old life: they must say the
+// life ended - the name out of the tracked set and its input, the caller's
+// new generation in (rollback_world::remote_generation) - as a live record
+// after the death would.  A second rewind of the same frame anchored before
+// the death (3) then hands the life to restore_lives as ended at 5, so the
+// replay of 4 has the body.  Without the hook (the control) the records keep
+// the old generation and the second rewind hands over nothing.
+TEST(RollbackEngine, ALifeEndedInsideAReplayIsRecordedEndedSoALaterRewindRevivesIt) {
+    for (const bool hook: {true, false}) {
+        SCOPED_TRACE(hook ? "remote_generation" : "no remote_generation (control)");
+        fake_world world;
+        world.bodies["Own"];
+        world.bodies["Remote"].position[0] = 5.0;
+        world.navs["Remote"] = {};
+        rollback_engine engine;
+        auto w = world.adapter();
+        // A real world has no body to write for a name it does not have.
+        const auto base_set = w.set_body;
+        w.set_body = [&](const std::string& entity, const bmmo_physics_body_state& state, wake_mode mode, bool recheck) {
+            if (!world.bodies.contains(entity)) return false;
+            return base_set(entity, state, mode, recheck);
+        };
+        rollback_tracked alive;
+        alive.own_entity = "Own";
+        alive.remote_entities = {"Remote"};
+        alive.generations = {{"Own", 1}, {"Remote", 1}};
+        for (uint32_t tick = 1; tick <= 10; ++tick) {
+            w.step();
+            engine.record(w, tick, alive, {{"Own", input_frame{}}, {"Remote", input_frame{}}});
+        }
+        constexpr uint32_t kDeath = 5;
+        uint32_t generation = 1;   // the caller's (the core's generations_)
+        bool death_queued = true;  // the late death, drained in the replay at its stamp
+        bool remote_at_4 = false;  // the replay of tick 4 had the body
+        w.pre_step = [&](uint32_t tick) {
+            if (tick == 4) remote_at_4 = world.bodies.contains("Remote");
+            if (tick == kDeath && death_queued && world.bodies.erase("Remote")) {
+                world.navs.erase("Remote");
+                ++generation;
+                death_queued = false;
+            }
+        };
+        w.replay_remotes = [&](uint32_t, std::map<std::string, uint32_t>& out) {
+            if (world.bodies.contains("Remote")) out["Remote"] = generation;
+        };
+        if (hook)
+            w.remote_generation = [&](const std::string& entity, uint32_t& out) {
+                if (entity != "Remote") return false;
+                out = generation;
+                return true;
+            };
+        std::vector<bmmo::session::ended_life> handed;
+        w.restore_lives = [&](uint32_t, uint32_t, const std::vector<bmmo::session::ended_life>& ended, bool,
+                              std::map<std::string, bmmo::session::life_outcome>& out) {
+            handed = ended;
+            for (const auto& life: ended) {
+                // The core's half: the A-life made again, its generation put
+                // back, the window's death queued for the replay.
+                world.bodies[life.name] = fake_body{};
+                world.navs[life.name] = {};
+                generation = life.generation;
+                death_queued = true;
+                out[life.name].revived_until = life.end_tick;
+            }
+        };
+
+        ASSERT_TRUE(engine.rewind_to(w, kDeath - 1, 10, no_input, "ball of 2 born at tick 5"));
+        EXPECT_FALSE(world.bodies.contains("Remote"));
+        EXPECT_EQ(generation, 2u);
+        uint32_t recorded = 0;
+        ASSERT_TRUE(engine.generation_at("Remote", kDeath - 1, recorded));
+        EXPECT_EQ(recorded, 1u) << "the anchor's record is not re-captured";
+        for (uint32_t tick = kDeath; tick <= 10; ++tick) {
+            SCOPED_TRACE("tick " + std::to_string(tick));
+            EXPECT_FALSE(engine.recorded_body("Remote", tick));
+            ASSERT_TRUE(engine.generation_at("Remote", tick, recorded));
+            const rollback_tracked* tracked = engine.recorded_tracked(tick);
+            ASSERT_NE(tracked, nullptr);
+            const bool named = std::find(tracked->remote_entities.begin(), tracked->remote_entities.end(), "Remote")
+                != tracked->remote_entities.end();
+            input_frame frame{};
+            if (hook) {
+                EXPECT_EQ(recorded, 2u) << "the end the replay made";
+                EXPECT_FALSE(named);
+                EXPECT_FALSE(engine.recorded_input("Remote", tick, frame));
+            } else {
+                EXPECT_EQ(recorded, 1u);
+                EXPECT_TRUE(named);
+            }
+        }
+        EXPECT_EQ(engine.stats().replay_lives_ended, hook ? 6u : 0u);
+
+        // The same frame: an input correction anchored before the death.
+        remote_at_4 = false;
+        ASSERT_TRUE(engine.rewind_to(w, kDeath - 2, 10, no_input, "Own input corrected at tick 4"));
+        if (hook) {
+            ASSERT_EQ(handed.size(), 1u);
+            EXPECT_EQ(handed[0].name, "Remote");
+            EXPECT_EQ(handed[0].generation, 1u);
+            EXPECT_EQ(handed[0].end_tick, kDeath);
+            EXPECT_TRUE(handed[0].kind == bmmo::session::life_kind::mirror);
+            EXPECT_TRUE(remote_at_4) << "the replay of 4 has the revived body";
+            EXPECT_EQ(engine.stats().lives_revived_mirror, 1u);
+            EXPECT_EQ(engine.stats().lives_unrevivable, 0u);
+            EXPECT_FALSE(world.bodies.contains("Remote")) << "removed again at its stamp";
+            for (uint32_t tick = kDeath; tick <= 10; ++tick) {
+                ASSERT_TRUE(engine.generation_at("Remote", tick, recorded));
+                EXPECT_EQ(recorded, 2u) << "tick " << tick;
+            }
+        } else {
+            EXPECT_TRUE(handed.empty());
+            // The control: it pins the pre-GL1 (faulty) reading of a world
+            // without the hook, to show the hook is what changes it.  Drop
+            // this assertion if the no-hook path is ever fixed too.
+            EXPECT_FALSE(remote_at_4) << "the old reading: the replay runs without the body";
+        }
+    }
+}
+
 // A remote whose history has its birth later in the window than the caller
 // claims (a Physicalize made live at tick 10, first recorded at 11, while
 // replay_remotes names it from its stamp 5): parked until its birth record, so

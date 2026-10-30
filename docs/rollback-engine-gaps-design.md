@@ -3746,3 +3746,120 @@ no new bridge API (the force is read with v14's `force_block_get`).
 - **Not run (deferred to the retail batches):** a retail session exercising
   `outside_forces` through the plugin (retail code changed by one platform
   operation that reads; compile only here).
+
+## As built (step GL1, FULL close-out, 2026-10-30): gap L's late death - a life the replay ends is recorded ended
+
+The fix of "As built (step S2)" above (FULL plan step GL1; roadmap §4
+item 4, with DX11's queued residual (a) of world-agreement-gaps-design.md
+"As built (step DX11)"). Shared engine and core only; no protocol, journal,
+IVP, engine-change, server or host change, no `BallanceMMOClient` member.
+
+- **The open revive question, answered.** EL7's `revive_ended_lives` did
+  not hand these lives over because the records it reads never showed the
+  end. A replay re-captures each tick with a copy of the old record's
+  tracked set (`step_tracked = recorded->tracked`); only the remotes the
+  core lists as driven (`replay_remotes`: physicalized and navigated) get
+  the generation they have now. A mirror the replay removes at its stamp D
+  (a late death since DX11 removed by `drain_pending_lives` in D's pre-step;
+  a beam pair's old clone; a revived life ended again) is no longer listed,
+  so the re-captured records D..now kept its name, its input and its OLD
+  generation g while the core's `generations_` said g + 1. A later rewind of
+  the same frame (no live record in between) anchored at A <= D - 1 then
+  compared A's g with the newest record's g, saw the life alive, no half
+  revived it, the blob restore skipped it ("is in the savestate but not in
+  the world", its friction systems dropped) and the replay ran [A + 1, D)
+  without the body. Trace: `h5_full/h123_150/trace/client0.log` (HEAD) -
+  "rollback to tick 602 (... born at tick 603)" then "rollback to tick 601
+  (... input corrected at tick 602)" in one frame, no "lives:" line; the
+  same in DX11's J4 c0 replayed on rDX11 (`maps/arena-test/gl1/j4_rDX11`:
+  the 1001 beam pair's second "rollback to tick 1000" restores into a world
+  without `Ball_Stone_BMMO_30484125` - "is in the savestate but not in the
+  world" - and no "lives:" line anywhere). The gates
+  DX11's lead named (`at.tracked.remote_entities`, `at.bodies`,
+  `restore_lives`) were not the cause; the premise of DX11's fix shape (ii)
+  ("the engine can hand these lives over") holds once the records are
+  truthful, and the revive-before-restore path already exists - so this is
+  not the (i)/(ii) trade-off; nothing new was decided.
+- **The fix (`session/rollback.hpp`, the replay loop after
+  `replay_remotes`).** A remote the record of t names that `replay_remotes`
+  did not list, that the replayed world has no body for, that is not held
+  out for a later birth (the parked rule), and whose generation the caller
+  has moved on (new optional hook `rollback_world::remote_generation`:
+  the core's `generations_` by name, `client_core.cpp`, plumbed through
+  `core_world_hooks` and `bind_session_world`) is re-captured as a live
+  record after its end would be: the name out of `remote_entities`, its
+  input dropped, the caller's generation in. Counter
+  `rollback_stats::replay_lives_ended`; log "replay: N has no body at tick
+  T: its life ended in this replay (generation g -> g'), recorded so from
+  here on" once per name per replay (capped at 8). Without the hook (unit
+  tests, SimTool's own worlds) nothing changes. The core's reconcile is
+  unchanged: the later rewind now gets the life as ended at D, revives the
+  A-life before the blob, queues the window's death (and a beam pair's
+  birth) and the replay removes it at D again.
+- **Covered:** gap L's late death (S2's cases and H5's `h123_150`), and
+  DX11's queued (a) - the beam pair's birth rewind, a second same-stamp
+  death and a dead ball's input rewind all restore into a world with the
+  body now ("in the savestate but not in the world" 0 in every replay
+  below). **Not covered, still queued:** DX11's (b), the overtaken-birth
+  branch's death left `skipped` in the life log (a different mechanism:
+  the log, not the records; `note_life_made` after `remove_remote`).
+- **Limits (the review's nits, left as they are):** (1) the rule does not
+  check that the body existed earlier in the same replay; a life the core
+  failed to revive (`generations_` moved on, no body from A + 1) is
+  recorded ended from A + 1 instead of from its death, so a later rewind
+  anchored before A gets that name's inputs of [A + 1, D) only from the
+  relay or the carried frame and logs the end at A + 1 (`ended_life::
+  end_tick` is only logged, no simulation reads it); not met in any run
+  above (0 "not revived"). (2) A later life of the same name parked in the
+  window (the parked rule keeps the name) leaves the records of [D, B)
+  under the old generation, so a later rewind dates that end at the birth
+  B instead of D - again only the log; with DX11's (b) above.
+- **Verified** (all snapshots off; rDX11 = HEAD 1b2485b8's x64 build,
+  rGL1 = this tree; `.local-tools/work/GL1/replay.sh`, H5's `rows_cmp.py`,
+  every field bit for bit against the server's rows):
+  - `h5_full/h123_150` FINAL rows: clients 0 and 3 had 5 differing keys on
+    rDX11 (c2's mirror missing in row 602, from 788 the paper ball 30.0 m,
+    c1's mirror 39.7 / 19.8 m, the Pusher 9.4 mm at 1118, P_Ball_Wood_MF's
+    flags at 900); rGL1: 0 differing keys on all four clients, no missing
+    ball row. "In the savestate but not in the world": 1 per client on
+    rDX11, 0 on rGL1.
+  - S2's cases: `core_ref_s12/swing_snapoff` with `--force-rollback 13:24
+    --replay-free-cost-clock`: c0 lacked client 3's ball at 3 FINAL rows on
+    rDX11, none on rGL1, 0 differing keys on all four on both;
+    `core_ref_s12/h1_150` (plain replay): the 1-2 missing ball rows on
+    every client gone (0 differing keys on clients 0, 1, 3 on both).
+  - DX11's replays (`work/DX11/replay_j4.sh`, `replay_run.sh`): J4 (c0, c2,
+    c3, 1000-1400), J1 and J2 (every client, whole run) 0.0000 m as on DX11;
+    "in the savestate but not in the world" J4 c0 1 -> 0, J2 c0 2 -> 0,
+    J1 c0 3 -> 0; every ended life revived ("lives: mirror ... revived"),
+    0 "not revived", 0 "revived by no half", 0 contacts re-created.
+  - One live run (`maps/arena-test/h5_full/gl1_h123_150`, H5's recipe: 4
+    clients 35 s at 150 ms, beams at 600, client 3 into sector 2; the Arch
+    server of H5, no server code changed): VERDICT PASS; its captures
+    replayed with `--final-checkpoints`: every key of all four clients
+    bit-equal to the server at every FINAL row (882-912 ticks), the only
+    one-side row INV's server-only prop removal (`P_Ball_Paper_MF` from
+    1560); live logs: 5-11 mirror lives revived per client, 0 savestate
+    misses.
+  - Unit test `RollbackEngine.ALifeEndedInsideAReplayIsRecordedEndedSoALaterRewindRevivesIt`
+    (with a no-hook control); 679/679 pass; GCC syntax 31/31 ok; x64
+    BUILD-OK (deps VALID), x86 CLIENT-BUILD-OK (core_host,
+    physics_session_client, client_core* rebuilt); the wire check rDX11 ->
+    rGL1 over `core_ref_s12`: 36/36 sends SAME, 36/36 journals IDENTICAL,
+    `WIRE-CHECK: ALL SAME` (LOCAL rows only: the FINAL rows are where the
+    fix shows).
+- **Found, pre-existing, outside GL1 (not attributed):** `core_ref_s12/
+  h1_150` client 2's FINAL rows differ from the server's IDENTICALLY on
+  rDX11 and rGL1 (7 keys): mirror 3035006883 rotation / angular from 1186,
+  mirror 1821203589 position from 1190 (10.8 m), its own ball from its own
+  paper trafo birth at 1202 (10.9 m; the replay logs "Ball_Paper made again
+  at tick 1202 from the inputs it has now, kept against its birth record:
+  dp=(0.0338,-0.0107,0.00205)"), mirror 814755977 from 1224 (55.5 m),
+  P_Ball_Wood_MF from 1292, the Pusher from 1436 (29.7 mm); REF12's live
+  LOCAL rows of client 2 show the own ball off from 1202 too. No fan push,
+  slot line or contact re-creation near 1186; the signature matches neither
+  FANP nor INV's finding 2 on its face. Clients 0, 1 and 3 are exact. For
+  the orchestrator's queue (REF12's PASS table did not judge rows bit for
+  bit against the server).
+- **Not run:** a retail session (the retail core runs the same shared
+  code; compile only), CPU parity.

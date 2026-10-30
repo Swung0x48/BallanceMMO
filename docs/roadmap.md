@@ -2292,7 +2292,30 @@ numbers 1-10 are unchanged.
      gate, a beam pair's new name) - plus the overtaken-birth branch's
      death left `skipped` in the life log (no revive for a later input
      rewind between that birth and death; `note_life_made` after
-     `remove_remote`) (design note "As built (step DX11)"). **(item 2) 8 members at 0 ms
+     `remove_remote`) (design note "As built (step DX11)"). **The first
+     built at step GL1** with gap L's late death (S2): the open question's
+     answer is that a replay re-captured the removed mirror under its old
+     generation (only the remotes `replay_remotes` lists get the current
+     one), so no record showed the end; the replay now records a remote
+     with no body whose generation the core moved on as ended
+     (`rollback_world::remote_generation`), and the later rewind revives
+     it before the restore - `h123_150` 0 differing keys on all four
+     clients (5 on c0 / c3 before), J1 / J2 / J4 savestate misses 0
+     (rollback-engine-gaps-design.md "As built (step GL1)"). **Still
+     queued:** the overtaken-birth branch's `skipped` death entry.
+     **Found at GL1, queued, cause open:** `core_ref_s12/h1_150` client 2's
+     FINAL rows differ from the server's identically on rDX11 and rGL1
+     (pre-existing; clients 0, 1, 3 exact): mirror 3035006883 rotation /
+     angular from 1186, mirror 1821203589 10.8 m from 1190, the own ball
+     10.9 m from its own paper trafo birth at 1202 (the replay logs
+     "Ball_Paper made again at tick 1202 ... kept against its birth
+     record: dp=(0.0338,-0.0107,0.00205)"), mirror 814755977 55.5 m from
+     1224, P_Ball_Wood_MF from 1292, the Pusher 29.7 mm from 1436; REF12's
+     live LOCAL rows show the own ball off from 1202 too. Not FANP or
+     INV's finding 2 on its face; possibly the own-ball birth residual (A)
+     of SFD, not shown. Next: first divergence of client 2 against the
+     server before 1186 (rollback-engine-gaps-design.md "As built (step
+     GL1)"). **(item 2) 8 members at 0 ms
      start late, measured**: U9 and its control without the FIFO and the
      reload (`u9ctl`) starve - every client steps tick T 2.6-4.5 ticks after
      the server from its first tick to the end (4 members, h1_0_on: 0.3-1.2

@@ -497,6 +497,7 @@ namespace bmmo::session {
         binding.replay_mechanisms = hooks.replay_mechanisms;
         binding.on_correction = hooks.on_correction;
         rollback_world world = bind_rollback_world(backend, binding);
+        world.remote_generation = hooks.remote_generation;   // step GL1
         world.after_step = o.after_replayed_step;   // step N02R
         // Step G3 (world agreement 2.5): the proximity union's place point
         // of every replayed tick, the core's (empty when the session does
