@@ -29,6 +29,13 @@
 
 namespace bmmo::session {
 
+    namespace {
+        // Step DX10 (review 3): the frames a resync state waits for a
+        // mirror's navigation before it goes on with that mirror undriven
+        // (the TRL naming point of a wait).
+        constexpr uint32_t kNavigationWaitFrames = 60;
+    }
+
     // post_step's tracked set, for a record made outside a frame (the
     // synthetic anchor): the own ball when it has a body, every navigated
     // mirror, every movable mechanism, the generations.
@@ -282,6 +289,42 @@ namespace bmmo::session {
                 }
                 const auto it = s.remotes_.find(body.owner);
                 if (it != s.remotes_.end() && it->second.physicalized) {
+                    // Step DX10 (J1b): the server's state at S drives this
+                    // mirror from S + 1, and a replay drives only a navigated
+                    // one (replay_remotes): a mirror made before the host
+                    // knew the navigation graph (the attach answered
+                    // `unavailable`) waits for it here like a missing body.
+                    // Only a ball the server navigated at S; never a failed
+                    // attach (no later frame would make it succeed).
+                    if (!it->second.navigation
+                            && std::any_of(st.navs.begin(), st.navs.end(),
+                                           [&](const auto& nav) { return nav.first == body.owner; })) {
+                        auto& remote = it->second;
+                        const mirror_navigation answer = attach_remote_navigation(body.owner, remote);
+                        // An attach made here is the discovery's
+                        // (post_step): the ticks before this one ran the
+                        // mirror undriven, so a rewind before this state
+                        // applies (the wait goes on for another body, or the
+                        // state is dropped) must not drive it across them.
+                        // An apply that proceeds lowers it to S + 1 below.
+                        const uint32_t tick = current_tick();
+                        if (remote.navigation && static_cast<int32_t>(tick - remote.driven_from) > 0)
+                            remote.driven_from = tick;
+                        if (answer == mirror_navigation::unavailable) {
+                            // Bounded (review 3): a host that never learns
+                            // the graph (retail's leaf rule: fewer than four
+                            // keyed leaves) would wait for good; after the
+                            // TRL naming point the state goes on with the
+                            // mirror undriven, as before DX10.
+                            if (s.resync_wait_frames_ < kNavigationWaitFrames) {
+                                waiting.push_back("the navigation of the ball of " + std::to_string(body.owner));
+                                continue;
+                            }
+                            logf("resync: the state of tick %u goes on at tick %u without the navigation of the ball of %u "
+                                 "(not known after %u frames): its mirror stays undriven", anchor, now, body.owner,
+                                 s.resync_wait_frames_);
+                        }
+                    }
                     rows[it->second.entity] = &body;
                     continue;
                 }
@@ -434,6 +477,46 @@ namespace bmmo::session {
                 ++s.resync_rows_unmapped_;
             }
         }
+        // Step DX10 (J1b, world-agreement gaps "As built (step H4)"): the
+        // server's state at S drives every mirror alive at S.  A replay
+        // drives a mirror from its driven_from on (replay_remotes), which a
+        // late live birth (the catch-up birth made at the tick it was
+        // drained, seed 3: 1669 for S 1655) or the navigation's discovery
+        // (seeds 2 and j1: S + 3) put after S + 1: the re-step left the
+        // mirror undriven on the ticks between, on the live prediction's
+        // hold-last keys.  Keyed on the row, not on the local birth.  Its
+        // born_tick goes with it: the body this history has is the
+        // server's of S (the restore writes the row), so no rewind parks it
+        // at a later birth record any more (the relay's birth-frozen rule
+        // and remakes_birth read born_tick), and it is no longer the body
+        // its Physicalize made (birth_known).
+        uint32_t driven_moved = 0;
+        // What the block below changed, put back if the re-step is refused
+        // (review 1): the world is then still the live one, whose births
+        // and driven ranges these are.
+        struct moved_mirror { uint32_t player, driven_from, born_tick; bool birth_known; };
+        std::vector<moved_mirror> moved_mirrors;
+        for (auto& [player, remote]: s.remotes_) {
+            if (!remote.physicalized || !rows.count(remote.entity)) continue;
+            const moved_mirror before{player, remote.driven_from, remote.born_tick, remote.birth_known};
+            bool moved = false;
+            if (static_cast<int32_t>(remote.driven_from - (anchor + 1)) > 0) {
+                if (config.trace)
+                    logf("resync: mirror %s of %u driven from %u (was %u, born %u)", remote.entity.c_str(), player, anchor + 1,
+                         remote.driven_from, remote.born_tick);
+                remote.driven_from = anchor + 1;
+                moved = true;
+            }
+            if (static_cast<int32_t>(remote.born_tick - anchor) > 0) {
+                remote.born_tick = anchor;
+                remote.birth_known = false;
+                moved = true;
+            }
+            if (moved) {
+                ++driven_moved;
+                moved_mirrors.push_back(before);
+            }
+        }
         // 5. The reconcile (2.6.3): the anchor's bodies the server's state at
         // S has no row for.
         resync_spec spec;
@@ -578,6 +661,20 @@ namespace bmmo::session {
         s.last_rewind_rederived_ = false;
         if (!ok) {
             rd.r.abandon(s.pass_log_);
+            // The mirrors the block before step 5 moved to S + 1 keep the
+            // live history's ranges: a later rewind remakes a live birth at
+            // its tick (remakes_birth) and drives no tick it ran undriven.
+            // Only a field the block wrote and nothing changed since.
+            for (const auto& was: moved_mirrors) {
+                const auto it = s.remotes_.find(was.player);
+                if (it == s.remotes_.end()) continue;
+                auto& remote = it->second;
+                if (remote.driven_from == anchor + 1) remote.driven_from = was.driven_from;
+                if (remote.born_tick == anchor && !remote.birth_known) {
+                    remote.born_tick = was.born_tick;
+                    remote.birth_known = was.birth_known;
+                }
+            }
             ++s.resync_states_refused_;
             logf("resync: the re-step from tick %u to %u was refused: asking again", anchor, now);
             s.have_resync_state_ = false;
@@ -643,13 +740,13 @@ namespace bmmo::session {
         logf("resync: re-stepped from the server's tick %u to %u (%u ticks, delta %+lld, waited %u frame(s); %u navs; %zu rows: %u "
              "written, %u equal, %u unmapped; %zu script bytes (%s, %u unportable, %u kept local); blob %zu bytes %s (%s); "
              "keep-local %u, local-only %u, destroyed %u/%u, remade %u, from record %u, rechecked %u+%u deferred, "
-             "unexplained %u, unattributed %u; union {%s}; renames:%s) [%s]",
+             "unexplained %u, unattributed %u; %u mirror(s) driven from S + 1; union {%s}; renames:%s) [%s]",
              anchor, now, depth, static_cast<long long>(s.resync_delta_), s.resync_wait_frames_, navs, st.rows.size(),
              restored.rows_written, restored.rows_equal, unmapped, st.scripts.size(), scripts_ok ? "localized" : "REFUSED",
              script_report.unportable, script_report.kept_local, st.savestate.size(),
              restored.blob_applied ? "restored" : restored.anchor_blob ? "REFUSED, the anchor's own" : "REFUSED",
              restored.blob_summary.c_str(), keep_local, local_only, restored.destroyed, destroy, restored.remade,
-             restored.from_record, restored.rechecked, restored.deferred, unexplained, unattributed, active.c_str(),
+             restored.from_record, restored.rechecked, restored.deferred, unexplained, unattributed, driven_moved, active.c_str(),
              renamed.empty() ? " none" : renamed.c_str(), why);
         if (journal_.journalling()) {
             journal_resync r;

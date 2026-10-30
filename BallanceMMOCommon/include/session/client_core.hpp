@@ -1622,7 +1622,10 @@ namespace bmmo::session {
         uint32_t mirror_player_of(const std::string& entity) const;
         // A physicalized mirror without navigation is driven from now on, if
         // the host has the navigation (post_step step 16, and every birth).
-        void attach_remote_navigation(uint32_t player, client_core_state::remote_ball& remote, bool quiet = false);
+        // Step DX10: the host's answer (attached for one driven already,
+        // unavailable for one without a body), for the resync's wait.
+        bmmo::session::mirror_navigation attach_remote_navigation(uint32_t player, client_core_state::remote_ball& remote,
+                                                                  bool remake = false);
         // A restore's destroy_body for a mirror (core_world_hooks::
         // remake_mirror_birth, step LB): the mirror born at `birth_tick` is
         // taken out (body and navigation) and its birth queued again, so the

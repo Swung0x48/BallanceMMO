@@ -6730,6 +6730,251 @@ namespace {
         EXPECT_EQ(s.resyncs_restepped_, 1u);
     }
 
+    // The b1 world, able to drive the navigated balls in the replay (the
+    // server's navigation of S written at the restore).  `time_factor`, when
+    // given: the world's live time factor, recorded with every record, whose
+    // writes the world refuses (C3: the re-step is then refused).
+    session_platform dx10_platform(flow_fake& fake, std::shared_ptr<float> time_factor = nullptr) {
+        session_platform platform = b1_platform(fake, std::make_shared<bool>(false));
+        const auto bind = platform.bind_world;
+        platform.bind_world = [bind, time_factor](const bmmo::session::core_world_hooks& hooks) {
+            bmmo::session::rollback_world world = bind(hooks);
+            world.nav_input = [](const std::string&, const bmmo::session::input_frame&) { return true; };
+            world.nav_poll = [](const std::string&, bool) { return true; };
+            world.set_nav = [](const std::string&, const bmmo_physics_nav_state&) { return true; };
+            if (time_factor) {
+                world.get_globals = [time_factor](bmmo_physics_globals& out) {
+                    out = bmmo_physics_globals{};
+                    out.time_factor = *time_factor;
+                    return true;
+                };
+                world.set_globals = [](const bmmo_physics_globals&) { return false; };
+            }
+            return world;
+        };
+        return platform;
+    }
+
+    // Step DX10 (J1b, world-agreement gaps "As built (step H4)"): the
+    // server's state at S drives every mirror alive at S.  A mirror whose
+    // driven_from a late live birth or the navigation's discovery put after
+    // S + 1 is driven by the re-step from S + 1 (replay_remotes names it on
+    // every replayed tick), its born_tick lowered to S (the body is the
+    // server's of S, not its Physicalize's); a mirror driven from before S
+    // keeps its range; one with no row at S is not touched.
+    TEST(SessionClientCoreResync, TheImportsReStepDrivesEveryMirrorWithARowFromSPlusOne) {
+        flow_fake fake;
+        session_client_core core(dx10_platform(fake), session_capabilities{});
+        b1_session(core, fake, 125);
+        core.on_session_assign(exact_assign(9, 140));   // S = 139
+        auto& s = state_of(core);
+        const auto mirror = [&](uint32_t player, const std::string& entity, uint32_t born, uint32_t driven) {
+            auto& remote = s.remotes_[player];
+            remote.entity = entity;
+            remote.physicalized = true;
+            remote.navigation = true;
+            remote.born_tick = born;
+            remote.driven_from = driven;
+            remote.birth.tick = born;
+            remote.birth.player = player;
+            remote.birth_known = true;
+        };
+        mirror(4, "Ball_0_BMMO_4", 147, 147);   // a late live birth (seed 3's)
+        mirror(5, "Ball_0_BMMO_5", 141, 143);   // born at base + 1, navigated at base + 3 (seed 2's, j1's)
+        mirror(6, "Ball_0_BMMO_6", 100, 100);   // driven since before S
+        mirror(7, "Ball_0_BMMO_7", 148, 148);   // no row at S: not the server's at S
+        b1_frames(core, 140, 150);
+        auto msg = resync_state(140, {1});
+        for (const uint32_t player: {4u, 5u, 6u}) {
+            bmmo::session::body_state row;
+            row.kind = bmmo::session::body_kind::Ball;
+            row.owner = player;
+            msg.rows.push_back(row);
+            msg.navs.emplace_back(player, bmmo_physics_nav_state{});
+        }
+        const size_t from = fake.calls.size();
+        deliver(core, std::move(msg));
+        const auto calls = since(fake.calls, from);
+        ASSERT_FALSE(s.resync_pending_);
+        EXPECT_EQ(s.resyncs_restepped_, 1u);
+        EXPECT_EQ(s.remotes_.at(4).driven_from, 140u) << "S + 1";
+        EXPECT_EQ(s.remotes_.at(4).born_tick, 139u) << "the server's body of S";
+        EXPECT_FALSE(s.remotes_.at(4).birth_known);
+        EXPECT_EQ(s.remotes_.at(5).driven_from, 140u);
+        EXPECT_EQ(s.remotes_.at(5).born_tick, 139u);
+        EXPECT_EQ(s.remotes_.at(6).driven_from, 100u) << "driven from before S: kept";
+        EXPECT_EQ(s.remotes_.at(6).born_tick, 100u);
+        EXPECT_TRUE(s.remotes_.at(6).birth_known);
+        EXPECT_EQ(s.remotes_.at(7).driven_from, 148u) << "no row at S";
+        EXPECT_EQ(s.remotes_.at(7).born_tick, 148u);
+        // The re-step's driven range: every replayed tick (S, now] names the
+        // three mirrors with a row; the fourth only from its own driven_from.
+        for (const uint32_t t: {140u, 146u, 147u, 150u}) {
+            std::map<std::string, uint32_t> driven;
+            steps{core}.world_hooks().replay_remotes(t, driven);
+            EXPECT_EQ(driven.count("Ball_0_BMMO_4"), 1u) << t;
+            EXPECT_EQ(driven.count("Ball_0_BMMO_5"), 1u) << t;
+            EXPECT_EQ(driven.count("Ball_0_BMMO_6"), 1u) << t;
+            EXPECT_EQ(driven.count("Ball_0_BMMO_7"), t >= 148u ? 1u : 0u) << t;
+        }
+        // A row of the server's at a replayed tick is that mirror's from S + 1.
+        EXPECT_EQ(steps{core}.world_hooks().row_entity(bmmo::session::body_kind::Ball, 4, 140), "Ball_0_BMMO_4");
+        const auto line = std::find_if(calls.begin(), calls.end(), [](const std::string& c) {
+            return c.rfind("log:0:resync: re-stepped from the server's tick 139 to 150", 0) == 0;
+        });
+        ASSERT_NE(line, calls.end());
+        EXPECT_NE(line->find("; 2 mirror(s) driven from S + 1;"), std::string::npos) << *line;
+    }
+
+    // Step DX10: a mirror with a row at S that the host could not navigate
+    // yet (its graph unknown: the attach answers `unavailable`) holds the
+    // state like a missing body - the re-step cannot drive it - and the
+    // apply follows once the attach succeeds, driving it from S + 1.  A
+    // failed attach never holds it, nor does a ball the server did not
+    // navigate at S.
+    TEST(SessionClientCoreResync, TheStateWaitsForAMirrorsNavigation) {
+        for (const auto answer: {bmmo::session::mirror_navigation::unavailable, bmmo::session::mirror_navigation::failed}) {
+            for (const bool server_navigated: {true, false}) {
+                flow_fake fake;
+                session_client_core core(dx10_platform(fake), session_capabilities{});
+                b1_session(core, fake, 125);
+                core.on_session_assign(exact_assign(9, 140));
+                auto& s = state_of(core);
+                auto& remote = s.remotes_[4];
+                remote.entity = "Ball_0_BMMO_4";
+                remote.physicalized = true;
+                remote.born_tick = remote.driven_from = 141;
+                b1_frames(core, 140, 145);
+                fake.attach_answer = answer;
+                auto msg = resync_state(140, {1});
+                bmmo::session::body_state row;
+                row.kind = bmmo::session::body_kind::Ball;
+                row.owner = 4;
+                msg.rows.push_back(row);
+                if (server_navigated) msg.navs.emplace_back(4u, bmmo_physics_nav_state{});
+                deliver(core, std::move(msg));
+                const bool waits = answer == bmmo::session::mirror_navigation::unavailable && server_navigated;
+                EXPECT_EQ(s.resync_pending_, waits) << static_cast<int>(answer) << server_navigated;
+                if (!waits) {
+                    EXPECT_EQ(s.remotes_.at(4).driven_from, 140u) << "applied: the rule still holds";
+                    continue;
+                }
+                EXPECT_TRUE(s.have_resync_state_);
+                EXPECT_EQ(s.resync_deferred_, 1u);
+                EXPECT_FALSE(steps{core}.try_apply_resync("retry"));
+                EXPECT_FALSE(s.remotes_.at(4).navigation);
+                fake.attach_answer = bmmo::session::mirror_navigation::attached;
+                EXPECT_TRUE(steps{core}.try_apply_resync("retry"));
+                EXPECT_FALSE(s.resync_pending_);
+                EXPECT_TRUE(s.remotes_.at(4).navigation);
+                EXPECT_EQ(s.remotes_.at(4).driven_from, 140u);
+                std::map<std::string, uint32_t> driven;
+                steps{core}.world_hooks().replay_remotes(140, driven);
+                EXPECT_EQ(driven.count("Ball_0_BMMO_4"), 1u);
+            }
+        }
+    }
+
+    // Step DX10 (review 1): a refused re-step (here C3, the world refusing
+    // the recorded globals) leaves the live world, so the mirrors the block
+    // before step 5 moved get their live ranges back: the late birth's tick
+    // (a later rewind remakes it there, remakes_birth) and its driven_from.
+    TEST(SessionClientCoreResync, ARefusedReStepPutsTheMirrorsRangesBack) {
+        flow_fake fake;
+        const auto time_factor = std::make_shared<float>(1.0f);
+        session_client_core core(dx10_platform(fake, time_factor), session_capabilities{});
+        b1_session(core, fake, 125);
+        core.on_session_assign(exact_assign(9, 140));   // S = 139
+        auto& s = state_of(core);
+        auto& remote = s.remotes_[4];
+        remote.entity = "Ball_0_BMMO_4";
+        remote.physicalized = true;
+        remote.navigation = true;
+        remote.born_tick = remote.driven_from = remote.birth.tick = 147;
+        remote.birth.player = 4;
+        remote.birth_known = true;
+        b1_frames(core, 140, 150);
+        *time_factor = 0.5f;   // the live value differs from every record's: the replay's write is refused
+        auto msg = resync_state(140, {1});
+        bmmo::session::body_state row;
+        row.kind = bmmo::session::body_kind::Ball;
+        row.owner = 4;
+        msg.rows.push_back(row);
+        msg.navs.emplace_back(4u, bmmo_physics_nav_state{});
+        deliver(core, std::move(msg));
+        EXPECT_EQ(s.resync_states_refused_, 1u);
+        EXPECT_EQ(s.resyncs_restepped_, 0u);
+        EXPECT_EQ(s.remotes_.at(4).driven_from, 147u);
+        EXPECT_EQ(s.remotes_.at(4).born_tick, 147u);
+        EXPECT_TRUE(s.remotes_.at(4).birth_known);
+    }
+
+    // Step DX10 (review 2): a navigation the wait itself attaches, while the
+    // state still waits for another body, is driven from the tick it was
+    // attached at, as post_step's discovery does - a rewind before the apply
+    // must not drive the ticks it ran undriven.  (Review 3) A navigation
+    // still unknown after the TRL naming point no longer holds the state: it
+    // goes on with that mirror undriven, as before DX10.
+    TEST(SessionClientCoreResync, TheNavigationWaitDrivesFromTheAttachAndIsBounded) {
+        {
+            flow_fake fake;
+            session_client_core core(dx10_platform(fake), session_capabilities{});
+            b1_session(core, fake, 125);
+            core.on_session_assign(exact_assign(9, 140));
+            auto& s = state_of(core);
+            auto& remote = s.remotes_[4];
+            remote.entity = "Ball_0_BMMO_4";
+            remote.physicalized = true;
+            remote.born_tick = remote.driven_from = 141;
+            b1_frames(core, 140, 145);
+            auto msg = resync_state(140, {1});
+            for (const uint32_t player: {4u, 8u}) {   // 8: no mirror yet, the state waits for it
+                bmmo::session::body_state row;
+                row.kind = bmmo::session::body_kind::Ball;
+                row.owner = player;
+                msg.rows.push_back(row);
+                msg.navs.emplace_back(player, bmmo_physics_nav_state{});
+            }
+            deliver(core, std::move(msg));
+            EXPECT_TRUE(s.resync_pending_) << "waits for the ball of 8";
+            EXPECT_TRUE(s.remotes_.at(4).navigation) << "attached by the wait";
+            EXPECT_EQ(s.remotes_.at(4).driven_from, 145u) << "driven from the attach, not from 141";
+        }
+        {
+            flow_fake fake;
+            session_client_core core(dx10_platform(fake), session_capabilities{});
+            b1_session(core, fake, 125);
+            core.on_session_assign(exact_assign(9, 140));
+            auto& s = state_of(core);
+            auto& remote = s.remotes_[4];
+            remote.entity = "Ball_0_BMMO_4";
+            remote.physicalized = true;
+            remote.born_tick = remote.driven_from = 141;
+            b1_frames(core, 140, 145);
+            fake.attach_answer = bmmo::session::mirror_navigation::unavailable;
+            auto msg = resync_state(140, {1});
+            bmmo::session::body_state row;
+            row.kind = bmmo::session::body_kind::Ball;
+            row.owner = 4;
+            msg.rows.push_back(row);
+            msg.navs.emplace_back(4u, bmmo_physics_nav_state{});
+            deliver(core, std::move(msg));
+            ASSERT_TRUE(s.resync_pending_);
+            EXPECT_EQ(s.resync_wait_frames_, 1u);
+            for (int i = 0; i < 59; ++i) EXPECT_FALSE(steps{core}.try_apply_resync("retry")) << i;
+            EXPECT_EQ(s.resync_wait_frames_, 60u);
+            const size_t from = fake.calls.size();
+            EXPECT_TRUE(steps{core}.try_apply_resync("retry"));
+            EXPECT_FALSE(s.resync_pending_);
+            EXPECT_EQ(s.resyncs_restepped_, 1u);
+            EXPECT_FALSE(s.remotes_.at(4).navigation) << "undriven";
+            const auto calls = since(fake.calls, from);
+            EXPECT_TRUE(std::any_of(calls.begin(), calls.end(), [](const std::string& c) {
+                return c.find("without the navigation of the ball of 4 (not known after 60 frames)") != std::string::npos;
+            }));
+        }
+    }
+
     TEST(SessionClientCoreResync, TheHoldHoldsAtTheReachAndTimesOut) {
         flow_fake fake;
         session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});

@@ -865,19 +865,21 @@ namespace bmmo::session {
     // `remake`: the navigation of a mirror made again inside a replay (step
     // LB) - attached as at its birth, without the log line and with the
     // corrector left as the live frames have it.
-    void session_client_core::attach_remote_navigation(uint32_t player, remote_ball& remote, bool remake) {
-        if (!remote.physicalized || remote.navigation) return;
+    mirror_navigation session_client_core::attach_remote_navigation(uint32_t player, remote_ball& remote, bool remake) {
+        if (!remote.physicalized) return mirror_navigation::unavailable;
+        if (remote.navigation) return mirror_navigation::attached;
         std::string error;
         const mirror_navigation attached = platform_.attach_mirror_navigation(player, remote.entity, remote.ball_type, error);
-        if (attached == mirror_navigation::unavailable) return;
+        if (attached == mirror_navigation::unavailable) return attached;
         if (attached == mirror_navigation::attached) {
             remote.navigation = true;
-            if (remake) return;
+            if (remake) return attached;
             remote.corrector.clear();
             logf("remote %s now predicted", remote.entity.c_str());
         } else {
             logf("remote navigation for %s: %s", remote.entity.c_str(), error.c_str());
         }
+        return attached;
     }
 
 

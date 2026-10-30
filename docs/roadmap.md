@@ -2251,7 +2251,12 @@ numbers 1-10 are unchanged.
      the fix step also handles a mirror not navigated at the import
      (`replay_remotes` skips it) and a replayed tick with no relayed frame
      in (S, t] (seed 2's ring starts at S + 2); then j1b seeds 2 / 3 on
-     their captures. **(item 4) a removal in a rewind's window drops the
+     their captures (**built at step DX10**: the rule, `born_tick` lowered
+     to S with it, a mirror not navigated yet holds the state like a
+     missing body, the no-frame case named; H4's captures of j1b seeds 1-5
+     and j1 replay with the joiner's mirrors 0.0000 m - seed 3 13.84 -> 0,
+     seed 2 2.14 -> 0; world-agreement-gaps-design.md "As built (step
+     DX10)"). **(item 4) a removal in a rewind's window drops the
      friction system the removed body shared** - J4's probe half: client 1
      leaves in contact with the moving P_Modul_01 Pusher; the Pusher
      bit-equal through 1080, then 0.0085 m at 1082 and 0.025 m for good on

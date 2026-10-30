@@ -4445,3 +4445,137 @@ check.
   without the delay), step time max 3.5 ms, starved 0, resyncs 0, server
   journal 4081/4081, the four clients' captures replayed byte-identical to
   their live journals. PASS.
+
+### As built (step DX10, FULL close-out, 2026-10-30): J1b - the import's re-step drives every mirror alive at S
+
+H4's J1b finding (above, "As built (step H4)"; roadmap §4 item 4; FULL plan
+step DX10), built as the design settles it: the server's state at S drives
+every mirror alive at S. Shared core only (`client_core_resync.cpp`,
+`client_core_lifecycle.cpp`, `client_core.hpp`); no protocol, journal or
+layout change (no data member added anywhere), no IVP or engine change.
+
+- **The rule** (`try_apply_resync`, after the rows and the mirrors made
+  from their row, before the restore): every physicalized mirror with a
+  row at S gets `driven_from` = min(`driven_from`, S + 1), so
+  `replay_remotes` names it on every replayed tick from S + 1 (and
+  `row_entity` maps the server's rows onto it from there). Keyed on the
+  row, not on the local birth, as H4 asked (seed 3's mirror was born live
+  at 1669 > S). Every exact resync takes it, the late joiner's import and
+  a running member's A3 resync alike. The log line "resync: re-stepped
+  ..." counts the mirrors it moved ("N mirror(s) driven from S + 1");
+  `--trace` names each with its old value.
+- **Adapted: `born_tick` goes with it.** A rowed mirror whose `born_tick` is
+  after S gets `born_tick` = S and `birth_known` = false: the body this
+  history has is the server's of S (the restore writes the row), not the
+  one its Physicalize made at the later tick. Left at 1669, the relay's
+  birth-frozen rule (`client_core_messages.cpp` ~516: a frame for
+  `tick == born_tick` is dropped because "every rewind parks it there")
+  would have dropped a late frame for 1669 with no rewind, and
+  `remakes_birth` (`driven_from == born_tick`, now possibly true at S + 1
+  for a mirror born at its stamp S + 1) could have taken the body out at a
+  later restore anchored at S and made it again from its Physicalize. With
+  `born_tick` = S and `driven_from` = S + 1, `remakes_birth` is false for
+  it and no frame after S is frozen. The design named `driven_from` only;
+  recorded here.
+- **Hole 1, a mirror not navigated at the import: closed by a wait.** A
+  replay drives only a navigated mirror; a mirror made before the host
+  knew the navigation graph has none. The state now waits for it like a
+  missing body (2.6.4 step 2, the same `waiting` list, the same hold and
+  reach - an anchor that leaves the history is asked for again): only a
+  ball with a row at S that the server navigated at S (a `navs` entry),
+  and only while the host's attach answers `unavailable` (the graph not
+  known yet); a `failed` attach never holds it (no later frame would make
+  it succeed). `attach_remote_navigation` returns the host's answer for
+  this (no caller else reads it). An attach the wait itself makes (the
+  graph became known since the last `post_step`) sets `driven_from` to the
+  current tick exactly as the discovery does (review 2): while the state
+  still waits for another body, or is dropped, a rewind must not drive the
+  ticks the mirror ran undriven; an apply that proceeds lowers it to S + 1.
+  Such an attach also clears the corrector and logs "now predicted" during
+  an apply that may not go ahead (harmless: the live frames re-fill it).
+  The wait is bounded (review 3): retail's discovery never makes the graph
+  known when it has fewer than four keyed leaves (other mods' unbound
+  leaves, `core_host.cpp` `discover_navigation`), and an unbounded wait
+  would hold the join until the hold timed out and asked again, for good;
+  after `kNavigationWaitFrames` = 60 frames (the TRL naming point of a
+  wait) the state goes on with that mirror undriven, as before DX10, and
+  logs "goes on ... without the navigation of the ball of N". With the
+  wait, a rowed mirror is otherwise always navigated before the import, so
+  the discovery rule
+  (`client_core_frame.cpp` 692-697) can no longer move a rowed mirror's
+  `driven_from` past S + 1 after an import (the graph is discovered once
+  per session, and that discovery came before the import): no code there.
+  That holds for a mirror the server navigated at S; a row without a
+  `navs` entry, or a mirror whose attach answered `failed`, is not waited
+  for, gets `driven_from` = S + 1 at the import but is skipped by
+  `replay_remotes` (no navigation), and a later discovery moves it to
+  that tick as before - the re-step cannot drive it either way. (A
+  `failed` mirror re-logs its attach error on each retry while the state
+  waits for another body; log noise only.)
+  A mirror the import makes from its row with its death after S (A3's
+  2.6.3 path) is made at S with `driven_from` = S already. Met in no run
+  or capture: in all six J runs the import came 30-80 ticks after the
+  discovery ("3 navs").
+- **Hole 2, a replayed tick with no relayed frame in (S, t]: named, no
+  code.** When the ring has no frame at or before t and the live record
+  has no prediction for the mirror at t (seed 2: the ring starts at S + 2,
+  the mirror was not navigated live at S + 1), nothing drives it and its
+  navigation keeps the server's navigation of S that the restore wrote
+  (`spec.navs`) - the server's own hold-last: seed 2's two such ticks
+  replay exact. The remaining case - the ring holds a frame before S and
+  none in (S, t] - takes that nearest earlier frame
+  (`relay_frame_or_earlier`), and one named live with no frame at all
+  takes its live prediction (`rollback.hpp` ~2060 feed); a later relayed
+  frame for those ticks is news (no record of it, or a different one)
+  and rewinds them. Met in no run.
+
+**Verified** (quick tier). The pass evidence is the deterministic replay of
+H4's own captures (`maps/arena-test/h4_full/<run>/capture3.bmic`, the
+joiner, `--final-checkpoints`, `.local-tools/work/DX10/rep.sh`, judged
+with `work/H4/final_cmp.py` against each run's server journal):
+
+| run | HEAD (rDX9) joiner, mirrors | DX10 joiner, mirrors | moved |
+|---|---|---|---|
+| j1b seed 1 | (exact at H4) | 0.0000 m | 3 |
+| j1b seed 2 | 2.1359 m, first 0.0512 m at 1662 | 0.0000 m | 3 |
+| j1b seed 3 | 13.8374 m, first 0.8740 m at 1670 | 0.0000 m | 3 |
+| j1b seed 4 | (exact at H4) | 0.0000 m | 3 |
+| j1b seed 5 | (exact at H4) | 0.0000 m | 3 |
+| j1 | 0.0000 m | 0.0000 m | 3 |
+
+Own ball and map bodies 0.0000 m in every row; no wait, no "asking
+again". Seed 3's clients 0-2 (no resync) replay exact as before. Every J
+run's import moved all three mirrors (each made at S + 1 or later: seed
+3's 1669 catch-up birth, the others' base births with the keys learned at
+S + 3), so seeds 1, 4, 5 and j1 were exact only because their undriven
+ticks' stale keys happened to be right (H4's j1 reading). Unit tests
+`SessionClientCoreResync.TheImportsReStepDrivesEveryMirrorWithARowFromSPlusOne`
+(the driven range of the re-step: four mirrors - a late birth, a base
+birth navigated late, one driven since before S, one with no row) and
+`SessionClientCoreResync.TheStateWaitsForAMirrorsNavigation` (unavailable /
+failed x navigated / not by the server).
+
+- **A refused re-step puts the ranges back** (review 1). The block runs
+  before `rollback_.resync`; a re-step refused there (C3's globals write,
+  "asking again") leaves the live world, whose births and driven ranges
+  these were, so each moved mirror's `driven_from`, `born_tick` and
+  `birth_known` are restored (each field only if it still holds what the
+  block wrote). Left moved, a live rewind anchored between S and the live
+  birth would have parked the ball instead of remaking it at its birth
+  (`remakes_birth` false) and driven it on ticks before it existed live.
+  Unit tests `ARefusedReStepPutsTheMirrorsRangesBack` (C3 refusal through
+  a world refusing every globals write) and
+  `TheNavigationWaitDrivesFromTheAttachAndIsBounded` (reviews 2 and 3).
+- **Evidence standing in for live runs.** The plan row's "J1b's five seeds
+  exact on the joiner" is shown by the deterministic replays above (the
+  same captured inbound against pinned game data, repeatable), plus one
+  live smoke run of seed 3's recipe on the new build
+  (`maps/arena-test/h4_full/dx10_j1b_s3`, Arch server snapshots off: the
+  joiner re-stepped 1696 -> 1751 moving 3 mirrors, the FINAL rows of all
+  four clients 0.0000 m, starved 0, far 0); seeds 1, 2, 4, 5 and j1 were
+  not rerun live. The wire check against `core_ref_s12` is ALL SAME (a
+  no-regression check only: that set's three resyncs moved 0 mirrors).
+  After the review fix-ups: 676/676 unit tests, GCC syntax 31/31 ok, the
+  x64 and x86 builds, the wire check ALL SAME again, and the seed 2 and
+  seed 3 joiner replays 0.0000 m (own, mirror, body; 3 mirrors moved each,
+  no navigation wait cut short, no refusal).
