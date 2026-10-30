@@ -1103,9 +1103,14 @@ namespace bmmo::session {
         // step it, and be applied a tick late (the server logs it: "late
         // by 1", seen on BodyRevived and Physicalize).
         platform_.send(bytes, send_mode::reliable_no_nagle);
-        // ...and again, unreliably, on each of the next ticks
-        // (flush_inputs): the server takes the first copy to arrive.
-        s.own_event_repeats_.push(bytes, {0u});
+        // ...and again, unreliably, on the next ticks (flush_inputs): the
+        // server takes the first copy to arrive.  Step DX8 (D4 (b')): the
+        // own schedule - L + 1, L + 2, L + 3, then every other tick
+        // (lifecycle.hpp kOwnEventRepeats): the server steps an own event's
+        // stamp L + 1 as soon as frame L + 1 is in, whichever datagram
+        // carries it first must carry a copy too.
+        s.own_event_repeats_.push(bytes, {0u}, bmmo::session::kOwnEventRepeats, bmmo::session::kOwnEventRepeatSpacing,
+                                  bmmo::session::kOwnEventRepeatsDense);
     }
 
 }

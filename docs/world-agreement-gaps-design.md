@@ -4182,6 +4182,29 @@ Tests only; no code under test changed.
     target links neither; WM1's note); U7 needs a crafted journal and a
     SimTool replay - about half a day for the seam and U6, 2 h for U7.
 
+### As built (step DX8, FULL close-out, 2026-10-30): U5 (c) built
+
+The user's D4 answer ("你决定"; the orchestrator's (b') with U5 (c)) unblocked
+S3's finding. `rewind_for_lifecycle` (`client_core_lifecycle.cpp`): a late
+lifecycle event whose rewind the history cannot reach is counted
+`life_rewinds_missed_` as before and now requests a resync ("a late
+lifecycle event beyond the reach", owed: one the 2 s limiter holds back is
+asked again), with the late Sector path's two guards - nothing while a
+resync is pending (its state covers the event; the pending exact resync's
+case before its anchor already returned earlier, step A3) and nothing for a
+stamp at or before the numbering's first tick (`tick_base_`, a late joiner's
+catch-up). Adapted from §7.1 U5 (c)'s "no mirror made": the change is still
+applied live by the drain until the resync's state replaces the world, as
+the Sector path stamps live and resyncs - not making the mirror would be a
+second, drain-side path for one rare case, and the resync overwrites it
+either way. Tests: `SessionClientCoreMemberLives.AParkedEventPastItsTickTakesTheLatePath`
+(the request and `resyncs_sent_` 1) and `SessionClientCoreLifecycle`'s
+overtaken-birth case (two misses in one drain: one request, the second
+held by the request in flight). H4's J3 at a 4500 ms hold (the joiner's
+mirror 12.7 m off for good) is the live case this answers; not re-run here
+(the step's live runs went to D4's measurement), deferred to the close-out.
+The schedule half of DX8: late-player-design.md 3.1 "As built (step DX8)".
+
 ### As built (step H4, FULL close-out, 2026-10-29): members, rejoins, I/O (live)
 
 FULL plan rows WM1-J (J1b x5, J2, J4), WM1-J3, WG2-Je, WGQ7-U9, WGQ7-ctl,

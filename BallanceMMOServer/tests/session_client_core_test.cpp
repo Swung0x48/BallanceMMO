@@ -2370,8 +2370,10 @@ namespace {
         }
         EXPECT_TRUE(state_of(core).remotes_.empty());
 
-        // ...applied before it: made (late, outside the history: live), and
-        // the death applied again with its own rewind.
+        // ...applied before it: made (late, outside the history: live, and
+        // a resync asked for - step DX8, U5 (c)), and the death applied
+        // again with its own rewind (outside too: the request in flight
+        // covers it).
         core.on_session_event(event_message(4, bmmo::session::event_type::Physicalize, 123, 121));
         from = fake.calls.size();
         steps{core}.drain_due_events(126);
@@ -2384,19 +2386,23 @@ namespace {
                 "attach_mirror_navigation:4:Ball_0_BMMO_4", "log:0:remote Ball_0_BMMO_4 now predicted",
                 "log:0:remote player 4 physicalized (Ball_0_BMMO_4) at tick 123, predicted",
                 "keep_live_cells:enter:125", "bind_world",
-                "log:0:lifecycle event of 4 stamped tick 123 is outside the rollback history at local tick 125: the "
-                "body set disagrees until a snapshot re-anchors it",
+                "log:0:lifecycle event of 4 stamped tick 123 is outside the rollback history at local tick 125: "
+                "applied live, resync",
+                "now:resync_limiter", "send:0",
+                "log:0:resync requested (a late lifecycle event beyond the reach) at tick 125",
                 "keep_live_cells:exit",
                 "detach_mirror_navigation:Ball_0_BMMO_4",
                 "mute_event_log:on", "unmake_mirror:Ball_0_BMMO_4", "mute_event_log:off",
                 "log:0:remote player 4 unphysicalized at tick 124",
                 "keep_live_cells:enter:125", "bind_world",
-                "log:0:lifecycle event of 4 stamped tick 124 is outside the rollback history at local tick 125: the "
-                "body set disagrees until a snapshot re-anchors it",
+                "log:0:lifecycle event of 4 stamped tick 124 is outside the rollback history at local tick 125: "
+                "applied live, resync",
+                "now:resync_limiter",
                 "keep_live_cells:exit"};
             EXPECT_EQ(since(fake.calls, from), expected);
         }
         EXPECT_EQ(state_of(core).life_rewinds_missed_, 2u);
+        EXPECT_EQ(state_of(core).resyncs_sent_, 1u);
         const auto& four = state_of(core).remotes_.at(4);
         EXPECT_FALSE(four.physicalized);
         EXPECT_FALSE(four.navigation);
@@ -7842,8 +7848,8 @@ namespace {
     // U5 (b)/(c): the member message comes after the event's tick has
     // passed - released, the event takes the late path at the next drain:
     // made at its stamp with the life's group and kick (P#5, never 63), and
-    // its rewind asked for (outside this fixture's history: refused and
-    // logged, as any late birth).
+    // its rewind asked for (outside this fixture's history: refused, so -
+    // step DX8, U5 (c) - a resync is requested, as any late birth).
     TEST(SessionClientCoreMemberLives, AParkedEventPastItsTickTakesTheLatePath) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
@@ -7863,8 +7869,12 @@ namespace {
                   calls.end());
         EXPECT_NE(std::find(calls.begin(), calls.end(),
                             "log:0:lifecycle event of 11 stamped tick 122 is outside the rollback history at local tick 125: "
-                            "the body set disagrees until a snapshot re-anchors it"),
+                            "applied live, resync"),
                   calls.end());
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:resync requested (a late lifecycle event beyond the reach) at tick 125"),
+                  calls.end());
+        EXPECT_EQ(state_of(core).resyncs_sent_, 1u);
         EXPECT_EQ(core.mirrors_outside_lives(), 0u);
         EXPECT_EQ(core.member_life_outside(), 0u);
         ASSERT_EQ(state_of(core).remotes_.count(11), 1u);

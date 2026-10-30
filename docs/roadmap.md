@@ -2288,7 +2288,12 @@ numbers 1-10 are unchanged.
    its ball up to 2 ticks before the server and every mirror, and contacts
    in those ticks differ with no correction (snapshots off). About 1 % of
    lone events at 10 % loss; how much of it remains depends on the D4
-   answer (the stamp rule / repeat schedule).
+   answer (the stamp rule / repeat schedule). D4 answered and built at
+   step DX8 ((b') hybrid repeats, late-player-design.md 3.1 "As built (step
+   DX8)"): modelled late lone events at 10 % loss 9.1 -> 0.1 per 1000
+   (burst 1), about 50 -> 2.7 (burst 2), with the copies coalesced into
+   the input datagrams as the proxy logs show for 83 of 86 events (an
+   upper bound on the gain); step 22 stays queued for the rest.
 
 **Stage C - close the core (goal 1).**
 

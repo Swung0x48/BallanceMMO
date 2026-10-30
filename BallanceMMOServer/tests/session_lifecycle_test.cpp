@@ -662,6 +662,32 @@ TEST(LifecycleEventRedundancy, RepeatsGoOutOncePerCallToEveryRecipientAndStop) {
     }
     EXPECT_EQ(calls_with_a_copy, (std::vector<int>{0, 2, 4, 6, 8, 10}));
     EXPECT_EQ(spaced.pending(), 0u);
+    // Step DX8 (D4 (b')): a client's own events - three copies one call
+    // apart, then two apart: every call of the schedule above plus the
+    // second (L + 1, L + 2, L + 3, L + 5 ... L + 11), seven copies.
+    bmmo::session::event_repeats own;
+    own.push("G", {0}, bmmo::session::kOwnEventRepeats, bmmo::session::kOwnEventRepeatSpacing,
+             bmmo::session::kOwnEventRepeatsDense);
+    std::vector<int> own_calls;
+    for (int call = 0; call < 14; ++call) {
+        bool any = false;
+        own.send_due([&any](uint32_t, const std::string&) { any = true; });
+        if (any) own_calls.push_back(call);
+    }
+    EXPECT_EQ(own_calls, (std::vector<int>{0, 1, 2, 4, 6, 8, 10}));
+    EXPECT_EQ(own.pending(), 0u);
+    for (int call: calls_with_a_copy)
+        EXPECT_NE(std::find(own_calls.begin(), own_calls.end(), call), own_calls.end()) << "a superset of " << call;
+    // Dense copies only (dense >= copies): every call.
+    bmmo::session::event_repeats burst;
+    burst.push("H", {0}, 3, 2, 5);
+    std::vector<int> burst_calls;
+    for (int call = 0; call < 6; ++call) {
+        bool any = false;
+        burst.send_due([&any](uint32_t, const std::string&) { any = true; });
+        if (any) burst_calls.push_back(call);
+    }
+    EXPECT_EQ(burst_calls, (std::vector<int>{0, 1, 2}));
 }
 
 TEST(LifecycleEventRedundancy, OneStampOrdersTheDeathBeforeTheBirth) {

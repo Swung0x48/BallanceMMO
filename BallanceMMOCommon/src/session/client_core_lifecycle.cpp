@@ -371,8 +371,13 @@ namespace bmmo::session {
     // also what its owner had.  (A destroyed body cannot be restored by the
     // engine, and does not need to be - the replay runs without it.)
     //
-    // A stamp older than the rollback history has nothing to rewind to, and
-    // then the snapshot path takes over - which is what it is there for.
+    // A stamp older than the rollback history has nothing to rewind to: the
+    // change stays where the drain made it, at the live tick, and a resync
+    // brings the world to the server's (step DX8, world-agreement design
+    // 7.1 U5 (c); until DX8 it waited for a snapshot, which under "assume
+    // no snapshots" never came).  As the late Sector path: not while a
+    // resync is pending (its state covers it) and not for a stamp at or
+    // before this numbering's first tick (a late joiner's catch-up).
     void session_client_core::rewind_for_lifecycle(const bmmo::session_event_msg& event) {
         rewind_for_lifecycle(event.player, event.tick);
     }
@@ -404,8 +409,15 @@ namespace bmmo::session {
             return;
         }
         ++s.life_rewinds_missed_;
+        if (s.resync_pending_ || static_cast<int32_t>(event_tick - s.tick_base_) <= 0) {
+            logf("lifecycle event of %u stamped tick %u is outside the rollback history at local tick %u: "
+                 "applied live, %s", player, event_tick, now,
+                 s.resync_pending_ ? "the pending resync covers it" : "before this numbering");
+            return;
+        }
         logf("lifecycle event of %u stamped tick %u is outside the rollback history at local tick %u: "
-             "the body set disagrees until a snapshot re-anchors it", player, event_tick, now);
+             "applied live, resync", player, event_tick, now);
+        request_resync("a late lifecycle event beyond the reach", true);
     }
 
     // ------------------------------------------------------------ events

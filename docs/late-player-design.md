@@ -2115,6 +2115,93 @@ measured runs, both resynced), far fewer at realistic loss; it conflicts
 with the headline's resyncs 0 for the 10 %-loss arm and leaves the 2-tick
 own-death gap.
 
+*As built (step DX8, FULL, 2026-10-30): D4 = (b') hybrid repeats, measured
+and kept; U5 (c).* The user's answer to D4 was "你决定"; the orchestrator
+chose (b'). **The schedule**: the old copy ticks plus one, i.e. the copies
+of an own event ride the input datagrams of L + 1, L + 2, L + 3, L + 5 ...
+L + 11 (seven copies, span 11) - `lifecycle.hpp` `kOwnEventRepeats` 7,
+`kOwnEventRepeatsDense` 3, `kOwnEventRepeatSpacing` 2, `event_repeats`'s new
+`dense` count (the first `dense` copies on consecutive calls), pushed only by
+the core's `put_event_on_wire` (`client_core.cpp`) - so it applies to every
+own event the core sends (Sector, BodyRevived and Trafo too, not only the
+Physicalize / Unphysicalize the plan row names: one more copy each,
+harmless). Adapted from the plan's
+wording ("first repeats at L + 1 and L + 2, then spacing 2", which also reads
+as L + 1, L + 2, L + 4 ... L + 12): that reading drops L + 3, so a burst of
+three from the reliable datagram (reliable, L + 1, L + 2 lost, L + 3 passed),
+on time today, would be late; the superset keeps every send tick of the old
+schedule, so no loss pattern, bursts included, makes an event later than
+before. **Split as the plan allowed**: `kLifecycleEventRepeats` /
+`kLifecycleEventRepeatSpacing` and `event_repeats::push`'s defaults are
+unchanged, so the server's relay (the downlink is not the problem: relayed
+depth 20-25 against a reach of 52-74) and the legacy retail path send
+exactly as before. **Two send orders** (found here): an event sent after the
+frame's input (the beam at 700 of F3's seed 1) is stamped L + 1 and its
+copies were at L + 1, L + 3 ...; one sent at a frame's start, ahead of that
+frame's input (a birth or a death the platform reports first, e.g. 864 of
+DX8's burst-2 run, S5 `origin=864`), is stamped L and its copies were at L,
+L + 2 ...: in both the tick after the first copy - the datagram that carries
+the stamp's frame when the first one is lost - had none, and it has one now.
+**Measured** (`.local-tools/work/DX8/lcm_model.py`, the physics-free model of
+F3's rule: on time if the reliable datagram(s) passed or a copy rides the
+first passed input datagram at or after the stamp; worst case, the sender
+paces the server): (1) the proxy's own loss rule (`arena_map_test.py`
+`LinkProxy`, per direction a burst of b started with q = p / (b - p (b - 1)),
+p = 0.10) drawn over a synthetic uplink, 200 000 events per cell, late per
+1000 events old -> new: burst 1 lone 9.1 -> 0.1, beam pairs 17.2-17.6 ->
+0.15-0.2; burst 2 about 50 -> 2.7; burst 3 about 35 -> 2.4-3.7; burst 4
+about 50 -> 26; bursts 6 and 8 about 50 -> 34-39 (both send orders; the new
+schedule was never later than the old on any draw); (2) F3's three recorded
+runs (`maps/arena-test/f3_lcm`, proxy logs, 50 events aligned): the model
+reproduces exactly the one late event pair seen (seed 1 c2's beam at 700,
+old late 2 = S5 margin -2), and scores it on time under the new schedule; no
+other event late either way. **The model's one assumption** (the review's
+finding): a copy shares the fate of its tick's input datagram. In the code
+each copy is a send of its own (`flush_inputs` sends the due copies
+unreliable-no-delay, then the input datagram), so it only holds where GNS
+packs the two into one packet. The recorded proxy logs say it does: an
+event counts as coalesced when at least four of its first five
+copy-carrying input datagrams are 20 bytes or more above the median of the
+copy-free ones, and 83 of the 86 scored events are (F3's three runs 49/50,
+DX8's burst-2 run 18/18, burst-1 run 16/18; the other three unconfirmed,
+not contradicted). Where a copy does go alone and is lost while its input
+datagram passes, the event is late under both schedules, by 1 instead of
+2: so the model's late counts are the gain under full coalescing (an upper
+bound on it), and "never later than the old" holds on every draw either
+way, the new copy ticks being a superset; (3) two live runs of F3's recipe with the DX8
+build (`.local-tools/work/DX8/dx8_run.sh`, `maps/arena-test/dx8_lcm`):
+burst 2 seed 0 - 0 late member events, resyncs 0/0 on all four, far 0,
+VERDICT PASS, and one rescue on the wire: c0's lone death at 864 lost its
+reliable datagram and the input datagram of 864, the 865 datagram (with the
+new copy) passed, S5 `late=0 margin=0` - late 2 under the old schedule (the
+silent own-death gap); burst 1 seed 1 - 0 late, resyncs 0/0, PASS (seed
+numbers do not pair runs: the proxy draws one stream for both directions in
+arrival order). Cost: one more copy per own event (28-150 bytes in the
+L + 2 datagram). Not changed: a lone own Unphysicalize the server does
+re-stamp late is still "kept where we stamped it" (roadmap item 8, plan
+step 22); it is rarer now. **U5 (c)**: `rewind_for_lifecycle`'s miss
+(`client_core_lifecycle.cpp`, a late event whose rewind the history cannot
+reach) now asks for a resync ("a late lifecycle event beyond the reach",
+owed), with the late Sector path's guards: not while a resync is pending
+and not for a stamp at or before the numbering's first tick; the change
+itself is still applied live meanwhile (as the Sector path does; the
+resync's state replaces it). The log line says "applied live, resync" (no
+longer "until a snapshot re-anchors it"). See world-agreement-gaps-design.md
+"As built (step DX8)". **Checks**: unit tests 671/671; GCC syntax 31/31;
+x86 client compile; the wire check rDX7 -> rDX8 over core_ref_s12 prints
+DIFFERENCES by design - all 36 send traces differ only by the added copies
+(`.local-tools/work/DX8/trace_diff.py`: removing one unreliable copy per own
+event at its first copy + 1 gives the old trace exactly, 36/36 EXPLAINED,
+3-16 copies per client) - and all 36 journals are IDENTICAL (no capture has
+a late event outside the history, so U5 (c) never fires in the set). Not
+run (QUICK budget; FULL batches): F3's live seed sweep old vs new (seeds
+0/1/2, bursts 1 and > 1) - the keep rule was judged on the model, F3's
+recorded runs and the two live runs above. That sweep (F3's recipe,
+old and new build, seeds 0/1/2, bursts 1, 2 and 4, late member events AND
+resyncs per run - U5 (c) adds resyncs that did not exist before, and only
+the two runs above counted them: 0) is queued as an explicit item of the
+close-out's remaining batches.
+
 ### 3.2 Removals and the other server-side fixes
 
 The barrier itself is deleted: `waiting_for_lifecycle` and its call

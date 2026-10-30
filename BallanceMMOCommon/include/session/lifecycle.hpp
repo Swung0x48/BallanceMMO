@@ -247,8 +247,11 @@ namespace bmmo::session {
     // so a respawn or a beam applied that late left the mirror 10-30 m from
     // where the server has the ball until the next forced snapshot.  So, as
     // with the input relay, the reliable copy is backed by unreliable ones:
-    // the sender repeats the same bytes on each of the next
-    // kLifecycleEventRepeats ticks (one per tick, each in its own packet),
+    // the sender repeats the same bytes kLifecycleEventRepeats times on
+    // later ticks (the spacing and the schedule below; each copy is a send
+    // of its own, which GNS usually coalesces with that tick's other
+    // datagram, the uplink's input or the server's tick - step DX8 measured
+    // it on the uplink in the proxy logs),
     // and every receiver takes the first arrival of a (player, stamp, type,
     // ball type, sector, name) and ignores the rest.  Nothing needs the
     // copies in order: the server applies events by stamp in join order,
@@ -317,8 +320,26 @@ namespace bmmo::session {
     // than a burst of a dozen datagrams (measured: six copies one tick apart
     // were all inside such a burst, and the reliable copy carried the event
     // late again).
+    // (The server's relay and the legacy retail path keep exactly this.)
     inline constexpr int kLifecycleEventRepeats = 6;
     inline constexpr int kLifecycleEventRepeatSpacing = 2;
+
+    // A client's own events on the uplink (step DX8, the FULL plan's D4
+    // option (b'), late-player design 3.1 "As built (step DX8)"): one more
+    // copy, at L + 2 - the copies ride the input datagrams of L + 1, L + 2,
+    // L + 3, then every other tick to L + 11 (seven copies).  An own
+    // Physicalize / Unphysicalize is stamped L + 1 and the server steps
+    // L + 1 as soon as frame L + 1 is in (step F3: margin 0..1 for the
+    // pacing member), so the copy must ride whichever datagram first
+    // carries frame L + 1: with the reliable copy and the L + 1 datagram
+    // both lost, that is the L + 2 one, which at spacing 2 had no copy (late
+    // by 2: a resync, or a 2-tick own-death gap).  Every send tick of the
+    // old schedule is kept (a superset: no loss pattern makes an event later
+    // than before, bursts included); the tail stays at spacing 2 for the
+    // burst reason above.  The span is 11 ticks.
+    inline constexpr int kOwnEventRepeats = 7;
+    inline constexpr int kOwnEventRepeatsDense = 3;   // the first three one tick apart
+    inline constexpr int kOwnEventRepeatSpacing = 2;
 
     // The order two events of one player with one stamp are applied in: the
     // Unphysicalize before the Physicalize (a beam sends both at one tick), the
@@ -523,8 +544,10 @@ namespace bmmo::session {
     // The copies still to send: the serialized message, its recipients (the
     // uplink has one, named 0), how many are left and how many calls apart
     // they go.  send_due() is called once per tick; an entry sends a copy
-    // every `spacing` calls, each in its own packet, the first on the call
-    // after the push.
+    // every `spacing` calls, each a send of its own (GNS usually packs it
+    // with the tick's input datagram), the first on the call after the
+    // push.  `dense` (step DX8): the first `dense` copies go on
+    // consecutive calls, the rest `spacing` apart (0 = all spaced).
     class event_repeats {
     public:
         struct entry {
@@ -533,18 +556,20 @@ namespace bmmo::session {
             int remaining = 0;
             int spacing = 1;
             int wait = 0;
+            int dense = 0;
         };
         void push(std::string bytes, std::vector<uint32_t> to, int copies = kLifecycleEventRepeats,
-                  int spacing = kLifecycleEventRepeatSpacing) {
+                  int spacing = kLifecycleEventRepeatSpacing, int dense = 0) {
             if (copies <= 0 || to.empty()) return;
-            entries_.push_back(entry{std::move(bytes), std::move(to), copies, std::max(spacing, 1), 0});
+            entries_.push_back(entry{std::move(bytes), std::move(to), copies, std::max(spacing, 1), 0, std::max(dense, 0)});
         }
         template <class Send>
         void send_due(Send send) {
             for (auto it = entries_.begin(); it != entries_.end();) {
                 if (it->wait > 0) { --it->wait; ++it; continue; }
                 for (uint32_t to: it->to) send(to, it->bytes);
-                it->wait = it->spacing - 1;
+                if (it->dense > 0) --it->dense;
+                it->wait = it->dense > 0 ? 0 : it->spacing - 1;
                 if (--it->remaining <= 0) it = entries_.erase(it);
                 else ++it;
             }
