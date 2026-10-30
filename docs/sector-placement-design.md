@@ -1218,7 +1218,7 @@ any shared surface's hull differs between rows; §9 Q6 has the options.
 | `session_start_msg` | `uint32_t world_options` after `protocol` (exists since protocol 11, trafo T2); the server sets bit 0 from config `physics.placement_clones` (default **false** from S5 to S10: adaptation M3, see As built (step S5) below; **true** since S10, As built (step SP10)). It is the switch for the negative control (§7.6) and for replaying old journals; it is never a per-client choice. |
 | `session_ready_msg` | `uint64_t anchor_placement` appended after `caps`, read when `protocol >= 12`; filled by a host that declares `CAP_PLACEMENT` (placement on or off, §2.4), 0 otherwise (As built (step S5)). |
 | `world_ready_info`, `on_world_ready` (SRN hpp:119-131, SV:966-980) | `anchor_placement` from `physics_world`, stored in the session. |
-| server `handle_session_ready` (SV:1537-1577) | after the engine check, before the anchor-hash compare: `anchor_placement != s.anchor_placement` ends the session with "placement mismatch for X (client %016llx, server %016llx)", **for late joiners too** (unlike the anchor hashes, the signature does not depend on time), the way the protocol and engine mismatches already do for any client. |
+| server `handle_session_ready` (SV:1537-1577) | after the engine check, before the anchor-hash compare: `anchor_placement != s.anchor_placement` ends the session with "placement mismatch for X (client %016llx, server %016llx)", **for late joiners too** (unlike the anchor hashes, the signature does not depend on time), the way the protocol and engine mismatches already do for any client. **Since step DX7 (the user, 2026-10-29) it refuses that member alone** (SessionEnd to it with `placement_mismatch_reason`, out of the session, not the room; the rest go on), late joiners too: §12.9. |
 | `journal_header` (journal.hpp) | `uint64_t anchor_placement` trailing after `world_options` (which trafo T2 appended at v5); `kJournalVersion` 5 -> 6; an older file reads as placement 0 (unknown, not compared), a file older than v5 as options 0 (no copies). |
 | SimTool `--replay-session` | builds the world with the header's options and, for a header with a non-zero placement, refuses a replay whose anchor placement differs from the header's ("journal placement X, replay Y"). |
 | legacy retail path | parses the new fields (shared message code) and ends locally on `WORLD_PLACEMENT_CLONES` (§2.4). |
@@ -1592,7 +1592,7 @@ current deployed lead and input delay:
 | L8 invariant (networked) | the server journal of "L8 cross" replayed twice by SimTool: as recorded, and with the Sector events of sectors > 1 dropped (new `--replay-session --drop-sectors-above 1`) | the s1 rows' trace (§7.3 format) identical between the two replays |
 | L8 late | c3 joins after c1/c2 are in s2/s3 | c3: `level walk seen` before its first owed pass, owed passes after it, signature equal to the server's, `mechanisms=K/K` (today's arena analogue `lp1_join` gives 52/45) |
 | L11 cross | four clients s1->s2->s3, one stays in s1 on the P_Modul_25 bridge | as L8 cross; the s3 sack copy `P_Modul_26_*_R35` exact on every client at 0 ms |
-| mismatch | one headless client run with a test switch that perturbs its signature | the server ends the session with "placement mismatch for ..."; the same as a late joiner |
+| mismatch | one headless client run with a test switch that perturbs its signature | the server ends the session with "placement mismatch for ..."; the same as a late joiner (since step DX7: refuses that member alone with the reason echoed to it, the others play on; §12.9) |
 | arena regression | the existing arena recipes (the 10 recent headless runs) | journals identical to the pre-change build except the header version and fields; `level walk seen at tick N` equal on every side |
 | forced rollbacks | L8 cross with `--force-rollback` windows that contain the s2 pass | 0 bodies diverging vs the control (`worst_bodies.py`), `birth_recreate_failures` 0 |
 
@@ -2486,7 +2486,8 @@ list in 12.2 says what the code does.
    capability and the session's `WORLD_PLACEMENT_CLONES`. A host with the
    capability sends `CAP_PLACEMENT` and its signature (`anchor_placement`)
    option on or off; the server compares it right after the engine check,
-   late joiners included, and refuses a member without the capability from
+   late joiners included (a mismatch refuses that member alone since step
+   DX7, §12.9), and refuses a member without the capability from
    a session with the option (out of the session, not the room). Protocol
    12, journal v6 (the header's trailing `anchor_placement`; client headers
    carry `world_options` too). SimTool `--replay-session` builds by the
@@ -2672,7 +2673,7 @@ live" item and the §7.4 arms the quick tiers deferred:
   false)` reaches it through a one-line else-branch, not exercised here. The retail natural path (a level that ran a session with the
   option on, then one with it off, `session reload off`) stays RT2's.
 - **A mismatch at the start ends the session for every member**
-  (`server.cpp` `handle_session_ready`), as §5 specifies ("the same as a
+  (`server.cpp` `handle_session_ready`; superseded by step DX7, §12.9), as §5 specifies ("the same as a
   late joiner"); the room is kept: PASS as designed (the FULL plan's
   "refuses that member" contradicts §5, plan C15). The probe signature
   and the session core refuse the member instead (WG3, B9DX). Not changed
@@ -2696,3 +2697,68 @@ live" item and the §7.4 arms the quick tiers deferred:
   (SimTool `--describe-script Gameplay_Ingame`, L11). An unphysicalize at
   736 therefore started with a depth-test hit at ~667, 68 ticks before
   the `+3` at 735: not the sector pass. SP8 (g) is closed.
+
+### 12.9 As built (step DX7, FULL close-out, 2026-10-30): a mismatch refuses that member alone
+
+The user's answer 8 of 2026-10-29 ("改吧，记得给这个玩家踢出的时候回显一个reason":
+change it, and echo a reason to the player when it is put out) replaces §5's
+"ends the session" and §12.8's "PASS as designed" (plan C15):
+
+- **Server** (`server.cpp` `handle_session_ready`, the placement compare
+  right after the session-core refusal): a member whose `anchor_placement`
+  differs from the world's is refused through the same `refuse` lambda the
+  probe signature (WG3) and the session core (B9DX) use -
+  `send_session_end` to that member alone, then
+  `physics_session_member_left` (out of the session, not out of the room;
+  the runner removes its life and the start barrier re-checks the others).
+  Start members and late joiners take the same branch (the signature does
+  not depend on time). The server logs "Physics session N: NAME refused:
+  placement mismatch (client X, server Y) (caps ..., world options ...)".
+  The anchor-hash "world mismatch" of a start member and the protocol and
+  engine mismatches still end the whole session (not in the answer).
+- **The reason** (`entity/session.hpp` `placement_mismatch_reason`):
+  "placement signature mismatch: yours X, the server's Y - this client's
+  level holds other sector placement copies than the session's; use the
+  server's BallanceMMO build and the same map" (both signatures 16 hex
+  digits, 213 characters, under `MAX_REASON` 256). **Adaptation:** the
+  plan's example text said "check the mod's placement option"; the retail
+  mod has no placement switch (`session placement` is status only; its
+  placement is on with the session core and the session's option), and
+  `--placement-signature` is a headless test switch, so the text names the
+  build and the map instead.
+- **No wire change**: `session_end_msg::reason` already carries the text;
+  protocol 22 and journal v9 unchanged, so `core_ref_s12` still replays.
+- **The clients need no code**: the headless client logs it
+  (`client_core.cpp` `on_session_end`: "session N ended: <reason>"); the
+  retail core host shows it in the chat (`core_host.cpp` the mailbox's
+  SessionEnd -> `core_host_end_local("ended by the server: " + reason)` ->
+  "Physics session N over (ended by the server: <reason>).").
+- Unit test `SessionAdmission.APlacementMismatchReasonNamesBothSignatures`.
+- **Live** (`maps/arena-test/dx7/dx7_refuse`, `.local-tools/work/DX7/dx7_run.sh`,
+  arena, the deployed defaults, snapshots off, 4 clients, 60 s; client 2
+  `--placement-signature 0000000000000001` from the start, client 3
+  `--placement-signature 0000000000000002` and `--join-late 3:600`): the
+  harness ran its four arena sessions, and in each the server refused
+  Arena2 when the world was ready and Arena3 at its late SessionReady
+  ("refused: placement mismatch (client ..., server ecfbfd9b63a330b5)"),
+  both refused clients logged "session N ended: placement signature
+  mismatch: yours ..." (8 of 8), clients 0 and 1 saw the start member's
+  life end at server tick 9 and the joiner's +618 / -621, and played to
+  the end (mechanisms 32/32, mism 0, hard 0, starved 0, resyncs 0), the
+  server journal replays matched 4590/4590, 4181/4181, 4634/4634,
+  4165/4165, 0 checkpoint mismatches; each session ended "everyone left"
+  at the run's end. The run's own VERDICT read FAIL only for "client2 /
+  client3 resolved no mechanism bodies" - a refused client resolves none,
+  and the harness had no notion of an expected refusal. **Harness:**
+  `scripts/arena_map_test.py --expect-refused N[:TEXT]` (repeatable; TEXT
+  defaults to "placement signature mismatch") now judges such a client
+  only by exit 0 and a "session S ended: ...TEXT..." line in its log, and
+  the rest of the verdict by the survivors; `--report-only` recomputes the
+  verdict. The store re-judged with `--expect-refused 2 --expect-refused 3`
+  (`maps/arena-test/dx7/dx7_refuse_rejudge`): VERDICT PASS in all four
+  sessions; the harness selftest has a case for it.
+- Not covered live: the retail chat line (the retail mod has no switch
+  that perturbs its signature; the path is the existing SessionEnd one,
+  read above). Its length (about 265 characters through
+  `SendIngameMessage`) was not seen on BML's message board: deferred to
+  the retail runs (RT2 / RT3).

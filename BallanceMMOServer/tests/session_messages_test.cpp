@@ -1352,6 +1352,27 @@ TEST(SessionAdmission, AClientWithoutTheSessionCoreIsRefusedInEverySession) {
     EXPECT_EQ(no_core, parsed.reason);
 }
 
+// Step DX7 (the user's answer 8 of 2026-10-29): a placement signature
+// mismatch refuses that member alone, and the reason it is sent names both
+// signatures (16 hex digits each) and what to check, within MAX_REASON, and
+// reaches it whole as a SessionEnd.
+TEST(SessionAdmission, APlacementMismatchReasonNamesBothSignatures) {
+    const std::string reason = bmmo::session::placement_mismatch_reason(0x0000000000000001ULL, 0xecfbfd9b63a330b5ULL);
+    EXPECT_EQ(0u, reason.find("placement signature mismatch: yours 0000000000000001, the server's ecfbfd9b63a330b5"))
+        << reason;
+    EXPECT_NE(std::string::npos, reason.find("BallanceMMO build"));
+    EXPECT_LE(reason.size(), bmmo::session::MAX_REASON);
+    const std::string high = bmmo::session::placement_mismatch_reason(0xffffffffffffffffULL, 0x0123456789abcdefULL);
+    EXPECT_NE(std::string::npos, high.find("yours ffffffffffffffff, the server's 0123456789abcdef")) << high;
+    EXPECT_EQ(reason.size(), high.size());
+    bmmo::session_end_msg end{};
+    end.session = 7;
+    end.reason = reason;
+    auto parsed = round_trip(end);
+    EXPECT_EQ(7u, parsed.session);
+    EXPECT_EQ(reason, parsed.reason);
+}
+
 // Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): SessionReady
 // carries the client's probe signature after the placement's; a protocol 15
 // client's message parses without it (0).

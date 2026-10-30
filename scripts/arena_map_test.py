@@ -2117,14 +2117,48 @@ def replay(args, journal, out_dir):
     return {'exit_code': proc.returncode, 'summary': summary[-1] if summary else ''}
 
 
-def verdict(case, event_clients=()):
+DEFAULT_REFUSAL = 'placement signature mismatch'
+
+
+def parse_expect_refused(specs):
+    """--expect-refused N[:TEXT] -> {N: TEXT} (TEXT defaults to DEFAULT_REFUSAL)."""
+    out = {}
+    for spec in specs:
+        index, _, text = spec.partition(':')
+        out[int(index)] = text or DEFAULT_REFUSAL
+    return out
+
+
+def verdict(case, event_clients=(), expect_refused=None):
     """Pass only when the run was both clean and actually interactive.
     `event_clients`: the clients an --event is on.  Their substituted ticks are
     the event's (since step 4 `starved` and `worst` count every substitution,
     from the relay header, with snapshots off too), so on them a starvation
-    count is a note, not a problem."""
+    count is a note, not a problem.
+    `expect_refused` {client: text}: clients the server must refuse (step DX7: a
+    placement signature mismatch refuses that member alone, with a reason).  Such
+    a client passes when it exited 0 and its log holds the session-end reason
+    text; none of the playing client's checks apply to it (it never plays), and
+    the rest of the verdict is the survivors'."""
     problems, warnings = [], []
+    expect_refused = expect_refused or {}
     for i, c in enumerate(case['clients']):
+        if i in expect_refused:
+            text = expect_refused[i]
+            try:
+                log = (pathlib.Path(case['dir']) / f'client{i}.log').read_text(encoding='utf8', errors='replace')
+            except OSError:
+                log = ''
+            ended = [l for l in log.splitlines() if 'ended: ' in l and text in l]
+            if c.get('never_started'):
+                problems.append(f'client{i} never started (expected refused)')
+            elif c['exit_code'] != 0:
+                problems.append(f'client{i} exit {c["exit_code"]} (expected refused)')
+            elif not ended:
+                problems.append(f'client{i} not refused with "{text}" (expected refused)')
+            else:
+                warnings.append(f'client{i} refused as expected: {ended[0].strip()[:160]}')
+            continue
         if c.get('never_started'):
             problems.append(f'client{i} never started')
             continue
@@ -2181,15 +2215,16 @@ def verdict(case, event_clients=()):
     # snapshot-free measurements, a few dozen lifecycle-forced ones in
     # 60 s) has none to show even when every mechanism and every ball is
     # tracked and in step, so there both checks are a note, not a failure.
-    snapshot_free = all((c['metrics'] or {}).get('snapshots', 0) < 100 for c in case['clients']
-                        if not c.get('never_started'))
+    snapshot_free = all((c['metrics'] or {}).get('snapshots', 0) < 100
+                        for i, c in enumerate(case['clients'])
+                        if not c.get('never_started') and i not in expect_refused)
     free_note = ' (snapshot-free run: the corrections cannot show it)' if snapshot_free else ''
     if not inter['mechanism_bodies_corrected']:
         (warnings if snapshot_free else problems).append('no mechanism interaction observed' + free_note)
     # Ball-to-ball interaction too is only observable through the body-set
     # corrections (peer_balls_corrected), so every snapshot-free multi-client
     # arm failed on it (step B9DX, item HWARN; found at REF8's review).
-    if len(case['clients']) > 1 and not inter['peer_balls_corrected']:
+    if len(case['clients']) - len(expect_refused) > 1 and not inter['peer_balls_corrected']:
         (warnings if snapshot_free else problems).append('no ball-to-ball interaction observed' + free_note)
     return problems, warnings
 
@@ -2479,6 +2514,27 @@ def selftest():
           order == sorted(order) and after,
           '%d down datagrams, %d sent after the spike, %d out of order'
           % (len(order), len(after), sum(1 for a, b in zip(order, order[1:]) if b < a)))
+    # DX7: --expect-refused judges the named client by its session-end reason only.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        metrics = {'mechanisms': '9/9', 'snapshots': 0, 'tick': 3000}
+        (pathlib.Path(tmp) / 'client1.log').write_text(
+            'session 1 ended: placement signature mismatch: yours 0000000000000001, the server\'s 0123\n', encoding='utf8')
+        case = {'dir': tmp, 'replays': [],
+                'interaction': {'mechanism_bodies_corrected': [], 'peer_balls_corrected': []},
+                'clients': [{'exit_code': 0, 'metrics': dict(metrics)},
+                            {'exit_code': 0, 'metrics': {'mechanisms': '0/0', 'snapshots': 0, 'tick': 0}},
+                            {'exit_code': 0, 'metrics': dict(metrics)}]}
+        p_plain, _ = verdict(case)
+        p_ok, w_ok = verdict(case, (), parse_expect_refused(['1']))
+        p_text, _ = verdict(case, (), parse_expect_refused(['1:some other reason']))
+        p_wrong, _ = verdict(case, (), parse_expect_refused(['2']))
+        check('verdict --expect-refused',
+              any('client1 resolved no mechanism' in p for p in p_plain) and not p_ok
+              and any('refused as expected' in w for w in w_ok)
+              and any('client1 not refused' in p for p in p_text)
+              and any('client2 not refused' in p for p in p_wrong) and any('client1 resolved no' in p for p in p_wrong),
+              str((p_plain, p_ok, w_ok, p_text, p_wrong)))
     print('selftest: %s' % ('PASS' if not failures else 'FAIL - ' + ', '.join(failures)))
     return 1 if failures else 0
 
@@ -2512,6 +2568,15 @@ def report_only(args):
     for case in cases:
         if (base / 'server.bmjr').exists():
             case['journal'] = [str(base / 'server.bmjr')]
+        # The verdict again too (DX7: a run judged afterwards with --expect-refused).
+        case['dir'] = str(base / f'sector{case["sector"]}')
+        problems, warnings = verdict(case, {ev.client for ev in args.events if ev.kind != 'none'},
+                                     args.expect_refused)
+        case['problems'], case['warnings'] = problems, warnings
+        print(f'=== sector {case["sector"]} ===', flush=True)
+        if warnings:
+            print(f'  note: {"; ".join(warnings)}', flush=True)
+        print(f'  VERDICT: {"PASS" if not problems else "FAIL - " + "; ".join(problems)}', flush=True)
         emit_report(args, case, base / f'sector{case["sector"]}')
     (base / 'summary.json').write_text(json.dumps(cases, indent=2), encoding='utf8')
     return 0
@@ -2608,6 +2673,10 @@ def main():
                     help='H3: extra arguments for client N alone; repeatable')
     ap.add_argument('--join-late', action='append', default=[], metavar='N:T',
                     help='H4: client N starts when the host reaches tick T')
+    ap.add_argument('--expect-refused', action='append', default=[], metavar='N[:TEXT]',
+                    help='DX7: the server must refuse client N (its log holds "session S ended: ...TEXT..."; '
+                         'default TEXT "%s"); the verdict is the other clients\' ' % DEFAULT_REFUSAL),
+
     ap.add_argument('--leave', action='append', default=[], metavar='N:T',
                     help='world agreement J2/J4: client N leaves the room at its tick T and exits (--leave-room-at)')
     ap.add_argument('--rejoin', action='append', default=[], metavar='N:T[:MS]',
@@ -2632,6 +2701,7 @@ def main():
     if not args.root and not args.report_only:
         ap.error('--root is required')
     args.links = dict(parse_link(s) for s in args.link)
+    args.expect_refused = parse_expect_refused(args.expect_refused)
     args.events = [parse_event(s) for s in args.event]
     if args.event_client >= 0 or args.event_tick:
         kinds = [(k, ms) for k, ms in (('blackout', args.blackout_ms), ('spike', args.spike_ms), ('step', args.step_ms)) if ms > 0]
@@ -2681,7 +2751,8 @@ def main():
         for j in case['journal']:
             case.setdefault('replays', []).append(replay(args, j, base))
             case.setdefault('events', []).append(journal_events(args, j))
-        problems, warnings = verdict(case, {ev.client for ev in args.events if ev.kind != 'none'})
+        problems, warnings = verdict(case, {ev.client for ev in args.events if ev.kind != 'none'},
+                                     args.expect_refused)
         case['problems'], case['warnings'] = problems, warnings
         failed += bool(problems)
         results.append(case)

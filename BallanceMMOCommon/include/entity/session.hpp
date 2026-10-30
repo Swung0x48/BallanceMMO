@@ -337,6 +337,24 @@ namespace bmmo::session {
         }
         return "";
     }
+    // Step DX7 (the user's answer 8 of 2026-10-29: a placement mismatch
+    // refuses that member alone, with a reason echoed to it): the SessionEnd
+    // reason a member whose anchor placement signature differs from the
+    // server's is sent, at the start or as a late joiner (sector placement
+    // design 5, 12.8).  Both signatures as 16 hex digits; at most MAX_REASON.
+    // The retail mod has no placement switch (its sector placement is on
+    // with the session core), so the text names the build and the map.
+    inline std::string placement_mismatch_reason(uint64_t client, uint64_t server) {
+        static const char digits[] = "0123456789abcdef";
+        const auto hex = [](uint64_t v) {
+            std::string out(16, '0');
+            for (int k = 15; k >= 0; --k, v >>= 4) out[static_cast<size_t>(k)] = digits[v & 0xfu];
+            return out;
+        };
+        return "placement signature mismatch: yours " + hex(client) + ", the server's " + hex(server)
+            + " - this client's level holds other sector placement copies than the session's; "
+              "use the server's BallanceMMO build and the same map";
+    }
 
     // session_assign_msg::flags (protocol 10).  STATE_FOLLOWS: a
     // SessionResyncState of tick first_tick - 1 follows on the reliable

@@ -2061,11 +2061,17 @@ public:
         // placement, or the two worlds do not hold the same objects.  For
         // late joiners too - unlike the anchor hashes below, the signature
         // does not depend on time.  Every member admitted here declares
-        // CAP_PLACEMENT and sends its signature.
+        // CAP_PLACEMENT and sends its signature.  Step DX7 (the user's answer
+        // 8 of 2026-10-29): refused - out of the session, not out of the
+        // room, and the rest go on, as the probe check below - with a reason
+        // naming both signatures echoed to it; until DX7 it ended the session
+        // for every member.
         if (s.world_ready && msg.anchor_placement != s.anchor_placement) {
-            end_physics_session(msg.session, Sprintf("placement mismatch for %s (client %016llx, server %016llx)",
-                    client_it->second.name, static_cast<unsigned long long>(msg.anchor_placement),
-                    static_cast<unsigned long long>(s.anchor_placement)));
+            const std::string what = Sprintf("placement mismatch (client %016llx, server %016llx)",
+                    static_cast<unsigned long long>(msg.anchor_placement),
+                    static_cast<unsigned long long>(s.anchor_placement));
+            const std::string reason = bmmo::session::placement_mismatch_reason(msg.anchor_placement, s.anchor_placement);
+            refuse(what.c_str(), reason.c_str());
             return;
         }
         // Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): under

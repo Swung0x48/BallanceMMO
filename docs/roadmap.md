@@ -2046,7 +2046,12 @@ numbers 1-10 are unchanged.
      blocking nothing: refuse the member like the WG3 probe check
      (`send_session_end` to it + `physics_session_member_left`, a few
      server lines, no protocol change) - today one misbuilt client ends
-     everyone's session, at the start or as a late joiner. **SP6-a** L8 late (`sp6a_l8_late`,
+     everyone's session, at the start or as a late joiner. **Built at step
+     DX7** (the user's answer 8 of 2026-10-29: the member alone is refused,
+     with `placement_mismatch_reason` echoed to it; a start member and a late
+     joiner refused in each of four arena sessions while the two others
+     played to the end, server journals matched; sector-placement-design.md
+     §12.9). **SP6-a** L8 late (`sp6a_l8_late`,
      0 ms, client 3 `--join-late 3:900`, then its own `+4`): c3 joins with
      the state of 1004, `level walk seen at tick 1008` before its owed
      `+2` (1014) and `+3` (1021), its own `+4` at 1109 on all five sides,
