@@ -4579,3 +4579,150 @@ failed x navigated / not by the server).
   x64 and x86 builds, the wire check ALL SAME again, and the seed 2 and
   seed 3 joiner replays 0.0000 m (own, mirror, body; 3 mirrors moved each,
   no navigation wait cut short, no refusal).
+
+### As built (step DX11, FULL close-out, 2026-10-30): J4 - a leave inside a rewind's window removed in the replay at its stamp
+
+H4's J4 probe-half finding (above, "As built (step H4)"; roadmap §4 item 4;
+FULL plan step DX11), built as fix shape (b), the orchestrator's choice: the
+client world runs the server's sequence. Shared core only
+(`client_core_lifecycle.cpp`, `client_core.hpp`); no protocol, journal or
+layout change (a member function added, no data member), no IVP, engine or
+savestate-restore change (shape (a) was rejected), no host change (retail's
+core runs the same code), no server change (the server binary compiles no
+`client_core*` source: no Arch rebuild).
+
+- **The rule** (`remove_remote`, the death half of `make_remote_birth`'s
+  gate): a remote's Unphysicalize stamped D <= the last stepped tick whose
+  anchor D - 1 the history still knows, of a mirror with a body, with the
+  rollback and the lifecycle rewind on, is not applied live any more: it is
+  queued as a `pending_death` (not `reconciled`) and `rewind_for_lifecycle`
+  restores D - 1 **with the body present** (its friction systems intact,
+  the Pusher's Rinne contacts among them); `drain_pending_lives` removes it
+  in the replayed pre-step of D, muted, in the server's order (join order,
+  origin, rank) - where the server's `remove_player` removes it, so IVP's
+  `delete_friction_distance` unlinks only its own points, as on the server.
+- **The live fallback.** If the replay did not get as far as D's pre-step
+  (the rewind refused or missed - DX8's U5 (c) resync is then asked by
+  `rewind_for_lifecycle` as before -, an exact resync's anchor covers the
+  stamp (A3), a frozen clock's rewind with no replay), the death is still
+  queued after the rewind: it is taken off the queue and applied live
+  ("remote unphysicalize of N: the replay did not reach tick D, removed
+  live"). `settle_unreplayed_lives` takes only `reconciled` entries, so
+  this sweep is the death's own, as the birth's is in `make_remote_birth`.
+- **Unchanged paths.** A death on time (held, stamp = the frame's tick), of
+  a bodiless mirror, or stamped outside the history (the U5 (c) resync,
+  DX8) is applied live and then rewound for, as before. The overtaken-birth
+  branch (a birth older than an applied death: made, then the death again)
+  goes through the same `remove_remote`, so there is one implementation.
+- **The life log (gap L, EL7).** The death's entry is noted with its
+  entity before its rewind, as when the death was applied first (the
+  reconcile of that rewind reads it: a window that begins with a death is
+  left alone), and again after it, with the generation the removal gave and
+  `made_at` = D when the replay removed it (the next live tick when the
+  fallback did). `life_entry::generation` has no reader; the reconcile
+  logic is unchanged (its comment updated: the body is still there at the
+  death's own restore).
+
+**Verified** (quick tier, 12.5 min of wall clock, one live run). The pass
+evidence is the deterministic replay of H4's own J4 captures
+(`maps/arena-test/h4_full/j4/capture*.bmic`, `--final-checkpoints`,
+`.local-tools/work/DX11/replay_j4.sh` / `replay_run.sh`, judged with
+`work/H4/final_cmp.py` against the run's server journal):
+
+| check | HEAD (rDX10) | DX11 |
+|---|---|---|
+| J4 probe half, clients 0 / 2 / 3, ticks 1000-1400 | P_Modul_01_Pusher 0.0085 m at 1082, max 0.0267 m at 1090 (identical on all three) | 0.0000 m (own, mirror, body) on all three |
+| J4 all five journals (clients 0-3, client 2's rejoin life), whole run | - | 0.0000 m |
+| anchor-1056 forced control (capture 0, `--force-rollback-at 1066:10 --replay-free-cost-clock`) | exact at H4 | 0.0000 m, forced 1/0 |
+| J1, J2, J3, J3c (H4's captures, every client, whole run) | exact at H4 | 0.0000 m |
+| J3b (H4's captures) | stops at 2017 steps on clients 0-2 | the same, identically; 0.0000 m to 1790 |
+
+The replay logs show the mechanism: on rDX10 the death's rewind printed
+"object 'Ball_Stone_BMMO_30484126' is in the savestate but not in the
+world" and "contact restore of P_Modul_01_Pusher at tick 1101: 2 re-created
+of 3 recorded"; on DX11 the restore of 1080 is intact and "remote player
+30484124 unphysicalized at tick 1081" is printed inside the replay, with no
+contact re-created. No "removed live" fallback in any of the DX11 replays. J3b's three
+replays stop at the same record on rDX10 and DX11: its released
+Physicalize (stamp 1861, local 1919, outside the history) now asks for
+DX8's U5 (c) resync, a clock read (`resync_limiter`) H4's capture predates -
+DX8's change, not DX11's. The one live run (`maps/arena-test/h4_full/dx11_j4`, H4's J4 recipe: 4
+clients 40 s, `--leave 1:1080 --rejoin 2:1200 --client-arg-for '1:--beam
+155 4 43 1000 --join-first'`, the Arch server snapshots off, trafo inputs
+and placement on; the harness ran its four sector sessions, ~4.8 min):
+VERDICT PASS in all four. H4's j4 ran sector 1 only; the harness's
+per-sector files overwrite each other, so the store
+`maps/arena-test/h4_full/dx11_j4` holds sector 4's captures, client files
+and server journal (no probe there) - the probe half was judged from
+`maps/arena-test/h4x_dx11_j4/sector1/` and the server's
+`session_1_level13_20261030073004.bmjr`: sector 1's LOCAL rows against session 1's server
+journal (`maps/arena-test/dx11/live_s1`): clients 0-3 0.0000 m with the
+Pusher focused (the probe half live), client 2's rejoin life 0.0000 m from
+1242 (its first rows 1234-1241 predate its import: the same 1.62 m / 0.28 m
+as H4's own live j4 rejoin rows 1276-1282, pre-existing; its FINAL rows
+replay exact above). Unit tests
+`SessionClientCoreLifecycle.ALateDeathInsideTheHistoryIsRemovedInTheReplayAtItsStamp`
+and `...DeathTheReplayDidNotReachIsRemovedLive` (678/678 pass); GCC syntax
+31/31 ok; the x64 and x86 builds; the wire check rDX10 -> rDX11 over
+`core_ref_s12` ALL SAME, journals IDENTICAL (a no-regression check only;
+whether any of its 36 captures takes the new path was not established -
+its replays keep no client log).
+
+- **Residual found, pre-existing, queued (roadmap §4 item 4): a later
+  rewind of the same frame anchored before a removal the previous replay
+  made.** Each late body change takes its own rewind to its stamp - 1, in
+  drain order. Once a replay has removed a body at D (now the death's own
+  replay; before DX11 the live drain), every later rewind of that frame
+  anchored at or before D - 1 restores the anchor into a world without the
+  body: "object ... is in the savestate but not in the world", its friction
+  systems dropped whole - J4's mechanism, one rewind later. Met in the
+  replays: a beam pair (Unphysicalize + Physicalize of one player at one
+  stamp: the birth's rewind) - J4 client 0 at 1001, J2 client 0 at 1301 and
+  1951; two players' deaths at one stamp (the second death's rewind) and a
+  relayed input of a dead ball at that stamp (its input rewind) - J1 client
+  0 at 2314. Counts of such restores per journal on DX11 vs rDX10: J4 c0 1
+  vs 2, J2 c0 2 vs 3, J3c c0 3 vs 5 (DX11 removes the death's own one; the
+  later ones are pre-existing; J1 c0 3). EL7's revive does not run for them (no
+  "lives: mirror ... revived" line, `mlives=0/0/0/0/0` in J4 c0's status
+  rows); why the engine does not hand those lives over as ended was not
+  separated here, and by the code it should: `tracked_now`
+  (`client_core_resync.cpp` 42-53) records every generation, so the first
+  replay's records D..now carry the removed mirror's g + 1, and
+  `revive_ended_lives` (`rollback.hpp` ~3043-3077) hands a name over as
+  ended when its generation at A differs from the newest record's - unless
+  the name is missing from `at.tracked.remote_entities` (only a mirror with
+  a body AND navigation at A is listed there), from `at.bodies`, or
+  `restore_lives` gave no outcome for it (the capped "not revived" lines).
+  Lead for the follow-up step: which of those gates drops it - in the beam
+  pair the birth makes a NEW name (J4 c0: `Ball_Stone_BMMO_30484125` gone,
+  `..._30484126` made at 1001), so the old name's life is one the window
+  ends without a successor. In every one of them no
+  other body's contact was re-created ("contact restore of" never printed
+  in any DX11 replay), so nothing moved (0.0000 m everywhere above); a
+  removed body touching a moving mechanism would show J4's error. Fix
+  shapes for its own step: (i) one rewind per frame for the frame's late
+  lifecycle events, to the lowest stamp - 1, every change replayed at its
+  stamp in the server's order (as `rewind_for_sectors` does for a frame's
+  late Sector stamps since B1; one rewind fewer per extra event, so a
+  capture with such a frame then needs `--replay-free-cost-clock` in the
+  wire check: its rewind-cost clock reads change); this covers the beam
+  pair and same-stamp deaths but not a later input rewind of the frame;
+  (ii) the later rewind revives the removed body before the restore (EL7's
+  reconcile handed the life as ended; revival runs before the blob restore,
+  `rollback.hpp` ~1573), which would cover all three - but only once the
+  open question above is answered: its premise, that the engine can be
+  made to hand these lives over, is not verified.
+- **Pre-existing, queued with it (review of DX11, nit): the overtaken-birth
+  branch does not re-note its death.** `apply_event`'s Physicalize case,
+  when a birth arrives after its own death (`overtaken`), makes the birth
+  and removes the body again (since DX11 through `remove_remote`, before it
+  through `unphysicalize_remote`), but the death's life-log entry stays
+  `skipped` from when it was first applied to a bodiless mirror. A later
+  input rewind anchored between that birth and that death finds the ended
+  life but no logged death in the window ("no logged event") and does not
+  revive it. Fix for the follow-up step: `note_life_made` for the death
+  after `remove_remote`, as the Unphysicalize case does (with a unit test
+  of the scenario). The rewind reason string "ball of P born at tick T",
+  which `rewind_for_lifecycle` also gives a death, is pre-existing too; it
+  is left as it is because the analysis tools classify rewinds by it
+  (`.local-tools/work/CPUPROF/reasons.py`).

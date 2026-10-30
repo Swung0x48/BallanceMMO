@@ -2272,7 +2272,27 @@ numbers 1-10 are unchanged.
      their state. Fix shapes (a) salvage the system minus the missing core
      in the restore, (b) keep the body to the rewind and remove it in the
      replay's pre-step at its stamp, as IVP does on the server - for the fix
-     step (design note "As built (step H4)"). **(item 2) 8 members at 0 ms
+     step (design note "As built (step H4)"). **Built at step DX11** (shape (b):
+     a late death inside the history is queued, the anchor restored with
+     the body present and the replay removes it at its stamp; the H4 J4
+     captures replay with the Pusher 0.0000 m on clients 0, 2, 3 - 0.0085 /
+     0.0267 m on rDX10 -, J1 / J2 / J3c and the forced control exact;
+     world-agreement-gaps-design.md "As built (step DX11)"). **Queued from
+     DX11 (item 4): a later rewind of the same frame anchored before a
+     removal the previous replay made** - each late body change takes its
+     own rewind, so a beam pair's birth rewind, a second same-stamp death's
+     and a dead ball's input rewind restore an anchor into a world the
+     earlier replay already took the body out of (its friction systems
+     dropped whole, J4's mechanism; pre-existing, met in J1 / J2 / J4 with
+     no other body touched, 0.0000 m); fix shapes (i) one rewind per frame
+     for its late lifecycle events, (ii) revive the removed body before the
+     restore - which depends on an open question: by the code EL7's
+     `revive_ended_lives` should already hand those lives over as ended,
+     and it does not (lead: the `at.tracked.remote_entities` / navigation
+     gate, a beam pair's new name) - plus the overtaken-birth branch's
+     death left `skipped` in the life log (no revive for a later input
+     rewind between that birth and death; `note_life_made` after
+     `remove_remote`) (design note "As built (step DX11)"). **(item 2) 8 members at 0 ms
      start late, measured**: U9 and its control without the FIFO and the
      reload (`u9ctl`) starve - every client steps tick T 2.6-4.5 ticks after
      the server from its first tick to the end (4 members, h1_0_on: 0.3-1.2

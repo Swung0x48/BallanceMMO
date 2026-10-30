@@ -3794,6 +3794,99 @@ namespace {
             state_of(core).rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick, bmmo::session::rollback_tracked{}, {});
     }
 
+    // Step DX11 (J4): a late death inside the history is not applied live
+    // before its rewind: the anchor (stamp - 1) is restored with the body
+    // present and the replay removes it in the pre-step of its stamp, as
+    // the server's remove_player does before its step; the life log names
+    // the entity, the generation the removal gave and the stamp it was
+    // made at.  A death outside the history stays on the live path (U5 (c),
+    // SupersedeGuards).
+    TEST(SessionClientCoreLifecycle, ALateDeathInsideTheHistoryIsRemovedInTheReplayAtItsStamp) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_client_core core(replay_platform(fake, bound), session_capabilities{});
+        bound = &core;
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        auto& four = state_of(core).remotes_[4];
+        four.entity = "Ball_0_BMMO_4";
+        four.physicalized = true;
+        four.navigation = true;
+        state_of(core).generations_["Ball_0_BMMO_4"] = 1;
+        record_ticks(core, 118, 125);
+        core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 123, 123));
+        size_t from = fake.calls.size();
+        steps{core}.drain_due_events(126);
+        {
+            const std::vector<std::string> expected = {
+                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay",
+                "pre_step:123", "mute_event_log:on", "detach_mirror_navigation:Ball_0_BMMO_4",
+                "mute_event_log:on", "unmake_mirror:Ball_0_BMMO_4", "mute_event_log:on",
+                "log:0:remote player 4 unphysicalized at tick 123", "mute_event_log:off", "step",
+                "pre_step:124", "step", "pre_step:125", "step",
+                "now:rewind_end", "keep_live_cells:exit:rolled back"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_TRUE(state_of(core).pending_deaths_.empty());
+        EXPECT_FALSE(four.physicalized);
+        EXPECT_FALSE(four.navigation);
+        EXPECT_EQ(state_of(core).generations_.at("Ball_0_BMMO_4"), 2u) << "removed once, in the replay";
+        EXPECT_EQ(state_of(core).life_rewinds_, 1u);
+        EXPECT_EQ(state_of(core).life_rewinds_missed_, 0u);
+        ASSERT_FALSE(state_of(core).life_log_.empty());
+        const auto& logged = state_of(core).life_log_.back();
+        EXPECT_EQ(logged.type, bmmo::session::event_type::Unphysicalize);
+        EXPECT_EQ(logged.entity, "Ball_0_BMMO_4");
+        EXPECT_EQ(logged.generation, 2u);
+        EXPECT_EQ(logged.made_at, 123u) << "removed at its stamp";
+    }
+
+    // ...and when the replay does not reach the stamp's pre-step (here a
+    // world with no pre_step: the deferred death is never drained), it is
+    // removed live after the rewind and nothing is left pending.
+    TEST(SessionClientCoreLifecycle, DeathTheReplayDidNotReachIsRemovedLive) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        platform.bind_world = [&fake](const bmmo::session::core_world_hooks&) {
+            fake.calls.push_back("bind_world");
+            bmmo::session::rollback_world world;
+            world.get_body = [](const std::string&, bmmo_physics_body_state&) { return false; };
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.step = [&fake]() {
+                fake.calls.push_back("step");
+                return true;
+            };
+            return world;
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        auto& four = state_of(core).remotes_[4];
+        four.entity = "Ball_0_BMMO_4";
+        four.physicalized = true;
+        four.navigation = true;
+        state_of(core).generations_["Ball_0_BMMO_4"] = 1;
+        record_ticks(core, 118, 125);
+        core.on_session_event(event_message(4, bmmo::session::event_type::Unphysicalize, 123, 123));
+        size_t from = fake.calls.size();
+        steps{core}.drain_due_events(126);
+        {
+            const std::vector<std::string> expected = {
+                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay", "step", "step", "step",
+                "now:rewind_end", "keep_live_cells:exit:rolled back",
+                "log:0:remote unphysicalize of 4: the replay did not reach tick 123, removed live",
+                "detach_mirror_navigation:Ball_0_BMMO_4", "mute_event_log:on", "unmake_mirror:Ball_0_BMMO_4",
+                "mute_event_log:off", "log:0:remote player 4 unphysicalized at tick 123"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_TRUE(state_of(core).pending_deaths_.empty());
+        EXPECT_FALSE(four.physicalized);
+        EXPECT_EQ(state_of(core).generations_.at("Ball_0_BMMO_4"), 2u) << "removed once, live";
+        EXPECT_EQ(state_of(core).life_log_.back().made_at, 126u) << "removed live: the next tick";
+    }
+
     // An own birth of Ball_Wood stamped `origin`, as record_own_birth keeps
     // it (the scripts made it live).
     client_core_state::own_life own_birth(uint32_t origin, uint32_t generation = 0) {

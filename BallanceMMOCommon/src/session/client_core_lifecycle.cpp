@@ -367,9 +367,14 @@ namespace bmmo::session {
     // with the body set we should have had from there.  The owner's change
     // took effect before that tick's step, so the anchor is stamp - 1: a
     // newborn is stepped at the stamp tick exactly as its owner stepped it,
-    // and a body that went away is simply absent from the replay, which is
-    // also what its owner had.  (A destroyed body cannot be restored by the
-    // engine, and does not need to be - the replay runs without it.)
+    // and a body that went away is removed in the replay's pre-step of the
+    // stamp tick, which is also where its owner and the server removed it.
+    // Step DX11 (J4): the death is not applied live before the rewind any
+    // more (remove_remote): the anchor's record holds the body in its
+    // friction systems with every body it touched, and a restore into a
+    // world without it dropped those systems whole and re-created the
+    // other bodies' contacts fresh, where the server's IVP deletion kept
+    // them (P_Modul_01_Pusher 0.0085 m at the next tick, 0.025 m at rest).
     //
     // A stamp older than the rollback history has nothing to rewind to: the
     // change stays where the drain made it, at the live tick, and a resync
@@ -434,6 +439,49 @@ namespace bmmo::session {
         }
         it->second.physicalized = false;
         logf("remote player %u unphysicalized at tick %u", player, tick);
+        return true;
+    }
+
+    // Step DX11 (J4, world-agreement gaps "As built (step H4)"; FULL plan
+    // shape (b): the client world runs the server's sequence).  A death
+    // stamped in the past whose anchor (stamp - 1) is still in the history,
+    // of a mirror with a body: queued for the replay (pending_deaths_), not
+    // applied here - the rewind restores the anchor with the body present
+    // (its friction systems intact) and drain_pending_lives removes it in
+    // the pre-step of the stamp tick, where the server's remove_player
+    // does, so IVP deletes only its own contacts.  The gate is
+    // make_remote_birth's.  If the replay did not get that far (the rewind
+    // refused or missed, an exact resync's anchor covers the stamp, a
+    // frozen clock), it is removed now, live.  Any other death - a stamp
+    // outside the history (rewind_for_lifecycle's resync, U5 (c)), on
+    // time, or of a bodiless mirror - is applied live and rewound for, as
+    // before.
+    bool session_client_core::remove_remote(uint32_t player, uint32_t stamp, uint32_t origin, bool& replayed) {
+        replayed = false;
+        const auto remote = s.remotes_.find(player);
+        if (remote == s.remotes_.end()) return false;
+        const uint32_t now = current_tick();
+        if (remote->second.physicalized && config.rollback && config.lifecycle_rewind && stamp != 0
+                && static_cast<int32_t>(stamp - now) <= 0 && s.rollback_.knows_tick(stamp - 1)) {
+            client_core_state::pending_death death;
+            death.player = player;
+            death.tick = stamp;
+            death.origin = origin;
+            s.pending_deaths_.push_back(death);
+            rewind_for_lifecycle(player, stamp);
+            replayed = true;
+            for (auto it = s.pending_deaths_.begin(); it != s.pending_deaths_.end(); ++it)
+                if (it->player == player && it->tick == stamp && !it->reconciled) {
+                    s.pending_deaths_.erase(it);
+                    replayed = false;
+                    logf("remote unphysicalize of %u: the replay did not reach tick %u, removed live", player, stamp);
+                    unphysicalize_remote(player, stamp);
+                    break;
+                }
+            return true;
+        }
+        unphysicalize_remote(player, stamp);
+        rewind_for_lifecycle(player, stamp);
         return true;
     }
 
@@ -512,7 +560,8 @@ namespace bmmo::session {
                      " at %u already: made, and the death applied again", event.player, event.origin_tick,
                      event.tick, later.origin, later.applied);
                 make_remote_birth(event);
-                if (unphysicalize_remote(event.player, later.applied)) rewind_for_lifecycle(event.player, later.applied);
+                bool replayed = false;   // step DX11: removed in the replay at its tick, as any late death
+                remove_remote(event.player, later.applied, later.origin, replayed);
                 break;
             }
             make_remote_birth(event);
@@ -586,18 +635,27 @@ namespace bmmo::session {
                 death->second = applied_death{event.origin_tick, event.tick};
             {
                 const auto remote = s.remotes_.find(event.player);
-                const std::string entity = remote == s.remotes_.end() ? std::string() : remote->second.entity;
-                const bool had_body = remote != s.remotes_.end() && remote->second.physicalized;
-                if (!unphysicalize_remote(event.player, event.tick)) {
+                if (remote == s.remotes_.end()) {
                     note_life_skipped(event.player, event.type, event.tick, event.origin_tick);
                     return;
                 }
+                const std::string entity = remote->second.entity;
+                const bool had_body = remote->second.physicalized;
                 // Gap L, L2 (step EL7): what the death removed, for the
                 // reconcile (a death of a mirror with no body changed none).
+                // Step DX11: noted before its rewind, as when the death was
+                // applied live first - the reconcile of that rewind reads
+                // the entity (a window that begins with a death) - and
+                // again after it, with the generation the removal gave and
+                // the tick it was made at (the stamp when the replay made it).
                 if (!had_body) note_life_skipped(event.player, event.type, event.tick, event.origin_tick);
                 else note_life_made(event.player, event.type, event.tick, event.origin_tick, entity, live_first_tick(event.tick));
+                bool replayed = false;
+                remove_remote(event.player, event.tick, event.origin_tick, replayed);
+                if (had_body)
+                    note_life_made(event.player, event.type, event.tick, event.origin_tick, entity,
+                                   replayed ? event.tick : live_first_tick(event.tick));
             }
-            rewind_for_lifecycle(event);
             break;
         }
         default:
@@ -1244,9 +1302,10 @@ namespace bmmo::session {
             // A window that begins with a death took a life the anchor had:
             // one the engine did not hand over as ended, because no record
             // of the window shows its end yet - a late death's own rewind
-            // (A = D - 1: the body went before the restore, the replay runs
-            // without it from D on, as live) and the late birth's of the
-            // same beam pair.  Nothing to replay here.
+            // (A = D - 1: since step DX11 the body is still there at the
+            // restore and the replay removes it at D, remove_remote queued
+            // it) and the late birth's of the same beam pair.  Nothing to
+            // replay here.
             {
                 const auto first = std::find_if(window.begin(), window.end(),
                                                 [](const entry_t* e) { return !e->entity.empty(); });

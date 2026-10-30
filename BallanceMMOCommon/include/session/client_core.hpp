@@ -1895,6 +1895,12 @@ namespace bmmo::session {
         void rewind_for_lifecycle(const bmmo::session_event_msg& event);
         void rewind_for_lifecycle(uint32_t player, uint32_t event_tick);
         bool unphysicalize_remote(uint32_t player, uint32_t tick);
+        // Step DX11 (J4): a remote's death applied with its rewind - a late
+        // one inside the history removed in the replay at its stamp (the
+        // anchor restored with the body present, as the server's pre-step
+        // removes it); otherwise live, then rewound for.  False when there
+        // is no such remote; `replayed` says the replay removed it.
+        bool remove_remote(uint32_t player, uint32_t stamp, uint32_t origin, bool& replayed);
         uint32_t live_first_tick(uint32_t stamp) const;
         void unphysicalize_mirror(const std::string& entity);
         // True when the mirror's body was made.
