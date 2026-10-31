@@ -109,6 +109,12 @@ namespace bmmo::session {
         // host owns it, one per selection, and drops it where it makes a new
         // selection.  Null: walked at every binding, as before.
         bmmo::game::array_reads::cells_memo* cells_memo = nullptr;
+        // Step OPC (rewind-cost-design R.4 row C, game/script_record_reuse.hpp):
+        // an inactive selected root's block copied from the record of the
+        // tick before (rollback_world::capture_scripts_from), in the mode
+        // BMMO_SCRIPT_REUSE names (on when unset).  Off: walked at every
+        // capture, as before (the legacy path).
+        bool record_reuse = false;
     };
 
     // Gap Q4's executed scripts (rollback-engine gaps design 2.2.4): every
@@ -226,8 +232,25 @@ namespace bmmo::session {
                                     std::vector<uint8_t>& out) {
             return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo, queue_ptr, hold_ptr, cells_ptr);
         };
+        // Step OPC: the reusing capture, with the host-write generation the
+        // engine compares (game/script_record_reuse.hpp).
+        if (o.record_reuse && bmmo::game::script_reuse_mode_from_env() != bmmo::game::script_reuse_mode::off) {
+            world.capture_scripts_from = [context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr, cells, cells_ptr](
+                                             std::vector<uint8_t>& out, const std::vector<uint8_t>* previous, uint32_t tick) {
+                bmmo::game::script_replay::reuse_request reuse;
+                reuse.previous = previous;
+                reuse.tick = tick;
+                reuse.mode = bmmo::game::script_reuse_mode_from_env();
+                return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo, queue_ptr, hold_ptr, cells_ptr,
+                                                          &reuse);
+            };
+            world.script_writes = []() { return bmmo::game::script_write_generation(); };
+        }
         world.restore_scripts = [o, context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr](
                                     const std::vector<uint8_t>& bytes, uint32_t anchor) {
+            // Step OPC: a script restore writes the scripts, whoever calls it
+            // (the engine's own restore is behind its barrier as well).
+            bmmo::game::note_script_write();
             std::vector<CK_ID> kept_live;
             if (o.reset_ticks)
                 for (const auto& [id, reset_tick]: *o.reset_ticks)

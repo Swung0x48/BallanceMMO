@@ -4108,6 +4108,7 @@ namespace {
                 } else {
                     const bool was_active = script->IsActive() != FALSE;
                     scene->Activate(script, TRUE);
+                    bmmo::game::note_script_write();   // step OPC
                     logf("--activate-script: %s (#%u) activated after tick %u (tick base %u, frame %u next; it was %s)",
                          args_.activate_script.c_str(), static_cast<unsigned>(script->GetID()), now, h1_base_,
                          now - h1_base_ + 2, was_active ? "active" : "inactive");
@@ -4531,6 +4532,7 @@ namespace {
                 so.written_cells = true;
                 so.written_columns = &written_columns_;   // the columns the records carry (status line)
                 so.cells_memo = &cells_memo_;             // step OPB: walked only when what it reads changed
+                so.record_reuse = true;                   // step OPC: an inactive script's record reused (BMMO_SCRIPT_REUSE)
                 // Step G3 (world agreement 4.2): the proximity union's hold
                 // section with every record (v6), back at the anchor.
                 if (core_.proximity_union_active()) {
@@ -4703,6 +4705,11 @@ namespace {
             // cause, verify mismatches, the watch list's size).
             logf("%s", cells_memo_.line().c_str());
             for (const std::string& note: cells_memo_.notes()) logf("%s", note.c_str());
+            if (args_.script_replay) {   // step OPC
+                const auto& reuse = bmmo::game::script_reuse_totals();
+                logf("%s", reuse.line(bmmo::game::script_reuse_mode_from_env()).c_str());
+                for (const std::string& note: reuse.notes) logf("%s", note.c_str());
+            }
             // Steps RLM / FX1: the restores' membership ledger in this process -
             // registrations, those taken back, settled, and the replayed
             // frames' pending adds a later restore of the same live frame took

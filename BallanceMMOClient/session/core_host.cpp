@@ -2452,6 +2452,11 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     // Step OPB: the written-cell columns' memo (this process, every session).
     logger_->Info("Physics session: %s", cells_memo_host.line().c_str());
     for (const std::string& note: cells_memo_host.notes()) logger_->Warn("Physics session: %s", note.c_str());
+    {   // step OPC
+        const auto& reuse = bmmo::game::script_reuse_totals();
+        logger_->Info("Physics session: %s", reuse.line(bmmo::game::script_reuse_mode_from_env()).c_str());
+        for (const std::string& note: reuse.notes) logger_->Warn("Physics session: %s", note.c_str());
+    }
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     // Step WG4 (world-agreement-gaps design 2.3 "Release"): the level
     // outlives the session, so the union's sources go back now - vanilla play
@@ -3422,6 +3427,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             so.written_cells = true;
             so.written_columns = &written_columns_host;
             so.cells_memo = &cells_memo_host;   // step OPB
+            so.record_reuse = true;             // step OPC (BMMO_SCRIPT_REUSE)
             // Step WG4 (world agreement 4.2): the proximity union's hold
             // section with every record (v6), back at the anchor.
             if (proximity_host.active) {
@@ -3599,6 +3605,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                 } else {
                     const bool was_active = script->IsActive() != FALSE;
                     scene->Activate(script, TRUE);
+                    bmmo::game::note_script_write();   // step OPC
                     logger_->Info("Automation: session activate: %s (#%u) activated after tick %u (tick base %u, frame %u "
                                   "next; it was %s)", host.activate_script.c_str(),
                                   static_cast<unsigned>(script->GetID()), live, base, live - base + 2,

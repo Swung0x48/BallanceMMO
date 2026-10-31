@@ -34,6 +34,7 @@
 #include "CKAll.h"
 
 #include "menu_driver.hpp"
+#include "script_record_reuse.hpp"
 
 namespace bmmo::game {
     // One pass of the sector union, the writes every world makes (the
@@ -46,6 +47,7 @@ namespace bmmo::game {
         parameters->SetElementValue(0, 2, &none, sizeof(none));
         parameters->SetElementValue(0, 1, &sector, sizeof(sector));
         if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, TRUE);
+        note_script_write();   // step OPC: the host activates the manager (game/script_record_reuse.hpp)
     }
 
     // Depth first: the first behaviour named `name` in `parent`'s tree, the

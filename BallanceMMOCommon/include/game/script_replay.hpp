@@ -69,6 +69,7 @@
 #include <utility>
 #include <vector>
 
+#include <game/script_record_reuse.hpp>
 #include <physics/callback_queue_plan.hpp>
 #include <session/resync_rules.hpp>
 #include <session/trafo_input.hpp>
@@ -1230,14 +1231,58 @@ namespace bmmo::game {
             return out;
         }
 
+        // Step OPC (game/script_record_reuse.hpp): the record of t - 1 a
+        // capture may copy an inactive selected root's block from, the tick
+        // being captured (verify's notes) and the mode.  The rollback engine
+        // passes `previous` only when nothing wrote the scripts since it was
+        // captured (session/rollback.hpp capture).
+        struct reuse_request {
+            const std::vector<uint8_t>* previous = nullptr;
+            uint32_t tick = 0;
+            script_reuse_mode mode = script_reuse_mode::off;
+        };
+
         // The runtime state of the scripts, as bytes.  Deterministic for a
         // deterministic world, so two captures of the same tick compare
         // byte for byte.
         static bool capture(CKContext* context, const selection& sel, const script_replay_hooks& hooks,
                             std::vector<uint8_t>& out, const trafo_part* trafo = nullptr, const queue_hooks* queue = nullptr,
-                            const hold_hooks* hold = nullptr, const std::vector<written_column>* cells = nullptr) {
+                            const hold_hooks* hold = nullptr, const std::vector<written_column>* cells = nullptr,
+                            const reuse_request* reuse = nullptr) {
             out.clear();
             if (!context) return false;
+            // Step OPC: the previous record's script list, indexed by id.
+            const bool reusing = reuse && reuse->mode != script_reuse_mode::off;
+            script_reuse_stats& reuse_stats = script_reuse_totals();
+            record_index previous_index;
+            bool have_previous = false;
+            if (reusing) {
+                ++reuse_stats.captures;
+                if (reuse->previous) {
+                    have_previous = index_record(*reuse->previous, previous_index);
+                    if (have_previous) ++reuse_stats.with_previous;
+                    else ++reuse_stats.index_failed;
+                }
+                // No record to reuse from (the first record, a barrier, a
+                // host write): the subtrees are looked at again.
+                if (!have_previous) physics_blocks().roots.clear();
+            }
+            // The block of `id` in the previous record (present), or null.
+            // Same order as the selection unless scripts joined it: the same
+            // position first, then a search.
+            const auto previous_block = [&](size_t k, CK_ID id, size_t& size) -> const uint8_t* {
+                const record_index::script* s = nullptr;
+                if (k < previous_index.scripts.size() && previous_index.scripts[k].id == id) {
+                    s = &previous_index.scripts[k];
+                } else {
+                    for (const record_index::script& e: previous_index.scripts)
+                        if (e.id == id) { s = &e; break; }
+                }
+                // id (4) and present (1), then the block.
+                if (!s || s->end < s->begin + 5 || (*reuse->previous)[s->begin + 4] != 1) return nullptr;
+                size = s->end - s->begin - 5;
+                return reuse->previous->data() + s->begin + 5;
+            };
             // Sized like this thread's previous record (a tick's scripts are
             // the last tick's): the bytes are appended without the vector
             // moving them as it grows (step TR3: every member's trafo set
@@ -1262,11 +1307,58 @@ namespace bmmo::game {
             }
             for (const auto* list: {&sel.scripts, &sel.satellites}) {
                 put_u32(out, static_cast<uint32_t>(list->size()));
-                for (CK_ID id: *list) {
+                const bool roots = list == &sel.scripts;
+                for (size_t k = 0; k < list->size(); ++k) {
+                    const CK_ID id = (*list)[k];
                     auto* beh = CKBehavior::Cast(context->GetObject(id));
                     put_u32(out, static_cast<uint32_t>(id));
                     put_u8(out, beh ? 1 : 0);
-                    if (beh) capture_behavior(beh, hooks, out);
+                    if (!beh) continue;
+                    if (!reusing || !roots) {
+                        capture_behavior(beh, hooks, out);
+                        continue;
+                    }
+                    // Physics state in the block: always walked.
+                    if (root_has_physics_block(beh)) {
+                        ++reuse_stats.walked_physics;
+                        capture_behavior(beh, hooks, out);
+                        continue;
+                    }
+                    // Step OPC: an inactive root whose activation words equal
+                    // record t - 1's takes that record's block.
+                    size_t size = 0;
+                    const uint8_t* block = have_previous ? previous_block(k, id, size) : nullptr;
+                    script_root_words recorded;
+                    if (!block || !read_script_root_words(block, size, recorded)) {
+                        ++reuse_stats.walked_unrecorded;
+                        capture_behavior(beh, hooks, out);
+                        continue;
+                    }
+                    if (!reusable_root(recorded, root_words_of(beh), static_cast<uint32_t>(kFrameFlags))) {
+                        ++reuse_stats.walked;
+                        capture_behavior(beh, hooks, out);
+                        continue;
+                    }
+                    ++reuse_stats.reused;
+                    const size_t at = out.size();
+                    if (reuse->mode == script_reuse_mode::verify) {
+                        // Walked as well and compared; the copy is recorded
+                        // either way (a verify run records what on would).
+                        ++reuse_stats.verified;
+                        capture_behavior(beh, hooks, out);
+                        const size_t fresh = out.size() - at;
+                        if (fresh != size || !std::equal(block, block + size, out.begin() + static_cast<std::ptrdiff_t>(at))) {
+                            const size_t where = first_difference(out.data() + at, fresh, block, size);
+                            reuse_stats.note("script_reuse mismatch: " + owner_name(beh) + " / "
+                                             + (beh->GetName() ? beh->GetName() : "") + " (#" + std::to_string(id)
+                                             + ") at tick " + std::to_string(reuse->tick) + ": a fresh walk ("
+                                             + std::to_string(fresh) + " bytes) differs from record t - 1's block ("
+                                             + std::to_string(size) + " bytes) at byte " + std::to_string(where)
+                                             + "; recorded the copy");
+                        }
+                        out.resize(at);
+                    }
+                    out.insert(out.end(), block, block + size);
                 }
             }
             // The data-array cells the manager and the modules read and the
@@ -1364,6 +1456,64 @@ namespace bmmo::game {
             for (int i = 0; i < outputs && i < 32; ++i)
                 if (beh->IsOutputActive(i)) outs |= 1u << i;
             return ins == in_mask && outs == out_mask;
+        }
+
+        // Step OPC: a root's activation words as put_activation writes them.
+        static script_root_words root_words_of(CKBehavior* beh) {
+            script_root_words w;
+            w.id = static_cast<uint32_t>(beh->GetID());
+            w.flags = static_cast<uint32_t>(beh->GetFlags()) & kRuntimeFlags;
+            const int inputs = beh->GetInputCount(), outputs = beh->GetOutputCount();
+            for (int i = 0; i < inputs && i < 32; ++i)
+                if (beh->IsInputActive(i)) w.in_mask |= 1u << i;
+            for (int i = 0; i < outputs && i < 32; ++i)
+                if (beh->IsOutputActive(i)) w.out_mask |= 1u << i;
+            return w;
+        }
+
+        // Step OPC (review finding 1): a root with a force or a joint block
+        // anywhere in its subtree is never a reuse source.  Those blocks'
+        // bytes (put_force_and_joint: the force controller's existence,
+        // position and force; the joint's image hash and its place among its
+        // core's controllers of one priority and name) are read from
+        // physics_RT, not from the script, and can change while the script is
+        // inactive with unchanged words (another script's constraint shut
+        // down, the body unphysicalized).  The subtree changes only through a
+        // host write (the proximity union's unit copies add and remove
+        // blocks), a re-creation or anything else behind the engine's write
+        // barrier, so the answer is cached per root (id and pointer) for one
+        // host-write generation and dropped by every capture with no record
+        // of t - 1 to reuse from (each barrier makes at least one).
+        static bool subtree_has_physics_block(CKBehavior* beh) {
+            if (!beh) return false;
+            if (is_force_block(beh) || is_joint_block(beh)) return true;
+            if (beh->IsUsingFunction()) return false;
+            const int children = beh->GetSubBehaviorCount();
+            for (int i = 0; i < children; ++i)
+                if (subtree_has_physics_block(beh->GetSubBehavior(i))) return true;
+            return false;
+        }
+        struct physics_block_cache {
+            uint64_t generation = ~0ull;
+            std::map<CK_ID, std::pair<CKBehavior*, bool>> roots;
+        };
+        static physics_block_cache& physics_blocks() {
+            thread_local physics_block_cache cache;
+            return cache;
+        }
+        static bool root_has_physics_block(CKBehavior* root) {
+            physics_block_cache& cache = physics_blocks();
+            const uint64_t generation = script_write_generation();
+            if (cache.generation != generation) {
+                cache.roots.clear();
+                cache.generation = generation;
+            }
+            const CK_ID id = root->GetID();
+            const auto it = cache.roots.find(id);
+            if (it != cache.roots.end() && it->second.first == root) return it->second.second;
+            const bool has = subtree_has_physics_block(root);
+            cache.roots[id] = {root, has};
+            return has;
         }
 
         // Whether a record skips a parameter's bytes (is_opaque below): a

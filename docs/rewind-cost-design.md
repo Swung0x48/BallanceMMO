@@ -17,8 +17,11 @@ optimization); its first step was pulled ahead of trafo T3 by the user's
 decision of 2026-10-25 (§11). The research of FULL step OPTR (2026-10-30,
 the user's two ideas measured against a frame profile; blocked on the user)
 is the section "Research (step OPTR)"; its option A is built at step OPA
-("As built (step OPA)") and its option B1 at step OPB ("As built (step
-OPB)", the last section).
+("As built (step OPA)"), its option B1 at step OPB ("As built (step
+OPB)") and its option C at step OPC ("As built (step OPC)", the last
+section; exact, but its review's subtree guard leaves 10-16 % of the
+captures reused and no measurable saving - the refinement that recovers it
+is queued there).
 
 Base: HEAD 49e2cc8. Line numbers are HEAD's plus RC1's own edits. The profile
 this design rests on is step CPUPROF's ("The rewind-cost profile
@@ -4652,3 +4655,261 @@ reaching a watched writer or a second session in one process, so with real
 CK data only the hit path (verified against a fresh walk at every bind) and
 the first walk were exercised. No stale case was found, so nothing waits on
 the user.
+
+## As built (step OPC, FULL close-out, 2026-10-31): an inactive script's record reused (R.4 row C)
+
+The user's decision (2026-10-30, OPTR), verbatim: "你决定，按你的推荐来" -
+A, then B1, then C. This is C. Base 6a4686bd (OPB; protocol 23, journal v9).
+Shared code and the two core hosts only: no IVP, physics_RT, engine,
+protocol, journal or record change (the record's bytes are what the walk
+writes); no `BallanceMMOClient` member; the legacy PSC binding and the server
+are unchanged in behaviour (the server compiles the shared helpers that now
+bump a counter, nothing reads it there).
+
+**What was built.**
+- `BallanceMMOCommon/include/game/script_record_reuse.hpp` (new, engine-free):
+  the modes `BMMO_SCRIPT_REUSE=off | on | verify` (on when unset, read once
+  per process); the host-write generation (`note_script_write()` /
+  `script_write_generation()`, one process-wide atomic counter); the rule
+  `reusable_root(recorded, now, frame_flags)` on a root's four record words
+  (id, runtime flags, active-input mask, active-output mask): the same root,
+  no frame flag now (active or a next-frame change), and the recorded words
+  equal to the words now - so none at t - 1 either, launched-once unchanged,
+  no IO switched; the counters and the `script_reuse:` report line.
+- `game/script_replay.hpp` `capture(..., const reuse_request* reuse)`: the
+  previous record's script list indexed once per capture (the existing
+  `index_record`, matched by id: the same position first, then a search, so
+  scripts joining the selection shift nothing); for every selected ROOT
+  script (`sel.scripts`; the satellites, the three cells, the trafo part with
+  its RC4 ledger, the queue, hold and written-cell sections are captured as
+  before) whose block in record t - 1 is present and passes the rule, the
+  block's bytes are copied (`root_words_of` reads the words now). Verify walks
+  every such script as well, compares the bytes, counts and notes a mismatch
+  (owner / script, id, tick, sizes, first differing byte) and records the copy
+  (a verify run records what `on` would - OPA / OPB's precedent; RC2 (b)'s
+  verify keeps the fresh values instead).
+- `session/rollback.hpp`: `rollback_world::capture_scripts_from(out,
+  previous, tick)` and `rollback_world::script_writes()`; `tick_state::
+  script_writes` (in memory only). `capture()` finds the record of t - 1
+  exactly as RC2 (b) does (`write_generation == engine_writes_`, never the
+  record being amended) - now also when the capture cache is off - and hands
+  its scripts over only when that record has scripts and was captured under
+  the host-write generation of now; otherwise null (the capture walks).
+- `session/rollback_binding_scripts.hpp`: `script_binding_options::
+  record_reuse` (off: as before - the legacy path); when on and the mode is
+  not off, `bind_script_replay` binds `capture_scripts_from` and
+  `script_writes`; every `restore_scripts` call bumps the host-write
+  generation (whoever calls it; the engine's own restore is behind its barrier
+  as well).
+- The host writes into scripts outside the engine's restore, each bumping the
+  generation: `session_host_support.hpp` `replay()` (every re-issued script
+  activation and the manager's), `sector_activation.hpp` `run_sector_pass`,
+  `proximity_union.hpp` `rewire` / `release` (Q7's unit copies change the
+  selected scripts' graphs), `sector_placement.hpp` (the copies' scripts
+  stopped), `script_state.hpp` (the sequencers' anchor values, the proximity
+  countdowns), the headless `--activate-script` and the retail automation's
+  `session activate`.
+- Hosts: `record_reuse = true` on the headless client (`session_client.cpp`;
+  the periodic report prints `script_reuse:` and any mismatch notes after
+  `cells_memo:`), the retail core host (`core_host.cpp`, its session-end log)
+  and both SimTool bindings (`--savestate-check`'s summary prints the line).
+  The counters are process-wide statics never reset (as `dormancy()`,
+  `joint_stats()`, `queue_stats()`), so a second session in one game launch
+  prints cumulative figures; every run below launched a fresh process per
+  session. The reuse keeps no state of its own to drop (OPB's memo is
+  host-owned and dropped per selection): its only source is the record of
+  t - 1.
+- Unit tests (`tests/script_record_reuse_test.cpp`, `ScriptRecordReuse.*`, 4;
+  `rollback_engine_test.cpp`, `RollbackEngine.ScriptReuseGetsTheRecordOfThe
+  TickBeforeOnlyWithNoWriteInBetween`): the rule (a frame flag now or at t - 1,
+  launched-once, an input or output switched, another id); the mode parser and
+  the generation; the counters and notes; the engine handing over t - 1 only
+  with no host write and no engine write in between (first record, a host
+  write, a gap, the first replayed tick after a restore, the live capture
+  after the replay's exit barrier, then t - 1 again).
+
+**Adaptations (within the design).** (1) The design's barrier is RC2 (b)'s
+engine-write generation; RCB's barrier covers the restore (the scripts, the
+proximity hold), re-creations, births and rows, but not the host's own writes
+into the scripts outside a restore (a replayed or live host activation runs
+in `pre_step`, before that tick's script frame, so a script it activates can
+run and finish inside one frame with no flag at either capture). Those writers
+bump a second, host-write generation the engine compares per record
+(`tick_state::script_writes`), instead of a public engine call: the writers
+are shared CK helpers that have no engine. A bump costs walks only, so a
+writer that may not touch a selected script bumps too. (2) The rule compares
+the whole runtime flag word and the IO masks (RC4's root guard), not only "no
+next-frame flags at t and t - 1": a script that ran between the captures
+switches an IO or sets launched-once. (3) Writers not bumped, because what
+they write is outside the selection (`is_mechanism_script`: roots owned by a
+P_* / PE_* object but P_Extra, Gameplay_SectorManager, the trafo scripts
+without trafo inputs): `tutorial_exit` (Gameplay_Tutorial's IO),
+`menu_driver`, `sector_reset_guard` (Gameplay_Ingame's Execute Script
+targets), `zero_retail_forces` (the own ball's force input), and
+`trafo_sets` (the trafo part, RC4's ledger). Verify would show any of them
+reaching a selected script.
+
+**The two unproven cases (OPTR).** Verify ran over every check below,
+including the scripted levels the plan names: no mismatch anywhere. A script
+activated through the scene (Activate Script, CKScene::ActivateScript sets
+ACTIVATENEXTFRAME, `submodule/Ballanced/Source/CK2/src/CKScene.cpp:277-315`)
+by another script shows the flag at the capture before it runs, so the rule
+walks it; activated by the host, it is a host write; a block calling
+CKBehavior::Activate on another script directly is the case only verify
+covers (none seen). No parameter of an
+inactive selected script was written by another script or by the core in any
+run (L1: 5 selected scripts, L11: 65, L12: 69 with placement copies).
+
+**Checks (2026-10-31).**
+- Builds: x64 BUILD-OK, DEPS-OK; x86 CLIENT-BUILD-OK, DEPS-OK (`core_host.cpp`,
+  `physics_session_client.cpp` and the core sources recompiled; the slot-13
+  hack not applied, map.hpp clean); Arch server ARCH-BUILD-OK
+  `ballanced-36c04e3d24c9+bmmo-6a4686bd6311-dirty`. Unit tests 708/708 pass
+  (5 new). GCC syntax (linux_test_syntax.sh) 33/33 ok.
+- Wire check, the new binary in verify mode (`BMMO_SCRIPT_REUSE=verify
+  EXTRA="--accept-protocol 22" wire_check.sh rOPB rOPC rOPCw`, core_ref_s12's
+  nine arms with h1_150 from core_ref_s12h): ALL SAME, sends 36/36 SAME,
+  journals 36/36 IDENTICAL; verify mismatches 0 on all 36 (reused 63-86 % of
+  the selected scripts' captures: arena arms 72-74 %, cliff 63 %, swing 65 %,
+  l8_cross 63-64 %, h1_150 86 %; 43010-62067 verified copies per client).
+- Verify over core_ref_s12's solo1 / solo2 and RCB's cpu_full `rcb_l8x_on`,
+  `rcb_l12x_on2`, `rcb_h1_on` (14 replays, `work/OPC/verify_more.sh`): every
+  journal IDENTICAL to rOPB's replay and to the live client's; mismatches 0
+  (solo 78 %, L8 65 %, L12 50-51 %, h1 86 % reused).
+- SimTool `--savestate-check` (RCB's recipe, `work/OPC/simcheck.sh`: the
+  arena, P_Modul_18 dropped, frames, the session recipe, depth 48): K=2 seed 1
+  x 40 rounds off / on / verify PASS, K=8 seed 2 x 60 rounds on / verify PASS;
+  verify 0 mismatches over 13286 / 18525 copies (78 %).
+- Live, headless, snapshots off, trafo inputs and placement copies on, 150 ms,
+  the four clients in verify mode (`work/OPC/live.sh`, CPU's `cpu_run.sh`):
+  L1 (`cpu_full/opc_l1_verify`, RK3H's recipe: drive, client 3 joining at 700)
+  VERDICT PASS, server replay 2703/2703 matched, every client 0 mismatches
+  (96-97 % of 5 scripts reused), resyncs 0, starved 0; L11
+  (`cpu_full/opc_l11_verify`, drive, sector 1) VERDICT PASS, server replay
+  2587/2587 matched, every client 0 mismatches over 146526-161268 verified
+  copies (80 %), resyncs 0, starved 0. Both arms' captures replayed by the
+  same binary with the reuse off and on: 16/16 journals IDENTICAL to the live
+  clients' (`work/OPC/live_offcheck.sh`). L1's "late ball mirror" criterion
+  (2.59 m) is not a verdict criterion and is pre-existing: RK3H's run of the
+  same recipe had 2.82 m (`maps/arena-test/rk3h_h3`), and the reuse-off
+  replay's journals are identical.
+- The saving on E-cores (decision 33; `work/OPC/ecore_ab.sh`, the four
+  clients of an arm at once, client i on logical processors 16+3i..18+3i; the
+  same rOPC binary with `BMMO_SCRIPT_REUSE=off` as "before" and `on` as
+  "after", the same captures; off vs on journals IDENTICAL 12/12; OPA's and
+  OPB's memos on in both). Mean of the four clients (`work/OPC/ab_summary.py`):
+
+| | frame p50 off -> on | p99 | p999 (rewind frames) | max (range) | t_rep per resim tick | t_cap per frame |
+|---|---|---|---|---|---|---|
+| L8 `rcb_l8x_on` | 2.10 -> 1.92 | 3.50 -> 3.17 | 82.8 -> 72.6 | 131 (91-178) -> 123 (86-168) | 1.45 -> 1.26 ms | 0.91 -> 0.72 ms |
+| L12 `rcb_l12x_on2` | 3.95 -> 3.12 | 11.1 -> 9.8 | 147.5 -> 106.8 | 199 (168-229) -> 145 (114-192) | 2.23 -> 1.49 ms | 2.33 -> 1.36 ms |
+| h1 `rcb_h1_on` | 2.35 -> 2.23 | 34.8 -> 32.7 | 72.1 -> 69.7 | 96 (79-109) -> 92 (73-107) | 1.19 -> 1.09 ms | 0.93 -> 0.82 ms |
+
+  (t_cap counts the live and the replayed captures; one run per mode, a
+  smoke figure, not a band.)
+- Retail L12 (RT2's SP8-e recipe session 1, `work/OPC/opc_retail.py`, the OPC
+  x86 build in both copies, each game on E-cores of its own: client 1 16-21,
+  client 2 22-27; `net lag 150`, client 1 crossing s2, s3, s4; the Arch server
+  of this tree, snapshots off): `BMMO_SCRIPT_REUSE=verify`
+  (`scripts/retail/opc_l12_verify`) - 0 mismatches over 81287 / 81587
+  verified copies (72.7 % of 69 scripts' captures), resyncs 0, subst 0, rb 3 /
+  resim 70-72 per client; then `off` (`opc_l12_off`, the "before") and `on`
+  (`opc_l12_on`), resyncs 0 and subst 0 in both:
+
+| client 1 / client 2 | off (before) | on (after) | verify (walks every copy too) |
+|---|---|---|---|
+| `core_frame_time` p50 | 3.5 / 3.4 | 2.4 / 2.3 | 3.7 / 3.6 |
+| `core_frame_time` p99 | 5.5 / 4.1 | 3.5 / 3.3 | 5.8 / 4.2 |
+| `core_frame_time` max | 52.3 / 50.2 | 38.3 / 40.0 | 53.7 / 53.0 |
+| `frame_interval` p50 / p99 | 15.1 / 16.7, 15.1 / 16.7 | 15.1 / 16.9, 15.1 / 16.6 | 15.1 / 16.7, 15.1 / 16.7 |
+| t_cap (ms, session) | 3317 / 3242 | 1581 / 1522 | 3599 / 3539 |
+| t_rep (ms) over resim ticks | 116 over 72, 109 over 69 | 70 over 69, 70 over 69 | 130 over 70, 127 over 72 |
+
+  So retail L12 on E-cores: `core_frame_time` p50 3.5 / 3.4 -> 2.4 / 2.3 ms,
+  t_cap -53 %, t_rep per resim tick 1.6 -> 1.0 ms. Verify costs more than off
+  (it walks every copied script and indexes and copies as well); OPB's `on`
+  session of the same recipe (no reuse) had p50 3.4 / 3.5, as off here. One
+  session per mode (a smoke figure, not a band).
+
+**Not run / deferred.** The retail x86 plugin's record bytes are not checked
+offline (the retail evidence is verify's in-game compare, 0 mismatches, and
+the frame times). L1's selection is 5 scripts (its tutorial is not a selected
+script), so L1 exercises little; L11 and L12 are the scripted coverage. No
+mid-session selection change ran (the index matches by id; a script joining
+the selection walks once). No stale case was found, so nothing waits on the
+user.
+
+### The review's gate round (step OPC, 2026-10-31): a root with a force or joint block is always walked
+
+Everything above was measured on the implement round's build. The review
+found that a root's block carries more than script state: a force block's
+bytes (`put_force_and_joint`: the force controller's existence, position and
+force) and a joint block's (the image hash and `order`, the constraint's place
+among its core's controllers of one priority and name,
+`physics_rt_api.h:160-165`) are read from physics_RT, and can change while the
+root stays inactive with unchanged words - a second constraint of the same
+name shut down by another script moves `order`, a body unphysicalized flips
+`exists`. A copied block would carry the stale values on, tick after tick,
+into a rollback's restore (a refused `order_joints` or a constraint order
+unlike live). No verify run had shown one; the hole is real by the code.
+
+**Fix.** `script_replay.hpp` `root_has_physics_block`: a selected root whose
+subtree holds a force block or a joint block is never reused, it is walked
+(counted as `physics=` in the `script_reuse:` line, which gained that field).
+The answer is cached per root (id and pointer) for one host-write generation
+and dropped by every capture with no record of t - 1 to reuse from (the
+first record, every engine barrier, every host write), so a subtree rebuilt
+by a unit copy or a re-creation is looked at again. Unit test updated
+(`physics=` in the line); 708/708 pass.
+
+**Consequence, measured: the saving is gone.** The reviewer's premise ("such
+roots are few") is refuted by the counters: about 80 % of the selected roots'
+captures are of a root with a force or joint block (every module with a hinge,
+a spring or a force). The reused share fell from 50-86 % to 9.4-16.5 % - wire
+check arms 15.3-16.5 % (l8_cross 9.4 %, h1_150 12.7-13.1 %), solo 15.3 %,
+cpu_full L8 9.8-9.9 %, L12 14.7-14.9 %, h1 12.7-13.2 %, the savestate check
+6.0 % - and the E-core A/B of the same binary off -> on (`work/OPC/
+ecore_ab_g.sh`, L12 and L8, the four clients on E-cores of their own, nothing
+else running) shows no saving above the run-to-run scatter: L12 p50 4.4-4.6 ->
+4.4-4.7 ms, p999 140-212 -> 138-211 ms, t_cap 4804-5316 -> 4726-5390 ms per
+session, t_rep 1153-1378 -> 1115-1414 ms; L8 p50 2.2-2.4 -> 2.2-2.4, t_cap
+2009-2241 -> 2067-2254 ms. The E-core and the retail tables above describe the
+implement round's build (without the guard) and are not this commit's.
+
+**The refinement, queued (OPC2).** Copy a reused root's block but re-emit
+the physics tails fresh: walk record t - 1's block in step with the live
+graph - the 16 header bytes and both parameter sections copied with the
+existing skip helpers (`skip_parameters_v2`), `put_force_and_joint` re-run for
+every block (the old force and joint bytes skipped), the child count and each
+child's presence checked against the live graph, the delayed links copied -
+and walk the root whenever a structure check fails. Exact by construction (the
+only bytes not copied are the ones read from physics_RT, and those are read
+fresh) and covered end to end by verify; it keeps the parameter capture, which
+is the cost, out of the 80 %. Its price is a `capture_joint` image per joint
+block per tick, which the A/B must show is cheaper than the walk. Not built in
+this gate round: it needs its own exact set and the E-core A/B, which did not
+fit the gate budget.
+
+**The review's second finding (a script run and finished inside one frame).**
+A host activation is covered by the host-write generation and a scene
+activation shows ACTIVATENEXTFRAME at the capture before it runs. A block
+calling CKBehavior::Activate on a selected root directly, or an Activate
+Script block of a non-selected game script (Gameplay_Ingame, BallManager)
+that runs its target in the same frame, can leave the root's words unchanged
+with changed locals; CKBEHAVIOR_EXECUTEDLASTFRAME cannot tell (profile mode
+only, `CKEnums.h:327`). If that happens the stale block is not a one-tick
+error: it is re-copied every tick until the root's words change. Verify is the
+only check that would catch it; none of its runs saw one (every check above
+and below: 0 mismatches).
+
+**Gate round checks (05:32-05:47, 14.6 min).** x64 BUILD-OK, DEPS-OK; x86
+CLIENT-BUILD-OK, DEPS-OK; unit tests 708/708; GCC syntax 33/33 ok; wire check
+in verify mode (`wire_check.sh rOPB rOPC rOPCg2`, `--accept-protocol 22`) ALL
+SAME, 36/36 journals IDENTICAL, 0 mismatches; `verify_more.sh` (solo1/solo2,
+cpu_full L8 / L12 / h1, 14 replays) every journal IDENTICAL to rOPB's and to
+the live client's, 0 mismatches; SimTool `--savestate-check` K=2 seed 1 x 40
+off / on / verify and K=8 seed 2 x 60 on / verify PASS, 0 mismatches; the
+E-core A/B above (off vs on journals IDENTICAL 8/8). Not rerun: the live L1 /
+L11 runs and the retail sessions (the fix-up changes which roots are copied,
+not a record byte, and the exact checks above show the bytes unchanged; the
+retail re-measure of a saving that is gone belongs with OPC2).

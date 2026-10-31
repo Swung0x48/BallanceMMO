@@ -588,7 +588,13 @@ numbers 1-10 are unchanged.
    saving (the per-body cost is the name lookup); retail L11's t_cap was 8 %
    lower across builds (not isolated); RC5 (b) not built (steps 3 / 11 / 14 are 2-3.5 % of a restore); the
    CPU axes again - "As built (step RCB)"; whether to keep RC2 (b) is the
-   user's.** **RC3 is built and on by default (step B5RX)**: a snapshots-off
+   user's.** **FULL step OPC (OPTR option C): an inactive script's record
+   reused, built exact (verify 0 mismatches everywhere), but the review's
+   guard - a root with a force or joint block is always walked, those bytes
+   are physics_RT's state - covers about 80 % of the selected roots, so it
+   reuses 10-16 % and measures no saving; queued: OPC2, a copied block with
+   its force and joint tails re-read fresh ("As built (step OPC)", its gate
+   round).** **RC3 is built and on by default (step B5RX)**: a snapshots-off
    session takes a body-set full snapshot for its names and rows only (no
    compare, no rewind; headless `--body-set-corrections` is the control
    arm). The user, 2026-10-28, verbatim: "不对，RC3要保留快照？现在应该尽可能假设

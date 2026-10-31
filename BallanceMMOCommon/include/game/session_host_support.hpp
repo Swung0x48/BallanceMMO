@@ -397,6 +397,7 @@ namespace bmmo::game {
                     if (auto* script = CKBehavior::Cast(context->GetObject(a.script))) {
                         scene->Activate(script, a.reset ? TRUE : FALSE);
                         ++scripts_reissued_;
+                        note_script_write();   // step OPC: an activation no script of this frame made
                     }
             }
             const std::vector<const manager_activation*> due = slots_.at(tick);
@@ -410,6 +411,7 @@ namespace bmmo::game {
                 parameters->SetElementValue(0, 2, &deactivate, sizeof(int));
                 if (scene) scene->Activate(manager, a->reset ? TRUE : FALSE);
             }
+            note_script_write();   // step OPC: the manager re-activated by the host
             return due.back();
         }
         // Step N02R: after the replayed step of `tick`, before its record is

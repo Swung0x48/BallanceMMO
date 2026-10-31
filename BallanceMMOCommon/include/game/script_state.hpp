@@ -32,6 +32,8 @@
 
 #include "CKAll.h"
 
+#include "script_record_reuse.hpp"
+
 namespace bmmo::game {
     class sequencer_state {
     public:
@@ -90,6 +92,7 @@ namespace bmmo::game {
         // how many blocks were written.
         int restore(CKContext* context) const {
             if (!context) return 0;
+            note_script_write();   // step OPC: the sequencers' values written by the host (game/script_record_reuse.hpp)
             int written = 0;
             for (const entry& e: entries_) {
                 CKBehavior* beh = mechanism_sequencer(context->GetObject(e.id), nullptr);
@@ -329,6 +332,7 @@ namespace bmmo::game {
 
         static bool write(CKParameterLocal* local, int value, bool& changed) {
             if (!local) return false;
+            note_script_write();   // step OPC: a proximity block's countdown written by the host
             int now = 0;
             if (local->GetValue(&now) != CK_OK || now != value) changed = true;
             return local->SetValue(&value, sizeof(value)) == CK_OK;

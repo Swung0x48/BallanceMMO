@@ -201,6 +201,7 @@ namespace bmmo::game {
             // would forget them, and the structural test would then find no
             // Ball_Pos_Frame source and rewire nothing.
             if (!probes_.empty() || !identities_.empty() || no_ball_ || !units_.empty()) release(context);
+            note_script_write();   // step OPC: the unit copies change the selected scripts' graphs
             clear();
             which_ = which;
             options_ = options;
@@ -723,6 +724,7 @@ namespace bmmo::game {
                 }
                 destroy(context, no_ball_);
                 release_units(context);   // step Q7: the slot copies with their links, after the union's own objects
+                note_script_write();      // step OPC: the selected scripts' graphs changed
             }
             clear();
             return restored;

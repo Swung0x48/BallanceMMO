@@ -710,6 +710,7 @@ namespace bmmo::game {
                 if (!scene->IsObjectActive(c)) scene->Activate(c, FALSE);
             }
             int scripts = 0;
+            note_script_write();   // step OPC: the copies' scripts stopped by the host (game/script_record_reuse.hpp)
             for (CK3dEntity* c: hc)
                 for (int s = 0; s < c->GetScriptCount(); ++s) {
                     CKBehavior* script = c->GetScript(s);

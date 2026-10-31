@@ -359,6 +359,16 @@ namespace bmmo::session {
         // frames start the scripts where the live frames had them.  Optional;
         // without them the replay is physics only, as it was.
         std::function<bool(std::vector<uint8_t>& out)> capture_scripts;
+        // Step OPC (rewind-cost design R.4 row C, game/script_record_reuse.hpp):
+        // capture_scripts with the record of the tick before (`previous`,
+        // null: none valid) an inactive script's block may be copied from,
+        // and the tick captured.  The engine passes a record only when no
+        // engine write (engine_writes_) and no host write into the scripts
+        // (`script_writes`, a generation the binding reads) came between the
+        // two captures.  Used instead of capture_scripts when bound.
+        std::function<bool(std::vector<uint8_t>& out, const std::vector<uint8_t>* previous, uint32_t tick)>
+            capture_scripts_from;
+        std::function<uint64_t()> script_writes;
         // `anchor` is the tick the bytes were captured at: the adapter keeps
         // live every script the game reset after it (script_replay::restore).
         std::function<bool(const std::vector<uint8_t>& bytes, uint32_t anchor)> restore_scripts;
@@ -3089,6 +3099,9 @@ namespace bmmo::session {
             // extras and contacts from the record of t - 1 only when no
             // engine write came between the two captures.  In memory only.
             uint64_t write_generation = 0;
+            // Step OPC: rollback_world::script_writes when this record's
+            // scripts were captured (0 without the hook).  In memory only.
+            uint64_t script_writes = 0;
         };
 
 
@@ -3460,11 +3473,18 @@ namespace bmmo::session {
             // sleeping body reads bit-equal to the anchor's record while its
             // calm times are not the recorded ones (review finding 1,
             // measured with --no-savestate: 12-1110 mismatches per client).
+            // Step OPC: the same record of t - 1 is the script capture's reuse
+            // source (rollback_world::capture_scripts_from), whatever the
+            // cache's mode.
             const tick_state* previous = nullptr;
-            if (capture_cache_ != capture_cache_mode::off)
+            const tick_state* scripts_previous = nullptr;
+            if (capture_cache_ != capture_cache_mode::off || world.capture_scripts_from)
                 for (auto it = history_.rbegin(); it != history_.rend(); ++it)
                     if (&*it != &state && it->tick == state.tick - 1) {
-                        if (it->write_generation == engine_writes_) previous = &*it;
+                        if (it->write_generation == engine_writes_) {
+                            if (capture_cache_ != capture_cache_mode::off) previous = &*it;
+                            scripts_previous = &*it;
+                        }
                         break;
                     }
             state.write_generation = engine_writes_;
@@ -3558,7 +3578,19 @@ namespace bmmo::session {
             bmmo_physics_globals globals{};
             state.have_globals = world.get_globals && world.set_globals && world.get_globals(globals);
             state.globals = state.have_globals ? globals : bmmo_physics_globals{};
-            state.have_scripts = replay_scripts_ && world.capture_scripts && world.capture_scripts(state.scripts);
+            if (replay_scripts_ && world.capture_scripts_from) {
+                // Step OPC: the record of t - 1 serves only when its scripts
+                // were captured under the host-write generation of now.
+                const uint64_t writes = world.script_writes ? world.script_writes() : 0;
+                if (scripts_previous && (!scripts_previous->have_scripts || scripts_previous->script_writes != writes))
+                    scripts_previous = nullptr;
+                state.script_writes = writes;
+                state.have_scripts =
+                    world.capture_scripts_from(state.scripts, scripts_previous ? &scripts_previous->scripts : nullptr, state.tick);
+            } else {
+                state.script_writes = 0;
+                state.have_scripts = replay_scripts_ && world.capture_scripts && world.capture_scripts(state.scripts);
+            }
             if (!state.have_scripts) state.scripts.clear();
             // Recorded whatever set_exact_restore says, so the switch is an A/B
             // over the same records.  An empty blob counts as none.

@@ -6208,3 +6208,57 @@ TEST(RollbackEngine, CaptureCacheReadsFreshAfterARestoreThatShiftedTheCalmRefere
         EXPECT_EQ(engine.stats().capture_cache_mismatches, 0u);
     }
 }
+
+// Step OPC (rewind-cost-design R.4 row C): the record a script capture may
+// copy an inactive script's block from is the record of t - 1, handed over
+// only when no engine write (RC2 (b)'s barrier: a restore, and its replay's
+// exit) and no host write into the scripts (rollback_world::script_writes)
+// came between the two captures.
+TEST(RollbackEngine, ScriptReuseGetsTheRecordOfTheTickBeforeOnlyWithNoWriteInBetween) {
+    fake_world world;
+    world.bodies["Remote"].position[0] = 5.0;
+    world.navs["Remote"] = {};
+    rollback_engine engine;
+    auto w = world.adapter();
+    uint64_t writes = 0;
+    uint8_t next = 1;
+    std::vector<int> handed;
+    w.capture_scripts_from = [&](std::vector<uint8_t>& out, const std::vector<uint8_t>* previous, uint32_t) {
+        handed.push_back(previous && !previous->empty() ? (*previous)[0] : -1);
+        out = {next++};
+        return true;
+    };
+    w.script_writes = [&]() { return writes; };
+    w.restore_scripts = [&](const std::vector<uint8_t>&, uint32_t) { return true; };
+    rollback_tracked tracked;
+    tracked.remote_entities = {"Remote"};
+    auto record = [&](uint32_t tick) {
+        w.step();
+        engine.record(w, tick, tracked, {{"Remote", input_frame{}}});
+    };
+    record(1);
+    record(2);
+    ASSERT_EQ(handed.size(), 2u);
+    EXPECT_EQ(handed[0], -1) << "the first record has none before it";
+    EXPECT_EQ(handed[1], 1) << "tick 2 gets tick 1's record";
+    writes = 5;   // a host write between the captures of 2 and 3
+    record(3);
+    EXPECT_EQ(handed[2], -1) << "a host write since the record of t - 1";
+    record(4);
+    EXPECT_EQ(handed[3], 3) << "captured under the same generation again";
+    record(5);
+    record(6);
+    EXPECT_EQ(handed[5], 5);
+    // A rewind to 4: the restore is an engine write, so the first replayed
+    // capture (5) has no source and the next ones have the replayed records;
+    // the barrier on the replay's exit leaves the live capture after it none.
+    const size_t before = handed.size();
+    ASSERT_TRUE(engine.rewind_to(w, 4, 6, no_input, "test"));
+    ASSERT_GE(handed.size(), before + 2);
+    EXPECT_EQ(handed[before], -1) << "the first replayed tick after the restore";
+    EXPECT_NE(handed[before + 1], -1) << "the second replayed tick gets the first's record";
+    record(7);
+    EXPECT_EQ(handed.back(), -1) << "the live capture after the replay";
+    record(8);
+    EXPECT_EQ(handed.back(), next - 2) << "then the record of t - 1 again";
+}

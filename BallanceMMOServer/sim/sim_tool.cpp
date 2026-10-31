@@ -3863,6 +3863,7 @@ namespace {
         script_options.resize_strings = true;
         script_options.live_membership = true;   // step B2SW (G1, F): the core hosts' rule
         script_options.written_cells = passes;   // step RK2 (record-format Q4): the core hosts' written-cell section
+        script_options.record_reuse = true;      // step OPC: the core hosts' record reuse (BMMO_SCRIPT_REUSE)
         // Step RK2's review: the binding's columns, for the round check below
         // (every row of each is set to a sentinel before the rewind; at the
         // round's end it must hold the straight pass's values at e - one
@@ -5182,6 +5183,12 @@ namespace {
             // Step RLQ: the PreSimulate queue binding's counters (the clients'
             // cbq line).
             const auto& q = bmmo::game::script_replay::queue_stats();
+            {
+                // Step OPC: the record reuse's counters (verify's mismatches).
+                const auto& reuse = bmmo::game::script_reuse_totals();
+                std::printf("savestate-check: %s\n", reuse.line(bmmo::game::script_reuse_mode_from_env()).c_str());
+                for (const std::string& note: reuse.notes) std::printf("savestate-check: %s\n", note.c_str());
+            }
             {
                 const auto& w = bmmo::game::script_replay::written_cells_stats();   // step RK2
                 std::printf("savestate-check: cells (step RK2): captured=%llu columns=%llu rows=%llu restores=%llu "
@@ -9038,6 +9045,7 @@ namespace {
             so.resize_strings = true;
             so.live_membership = true;   // step B2SW (G1, F): the core hosts' rule
             so.written_cells = true;     // step RK2 (record-format Q4): the core hosts' written-cell section
+            so.record_reuse = true;      // step OPC
             bmmo::session::bind_script_replay(bound, backend, so);
         };
         bmmo::session::rollback_world binding = bmmo::session::bind_session_world(backend, core_hooks, w);
