@@ -2442,3 +2442,127 @@ releases the own ball, the ball is released by a key pressed in the menu;
 its keys stay neutral until the menu closes either way (the mute), and the
 tutorial's time-factor writes are held (`pause_clock_apply`, RK3H), so
 nothing compared between worlds changes.
+(Answered 2026-10-31 by the user, built at step ESCK below.)
+
+## As built (step ESCK, FULL close-out, 2026-10-31): while the ESC menu is open its keys reach the menu only
+
+The user's decision (2026-10-31): while the overlay menu is open, a key
+operates the menu and nothing else (ESCX's observation above). Retail only,
+core session only, host-local: no wire, journal or record change, no shared
+or headless file, no `BallanceMMOClient` member; the legacy path and offline
+play never install it.
+
+**Census** (H1X's per-level script dumps, `SimTool --dump-script` of every
+root script at tick 251 on L1-L13, `.local-tools/work/ESCK/census.py`, for
+which scripts read keys on which level; the counts below are the retail
+anchor's scan of every behavior, which the dump scan undercounts for
+Gameplay_Events - 3 vs 6, its top-level blocks print differently). The only
+keyboard readers are building blocks; outside the menus they are, on every
+level alike: Gameplay_Tutorial Key Event x29, Gameplay_Ingame x13 (Ball
+Navigation's keys, Cam Navigation's rotation / lift keys), Gameplay_Events
+x6 (the ESC pause #30448, the level end's "3 keys" ESC / Space / Enter, two
+debug keys), Gameplay_Energy x1 (the F3 level info, debug-gated), Debug_Info
+Key Event x2 + Key Waiter x1 (specific key). No module script (P_*, PC_*,
+PE_*, PR_*, PS_*) reads a key on any level; the arena instantiates the same
+module scripts from `3D Entities/PH/` (maps/README.md), so it has the same
+set - the anchor's scan of the running level is what counts and is logged
+each time. The menus (every root script owned by All_Menu: Menu_Pause,
+Menu_YesNo, Menu_Options, Menu_Opt_*, ... - 125 blocks incl. Keyboard,
+Input String, TT_Key Waiter) and Event_handler (a Mouse Waiter, no key) keep
+the keyboard.
+
+**Built**: `BallanceMMOClient/session/menu_keys.hpp`, a file-scope
+`core_menu_keys` in `core_host.cpp`, resolved at the anchor right after the
+overlay, kept by the frame guard next to the overlay's `apply`, handed back
+in `core_host_end_local` (its status logged there and appended to
+`pausechain` in a core session).
+
+- Every Key Event and Key Waiter outside the menus gets its per-block
+  function (`CKBehavior::SetFunction`, physics_state.cpp's Random-block
+  precedent) replaced by a wrapper that runs the block's own function with
+  the block's own keys reading `KS_IDLE` in the input manager's keyboard
+  buffer (the bytes `IsKeyDown` reads) and puts the bytes back right after.
+  The block takes its own no-key path; nothing is re-implemented. A key
+  input is read only when its parameter is 4 bytes (ESCX's `read_int`), so a
+  custom map's or a mod's block with a non-key input cannot overrun it. A Key
+  Waiter in its any-key mode (ReadKey, the key buffer, not maskable per key)
+  is not run while the menu is open or a key is latched (its no-key path only
+  waits); none exists outside the menus (Debug_Info's waits for one key).
+  "Open" is the mute's own test, `IsIngame() && IsPaused()`, read live.
+- **Exempt: ESCX's ESC block** (#30448). Masked, it would read ESC up, reset
+  its Key State and fire Pressed on a frame after the close with ESC still
+  down - RK3E's re-pause. Exempt, ESCX's hold rules are unchanged.
+- **Keys held at the open**: the blocks see them released (a Key Event with
+  Key State TRUE fires Released once, as for a real release).
+- **Keys held at the close: hidden until let go** (a per-key latch taken at
+  the open -> closed transition, every key not `KS_IDLE`; a key leaves the
+  latch once it reads idle). Why: the key that closes the menu - Enter on
+  Back, ESC - is still down for several frames after the close (the
+  automation's taps hold it 0.2-0.35 s); with no latch its first unmasked
+  frame is a fresh press into the level (the tutorial's RETURN, the "3
+  keys"), the very thing the user ruled out. Consequence: a key held across
+  the whole menu period needs a new press after the close. The own ball is
+  not affected: the replica reads the buffer itself (ball_navigation.cpp's
+  poll) and takes keys again from the mute's end, as ESCX built it.
+- Every wrapped block is checked each frame (a level reset may give a block
+  its prototype's function back; `rewraps` counts it - 0 in the run). A
+  session that ends with the menu open or a key latched keeps the mask until
+  both are over (`end()` / `release()`, ESCX's hold pattern), then hands
+  every block back.
+
+**Checks** (`.local-tools/work/ESCK/esck_retail.py l1`, two retail copies,
+the Arch server of OPC2's tree, snapshots off, trafo inputs and placement
+on; `scripts/retail/esck_l1`: L1 offline control, an L1 session, then L8 in
+the same game processes; 140 s):
+
+- x86 CLIENT-BUILD-OK (DEPS-OK). No shared or headless file changed: no x64
+  build, wire check, GCC check or unit test is reachable.
+- Anchor (both sessions): 51 blocks wrapped (Debug_Info 3, Gameplay_Energy 1,
+  Gameplay_Events 5, Gameplay_Ingame 13, Gameplay_Tutorial 29), 125 left to
+  the menus, ESC #30448 exempt, no reader outside the menus left unmasked.
+- L1, the menu works: ESC opens it, down / up, Enter on Back closes it
+  (`paused=0`); ESC / ESC opens and closes it with no re-pause.
+- L1, the tutorial waiting for RETURN after `restart` (`own_phys=0`): ESC,
+  down / up, Enter on Back (held 0.35 s, across the close): the menu closed,
+  `own_phys=0` 1.5 s and 3 s later, the ball where it was; the mask hid a
+  down key from Gameplay_Tutorial's blocks on 68 runs (38 while the menu was
+  open with the arrows, the rest the Enter in the menu and across the close;
+  latch_total 3). One Enter afterwards: `own_phys=1`.
+- L8 (Gameplay_Ingame's Cam Navigation, key-gated): with the menu open,
+  Shift + Left and Space: hidden on 119 block runs, Cam_OrientRef unchanged
+  through the period and after the close; after the close the same Shift +
+  Left turned the camera (Cam_OrientRef's first row 0 -> -1).
+- 0 same-frame Unpause / Pause pairs (`menu_periods.py`; 8 PauseLevel, 5
+  UnpauseLevel incl. the offline control, the `restart` and the level exit);
+  every menu period's own input frames keys 0, flagged paused (196 / 90 / 45
+  / 198 on L1, 258 on L8).
+- FINAL rows (`rt1_judge.py`, each client's FINAL rows against the server
+  journal's FULL rows at every common tick): every body bit-equal to the
+  server on both clients in both sessions (L1 834 common ticks: own, mirror, 8/8 mechanisms; L8 435: own,
+  mirror, 2/2 mechanisms).
+- Offline control (the same build, before the session): ESC pauses
+  (`paused=1`, tutorial script 0), ESC resumes; no key mask (no core
+  session, no `keys` line).
+
+- A session that ends with the menu open (ESCX's gate recipe,
+  `escx_retail.py endopen`, `scripts/retail/esck_endopen`, 73 s): at the
+  room close the mask stays (`open=1`, "read no key until both are over"),
+  the closing ESC gives one UnpauseLevel and no PauseLevel (ESCX's hold
+  released in that frame), the mask hands every block back when ESC is let
+  go 0.3 s later (the latch); then the vanilla pause (`paused=1`, ingame /
+  events scripts 0) and resume (`paused=0`, scripts 1).
+
+- Review fix-up (gate round): the size-checked key read and the any-key
+  waiter's latch rule above; x86 CLIENT-BUILD-OK (DEPS-OK). No third retail
+  run (the step's two-run cap): on L1-L13 every wrapped block's key inputs
+  are 4-byte keyboard parameters, read the same way ESCX's `read_int` finds
+  the ESC block live, and no any-key waiter exists outside the menus, so the
+  runs above stand; a retail rerun goes to the FULL batch.
+- A key latched when the session ends keeps the mask into offline play until
+  it is let go (`end()`): kept on purpose - dropping the latch there would let
+  the closing key reach the level's scripts as a fresh press when the session
+  ends right after a close; the cost is a held key needing a new press.
+
+**Not run / not covered:** the level end's "3 keys" with the menu open
+(needs a finished level); Options / Menu_YesNo through their keys (left to
+the menus by construction; the anchor's census shows them unwrapped).

@@ -60,9 +60,8 @@
 // Not touched: the menu's own work - the cursor, End / Start Music, the
 // Unpause chain's Gameplay_Refresh activation (key bindings; its tutorial
 // time-factor write is held by step DX2), BallNav activate / deactivate (the
-// own replica drives the ball).  A key the menu reads also reaches the
-// running scripts, exactly as it would with no menu (Enter on the menu's Back
-// also reaches a waiting tutorial text).
+// own replica drives the ball).  A key the menu reads reaches the menu only:
+// step ESCK's key mask (menu_keys.hpp) hides it from the level's scripts.
 //
 // Retail-only (the Virtools SDK of the mod).  File-scope state of
 // core_host.cpp: BallanceMMOClient keeps its layout.
@@ -161,6 +160,10 @@ namespace bmmo::retail {
             esc_block_ = 0;
             return true;
         }
+
+        // Piece 1's block (0 when it was not found): step ESCK's key mask
+        // (menu_keys.hpp) leaves it to the hold above.
+        CK_ID esc_block() const { return esc_block_; }
 
         // The automation's read ('pausechain', appended in a core session).
         std::string status(CKContext* context) const {

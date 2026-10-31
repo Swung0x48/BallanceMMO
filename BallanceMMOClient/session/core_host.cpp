@@ -79,6 +79,7 @@
 #include <session/session_host_world.hpp>
 
 #include "core_host.hpp"
+#include "menu_keys.hpp"
 #include "menu_overlay.hpp"
 #include "session_journal_client.hpp"
 
@@ -129,6 +130,12 @@ namespace {
     // the session's end and before the next anchor.  File scope:
     // BallanceMMOClient keeps its layout.
     bmmo::retail::menu_overlay core_menu_overlay;
+    // FULL step ESCK (session/menu_keys.hpp): while that menu is open its
+    // keys reach the menu only - the level's keyboard-reading blocks read no
+    // key (and a key held across the close stays hidden from them until it
+    // is let go).  Resolved with the overlay, kept by the same frame guard,
+    // handed back at the session's end.  File scope, as above.
+    bmmo::retail::menu_key_mask core_menu_keys;
 }
 
 
@@ -1389,7 +1396,8 @@ bool bmmo::session::retail::core_tutorial_owned() {
 // path's) and the ESC menu overlay.  Empty while no core session runs.
 std::string bmmo::session::retail::menu_overlay_status(CKContext* context) {
     if (!core_session_running()) return {};
-    return std::format("core_muted={} ", host.input_muted ? 1 : 0) + core_menu_overlay.status(context);
+    return std::format("core_muted={} ", host.input_muted ? 1 : 0) + core_menu_overlay.status(context) + " "
+           + core_menu_keys.status();
 }
 
 bmmo::game::proximity_countdown_state& bmmo::session::retail::level_proximities() {
@@ -1835,6 +1843,11 @@ void BallanceMMOClient::core_host_process() {
     if (core_menu_overlay.release(m_bml->GetCKContext(), m_bml->IsIngame() && m_bml->IsPaused()))
         logger_->Info("Physics session: ESC menu overlay: the menu closed after the session's end (or the level was "
                       "left); the ESC hold is released");
+    // FULL step ESCK: the key mask likewise, until the menu has closed and
+    // every key held across the close has been let go.
+    if (core_menu_keys.release(m_bml->GetCKContext()))
+        logger_->Info("Physics session: ESC menu keys: the menu closed and its keys were let go after the session's "
+                      "end; every key-reading block is handed back");
     core_host_drain();
     switch (host.phase) {
     case retail_host::phase_type::counting_down:
@@ -2032,6 +2045,19 @@ void BallanceMMOClient::core_host_anchor() {
             logger_->Info("Physics session: ESC menu overlay: %s", line.c_str() + 3);
         else
             logger_->Error("Physics session: ESC menu overlay: %s", line.size() > 6 ? line.c_str() + 6 : line.c_str());
+    }
+    // FULL step ESCK: the menu's keys reach the menu only (menu_keys.hpp);
+    // ESCX's ESC block keeps its hold instead.
+    {
+        IBML* bml = m_bml;
+        for (const std::string& line: core_menu_keys.resolve(
+                     m_bml->GetCKContext(), [bml]() { return bml->IsIngame() && bml->IsPaused(); },
+                     core_menu_overlay.esc_block())) {
+            if (line.rfind("ok ", 0) == 0)
+                logger_->Info("Physics session: ESC menu %s", line.c_str() + 3);
+            else
+                logger_->Error("Physics session: ESC menu %s", line.size() > 6 ? line.c_str() + 6 : line.c_str());
+        }
     }
     death_reset_restore();
     sector_deactivate_restore();
@@ -2315,6 +2341,9 @@ void BallanceMMOClient::core_host_frame() {
         // FULL step ESCX (RK3E): the overlay kept; while the menu is open
         // (the mute's own test below) the ESC block's Key State is held.
         core_menu_overlay.apply(m_bml->GetCKContext(), m_bml->IsIngame() && m_bml->IsPaused());
+        // FULL step ESCK: the key mask's open/close transition and latch,
+        // every wrapped block still wrapped.
+        core_menu_keys.apply(m_bml->GetCKContext());
         // The tick driver restarted its schedule (a pause, a long stall): our
         // tick numbers no longer line up with the server's.
         if (core.assigned() && fixed_tick_.rebases() != host.last_rebases) {
@@ -2414,6 +2443,10 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     if (core_menu_overlay.end(m_bml->GetCKContext(), m_bml->IsIngame() && m_bml->IsPaused()))
         logger_->Info("Physics session: ESC menu overlay: the session ended with the menu open; the ESC hold stays "
                       "until the menu closes");
+    logger_->Info("Physics session: ESC menu %s at the end", core_menu_keys.status().c_str());
+    if (core_menu_keys.end(m_bml->GetCKContext()))
+        logger_->Info("Physics session: ESC menu keys: the session ended with the menu open or a key held across its "
+                      "close; the level's key-reading blocks read no key until both are over");
     death_reset_restore();
     sector_deactivate_restore();
     sector_activate_restore();

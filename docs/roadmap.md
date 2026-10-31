@@ -1375,6 +1375,15 @@ numbers 1-10 are unchanged.
    FINAL rows bit-equal (L8: client 2's ball, which opened no menu,
    rotation-only 2.98e-8 - SLX's known FINAL-row read)
    (`record-format-gaps-design.md` "As built (step ESCX)").
+   **The menu's keys reach the menu only (the user, 2026-10-31), built at
+   FULL step ESCK** (`BallanceMMOClient/session/menu_keys.hpp`, core host
+   only): every Key Event / Key Waiter of the level's scripts (51 blocks;
+   no module script reads a key) reads no key while the menu is open, a key
+   held across the close stays hidden until let go, ESCX's ESC block
+   exempt; retail L1: Enter on Back no longer advances the tutorial or
+   releases the ball, one Enter after the close does; L8: camera keys in
+   the menu do nothing; FINAL rows bit-equal
+   (`record-format-gaps-design.md` "As built (step ESCK)").
 7. **Stage close-out (the one FULL verification):** four clients, 150 ms,
    10 % loss, snapshots off: the spawn pile and every mechanism
    bit-identical to the server at every checkpoint; and every check below.
