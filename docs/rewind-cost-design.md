@@ -17,7 +17,8 @@ optimization); its first step was pulled ahead of trafo T3 by the user's
 decision of 2026-10-25 (§11). The research of FULL step OPTR (2026-10-30,
 the user's two ideas measured against a frame profile; blocked on the user)
 is the section "Research (step OPTR)"; its option A is built at step OPA
-("As built (step OPA)", the last section).
+("As built (step OPA)") and its option B1 at step OPB ("As built (step
+OPB)", the last section).
 
 Base: HEAD 49e2cc8. Line numbers are HEAD's plus RC1's own edits. The profile
 this design rests on is step CPUPROF's ("The rewind-cost profile
@@ -4479,3 +4480,175 @@ empty, so each event counts once. Rerun after the fix-up (it changes
 `physics_state.cpp` only, no header and no hash value): the x64 and x86
 builds, the unit tests, the GCC syntax check and the wire check in verify
 mode.
+
+## As built (step OPB, FULL close-out, 2026-10-31): the rollback world's written-cells walk memoized (R.4 row B, option B1)
+
+The user's decision (2026-10-30, OPTR), verbatim: "你决定，按你的推荐来" -
+A, then B1, then C. This is B1; B2 (caching the bound `rollback_world`) is
+not built. Base 6768bcab (OPA; protocol 23, journal v9). Shared code and the
+two core hosts only: no IVP, physics_RT, engine, protocol, journal or record
+change; no `BallanceMMOClient` member; the server's census (`array_reads::run`
+/ `anchor_log`) and the legacy PSC binding are unchanged.
+
+**What was built.**
+- `BallanceMMOCommon/include/game/written_cells_memo.hpp` (new, engine-free):
+  `written_cells_memo<Value, Watch>` keeps the last walk's columns under a
+  three-part key (`scripts`, `pins`, `layout`) and walks again when any part
+  differs (counted by the part that changed), when the probe cannot resolve
+  the watch list (a watched block gone or another object), after a host
+  `drop()` and in mode `off`. Modes `BMMO_CELLS_MEMO=off | on | verify` (on
+  when unset, read once per process): verify walks every memo hit as well,
+  counts and notes a mismatch, still returns the memo's columns (so a verify
+  run records what `on` would) and drops the memo, so the next bind walks.
+  `line()` is the report: `cells_memo: mode= binds= hits= walks= (first=
+  scripts= pins= layout=) drops= verified= mismatches= watch: blocks= pins=
+  dynamic_pins= arrays= columns=`.
+- `game/array_reads.hpp`: `written_cells(context, sel, cells_memo&)` beside
+  the unchanged fresh `written_cells(context, sel)`, which stays the walk.
+  The watch list (`watch_of`, made with each walk): every column-confined
+  writer block (Set Cell, Column Transform, Column Operation - only such a
+  block can put a column into the section, `table_of`) of the selection's
+  non-keep-local scripts, with its row / column pin indices and whether the
+  walk read each as a constant (`constant_int`), and every array those blocks
+  name. The key (`cells_key`), built again at every bind from the list:
+  `scripts` = each selected id and the object it resolves to; `pins` = per
+  watched block, the block re-fetched by id (another object: walk), the
+  arrays its target and every input resolve to now (`arrays_of`:
+  `GetRealSource()`, then the value), its row and column pins' real sources
+  and, for a constant, its value; `layout` = per array, the object its id
+  resolves to, its name (the census classifies by it), column count and
+  column types. `operator==` on `written_column` for verify.
+- `session/rollback_binding_scripts.hpp`: `script_binding_options::cells_memo`
+  (null: walked at every binding, as before); `bind_script_replay` asks the
+  memo when one is given.
+- Hosts: the headless client (`session_client.cpp`, member `cells_memo_`,
+  dropped where the previous session's state is cleared
+  (`scripts_.clear()`) and again where the new selection is made; the periodic report prints the `cells_memo:` line and
+  any mismatch notes after `cells:`), the retail core host (`core_host.cpp`,
+  file-scope `cells_memo_host`, dropped where `host.script_ids` is made; the
+  session-end block logs the line after `frame_interval`, mismatch notes as
+  warnings). SimTool keeps the fresh walk (no memo passed).
+- Unit tests (`tests/written_cells_memo_test.cpp`, `WrittenCellsMemo.*`, 7):
+  a hit walks nothing; a repointed pin walks again and the new key then
+  hits; a changed column layout (a column's type, a column added, an array
+  renamed) walks again; a born script and a gone watched block walk again;
+  verify catches a stale memo (a change the key cannot see, and a forced
+  value) and returns the memo's columns, `on` keeps a forced value; `off`
+  walks every bind and `drop` forgets; the mode parser.
+
+**Adaptations (within the design).** (1) The design's key re-resolves only
+"the pins whose real source can change at run time". The hosts themselves
+repoint pins with `SetDirectSource` (the proximity union's identity rewire,
+`proximity_union.hpp` ~1207; the checkpoint phase copy,
+`checkpoint_phase.hpp` ~216 / 246; the depth test, `depth_test.hpp` ~179 /
+240), including pins whose source was a never-written local, so a list made
+by source class alone could miss a rewire. Instead every target and input pin
+of the watched blocks is re-resolved (`arrays_of`), which is exact and still
+short: the watched blocks are the column-confined writers only, a block of
+any other prototype cannot change the section. The design's "dynamic pins"
+(an object-typed real source that is not a never-written local of the
+block's script) are counted for the report. (2) Key parts beyond the
+design's: the block and array objects behind the ids, the arrays' names, the
+row / column pins' real sources and constant values (a pin's value enters the
+key only when the walk read it as a constant, so a row an Iterator drives
+does not re-walk every frame). (3) The memo is owned by the host and passed
+through the binding options (not a static of the helper), and the host drops
+it with every new selection, so a CK_ID reused across a level reload never
+meets the previous level's memo.
+
+**The dynamic-pin list (OPTR's assumption).** Measured on every level a
+check ran: the arena (core_ref_s12's arms, h1_150, solo1 / solo2): 4 watched
+blocks, 16 pins, 0 dynamic, 2 arrays, 1 column; L8 with 39 placement copies
+(`l8_cross`, `rcb_l8x_on`, the live arm): 14 blocks, 56 pins, 0 dynamic;
+L12 (`rcb_l12x_on2`, retail): 54 blocks, 216 pins, 0 dynamic. In every run
+the memo walked once (the first bind after the anchor) and never again:
+`scripts=0 pins=0 layout=0`, no rewire or repoint ever reached a watched
+writer.
+
+**Checks (2026-10-31).**
+- Builds: x64 - `build_server.bat` compiled and linked every target but
+  ended without BUILD-OK: deps_heal `--final` reported
+  DEPS-ZERO-AFTER-REBUILD on 26 objects (the `BallanceMMOCommon/src` objects
+  `client_core*.cpp`, `client_journal.cpp`, `console.cpp`,
+  `ranking_entry.cpp` of the four targets), whose `/showIncludes` notes
+  ninja printed raw: cl wrote them in UTF-8, not in the GBK prefix
+  rules.ninja matches. Pre-existing and not this step's: the same class of
+  STILL-ZERO as 2026-10-29 03:11 (33 objects) and OPA's two builds
+  (`session_client.cpp.obj`, `client_journal.cpp.obj`) in `deps_heal.log`;
+  the affected set changes from build to build (`session_client.cpp.obj`,
+  zero at OPA, records 509 deps now) with the same rule, flags and plain
+  ASCII sources, and objects of one ninja run differ (the new test object
+  parsed, `ranking_entry.cpp.obj` did not), so the encoding flips per cl
+  process, not per object - the likeliest cause, not proven here, is a
+  `cmake.exe` step running beside the compiles (`vs_link_exe`, the build-id
+  script) switching the shared console to UTF-8 (B5RX's mechanism inside
+  one build). Fix item (build tooling, queued, not this step's): compile
+  with an English prefix (`VSLANG=1033` and a reconfigure) so the prefix no
+  longer depends on the code page. This step's build is current: none of
+  the 26 includes a header this step changed (they are engine-free core
+  sources); every object that does (`session_client.cpp`, `sim_tool.cpp`,
+  `physics_world.cpp`, `rollback_binding_test.cpp`, the new test) records
+  its deps (`ninja -t deps`: 509 / 298 / 284 / 46 / 22, VALID) and was
+  compiled after every edit. x86 CLIENT-BUILD-OK, DEPS-OK (the slot-13 hack not applied: L12 is
+  a retail level). Arch server ARCH-BUILD-OK
+  `ballanced-36c04e3d24c9+bmmo-6768bcab848a-dirty` (GCC compiles the new
+  `array_reads.hpp` code there through `physics_world.cpp`). Unit tests
+  703/703 pass (WrittenCellsMemo 7/7). GCC syntax (linux_test_syntax.sh)
+  32/32 ok.
+- Wire check, the new binary in verify mode (`BMMO_CELLS_MEMO=verify
+  EXTRA="--accept-protocol 22" wire_check.sh rOPA rOPB rOPBw`, core_ref_s12's
+  nine arms with h1_150 from core_ref_s12h): ALL SAME, sends 36/36 SAME,
+  journals 36/36 IDENTICAL; verify mismatches 0 on all 36 (4116-7336 binds
+  per client, every one but the first a verified hit).
+- Verify over core_ref_s12's solo1 / solo2 and RCB's cpu_full `rcb_l8x_on`,
+  `rcb_l12x_on2`, `rcb_h1_on` (14 replays, `work/OPB/verify_more.sh`): every
+  journal IDENTICAL to rOPA's replay and to the live client's; mismatches 0
+  (e.g. L12 c0 3714 verified hits).
+- One live arm (RCB's l8x_on recipe, `work/OPB/live_l8.sh`,
+  `maps/arena-test/cpu_full/opb_l8x_verify`; snapshots off, trafo_inputs and
+  placement_clones on, 39 copies, 150 ms; the four clients in verify mode):
+  VERDICT PASS, server replay 2625/2625 matched, every client 0 mismatches
+  over 3966-4130 verified hits, resyncs 0, starved 0.
+- The saving on E-cores (decision 33; `work/OPB/ecore_ab.sh`: the four clients
+  of an arm at once, client i on logical processors 16+3i..18+3i; the same
+  rOPB binary with `BMMO_CELLS_MEMO=off` as "before" and `on` as "after", the
+  same captures; off vs on journals IDENTICAL 12/12; OPA's hash memo on in
+  both). Frame time, mean of the four clients' `frame_time` (ms):
+
+| | p50 off -> on | p99 off -> on | max off -> on (range) |
+|---|---|---|---|
+| L8 `rcb_l8x_on` | 3.55 -> 2.1 | 5.2 -> 3.6 | 95-188 -> 89-176 |
+| L12 `rcb_l12x_on2` | 8.7 -> 4.0 | 15.9 -> 11.1 | 175-239 -> 169-232 |
+| h1 `rcb_h1_on` | 2.8 -> 2.4 | 34.4 -> 33.5 | 80-109 -> 75-108 |
+
+  The max / p999 (and h1's p99) are rewind frames, which bind the world a few
+  times like any frame; their cost is the replay, which this does not touch.
+- Retail L12 (RT2's SP8-e recipe session 1, `work/OPB/opb_retail.py`, the OPB
+  x86 build in both copies, each game on E-cores of its own: client 1 16-21,
+  client 2 22-27; `net lag 150`, client 1 crossing s2, s3, s4; the Arch
+  server of this tree, snapshots off): `BMMO_CELLS_MEMO=verify`
+  (`scripts/retail/opb_l12_verify`) - 0 mismatches over 3106 / 3108 verified
+  hits (54 blocks, 216 pins, 0 dynamic), resyncs 0, subst 0, rb 3 / resim
+  70-71 per client; then `on` (`opb_l12_on`):
+
+| client 1 / client 2 | verify (walks every bind) | on | OPA's `on` (no cells memo) |
+|---|---|---|---|
+| `core_frame_time` p50 | 8.0 / 7.7 | 3.4 / 3.5 | 7.8 / 7.8 |
+| `core_frame_time` p99 | 11.6 / 9.3 | 4.0 / 5.4 | 9.2 / 10.0 |
+| `core_frame_time` max | 62.2 / 55.9 | 49.7 / 52.3 | 59.1 / 57.3 |
+| `frame_interval` p50 / p99 | 15.1 / 16.8, 15.1 / 16.6 | 15.1 / 16.7, 15.1 / 16.7 | 15.1 / 17.1, 15.1 / 16.7 |
+
+  One session per mode (a smoke figure, not a band); verify walks every bind
+  like the pre-memo build, so its frame time is the "before" of this build.
+
+**Not run / deferred.** The dynamic-pin count on the levels no check ran
+(L1-L7, L9-L11, L13): every level measured has 0, and the count is printed by
+every session's report. SimTool's bindings keep the fresh walk (no memo), so
+`--savestate-check` and SimTool replays measure nothing new. The memo's
+re-walk branches (a changed script set, a repointed watched pin, a changed
+layout, a watched block gone, a host drop of a valid memo) ran in the unit
+tests' fakes only: no run had a mid-session selection change, a rewire
+reaching a watched writer or a second session in one process, so with real
+CK data only the hit path (verified against a fresh walk at every bind) and
+the first walk were exercised. No stale case was found, so nothing waits on
+the user.

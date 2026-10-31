@@ -80,6 +80,7 @@
 
 #include <algorithm>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -87,15 +88,22 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "CKAll.h"
 
 #include <game/script_replay.hpp>
+#include <game/written_cells_memo.hpp>
 #include <session/collectible_rules.hpp>
 #include <session/resync_rules.hpp>
 
 namespace bmmo::game {
+    // Step OPB: the memo's verify compares two walks' columns.
+    inline bool operator==(const written_column& a, const written_column& b) {
+        return a.array == b.array && a.column == b.column;
+    }
+
     class array_reads {
     public:
         enum class access { read, write, both };
@@ -152,6 +160,58 @@ namespace bmmo::game {
             int selected = 0, keep_local = 0, blocks = 0;
             collect(context, sel, false, entries, selected, keep_local, blocks, nullptr);
             return table_of(context, entries);
+        }
+
+        // Step OPB (rewind-cost-design R.4 row B, option B1): written_cells
+        // memoized (game/written_cells_memo.hpp has the rules).  The watch
+        // list the walk leaves: every column-confined writer block of the
+        // selection's non-keep-local scripts (only such a block can put a
+        // column into the section: table_of) with its row and column pin
+        // indices, and every array those blocks name.  At each bind the key
+        // is built again from it: each block re-fetched by id (another
+        // object, or none: walk), the arrays its target and inputs resolve to
+        // now (arrays_of: GetRealSource, then the value - a repointed or
+        // rewired pin), its row and column pins' real sources and values, and
+        // each array's object, name, column count and column types.
+        struct cells_watch {
+            struct block_watch {
+                CK_ID id = 0;
+                CKBehavior* block = nullptr;
+                int row_pin = -1, column_pin = -1;
+                // Whether the walk read the pin as a constant (constant_int:
+                // a never-written int local of the block's script); only a
+                // constant's value is in the key (a row an Iterator drives
+                // changes every frame and never enters the section), its
+                // real source always.
+                bool row_constant = false, column_constant = false;
+            };
+            std::vector<block_watch> blocks;
+            std::vector<std::pair<CK_ID, CKDataArray*>> arrays;
+            size_t count_blocks = 0, count_pins = 0, count_dynamic = 0, count_arrays = 0;
+        };
+        using cells_memo = written_cells_memo<std::vector<written_column>, cells_watch>;
+
+        static std::vector<written_column> written_cells(CKContext* context, const script_replay::selection& sel,
+                                                         cells_memo& memo) {
+            const auto probe = [context, &sel](const cells_watch& w, cells_memo_key& key) {
+                return cells_key(context, sel, w, key);
+            };
+            const auto walk = [context, &sel](cells_watch* w, cells_memo_key* key) {
+                std::vector<written_column> out = written_cells(context, sel);
+                if (w && key) {
+                    watch_of(context, sel, *w);
+                    cells_key(context, sel, *w, *key);
+                }
+                return out;
+            };
+            const auto describe = [](const std::vector<written_column>& cells) {
+                std::string s = "[";
+                for (const written_column& c: cells)
+                    s += (s.size() > 1 ? " " : "") + std::to_string(static_cast<unsigned>(c.array)) + ":"
+                       + std::to_string(c.column);
+                return s + "]";
+            };
+            return memo.get(probe, walk, describe);
         }
 
         static result run(CKContext* context, const script_replay::selection& sel, bool client_scope) {
@@ -395,6 +455,102 @@ namespace bmmo::game {
                     }
                 });
             }
+        }
+
+        // Step OPB: the memo's watch list (cells_watch) from the selection.
+        static void watch_of(CKContext* context, const script_replay::selection& sel, cells_watch& w) {
+            w = cells_watch{};
+            if (!context) return;
+            CKParameterManager* pm = context->GetParameterManager();
+            for (CK_ID id: sel.scripts) {
+                auto* script = CKBehavior::Cast(context->GetObject(id));
+                if (!script) continue;
+                CKBeObject* owner = script->GetOwner();
+                const std::string owner_name = owner && owner->GetName() ? owner->GetName() : "";
+                const std::string script_name = script->GetName() ? script->GetName() : "";
+                if (bmmo::session::keep_local_script(owner_name, script_name)) continue;
+                walk(script, std::string(), [&](CKBehavior* block, const std::string&) {
+                    if (!column_confined(prototype_of(block))) return;
+                    cells_watch::block_watch b;
+                    b.id = block->GetID();
+                    b.block = block;
+                    b.row_pin = row_pin(block);
+                    b.column_pin = column_pin(block);
+                    int unused = -1;
+                    b.row_constant = constant_int(block, b.row_pin, unused);
+                    b.column_constant = constant_int(block, b.column_pin, unused);
+                    w.blocks.push_back(b);
+                    // The pins re-resolved at every bind (arrays_of: the
+                    // target and every input), and of those the ones whose
+                    // object value can change at run time: an object-typed
+                    // real source that is not a local of this script no
+                    // block or operation of it writes.
+                    const auto count = [&](CKParameterIn* in) {
+                        if (!in) return;
+                        ++w.count_pins;
+                        CKParameter* source = in->GetRealSource();
+                        if (!source || !pm || !pm->IsDerivedFrom(source->GetGUID(), CKPGUID_OBJECT)) return;
+                        bool fixed = source->GetClassID() == CKCID_PARAMETERLOCAL;
+                        if (fixed) {
+                            CKBehavior* root = block;
+                            while (root->GetParent()) root = root->GetParent();
+                            fixed = !written(root, source);
+                        }
+                        if (!fixed) ++w.count_dynamic;
+                    };
+                    count(block->GetTargetParameter());
+                    const int inputs = block->GetInputParameterCount();
+                    for (int i = 0; i < inputs; ++i) count(block->GetInputParameter(i));
+                    for (CKDataArray* a: arrays_of(context, block)) {
+                        const std::pair<CK_ID, CKDataArray*> key(a->GetID(), a);
+                        if (std::find(w.arrays.begin(), w.arrays.end(), key) == w.arrays.end()) w.arrays.push_back(key);
+                    }
+                });
+            }
+            w.count_blocks = w.blocks.size();
+            w.count_arrays = w.arrays.size();
+        }
+
+        // Step OPB: the memo's key now, from the watch list; false when a
+        // watched block no longer resolves to the object the walk saw.
+        static bool cells_key(CKContext* context, const script_replay::selection& sel, const cells_watch& w,
+                              cells_memo_key& key) {
+            key.clear();
+            if (!context) return false;
+            const auto word = [](const void* p) { return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p)); };
+            key.scripts.reserve(sel.scripts.size() * 2);
+            for (CK_ID id: sel.scripts) {
+                key.scripts.push_back(id);
+                key.scripts.push_back(word(context->GetObject(id)));
+            }
+            for (const cells_watch::block_watch& b: w.blocks) {
+                if (context->GetObject(b.id) != b.block) return false;
+                const std::vector<CKDataArray*> arrays = arrays_of(context, b.block);
+                key.pins.push_back(b.id);
+                key.pins.push_back(arrays.size());
+                for (CKDataArray* a: arrays) key.pins.push_back(a->GetID());
+                const std::pair<int, bool> pins[2] = {{b.row_pin, b.row_constant}, {b.column_pin, b.column_constant}};
+                for (const auto& [pin, constant]: pins) {
+                    CKParameterIn* in = pin >= 0 ? b.block->GetInputParameter(pin) : nullptr;
+                    CKParameter* source = in ? in->GetRealSource() : nullptr;
+                    key.pins.push_back(word(source));
+                    int value = 0;
+                    if (constant && source && source->GetDataSize() == static_cast<int>(sizeof(int)))
+                        source->GetValue(&value, FALSE);
+                    key.pins.push_back(static_cast<uint32_t>(value));
+                }
+            }
+            for (const auto& [id, at]: w.arrays) {
+                auto* a = CKDataArray::Cast(context->GetObject(id));
+                key.layout.push_back(id);
+                key.layout.push_back(word(a));
+                if (!a || a != at) continue;
+                const int columns = a->GetColumnCount();
+                key.layout.push_back(static_cast<uint32_t>(columns));
+                for (int c = 0; c < columns; ++c) key.layout.push_back(static_cast<uint32_t>(a->GetColumnType(c)));
+                key.names.push_back(a->GetName() ? a->GetName() : "");
+            }
+            return true;
         }
 
         // The written-cell section's columns of a walk (see written_cells).

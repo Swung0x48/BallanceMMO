@@ -1002,6 +1002,11 @@ namespace {
     // ... and the script binding's written-cell columns (the ones the
     // records carry; the status line's written_columns).
     std::vector<bmmo::game::written_column> written_columns_host;
+    // Step OPB (rewind-cost-design R.4 row B1): their memo, so a binding
+    // walks the selection only when what the walk reads changed
+    // (BMMO_CELLS_MEMO=off | on | verify, on when unset); dropped with every
+    // new selection.  File-scope (BallanceMMOClient takes no member).
+    bmmo::game::array_reads::cells_memo cells_memo_host;
 
     int32_t controller_alias_cb(void* user, const char* name, char* out, uint32_t out_size);
 
@@ -2139,6 +2144,7 @@ void BallanceMMOClient::core_host_anchor() {
     // selected; the sets' scripts travel beside the selection as the trafo
     // part (trafo-replication design 4.3).
     host.script_ids = bmmo::game::session_script_selection(m_bml->GetCKContext(), trafo_host.on);
+    cells_memo_host.drop();   // step OPB: a new selection, a new memo
     if (trafo_host.on && host.script_ids.empty())
         logger_->Warn("Physics session: trafo: inputs on but the script selection is empty - no script replay, "
                       "a replayed tick's births are logged at the live tick + 1");
@@ -2443,6 +2449,9 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
         logger_->Info("Physics session: %s", frame_times.frame.line("core_frame_time").c_str());
         logger_->Info("Physics session: %s", frame_times.interval.line("frame_interval").c_str());
     }
+    // Step OPB: the written-cell columns' memo (this process, every session).
+    logger_->Info("Physics session: %s", cells_memo_host.line().c_str());
+    for (const std::string& note: cells_memo_host.notes()) logger_->Warn("Physics session: %s", note.c_str());
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     // Step WG4 (world-agreement-gaps design 2.3 "Release"): the level
     // outlives the session, so the union's sources go back now - vanilla play
@@ -3412,6 +3421,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             // section with every record, back at the anchor.
             so.written_cells = true;
             so.written_columns = &written_columns_host;
+            so.cells_memo = &cells_memo_host;   // step OPB
             // Step WG4 (world agreement 4.2): the proximity union's hold
             // section with every record (v6), back at the anchor.
             if (proximity_host.active) {

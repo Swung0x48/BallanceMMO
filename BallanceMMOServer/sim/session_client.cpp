@@ -2464,6 +2464,7 @@ namespace {
             own_group_set_ = false;
             own_capture_.valid = false;
             scripts_.clear();
+            cells_memo_.drop();   // step OPB: a new selection, a new memo
             script_activations_.clear();
             script_reset_ticks_.clear();
             reset_guard_.restore(engine_->context());
@@ -2623,6 +2624,7 @@ namespace {
             // selection as the trafo part (trafo-replication design 4.3).
             scripts_ = args_.script_replay ? bmmo::game::session_script_selection(engine_->context(), core_.trafo_active())
                                            : bmmo::game::script_replay::selection{};
+            cells_memo_.drop();   // step OPB: a new selection, a new memo
             script_activations_ = bmmo::game::session_script_activations(engine_->context(), scripts_);
             // The trafo explosion pieces (step P): never a BodyRevived.
             explosion_pieces_ = bmmo::game::explosion_pieces(engine_->context());
@@ -4528,6 +4530,7 @@ namespace {
                 // section with every record, back at the anchor.
                 so.written_cells = true;
                 so.written_columns = &written_columns_;   // the columns the records carry (status line)
+                so.cells_memo = &cells_memo_;             // step OPB: walked only when what it reads changed
                 // Step G3 (world agreement 4.2): the proximity union's hold
                 // section with every record (v6), back at the anchor.
                 if (core_.proximity_union_active()) {
@@ -4696,6 +4699,10 @@ namespace {
                      static_cast<unsigned long long>(w.captured_rows), static_cast<unsigned long long>(w.restores),
                      static_cast<unsigned long long>(w.rows), static_cast<unsigned long long>(w.skipped));
             }
+            // Step OPB: the written-cell columns' memo (hits, re-walks by
+            // cause, verify mismatches, the watch list's size).
+            logf("%s", cells_memo_.line().c_str());
+            for (const std::string& note: cells_memo_.notes()) logf("%s", note.c_str());
             // Steps RLM / FX1: the restores' membership ledger in this process -
             // registrations, those taken back, settled, and the replayed
             // frames' pending adds a later restore of the same live frame took
@@ -4802,6 +4809,7 @@ namespace {
         bmmo::game::checkpoint_phase_split checkpoint_phase_;  // the chain's own phase cell (game/checkpoint_phase.hpp)
         bmmo::game::array_reads::anchor_summary array_reads_;   // step RK2: the anchor's array-read census
         std::vector<bmmo::game::written_column> written_columns_;   // step RK2: the script binding's written-cell columns
+        bmmo::game::array_reads::cells_memo cells_memo_;            // step OPB: their memo (BMMO_CELLS_MEMO)
         bmmo::game::sector_reset_guard reset_guard_;         // the retail sector resets, neutralized (game/sector_reset_guard.hpp)
         std::vector<bmmo::game::deactivate_pin> deactivate_pins_;   // N2's pins (game/sector_deactivate_pin.hpp)
         bmmo::game::depth_test_rule depth_test_;             // FULL step PRX: Gameplay_Ingame/DepthTest as a rule (game/depth_test.hpp)

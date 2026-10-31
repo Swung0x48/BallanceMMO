@@ -103,6 +103,12 @@ namespace bmmo::session {
         // columns found (the host's report).
         bool written_cells = false;
         std::vector<bmmo::game::written_column>* written_columns = nullptr;
+        // Step OPB (rewind-cost-design R.4 row B, option B1): the host's
+        // memo of those columns (game/written_cells_memo.hpp), so a binding
+        // walks the selection only when what the walk reads changed.  The
+        // host owns it, one per selection, and drops it where it makes a new
+        // selection.  Null: walked at every binding, as before.
+        bmmo::game::array_reads::cells_memo* cells_memo = nullptr;
     };
 
     // Gap Q4's executed scripts (rollback-engine gaps design 2.2.4): every
@@ -211,7 +217,8 @@ namespace bmmo::session {
         std::shared_ptr<std::vector<bmmo::game::written_column>> cells;
         if (o.written_cells) {
             cells = std::make_shared<std::vector<bmmo::game::written_column>>(
-                bmmo::game::array_reads::written_cells(context, *selection));
+                o.cells_memo ? bmmo::game::array_reads::written_cells(context, *selection, *o.cells_memo)
+                             : bmmo::game::array_reads::written_cells(context, *selection));
             if (o.written_columns) *o.written_columns = *cells;
         }
         const std::vector<bmmo::game::written_column>* cells_ptr = cells && !cells->empty() ? cells.get() : nullptr;
