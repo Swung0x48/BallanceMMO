@@ -5,7 +5,7 @@ Journals, logs and transcripts of a run are collected under ./retail/<label>/ ne
 Processes started from an agent sandbox may be killed ~10 min after launch: keep a run under that.
 
 usage:
-  python retail_test.py install            copy the built mod + physics_RT.dll into the two game copies (backs up the current files)
+  python retail_test.py install            copy the built mod, physics_RT.dll and the mod's four runtime DLLs into the two game copies (backs up the current files)
   python retail_test.py restore            put the backed-up files back
   python retail_test.py start [--port P]   start the local server and both clients (hidden), connect, load level 11
   python retail_test.py cmd <ids> <cmd...> send commands (ids like 1,2) and print the responses
@@ -51,24 +51,42 @@ def send(i, commands, timeout=20):
         time.sleep(0.02)
     raise TimeoutError(str(path))
 
+# The mod's runtime DLLs: one set from one vcpkg install (the build copies them next to the
+# .bmodp), never mixed across baselines - GNS's flat API binds by name, so a stale
+# GameNetworkingSockets.dll loads silently. Bin/ holds a copy too; both are replaced.
+RUNTIME_DLLS = ['GameNetworkingSockets.dll', 'abseil_dll.dll', 'libcrypto-3.dll', 'libprotobuf.dll']
+
+def _installed_files(copy):
+    files = [('ModLoader/Mods/BallanceMMOClient.bmodp', CLIENT_BUILD / 'BallanceMMOClient/BallanceMMOClient.bmodp'),
+             ('BuildingBlocks/physics_RT.dll', CLIENT_BUILD / 'BuildingBlocks/physics_RT.dll')]
+    for dll in RUNTIME_DLLS:
+        files.append(('ModLoader/Mods/' + dll, CLIENT_BUILD / 'BallanceMMOClient' / dll))
+        if (copy / 'Bin' / dll).exists():
+            files.append(('Bin/' + dll, CLIENT_BUILD / 'BallanceMMOClient' / dll))
+    return files
+
+def _backup_name(rel):
+    # the file's own name (the names backups had before the DLLs joined), Bin/ copies prefixed
+    name = pathlib.Path(rel).name
+    return 'Bin__' + name if rel.startswith('Bin/') else name
+
 def install():
     for i, copy in COPIES.items():
         backup = ROOT / f'backup-{i}'
         backup.mkdir(parents=True, exist_ok=True)
-        for rel in ['ModLoader/Mods/BallanceMMOClient.bmodp', 'BuildingBlocks/physics_RT.dll']:
+        for rel, built in _installed_files(copy):
             src = copy / rel
-            dst = backup / pathlib.Path(rel).name
+            dst = backup / _backup_name(rel)
             if src.exists() and not dst.exists():
                 shutil.copy2(src, dst)
-        shutil.copy2(CLIENT_BUILD / 'BallanceMMOClient/BallanceMMOClient.bmodp', copy / 'ModLoader/Mods/BallanceMMOClient.bmodp')
-        shutil.copy2(CLIENT_BUILD / 'BuildingBlocks/physics_RT.dll', copy / 'BuildingBlocks/physics_RT.dll')
+            shutil.copy2(built, src)
         print('installed into', copy)
 
 def restore():
     for i, copy in COPIES.items():
         backup = ROOT / f'backup-{i}'
-        for rel in ['ModLoader/Mods/BallanceMMOClient.bmodp', 'BuildingBlocks/physics_RT.dll']:
-            src = backup / pathlib.Path(rel).name
+        for rel, _ in _installed_files(copy):
+            src = backup / _backup_name(rel)
             if src.exists():
                 shutil.copy2(src, copy / rel)
                 print('restored', copy / rel)

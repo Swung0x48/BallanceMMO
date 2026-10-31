@@ -115,7 +115,8 @@ Which GNS each binary runs:
   ValveSoftware/GameNetworkingSockets PR #371's ref, on no branch; master
   carries upstream's own fix for the same error (`096c195`, "Remove call to
   GetTypeName() from assert", 2025-10-03), so no patch is carried. Master
-  builds with the x64 vcpkg protobuf 6.33.4 / OpenSSL 3.6.3 and with Arch's
+  builds with the x64 vcpkg protobuf 6.33.4 / OpenSSL 3.6.3 (GNSU's baseline;
+  7.36.2 / 3.6.5 since VCPKGU) and with Arch's
   protobuf 36.1 / OpenSSL 3.6.5 (GCC 16.2.1). A fresh clone needs no
   recursive init for it: `src/external/abseil` and `webrtc` are only for
   `USE_STEAMWEBRTC` (off) and `src/external/vjson` only for the cert tool
@@ -140,24 +141,29 @@ Which GNS each binary runs:
   is not empty), so delete it (or move it out of the tree) after updating.
 - **The retail mod (x86 MSVC)** does not build the submodule: its tree
   resolves `find_package(GameNetworkingSockets)` from vcpkg's
-  `gamenetworkingsockets` port of the vcpkg submodule's baseline (1.6.0 =
-  upstream tag `v1.6.0`, `2cb93a0`, 2026-06-03; `ice` feature on), and the game copies ship
-  that `GameNetworkingSockets.dll` next to the mod. 1.6.0 lies on master's
-  line, 54 commits behind `d534c19`, and 278 commits after `725e273`
+  `gamenetworkingsockets` port of the vcpkg submodule's baseline, and the
+  game copies ship that `GameNetworkingSockets.dll` next to the mod. Since
+  FULL step VCPKGU (below) that port is **1.6.1** (`vcpkg_from_github` of
+  upstream tag `v1.6.1` = `d534c19`, the same commit the server builds from
+  the submodule; `ice` feature on). At GNSU it was 1.6.0 (`2cb93a0`,
+  2026-06-03), 54 commits behind `d534c19` and 278 after `725e273`
   (f938f6f's base): before GNSU the mod ran a NEWER GNS than the server.
   Master itself builds with the x86 toolchain and the retail tree's x86
   protobuf / OpenSSL / abseil (`.local-tools/work/GNSU/gns_x86_master.bat`).
 
-  **Requirement: the retail mod needs GameNetworkingSockets 1.6.0** (the
-  user's decision, 2026-10-31: the mod stays on vcpkg's port, it does not
-  build the submodule). Build the x86 tree with the vcpkg submodule as
-  pinned, whose `gamenetworkingsockets` port is 1.6.0 (`2cb93a0`), and ship
-  that `GameNetworkingSockets.dll` beside the mod - not a DLL built from
-  `submodule/GameNetworkingSockets`. A vcpkg baseline bump that moves the
-  port off 1.6.0 changes this requirement and needs its own retail check:
-  GNSU verified only the mod on 1.6.0 against the server on `d534c19`
-  (a retail L11 session - connect, play, disconnect, reconnect, late
-  re-join - every FINAL row bit-equal to the server).
+  **Requirement: every binary runs GameNetworkingSockets 1.6.1** (the
+  user's decisions, 2026-10-31: the mod stays on vcpkg's port and does not
+  build the submodule; then "update the whole vcpkg" so that the port is
+  1.6.1 too). Build the x86 tree with the vcpkg submodule as pinned
+  (baseline `9a5dfef5d1`, below), whose `gamenetworkingsockets` port is
+  1.6.1, and ship that `GameNetworkingSockets.dll` with its three runtime
+  dependencies from the same install (`abseil_dll.dll`, `libcrypto-3.dll`,
+  `libprotobuf.dll`) beside the mod - not a DLL built from
+  `submodule/GameNetworkingSockets`, and never a GNS DLL of one vcpkg
+  baseline next to a `libprotobuf.dll` of another (1.6.1 is linked against
+  protobuf 7.36.2; the 1.6.0 install had 6.33.4). A vcpkg baseline bump
+  that moves the port off 1.6.1 changes this requirement and needs its own
+  retail check.
 
 Upstream changes between `725e273` (f938f6f's base) and `d534c19` that touch
 what BMMO uses (send flags Reliable / ReliableNoNagle / UnreliableNoDelay /
@@ -203,13 +209,96 @@ retail two-copy L11 session (mod on 1.6.0, `scripts/retail/gnsu_retail`:
 connect, play, `mmo disconnect`, reconnect, late re-join): every FINAL row
 of both lives bit-equal to the server.
 
+### vcpkg on upstream master, GNS 1.6.1 in the mod (As built, FULL step VCPKGU, 2026-10-31)
+
+`submodule/vcpkg` moved from `9e593bb18ea69cc5095e012465dcd675a822ed0d`
+(2026-07-29, tag `2026.07.29`) to upstream master
+`9a5dfef5d1a0438a7d24856a85bd60f309d355e9` (2026-10-30 23:46 -0700,
+"Release vcpkg-tool 2026-10-29"), and `vcpkg.json`'s `builtin-baseline` with
+it. The new baseline needs the vcpkg tool 2026-10-29: run
+`submodule\vcpkg\bootstrap-vcpkg.bat -disableMetrics` after updating (the
+toolchain bootstraps only when `vcpkg.exe` is missing, not when it is old).
+The dependency closure (50 ports, read from both trees' `vcpkg_installed`),
+old -> new:
+
+| ports | old | new |
+|---|---|---|
+| `gamenetworkingsockets` | 1.6.0 | **1.6.1** |
+| `protobuf`, `utf8-range` | 6.33.4 (port-version 2 / 0) | **7.36.2** |
+| `openssl` | 3.6.3 | 3.6.5 (port-version 2) |
+| the 41 `boost-*` ports (algorithm, circular-buffer, lexical-cast, regex, uuid and their dependencies) | 1.91.0 | 1.92.0 |
+| `vcpkg-boost` / `vcpkg-cmake` (host helpers) | 2025-03-29 / 2024-04-23 | 2026-08-21 / 2025-08-07 |
+| `abseil`, `vcpkg-cmake-config`, `vcpkg-cmake-get-vars` | 20260107.1#3, 2026-07-21, 2025-05-29 | unchanged |
+
+yaml-cpp, SDL and googletest are not vcpkg ports here (not in `vcpkg.json`).
+Arch / Linux builds use pacman packages, not vcpkg, and are unchanged. The
+server, headless client, SimTool and tests still build GNS from the submodule
+(`d534c19` = v1.6.1) but now take protobuf 7.36.2 / OpenSSL 3.6.5 / abseil from
+the x64 install; the mod takes the port's 1.6.1 - the same GNS release on every
+binary. No BMMO source changed.
+
+**An existing x64 tree after a protobuf bump:** GNS's `src/CMakeLists.txt`
+generates its `.pb.h` / `.pb.cc` with `protobuf_generate_cpp`, whose custom
+command depends on the `.proto` files only, not on `protoc.exe`. So a tree that
+built against 6.33.4 keeps the old generated headers, and the next build fails
+in every GNS source with `steamnetworkingsockets_messages_certs.pb.h(16): fatal
+error C1189: #error: "Protobuf C++ gencode is built with an incompatible
+version of"`. Touch the three `src/common/*.proto` of the submodule (a
+timestamp, not content: `git status` stays clean) or use a fresh tree; protoc
+then regenerates them. The retail tree does not build the submodule and is not
+affected.
+
+Verified at VCPKGU: both installs rebuilt from source (x64 7.4 min, x86 5.2
+min); x64 BUILD-OK + DEPS-OK (1543 objects), `BallanceMMOMessageTests`
+712/712; x86 CLIENT-BUILD-OK + DEPS-OK (251 objects); GCC syntax 33/33. The
+mod's import closure (dumpbin) is `GameNetworkingSockets.dll` and
+`libcrypto-3.dll`; GNS imports `libprotobuf.dll` and `libcrypto-3.dll`;
+`libprotobuf.dll` imports `abseil_dll.dll` - the four DLLs shipped (no Boost
+DLL). The wire check over `core_ref_s12` (36 captures, `--accept-protocol
+22`), rIOX vs rVCPKGU: ALL SAME, 36/36 sends, 36/36 journals IDENTICAL. Live,
+Arch server unchanged, snapshots off: DFR's swing arm (150 ms, 10 % loss,
+burst 4, seed 0; `dfr_full/vcpkgu_b4_s0`): 0 resyncs, server replay 3776/3776,
+FINAL rows exact on all four with the design's exceptions (the balloon platform
+0.0140 m from 2836 and client 1's own ball in the airship zone, the same
+signatures as `gnsu_b4_s0`); two body-set ticks on client 0 (864) and one on
+client 3 (3188) are a lone late own Unphysicalize re-stamped by the server
+(868, 3190) and "kept where we stamped it" by its owner - the queued residual
+of roadmap item 8 (plan step 22), and the previous build's replay of the same
+captures writes identical journals. J1 (`dfr_full/vcpkgu_j1`): 0 resyncs on the
+founders, the joiner's one import, server replay 3117/3117, FINAL rows exact on
+all four. One retail two-copy L11 session (`scripts/retail/vcpkgu_retail`;
+connect, play, `mmo disconnect`, reconnect, late re-join), both copies loading
+the four DLLs from `ModLoader\Mods` (`loaded_modules.txt`): every FINAL row of
+all three client lives is bit-equal to the server's (`first_divergence.py
+--final --tolerance 0`, and no differing position / rotation / linear /
+angular field in `.local-tools/work/RT1/final_fields.py`).
+
+A tree on another checkout that compiles the GNS submodule and still holds
+protobuf 6.33.4's generated code meets the same stale-gencode error on its
+next build; the same touch fixes it. On this machine the VCPKGU touch
+already made the `.proto` files newer than every existing tree's generated
+output (`build/`, and the trees with their own install such as
+`build-retail`, `build-sim-x86`, `.../x64-server/out`, whose next configure
+installs the new baseline), so each of them regenerates it. Only
+`build-agent` and the retail tree were rebuilt at VCPKGU.
+
+`scripts/retail_two_client_test.py install` copies the four runtime DLLs
+(from the build output next to the `.bmodp`, which the build copies from the
+x86 install) into `ModLoader/Mods`, and into `Bin` where the copy holds them
+there too, with the mod and `physics_RT.dll`; before VCPKGU it copied only
+the latter two.
+
 ## Distributing the client mod
 
 Players need, under their game install:
 
 1. BML or BMLPlus itself (`BML.dll` under `BuildingBlocks`).
-2. `BallanceMMOClient.bmodp` (plus its runtime DLL dependencies, if built
-   against shared vcpkg libraries) under `ModLoader/Mods`.
+2. `BallanceMMOClient.bmodp` under `ModLoader/Mods`, with its four runtime
+   DLLs next to it: `GameNetworkingSockets.dll` (1.6.1), `libprotobuf.dll`,
+   `abseil_dll.dll` and `libcrypto-3.dll`, all four from the same x86 vcpkg
+   install (the build copies them next to the `.bmodp`). Never mix them
+   across vcpkg baselines, e.g. a new `GameNetworkingSockets.dll` beside an
+   old `libprotobuf.dll`.
 3. **`physics_RT.dll` under `BuildingBlocks`, overwriting the game's own
    copy.** This is the collision-overhaul-specific step: without it the mod
    still loads and shadow-ball rooms still work (it detects the retail DLL
