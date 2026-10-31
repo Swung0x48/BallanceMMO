@@ -109,7 +109,7 @@ Which GNS each binary runs:
 - **Server, headless client, SimTool, tests (x64 MSVC and Linux GCC):**
   `BallanceMMOServer/CMakeLists.txt` `add_subdirectory`s
   `submodule/GameNetworkingSockets`, pinned to upstream master
-  `d534c19aa760df3fb75fd20db13ba1932b8a5463` (2026-10-02, "Increase timeout
+  `d534c19aa760df3fb75fd20db13ba1932b8a5463` = release tag `v1.6.1` (2026-10-02, "Increase timeout
   for STUN server to start"). Before GNSU it was `f938f6f` (2025-03-17), a
   protobuf >= 29 compile fix reachable only through
   ValveSoftware/GameNetworkingSockets PR #371's ref, on no branch; master
@@ -141,7 +141,7 @@ Which GNS each binary runs:
 - **The retail mod (x86 MSVC)** does not build the submodule: its tree
   resolves `find_package(GameNetworkingSockets)` from vcpkg's
   `gamenetworkingsockets` port of the vcpkg submodule's baseline (1.6.0 =
-  upstream `2cb93a0`, 2026-06-03; `ice` feature on), and the game copies ship
+  upstream tag `v1.6.0`, `2cb93a0`, 2026-06-03; `ice` feature on), and the game copies ship
   that `GameNetworkingSockets.dll` next to the mod. 1.6.0 lies on master's
   line, 54 commits behind `d534c19`, and 278 commits after `725e273`
   (f938f6f's base): before GNSU the mod ran a NEWER GNS than the server.
