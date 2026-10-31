@@ -2644,6 +2644,72 @@ numbers 1-10 are unchanged.
      not new: a retail beam of a ball in a floor contact leaves one own row
      0.3-1.9 mm off the server (item 9's R6 residual; RT1's 300 / 340 / 750
      too).
+   - **Run at RT3 (2026-10-30, FULL retail batch 3, the arena; the x86 mod
+     of HEAD e1b88fe8 plus two retail-only diagnostics in `core_host.cpp` -
+     `BMMO_TRACE_ENTITY=@mirrors` (every mirror's matrix, alpha / blending,
+     shown, in frustum, pinned, per live frame and replayed tick) and the
+     session-end `joints:` line (RLC's ledger, as the headless client's) -
+     built with the slot-13 hack, the Arch server of the same tree with it,
+     and for WG4-R1 an x64 headless copy with it (`build-agent-rRT3hack`,
+     never a reference; deleted after the batch, same build id as HEAD's
+     clean build); all three rebuilt clean after, map.hpp clean; 8
+     game runs, snapshots off, trafo inputs and placement on, the union and
+     per-player mechanisms on, `cpu_sampler.ps1` beside each, host <= 20.9 %;
+     `scripts/retail/rt3_*`, `.local-tools/work/RT3/`):**
+     world-agreement-gaps-design.md, rollback-engine-gaps-design.md and
+     rewind-cost-design.md "As built (step RT3)". §4 C9 confirmed from the
+     code: a headless client announces the md5 its binary's slot table
+     holds (`session_client.cpp:2345`) and the server compares the members'
+     md5 (`room_members_same_map`, `server.cpp:2769`) and the host's against
+     its table (`:2774`), so on a hacked server an unhacked headless client is
+     refused (MapMismatch) next to a retail copy of the arena - the headless
+     copy needs the hack too. PASS: WG4-R1 (two runs: the Pusher wakes at
+     612 in all five worlds, a headless ball first; every retail FINAL row
+     of the 17 mechanisms = the server's; `anchor_probes` c7e224f5cf8c631b
+     on both retail copies, both headless clients and the server, no probe
+     mismatch); RLC-r (six one-shot rewinds 45 deep on client 2 over
+     P_Modul_29's moving plates, two of the restores re-making a broken
+     hinge: `joints: recreated=2 replaced=0 missing=0
+     order_failed=0`, no "no live controller", the plates' FINAL rows =
+     the server's); ASL-r (the own ball latched at 407 slept 432-532 on the
+     platform - "asleep in its latch ... the latch holds" - and the latch held
+     through the sleep and the wake until the death beam at 720, no "back in
+     the sync"; the rest phase was about 5 s, shorter than the recipe meant -
+     its asleep wait matched a stale line of the appended
+     `physics-stdout.log`); BALA-tr (client 2's ghost of client 1: 315 of 315 live
+     frames of the span translucent - alpha 0.5 / 0.632 / 0.7, blending on -
+     shown and in the view frustum, one pinned matrix; alpha 1.0 from the
+     first frame after it); BALL-pm (the pinned translation = float32 of the
+     server clone's row at 156 of 156 ticks of the final history; the one
+     live frame that differed, 720, was the death beam's tick before its
+     lifecycle reached client 2, re-run by the rewind with the beam);
+     BALA-end on Level 2 (`rt3_oend2`: four checkpoints by the chain, the
+     platform, "Sending level finish message", the server's Finish at 738
+     and "finished Level 02 in 1st place"). **Found (the test map, its own
+     item): the arena's level end cannot fire, vanilla or session**
+     (`rt3_end2` by the checkpoint chain, `rt3_vend` / `rt3_vend2` without
+     a room): PE_Balloon Script's finish proximity (`TT Scaleable
+     Proximity`, distance 1, squared, xyz, `Ball_Pos_Frame` against
+     `PE_Balloon_Platform`) is the last gate before Level_Finish, and a ball
+     resting on the arena's platform has its centre 2.02 m above the
+     platform's origin (929.30, 2.02, 14.98 against 930, 0, 15) - outside it
+     for good; on Level 2 the same beam finishes in 0.5 s. Fix: the arena's
+     `PE_Balloon` placed so a resting ball's centre is within 1 m of
+     `PE_Balloon_Platform`'s origin (`maps/build_arena_map.py`; re-capture
+     nothing that does not reach the airship) - on Level 2 the landing ball's
+     centre is 0.17 m above the platform's origin. **Found (its own item,
+     pre-existing; the legacy display, not physics):** in a core session the
+     mod's own sector lags one checkpoint (status 1 / 2 / 3 after the
+     crossings to 2 / 3 / 4; vanilla 2 / 3 / 4): the checkpoint hook reads
+     `IngameParameter[0][1]` (`BallanceMMOClient.h:999`) before the union
+     pass writes the split cell, and that pass's write is then marked not
+     own (`core_host.cpp` ~2806) - what `send_current_sector` and the sector
+     timestamps carry, not the session's Sector events (on time).
+     Recorded, not new: FINAL rows'
+     rotation <= 2.98e-8 (the records read at 24-bit x87); the retail beam's
+     in-place write (item 9's R6: a beamed own ball 5.3e-4 m off at rest,
+     0.53 m on Level 2's slopes before the airship, its mirror in the other
+     world exact); `frame_interval` p99 16.6-16.9 ms (Q-CPU).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

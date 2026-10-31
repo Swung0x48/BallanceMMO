@@ -6261,3 +6261,36 @@ equal" and no "no live controller" (WFA's alias). The spawn-impulse
 criterion is stale (spawn ghost since protocol 15, H4's note). PASS. Not
 covered by this run: J1b's loss, the 150 ms link (the run is local) - J1b
 stays H4's headless row.
+
+### As built (step RT3, FULL close-out, 2026-10-30): R1 on the arena
+
+§7.4 row R1 (`scripts/retail/rt3_r1`, `rt3_r1b`; driver
+`.local-tools/work/RT3/rt3_retail.py r1`, judge `rt3_judge.py`). The arena in
+slot 13 of both game copies, the x86 mod, the Arch server and an x64 headless
+copy (`build-agent-rRT3hack`; deleted after the batch, it had the same build
+id as HEAD's clean build) all built with the slot-13 hack (reverted and
+rebuilt after). The hack is needed on the headless side too (§4 C9 of the
+FULL plan): the headless client announces the md5 of its own slot table
+(`session_client.cpp:2345`), the server compares every member's md5
+(`room_members_same_map`, `server.cpp:2769`) and the host's against its table
+(`server.cpp:2774`), so an unhacked headless client next to a retail copy of
+the arena is refused (MapMismatch); read from the code, no launch spent.
+Retail client 1 hosts; headless 0 replays `h123_0`'s `input1.bmrc` and is
+beamed to (140, 4, 43) at 601, short of P_Modul_01; headless 1 replays
+`input3.bmrc`, enters sector 2 at 599 and is beamed onto P_Modul_29 at 601;
+the retail balls stay at the spawn. Snapshots off, trafo inputs, placement,
+the union and per-player mechanisms (8 slots) on.
+
+- The Pusher (`P_Modul_01_Pusher`) wakes at 612 in all five worlds (server,
+  both retail copies, both headless clients) in both runs - a headless ball
+  first. Every retail FINAL row of the 17 mechanism bodies equals the
+  server's (rt3_r1b: 7038 rows; the 31 rows that differ differ only in
+  rotation, <= 2.98e-8: the FINAL rows' 24-bit report, session-client-core
+  design "FINAL rows' rotation"); the headless LOCAL mechanism rows are equal
+  too (7038/7038).
+- `anchor_probes`: c7e224f5cf8c631b in both retail copies' anchor logs and
+  `session probes`, in both headless logs and as the server's mechanism
+  signature; no "probe mismatch". PASS.
+- rt3_r1's room started a second session ("restarted by the host": the
+  driver's second Start while the first was booting); its session 2 is the
+  run judged, and the driver now sends one Start.

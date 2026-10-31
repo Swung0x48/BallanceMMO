@@ -4014,3 +4014,30 @@ remote one built a hull one ulp off the other worlds', and no rollback undoes th
   padding would make KEPT report DIFFERS for equal hulls (and so end the session) - a false
   alarm, never a silent difference. `core_ref_s12/h1_150` is marked superseded in that set's
   README and `.local-tools/wire_check.sh` replays h1_150 from `core_ref_s12h` when REF is unset.
+
+## As built (step RT3, FULL close-out, 2026-10-30): RLC-r, a retail rewind across the bridge break
+
+The FULL row RLC-r (`scripts/retail/rt3_r1b`, the arena with the slot-13 hack,
+two retail copies and two headless clients - world-agreement-gaps-design "As
+built (step RT3)"). Headless 1's stone ball breaks P_Modul_29 (its plates
+move from 616 in every world); retail client 2 arms six one-shot forced
+rewinds after its session's begin (`session force-rollback at
+700:45,725:45,750:45,780:45,820:45,880:45`; armed before the begin they are
+cleared by it - rt3_r1's `forced=0`). All six rolled; the plates move from
+616, so every window (the first opens at 655) holds plate motion, but only
+some of the restores re-made a broken hinge - two (`recreated=2`; the line
+is a session total and does not say which rewinds). Client 2's session-end
+line: `joints: imaged=12891 recreated=2 replaced=0 missing=0 unmatched=0
+reordered=0 order_failed=0` (client 1, natural rewinds only: recreated=0); no
+"no live controller" and no "world damaged" in either log or the server's;
+client 2's FINAL plate rows equal the server's (rotation <= 2.98e-8, the
+report difference). PASS.
+
+**Added (retail diagnostics, `core_host.cpp`):** the session's end logs the
+joint ledger as the headless client's `joints:` line
+(`script_replay::joint_stats()`, this process's counts); and
+`BMMO_TRACE_ENTITY` takes `@mirrors` - every mirror entity of the session
+(their names carry the peer's connection id, unknown before it), its world
+matrix, first material's alpha and blending, shown / in frustum and whether a
+ghost pin holds it, after every live frame's post_step and before every
+replayed tick. Off by default; nothing is decided from either.

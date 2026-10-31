@@ -3597,3 +3597,92 @@ ruling).
   ball list between the listeners is not needed. The diagnostic build changed no
   output: its journals IDENTICAL to rRSX's 8 of 8, the L8 live journals
   IDENTICAL to their replays 4 of 4.
+
+## As built (step RT3, FULL close-out, 2026-10-30): ASL-r, BALA-tr, BALL-pm, BALA-end on retail
+
+The deferred retail rows of ASL, BALA and BALL (`scripts/retail/rt3_air`,
+`rt3_end2`, `rt3_vend`, `rt3_vend2`, `rt3_oend2`; driver
+`.local-tools/work/RT3/rt3_retail.py`, analysis `ghost_trace.py`,
+`rt3_judge.py`). The arena in slot 13 (x86 mod and Arch server with the
+slot-13 hack, both rebuilt clean after), two retail copies, snapshots off,
+trafo inputs and placement on. `rt3_air`: client 1 `sector 4`, beamed onto
+PE_Balloon_Platform (930, 2.5, 15), no keys; client 2 beamed onto the lane
+at (900, 4, 15), outside the box (905.250 .. 941.625), its camera towards the
+platform; client 2 with `BMMO_TRACE_ENTITY=@mirrors` (rollback-engine-gaps
+design "As built (step RT3)").
+
+- **ASL-r: PASS.** Client 1's own ball latched at 407 ("out of the sync
+  from here"), came to rest on the platform and slept from 432 to 532
+  (journal flags 2; `physics-stdout`: "asleep in its latch at clock
+  12.848485 (latched at 12.075758; not in m_MovableObjects): the latch
+  holds"), woke at ~535 and rolled slowly (0.18 -> 0.05 m/s) on the
+  platform; the latch held through the sleep and the wake until the death
+  beam at 720 - no "not latched ... any more" / "back in the sync", the
+  ghost in client 2's world and the server's one span 407..721. (The
+  driver's asleep wait matched a stale line of an earlier build in the
+  client's `physics-stdout.log`, which is appended across launches, so the
+  rest phase the recipe meant to give before its wake check was cut to
+  about 5 s; the judgment uses the run's own line, the last one. A reused
+  driver must scan the log only past its size at launch.)
+- **BALA-tr: PASS (recorded per frame).** Client 2's ghost of client 1 over
+  the span: 315 of 315 live frames translucent (alpha 0.5 at the hand-over,
+  then 0.632 / 0.7 by the dynamic opacity; blending on), shown and in the
+  view frustum (drawn at the top edge of client 2's view, `asleep_c2.bmp`),
+  one pinned matrix throughout; from the first frame after the span (722)
+  alpha 1.0, blending off - solid.
+- **BALL-pm: PASS.** The pinned matrix's translation (the CK matrix the
+  frame's place points read) equals float32 of the server clone's FULL row
+  position at 156 of 156 checkpoint ticks of the final history (930, 2.5, 15
+  - the entry pose every world freezes), the rotation the identity on both;
+  client 2's own FINAL rows of the mirror alike. The discriminating part:
+  over 540-718 client 1's own ball rolled from x 930.0 to 929.45 (the pose
+  its legacy stream carries to client 2's display), while every in-frame
+  trace line of client 2 stayed at 930.0 - the frame read the pin, not the
+  stream. The one live trace line that differed, t=720, is the death
+  beam's tick before its lifecycle reached client 2: the lifecycle rewind
+  re-ran 720 with the beam (the replayed line shows (60, -30, 15)).
+- **BALA-end: the arena cannot finish; Level 2 does (PASS there).**
+  `rt3_end2`: client 1 crosses PC_TwoFlames at 220 / 460 / 700 by beams
+  (sector +2 at 328, +3 at 434, +4 at 549, the checkpoint chain), then onto
+  the platform: no level end in 34 s. `rt3_vend` / `rt3_vend2` (vanilla, no
+  room): the same - status sector 4, the ball at rest at (929.30, 2.02,
+  14.98), no Level_Finish. Cause (the test map): PE_Balloon Script's last
+  gate before its Send Message (Level_Finish) is a `TT Scaleable Proximity`
+  of distance 1 (squared, xyz) between `Ball_Pos_Frame` and
+  `PE_Balloon_Platform` (the 70-unit one before it fires; the 1-unit one
+  stays active once the ball is on, `balloon_on.txt`); on the arena the
+  platform's origin is 2.02 m below a resting ball's centre, so it never
+  comes in range. `rt3_oend2`, the same recipe on Level 2 (four checkpoints
+  by the chain): the ball lands at 734 with its centre 0.17 m above the
+  platform's origin (y 27.297 against 27.132), and "On Message LevelFinish",
+  "Sending level finish message", the server's Finish event at 738 and
+  "finished Level 02 in 1st place" follow, 0.5 s after the beam onto the
+  platform. The arena fix (place PE_Balloon so
+  a resting ball's centre is within 1 m of the platform's origin,
+  `maps/build_arena_map.py`) is queued (roadmap item 7, RT3).
+- Recorded, not new: client 2's own ball beamed off its spawn contact in
+  `rt3_air` is 5.3e-4 m off the server at rest, and client 1's own ball on
+  Level 2's slopes up to 0.53 m between beams - the retail beam's in-place
+  write (roadmap item 9, R6), every mirror of it in the other world exact;
+  the balloon module (PE_Balloon*, PE_Box_slide; exception c) and the own
+  ball's airship span differ by design; resyncs, starved, far and rebases 0
+  in every run; `frame_interval` p99 16.6-16.9 ms (Q-CPU). The own ball's
+  wake at ~535 on the platform: cause not established (the airship module is
+  per-world, exception c, and the own ball is out of the sync there, so it is
+  no sync gap).
+- **Found (its own item, pre-existing, not a physics state): in a core
+  session the mod's own sector (`current_sector_`) lags one checkpoint.**
+  `rt3_end2`'s status read sector 1 / 2 / 3 after the crossings that made
+  sectors 2 / 3 / 4 (and stayed 3); vanilla (`rt3_vend`) reads 2 / 3 / 4.
+  Cause: the checkpoint hook (`on_sector_changed(true)`,
+  `BallanceMMOClient.cpp:339`) reads `IngameParameter[0][1]`
+  (`update_current_sector`, `BallanceMMOClient.h:999`), but the session
+  splits that cell - the chain's Set Cell writes a private copy - so at the
+  hook the cell still holds the previous sector; the union pass writes the
+  new one later through `p.run_sector`, which marks a cell differing from
+  `current_sector_` not own (`core_host.cpp` ~2806), so the own new sector is
+  adopted only at the next crossing (the previous one's). It reaches what the
+  mod reports as its sector (`send_current_sector`, the player list and the
+  sector timestamps), never the session's events (the stamped Sector events
+  were +2 / +3 / +4 on time). Fix: the hook takes the sector the core
+  stamps for the crossing, or adopts the union pass of its own crossing.

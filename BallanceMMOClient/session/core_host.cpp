@@ -1260,7 +1260,17 @@ namespace {
     //                            every replayed tick (the state that tick's
     //                            scripts read).  Solo runs: the entity is the
     //                            first of that name, which in a session with
-    //                            peers can be a remote clone's child.
+    //                            peers can be a remote clone's child.  The
+    //                            entry @mirrors (FULL step RT3) stands for every
+    //                            mirror entity this session made (their names
+    //                            carry the peer's connection id, unknown before
+    //                            the session): its whole world matrix, its first
+    //                            material's alpha and alpha blending, shown /
+    //                            in the view frustum, and whether a ghost pin
+    //                            holds it - inside the frame, so the matrix is
+    //                            the one the frame's place points read (the
+    //                            pinned one for an airship ghost) and the alpha
+    //                            the one the previous frame was drawn with.
     bool diag_trace_plan() {
         static const bool on = [] {
             const char* v = std::getenv("BMMO_TRACE_PLAN");
@@ -1295,6 +1305,33 @@ namespace {
     std::string diag_entity_line(CKContext* context, const char* when, uint32_t tick) {
         std::string out = std::format("entity trace {} t={}", when, tick);
         for (const std::string& name: diag_trace_entities()) {
+            if (name == "@mirrors") {
+                CKRenderContext* rc = context ? context->GetPlayerRenderContext() : nullptr;
+                for (const auto& [mirror, player]: host.mirror_player) {
+                    auto* entity = context ? CK3dEntity::Cast(context->GetObjectByNameAndParentClass(
+                            const_cast<CKSTRING>(mirror.c_str()), CKCID_3DENTITY, nullptr)) : nullptr;
+                    if (!entity) {
+                        out += std::format(" {}=none", mirror);
+                        continue;
+                    }
+                    const VxMatrix& m = entity->GetWorldMatrix();
+                    float alpha = -1.0f;
+                    int blend = -1;
+                    if (CKMesh* mesh = entity->GetCurrentMesh(); mesh && mesh->GetMaterialCount() > 0)
+                        if (CKMaterial* material = mesh->GetMaterial(0)) {
+                            alpha = material->GetDiffuse().a;
+                            blend = material->AlphaBlendEnabled() ? 1 : 0;
+                        }
+                    const auto pin = ghost_pins.find(mirror);
+                    out += std::format(" {}=[{:a},{:a},{:a}][{:a},{:a},{:a}][{:a},{:a},{:a}]({:a},{:a},{:a}) a={:.4f} b={}"
+                                       " v={} f={} pin={}",
+                                       mirror, m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1],
+                                       m[2][2], m[3][0], m[3][1], m[3][2], alpha, blend, entity->IsVisible() ? 1 : 0,
+                                       rc && entity->IsInViewFrustrum(rc) ? 1 : 0,
+                                       pin != ghost_pins.end() && pin->second.held ? 1 : 0);
+                }
+                continue;
+            }
             auto* entity = context ? CK3dEntity::Cast(context->GetObjectByNameAndParentClass(
                     const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr)) : nullptr;
             if (!entity) {
@@ -2336,6 +2373,17 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                   host.script_order.entries(), static_cast<unsigned long long>(report_precision_reads),
                   static_cast<unsigned long long>(report_precision_failed), placement_host.active ? "on" : "off",
                   placement_host.made, static_cast<unsigned long long>(placement_host.signature));
+    {
+        // FULL step RT3 (RLC-r): the joint ledger of step RLC, as the headless
+        // client's 'joints:' line (this process's counts, every session so far).
+        const auto& j = bmmo::game::script_replay::joint_stats();
+        logger_->Info("Physics session: joints: imaged=%llu recreated=%llu replaced=%llu missing=%llu unmatched=%llu "
+                      "reordered=%llu order_failed=%llu",
+                      static_cast<unsigned long long>(j.imaged), static_cast<unsigned long long>(j.recreated),
+                      static_cast<unsigned long long>(j.replaced), static_cast<unsigned long long>(j.missing),
+                      static_cast<unsigned long long>(j.unmatched), static_cast<unsigned long long>(j.reordered),
+                      static_cast<unsigned long long>(j.order_failed));
+    }
     if (frame_times.session == session && frame_times.frame.count) {   // FULL step RT1 (RCX-x86)
         logger_->Info("Physics session: %s", frame_times.frame.line("core_frame_time").c_str());
         logger_->Info("Physics session: %s", frame_times.interval.line("frame_interval").c_str());
