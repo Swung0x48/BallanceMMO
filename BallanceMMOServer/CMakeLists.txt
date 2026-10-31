@@ -49,7 +49,7 @@ endif ()
 
 include_directories(../submodule/asio/asio/include)
 include_directories(../submodule/ya_getopt)
-include_directories(../submodule/GameNetworkingSockets/src/external)
+include_directories(../submodule/picojson)
 include_directories(../submodule/replxx/include)
 
 include_directories("${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include"

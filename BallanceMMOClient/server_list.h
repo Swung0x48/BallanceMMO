@@ -3,7 +3,7 @@
 #ifndef PICOJSON_USE_INT64
 # define PICOJSON_USE_INT64
 #endif // !PICOJSON_USE_INT64
-#include <picojson/picojson.h>
+#include <picojson.h>
 
 #include "bml_includes.h"
 #include "config_manager.h"

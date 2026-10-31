@@ -19,3 +19,6 @@
 [submodule "submodule/Ballanced"]
 	path = submodule/Ballanced
 	url = https://github.com/Swung0x48/Ballanced.git
+[submodule "submodule/picojson"]
+	path = submodule/picojson
+	url = https://github.com/kazuho/picojson.git

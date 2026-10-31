@@ -21,7 +21,7 @@
 #include <yaml-cpp/yaml.h>
 
 #define PICOJSON_USE_INT64
-#include <picojson/picojson.h>
+#include <picojson.h>
 #include "server_data.hpp"
 #include "config_manager.hpp"
 #include "room/room_manager.hpp"

@@ -102,6 +102,98 @@ CI-style verification without a real game client), `BallanceMMOSimTool`
 deployable unit. On Linux, `cmake --build build-server --target install`
 additionally installs everything under `CMAKE_INSTALL_PREFIX/bin` and `lib`.
 
+### GameNetworkingSockets and picojson (As built, FULL step GNSU, 2026-10-31)
+
+Which GNS each binary runs:
+
+- **Server, headless client, SimTool, tests (x64 MSVC and Linux GCC):**
+  `BallanceMMOServer/CMakeLists.txt` `add_subdirectory`s
+  `submodule/GameNetworkingSockets`, pinned to upstream master
+  `d534c19aa760df3fb75fd20db13ba1932b8a5463` (2026-10-02, "Increase timeout
+  for STUN server to start"). Before GNSU it was `f938f6f` (2025-03-17), a
+  protobuf >= 29 compile fix reachable only through
+  ValveSoftware/GameNetworkingSockets PR #371's ref, on no branch; master
+  carries upstream's own fix for the same error (`096c195`, "Remove call to
+  GetTypeName() from assert", 2025-10-03), so no patch is carried. Master
+  builds with the x64 vcpkg protobuf 6.33.4 / OpenSSL 3.6.3 and with Arch's
+  protobuf 36.1 / OpenSSL 3.6.5 (GCC 16.2.1). A fresh clone needs no
+  recursive init for it: `src/external/abseil` and `webrtc` are only for
+  `USE_STEAMWEBRTC` (off) and `src/external/vjson` only for the cert tool
+  (`BUILD_TOOLS` off). Since upstream `8e9c05e` exactly one of `NDEBUG` /
+  `_DEBUG` must be defined: GCC without `NDEBUG` now builds a debug-flavoured
+  GNS (asserts on) and a single-config MSVC tree without `NDEBUG` does not
+  compile it, so configure with a build type (`-DCMAKE_BUILD_TYPE=Release` or
+  `RelWithDebInfo`; the root `build_server.sh` passes none by itself - add it
+  to its arguments). The CI workflows and the local trees all pass one.
+- **picojson:** upstream removed its `src/external/picojson` submodule
+  (`0b3406a`, 2026-05-09; the cert tool moved to vjson), which BMMO had
+  borrowed through `include_directories(.../GameNetworkingSockets/src/external)`.
+  It is now BMMO's own submodule `submodule/picojson`
+  (https://github.com/kazuho/picojson.git) at the same commit
+  `111c9be5188f7350c2eac9ddaedd8cca3d7bf394` (the header is byte-identical),
+  on the include path of the server targets and the retail mod; the five
+  includes read `#include <picojson.h>`. An existing checkout keeps the old
+  nested `submodule/GameNetworkingSockets/src/external/picojson` directory as
+  untracked content (git does not remove a dropped nested submodule's work
+  tree); it is no longer on any include path, but `cmake/WriteBuildId.cmake`
+  marks every build of such a checkout `-dirty` (its `git status --porcelain`
+  is not empty), so delete it (or move it out of the tree) after updating.
+- **The retail mod (x86 MSVC)** does not build the submodule: its tree
+  resolves `find_package(GameNetworkingSockets)` from vcpkg's
+  `gamenetworkingsockets` port of the vcpkg submodule's baseline (1.6.0 =
+  upstream `2cb93a0`, 2026-06-03; `ice` feature on), and the game copies ship
+  that `GameNetworkingSockets.dll` next to the mod. 1.6.0 lies on master's
+  line, 54 commits behind `d534c19`, and 278 commits after `725e273`
+  (f938f6f's base): before GNSU the mod ran a NEWER GNS than the server.
+  GNSU did not move it (the way the mod should follow master is the user's
+  decision); master itself
+  builds with the x86 toolchain and the retail tree's x86 protobuf / OpenSSL /
+  abseil (`.local-tools/work/GNSU/gns_x86_master.bat`).
+
+Upstream changes between `725e273` (f938f6f's base) and `d534c19` that touch
+what BMMO uses (send flags Reliable / ReliableNoNagle / UnreliableNoDelay /
+UnreliableNoNagle, `SendMessageToConnection`, `GetConnectionRealTimeStatus`,
+`ReceiveMessagesOnConnection` / `OnPollGroup`, `TimeoutConnected`,
+`IP_AllowWithoutAuth`, the FakePacket* settings, message size limits):
+`SendMessages` gained a `bDeleteFailedMessages` argument (`4fbfe83`; BMMO
+never calls it); `SteamNetConnectionRealTimeStatus_t` gained
+`m_usecMaxJitter` out of its reserved words (`a246ee3`; same size, BMMO only
+reads it locally); the `k_nSteamNetworkingSend_UnreliableNoDelay` comment
+now says it drops only while not connected (`1ed5887`, docs only: the
+"~200 ms queued" drop was never implemented); message size checks moved to
+the API entry points with an overflow fix (`10f2446`, `fa489fd`; BMMO's
+largest messages are far below `k_cbMaxSteamNetworkingSocketsMessageSizeSend`);
+SNP reliability and ack fixes (`8ac7997` reliable message size decoding,
+`020277d` reliable segment gap map, `08bae06`, `8bd39a3`, `0e4365d`,
+`692c40f` stop-waiting / ack scheduling, `d707afb` ack frame encoding - a
+wire change, already in the mod's 1.6.0, so the mixed sessions of GNSU did
+not cross it); lanes no longer reorder messages across
+lanes (`99ae282`; BMMO uses one lane); a listen socket now tells a peer that
+keeps sending for a closed connection that it is gone (`cce27af`); the
+connection state became `std::atomic` (`5f06b0a`); queued background tasks
+are deleted on shutdown (`8f36871`); `IPLocalHost_AllowWithoutAuth` defaults
+like `IP_AllowWithoutAuth` (`399192b`). Nothing changed in the Nagle /
+NoNagle queueing or in when a datagram is built: SAXE's finding holds on
+master (`CheckConnectionStateOrScheduleWakeUp` is still `SetNextThinkTimeASAP`
+under its FIXME, `steamnetworkingsockets_connections.cpp:3382-3388`; the wire
+below).
+
+Verified at GNSU: x64 BUILD-OK, `BallanceMMOMessageTests` 708/708, x86
+CLIENT-BUILD-OK, Arch ARCH-BUILD-OK, GCC syntax 33/33; the wire check over
+`core_ref_s12` (36 captures, `--accept-protocol 22`) ALL SAME, 36/36 sends,
+36/36 journals IDENTICAL (the replays do not run GNS; they show BMMO's own
+bytes unchanged). Live, Arch server on master, snapshots off: the SAXE
+volley (`--assign-volley 5`, `maps/arena-test/saxe/gnsu_volley5`) still
+leaves as ONE 130-byte datagram on all four members, then the fallback's
+48-byte copies ~15 ms apart, exactly as `saxe/volley5_wire`; DFR's swing arm
+at 150 ms, 10 % loss, burst 4, seed 0 (`dfr_full/gnsu_b4_s0`): 0 resyncs,
+server replay 3808/3808, FINAL rows exact on all four; J1
+(`dfr_full/gnsu_j1`): 0 resyncs on the founders, the joiner's one import,
+FINAL rows exact on all four, the same as `dfr_full/sax_j1` on f938f6f; one
+retail two-copy L11 session (mod on 1.6.0, `scripts/retail/gnsu_retail`:
+connect, play, `mmo disconnect`, reconnect, late re-join): every FINAL row
+of both lives bit-equal to the server.
+
 ## Distributing the client mod
 
 Players need, under their game install:

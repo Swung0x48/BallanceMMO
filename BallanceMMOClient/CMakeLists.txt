@@ -93,7 +93,7 @@ foreach (required_path IN ITEMS "${BMLPLUS_INCLUDE_DIR}/BML/BMLAll.h" "${BMLPLUS
 endforeach ()
 
 set(ASIO_INCLUDE_DIR ../submodule/asio/asio/include)
-set(GNS_EXT_INCLUDE_DIR ../submodule/GameNetworkingSockets/src/external)
+set(PICOJSON_INCLUDE_DIR ../submodule/picojson)
 set(PARALLEL_HASHMAP_INCLUDE_DIR ../submodule/parallel-hashmap)
 set(REPLXX_INCLUDE_DIR ../submodule/replxx/include)
 
@@ -178,7 +178,7 @@ target_include_directories(BallanceMMOClient PRIVATE
                             "${CMAKE_CURRENT_LIST_DIR}"
                             ${REPLXX_INCLUDE_DIR}
                             ${ASIO_INCLUDE_DIR}
-                            ${GNS_EXT_INCLUDE_DIR}
+                            ${PICOJSON_INCLUDE_DIR}
                             ${PARALLEL_HASHMAP_INCLUDE_DIR})
 target_link_libraries(BallanceMMOClient PRIVATE
                         bmmo_minhook

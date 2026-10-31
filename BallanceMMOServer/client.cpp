@@ -22,7 +22,7 @@
 #include <asio/io_service.hpp>
 #include <asio/ip/tcp.hpp>
 #include <ya_getopt.h>
-#include <picojson/picojson.h>
+#include <picojson.h>
 
 #include "common.hpp"
 #include "entity/record_entry.hpp"
