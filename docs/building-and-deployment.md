@@ -15,9 +15,27 @@ equivalent of for its headless simulation.
 
 Same prerequisites as the base README (VS2022 with the C++ workload and the
 English language pack, CMake, Ninja), plus an extracted BMLPlus SDK
-(`include/BML/BMLAll.h` and `lib/BMLPlus.lib`). Build from Git Bash or
-`cmd.exe`, not PowerShell — PowerShell's UTF-8 console breaks ninja's header
-dependency tracking, which silently produces stale incremental builds.
+(`include/BML/BMLAll.h` and `lib/BMLPlus.lib`).
+
+Header dependencies under a non-English MSVC: ninja learns each object's
+headers from cl's `/showIncludes` lines, whose prefix is localized and printed
+in the console's code page, and CMake writes the prefix it expects
+(`msvc_deps_prefix` in `CMakeFiles/rules.ninja`) in the code page of the
+console that generated the tree. When the two differ, every object records no
+header dependencies and a later header edit leaves it stale, silently. The
+code page does not stay put during a build: the `vcpkg.exe z-applocal` step
+that runs after every exe/dll link switches the shared console to 65001
+(UTF-8) while it runs, and two overlapping links leave it there for the rest of
+the build (a `wsl.exe` does the same). So with a localized Visual Studio (or
+any console not already in UTF-8), run `chcp 65001` in the developer console
+before both the CMake generation and every build, and regenerate an existing
+tree (`cmake <tree>`) in that console once; every later switch is then a no-op.
+With only the English language pack the prefix is ASCII and the code page does
+not matter. The console code page changes no compiled object (cl reads sources
+without a BOM in the system ANSI code page, or as UTF-8 under `/utf-8`, either
+way). `ninja -C <tree> -t deps`
+shows each object's recorded headers; `#deps 0` on an object whose source
+includes a project header means the tree was hit.
 
 ```bash
 cmake -S . -B build-client -G Ninja -DCMAKE_BUILD_TYPE=Release \
