@@ -1133,6 +1133,11 @@ numbers 1-10 are unchanged.
    RT1)"): (a) re-choose the drive at pre_step(T) from an exact frame that
    arrived in the slot; (b) keep such a frame and replay from T - 1 when it
    differs from the recorded drive; (c) both.
+   **Built (FULL step SLX, the user's Q-SLOT (a)):** pre_step(T) drives T
+   with the ring's exact frame for T when it arrived after post_step(T - 1)
+   and differs from the drive chosen there; retail `slx_ctl` client 2's two
+   drain hits (1090, 1129) driven, its mirror 0 m off the server (core
+   design "As built (FULL step SLX)").
 5. **World agreement** (`world-agreement-gaps-design.md`), after F5-F7
    (WAG:1204, order constraint M6): client proximity sensors rewired to
    the nearest ball (own or mirror; the G-c leader-only wakes P_Modul_03

@@ -616,6 +616,25 @@ namespace bmmo::session {
             // drive_from_newest_relay (R1): chosen now, from the relay the
             // messages since post_step left (the record of T stores it).
             if (config.drive_from_newest_relay) remote.applied = live_drive(remote, frame_tick);
+            // FULL step SLX (Q-SLOT (a), every host): the relayed frame for
+            // this very tick, when it reached the ring in the drain between
+            // post_step(T - 1) and now, drives T.  post_step(T - 1) chose
+            // from the relay as it was then (hold-last when the ring had no
+            // frame for T), and note_input_correction does not remember a
+            // frame for a tick not simulated yet - stepped on the prediction,
+            // that tick was never corrected (RT1: a death fall's navigation
+            // off played on).  Only the exact frame for T, never a newer one
+            // (R1's policy stays the flag above); one that was in the ring at
+            // post_step(T - 1) is the one chosen there, so it changes nothing.
+            // The record of T (post_step's `applied`) stores this drive.
+            else if (const auto exact = remote.inputs.find(frame_tick);
+                     exact != remote.inputs.end() && !same_frame(exact->second, remote.applied)) {
+                if (s.drain_drives_++ < kDrainDriveLogs)
+                    logf("drain drive: player %u's frame for tick %u arrived after the previous step: keys %u flags %u "
+                         "-> keys %u flags %u", id, frame_tick, remote.applied.keys, remote.applied.flags,
+                         exact->second.keys, exact->second.flags);
+                remote.applied = exact->second;
+            }
             std::string drive_error;
             if (!platform_.drive(remote.entity, remote.applied, drive_error))
                 logf("remote navigation input %s: %s", remote.entity.c_str(), drive_error.c_str());

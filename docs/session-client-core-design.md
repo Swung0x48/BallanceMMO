@@ -7040,3 +7040,89 @@ Runs `scripts/retail/rt1_*`, driver and judges `.local-tools/work/RT1/`
   `net lag 150`): `frame_interval` p99 26.8 / 27.0 ms, `core_frame_time` p99
   25.8 / 26.2 ms. The arms and the control: `frame_interval` p99 17.0-54.3 ms
   (`rt1_ctl2` 17.0 / 23.0 ms).
+
+**As built (FULL step SLX, 2026-10-30): a relayed frame for the tick about
+to be stepped drives that tick (Q-SLOT (a)).** The user's answer to RT1's
+"neither driven nor corrected" (above): option (a). Shared core only; no
+protocol, journal, IVP, engine or `BallanceMMOClient` member change.
+- **Built.** `pre_step(T)` (`client_core_frame.cpp`, the remotes' drive loop
+  before the forced own tick): with `drive_from_newest_relay` off (both hosts
+  now), when the ring holds the relayed frame for T itself and it differs
+  (`same_frame`) from `remote.applied` - the drive `post_step(T - 1)` chose,
+  hold-last when the ring had no frame for T then - that frame becomes
+  `remote.applied` and drives T. Only the exact frame for T, never a newer
+  one (R1's newest-relay policy stays the flag's); a frame that was in the
+  ring at `post_step(T - 1)` is the one chosen there (`live_drive` returns the
+  exact frame unchanged), so no arrival timestamp is kept and nothing else
+  changes. No replay: T is not simulated yet. The record of T is consistent
+  by construction - `post_step(T)` records `remote.applied` before its
+  end-of-frame loop chooses T + 1, and nothing between the two writes it
+  (`attach_remote_navigation` does not). Counted in `drain_drives_`, logged
+  "drain drive: player P's frame for tick T arrived after the previous step:
+  keys a flags b -> keys c flags d" (the first 32), and shown on the status
+  line as ` drain_drive=N` only when N > 0 (every other status line is the
+  text it was). The count (and the log line's wording) also takes in the
+  first pre_step after an anchor or a resync rebase when the `applied` left
+  from before differs from the ring's frame for T: no post_step(T - 1) ran
+  on this host there, but taking the exact frame is just as right (review
+  nit, kept as is). The host comment of `core_host.cpp` (`drive_from_newest_relay
+  = !input_rewind`) and the flag's comment in `client_core.hpp` say so.
+- **Where a frame can arrive (why no replay is needed).** Both hosts take
+  messages only outside pre_step(T) .. post_step(T): retail drains its
+  mailbox (`core_host_drain`) inside `core_host_frame` between post_step(T)
+  and pre_step(T + 1) (`core_host.cpp:2301`), in the resync hold before
+  pre_step (`:2319`) and in the anchor hold before the first step (`:2188`);
+  the headless frame runs pre_step, the engine tick and post_step back to
+  back (`session_client.cpp:3571-3574`) and polls outside them. So a frame
+  for T reaches the ring either before post_step(T - 1) (chosen there),
+  in the drain (chosen now) or after post_step(T) (a simulated tick:
+  `note_input_correction`'s replay, unchanged); no window is left between
+  pre_step(T) and post_step(T).
+- **Unit tests.** `SessionClientCoreSLX.ExactFrameArrivedInTheDrainDrivesItsTick`:
+  a frame for 126 put in the ring after post_step(125) chose hold-last (keys
+  1) drives 126 with keys 5, `applied` keys 5 and, after post_step(126),
+  the rollback record of 126 keys 5 (`recorded_input`), one
+  drain drive and its log line; the same frame already in the ring when
+  post_step(125) chose, and a frame for 127 instead, leave the drive at what
+  post_step chose (0 drain drives). `SessionClientCoreR1.DriveFromTheNewest
+  RelayAtPreStep` adapted: its policy-off arm put the frame of 126 itself in
+  the ring - the case SLX now drives - so the two policies are told apart by a
+  newer frame (127): on drives it, off keeps post_step's choice. 686/686.
+- **Checks** (`.local-tools/work/SLX`, x64 `build-agent-rSLX` and the x86 mod
+  of the tree over HEAD f71b30ee, build id `ballanced-36c04e3d24c9+bmmo-
+  f71b30eea7b4-dirty`; Arch server rebuilt from the same tree, replacing
+  SAX's 8-copy binary: the run's server log names that id). Wire check
+  rBALX (HEAD f71b30ee's own x64 build) -> rSLX over `core_ref_s12`
+  (h1_150 from `core_ref_s12h`, `EXTRA="--accept-protocol 22"`, the pacer
+  flag auto-added): ALL SAME, 36/36 sends SAME, 36/36 journals IDENTICAL; 0
+  "drain drive" lines in the 36 replays (the headless lead keeps the
+  captured clients ahead of the relay); h1_150's four journals identical
+  to rBALX's, whose rows BALX found 0 differing from the server (exact by
+  transitivity). `h6_full/a3_trans` c0-c3 and `h4_full`
+  J1b seeds 1-5 + j1 (client 3) replayed with `--final-checkpoints
+  --accept-protocol 22` (`work/SLX/rep.sh`; a3_trans c0/c1 without
+  `--pacer-restart-on-resync`, with which rBALX stops there too): every FINAL
+  row within 0.000 m of the server (c0 659, c1 669, c2 747, c3 476 ticks;
+  J1b / j1 own, mirror and body 0.0000 m), 0 drain drives. GCC syntax 31/31,
+  x86 CLIENT-BUILD-OK (deps valid: `physics_session_client.cpp.obj` #deps
+  1254). Retail: RT1's control recipe on the two copies (`rt1_retail.py arm
+  slx_ctl 0:0 0:0`, L11, snapshots off, trafo inputs and placement on,
+  `scripts/retail/slx_ctl`): client 2 starved again (470 reports, one DX6
+  resync at 1237 - RT1's known slip, Q-CPU), and the drain hits came back at
+  the same places: `work/SLX/slot2.py` (RT1's `gap6/slot.py` plus the drive
+  stepped under this rule) counts 55 frames in client 2's slot, 2 differing
+  from post_step's choice - 1090 (client 1's death fall, flags 5 -> 1, as
+  in `rt1_ctl`) and 1129 (keys 1 -> 2) - and 0 differing from the drive
+  stepped; the core's two "drain drive" lines match the two hits one to
+  one (client 1: 0 / 0) - the slot2 column "differing from the drive
+  stepped" is the rule's model, 0 by construction; the evidence is the log
+  lines matching the hits and the rows below. `rt1_judge.py`: client 2's mirror of client 1
+  worst position 0 m over its 711 FINAL rows (`rt1_ctl`: 0.1074 m at 1098),
+  the 82 unequal rows rotation only, max 2.98e-8 (`final_fields.py`: RT1's
+  FINAL-row x87 read, a report difference); 0 UNCONFIRMED rows on client 2
+  (`rt1_ctl`: 1); mechanisms 23/23 bit-equal on both clients, pieces
+  position 0 m. The own balls' 0.001946 m at the beam ticks 300 / 340 are
+  the same on `rt1_ctl` / `rt1_ctl2` (pre-existing, not this step's).
+- **Not built:** option (b) (a one-tick replay when such a frame differs
+  from the recorded drive) - with (a) no tick is stepped on a superseded
+  exact frame, so nothing is left for it to correct.

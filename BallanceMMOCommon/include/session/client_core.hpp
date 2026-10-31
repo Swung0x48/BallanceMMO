@@ -546,6 +546,10 @@ namespace bmmo::session {
         uint64_t relay_bodiless_ = 0;
         // ...and for a mirror's birth tick, which no replay can change.
         uint64_t relay_birth_frozen_ = 0;
+        // FULL step SLX (Q-SLOT (a)): mirror steps whose drive pre_step
+        // re-chose from the relayed frame for that very tick, which reached
+        // the ring after post_step(T - 1) chose another (the drain hits).
+        uint64_t drain_drives_ = 0;
         uint32_t relay_lag_max_ = 0;
         // Late-player plan step 12: the relay lag of the server's newest
         // step at each first arrival of it (current - header tick, the
@@ -1087,6 +1091,9 @@ namespace bmmo::session {
         // corrects that tick's prediction but the next snapshot, so a key
         // edge relayed in between is played a tick late and every edge
         // costs one more mismatched snapshot (R1 (b): 22-29 against 17-21).
+        // Off, the drive of T is still re-chosen at pre_step(T) from the
+        // relayed frame for T itself when that one arrived after post_step
+        // (T - 1) (FULL step SLX, Q-SLOT (a); never a newer frame).
         bool drive_from_newest_relay = false;
         // The window: line's phase (E10; design 1.2): a line closes the
         // window on the ticks t with (t - window_shift) % kWindowTicks == 0
@@ -1846,6 +1853,9 @@ namespace bmmo::session {
         void learn_held_tick(uint32_t tick);
         uint64_t held_learned_upto(uint32_t tick) const;
         static constexpr uint32_t kHeldGapTicks = 64;
+        // FULL step SLX: the drain-drive lines logged per session (the count
+        // goes on in the status line's drain_drive= section).
+        static constexpr uint64_t kDrainDriveLogs = 32;
         void check_held_complete(const bmmo::session_remote_input_msg& msg);
         void reset_held_epoch(const char* why = "the new base");
         void drop_pending_rewind();

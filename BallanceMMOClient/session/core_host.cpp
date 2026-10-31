@@ -1540,7 +1540,9 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // R1's policy (the legacy frame's order) only stood in for the input
     // rewind: with it a key edge relayed between the frames replays from its
     // tick, so the drive of T + 1 is chosen at post_step(T) as on the
-    // headless client (As built, step R2).
+    // headless client (As built, step R2) - but for the relayed frame of T + 1
+    // itself, arrived after post_step(T): pre_step(T + 1) drives with it on
+    // every host (FULL step SLX).
     config.drive_from_newest_relay = !config.input_rewind;
     config.window_shift = 0;
     if (core.begin(msg, config).refused) {

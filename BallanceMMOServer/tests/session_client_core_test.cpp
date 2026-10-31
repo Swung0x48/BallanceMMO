@@ -5911,8 +5911,10 @@ namespace {
 
     // drive_from_newest_relay (R1): with the policy, the step of T drives a
     // predicted mirror with the frame live_drive chooses at pre_step(T) from
-    // the relay as the messages left it; without (the headless setting), with
-    // the one post_step(T - 1) chose.
+    // the relay as the messages left it - here the newest relayed frame, of
+    // tick 127, the ring having none for 126; without (the headless setting),
+    // with the one post_step(T - 1) chose (a newer frame is never taken: only
+    // the exact frame for T is, FULL step SLX's test below).
     TEST(SessionClientCoreR1, DriveFromTheNewestRelayAtPreStep) {
         for (const bool on: {false, true}) {
             SCOPED_TRACE(on ? "policy on" : "policy off");
@@ -5925,13 +5927,67 @@ namespace {
             four.physicalized = true;
             four.navigation = true;
             four.applied = keys_frame(1);   // what post_step(125) chose
-            four.inputs[126] = keys_frame(5);   // relayed since
+            four.inputs[127] = keys_frame(5);   // relayed since, for a later tick
+            four.input = keys_frame(5);
+            four.input_tick = 127;
+            four.have_input = true;
             const size_t from = fake.calls.size();
             core.pre_step();
             const auto calls = since(fake.calls, from);
             EXPECT_NE(std::find(calls.begin(), calls.end(), on ? "drive:Ball_Wood_BMMO_4:5" : "drive:Ball_Wood_BMMO_4:1"),
                       calls.end());
             EXPECT_EQ(state_of(core).remotes_.at(4).applied.keys, on ? 5 : 1) << "the record of 126 stores what drove it";
+            EXPECT_EQ(state_of(core).drain_drives_, 0u);
+        }
+    }
+
+    // FULL step SLX (Q-SLOT (a)): with R1's policy off (both hosts), a relayed
+    // frame for the tick about to be stepped that reached the ring in the
+    // drain after post_step(T - 1) drives T, and the record of T stores it;
+    // one that arrived before post_step(T - 1) (the drive chosen there) or one
+    // for a later tick leaves the drive as post_step chose it.
+    TEST(SessionClientCoreSLX, ExactFrameArrivedInTheDrainDrivesItsTick) {
+        enum class arrival { drain, earlier, later };
+        for (const arrival when: {arrival::drain, arrival::earlier, arrival::later}) {
+            SCOPED_TRACE(when == arrival::drain ? "in the drain" : when == arrival::earlier ? "before post_step" : "a later tick");
+            flow_fake fake;
+            session_client_core core(frame_platform(fake, false), session_capabilities{});
+            run_to_tick_125_four(core, fake);
+            ASSERT_FALSE(core.config.drive_from_newest_relay);
+            auto& four = state_of(core).remotes_[4];
+            four.entity = "Ball_Wood_BMMO_4";
+            four.physicalized = true;
+            four.navigation = true;
+            four.input = keys_frame(1);
+            four.input_tick = 125;
+            four.have_input = true;
+            four.inputs[125] = keys_frame(1);
+            if (when == arrival::earlier) {
+                // In the ring when post_step(125) chose: live_drive took it.
+                four.inputs[126] = keys_frame(5);
+                four.applied = keys_frame(5);
+            } else {
+                four.applied = keys_frame(1);   // hold-last: the frame of 125
+                // Relayed after post_step(125): for 126 itself, or for 127.
+                four.inputs[when == arrival::drain ? 126u : 127u] = keys_frame(5);
+            }
+            const size_t from = fake.calls.size();
+            core.pre_step();
+            const auto calls = since(fake.calls, from);
+            const int expected = when == arrival::later ? 1 : 5;
+            EXPECT_NE(std::find(calls.begin(), calls.end(), "drive:Ball_Wood_BMMO_4:" + std::to_string(expected)), calls.end());
+            EXPECT_EQ(state_of(core).remotes_.at(4).applied.keys, expected) << "the record of 126 stores what drove it";
+            EXPECT_EQ(state_of(core).drain_drives_, when == arrival::drain ? 1u : 0u);
+            const bool logged = std::find(calls.begin(), calls.end(),
+                "log:0:drain drive: player 4's frame for tick 126 arrived after the previous step: keys 1 flags 0 -> keys 5 flags 0")
+                != calls.end();
+            EXPECT_EQ(logged, when == arrival::drain);
+            // The record of 126 is the drive that stepped it (post_step(126)
+            // records remote.applied before choosing 127's).
+            ASSERT_TRUE(core.post_step(true));
+            bmmo::session::input_frame recorded{};
+            ASSERT_TRUE(state_of(core).rollback_.recorded_input("Ball_Wood_BMMO_4", 126, recorded));
+            EXPECT_EQ(recorded.keys, expected) << "the record of 126 stores what drove it";
         }
     }
 
