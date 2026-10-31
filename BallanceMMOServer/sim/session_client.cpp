@@ -351,6 +351,10 @@ namespace {
         // changed nothing its inbound messages carry (core_config::
         // accept_protocol).  0: none.
         uint32_t accept_protocol = 0;
+        // --capture-cache off|on|verify (RC2 (b), step RCB): the capture's
+        // per-body read cache (core_config::capture_cache); on by default.
+        bmmo::session::rollback_engine::capture_cache_mode capture_cache =
+            bmmo::session::rollback_engine::capture_cache_mode::on;
         int hold_event_type = -1;
         uint32_t hold_event_nth = 0;
         int hold_event_ms = 0;
@@ -537,6 +541,7 @@ namespace {
                   "       [--stall-after-ready MS]   (test: sleep MS ms right after sending SessionReady)\n"
                   "       [--body-set-corrections]   (snapshots off: a body-set change's full snapshot still corrects, as before RC3; the control arm)\n"
                   "       [--accept-protocol N]      (test only: also take a SessionStart of physics protocol N - a reference capture's replay)\n"
+                  "       [--capture-cache off|on|verify]   (RC2 (b): the capture's per-body read cache; default on, verify = read anyway and count differences)\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--beam2 X Y Z TICK] [--keep-lane Z] [--keep-lane-dwell N]\n"
                   "       [--brake-tap N:P]   (while the record holds UP: DOWN instead for N frames in every P)\n"
                   "       [--keep-lane-tap N:M]   (the steer's key pressed N frames, released M, repeating)\n"
@@ -786,6 +791,15 @@ namespace {
             else if (arg == "--no-trafo-cap") out.no_trafo_cap = true;
             else if (arg == "--ignore-snapshots") out.ignore_snapshots = true;
             else if (arg == "--body-set-corrections") out.body_set_corrections = true;
+            else if (arg == "--capture-cache") {
+                if (!(v = next())) return false;
+                using mode = bmmo::session::rollback_engine::capture_cache_mode;
+                const std::string m = v;
+                if (m == "off") out.capture_cache = mode::off;
+                else if (m == "on") out.capture_cache = mode::on;
+                else if (m == "verify") out.capture_cache = mode::verify;
+                else return false;
+            }
             else if (arg == "--accept-protocol") { if (!(v = next())) return false; out.accept_protocol = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--trafo-no-resets") out.trafo_no_resets = true;
             else if (arg == "--leave-at") { if (!(v = next())) return false; out.leave_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
@@ -2169,6 +2183,7 @@ namespace {
             c.window_shift = args_.window_shift;
             c.reach_ticks = args_.reach_ticks;
             c.body_set_corrections = args_.body_set_corrections;
+            c.capture_cache = args_.capture_cache;
             c.accept_protocol = args_.accept_protocol;
             return c;
         }

@@ -6065,3 +6065,146 @@ TEST(ForceAliasTable, RoundTripAcrossAnIdOffset) {
     EXPECT_FALSE(a.built());
     EXPECT_FALSE(a.alias("rt:force/46734", out));
 }
+
+// RC2 (b) (FULL step RCB, rewind-cost design "As built (step B5RX)", item
+// RC2S option (b)): a body asleep in the record of the tick before and now,
+// with a bit-equal body read, takes that record's extras and contacts; a
+// moving body, a pose the engine never wrote (a teleport) and a woken body
+// are read again; `verify` reads anyway and counts a cached entry that
+// differs, keeping the fresh one; `off` (the engine's default) never caches.
+TEST(RollbackEngine, CaptureCacheReusesAnUnchangedSleepingBodysExtrasAndContacts) {
+    fake_world world;
+    world.savestates = true;   // installs get_contacts (one resting contact per body)
+    world.bodies["Plate"].position[0] = 40.0;
+    world.bodies["Plate"].simulated = false;
+    world.bodies["Plate"].speed_change[0] = 0.5f;
+    world.bodies["Ball"].linear[0] = 1.0f;
+    rollback_tracked tracked;
+    tracked.mechanisms = {"Plate", "Ball"};
+    std::map<std::string, int> extra_reads, contact_reads;
+    auto w = world.adapter();
+    const auto get_extra = w.get_body_extra;
+    w.get_body_extra = [&](const std::string& entity, bmmo_physics_core_extra& out) {
+        ++extra_reads[entity];
+        return get_extra(entity, out);
+    };
+    const auto get_contacts = w.get_contacts;
+    w.get_contacts = [&](const std::string& entity, std::vector<bmmo_physics_contact>& out) {
+        ++contact_reads[entity];
+        return get_contacts(entity, out);
+    };
+    const auto record = [&](rollback_engine& engine, uint32_t tick) {
+        w.step();
+        engine.record(w, tick, tracked, {});
+    };
+
+    rollback_engine off;   // the default
+    EXPECT_EQ(off.capture_cache(), rollback_engine::capture_cache_mode::off);
+    for (uint32_t tick = 1; tick <= 3; ++tick) record(off, tick);
+    EXPECT_EQ(extra_reads["Plate"], 3);
+    EXPECT_EQ(off.stats().capture_cache_hits, 0u);
+
+    extra_reads.clear();
+    contact_reads.clear();
+    rollback_engine engine;
+    engine.set_capture_cache(rollback_engine::capture_cache_mode::on);
+    for (uint32_t tick = 1; tick <= 3; ++tick) record(engine, tick);
+    // Tick 1 has no record before it; ticks 2 and 3 take the plate's from it.
+    EXPECT_EQ(extra_reads["Plate"], 1);
+    EXPECT_EQ(contact_reads["Plate"], 1);
+    EXPECT_EQ(extra_reads["Ball"], 3) << "a moving body is always read";
+    EXPECT_EQ(engine.stats().capture_cache_hits, 2u);
+    bmmo_physics_core_extra extra{};
+    ASSERT_TRUE(engine.recorded_extra("Plate", 3, extra));
+    EXPECT_EQ(extra.speed_change[0], 0.5f) << "the cached record carries the plate's extras";
+    EXPECT_EQ(engine.recorded_contact_count("Plate", 3), 1) << "...and its contacts";
+
+    // A pose write the engine does not see (a script's teleport): read again.
+    world.bodies["Plate"].position[1] = 1.0;
+    record(engine, 4);
+    EXPECT_EQ(extra_reads["Plate"], 2);
+    // It wakes: read again (and while it moves).
+    world.bodies["Plate"].simulated = true;
+    record(engine, 5);
+    EXPECT_EQ(extra_reads["Plate"], 3);
+    // Asleep again: the first tick reads (the record before has it moving).
+    world.bodies["Plate"].simulated = false;
+    record(engine, 6);
+    record(engine, 7);
+    EXPECT_EQ(extra_reads["Plate"], 4);
+    // An amendment re-captures from the record before the amended one.
+    ASSERT_TRUE(engine.amend_record(w, 7));
+    EXPECT_EQ(extra_reads["Plate"], 4);
+    EXPECT_EQ(engine.stats().capture_cache_hits, 4u);
+
+    // verify: a hidden field changed under an unchanged sleeping pose is
+    // counted, and the record keeps the fresh read.
+    engine.set_capture_cache(rollback_engine::capture_cache_mode::verify);
+    record(engine, 8);
+    EXPECT_EQ(extra_reads["Plate"], 5) << "verify reads anyway";
+    EXPECT_EQ(engine.stats().capture_cache_mismatches, 0u);
+    world.bodies["Plate"].speed_change[0] = 0.25f;
+    record(engine, 9);
+    EXPECT_EQ(engine.stats().capture_cache_mismatches, 1u);
+    ASSERT_TRUE(engine.recorded_extra("Plate", 9, extra));
+    EXPECT_EQ(extra.speed_change[0], 0.25f);
+    EXPECT_EQ(world.count("log capture cache (verify): 'Plate' at tick 9: the cached extras (queued impulses) differ"), 1);
+}
+
+// RC2 (b)'s barrier (step RCB, review finding 1): a per-body restore with the
+// clock left live writes a sleeping body's calm references shifted by the
+// clock's offset, while its pose, velocity and flags stay bit-equal to the
+// anchor's record.  The replay's first capture must read them fresh, not take
+// the anchor record's unshifted ones; once a record is captured after the
+// write, the cache serves again.
+TEST(RollbackEngine, CaptureCacheReadsFreshAfterARestoreThatShiftedTheCalmReferences) {
+    for (const auto mode: {rollback_engine::capture_cache_mode::on, rollback_engine::capture_cache_mode::verify}) {
+        SCOPED_TRACE(mode == rollback_engine::capture_cache_mode::on ? "on" : "verify");
+        fake_world world;   // no savestates: the per-body path
+        world.bodies["Plate"].position[0] = 40.0;
+        world.bodies["Plate"].simulated = false;
+        world.bodies["Ball"].linear[0] = 1.0f;
+        rollback_tracked tracked;
+        tracked.mechanisms = {"Plate", "Ball"};
+        std::map<std::string, double> calm{{"Plate", 0.5}, {"Ball", 0.25}};
+        auto w = world.adapter();
+        const auto get_extra = w.get_body_extra;
+        w.get_body_extra = [&](const std::string& entity, bmmo_physics_core_extra& out) {
+            if (!get_extra(entity, out)) return false;
+            out.fields |= BMMO_PHYSICS_EXTRA_CALM;
+            out.calm_time[0] = calm[entity];
+            return true;
+        };
+        const auto set_extra = w.set_body_extra;
+        w.set_body_extra = [&](const std::string& entity, const bmmo_physics_core_extra& state) {
+            if (state.fields & BMMO_PHYSICS_EXTRA_CALM) calm[entity] = state.calm_time[0];
+            return set_extra(entity, state);
+        };
+        rollback_engine engine;
+        engine.set_restore_clock(false);   // the core's and retail's setting
+        engine.set_capture_cache(mode);
+        for (uint32_t tick = 1; tick <= 4; ++tick) {
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        EXPECT_EQ(engine.stats().capture_cache_hits, 3u);
+        EXPECT_TRUE(engine.rewind_to(w, 2, 4, no_input, "test"));
+        EXPECT_EQ(world.count("set_clock"), 0);
+        const double shifted = 0.5 + 2 * kDt;   // the live clock is two ticks past the anchor's
+        EXPECT_NEAR(calm["Plate"], shifted, 1e-12) << "the restore shifted the plate's calm reference";
+        for (const uint32_t tick: {3u, 4u}) {
+            bmmo_physics_core_extra extra{};
+            ASSERT_TRUE(engine.recorded_extra("Plate", tick, extra));
+            EXPECT_EQ(extra.calm_time[0], calm["Plate"]) << "the replayed record of tick " << tick << " holds the live calm time";
+        }
+        // Tick 3 read fresh (a write came after record 2), tick 4 took 3's.
+        EXPECT_EQ(engine.stats().capture_cache_hits, 4u);
+        // The live capture after the rollback reads fresh too, then serves.
+        w.step();
+        engine.record(w, 5, tracked, {});
+        w.step();
+        engine.record(w, 6, tracked, {});
+        EXPECT_EQ(engine.stats().capture_cache_hits, 5u);
+        EXPECT_EQ(engine.stats().capture_cache_mismatches, 0u);
+    }
+}

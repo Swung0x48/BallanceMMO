@@ -1537,6 +1537,9 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // the session's snapshots off, a body-set change's full snapshot is no
     // correction, only names and rows.
     config.body_set_corrections = false;
+    // RC2 (b) (step RCB, the user's Q-CPU (b)): the capture's per-body read
+    // cache, on as on the headless client.
+    config.capture_cache = bmmo::session::rollback_engine::capture_cache_mode::on;
     // R1's policy (the legacy frame's order) only stood in for the input
     // rewind: with it a key edge relayed between the frames replays from its
     // tick, so the drive of T + 1 is chosen at post_step(T) as on the

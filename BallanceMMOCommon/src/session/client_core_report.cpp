@@ -230,6 +230,15 @@ namespace bmmo::session {
         // other status line is the text it was).
         const std::string drain = !s.drain_drives_ ? std::string() : textf(
             " drain_drive=%llu", static_cast<unsigned long long>(s.drain_drives_));
+        // RC2 (b) (step RCB): ccache=hits/mismatches - the bodies whose
+        // extras and contacts a capture took from the record before, and the
+        // cached entries that differed from a fresh read (verify only, then
+        // marked "v") - only when the cache is not off.
+        const auto cache_mode = s.rollback_.capture_cache();
+        const std::string ccache = cache_mode == rollback_engine::capture_cache_mode::off ? std::string() : textf(
+            " ccache=%llu/%llu%s", static_cast<unsigned long long>(rs.capture_cache_hits),
+            static_cast<unsigned long long>(rs.capture_cache_mismatches),
+            cache_mode == rollback_engine::capture_cache_mode::verify ? "v" : "");
         return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
@@ -239,7 +248,7 @@ namespace bmmo::session {
                      "resync: restepped=%llu/%llu depth=%llu states=%llu stale=%llu refused=%llu deferred=%llu/%llu "
                      "snaps_dropped=%llu scripts_refused=%llu blobs_refused=%llu destroyed=%llu unexplained=%llu "
                      "unattributed=%llu unmapped=%llu unportable=%llu holds=%llu/%llu hold_max=%.0f window_rew=%llu subsumed=%llu amended=%llu resent=%llu join_wakes_withheld=%llu "
-                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f reach=%u/%u/%zu cap=%u/%.2f/%.3f/%llu wait=%u starve_run=%u/%u/%llu%s%s%s%s%s",
+                     "input: reports=%llu starved=%llu (%.0f%%) worst=%u lead=%.1f reach=%u/%u/%zu cap=%u/%.2f/%.3f/%llu wait=%u starve_run=%u/%u/%llu%s%s%s%s%s%s",
                      static_cast<int>(s.phase_), s.session_, current_tick(), s.assigned_ ? 1 : 0, s.held_ ? 1 : 0,
                      static_cast<long long>(s.frames_since_anchor_),
                      static_cast<unsigned long long>(s.inputs_sent_), static_cast<unsigned long long>(s.events_sent_),
@@ -448,7 +457,7 @@ namespace bmmo::session {
                      // starved reports now, the longest run, and the resyncs
                      // the starved rule asked for.
                      s.starved_run_, s.starved_run_max_, static_cast<unsigned long long>(s.starved_resyncs_),
-                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str());
+                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), ccache.c_str());
     }
 
 }

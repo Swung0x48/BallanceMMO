@@ -382,6 +382,10 @@ namespace {
         bool savestate_inert_from_birth = false;
         bool savestate_frames = false;
         bool legacy_restore = false;
+        // --capture-cache off|on|verify (RC2 (b), step RCB): the engine's
+        // per-body read cache in --savestate-check (0 off, the default; 1 on;
+        // 2 verify: read anyway and count every cached entry that differs).
+        int capture_cache = 0;
         // Step RLQ (gap Q's hold in the harness): --savestate-check binds the
         // clients' PreSimulate outside-entry hold (B7EG's Q4, and with the
         // clients' recipe the queue section too); --savestate-no-hold leaves
@@ -1118,7 +1122,17 @@ namespace {
             else if (arg == "--savestate-every") { if (!(v = next())) return false; out.savestate_every = std::atoi(v); }
             else if (arg == "--savestate-lead") { if (!(v = next())) return false; out.savestate_lead = std::atoi(v); }
             else if (arg == "--savestate-inert-from-birth") out.savestate_inert_from_birth = true;
-            else if (arg == "--frames") out.savestate_frames = true;
+            else if (arg == "--frames" || arg == "--capture-cache") {   // RCB: one branch (C1061)
+                if (arg == "--frames") out.savestate_frames = true;
+                else {
+                    if (!(v = next())) return false;
+                    const std::string m = v;
+                    if (m == "off") out.capture_cache = 0;
+                    else if (m == "on") out.capture_cache = 1;
+                    else if (m == "verify") out.capture_cache = 2;
+                    else return false;
+                }
+            }
             else if (arg == "--legacy-restore" || arg == "--savestate-no-hold" || arg == "--savestate-no-ledger"
                      || arg == "--joint-shuffle" || arg == "--joint-order-off")   // RLQ, RLM, RLC: one branch (C1061)
                 (arg == "--legacy-restore" ? out.legacy_restore
@@ -3959,6 +3973,9 @@ namespace {
         engine.thresholds().max_resim_ticks = static_cast<uint32_t>(window) + 2u;
         engine.set_exact_restore(!legacy);
         engine.set_replay_scripts(frames);
+        using cache_mode = bmmo::session::rollback_engine::capture_cache_mode;
+        engine.set_capture_cache(args.capture_cache == 2 ? cache_mode::verify
+                                 : args.capture_cache == 1 ? cache_mode::on : cache_mode::off);
         // A replay re-records every tick it steps, so one round's result would
         // become the next round's records: every round starts from the engine
         // as the straight pass left it.
@@ -4406,8 +4423,26 @@ namespace {
         }
         const double straight_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         pristine = engine;
+        // RC2 (b) (step RCB): the capture cache's counts over the straight
+        // pass and every round (each round starts from `pristine`).
+        uint64_t cache_hits = engine.stats().capture_cache_hits, cache_mismatches = engine.stats().capture_cache_mismatches;
+        const auto take_capture_cache = [&]() {
+            cache_hits += engine.stats().capture_cache_hits - pristine.stats().capture_cache_hits;
+            cache_mismatches += engine.stats().capture_cache_mismatches - pristine.stats().capture_cache_mismatches;
+        };
 
         const auto summary = [&](int rounds_run, int rounds_failed) {
+            if (args.capture_cache != 0) {
+                char cache_line[160];
+                std::snprintf(cache_line, sizeof(cache_line), "capture-cache: mode=%s hits=%llu mismatches=%llu",
+                              args.capture_cache == 2 ? "verify" : "on",
+                              static_cast<unsigned long long>(cache_hits + engine.stats().capture_cache_hits
+                                                              - pristine.stats().capture_cache_hits),
+                              static_cast<unsigned long long>(cache_mismatches + engine.stats().capture_cache_mismatches
+                                                              - pristine.stats().capture_cache_mismatches));
+                std::printf("%s\n", cache_line);
+                trace.put(cache_line);
+            }
             char line[768];
             std::snprintf(line, sizeof(line),
                 "summary: savestate-check rounds=%d failed=%d ticks=%d blob_bytes=%zu contacts_min=%u collisions_min=%u"
@@ -4521,6 +4556,7 @@ namespace {
                             if (CKObject* o = context->GetObject(id); o && trafo->hooks().has_body(o->GetName()))
                                 trafo->hooks().unphysicalize(o->GetName(), remake_error);
                 world->restore_step_state(straight[0].counters);
+                take_capture_cache();
                 engine = pristine;
                 engine.forget_after(t0);
                 if (!engine.rewind_to(binding, t0, t0, no_input, "savestate-check: the round's live world")) {
@@ -4597,6 +4633,7 @@ namespace {
                         backend.set_event_log_muted(false, mute_error);
                     }
                     world->restore_step_state(straight[0].counters);
+                    take_capture_cache();
                     engine = pristine;
                     engine.forget_after(t0);
                     if (!engine.rewind_to(binding, t0, t0, no_input, "savestate-check: the round's live world")
@@ -4684,6 +4721,7 @@ namespace {
             world->restore_step_state(anchor.counters);
             if (args.probe_scramble == 2) world->displace_probe_frames(1000.0f);
             if (have_end_globals) put_globals(&end_globals);   // C3: the stand-in's running clock
+            take_capture_cache();
             engine = pristine;
             if (trafo || passes) engine.forget_after(t0 + static_cast<uint32_t>(e));
             probe_tick = t0 + static_cast<uint32_t>(a) + 1u;

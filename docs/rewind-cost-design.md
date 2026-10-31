@@ -241,10 +241,10 @@ names no server file); the own ball's feed; the legacy retail path
 | step | what | checks |
 |---|---|---|
 | RC1 | the hold-last re-prediction (§2) | §7; quick tier |
-| RC2 | incremental capture for sleeping bodies - **not built, the user's choice 2026-10-28** (the blob has no per-body bytes and IVP no sleep generation; options (a) / (b) kept for later: "As built (step B5RX)", item RC2S) | the savestate exactness set, the wire check (ALL SAME: no behaviour change), CPU parity, H1 at 150 ms |
+| RC2 | incremental capture for sleeping bodies - **not built, the user's choice 2026-10-28** (the blob has no per-body bytes and IVP no sleep generation; options (a) / (b) kept for later: "As built (step B5RX)", item RC2S); **option (b) built at FULL step RCB (the user's Q-CPU (b), 2026-10-30): mechanisms only, validity by a bit-equal sleeping body read and a barrier at every engine write; measured no headless saving, retail L11 t_cap 8 % lower across builds ("As built (step RCB)")** | the savestate exactness set, the wire check (ALL SAME: no behaviour change), CPU parity, H1 at 150 ms |
 | RC3 | no body-set full snapshot while snapshots are off - **built at B5RX, the default on every host** (the user's correction of 2026-10-28; the drifts it exposes go to step SFD) | its own drift check, the snapshots-off arms |
 | RC4 | the dormant-script encoding (trafo design 9.4) - **built at B6RC** | script replay exactness, the wire check |
-| RC5 | incremental restore - **not built: stopped at B6RC, left to the orchestrator by the user (2026-10-28), who chose option (c), like RC2** (the restore's whole-world teardown and world-wide numbers: a selective teardown, a wake counter or a per-object blob; "As built (step B6RC)", item RC5) | the savestate checks, the wire check |
+| RC5 | incremental restore - **not built: stopped at B6RC, left to the orchestrator by the user (2026-10-28), who chose option (c), like RC2** (the restore's whole-world teardown and world-wide numbers: a selective teardown, a wake counter or a per-object blob; "As built (step B6RC)", item RC5); **option (b) not built at FULL step RCB: steps 3 / 11 / 14 are 2-3.5 % of a restore, step 14's unchanged-matrix skip already in since gap P ("As built (step RCB)")** | the savestate checks, the wire check |
 | RC6 | **not adopted at RC1** (the user's ruling of 2026-10-27, quoted in §11); R6 and R7 measured (RC1d, RC1e) and kept as a possible later refinement if human rapid-trigger play shows periods. (History: proposed by Measurement RC1d; ruled 2026-10-27 "R6 直接并入 RC1", then the R7 variant measured, Measurement RC1e: R7 not selected, the choice between R6, R7 and hold-last went back to the user, who chose hold-last.) What the refinement would be, as specified when it was proposed: the tail prediction refinement: hold-last replaced past a remote's newest relayed frame by **R6** (per-key pattern-repeat: each key bit's own period repeated, the other keys of the newest frame by R4's history-adaptive hold, k = 5; §9.2; R5, the whole-frame pattern-repeat, is the measured fallback choice), one function in IR next to `relay_frame_or_newest` (IR:353-367) called from both sites (`recorded_input_at`'s tail branch, CF:494; `live_drive`, CL:467-470); its history window fixed relative to the newest frame (the 128 ticks before it - not the ring's cap `kRelayRing`, IR:47, so a later change of the cap cannot change a prediction), no allocation on the path (the measured build's per-key `std::vector` goes), and the periods found once per arrival, not per tail tick | unit tests of the function (a 1:1 and a 1:3 lateral alternation, an UP/DOWN 1:1 and 2:1 alternation, a 1-tick DOWN every 10 ticks repeated, a direct LEFT -> RIGHT switch, a hold with and without complete holds, a 6-tick brake, flags as hold-last, holes, the start and a birth unchanged) and a session test pinning the two sites on the tail; the wire check against `core_ref_rc1` (every first difference attributed to a tail tick the rule fed differently); solo IDENTICAL; **the paired drift check with the own keys pinned** (`.local-tools/work/RC1d/gaps/pinned_replay.py`, every rule's replay of the same captures; R1 replays byte-identical on every cell) on the RC1d cells with these **required cells at both lags (resync_at150 and resync_at150_down)**: the native steer d0; the 1-tick lateral taps t1x1 (rapid-trigger 1:1 alternation) and t1x3; the brake cells d0_brake and t1x1_brake (a 6-tick DOWN in every 90 UP ticks) and d0_ud1x9 (a 1-tick DOWN in every 10: the 1-tick brake tap); the UP/DOWN fast switches d0_ud1x2 (UP UP DOWN) and d0_ud1x1 (UP/DOWN 1:1); the holds d5 / d10 / d15 and d10_brake (direct LEFT -> RIGHT switches: 405 in d10, Measurement RC1d). Criteria: (1) pooled mean no worse than hold-last's on every required cell and no client more than 5 % worse; (2) on the hold and brake cells (d0, d5, d10, d15, d0_brake, d10_brake) input rewinds per real change no more than hold-last's + 0.1, on the tap and UP/DOWN cells no more input rewinds than hold-last; (3) replayed ticks reported per required cell next to hold-last's. **As measured, R6 (and R5) fail (2) on resync_at150_down d0: 0.96 against 0.80 per change, replayed ticks +21 % (42893 -> 51716), all of it on the mirrors of the lowered player (Measurement RC1d (e)); every other required cell passes (largest excess +0.06).** RC6 is therefore not passable as measured unless the user accepts that cell or RC6 removes the excess. [Checked after the fix-up round, 2026-10-27, `gaps/record_model.py`: a physics-free model of the engine's records (a tick keeps the prediction made when it was last simulated, live or in the last rewind) reproduces the cell's rewinds on the lowered player's mirror (client 1: R1 232, R4 / R5 / R6 299; measured 231 / 296). The excess is all lateral: corrections where the rule had released a lateral key the player still held go 187 -> 266, the opposite kind 157 -> 136, UP / DOWN corrections 20 in every rule. So the excess is R4's fallback releasing a lateral key early at max(5, H - r) on the native steer's irregular long holds, and holding the forward / backward keys (named here before this check) would not remove it; a fix has to change the lateral release, not measured.] The live A/B (snapshots off) on the required cells, t1x1, d0_ud1x2 and d0_ud1x9 at least three sessions per rule at each lag (one session is not evidence of starvation either way); CPU parity, against the replayed ticks of (3) | quick tier |
 | close-out | H4 and H6 of the trafo design §7.3, **with snapshots off** (the user, 2026-10-28: "改成关快照"; replaces decision (b) of 2026-10-25, which ran them with snapshots on; §11), against T3's snapshots-off CPU numbers as the baseline. **Run at step RCX: H4 passes, H6 fails, stopped for the user ("As built (step RCX)"); passed by the user's ruling of 2026-10-28 (option (a): H6 judged by its absolute limits, starved within the band and the server's p99 within the budget; H6's numbers stay recorded in RCX's note), `physics.trafo_inputs` on by default since B9DX (§11)** | quick tier (a stage-internal close-out, the user's 15-minute rule; the second pair and the retail run are deferred to the stage close-out) |
 
@@ -3779,3 +3779,260 @@ drops every contact silently and splits the simulation unit at once).
   balls in apart, so no drop fires there (the drop is exercised by the three
   replays above). 685/685 unit tests, GCC syntax 31/31 (physics_state.cpp is
   compiled by the Arch server build: ARCH-BUILD-OK), x86 CLIENT-BUILD-OK.
+
+## As built (step RCB, FULL close-out, 2026-10-30): RC2 (b) built, RC5 (b) not built, the CPU axes again
+
+FULL plan step RCB, the user's Q-CPU (b) (2026-10-30, verbatim:
+"Q-CPU：b，外加你看看是否有别的优化可以做"; the research half is OPTR). Base
+dbec6ff5 (protocol 23, journal v9); no protocol, journal, blob or IVP change, no
+engine change, no `BallanceMMOClient` data member.
+
+**The profile first** (a temporary diagnostic build, `work/RCB/rcb_diag.hpp` +
+`patch_diag.py`, applied, built, measured, reverted; replays of every client of
+`cpu_full/l8x_on` and `cpu_full/l12x_on2`, headless x64; per capture and per
+restore, the four clients within 2 % of each other):
+
+| | L8 (`l8x_on`) | L12 (`l12x_on2`) |
+|---|---|---|
+| capture (live and replayed) | 732-744 us | 1331-1350 us |
+| - scripts (`capture_scripts`) | 366-373 us (50 %) | 934-947 us (70 %) |
+| - the IVP blob | 219-223 us (30 %) | 210-214 us (16 %) |
+| - per-body reads (39 / 34 bodies) | 143-145 us (20 %) | 183-185 us (14 %) |
+| bodies asleep / asleep with the same read at t - 1 | 76-77 % / 76-77 % | 69 % / 69 % |
+| restore (`set_savestate`) | 527-747 us | 449-486 us |
+| - step 0 (index, validate, plan, mute) | 13-18 % | 26-28 % |
+| - step 5 (checkers) | 38-46 % | 21 % |
+| - steps 2 / 4 / 8 / 12 (teardown, units, hull lists, controllers) | 9-10 / 5-6 / 9-10 / 6-7 % | 10 / 10-12 / 6-7 / 12 % |
+| - **steps 3 + 11 (cores and objects, both passes)** | **1.2-1.3 % (7 us)** | **2.0 % (7 us)** |
+| - **step 14 (physics_RT)** | **0.7-0.9 % (4-5 us)** | **1.4 % (5 us)** |
+
+**RC5 (b): not built** (the plan: "only if the profile shows steps 3 / 11 / 14
+are a real share"). Steps 3 + 11 + 14 are 2-3.5 % of a restore, 11-12 us, and a
+client restores 11-23 times a session (0.1-0.3 ms per session). Step 14's matrix
+write of an unchanged body is already skipped since gap P (B8EG item EGP, option
+(i): the `memcmp` of the entity's world matrix in `physics_savestate_restore.cpp`
+`restorer::physics_rt`) - B6RC's RC5 (b) text predates it - so what is left of
+RC5 (b) is `write_core`'s ~60 scalar stores per body in steps 3 / 11, which a
+compare-before-write cannot make cheaper (it reads as many fields as it writes).
+
+**RC2 (b): built** (item RC2S option (b), with two adaptations).
+- `rollback_engine::capture` (`BallanceMMOCommon/include/session/rollback.hpp`):
+  the source is the record of the tick before (`state.tick - 1`, never the record
+  being captured, so `amend_record` takes the one before it; a replay re-records
+  in order, so at t the record of t - 1 is the replayed one or the restored
+  anchor). A **mechanism** whose fresh `get_body` is asleep and bit-equal, field
+  by field, to that record's (`same_sleeping_body`: pose, velocities, sleep,
+  movable and collision flags, movement state, name) takes that record's extras
+  and contacts; everything else is read as before. `capture_cache_mode` off / on
+  / verify (`set_capture_cache`): the engine's default is **off** (the legacy
+  retail path and the SimTool read as before); `core_config::capture_cache` is
+  **on** on both hosts (`client_core.cpp` passes it to the engine; retail
+  `core_host.cpp` sets it in its config block); headless `--capture-cache
+  off|on|verify`; SimTool `--savestate-check ... --capture-cache off|on|verify`
+  (prints `capture-cache: mode= hits= mismatches=`). `verify` reads anyway, keeps
+  the fresh values, and counts and logs (16) every cached entry that differs,
+  naming the field group. Counters `capture_cache_hits` /
+  `capture_cache_mismatches` (`rollback_stats`), on the status line as
+  ` ccache=hits/mismatches[v]` only when the cache is not off.
+  `recorded_extra` / `recorded_contact_count` are test accessors. Unit test
+  `RollbackEngine.CaptureCacheReusesAnUnchangedSleepingBodysExtrasAndContacts`.
+- *Adaptation 1: validity by equality AND by the engine's writes.* The design
+  text invalidates on every engine write (restore, set_body, recreate, destroy,
+  rows). Bodies are also written outside the engine (the core's beams and
+  platform writes, physics_RT scripts, the PSI listeners), which an engine-side
+  generation cannot see; so the bit-equal body read is a validity test of its
+  own, and a write that moves, wakes or re-flags a body is never served from the
+  cache. The engine's own writes are a barrier besides (fix-up round, review
+  finding 1): `engine_writes_` is bumped when `restore_and_replay` starts and
+  when it ends, at a re-creation, a birth re-pose and every `reapply_rows`; each
+  record keeps the value it was captured under (`tick_state::write_generation`,
+  in memory only) and serves the cache only while it is still current. Without
+  it the per-body restore path was wrong: with the clock left live
+  (`core_config::restore_clock` false on both hosts) `write_extra` puts each calm
+  reference back shifted by the clock's offset, the sleeping body reads
+  bit-equal to the anchor's record, and the replay's first capture took the
+  anchor's unshifted calm times, chaining them on while the body slept. Measured
+  by the reviewer with `--no-savestate` added to `verify.sh`
+  (`work/RCB_review/verify_nosave.sh`, rRCB3: resync_snapoff 973 / 1110 / 591 /
+  954, swing_snapoff 682 / 773 / 834 / 897, l8_cross 12 / 81 / 223 / 12
+  mismatches, all "extras (calm times)"); the blob path carries the clock, so it
+  was clean. Unit test
+  `RollbackEngine.CaptureCacheReadsFreshAfterARestoreThatShiftedTheCalmReferences`.
+- *Adaptation 2: mechanisms only.* The first verify pass cached player balls too
+  and found 12-15 mismatches per client on `core_ref_s12/resync_snapoff` (0 on
+  every other arm): mirrors `Ball_Stone_BMMO_*` in the airship zone, their calm
+  times differing, at the first replayed tick after a restore and the first two
+  live ticks after the replay (c0: 2247, 2268, 2269 around the rewind to 2246).
+  Cause: the airship listener (`physics_state.cpp`,
+  `airship_zone_listener::event_PSI`) freezes every simulated ghost in its box at
+  each PSI (`disable_simulation`, exception c); a replayed input that wakes a
+  ghost is undone inside the same tick, so the body read stays bit-equal while
+  the wake moved its calm references. A player ball can be frozen outside the
+  engine's writes; no listener freezes a mechanism. With the balls excluded: 0
+  mismatches everywhere (below). Balls are 5 of the 34-39 tracked bodies and
+  rarely asleep.
+
+**Exactness (RC2 (b)'s own check and the step's pass list).**
+- `--capture-cache verify` replays (`work/RCB/verify.sh`, build rRCB3): every
+  client of `core_ref_s12`'s ten arms (a5u_lead, a6m_snapoff, cliff, l8_cross,
+  resync_at150, resync_at150_down, resync_snapoff, swing_snapoff, solo1, solo2),
+  `core_ref_s12h/h1_150` and `cpu_full`'s `l8x_on`, `l12x_on2`, `h1_on`: 50
+  replays, every one to its end marker, **0 mismatches over 5.0 M cache hits**
+  (per client e.g. l8_cross 60532-63847, h1_150 170200-194521, cliff
+  153804-179835).
+- Wire check `EXTRA="--accept-protocol 22" wire_check.sh rSLX rRCB3 rRCB3w`
+  (`core_ref_s12`, h1_150 from `core_ref_s12h`; the cache on in the new binary):
+  **ALL SAME**, 36/36 send traces SAME, 36/36 journals IDENTICAL.
+- SimTool `--savestate-check` (H5b's / BALX's RK2 recipe: the arena, P_Modul_18
+  dropped, `--frames --session-recipe`, 160 ticks, depth 48): seed 1 x 40 rounds
+  K=2 cache off PASS, verify PASS (3186 hits, 0 mismatches); seed 2 x 60 rounds
+  K=8 verify PASS and on PASS (4452 hits, 0 mismatches).
+- 687/687 unit tests; GCC syntax 31/31; x64 BUILD-OK; x86 CLIENT-BUILD-OK (all
+  14 x86 objects that include `rollback.hpp` / `client_core.hpp` rebuilt); the
+  Arch server rebuilt from this tree, ARCH-BUILD-OK
+  (`ballanced-36c04e3d24c9+bmmo-dbec6ff5624f-dirty`).
+- Fix-up round (the write barrier, build rRCB4): `verify_nosave.sh` (the
+  per-body path) on resync_snapoff, swing_snapoff and l8_cross: **0 mismatches**
+  on all 12 clients (41976-90534 hits each; 12-1110 per client before), the
+  replays ending where rRCB3's did (`--no-savestate` diverges from the capture
+  on resync_snapoff c3 and every swing_snapoff client, cache off alike);
+  `verify.sh` (blob path) on resync_snapoff, swing_snapoff and cliff: 0
+  mismatches, 88872-176552 hits per client; wire check `rSLX rRCB4` ALL SAME,
+  36/36 sends SAME, 36/36 journals IDENTICAL; 688/688 tests; GCC 31/31; x64
+  BUILD-OK, x86 CLIENT-BUILD-OK. (The journals of `--no-savestate` replays with
+  the cache off and on, `work/RCB/onoff_nosave.sh`, are byte-identical on both
+  rRCB4 and rRCB3: the stale calm times did not reach a recorded value in those
+  replays, so verify's count, not the journals, is this path's check.)
+
+**What RC2 (b) saves: nothing measurable on the headless client; on retail L11
+t_cap was 8 % lower than in the three sessions before it (across builds, not an
+isolated A/B).**
+- Headless, paired pinned replays (`work/RCB/abpair.sh`: each client's off and on
+  replays side by side on two fixed P-cores, one pair at a time): t_cap summed
+  over the four clients L8 5007 ms off / 5010 on, L12 8271 / 8288 - inside the
+  scatter (+-3 % per client). A second diagnostic timing only the per-body loop
+  (`patch_diag2.py`) over the same pairs: 115.9 -> 116.2 us per capture (L8),
+  153.5 -> 157.8 (L12), with 22-23 hits per capture.
+- Why: the per-body cost is the **name lookup**, not the reads the cache skips.
+  A third diagnostic (`patch_diag3.py`, `find_entity` timed; one client each):
+  inside a capture's lookup scope the first `kScanLookups` = 12 lookups each
+  scan every object by name (`GetObjectByNameAndParentClass`: 3.7 us per scan on
+  L8, 5.2 us on L12) and the 13th builds the scope's hash table over every 3D
+  entity (32 us L8, 48 us L12): 72-110 us of the 120-154 us per-body loop of a
+  capture. A hashed find is 45 ns. The balls' 12 lookups (own + 3 remotes, three
+  reads each) come first, so the cache never avoids the table build; each read
+  it skips is a hashed find plus a few field copies, comparable to what a hit
+  costs (two map finds and the copies into the new record).
+- **Outside captures** the same scan runs for every by-name call made with no
+  scope: ~84 000 (L12) to ~104 000 (L8) scans per 40 s client session,
+  0.44-0.48 s, **180-225 us per frame** - the larger hidden cost of name lookups
+  (handed to OPTR, below).
+- Retail (x86) has no lookup scope at all (`BallanceMMOClient/physics/
+  physics_view.hpp` has no `lookup_scope`: every per-body read is a scan), so a
+  hit skips two scans. RT1's ctl recipe, client 1 t_cap 4200 / 4212 / 4220 ms
+  (rt1_ctl, rt1_ctl2, slx_ctl) -> 3852 / 3859 (rcb_ctl, rcb_ctl2): 1.66 -> 1.51
+  ms per frame, 22-23 hits per capture. The L12 SP8-e session has 3.7 hits per
+  capture (14 mechanisms): 1490 -> 1476 / 1475. These compare live sessions of
+  different builds (SLX and RCB differ only by RCB's code, the RT1 sessions by
+  more); the retail host has no switch for the cache (`core_host.cpp` sets
+  `capture_cache` on in its config block; no verb), so no same-build off arm was
+  run, and `verify` (the exactness check) ran on the headless replays only: the
+  cache's premise is IVP's (an asleep, bit-equal core keeps its extras and
+  contacts), the same in the plugin's bridge, which is an inference for the
+  retail path. Deferred: a retail `session` verb for the mode, then a ctl
+  session with the cache off and one with verify.
+
+**The CPU axes again (live, the plan's recipes; before = step CPU's table,
+`work/CPU/cpu_table.txt`, measured on rRSX = 16ba27a5, after = rRCB3 = this
+tree).** CPU's `cpu_run.sh` verbatim (`work/RCB/axes.sh`, labels
+`cpu_full/rcb_<arm>`; the Arch server rebuilt from this tree; snapshots off,
+150 ms, 4 headless clients, 40 s, the sampler beside each, one run at a time,
+host max 15.0-22.6 %, worst outside process 1.1 %). Every arm: starved,
+rebases, resyncs and far 0 on all four clients; every server journal N/N, 0
+checkpoint mismatches; harness VERDICT PASS. Per client 0 / 1 / 2 / 3; side by
+side in `work/RCB/side_by_side.txt`:
+
+| arm | t_cap ms before -> after | t_cap per frame ms | t_rep ms | t_rest ms | t_max ms | frame p99 ms | reach cap |
+|---|---|---|---|---|---|---|---|
+| h1_on | 1502/1511/1528/1554 -> 1608/1538/1576/1589 | 0.71 -> 0.70-0.74 | 675-830 -> 721-926 | 85-101 -> 89-113 | 44-46 -> 46-48 | 15.0/21.7/22.9/21.5 -> 17.8/24.9/24.1/22.5 | 48 -> 48 |
+| h1_off | 883/898/950/965 -> 942/934/988/1000 | 0.42-0.44 -> 0.42-0.44 | 448-545 -> 456-552 | 37-48 -> 41-50 | 15-17 -> 15-17 | 12.3-13.7 -> 12.8-13.9 | 90-99 -> 86-98 |
+| l8x_on | 1391/1415/1437/1455 -> 1435/1434/1473/1480 | 0.70 -> 0.71 | 213-255 -> 211-254 | 12-17 -> 17-27 | 29-34 -> 27-35 | 5.3-5.4 -> 5.3-5.4 | 63-68 -> 56-65 |
+| l8x_poff | 1086/1111/1117/1145 -> 1111/1125/1140/1157 | 0.51-0.52 -> 0.51-0.52 | 274-338 -> 278-344 | 21-27 -> 20-27 | 22 -> 21-22 | 4.2-4.4 -> 4.1-4.7 | 94-98 -> 92-95 |
+| l8x_puoff | 1061/1074/1137/1112 -> 1130/1158/1186/1173 | 0.55-0.57 -> 0.56-0.57 | 163-197 -> 168-209 | 11-14 -> 11-14 | 22-24 -> 21-25 | 4.1-4.3 -> 4.3-4.4 | 86-93 -> 86-96 |
+| l12x_on2 | 2282/2337/2384/2409 -> 2426/2476/2498/2569 | 1.28-1.30 -> 1.32-1.33 | 603-679 -> 629-781 | 29-36 -> 30-38 | 37-40 -> 40-43 | 11.4-12.2 -> 11.6-11.9 | 48 -> 48 |
+| l12x_poff | 1586/1638/1647/1652 -> 1648/1676/1687/1713 | 0.76-0.77 -> 0.77 | 360-438 -> 352-429 | 23-29 -> 22-27 | 25-28 -> 24-25 | 8.0-8.2 -> 7.8-8.0 | 59-62 -> 61-62 |
+
+Server step p99 per 660-tick window at most 5522 us (l12x_on2) against 15.15 ms.
+Read: the after arms are 1-8 % above the before arms on t_cap. Not RC2 (b):
+the same-binary paired replays isolate the cache at +-0.3 % (above). The code
+between 16ba27a5 and this tree (RT3, WFA's force aliases, BALX, SLX) is +1.0 %
+(L12) / +2.1 % (L8) of t_cap offline (`work/RCB/abdrift.sh`: CPU's own
+captures of `l12x_on2` / `l8x_on` replayed by rRSX and by rRCB3 with the cache
+off, paired and pinned: 7490 -> 7565 ms and 4398 -> 4490 ms over the four
+clients); the rest is run-to-run scatter (CPU's own `l12x_on` and `l12x_on2`
+differ by up to 4 %). The replays of `rcb_l8x_on`'s own captures give t_rest
+15/15/12/15 ms with the cache off and 15/15/11/14 on. `l8x_on`'s higher t_rest
+(17-27 ms) and lower reach cap (56-65; the cap's restore estimate 5.7-6.3 ms on
+clients 1-3) come from one live restore at the 740 birth rewind that took
+~10 ms longer on three clients at the same wall-clock moment - not reproduced
+by replaying the same captures (the replays read the cap's clock from the
+capture, so they repeat the 5.70 ms estimate, but their own t_rest is 15 ms
+off and on).
+
+**Retail x86 (the step's x86 build installed in both copies; the Arch server
+of this tree).**
+- RT2's SP8-e recipe, session 1 (`work/RCB/rcb_retail.py l12`,
+  `scripts/retail/rcb_l12`; L12, `net lag 150` on both, client 1 crossing s2 at
+  94, s3 385, s4 683; 1547 / 1551 frames; sampler max 20.0 %):
+  `core_frame_time` p99 12.6 / 12.7 ms (RT2 12.8 / 12.4), `frame_interval` p50
+  15.1, p99 16.6 / 16.6 ms (RT2 16.6 / 16.6), max 77.3 / 39.5; resyncs, rebases,
+  starved, far 0; `rb=3 resim=68 t_rest=3 t_rep=65 t_max=25 t_cap=1476 / 1475`
+  (RT2 client 1: rb 3, resim 65, t_rep 58, t_cap 1490); `ccache=5843/0`,
+  `5867/0`.
+- RT1's ctl recipe (`rt1_retail.py arm LABEL 0:0 0:0`, L11; `rcb_ctl` without a
+  sampler - the recipe has none - and `rcb_ctl2` with `cpu_sampler.ps1` beside,
+  max 23.4 %, worst outside 2.5 %):
+
+| | client 1 core_frame_time p99 / frame_interval p99 | client 1 t_cap | client 2 core_frame_time p99 / frame_interval p99 | client 2 resyncs, starved |
+|---|---|---|---|---|
+| rt1_ctl (RT1) | 15.0 / 17.1 | 4200 | 33.3 / 34.1 | 1, 445 |
+| rt1_ctl2 (RT1) | 15.0 / 17.0 | 4212 | 22.1 / 23.0 | 1, 331 |
+| slx_ctl (SLX) | 15.0 / 16.7 | 4220 | 34.5 / 35.5 | 1, 470 |
+| rcb_ctl | 14.7 / 16.7 | 3852 | 15.8 / 17.1 | 0, 47 |
+| rcb_ctl2 | 15.7 / 17.0 | 3859 | 16.5 / 19.2 | 0, 339 |
+
+  Client 2's earlier p99 figures carry the burst-slip resync (RT1 ctl2's
+  sampler evidence: client 2 starves, then resyncs); neither RCB run resynced
+  (0/0 on both clients), client 2 starved 47 and 339 ticks. Two runs are not
+  evidence that the slip is gone (it is a host-burst event); recorded, not
+  judged. `ccache` 57960-59651 hits per client (mode on: mismatches are not
+  counted there).
+- The verdict against the band (sector-placement-design §12.10, Q-CPU) is the
+  user's and is not made here.
+
+**Handed to OPTR (the research half of Q-CPU), from this profile:** (1) the
+scripts' capture is 50-70 % of every capture (366-947 us per tick on L8 / L12),
+untouched by RC2-RC5; (2) name lookups: the scope's 12 linear scans and its
+table build per capture (72-110 us), and 180-225 us per frame of unscoped
+by-name scans outside captures on the headless client; on retail every
+by-name read is a scan (no lookup scope) - a persistent name index (made
+once, kept in step with entity creation, destruction and renaming) or a scope
+that builds its table at once would remove most of it, a design choice not
+made here; (3) the restore's step 0 (index, validate, plan: 13-28 %) and step
+5 (checkers: 21-46 %).
+
+**Open for the user (RC2 (b) as built):** the cut the user chose measures no
+headless saving (above) and, across builds, 8 % lower t_cap on retail L11
+(22-23 hits per capture; 1 % on L12, 3.7 hits; not isolated, see above). Options: keep it as built (verified exact, on
+by default on both hosts, `--capture-cache off` as the control); turn it off
+by default and keep the code for retail only; or take it out and put the effort
+into the lookup cost (2) above. Nothing else of this step waits on it.
+
+Checks (FULL step; the plan's run count: 7 headless arms + 3 retail sessions;
+plus offline): the profile and three diagnostic builds (reverted, rebuilt
+clean, `-t deps` VALID), 50 verify replays, the wire check, the SimTool
+savestate checks, the paired replays, 687 tests, GCC 31/31, x86 and Arch
+builds, and the old-vs-new pairing above (`abdrift.sh`). Not run:
+`cpu_parity.sh` (its `rm -rf`, step CPU's queued tools item; old and new cannot
+replay each other's live sessions across protocol 23 - `abdrift.sh` pairs them
+on CPU's protocol-22 captures instead).

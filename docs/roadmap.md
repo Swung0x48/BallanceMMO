@@ -582,7 +582,13 @@ numbers 1-10 are unchanged.
    references (at most 3.2 of 4.6 us per sleeping body, a protocol bump)
    and (b) a cache of the rollback engine's per-body reads (at most
    1.3-1.4 us, no format change) - `rewind-cost-design.md` "As built (step
-   B5RX)". **RC3 is built and on by default (step B5RX)**: a snapshots-off
+   B5RX)". **FULL step RCB (the user's Q-CPU (b), 2026-10-30): RC2 (b) built
+   (mechanisms only, validity by a bit-equal sleeping body read and the engine's own writes, on by default
+   on both hosts, verified exact over 50 replays); it measures no headless
+   saving (the per-body cost is the name lookup); retail L11's t_cap was 8 %
+   lower across builds (not isolated); RC5 (b) not built (steps 3 / 11 / 14 are 2-3.5 % of a restore); the
+   CPU axes again - "As built (step RCB)"; whether to keep RC2 (b) is the
+   user's.** **RC3 is built and on by default (step B5RX)**: a snapshots-off
    session takes a body-set full snapshot for its names and rows only (no
    compare, no rewind; headless `--body-set-corrections` is the control
    arm). The user, 2026-10-28, verbatim: "不对，RC3要保留快照？现在应该尽可能假设

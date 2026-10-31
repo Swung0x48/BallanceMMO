@@ -880,6 +880,11 @@ namespace bmmo::session {
         // capture of the record (its blob and scripts) with the longest one.
         // What a client's frame budget pays for the rollback - a frame is 15 ms.
         uint64_t restore_us = 0, replay_us = 0, rewind_us_max = 0, capture_us = 0, capture_us_max = 0;
+        // RC2 (b) (step RCB): bodies whose extras and contacts a capture took
+        // from the record of the tick before (in verify mode: would have
+        // taken), and - verify only - those whose cached entries differed
+        // from the fresh read.
+        uint64_t capture_cache_hits = 0, capture_cache_mismatches = 0;
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t captures_never_made = 0;   // a deferred record (capture_now false) no amend_record captured
         uint64_t too_far = 0;          // a snapshot or a rewind deeper than max_resim_ticks: refused, nothing written
@@ -1250,6 +1255,19 @@ namespace bmmo::session {
                                 const resync_spec* rs = nullptr, resync_outcome* ro = nullptr, uint32_t deep = 0) {
             tick_state* at = find(anchor);
             if (!at) return false;
+            // RC2 (b)'s barrier (step RCB, review finding 1): the restore
+            // writes the world (the per-body path puts calm references back
+            // shifted by a live clock's offset, a mask drops fields, rows and
+            // births are written), so no record captured before it may serve
+            // the capture cache; nor may the last replayed record serve the
+            // live capture that follows (the host's own restore halves run
+            // around the replay).  Every capture after this reads fresh until
+            // a record is captured under the new generation.
+            ++engine_writes_;
+            struct write_barrier_on_exit {
+                uint64_t& writes;
+                ~write_barrier_on_exit() { ++writes; }
+            } barrier_on_exit{engine_writes_};
             // A resync re-steps as deep as the history (resync()), and so does
             // a correction inside its re-step (rewind_to's `reach`, passed as
             // `deep`); every other restore stops at max_resim_ticks.  Never
@@ -2239,6 +2257,7 @@ namespace bmmo::session {
                 for (const std::string& entity: born_now) {
                     restore& item = plan[entity];
                     if (!item.recreate || !world.recreate_body) continue;   // no hook: the replayed scripts make it
+                    ++engine_writes_;   // RC2 (b)'s barrier
                     if (!world.recreate_body(entity, t)) {
                         ++stats_.birth_recreate_failures;
                         item.recreate = false;   // nothing to compare after the step; the re-pose below finds no body
@@ -2464,6 +2483,7 @@ namespace bmmo::session {
                                       + std::to_string(t) + " is not at its birth record after the step:" + buf);
                         }
                     }
+                    ++engine_writes_;   // RC2 (b)'s barrier
                     world.set_body(entity, item.birth.state, item.birth.mode, true);
                     write_extra(entity, item, false, true);
                     write_extra(entity, item, true, true);
@@ -2757,6 +2777,16 @@ namespace bmmo::session {
         void set_script_log_cap(uint32_t n) { script_log_cap_ = n; }
         const rollback_thresholds& thresholds() const { return thresholds_; }
         void set_exact_restore(bool enable) { exact_restore_ = enable; }
+        // RC2 (b) (step RCB): the capture's per-body read cache - a body
+        // asleep in the record of the tick before and now, with a bit-equal
+        // body read, takes that record's extras and contacts (capture()).
+        // `off` (the default: the legacy retail path and the SimTool read as
+        // before), `on` (the session core's default, core_config::
+        // capture_cache), `verify` (reads anyway, keeps the fresh values and
+        // counts every cached entry that differs: capture_cache_mismatches).
+        enum class capture_cache_mode : uint8_t { off, on, verify };
+        void set_capture_cache(capture_cache_mode mode) { capture_cache_ = mode; }
+        capture_cache_mode capture_cache() const { return capture_cache_; }
         // Log which branch every body of a restore took (capped at 16).
         void set_trace_plan(bool enable) { trace_plan_ = enable; }
 
@@ -2883,6 +2913,23 @@ namespace bmmo::session {
             if (it == at->bodies.end()) return false;
             out = it->second;
             return true;
+        }
+        // The leapfrog extras and the number of friction contacts the record
+        // of `tick` holds for `entity` (false / -1 when none).  Test support
+        // (RC2 (b)'s capture cache, step RCB): nothing decides on them.
+        bool recorded_extra(const std::string& entity, uint32_t tick, bmmo_physics_core_extra& out) const {
+            const tick_state* at = find_const(tick);
+            if (!at) return false;
+            const auto it = at->extras.find(entity);
+            if (it == at->extras.end()) return false;
+            out = it->second;
+            return true;
+        }
+        int recorded_contact_count(const std::string& entity, uint32_t tick) const {
+            const tick_state* at = find_const(tick);
+            if (!at) return -1;
+            const auto it = at->contacts.find(entity);
+            return it == at->contacts.end() ? -1 : static_cast<int>(it->second.size());
         }
 
         // Re-anchor on a tick in the past because the WORLD changed there, not
@@ -3037,6 +3084,11 @@ namespace bmmo::session {
             // memory only: no record, blob, journal or protocol field; a
             // live record never has any (the body did not exist yet).
             std::map<std::string, uint32_t> unborn;
+            // RC2 (b) (step RCB): rollback_engine::engine_writes_ when this
+            // record was captured.  The capture cache takes a sleeping body's
+            // extras and contacts from the record of t - 1 only when no
+            // engine write came between the two captures.  In memory only.
+            uint64_t write_generation = 0;
         };
 
 
@@ -3138,6 +3190,7 @@ namespace bmmo::session {
         // row (rollback_world::row_entity).  Returns the rows written.
         size_t reapply_rows(const rollback_world& world, const tick_state& recorded, const rollback_tracked& tracked,
                             const std::map<std::string, restore>& plan, uint32_t t) {
+            ++engine_writes_;   // RC2 (b)'s barrier: rows go into the world after this tick's step
             size_t written = 0;
             std::vector<std::string> rechecks;
             std::vector<std::pair<std::string, const applied_row*>> contacted;
@@ -3395,23 +3448,99 @@ namespace bmmo::session {
                 explicit scope(const rollback_world& world) : w(world) { if (w.capture_scope) w.capture_scope(true); }
                 ~scope() { if (w.capture_scope) w.capture_scope(false); }
             } lookups(world);
-            auto grab = [&](const std::string& entity) {
+            // RC2 (b) (step RCB; rewind-cost design, "As built (step B5RX)",
+            // item RC2S option (b)): the record of the tick before is the
+            // cache's source - the previous tick's capture, live or replayed
+            // (a replay re-records in order, so at tick t the record of t - 1
+            // is the replayed one, or the anchor the restore put back).  Never
+            // `state` itself (amend_record re-captures a held record).  Only a
+            // record captured since the engine's last write into the world
+            // (engine_writes_): a per-body restore with the clock left live
+            // writes each calm reference shifted by the clock's offset, so a
+            // sleeping body reads bit-equal to the anchor's record while its
+            // calm times are not the recorded ones (review finding 1,
+            // measured with --no-savestate: 12-1110 mismatches per client).
+            const tick_state* previous = nullptr;
+            if (capture_cache_ != capture_cache_mode::off)
+                for (auto it = history_.rbegin(); it != history_.rend(); ++it)
+                    if (&*it != &state && it->tick == state.tick - 1) {
+                        if (it->write_generation == engine_writes_) previous = &*it;
+                        break;
+                    }
+            state.write_generation = engine_writes_;
+            auto grab = [&](const std::string& entity, bool cacheable) {
                 if (entity.empty()) return;
                 bmmo_physics_body_state body{};
                 if (world.get_body(entity, body)) state.bodies[entity] = body;
                 // A tracked name the world no longer knows must not survive an
                 // amendment: a later rollback would write the body back.
                 else { state.bodies.erase(entity); state.extras.erase(entity); state.contacts.erase(entity); return; }
+                // RC2 (b): a body asleep at t - 1 and now, whose fresh body
+                // read is bit-equal to the record of t - 1's (pose, velocity,
+                // sleep and collision flags), takes that record's leapfrog
+                // extras and friction contacts instead of reading them again.
+                // The equality is the validity test, so a write the engine
+                // does not see (a beam, a script's teleport, a platform
+                // write) cannot serve a stale entry unless it leaves every
+                // field of the body as it was; `verify` reads anyway and
+                // counts every difference (the exactness check).  Mechanisms
+                // only: a player ball (own, mirror) can be frozen outside the
+                // engine's writes - the airship zone's listener freezes a
+                // ghost at every PSI (exception c), so a ghost a replayed
+                // input woke and the listener froze again inside one tick
+                // reads bit-equal with new calm times (measured, step RCB:
+                // core_ref_s12 resync_snapoff, every client).
+                const bmmo_physics_core_extra* cached_extra = nullptr;
+                const std::vector<bmmo_physics_contact>* cached_contacts = nullptr;
+                bool hit = false;
+                if (cacheable && previous && !body.simulated) {
+                    const auto was = previous->bodies.find(entity);
+                    if (was != previous->bodies.end() && same_sleeping_body(was->second, body)) {
+                        hit = true;
+                        const auto ex = previous->extras.find(entity);
+                        if (ex != previous->extras.end()) cached_extra = &ex->second;
+                        const auto ct = previous->contacts.find(entity);
+                        if (ct != previous->contacts.end()) cached_contacts = &ct->second;
+                    }
+                }
+                if (hit && capture_cache_ == capture_cache_mode::on) {
+                    ++stats_.capture_cache_hits;
+                    if (cached_extra) state.extras[entity] = *cached_extra;
+                    else state.extras.erase(entity);
+                    if (cached_contacts) state.contacts[entity] = *cached_contacts;
+                    else state.contacts.erase(entity);
+                    return;
+                }
                 bmmo_physics_core_extra extra{};
-                if (world.get_body_extra && world.get_body_extra(entity, extra)) state.extras[entity] = extra;
+                const bool have_extra = world.get_body_extra && world.get_body_extra(entity, extra);
+                if (have_extra) state.extras[entity] = extra;
                 else state.extras.erase(entity);
                 std::vector<bmmo_physics_contact> contacts;
-                if (world.get_contacts && world.get_contacts(entity, contacts) > 0 && !contacts.empty()) state.contacts[entity] = std::move(contacts);
+                const bool have_contacts = world.get_contacts && world.get_contacts(entity, contacts) > 0 && !contacts.empty();
+                if (hit) {
+                    // verify: the fresh reads are kept; the cache is judged.
+                    ++stats_.capture_cache_hits;
+                    const char* differs = nullptr;
+                    if (have_extra != (cached_extra != nullptr)) differs = "extras (presence)";
+                    else if (have_extra && !same_extra(extra, *cached_extra)) differs = extra_difference(extra, *cached_extra);
+                    else if (have_contacts != (cached_contacts != nullptr)
+                             || (have_contacts && !same_contacts(contacts, *cached_contacts)))
+                        differs = "contacts";
+                    if (differs) {
+                        ++stats_.capture_cache_mismatches;
+                        if (world.log && capture_cache_logs_ < 16) {
+                            ++capture_cache_logs_;
+                            world.log("capture cache (verify): '" + entity + "' at tick " + std::to_string(state.tick)
+                                      + ": the cached " + differs + " differ from a fresh read");
+                        }
+                    }
+                }
+                if (have_contacts) state.contacts[entity] = std::move(contacts);
                 else state.contacts.erase(entity);
             };
-            grab(state.tracked.own_entity);
-            for (const auto& remote: state.tracked.remote_entities) grab(remote);
-            for (const auto& mechanism: state.tracked.mechanisms) grab(mechanism);
+            grab(state.tracked.own_entity, false);
+            for (const auto& remote: state.tracked.remote_entities) grab(remote, false);
+            for (const auto& mechanism: state.tracked.mechanisms) grab(mechanism, true);
             auto grab_nav = [&](const std::string& entity) {
                 if (entity.empty()) return;
                 bmmo_physics_nav_state nav{};
@@ -3437,6 +3566,50 @@ namespace bmmo::session {
             state.have_savestate = world.get_savestate && world.get_savestate(state.savestate) && !state.savestate.empty();
             if (!state.have_savestate) state.savestate.clear();
             if (world.get_savestate && !state.have_savestate) ++stats_.savestate_capture_failures;
+        }
+
+        // RC2 (b): field-wise bit equality (never memcmp over a struct: its
+        // padding is not part of the value).  A body is a cache candidate
+        // only while asleep in both reads.
+        template <class T, size_t N>
+        static bool same_bits(const T (&a)[N], const T (&b)[N]) { return std::memcmp(a, b, sizeof a) == 0; }
+        static bool same_sleeping_body(const bmmo_physics_body_state& a, const bmmo_physics_body_state& b) {
+            return !a.simulated && !b.simulated && a.movable == b.movable && a.collision_enabled == b.collision_enabled
+                && a.movement_state == b.movement_state
+                && std::strncmp(a.name, b.name, BMMO_PHYSICS_NAME_SIZE) == 0 && same_bits(a.position, b.position)
+                && same_bits(a.rotation, b.rotation) && same_bits(a.linear, b.linear) && same_bits(a.angular, b.angular);
+        }
+        static bool same_extra(const bmmo_physics_core_extra& a, const bmmo_physics_core_extra& b) {
+            return a.fields == b.fields && a.movement_state == b.movement_state
+                && a.unit_next_movement_check == b.unit_next_movement_check && same_bits(a.speed_change, b.speed_change)
+                && same_bits(a.rot_speed_change, b.rot_speed_change) && same_bits(a.q_last_psi, b.q_last_psi)
+                && same_bits(a.q_next_psi, b.q_next_psi) && same_bits(a.calm_time, b.calm_time)
+                && std::memcmp(a.calm_quat, b.calm_quat, sizeof a.calm_quat) == 0
+                && std::memcmp(a.calm_position, b.calm_position, sizeof a.calm_position) == 0;
+        }
+        // The first field of two extras that differs (verify's log line).
+        static const char* extra_difference(const bmmo_physics_core_extra& a, const bmmo_physics_core_extra& b) {
+            if (a.fields != b.fields) return "extras (fields)";
+            if (a.movement_state != b.movement_state) return "extras (movement_state)";
+            if (a.unit_next_movement_check != b.unit_next_movement_check) return "extras (unit countdown)";
+            if (!same_bits(a.speed_change, b.speed_change) || !same_bits(a.rot_speed_change, b.rot_speed_change))
+                return "extras (queued impulses)";
+            if (!same_bits(a.q_last_psi, b.q_last_psi) || !same_bits(a.q_next_psi, b.q_next_psi)) return "extras (psi quaternions)";
+            if (!same_bits(a.calm_time, b.calm_time)) return "extras (calm times)";
+            return "extras (calm references)";
+        }
+        static bool same_contacts(const std::vector<bmmo_physics_contact>& a, const std::vector<bmmo_physics_contact>& b) {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i) {
+                const bmmo_physics_contact& x = a[i];
+                const bmmo_physics_contact& y = b[i];
+                if (std::strncmp(x.partner, y.partner, BMMO_PHYSICS_NAME_SIZE) != 0
+                    || std::memcmp(&x.gap, &y.gap, sizeof x.gap) != 0 || !same_bits(x.span, y.span)
+                    || std::memcmp(&x.pressure, &y.pressure, sizeof x.pressure) != 0 || x.pull != y.pull
+                    || x.keeper != y.keeper)
+                    return false;
+            }
+            return true;
         }
 
         tick_state* find(uint32_t tick) {
@@ -3526,6 +3699,13 @@ namespace bmmo::session {
         bool sleep_as_recorded_ = true;
         bool replay_scripts_ = true;
         bool exact_restore_ = true;
+        capture_cache_mode capture_cache_ = capture_cache_mode::off;   // RC2 (b)
+        // RC2 (b): bumped by every write the engine makes into the world
+        // (restore_and_replay on entry and exit, a re-creation, a birth
+        // re-pose, a row re-application); a record serves the cache only
+        // when captured under the current value (tick_state::write_generation).
+        uint64_t engine_writes_ = 0;
+        uint32_t capture_cache_logs_ = 0;
         uint32_t script_mismatch_logs_ = 0;
         uint32_t too_far_logs_ = 0;
         uint32_t script_log_cap_ = 8;   // set_script_log_cap: a diagnostic run raises it to name every differing script

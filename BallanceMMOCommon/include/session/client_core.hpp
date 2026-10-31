@@ -1123,6 +1123,11 @@ namespace bmmo::session {
         // retail 'session rollback off', diagnostic modes) the blend ladder
         // still sets the balls from every snapshot, as before.
         bool body_set_corrections = false;
+        // RC2 (b) (step RCB, the user's Q-CPU (b)): the capture's per-body
+        // read cache (rollback_engine::set_capture_cache).  On by default on
+        // both hosts; off is the before arm, verify the exactness check
+        // (headless --capture-cache off|on|verify).
+        rollback_engine::capture_cache_mode capture_cache = rollback_engine::capture_cache_mode::on;
     };
 
     // (legacy_calls, the transitional back-calls of design 6.1 "Linking while
