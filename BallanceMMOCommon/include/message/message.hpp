@@ -106,6 +106,11 @@ namespace bmmo {
         // lives.  It takes the value SessionGhostPose had; a build of
         // protocol 14-16 is refused at SessionStart before it could read one.
         SessionMember,
+        // Protocol 24 (FULL step SAXH): the start handshake
+        // (session/start_handshake.hpp).
+        SessionClockAck,
+        SessionStartAt,
+        SessionStartStatus,
     };
 
     template<typename T, opcode C = None>

@@ -3,6 +3,10 @@
 // round trips, every truncation of a valid payload, and forged element
 // counts a malicious peer could send (both above the hard cap and larger
 // than what the remaining bytes could possibly hold).
+#include <message/session_clock_ack_msg.hpp>
+#include <message/session_start_at_msg.hpp>
+#include <message/session_start_status_msg.hpp>
+#include <message/session_assign_msg.hpp>
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -145,7 +149,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(23u, bmmo::session::PHYSICS_PROTOCOL_VERSION);   // step RK3H: the frame-9 hold (22); step WFA: the force block aliases (23)
+    EXPECT_EQ(24u, bmmo::session::PHYSICS_PROTOCOL_VERSION);   // step RK3H: the frame-9 hold (22); step WFA: the force block aliases (23); step SAXH: the start handshake (24)
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -756,11 +760,16 @@ TEST(SessionAssignMsg, FlagsRoundTrip) {
     EXPECT_EQ(9u, parsed.session);
     EXPECT_EQ(1572u, parsed.first_tick);
     EXPECT_EQ(bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS, parsed.flags);
-    // A protocol 9 assignment (no flags byte) is refused, never read short.
+    // A protocol 9 assignment (no flags byte) is refused, never read short
+    // (protocol 24, FULL step SAXH: the two trailing instants come after the
+    // flags; a cut inside them is refused too).
     const std::string bytes = msg.raw.str();
     bmmo::session_assign_msg old;
-    old.raw.str(bytes.substr(0, bytes.size() - 1));
+    old.raw.str(bytes.substr(0, bytes.size() - 17));
     EXPECT_FALSE(old.deserialize());
+    bmmo::session_assign_msg cut;
+    cut.raw.str(bytes.substr(0, bytes.size() - 1));
+    EXPECT_FALSE(cut.deserialize());
 }
 
 TEST(SessionResyncStateMsg, RoundTripWithEveryTrailingSection) {
@@ -1696,4 +1705,99 @@ TEST(SessionMemberMsg, RoundTripAndRefusals) {
     auto event_back = round_trip(event);
     EXPECT_EQ(3, event_back.life);
     EXPECT_EQ(9u, event_back.origin_tick);
+}
+
+// Protocol 24 (FULL step SAXH): the start handshake's messages, and the
+// assignment's trailing instants - absent from a protocol-23 capture's bytes.
+TEST(SessionStartHandshakeMsgs, RoundTrip) {
+    bmmo::session_assign_msg a;
+    a.session = 3;
+    a.first_tick = 77;
+    a.flags = bmmo::session::ASSIGN_FLAG_SCHEDULED;
+    a.server_us = -5;
+    a.start_us = 123456789012345LL;
+    a.serialize();
+    bmmo::session_assign_msg a2;
+    { const std::string b = a.raw.str(); a2.raw.write(b.data(), static_cast<std::streamsize>(b.size())); }
+    ASSERT_TRUE(a2.deserialize());
+    EXPECT_EQ(a2.first_tick, 77u);
+    EXPECT_EQ(a2.flags, bmmo::session::ASSIGN_FLAG_SCHEDULED);
+    EXPECT_EQ(a2.server_us, -5);
+    EXPECT_EQ(a2.start_us, 123456789012345LL);
+    // The protocol-23 layout: 9 bytes after the opcode.
+    std::string old = a.raw.str();
+    old.resize(old.size() - 16);
+    bmmo::session_assign_msg a3;
+    a3.raw.write(old.data(), static_cast<std::streamsize>(old.size()));
+    ASSERT_TRUE(a3.deserialize());
+    EXPECT_EQ(a3.first_tick, 77u);
+    EXPECT_EQ(a3.server_us, 0);
+    EXPECT_EQ(a3.start_us, 0);
+
+    bmmo::session_clock_ack_msg k;
+    k.session = 4;
+    k.first_tick = 9;
+    k.kind = bmmo::session::CLOCK_ACK_START;
+    k.seq = 2;
+    k.server_us = 11;
+    k.client_us = -12;
+    k.serialize();
+    bmmo::session_clock_ack_msg k2;
+    { const std::string b = k.raw.str(); k2.raw.write(b.data(), static_cast<std::streamsize>(b.size())); }
+    ASSERT_TRUE(k2.deserialize());
+    EXPECT_EQ(k2.kind, bmmo::session::CLOCK_ACK_START);
+    EXPECT_EQ(k2.seq, 2u);
+    EXPECT_EQ(k2.server_us, 11);
+    EXPECT_EQ(k2.client_us, -12);
+    {   // the started member's answer (the gate round of SAXH)
+        bmmo::session_clock_ack_msg st;
+        st.kind = bmmo::session::CLOCK_ACK_STARTED;
+        st.seq = 1;
+        st.serialize();
+        bmmo::session_clock_ack_msg st2;
+        { const std::string b = st.raw.str(); st2.raw.write(b.data(), static_cast<std::streamsize>(b.size())); }
+        ASSERT_TRUE(st2.deserialize());
+        EXPECT_EQ(st2.kind, bmmo::session::CLOCK_ACK_STARTED);
+        EXPECT_EQ(st2.seq, 1u);
+    }
+    bmmo::session_clock_ack_msg bad;
+    bad.kind = 7;
+    bad.serialize();
+    bmmo::session_clock_ack_msg bad2;
+    { const std::string b = bad.raw.str(); bad2.raw.write(b.data(), static_cast<std::streamsize>(b.size())); }
+    EXPECT_FALSE(bad2.deserialize()) << "an unknown kind";
+
+    bmmo::session_start_at_msg t;
+    t.session = 5;
+    t.first_tick = 8;
+    t.seq = 3;
+    t.flags = bmmo::session::START_AT_FLAG_CORRECTION;
+    t.server_us = 1;
+    t.start_server_us = 2;
+    t.start_us = 3;
+    t.serialize();
+    bmmo::session_start_at_msg t2;
+    { const std::string b = t.raw.str(); t2.raw.write(b.data(), static_cast<std::streamsize>(b.size())); }
+    ASSERT_TRUE(t2.deserialize());
+    EXPECT_EQ(t2.seq, 3u);
+    EXPECT_EQ(t2.flags, bmmo::session::START_AT_FLAG_CORRECTION);
+    EXPECT_EQ(t2.start_server_us, 2);
+    EXPECT_EQ(t2.start_us, 3);
+
+    bmmo::session_start_status_msg st;
+    st.session = 6;
+    st.phase = static_cast<uint8_t>(bmmo::session::start_status_phase::postponed);
+    st.confirmed = 2;
+    st.total = 3;
+    st.text = "start postponed";
+    st.serialize();
+    bmmo::session_start_status_msg st2;
+    { const std::string b = st.raw.str(); st2.raw.write(b.data(), static_cast<std::streamsize>(b.size())); }
+    ASSERT_TRUE(st2.deserialize());
+    EXPECT_EQ(st2.text, "start postponed");
+    EXPECT_EQ(st2.confirmed, 2u);
+    EXPECT_EQ(st2.total, 3u);
+    // Distinct sizes on the wire (the harness proxy anchors a burst on one).
+    EXPECT_NE(t.raw.str().size(), a.raw.str().size());
+    EXPECT_NE(t.raw.str().size(), k.raw.str().size());
 }

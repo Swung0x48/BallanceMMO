@@ -83,6 +83,18 @@ namespace bmmo::session {
         // Headless: origin_ = wall_now(site); retail: nothing (its fixed tick
         // counts on its own).
         std::function<void(clock_site site)> numbering_restarted;
+        // FULL step SAXH (protocol 24, session/start_handshake.hpp): a line
+        // for the PLAYER about the session's start (waiting for the others to
+        // confirm, starting in about N ms, postponed, started), one per state
+        // change, English.  The core logs it either way.  Retail: the game's
+        // own message area (SendIngameMessage); headless: nothing more.
+        std::function<void(const std::string& text)> notice;
+        // FULL step SAXH: the numbering started `ticks` (>= 1) whole ticks
+        // later than the server's clock says its frame was due (a late
+        // joiner's assignment or a resync's arrived late): the pacer catches
+        // them up - headless: the origin moves `ticks` periods earlier;
+        // retail: the tick driver's slew (two frames per slot).
+        std::function<void(int ticks)> catch_up;
         // An own event, counted and journaled, before it goes on the wire
         // (headless --hold-event).
         std::function<event_send_verdict(const bmmo::session_event_msg& event)> filter_event;

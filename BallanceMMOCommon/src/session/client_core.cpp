@@ -567,6 +567,14 @@ namespace bmmo::session {
         s.held_ = true;
         s.hold_polls_ = 0;
         s.hold_deadline_ = platform_.now(clock_site::anchor_hold) + kAnchorHoldTimeout;
+        // FULL step SAXH: no start instant yet (session/start_handshake.hpp).
+        s.start_scheduled_ = false;
+        s.start_seq_ = 0;
+        s.start_instant_known_ = false;
+        s.release_at_instant_ = false;
+        s.release_local_known_ = false;
+        s.corrected_ = false;
+        s.started_seq_ = 0;
         // The anchor signature this world reports (step S5; 0 without the
         // capability: not compared) - the journal header holds it too.
         const uint64_t placement = caps_.placement ? report.placement : 0;
@@ -687,11 +695,46 @@ namespace bmmo::session {
         hold_state state;
         if (!s.held_) return state;
         ++s.hold_polls_;
-        if (platform_.now(clock_site::hold_poll) < s.hold_deadline_) {
+        const auto now = platform_.now(clock_site::hold_poll);
+        // FULL step SAXH: a scheduled start releases at its instant, every
+        // member at its own clock's image of the same server instant; the
+        // host's pacer takes the instant as its origin (release_origin).
+        if (s.start_scheduled_ && s.start_instant_known_ && now >= s.start_instant_) {
+            // A committed start whose instant already passed (another member
+            // started on it, START_AT_FLAG_COMMIT) is released now and its
+            // whole ticks caught up; under one tick the instant itself is
+            // the pacer's origin.
+            const int late = bmmo::session::start_lateness_ticks(
+                    std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count(),
+                    std::chrono::duration_cast<std::chrono::microseconds>(s.start_instant_.time_since_epoch()).count(),
+                    bmmo::session::kStartTickRate);
+            s.held_ = false;
+            s.start_scheduled_ = false;
+            s.release_at_instant_ = late == 0;
+            if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::assign_release);
+            s.release_at_instant_ = false;
+            s.started_seq_ = s.start_seq_;
+            s.started_epoch_ = s.tick_base_;
+            s.started_effective_ = late == 0 ? s.start_instant_ : now;
+            if (late > 0) {
+                const int caught = catch_up_start(late, "a committed start released after its instant");
+                s.started_effective_ -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(caught / bmmo::session::kStartTickRate));
+            }
+            const double after_ms = std::chrono::duration<double, std::milli>(now - s.start_instant_).count();
+            logf("start handshake: anchor hold released at the scheduled instant of start %u (%.2f ms after it, %d "
+                 "polls): the first frame is tick %u", s.start_seq_, after_ms, s.hold_polls_, s.tick_base_);
+            journal_.note("anchor hold released at the scheduled start " + std::to_string(s.start_seq_) + ", tick base "
+                          + std::to_string(s.tick_base_));
+            start_notice("started.");
+            return state;
+        }
+        if (now < s.hold_deadline_) {
             state.held = true;
             return state;   // poll the network, step nothing
         }
         s.held_ = false;
+        s.start_scheduled_ = false;
         if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::hold_timeout);
         logf("anchor hold: no tick base after %.1f s; running anyway (the world will be out of phase with "
              "the server's)", std::chrono::duration<double>(kAnchorHoldTimeout).count());
@@ -803,7 +846,206 @@ namespace bmmo::session {
     }
 
     // ------------------------------------------------------- messages
+    // FULL step SAXH (protocol 24, session/start_handshake.hpp): every copy
+    // with a server instant is answered (a clock sample); then the
+    // assignment as before, except that a scheduled one keeps the hold for
+    // its start instant, and an unscheduled one - a late joiner, a resync -
+    // catches up the whole ticks it was applied late, once its due instant
+    // is known (a resync's assignment carries it; a late joiner's comes as a
+    // SessionStartAt correction).
     void session_client_core::on_session_assign(const bmmo::session_assign_msg& msg) {
+        if (msg.session != s.session_ || s.phase_ != client_core_state::phase::running) return;
+        std::chrono::steady_clock::time_point stamp{};
+        if (msg.server_us != 0) {
+            stamp = platform_.now(clock_site::handshake_stamp);
+            send_clock_ack(msg.first_tick, bmmo::session::CLOCK_ACK_ASSIGN, 0, msg.server_us, stamp);
+        }
+        if (s.assigned_ && static_cast<int32_t>(msg.first_tick - s.last_assign_first_tick_) <= 0) {
+            ++s.duplicate_assigns_;
+            return;
+        }
+        const bool was_assigned = s.assigned_;
+        const bool scheduled = (msg.flags & bmmo::session::ASSIGN_FLAG_SCHEDULED) != 0;
+        apply_session_assign(msg);
+        if (s.session_ != msg.session || s.phase_ != client_core_state::phase::running || msg.server_us == 0) return;
+        if (scheduled && !was_assigned && s.held_) {
+            // Phase 1: renumbered, still holding; the hold's fault deadline
+            // now runs from here (the start instant moves it again).
+            s.start_scheduled_ = true;
+            s.hold_deadline_ = stamp + kAnchorHoldTimeout;
+            logf("start handshake: start base %u assigned; holding for the start instant", msg.first_tick);
+            start_notice("waiting for the other players to confirm the start.");
+            return;
+        }
+        if (!was_assigned) {
+            // Started on arrival (a late joiner): when, for its correction.
+            s.release_local_known_ = true;
+            s.release_local_ = platform_.now(clock_site::handshake_release);
+            s.release_epoch_ = msg.first_tick;
+            s.corrected_ = false;
+            if (msg.start_us != 0) apply_start_correction(msg.first_tick, msg.start_us, s.release_local_, "the assignment");
+            return;
+        }
+        // A resync (or another reassignment): the same - with the instant in
+        // the assignment when the server's clock estimate of this client is
+        // fresh, else in a correction after this assignment's first ack.
+        s.release_local_known_ = true;
+        s.release_local_ = platform_.now(clock_site::handshake_lateness);
+        s.release_epoch_ = msg.first_tick;
+        s.corrected_ = false;
+        if (msg.start_us != 0) apply_start_correction(msg.first_tick, msg.start_us, s.release_local_, "the resync's assignment");
+    }
+
+    void session_client_core::apply_start_correction(uint32_t epoch, int64_t due_us, std::chrono::steady_clock::time_point started,
+                                                     const char* what) {
+        if (s.corrected_ && s.corrected_epoch_ == epoch) return;
+        s.corrected_ = true;
+        s.corrected_epoch_ = epoch;
+        const int64_t started_us = std::chrono::duration_cast<std::chrono::microseconds>(started.time_since_epoch()).count();
+        const int ticks = bmmo::session::start_lateness_ticks(started_us, due_us, bmmo::session::kStartTickRate);
+        logf("start handshake: base %u started %+.2f ms after it was due (%s)%s", epoch,
+             static_cast<double>(started_us - due_us) / 1000.0, what,
+             ticks > 0 ? (": catching up " + std::to_string(ticks) + " tick(s)").c_str() : "");
+        if (ticks <= 0) return;
+        catch_up_start(ticks, what);
+    }
+
+    int session_client_core::catch_up_start(int ticks, const char* what) {
+        if (ticks <= 0) return 0;
+        if (ticks > bmmo::session::kStartMaxCatchUpTicks) {
+            logf("start handshake: %s: %d tick(s) late, more than the %d a catch-up takes (a wrong instant?): "
+                 "catching up %d", what, ticks, bmmo::session::kStartMaxCatchUpTicks, bmmo::session::kStartMaxCatchUpTicks);
+            ticks = bmmo::session::kStartMaxCatchUpTicks;
+        }
+        s.start_catch_up_ticks_ += static_cast<uint64_t>(ticks);
+        if (platform_.hooks.catch_up) platform_.hooks.catch_up(ticks);
+        return ticks;
+    }
+
+    void session_client_core::on_session_start_at(const bmmo::session_start_at_msg& msg) {
+        if (msg.session != s.session_ || s.phase_ != client_core_state::phase::running) return;
+        const auto stamp = platform_.now(clock_site::handshake_stamp);
+        if (msg.flags & bmmo::session::START_AT_FLAG_CORRECTION) {
+            send_clock_ack(msg.first_tick, bmmo::session::CLOCK_ACK_START, msg.seq, msg.server_us, stamp);
+            if (!s.assigned_ || msg.first_tick != s.last_assign_first_tick_ || !s.release_local_known_
+                    || s.release_epoch_ != msg.first_tick)
+                return;
+            apply_start_correction(msg.first_tick, msg.start_us, s.release_local_, "the late join's correction");
+            return;
+        }
+        if (msg.flags & bmmo::session::START_AT_FLAG_COMMIT) {
+            // A member started on start `seq` before a later one reached it:
+            // that start is the session's (start_handshake::started_on).
+            send_clock_ack(msg.first_tick, bmmo::session::CLOCK_ACK_START, msg.seq, msg.server_us, stamp);
+            const std::chrono::steady_clock::time_point instant{std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::microseconds(msg.start_us))};
+            if (s.held_ && s.start_scheduled_ && msg.first_tick == s.tick_base_) {
+                // Still holding: start on it - at once, catching up, when
+                // its instant has passed (poll_hold).
+                if (s.start_instant_known_ && s.start_seq_ == msg.seq && s.start_instant_ == instant) return;
+                s.start_seq_ = msg.seq;
+                s.start_instant_ = instant;
+                s.start_instant_known_ = true;
+                s.hold_deadline_ = std::max(instant, stamp) + kAnchorHoldTimeout;
+                const double in_ms = std::chrono::duration<double, std::milli>(instant - stamp).count();
+                logf("start handshake: start %u committed (a member already started on it): the first frame (tick %u) "
+                     "is due %+.1f ms from now", msg.seq, msg.first_tick, in_ms);
+                start_notice(in_ms > 0 ? "another player has started - starting in about "
+                                                 + std::to_string(static_cast<long long>(in_ms)) + " ms."
+                                       : std::string("another player has started - starting now (catching up)."));
+                return;
+            }
+            if (s.started_seq_ != 0 && msg.first_tick == s.started_epoch_ && msg.seq != s.started_seq_) {
+                // Started on another (later) start: catch up the difference.
+                const int late = bmmo::session::start_lateness_ticks(
+                        std::chrono::duration_cast<std::chrono::microseconds>(s.started_effective_.time_since_epoch()).count(),
+                        msg.start_us, bmmo::session::kStartTickRate);
+                logf("start handshake: start %u committed while this client runs on start %u (%+.2f ms): %s", msg.seq,
+                     s.started_seq_, std::chrono::duration<double, std::milli>(s.started_effective_ - instant).count(),
+                     late > 0 ? ("catching up " + std::to_string(late) + " tick(s)").c_str() : "nothing to catch up");
+                s.started_seq_ = msg.seq;
+                const int caught = catch_up_start(late, "a committed earlier start");
+                s.started_effective_ -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(caught / bmmo::session::kStartTickRate));
+            }
+            return;
+        }
+        if (!s.start_scheduled_ || msg.first_tick != s.tick_base_) {
+            if (s.started_seq_ != 0 && msg.first_tick == s.started_epoch_ && msg.seq > s.started_seq_) {
+                // It came after this client started on an earlier start: say
+                // which (every copy - each is a chance to get through), so
+                // the server commits that one instead of postponing (and in
+                // the end refusing) a member that runs already.
+                send_clock_ack(msg.first_tick, bmmo::session::CLOCK_ACK_STARTED, s.started_seq_, msg.server_us, stamp);
+                if (msg.seq > s.start_seq_) {
+                    ++s.start_messages_late_;
+                    logf("start handshake: start %u came after this client started on start %u: told the server",
+                         msg.seq, s.started_seq_);
+                    s.start_seq_ = msg.seq;
+                }
+                return;
+            }
+            if (msg.seq > s.start_seq_) {
+                ++s.start_messages_late_;
+                logf("start handshake: start %u (base %u) came while this client was not waiting for one (start %u "
+                     "applied): ignored", msg.seq, msg.first_tick, s.start_seq_);
+                s.start_seq_ = msg.seq;
+            }
+            return;
+        }
+        const std::chrono::steady_clock::time_point instant{std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::microseconds(msg.start_us))};
+        if (msg.seq <= s.start_seq_) {   // a copy of the start already accepted, or of an older one
+            if (msg.seq == s.start_seq_) send_clock_ack(msg.first_tick, bmmo::session::CLOCK_ACK_START, msg.seq, msg.server_us, stamp);
+            return;
+        }
+        if (stamp >= instant) {
+            // Too late to start on: the server, without this client's
+            // confirmation by its deadline, moves the start for everyone.
+            ++s.start_messages_late_;
+            logf("start handshake: start %u arrived %.1f ms after its instant: not taken, waiting for the next one",
+                 msg.seq, std::chrono::duration<double, std::milli>(stamp - instant).count());
+            return;
+        }
+        const bool moved = s.start_instant_known_;
+        s.start_seq_ = msg.seq;
+        s.start_instant_ = instant;
+        s.start_instant_known_ = true;
+        s.hold_deadline_ = instant + kAnchorHoldTimeout;
+        send_clock_ack(msg.first_tick, bmmo::session::CLOCK_ACK_START, msg.seq, msg.server_us, stamp);
+        const auto in_ms = std::chrono::duration_cast<std::chrono::milliseconds>(instant - stamp).count();
+        logf("start handshake: start %u accepted: the first frame (tick %u) at %lld us of this clock (server %lld us), "
+             "in %lld ms", msg.seq, msg.first_tick, static_cast<long long>(msg.start_us),
+             static_cast<long long>(msg.start_server_us), static_cast<long long>(in_ms));
+        start_notice(std::string(moved ? "new start time" : "all players confirmed") + " - starting in about "
+                     + std::to_string(in_ms) + " ms.");
+    }
+
+    void session_client_core::on_session_start_status(const bmmo::session_start_status_msg& msg) {
+        if (msg.session != s.session_) return;
+        start_notice(msg.text);
+    }
+
+    void session_client_core::start_notice(const std::string& text) {
+        logf("start handshake (shown to the player): %s", text.c_str());
+        if (platform_.hooks.notice) platform_.hooks.notice(text);
+    }
+
+    void session_client_core::send_clock_ack(uint32_t first_tick, uint8_t kind, uint32_t seq, int64_t server_us,
+                                             std::chrono::steady_clock::time_point stamp) {
+        bmmo::session_clock_ack_msg ack;
+        ack.session = s.session_;
+        ack.first_tick = first_tick;
+        ack.kind = kind;
+        ack.seq = seq;
+        ack.server_us = server_us;
+        ack.client_us = std::chrono::duration_cast<std::chrono::microseconds>(stamp.time_since_epoch()).count();
+        ack.serialize();
+        platform_.send(ack.raw.str(), send_mode::unreliable_no_delay);
+        ++s.clock_acks_sent_;
+    }
+
+    void session_client_core::apply_session_assign(const bmmo::session_assign_msg& msg) {
         using own_life = client_core_state::own_life;
         if (msg.session != s.session_ || s.phase_ != client_core_state::phase::running) return;
         // The server sends an assignment several times, unreliably,
@@ -938,7 +1180,7 @@ namespace bmmo::session {
         // The anchor hold ends here: the next frame is the world's
         // first step and it is numbered `tick_base_`, exactly like the
         // server's own first step (design 9.25 phase alignment).
-        if (s.held_) {
+        if (s.held_ && !(msg.flags & bmmo::session::ASSIGN_FLAG_SCHEDULED)) {
             s.held_ = false;
             if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::assign_release);
             logf("anchor hold released after %d polls: the first frame is tick %u", s.hold_polls_, s.tick_base_);

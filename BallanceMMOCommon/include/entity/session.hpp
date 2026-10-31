@@ -179,7 +179,19 @@ namespace bmmo::session {
     //      in every world, so the server's resync and join blobs name
     //      controllers a client of another number would not match.  No
     //      message layout changed; no journal version.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 23;
+    //  24  the session start as a handshake (FULL step SAXH, Q-SAX; the
+    //      user, 2026-10-31): SessionAssign carries its copy's server
+    //      instant and the member's start instant (two trailing i64s), the
+    //      members present at the start get ASSIGN_FLAG_SCHEDULED and hold
+    //      until a SessionStartAt names their start instant, every
+    //      assignment / start copy is answered by a SessionClockAck (the
+    //      clock samples), SessionStartStatus says why the start waits
+    //      (session/start_handshake.hpp; lockstep-without-snapshots.md
+    //      "As built (FULL step SAXH)"); a member that already started on a
+    //      superseded start answers CLOCK_ACK_STARTED and the server commits
+    //      that start (START_AT_FLAG_COMMIT).  No journal version: nothing the
+    //      journal records changed.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 24;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -369,6 +381,36 @@ namespace bmmo::session {
     // channel, to this member only; the client anchors its history there
     // and applies it as that tick (resync design 2.6).
     constexpr uint8_t ASSIGN_FLAG_STATE_FOLLOWS = 1u << 0;
+    // Protocol 24 (FULL step SAXH): the assignment of a member present at
+    // the start.  The client renumbers onto the base but keeps holding its
+    // anchor: its first frame waits for the instant a SessionStartAt names
+    // (session/start_handshake.hpp), which every member of the start shares.
+    constexpr uint8_t ASSIGN_FLAG_SCHEDULED = 1u << 1;
+    // session_start_at_msg::flags (protocol 24).  CORRECTION: the instant
+    // the frame `first_tick` of a member that already started (a late
+    // joiner, which starts on its assignment's arrival) was due; the client
+    // catches up the whole ticks it started late.  Without it: the shared
+    // start instant of a scheduled start.
+    constexpr uint8_t START_AT_FLAG_CORRECTION = 1u << 0;
+    // COMMIT: a member already started on start `seq` (its postponement
+    // reached it after that start's instant), so that start is the
+    // session's: a member still holding starts at once and catches up the
+    // whole ticks since its instant `start_us`; one that started on a later
+    // start catches up the difference.
+    constexpr uint8_t START_AT_FLAG_COMMIT = 1u << 1;
+    // session_clock_ack_msg::kind (protocol 24): what the acknowledged copy was.
+    constexpr uint8_t CLOCK_ACK_ASSIGN = 0;
+    constexpr uint8_t CLOCK_ACK_START = 1;
+    // The answer of a member that already STARTED to a start message it got
+    // too late: `seq` is the start it started on (the server commits it).
+    constexpr uint8_t CLOCK_ACK_STARTED = 2;
+    // session_start_status_msg::phase (protocol 24).
+    enum class start_status_phase : uint8_t {
+        waiting_assign = 0,   // waiting for members to confirm their assignment
+        waiting_start = 1,    // waiting for members to confirm the start instant
+        postponed = 2,        // the start instant moved (a member had not confirmed)
+        refused = 3,          // a member was refused (it never confirmed)
+    };
 
     // Wire limits, mirroring entity/room.hpp's approach: hard caps so a
     // forged count can never make a reader allocate unbounded memory.

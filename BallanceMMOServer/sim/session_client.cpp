@@ -1432,6 +1432,18 @@ namespace {
                 core_.on_session_lead(msg);
                 break;
             }
+            case bmmo::SessionStartAt: {   // protocol 24, FULL step SAXH
+                bmmo::session_start_at_msg msg;
+                if (!fill(msg)) return;
+                core_.on_session_start_at(msg);
+                break;
+            }
+            case bmmo::SessionStartStatus: {   // protocol 24, FULL step SAXH
+                bmmo::session_start_status_msg msg;
+                if (!fill(msg)) return;
+                core_.on_session_start_status(msg);
+                break;
+            }
             case bmmo::SessionEnd: {
                 bmmo::session_end_msg msg;
                 if (!fill(msg)) return;
@@ -1924,11 +1936,22 @@ namespace {
                 const auto now = wall_now(site);
                 if (site == bmmo::session::clock_site::assign_resync && !args_.pacer_restart_on_resync) {
                     pacer_resync_renumbered(now);
+                } else if (const auto at = core_.release_origin(); at && site == bmmo::session::clock_site::assign_release) {
+                    // FULL step SAXH: a scheduled start - frame 1 is due one
+                    // period after the start instant, not after this poll.
+                    origin_ = *at;
+                    phase_kept_unrun_ = false;
                 } else {
                     origin_ = now;
                     phase_kept_unrun_ = false;
                 }
                 paced_frames_ = 0;
+            };
+            // FULL step SAXH: a late start's whole ticks, run as fast as the
+            // pacer catches up (under its rebase threshold).
+            p.hooks.catch_up = [this](int ticks) {
+                origin_ -= std::chrono::duration_cast<clock_type::duration>(
+                        std::chrono::duration<double>(static_cast<double>(ticks) / bmmo::sim::kTickRate));
             };
             // Step A3: the frames a resync hold did not run are not owed.
             p.hooks.resync_hold_ended = [this](std::chrono::steady_clock::duration held) { origin_ += held; };

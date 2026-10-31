@@ -435,10 +435,15 @@ class ServerReadyCue(object):
 
     MARK = b'players ready, ticking from'
 
-    def __init__(self, path, offset, cue_files):
+    def __init__(self, path, offset, cue_files, mark=None):
         self.path = path
         self.offset = offset
         self.cue_files = cue_files
+        # --join-cue-mark (FULL step SAXH): another server line cues the
+        # Join, e.g. the start handshake's first line - a joiner in the
+        # handshake window, before the session ticks.
+        if mark:
+            self.MARK = mark.encode('utf8')
         self.fired_at = None
         self.running = True
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -461,8 +466,8 @@ class ServerReadyCue(object):
                     for f in self.cue_files:
                         pathlib.Path(f).write_text('cue\n', encoding='utf8')
                     self.fired_at = time.monotonic()
-                    print('  join cue: the server\'s all-ready line seen; cue written for %d joiner(s)'
-                          % len(self.cue_files), flush=True)
+                    print('  join cue: the server\'s %r line seen; cue written for %d joiner(s)'
+                          % (self.MARK.decode('utf8', 'replace'), len(self.cue_files)), flush=True)
                     return
             time.sleep(0.002)
 
@@ -789,7 +794,8 @@ def run_case(args, sector, case_dir):
                 cue_offset = cue_log.stat().st_size
             except OSError:
                 cue_offset = 0
-            watches.append(ServerReadyCue(cue_log, cue_offset, list(cue_files.values())))
+            watches.append(ServerReadyCue(cue_log, cue_offset, list(cue_files.values()),
+                                          getattr(args, 'join_cue_mark', None)))
 
         def launch(i, seconds):
             client_dir = case_dir / f'client{i}'
@@ -2885,6 +2891,10 @@ def main():
     ap.add_argument('--join-late', action='append', default=[], metavar='N:T',
                     help='H4: client N starts when the host reaches tick T; N:cue (step DX9): a pre-booted joiner '
                          'whose Join the server\'s all-ready line cues')
+    ap.add_argument('--join-cue-mark', default=None, metavar='TEXT',
+                    help='FULL step SAXH: the server log line (a substring) that cues the N:cue joiners instead of '
+                         'the all-ready line, e.g. "start handshake: the start base" (a join inside the start '
+                         'handshake\'s window)')
     ap.add_argument('--expect-refused', action='append', default=[], metavar='N[:TEXT]',
                     help='DX7: the server must refuse client N (its log holds "session S ended: ...TEXT..."; '
                          'default TEXT "%s"); the verdict is the other clients\' ' % DEFAULT_REFUSAL),

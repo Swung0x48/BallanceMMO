@@ -45,6 +45,9 @@
 // two entries are the optional hooks.ended and hooks.describe_movables, which
 // the flow fake records as "hook:ended" and "hook:describe_movables".
 
+#include <optional>
+#include <message/session_clock_ack_msg.hpp>
+#include <message/session_start_at_msg.hpp>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -9037,5 +9040,286 @@ namespace {
             }
         }
         EXPECT_EQ(retired_entries, static_cast<size_t>(bmmo::session::kTrafoTypes));
+    }
+
+    // FULL step SAXH (protocol 24, session/start_handshake.hpp): a scheduled
+    // assignment is acknowledged (a clock sample) and keeps the hold; the
+    // start message's instant releases it, with that instant as the pacer's
+    // origin; a start message that arrives after its instant is not taken.
+    int64_t fake_us(std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count();
+    }
+
+    TEST(SessionClientCoreFlow, ScheduledStartHoldsUntilItsInstant) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        std::vector<std::string> notices;
+        std::optional<std::chrono::steady_clock::time_point> origin;
+        session_client_core* core_ptr = nullptr;
+        platform.hooks.notice = [&notices](const std::string& text) { notices.push_back(text); };
+        platform.hooks.numbering_restarted = [&origin, &core_ptr](clock_site site) {
+            if (site == clock_site::assign_release && core_ptr) origin = core_ptr->release_origin();
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        core_ptr = &core;
+        run_to_anchor(core, fake);
+        auto assign = assign_message(9, 120);
+        assign.flags = bmmo::session::ASSIGN_FLAG_SCHEDULED;
+        assign.server_us = 777;
+        const size_t sends = fake.sent.size();
+        core.on_session_assign(assign);
+        EXPECT_TRUE(core.assigned());
+        EXPECT_TRUE(core.holding()) << "a scheduled assignment keeps the hold";
+        EXPECT_EQ(core.current_tick(), 120u);
+        ASSERT_EQ(fake.sent.size(), sends + 1);
+        {
+            const auto ack = decode<bmmo::session_clock_ack_msg>(fake.sent.back().first);
+            EXPECT_EQ(fake.sent.back().second, send_mode::unreliable_no_delay);
+            EXPECT_EQ(ack.kind, bmmo::session::CLOCK_ACK_ASSIGN);
+            EXPECT_EQ(ack.server_us, 777);
+            EXPECT_EQ(ack.client_us, fake_us(fake.clock));
+            EXPECT_EQ(ack.first_tick, 120u);
+        }
+        // A copy: acknowledged again (another sample), nothing else.
+        core.on_session_assign(assign);
+        EXPECT_EQ(fake.sent.size(), sends + 2);
+        EXPECT_TRUE(core.holding());
+        ASSERT_EQ(notices.size(), 1u);
+        EXPECT_EQ(notices[0], "waiting for the other players to confirm the start.");
+        // The start at +100 ms.
+        bmmo::session_start_at_msg start;
+        start.session = 9;
+        start.first_tick = 120;
+        start.seq = 1;
+        start.server_us = 900;
+        start.start_us = fake_us(fake.clock + std::chrono::milliseconds(100));
+        core.on_session_start_at(start);
+        ASSERT_EQ(fake.sent.size(), sends + 3);
+        {
+            const auto ack = decode<bmmo::session_clock_ack_msg>(fake.sent.back().first);
+            EXPECT_EQ(ack.kind, bmmo::session::CLOCK_ACK_START);
+            EXPECT_EQ(ack.seq, 1u);
+            EXPECT_EQ(ack.server_us, 900);
+        }
+        ASSERT_EQ(notices.size(), 2u);
+        EXPECT_EQ(notices[1], "all players confirmed - starting in about 100 ms.");
+        fake.advance(std::chrono::milliseconds(99));
+        EXPECT_TRUE(core.poll_hold().held);
+        EXPECT_FALSE(origin.has_value());
+        // A postponed start (seq 2) moves the instant.
+        start.seq = 2;
+        start.start_us = fake_us(fake.clock + std::chrono::milliseconds(50));
+        core.on_session_start_at(start);
+        EXPECT_EQ(notices.back(), "new start time - starting in about 50 ms.");
+        fake.advance(std::chrono::milliseconds(10));
+        EXPECT_TRUE(core.poll_hold().held) << "the old instant passed, the new one has not";
+        fake.advance(std::chrono::milliseconds(41));
+        const auto state = core.poll_hold();
+        EXPECT_FALSE(state.held);
+        EXPECT_FALSE(state.timed_out);
+        EXPECT_FALSE(core.holding());
+        ASSERT_TRUE(origin.has_value());
+        EXPECT_EQ(fake_us(*origin), start.start_us) << "the pacer's origin is the instant, not the poll";
+        EXPECT_FALSE(core.release_origin().has_value()) << "only during the release";
+        EXPECT_EQ(notices.back(), "started.");
+        // A later start message (a postponement that came too late): the
+        // client says which start it runs on (the gate round of SAXH,
+        // review finding 2), and changes nothing else.
+        start.seq = 3;
+        start.server_us = 950;
+        start.start_us = fake_us(fake.clock + std::chrono::milliseconds(50));
+        const size_t before = fake.sent.size();
+        core.on_session_start_at(start);
+        ASSERT_EQ(fake.sent.size(), before + 1);
+        {
+            const auto ack = decode<bmmo::session_clock_ack_msg>(fake.sent.back().first);
+            EXPECT_EQ(ack.kind, bmmo::session::CLOCK_ACK_STARTED);
+            EXPECT_EQ(ack.seq, 2u) << "the start it started on";
+            EXPECT_EQ(ack.server_us, 950);
+        }
+        core.on_session_start_at(start);   // every copy is answered
+        EXPECT_EQ(fake.sent.size(), before + 2);
+        EXPECT_FALSE(core.holding());
+    }
+
+    // The gate round of SAXH (review finding 2): a member still holding
+    // when the server commits an earlier start (another member started on
+    // it) starts at once and catches up the whole ticks since its instant;
+    // a member that started on a later start catches up the difference.
+    TEST(SessionClientCoreFlow, CommittedStartReleasesAndCatchesUp) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        std::vector<int> caught;
+        std::vector<std::string> notices;
+        std::optional<std::chrono::steady_clock::time_point> origin;
+        bool released = false;
+        session_client_core* core_ptr = nullptr;
+        platform.hooks.catch_up = [&caught](int ticks) { caught.push_back(ticks); };
+        platform.hooks.notice = [&notices](const std::string& text) { notices.push_back(text); };
+        platform.hooks.numbering_restarted = [&origin, &released, &core_ptr](clock_site site) {
+            if (site == clock_site::assign_release && core_ptr) {
+                released = true;
+                origin = core_ptr->release_origin();
+            }
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        core_ptr = &core;
+        run_to_anchor(core, fake);
+        auto assign = assign_message(9, 120);
+        assign.flags = bmmo::session::ASSIGN_FLAG_SCHEDULED;
+        assign.server_us = 5;
+        core.on_session_assign(assign);
+        bmmo::session_start_at_msg start;
+        start.session = 9;
+        start.first_tick = 120;
+        start.seq = 3;
+        start.server_us = 6;
+        start.start_us = fake_us(fake.clock + std::chrono::milliseconds(200));
+        core.on_session_start_at(start);
+        EXPECT_TRUE(core.holding());
+        // Start 2 is committed; its instant was 50 ms ago (3.3 ticks).
+        bmmo::session_start_at_msg commit;
+        commit.session = 9;
+        commit.first_tick = 120;
+        commit.seq = 2;
+        commit.flags = bmmo::session::START_AT_FLAG_COMMIT;
+        commit.server_us = 7;
+        commit.start_us = fake_us(fake.clock - std::chrono::milliseconds(50));
+        const size_t sends = fake.sent.size();
+        core.on_session_start_at(commit);
+        ASSERT_EQ(fake.sent.size(), sends + 1) << "a clock sample";
+        EXPECT_EQ(notices.back(), "another player has started - starting now (catching up).");
+        EXPECT_TRUE(core.holding()) << "released by the next poll";
+        const auto state = core.poll_hold();
+        EXPECT_FALSE(state.held);
+        EXPECT_FALSE(state.timed_out);
+        EXPECT_TRUE(released);
+        EXPECT_FALSE(origin.has_value()) << "late by whole ticks: the pacer starts now and catches up";
+        ASSERT_EQ(caught.size(), 1u);
+        EXPECT_EQ(caught[0], 3);
+        // A copy of the commit: nothing more.
+        core.on_session_start_at(commit);
+        EXPECT_EQ(caught.size(), 1u);
+        // An even earlier start committed later: due 90 ms ago, the base
+        // stands for 45.5 ms ago (3 ticks caught up) - 2 more ticks.
+        commit.seq = 1;
+        commit.start_us = fake_us(fake.clock - std::chrono::milliseconds(90));
+        core.on_session_start_at(commit);
+        ASSERT_EQ(caught.size(), 2u);
+        EXPECT_EQ(caught[1], 2);
+    }
+
+    // A resync's assignment without an instant (the server's clock estimate
+    // was not fresh) is corrected after its ack, like a late joiner's.
+    TEST(SessionClientCoreFlow, ResyncWithoutInstantTakesACorrection) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        std::vector<int> caught;
+        platform.hooks.catch_up = [&caught](int ticks) { caught.push_back(ticks); };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_anchor(core, fake);
+        auto assign = assign_message(9, 500);
+        assign.server_us = 10;
+        assign.start_us = fake_us(fake.clock);
+        core.on_session_assign(assign);
+        EXPECT_TRUE(caught.empty());
+        fake.advance(std::chrono::seconds(30));
+        auto resync = assign_message(9, 2600);
+        resync.server_us = 11;
+        core.on_session_assign(resync);
+        const auto applied = fake.clock;
+        fake.advance(std::chrono::milliseconds(200));
+        bmmo::session_start_at_msg correction;
+        correction.session = 9;
+        correction.first_tick = 2600;
+        correction.flags = bmmo::session::START_AT_FLAG_CORRECTION;
+        correction.server_us = 12;
+        correction.start_us = fake_us(applied - std::chrono::milliseconds(35));
+        core.on_session_start_at(correction);
+        ASSERT_EQ(caught.size(), 1u);
+        EXPECT_EQ(caught[0], 2);
+        // A catch-up is capped.
+        auto resync2 = assign_message(9, 4000);
+        resync2.server_us = 13;
+        resync2.start_us = fake_us(fake.clock - std::chrono::seconds(2));
+        core.on_session_assign(resync2);
+        ASSERT_EQ(caught.size(), 2u);
+        EXPECT_EQ(caught[1], bmmo::session::kStartMaxCatchUpTicks);
+    }
+
+    TEST(SessionClientCoreFlow, StartMessageAfterItsInstantIsNotTaken) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_anchor(core, fake);
+        auto assign = assign_message(9, 120);
+        assign.flags = bmmo::session::ASSIGN_FLAG_SCHEDULED;
+        assign.server_us = 1;
+        core.on_session_assign(assign);
+        bmmo::session_start_at_msg start;
+        start.session = 9;
+        start.first_tick = 120;
+        start.seq = 1;
+        start.server_us = 2;
+        start.start_us = fake_us(fake.clock - std::chrono::milliseconds(5));
+        const size_t sends = fake.sent.size();
+        core.on_session_start_at(start);
+        EXPECT_EQ(fake.sent.size(), sends) << "no confirmation: the server postpones";
+        EXPECT_TRUE(core.holding());
+        fake.advance(std::chrono::milliseconds(20));
+        EXPECT_TRUE(core.poll_hold().held);
+        EXPECT_EQ(state_of(core).start_messages_late_, 1u);
+    }
+
+    // A late joiner starts on its assignment's arrival; the correction says
+    // when its base was due, and the whole ticks it is late are caught up.
+    TEST(SessionClientCoreFlow, LateJoinerCatchesUpItsLateStart) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        std::vector<int> caught;
+        platform.hooks.catch_up = [&caught](int ticks) { caught.push_back(ticks); };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_anchor(core, fake);
+        auto assign = assign_message(9, 500);
+        assign.server_us = 10;
+        core.on_session_assign(assign);
+        EXPECT_FALSE(core.holding()) << "unscheduled: starts on arrival";
+        const auto started = fake.clock;
+        fake.advance(std::chrono::milliseconds(300));
+        bmmo::session_start_at_msg correction;
+        correction.session = 9;
+        correction.first_tick = 500;
+        correction.flags = bmmo::session::START_AT_FLAG_CORRECTION;
+        correction.server_us = 11;
+        // Due 70 ms before it started: 4.62 ticks -> 4.
+        correction.start_us = fake_us(started - std::chrono::milliseconds(70));
+        core.on_session_start_at(correction);
+        ASSERT_EQ(caught.size(), 1u);
+        EXPECT_EQ(caught[0], 4);
+        core.on_session_start_at(correction);   // a copy: once per epoch
+        EXPECT_EQ(caught.size(), 1u);
+        // A resync's assignment applied less than a tick late: nothing moves.
+        auto resync = assign_message(9, 900);
+        resync.server_us = 12;
+        resync.start_us = fake_us(fake.clock - std::chrono::milliseconds(10));
+        core.on_session_assign(resync);
+        EXPECT_EQ(caught.size(), 1u);
+        auto resync2 = assign_message(9, 1200);
+        resync2.server_us = 13;
+        resync2.start_us = fake_us(fake.clock - std::chrono::milliseconds(31));
+        core.on_session_assign(resync2);
+        ASSERT_EQ(caught.size(), 2u);
+        EXPECT_EQ(caught[1], 2);
+    }
+
+    // Protocol <= 23 bytes (a capture): no instants, no ack, the old path.
+    TEST(SessionClientCoreFlow, AssignmentWithoutInstantsSendsNoAck) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_anchor(core, fake);
+        const size_t sends = fake.sent.size();
+        core.on_session_assign(assign_message(9, 120));
+        EXPECT_FALSE(core.holding());
+        for (size_t i = sends; i < fake.sent.size(); ++i)
+            EXPECT_NE(static_cast<uint8_t>(fake.sent[i].first[0]), static_cast<uint8_t>(bmmo::SessionClockAck));
     }
 }

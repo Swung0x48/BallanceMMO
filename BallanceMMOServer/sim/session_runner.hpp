@@ -74,6 +74,13 @@ namespace bmmo::sim {
         // is logged and nothing is sent.  Off, the runner does exactly what it
         // did before: the decisions are observed and logged, nothing else.
         bool lead_adjust = false;
+        // FULL step SAXH (protocol 24, session/start_handshake.hpp): the
+        // members present at the start confirm one scheduled start instant
+        // first, so a session does not start ticking when its last member is
+        // ready but when start_at names that instant (and every member is
+        // ready).  Off (the SimTool, the tests): the start on the last ready
+        // member, as before.
+        bool scheduled_start = false;
         // (The lifecycle barrier is gone, plan step 20: a tick whose input
         // shows a ball the world does not have is stepped without it, and
         // the S4 line says so - session/lifecycle.hpp, bodiless_tracker.)
@@ -317,6 +324,12 @@ namespace bmmo::sim {
         // (late-player design 2.1: its reference is measured anew after every
         // assignment).
         void player_ready(uint32_t session, uint32_t player, uint32_t first_tick);
+        // FULL step SAXH (runner_config::scheduled_start): the start handshake
+        // is through - the session's schedule starts at `origin` (its tick 0
+        // is due there, the start base start_base periods later, exactly as
+        // when start_ticking took the moment of the last ready member), as
+        // soon as every member is ready.
+        void start_at(uint32_t session, std::chrono::steady_clock::time_point origin);
         // Late-player design 2.2, 2.5: what the player's SessionReady
         // declared (session::CAP_*) and the lead of its first assignment (the
         // start base, or a late joiner's lead), against which the total lead
@@ -551,6 +564,9 @@ namespace bmmo::sim {
             // by the round trip and the starvation detector resynced everyone
             // two seconds into a real-network session).
             uint32_t start_base = 0;
+            // FULL step SAXH: the start instant start_at named (scheduled_start).
+            bool start_scheduled = false;
+            std::chrono::steady_clock::time_point start_origin{};
             bmmo::session::tick_scheduler scheduler;
             bmmo::session::snapshot_cadence cadence;
             // Step R12 (protocol 13, lateness.hpp server_wait_ticks): each

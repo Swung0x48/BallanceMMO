@@ -2594,6 +2594,162 @@ change); (4) `physics.lead_adjust` on, re-anchoring a late member (a session
 default changes); (5) a GNS submodule patch that sends in the caller's thread
 (a third-party fork).
 
+**As built (FULL step SAXH, 2026-10-31; protocol 24): the session start as a
+handshake (Q-SAX; the user: start once the handshake has passed).** SAXE's
+copies left a member whose assignment a burst delayed that many ticks late for
+the whole session. Protocol 24 moves the uncertainty before the start
+(`session/start_handshake.hpp`, the server in `server.cpp`
+`assign_start_members` / `check_start_handshakes` / `handle_session_clock_ack`,
+the client in `client_core.cpp` `on_session_assign` / `on_session_start_at` /
+`poll_hold`):
+- Phase 1: the members present at the start get their assignment as before
+  (reliable `ReliableNoNagle` + SAXE's sixteen copies), now flagged
+  `ASSIGN_FLAG_SCHEDULED`; they renumber onto the start base but keep the
+  anchor hold. Every copy carries its own send instant (`server_us`, two
+  trailing i64s on `session_assign_msg`; bytes without them - a protocol <= 23
+  capture - read as 0, the old path) and is answered by a `SessionClockAck`
+  (client stamp at handling): one clock sample, the lowest round trip kept
+  (`clock_estimate`). Phase 2 starts once every member has a sample and 4
+  each, or 400 ms after the assignment.
+- Phase 2: the server picks X on its own clock (`plan_start`: now + worst
+  round trip + 160 ms to send and hear the confirmation + a guard of half the
+  worst round trip + 60 ms to postpone in) and sends each member a
+  `SessionStartAt` (reliable + the same per-pass copies) with ITS start
+  instant on its own clock. **Adaptation:** the plan says "starts its tick 0
+  at that local instant"; a member's frame `start_base` is put at X + its
+  offset + half its round trip - where its assignment would have arrived on a
+  lossless link - not at X itself, so the start base keeps the meaning it was
+  sized with (input delay + the round trip allowance; with X itself every
+  member would gain its one-way trip of lead and of rewind depth, ~5 ticks at
+  150 ms). On one machine the members' instants then agree to the offset
+  estimate's error (measured below). The client takes only a start message
+  that arrived before its instant (one that came late is not confirmed, so
+  the server moves the start), confirms it (`CLOCK_ACK_START`, seq), and
+  releases the hold at the instant; the headless pacer takes the instant as
+  its origin (`release_origin`), the retail tick driver starts on the hold
+  loop's 1 ms poll. All confirmed: the runner's schedule starts at X
+  (`session_runner::start_at`, `runner_config::scheduled_start`; tick k due at
+  X + k periods, as it was from the barrier moment). A confirmation missing at
+  the deadline postpones the start for everyone (seq + 1); after 3
+  postponements the missing members are refused (out of the session, not the
+  room, with a reason, as a placement mismatch); phase 1 refuses a member with
+  no sample after 5 s.
+- Late joiners and resyncs: the server keeps every member's estimate for the
+  session. A resync's assignment carries the member's start instant at once
+  (`start_us`); a late joiner's first assignment has none (no sample yet), so
+  it starts on arrival as before and gets a `SessionStartAt` with
+  `START_AT_FLAG_CORRECTION` (the instant its base was due) once its first ack
+  is in. Either way the client catches up the whole ticks it started late
+  (`start_lateness_ticks`, >= 1; under one tick nothing moves, so a lossless
+  join or resync is unchanged): headless moves the pacer's origin, retail
+  slews its tick driver (`hooks.catch_up`). Exactness is unchanged: the base
+  and the state a join or a resync anchors at are the same; only the
+  wall-clock instant of the member's frame `base` moves.
+- What the player sees (the user: the wait must not look like a hang): one
+  line per state change, English, through `hooks.notice` (retail:
+  `SendIngameMessage`, the game's message area; headless: the log) - "waiting
+  for the other players to confirm the start.", "all players confirmed -
+  starting in about N ms.", "new start time - starting in about N ms.",
+  "started."; the server's `SessionStartStatus` lines: "waiting for the other
+  players to confirm the start (n / N confirmed; missing: <names>)" a second
+  into a phase, "start postponed (k of 3): <names> did not confirm the start in
+  time; starting in about N ms", "<name> refused: did not confirm the session
+  start in time"; the server logs each.
+- **Measured** (`maps/arena-test/saxh/hs1`, `hs2`: swing_snapoff's layout, 4
+  clients, 150 ms, no random loss, snapshots off, the proxy's `--drop-down`):
+  hs1 - the reliable assignment and its first 7 copies dropped to client 0
+  (`size60-70:8`): its first sample came from copy 8, the start waited for the
+  400 ms cap, every member started within 1.6 ms of the others (start
+  instants on one host clock), 0 resyncs, 0 late member events, server replay
+  3791/3791, FINAL rows exact (`final_cmp.py`: own, mirror, body 0.0000 m on
+  all four; the balloon and an airship span excluded). hs2 - the start message
+  and its first 3 copies dropped to client 1 (`size81:4`: confirmed in time,
+  no postponement) and 16 datagrams of it to client 2 (`size81:16`, ~240 ms of
+  copies: no confirmation by the deadline) - "start postponed (1 of 3): Arena2
+  ...", start 2 confirmed by all three, their instants within 11 us; a late
+  joiner (client 3 at host tick 600, base 662): correction +0.85 ms (no catch
+  up), exact (FINAL 0.0000 m from 662); 0 resyncs, 0 late events, server replay
+  3991/3991. Retail (`scripts/retail/saxh_r1..r3`, L11, two copies, `net lag
+  150` both): both copies started within 7.2 / 1.1 / 0.02 ms of each other, 0
+  resyncs, 0 rebases, rows equal to the server's; the lines reached BML at the
+  right moments (ModLoader.log: waiting at +0.33 s after the anchor, starting
+  in about 680 ms at +0.7 s, started at +1.4 s). **Not met: the player does not
+  SEE them while the session waits.** The retail anchor hold is the blocking
+  loop inside the anchor frame (design 2.3), so the game renders nothing until
+  the start; the queued lines show in the message area at once after the
+  first frame. Tried (not kept; `.local-tools/work/SAXH/core_host_with_hold_render_experiment.patch`):
+  handing the queue to BML and calling `CKRenderContext::Render` (and
+  `Clear`/`DrawScene` with a back-buffer dump) from the hold loop every 250 ms
+  - the frames are black (the level has just been reloaded on "Go!" and no
+  frame of it has been drawn; BML's message area is not part of that render)
+  and the desktop showed black windows. The way to show them is the user's
+  choice (reported with the step).
+- The wire check over core_ref_s12 (`--accept-protocol 22`, rESCK vs rSAXH):
+  every journal IDENTICAL (36/36); sends equal but the SessionReady's
+  protocol field (one 75-byte send per client, 36/36) - the captures carry no
+  handshake (no `server_us`), so they replay the pre-handshake path, which is
+  therefore unchanged. A protocol-24 reference set is REF13's.
+- **The gate round (the review's findings, all confirmed in the code and
+  fixed):**
+  - A joiner inside the handshake window (the start members' assignments
+    out, the runner not ticking yet) used to be admitted as a start member:
+    the handshake left it out, the others started at X, the runner's
+    `start_at` waited for its level load (no server ticks: the others
+    starved), then started from an X seconds in the past (a burst), and the
+    joiner held its scheduled assignment for 10 s with no start message. Now
+    `physics_session_member_joined` puts such a joiner on `start_waiting`
+    (the handshake past idle and `runner_->running` false - the runner's own
+    flag, set on its thread after `start_at`, not the handshake's phase), and
+    `check_start_handshakes` admits it through the late path once the runner
+    ticks (`join_member`, the old body; a waiter that leaves is dropped, a
+    session that ends tells it). The runner's player set at `start_at` is
+    therefore the handshake's members. Measured: `saxh/hs3`, `hs3b` (below).
+  - A member whose postponement reached it after its accepted instant has
+    started on the old start; it used to ignore the new one unanswered, and
+    the server postponed against it and in the end refused a running member.
+    Now it answers every later start copy with `CLOCK_ACK_STARTED` (seq = the
+    start it runs on), and the server COMMITS the earliest started seq
+    (`start_handshake::started_on`): every member gets `SessionStartAt` with
+    `START_AT_FLAG_COMMIT` and that start's instant; one still holding
+    releases at once and catches up the whole ticks since the instant (the
+    release takes the instant as the pacer's origin only under one tick;
+    otherwise origin = now plus `hooks.catch_up`), one that started on a
+    later start catches up the difference (`started_effective_`); the
+    runner's schedule starts at that instant (if it already ticks - an even
+    earlier start reported after a commit - it keeps its origin, logged, and
+    the members catch up among themselves). A confirmation of the current
+    start still starts the normal way.
+  - The clock estimate went stale: two PCs' clocks drift up to ~100 ppm
+    (240 ms in 40 minutes), and a resync's instant came from the start's
+    sample. Now a sample older than `kClockEstimateMaxAgeUs` (10 s) is
+    replaced by any newer one, and an assignment carries an instant only
+    from a FRESH estimate (`clock_estimate::fresh`); otherwise the resync (or
+    late join) starts on arrival and gets the correction after its first ack
+    (a fresh sample), as a late joiner does - the client now records a
+    resync's arrival for it. A catch-up is capped at
+    `kStartMaxCatchUpTicks` (33, half a second): more means a wrong instant.
+  - The correction went to every resync too (they are in `s.late`), 1 + 16
+    sends the client dropped; it now goes only when the member's current
+    assignment carried no instant (`assign_had_instant`).
+  - Harness: `arena_map_test.py --join-cue-mark TEXT` cues the `N:cue`
+    joiners on another server line; the runner's scheduled-start line keeps
+    "players ready, ticking from" so the default cue still fires.
+  - Measured (the final binaries, `maps/arena-test/saxh/hs3b`; `hs3` was the
+    same cell one build earlier): 4 clients, 150 ms, client 3 a pre-booted
+    joiner cued by "start handshake: the start base", client 1's start message
+    and 7 copies dropped (`size81:8`, confirmed in time). The server logged
+    "Arena3 waits for the start handshake to end", the three started on start 1
+    within 1.0 ms, then "Arena3 waited for the start handshake: joining late"
+    (base 46, correction +0.95 ms, no catch-up); 0 resyncs, 0 late events,
+    harness PASS, server replay 4100/4100, FINAL rows of all four exact on
+    every `P_` body and on every ball up to its own airship-zone entry (the
+    balloon, `PE_Box_slide` and the airship ghost are exception c). hs3's
+    joiner logged `exit code 0` but its process did not end for 240 s (the
+    harness's TimeoutExpired); not reproduced in hs3b with a dump watcher
+    armed (`.local-tools/work/SAXH/hang_dump.py`); the same process-exit
+    hang is recorded once before SAXH (rewind-cost-design.md, RC1d's
+    resync_at150_down d15_brake run, client 1).
+
 ### The lifecycle events, repeated (2026-10-21, protocol 6)
 
 The relay's loss runs left the lifecycle events as the next late thing: a

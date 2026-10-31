@@ -626,6 +626,8 @@ namespace {
         case bmmo::SessionLead: return "SessionLead";
         case bmmo::SessionResyncState: return "SessionResyncState";
         case bmmo::SessionMember: return "SessionMember";
+        case bmmo::SessionStartAt: return "SessionStartAt";
+        case bmmo::SessionStartStatus: return "SessionStartStatus";
         default: return "?";
         }
     }
@@ -651,6 +653,8 @@ namespace {
         case bmmo::SessionEnd: { bmmo::session_end_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionResyncState: { bmmo::session_resync_state_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionMember: { bmmo::session_member_msg m{}; return decode_bytes(bytes, m); }
+        case bmmo::SessionStartAt: { bmmo::session_start_at_msg m{}; return decode_bytes(bytes, m); }
+        case bmmo::SessionStartStatus: { bmmo::session_start_status_msg m{}; return decode_bytes(bytes, m); }
         default: return false;
         }
     }
@@ -1454,6 +1458,8 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
     case bmmo::SessionLead:
     case bmmo::SessionResyncState:   // step A3 (protocol 10): the core path alone; the legacy one ignores it
     case bmmo::SessionMember:        // step M1 (protocol 18): the core path alone
+    case bmmo::SessionStartAt:       // FULL step SAXH (protocol 24): the core path alone
+    case bmmo::SessionStartStatus:
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         return true;
     default:
@@ -2583,6 +2589,16 @@ void BallanceMMOClient::core_host_dispatch(int code, const std::string& bytes) {
         }
         break;
     }
+    case bmmo::SessionStartAt: {   // FULL step SAXH (protocol 24)
+        bmmo::session_start_at_msg msg{};
+        if (decode(msg)) core.on_session_start_at(msg);
+        break;
+    }
+    case bmmo::SessionStartStatus: {
+        bmmo::session_start_status_msg msg{};
+        if (decode(msg)) core.on_session_start_status(msg);
+        break;
+    }
     case bmmo::SessionEnd: {
         bmmo::session_end_msg msg{};
         if (decode(msg)) core.on_session_end(msg);
@@ -3618,6 +3634,19 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         return core_tutorial_exit.activate(m_bml->GetCKContext(), error);
     };
     p.hooks.window = [this](const std::string& text) { logger_->Info("%s", text.c_str()); };
+    // FULL step SAXH (protocol 24): the start handshake's lines go to the
+    // player, in the game's own message area (the user, 2026-10-31: the wait
+    // must not look like a hang); the core has logged them already.
+    p.hooks.notice = [this](const std::string& text) {
+        SendIngameMessage("Physics session: " + text, bmmo::ansi::BrightGreen);
+    };
+    // FULL step SAXH: a late start's whole ticks - the tick driver's origin
+    // moves that many ticks earlier and its pacing catches up (two frames
+    // per slot through SkipRenderForNextTick), as a SessionLead raise does.
+    p.hooks.catch_up = [this](int ticks) {
+        fixed_tick_.slew(ticks);
+        logger_->Info("Physics session: catching up %d tick(s) of a late start (the tick driver's slew)", ticks);
+    };
     p.hooks.status = [this](const std::string& text) { logger_->Info("%s", text.c_str()); };
     // 'session force-rollback E:D' (design 3.1's --force-rollback, the retail
     // verb): after the frame's own rewinds, every E ticks, D deep.

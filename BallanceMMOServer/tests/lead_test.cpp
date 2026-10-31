@@ -9,6 +9,7 @@
 // tick and player carrying its last 8 frames, the runner's step test after
 // every arrival and at every deadline, the decision taken after a step, and
 // every applied frame written to a real server journal and read back.
+#include <session/start_handshake.hpp>
 #include <gtest/gtest.h>
 
 #include <session/journal.hpp>
@@ -1434,4 +1435,250 @@ TEST(AssignCopies, OneCopyPerMainLoopPass) {
         }
         EXPECT_TRUE(s.done());
     }
+}
+
+// FULL step SAXH (session/start_handshake.hpp): the clock estimate, the
+// start schedule, the postponement and the refusals.
+TEST(StartHandshake, OffsetEstimateKeepsTheLowestRoundTrip) {
+    using namespace bmmo::session;
+    // The client's clock is 5 s ahead; 40 ms each way.
+    const auto s1 = make_clock_sample(1'000'000, 1'000'000 + 5'000'000 + 40'000, 1'080'000);
+    EXPECT_EQ(s1.rtt_us, 80'000);
+    EXPECT_EQ(s1.offset_us, 5'000'000);
+    // A copy delayed 30 ms on the way back: a longer trip, a skewed offset.
+    const auto s2 = make_clock_sample(2'000'000, 2'000'000 + 5'000'000 + 40'000, 2'110'000);
+    EXPECT_EQ(s2.rtt_us, 110'000);
+    EXPECT_EQ(s2.offset_us, 5'000'000 - 15'000);
+    clock_estimate e;
+    EXPECT_FALSE(e.known());
+    e.add(s2);
+    e.add(s1);
+    e.add(s2);
+    EXPECT_EQ(e.samples, 3u);
+    EXPECT_EQ(e.best.rtt_us, 80'000);
+    EXPECT_EQ(e.best.offset_us, 5'000'000);
+    // Where a message the server sends at 3 s lands on the client's clock.
+    EXPECT_EQ(e.arrival_local(3'000'000), 3'000'000 + 5'000'000 + 40'000);
+    // A negative trip (clock noise) is no trip.
+    EXPECT_EQ(make_clock_sample(10, 0, 5).rtt_us, 0);
+}
+
+TEST(StartHandshake, ScheduleCoversTheWorstRoundTrip) {
+    using namespace bmmo::session;
+    const auto s = plan_start(1'000'000, 300'000);
+    EXPECT_EQ(s.deadline_us, 1'000'000 + 300'000 + kStartWindowSlackUs);
+    EXPECT_EQ(s.x_us, s.deadline_us + 150'000 + kStartGuardSlackUs);
+    EXPECT_GT(s.x_us - s.deadline_us, 150'000) << "a postponement sent at the deadline reaches a member before X";
+    EXPECT_EQ(start_lateness_ticks(0, 0, 66.0), 0);
+    EXPECT_EQ(start_lateness_ticks(15'000, 0, 66.0), 0) << "under one tick";
+    EXPECT_EQ(start_lateness_ticks(16'000, 0, 66.0), 1);
+    EXPECT_EQ(start_lateness_ticks(122'000, 0, 66.0), 8);
+    EXPECT_EQ(start_lateness_ticks(0, 50'000, 66.0), 0) << "early: nothing";
+}
+
+TEST(StartHandshake, StartsWhenEveryMemberConfirmed) {
+    using namespace bmmo::session;
+    start_handshake h;
+    const std::vector<uint32_t> members = {1, 2};
+    h.begin(0);
+    EXPECT_EQ(h.current_phase(), start_handshake::phase::assign);
+    h.add_sample(1, make_clock_sample(0, 100, 20'000));
+    auto r = h.poll(30'000, members);
+    EXPECT_FALSE(r.send_start) << "member 2 has no sample";
+    EXPECT_EQ(r.confirmed, 1u);
+    for (int i = 0; i < 4; ++i) h.add_sample(2, make_clock_sample(i * 15'000, 7, i * 15'000 + 30'000));
+    r = h.poll(40'000, members);
+    EXPECT_FALSE(r.send_start) << "member 1 has 1 sample of 4 and the wait is not over";
+    r = h.poll(kStartSampleWaitUs, members);
+    ASSERT_TRUE(r.send_start);
+    EXPECT_FALSE(r.postponed);
+    EXPECT_EQ(h.seq(), 1u);
+    EXPECT_EQ(h.current_phase(), start_handshake::phase::start);
+    EXPECT_EQ(h.schedule().x_us, plan_start(kStartSampleWaitUs, 30'000).x_us) << "the worst member's round trip";
+    h.start_acked(1, 1);
+    h.start_acked(2, 0);   // an older start's: void
+    r = h.poll(kStartSampleWaitUs + 1, members);
+    EXPECT_FALSE(r.start_now);
+    EXPECT_EQ(r.missing, std::vector<uint32_t>{2});
+    h.start_acked(2, 1);
+    r = h.poll(kStartSampleWaitUs + 2, members);
+    EXPECT_TRUE(r.start_now);
+    EXPECT_EQ(h.current_phase(), start_handshake::phase::started);
+    EXPECT_FALSE(h.poll(kStartSampleWaitUs + 3, members).start_now) << "once";
+}
+
+TEST(StartHandshake, MissingConfirmationPostponesForEveryone) {
+    using namespace bmmo::session;
+    start_handshake h;
+    const std::vector<uint32_t> members = {1, 2, 3};
+    h.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, 300'000));
+    auto r = h.poll(10, members);
+    ASSERT_TRUE(r.send_start);
+    const auto first = h.schedule();
+    h.start_acked(1, 1);
+    h.start_acked(2, 1);
+    r = h.poll(first.deadline_us - 1, members);
+    EXPECT_FALSE(r.send_start);
+    EXPECT_FALSE(r.start_now);
+    r = h.poll(first.deadline_us, members);
+    ASSERT_TRUE(r.send_start) << "member 3 missed the deadline: a new instant for all";
+    EXPECT_TRUE(r.postponed);
+    EXPECT_EQ(r.missing, std::vector<uint32_t>{3});
+    EXPECT_TRUE(r.refuse.empty());
+    EXPECT_EQ(h.seq(), 2u);
+    EXPECT_EQ(h.postpones(), 1);
+    EXPECT_GT(h.schedule().x_us, first.x_us);
+    h.start_acked(3, 1);   // the old start's: void
+    h.start_acked(1, 2);
+    h.start_acked(2, 2);
+    EXPECT_FALSE(h.poll(first.deadline_us + 1, members).start_now) << "member 3 must confirm start 2";
+    h.start_acked(3, 2);
+    EXPECT_TRUE(h.poll(first.deadline_us + 2, members).start_now);
+}
+
+TEST(StartHandshake, RefusesAMemberThatNeverConfirms) {
+    using namespace bmmo::session;
+    start_handshake h;
+    std::vector<uint32_t> members = {1, 2};
+    h.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, 100'000));
+    int64_t now = 1;
+    auto r = h.poll(now, members);
+    ASSERT_TRUE(r.send_start);
+    for (int p = 1; p <= kStartMaxPostpones; ++p) {
+        h.start_acked(1, h.seq());
+        now = h.schedule().deadline_us;
+        r = h.poll(now, members);
+        ASSERT_TRUE(r.send_start);
+        EXPECT_TRUE(r.postponed) << p;
+        EXPECT_TRUE(r.refuse.empty()) << p;
+    }
+    h.start_acked(1, h.seq());
+    now = h.schedule().deadline_us;
+    r = h.poll(now, members);
+    EXPECT_EQ(r.refuse, std::vector<uint32_t>{2}) << "past the bound: refused";
+    ASSERT_TRUE(r.send_start) << "the rest get a new instant";
+    EXPECT_FALSE(r.postponed);
+    members = {1};   // the server took member 2 out
+    h.forget(2);
+    h.start_acked(1, h.seq());
+    EXPECT_TRUE(h.poll(now + 1, members).start_now);
+}
+
+TEST(StartHandshake, PhaseOneNoticeThenRefusal) {
+    using namespace bmmo::session;
+    start_handshake h;
+    const std::vector<uint32_t> members = {1, 2};
+    h.begin(0);
+    h.add_sample(1, make_clock_sample(0, 0, 10'000));
+    auto r = h.poll(kStartMissingNoticeUs - 1, members);
+    EXPECT_FALSE(r.notice_missing);
+    r = h.poll(kStartMissingNoticeUs, members);
+    EXPECT_TRUE(r.notice_missing);
+    EXPECT_EQ(r.missing, std::vector<uint32_t>{2});
+    EXPECT_FALSE(h.poll(kStartMissingNoticeUs + 1, members).notice_missing) << "once per phase";
+    r = h.poll(kStartAssignGiveUpUs, members);
+    EXPECT_EQ(r.refuse, std::vector<uint32_t>{2});
+    EXPECT_FALSE(r.send_start);
+    r = h.poll(kStartAssignGiveUpUs + 1, std::vector<uint32_t>{1});
+    EXPECT_TRUE(r.send_start) << "the rest go on";
+}
+
+// The gate round of SAXH (review finding 2): a member whose postponement
+// reached it after the old instant has started on the old start; it says
+// so (CLOCK_ACK_STARTED) and that start is committed for everyone instead
+// of the member being postponed against and in the end refused.
+TEST(StartHandshake, AStartedMemberCommitsItsStart) {
+    using namespace bmmo::session;
+    start_handshake h;
+    const std::vector<uint32_t> members = {1, 2, 3};
+    h.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, 150'000));
+    ASSERT_TRUE(h.poll(10, members).send_start);
+    const auto first = h.schedule();
+    h.start_acked(1, 1);
+    h.start_acked(2, 1);
+    auto r = h.poll(first.deadline_us, members);
+    ASSERT_TRUE(r.postponed) << "member 3 missed start 1";
+    EXPECT_EQ(h.seq(), 2u);
+    h.started_on(1, 3);   // a start that does not exist: void
+    h.started_on(1, 0);
+    EXPECT_FALSE(h.poll(first.deadline_us + 1, members).start_now);
+    // Start 2 reached member 1 after start 1's instant: it runs on start 1.
+    h.started_on(1, 1);
+    h.start_acked(2, 2);
+    r = h.poll(first.deadline_us + 2, members);
+    ASSERT_TRUE(r.start_now);
+    EXPECT_TRUE(r.commit);
+    EXPECT_EQ(r.commit_seq, 1u);
+    EXPECT_EQ(r.committed_by, 1u);
+    EXPECT_EQ(h.current_phase(), start_handshake::phase::started);
+    EXPECT_EQ(h.schedule().x_us, first.x_us) << "start 1's instant is the server's origin";
+    EXPECT_FALSE(h.poll(first.deadline_us + 3, members).start_now) << "once";
+    h.started_on(2, 1);   // the same start again: nothing new
+    EXPECT_FALSE(h.poll(first.deadline_us + 4, members).commit);
+}
+
+TEST(StartHandshake, AnEarlierStartReportedLaterIsCommittedInstead) {
+    using namespace bmmo::session;
+    start_handshake h;
+    const std::vector<uint32_t> members = {1, 2};
+    h.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, 100'000));
+    ASSERT_TRUE(h.poll(10, members).send_start);
+    const auto first = h.schedule();
+    ASSERT_TRUE(h.poll(first.deadline_us, members).postponed);
+    const auto second = h.schedule();
+    ASSERT_TRUE(h.poll(second.deadline_us, members).postponed);
+    EXPECT_EQ(h.seq(), 3u);
+    h.started_on(2, 2);
+    auto r = h.poll(second.deadline_us + 1, members);
+    ASSERT_TRUE(r.commit);
+    EXPECT_EQ(r.commit_seq, 2u);
+    h.started_on(1, 1);   // member 1 ran on an even earlier one
+    r = h.poll(second.deadline_us + 2, members);
+    ASSERT_TRUE(r.commit);
+    EXPECT_EQ(r.commit_seq, 1u);
+    EXPECT_EQ(h.schedule().x_us, first.x_us);
+    h.started_on(2, 2);
+    EXPECT_FALSE(h.poll(second.deadline_us + 3, members).commit) << "a later start than the committed one: void";
+    // A normal start confirmed by everyone commits its own seq: an earlier
+    // started report after it still moves it (the members catch up).
+    start_handshake g;
+    g.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) g.add_sample(m, make_clock_sample(0, 0, 100'000));
+    ASSERT_TRUE(g.poll(10, members).send_start);
+    g.start_acked(1, 1);
+    g.start_acked(2, 1);
+    r = g.poll(20, members);
+    EXPECT_TRUE(r.start_now);
+    EXPECT_FALSE(r.commit);
+    EXPECT_EQ(g.committed_seq(), 1u);
+    g.started_on(1, 1);
+    EXPECT_FALSE(g.poll(30, members).commit);
+}
+
+// The gate round of SAXH (review finding 3): the two clocks drift, so a
+// sample older than kClockEstimateMaxAgeUs is replaced by any newer one and
+// an estimate whose best sample is that old is not fresh.
+TEST(StartHandshake, ClockEstimateGoesStale) {
+    using namespace bmmo::session;
+    clock_estimate e;
+    e.add(make_clock_sample(0, 1'000, 20'000), 20'000);
+    EXPECT_TRUE(e.fresh(20'000 + kClockEstimateMaxAgeUs));
+    EXPECT_FALSE(e.fresh(20'001 + kClockEstimateMaxAgeUs));
+    e.add(make_clock_sample(100, 1'000, 50'100), 50'100);
+    EXPECT_EQ(e.best.rtt_us, 20'000) << "recent and slower: the best stays";
+    const int64_t later = 20'000 + kClockEstimateMaxAgeUs + 1;
+    e.add(make_clock_sample(later - 60'000, 9'000, later), later);
+    EXPECT_EQ(e.best.rtt_us, 60'000) << "the best is stale: replaced";
+    EXPECT_EQ(e.best_at_us, later);
+    EXPECT_TRUE(e.fresh(later));
+    EXPECT_EQ(e.samples, 3u);
 }

@@ -159,7 +159,10 @@ namespace bmmo::sim {
         std::lock_guard lk(view_mutex_);
         auto it = views_.find(session);
         if (it == views_.end() || !it->second.running) return 0;
-        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - it->second.start).count();
+        // (FULL step SAXH: a scheduled start's view starts at its instant,
+        // which may still be ahead.)
+        const auto elapsed = std::max<long long>(
+                0, std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - it->second.start).count());
         // the tick the server reaches now, plus a second so the joiner's
         // first inputs arrive in time
         return it->second.first_tick + static_cast<uint32_t>(elapsed * 66 / 1000000) + 66;
@@ -206,7 +209,9 @@ namespace bmmo::sim {
         // Design 9.26: the first step (tick start_base) is due start_base
         // periods from now - where a world counting from 0 reached it - so
         // the members keep the wall-clock lead the base gives them.
-        const auto now = clock::now();
+        // FULL step SAXH: from the start instant the handshake fixed instead
+        // of now (the members' frames are scheduled from the same instant).
+        const auto now = s.start_scheduled ? s.start_origin : clock::now();
         const auto schedule_start = now + std::chrono::duration_cast<clock::duration>(
                 std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0));
         s.scheduler.start(schedule_start, s.world->tick_index(), s.input_delay);
@@ -657,6 +662,7 @@ namespace bmmo::sim {
             publish_state(s);   // step M1: the leaving horizon (J4)
             // A session waiting for readiness may now be complete.
             if (!s.running && !s.failed && s.world && !s.players.empty()
+                    && (!config_.scheduled_start || s.start_scheduled)
                     && std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
                 start_ticking(s);
                 log_patience_on(s);
@@ -717,12 +723,49 @@ namespace bmmo::sim {
                 p->second.cut.clear();
             }
             if (s.running) return;
+            // FULL step SAXH: with a scheduled start, ready is not enough -
+            // start_at names the instant once the handshake is through.
+            if (config_.scheduled_start && !s.start_scheduled) return;
             if (std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
                 start_ticking(s);
                 log("[session " + std::to_string(session) + "] all " + std::to_string(s.players.size())
                     + " players ready, ticking from " + std::to_string(s.world->tick_index()));
                 log_patience_on(s);
             }
+            wake_.notify_all();
+        });
+    }
+
+    void session_runner::start_at(uint32_t session, std::chrono::steady_clock::time_point origin) {
+        post([this, session, origin] {
+            auto it = sessions_.find(session);
+            if (it == sessions_.end() || !it->second->world) return;
+            auto& s = *it->second;
+            if (s.failed) return;
+            if (s.running) {
+                // A start committed after the schedule started (a member
+                // reported an earlier start late): the schedule keeps its
+                // origin; the members catch up among themselves.
+                log("[session " + std::to_string(session) + "] start instant "
+                    + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(origin - s.start_origin).count())
+                    + " ms from the one the schedule started at: ignored (already ticking)");
+                return;
+            }
+            s.start_scheduled = true;
+            s.start_origin = origin;
+            const auto ahead = std::chrono::duration_cast<std::chrono::milliseconds>(origin - clock::now()).count();
+            if (s.players.empty()
+                    || !std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
+                log("[session " + std::to_string(session) + "] start instant set (" + std::to_string(ahead)
+                    + " ms ahead); waiting for every player to be ready");
+                return;
+            }
+            start_ticking(s);
+            // ("players ready, ticking from": the harness's join cue reads it.)
+            log("[session " + std::to_string(session) + "] all " + std::to_string(s.players.size())
+                + " players ready, ticking from " + std::to_string(s.world->tick_index())
+                + " at the start handshake's scheduled instant (" + std::to_string(ahead) + " ms ahead)");
+            log_patience_on(s);
             wake_.notify_all();
         });
     }

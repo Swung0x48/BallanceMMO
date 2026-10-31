@@ -71,5 +71,8 @@
 #include "session_lead_msg.hpp"
 #include "session_resync_state_msg.hpp"
 #include "session_member_msg.hpp"
+#include "session_clock_ack_msg.hpp"
+#include "session_start_at_msg.hpp"
+#include "session_start_status_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

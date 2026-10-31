@@ -37,6 +37,7 @@
 #include <session/member_lives.hpp>
 #include <session/mechanism_units.hpp>
 #include <session/spawn_impulse.hpp>
+#include <session/start_handshake.hpp>
 #include <cmath>
 #endif
 
@@ -96,6 +97,7 @@ public:
         {
             std::lock_guard lk(state_mutex_);
             check_start_barriers();
+            check_start_handshakes();   // FULL step SAXH
             send_assign_repeats();
             post_player_rtts();
         }
@@ -675,8 +677,37 @@ public:
             // Protocol 10: every copy carries the reliable one's flags
             // (ASSIGN_FLAG_STATE_FOLLOWS), whichever arrives first.
             uint8_t flags = 0;
+            int64_t start_us = 0;   // protocol 24: the reliable one's start instant
         };
         std::vector<assign_repeat> assign_repeats;
+        // FULL step SAXH (protocol 24, session/start_handshake.hpp): the
+        // start as a handshake.  `handshake` runs the start members' two
+        // phases and keeps every member's clock estimate for the session's
+        // life; `assign_sent_us` is each member's current assignment's
+        // reliable send instant (the instant its base was taken for: a late
+        // joiner's correction), `corrected` the epochs a late joiner's
+        // correction went out for; `start_repeats` the SessionStartAt copies
+        // still due, one per main-loop pass like the assignment's.
+        bmmo::session::start_handshake handshake;
+        std::map<HSteamNetConnection, int64_t> assign_sent_us;
+        // ...and whether that assignment carried the member's instant (a
+        // fresh clock estimate): one that did needs no correction.
+        std::map<HSteamNetConnection, bool> assign_had_instant;
+        std::map<HSteamNetConnection, uint32_t> corrected;
+        // The joiners that came while the start handshake ran (the start
+        // members' assignments out, the runner not ticking yet): admitted
+        // as late joiners once the runner ticks (check_start_handshakes) -
+        // admitted as start members they would hold the runner's start for
+        // their level load while the others run (the review of SAXH).
+        std::deque<HSteamNetConnection> start_waiting;
+        struct start_repeat {
+            HSteamNetConnection to;
+            uint32_t first_tick = 0, seq = 0;
+            uint8_t flags = 0;
+            int64_t start_server_us = 0, start_us = 0;   // server_us is stamped per copy
+            bmmo::sim::assign_copy_schedule schedule;
+        };
+        std::vector<start_repeat> start_repeats;
         // Late-player design 2.2-2.5 (physics.lead_adjust): per member, what
         // its SessionReady declared, the lead of its first assignment (the
         // start base, or a late joiner's lead) and the offset its
@@ -836,6 +867,7 @@ public:
         rc.trace = config_.physics_debug_trace;
         rc.patience = config_.physics_patience;
         rc.lead_adjust = config_.physics_lead_adjust;
+        rc.scheduled_start = true;   // FULL step SAXH: the start handshake names the start instant
         // The headless engine chdir's into the game's Bin directory, so the
         // journal directory has to be resolved against the directory the
         // server was started from before the first world boots.
@@ -1109,7 +1141,14 @@ public:
             send_room_event(m, bmmo::room::event_type::SessionEnded, bmmo::room::error_code::None, s.room,
                     k_HSteamNetConnection_Invalid, k_HSteamNetConnection_Invalid, reason);
         }
-        // Step Q7: the joiners still waiting for a join order are told too.
+        // Step Q7: the joiners still waiting for a join order are told too
+        // (and those waiting for the start handshake, FULL step SAXH).
+        for (const auto w: s.start_waiting) {
+            client_session_.erase(w);
+            send_session_end(session, w, reason);
+            send_room_event(w, bmmo::room::event_type::SessionEnded, bmmo::room::error_code::None, s.room,
+                    k_HSteamNetConnection_Invalid, k_HSteamNetConnection_Invalid, reason);
+        }
         for (const auto w: s.waiting_orders) {
             client_session_.erase(w);
             send_session_end(session, w, reason);
@@ -1589,6 +1628,25 @@ public:
         auto it = physics_sessions_.find(rs->second);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
+        // FULL step SAXH: while the start handshake runs (the start members
+        // are assigned, the runner does not tick yet) a joiner is neither a
+        // start member (it would hold the runner's start for its level load
+        // and get no start instant) nor a late one (nothing ticks to anchor
+        // it on): it waits, and is admitted as a late joiner once the runner
+        // ticks (check_start_handshakes).
+        if (s.handshake.current_phase() != bmmo::session::start_handshake::phase::idle && !runner_->running(s.id)) {
+            s.start_waiting.push_back(c);
+            client_session_[c] = s.id;
+            Printf("Physics session %u: %s waits for the start handshake to end (joins late once the session ticks).",
+                   s.id, get_client_name(c));
+            return;
+        }
+        join_member(s, c);
+    }
+
+    // The join itself (physics_session_member_joined's body until SAXH; also
+    // the release of a joiner that waited for the start handshake).
+    void join_member(physics_session_state& s, HSteamNetConnection c) {
         // Step Q7 (world-agreement-gaps-design.md 2.10 "The cap"): with K
         // mechanism slots a joiner takes an order below K; it waits for a
         // retiring one, or - every order below K held by a live life - is
@@ -1668,6 +1726,11 @@ public:
             s.waiting_orders.erase(w);
             return;
         }
+        // FULL step SAXH: nor one waiting for the start handshake.
+        if (const auto w = std::find(s.start_waiting.begin(), s.start_waiting.end(), c); w != s.start_waiting.end()) {
+            s.start_waiting.erase(w);
+            return;
+        }
         s.members.erase(std::remove(s.members.begin(), s.members.end(), c), s.members.end());
         s.assign_repeats.erase(std::remove_if(s.assign_repeats.begin(), s.assign_repeats.end(),
                                               [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),
@@ -1675,6 +1738,14 @@ public:
         retire_lead_repeats(s, c);
         s.leads.erase(c);
         s.event_repeats.forget(c);
+        // FULL step SAXH: the handshake's state of the member.
+        s.handshake.forget(c);
+        s.assign_sent_us.erase(c);
+        s.assign_had_instant.erase(c);
+        s.corrected.erase(c);
+        s.start_repeats.erase(std::remove_if(s.start_repeats.begin(), s.start_repeats.end(),
+                                             [c](const physics_session_state::start_repeat& r) { return r.to == c; }),
+                              s.start_repeats.end());
         s.ready.erase(c);
         s.assigned.erase(c);
         if (const auto notice = s.notices.find(c); notice != s.notices.end()) {
@@ -1885,11 +1956,30 @@ public:
     // reliable copy goes NoNagle, so it leaves at once in a packet of its own
     // rather than waiting the Nagle time for company.
     // The clients apply the first to arrive and ignore the rest.
+    // Protocol 24 (FULL step SAXH): every copy carries its own send instant
+    // (a clock sample the client answers), and the assignment the member's
+    // start instant on its own clock when the server has its clock estimate
+    // (a resync; a late joiner's first assignment has none yet and gets a
+    // correction once its first ack is in).  A start member's carries
+    // ASSIGN_FLAG_SCHEDULED instead: it holds until SessionStartAt.
+    static int64_t steady_us(std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count();
+    }
     void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick, uint8_t flags = 0) {
+        const auto sent = std::chrono::steady_clock::now();
         bmmo::session_assign_msg assign;
         assign.session = s.id;
         assign.first_tick = first_tick;
         assign.flags = flags;
+        assign.server_us = steady_us(sent);
+        // Only from a fresh estimate (start_handshake.hpp
+        // kClockEstimateMaxAgeUs: the two clocks drift); else the member
+        // gets its instant in a correction after this assignment's first ack.
+        if (!(flags & bmmo::session::ASSIGN_FLAG_SCHEDULED))
+            if (const auto* e = s.handshake.estimate(c); e && e->fresh(assign.server_us))
+                assign.start_us = e->arrival_local(assign.server_us);
+        s.assign_sent_us[c] = assign.server_us;
+        s.assign_had_instant[c] = assign.start_us != 0;
         assign.serialize();
         send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_ReliableNoNagle);
         // --assign-volley (test builds): the (e) volley, for the wire to show.
@@ -1903,7 +1993,7 @@ public:
             c, first_tick,
             bmmo::sim::assign_copy_schedule::after_reliable(main_pass_.load(std::memory_order_relaxed),
                                                             std::chrono::steady_clock::now()),
-            flags});
+            flags, assign.start_us});
         s.assigned.insert(c);
         // A SessionLead of the previous base is void (the client drops it by
         // its epoch), so its copies stop and nothing waits for its ack.
@@ -1931,11 +2021,239 @@ public:
     // numbered from its own anchor for the rest of the session, running ahead
     // of the server by however long the slowest level load took: the relay lag
     // (design 9.1) and the rollback lag both grew by that amount, unbounded.
+    // FULL step SAXH (protocol 24): flagged ASSIGN_FLAG_SCHEDULED - the
+    // members renumber and keep holding; the start handshake
+    // (check_start_handshakes) then gives them one start instant.
     void assign_start_members(physics_session_state& s) {
         for (const auto m: s.members)
             if (!s.late.count(m) && !s.ready.count(m)) return;
+        size_t sent = 0;
         for (const auto m: s.members)
-            if (!s.late.count(m) && !s.assigned.count(m)) send_session_assign(s, m, s.start_tick_base);
+            if (!s.late.count(m) && !s.assigned.count(m)) {
+                send_session_assign(s, m, s.start_tick_base, bmmo::session::ASSIGN_FLAG_SCHEDULED);
+                ++sent;
+            }
+        if (sent && s.handshake.current_phase() == bmmo::session::start_handshake::phase::idle) {
+            s.handshake.begin(steady_us(std::chrono::steady_clock::now()));
+            Printf("Physics session %u: start handshake: the start base %u went to %zu member(s); waiting for every "
+                   "member to confirm it (clock samples).", s.id, s.start_tick_base, sent);
+        }
+    }
+
+    // The start members the handshake waits for: present at the start (not
+    // late) and assigned.
+    std::vector<uint32_t> handshake_members(const physics_session_state& s) const {
+        std::vector<uint32_t> out;
+        for (const auto m: s.members)
+            if (!s.late.count(m) && s.assigned.count(m)) out.push_back(m);
+        return out;
+    }
+
+    std::string member_names(const std::vector<uint32_t>& members) {
+        std::string out;
+        for (const auto m: members) {
+            if (!out.empty()) out += ", ";
+            out += get_client_name(static_cast<HSteamNetConnection>(m));
+        }
+        return out;
+    }
+
+    void send_start_status(physics_session_state& s, bmmo::session::start_status_phase phase, uint32_t confirmed,
+                           uint32_t total, const std::string& text) {
+        bmmo::session_start_status_msg msg;
+        msg.session = s.id;
+        msg.phase = static_cast<uint8_t>(phase);
+        msg.confirmed = static_cast<uint8_t>(std::min<uint32_t>(confirmed, 255));
+        msg.total = static_cast<uint8_t>(std::min<uint32_t>(total, 255));
+        msg.text = text;
+        msg.serialize();
+        for (const auto m: s.members)
+            if (!s.late.count(m)) send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        Printf("Physics session %u: start handshake: %s", s.id, text.c_str());
+    }
+
+    // One SessionStartAt (reliable, then copies one per main-loop pass).
+    void send_start_at(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick, uint32_t seq,
+                       uint8_t flags, int64_t start_server_us, int64_t start_us) {
+        bmmo::session_start_at_msg msg;
+        msg.session = s.id;
+        msg.first_tick = first_tick;
+        msg.seq = seq;
+        msg.flags = flags;
+        msg.start_server_us = start_server_us;
+        msg.start_us = start_us;
+        const auto now = std::chrono::steady_clock::now();
+        msg.server_us = steady_us(now);
+        msg.serialize();
+        send(c, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+        s.start_repeats.erase(std::remove_if(s.start_repeats.begin(), s.start_repeats.end(),
+                                             [c](const physics_session_state::start_repeat& r) { return r.to == c; }),
+                              s.start_repeats.end());
+        s.start_repeats.push_back(physics_session_state::start_repeat{
+                c, first_tick, seq, flags, start_server_us, start_us,
+                bmmo::sim::assign_copy_schedule::after_reliable(main_pass_.load(std::memory_order_relaxed), now)});
+    }
+
+    // FULL step SAXH: the start handshake's main-loop half (wall-clock
+    // deadlines, like the start barrier): phase 2's start instant, the
+    // postponements, the refusals and the players' status lines.
+    void check_start_handshakes() {
+        if (!runner_) return;
+        const auto now_tp = std::chrono::steady_clock::now();
+        const int64_t now = steady_us(now_tp);
+        std::vector<std::pair<uint32_t, HSteamNetConnection>> refused;   // session, member
+        for (auto& [id, s]: physics_sessions_) {
+            // The joiners that waited for the handshake join late now that
+            // the runner ticks (its running flag is set by its own thread,
+            // after start_at: the handshake's phase alone is not enough).
+            if (!s.start_waiting.empty() && runner_->running(id)) {
+                const auto waiting = std::move(s.start_waiting);
+                s.start_waiting.clear();
+                for (const auto c: waiting) {
+                    client_session_.erase(c);
+                    Printf("Physics session %u: %s waited for the start handshake: joining late.", id, get_client_name(c));
+                    join_member(s, c);
+                }
+            }
+            const auto ph = s.handshake.current_phase();
+            // (A start committed after the schedule started - an earlier
+            // start reported late - is still sent to the members.)
+            if (ph != bmmo::session::start_handshake::phase::assign && ph != bmmo::session::start_handshake::phase::start
+                    && !s.handshake.commit_pending())
+                continue;
+            const auto members = handshake_members(s);
+            const auto r = s.handshake.poll(now, members);
+            if (r.notice_missing)
+                send_start_status(s, ph == bmmo::session::start_handshake::phase::assign
+                                         ? bmmo::session::start_status_phase::waiting_assign
+                                         : bmmo::session::start_status_phase::waiting_start,
+                                  r.confirmed, r.total,
+                                  Sprintf("waiting for the other players to confirm the start (%u / %u confirmed; "
+                                          "missing: %s)", r.confirmed, r.total, member_names(r.missing).c_str()));
+            for (const auto m: r.refuse) refused.emplace_back(id, static_cast<HSteamNetConnection>(m));
+            if (!r.refuse.empty())
+                send_start_status(s, bmmo::session::start_status_phase::refused, r.total - r.refuse.size(), r.total,
+                                  Sprintf("%s refused: did not confirm the session start in time; the others start "
+                                          "without %s", member_names(r.refuse).c_str(),
+                                          r.refuse.size() == 1 ? "that player" : "them"));
+            if (r.send_start) {
+                const auto& sch = s.handshake.schedule();
+                const int64_t in_ms = (sch.x_us - now) / 1000;
+                if (r.postponed)
+                    send_start_status(s, bmmo::session::start_status_phase::postponed, r.confirmed, r.total,
+                                      Sprintf("start postponed (%d of %d): %s did not confirm the start in time; "
+                                              "starting in about %lld ms", s.handshake.postpones(),
+                                              bmmo::session::kStartMaxPostpones, member_names(r.missing).c_str(),
+                                              static_cast<long long>(in_ms)));
+                std::string offsets;
+                for (const auto m: members) {
+                    if (std::find(r.refuse.begin(), r.refuse.end(), m) != r.refuse.end()) continue;
+                    const auto* e = s.handshake.estimate(m);
+                    if (!e) continue;
+                    send_start_at(s, static_cast<HSteamNetConnection>(m), s.start_tick_base, s.handshake.seq(), 0,
+                                  sch.x_us, e->arrival_local(sch.x_us));
+                    offsets += Sprintf(" %s rtt %.1f ms offset %+lld us (%u samples);",
+                                       get_client_name(static_cast<HSteamNetConnection>(m)), e->best.rtt_us / 1000.0,
+                                       static_cast<long long>(e->best.offset_us), e->samples);
+                }
+                Printf("Physics session %u: start handshake: start %u at +%lld ms (confirm by +%lld ms, worst rtt "
+                       "%.1f ms):%s", id, s.handshake.seq(), static_cast<long long>(in_ms),
+                       static_cast<long long>((sch.deadline_us - now) / 1000),
+                       s.handshake.worst_rtt_us(members) / 1000.0, offsets.c_str());
+            }
+            if (r.commit) {
+                // A member started on an earlier start (its postponement came
+                // too late): that start is everyone's - the members still
+                // holding start at once and catch up; the server's schedule
+                // starts at that start's instant.
+                const auto& sch = s.handshake.schedule();
+                std::string offsets;
+                for (const auto m: members) {
+                    const auto* e = s.handshake.estimate(m);
+                    if (!e) continue;
+                    send_start_at(s, static_cast<HSteamNetConnection>(m), s.start_tick_base, r.commit_seq,
+                                  bmmo::session::START_AT_FLAG_COMMIT, sch.x_us, e->arrival_local(sch.x_us));
+                }
+                send_start_status(s, bmmo::session::start_status_phase::postponed, r.total, r.total,
+                                  Sprintf("%s started on an earlier start time (start %u): everyone starts on it now",
+                                          get_client_name(static_cast<HSteamNetConnection>(r.committed_by)),
+                                          r.commit_seq));
+            }
+            if (r.start_now) {
+                const auto& sch = s.handshake.schedule();
+                const auto origin = now_tp + std::chrono::microseconds(sch.x_us - now);
+                runner_->start_at(id, origin);
+                if (r.commit)
+                    Printf("Physics session %u: start handshake: start %u committed (%s started on it); its instant "
+                           "is %+lld ms from now (the runner keeps an origin it already ticks from).", id, r.commit_seq,
+                           get_client_name(static_cast<HSteamNetConnection>(r.committed_by)),
+                           static_cast<long long>((sch.x_us - now) / 1000));
+                else
+                    Printf("Physics session %u: start handshake: all %u members confirmed start %u; the schedule "
+                           "starts in %lld ms.", id, r.total, s.handshake.seq(),
+                           static_cast<long long>((sch.x_us - now) / 1000));
+            }
+        }
+        // Outside the loop (physics_session_member_left may end a session).
+        for (const auto& [session, m]: refused) {
+            Printf("Physics session %u: %s refused: it did not confirm the session start (start handshake).", session,
+                   get_client_name(m));
+            send_session_end(session, m, "refused: this client did not confirm the session start in time (the start "
+                                         "handshake's messages did not get through)");
+            physics_session_member_left(m);
+        }
+    }
+
+    // FULL step SAXH: a clock sample (every copy of an assignment or a start
+    // message is answered) and, for a start copy, its confirmation.  A late
+    // joiner's first sample also gives it its correction: the instant its
+    // frame `base` was due on its own clock.
+    void handle_session_clock_ack(HSteamNetConnection c, const bmmo::session_clock_ack_msg& msg,
+                                  SteamNetworkingMicroseconds received) {
+        auto cs = client_session_.find(c);
+        if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
+        auto it = physics_sessions_.find(msg.session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        auto arrival = std::chrono::steady_clock::now();
+        constexpr SteamNetworkingMicroseconds kMaxAge = 10000000;
+        const SteamNetworkingMicroseconds age = SteamNetworkingUtils()->GetLocalTimestamp() - received;
+        if (received > 0 && age > 0)
+            arrival -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::microseconds(age < kMaxAge ? age : kMaxAge));
+        if (msg.server_us <= 0) return;
+        const int64_t arrival_us = steady_us(arrival);
+        s.handshake.add_sample(c, bmmo::session::make_clock_sample(msg.server_us, msg.client_us, arrival_us), arrival_us);
+        if (msg.kind == bmmo::session::CLOCK_ACK_START) {
+            s.handshake.start_acked(c, msg.seq);
+            return;
+        }
+        if (msg.kind == bmmo::session::CLOCK_ACK_STARTED) {
+            const uint32_t before = s.handshake.committed_seq();
+            s.handshake.started_on(c, msg.seq);
+            if (s.handshake.committed_seq() != before)
+                Printf("Physics session %u: %s already started on start %u (a later start reached it too late): "
+                       "start %u is committed.", s.id, get_client_name(c), msg.seq, msg.seq);
+            return;
+        }
+        // A late joiner: its first assignment had no start instant (no
+        // estimate yet), so it started on arrival; now that one is in, tell
+        // it when its base was due - once per epoch.
+        if (!s.late.count(c)) return;
+        const auto n = s.notices.find(c);
+        if (n == s.notices.end() || !n->second.assigned || n->second.epoch != msg.first_tick) return;
+        if (const auto done = s.corrected.find(c); done != s.corrected.end() && done->second == msg.first_tick) return;
+        // An assignment that carried the instant needs no correction.
+        if (const auto had = s.assign_had_instant.find(c); had != s.assign_had_instant.end() && had->second) return;
+        const auto sent = s.assign_sent_us.find(c);
+        const auto* e = s.handshake.estimate(c);
+        if (sent == s.assign_sent_us.end() || !e) return;
+        s.corrected[c] = msg.first_tick;
+        send_start_at(s, c, msg.first_tick, 0, bmmo::session::START_AT_FLAG_CORRECTION, sent->second,
+                      e->arrival_local(sent->second));
+        Printf("Physics session %u: %s's base %u was due at its +%lld us (rtt %.1f ms, offset %+lld us): correction sent.",
+               s.id, get_client_name(c), msg.first_tick, static_cast<long long>(e->arrival_local(sent->second)),
+               e->best.rtt_us / 1000.0, static_cast<long long>(e->best.offset_us));
     }
 
     // Start barrier (design 8.3): SessionStart went out, but a member that
@@ -1973,10 +2291,29 @@ public:
                 assign.session = s.id;
                 assign.first_tick = r->first_tick;
                 assign.flags = r->flags;
+                assign.server_us = steady_us(now);
+                assign.start_us = r->start_us;
                 assign.serialize();
                 send(r->to, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
                 r->schedule.sent(pass, now);
                 if (r->schedule.done()) r = s.assign_repeats.erase(r);
+                else ++r;
+            }
+            // FULL step SAXH: a SessionStartAt's copies, the same way.
+            for (auto r = s.start_repeats.begin(); r != s.start_repeats.end();) {
+                if (!r->schedule.due(pass, now)) { ++r; continue; }
+                bmmo::session_start_at_msg copy;
+                copy.session = s.id;
+                copy.first_tick = r->first_tick;
+                copy.seq = r->seq;
+                copy.flags = r->flags;
+                copy.start_server_us = r->start_server_us;
+                copy.start_us = r->start_us;
+                copy.server_us = steady_us(now);
+                copy.serialize();
+                send(r->to, copy.raw.str().data(), copy.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                r->schedule.sent(pass, now);
+                if (r->schedule.done()) r = s.start_repeats.erase(r);
                 else ++r;
             }
             for (auto r = s.lead_repeats.begin(); r != s.lead_repeats.end();) {
@@ -4022,6 +4359,11 @@ protected:
             case bmmo::SessionResync: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::session_resync_msg>(networking_msg);
                 handle_session_resync(networking_msg->m_conn, msg);
+                break;
+            }
+            case bmmo::SessionClockAck: {   // protocol 24, FULL step SAXH
+                auto msg = bmmo::message_utils::deserialize<bmmo::session_clock_ack_msg>(networking_msg);
+                handle_session_clock_ack(networking_msg->m_conn, msg, networking_msg->m_usecTimeReceived);
                 break;
             }
             case bmmo::SessionLeadAck: {

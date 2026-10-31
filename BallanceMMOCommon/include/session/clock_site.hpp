@@ -49,6 +49,9 @@ namespace bmmo::session {
         rewind_start,         // rollback rewind: the start of the restore (step R12, the cap's rewind cost)
         rewind_replay,        // rollback rewind: the start of the replay (step R12)
         rewind_end,           // rollback rewind: the end of a rewind that replayed (step R12)
+        handshake_stamp,      // a SessionAssign / SessionStartAt copy with a server instant: the ack's stamp (FULL step SAXH)
+        handshake_release,    // an unscheduled assignment of protocol 24 started the numbering: its local instant (SAXH)
+        handshake_lateness,   // a resync's assignment with a start instant: how late it is applied (SAXH)
         count_
     };
 
@@ -58,7 +61,8 @@ namespace bmmo::session {
             "assign_renumber", "assign_release", "anchor_origin", "anchor_hold", "hold_poll", "hold_timeout",
             "pace_expected", "pace_rebase", "pace_due", "slew_step", "slew_start", "hold_event_stamp",
             "hold_event_release", "resync_limiter", "journal_ms", "journal_start", "journal_utc", "own_backstop",
-            "resync_hold", "resync_release", "resync_hold_timeout", "rewind_start", "rewind_replay", "rewind_end"};
+            "resync_hold", "resync_release", "resync_hold_timeout", "rewind_start", "rewind_replay", "rewind_end",
+            "handshake_stamp", "handshake_release", "handshake_lateness"};
         static_assert(sizeof(names) / sizeof(names[0]) == static_cast<size_t>(clock_site::count_),
                       "a name for every clock site");
         const auto i = static_cast<size_t>(site);

@@ -102,6 +102,10 @@
 #include "../message/session_remote_input_msg.hpp"
 #include "../message/session_resync_state_msg.hpp"
 #include "../message/session_start_msg.hpp"
+#include "../message/session_clock_ack_msg.hpp"
+#include "../message/session_start_at_msg.hpp"
+#include "../message/session_start_status_msg.hpp"
+#include "start_handshake.hpp"
 #include "../physics/world_hash.hpp"
 
 #include <algorithm>
@@ -110,6 +114,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <optional>
 #include <iterator>
 #include <map>
 #include <set>
@@ -437,6 +442,32 @@ namespace bmmo::session {
         bool held_ = false;
         clock_type::time_point hold_deadline_{};
         int hold_polls_ = 0;
+        // FULL step SAXH (protocol 24, session/start_handshake.hpp): a
+        // scheduled assignment (ASSIGN_FLAG_SCHEDULED) keeps the hold until
+        // the start instant of the newest SessionStartAt accepted (seq); the
+        // hold's release at that instant gives the host that instant as its
+        // pacer origin (release_origin).  An unscheduled assignment of
+        // protocol 24 (a late joiner) records the local instant its numbering
+        // started, against which its correction is measured once per epoch.
+        bool start_scheduled_ = false;
+        uint32_t start_seq_ = 0;
+        bool start_instant_known_ = false;
+        clock_type::time_point start_instant_{};
+        bool release_at_instant_ = false;
+        bool release_local_known_ = false;
+        clock_type::time_point release_local_{};
+        uint32_t release_epoch_ = 0;
+        bool corrected_ = false;
+        uint32_t corrected_epoch_ = 0;
+        // The scheduled start this client released on (0: none yet), the
+        // base it was for, and the local instant its frame `base` now stands
+        // for (the start instant, moved earlier by every catch-up): a later
+        // start message is answered CLOCK_ACK_STARTED with it, and a
+        // committed earlier start (START_AT_FLAG_COMMIT) is caught up from it.
+        uint32_t started_seq_ = 0;
+        uint32_t started_epoch_ = 0;
+        clock_type::time_point started_effective_{};
+        uint64_t clock_acks_sent_ = 0, start_messages_late_ = 0, start_catch_up_ticks_ = 0;
         uint32_t tick_base_ = 0;
         int64_t frames_since_anchor_ = -1;
         std::deque<std::pair<uint32_t, bmmo::session::input_frame>> input_history_;
@@ -1287,6 +1318,16 @@ namespace bmmo::session {
         // protocol error (design 2.3): counted, journaled, not applied, not
         // acknowledged.
         void on_session_lead(const bmmo::session_lead_msg& msg);
+        // FULL step SAXH (protocol 24): the start handshake's server messages.
+        void on_session_start_at(const bmmo::session_start_at_msg& msg);
+        void on_session_start_status(const bmmo::session_start_status_msg& msg);
+        // During the hooks.numbering_restarted call of a scheduled start's
+        // release (clock_site::assign_release): the start instant the pacer's
+        // origin takes instead of now.  Empty otherwise.
+        std::optional<std::chrono::steady_clock::time_point> release_origin() const {
+            if (!s.release_at_instant_) return std::nullopt;
+            return s.start_instant_;
+        }
         // SessionEvent (E6): counted; when it is this running session's and
         // its first arrival, an echo of our own event is queued for the
         // frame's echoes, another member's for its due tick.
@@ -1440,6 +1481,18 @@ namespace bmmo::session {
         // An own lifecycle event: stamped, counted, journaled, then on the
         // wire unless hooks.filter_event keeps it.
         void send_event(bmmo::session_event_msg& event);
+        // FULL step SAXH: one SessionClockAck (a clock sample, and for a start copy its confirmation).
+        void send_clock_ack(uint32_t first_tick, uint8_t kind, uint32_t seq, int64_t server_us,
+                            std::chrono::steady_clock::time_point stamp);
+        // FULL step SAXH: the assignment itself (on_session_assign's body until
+        // protocol 24), and the catch-up of a start applied late.
+        void apply_session_assign(const bmmo::session_assign_msg& msg);
+        void apply_start_correction(uint32_t epoch, int64_t due_us, std::chrono::steady_clock::time_point started,
+                                    const char* what);
+        // `ticks` whole ticks of a late start, capped at kStartMaxCatchUpTicks,
+        // through hooks.catch_up; returns the ticks caught up.
+        int catch_up_start(int ticks, const char* what);
+        void start_notice(const std::string& text);
         // A held send (hooks.filter_event) goes out now.
         void release_event(const std::string& wire_bytes) { put_event_on_wire(wire_bytes); }
 
