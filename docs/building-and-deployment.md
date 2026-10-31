@@ -145,10 +145,19 @@ Which GNS each binary runs:
   that `GameNetworkingSockets.dll` next to the mod. 1.6.0 lies on master's
   line, 54 commits behind `d534c19`, and 278 commits after `725e273`
   (f938f6f's base): before GNSU the mod ran a NEWER GNS than the server.
-  GNSU did not move it (the way the mod should follow master is the user's
-  decision); master itself
-  builds with the x86 toolchain and the retail tree's x86 protobuf / OpenSSL /
-  abseil (`.local-tools/work/GNSU/gns_x86_master.bat`).
+  Master itself builds with the x86 toolchain and the retail tree's x86
+  protobuf / OpenSSL / abseil (`.local-tools/work/GNSU/gns_x86_master.bat`).
+
+  **Requirement: the retail mod needs GameNetworkingSockets 1.6.0** (the
+  user's decision, 2026-10-31: the mod stays on vcpkg's port, it does not
+  build the submodule). Build the x86 tree with the vcpkg submodule as
+  pinned, whose `gamenetworkingsockets` port is 1.6.0 (`2cb93a0`), and ship
+  that `GameNetworkingSockets.dll` beside the mod - not a DLL built from
+  `submodule/GameNetworkingSockets`. A vcpkg baseline bump that moves the
+  port off 1.6.0 changes this requirement and needs its own retail check:
+  GNSU verified only the mod on 1.6.0 against the server on `d534c19`
+  (a retail L11 session - connect, play, disconnect, reconnect, late
+  re-join - every FINAL row bit-equal to the server).
 
 Upstream changes between `725e273` (f938f6f's base) and `d534c19` that touch
 what BMMO uses (send flags Reliable / ReliableNoNagle / UnreliableNoDelay /
