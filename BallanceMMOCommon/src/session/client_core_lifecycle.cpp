@@ -829,6 +829,29 @@ namespace bmmo::session {
             if (remote.physicalized && remote.entity != entity) {
                 ++s.generations_[remote.entity];   // a trafo: the old mirror's lifetime ends here
                 unphysicalize_mirror(remote.entity);
+            } else if (remote.physicalized && !remake) {
+                // Step HLX: a Physicalize of the same entity while its body
+                // lives - a beam whose Physicalize was applied before its
+                // same-origin Unphysicalize (the copies of the pair arrived
+                // in two drains: drain_due_events orders U before P only
+                // within one).  A Physicalize always makes the body at its
+                // pose, so the old life ends here as a trafo's does and the
+                // death the pair carries would (unphysicalize_remote: the
+                // navigation went above, the generation bumped, the body
+                // out); the backend's physicalize of a live body is a
+                // no-op, so without this the old body rolled on, in every
+                // replay too.  The late Unphysicalize is then superseded
+                // (equal origin) correctly.  Receivers must not depend on
+                // copy order (lifecycle.hpp, protocol 6); the server's
+                // world does the same (physics_world::apply_event).
+                ++s.generations_[remote.entity];
+                unphysicalize_mirror(remote.entity);
+                remote.physicalized = false;
+                if (!event.reconciled) {
+                    ++s.births_replaced_live_;
+                    logf("remote physicalize of %u stamped %u: its mirror %s was alive, the old body replaced",
+                         event.player, event.tick, remote.entity.c_str());
+                }
             }
             mirror_spec spec;
             spec.player = event.player;

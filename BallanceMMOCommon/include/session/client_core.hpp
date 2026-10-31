@@ -619,6 +619,7 @@ namespace bmmo::session {
             uint64_t lead_adj = 0;
             uint64_t echo_acked = 0, echo_moved = 0, echo_superseded = 0, echo_rejected = 0, echo_missing = 0;
             uint64_t birth_moved = 0, own_moved = 0, own_removed = 0, own_resynced = 0;
+            uint64_t superseded = 0, replaced = 0;   // step HLX
             int rebases = 0;
         } window_base_;
         uint64_t input_rewind_depth_ = 0, life_rewind_depth_ = 0, forced_rollback_depth_ = 0;
@@ -803,6 +804,13 @@ namespace bmmo::session {
         uint64_t own_revives_ = 0, own_revive_failures_ = 0, own_window_remakes_ = 0, own_due_settled_ = 0;
         uint64_t own_matrix_writes_ = 0;
         uint64_t births_overtaken_ = 0;   // older births dropped (same tick) or re-ordered (earlier) behind a death
+        // Step HLX: Physicalize events that found their mirror's body alive
+        // (a beam's P applied before its same-origin U) and replaced it;
+        // counted once per event, not in the reconcile's re-applications -
+        // except settle_unreplayed_lives, which clears `reconciled` before it
+        // applies a window birth no replay reached live: a P-first birth
+        // settled that way counts a second time (diagnostic only).
+        uint64_t births_replaced_live_ = 0;
         bool resync_pending_ = false;
         // ---- step A3: the exact resync (resync design 2.6) ----
         // The pending resync is answered by a SessionResyncState of tick

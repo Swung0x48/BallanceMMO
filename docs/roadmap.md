@@ -1280,6 +1280,23 @@ numbers 1-10 are unchanged.
    `ExecuteBB::SetPhysicsForce` calls are commented out,
    `BallanceMMOClient.h` ~1382, `BallanceMMOClient.cpp:905`) is never in a
    server blob; the bit-on retail resync wrote 0 of 57 rows.
+   **Queued (FULL step HLX's review, pre-existing): a death overtaken by a
+   newer respawn at one receiver.** The server applies a player's death
+   U(800) and respawn P(850) in order and relays both; a receiver that lost
+   every early copy of U(800) applies P(850) first. Since HLX the P replaces
+   the old body at 850 (before HLX it was never removed); the late U(800) is
+   then dropped by `lifecycle_unphysicalize_superseded` (`lifecycle.hpp`,
+   origins only), so that receiver alone keeps the old body alive 800..850
+   while the server and every other receiver have none - it can collide
+   with their balls. The server's own copy order agrees in every world.
+   Options (the user's: the second changes the protocol-6 supersede rule,
+   late-player-design §3.1): drop the late U as now (the window bounded to
+   death -> respawn), or apply a cross-origin U older than the last P in a
+   rewind at its stamp (the old body out at 800 in every world; the guard
+   then distinguishes a copy that lost its place from a death the respawn
+   replaced). Not seen: `.local-tools/work/HLX/cross_origin.py` finds 0 of
+   294 remote deaths in the `hl_full` and `core_ref_s13` client journals
+   (late-player-design.md "As built (step HLX)").
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire
@@ -2854,6 +2871,33 @@ numbers 1-10 are unchanged.
      exact in the controlled cell; **open (the user's decision):** a member
      whose assignment loses b datagrams still starts b passes (b ticks) late
      for the session with `lead_adjust` off (4 and 8 ticks measured).
+   - **FULL step HLX (2026-10-31; HL run 15's `swing_s1` failure):** a
+     beam's Physicalize applied in a drain before its same-origin
+     Unphysicalize was a no-op on the live mirror (the entity is kept, the
+     backend skips a live body), and the late U was superseded, so client 3's
+     mirrors rolled on 541-545 m off for 178 confirmed rows with mism 0. A
+     Physicalize now always replaces a living body of the same entity, in the
+     client core and in the server's world (the uplink twin), so receivers do
+     not depend on copy order, as protocol 6 already stated; `superseded=`
+     on the status and window lines (late-player-design.md "As built (step
+     HLX)"). The stored `swing_s1` replays bit-equal on every client's
+     confirmed FINAL rows; wire check on `core_ref_s13` ALL SAME. **HL's
+     adaptations of its written criteria, kept for its rerun:** (1)
+     "first_divergence.py empty": on the swing arms each client's first row
+     is its own ball one tick into its airship span (exception c), and
+     first_divergence.py has no span option, so `work/D0/hl_judge.py`
+     (span-aware, tolerance 0, confirmed FINAL rows) is the check;
+     l11_cross's first_divergence is empty. (2) `own_ball.py` reads retail
+     journals only; the own-ball criterion is hl_judge's own-ball line on
+     the FINAL rows. (3) `mech_rows.py --prefix P_` (33 arena / 54 L11
+     bodies) instead of its arena-only default; hl_judge's bodies line
+     covers every body. (4) `mechanisms=52/43` in some last status lines is
+     mechanism_tracking's name map (known/resolved), not the rollback's
+     tracked set: 9 named owners with no local body at the probe, ignored by
+     design; it does not reach the comparison. (5) "two seeds" =
+     `--loss-seed 0 / 1` on core_ref_s13's swing_snapoff recipe; L11 cross =
+     H2's `l11_args.txt` + `--loss-pct 10`, 40 s. `judge_arm.sh` reports
+     `pair_order.py`'s split pairs.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

@@ -96,6 +96,7 @@ namespace bmmo::session {
         now.echo_missing = s.own_echo_missing_;
         now.birth_moved = s.own_birth_echo_moved_; now.own_moved = s.own_births_moved_;
         now.own_removed = s.own_births_removed_; now.own_resynced = s.own_moves_resynced_;
+        now.superseded = s.events_superseded_; now.replaced = s.births_replaced_live_;
         const window_base& was = s.window_base_;
         std::string text;
         if (!first) {
@@ -122,12 +123,15 @@ namespace bmmo::session {
             // missing of every type, and ownlife=moved/removed/resynced what
             // this client did with a moved, superseded or rejected birth
             // (late-player design 3.3): moved inside the history, removed
-            // from it, or resynced past the reach.
+            // from it, or resynced past the reach.  Last, superseded=
+            // deaths/replaced (step HLX): this window's remote deaths
+            // dropped by the supersede guard and births that replaced a
+            // living mirror's body (a beam pair split across two drains).
             text = textf("window: tick=%u inrew=%llu/%llu life=%llu/%llu forced=%llu/%llu snaprb=%llu/%llu snaps=%llu "
                          "resyncs=%llu/%llu rebases=%d relay=%llu late=%llu covered=%llu"
                          " subst=%llu/%llu/%llu/%llu/%llu/%llu substrew=%llu/%llu substco=%llu/%llu/%llu/%llu"
                          " lead_adj=%llu lead=%d slew=%d"
-                         " moved=%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu",
+                         " moved=%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu superseded=%llu/%llu",
                          tick, d(now.inrew, was.inrew), d(now.inrew_depth, was.inrew_depth), d(now.life, was.life),
                          d(now.life_depth, was.life_depth), d(now.forced, was.forced), d(now.forced_depth, was.forced_depth),
                          d(now.snaprb, was.snaprb), d(now.snaprb_depth, was.snaprb_depth), d(now.snaps, was.snaps),
@@ -145,7 +149,8 @@ namespace bmmo::session {
                          d(now.echo_moved, was.echo_moved), d(now.echo_superseded, was.echo_superseded),
                          d(now.echo_rejected, was.echo_rejected), d(now.echo_missing, was.echo_missing),
                          d(now.own_moved, was.own_moved),
-                         d(now.own_removed, was.own_removed), d(now.own_resynced, was.own_resynced));
+                         d(now.own_removed, was.own_removed), d(now.own_resynced, was.own_resynced),
+                         d(now.superseded, was.superseded), d(now.replaced, was.replaced));
             for (const auto& [player, hist]: s.window_lag_) {
                 text += " lag[" + std::to_string(player) + "]=";
                 bool comma = false;
@@ -239,7 +244,7 @@ namespace bmmo::session {
             " ccache=%llu/%llu%s", static_cast<unsigned long long>(rs.capture_cache_hits),
             static_cast<unsigned long long>(rs.capture_cache_mismatches),
             cache_mode == rollback_engine::capture_cache_mode::verify ? "v" : "");
-        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
+        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu superseded=%llu/%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                      "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu unmatched_run=%d/%llu far=%llu frozen=%llu globals=%llu/%llu/%llu/%llu/%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu parked=%llu missing=%llu lives=%llu/%llu/%llu/%llu/%llu/%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
@@ -269,6 +274,13 @@ namespace bmmo::session {
                      // overtaken: older remote births relayed after their death
                      // and put back in front of it (dropped or re-ordered).
                      static_cast<unsigned long long>(s.births_overtaken_),
+                     // superseded=deaths/replaced (step HLX): remote deaths no
+                     // newer by origin than the player's last applied birth,
+                     // dropped (a copy that lost its place, or a beam's U
+                     // after its P), and the births that found their mirror
+                     // alive and replaced its body (a beam's P before its U).
+                     static_cast<unsigned long long>(s.events_superseded_),
+                     static_cast<unsigned long long>(s.births_replaced_live_),
                      // remake=made/lost (step LB): mirrors made again at their
                      // birth tick inside a replay (or live after it), and those
                      // made again neither in the replay nor live (bodiless).

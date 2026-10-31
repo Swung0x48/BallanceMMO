@@ -3845,6 +3845,111 @@ namespace {
         EXPECT_EQ(logged.made_at, 123u) << "removed at its stamp";
     }
 
+    // Step HLX (HL's swing_s1): a beam pair (U and P of one origin) whose
+    // copies arrive in different drains.  Players 4 and 5 beam at 123, both
+    // late, inside the history.  In order (one drain: U4 P4 U5 P5) each
+    // body is taken out and made again in the replay at 123.  With the P
+    // first (P4 | P5 | U4 | U5, the journal order client 3 had, and U4 | P4
+    // | P5 | U5, one pair split) the P finds the body alive: it ends the old
+    // life itself (navigation, generation, body out) and makes the new one
+    // at the same tick in the same replay, and the late U is superseded.
+    // Every order leaves the same remotes, the same generations and one
+    // take-out and one make per body, each take-out before its make at 123.
+    TEST(SessionClientCoreLifecycle, ABeamsPhysicalizeBeforeItsUnphysicalizeReplacesTheBody) {
+        using bmmo::session::event_type;
+        struct outcome {
+            std::vector<std::string> mirror_ops;   // make/unmake/detach/attach, in order
+            std::map<std::string, uint32_t> generations;
+            bool physicalized[2] = {}, navigation[2] = {};
+            uint32_t born[2] = {}, birth_tick[2] = {};
+            uint64_t superseded = 0, replaced = 0;
+        };
+        const auto run = [](const std::vector<std::vector<std::pair<uint32_t, event_type>>>& drains) {
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_client_core core(replay_platform(fake, bound), session_capabilities{});
+            bound = &core;
+            run_to_tick_125_four(core, fake);
+            core.config.rollback = true;
+            core.config.lifecycle_rewind = true;
+            for (const uint32_t player: {4u, 5u}) {
+                auto& remote = state_of(core).remotes_[player];
+                remote.entity = "Ball_0_BMMO_" + std::to_string(player);
+                remote.physicalized = true;
+                remote.navigation = true;
+                state_of(core).generations_[remote.entity] = 1;
+            }
+            record_ticks(core, 118, 125);
+            const size_t from = fake.calls.size();
+            for (const auto& drain: drains) {
+                for (const auto& [player, type]: drain) core.on_session_event(event_message(player, type, 123, 123));
+                steps{core}.drain_due_events(126);
+            }
+            outcome out;
+            uint32_t tick = 0;
+            for (const auto& call: since(fake.calls, from)) {
+                if (call.rfind("pre_step:", 0) == 0) tick = static_cast<uint32_t>(std::stoul(call.substr(9)));
+                for (const char* op: {"make_mirror:", "unmake_mirror:", "detach_mirror_navigation:", "attach_mirror_navigation:"})
+                    if (call.rfind(op, 0) == 0) out.mirror_ops.push_back(std::to_string(tick) + "|" + call);
+            }
+            out.generations = {state_of(core).generations_.begin(), state_of(core).generations_.end()};
+            for (int k = 0; k < 2; ++k) {
+                const auto& remote = state_of(core).remotes_.at(4u + k);
+                out.physicalized[k] = remote.physicalized;
+                out.navigation[k] = remote.navigation;
+                out.born[k] = remote.born_tick;
+                out.birth_tick[k] = remote.birth.tick;
+            }
+            out.superseded = state_of(core).events_superseded_;
+            out.replaced = state_of(core).births_replaced_live_;
+            EXPECT_TRUE(state_of(core).pending_births_.empty());
+            EXPECT_TRUE(state_of(core).pending_deaths_.empty());
+            return out;
+        };
+        const auto U = event_type::Unphysicalize;
+        const auto P = event_type::Physicalize;
+        const outcome in_order = run({{{4, U}, {4, P}, {5, U}, {5, P}}});
+        const outcome split = run({{{4, P}}, {{5, P}}, {{4, U}}, {{5, U}}});
+        const outcome one_split = run({{{4, U}}, {{4, P}}, {{5, P}}, {{5, U}}});
+        for (const outcome* o: {&in_order, &split, &one_split}) {
+            SCOPED_TRACE(o == &in_order ? "U4 P4 U5 P5" : o == &split ? "P4 | P5 | U4 | U5" : "U4 | P4 | P5 | U5");
+            EXPECT_EQ(o->generations, in_order.generations);
+            EXPECT_EQ(o->generations.at("Ball_0_BMMO_4"), 3u) << "the old life ended, the new one begun";
+            EXPECT_EQ(o->generations.at("Ball_0_BMMO_5"), 3u);
+            for (int k = 0; k < 2; ++k) {
+                EXPECT_TRUE(o->physicalized[k]);
+                EXPECT_TRUE(o->navigation[k]);
+                EXPECT_EQ(o->born[k], 123u) << "made in the replay at the origin";
+                EXPECT_EQ(o->birth_tick[k], 123u);
+                const std::string ball = "Ball_0_BMMO_" + std::to_string(4 + k);
+                EXPECT_EQ(count_prefix(o->mirror_ops, "123|unmake_mirror:" + ball), 1u) << "the old body out at 123";
+                EXPECT_EQ(count_prefix(o->mirror_ops, "123|make_mirror:" + ball), 1u) << "the new one made at 123";
+                EXPECT_EQ(count_prefix(o->mirror_ops, "0|"), 0u) << "nothing changed outside a replay";
+                const auto out = std::find(o->mirror_ops.begin(), o->mirror_ops.end(), "123|unmake_mirror:" + ball);
+                const auto made = std::find(o->mirror_ops.begin(), o->mirror_ops.end(), "123|make_mirror:" + ball + ":P#"
+                                            + std::to_string(k == 0 ? 0 : 1));
+                EXPECT_LT(out, made) << ball << ": taken out before it is made again";
+            }
+        }
+        EXPECT_EQ(in_order.superseded, 0u);
+        EXPECT_EQ(in_order.replaced, 0u);
+        EXPECT_EQ(split.superseded, 2u) << "both late deaths superseded";
+        EXPECT_EQ(split.replaced, 2u);
+        EXPECT_EQ(one_split.superseded, 1u);
+        EXPECT_EQ(one_split.replaced, 1u);
+        // Per body, the same mirror operations in the same order.
+        for (const std::string ball: {"Ball_0_BMMO_4", "Ball_0_BMMO_5"}) {
+            const auto of = [&ball](const outcome& o) {
+                std::vector<std::string> ops;
+                for (const auto& op: o.mirror_ops)
+                    if (op.size() > ball.size() && op.find(":" + ball) != std::string::npos) ops.push_back(op);
+                return ops;
+            };
+            EXPECT_EQ(of(split), of(in_order)) << ball;
+            EXPECT_EQ(of(one_split), of(in_order)) << ball;
+        }
+    }
+
     // ...and when the replay does not reach the stamp's pre-step (here a
     // world with no pre_step: the deferred death is never drained), it is
     // removed live after the rewind and nothing is left pending.
@@ -5702,7 +5807,7 @@ namespace {
         EXPECT_EQ(core.window_text(60, h),
                   "window: tick=60 inrew=2/5 life=0/0 forced=0/0 snaprb=0/0 snaps=0 resyncs=0/0 rebases=1 relay=0 "
                   "late=0 covered=0 subst=3/0/0/0/0/0 substrew=0/0 substco=0/0/0/0 lead_adj=0 lead=-2 slew=0 moved=0 "
-                  "echo=0/0/0/0/0 ownlife=0/0/0 lag[3]=5*2,7*1 lag[6]=1*4 inrew[3]=2");
+                  "echo=0/0/0/0/0 ownlife=0/0/0 superseded=0/0 lag[3]=5*2,7*1 lag[6]=1*4 inrew[3]=2");
         EXPECT_TRUE(state_of(core).window_lag_.empty());
         EXPECT_TRUE(state_of(core).window_inrew_src_.empty());
         EXPECT_FALSE(core.window_due(119));

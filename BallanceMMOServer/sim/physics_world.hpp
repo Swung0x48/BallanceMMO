@@ -476,6 +476,8 @@ namespace bmmo::sim {
         // Step G5: BodyRevived events this world did not apply (the world
         // option: every world wakes its own mechanisms).
         uint64_t revived_ignored() const { return revived_ignored_; }
+        // Step HLX: Physicalize events that found the player's body alive and replaced it.
+        uint64_t births_replaced() const { return births_replaced_; }
         const bmmo::game::sector_placement& placement() const { return placement_; }
 
     private:
@@ -591,6 +593,7 @@ namespace bmmo::sim {
         uint32_t probes_placed_tick_ = 0;
         uint64_t proximity_hold_failures_ = 0;
         uint64_t revived_ignored_ = 0;   // step G5
+        uint64_t births_replaced_ = 0;   // step HLX
         CK_ID current_level_ = 0;
         // The session's script selection (game/session_host_support.hpp
         // session_script_selection: the selection both clients make at their

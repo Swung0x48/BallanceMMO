@@ -3474,3 +3474,121 @@ judges every frame by its arrival against its own tick's deadline.
   every journal every 0.25 s for as long as the server lived (`/mnt/d`
   keeps an mtime to the second, so `-nt` against a copy never turned
   false); it now compares whole seconds and the size.
+
+## As built (step HLX, FULL close-out, 2026-10-31): a beam's Physicalize applied before its same-origin Unphysicalize replaces the body
+
+**Symptom (FULL step HL, run 15, `.local-tools/work/HL/hl_result.txt`).**
+In HL's `swing_s1` arm (four headless clients, 150 ms, 10 % loss,
+`--loss-seed 1`, snapshots off) client 3's confirmed FINAL rows kept the
+mirrors of clients 1 and 2 rolling down the lane for ticks 702..886 (178
+rows, 541-545 m off) after the server beamed both balls at 701; mism 0,
+resyncs 0 - the client never noticed. Deterministic from the stored capture.
+
+**Cause.** Client 3 applied each beam's Physicalize (origin 701) in a
+drain before its same-origin Unphysicalize arrived (journal order P, P, U,
+U). `drain_due_events` puts a pair's U before its P only within one drain
+(`lifecycle_apply_before`, §3.1); across drains the P came first.
+`physicalize_remote` ended the old life only when the entity changed (a
+trafo); a beam keeps the entity, and the backend's physicalize is a no-op on
+a live body (`physics_state.cpp`, `if (physics->GetPhysicsObject(entity))
+return true;`), so the old IVP body rolled on, in the live apply and in every
+replay. The late U was then superseded by the protocol-6 guard (equal origin,
+`lifecycle_unphysicalize_superseded`) and dropped, uncounted on any line. This
+broke the rule protocol 6 already states (`lifecycle.hpp`: receivers must not
+depend on copy order). The server's world had the same hole for the uplink
+twin (`physics_world::apply_event`: an owner's P applied at its origin and
+its U re-stamped later, then superseded by the runner's guard,
+`session_runner.cpp`). Pre-existing since protocol 6 / 9; 2 of 84 same-origin
+remote pairs at 10 % loss in HL's journals (`HL/pair_order.py`).
+
+**The fix (option (e) of HL's review; the orchestrator ruled it settled by
+the design; no protocol, journal or design-rule change).** A Physicalize
+always makes the body at its pose:
+- client core (`client_core_lifecycle.cpp`, `physicalize_remote`): when the
+  remote is physicalized under the same entity and the event is not an LB
+  remake, the old life ends first exactly as the pair's U would end it
+  (navigation detached above, generation bumped, `unphysicalize_mirror`,
+  `physicalized = false`), then the birth makes the new body and bumps the
+  generation again - the same platform calls and the same two bumps as the
+  in-order U, P. The late U is then superseded correctly. The reconcile
+  needs nothing new: the superseded U is logged skipped, so a later rewind
+  across the beam revives the A-life and queues the one window event (the
+  P), which ends that life again in the replay (swing_s1 c3:
+  "revived until tick 701; 1 window event(s) queued", rows exact).
+- server world (`physics_world.cpp`, the Physicalize case): when the
+  player's clone is the same and still has its body, it is taken out as the
+  Unphysicalize case does (`shutdown_all`, `unphysicalize`,
+  `physicalized = false`) before the clone is physicalized; logged
+  "world: physicalize ... found its body alive: the old body replaced",
+  counted (`births_replaced()`).
+- the counters: the status line has `superseded=deaths/replaced` after
+  `overtaken=` (the guard's dropped remote deaths, `events_superseded_`, and
+  the births that replaced a living mirror, `births_replaced_live_`, counted
+  once per event, not in the reconcile's re-applications - except a P-first
+  birth no replay reached, which `settle_unreplayed_lives` applies live with
+  `reconciled` cleared and so counts a second time; diagnostic only), the
+  window line the same per window after `ownlife=`.
+
+**Is (e) ever inexact?** Not for a beam: the P carries the whole
+replacement, so it no longer matters whether or when its U arrives (a U that
+never comes is the same case). Every world runs the same rule, so worlds
+agree. The P senders were checked: a beam sends U then P of one origin
+(`apply_requested_beam`), a respawn's P follows its death; the bare-P sender
+`re_report_own_birth` (a birth the server never made) means "the body is
+made here" too and is replaced alike on the server and every receiver. The
+`own_body_backstop` re-report (`check_own_body`) fires only when the
+server's snapshot has no row for the ball, i.e. the server has no body, so
+the branch does not fire for it on the server, nor on a receiver that
+followed the server (and it never fires with snapshots off).
+**The one inexact ordering (review of HLX, queued under roadmap §4 item 5):**
+a death and a LATER respawn of different origins - the server applies U(800)
+and P(850) in order and relays both - at a receiver that lost every early
+copy of U(800) and got P(850) first. HLX replaces the old body at 850; the
+late U(800) is then dropped by `lifecycle_unphysicalize_superseded`
+(`lifecycle.hpp`, origins only, 800 <= 850). That receiver alone keeps the
+old body alive 800..850, where the server and every receiver that got the U
+in time have none (it can collide with their balls). Before HLX it was
+never removed at all (unbounded); HLX bounds it to the death-to-respawn
+interval. The server-side twin (an owner's uplink reordered) agrees in every
+world, because every receiver follows the server's applied order. Option
+(a) (hold the P until its U) does not apply - it only pairs same-origin
+events - and applying such a late U in a rewind at its stamp instead of
+dropping it changes the protocol-6 supersede rule (design §3.1), a design
+rule and so the user's choice. Not seen: `.local-tools/work/HLX/cross_origin.py`
+(a remote U journalled after a P of a newer origin) finds 0 of 294 remote
+Unphysicalize events in the client journals of `hl_full` (swing_s0,
+swing_s1, l11_cross, hlxsmoke_s1) and `core_ref_s13`.
+One state difference remains between the orders: the superseded U does not
+set `remote_last_unphysicalize_`, which only the overtaken-birth rule reads
+(an older P relayed after the pair). The server never relays an older P
+whose applied tick falls after the pair (`lifecycle_acceptance::accept`
+supersedes it); one applied before the pair is made in its window and
+replaced at the pair's tick by the P (in order: taken out by the re-applied
+death and made again by the P), so the body set is the same. Analysed, not
+exercised by any capture.
+
+**Verified (2026-10-31).** Unit test
+`SessionClientCoreLifecycle.ABeamsPhysicalizeBeforeItsUnphysicalizeReplacesTheBody`
+(U4 P4 U5 P5 in one drain vs P4 | P5 | U4 | U5 vs U4 | P4 | P5 | U5: the same
+remotes, generations 3, one take-out and one make per body at 123, the
+take-out first, the same per-body mirror operations; it fails without the
+fix); 729/729 tests. HL's stored `swing_s1` capture replayed with the HLX
+build (`HL/final_replay.sh rHLX hl_full hlx swing_s1`, `judge_arm.sh`): every
+client's confirmed FINAL rows bit-equal to the server (own, mirror, bodies,
+body set 0), client 3 `superseded=2/2`, both split pairs replaced. The
+server's half (adapted: the row asked for a test; `physics_world` needs the
+game engine and does not link into the message tests, so the runner's path
+is checked by reading `session_runner.cpp` ~1357-1369 and by this
+edited-journal replay instead): `swing_s1`'s server journal with client 1's
+U at 701 left out
+(`.local-tools/work/HLX/strip_event.py`: what the runner journals when it
+supersedes a re-stamped U) replays 674/4024 matched, first divergence 701,
+1242 checkpoint mismatches with the previous build (rRTR) and 4024/4024, 0
+mismatches with HLX, which logs the replacement once; the unedited journal
+4024/4024 with no replacement. The 13 `core_ref_s13` server journals replay
+exact with HLX, no replacement. The wire check `rRTR rHLX` on `core_ref_s13`:
+ALL SAME (44 sends SAME, 45 journals IDENTICAL), as predicted - no split pair
+in any of its arms (`pair_order.py`). One live smoke run (swing recipe,
+`--loss-seed 1`, Arch server rebuilt from this tree): a split pair occurred
+again (client 3, 701), `superseded=1/1`, PASS, every client's confirmed FINAL
+rows bit-equal to the server.

@@ -948,6 +948,21 @@ namespace bmmo::sim {
             if (p.ball && p.ball != clone && manager->GetPhysicsObject(p.ball)) {
                 std::string ignored;
                 bmmo::physics::unphysicalize(manager, p.ball->GetName(), ignored);
+            } else if (p.ball == clone && manager->GetPhysicsObject(clone)) {
+                // Step HLX: the same clone still has its body - a beam's
+                // Physicalize accepted before its same-origin Unphysicalize
+                // (the U re-stamped later, then superseded by the runner's
+                // guard).  A Physicalize always
+                // makes the body at its pose: the old life ends here exactly
+                // as the pair's Unphysicalize would end it (below), or the
+                // physicalize further down is a no-op on the live body and
+                // the ball rolls on where every receiver replaced it.
+                ++births_replaced_;
+                log("world: physicalize " + std::string(clone->GetName() ? clone->GetName() : "?") + " at tick "
+                    + std::to_string(tick_) + " found its body alive: the old body replaced");
+                if (p.navigation) p.navigation->shutdown_all();
+                if (!bmmo::physics::unphysicalize(manager, clone->GetName(), error)) return false;
+                p.physicalized = false;
             }
             clone->SetWorldMatrix(matrix_from_pose(event.position, event.rotation));
             if (!ensure_collision_filter(error)) return false;
