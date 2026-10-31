@@ -5207,3 +5207,104 @@ one and not the others makes every copy fall back to the walk, exact but
 without the saving, `structure=` rising), and the `tails=` counter is
 documented as force and joint blocks re-emitted (a force block whose
 `capture_force` hook fails still counts). No rebuild or rerun (comments only).
+
+## As built (step DEP, FULL close-out, 2026-10-31): snapshots off by default (SNAP-off) and the deployed config's keys (RCX-cfg)
+
+Roadmap item 7's "on pass" ("snapshots off in the deployed configuration and
+in the retail default; only the one state transfer remains"), goal 2's "then
+switched off", after HL run 16 passed its three arms
+(`.local-tools/work/HL/hl_result_r16.txt`, the orchestrator's verdict). No
+protocol, journal, engine or simulation change.
+
+**The server's default** (`BallanceMMOServer/config_manager.hpp`
+`physics_snapshot_interval`, `physics_full_snapshot_interval`): 100000 and
+100000 (were 2 and 66) - the value every snapshots-off check ran with
+(`arch_server_lp.sh ... 100000 100000`, every reference set since B5RX).
+SessionStart carries any interval of 255 or more as 255, which the clients
+read as off (`snapshots_run()`); the full snapshot of a body-set change is
+still broadcast and taken for its mechanism names only (RC3). The server's
+own world never read a snapshot; the correction fallback stays a
+configuration (2 / 66). The config file's header text says so
+(`config_manager.cpp`). Checked by loading a config.yml without either key
+with the new x64 server: both written back as 100000.
+
+**The retail default** (adaptation: the design had no client-side knob - a
+client's snapshots were whatever the server's interval said). A core
+setting, `core_config::snapshots` (`client_core.hpp`): true follows
+SessionStart's interval (the headless client's default, unchanged); false
+runs every session of the host as a snapshots-off session whatever the
+server sends - `snapshots_run()` is `config.snapshots &&
+s.snapshot_interval_ < 255`, so both of its readers follow: the RC3 gate in
+`apply_snapshot` (each snapshot still journalled as RECEIVED, its names and
+rows still the registry's, none compared or restored from) and
+`move_own_birth` without own body control (a moved own birth resyncs instead
+of waiting for snapshots, as in every snapshots-off session). The names-only
+log line says which reason applied. The retail core host sets it from a
+file-scope `snapshots_next` (false by default; `session snapshots
+on|off|status`, next-session semantics like `session cache`; no
+`BallanceMMOClient` member). The one effect left of an un-migrated server
+(2 / 66) on a DEP retail client is the snapshot bytes it receives and
+journals; `own_body_backstop` (retail only) still reads their ball rows for
+the own body's presence - a re-reported Physicalize, not a correction - and
+is dormant with the server's snapshots off. The legacy path is untouched.
+
+**The deployed config (RCX-cfg; prepared, not deployed - plan D7).** The
+server writes a missing key's default at load and keeps a stored value
+across rebuilds, so only keys whose default changed after a config.yml was
+written keep an old value. `.local-tools/work/DEP/default_history.py` over
+every `config_manager.hpp` / `.cpp` commit since 2026-09-01: the keys are
+`snapshot_interval` 2 -> 100000 (DEP), `full_snapshot_interval` 66 ->
+100000 (DEP), `trafo_inputs` false -> true (T2 added it off, B9DX on),
+`placement_clones` false -> true (S5 off, S10 on), `proximity_union` false
+-> true (G2 off, G3 on, same day); every other physics key kept its default
+since it was added, so a config that lacks one gets HEAD's value written at
+the first load (`lifecycle_barrier`, removed, is ignored). The okbc.st file
+itself was not read (no access without the user's go); the list is by the
+defaults' history, to be checked against `~/bmmo/config.yml` at the
+deployment. `.local-tools/work/DEP/okbc_config_keys.sh` sets the five keys in
+place (backup `config.yml.pre-dep`, `--dry-run` prints the diff; run it with
+the server stopped), tested on a copy with the old values.
+
+**Checks (quick tier, 7 min).** x64 BUILD-OK (DEPS-OK, `server.cpp.obj`
+records `config_manager.hpp`), x86 CLIENT-BUILD-OK (DEPS-OK,
+`client_core_frame.cpp.obj` records `client_core.hpp`); unit tests 729/729
+(the RC3 test gains a fourth arm: interval 2, a host without snapshots ->
+names only, nothing compared); GCC syntax 33/33 ok; wire check `rSRT ->
+rDEP` over `core_ref_s13`: ALL SAME (44 send traces, 45 journals IDENTICAL).
+One two-copy retail L11 core session (`scripts/retail/dep_smoke`) with the
+Arch server SENDING snapshots (2 / 66, as an un-migrated config would; HLX's
+server binary, the harness writes the intervals): client 1 at the retail
+default received 815 snapshots and compared none (`rollback: snaps=0`, the
+names-only line "this client runs without snapshots (step DEP)"); client 2
+with `session snapshots on` compared 818 (ok 818, mism 0) - the switch
+exists, its correction quality is not judged; both core on, assigned, 53
+copies with signature `5d22d3b5a61c38cb`, mechanisms 23/23, resyncs 0,
+rebases 0, far 0, superseded 0/0.
+
+**Not done / deferred.** The okbc.st deployment and its config edit (the
+user's go, D7). The Arch server binary was not rebuilt for this step: the
+default only reaches a config without the keys and the harness writes both
+intervals, so its runs are unchanged; the next Arch build takes it.
+`docs/rooms-and-sessions-protocol.md` §3's config example and
+snapshot cadence text updated to the new defaults (docs only).
+
+**Gate round (review fix-ups).** (1) The journal records the refusal: the
+journal's header and SESSION record keep the server's interval, so a replay
+of a retail journal recorded against a server still at 2 / 66 could not tell
+that the live client compared and restored from none of the snapshots. The
+core now writes the note "snapshots: this client runs without snapshots
+(step DEP); the session's interval N is not applied" right after the
+journal opens (`client_core.cpp`, after `journal_.open`) when
+`config.snapshots` is false - a NOTE record, no format change; nothing is
+written when the host follows the server (the headless default, so the
+wire check is unaffected). SimTool `--replay-session` only compares FULL and
+RECEIVED checkpoint rows and applies none (`sim_tool.cpp` checkpoint loop),
+so it replays such a journal as the live client ran it; a future
+core-driven replay of retail journals reads the note. The `dep_smoke`
+journals of the implement round predate the note. (2) With rollback off
+(`session rollback off`, a diagnostic mode) the blend ladder still sets the
+balls and mechanisms from every snapshot, whatever `config.snapshots` says,
+as for any interval - the `core_config` comment says so now. (3) The
+move_own_birth no-own-body-control test gains a third arm: interval 2 with a
+host without snapshots resyncs the moved birth like interval 255. Rerun:
+x64 and x86 builds, unit tests, GCC syntax, the wire check.

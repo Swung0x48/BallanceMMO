@@ -142,8 +142,10 @@ namespace bmmo::session {
             // snapshots-off judgement is there to show.
             if (!snapshots_run() && !config.body_set_corrections) {
                 if (s.snapshots_uncorrected_++ < 4)
-                    logf("snapshot of tick %u (%s, %zu rows) taken for its names only: the session's snapshots are off "
-                         "(step RC3)", snapshot.tick, snapshot.full ? "full" : "delta", snapshot.bodies.size());
+                    logf("snapshot of tick %u (%s, %zu rows) taken for its names only: %s", snapshot.tick,
+                         snapshot.full ? "full" : "delta", snapshot.bodies.size(),
+                         config.snapshots ? "the session's snapshots are off (step RC3)"
+                                          : "this client runs without snapshots (step DEP)");
                 return;
             }
             auto entity_of = [&](const bmmo::session::body_state& body) -> std::string {

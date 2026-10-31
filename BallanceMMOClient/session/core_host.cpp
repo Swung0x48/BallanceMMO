@@ -269,6 +269,14 @@ namespace {
     // headless client.  Host-local: nothing goes on the wire.
     std::atomic<uint8_t> capture_cache_next{
         static_cast<uint8_t>(bmmo::session::rollback_engine::capture_cache_mode::on)};
+    // FULL step DEP (roadmap 4.7 "on pass: snapshots off ... in the retail
+    // default"): the NEXT core session runs as a snapshots-off session
+    // whatever interval the server sends (core_config::snapshots false: every
+    // snapshot taken for its names only, none compared or restored from).
+    // 'session snapshots on' brings the snapshot fallback back for the next
+    // session (it then follows the server's interval, as before DEP).
+    // Host-local: nothing goes on the wire.
+    std::atomic<bool> snapshots_next{false};
 
     // ------------------------------------------------------------ the mailbox
     // Design 3.2 "Receive": every Session* opcode's bytes, in arrival order.  A
@@ -1586,6 +1594,8 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // the session's snapshots off, a body-set change's full snapshot is no
     // correction, only names and rows.
     config.body_set_corrections = false;
+    // FULL step DEP: no snapshot correction by default ('session snapshots').
+    config.snapshots = snapshots_next.load();
     // RC2 (b) (step RCB, the user's Q-CPU (b)): the capture's per-body read
     // cache, on as on the headless client; 'session cache off|on|verify'
     // picks it for the next session (FULL step RCV).
@@ -3735,7 +3745,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
 // ---------------------------------------------------------------- the verbs
 
 // session core on|off|status, session force-rollback E:D, session cache
-// off|on|verify|status (FULL step RCV).
+// off|on|verify|status (FULL step RCV), session snapshots on|off|status
+// (FULL step DEP).
 std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     std::istringstream args(rest);
     std::string what, value;
@@ -3794,6 +3805,22 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         }
         if (!value.empty() && value != "status") return "error usage: session cache off|on|verify|status";
         return std::format("ok cache next={} running={}", name(capture_cache_next.load()),
+                           core_session_running() ? 1 : 0);
+    }
+    if (what == "snapshots") {
+        // FULL step DEP: the snapshot fallback (core_config::snapshots) for
+        // the next core session - off (the default: the session runs as
+        // snapshots off whatever the server's interval) or on (it follows the
+        // server's interval).  A running session keeps what it began with.
+        if (value == "on" || value == "off") {
+            snapshots_next.store(value == "on");
+            return std::format("ok session snapshots {}: the next core session {}{}", value,
+                               value == "on" ? "follows the server's snapshot interval"
+                                             : "runs without snapshot corrections",
+                               core_session_running() ? " (the running session keeps its own)" : "");
+        }
+        if (!value.empty() && value != "status") return "error usage: session snapshots on|off|status";
+        return std::format("ok snapshots next={} running={}", snapshots_next.load() ? "on" : "off",
                            core_session_running() ? 1 : 0);
     }
     if (what == "reload") {
@@ -3902,7 +3929,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     return "error usage: session core on|off|status | session force-rollback <every>:<depth> | "
            "session force-rollback at <live>:<depth>[,...] | session stall <ms> | "
            "session drop-birth | session placement | session probes | session activate <script> at b+<n>|<tick> | "
-           "session cache off|on|verify|status";
+           "session cache off|on|verify|status | session snapshots on|off|status";
 }
 
 // net lag <ms> [up|down] [at <tick>] | net blackout <ms> [up|down] [at <tick>]

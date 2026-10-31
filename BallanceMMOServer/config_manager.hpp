@@ -54,13 +54,22 @@ public:
     // collision-overhaul physics sessions (docs/rooms-and-sessions-protocol.md section 3)
     bool physics_enabled = false;
     std::string physics_game_root;                 // directory containing base.cmo
-    uint32_t physics_snapshot_interval = 2;        // ticks between snapshots
+    // Ticks between snapshots.  Off by default since FULL step DEP (roadmap
+    // 4.7 "on pass: snapshots off in the deployed configuration"; goal 2):
+    // 100000, the value every snapshots-off check ran with; SessionStart
+    // carries every interval of 255 or more as 255, which the clients read
+    // as "snapshots off" (client_core.hpp snapshots_run()).  The server's
+    // own world never reads a snapshot.  2 (with 66 below) was the default
+    // before DEP: the correction fallback, kept as a configuration.
+    uint32_t physics_snapshot_interval = 100000;
     // Ticks between FULL snapshots, which the delta interval above does not
     // govern: the cadence sends one regardless, and one more whenever the body
-    // set changes (session/timeline.hpp snapshot_cadence::decide).  Raising
-    // both is how a session is run with the snapshot path all but off, holding
-    // the relayed input stream alone responsible for keeping clients in step.
-    uint32_t physics_full_snapshot_interval = 66;
+    // set changes (session/timeline.hpp snapshot_cadence::decide) - a client
+    // with snapshots off takes that one for its mechanism names only (step
+    // RC3).  Raising both is how a session runs with the snapshot path off,
+    // holding the relayed input stream alone responsible for keeping clients
+    // in step: 100000 since FULL step DEP (66 before).
+    uint32_t physics_full_snapshot_interval = 100000;
     uint32_t physics_input_delay = 6;              // floor for the per-session input delay;
                                                    // the value itself comes from the members' ping
     uint32_t maximum_physics_rooms = 1;

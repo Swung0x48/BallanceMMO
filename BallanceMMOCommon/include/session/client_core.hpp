@@ -1162,6 +1162,22 @@ namespace bmmo::session {
         // retail 'session rollback off', diagnostic modes) the blend ladder
         // still sets the balls from every snapshot, as before.
         bool body_set_corrections = false;
+        // FULL step DEP (roadmap 4.7 "on pass: snapshots off ... in the
+        // retail default"; goal 2: the snapshot corrections switched off):
+        // true follows SessionStart's interval (snapshots_run(): the
+        // server's interval below 255); false runs every session of this
+        // host as a snapshots-off session whatever the server sends - each
+        // snapshot is still journalled and its names and rows still go to
+        // the mechanism registry, but with rollback on none is compared or
+        // restored from (the RC3 gate below the rollback switch; the
+        // diagnostic rollback-off blend ladder still sets the balls and the
+        // mechanisms from every snapshot, as for any interval), the journal
+        // says so in a note at its open, and a moved own birth
+        // without own body control resyncs instead of waiting for the
+        // snapshots (move_own_birth).  The headless client keeps true (its
+        // runs are judged with the server's snapshots off); the retail host
+        // sets false unless 'session snapshots on' asked for the fallback.
+        bool snapshots = true;
         // RC2 (b) (step RCB, the user's Q-CPU (b)): the capture's per-body
         // read cache (rollback_engine::set_capture_cache).  On by default on
         // both hosts; off is the before arm, verify the exactness check
@@ -2058,8 +2074,10 @@ namespace bmmo::session {
         // 255 or more to 255 (server.cpp:942), and 255 is treated as off -
         // a snapshot at most every 255 ticks reconciles nothing in time, so
         // a moved birth without own body control resyncs instead (the safe
-        // side: one extra resync).
-        bool snapshots_run() const { return s.snapshot_interval_ < 255; }
+        // side: one extra resync).  A host that runs without snapshots
+        // (core_config::snapshots false, the retail default since FULL step
+        // DEP) treats every session as off.
+        bool snapshots_run() const { return config.snapshots && s.snapshot_interval_ < 255; }
         void commit_own_birth(const own_birth_report& report);
         void beam_own_ball(uint32_t tick);
         bool write_beam(const std::string& name, const double position[3], uint32_t tick);

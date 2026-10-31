@@ -584,6 +584,15 @@ namespace bmmo::session {
         // The box starts where the session does: at the anchor the server
         // has to agree with, before the tick base is known.
         journal_.open(report.hash, report.build_id, report.own_name, placement);
+        // FULL step DEP: the box records that this host refused the
+        // session's snapshots (core_config::snapshots false, the retail
+        // default) - the interval in the record is the server's, so without
+        // this note a replay of the journal could not tell that the live
+        // client compared and restored from none of them.  Nothing is
+        // written when the host follows the server's interval.
+        if (!config.snapshots)
+            journal_.note("snapshots: this client runs without snapshots (step DEP); the session's interval "
+                          + std::to_string(s.snapshot_interval_) + " is not applied");
         // Step BALA (the airship rule of 2026-10-28): the zone over this
         // world, from the level's airship as the anchor finds it - its
         // starting pose - with the own ball's group.

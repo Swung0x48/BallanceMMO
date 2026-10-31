@@ -17,6 +17,11 @@ of what the code does.
    every peer's physics world (the server's, every client's) is bit-identical.
    Snapshot corrections are not part of the design; they are a fallback kept
    only until the known divergence sources are fixed, and then switched off.
+   **Switched off at FULL step DEP (2026-10-31)**: the server's default
+   intervals are 100000 (off) and the retail client runs every session
+   without snapshot corrections by default; the fallback remains a
+   configuration (`snapshot_interval: 2`, `full_snapshot_interval: 66`, and
+   `session snapshots on` on retail).
 3. **Run-ahead with rollback.** A client runs a few frames ahead of the
    server. A divergence is handled by rewinding to the last frame that was
    not in doubt and replaying the inputs now known. The divergence source is
@@ -195,6 +200,7 @@ broken: server and clients are rebuilt together.
 | Trafo T3 (step TR3b): the core and the headless host, merged onto RC1 and RL1 | 3394ffd | H1 at 150 ms, snapshots off: pieces 150/150 bit-equal on four clients, starved 0/0/0/0 against the control's 0/0/0/0 |
 | Trafo T4 (step TR4): the retail host (core on), bridge v22 | 3940bf3 | one two-copy L11 session: pieces 32/32 bit-equal across the clients (5056 rows), drawn on both |
 | Trafo T5 (step TR5): the records | 168e53e | `engine-changes.md` bridge note v21/v22, core design "As built (step T)", 9.29 |
+| Stage A close-out, "on pass" (FULL step DEP): snapshots off by default - the server's intervals 100000, the retail core's `core_config::snapshots` false (`session snapshots on` = the fallback); the okbc.st `config.yml` keys prepared, not deployed | the DEP commit after f8ad8e87 | retail L11 against a server sending 2 / 66: the default client compared 0 of 815 snapshots, the `on` client 818 (mism 0); wire check ALL SAME |
 
 ## 4. What is left, in order
 
@@ -1406,6 +1412,10 @@ numbers 1-10 are unchanged.
    bit-identical to the server at every checkpoint; and every check below.
    On pass: snapshots off in the deployed configuration and in the retail
    default; only the one state transfer remains.
+   **Closed at FULL step DEP (2026-10-31)**, after HL run 16 passed its
+   three arms (the FULL notes below, "FULL step DEP"): snapshots off in the
+   server's default and the retail default; the deployed server's config
+   change is prepared and waits for the user's go (plan D7).
 
    **Removed at step B9DX** (the user, 2026-10-28, answer 7: the server
    refuses every client without the session core, so no check exists for
@@ -2898,6 +2908,35 @@ numbers 1-10 are unchanged.
      `--loss-seed 0 / 1` on core_ref_s13's swing_snapoff recipe; L11 cross =
      H2's `l11_args.txt` + `--loss-pct 10`, 40 s. `judge_arm.sh` reports
      `pair_order.py`'s split pairs.
+   - **FULL step DEP (2026-10-31; SNAP-off, RCX-cfg) - item 7 closed.** HL
+     run 16 (after HLX) passed all three arms on the headline criteria
+     (`.local-tools/work/HL/hl_result_r16.txt`, the readings above). Then
+     the "on pass": the server's `physics.snapshot_interval` and
+     `full_snapshot_interval` default to 100000 (were 2 / 66; any interval
+     of 255 or more is "off" for the clients, the full snapshot of a
+     body-set change is taken for its names only, RC3), and the core gains
+     `core_config::snapshots` (true = follow the server's interval, the
+     headless default; false = every session runs as snapshots off), which
+     the retail core host sets false unless `session snapshots on` - so a
+     retail client applies no snapshot correction even from a server whose
+     config still says 2 / 66 (rewind-cost-design.md "As built (step
+     DEP)"). RCX-cfg: an existing `config.yml` keeps a stored value across
+     rebuilds, so the okbc.st file needs five keys set by hand -
+     `snapshot_interval` and `full_snapshot_interval` 100000,
+     `trafo_inputs`, `placement_clones` and `proximity_union` true (by the
+     defaults' history since 2026-09-01; the file itself not read) -
+     prepared as `.local-tools/work/DEP/okbc_config_keys.sh`, not run: the
+     deployment waits for the user's go (plan D7). Still open after the
+     close-out, each where it is recorded: SRT's two decisions (the target
+     and the approach for rollbacks a player must not feel; it also owns
+     RTR's E-core L11 own-pair resync; `realtime-design.md` §6), the
+     retail anchor hold made non-blocking (queued into Stage C with R6, the
+     user's answer to SAXH; SAXE's open decision itself was answered by
+     SAXH's start handshake, `lockstep-without-snapshots.md`), D3 Q5 (the
+     PreSimulate entries in the resync record,
+     item 4, deferred), and the Stage C items (R6's in-place beam residual,
+     item 9). The one state transfer (the exact resync) is the only state a
+     client takes from the server by default.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

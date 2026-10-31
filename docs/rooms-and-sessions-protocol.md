@@ -82,7 +82,7 @@ SessionStart, SessionEnd, SessionReady, SessionInput, SessionSnapshot, SessionRe
 - `tick` 长度 1/66 s。每个客户端在收到 `SessionStart` 后先播放 3 秒 “3 - 2 - 1 - Go!” 倒计时（沿用 `countdown_msg` 的提示音与提示行，纯本地效果，不参与确定性），在 “Go!” 这一帧重开当前关卡，`Gameplay_Ingame` 首次激活的行为帧为锚点，锚点的编号由服务端在 `SessionAssign` 里给出：会话开始时在场的成员用**会话起始基数**（见 2.2 的公式），迟到加入者与重同步者用服务端当前 tick 加上同一个前导量。锚点执行会话重置（IVP 时钟归零、`ivp_srand(seed)`），此后每个行为帧一个 tick。
 - 客户端每 tick 发送 `SessionInput`；服务端在收齐所有成员该 tick 的输入、或墙钟超过 `开始时刻 + (tick + input_delay)/66 s` 时模拟该 tick，缺失输入沿用该玩家上一 tick 的输入。
 - `input_delay` 是**每个会话**自己的，在会话开始时定下并写进该会话的 `SessionStart`：取成员里最差的一条链路（GNS 的 `m_nPing`，且用该连接上见过的峰值而不是当下值），按 `单程 × 1.5 + 16 ms` 折成 tick，再夹在 `physics.input_delay`（下限）与 40 tick（上限）之间。窗口装的是**单程**——客户端按自己的时钟跑在服务端调度之前，输入只需单向抵达；乘 1.5 是因为决定输入迟不迟到的是抖动而不是均值，而 RTT 本身已经是平滑过的数。定下之后整场不变：调度的截止时刻是从会话开始时刻带着这个值算出来的，迟到加入者不能把已经在跑的成员的时间线挪走。
-- 服务端每 `snapshot_interval` 个 tick 广播一次 `SessionSnapshot`（不可靠）；每 66 tick 或刚体集合变化时广播 full 快照（可靠，携带机关名字典）。
+- 服务端每 `snapshot_interval` 个 tick 广播一次 `SessionSnapshot`（不可靠）；每 `full_snapshot_interval` 个 tick 或刚体集合变化时广播 full 快照（可靠，携带机关名字典）。FULL 步骤 DEP 起两项默认都是 100000，即快照关闭：只剩刚体集合变化时的 full 快照（以及每 100000 tick、约 25 分钟一次的 full 快照），客户端只取其中的机关名；零售客户端默认（`session snapshots off`）即使服务端仍发快照也不用它们做纠正。
 - 生命周期事件（`SessionEvent`）可靠传输，带发生的客户端 tick（**origin**）；**协议 9 起**服务端在模拟线程上**接受**它时定下应用 tick `applied = max(origin, N)`（N = 该会话下一个要模拟的 tick），恰好在 `applied` 那一步应用，并从接受处转发给**全部**成员（含发送者本人，`player` 字段为来源），`tick = applied`、`origin_tick = origin`。按时到达的事件 `applied == origin`，与以前一样；迟到的事件不再 “late by N” 地只在服务端晚应用，而是各端都在 `applied` 应用（迟到玩家设计 3.1）。
 - **分节是整场会话的输入**（协议 3，`session/sector_union.hpp`）：每一端——服务端世界、每个客户端——都运行**所有成员到过的分节的并集**，且每个分节在每一端都于同一 tick 启动。成员跨过检查点时把 `Sector` 事件盖上 `当前步 + 1 + sector_lead` 的 tick 立即发出（原版链里跑 `Gameplay_SectorManager` 的那一步被扣住，见中和 N3），服务端在该 tick 应用并**不经 Nagle** 转发，其他成员收到后同样在该 tick 应用；随后启动该分节的那一遍管理器运行（`IngameParameter[0,2]=0`、`[0,1]=分节`、`scene->Activate`）在各端按同一节拍规则跑（`session/sector_pacer.hpp`：管理器空闲 3 tick 后一遍，最小的待启动分节先）。**任何一端都不再反激活任何分节**，服务端也不：并集只增不减。迟到加入者与重同步者在各成员最近的 Physicalize 之后补收本场会话的全部 `Sector` 事件。
 - `sector_lead` 同样是每个会话自己的，与 `input_delay` 出自同一次 RTT 测量并写进 `SessionStart`（`session::sector_lead_for_ping`）：`input_delay`（到服务端那一程的单程预算）+ 1 tick（客户端只能在它的**下一步**之前跑管理器）+ 再一份按同一 RTT 折算的单程预算（服务端转发到其他成员那一程）。局域网 9 tick，100 ms RTT 约 15，300 ms 约 33。太短则转发晚于该 tick 到达，那名成员的这个分节从此错相且回滚修不回来（回滚无法重放分节的初始化）；太长只是机关在过线后晚一点启动。
@@ -196,13 +196,14 @@ rooms:
 physics:
   enabled: true
   game_root: "C:/Ballance"            # base.cmo 所在目录（含 Bin/、3D Entities/ 等）
-  snapshot_interval: 2                # tick
+  snapshot_interval: 100000           # tick；FULL 步骤 DEP 起默认 100000 = 快照关闭（≥ 255 客户端一律视为关闭）；2 是之前的默认，作为兜底配置保留
+  full_snapshot_interval: 100000      # tick；DEP 起默认 100000（之前 66）；刚体集合变化时的 full 快照照发，快照关闭的客户端只取其中的机关名
   input_delay: 6                      # 输入宽限的**下限**（tick）；每个会话开始时按成员里最差的 RTT 自行决定实际值
   spawn_impulse: 3.0                  # m/s；每次出生 Physicalize 的踢出速度，0 = 关闭；单人会话强制 0；出生幽灵球开启时（协议 15 起每个构建）与 spawn_spacing 一起被忽略，SessionStart 两项都发 0（步骤 SPX）
   maximum_physics_rooms: 1            # M3 只验证过单房间
   debug_trace: false                  # 每 tick 诊断日志（rng/清醒刚体变化、输入沿、精确核心转储）；客户端用自动化命令 session trace on 配对
   event_rate_limit: 20                # 每玩家每秒上报事件数上限，超出部分丢弃；0 = 不限
-  trafo_inputs: false                 # 协议 11：世界选项 WORLD_TRAFO_INPUTS（变球作为输入）；会话拒绝没有 CAP_TRAFO_INPUTS 的成员
+  trafo_inputs: true                  # 协议 11：世界选项 WORLD_TRAFO_INPUTS（变球作为输入）；会话拒绝没有 CAP_TRAFO_INPUTS 的成员；B9DX 起默认开，写过的 config.yml 保留原值，要开需手改
   placement_clones: true              # 协议 12：世界选项 WORLD_PLACEMENT_CLONES（小节摆放）；会话拒绝没有 CAP_PLACEMENT 的成员；写过的 config.yml 保留原值，要开需手改
   proximity_union: true               # 协议 16：世界选项 WORLD_PROXIMITY_UNION（邻近并集，BodyRevived 退役）；关 = 反向对照与旧 journal 的重放
   player_mechanisms: true             # 协议 19：世界选项 WORLD_PLAYER_MECHANISMS（每个玩家一份机关逻辑，K = maximum_members 夹在 [1, 64]，加入顺序限于 K 以下）；只在 proximity_union 开时生效；关 = 反向对照

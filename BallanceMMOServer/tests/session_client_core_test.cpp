@@ -3611,15 +3611,21 @@ namespace {
     // the same snapshot with snapshots on, or with the pre-RC3 switch
     // (--body-set-corrections, the control arm), rewinds as before.  The
     // default is RC3's (step B5RX: work as if snapshots did not exist).
+    // FULL step DEP: a host that runs without snapshots
+    // (core_config::snapshots false, the retail default) takes the same
+    // snapshot of a snapshots-on session (interval 2) for its names only too.
     TEST(SessionClientCoreSnapshot, ASnapshotsOffSessionTakesABodySetSnapshotForItsNamesOnly) {
         EXPECT_FALSE(bmmo::session::core_config{}.body_set_corrections) << "snapshot-free by default";
+        EXPECT_TRUE(bmmo::session::core_config{}.snapshots) << "the server's interval decides by default";
         struct arm {
             uint8_t interval;
             bool corrections;
             bool rolls;
+            bool host_snapshots = true;
         };
-        for (const arm a: {arm{255, false, false}, arm{255, true, true}, arm{2, false, true}}) {
-            SCOPED_TRACE("interval " + std::to_string(a.interval) + (a.corrections ? ", --body-set-corrections" : ""));
+        for (const arm a: {arm{255, false, false}, arm{255, true, true}, arm{2, false, true}, arm{2, false, false, false}}) {
+            SCOPED_TRACE("interval " + std::to_string(a.interval) + (a.corrections ? ", --body-set-corrections" : "")
+                         + (a.host_snapshots ? "" : ", host without snapshots"));
             flow_fake fake;
             fake.driven = "Ball_Wood";
             auto platform = fake.make_flow();
@@ -3649,6 +3655,7 @@ namespace {
             run_to_tick_125(core, fake);
             core.config.rollback = true;
             core.config.body_set_corrections = a.corrections;
+            core.config.snapshots = a.host_snapshots;
             state_of(core).snapshot_interval_ = a.interval;
             state_of(core).own_physicalized_ = true;
             bmmo::session::rollback_tracked tracked;
@@ -3665,8 +3672,11 @@ namespace {
             EXPECT_EQ(state_of(core).snapshots_uncorrected_, a.rolls ? 0u : 1u);
             const auto calls = since(fake.calls, from);
             const bool logged = std::find(calls.begin(), calls.end(),
-                                          "log:0:snapshot of tick 122 (full, 1 rows) taken for its names only: the session's "
-                                          "snapshots are off (step RC3)") != calls.end();
+                                          a.host_snapshots
+                                              ? "log:0:snapshot of tick 122 (full, 1 rows) taken for its names only: the session's "
+                                                "snapshots are off (step RC3)"
+                                              : "log:0:snapshot of tick 122 (full, 1 rows) taken for its names only: this client "
+                                                "runs without snapshots (step DEP)") != calls.end();
             EXPECT_EQ(logged, !a.rolls);
             EXPECT_EQ(std::find(calls.begin(), calls.end(), "keep_live_cells:exit:rolled back") != calls.end(), a.rolls);
         }
@@ -4541,17 +4551,27 @@ namespace {
             EXPECT_EQ(since(fake.calls, restore), out);
             EXPECT_FALSE(steps{core}.destroy_moved_own_birth("Ball_Wood", 123, destroyed));
         }
-        for (const uint8_t interval: {uint8_t{2}, uint8_t{255}}) {
+        // FULL step DEP: a host that runs without snapshots
+        // (core_config::snapshots false, the retail default) resyncs a moved
+        // birth of a snapshots-on session (interval 2) as if they were off.
+        struct no_control_arm {
+            uint8_t interval;
+            bool host_snapshots;
+        };
+        for (const no_control_arm a: {no_control_arm{2, true}, no_control_arm{255, true}, no_control_arm{2, false}}) {
+            SCOPED_TRACE("interval " + std::to_string(a.interval) + (a.host_snapshots ? "" : ", host without snapshots"));
+            const uint8_t interval = a.interval;
             flow_fake fake;
             session_client_core core(fake.make_flow(), session_capabilities{});
             run_to_tick_125(core, fake);
+            core.config.snapshots = a.host_snapshots;
             state_of(core).snapshot_interval_ = interval;
             state_of(core).own_life_ = {own_birth(122)};
             fake.bodies_there = {"Ball_Wood"};
             core.on_session_event(own_echo(124, 122, bmmo::session::EVENT_STATE_MOVED));
             const size_t from = fake.calls.size();
             steps{core}.process_own_echoes();
-            if (interval == 2) {
+            if (interval == 2 && a.host_snapshots) {
                 EXPECT_TRUE(since(fake.calls, from).empty()) << "snapshots run: left to them";
                 EXPECT_FALSE(state_of(core).own_life_[0].retired);
             } else {
