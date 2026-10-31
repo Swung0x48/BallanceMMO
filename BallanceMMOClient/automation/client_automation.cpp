@@ -395,7 +395,10 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // ingame_script=1 is the fix (the level's per-frame world work, the
         // BallManager death test included, keeps running while the world steps),
         // and every entry's now=0 is a block whose target the session emptied.
-        return "ok " + pause_scripts_status();
+        // FULL step ESCX: a core session adds its own mute and the ESC menu
+        // overlay (session/menu_overlay.hpp).
+        const std::string overlay = bmmo::session::retail::menu_overlay_status(m_bml->GetCKContext());
+        return "ok " + pause_scripts_status() + (overlay.empty() ? "" : " " + overlay);
     }
     if (verb == "objects") {
         auto* context = m_bml->GetCKContext();

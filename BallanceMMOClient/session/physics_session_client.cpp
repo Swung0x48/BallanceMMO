@@ -584,7 +584,9 @@ void BallanceMMOClient::pause_clock_restore() {
 // blocks - and Gameplay_Events the level's event scripts.  Gameplay_Tutorial is
 // not in this set on purpose: the menu stopping the tutorial is retail
 // behaviour with no consequence for the world, and the unpause chain resumes it
-// without a reset.
+// without a reset.  (That is this legacy path's rule.  A core session keeps the
+// tutorial and the points timer running too and takes out the ESC re-pause:
+// FULL step ESCX, session/menu_overlay.hpp.)
 namespace {
     const char* const kSessionWorldScripts[] = {"Gameplay_Events", "Gameplay_Ingame"};
     constexpr int kSessionWorldScriptCount = 2;

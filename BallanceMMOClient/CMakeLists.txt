@@ -120,6 +120,7 @@ set(BMMO_CLIENT_HDR
         automation/command_pipe.h
         session/physics_session.hpp
         session/core_host.hpp
+        session/menu_overlay.hpp
         session/session_journal_client.hpp
 )
 set(BMMO_CLIENT_SRC

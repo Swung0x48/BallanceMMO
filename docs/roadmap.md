@@ -1343,6 +1343,18 @@ numbers 1-10 are unchanged.
    which Gameplay_Events work must run while paused - the level's event
    scripts were the reason it is kept); (c) leave it, documented (the menu's
    own Continue entry, not exercised, may still resume).
+   **Decided 2026-10-30 (the user, RK3E): the menu is an overlay in a core
+   session, the game keeps running as with no menu, the own ball takes no
+   keys while it is open. Built at FULL step ESCX (2026-10-31,
+   `BallanceMMOClient/session/menu_overlay.hpp`, core host only):** the ESC
+   block's Key State held while the menu is open (vanilla's stale TRUE), the
+   pause chains' Gameplay_Tutorial targets and the All_Gameplay pause
+   listeners (Gameplay_Energy's points timer, Gameplay_Blitz) re-pointed at
+   session constants; retail L1 + L8: 0 same-frame pairs, tutorial / timer /
+   world / own ball run on through every menu period, own input neutral,
+   FINAL rows bit-equal (L8: client 2's ball, which opened no menu,
+   rotation-only 2.98e-8 - SLX's known FINAL-row read)
+   (`record-format-gaps-design.md` "As built (step ESCX)").
 7. **Stage close-out (the one FULL verification):** four clients, 150 ms,
    10 % loss, snapshots off: the spawn pile and every mechanism
    bit-identical to the server at every checkpoint; and every check below.

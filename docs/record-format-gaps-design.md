@@ -2305,3 +2305,140 @@ frame 10 (tick 17).
   predates the core), on every level, not caused by this step; the menu's
   own Continue entry was not exercised. Queued as its own item in
   `docs/roadmap.md` §4 item 6 (**RK3E**); options there.
+
+## As built (step ESCX, FULL close-out, 2026-10-31): RK3E - the ESC menu as an overlay in a core session
+
+The user's decision (2026-10-30, RK3E): in a session the ESC menu opens,
+closes and works, and the game keeps running while it is open as if it were
+not; the own ball takes no keys while it is open (its physics runs on). RT2
+(above) found the symptom - the closing ESC re-paused in the same frame -
+and its cause (Gameplay_Events' ESC Key Event stays live because a session
+keeps the script running).
+
+**Built** (retail only, host-local, no wire or journal change, no
+`BallanceMMOClient` member; core session only - the legacy path and offline
+play are unchanged): `BallanceMMOClient/session/menu_overlay.hpp`, a
+file-scope `core_menu_overlay` in `core_host.cpp` - resolved at the anchor
+right after `pause_scripts_resolve()`, kept in the frame guard next to
+`pause_scripts_apply()` (`IsIngame() && IsPaused()`, the mute's own test),
+handed back in `core_host_end_local` (its status logged there). Three
+independent pieces, each found structurally (one that does not match is
+logged as an error and left out, the others still apply):
+
+1. **The ESC re-pause.** Vanilla ignores the closing ESC because the pause
+   stops Gameplay_Events with the Key Event's `Key State` output still TRUE
+   from the opening press (Key Event fires Pressed only on a FALSE -> down
+   edge; the first release afterwards resets it). The overlay reproduces
+   exactly that: while the menu is open the block's Key State is written
+   TRUE every frame; when it closes nothing is written and the block resets
+   itself on the key's release. The block is the Gameplay_Events Key Event
+   on ESC whose Pressed reaches a "Pause Level" Send Message within 12
+   links; accepted only with one key, an unlinked Released (it fires on each
+   frame's release while the menu is open) and a Key State without
+   destinations. **Adapted:** the first form required exactly one ESC Key
+   Event in Gameplay_Events; the level has two (#30140 and the level end's
+   "3 keys" ESC / Space / Enter, #30400), so the run `scripts/retail/escx_l1`
+   refused the piece ("2 Key Event(s) on ESC (of 6)") and re-paused as
+   before; the selection is the reach test.
+2. **The tutorial.** Event_handler's Pause Level Deactivate Script #4029 and
+   Unpause Level Activate Script #2193 (Gameplay_Tutorial) re-pointed
+   (`SetDirectSource`) at a session constant holding no script (CK_ID 0 - the
+   blocks act on nothing, as `pause_scripts_resolve`'s emptied targets).
+   A re-pointed input rather than an emptied parameter, so no reader check
+   is needed, and not an entry of `kSessionWorldScripts`, which the legacy
+   path shares (its comment now says so).
+3. **The timers.** Every Switch On Message of a script on All_Gameplay that
+   waits for Pause / Unpause Level: Gameplay_Energy #29693 (the points
+   timer's TT_Timer Pause / Play; inputs 0, 2) and Gameplay_Blitz #35680 (the
+   thunderstorm's flashes, a Binary Memory; inputs 0, 1; cosmetic, its
+   Random block is not one the session patches) re-pointed at a session
+   constant holding a message type nobody sends (`AddMessageType`, 52 on
+   L1 / L8). "Counter inactive" / "Counter active" keep working. **Adapted:**
+   Gameplay_Blitz was found by the anchor's census (the first run), not in
+   the plan; it is the same kind of pause listener. The census left after the
+   overlay: Event_handler #3523 (the menu itself) and Sound_Manager #7190
+   (Unpause: the menu's audio) - the menu's own work, left alone with the
+   cursor, End / Start Music, BallNav (de)activate and the Unpause chain's
+   Gameplay_Refresh activation (DX2 holds its tutorial write).
+
+The own ball's neutral input while the menu is open was already built
+(`host.input_muted`, core_host.cpp, recorded as `paused` frames with keys 0)
+and is unchanged. The automation's `pausechain` gains, in a core session,
+`core_muted=` (the core's mute; the line's `muted=` is the legacy path's)
+and the overlay line (`esc`, `esc_state`, `esc_writes`, `openings`,
+`tutorial=k/n`, `timer=k/n` re-pointed).
+
+**Checks** (`.local-tools/work/ESCX/escx_retail.py`, two retail copies, the
+Arch server of RCB's tree, snapshots off, trafo inputs and placement on;
+`scripts/retail/escx_l1b`: L1 offline control, an L1 session, then L8 in the
+same game processes; judges `menu_periods.py`, RT1's `rt1_judge.py` /
+`final_fields.py`):
+
+- x86 CLIENT-BUILD-OK (DEPS-OK). No shared or headless file changed: no x64
+  build, wire check, GCC check or unit test is reachable from it.
+- 0 same-frame Unpause / Pause pairs (13 PauseLevel, 10 UnpauseLevel; the
+  first run with piece 1 refused: 3 pairs). Per session, menu periods from
+  the log's mute lines: L1 325-490, 646-909, 978-1072 (left with Enter on
+  the menu's Back), 1165-1254, 1352-1397 (the `restart`), 1560-1757 (on the
+  replayed tutorial's text); L8 325-489, 645-910, 978-1072 (Back),
+  1166-1255. Every menu period's own input frames: keys 0, flagged paused
+  (165 / 263 / 94 / 89 / 45 / 197 and 164 / 265 / 94 / 89).
+- The world and the own ball run on: the own ball moved 5.3 / 6.1 / 0.23 /
+  0.14 m (L1) and 7.2 / 5.8 / 0.22 / 0.15 m (L8) inside the periods; client
+  2's ball (holding up) 57.7 m and 36.2 m inside L8's periods 1 and 4.
+  The scripts: `ingame_script=1 events_script=1` in every open probe,
+  `tutorial_script=1` on the replayed tutorial with the menu open (C1), and
+  ESC closed it (C2 `paused=0`); Enter afterwards made the own ball (C3).
+  The points timer: 985 -> 980 over 2.6 s with the menu open (L1), 984 ->
+  979 (L8); offline 1000 -> 1000 over 1.6 s paused.
+- FINAL rows (`rt1_judge.py`): L1 every body bit-equal on both clients
+  (1065 common ticks: own 631 / 664 rows, mirrors, 8/8 mechanisms). L8: own
+  ball of client 1 (the menu's), mechanisms 2/2 bit-equal; client 2's ball
+  (no menu) rotation only, 375 rows, max 2.98e-8, position / velocities 0 -
+  on its own FINAL rows and on client 1's mirror alike: the FINAL-row x87
+  read, a report difference (session-client-core-design "As built (step
+  SLX)": the same 2.98e-8 maximum on `slx_ctl`), not this step's.
+- Offline control (the same build, before the session): ESC pauses
+  (`paused=1`, ingame / events / tutorial scripts 0, factor 0, points frozen),
+  the second ESC resumes with one UnpauseLevel - vanilla unchanged.
+
+- Hand-back: both clients log "ESC menu overlay at the end ... tutorial=2/2
+  timer=4/4" at each session's end (the room close; client 2's session was
+  ended by the server), and `restore()` re-points every input back
+  (`ShareSourceWith` / `SetDirectSource`, `depth_test.hpp`'s pattern).
+- **A session that ends with the menu open** (the review's finding, fixed
+  in the gate round): an immediate hand-back brought RK3E's symptom back
+  once - the session kept Gameplay_Events running, so with the hold gone
+  the closing ESC fired the Key Event's Pressed -> "Pause Level" through
+  the restored chains in the frame Menu_Pause's ESC sent "Unpause Level".
+  `menu_overlay::end()` (from `core_host_end_local`) hands the tutorial and
+  timer inputs back at once (the Unpause chain's Gameplay_Tutorial
+  activation #2193 has Reset FALSE, the timer's Play on a running timer
+  changes nothing) and keeps the ESC hold while the menu stays open;
+  `release()`, called every frame from `core_host_process` outside a core
+  session, lets it go when the menu closes or the level is left. Gate run
+  `scripts/retail/escx_endopen` (`escx_retail.py endopen`, L1, the same
+  server and settings): ESC opens the menu in the session, `mmo room close`
+  ends it with the menu open (log: "the ESC hold stays until the menu
+  closes"), one ESC closes it - one UnpauseLevel, no PauseLevel, "the ESC
+  hold is released" in the same frame, `paused=0` 1.0 s and 2.5 s later,
+  points 988 -> 985; then the vanilla pause after the session: ESC ->
+  `paused=1`, `ingame_script=0 events_script=0`, points 984 -> 984 over
+  1.5 s, ESC resumes (`paused=0`, scripts 1). 0 same-frame pairs (3
+  PauseLevel, 2 UnpauseLevel). The message type the timer piece registers
+  (`AddMessageType`) stays registered for the process: the message manager
+  has no removal, the numbering is local and compared nowhere.
+
+**Not run / not covered:** the menu's Restart Level / Exit Level entries
+through the menu's own keys (the run used the `restart` verb, RT2's path,
+and the room close + `exitlevel` between the levels; Menu_Pause is not
+touched, so its entries are the retail ones); Options; a level with a
+thunderstorm (Gameplay_Blitz's re-pointing is logged, its flashes during a
+menu period not observed); the headless client has no menu (nothing to do).
+Observation: a key the menu reads also reaches the running scripts, as with
+no menu - Enter on the menu's Back also reaches a tutorial text waiting for
+RETURN. A note for the user, not decided here: if that text is the one that
+releases the own ball, the ball is released by a key pressed in the menu;
+its keys stay neutral until the menu closes either way (the mute), and the
+tutorial's time-factor writes are held (`pause_clock_apply`, RK3H), so
+nothing compared between worlds changes.

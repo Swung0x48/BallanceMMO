@@ -30,6 +30,10 @@ namespace bmmo::session {
         // branch's own exit on a countdown restart (OnStartLevel's timer)
         // stays out of it.  False whenever no core session runs.
         bool core_tutorial_owned();
+        // FULL step ESCX: the core host's mute and the ESC menu overlay, for
+        // the automation's 'pausechain' (session/menu_overlay.hpp); empty
+        // while no core session runs.
+        std::string menu_overlay_status(CKContext* context);
         // Step Q: the level's proximity countdowns as loaded (a file-scope
         // static of core_host.cpp; both paths' anchors restore them).
         bmmo::game::proximity_countdown_state& level_proximities();
