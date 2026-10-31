@@ -2468,6 +2468,132 @@ measured in "The activation replay on the networked path"), and one lane
 client crashed at shutdown in `PhysicsHingeCallBack` under
 `CKContext::Reset` after reporting exit code 0 - noted as open.
 
+**FULL step SAX (2026-10-30; blocked on the user, never committed - SAXE below
+replaced it): eight copies 30 ms apart.** The
+three copies 40 ms apart above did not survive the harness's loss burst. A
+burst counts datagrams, not milliseconds (`scripts/arena_map_test.py`'s
+proxy: a drop takes the next `burst - 1` datagrams in the same direction),
+and between the start barrier and the session's first tick the downlink
+carries nothing else, so the reliable copy and its three copies were four
+consecutive datagrams however far apart in time: DFR's swing_snapoff cell
+(150 ms, 10 % loss, burst 4, seed 0) lost all four (proxy0 +11.092 s: 51 B,
+then 48 B x3), the reliable retransmit came ~330 ms later, the member started
+~25 ticks late and DX6's starved rule resynced it (rDX7 and HEAD alike). No
+spacing fixes a count-shaped burst on an idle link; only the count does. So
+`BallanceMMOServer/sim/assign_copies.hpp`: `kAssignRepeats` 8 copies
+`kAssignRepeatSpacing` 30 ms apart (two main-loop passes, the server's
+lifecycle-event spacing), each still from a pass of its own - any one burst of
+up to 8 datagrams leaves one (8 is the harness's longest recipe burst), and
+they span 240 ms, inside the ~330 ms the reliable retransmit takes at 150 ms
+each way, so a time-shaped outage shorter than that leaves one too. The copies
+cannot be retired early: a `session_input_msg` names no epoch, and a resynced
+member's old numbering already sends ticks at or after the new base (A3), so
+no uplink frame proves the new assignment arrived. A `SessionLead` keeps the
+old three copies 40 ms apart (`kLeadRepeats`): it rides a downlink that
+carries the relayed datagrams between its copies. Server only; no protocol,
+client or journal change. Unit test `AssignCopies.OutlastABurstOfLostDatagrams`
+(the proxy's model, `first_assign_copy_through_burst`).
+
+**Measured** (`maps/arena-test/dx8_lcm/sax_b4_s0`, the same cell): 0 resyncs
+on all four clients, FINAL rows exact (H4's `final_cmp.py`: own, mirror and
+body max 0.0000 m on every client), the harness's server replay 3770/3770.
+The burst did hit client 0's assignment - the reliable copy and the first two
+copies (`burst`), copy 3 through at +86 ms - but it had begun one datagram
+earlier than DFR's, on a 30 B datagram a second before, so the old schedule
+would have survived this one too (its copy 3 at +120 ms): the proxy's random
+stream is shared by both directions, so a seed does not fix where a burst
+falls and the cell is not a repeatable test of the alignment. **What the copies
+do not remove:** a member whose assignment goes through a burst of b still
+starts `b x 30 ms` late (here 86 ms, 5.7 ticks) and, with
+`physics.lead_adjust` off, stays that late: client 0's event margins at the
+server were 5-6 ticks below the other three all run (Physicalize 0-1 against
+6). One of its events was then late: the beam's Physicalize at origin 701
+(`late=5`, margin -5), whose reliable send and three dense copies were lost to
+an uplink burst of 4 (proxy0 69409.39-69409.44) - 5 ticks that a member on time
+absorbs inside its margin of 6. In DFR's alignment (a burst of 4 beginning at
+the reliable copy) the first copy through is copy 4 at +120 ms, 8 ticks, a
+margin of about -2 on every Physicalize of that member with no second burst at
+all. FINAL rows stay exact either way: it is relay timeliness, not a
+divergence. Left to a decision (FULL plan SAX's "0 late events"): accept the
+start lateness, copies one main-loop pass apart (~15 ms, 16 for the same span:
+4 ticks for a burst of 4), copies that carry their own age so the client
+starts on schedule (a protocol and client-core change), `lead_adjust` on, or
+a volley (k extra copies in the same pass, each flushed into a packet of its
+own, plus the spaced ones for a time-shaped outage: against a count-shaped
+burst the lateness falls to about 0, server only - not yet measured whether
+GNS really sends them as separate packets). The live cell is therefore NOT
+evidence that the eight copies fix DFR's case (its burst missed the alignment);
+the only evidence for that is the proxy model in the unit test, which does not
+exercise `send_assign_repeats`.
+
+**As built (FULL step SAXE, 2026-10-31): the volley cannot be built on this
+GNS; the fallback (b), sixteen copies one main-loop pass apart.** The user's
+Q-SAX answer was (e): a volley of k copies in the assignment's own pass, each
+sent `k_nSteamNetworkingSend_UnreliableNoNagle`, so a count-shaped burst
+leaves one at once. The GNS source says no send flag builds a datagram in the
+caller's thread: `SendMessageToConnection` passes no think-immediately out
+parameter (`csteamnetworkingsockets.cpp:1248-1255`); NoNagle only clears the
+Nagle timers and queues the message (`steamnetworkingsockets_snp.cpp:421-429`),
+then `SetNextThinkTimeASAP` (`:526`); even `k_nSteamNetworkingSend_UseCurrentThread`
+ends in `CheckConnectionStateOrScheduleWakeUp`, which is `SetNextThinkTimeASAP`
+under a FIXME (`steamnetworkingsockets_connections.cpp:3317-3323`); the service
+thread then fills one packet with every segment queued by then (`snp.cpp`
+~2430-2500). The send-rate limiter is not what holds them (the token bucket
+starts at one MTU, `k_flSendRateBurstOverageAllowance`, and the volley is
+~130 bytes). The wire agrees: the test flag `--assign-volley 5` (server
+test builds; `maps/arena-test/saxe/volley5_wire`, 150 ms, no loss) put the
+reliable copy and its five volley copies into ONE 130-byte downlink datagram
+on all four members (51 bytes alone), so a burst of 1 takes all six. Per the
+plan the server falls back to (b): `sim/assign_copies.hpp`
+`assign_copy_schedule`, sixteen copies, one per main-loop pass (a pass
+counter, never the reliable one's pass, never sooner than 5 ms after the
+datagram before - an assignment the simulation thread makes just before a
+pass boundary would otherwise share the reliable one's packet), spanning
+~242 ms like SAX's eight; the reliable copy now goes `ReliableNoNagle` so it
+leaves at once. The wire: sixteen 48-byte datagrams 15.1-15.4 ms apart after
+the 51-byte reliable one on every member. The harness proxy gained
+`--drop-down N:ANCHOR:COUNT` (a deterministic downlink burst from a datagram
+index or the first datagram of a size; `sizeA` anchors the reliable
+SessionAssign, 51 bytes) and its selftest.
+
+**Measured** (`maps/arena-test/saxe/b_ctl_b4`: swing_snapoff, 150 ms, 10 %
+loss, burst 4, seed 0, snapshots off, plus `--drop-down 0:size51:4`): the
+forced burst took client 0's reliable copy and copies 1-3, and the random
+loss then took copies 4-7 as well, so its first copy through was copy 8 at
++121.7 ms; the random loss alone gave client 2 DFR's alignment (a burst of 4
+from the reliable copy), first copy through copy 4 at +60.8 ms. (The proxy's
+forced drop then skipped the loss rule's rng draws, which shifted seed 0's
+pattern after it - why client 0 saw a burst of 8, not 4. Fixed in the gate
+round: a forced datagram now takes the draws it would have taken and is
+dropped after them; the selftest checks the stream stays aligned. A clean
+cell - the forced burst alone at 0 % loss - was over the step's live-run cap
+and is deferred to the close-out; the burst-4 figure above is client 2's,
+from random loss.) Result: 0
+resyncs on all four, 0 late member events (server `S5 event` late=0
+throughout), the harness's server replay 3775/3775, FINAL rows exact on all
+four clients (H4's `final_cmp.py`: own, mirror and body max 0.0000 m). The
+start lateness is what (b) cannot remove: one pass (one tick) per datagram the
+burst took - client 0's beam-event margins at the server 0-3 ticks against
+7-9 on the two members on time, client 2's 4-6. A member started b ticks late
+keeps b ticks less margin all session (`physics.lead_adjust` off); client 0
+reached margin 0 on two Physicalize events. The plan's "at most 1 tick late"
+is therefore not met by (b); the choice of what to do about it is the user's
+(FULL plan SAXE; roadmap §4 item 7). The options put to the user, unranked:
+(1) keep (b), about one tick per lost datagram, built; (2) a volley paced by
+GNS's queue, server only, no protocol change, in one of two shapes - (2a) in
+the main loop, waiting for each copy to leave (`GetConnectionRealTimeStatus`
+pending bytes 0) before queueing the next, which holds `state_mutex_` k times
+the service thread's wake latency and can delay the simulation thread's
+callbacks, or (2b) a small sender outside `state_mutex_` (its own thread or a
+timer) that `send_session_assign` hands the bytes to, which sends the next
+copy once the queue is empty or after a fixed 2-3 ms, without blocking the
+main loop; either way the lateness is about b times the service thread's wake
+latency, unmeasured - the number to measure first; (3) copies that carry
+their age so the client starts on schedule (a protocol and client-core
+change); (4) `physics.lead_adjust` on, re-anchoring a late member (a session
+default changes); (5) a GNS submodule patch that sends in the caller's thread
+(a third-party fork).
+
 ### The lifecycle events, repeated (2026-10-21, protocol 6)
 
 The relay's loss runs left the lifecycle events as the next late thing: a

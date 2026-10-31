@@ -30,6 +30,7 @@
 #include "sim/crash_report.hpp"
 #include <session/io_pool.hpp>
 #include "sim/late_tick.hpp"
+#include "sim/assign_copies.hpp"
 #include <physics/physics_state.hpp>
 #include <session/lifecycle.hpp>
 #include <session/input_relay.hpp>
@@ -55,6 +56,13 @@ public:
     // every build without the flag): sent at once.
     void set_test_hold_member_ms(uint32_t ms) { test_hold_member_ms_ = ms; }
     uint32_t test_hold_member_ms() const { return test_hold_member_ms_; }
+    // --assign-volley K (FULL step SAXE, test builds only): K extra
+    // unreliable copies of every SessionAssign in the reliable one's own pass,
+    // each sent k_nSteamNetworkingSend_UnreliableNoNagle - the user's Q-SAX
+    // (e) as specified, kept so the wire can show what GNS makes of it
+    // (sim/assign_copies.hpp: one datagram, not K).  0 (the default, and
+    // every build without the flag): no volley.
+    void set_test_assign_volley(int k) { test_assign_volley_ = k; }
 
     // Main network loop. Each iteration:
     //   1. update(): drain incoming messages and run connection callbacks;
@@ -80,6 +88,7 @@ public:
     // SessionReady has no ticks at all, and tick() is skipped entirely unless
     // the server is ticking.  Runs before the tick broadcast every iteration.
     bool update() override {
+        main_pass_.fetch_add(1, std::memory_order_relaxed);   // step SAXE: before this pass's messages
         const bool had_messages = role::update();
 #if BMMO_BUILD_SIM
         {
@@ -563,8 +572,12 @@ public:
     // All of these run with state_mutex_ held; the runner callbacks take it
     // themselves because they arrive on the simulation thread.
 
-    static constexpr int kAssignRepeats = 3;   // unreliable copies of a SessionAssign after the reliable one
-    static constexpr std::chrono::milliseconds kAssignRepeatSpacing{40};   // ...this far apart, each in its own packet
+    // A SessionAssign's unreliable copies: bmmo::sim::kAssignRepeats, one per main-loop pass
+    // (sim/assign_copies.hpp, steps SAX / SAXE: enough of them to outlast a burst of lost datagrams).
+    // A SessionLead's keep the assignment's pre-SAX pattern: it rides a downlink that already
+    // carries the relayed datagrams between its copies, and a late one only delays a lead change.
+    static constexpr int kLeadRepeats = 3;   // unreliable copies of a SessionLead after the reliable one
+    static constexpr std::chrono::milliseconds kLeadRepeatSpacing{40};   // ...this far apart, each in its own packet
 
     struct physics_session_state {
         uint32_t id = 0, room = 0;
@@ -650,14 +663,13 @@ public:
         std::map<uint64_t, awaiting_event> awaiting_events;
         uint64_t next_event_token = 1;
         uint64_t restamped_events = 0, superseded_births = 0;
-        // Assignments still to be repeated unreliably, one copy every
-        // kAssignRepeatSpacing from the main loop (send_session_assign,
+        // Assignments still to be repeated unreliably, one copy per main-loop
+        // pass (bmmo::sim::assign_copy_schedule; send_session_assign,
         // send_assign_repeats).
         struct assign_repeat {
             HSteamNetConnection to;
             uint32_t first_tick;
-            int remaining;
-            std::chrono::steady_clock::time_point next_due;
+            bmmo::sim::assign_copy_schedule schedule;
             // Protocol 10: every copy carries the reliable one's flags
             // (ASSIGN_FLAG_STATE_FOLLOWS), whichever arrives first.
             uint8_t flags = 0;
@@ -678,7 +690,7 @@ public:
             int outstanding_k = 0;      // its delta: what an ack may apply at most (lateness_bound_applied)
         };
         std::map<HSteamNetConnection, member_lead> leads;
-        // A SessionLead's unreliable copies, one every kAssignRepeatSpacing
+        // A SessionLead's unreliable copies, one every kLeadRepeatSpacing
         // after the reliable one, retired by its ack or a newer assignment.
         struct lead_repeat {
             HSteamNetConnection to;
@@ -1783,7 +1795,7 @@ public:
 
     // Simulation thread: a lead decision for a member that declared CAP_LEAD
     // (late-player design 2.2).  Reliable, then three unreliable copies 40 ms
-    // apart from the main loop (the SessionAssign pattern), retired early by
+    // apart from the main loop (the SessionAssign's pre-SAX pattern), retired early by
     // the ack.  A decision taken under an assignment the member has since
     // left (a resync crossed it on its way here) is not sent: the client
     // would drop it by its epoch anyway, and nothing would ever ack it.
@@ -1817,7 +1829,7 @@ public:
         send(c, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         retire_lead_repeats(s, c);
         s.lead_repeats.push_back(physics_session_state::lead_repeat{
-            c, notice.id, msg.raw.str(), kAssignRepeats, std::chrono::steady_clock::now() + kAssignRepeatSpacing});
+            c, notice.id, msg.raw.str(), kLeadRepeats, std::chrono::steady_clock::now() + kLeadRepeatSpacing});
         lead->second.outstanding = notice.id;
         lead->second.outstanding_k = notice.k;
         Printf("Physics session %u: SessionLead %u to %s: %+d ticks, held [%u, %u), base %u.", s.id, notice.id,
@@ -1860,10 +1872,16 @@ public:
     // relayed frame in the member's future).  Measured at 10 % loss: the
     // reliable copy's retransmit came ~400 ms after the others' assignments
     // and left two members of four 26 ticks behind for the whole session.  So
-    // the reliable copy is backed by unreliable ones 40 ms apart from the
-    // main loop (send_assign_repeats): copies sent in the same instant share
-    // the reliable one's packet and its loss, and the session's first tick -
+    // the reliable copy is backed by unreliable ones from the main loop
+    // (send_assign_repeats): copies sent in the same instant share the
+    // reliable one's packet and its loss, and the session's first tick -
     // start_base periods after the barrier - comes too late to carry them.
+    // Step SAX: more copies (a loss burst counts datagrams, and on the idle
+    // downlink before the first tick a burst of 4 took the reliable copy and
+    // all three of the old copies); step SAXE: sixteen, one per main-loop
+    // pass (sim/assign_copies.hpp has why not a volley in one pass).  The
+    // reliable copy goes NoNagle, so it leaves at once in a packet of its own
+    // rather than waiting the Nagle time for company.
     // The clients apply the first to arrive and ignore the rest.
     void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick, uint8_t flags = 0) {
         bmmo::session_assign_msg assign;
@@ -1871,13 +1889,19 @@ public:
         assign.first_tick = first_tick;
         assign.flags = flags;
         assign.serialize();
-        send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_Reliable);
+        send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+        // --assign-volley (test builds): the (e) volley, for the wire to show.
+        for (int i = 0; i < test_assign_volley_; ++i)
+            send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_UnreliableNoNagle);
         // A newer assignment retires the copies of the previous one still due.
         s.assign_repeats.erase(std::remove_if(s.assign_repeats.begin(), s.assign_repeats.end(),
                                               [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),
                                s.assign_repeats.end());
         s.assign_repeats.push_back(physics_session_state::assign_repeat{
-            c, first_tick, kAssignRepeats, std::chrono::steady_clock::now() + kAssignRepeatSpacing, flags});
+            c, first_tick,
+            bmmo::sim::assign_copy_schedule::after_reliable(main_pass_.load(std::memory_order_relaxed),
+                                                            std::chrono::steady_clock::now()),
+            flags});
         s.assigned.insert(c);
         // A SessionLead of the previous base is void (the client drops it by
         // its epoch), so its copies stop and nothing waits for its ack.
@@ -1940,22 +1964,23 @@ public:
                 if (std::find(s.members.begin(), s.members.end(), static_cast<HSteamNetConnection>(to)) != s.members.end())
                     send(to, bytes.data(), bytes.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
             });
+            const uint64_t pass = main_pass_.load(std::memory_order_relaxed);
             for (auto r = s.assign_repeats.begin(); r != s.assign_repeats.end();) {
-                if (now < r->next_due) { ++r; continue; }
+                if (!r->schedule.due(pass, now)) { ++r; continue; }
                 bmmo::session_assign_msg assign;
                 assign.session = s.id;
                 assign.first_tick = r->first_tick;
                 assign.flags = r->flags;
                 assign.serialize();
                 send(r->to, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
-                r->next_due = now + kAssignRepeatSpacing;
-                if (--r->remaining <= 0) r = s.assign_repeats.erase(r);
+                r->schedule.sent(pass, now);
+                if (r->schedule.done()) r = s.assign_repeats.erase(r);
                 else ++r;
             }
             for (auto r = s.lead_repeats.begin(); r != s.lead_repeats.end();) {
                 if (now < r->next_due) { ++r; continue; }
                 send(r->to, r->bytes.data(), r->bytes.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
-                r->next_due = now + kAssignRepeatSpacing;
+                r->next_due = now + kLeadRepeatSpacing;
                 if (--r->remaining <= 0) r = s.lead_repeats.erase(r);
                 else ++r;
             }
@@ -4145,6 +4170,14 @@ protected:
     config_manager config_;
     // --hold-member-ms (step M0, test builds): see set_test_hold_member_ms.
     uint32_t test_hold_member_ms_ = 0;
+    // --assign-volley (step SAXE, test builds): see set_test_assign_volley.
+    int test_assign_volley_ = 0;
+    // The main loop's pass counter (step SAXE): one more at the start of every
+    // update(), before its messages are handled, so an assignment made while
+    // handling them, at the barrier or on the simulation thread belongs to
+    // the pass it was sent in and its first copy waits for the next one
+    // (bmmo::sim::assign_copy_schedule).
+    std::atomic<uint64_t> main_pass_{0};
 
     std::unordered_map<std::string, std::string> map_names_;
     // Bounds on what clients may add to map_names_; the whole map is sent to
@@ -4154,12 +4187,14 @@ protected:
 
 // parse arguments (optional port and help/version/log) with getopt
 // `hold_member_ms`: the test flag --hold-member-ms (BMMO_SERVER_TEST_FLAGS
-// builds only; step M0).
+// builds only; step M0); `assign_volley`: --assign-volley (the same; step
+// SAXE).
 static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run,
-                      uint32_t& hold_member_ms) {
-    enum option_values { DryRun = UINT8_MAX + 1, HoldMemberMs };
+                      uint32_t& hold_member_ms, int& assign_volley) {
+    enum option_values { DryRun = UINT8_MAX + 1, HoldMemberMs, AssignVolley };
 #if !defined(BMMO_SERVER_TEST_FLAGS)
-    (void)hold_member_ms;  // the flag exists in test builds only
+    (void)hold_member_ms;  // the flags exist in test builds only
+    (void)assign_volley;
 #endif
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
@@ -4169,6 +4204,7 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
         {"dry-run", no_argument, 0, DryRun},
 #if defined(BMMO_SERVER_TEST_FLAGS)
         {"hold-member-ms", required_argument, 0, HoldMemberMs},
+        {"assign-volley", required_argument, 0, AssignVolley},
 #endif
         {0, 0, 0, 0}
     };
@@ -4191,6 +4227,7 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
                 puts("      --dry-run\t\t Test the server by starting it and exiting immediately.");
 #if defined(BMMO_SERVER_TEST_FLAGS)
                 puts("      --hold-member-ms=MS\t (test build) Send the SessionMember messages MS ms late.");
+                puts("      --assign-volley=K\t (test build) K extra UnreliableNoNagle SessionAssign copies in its own pass.");
 #endif
                 return -1;
             case 'v':
@@ -4207,6 +4244,9 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
             case HoldMemberMs:
                 hold_member_ms = static_cast<uint32_t>(std::strtoul(optarg, nullptr, 10));
                 break;
+            case AssignVolley:
+                assign_volley = std::clamp(std::atoi(optarg), 0, 32);
+                break;
 #endif
         }
     }
@@ -4218,7 +4258,8 @@ int main(int argc, char** argv) {
     bool dry_run = false;
     std::string log_path;
     uint32_t hold_member_ms = 0;
-    if (parse_args(argc, argv, port, log_path, dry_run, hold_member_ms) < 0)
+    int assign_volley = 0;
+    if (parse_args(argc, argv, port, log_path, dry_run, hold_member_ms, assign_volley) < 0)
         return 0;
 
     if (port == 0) {
@@ -4250,6 +4291,11 @@ int main(int argc, char** argv) {
         server.set_test_hold_member_ms(hold_member_ms);
         printf("Test flag: --hold-member-ms %u (the SessionMember messages leave %u ms late).\n", hold_member_ms,
                hold_member_ms);
+    }
+    if (assign_volley) {
+        server.set_test_assign_volley(assign_volley);
+        printf("Test flag: --assign-volley %d (%d UnreliableNoNagle SessionAssign copies in the reliable one's pass).\n",
+               assign_volley, assign_volley);
     }
 
     printf("Bootstrapping server...\n");

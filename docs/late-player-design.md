@@ -619,7 +619,10 @@ SessionAssign cannot carry this. A newer `first_tick` means a renumbering, a
 history wipe and a snapshot resync (session_client.cpp:664-695; retail
 physics_session_client.cpp:234-250). A new reliable message is needed, sent
 with three unreliable copies 40 ms apart through the `assign_repeats` pattern
-(server.cpp:551-552, 1157-1176):
+(server.cpp:551-552, 1157-1176). (FULL steps SAX / SAXE: the SessionAssign
+itself now sends sixteen copies, one per server main-loop pass,
+`sim/assign_copies.hpp`; the SessionLead keeps three 40 ms apart as its own
+`kLeadRepeats` / `kLeadRepeatSpacing`.)
 
 | field | meaning |
 |---|---|

@@ -18,6 +18,8 @@
 #include <session/timeline.hpp>
 
 #include "../sim/late_tick.hpp"
+#include "../sim/assign_copies.hpp"
+#include <entity/constants.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -1334,4 +1336,102 @@ TEST(ReanchorOnSchedule, TheLogLinesPartsAreTheRules) {
     EXPECT_EQ(p.floor, 29u);
     EXPECT_EQ(p.base, 51u);
     EXPECT_FALSE(p.floored());
+}
+
+// FULL steps SAX / SAXE: the SessionAssign's unreliable copies outlast a
+// burst of lost datagrams on the idle downlink before the session's first
+// tick (the harness proxy's count-shaped burst), and a time-shaped outage up
+// to the reliable retransmit's ~330 ms (150 ms each way) less a margin.
+TEST(AssignCopies, OutlastABurstOfLostDatagrams) {
+    using namespace bmmo::sim;
+    // The pre-SAX pattern (three copies): a burst of 4 at the reliable copy
+    // took every datagram (DFR, swing_snapoff burst 4 seed 0).
+    EXPECT_EQ(first_assign_copy_through_burst(3, 0, 4), -1);
+    // Every burst up to the harness's longest recipe burst (8), and up to the
+    // copy count, wherever it began - on an earlier datagram, at the reliable
+    // copy or on a copy - leaves a copy, and after one that began at the
+    // reliable copy the first to arrive is the b-th, b passes late.
+    for (int burst = 1; burst <= kAssignRepeats; ++burst) {
+        for (int start = -(burst - 1); start <= kAssignRepeats; ++start) {
+            const int first = first_assign_copy_through_burst(kAssignRepeats, start, burst);
+            ASSERT_GE(first, 0) << "burst " << burst << " from datagram " << start;
+            EXPECT_LE(first, burst) << "burst " << burst << " from datagram " << start;
+        }
+        EXPECT_EQ(first_assign_copy_through_burst(kAssignRepeats, 0, burst), burst);
+    }
+    // The limit, stated: one more lost datagram than there are copies.
+    EXPECT_EQ(first_assign_copy_through_burst(kAssignRepeats, 0, kAssignRepeats + 1), -1);
+    // One copy per main-loop pass (SERVER_RECEIVE_INTERVAL, ~15.15 ms): the
+    // copies span ~242 ms - a time-shaped outage shorter than that leaves one,
+    // and the last copy still goes before the ~330 ms reliable retransmit.
+    const auto pass = std::chrono::duration_cast<std::chrono::microseconds>(bmmo::SERVER_RECEIVE_INTERVAL);
+    EXPECT_GE(kAssignRepeats * pass, std::chrono::milliseconds(240));
+    EXPECT_LT(kAssignRepeats * pass, std::chrono::milliseconds(330));
+    // The minimum gap keeps a copy out of the previous datagram's packet but
+    // never holds a copy past the next pass.
+    EXPECT_LT(kAssignCopyMinGap, pass);
+}
+
+// FULL step SAXE: the copies' schedule - never in the pass of the datagram
+// before them, never sooner than kAssignCopyMinGap after it, at most one per
+// pass, exactly kAssignRepeats of them.
+TEST(AssignCopies, OneCopyPerMainLoopPass) {
+    using namespace bmmo::sim;
+    using clock = std::chrono::steady_clock;
+    const auto pass_len = std::chrono::duration_cast<clock::duration>(bmmo::SERVER_RECEIVE_INTERVAL);
+    const clock::time_point t0{std::chrono::seconds(100)};
+
+    // An assignment made inside pass 7 (its messages, or the barrier), 3 ms
+    // into the pass: nothing more in pass 7, then one copy a pass.
+    {
+        auto s = assign_copy_schedule::after_reliable(7, t0);
+        EXPECT_FALSE(s.due(7, t0));
+        EXPECT_FALSE(s.due(7, t0 + std::chrono::milliseconds(12)));   // same pass, later in it
+        int sent = 0;
+        uint64_t pass = 8;
+        clock::time_point now = t0 + pass_len;   // the next pass, at the same offset
+        std::vector<uint64_t> passes;
+        while (!s.done() && pass < 100) {
+            if (s.due(pass, now)) {
+                s.sent(pass, now);
+                passes.push_back(pass);
+                ++sent;
+                EXPECT_FALSE(s.due(pass, now)) << "a second copy in pass " << pass;
+            }
+            ++pass;
+            now += pass_len;
+        }
+        EXPECT_EQ(sent, kAssignRepeats);
+        ASSERT_EQ(passes.size(), size_t(kAssignRepeats));
+        for (size_t i = 0; i < passes.size(); ++i) EXPECT_EQ(passes[i], 8u + i);
+        EXPECT_FALSE(s.due(pass, now));   // done: nothing more
+    }
+    // An assignment the simulation thread makes 1 ms before pass 8 begins:
+    // pass 8 is a new pass but too soon (the copy would share the reliable
+    // one's packet), so the first copy goes in pass 9.
+    {
+        const auto at = t0 + pass_len - std::chrono::milliseconds(1);
+        auto s = assign_copy_schedule::after_reliable(7, at);
+        EXPECT_FALSE(s.due(8, t0 + pass_len));
+        EXPECT_TRUE(s.due(9, t0 + 2 * pass_len));
+    }
+    // A pass that came late (a slow update) still sends one copy, and the
+    // pass after it the next one once the gap has passed.
+    {
+        auto s = assign_copy_schedule::after_reliable(1, t0);
+        ASSERT_TRUE(s.due(2, t0 + std::chrono::milliseconds(40)));
+        s.sent(2, t0 + std::chrono::milliseconds(40));
+        EXPECT_FALSE(s.due(3, t0 + std::chrono::milliseconds(43)));   // a new pass but inside the gap
+        EXPECT_TRUE(s.due(3, t0 + std::chrono::milliseconds(46)));
+        EXPECT_EQ(s.remaining, kAssignRepeats - 1);
+    }
+    // The count is a parameter (a SessionLead-like pattern would use 3).
+    {
+        auto s = assign_copy_schedule::after_reliable(0, t0, 3);
+        for (int i = 1; i <= 3; ++i) {
+            ASSERT_TRUE(s.due(i, t0 + i * pass_len));
+            s.sent(i, t0 + i * pass_len);
+        }
+        EXPECT_TRUE(s.done());
+    }
 }

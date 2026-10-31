@@ -2783,6 +2783,19 @@ numbers 1-10 are unchanged.
      old-vs-new check whose OLD predates BALX reports them, until a REF
      step re-captures a5u_lead, a6m_snapoff and cliff with a BALX-or-later
      binary (3 live runs; marked in `core_ref_s12/README.md`).
+   - **FULL steps SAX / SAXE (2026-10-30 / 31; DFR's queued item 2):** a
+     SessionAssign's three unreliable copies 40 ms apart did not survive the
+     harness's count-shaped burst of 4 (DFR: ~330 ms retransmit, ~25 ticks
+     late, a starved resync). SAX's eight copies 30 ms apart waited on the
+     user (Q-SAX); the user chose (e), a volley of separate UnreliableNoNagle
+     packets in one pass. SAXE: this GNS sends such a volley as ONE datagram
+     (the source and the wire, lockstep-without-snapshots.md "As built (FULL
+     step SAXE)"), so the server falls back to (b): sixteen copies, one per
+     main-loop pass (`BallanceMMOServer/sim/assign_copies.hpp`; server only,
+     no protocol change). Measured: 0 resyncs, 0 late events, FINAL rows
+     exact in the controlled cell; **open (the user's decision):** a member
+     whose assignment loses b datagrams still starts b passes (b ticks) late
+     for the session with `lead_adjust` off (4 and 8 ticks measured).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

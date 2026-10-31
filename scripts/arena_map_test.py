@@ -164,6 +164,16 @@ class DelayProxy:
             self.log.write('# t_recv dir size verdict t_due\n')
         self.dropped = 0
         self.passed = 0
+        # --drop-down (step SAXE): a deterministic drop on the downlink, not a
+        # draw: (anchor, count) - from the downlink datagram the anchor names
+        # (('index', n): the n-th downlink datagram, 0-based; ('size', a, b):
+        # the first one of a..b bytes), that one and the next count - 1
+        # downlink datagrams are dropped, once.  Counted apart from the loss.
+        self.drop_down = None
+        self.down_seen = 0
+        self.forced_left = 0
+        self.forced_dropped = 0
+        self.forced_fired = None   # (downlink index, size) of the anchor once it fired
         self.bytes_up = 0      # client -> server, after the loss
         self.bytes_down = 0    # server -> client, after the loss
         # Link events (LinkEvent): armed from the client's log by EventArmer,
@@ -214,14 +224,39 @@ class DelayProxy:
                     out, dest = self.front, self.client
                 else:
                     continue
+                # A forced drop still walks the loss rule below (its burst
+                # count and its rng draws) and only then is dropped, so the
+                # seed's loss pattern around it is the one the same seed gives
+                # without --drop-down (SAXE review: skipping the draws shifted
+                # the pattern, and a burst of 4 became one of 8).
+                forced = False
+                if sock is self.back and self.drop_down is not None:
+                    idx = self.down_seen
+                    self.down_seen += 1
+                    if self.forced_fired is None and drop_anchor_matches(self.drop_down[0], idx, len(data)):
+                        self.forced_fired = (idx, len(data))
+                        self.forced_left = self.drop_down[1]
+                        if self.log:
+                            self.log.write('# drop-down: fired at downlink datagram %d (%d B), dropping %d\n'
+                                           % (idx, len(data), self.forced_left))
+                    if self.forced_left > 0:
+                        self.forced_left -= 1
+                        self.forced_dropped += 1
+                        forced = True
+                        if self.log:
+                            self.log.write('%.6f down %d drop -\n' % (time.monotonic(), len(data)))
                 if self.burst_left.get(sock, 0) > 0:
                     self.burst_left[sock] -= 1
+                    if forced:
+                        continue
                     self.dropped += 1
                     if self.log:
                         self.log.write('%.6f %s %d burst -\n' % (time.monotonic(), 'up' if sock is self.front else 'down', len(data)))
                     continue
                 if self.loss > 0.0 and self.rng.random() < self.burst_start:
                     self.burst_left[sock] = self.burst - 1
+                    if forced:
+                        continue
                     self.dropped += 1
                     if self.log:
                         self.log.write('%.6f %s %d loss -\n' % (time.monotonic(), 'up' if sock is self.front else 'down', len(data)))
@@ -230,6 +265,8 @@ class DelayProxy:
                 # datagram an event drops still takes its draw and the rest of
                 # the run draws exactly what the control drew.
                 extra = self.rng.random() * self.jitter if self.jitter > 0.0 else 0.0
+                if forced:
+                    continue
                 direction = 'up' if sock is self.front else 'down'
                 now = time.monotonic()
                 due = None
@@ -281,6 +318,28 @@ LINK_KEYS = {'lat': 'latency_ms', 'latency': 'latency_ms', 'loss': 'loss_pct',
              'burst': 'loss_burst', 'jitter': 'jitter_ms'}
 EVENT_KINDS = ('blackout', 'spike', 'step', 'stall', 'none')
 PROXY_KINDS = ('blackout', 'spike', 'step')
+
+
+def parse_drop_down(spec):
+    '''--drop-down 'N:ANCHOR:COUNT' (step SAXE) -> (N, (anchor, COUNT)).
+    ANCHOR is a downlink datagram index (0-based, counted by client N's proxy)
+    or sizeA / sizeA-B (the first downlink datagram of A..B bytes).'''
+    parts = spec.split(':')
+    if len(parts) != 3:
+        raise ValueError('--drop-down wants N:ANCHOR:COUNT, got %r' % spec)
+    index, anchor, count = int(parts[0]), parts[1].strip(), int(parts[2])
+    if count < 1:
+        raise ValueError('--drop-down count must be >= 1 in %r' % spec)
+    if anchor.startswith('size'):
+        lo, _, hi = anchor[4:].partition('-')
+        return index, (('size', int(lo), int(hi or lo)), count)
+    return index, (('index', int(anchor)), count)
+
+
+def drop_anchor_matches(anchor, idx, size):
+    if anchor[0] == 'index':
+        return idx == anchor[1]
+    return anchor[1] <= size <= anchor[2]
 
 
 def parse_link(spec):
@@ -743,13 +802,15 @@ def run_case(args, sector, case_dir):
             link_events = [ev for ev in args.events if ev.client == i and ev.kind in PROXY_KINDS]
             # A proxy per client, kept by index: its own link, and the place
             # an event on that client's link happens.
-            if link['latency_ms'] > 0 or link['loss_pct'] > 0 or link['jitter_ms'] > 0 or link_events:
+            drop_down = args.drop_downs.get(i)
+            if link['latency_ms'] > 0 or link['loss_pct'] > 0 or link['jitter_ms'] > 0 or link_events or drop_down:
                 pport = args.port + 400 + i
                 proxy = DelayProxy(pport, server_addr, link['latency_ms'], link['loss_pct'], link['jitter_ms'],
                                    link['loss_burst'], args.loss_seed,
                                    str(case_dir / f'proxy{i}.log') if args.proxy_log else None)
                 proxy.events = link_events
                 proxy.index = i
+                proxy.drop_down = drop_down
                 proxies.append(proxy)
                 proxy_of[i] = proxy
                 connect_host, connect_port = '127.0.0.1', pport
@@ -893,6 +954,10 @@ def run_case(args, sector, case_dir):
             proxy_stats['bytes_up'] = [q.bytes_up for q in ordered]
             proxy_stats['links'] = {q.index: links[q.index] for q in ordered}
         for q in proxies:
+            if q.drop_down is not None:
+                proxy_stats.setdefault('drop_down', []).append(
+                    {'client': q.index, 'fired_at': q.forced_fired, 'dropped': q.forced_dropped})
+        for q in proxies:
             q.close()
 
     result = {'sector': sector, 'dir': str(case_dir), 'clients': []}
@@ -901,6 +966,12 @@ def run_case(args, sector, case_dir):
         result['proxy_passed'] = proxy_stats['passed']
         print('  proxy dropped %d of %d datagrams'
               % (proxy_stats['dropped'], proxy_stats['dropped'] + proxy_stats['passed']))
+    if 'drop_down' in proxy_stats:
+        result['proxy_drop_down'] = proxy_stats['drop_down']
+        for d in proxy_stats['drop_down']:
+            print('  proxy drop-down: client%d %s' % (
+                d['client'], 'fired at downlink datagram %d (%d B), dropped %d' % (d['fired_at'][0], d['fired_at'][1], d['dropped'])
+                if d['fired_at'] else 'NEVER FIRED (no downlink datagram matched the anchor)'))
     if 'bytes_down' in proxy_stats:
         result['proxy_bytes_down'] = proxy_stats['bytes_down']
         result['proxy_bytes_up'] = proxy_stats['bytes_up']
@@ -2574,6 +2645,82 @@ def selftest():
           order == sorted(order) and after,
           '%d down datagrams, %d sent after the spike, %d out of order'
           % (len(order), len(after), sum(1 for a, b in zip(order, order[1:]) if b < a)))
+    # SAXE: --drop-down parses, and drops exactly the anchored downlink run.
+    check('parse_drop_down',
+          parse_drop_down('1:size51:4') == (1, (('size', 51, 51), 4))
+          and parse_drop_down('0:12:3') == (0, (('index', 12), 3))
+          and parse_drop_down('2:size40-60:2') == (2, (('size', 40, 60), 2)),
+          str((parse_drop_down('1:size51:4'), parse_drop_down('0:12:3'))))
+    server2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server2.bind(('127.0.0.1', 0))
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.bind(('127.0.0.1', 0))
+    port2 = probe.getsockname()[1]
+    probe.close()
+    proxy2 = DelayProxy(port2, server2.getsockname(), 0.0)
+    proxy2.drop_down = (('size', 51, 51), 4)
+    client2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client2.bind(('127.0.0.1', 0))
+    server2.settimeout(0.5)
+    client2.settimeout(0.05)
+    client2.sendto(b'hello', ('127.0.0.1', port2))
+    _, caddr = server2.recvfrom(64)
+    # Downlink sizes 30, 30, 51, 48 x 6: the 51 and the next three go.
+    sizes = [30, 30, 51] + [48] * 6
+    for k, n_bytes in enumerate(sizes):
+        server2.sendto(bytes([k]) * n_bytes, caddr)
+        time.sleep(0.003)
+    got = []
+    t_end = time.monotonic() + 0.4
+    while time.monotonic() < t_end:
+        try:
+            data, _ = client2.recvfrom(128)
+            got.append(data[0])
+        except (socket.timeout, ConnectionResetError):
+            pass
+    proxy2.close()
+    server2.close()
+    client2.close()
+    check('drop-down drops the anchored run once, and only it',
+          got == [0, 1, 6, 7, 8] and proxy2.forced_fired == (2, 51) and proxy2.forced_dropped == 4,
+          'got %s, fired %s, dropped %d' % (got, proxy2.forced_fired, proxy2.forced_dropped))
+
+    # SAXE review: under random loss a forced drop still takes the loss rule's
+    # draws, so the same seed draws the same stream with and without it.
+    def lossy_run(drop):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        srv.bind(('127.0.0.1', 0))
+        pr = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        pr.bind(('127.0.0.1', 0))
+        lport = pr.getsockname()[1]
+        pr.close()
+        px = DelayProxy(lport, srv.getsockname(), 0.0, loss_pct=30.0, jitter_ms=1.0, loss_burst=2)
+        px.rng = random.Random(4242)
+        px.drop_down = drop
+        cl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        cl.bind(('127.0.0.1', 0))
+        srv.settimeout(0.5)
+        caddr = None
+        for _ in range(20):          # the hello may be lost: send until one passes
+            cl.sendto(b'hello', ('127.0.0.1', lport))
+            try:
+                _, caddr = srv.recvfrom(64)
+                break
+            except socket.timeout:
+                pass
+        draws_up = px.rng.getstate()
+        for k, n_bytes in enumerate([30, 30, 51] + [48] * 20):
+            srv.sendto(bytes([k]) * n_bytes, caddr)
+            time.sleep(0.003)
+        time.sleep(0.1)
+        px.close()
+        srv.close()
+        cl.close()
+        return draws_up, px.rng.getstate(), px.dropped, px.forced_dropped
+    plain, forced_run = lossy_run(None), lossy_run((('size', 51, 51), 4))
+    check('drop-down keeps the seed\'s loss draws aligned',
+          plain[0] == forced_run[0] and plain[1] == forced_run[1] and forced_run[3] == 4,
+          'same before %s, same after %s, forced %d' % (plain[0] == forced_run[0], plain[1] == forced_run[1], forced_run[3]))
     # DX7: --expect-refused judges the named client by its session-end reason only.
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -2714,6 +2861,10 @@ def main():
                     help='seconds to wait between cases so the last session fully exits')
     ap.add_argument('--label', default=time.strftime('%Y%m%d%H%M%S'))
     # The late-player harness (docs/late-player-design.md 5.1).
+    ap.add_argument('--drop-down', action='append', default=[], metavar='N:ANCHOR:COUNT',
+                    help='step SAXE: client N\'s proxy drops COUNT consecutive downlink datagrams once, from the '
+                         'one ANCHOR names - a 0-based downlink datagram index, or sizeA / sizeA-B (the first '
+                         'downlink datagram of A..B bytes); a deterministic burst, apart from --loss-pct; repeatable')
     ap.add_argument('--link', action='append', default=[], metavar='N:lat=,loss=,burst=,jitter=',
                     help='H1: client N\'s own link, over the shared one; repeatable')
     ap.add_argument('--event', action='append', default=[], metavar='N:T:KIND=MS[:dur=MS][:dir=D][:until=T2]',
@@ -2762,6 +2913,7 @@ def main():
     if not args.root and not args.report_only:
         ap.error('--root is required')
     args.links = dict(parse_link(s) for s in args.link)
+    args.drop_downs = dict(parse_drop_down(s) for s in args.drop_down)
     args.expect_refused = parse_expect_refused(args.expect_refused)
     args.events = [parse_event(s) for s in args.event]
     if args.event_client >= 0 or args.event_tick:
