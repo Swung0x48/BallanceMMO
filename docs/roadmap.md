@@ -2710,6 +2710,21 @@ numbers 1-10 are unchanged.
      in-place write (item 9's R6: a beamed own ball 5.3e-4 m off at rest,
      0.53 m on Level 2's slopes before the airship, its mirror in the other
      world exact); `frame_interval` p99 16.6-16.9 ms (Q-CPU).
+   - **Built at FULL step BALX (2026-10-30; DFR's queued item 1):** the own
+     ball's airship latch drops its friction contacts with every partner
+     the pair rule refuses (another ball, a mechanism), silently and with
+     an immediate friction-system split, without freezing the own ball, as
+     every other world's ghost freeze does (rewind-cost-design.md "As built
+     (step BALX)"; no engine, protocol or journal change). `core_ref_s12`
+     a5u_lead, a6m_snapoff and cliff replayed bit on: 0 differing keys on
+     every client (before: client 0's mirror of client 3, 4 FINAL rows).
+     **Queued (REF, re-capture):** those three arms' client-0 journals are
+     stale as references from the latch on (rows 2188 / 2178 / 2188, the
+     latched own ball and the partner mirror, <= 5.7e-6 m; the captures and
+     sends stay valid): a "-"-mode wire check reports them, and an
+     old-vs-new check whose OLD predates BALX reports them, until a REF
+     step re-captures a5u_lead, a6m_snapoff and cliff with a BALX-or-later
+     binary (3 live runs; marked in `core_ref_s12/README.md`).
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

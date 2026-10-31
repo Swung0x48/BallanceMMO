@@ -3493,6 +3493,7 @@ namespace bmmo::physics {
             };
             std::vector<own_life> own_lives;
             uint64_t own_rechecks = 0;
+            uint64_t own_contacts_dropped = 0;   // step BALX: friction contacts the latch PSI dropped (stats only, read by nothing, like own_rechecks)
             uint64_t frozen = 0;
             airship_zone_filter* filter = nullptr;       // installed in `environment`
             airship_zone_listener* listener = nullptr;
@@ -3597,6 +3598,90 @@ namespace bmmo::physics {
             return true;
         }
 
+        // Step BALX: the latch PSI's other half.  The recheck removes the
+        // own ball's mindists with every partner the pair rule now refuses,
+        // but not a friction contact it already has with one (measured on
+        // core_ref_s12 a5u_lead: client 0's mirror of client 3 kept
+        // fr{Ball_Stone press=0} and a two-body simulation unit from the
+        // latch at 2187 on, while every other world - where client 0's ball
+        // is a ghost, frozen by recheck + disable_simulation() - dropped it
+        // at that PSI; the mirror's FINAL rows differed by 1e-9).  So every
+        // friction contact with a refused partner (another ball, a mechanism:
+        // anything but the static level and the own airship) goes here,
+        // through IVP's own deletion (silent, like disable_simulation()'s
+        // unlink_contact_points(IVP_TRUE): it wakes no core, resets both
+        // cores' freeze checks, removes emptied infos and systems), and the
+        // simulation unit is split at once as disable_simulation() does -
+        // without its freeze: the own ball keeps simulating.  Contacts with
+        // the static level and the airship stay.  At this PSI only, so
+        // live and every replay reaching it do the same (so the stdout line
+        // below is printed again by every rollback whose window re-steps the
+        // latch PSI: one line per stepping of it, not one per latch).
+        // `own` is the ball's one IVP_Real_Object (a ball core carries one
+        // object); disable_simulation() walks every object of the core, so
+        // a caller with a compound body would have to loop over
+        // core->objects first.
+        int airship_own_drop_contacts(airship_zone_state& state, IVP_Real_Object* own, double now) {
+            std::vector<IVP_Real_Object*> refused;
+            int contacts = 0;
+            for (IVP_Synapse_Friction* syn = own->get_first_friction_synapse(); syn; syn = syn->get_next()) {
+                IVP_Contact_Point* cp = syn->get_contact_point();
+                if (!cp) continue;
+                IVP_Real_Object* a = cp->get_synapse(0)->get_object();
+                IVP_Real_Object* b = cp->get_synapse(1)->get_object();
+                IVP_Real_Object* other = a == own ? b : a;
+                if (!other || airship_pair_allowed(state, own, other, now)) continue;
+                ++contacts;
+                if (std::find(refused.begin(), refused.end(), other) == refused.end()) refused.push_back(other);
+            }
+            if (refused.empty()) return 0;
+            // unlink_contact_points_for_object returns once a system it
+            // emptied is deleted, so it is called until no contact with the
+            // partner is left (bounded by the count taken above).
+            auto touches = [own](IVP_Real_Object* other) {
+                for (IVP_Synapse_Friction* syn = own->get_first_friction_synapse(); syn; syn = syn->get_next()) {
+                    IVP_Contact_Point* cp = syn->get_contact_point();
+                    if (cp && (cp->get_synapse(0)->get_object() == other || cp->get_synapse(1)->get_object() == other))
+                        return true;
+                }
+                return false;
+            };
+            std::string names;
+            for (IVP_Real_Object* other: refused) {
+                for (int guard = 0; guard <= contacts && touches(other); ++guard) own->unlink_contact_points_for_object(other);
+                const char* name = other->get_name();
+                names += ' ';
+                names += name ? name : "?";
+            }
+            // The friction system the own ball is still in (its contacts with
+            // the static level, which links nothing) would otherwise hold the
+            // partner's contacts too until IVP splits it after this PSI's
+            // solve, and the partner's contacts would be solved together with
+            // the own ball's (measured: the mirror then lands 9.9e-11 m off
+            // in y at the next tick, velocity equal); every other world solves
+            // the partner's system without the ghost's contacts already at
+            // this PSI.  So the own ball's part is split off now, into a new
+            // system, and the partner's contacts stay in the old one in their
+            // order, as the ghost path leaves them.
+            IVP_Core* core = own->get_core();
+            IVP_Friction_Info_For_Core* info =
+                core && !core->physical_unmoveable ? core->core_friction_info.for_moveables.moveable_core_friction_info : nullptr;
+            if (IVP_Friction_System* fs = info ? info->l_friction_system : nullptr) {
+                if (fs->union_find_necessary && fs->union_find_fr_sys()) {
+                    IVP_Core* father = core->union_find_get_father();
+                    fs->split_friction_system(father);
+                    core->sim_unit_of_core->union_find_needed_for_sim_unit = IVP_TRUE;
+                }
+            }
+            if (core && core->sim_unit_of_core && core->sim_unit_of_core->union_find_needed_for_sim_unit)
+                core->sim_unit_of_core->do_sim_unit_union_find();
+            state.own_contacts_dropped += static_cast<uint64_t>(contacts);
+            const char* own_name = own->get_name();
+            std::printf("[bmmo] airship: the own ball %s's latch at clock %.6f dropped %d friction contact(s) with:%s\n",
+                        own_name ? own_name : "?", now, contacts, names.c_str());
+            return contacts;
+        }
+
         class airship_zone_filter : public IVP_Collision_Filter {
         public:
             CKIpionManager* physics = nullptr;
@@ -3668,6 +3753,7 @@ namespace bmmo::physics {
                         if (life && life->entered == now) {
                             own->recheck_collision_filter();
                             ++state->own_rechecks;
+                            airship_own_drop_contacts(*state, own, now);
                         }
                     } else if (!own) {
                         for (auto& life: state->own_lives)

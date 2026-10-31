@@ -3686,3 +3686,96 @@ design "As built (step RT3)").
   sector timestamps), never the session's events (the stamped Sector events
   were +2 / +3 / +4 on time). Fix: the hook takes the sector the core
   stamps for the crossing, or adopts the union pass of its own crossing.
+
+## As built (step BALX, FULL close-out, 2026-10-30): the own ball's latch drops its friction contacts with refused partners
+
+Found at DFR (queue "Chain FULL - DFR" item 1): BALA's rule above says the
+latched own ball "collides only with the static level and its own airship",
+but the latch PSI only called `recheck_collision_filter()`, which removes the
+own ball's mindists with a refused partner, not a friction contact it already
+has with one. Every other world freezes its copy of that ball through the ghost
+path (recheck + `disable_simulation()`, whose `unlink_contact_points(IVP_TRUE)`
+drops every contact silently and splits the simulation unit at once).
+
+- **Cause, on the trace** (`.local-tools/work/DFR/trace_a5u`, `core_ref_s12`
+  a5u_lead): client 0's own ball latches at 2187 while touching client 3's
+  ball. In client 0's world the mirror of client 3 keeps
+  `fr=2{A_Floor_035 ...}{Ball_Stone keeper=20 gap=0.0337 press=0}` and a
+  two-body unit (`unit=1/2`) through >= 2192 after the recheck took the pair's
+  mindist (`mind=5 -> 1` at 2188); in client 1's world, where client 0's ball
+  is a ghost, the same mirror is `fr=1 unit=1/1` from 2189. Client 0's FINAL
+  rows of that mirror then differ from the server's on 4 rows (dv 6.5e-9 m/s,
+  dpos <= 1.8e-9 m) from 2188 until the mirror's own zone entry; the same on
+  a6m_snapoff (2178) and cliff (2188). The fix making those rows exact (below)
+  proves it is that contact.
+- **The change** (`physics_state.cpp` `airship_own_drop_contacts`, called at
+  the latch PSI right after the recheck, live and in every replay reaching
+  that PSI): every friction contact of the own ball whose partner the pair
+  rule now refuses (`airship_pair_allowed`: another ball, a mechanism -
+  anything but the static level and the own airship) is deleted through IVP's
+  own `unlink_contact_points_for_object` (silent: no core woken; both cores'
+  freeze checks reset; emptied infos and systems removed), repeated until no
+  contact with that partner is left (that IVP call returns once it deletes an
+  emptied system). The own ball is NOT frozen. Then the friction system the
+  own ball is still in (through its contacts with the static level, which link
+  nothing) is split at once - `union_find_fr_sys()` and
+  `split_friction_system(<the own core's union-find father>)`, so the own
+  ball's part goes to a new system and the partner's contacts stay in the old
+  one in their order, as the ghost path leaves them - and the own core's
+  simulation unit is union-found (`do_sim_unit_union_find()`, as
+  `disable_simulation()` does from the same listener). One stdout line per
+  drop ("the own ball ...'s latch at clock C dropped N friction contact(s)
+  with: <partners>"; printed again each time a rollback's window re-steps
+  the latch PSI, so it counts steppings of the latch, not latches) and a
+  stats counter (`own_contacts_dropped`, read by nothing, like
+  `own_rechecks`). The helper works on the ball's one `IVP_Real_Object` (a
+  ball core has one); `disable_simulation()` walks every object of the core,
+  so a compound body would need that loop first.
+- **Adaptation (measured):** the deletion and the unit split alone left the
+  mirror 9.88e-11 m off in y from 2188 on, velocity equal: without the
+  immediate system split, IVP splits the system only after this PSI's solve
+  (`ivp_friction.cxx` 2172-2181), so the partner's contacts were solved in one
+  system with the own ball's (`do_friction_system`) where every other world
+  solves them alone (`do_simulation_single_friction`). With the split: exact.
+- No IVP or physics_RT source changed (all of it public IVP API; no engine
+  change), no protocol, journal, savestate or bridge API change, no retail or
+  BallanceMMOClient member change. Not handled (no case seen): an own ball
+  latching while asleep (the ghost path skips a sleeping ball; the own ball
+  enters the box moving), and two refused partners connected only through the
+  own ball (the split's own recursion then splits them at this PSI, where the
+  ghost world splits them after the solve), and the own ball and another ball
+  entering the box at one PSI while both touch a third body (the own ball is
+  handled first here, the ghosts by group in every other world, so the
+  deletions could run in another order). The plan's "pending impact /
+  mindist": the recheck already removes the refused pair's mindists and their
+  queued events (the trace's `mind=5 -> 1` at 2188); only the friction
+  contact outlived it. A rewind spanning the latch (a restore before it,
+  re-stepped through it) re-runs the drop on the restored contact; it did
+  not occur in the three replays below (no restore at 2140-2229 in their
+  client-0 logs, one drop line each), so it is not exercised.
+- **Checks** (`.local-tools/work/BALX`, x64 build `build-agent-rBALX` of the
+  tree over HEAD 681c7163): `core_ref_s12` a5u_lead, a6m_snapoff and cliff
+  replayed bit on (`--final-checkpoints --pacer-restart-on-resync
+  --accept-protocol 22`), rows against the server journal: 0 differing keys on
+  every client (38 keys each; before: client 0's mirror 4/1239 rows, on
+  rWFA too); the three resync arms 0, `core_ref_s12h` h1_150 0 (139 keys);
+  RK2-fan (H5b's savestate-check recipe) PASS 40/40 (9 span the claim, 0
+  differ) and K=8 PASS 60/60 (7, 0). Wire check rWFA -> rBALX over the nine
+  arms (`EXTRA="--accept-protocol 22"`): every send SAME (36/36); every
+  journal IDENTICAL but client 0's of a5u_lead, a6m_snapoff and cliff, which
+  differ only in the latched own ball and the partner mirror, from the row
+  after the latch (2188 / 2178 / 2188), at most 5.7e-6 m; each of the three
+  replays logs one drop (`Ball_Stone_BMMO_<c3>`). So those three client-0
+  journals of `core_ref_s12` are stale as references from their latch on (the
+  captures and sends still are): a wire check against the live journals
+  ("-" mode) reports them until a REF step re-captures the three arms
+  (queued: roadmap §4 item 7, "BALX"; marked in `core_ref_s12/README.md` and
+  `.local-tools/wire_check.sh`'s header); an old-vs-new check with both
+  binaries BALX or later is unaffected (with a pre-BALX OLD it reports these
+  three journals, as this step's did). Live: H6's airship recipe
+  (`maps/arena-test/h6_full/balx_airship`, Arch server rebuilt, snapshots
+  off): rows_cmp 0 differing keys on all four (18 keys), harness verdict FAIL
+  by the recipe's design (its two --resync-at), as H6's; the recipe beams the
+  balls in apart, so no drop fires there (the drop is exercised by the three
+  replays above). 685/685 unit tests, GCC syntax 31/31 (physics_state.cpp is
+  compiled by the Arch server build: ARCH-BUILD-OK), x86 CLIENT-BUILD-OK.
