@@ -3763,6 +3763,101 @@ core only (`client_core.hpp`, `client_core_resync.cpp`,
   11057 under the H1X hull) identical on rH1X. Wire check rH1X vs rRSX over
   core_ref_s12 (h1_150 from core_ref_s12h): ALL SAME.
 
+## As built (step SLG, FULL, 2026-10-31): the retail core session's reported sector follows the own stamps
+
+- **Symptom (RT3, roadmap item 7).** In a retail core session the mod's own
+  sector (`current_sector_`: the automation status, `send_current_sector`
+  and so the server's per-player `current_sector` and every peer's player
+  list, the sector timestamps) lagged one checkpoint: status 1 / 2 / 3 / 4
+  after the crossings into 2 / 3 / 4 / 5 on Level 2 (rt3_oend2). The
+  session's Sector events were on time.
+- **Cause.** B2SX (above) gave the checkpoint chain's `[0][1]` Set Cell a
+  private copy, so a crossing no longer writes `IngameParameter[0][1]`;
+  that cell holds what the last union pass wrote. The checkpoint hook
+  (`OnPostCheckpointReached` -> `on_sector_changed` ->
+  `update_current_sector`, `BallanceMMOClient.h`) read it at the crossing:
+  this ball's previous sector (no change reported), and at the next
+  crossing the pass's write of the one before. Worse, with a peer ahead the
+  cell holds the peer's higher sector, which the hook took for this ball's
+  and handed to `core_host_on_sector` -> `request_sector` (an own Sector
+  stamp for a sector this ball had not entered; latent, not seen in a run).
+  `run_sector` marking a peer's pass "not own" (`core_host.cpp`) is right
+  and stays.
+- **Fix (host only, retail; no shared file, no protocol).** While the core
+  session runs with the split applied and the hold in force
+  (`core_host_own_sector_from_stamps`, the same condition the host's
+  `poll_sector` reads the copy under), the checkpoint hook reads no cell and
+  requests nothing: the core's `poll_own_sector` already stamps the
+  crossing from the copy. Each frame after `post_step`,
+  `core_host_report_own_sector` adopts this ball's sector from the core's
+  own stamps (`own_sector_stamp`, which a MOVED echo rewrites if it
+  arrives before the stamp's tick) once the
+  core has stepped the stamp's tick - each own stamp once per session, the
+  latest when several fall due - and does what a change did before
+  (timestamp + ping, the map's first-arrival timestamp, `max_sector_`,
+  `CurrentSector`, the highscore flag), without `physics_session_on_sector`.
+  It is reported whether or not a pass runs (a sector a peer opened first
+  has no pass of its own). Without the split, or with the hold failed, the
+  chain writes `[0][1]` itself and the old path stands; core off unchanged.
+  File-scope state only (`own_sector_reports`), no `BallanceMMOClient`
+  member. A read-only automation verb `players` (own sector, max, timestamp;
+  every peer's sector and arrival timestamp; the map's first-arrival
+  timestamps) is the check's tool.
+- **Reported at the stamp tick, not at the crossing (adaptation).** The plan
+  asks for "the one the union pass gives this client at that tick"; the
+  report therefore comes `lead + 1` ticks (here 10, ~150 ms) after the
+  crossing, where the legacy path reported at the crossing. Reporting at
+  the crossing from the private copy would be the alternative (one read in
+  `update_current_sector`); it would be `lead + 1` ticks ahead of every
+  world's sector tick.
+- **Server timestamps.** The server keeps no sector timestamps: it sets
+  `current_sector` from `CurrentSector` and broadcasts the same message
+  (`server.cpp` CurrentSector case); the timestamps are the clients' (own:
+  local time + ping; a peer's: the broadcast's arrival). So "the server's
+  timestamps" are the report's wall time, which is now the frame that
+  stepped the stamped tick.
+- **Verified (slg_l2: `.local-tools/work/SLG/slg_retail.py`, RT3's oend
+  recipe on Level 2, two copies, core on, snapshots off, trafo_inputs and
+  placement on, the Arch server of RCB's tree).** Client 1 crossed four
+  checkpoints: "own sector N reported at tick T (stamped T)" for 2 / 3 / 4
+  / 5 at 328 / 534 / 749 / 864, the core's stamps and the server's
+  "sector +N at tick T (player ..., stamped T)" the same four ticks; status
+  and `players` 2 / 3 / 4 / 5 after each crossing; client 2's view of client
+  1 (= the server's `current_sector`, set by the message it relayed)
+  2 / 3 / 4 / 5; client 1's own timestamps minus client 2's arrival
+  timestamps 1026 / 1027 / 1026 / 1017 ms, the same as sector 1's
+  1020 ms (the two clients' clock bases differ), so the peer's view follows
+  the report within ~10 ms. FINAL rows (rt3_judge.py) as on rt3_oend2:
+  mirrors 533/533 equal on both, the 20 P_* mechanisms (the 12 P_Modul_*
+  among them) equal, the 18 differing mechanisms 17 PE_Balloon_* (exception
+  c) and PE_Box_slide, all from the level end (Finish applied 1010; client 2
+  998 for the balloon); rt3_oend2 had the same 18, PE_Box_slide included,
+  from its Finish (734 / 738); the
+  own ball on client 1 from the first beam (296; rt3_oend2 298: item 9's
+  R6 beam in-place write, recorded). The trailing ball (slg_trail2,
+  `.local-tools/work/SLG/slg_trail.py`): client 1 crossed into 2 (its pass
+  at 328), then client 2 was beamed onto the same flame: client 2 "sector 2
+  stamped for tick 528", no pass of its own (the union had 2), "own sector
+  2 reported at tick 528 (stamped 528)", the server's S5 Sector event of
+  client 2 origin 528 applied 528; client 1's view of client 2 1 -> 2.
+  FINAL rows there: mirrors 218/218 and the 8 mechanisms equal on both,
+  each own ball from its first beam (R6). x86 build CLIENT-BUILD-OK, DEPS-OK.
+- **Limits.** Own stamps live for the session and keep the shared numbering
+  across a resync (only a new session clears them, `client_core.cpp`), so
+  a crossing whose stamp tick a resync jumps past is reported at the first
+  frame after it; one the server moves is reported at the moved tick when
+  the echo arrives before the original tick, otherwise at the original
+  tick (same sector, the wall-clock timestamp early by the move). The
+  reported set is cleared with the session's platform state
+  (`reset_session_state`, at a session's start and end), not by comparing
+  session ids: a restarted server hands out session 1 again (review
+  finding of the gate round). The
+  stamp scan stops at sector 64 (`kMaxSector`; Ballance's levels have
+  fewer than 10). A sector reported is never reported again in the
+  session, as the core stamps each sector once.
+  Headless unaffected (no file under BallanceMMOCommon or the headless
+  client changed; no x64 build, wire check or GCC check needed).
+
 ## 9. Open questions
 
 **Q1. Is a rows-only anchor exact enough, or must the server's IVP blob

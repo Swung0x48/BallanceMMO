@@ -2727,7 +2727,12 @@ numbers 1-10 are unchanged.
      `IngameParameter[0][1]` (`BallanceMMOClient.h:999`) before the union
      pass writes the split cell, and that pass's write is then marked not
      own (`core_host.cpp` ~2806) - what `send_current_sector` and the sector
-     timestamps carry, not the session's Sector events (on time).
+     timestamps carry, not the session's Sector events (on time). **Fixed
+     at FULL step SLG (2026-10-31):** the hook reads no cell in a core
+     session with the split; the own sector is reported from the core's own
+     stamps at their ticks (2 / 3 / 4 / 5 at the server's 328 / 534 / 749 /
+     864 on Level 2; resync-and-sector-timing-design.md "As built (step
+     SLG)").
      Recorded, not new: FINAL rows'
      rotation <= 2.98e-8 (the records read at 24-bit x87); the retail beam's
      in-place write (item 9's R6: a beamed own ball 5.3e-4 m off at rest,

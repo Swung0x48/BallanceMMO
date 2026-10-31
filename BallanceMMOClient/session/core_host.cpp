@@ -88,6 +88,14 @@ namespace {
     // keeps the cell it polls).  File scope: BallanceMMOClient keeps its
     // layout.
     bmmo::game::sector_cell_split core_chain_cell;
+    // FULL step SLG: the own sectors core_host_report_own_sector has
+    // reported in this core session (each once, as the core stamps each
+    // once); cleared by reset_session_state at a session's start and end
+    // (a restarted server hands out session 1 again).  File scope:
+    // BallanceMMOClient keeps its layout.
+    struct own_sector_reports_state {
+        std::set<int> reported;
+    } own_sector_reports;
     // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)): the
     // Level 1 tutorial's exit event, found at the core session's anchor and
     // activated by the core before frame 10 (platform tutorial_exit).
@@ -788,6 +796,7 @@ namespace {
         host.restore_logs = host.savestate_logs = host.contact_logs = host.destroy_logs = host.line_logs = 0;
         host.forced = 0;
         host.force_once.clear();
+        own_sector_reports = {};   // step SLG
         // (Step RT2's 'session activate' is not cleared here: it is armed
         // before the anchor, after this reset of the session's begin; the
         // session's end clears it.)
@@ -2309,6 +2318,9 @@ void BallanceMMOClient::core_host_frame() {
         if (!diag_trace_entities().empty())   // step EG0 diagnostics (BMMO_TRACE_ENTITY), off by default
             logger_->Info("Physics session: %s",
                           diag_entity_line(m_bml->GetCKContext(), "live", core.current_tick()).c_str());
+        // FULL step SLG: this ball's sector as the core stamped it, once the
+        // core has stepped the stamp's tick.
+        core_host_report_own_sector();
         if (!stepped) ++host.refused;
         else if (host.beam_in_flight) {
             // post_step(T) consumed the request and stamped it T + 1.
@@ -4127,6 +4139,62 @@ bool BallanceMMOClient::core_host_on_sector(int sector, bool checkpoint) {
     event.sector = sector;
     core.send_event(event);
     return true;
+}
+
+// FULL step SLG (RT3's sector lag).  With the chain's [0][1] Set Cell split
+// (B2SX) the crossing writes only the private copy, and IngameParameter[0][1]
+// holds what the last union pass wrote - a peer's sector, or this ball's
+// previous one: the checkpoint hook's read of it reported the crossing one
+// checkpoint late (and a peer's higher sector as this ball's).  The core's
+// poll already stamps the crossing from the copy (poll_own_sector); so the
+// hook reads no cell here, and this ball's sector is reported when the core
+// has stepped the tick of its own stamp - the tick the server applies the
+// Sector event at, and every world's union counts it from (a MOVED echo
+// that arrives before that tick rewrites the stamp first; one that arrives
+// after it leaves the sector reported, its timestamp early by the move).  Without the split the chain writes [0][1]
+// itself and the hook's read stays right.
+bool BallanceMMOClient::core_host_own_sector_from_stamps() const {
+    return core_session_running() && core_chain_cell.applied() && sector_activate_.block && !sector_activate_failed_;
+}
+
+// Once per frame after post_step: the own stamps whose tick the core has
+// stepped and that are not yet reported, the latest of them adopted as this
+// ball's sector, with what update_current_sector and on_sector_changed do
+// for a change (timestamp, max sector, CurrentSector, the highscore flag),
+// but no physics_session_on_sector: the core has the crossing already.
+void BallanceMMOClient::core_host_report_own_sector() {
+    if (!core_host_own_sector_from_stamps()) return;
+    const auto& core = *host.core;
+    const uint32_t now = core.current_tick();
+    // Sectors are small numbers (IngameParameter's sector cell, 1-based; the
+    // anchor's sector 1 is never stamped); a stamp lookup each is cheap.
+    constexpr int kMaxSector = 64;
+    int sector = 0;
+    uint32_t stamped = 0;
+    for (int candidate = 2; candidate <= kMaxSector; ++candidate) {
+        uint32_t tick = 0;
+        if (own_sector_reports.reported.count(candidate) || !core.own_sector_stamp(candidate, tick)
+                || static_cast<int32_t>(tick - now) > 0)
+            continue;
+        own_sector_reports.reported.insert(candidate);
+        if (!sector || static_cast<int32_t>(tick - stamped) >= 0) {
+            sector = candidate;
+            stamped = tick;
+        }
+    }
+    if (!sector) return;
+    logger_->Info("Physics session: own sector %d reported at tick %u (stamped %u)%s", sector, now, stamped,
+                  sector == current_sector_ ? ", already the reported one" : "");
+    if (sector == current_sector_) return;
+    current_sector_ = sector;
+    current_sector_timestamp_ = db_.get_timestamp_ms();
+    if (connected()) {
+        current_sector_timestamp_ += get_status().m_nPing;
+        if (!spectator_mode_) update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
+    }
+    max_sector_ = std::max(current_sector_.load(), max_sector_.load());
+    if (connected()) send_current_sector();
+    if (current_level_mode_ == bmmo::level_mode::Highscore) extra_life_received_ = false;
 }
 
 bool BallanceMMOClient::core_host_on_finish() {

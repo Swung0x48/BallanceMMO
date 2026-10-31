@@ -273,6 +273,26 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
 
     if (verb == "ping") return "pong";
     if (verb == "status") return automation_status_line();
+    // FULL step SLG: what the player list is made of - this client's sector
+    // and its timestamp, every peer's as the server relayed it (the server
+    // keeps and broadcasts the same current_sector), and the current map's
+    // first-arrival sector timestamps.  Reads only.
+    if (verb == "players") {
+        std::string out = std::format("ok own sector={} max={} ts={}", current_sector_.load(), max_sector_.load(),
+                                      current_sector_timestamp_.load());
+        db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+            if (pair.first == db_.get_client_id()) return true;
+            out += std::format(" | peer {} {} sector={} ts={}", pair.first, pair.second.name, pair.second.current_sector,
+                               pair.second.current_sector_timestamp);
+            return true;
+        });
+        maps_.if_contains(current_map_.get_hash_bytes_string(), [&](const auto& entry) {
+            out += " | map";
+            for (const auto& [sector, timestamp]: entry.second.sector_timestamps)
+                out += std::format(" {}:{}", sector, timestamp);
+        });
+        return out;
+    }
     if (verb == "session") {
         // The shared core's transition switch and forced rollbacks
         // (session/core_host.cpp, design 6.2).

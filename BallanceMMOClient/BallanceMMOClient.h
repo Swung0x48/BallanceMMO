@@ -781,6 +781,12 @@ private:
 	                              int concaveCnt, CKMesh** concaveMesh);
 	bool core_host_on_unphysicalize(CK3dEntity* target);
 	bool core_host_on_sector(int sector, bool checkpoint);
+	// FULL step SLG: while a core session runs with the checkpoint chain's
+	// sector cell split (B2SX), this ball's sector is the core's own stamps,
+	// reported at their ticks (core_host_report_own_sector), not the
+	// IngameParameter cell the union's passes write.
+	bool core_host_own_sector_from_stamps() const;
+	void core_host_report_own_sector();
 	bool core_host_on_finish();
 	bool core_host_leave_player(uint32_t player);
 	bool core_host_beam(const double position[3], std::string& answer, int64_t at = -1);

@@ -334,6 +334,11 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
 // the one sector change a physics session treats as an input; the others (a
 // level start, the counter, a map entry) only report.
 void BallanceMMOClient::on_sector_changed(bool checkpoint, bool own_cell) {
+    // FULL step SLG: in a core session the chain writes its own copy of the
+    // cell (B2SX); IngameParameter[0][1] holds the last union pass's sector,
+    // not this crossing.  The core's poll stamps the crossing from the copy
+    // and core_host_report_own_sector reports it at its stamped tick.
+    if (checkpoint && core_host_own_sector_from_stamps()) return;
     // The own checkpoint chain writes the cell before its (held) manager run,
     // and the level's own start writes sector 1: the cell is ours again.
     if (checkpoint || own_cell) sector_cell_is_own_ = true;
