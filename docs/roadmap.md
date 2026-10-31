@@ -2938,25 +2938,13 @@ numbers 1-10 are unchanged.
      item 9). The one state transfer (the exact resync) is the only state a
      client takes from the server by default.
 
-**Stage B - the run-ahead policy (goal 3, the persistent late case).**
-
-8. Late-player design revision 3, R0-R5 (arrival ring, baseline, quorum
-   patience, the lead decision), plus plan steps 12 (per-client reach; see
-   item 2's first entry), 21 (events on the input datagram), 22 (own death
-   move). With step 22 (found at F3, late-player-design.md 3.1 "As built
-   (step F3)"): a lone own Unphysicalize the server re-stamps late is only
-   logged "kept where we stamped it" (`client_core_lifecycle.cpp`, the
-   `own ... echoed` branch of the lifecycle echo; only a moved pair
-   resyncs, through `own_moved_unphysicalize_`), so the own world removes
-   its ball up to 2 ticks before the server and every mirror, and contacts
-   in those ticks differ with no correction (snapshots off). About 1 % of
-   lone events at 10 % loss; how much of it remains depends on the D4
-   answer (the stamp rule / repeat schedule). D4 answered and built at
-   step DX8 ((b') hybrid repeats, late-player-design.md 3.1 "As built (step
-   DX8)"): modelled late lone events at 10 % loss 9.1 -> 0.1 per 1000
-   (burst 1), about 50 -> 2.7 (burst 2), with the copies coalesced into
-   the input datagrams as the proxy logs show for 83 of 86 events (an
-   upper bound on the gain); step 22 stays queued for the rest.
+**Order after Stage A (the user, 2026-10-30): Stage C, then Stage B, then
+Stage D.** Stage A closed at FULL step DEP (d5010dfc, 2026-10-31; the
+headline met at HL run 16). Before Stage C, the realtime track
+(`docs/realtime-design.md`, FULL step SRT, f8ad8e87) waits for the user's
+target terms (Q1) and approach (Q2); its steps SRT1-SRT5 are placed once
+answered. The item numbers below are kept (9 = C, 8 = B, 10 = D) so older
+notes still resolve.
 
 **Stage C - close the core (goal 1).**
 
@@ -2990,6 +2978,37 @@ numbers 1-10 are unchanged.
      D1 is R6 above; D5 / D6 are HU1's queued (d) / (a). None breaks the
      FULL headline; D3 needs a diagnostic line (none today) before the
      FULL batch that runs `--reset-level-at` can check it.
+   - **First item of R6 (the user, 2026-10-30):** plan step 21's
+     measurement - how long retail tolerates its own ball being absent for
+     several ticks - moves here from Stage B; step 21's protocol work stays
+     in Stage B.
+   - **A non-blocking retail anchor hold (the user, 2026-10-31, FULL step
+     SAXH's question):** today the retail anchor hold (design 2.3) is a
+     blocking loop inside OnProcess, so the screen stays black while the
+     members load and through SAXH's start handshake (about 0.7-1 s more at
+     150 ms), and SAXH's wait lines only appear at the start. Render while
+     behaviours and physics are frozen, keeping the rule that the frame after
+     the hold is the world's first step; it removes the whole black wait.
+
+**Stage B - the run-ahead policy (goal 3, the persistent late case).**
+
+8. Late-player design revision 3, R0-R5 (arrival ring, baseline, quorum
+   patience, the lead decision), plus plan steps 12 (per-client reach; see
+   item 2's first entry), 21 (events on the input datagram), 22 (own death
+   move). With step 22 (found at F3, late-player-design.md 3.1 "As built
+   (step F3)"): a lone own Unphysicalize the server re-stamps late is only
+   logged "kept where we stamped it" (`client_core_lifecycle.cpp`, the
+   `own ... echoed` branch of the lifecycle echo; only a moved pair
+   resyncs, through `own_moved_unphysicalize_`), so the own world removes
+   its ball up to 2 ticks before the server and every mirror, and contacts
+   in those ticks differ with no correction (snapshots off). About 1 % of
+   lone events at 10 % loss; how much of it remains depends on the D4
+   answer (the stamp rule / repeat schedule). D4 answered and built at
+   step DX8 ((b') hybrid repeats, late-player-design.md 3.1 "As built (step
+   DX8)"): modelled late lone events at 10 % loss 9.1 -> 0.1 per 1000
+   (burst 1), about 50 -> 2.7 (burst 2), with the copies coalesced into
+   the input datagrams as the proxy logs show for 83 of 86 events (an
+   upper bound on the gain); step 22 stays queued for the rest.
 
 **Stage D - the original levels.**
 
