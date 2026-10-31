@@ -3618,6 +3618,129 @@ flush option with the modes discussed; the default is flush per batch).
   SIO's `.local-tools/work/SIO/sio_log_flush_per_batch.patch` is superseded
   (not applied).
 
+### As built (step IOX, 2026-10-31): the rest of the session I/O off the tick, runner and game threads
+
+The user (2026-10-31): "我怎么记得已经有过放到线程池里做I/O的了，没做完吗？看下之前怎么做的，做干净"
+(I remember I/O already went to a thread pool - is it unfinished? see how it was done and finish it
+cleanly). SIO / IOF had moved the session journal, the headless log and the capture; the server's own
+log, every per-session open and the retail mod's own lines were still written by the threads that tick.
+IOX moves them onto **the same writer** - `session/io_queue.hpp` queues posted to an asio strand of the
+host's pool, the IOF flush modes, the same bounds and drains; no second mechanism. The writer gained
+three things:
+
+- `io_queue::open_deferred(path, poster, ..., create_parent, prepare)`: with a poster nothing of the open
+  runs on the caller - the writer's first task creates the parent directory, runs `prepare` (the retail
+  prune), then opens (truncates); a reopen of a path the queue's last posted close still holds waits for
+  it as SIO's reopen did (that deferral is now the general case). Without a poster it is `open()` after
+  the same work, with the failure in `error` (SimTool, tests, the legacy path: unchanged).
+  `journal_writer::open` uses it whenever it has a poster, with two new defaulted arguments: `prepare`
+  and `report`. **How an open's failure is reported:** the writer marks the queue `failed()`; the next
+  record the owner writes reads that flag (an atomic, no syscall), stops the journal like the size cap
+  and calls `report` once, on the writing thread - the runner's `log`, the core's `logf` ("journal:
+  PATH: the writer could not create or write the file, recording stopped"). Before, the open's failure
+  was returned by `open`; a session has always run on without its journal either way.
+- `io_queue::open_sink(sink, stream, ...)`: a queue whose chunks go to a function on the strand instead
+  of `fwrite` (the server's interactive console through replxx, the retail BML logger); `stream` is what
+  the flush modes and the drains flush.
+- `io_queue::close_after(last)` and `io::write_file(path, bytes, poster)`: a whole small file opened,
+  written and closed by one task of the strand (two rewrites through one strand stay in order). The
+  first version appended and closed in two steps, so a real pool could run the write in one batch and
+  the close in the next: the retail `.out` existed, empty and open, for a whole batch, and the harness
+  failed to delete it (WinError 32, the first retail run) - `close_after` puts the bytes and the close
+  request into the queue under one lock.
+
+**The audit** (every file / console write and open / flush / directory call reachable from the server's
+runner and main loop, the headless frame loop and the retail game-thread callbacks; per-tick or
+per-event rows moved, the rest justified):
+
+| host | site | thread | how often | now |
+|---|---|---|---|---|
+| server | `Printf` / `DebugOutput` / `LogFileOutput` (`misc.cpp`): stdout (`fflush` per line), replxx on a terminal, the `--log` file (`fflush` per line with `auto_flush_log`) | runner (`[Sim]` lines), main loop, GNS callback, console | per event; dozens per session start | **moved**: `start_log_writer` (main, a one-thread `io_pool` of its own) - formatted and timestamped on the caller, two queues (console: `open_stream(stdout)` or `open_sink` to replxx; the log file: `open_stream`), 16 MiB each with the dropped-bytes notice and a `[log] writer queue peak` line per factor 4 from 16 KiB; console mode = `session_io.log` (default batch), file mode = `auto_flush_log` (record / none). Before the start, after the stop, and in every host that never starts it (the retail mod, the mock client, the record parser) as before |
+| server | session journal open: `create_directories` + `fopen` (`session_runner::open_journal`) | runner | once per session | **moved** (deferred open); without the strand (sim-only build) as before |
+| server | session journal records | runner | per tick | SIO (unchanged) |
+| server | `player_status.json` (`save_player_status`) | main loop | per join / leave, when `save_player_status_to_file` (default off) | **moved**: `io::write_file` on a strand of the log pool, content serialized on the caller (same bytes) |
+| server | `login_data.yml` | its own writer thread (pre-IOX) | per login | already off the main loop; kept |
+| server | `config.yml` (`config_manager::save`) | setup; console (ban / mute / op) | startup and operator commands | kept: startup, or an operator's command - a few KB, rare; the harness edits the file right after start-up, so its write stays where it is in the order |
+| server | engine diagnostics on stdout (`physics_state.cpp` printf: spawn impulse without a body, own-group / airship latch notes) | runner | rare events (per life at most) | kept; note: they share stdout's FILE lock with the writer's `fwrite`, so a stdout stalled *inside* `fwrite` could still hold one of them (a writer only sleeping, the test switch, cannot show it) |
+| server | `FatalError` (Bug): stderr, `exit(2)`; the SIGTERM / SIGINT handler; the crash reporter | any | fatal | synchronous by design: the Bug path stops the writer first (bounded 2 s); the SIGTERM / SIGINT handler stays minimal (`fflush` of the --log file only, `role.hpp`'s rule: no drain there, so it loses the writer's queue - empty in a healthy run - as a kill does); the crash drain of SIO (fatal signals, the exception filter) covers the log queues too |
+| server | `flushlog` console command (`flush_log`) | console | operator command | blocking for the operator only: it waits for the writer without holding the log's mutex, so the runner and the main loop keep logging (queueing) meanwhile; the queue's state is shared under the mutex first (`io_queue::flusher`), so a stop or `close_log` on another thread meanwhile (an operator's `flushlog` inside the shutdown drain) cannot free it under the flush (the review's race, fixed) |
+| server | process exit | main | once | the stop guard (after the server, before the pool): `close_now` 2 s per queue, then the pool's `join` waits for a task already running (as SIO's pool) |
+| headless | log, journal records, capture records | tick | per tick / event | SIO (unchanged) |
+| headless | journal open: `create_directories` + `fopen` (`client_journal::open`) | tick | per session (and per rejoin) | **moved** (deferred open; failure via `logf` once) |
+| headless | capture open / close | main / end of `run()` | once each | kept: the open runs before the engine boots and a failure must refuse the run; the close runs after the last frame, bounded 60 s, so `write_failed()` is final in the log. Posting it was tried: the log line of its completion ran during the pool's join, after the static log was gone, and a queue holding a strand of a destroyed pool crashed in its destructor (the reason SIO's `session_io` destroys the log before the pool) |
+| headless | `--trace-sends` (`fprintf` per send), `--dump-savestate` / `BMMO_DUMP_FINAL_LAG` / `.scr` dumps, `--compare-scripts` reads | tick | per send / per tick, only with those flags | kept: diagnostics of the offline replays (the wire check), never on in a live or timed run; the compare must read synchronously |
+| headless | `BMMO_HULL_PROBE_FILE`, the IVP impact file (`out_deb_file`), engine printf | tick | env / verb diagnostics, rare events | kept (diagnostics) |
+| headless | the inbound replay's divergence exit | tick | once | synchronous by design (`drain_all` 10 s, `exit(3)`) |
+| retail | the mod's log (`logger_wrapper` -> BML `ILogger`: ModLoader.log, flushed by BML, and its console) | game thread (OnProcess, the core host's status / window / rewind lines), GNS callback | per event | **moved**: `bmmo::retail_log` (`log_manager.h`, file-scope, no `BallanceMMOClient` member): the line is formatted on the caller with the converted arguments, and the `ILogger` call itself runs on a `thread_pool_` strand (`open_sink`, mode none - BML flushes); 16 MiB bound with the dropped notice; started in the constructor, stopped in `OnExitGame` after the last drain and before a Bug's `terminate` |
+| retail | session journal open: `create_directories` + `prune` (in `journal_path`) + `fopen` | game thread | per session | **moved**: `journal_path` makes no file-system call; the new `session_platform::journal_prepare` (prune) runs on the journal's strand before its open; failure via `logf` once |
+| retail | session journal records | game thread | per tick | SIO (unchanged) |
+| retail | command file (`process_command_file`): `exists` every frame, read, remove, `.out` | game thread | **every frame**, in every game | **moved**: one poll in flight on a `thread_pool_` strand; the game thread dispatches what it found (one frame later than before) and the `.out` is `io::write_file` on the same strand (after this read, before the next poll) |
+| retail | command pipe `respond` (`WriteFile` + wait) | game thread | per command, only with `BMMO_COMMAND_PIPE` (the harness sets it empty) | kept: test interface, 64 KiB pipe buffer |
+| retail | `pipe_trace` (`BMMO_AUTOMATION_LOG`), tick record (`record` verb), `record_diag_`, physics_RT stdout (`BMMO_PHYSICS_STDOUT`, unbuffered, the harness sets it) with the engine's rare printf | game thread | env / verb diagnostics, rare events | kept (diagnostics) |
+| retail | legacy session journal (`session_journal_client`, core off) | game thread | per tick | unchanged by the rule (the legacy path gets nothing new; deleted at R7) |
+| retail | crash: `dumpfile.cpp` minidump, `on_fatal_error` drain; dump prune at start-up; config saves | crash / start-up / `OnCommand` (already posted to `thread_pool_`) | once / user commands | synchronous by design or already off the game thread; note: the crash drain (`on_fatal_error` -> `drain_all`) now also writes the retail log queue, i.e. calls BML's `ILogger` from the crash handler - a crash inside BML's logger holding a non-recursive lock of its own would hang that drain; the minidump is written before the callback (`dumpfile.cpp`), so only the fatal message box is at stake |
+
+**Disk-stall tests** (`BMMO_IO_TEST_DELAY_MS`, SIO's switch: every write task sleeps that long holding
+its file, as a stalled `WriteFile` would - chosen because it is deterministic and the same on Windows,
+the Arch WSL server and the game; a FIFO nobody reads never recovers, a paused 9P mount cannot be
+scripted; it now covers the server's log, the deferred opens, the retail log and the `.out` too).
+Server + headless in one run (`work/IOX/live.sh iox_stall 2000`: the Arch server and 4 clients each with
+2000 ms, 60 s, LANE arm, snapshots off, clients pinned to E-cores of their own, `pin_clients.py`) against
+the control (`iox_ctl 0`, same recipe): server step p99 453-571 us / max 503-740 us over its first six
+10-second windows (control 473-571 / 618-805), one 2556 us step in the stalled run's last window (ticks
+3987-4646, the session's end; a sixth of the 15.15 ms tick), client frame_time p99
+3.1 / 21.3 / 21.7 / 20.2 ms, max 59.7-62.3 (control 3.3 / 21.4 / 22.0 / 20.7, max 60.5-62.4), starved 0,
+rebases 0, resyncs 0 on all four in both, VERDICT PASS, the server journal replayed 4627/4627; queue
+peaks under the stall 828-839 KB per client journal and 414 KB for the server's (control 30-48 KB and
+6 KB), far below SIO's 32 MiB bound. The server's log goes through the writer: a `--dry-run` takes 1.22 s
+without the switch and 6.24 s with 3000 ms, same lines. Retail (`work/IOX/iox_retail.py
+iox_retail_stall2 500`, RT1's L11 ctl recipe as RCV ran it, both games on E-cores of their own, 500 ms):
+frame_interval p50 15.1 / 15.1 ms, p99 23.4 / 18.3, max 209.5 / 190.9 against the same build's control
+(`iox_retail_ctl 0`, run in the gate round with the identical installed x86 build: p50 15.1 / 15.1, p99
+18.4 / 22.6, max 220.0 / 240.5; core_frame_time p99 22.8 / 15.9 stalled, 16.8 / 21.6 control) - the
+same spread, the high p99 on the other game in each run (rollback load: c1's resim 364 stalled vs 303,
+starved 95 / 96), and within RCV's two runs of the same recipe (p99 17.0-22.7, max 139-398); both journals written by the stalled strand to their `end: room
+closed` (queue peaks 422 / 457 KB), the prune kept 10 files, every command answered.
+
+**Checks (FULL step, plan section IOX).** `BallanceMMOMessageTests` 712/712 (four new `SessionIo.*`:
+the deferred open makes the directory and runs `prepare` on the writer, once, before the file exists,
+bytes equal the synchronous writer's; an open that fails is reported once from the next record and
+stops the journal; a sink queue gets its chunks on the writer in order, the drain reaches it; two
+`write_file`s through one strand are one task each and land in order; three SIO tests now assert the
+file does not exist before the writer runs). Builds x64 BUILD-OK, x86 CLIENT-BUILD-OK (deps OK), Arch
+`ballanced-36c04e3d24c9+bmmo-a24835842ae8-dirty`; GCC syntax 33/33. Wire check `rGNSU` vs `rIOX` over
+`core_ref_s12` (`EXTRA="--accept-protocol 22"`): 36/36 sends SAME, 36/36 journals IDENTICAL, ALL SAME,
+run twice (before and after `close_after`; the review's fix-ups - `flush_log` without the mutex,
+the signal handler kept minimal, comments - touch no headless path), and once more in the gate round
+after `io_queue::flusher` (a shared header). The first wire
+check's new binary crashed at exit in every replay (0xC0000005 in `strand_impl`'s destructor) - the
+posted capture close above, reverted. Build note: after those fix-ups three x64 builds in a row failed to
+link with LNK1163 ("invalid COMDAT selection") on freshly compiled objects (`misc.cpp.obj`,
+`session_runner.cpp.obj`, `lead_test.cpp.obj`; their sections were byte-identical in kind to the other
+objects') until the long-running `mspdbsrv.exe` was ended; the next build was BUILD-OK, no source change.
+
+**Adaptations and notes.** (1) IOF's server adaptation is partly undone: the server now has a log stream
+on the writer, so `session_io.log` sets its console's mode (the config comment says so) and only
+`session_io.capture` is answered with the "headless client stream" note; `auto_flush_log` still decides
+the `--log` file. (2) A line written directly with `printf` / `std::cout` (the server's start-up and
+"Stopping...", engine diagnostics) can land ahead of queued lines; cosmetic, as SIO noted for the
+headless client. (3) On retail BML stamps a line when the strand hands it over: in a healthy run within
+the same millisecond, under a stall late by the stall; the mod's lines can interleave with BML's own and
+other mods' lines as they already could from the GNS thread. (4) Exit bounds: the server's stop guard
+and `retail_log::stop` wait 2 s per queue, `OnExitGame`'s drain 2 s; the pools' joins (server log pool,
+SIO's pools) still wait for a write already running. (5) The log writer and the command-file poll
+are mod-wide, so a retail game with `session core off` runs them too; the legacy *session* path (its
+journal) is unchanged, and no check was spent on core off (B9DX). (6) The interactive console (a
+terminal: replxx `print` called from the writer strand, `open_sink`) is built but not exercised here -
+every run wrote stdout to a file; the okbc.st screen session (DEP / HL) is where it runs. (7) BML's
+`ILogger` (`include/BML/ILogger.h`, an interface; 0.3.12's implementation is not in this tree) is now
+called from one pool thread for every mod line, as it already was from the GNS thread for the
+networking lines; whether it guards its file with a lock of its own is unknown, so a mod line and a
+BML / other-mod line written in the same instant may interleave inside the file (as before IOX for the
+GNS lines). (8) The console queue never reached the 16 KiB `[log] writer queue peak` note in the stalled
+run (2 s stalls hold less than that of the server's lines), so its bound is shown by the unit tests and
+SIO's shared code, not by the live run.
+
 ### As built (step WGQ7, 2026-10-29): Q7, per-player mechanism units (protocol 19)
 
 **Protocol and journal.** P_Q is **19** (`PHYSICS_PROTOCOL_VERSION`;

@@ -650,9 +650,20 @@ namespace bmmo::session {
         // `max_bytes` == 0 means no limit.  The directory must exist.
         // `poster` (step SIO): the host's I/O strand; empty = synchronous.
         // `flush` (step IOF): the strand's flush mode (ignored synchronous).
+        //
+        // Step IOX: with a poster the file is opened by the writer
+        // (io_queue::open_deferred): its parent directory is created there and
+        // `prepare` (the retail journal's prune) runs there first, so the
+        // caller's thread does no file-system call at all.  The open's failure
+        // then cannot be returned: the first record written after the writer
+        // found it stops the journal like the size cap and calls `report`
+        // once, on the caller's (the writing) thread.  Without a poster the
+        // directory, `prepare` and the open run here as before (the failure
+        // in `error`).
         bool open(const std::filesystem::path& path, const journal_header& header, uint64_t max_bytes,
                   std::string& error, io_poster poster = {}, uint64_t max_queued = kJournalMaxQueued,
-                  io_flush flush = io_flush::batch) {
+                  io_flush flush = io_flush::batch, std::function<void()> prepare = {},
+                  std::function<void(const std::string&)> report = {}) {
             close();
             last_input_.clear();
             capped_ = false;
@@ -660,7 +671,9 @@ namespace bmmo::session {
             last_tick_ = header.first_tick;
             max_bytes_ = max_bytes;
             path_ = path;
-            if (!sink_.open(path, std::move(poster), max_queued, error, 0, flush)) {
+            report_ = std::move(report);
+            const bool deferred = static_cast<bool>(poster);   // synchronous: the directory must exist, as before
+            if (!sink_.open_deferred(path, std::move(poster), max_queued, error, flush, deferred, std::move(prepare))) {
                 path_.clear();
                 return false;
             }
@@ -886,6 +899,18 @@ namespace bmmo::session {
         }
 
         void record(journal_tag tag, const std::string& payload) {
+            // Step IOX: the writer could not create (or write) the file - an
+            // atomic read, no syscall.  Reported once, here on the writing
+            // thread; nothing more is queued for a file that is not there.
+            if (sink_.async() && sink_.failed()) {
+                capped_ = true;
+                if (report_) {
+                    auto report = std::move(report_);
+                    report_ = nullptr;
+                    report(path_.string() + ": the writer could not create or write the file, recording stopped");
+                }
+                return;
+            }
             const uint64_t size = 5 + payload.size();
             if (max_bytes_ != 0 && bytes_ + size > max_bytes_) {
                 // The last thing in the file says why it stops; that note is
@@ -931,6 +956,7 @@ namespace bmmo::session {
         }
 
         io_queue sink_;   // step SIO (was a std::ofstream)
+        std::function<void(const std::string&)> report_;   // step IOX: a writer-side failure, once
         std::filesystem::path path_;
         std::map<uint32_t, input_frame> last_input_;   // per player, for the repeat flag
         uint64_t max_bytes_ = 0;

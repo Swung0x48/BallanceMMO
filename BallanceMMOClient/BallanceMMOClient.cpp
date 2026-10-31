@@ -825,6 +825,10 @@ void BallanceMMOClient::OnExitGame()
     // still holds goes to the file now, while thread_pool_ still exists
     // (bounded wait).
     bmmo::session::io::drain_all(std::chrono::milliseconds(2000));
+    // Step IOX: the log writer stops last (what it still queues is written,
+    // bounded); later lines are written on the calling thread again, while
+    // thread_pool_ goes away.
+    bmmo::retail_log::stop();
 }
 
 inline void BallanceMMOClient::on_fatal_error(char* extra_text) {
@@ -2914,6 +2918,7 @@ void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eTy
     }
 
     if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
+        bmmo::retail_log::stop();   // step IOX: the fatal line reaches the log first (bounded)
         get_instance()->SendIngameMessage("BallanceMMO has encountered a bug which is fatal. Please contact developer with this piece of log.");
         terminate(5);
     }

@@ -3551,11 +3551,14 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     };
     p.journal_path = [this](const bs::journal_header& header) -> std::filesystem::path {
         if (!config_manager_["session_journal"]->GetBoolean()) return {};
-        const auto directory = bs::client_journal::directory();
-        std::error_code ec;
-        std::filesystem::create_directories(directory, ec);
+        // Step IOX: no file-system call on the game thread - the directory is
+        // created and the old journals pruned by the journal's writer strand,
+        // just before it creates this file (journal_prepare below).
+        return bs::client_journal::directory()
+             / bs::client_journal::file_name(header.session, header.level, header.own_player);
+    };
+    p.journal_prepare = [](const std::filesystem::path& directory) {
         bs::client_journal::prune(directory, bs::client_journal::kKeepFiles - 1);
-        return directory / bs::client_journal::file_name(header.session, header.level, header.own_player);
     };
 
     // ---- reports and hooks ----

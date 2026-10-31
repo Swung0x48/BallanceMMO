@@ -60,18 +60,29 @@ namespace bmmo::session::core {
         const std::filesystem::path path = platform.journal_path ? platform.journal_path(header) : std::filesystem::path();
         if (path.empty()) return;
         close("a new session started");
-        std::error_code ec;
-        if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
         header.utc_ms = platform.utc_ms(clock_site::journal_utc);
         journal_start_ = platform.now(clock_site::journal_start);
         std::string error;
         // Step SIO: the host's I/O strand writes the file, flushing as the
         // host's mode says (step IOF, batch by default); none: the tick
         // thread does, as before.
-        if (!journal_.open(path, header, kJournalMaxBytes, error,
-                           platform.io_strand ? platform.io_strand() : bmmo::session::io_poster{},
+        // Step IOX: with a strand the open is the writer's too - the
+        // directory, the host's journal_prepare (retail: the prune) and the
+        // open run there, so this thread makes no file-system call.  A
+        // failure the writer meets is logged once from the next record.
+        bmmo::session::io_poster poster = platform.io_strand ? platform.io_strand() : bmmo::session::io_poster{};
+        if (!poster && path.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(path.parent_path(), ec);
+        }
+        std::function<void()> prepare;
+        if (platform.journal_prepare && path.has_parent_path())
+            prepare = [hook = platform.journal_prepare, directory = path.parent_path()] { hook(directory); };
+        if (!journal_.open(path, header, kJournalMaxBytes, error, std::move(poster),
                            bmmo::session::kJournalMaxQueued,
-                           platform.journal_flush ? platform.journal_flush() : bmmo::session::io_flush::batch)) {
+                           platform.journal_flush ? platform.journal_flush() : bmmo::session::io_flush::batch,
+                           std::move(prepare),
+                           [this](const std::string& text) { core_.logf("journal: %s", text.c_str()); })) {
             core_.logf("journal: %s", error.c_str());
             return;
         }

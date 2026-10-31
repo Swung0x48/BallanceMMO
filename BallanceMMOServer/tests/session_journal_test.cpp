@@ -1427,9 +1427,9 @@ TEST(SessionIo, WriterThreadWritesTheSameBytesInOrder) {
     }   // the pool runs the posted close before it joins
     held_poster held;
     write_synthetic(held_path, held.poster());
-    // nothing was written on the "tick thread": the file exists (opened
-    // there) but every record still waits for the writer
-    EXPECT_EQ(0u, std::filesystem::file_size(held_path));
+    // nothing was written on the "tick thread": step IOX - not even the
+    // open; every record and the file itself still wait for the writer
+    EXPECT_FALSE(std::filesystem::exists(held_path));
     EXPECT_EQ(1u, held.tasks->size());   // one task for the whole session, the close included
     EXPECT_GT(held.run(), 0u);
     const std::string expected = read_file(sync_path);
@@ -1460,7 +1460,7 @@ TEST(SessionIo, DestroyedWriterDrainsItsQueue) {
         ASSERT_TRUE(writer.open(held_path, make_header(), 0, error, held.poster())) << error;
         EXPECT_TRUE(writer.asynchronous());
         write_notes(writer, 50);
-        EXPECT_EQ(0u, std::filesystem::file_size(held_path));
+        EXPECT_FALSE(std::filesystem::exists(held_path));   // step IOX: opened by the writer
         EXPECT_EQ(writer.bytes(), writer.peak_queued());
     }
     EXPECT_EQ(read_file(sync_path), read_file(held_path));
@@ -1537,7 +1537,7 @@ TEST(SessionIo, DrainAllWritesAStalledQueue) {
     std::string error;
     ASSERT_TRUE(writer.open(path, make_header(), 0, error, held.poster())) << error;
     write_notes(writer, 30);
-    EXPECT_EQ(0u, std::filesystem::file_size(path));
+    EXPECT_FALSE(std::filesystem::exists(path));   // step IOX: the drain opens it
     io::drain_all(std::chrono::milliseconds(1000));
     EXPECT_EQ(writer.bytes(), std::filesystem::file_size(path));
     write_notes(writer, 5);
@@ -1767,4 +1767,114 @@ TEST(SessionIo, StreamFlushModesAndALateModeChange) {
         EXPECT_EQ(expected, read_file(path));   // the close hands the stream to the OS in every mode
         std::fclose(stream);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Step IOX: the rest of the session I/O off the hot threads.
+
+// A journal's open is the writer's: the parent directory, the host's prepare
+// (the retail prune) and the open run there, in that order, once; the tick
+// thread touches nothing; the bytes are the synchronous writer's.
+TEST(SessionIo, DeferredOpenMakesTheDirectoryAndRunsPrepareOnTheWriter) {
+    const temp_dir dir("iox_deferred_open");
+    const auto sync_path = dir.file("sync.bmjr");
+    const auto held_path = dir.path / "made" / "by" / "writer" / "held.bmjr";
+    std::string error;
+    {
+        journal_writer writer;
+        ASSERT_TRUE(writer.open(sync_path, make_header(), 0, error)) << error;
+        write_notes(writer, 20);
+    }
+    held_poster held;
+    int prepared = 0;
+    bool directory_at_prepare = false, file_at_prepare = true;
+    journal_writer writer;
+    ASSERT_TRUE(writer.open(held_path, make_header(), 0, error, held.poster(), kJournalMaxQueued, io_flush::batch,
+                            [&] {
+                                ++prepared;
+                                directory_at_prepare = std::filesystem::is_directory(held_path.parent_path());
+                                file_at_prepare = std::filesystem::exists(held_path);
+                            })) << error;
+    write_notes(writer, 20);
+    EXPECT_FALSE(std::filesystem::exists(dir.path / "made"));
+    EXPECT_EQ(0, prepared);
+    writer.close();
+    held.run();
+    EXPECT_EQ(1, prepared);
+    EXPECT_TRUE(directory_at_prepare);
+    EXPECT_FALSE(file_at_prepare);
+    EXPECT_EQ(read_file(sync_path), read_file(held_path));
+}
+
+// The writer cannot create the file: open() said yes (it cannot know), the
+// next record stops the journal like the cap and reports it once, on the
+// writing thread; nothing more is queued.
+TEST(SessionIo, ADeferredOpenThatFailsIsReportedOnceFromTheNextRecord) {
+    const temp_dir dir("iox_open_fails");
+    const auto blocker = dir.file("not_a_directory");
+    write_file(blocker, "x");
+    const auto path = blocker / "journal.bmjr";   // its parent is a file
+    held_poster held;
+    std::vector<std::string> reports;
+    journal_writer writer;
+    std::string error;
+    ASSERT_TRUE(writer.open(path, make_header(), 0, error, held.poster(), kJournalMaxQueued, io_flush::batch, {},
+                            [&](const std::string& text) { reports.push_back(text); })) << error;
+    write_notes(writer, 3);
+    held.run();
+    EXPECT_TRUE(reports.empty());   // the writer found it; the owner has not written since
+    const uint64_t bytes = writer.bytes();
+    write_notes(writer, 3);
+    ASSERT_EQ(1u, reports.size());
+    EXPECT_NE(std::string::npos, reports[0].find("journal.bmjr"));
+    EXPECT_NE(std::string::npos, reports[0].find("recording stopped"));
+    EXPECT_EQ(bytes, writer.bytes());
+    write_notes(writer, 3);
+    EXPECT_EQ(1u, reports.size());
+    writer.close();
+    held.run();
+    EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+// A sink queue (the server's interactive console, the retail BML logger):
+// the chunks reach the sink on the writer, in order, never on the caller.
+TEST(SessionIo, SinkQueueHandsTheChunksToTheSinkOnTheWriter) {
+    held_poster held;
+    std::vector<std::string> seen;
+    io_queue log;
+    log.open_sink([&](const std::string& chunk) {
+        seen.push_back(chunk);
+        return true;
+    }, stdout, held.poster(), 1 << 20, io_flush::none);
+    std::vector<std::string> expected;
+    for (int i = 0; i < 5; ++i) {
+        expected.push_back("Iline " + std::to_string(i));
+        EXPECT_TRUE(log.append(expected.back()));
+    }
+    EXPECT_TRUE(seen.empty());
+    EXPECT_EQ(1u, held.run());
+    EXPECT_EQ(expected, seen);
+    EXPECT_TRUE(log.append("Wlate"));
+    io::drain_all(std::chrono::milliseconds(1000));   // the crash / exit drain reaches a sink too
+    ASSERT_EQ(6u, seen.size());
+    EXPECT_EQ("Wlate", seen.back());
+    log.close();
+    held.run();
+    EXPECT_FALSE(log.failed());
+}
+
+// A whole small file through a strand (player_status.json, the automation's
+// .out): nothing on the caller; two rewrites of one path land in order.
+TEST(SessionIo, WriteFileOnAStrandKeepsTheRewritesInOrder) {
+    const temp_dir dir("iox_write_file");
+    const auto path = dir.file("player_status.json");
+    held_poster held;
+    EXPECT_TRUE(io::write_file(path, "[first]", held.poster()));
+    EXPECT_TRUE(io::write_file(path, "[second]", held.poster()));
+    EXPECT_EQ(2u, held.tasks->size());   // one task each: open, write and close together
+    EXPECT_FALSE(std::filesystem::exists(path));
+    held.run();
+    EXPECT_EQ("[second]", read_file(path));
+    EXPECT_TRUE(io::write_file(path, "[now]", {}));   // no strand: at once
+    EXPECT_EQ("[now]", read_file(path));
 }

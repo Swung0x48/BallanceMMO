@@ -795,7 +795,8 @@ namespace bmmo::session {
         // session, level and own player are filled; utc_ms is not yet); an
         // empty path means no journal.  An empty field means this host never
         // journals.  Headless: --journal verbatim; retail (R1): its journal
-        // directory and file name, after pruning old files.
+        // directory and file name (step IOX: no file-system call here - the
+        // directory and the prune are journal_prepare's, on the writer).
         std::function<std::filesystem::path(const journal_header& header)> journal_path;
         // Step SIO (session I/O off the tick thread): a new strand of the
         // host's I/O executor for one file (session/io_pool.hpp
@@ -809,6 +810,12 @@ namespace bmmo::session {
         // default).  Headless: --io-flush; retail: the SessionJournalFlush
         // property.
         std::function<io_flush()> journal_flush;
+        // Step IOX: work on the journal's directory before its file is
+        // created (retail: prune the old journals), run on the journal's
+        // writer strand just before the open (with no strand: on the tick
+        // thread, before the open).  journal_path itself must not touch the
+        // disk.  Empty: nothing (the directory is created either way).
+        std::function<void(const std::filesystem::path& directory)> journal_prepare;
 
         // ---- the trafo as an input (trafo-replication design 2.3-2.5, 2.11,
         // 4.7; step T3), required with session_capabilities::trafo_inputs ----

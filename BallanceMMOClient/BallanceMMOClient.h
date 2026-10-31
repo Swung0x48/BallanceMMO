@@ -37,6 +37,7 @@
 #include <optional>
 #include <queue>
 #include <asio.hpp>
+#include <session/io_pool.hpp>
 #include <parallel_hashmap/phmap.h>
 
 extern "C" {
@@ -56,6 +57,10 @@ public:
 		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
 		//	[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
 	{
+		// Step IOX: the mod's log lines are written by a strand of
+		// thread_pool_ from here on (log_manager.h bmmo::retail_log), not by
+		// the game thread; OnExitGame stops it after the last drain.
+		bmmo::retail_log::start(GetLogger(), bmmo::session::strand_poster(thread_pool_.get_executor()));
 		DeclareDumpFile(std::bind(&BallanceMMOClient::on_fatal_error, this, std::placeholders::_1));
 		this_instance_ = this;
 

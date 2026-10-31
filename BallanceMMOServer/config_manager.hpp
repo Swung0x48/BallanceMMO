@@ -15,6 +15,10 @@ class config_manager {
 private:
     YAML::Node config_;
     bool save_player_status_to_file_ = false;
+    // Step IOX: player_status.json is written by this strand of the server's
+    // log pool, not by the network thread that saves it (empty: written at
+    // once, as before).
+    bmmo::session::io_poster status_writer_;
     std::unordered_map<std::string, std::string> forced_names_, reserved_names_;
     std::unordered_map<std::string, bool> forced_cheat_modes_;
 
@@ -132,8 +136,14 @@ public:
     // session_io.journal (step IOF): when the server's I/O strand flushes a
     // session journal - none, batch (default, one fflush per written batch)
     // or record (one per record); never on the runner thread.  The server's
-    // own log file is not session I/O: auto_flush_log still governs it.
+    // --log file keeps auto_flush_log (step IOX: on the log writer's strand,
+    // true = record, false = none); its console takes session_io.log.
     bmmo::session::io_flush session_io_journal_flush = bmmo::session::io_flush::batch;
+    // session_io.log (step IOX): the flush mode of the server's console
+    // stream (stdout / the terminal), which the log writer's strand writes
+    // since step IOX - batch by default.  The --log file keeps
+    // auto_flush_log (true = record, false = none).
+    bmmo::session::io_flush session_io_log_flush = bmmo::session::io_flush::batch;
     std::unordered_map<std::string, std::string> physics_allowed_mods;  // mod id -> version; empty = no check
     ESteamNetworkingSocketsDebugOutputType logging_level = k_ESteamNetworkingSocketsDebugOutputType_Important;
 
@@ -161,6 +171,7 @@ public:
     // Queues a login for the writer thread; never touches the disk itself.
     void save_login_data(const SteamNetworkingIPAddr& ip, const std::string& uuid_str, const std::string& name);
     void save_player_status(const client_data_collection& clients);
+    void set_status_writer(bmmo::session::io_poster poster) { status_writer_ = std::move(poster); }
 
     ~config_manager();
 };

@@ -20,7 +20,10 @@
 // of the SimTool, the tests, the retail legacy path).
 //
 // The journal (session/journal.hpp journal_writer), the headless client's log
-// and its inbound capture each own one.  The host hands in an io_poster: a
+// and its inbound capture each own one; since step IOX also the server's log
+// (utility/misc.cpp: its console and --log file), the retail mod's BML log
+// lines (log_manager.h bmmo::retail_log, through an io_sink), and the small
+// whole files of io::write_file (player_status.json, the automation .out).  The host hands in an io_poster: a
 // function that posts a task to ONE strand (tasks run one at a time, in the
 // order posted) - an asio strand of the host's thread pool
 // (session/io_pool.hpp: the retail mod's existing thread_pool_, the server's
@@ -61,6 +64,11 @@ namespace bmmo::session {
     // Posts a task to one strand of the host's I/O executor.  Empty: no
     // writer thread, the queue writes on the caller's thread.
     using io_poster = std::function<void(io_task)>;
+    // Step IOX: a queue whose bytes go to a function instead of fwrite (the
+    // server's interactive console through replxx, the retail mod's BML
+    // logger).  Called on the writer strand with one appended chunk; false =
+    // the write failed.
+    using io_sink = std::function<bool(const std::string& chunk)>;
 
     // Step IOF: when the writer strand hands a file's stdio buffer to the OS
     // (see the header comment).  Never on the tick thread.
@@ -87,8 +95,9 @@ namespace bmmo::session {
 
     // The mode of each session I/O stream, every one batch by default.  A
     // host uses the streams it has: the headless client all three, the
-    // server and the retail mod only the journal (their own logs are not
-    // session I/O; the server's log file keeps auto_flush_log).
+    // server the journal and (step IOX) its console as `log` (its --log
+    // file keeps auto_flush_log), the retail mod only the journal (its BML
+    // log lines go through the writer with BML's own flushing).
     struct io_flush_config {
         io_flush log = io_flush::batch;
         io_flush journal = io_flush::batch;
@@ -148,6 +157,7 @@ namespace bmmo::session {
             std::timed_mutex io_mutex;
             std::FILE* file = nullptr;
             bool own_file = true;          // false: stdout, never closed
+            io_sink sink;                  // step IOX: set = chunks go here, not to fwrite(file)
             // Step IOF: the writer's flush mode (io_flush; batch by default,
             // the user's decision of 2026-10-29).  Atomic: the headless
             // client sets its log's mode after the log is open (set_flush).
@@ -159,6 +169,12 @@ namespace bmmo::session {
             std::filesystem::path open_path;
             size_t open_buffer = 0;
             std::shared_ptr<queue_state> predecessor;
+            // Step IOX (open_deferred): the per-session open moved off the
+            // tick thread - the parent directory created and `prepare` run
+            // (the retail journal's prune) on the writer, just before the
+            // open, both once.
+            bool create_parent = false;
+            std::function<void()> prepare;
             std::atomic<bool> closed{false};   // finish_file ran
             // ---- fixed after open
             std::filesystem::path path;    // empty for a stream
@@ -241,13 +257,19 @@ namespace bmmo::session {
             r.queues.swap(live);
         }
 
+        // io_mutex held: one chunk to the file, or to the sink (step IOX).
+        inline void put_chunk(queue_state& s, const std::string& c) {
+            if (c.empty()) return;
+            const bool ok = s.sink ? s.sink(c) : std::fwrite(c.data(), 1, c.size(), s.file) == c.size();
+            if (!ok) s.failed.store(true, std::memory_order_relaxed);
+        }
+
         // io_mutex held.  `flush_each` (the writer's record mode, step IOF):
         // one fflush after each chunk written.
         inline void write_chunks(queue_state& s, const std::vector<std::string>& chunks, bool flush_each = false) {
             for (const auto& c: chunks) {
                 if (!s.file || s.failed.load(std::memory_order_relaxed)) return;
-                if (!c.empty() && std::fwrite(c.data(), 1, c.size(), s.file) != c.size())
-                    s.failed.store(true, std::memory_order_relaxed);
+                put_chunk(s, c);
                 if (flush_each) {
                     std::fflush(s.file);
                     s.flushes.fetch_add(1, std::memory_order_relaxed);
@@ -274,6 +296,21 @@ namespace bmmo::session {
         // written and its file closed first, then the path is truncated.
         // False: the predecessor's file is held past `timeout` (a drain only;
         // the open waits for a later task).
+        // Step IOX: the deferred open's own work - the parent directory and
+        // the owner's `prepare` (each once), then the open.
+        inline void prepare_open(queue_state& s) {
+            if (s.create_parent && s.open_path.has_parent_path()) {
+                std::error_code ec;
+                std::filesystem::create_directories(s.open_path.parent_path(), ec);
+            }
+            s.create_parent = false;
+            if (s.prepare) {
+                auto prepare = std::move(s.prepare);
+                s.prepare = nullptr;
+                prepare();
+            }
+        }
+
         inline bool ensure_open_locked(queue_state& s, std::chrono::milliseconds timeout) {
             if (s.open_path.empty()) return true;
             if (s.predecessor) {
@@ -284,6 +321,7 @@ namespace bmmo::session {
                 p.io_mutex.unlock();
                 s.predecessor.reset();
             }
+            prepare_open(s);
             s.file = open_for_write(s.open_path);
             if (!s.file) s.failed.store(true, std::memory_order_relaxed);
             else if (s.open_buffer) std::setvbuf(s.file, nullptr, _IOFBF, s.open_buffer);
@@ -346,15 +384,14 @@ namespace bmmo::session {
                     predecessor->io_mutex.unlock();
                 }
                 predecessor.reset();
+                prepare_open(*this);
                 file = open_for_write(open_path);
                 open_path.clear();
                 if (!file) return;
             }
             if (!file) return;
             for (const auto& c: pending)
-                if (!c.empty() && !failed.load(std::memory_order_relaxed)
-                    && std::fwrite(c.data(), 1, c.size(), file) != c.size())
-                    failed.store(true, std::memory_order_relaxed);
+                if (!failed.load(std::memory_order_relaxed)) put_chunk(*this, c);
             if (own_file) std::fclose(file);
             else std::fflush(file);
         }
@@ -416,6 +453,54 @@ namespace bmmo::session {
             return true;
         }
 
+        // Step IOX: a file opened by the writer, not here - with a writer
+        // thread nothing of the open touches the disk on the caller's thread
+        // (a session's journal opens on the runner / tick / game thread): the
+        // writer's first task creates the parent directory
+        // (`create_parent`), runs `prepare` (the retail journal's prune), then
+        // opens (truncates) the path; a reopen of a path this queue's last
+        // posted close still holds waits for that file as open() does.  The
+        // open's failure is not known here: it shows as failed(), which the
+        // owner reads on its own thread (the journal reports it once and
+        // stops).  Without a poster this is open() after the same directory
+        // and `prepare` work, on the caller's thread, with the failure in
+        // `error`.
+        bool open_deferred(const std::filesystem::path& path, io_poster poster, uint64_t max_queued, std::string& error,
+                           io_flush flush = io_flush::batch, bool create_parent = false,
+                           std::function<void()> prepare = {}) {
+            if (!poster) {
+                if (create_parent && path.has_parent_path()) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(path.parent_path(), ec);
+                }
+                if (prepare) prepare();
+                return open(path, {}, max_queued, error, 0, flush);
+            }
+            close();
+            auto previous = closing_.lock();
+            closing_.reset();
+            if (previous && (previous->closed.load(std::memory_order_acquire) || previous->path != path))
+                previous.reset();
+            attach(nullptr, true, std::move(poster), max_queued, flush);
+            state_->path = path;
+            state_->open_path = path;
+            state_->predecessor = std::move(previous);
+            state_->create_parent = create_parent;
+            state_->prepare = std::move(prepare);
+            return true;
+        }
+
+        // Step IOX: a stream written through `sink` by the writer strand (the
+        // server's console via replxx, the retail mod's BML logger).
+        // `stream` is what the flush modes and the drains fflush (the sink's
+        // own stream, or stdout); it is never closed.
+        void open_sink(io_sink sink, std::FILE* stream, io_poster poster, uint64_t max_queued,
+                       io_flush flush = io_flush::batch) {
+            close();
+            attach(stream, false, std::move(poster), max_queued, flush);
+            state_->sink = std::move(sink);
+        }
+
         // A stream someone else owns (stdout): never closed; flushed by the
         // writer as `flush` says (step IOF; SIO built it with none), and at
         // the close and the exit / crash drains.
@@ -454,9 +539,7 @@ namespace bmmo::session {
             auto& s = *state_;
             if (!s.poster) {
                 std::lock_guard io(s.io_mutex);
-                if (s.file && !s.failed.load(std::memory_order_relaxed)
-                    && std::fwrite(bytes.data(), 1, bytes.size(), s.file) != bytes.size())
-                    s.failed.store(true, std::memory_order_relaxed);
+                if (s.file && !s.failed.load(std::memory_order_relaxed)) io_detail::put_chunk(s, bytes);
                 return true;
             }
             bool post = false;
@@ -488,11 +571,33 @@ namespace bmmo::session {
             io_detail::drain_locked(*state_, true, false, io_detail::kWait);
         }
 
+        // Step IOX: the same flush, to be run later on another thread
+        // without the lock that guards this queue: the state is shared into
+        // the callable here (under the owner's lock), so a close_now / close
+        // that resets state_ meanwhile cannot free it under the flush; a
+        // state closed by then has no file and the flush does nothing.
+        // Empty when nothing is open.
+        std::function<void()> flusher() const {
+            if (!state_) return {};
+            return [s = state_] {
+                std::lock_guard io(s->io_mutex);
+                io_detail::drain_locked(*s, true, false, io_detail::kWait);
+            };
+        }
+
         // With a writer thread: posts the close and returns at once (the
         // strand writes what is queued, then closes).  Without one: closes
         // here.
-        void close() {
+        void close() { close_after(std::string()); }
+
+        // Step IOX: `last` appended and the close requested in one step, so
+        // one write task writes, closes and never leaves a file open (and
+        // unflushed) between two batches - io::write_file's whole small file
+        // is open on the writer only for its fopen / fwrite / fclose, as the
+        // std::ofstream it replaces was on the caller.
+        void close_after(std::string last) {
             if (!state_) return;
+            if (!last.empty() && !state_->poster) append(std::move(last), true);
             auto s = std::move(state_);
             batches_ = s->batches.load(std::memory_order_relaxed);
             flushes_ = s->flushes.load(std::memory_order_relaxed);
@@ -501,6 +606,10 @@ namespace bmmo::session {
                 bool post = false;
                 {
                     std::lock_guard q(s->queue_mutex);
+                    if (!last.empty() && !s->close_requested) {
+                        s->pending_bytes += last.size();
+                        s->pending.push_back(std::move(last));
+                    }
                     if (!s->close_requested) {
                         s->close_requested = true;
                         if (!s->scheduled) s->scheduled = post = true;
@@ -565,6 +674,21 @@ namespace bmmo::session {
     };
 
     namespace io {
+        // Step IOX: a whole small file (the server's player_status.json, the
+        // retail automation's <command file>.out) written by the strand
+        // `poster` posts to: opened, written and closed there, after
+        // everything posted to that strand before (one strand per file keeps
+        // two rewrites of it in order).  Without a poster: here, at once.
+        // False only for a synchronous failure; a writer's failure is lost
+        // (callers are best effort, as the std::ofstream they replace).
+        inline bool write_file(const std::filesystem::path& path, std::string bytes, const io_poster& poster) {
+            io_queue file;
+            std::string error;
+            if (!file.open_deferred(path, poster, 0, error, io_flush::none)) return false;
+            file.close_after(std::move(bytes));   // one task: open, write, close
+            return poster || !file.failed();
+        }
+
         // Every queue with a writer thread is written out here and now: what
         // is queued is written, a requested close is done, the rest is handed
         // to the OS.  `timeout` per file (a crash may have killed the writer

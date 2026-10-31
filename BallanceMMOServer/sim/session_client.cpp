@@ -2298,6 +2298,10 @@ namespace {
                 logf("capture-inbound: %llu passes, %llu steps, %llu messages written",
                      static_cast<unsigned long long>(flow_pass_), static_cast<unsigned long long>(flow_steps_),
                      static_cast<unsigned long long>(inbound_.messages()));
+                // Step IOX's audit: this synchronous close (bounded 60 s) runs
+                // once, after the last frame (run() has left its loop), so it
+                // delays no tick; the process's exit would wait for the pool's
+                // join anyway, and write_failed() is final in the line below.
                 inbound_.close();
                 logf("capture-inbound: writer queue peak %llu bytes", static_cast<unsigned long long>(inbound_.peak_queued()));
                 if (inbound_.write_failed())

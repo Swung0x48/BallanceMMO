@@ -25,10 +25,10 @@
 #include "server_data.hpp"
 #include "config_manager.hpp"
 #include "room/room_manager.hpp"
+#include <session/io_pool.hpp>   // the session journals' pool (step SIO) and the log's (step IOX)
 #if BMMO_BUILD_SIM
 #include "sim/session_runner.hpp"
 #include "sim/crash_report.hpp"
-#include <session/io_pool.hpp>
 #include "sim/late_tick.hpp"
 #include "sim/assign_copies.hpp"
 #include <physics/physics_state.hpp>
@@ -55,6 +55,8 @@ public:
     // carries the value; M1's send points read it.  0 (the default, and
     // every build without the flag): sent at once.
     void set_test_hold_member_ms(uint32_t ms) { test_hold_member_ms_ = ms; }
+    // Step IOX: player_status.json's writer (a strand of main's log pool).
+    void set_status_writer(bmmo::session::io_poster poster) { config_.set_status_writer(std::move(poster)); }
     uint32_t test_hold_member_ms() const { return test_hold_member_ms_; }
     // --assign-volley K (FULL step SAXE, test builds only): K extra
     // unreliable copies of every SessionAssign in the reliable one's own pass,
@@ -4276,6 +4278,19 @@ int main(int argc, char** argv) {
         bmmo::set_log_file(log_file);
     }
 
+    // Step IOX (world-agreement-gaps-design.md, "As built (step IOX)"): the
+    // log (the console and the --log file) is written by a strand of this
+    // one-thread pool, never by the runner, the main loop or the console
+    // thread that logs - a stalled disk or terminal (CPU step: 1.2 s of the
+    // runner in fflush(stdout) through 9P) delays the lines, not the tick.
+    // The stop guard is destroyed after the server and before the pool: what
+    // is queued is written, then lines go back to the logging thread.
+    bmmo::session::io_pool log_io(1);
+    bmmo::start_log_writer(log_io.strand());
+    struct log_writer_stop {
+        ~log_writer_stop() { bmmo::stop_log_writer(); }
+    } log_writer_stop_guard;
+
 #if BMMO_BUILD_SIM
     bmmo::sim::install_crash_reporter();   // backtraces from the simulation thread
     // Step SIO: a crash writes out what the journals' writer still holds
@@ -4287,6 +4302,7 @@ int main(int argc, char** argv) {
 
     printf("Starting server at port %u.\n", port);
     server server(port);
+    server.set_status_writer(log_io.strand());   // step IOX
     if (hold_member_ms) {
         server.set_test_hold_member_ms(hold_member_ms);
         printf("Test flag: --hold-member-ms %u (the SessionMember messages leave %u ms late).\n", hold_member_ms,

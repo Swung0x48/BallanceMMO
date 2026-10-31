@@ -2,6 +2,8 @@
 #define BALLANCEMMOSERVER_INTERNAL_HPP
 #include <cstdio>
 #include <cstdarg>
+#include <cstdint>
+#include <functional>
 #include <steam/steamnetworkingtypes.h>
 
 namespace bmmo {
@@ -89,6 +91,17 @@ namespace bmmo {
     }
 
     void set_auto_flush_log(bool flush);
+    // Step IOX: the log written by a writer strand (`poster` posts to one
+    // strand of the host's I/O pool; session/io_queue.hpp io_poster), not by
+    // the logging thread.  The server starts it in main; stop_log_writer
+    // writes what is queued (bounded) and goes back to writing on the calling
+    // thread, before the pool goes.  A host that never starts it logs as
+    // before.  set_console_log_flush: the console stream's io_flush mode
+    // (batch by default; the log file's follows auto_flush_log: record /
+    // none).
+    void start_log_writer(std::function<void(std::function<void()>)> poster);
+    void stop_log_writer();
+    void set_console_log_flush(uint8_t mode);
     void flush_log();
     void close_log();
     // signal-handler safe(r) counterpart of close_log(); see misc.cpp

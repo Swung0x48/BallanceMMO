@@ -18,6 +18,23 @@
 #include <unordered_map>
 
 namespace {
+    // Step IOX (world-agreement-gaps-design.md, "As built (step IOX)"): the
+    // command file is looked for, read and deleted by a strand of the mod's
+    // thread_pool_, and its ".out" written there - every frame used to stat
+    // the file on the game thread.  The game thread only takes what a poll
+    // found (one poll in flight at a time) and dispatches it, as before.
+    struct command_file_poll {
+        std::mutex mutex;
+        bool polling = false;    // a poll task is posted and has not finished
+        bool have = false;       // `content` holds a file a poll read
+        std::string content;
+        bmmo::session::io_poster strand;
+    };
+    command_file_poll& command_file() {
+        static command_file_poll* poll = new command_file_poll;   // never destroyed: a late task may still run
+        return *poll;
+    }
+
     std::optional<CKDWORD> automation_key_code(std::string name) {
         std::transform(name.begin(), name.end(), name.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -100,18 +117,41 @@ void BallanceMMOClient::process_command_file() {
         const char* env = std::getenv("BMMO_COMMAND_FILE");
         return std::string(env && *env ? env : "bmmo_command.txt");
     }();
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec) || ec)
-        return;
+    auto& poll = command_file();
     std::string content;
     {
-        std::ifstream in(path, std::ios::binary);
-        if (!in) return;  // being written; try again next frame
-        std::ostringstream ss;
-        ss << in.rdbuf();
-        content = ss.str();
+        std::lock_guard lk(poll.mutex);
+        if (!poll.strand) poll.strand = bmmo::session::strand_poster(thread_pool_.get_executor());
+        if (!poll.have) {
+            if (!poll.polling) {
+                poll.polling = true;
+                poll.strand([&poll] {
+                    std::error_code ec;
+                    std::string text;
+                    bool found = false;
+                    if (std::filesystem::exists(path, ec) && !ec) {
+                        std::ifstream in(path, std::ios::binary);
+                        if (in) {   // else being written; the next poll tries again
+                            std::ostringstream ss;
+                            ss << in.rdbuf();
+                            text = ss.str();
+                            found = true;
+                        }
+                    }
+                    if (found) std::filesystem::remove(path, ec);
+                    std::lock_guard lk(poll.mutex);
+                    if (found) {
+                        poll.content = std::move(text);
+                        poll.have = true;
+                    }
+                    poll.polling = false;
+                });
+            }
+            return;
+        }
+        content = std::move(poll.content);
+        poll.have = false;
     }
-    std::filesystem::remove(path, ec);
 
     std::ostringstream out;
     std::istringstream lines(content);
@@ -132,7 +172,9 @@ void BallanceMMOClient::process_command_file() {
         logger_->Info("CommandFile: %s -> %s", line.c_str(), response.substr(0, 300).c_str());
         out << line << " -> " << response << "\n";
     }
-    std::ofstream(path + ".out", std::ios::binary | std::ios::trunc) << out.str();
+    // Step IOX: written by the poll's strand, after this file's read and
+    // before the next poll.
+    bmmo::session::io::write_file(path + ".out", out.str(), poll.strand);
 }
 
 void BallanceMMOClient::process_command_pipe() {

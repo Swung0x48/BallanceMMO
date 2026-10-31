@@ -146,6 +146,9 @@ bool config_manager::load() {
         // Step IOF: session I/O's flush mode.  The server writes one session
         // I/O stream, the journals; its log file is written by the logging
         // thread itself and keeps auto_flush_log, and it has no capture.
+        // Step IOX: the log is written by the log writer's strand now; its
+        // console stream takes session_io.log (the --log file still follows
+        // auto_flush_log), so only `capture` is a stream the server lacks.
         if (!config_["session_io"] || !config_["session_io"].IsMap())
             config_["session_io"] = YAML::Node(YAML::NodeType::Map);
         YAML::Node session_io = config_["session_io"];
@@ -156,10 +159,18 @@ bool config_manager::load() {
             session_io_journal_flush = bmmo::session::io_flush::batch;
             session_io["journal"] = std::string("batch");
         }
-        for (const char* stream: {"log", "capture"})
-            if (session_io[stream])
-                Printf("Note: session_io.%s is a headless client stream; the server has none "
-                       "(its log file follows auto_flush_log).", stream);
+        if (session_io["log"]) {
+            const std::string log = yaml_load_value(session_io, "log",
+                    std::string(bmmo::session::io_flush_name(session_io_log_flush)));
+            if (!bmmo::session::parse_io_flush(log, session_io_log_flush)) {
+                Printf("Warning: session_io.log \"%s\" is not none, batch or record; using batch.", log);
+                session_io_log_flush = bmmo::session::io_flush::batch;
+                session_io["log"] = std::string("batch");
+            }
+        }
+        bmmo::set_console_log_flush(static_cast<uint8_t>(session_io_log_flush));
+        if (session_io["capture"])
+            Printf("Note: session_io.capture is a headless client stream; the server has none.");
     }
 
     ifile.close();
@@ -239,7 +250,8 @@ void config_manager::save(bool reload_values) {
                    "# - Session I/O (session_io): journal = when the server's I/O thread flushes a physics session's\n"
                    "#   journal: none (only when its buffer fills and at the close), batch (default: once after each batch\n"
                    "#   it writes) or record (after each record); never on a session's own thread, and the file's bytes are\n"
-                   "#   the same in every mode. The server's log file is not session I/O: auto_flush_log still decides it\n"
+                   "#   the same in every mode. log (optional) = the same for the server's console output, which the\n"
+                   "#   server's log writer thread writes (default batch). The --log file follows auto_flush_log\n"
                    "#   (true flushes after every line, like record; false leaves it to the buffer, like none).\n"
                    "# - Map name list style: \"md5_hash: name\".\n"
                    "# - Life count list style: \"md5_hash: count\".\n"
@@ -367,8 +379,9 @@ void config_manager::save_player_status(const client_data_collection& clients) {
             {"login_time", value{data.login_time}},
         });
     }
-    std::ofstream player_status_file(resolve_path("player_status.json"));
-    if (player_status_file.is_open()) {
-        player_status_file << value{player_list};
-    }
+    // Step IOX: the file is written by the log pool's strand (in order, one
+    // rewrite after the other), not on the network thread that saves it;
+    // the content is the value's serialization, as the std::ofstream wrote
+    // (no newline in it, so text mode changed no byte).
+    bmmo::session::io::write_file(resolve_path("player_status.json"), value{player_list}.serialize(), status_writer_);
 }

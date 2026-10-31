@@ -240,11 +240,18 @@ namespace bmmo::sim {
                                       uint64_t anchor_surfaces, uint32_t first_tick, uint64_t anchor_placement) {
         if (config_.journal_dir.empty()) return;
         const std::string prefix = "[session " + std::to_string(s.id) + "] journal: ";
-        std::error_code ec;
-        std::filesystem::create_directories(config_.journal_dir, ec);
-        if (ec) {
-            log(prefix + config_.journal_dir.string() + ": " + ec.message());
-            return;
+        // Step IOX: with the I/O strand the directory is created and the file
+        // opened by the writer, never on this (the runner) thread; a failure
+        // there is logged once, from the next record (journal_writer's
+        // report).  Without one (a sim-only build) both run here as before.
+        bmmo::session::io_poster poster = config_.io_strand ? config_.io_strand() : bmmo::session::io_poster{};
+        if (!poster) {
+            std::error_code ec;
+            std::filesystem::create_directories(config_.journal_dir, ec);
+            if (ec) {
+                log(prefix + config_.journal_dir.string() + ": " + ec.message());
+                return;
+            }
         }
         bmmo::session::journal_header header;
         header.kind = bmmo::session::journal_kind::server;
@@ -264,9 +271,9 @@ namespace bmmo::sim {
         const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
         s.journal_start = clock::now();
         std::string error;
-        if (!s.journal.open(path, header, config_.journal_max_bytes, error,
-                            config_.io_strand ? config_.io_strand() : bmmo::session::io_poster{},
-                            bmmo::session::kJournalMaxQueued, config_.journal_flush)) {
+        if (!s.journal.open(path, header, config_.journal_max_bytes, error, std::move(poster),
+                            bmmo::session::kJournalMaxQueued, config_.journal_flush, {},
+                            [this, prefix](const std::string& text) { log(prefix + text); })) {
             log(prefix + error);
             return;
         }

@@ -521,6 +521,14 @@ numbers 1-10 are unchanged.
      `session_io.journal`, retail `Gameplay/SessionJournalFlush`);
      `arena_map_test.py`'s `LogWatch` sees each line within one batch
      again; `world-agreement-gaps-design.md`, "As built (step IOF)".
+     **Finished by step IOX (2026-10-31)**, the user: "看下之前怎么做的，
+     做干净": the server's own log (console and `--log` file), every
+     per-session journal open (directory, retail prune, `fopen`),
+     `player_status.json`, the retail mod's BML log lines and its
+     per-frame command-file poll moved onto the same writer
+     (`open_deferred`, `open_sink`, `io::write_file`); the audit table,
+     the stall tests on the three hosts and what stays synchronous in
+     `world-agreement-gaps-design.md`, "As built (step IOX)".
    - **relay_late counts frames the resync state covers** (queued by step
      WGQ7, 2026-10-29): `note_input_correction`
      (`client_core_messages.cpp:464-467`) counts a relayed frame "past the
