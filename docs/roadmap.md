@@ -2590,6 +2590,9 @@ numbers 1-10 are unchanged.
      with post-H1X binaries (FULL / REF12) - captured before H1X's paper
      hull, their paper mirror (fan_dr c2 4.81 m, h123_150 c2 DIVERGED at
      pass 11057) cannot match a same-build server on any build.
+     **Done at FULL step REF13:** both re-captured as
+     `core_ref_s13/fan_dr` and `core_ref_s13/h123_150` (HEAD 17972046's
+     build; in the default wire check, fan_dr's rejoin life included).
      **(item 2) 8 members at 0 ms
      start late, measured**: U9 and its control without the FIFO and the
      reload (`u9ctl`) starve - every client steps tick T 2.6-4.5 ticks after
@@ -2779,6 +2782,30 @@ numbers 1-10 are unchanged.
      still passes its pins and a slot-13 build (`maphack.sh` hashes the
      Ballance-Agent file) matches it; install the new map only in all of
      them at once, for an arena-end run or for REF13 itself.
+     **Built at FULL step REF13 (2026-10-31):** the map installed in
+     Ballance-Agent and both game copies at once; `core_ref_s13` captured by
+     HEAD 17972046's clean build (`rREF13`, the Arch server of the same id,
+     protocol 24 / journal v9, every option at the deployed defaults,
+     snapshots off): REF12's eleven arms plus RSX's queued `fan_dr` and
+     `h123_150` (13 live runs), every server journal N/N matched, the wire
+     check `- rREF13` ALL SAME with no `--accept-protocol` and no pacer flag
+     (44/44 sends, 45/45 journals incl. fan_dr's rejoin life; solo pair
+     byte-identical); new `pins.json` (only Level_13 differs), `SHA256SUMS`,
+     README (`maps/arena-test/core_ref_s13/README.md`); `wire_check.sh`
+     defaults to it (its pacer auto-add only for pre-DX9 sets). On this map
+     the 60 s drives no longer die at the road's end (in `resync_snapoff`
+     no death before the session's end, consistent with ARX's solo1; the
+     other arms keep fewer respawns, from deaths not located here):
+     `resync_snapoff` ends with sector 1's 23 mechanisms (52/52 before), so
+     it no longer covers a resync with sector 2 active (`resync_at150` /
+     `_down` still do), and the residuals cited on it - B5RC's Ball_Stone
+     mirror 0.109 -> 21 m in c1, SFD (A)'s c1 floor seam at 1238 - were
+     measured on `core_ref_s12` / `core_ref_wfa` with the pre-ARX map: not
+     seeing them on `core_ref_s13` is not evidence they are fixed.
+     BALA-end's arena half re-run on the map
+     (`scripts/retail/ref13_end`): both copies finished in one core session
+     (Finish 624 and 3323, resyncs 0, far 0); the game copies and the Arch
+     server keep the slot-13 builds of the new hash.
      **Found (its own item,
      pre-existing; the legacy display, not physics):** in a core session the
      mod's own sector lags one checkpoint (status 1 / 2 / 3 after the
@@ -2812,6 +2839,8 @@ numbers 1-10 are unchanged.
      old-vs-new check whose OLD predates BALX reports them, until a REF
      step re-captures a5u_lead, a6m_snapoff and cliff with a BALX-or-later
      binary (3 live runs; marked in `core_ref_s12/README.md`).
+     **Done at FULL step REF13:** the three arms re-captured in
+     `core_ref_s13` (a BALX-or-later binary; journals IDENTICAL in "-" mode).
    - **FULL steps SAX / SAXE (2026-10-30 / 31; DFR's queued item 2):** a
      SessionAssign's three unreliable copies 40 ms apart did not survive the
      harness's count-shaped burst of 4 (DFR: ~330 ms retransmit, ~25 ticks

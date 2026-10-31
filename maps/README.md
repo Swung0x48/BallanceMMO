@@ -384,15 +384,19 @@ right and none of them is obvious.
    f484363ae1be8acc...), and every reference capture taken on the arena up to
    `core_ref_s12` pins that file: `pins.json` pins everything under
    `3D Entities`, so with the new map installed `e0_replay.py` / `wire_check.sh`
-   refuse those sets (all of them, `l8_cross` included) until they are
-   re-captured. Every rebuild changes the hash, so re-point the entry - and
-   rebuild - whenever a new `.nmo` goes into the slot.
+   refuse those sets (all of them, `l8_cross` included). Every rebuild changes
+   the hash, so re-point the entry - and rebuild - whenever a new `.nmo` goes
+   into the slot.
 
-   **Until the re-capture (roadmap §4, REF13) the test game dirs keep the
-   previous map.** Ballance-Agent and both two-copy game dirs stay on
-   c58a76b9; `maphack.sh` hashes the Ballance-Agent file and the server's
+   **The test game dirs carry this map since FULL step REF13 (2026-10-31).**
+   Ballance-Agent and both two-copy game dirs were switched together, the
+   server and the slot-13 builds rebuilt from its hash, and the reference set
+   re-captured on it (`maps/arena-test/core_ref_s13`, the wire check's
+   default). `maphack.sh` hashes the Ballance-Agent file and the server's
    `game_root` reads it, so the server and every copy must switch together -
-   never install this map in only some of them.
+   never install a map in only some of them. To replay an older set, put the
+   previous map (kept at `.local-tools/work/ARX/Level_13.NMO.pre-ARX`) back in
+   Ballance-Agent.
 
    **Keep that edit local.** It is a test convenience, not a feature.
 

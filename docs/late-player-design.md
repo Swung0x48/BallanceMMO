@@ -1949,7 +1949,10 @@ revision 3 it had only 14 to give back.
       phase passes `--pacer-restart-on-resync` to them** -
       `EXTRA=--pacer-restart-on-resync` when both are DX9 or later,
       `NEW_EXTRA=` only when the old one predates DX9 (it has no such
-      flag) - until a later REF step re-captures the set; noted in
+      flag) - until a later REF step re-captures the set (done at FULL
+      step REF13: `core_ref_s13` was captured under the DX9 rule and
+      replays without the flag; `wire_check.sh` adds it only for a pre-DX9
+      set); noted in
       `wire_check.sh`'s header and the set's README. Gate round: the
       review's two should-fix items - that tooling note, and the newer
       assignment before any frame (above) - built; x64 build, unit

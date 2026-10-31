@@ -3777,6 +3777,7 @@ drops every contact silently and splits the simulation unit at once).
   journals of `core_ref_s12` are stale as references from their latch on (the
   captures and sends still are): a wire check against the live journals
   ("-" mode) reports them until a REF step re-captures the three arms
+  (done at FULL step REF13: `core_ref_s13`)
   (queued: roadmap §4 item 7, "BALX"; marked in `core_ref_s12/README.md` and
   `.local-tools/wire_check.sh`'s header); an old-vs-new check with both
   binaries BALX or later is unaffected (with a pre-BALX OLD it reports these
