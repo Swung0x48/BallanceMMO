@@ -7126,3 +7126,180 @@ protocol, journal, IVP, engine or `BallanceMMOClient` member change.
 - **Not built:** option (b) (a one-tick replay when such a frame differs
   from the recorded drive) - with (a) no tick is stepped on a superseded
   exact frame, so nothing is left for it to correct.
+
+**As built (FULL step RTR, 2026-10-31): RT1's retail batch in full and RT2's
+SP8-e again, on E-cores.** A check batch (FULL plan §2 RTR); no code changed.
+x86 mod of the clean HEAD 9ad1893a (`ballanced-36c04e3d24c9+bmmo-9ad1893ae6b6`,
+CLIENT-BUILD-OK, DEPS-OK, no maphack: L11 / L12 only), the Arch server rebuilt
+from the same clean tree (the server log names that id; the binary left by
+REF13 was its slot-13-hacked `17972046eb07-dirty` build), protocol 24; every
+session snapshots off, trafo inputs and placement on, the union and the
+per-player mechanisms on (config.yml) but in the bit-off control, the session
+core on, `BMMO_JOURNAL_CHECKPOINT_TICKS=2` and the FINAL rows on. Decision 33:
+each game pinned right after start-up to E-cores of its own (client 1
+logical processors 16-21, client 2 22-27; OPC's masks), with
+`cpu_sampler.ps1` and RT1's per-process sampler (`work/RT1/gap7/psampler.ps1`)
+beside every run (host max 19.4-22.5 %, every outside process <= 2.9 %).
+Driver `.local-tools/work/RTR/rtr_retail.py` (RT1's `rt1_retail.py` recipes
+unchanged, RT2's L12 recipe as OPC2 ran it), judges `judge_run.sh` (RT1's
+`rt1_judge.py` FINAL and LIVE, `rt1_logs.py`, and the rREF13 SimTool's
+`--replay-session` of every server journal), `windows.py` (the 60-tick window
+lines as ms a tick), `timing.py`; runs `scripts/retail/rtr_*`. Eight game runs
+(nine sessions, sixteen launches), each judged before the next.
+- **Adaptation.** The stall recipe's `BMMO_IO_TEST_DELAY_MS` is 500 ms (IOX's
+  value), not RT1's 2000: since IOX the automation command file's `.out` goes
+  through the same writer strand, so every reply of the driver would wait
+  behind the delayed journal writes.
+- **Every server journal replays N/N** (rREF13 SimTool): main 2529/2529 and
+  2819/2819, stall 1945, stall_off 2068, arm1 2588, arm2 2586, ctl 2552, l12
+  1548, l12 reuse-off 1540; 0 checkpoint mismatches.
+- **FINAL rows against the server (rt1_judge.py, final_fields.py).**
+  Mechanisms 15/15 (main, both sessions), 23/23 (arms, ctl, stall client 2),
+  14/14 (L12) bit-equal; mirrors worst position 0 m everywhere but the bit-off
+  control; trafo pieces worst position 0 m, their unequal rows rotation only
+  (<= 4.04e-8; RT1's FINAL-row x87 read), the mirrors' likewise (<= 3.04e-8);
+  L12 own and mirror 1/1 bit-equal. The own balls' one row at the trafo beam
+  ticks 300 / 340 (0.001946 m) as in every run since `rt1_ctl`. 0 "drain
+  drive" lines, 0 "birth log" lines, 0 "no live controller" lines in every
+  run. In the bit-off control the 0 does not mean its target disagreement is
+  gone (client 2's 18.9 m below): WFA's off run logged 2 + 1 at an import of
+  another tick (the 500 ms delay slows every driver reply, so this run's
+  stall landed at 1277 and its import at 1338; RT1's off stall at 921).
+  `rtr_main` session 2 client 1's `trafo_original_leaks=4244` is the main
+  recipe's closing `explode stone` (the old form bypasses the hold; RT1's
+  4142); the stall recipe's `explode stone next` leaks 0.
+- **Recognised, pre-existing (identical numbers in RT1's `rt1_stall2` and
+  WFA's `wfa_stall`):** the stall recipe's client 1 own ball 0.981 m at 598
+  and `P_Modul_01_Pusher001` 0.01707 m at 350 / `P_Modul_37_Bridge` from 450
+  (mechanisms 21/23): the own ball differs from the server from its beam onto
+  the Pusher at 300 (0.028 m, linear velocity 1.51 m/s: R6's in-place beam
+  write of a rolling ball) and pushes the Pusher and the bridge on another
+  path; the stall client 2's own ball 0.95 m at 1190 from its beam at 800 (the
+  same R6 write, in the fan). The bit-off control (`rtr_stall_off`) is
+  `wfa_stall_off`'s signature: client 2's mechanisms 18/23 from 316, its own
+  ball 18.9 m - the bit-off world disagreement WFA queued (the union bit is
+  the remedy), not a naming gap.
+- **RT1's rows.** RET-HEAD / TR4-b / TR4-c (`rtr_main`): session 1 resyncs 0
+  on both; session 2 (client 2 at `net lag 150`) resyncs 0, trafo `late=0`,
+  pieces 32/32 positions exact; between the sessions 0 session copies left
+  (`objects _Trafo` 32 = the level's own `P_Trafo_*`), the single-player paper
+  explosion's 18 pieces, then 148 copies again and the paper set rebuilt (54
+  `Ball_Paper_piece`); quiesce `0 bodies` with the reload (RT1's adaptation).
+  TR4-a / RK1-c / ELR / RO1-a (`rtr_arm1` 13:24 + 50:12, `rtr_arm2` 97:24 +
+  131:47): the one-shot `at 67:59` "rolled" (anchor 8) in both; every row
+  FINAL-exact through the forced windows, the beams inside them and the
+  sector-2 pass at 628; each client rebased and resynced once (as RT1's arms)
+  and every resync re-stepped 49-57 rows, 0 written. B8EG-R1: the servers'
+  applied INPUT records part from the control's at 628-916 (`input_cmp.py`;
+  RT1: 628 / 653), and up to 627 both balls and the 15 bodies are bit-equal
+  to the control on both clients in both arms (pieces carry the per-run ids,
+  never comparable); parked 13 / 1, 4 / 2, control 1 / 2. RL1-d / WG4-rs /
+  WADA / SIO-st (`rtr_stall`): client 2's 900 ms stall rebased and resynced
+  once, "57 rows: 0 written, 57 equal", the server's proximity hold localized
+  (2 clone references renamed), 0 "no live controller"; writer queue peaks
+  495 / 482 KB under the 500 ms delay (main 12.9 KB), every command answered.
+  TR4-f: "REJECTED Trafo explosion Stone ... farther than the reach" in the
+  server log and "echoed rejected ... dropped before its tick" on client 1
+  (`explode stone next`). WG4-R2: the fan with two driven paper balls and
+  client 2's mechanisms 23/23; client 1's crossings as recognised above.
+  WG4-R4: after the session and a vanilla restart the Pusher moves under the
+  own ball (y -31.895 -> -31.98). N01R-c: the control's mechanisms 23/23 on
+  both clients (no tick-728 float difference). IOF-c: "journal flush mode
+  record" (copy 1) / "batch" (copy 2). RLT-c: `covered=` on the status and
+  window lines (0; covered > 0 is H4's). B2SW-T4c: births recreated 21/21 in
+  main session 2, 0 "birth log ... made by the replayed tick". TR4-i: sixteen
+  launches reach the menu, no start-up hang. TR4-e: not applicable (C11).
+  RTX-b: not observable directly (the host prints no `links_rearmed`); the
+  nearest case, `rtr_ctl` client 2's restore of 633 (the sector-2 pass at 628)
+  re-stepping 7 ticks, is followed by bit-equal rows.
+- **RT1's "resyncs 0 unless the arm forces one" is NOT met by the control on
+  E-cores: the E-core form of RT1's slip (Q-CPU / SRT), pre-existing,
+  deterministic there (5 of 5 pinned L11 control runs; 0 of the 5 unpinned
+  ones, `rt1_ctl`, `rt1_ctl2`, `rcb_ctl`, `rcb_ctl2`, `slx_ctl`).**
+  `rtr_ctl` client 1: "own beam moved 750 ->
+  753 at local tick 749: its Unphysicalize was moved too (an own pair, plan
+  step 22), resync" (the 57 rows re-stepped equal). Mechanism: client 1's
+  game thread fell 18 ticks behind its schedule in the window 600-660
+  (1.185 s, 19.8 ms a tick), regained about one tick in 660-720 (14.9 ms a
+  tick) and was still about 14 behind at the beam (the resync's tick base
+  767 against its 752), so the beam it stamps one tick ahead (`armed for
+  tick 750 requested before post_step(749)`) reached the server after 750
+  and was moved - by design a resync for an own pair. Where the 18 ticks
+  went (from the timestamps of the command-file replies, about 12-tick
+  granularity; the retail host logs no per-rollback or per-frame time): about
+  95 ms (6 ticks) at 600-601, the `Ball_Stone` mirror's lifecycle rewind (two
+  1-tick rollbacks to 599 at its birth at 600; `life=2/2`); about 105 ms (7
+  ticks) at 627-632, the sector-2 activation at 628 with two 2-tick rollbacks
+  (the mirror's input corrected at 628 and 630); about 100 ms (6.6 ticks) at
+  644-660, two rollbacks (to 653, 3 ticks; to 656, 1 tick); 601-627 and
+  632-644 ran on schedule (14.2 / 15.3 ms a tick, the game's checkpoint
+  messages at 627 included). Client 1's session totals: rb 34, resim 314,
+  t_rest 277 ms, t_rep 857 ms, t_max 143 ms; which rollback carries t_max is
+  not logged. So the slow window is the sector-2 pass and the remote
+  mirror's rewinds together, each about a third; not split further: SRT's
+  subject. The sampler: that Player.exe at 102.9 % of one core
+  in the sample over 13:20:25-29 (20-37 % before and after), the host at
+  16.6 %. Every pinned L11 ctl run since RCV shows the same line at 749-750
+  (`rcv_l11_off` 750 -> 751, `rcv_l11_on` -> 753, `rcv_l11_verify` -> 765,
+  `iox_retail_ctl` -> 752; RCV recorded them as resyncs 1 / 0); the five
+  unpinned runs above slip 7-9 ticks in the same window (client 1) and
+  their resyncs, when any, are client 2's DX6 starvation. The slip is the
+  finding; the own-pair resync is its test-tool symptom: the automation
+  beam is stamped one tick ahead, while a player's own frames carry the
+  input delay (6 on L11). In this run the slipped frames themselves show as
+  the server's substitutions of client 1's own ticks (the window lines'
+  `subst=` received / different / same): 9/0/4 in 600-660, 58/0/60 in
+  660-720, 30/0/32 in 720-780 (97/0/96 over the session), every one equal
+  to what client 1 played (the automation's keys do not change there), so 0
+  own replays and 0 late. Whether a player's changing keys in such a slip
+  turn substitutions into own replays (different) or past-the-reach resyncs
+  (late) is not measured: SRT.
+- **Frame times (E-cores; RT1 / RCB unpinned, RT2 unpinned, OPC / RCV
+  pinned):**
+
+| run | `core_frame_time` p50 / p99 / max (c1, c2) | `frame_interval` p50 / p99 / max (c1, c2) | resyncs (c1 / c2) |
+|---|---|---|---|
+| `rtr_main` s1 | 2.3 / 11.5 / 22.6, 2.3 / 11.4 / 20.6 | 15.1 / 16.6 / 31.8, 15.1 / 16.6 / 22.2 | 0 / 0 |
+| `rt1_main4` s1 (RT1) | p99 11.2, 11.4 | p99 16.6, 16.6 | 0 / 0 |
+| `rtr_main` s2 (c2 lag 150) | 2.3 / 27.9 / 88.6, 2.3 / 27.0 / 65.9 | 15.1 / 29.3 / 90.5, 15.1 / 28.4 / 67.8 | 0 / 0 |
+| `rt1_main4` s2 (RT1) | p99 25.8, 26.2 | p99 26.8, 27.0 | 0 / 0 |
+| `rtr_ctl` | 2.9 / 17.6 / 151.4, 2.9 / 14.7 / 254.2 | 15.1 / 19.8 / 152.7, 15.1 / 17.2 / 254.8 | 1 / 0 |
+| `rt1_ctl2` (RT1) | 7.9 / 15.0 / 57.4, 7.9 / 22.1 / 166.3 | 15.1 / 17.0 / 68.7, 15.1 / 23.0 / 166.7 | 0 / 1 |
+| `rcb_ctl2` (RCB) | 7.8 / 15.7 / 66.7, 7.8 / 16.5 / 104.9 | 15.1 / 17.0 / 67.4, 15.0 / 19.2 / 105.3 | 0 / 0 |
+| `rtr_arm1` | 2.9 / 66.6 / 339.6, 2.9 / 25.8 / 183.9 | 15.1 / 68.2 / 340.4, 15.1 / 27.7 / 184.7 | 1 / 1 |
+| `rtr_arm2` | 3.0 / 32.9 / 341.1, 2.8 / 33.7 / 585.8 | 15.1 / 34.7 / 342.9, 15.1 / 35.2 / 586.5 | 1 / 1 |
+| `rtr_stall` | 3.3 / 10.2 / 26.3, 3.1 / 11.7 / 47.5 | 15.1 / 16.6 / 27.8, 15.1 / 16.8 / 908.1 (the stall) | 0 / 1 |
+
+  RT1's arms and control: `frame_interval` p99 17.0-54.3 ms. The core's
+  p50 is 2.9 ms against RT1 / RCB's 7.8-7.9 (OPA-OPC since); the p99 and the
+  maxima belong to the rewinds and the sector-2 pass, where the E-core runs
+  slip deeper.
+- **SP8-e (`rtr_l12`, L12, `net lag 150` on both, client 1 crossing s2 at
+  102, s3 383, s4 681; 1561 / 1565 frames):** `core_frame_time` p50 / p99 /
+  max 3.0 / 3.6 / 45.9 and 3.0 / 3.8 / 45.5 ms; `frame_interval` 15.1 / 16.8
+  / 46.8 and 15.1 / 16.6 / 46.1 ms; resyncs, rebases, starved, far 0; rb 3,
+  resim 68 / 69, t_max 35 / 38, t_cap 2665 / 2651 ms; every body FINAL-exact
+  (own, mirror, 14/14). Anchor work (the timing line to `anchored`) 3.37 /
+  3.41 s, "session starting" -> anchored 7.11 / 7.16 s, first frame 8.68 s
+  (the start handshake's 1.4 s included). Beside them: RT2 (`rt2_l12`,
+  unpinned) core p99 12.8 / 12.4, interval p99 16.6 / 16.6, max 50.9 / 37.5,
+  anchor work 2.15 / 2.16 s, SessionStart -> anchor 5.9 s, resyncs 0; RCB
+  (`rcb_l12`, unpinned) core p99 12.6 / 12.7, interval p99 16.6 / 16.6, max
+  77.3 / 39.5, resyncs 0; OPC (`opc_l12_on`, pinned) core p99 3.5 / 3.3,
+  interval p99 16.9 / 16.6. §7.6's retail p99 limit (15.15 ms) is again not
+  met by `frame_interval` (16.6-16.8 ms, the game's frame pacing per RT2's L1
+  control and IOX's), the core's p99 is a quarter of the tick; no rebase or
+  resync. The anchor work is 57 % longer than RT2's unpinned run of an older
+  build, and the same as the pinned runs of the builds before SAXH (OPC's
+  `opc_l12_on` 3.42 / 3.37 s, OPC2's `opc2_l12_verify` 3.40 / 3.35 s): the
+  E-core, not the build.
+- **OPC2's deferred retail reuse pair** (`rtr_l12_reuseoff`, the same recipe
+  with `BMMO_SCRIPT_REUSE=off`, right after `rtr_l12`): core p50 / p99 3.5 /
+  5.1 and 3.4 / 4.2 ms, interval p99 17.1 / 16.9, t_cap 3398 / 3313 ms, t_rep
+  111 / 108 over resim 71 / 70, resyncs 0, every body FINAL-exact; so reuse
+  on saves 20-22 % of t_cap and 0.4-0.5 ms of the core's p50 on retail L12.
+- **Left for later:** the E-core slip in L11's window 600-660 (the sector-2
+  pass and the remote mirror's rewinds; with the own-pair resync it causes in
+  every pinned control run) is SRT's subject
+  (a tick's work against 15.15 ms on an average machine); the arms' rebases
+  are their forced rewinds' known cost.

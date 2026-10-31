@@ -2976,6 +2976,14 @@ headless or server file changed.
   here. Deferred to Q-CPU's answer: the off-arm retail L12 control (the
   same recipe with the server's placement off), which is what would
   attribute the 1.45 ms.
+  **Re-run at FULL step RTR (2026-10-31, HEAD 9ad1893a, each game on
+  E-cores of its own; session-client-core-design "As built (FULL step
+  RTR)", `scripts/retail/rtr_l12`):** `core_frame_time` p99 3.6 / 3.8 ms
+  (OPA-OPC since), `frame_interval` p50 15.1, p99 16.8 / 16.6 ms - again
+  not 15.15, the pacing - max 46.8 / 46.1; rebases, resyncs, starved, far
+  0; every body FINAL-exact; anchor work 3.37 / 3.41 s (2.15 unpinned),
+  "session starting" -> anchored 7.1 s, first frame 8.7 s with the start
+  handshake.
 - **SP5-d's tick records (for S3):** a record anchors at the first frame
   with Gameplay_Ingame active after `record start` and needs `fixedtick on`
   (collision-overhaul design 9.x). `rt2_l8main*`'s and `rt2_rec`'s records
