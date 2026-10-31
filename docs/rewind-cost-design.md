@@ -14,7 +14,9 @@ is passed by the user's ruling on H6 of 2026-10-28: H6 is judged by its
 absolute limits and `physics.trafo_inputs` is on by default since step
 B9DX (§11). This document is roadmap §4 item 10 (the rewind-cost
 optimization); its first step was pulled ahead of trafo T3 by the user's
-decision of 2026-10-25 (§11).
+decision of 2026-10-25 (§11). The research of FULL step OPTR (2026-10-30,
+the user's two ideas measured against a frame profile; blocked on the user)
+is the last section, "Research (step OPTR)".
 
 Base: HEAD 49e2cc8. Line numbers are HEAD's plus RC1's own edits. The profile
 this design rests on is step CPUPROF's ("The rewind-cost profile
@@ -4036,3 +4038,281 @@ builds, and the old-vs-new pairing above (`abdrift.sh`). Not run:
 `cpu_parity.sh` (its `rm -rf`, step CPU's queued tools item; old and new cannot
 replay each other's live sessions across protocol 23 - `abdrift.sh` pairs them
 on CPU's protocol-22 captures instead).
+
+## Research (step OPTR, FULL close-out, 2026-10-30): what else can cut the client's rewind and step cost
+
+FULL plan step OPTR, the research half of the user's Q-CPU (2026-10-30,
+verbatim: "外加你看看是否有别的优化可以做，比如1. 跨sector的事情很可能不会互相影响太多、2.
+有很多用proximity块判断的机关，超出范围应该也能免于模拟。看看这些方面是否有优化空间。").
+Base 2cafe49e (protocol 23, journal v9). **No product code changed**: a
+diagnostic build only (`.local-tools/work/OPTR/optr_diag.patch`, with
+`optr_diag.hpp` / `optr_ivp.hpp` and the `patch_diag*.py` that applied it;
+reverted, the tree rebuilt clean, BUILD-OK / DEPS-OK). **Blocked on the user**
+for the choice at the end (R.4).
+
+**Method.** RCB's protocol-23 captures `cpu_full/rcb_l8x_on`,
+`rcb_l12x_on2` and `rcb_h1_on` (L8 and L12 crosses with placement + union +
+per-player mechanisms, h1 with trafo inputs; 150 ms, snapshots off, four
+clients, 40 s) replayed by the diagnostic build (`prof.sh`: the four clients
+of an arm at once, each pinned to its own P-core, arms one after another;
+capture replays are unpaced). Every diagnostic round's replay journals are
+IDENTICAL to the live clients' (`e0_compare.py`; 7 rounds, 76 replays), so the
+timers changed nothing. HEAD's code built by RCB's fix-up round (rRCB4, not a
+build of this step's reverted tree) replaying the same captures is the
+baseline: frame p50 3.7 / 8.8 / 1.9 ms (L8 / L12 / h1), the diagnostic build
+3.8 / 8.8 / 1.9 ms; the diagnostic's script hooks add 2-4 % to `t_cap`. What
+was read: `CKContext::m_Stats` (`TotalBehaviorExecution`, `ProcessTime`;
+profiling not enabled), the IVP performance counter physics_RT already
+installs (`IVP_PerformanceCounter_Simple`, its PSI elements, read only), the
+movable list after every live and replayed step (`m_MovableObjects` holds the
+awake bodies only, so the census counts awake bodies; the asleep share of the
+tracked bodies is RCB's 69-77 %), timers around the headless frame's
+`pre_step` / engine tick / `post_step`, lap timers through `post_step`, splits
+of `rollback_engine::capture`, the headless platform operations (wrapped),
+the replay's script frame and physics step, and each selected script's capture
+(time, bytes, equal to its previous capture or not, root active or not, its
+owner's distance to the nearest member ball). Summaries:
+`.local-tools/work/OPTR/summarize.py`, outputs `prof/d8_summary.txt` (the
+final round) and `prof/head/` (the baseline). The per-player mechanism units
+(Q7 (b)) are script sub-graphs, not bodies: their cost is the owning script's
+record (a fan's script is 6.1 KB per capture with its eight unit copies).
+
+### R.1 The profile: where a headless client's frame goes
+
+ms per frame, mean of the four clients (each within a few % of the mean); the
+frame is the headless `frame()`: `pre_step` + engine tick + `post_step`.
+
+| | L8 (`rcb_l8x_on`) | L12 (`rcb_l12x_on2`) | h1 (`rcb_h1_on`) |
+|---|---|---|---|
+| **frame** | **3.83** | **9.08** | **2.06** |
+| live tick (CK `Process`) | 0.17 (4.3 %) | 0.22 (2.4 %) | 0.15 (7.0 %) |
+| - scripts (behaviour manager, every script of the level) | 0.086 | 0.119 | 0.048 |
+| - IVP (PSI elements: universe, controllers, hull, mindists, ...) | 0.031 | 0.037 | 0.059 |
+| - other (managers, matrices, callbacks) | 0.049 | 0.062 | 0.039 |
+| `post_step` | 3.48 (90.9 %) | 8.40 (92.5 %) | 1.46 (70.5 %) |
+| - **journal TICK hash** (`capture_world_hash`) | **1.51 (39 %)** | **3.56 (39 %)** | 0.13 (6 %) |
+| - **binding the rollback world, twice** (`world()` -> `bind_world`) | **0.90 (24 %)** | **3.01 (33 %)** | 0.28 (14 %) |
+| - live capture (`t_cap`): selected scripts / blob / per-body reads | 0.60: 0.30 / 0.18 / 0.12 | 1.17: 0.81 / 0.20 / 0.16 | 0.58: 0.13 / 0.32 / 0.13 |
+| - legacy correctors' per-mechanism pose reads (`post.c`) | 0.14 | 0.15 | 0.19 |
+| - own trafo and sector polls (`post.j`) | 0.11 | 0.17 | 0.06 |
+| - headless traces (`after_amend` under `--trace`) | 0.04 | 0.10 | 0.03 |
+| - the rest of `post_step` | ~0.2 | ~0.2 | ~0.3 |
+| `pre_step` | 0.18 (4.8 %) | 0.46 (5.1 %) | 0.46 (22.5 %) |
+| - restore (`t_rest`) | 0.007 | 0.016 | 0.043 |
+| - replay (`t_rep`) | 0.113 | 0.318 | 0.360 |
+| - the rest (union pass, drives, probe places, binds) | 0.064 | 0.130 | 0.062 |
+
+*The two largest items are neither simulation nor rewind:*
+
+- **The journal TICK hash.** `capture_world_hash` -> `surface_signature`
+  (`BallanceMMOCommon/src/physics/physics_state.cpp:184-204`) FNV-hashes the
+  compact surface bytes of every physicalized object - the level's whole
+  collision geometry - every tick, for the journal's TICK record
+  (`client_core_frame.cpp`, end of `post_step`). The surfaces do not change
+  while their objects exist (a surface freed and compiled again mid-session
+  is a new one; see option A). 1.5 ms (L8) and 3.6 ms (L12) per frame: 39 % of
+  the frame. Only while the session journals: the core computes the hash
+  under `journal_.journalling()` (`client_core_frame.cpp:1020`), the server
+  only when it records (`session_runner.cpp:1402-1408`). The captures profiled
+  here all journal; so does every retail session by default (the mod's
+  `Gameplay/SessionJournal` property defaults to true,
+  `BallanceMMOClient/config_manager.cpp:119-125`), so the cost is the
+  retail default too, and zero for a player who unticks the black box.
+- **The rollback world is re-bound on every use.**
+  `session_client_core::world()` (`client_core.hpp:1821`) returns
+  `platform_.bind_world(world_hooks_)`, which rebuilds the whole
+  `rollback_world`; in it `bind_script_replay`
+  (`rollback_binding_scripts.hpp:210-216`) recomputes
+  `array_reads::written_cells` - a walk of every block of every selected
+  script, its arrays and its constant row / column pins
+  (`array_reads.hpp:150-155, 353-421`). `post_step` binds twice (its record
+  and its amend): 0.46 / 1.51 / 0.14 ms per bind, 96-98 % of it
+  `written_cells`.
+
+*Then the capture*, whose selected-scripts part is 50-70 % (RCB): on L12 0.81
+of the 1.17 ms live capture; per capture the PE_Balloon script is 7.5-7.6 KB,
+each fan (P_Modul_18: 6 scripts on L8, 26 on L12 with the placement copies)
+6.1 KB, each rope bridge (P_Modul_29, L8) 4.4-4.5 KB.
+
+*The simulation itself* - every script of the level plus IVP - is 0.15-0.22
+ms per frame: 2.4 % of the L12 frame, 4.3 % of L8's, 7 % of h1's.
+
+**The rewind frames** (the p99 / p999 tail: 0.3-1.7 % of the frames held a
+replay, 30-42 ticks deep on average) cost 44 ms (L8), 55 ms (L12) and 26 ms
+(h1) each. A replayed tick:
+
+| per replayed tick, ms | L8 | L12 | h1 |
+|---|---|---|---|
+| replayed tick (`t_rep` / resim) | 0.91 | 1.26 | 0.71 |
+| - script frame (`execute_frame`, the selection) | 0.022 | 0.047 | 0.045 |
+| - physics step (`step_physics`; its IVP part) | 0.035 (0.030) | 0.032 (0.027) | 0.100 (0.096) |
+| - the tick's capture: scripts / blob / per-body reads | 0.22 / 0.16 / 0.09 | 0.59 / 0.15 / 0.13 | 0.08 / 0.22 / 0.09 |
+| - headless-only blob diff (`world.diff_savestate`, 8 calls of 5-9 ms per session) | 0.27 | 0.12 | 0.04 |
+| - bookkeeping (feeds, births, the restore's share) | ~0.1 | ~0.2 | ~0.1 |
+
+So the replayed simulation (script frame + physics step) is 6 % (L8), 6 %
+(L12) and 20 % (h1) of a replayed tick; the replay's captures are 50-75 % of
+it, and their script part alone is 20-35 % of a whole rewind frame on L8 /
+L12 (9.0 of 44 ms, 19.6 of 55 ms).
+
+*Headless-only costs* (not product cost; no saving below counts them): the
+blob diff above, the `--trace` hooks (`after_amend`, 0.03-0.10 ms per frame),
+`--checkpoint-ticks 2` (LOCAL checkpoints, 0.03 ms per frame).
+
+**The IVP census** (awake bodies per tick, by distance to the nearest member
+ball). L8: 1.4 balls, 7.4 mechanism bodies (2.4 at 10-40 m; 3.5 at 100 m or
+more: the three P_Modul_26 sacks and three ropes, awake in 1008 of 2012 ticks,
+and a P_Modul_25 bridge plank), 0.1 placement copies. L12: 1.5 balls, 8.2 mechanism bodies, 5.4 of them 250 m or
+more away: the P_Modul_26 sacks and ropes (8 bodies, awake in 1472 of 1845
+ticks: a pendulum IVP does not put to sleep). h1: 2.2 balls, 7.5 trafo pieces
+(18 in a replay, 15 of them within 10 m of a ball). The rest of the mechanism
+bodies are asleep (RCB: 69-77 % of the tracked bodies), and IVP does not step
+a sleeping body.
+
+**Retail x86 (inferred, not measured here).** The retail core host runs the
+same three items: `core_host.cpp:3265` re-binds the world per use with
+`written_cells = true` (:3363); its `world_hash` (:2591) is the plugin's
+`api_capture_world_hash` -> the same `surface_signature`
+(`physics_rt_bridge.cpp:48-56`); the capture is the shared engine's. RCB's
+retail L12 session (`scripts/retail/rcb_l12`) has `core_frame_time` p50 11.4
+ms (= `post_step` + `pre_step`, the live step excluded) with `t_cap` 0.95 ms
+per frame: about 10 ms of non-capture core work per frame on x86, where the
+headless client's `pre_step` + `post_step` is 8.9 ms of which the hash and the
+binds are 6.6 ms. The retail profile itself is deferred (below).
+
+### R.2 Idea 1 - cross-sector independence (a partial rewind)
+
+*What the profile says.* A sector no member is near is already almost free to
+simulate: its bodies are asleep and IVP steps only awake simulation units; the
+one far body class awake is the P_Modul_26 pendulum (6-8 bodies; IVP's whole
+live step is 31-59 us per frame). What a far sector costs is being
+*recorded*: its scripts' state is captured every live and every replayed tick,
+its bodies are read and blobbed, and a restore rebuilds it.
+
+*Can a rewind restore / replay / capture only what a corrected input can
+reach?*
+- **Restore**: not exactly without RC5 (a). The blob is one world-wide
+  numbering (item RC2S: checkers, contacts, friction systems, units and
+  overlap nodes numbered in encounter order over one walk), and the restore
+  tears down and rebuilds world-global structures (item RC5: the one overlap
+  tree, the hull min-lists in recorded order, the mindist lists, the event
+  queue, the revive list). A body left live must be asleep and bit-equal at
+  the anchor and now *and* share no checker, contact or hull entry with a
+  restored body; keeping it through the teardown is RC5 (a)'s selective
+  teardown with a per-object blob - a protocol bump, the track's largest
+  exactness risk - for at most the restore's share: `t_rest` is 0.2-2.1 % of
+  the frame.
+- **Replay**: no. IVP steps the whole environment in one `simulate_dtime`;
+  besides the shared structures above, the PSI time and event queue, the
+  random stream (`ivp_srand`, read into every TICK hash) and the
+  movement-check countdown (`next_movement_check`) are world-global, and the
+  controllers run in one list. Skipping an awake body changes the order of
+  events and random draws for everything else, so the replay would no longer
+  be the server's simulation; skipping a sleeping body is what IVP already
+  does. The bound: the replayed simulation is 6 % (L8 / L12) and 20 % (h1) of
+  a replayed tick, and h1's is the trafo pieces next to the balls, not a far
+  sector.
+- **Capture**: by sector, only the parts with per-object identity can be
+  skipped - not the blob (world-wide numbering, RC2S). The per-body reads of a
+  sleeping, unchanged mechanism are RC2 (b) (built at RCB; its cost is the
+  name lookup, RCB's item (2)). The selected scripts' record of a module no
+  one is near is option C below, which needs no notion of sector or reach.
+- *A whole sector skipped by capture / restore*: the same three answers - the
+  blob cannot, the bodies are RC2 (b), the scripts are C.
+
+**Saving of idea 1 beyond C: at most ~0.1-0.2 ms per frame (the replayed
+simulation of far bodies, plus a restore share), and not exact** without
+RC5 (a). Not recommended.
+
+### R.3 Idea 2 - proximity-gated mechanisms out of range
+
+*The census* (world-agreement design §1.1.2 and WAD's consumer census,
+`.local-tools/work/WAD/consumers.txt`; not re-run): 290 mechanism-class
+`TT Scaleable Proximity` blocks on L1-L13 (3-43 per level), every one
+Barycenter 0, axes X-Z or X-Y-Z, squared distance; each drives one of four
+things: a **one-shot wake** (`In Range -> Physics WakeUp` and `Off`:
+P_Modul_01, 03, 19, 25, 29's 80 m probe, 30, 34, 37), a **script activation**
+(P_Modul_18's 80 m probe activates and deactivates the fan's force
+sub-script, which holds the eight per-player units), an **identity read** (the
+fan's 7 m probe, the bridge's 4 m break test) or sound. P_Modul_01's
+Physicalize / Unphysicalize is chosen once per script start, not by its probe
+(sector placement F14).
+
+*What they cost while out of every member's range* (L12, the level with the
+most: 43 blocks plus 26 per-player units):
+- awake bodies: none - a woken module sleeps again in IVP once it settles, and
+  the fan's force sub-script is deactivated by its own 80 m probe. The far
+  awake bodies of L8 / L12 are the P_Modul_26 sacks, which no proximity block
+  gates (they swing from their activation on);
+- their scripts' execution: the whole behaviour manager is 0.09-0.12 ms per
+  frame for every script of the level; the selected (mechanism) scripts run in
+  0.002-0.007 ms per replayed tick, most of them inactive;
+- their **record**: on L12 0.66 of the 0.72 ms per frame of the selected
+  scripts' live capture is for scripts whose owner is 100 m or more from every
+  ball (L8 0.15 of 0.27), and the same share of every replayed tick's capture.
+  A fan's 6.1 KB record (its eight units included) equals its previous capture
+  in 99.9 % of the captures.
+
+*What the original game does.* Nothing gates these scripts out of range but
+the sector: crossing into a sector deactivates the old one (module False
+branch: Hinge Shutdown, Unphysicalize, TT Restore IC; sector placement §1.2);
+the sector union (protocol 3, N2) never deactivates anything.
+
+*A deterministic gate* - "freeze or skip a mechanism's scripts while every
+member's ball at tick t is farther than R (its largest probe radius plus a
+margin)" - is implementable as a function of synchronized state: the balls'
+poses at t are in every record, so every world and the server decide alike,
+and a replay re-derives it. But it is vanilla's sector deactivation
+reintroduced per mechanism: it changes the server's simulation; it breaks
+"every script that affects physics runs in every world" and invariant I1 ("a
+player entering the next sector changes nothing in the previous one") wherever
+a gated module was not idle (the P_Modul_26 pendulum would stop, a fan would
+stop mid-push); it needs the gated state recorded and restored (record /
+savestate additions, a record version); and it changes what Q7 (b)'s units
+mean (a slot's unit would stop responding while its member is far). Its saving
+beyond C: the far bodies' IVP time (at most the 31-37 us IVP step per frame on
+L8 / L12) and the far scripts' execution (< 0.01 ms per frame): **~0.1 ms per
+frame, about 1 %**. Not recommended; a principle change in any case, so the
+user's.
+
+### R.4 The options
+
+Ranked by saving; every saving is the headless x64 client's, ms per frame (L8
+/ L12 / h1), from R.1.
+
+| | option | saving | exactness risk | protocol / engine / design rule | effort |
+|---|---|---|---|---|---|
+| **A** | **Memoize the journal hash's per-object term.** The per-object value is one sequential FNV-1a stream (`world_hash.hpp:23-34`: name, then surface type, then the compact surface bytes, `physics_state.cpp:188-201`), so the surface bytes cannot be hashed alone and recombined: the memo holds the whole per-object `hasher.value`, keyed by the `m_PhysicsObjects` entry (its key) plus the `IVP_Real_Object*`, the surface manager, the compact-surface pointer and size, and the name; any key part changing re-hashes that object. The table-order-free sum (`total += value * K`) stays as now. Only while journalling (R.1) | **1.51 / 3.56 / 0.13 (39 / 39 / 6 %)** while journalling; the server too when it records (`session_runner.cpp:1408`, the same function every tick; not measured on Linux), and retail (the plugin's same function; the black box is on by default) | none if the memo is right: the TICK hash value is bit-identical, so no format change. A memo that follows the stream wrongly (surface term cached alone) changes every TICK record - the wire check would report DIFFERENCES and it would be a journal-format bump; not this design. The ways a memo goes stale: (1) `DestroyEnvironment` or a level reload (cleared there); (2) mid-session frees - engine change #9's `CKIpionManager::RemoveCollisionSurface` (`CKIpionManager.cpp:926-946`; called from `physics_state.cpp:1928-1934` for the hull template and `:3137`, `:3251` for a restored frame's children, so that "the next Physicalize compiles the surface again from the entity as it stands now") and `DeletePrivateCollisionSurface(owner)` on unphysicalize (`CKIpionManager.cpp:442`, `:963`): a trafo piece or placement copy re-physicalized from a changed entity can land at the same address with the same size, and a pointer-plus-size key would return the old value - hiding a real divergence or reporting a false one until the next reset. Pointer keys alone cannot rule that out (a freed object, manager and surface can all come back at the same addresses), so the design also drops the whole memo (a) at each surface free the shared code itself makes (the call sites above and its unphysicalize paths) and (b) whenever the set of (`m_PhysicsObjects` key, `IVP_Real_Object*`) pairs differs from the previous hashed tick. What remains is a free and re-physicalize inside one tick by a script's own Physicalize / Unphysicalize blocks at identical addresses; closing that exactly needs a surface generation counter in physics_RT (an access-only engine change, numbered then) or a full re-hash at a fixed interval (bounds a wrong hash to that interval). Which one is part of A's design, not measured here. Check: a verify mode (re-hash every object and compare with the memo, every tick) over the capture replays and `core_ref_s12`'s arms, plus journals IDENTICAL and the wire check ALL SAME (the hash is in every journal of every host) | none (shared `physics_state.cpp`; neither IVP nor physics_RT) | small |
+| **B** | **Stop re-binding the rollback world per use.** B1: memoize `written_cells` inside `bind_script_replay`. Its inputs are not only the selected scripts' graphs and constant pins: `arrays_of` follows `GetRealSource()` of a block's target and input pins (`array_reads.hpp:446-456`), so the array a block names can be a runtime parameter value a script repoints; `table_of` reads `GetColumnCount` / `GetColumnType` live (`:401-408`); and the selection's script list grows when copies are born. So the memo key is the selection's script ids, plus the resolved array ids of the pins whose real source can change at run time (a list of those pins made by the first walk; re-resolving only them at each bind, not every pin of every block), plus each named array's column count and types; any change re-walks. Not a memo keyed by the selection object alone. B1's saving assumes that dynamic-pin list is short; not measured (if it is long, B1 saves less than the figure) A verify mode (the memo against a fresh walk at every bind) is part of B1's check; B2 (later, optional): cache the bound `rollback_world` and re-bind only when its inputs change | **B1 0.86 / 2.97 / 0.25 (22 / 33 / 12 %)**; B2 the rest of 0.90 / 3.01 / 0.28 | a stale column list would change what the records carry (wrong restores). Check: a verify mode (memo against a fresh walk at every bind) over `core_ref_s12`'s arms, the wire check ALL SAME | none; one shared helper (`rollback_binding_scripts.hpp`), both hosts | small (B1), medium (B2) |
+| **C** | **Reuse an inactive script's record.** RC4's dormant ledger generalized to the whole selection: a root script inactive with no next-frame flags at t and at t - 1 takes the bytes of record t - 1 (copied, not re-walked), with RC2 (b)'s engine-write barrier (a script restore, the proximity hold's restore, a replayed activation) | the selected scripts' capture time: 51 % (L8), 61 % (L12), 80 % (h1) - **live 0.15 / 0.49 / 0.10**, per replayed tick 0.11 / 0.36 / 0.07 (a 33-tick L12 rewind frame ~12 ms shorter) | measured: **0 of 761 128** inactive-to-inactive captures changed (three arms, 12 clients). Not proven in general: a script activated and finished inside one frame, and a parameter of an inactive script written by another, active script or by the core. Check: a `verify` mode (re-walk and compare at every reuse) over `core_ref_s12`'s ten arms plus scripted levels (L1's tutorial, L11), the wire check ALL SAME | none: the record bytes stay the same, so no record version and no resync change; shared `script_replay.hpp` | medium |
+| D | Idea 2's deterministic proximity gate (R.3) | ~0.1 beyond C (~1 %) | changes the simulation on purpose; the gated state must be recorded | changes the server, "every physics script runs in every world", I1 and the union (N2), Q7 (b)'s meaning; a record version | large |
+| E | Idea 1's partial rewind (R.2) | ~0.1-0.2 beyond C; the restore share only with RC5 (a) | a partial replay is not the server's simulation; a partial restore is RC5 (a) | RC5 (a)'s protocol bump (per-object blob) | large |
+| F | Smaller items: the by-name lookups (RCB's item (2); `body_state` 0.13-0.18 ms per frame here) and the legacy correctors' per-mechanism pose reads, which no snapshots-off session ever blends (`post.c`, 0.14-0.19 ms per frame) | ~0.3 | low (a persistent name index; the correctors skipped only where no blend can follow) | none | small-medium |
+
+**Recommendation: A, then B1, then C** - none changes a simulated value or a
+record's bytes when its memo / reuse is right, each with its own verify mode
+for the cases where a memo can go stale (A's in-tick re-physicalize, B1's
+dynamic pins, C's two unproven cases), in order of saving per effort, all three in shared code
+written once for every host (the user's rule of 2026-10-27). Together on the
+headless client: L8 3.83 -> ~1.3 ms, L12 9.08 -> ~2.1 ms, h1 2.06 -> ~1.6 ms
+per frame (A + B1 + C's live part), and C shortens every rewind frame by its
+script-capture share. Not recommended: D and E (R.2, R.3: about 1-2 % of the
+frame each beyond C, at a principle change or the track's largest exactness
+risk). F after them. The retail gain is to be measured first (deferred).
+
+**Open for the user** (blocked_on_user): which of A, B (B1 / B2), C and F to
+build, and whether D or E should be pursued despite R.2 / R.3. None of them is
+in the tree.
+
+**Checks run.** 7 diagnostic rounds, 76 replays (L8 alone in the first, then
+three arms x four clients), every replay journal IDENTICAL to its live
+client's; the baseline replays with
+HEAD's build (rRCB4) IDENTICAL 12/12; the diagnostic reverted and the x64
+tree rebuilt clean (BUILD-OK, DEPS-OK); map.hpp clean. No unit test, GCC
+check, wire check or live run: no product file changed.
+
+**Deferred.** The retail x86 profile (one RT2 SP8-e L12 session with the same
+split as per-item lines in the mod's log: an x86 diagnostic build and a retail
+session, beyond this step's time; the inference in R.1 stands until then); the
+server's journal-hash cost on Linux (the Arch server's step time with and
+without it); C's empirical premise on scripted levels (L1, L11).
