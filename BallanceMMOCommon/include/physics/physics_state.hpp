@@ -11,6 +11,7 @@
 #include <physics/deterministic_random.hpp>
 #include <physics/physics_rt_api.h>
 #include <physics/world_hash.hpp>
+#include <physics/world_hash_memo.hpp>
 
 class CKContext;
 class CKIpionManager;
@@ -30,6 +31,19 @@ namespace bmmo::physics {
 
     bool capture_world_hash(CKIpionManager* physics, bmmo::physics::world_hash& out,
                             std::string& error);
+    // Step OPA: the hash's per-object surface values memoized per manager
+    // (world_hash_memo.hpp).  The mode starts from BMMO_HASH_MEMO
+    // (off | on | verify; on when unset) on every host that hashes.
+    void set_surface_memo_mode(surface_memo_mode mode);
+    surface_memo_mode get_surface_memo_mode();
+    // Forget the manager's memo (nullptr: every manager's): a surface freed
+    // or a world torn down outside the shared code's own frees.
+    void drop_surface_memo(CKIpionManager* physics);
+    // The process's totals over every manager since start.
+    surface_memo_stats surface_memo_totals();
+    // "surface_memo: mode=... calls=... hits=... ..." plus the first verify
+    // mismatches, one per line.
+    std::string describe_surface_memo();
     bool reset_session_clock(CKIpionManager* physics, int seed, std::string& error);
     // One physics step outside the frame loop (design 9.6 rollback): the
     // manager's Simulate() with the given behaviour delta in milliseconds.

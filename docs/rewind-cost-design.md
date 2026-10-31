@@ -16,7 +16,8 @@ B9DX (§11). This document is roadmap §4 item 10 (the rewind-cost
 optimization); its first step was pulled ahead of trafo T3 by the user's
 decision of 2026-10-25 (§11). The research of FULL step OPTR (2026-10-30,
 the user's two ideas measured against a frame profile; blocked on the user)
-is the last section, "Research (step OPTR)".
+is the section "Research (step OPTR)"; its option A is built at step OPA
+("As built (step OPA)", the last section).
 
 Base: HEAD 49e2cc8. Line numbers are HEAD's plus RC1's own edits. The profile
 this design rests on is step CPUPROF's ("The rewind-cost profile
@@ -4316,3 +4317,165 @@ split as per-item lines in the mod's log: an x86 diagnostic build and a retail
 session, beyond this step's time; the inference in R.1 stands until then); the
 server's journal-hash cost on Linux (the Arch server's step time with and
 without it); C's empirical premise on scripted levels (L1, L11).
+
+## As built (step OPA, FULL close-out, 2026-10-31): the journal TICK hash memoized per object (R.4 row A)
+
+The user's decision (2026-10-30, OPTR), verbatim: "你决定，按你的推荐来" -
+A, then B1, then C. This is A. Base 0a61dddd (protocol 23, journal v9).
+Shared code only: no IVP, physics_RT, engine, protocol or journal-format
+change; no `BallanceMMOClient` member.
+
+**What was built.**
+- `BallanceMMOCommon/include/physics/world_hash_memo.hpp` (new, engine-free):
+  `surface_memo` keeps, per physicalized object in `m_PhysicsObjects` order,
+  the WHOLE per-object FNV value (the sequential stream name -> manager type
+  -> compact-surface bytes; never the surface term alone) under the key
+  (table key, `IVP_Real_Object*`, surface manager, manager type,
+  compact-surface pointer, size, the first 32 surface bytes, name). The sum
+  `value * kFoldMultiplier` is unchanged, so the TICK hash is bit-identical.
+  Rules: the environment, the object count or any position's (key, object)
+  pair differing from the previous hashed tick drops the whole memo
+  (`set_drops`); any other key part differing re-hashes that object; the host
+  drops the whole memo explicitly (`host_drops`) and through a body-deletion
+  generation it passes in. Modes `off` (hash everything, keep nothing), `on`
+  (default), `verify` (every memo hit is re-hashed and compared; a mismatch
+  is counted, described and the memo's value still returned, so a verify run
+  journals exactly what `on` would; the entry takes the fresh value after).
+- `physics_state.cpp`: `surface_signature` fills the probes and runs the memo
+  of its manager (a registry keyed by `CKIpionManager*`, one mutex per memo:
+  the server's sessions and the SimTool's worlds each have their own);
+  `surface_term` is the old per-object loop body, unchanged. Mode from
+  `BMMO_HASH_MEMO` (off | on | verify; on when unset), read once, on every
+  host that hashes (headless client, SimTool, server, the retail plugin).
+  Explicit drops at every surface free the shared code makes:
+  `unphysicalize`, `hull_template` (its `RemoveCollisionSurface` calls and the
+  template body), both restored-frame `RemoveCollisionSurface` sites (engine
+  change #9's callers), `trafo_set_unmake`'s piece deletions. The shared
+  object listener (`event_log_listener`) bumps the generation on every
+  `event_object_deleted` and `event_environment_deleted`.
+  `describe_surface_memo()` / `surface_memo_totals()` report the counters;
+  verify mismatches also go to stderr with the IVP time.
+- `session_client.cpp`: the headless client's periodic report prints the
+  `surface_memo:` line (and any mismatch lines) after `frame_time:`.
+- Unit tests (`tests/world_hash_test.cpp`, `SurfaceMemo.*`, 6): a memo hit
+  equals the full sum and hashes nothing; a key part change re-hashes that
+  object only; a drop on a free (the host's drop and the deletion
+  generation); a drop on a set change (a body added, every object moved, a
+  body removed); verify catching a forced stale entry (and `on` keeping it);
+  the mode parser.
+
+**Adaptations (within the design).** (1) Two key parts beyond the design's
+list: the manager type and the first 32 bytes of the compact surface (its
+header: mass centre, rotation inertia, radius, byte size, ledge-tree offset)
+- a surface recompiled at the same address and size from a changed entity
+almost always differs there; cost: one 32-byte compare per object. (2) The
+design's remaining stale case (a script's own Unphysicalize + Physicalize
+inside one tick at identical addresses) is closed without an engine change:
+every private-surface free in physics_RT follows a body deletion
+(`RemovePhysicsObject -> DeletePrivateCollisionSurface` from the deleted
+event; `DestroyEnvironment` deletes the environment), and the shared listener
+that already sees every deletion now drops the memo at the next hash. The
+listener is installed by every host that runs a session (headless
+`session_client.cpp`, the server's `physics_world.cpp`, the SimTool, retail
+`core_host.cpp`'s `drain_event_log`); a world never drained would rely on
+the other rules alone. So the choice the plan reserved for the user
+(a surface generation counter, engine change #22, or a periodic full
+re-hash) did not arise: verify never fired (below). (3) The memo is
+dropped whole on a set change even when only the table order changed
+(conservative; costs one full hash).
+
+**Checks (2026-10-31).**
+- Builds: x64 BUILD-OK (deps_heal: `session_client.cpp.obj` and the two
+  `client_journal.cpp.obj` record no header deps even after a fresh compile -
+  pre-existing, the same STILL-ZERO as 2026-10-30 00:08 in deps_heal.log; all
+  three were compiled in this build after every header edit, so the build is
+  current); x86 CLIENT-BUILD-OK, DEPS-OK (physics_RT.dll recompiled
+  physics_state.cpp); Arch server ARCH-BUILD-OK
+  `ballanced-36c04e3d24c9+bmmo-0a61dddd1522-dirty` (GCC compiles
+  physics_state.cpp there). Unit tests 696/696 pass (SurfaceMemo 6/6). GCC
+  syntax (linux_test_syntax.sh) 31/31 ok.
+- Wire check, the new binary in verify mode (`BMMO_HASH_MEMO=verify
+  EXTRA="--accept-protocol 22" wire_check.sh rSAXE rOPA rOPAw`, core_ref_s12's
+  nine arms with h1_150 from core_ref_s12h): ALL SAME, sends 36/36 SAME,
+  journals 36/36 IDENTICAL; verify mismatches 0 on all 36 (0.98-0.99 of all
+  objects memo hits, 7-15 set drops and 5-32 host drops per client).
+- Verify over core_ref_s12's solo1 / solo2 and RCB's cpu_full `rcb_l8x_on`,
+  `rcb_l12x_on2`, `rcb_h1_on` (14 replays, `work/OPA/verify_more.sh`): every
+  journal IDENTICAL to rSAXE's replay and to the live client's; mismatches 0
+  (e.g. L12 c0 173306 verified hits, h1 c0 277670).
+- Two live arms (snapshots off, trafo_inputs and placement_clones on,
+  150 ms, the four clients in verify mode, the server at the default `on`):
+  RCB's h1_on recipe (`work/OPA/live_h1.sh`,
+  `maps/arena-test/cpu_full/opa_h1_verify`: the arena's trafo births, but
+  0 placement copies there) - VERDICT PASS, the server journal's replay
+  2658/2658 ticks matched (the replaying SimTool in verify mode), every client
+  0 mismatches over 253009-268605 verified hits, 21-24 host drops (trafo
+  pieces), resyncs 0, starved 0; and RCB's l8x_on recipe
+  (`work/OPA/live_l8.sh`, `cpu_full/opa_l8x_verify`: placement on, 39
+  copies, the L8 trafos) - VERDICT PASS, server replay 2649/2649 matched,
+  every client 0 mismatches over 167426-172029 verified hits, resyncs 0,
+  starved 0.
+- The saving on E-cores (decision 33; `work/OPA/ecore_ab.sh`: the four
+  clients of an arm at once, client i on logical processors 16+3i..18+3i;
+  the same rOPA binary with `BMMO_HASH_MEMO=off` as "before" and `on` as
+  "after", the same captures; off vs on journals IDENTICAL 12/12). Frame
+  time, mean of the four clients' `frame_time` (ms):
+
+| | p50 off -> on | p99 off -> on | max off -> on (range) |
+|---|---|---|---|
+| L8 `rcb_l8x_on` | 6.7 -> 3.5 | 8.3 -> 5.2 | 92-190 -> 95-184 |
+| L12 `rcb_l12x_on2` | 16.0 -> 8.6 | 20.4 -> 16.1 | 170-242 -> 174-237 |
+| h1 `rcb_h1_on` | 3.1 -> 2.8 | 35.4 -> 34.7 | 78-110 -> 80-110 |
+
+  The max / p999 are rewind frames, which the memo does not touch (a rewind
+  frame hashes once, like any frame); h1's p99 is rewind frames too.
+- Retail L12 (RT2's SP8-e recipe session 1, `work/OPA/opa_retail.py`, the
+  OPA x86 build installed in both copies, each game pinned to E-cores of its
+  own: client 1 16-21, client 2 22-27; `net lag 150`, client 1 crossing s2,
+  s3, s4; the Arch server of this tree, snapshots off), `BMMO_HASH_MEMO=off`
+  (`scripts/retail/opa_l12_off`) then `on` (`opa_l12_on`):
+
+| client 1 / client 2 | off (before) | on (after) |
+|---|---|---|
+| `core_frame_time` p50 | 20.4 / 20.0 | 7.8 / 7.8 |
+| `core_frame_time` p99 | 33.9 / 31.0 | 9.2 / 10.0 |
+| `core_frame_time` max | 100.7 / 118.4 | 59.1 / 57.3 |
+| `frame_interval` p50 / p99 | 21.1 / 43.8, 20.6 / 31.6 | 15.1 / 17.1, 15.1 / 16.7 |
+| frames | 1080 / 1126 | 1569 / 1573 |
+| starved (subst) | 844 / 857 | 0 / 0 |
+| resyncs sent / done | 8 / 7, 7 / 7 | 0 / 0, 0 / 0 |
+| rb / resim | 12 / 269, 10 / 260 | 3 / 71, 3 / 73 |
+
+  On E-cores with the black box on, the hash alone pushed an L12 retail frame
+  past 16.6 ms: the game fell below 60 fps, starved and resynced; with the
+  memo the frame is 7.8 ms and the game holds its pacing. One session per
+  mode (a smoke figure, not a band); host samplers 12-19 % total.
+
+**Not run / deferred.** Retail in verify mode, and any check of the x86
+plugin's hash VALUES (the retail journals replayed by the x86 SimTool,
+`build/sim-x86-a3`, against the live TICK records): the retail evidence is
+frame time only - nothing in the mod's log shows the memo's counters (the
+counters live in the plugin, read by no bridge call), so the mode being
+honoured is shown by the timing (20.4 -> 7.8 ms) alone. The server's step time with / without the memo on Linux (the
+Arch server ran `on`; one more live pair). No stale case found, so nothing
+waits on the user.
+
+**Review fix-up.** (a) A manager's registry slot used to live for the
+process (a long-lived server opening and closing rooms would keep one memo,
+about 120 B per body, per dead `CKIpionManager` address). Each slot now
+records the environment its last hash saw; the shared listener's
+`event_environment_deleted` erases every slot of that environment and folds
+its counters (and mismatch notes) into the registry's `retired`, which
+`surface_memo_totals()` / `describe_surface_memo()` include. The slots are
+`shared_ptr`s, so a hash in flight keeps its slot alive while a deletion
+retires it. A world whose environment the listener was never installed on
+keeps its slot (the counters only; nothing reads it). (b) The mismatch lines
+(stderr and `describe_surface_memo`) now say "journalled the memo's value",
+so a reader does not take that tick's journal for a fresh hash. (c) The
+review's nit that `unphysicalize` / `trafo_set_unmake` count one deletion
+twice in `host_drops` does not hold: the explicit drop empties the memo, and
+the generation check that follows counts a drop only when the memo is not
+empty, so each event counts once. Rerun after the fix-up (it changes
+`physics_state.cpp` only, no header and no hash value): the x64 and x86
+builds, the unit tests, the GCC syntax check and the wire check in verify
+mode.

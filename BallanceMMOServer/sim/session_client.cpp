@@ -4725,6 +4725,17 @@ namespace {
                 logf("frame_time: frames=%llu p50=%.1f p99=%.1f p999=%.1f max=%.1f ms",
                      static_cast<unsigned long long>(frame_time_count_), frame_time_quantile(0.5),
                      frame_time_quantile(0.99), frame_time_quantile(0.999), frame_time_max_ms_);
+            // Step OPA: the journal hash's memo (hits, drops, verify mismatches).
+            {
+                const std::string memo = bmmo::physics::describe_surface_memo();
+                size_t from = 0;
+                while (from <= memo.size()) {
+                    const size_t end = memo.find('\n', from);
+                    logf("%s", memo.substr(from, end == std::string::npos ? std::string::npos : end - from).c_str());
+                    if (end == std::string::npos) break;
+                    from = end + 1;
+                }
+            }
         }
 
         // ------------------------------------------------------------ state

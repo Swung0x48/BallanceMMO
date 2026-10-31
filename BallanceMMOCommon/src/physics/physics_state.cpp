@@ -31,6 +31,9 @@
 #include <bmmo_build_id.h>
 
 #include <algorithm>
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <iterator>
 #include <array>
 #include <typeinfo>
@@ -179,13 +182,73 @@ namespace bmmo::physics {
 
     const char* build_id() { return BMMO_PHYSICS_BUILD_ID; }
 
-    // Sum of per-body signatures (name + compact surface bytes, or the
-    // surface type for balls), so the result does not depend on table order.
-    uint64_t surface_signature(CKIpionManager* physics) {
-        uint64_t total = 0;
-        for (auto it = physics->m_PhysicsObjects.Begin(); it != physics->m_PhysicsObjects.End(); ++it) {
-            IVP_Real_Object* real = (*it).m_RealObject;
-            if (!real) continue;
+    // ---- step OPA: the surface signature memoized per object ----
+    namespace {
+        struct surface_memo_slot {
+            std::mutex mutex;
+            surface_memo memo;
+            surface_memo_stats stats;            // this manager's, guarded by `mutex`
+            std::vector<std::string> notes;      // first verify mismatches
+            // The environment this manager's last hash saw (kept through a
+            // memo drop): its deletion retires the slot (step OPA review).
+            const void* environment = nullptr;
+        };
+        struct surface_memo_registry {
+            std::mutex mutex;
+            // shared_ptr: a hash holds its slot while an environment's deletion
+            // may retire it (retire_surface_memo).
+            std::unordered_map<const CKIpionManager*, std::shared_ptr<surface_memo_slot>> slots;
+            surface_memo_stats retired;          // the stats of slots retired with their environment
+            std::vector<std::string> retired_notes;
+        };
+        // Never destroyed (a host may hash from a static destructor's thread).
+        surface_memo_registry& memo_registry() {
+            static surface_memo_registry& registry = *new surface_memo_registry();
+            return registry;
+        }
+        std::atomic<int> g_surface_memo_mode{-1};
+        // Bodies deleted (and environments deleted) as the object listener
+        // saw them: a change drops every memo at its next hash, so a script's
+        // own Unphysicalize + Physicalize between two hashed ticks cannot
+        // leave a value behind even at identical addresses (step OPA).
+        std::atomic<uint64_t> g_surface_memo_generation{0};
+
+        // An environment was deleted: every slot whose last hash saw it is
+        // erased and its counters folded into `retired`, so a long-lived
+        // server that opens and closes rooms keeps no memo per dead manager.
+        // A hash in flight keeps its slot alive (shared_ptr).  Lock order as
+        // everywhere: registry, then slot.
+        void retire_surface_memo(const void* environment) {
+            if (!environment) return;
+            surface_memo_registry& registry = memo_registry();
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            for (auto it = registry.slots.begin(); it != registry.slots.end();) {
+                bool retire = false;
+                {
+                    std::lock_guard<std::mutex> slot_lock(it->second->mutex);
+                    if (it->second->environment == environment) {
+                        retire = true;
+                        registry.retired.add(it->second->stats);
+                        for (std::string& note: it->second->notes)
+                            if (registry.retired_notes.size() < 16) registry.retired_notes.push_back(std::move(note));
+                    }
+                }
+                if (retire) it = registry.slots.erase(it);
+                else ++it;
+            }
+        }
+
+        std::shared_ptr<surface_memo_slot> memo_slot(const CKIpionManager* physics) {
+            surface_memo_registry& registry = memo_registry();
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            std::shared_ptr<surface_memo_slot>& slot = registry.slots[physics];
+            if (!slot) slot = std::make_shared<surface_memo_slot>();
+            return slot;
+        }
+
+        // The sequential per-object stream (world_hash.hpp's fnv1a64): name,
+        // surface-manager type, compact-surface bytes.
+        uint64_t surface_term(IVP_Real_Object* real) {
             fnv1a64 hasher;
             const char* name = real->get_name() ? real->get_name() : "";
             hasher.feed(name, std::strlen(name));
@@ -198,8 +261,113 @@ namespace bmmo::physics {
                     if (surface) hasher.feed(surface, static_cast<size_t>(surface->get_size()));
                 }
             }
-            total += hasher.value * 0x9E3779B97F4A7C15ULL;
+            return hasher.value;
         }
+    }
+
+    void set_surface_memo_mode(surface_memo_mode mode) { g_surface_memo_mode.store(static_cast<int>(mode)); }
+
+    surface_memo_mode get_surface_memo_mode() {
+        int mode = g_surface_memo_mode.load();
+        if (mode < 0) {
+            mode = static_cast<int>(parse_surface_memo_mode(std::getenv("BMMO_HASH_MEMO"), surface_memo_mode::on));
+            int unset = -1;
+            g_surface_memo_mode.compare_exchange_strong(unset, mode);
+            mode = g_surface_memo_mode.load();
+        }
+        return static_cast<surface_memo_mode>(mode);
+    }
+
+    void drop_surface_memo(CKIpionManager* physics) {
+        surface_memo_registry& registry = memo_registry();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        for (auto& [manager, slot]: registry.slots) {
+            if (physics && manager != physics) continue;
+            std::lock_guard<std::mutex> slot_lock(slot->mutex);
+            slot->memo.drop(slot->stats);
+        }
+    }
+
+    surface_memo_stats surface_memo_totals() {
+        surface_memo_registry& registry = memo_registry();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        surface_memo_stats total = registry.retired;
+        for (auto& [manager, slot]: registry.slots) {
+            std::lock_guard<std::mutex> slot_lock(slot->mutex);
+            total.add(slot->stats);
+        }
+        return total;
+    }
+
+    std::string describe_surface_memo() {
+        const surface_memo_stats s = surface_memo_totals();
+        char line[400];
+        std::snprintf(line, sizeof(line),
+                      "surface_memo: mode=%s calls=%llu objects=%llu hits=%llu hashed=%llu set_drops=%llu "
+                      "host_drops=%llu verified=%llu mismatches=%llu",
+                      surface_memo_mode_name(get_surface_memo_mode()), static_cast<unsigned long long>(s.calls),
+                      static_cast<unsigned long long>(s.objects), static_cast<unsigned long long>(s.hits),
+                      static_cast<unsigned long long>(s.hashed), static_cast<unsigned long long>(s.set_drops),
+                      static_cast<unsigned long long>(s.host_drops), static_cast<unsigned long long>(s.verified),
+                      static_cast<unsigned long long>(s.mismatches));
+        std::string out = line;
+        // A mismatch tick journalled the memo's value; later ticks the fresh one.
+        surface_memo_registry& registry = memo_registry();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        for (const std::string& note: registry.retired_notes)
+            out += "\nsurface_memo mismatch (journalled the memo's value): " + note;
+        for (auto& [manager, slot]: registry.slots) {
+            std::lock_guard<std::mutex> slot_lock(slot->mutex);
+            for (const std::string& note: slot->notes)
+                out += "\nsurface_memo mismatch (journalled the memo's value): " + note;
+        }
+        return out;
+    }
+
+    // Sum of per-body signatures (name + compact surface bytes, or the
+    // surface type for balls), so the result does not depend on table order.
+    // Step OPA: each body's value memoized (world_hash_memo.hpp); the sum is
+    // bit-identical to hashing every body.
+    uint64_t surface_signature(CKIpionManager* physics) {
+        thread_local std::vector<surface_memo_probe> probes;
+        thread_local std::vector<IVP_Real_Object*> reals;
+        probes.clear();
+        reals.clear();
+        for (auto it = physics->m_PhysicsObjects.Begin(); it != physics->m_PhysicsObjects.End(); ++it) {
+            IVP_Real_Object* real = (*it).m_RealObject;
+            if (!real) continue;
+            surface_memo_probe p;
+            p.entry_key = static_cast<uint32_t>(it.GetKey());
+            p.object = real;
+            p.name = real->get_name() ? real->get_name() : "";
+            if (IVP_SurfaceManager* manager = real->get_surface_manager()) {
+                p.manager = manager;
+                p.manager_type = static_cast<int>(manager->get_type());
+                if (manager->get_type() == IVP_SURMAN_POLYGON) {
+                    const IVP_Compact_Surface* surface =
+                        static_cast<IVP_SurfaceManager_Polygon*>(manager)->get_compact_surface();
+                    if (surface) {
+                        p.surface = surface;
+                        p.surface_size = static_cast<uint32_t>(surface->get_size());
+                    }
+                }
+            }
+            probes.push_back(p);
+            reals.push_back(real);
+        }
+        const surface_memo_mode mode = get_surface_memo_mode();
+        const std::shared_ptr<surface_memo_slot> held = memo_slot(physics);
+        surface_memo_slot& slot = *held;
+        std::lock_guard<std::mutex> lock(slot.mutex);
+        slot.environment = physics->GetEnvironment();
+        const size_t notes_before = slot.notes.size();
+        const uint64_t total = slot.memo.signature(
+            physics->GetEnvironment(), g_surface_memo_generation.load(), probes, mode,
+            [](size_t i) { return surface_term(reals[i]); }, slot.stats, &slot.notes);
+        for (size_t i = notes_before; i < slot.notes.size(); ++i)
+            std::fprintf(stderr, "surface_memo mismatch (t=%.6f, journalled the memo's value): %s\n",
+                         physics->GetEnvironment() ? physics->GetEnvironment()->get_current_time().get_seconds() : -1.0,
+                         slot.notes[i].c_str());
         return total;
     }
 
@@ -575,6 +743,8 @@ namespace bmmo::physics {
                 *sink += out;
             }
             void event_object_deleted(IVP_Event_Object* event) override {
+                // Step OPA: a body went, and with it maybe its private surface.
+                g_surface_memo_generation.fetch_add(1);
                 record("deleted", event);
                 if (event && event->real_object) psi_watch_forget(event->real_object);
                 if (event && event->real_object) {
@@ -611,7 +781,11 @@ namespace bmmo::physics {
             }
             void event_object_revived(IVP_Event_Object* event) override { record("revived", event); }
             void event_object_frozen(IVP_Event_Object* event) override { record("frozen", event); }
-            void event_environment_deleted(IVP_Environment*) override { environment = nullptr; }
+            void event_environment_deleted(IVP_Environment* deleted) override {
+                g_surface_memo_generation.fetch_add(1);   // step OPA
+                retire_surface_memo(deleted);
+                environment = nullptr;
+            }
         };
         // Never destroyed: the IVP environment may outlive static storage at
         // process exit and would call into a dead listener.
@@ -1815,6 +1989,7 @@ namespace bmmo::physics {
         ++physics->m_DePhysicalizeCalls;
         PhysicsObject* object = physics->GetPhysicsObject(entity);
         if (object && object->m_RealObject) object->m_RealObject->delete_silently();
+        drop_surface_memo(physics);   // step OPA: its private surface is freed
         return true;
     }
 
@@ -1928,6 +2103,7 @@ namespace bmmo::physics {
                 physics->RemoveCollisionSurface(probe.c_str());
                 const bool ok = build_from_template(physics, probe.c_str(), mesh, out.signature, out.size, error);
                 physics->RemoveCollisionSurface(probe.c_str());
+                drop_surface_memo(physics);   // step OPA: surfaces freed
                 out.outcome = BMMO_HULL_TEMPLATE_KEPT;
                 return ok;
             }
@@ -1936,7 +2112,9 @@ namespace bmmo::physics {
         } else {
             out.outcome = BMMO_HULL_TEMPLATE_BUILT;
         }
-        return build_from_template(physics, surface, mesh, out.signature, out.size, error);
+        const bool built = build_from_template(physics, surface, mesh, out.signature, out.size, error);
+        drop_surface_memo(physics);   // step OPA: a surface freed (and the template body deleted)
+        return built;
     }
 
     bool set_body_guard(CKIpionManager* physics, bool enable, const char* except_entity, std::string& error) {
@@ -3134,7 +3312,8 @@ namespace bmmo::physics {
                 if (exempt) exempt->push_back(child->GetID());
                 if (physics && !physics->GetPhysicsObject(child))
                     if (CKMesh* mesh = child->GetCurrentMesh())
-                        if (mesh->GetName()) physics->RemoveCollisionSurface(mesh->GetName());
+                        if (mesh->GetName() && physics->RemoveCollisionSurface(mesh->GetName()))
+                            drop_surface_memo(physics);   // step OPA: a surface freed
             }
             return restored;
         }
@@ -3248,7 +3427,8 @@ namespace bmmo::physics {
                 // compiles it from the exact hierarchy installed here.
                 if (physics && !physics->GetPhysicsObject(child))
                     if (CKMesh* mesh = child->GetCurrentMesh())
-                        if (mesh->GetName()) physics->RemoveCollisionSurface(mesh->GetName());
+                        if (mesh->GetName() && physics->RemoveCollisionSurface(mesh->GetName()))
+                            drop_surface_memo(physics);   // step OPA: a surface freed
             }
         }
         // Ball_Pos_Frame sits on its ball's origin; the file gives it a 5e-6
@@ -3401,6 +3581,7 @@ namespace bmmo::physics {
             object->m_RealObject->delete_silently();
             ++removed;
         }
+        if (removed) drop_surface_memo(physics);   // step OPA: the pieces' surfaces may be freed
         restore_piece_frame(scene, physics, frame, nullptr);
         return removed;
     }
