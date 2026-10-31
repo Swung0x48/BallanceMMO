@@ -1263,9 +1263,6 @@ namespace bmmo::game {
                     if (have_previous) ++reuse_stats.with_previous;
                     else ++reuse_stats.index_failed;
                 }
-                // No record to reuse from (the first record, a barrier, a
-                // host write): the subtrees are looked at again.
-                if (!have_previous) physics_blocks().roots.clear();
             }
             // The block of `id` in the previous record (present), or null.
             // Same order as the selection unless scripts joined it: the same
@@ -1318,14 +1315,9 @@ namespace bmmo::game {
                         capture_behavior(beh, hooks, out);
                         continue;
                     }
-                    // Physics state in the block: always walked.
-                    if (root_has_physics_block(beh)) {
-                        ++reuse_stats.walked_physics;
-                        capture_behavior(beh, hooks, out);
-                        continue;
-                    }
                     // Step OPC: an inactive root whose activation words equal
-                    // record t - 1's takes that record's block.
+                    // record t - 1's takes that record's block - step OPC2:
+                    // with its force and joint tails emitted fresh.
                     size_t size = 0;
                     const uint8_t* block = have_previous ? previous_block(k, id, size) : nullptr;
                     script_root_words recorded;
@@ -1339,26 +1331,49 @@ namespace bmmo::game {
                         capture_behavior(beh, hooks, out);
                         continue;
                     }
-                    ++reuse_stats.reused;
+                    // Step OPC2: record t - 1's block walked in step with the
+                    // live graph, its header and parameter bytes copied, its
+                    // force and joint tails read from physics_RT now; any
+                    // structure mismatch walks the root instead.
                     const size_t at = out.size();
-                    if (reuse->mode == script_reuse_mode::verify) {
-                        // Walked as well and compared; the copy is recorded
-                        // either way (a verify run records what on would).
-                        ++reuse_stats.verified;
+                    const uint64_t imaged_before = joint_stats().imaged;
+                    size_t pos = static_cast<size_t>(block - reuse->previous->data());
+                    const size_t end = pos + size;
+                    uint64_t tails = 0;
+                    if (!copy_with_fresh_tails(beh, hooks, *reuse->previous, pos, out, tails) || pos != end) {
+                        out.resize(at);
+                        joint_stats().imaged = imaged_before;   // the walk below images them again
+                        ++reuse_stats.walked_structure;
                         capture_behavior(beh, hooks, out);
-                        const size_t fresh = out.size() - at;
-                        if (fresh != size || !std::equal(block, block + size, out.begin() + static_cast<std::ptrdiff_t>(at))) {
-                            const size_t where = first_difference(out.data() + at, fresh, block, size);
+                        continue;
+                    }
+                    ++reuse_stats.reused;
+                    reuse_stats.tails += tails;
+                    if (reuse->mode == script_reuse_mode::verify) {
+                        // Walked as well and compared with the copy; the copy
+                        // is recorded either way (a verify run records what on
+                        // would).  The walk's joint images are the copy's
+                        // (the ledger's note is idempotent on one hash); its
+                        // `imaged` count is taken back.
+                        ++reuse_stats.verified;
+                        const uint64_t imaged_copy = joint_stats().imaged;
+                        const size_t mid = out.size();
+                        capture_behavior(beh, hooks, out);
+                        joint_stats().imaged = imaged_copy;
+                        const size_t copied = mid - at, fresh = out.size() - mid;
+                        if (fresh != copied || !std::equal(out.begin() + static_cast<std::ptrdiff_t>(at),
+                                                           out.begin() + static_cast<std::ptrdiff_t>(mid),
+                                                           out.begin() + static_cast<std::ptrdiff_t>(mid))) {
+                            const size_t where = first_difference(out.data() + mid, fresh, out.data() + at, copied);
                             reuse_stats.note("script_reuse mismatch: " + owner_name(beh) + " / "
                                              + (beh->GetName() ? beh->GetName() : "") + " (#" + std::to_string(id)
                                              + ") at tick " + std::to_string(reuse->tick) + ": a fresh walk ("
-                                             + std::to_string(fresh) + " bytes) differs from record t - 1's block ("
-                                             + std::to_string(size) + " bytes) at byte " + std::to_string(where)
-                                             + "; recorded the copy");
+                                             + std::to_string(fresh) + " bytes) differs from the copy of record t - 1's block ("
+                                             + std::to_string(copied) + " bytes, " + std::to_string(tails)
+                                             + " physics tails fresh) at byte " + std::to_string(where) + "; recorded the copy");
                         }
-                        out.resize(at);
+                        out.resize(mid);
                     }
-                    out.insert(out.end(), block, block + size);
                 }
             }
             // The data-array cells the manager and the modules read and the
@@ -1471,49 +1486,85 @@ namespace bmmo::game {
             return w;
         }
 
-        // Step OPC (review finding 1): a root with a force or a joint block
-        // anywhere in its subtree is never a reuse source.  Those blocks'
-        // bytes (put_force_and_joint: the force controller's existence,
-        // position and force; the joint's image hash and its place among its
-        // core's controllers of one priority and name) are read from
-        // physics_RT, not from the script, and can change while the script is
-        // inactive with unchanged words (another script's constraint shut
-        // down, the body unphysicalized).  The subtree changes only through a
-        // host write (the proximity union's unit copies add and remove
-        // blocks), a re-creation or anything else behind the engine's write
-        // barrier, so the answer is cached per root (id and pointer) for one
-        // host-write generation and dropped by every capture with no record
-        // of t - 1 to reuse from (each barrier makes at least one).
-        static bool subtree_has_physics_block(CKBehavior* beh) {
-            if (!beh) return false;
-            if (is_force_block(beh) || is_joint_block(beh)) return true;
-            if (beh->IsUsingFunction()) return false;
-            const int children = beh->GetSubBehaviorCount();
-            for (int i = 0; i < children; ++i)
-                if (subtree_has_physics_block(beh->GetSubBehavior(i))) return true;
-            return false;
-        }
-        struct physics_block_cache {
-            uint64_t generation = ~0ull;
-            std::map<CK_ID, std::pair<CKBehavior*, bool>> roots;
-        };
-        static physics_block_cache& physics_blocks() {
-            thread_local physics_block_cache cache;
-            return cache;
-        }
-        static bool root_has_physics_block(CKBehavior* root) {
-            physics_block_cache& cache = physics_blocks();
-            const uint64_t generation = script_write_generation();
-            if (cache.generation != generation) {
-                cache.roots.clear();
-                cache.generation = generation;
+        // Step OPC2 (OPC's review finding 1, finished): a reused root's block
+        // with its force and joint tails emitted fresh.  Those tails' bytes
+        // (put_force_and_joint: the force controller's existence, position
+        // and force; the joint's image hash and its place among its core's
+        // controllers of one priority and name) are read from physics_RT, not
+        // from the script, and can change while the script is inactive with
+        // unchanged words (another script's constraint shut down, the body
+        // unphysicalized) - OPC's gate round therefore walked every root with
+        // such a block (~80 % of them).  Here record t - 1's block (`in` from
+        // `pos`, a v2 block as capture_behavior writes it) is walked in step
+        // with the live graph: each block's id must be the live block's, its
+        // activation words (16 bytes with the id) and both parameter sections
+        // (their counts checked against the graph) are copied, its old force
+        // and joint tails skipped and put_force_and_joint re-run (exactly as
+        // capture_behavior runs it, so the joint ledger is fed the same way),
+        // its child count and each child's presence checked, its delayed
+        // links copied (their count checked).  So the only bytes not copied
+        // are the ones read now, and the result equals a walk whenever the
+        // script state is record t - 1's (OPC's rule; verify compares).
+        // False on any structure mismatch, with `out` partly written: the
+        // caller cuts it back and walks.  `tails` counts the force and joint
+        // blocks whose tails were emitted fresh (a force block whose
+        // capture_force hook fails, writing a bare 0, still counts: a
+        // diagnostic counter of blocks, not of tail bytes).
+        // The block layout is capture_behavior's, read here and by skip_tail /
+        // skip_v2_block: a change to one must be made in all three, or every
+        // copy falls back to the walk (structure= rises; output stays exact).
+        static bool copy_with_fresh_tails(CKBehavior* beh, const script_replay_hooks& hooks, const std::vector<uint8_t>& in,
+                                          size_t& pos, std::vector<uint8_t>& out, uint64_t& tails) {
+            const auto copy_from = [&](size_t from) {
+                out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(from), in.begin() + static_cast<std::ptrdiff_t>(pos));
+            };
+            const auto parameters = [&](int live) {
+                size_t peek = pos;
+                uint16_t n = 0;
+                return get_u16(in, peek, n) && static_cast<int>(n) == live && skip_parameters_v2(in, pos);
+            };
+            const size_t head = pos;
+            uint32_t id = 0;
+            if (!get_u32(in, pos, id) || id != static_cast<uint32_t>(beh->GetID()) || !skip(in, pos, 12)) return false;
+            if (!parameters(beh->GetLocalParameterCount()) || !parameters(beh->GetOutputParameterCount())) return false;
+            copy_from(head);
+            // The recorded tails (skip_tail's first half), replaced.
+            uint8_t has_force = 0, has_joint = 0, handle = 0;
+            if (!get_u8(in, pos, has_force) || (has_force && !skip(in, pos, 49))) return false;
+            if (!get_u8(in, pos, has_joint)) return false;
+            if (has_joint && (!get_u8(in, pos, handle) || (handle == kJointImaged && !skip(in, pos, 8)))) return false;
+            const bool force = is_force_block(beh), joint = is_joint_block(beh);
+            if (force || joint) {
+                put_force_and_joint(beh, hooks, out, true);
+                tails += (force ? 1u : 0u) + (joint ? 1u : 0u);
+            } else {
+                if (has_force || has_joint) return false;   // the record had a tail this block cannot have
+                put_u8(out, 0);
+                put_u8(out, 0);
             }
-            const CK_ID id = root->GetID();
-            const auto it = cache.roots.find(id);
-            if (it != cache.roots.end() && it->second.first == root) return it->second.second;
-            const bool has = subtree_has_physics_block(root);
-            cache.roots[id] = {root, has};
-            return has;
+            uint16_t children = 0, delayed = 0;
+            if (!get_u16(in, pos, children)) return false;
+            if (beh->IsUsingFunction()) {
+                // capture_behavior's u16 0, u16 0.
+                if (children != 0 || !get_u16(in, pos, delayed) || delayed != 0) return false;
+                put_u16(out, 0);
+                put_u16(out, 0);
+                return true;
+            }
+            const int live = beh->GetSubBehaviorCount();
+            if (static_cast<int>(children) != live) return false;
+            put_u16(out, children);
+            for (int i = 0; i < live; ++i) {
+                CKBehavior* child = beh->GetSubBehavior(i);
+                uint8_t present = 0;
+                if (!get_u8(in, pos, present) || present != (child ? 1 : 0)) return false;
+                put_u8(out, present);
+                if (child && !copy_with_fresh_tails(child, hooks, in, pos, out, tails)) return false;
+            }
+            const size_t links = pos;
+            if (!get_u16(in, pos, delayed) || delayed != delayed_link_count(beh) || !skip(in, pos, 2u * delayed)) return false;
+            copy_from(links);
+            return true;
         }
 
         // Whether a record skips a parameter's bytes (is_opaque below): a
@@ -2806,6 +2857,10 @@ namespace bmmo::game {
             return false;
         }
 
+        // The v2 block layout.  Its other readers: skip_v2_block / skip_tail
+        // (stepping over a block) and copy_with_fresh_tails (step OPC2's
+        // reuse copy, which re-reads this layout field by field) - change
+        // them together.
         static void capture_behavior(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out) {
             put_u32(out, static_cast<uint32_t>(beh->GetID()));
             put_activation(beh, out);

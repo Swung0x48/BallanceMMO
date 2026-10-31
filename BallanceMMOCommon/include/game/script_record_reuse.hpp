@@ -22,10 +22,15 @@
 //    and the active inputs and outputs - equal the recorded ones, with no
 //    frame flag set (reusable_root): inactive at t - 1 and at t, nothing
 //    pending, nothing ran it in between through its IOs;
-//  - no block of its subtree is a force or a joint block (script_replay
-//    root_has_physics_block): their bytes are physics_RT's state (the force
+//  - (step OPC2) the copy walks record t - 1's block in step with the live
+//    graph (script_replay copy_with_fresh_tails): the activation words and
+//    the parameter sections are copied, but every force and joint block's
+//    tail is emitted fresh - those bytes are physics_RT's state (the force
 //    controller, the joint's image and controller order), which can change
-//    while the script is inactive.
+//    while the script is inactive; a block id, parameter count, child count,
+//    child presence or delayed-link count unlike the graph walks the root.
+//    (OPC's gate round walked every root with such a block instead: ~80 % of
+//    the roots, and no saving was left.)
 //
 // The record's bytes are unchanged (the copy is what the walk would write), so
 // no record version, no journal, wire or resync change.
@@ -113,14 +118,18 @@ namespace bmmo::game {
     // Captures with a record of t - 1 to reuse from, and without one (the
     // first record, after a barrier or a host write); scripts copied from it,
     // walked though it had their block (not reusable: active, a flag, words
-    // changed), walked without one and walked for a force or joint block;
-    // verify's re-walks, mismatches and the first notes naming them.
+    // changed), walked without one and walked because the in-step copy met
+    // a structure unlike the graph; the force and joint tails the copies
+    // emitted fresh (step OPC2; blocks, not scripts); verify's re-walks,
+    // mismatches and the first notes naming them.
     struct script_reuse_stats {
         uint64_t captures = 0, with_previous = 0, index_failed = 0;
         uint64_t reused = 0, walked = 0, walked_unrecorded = 0;
-        // Roots never reused because a force or joint block in their
-        // subtree carries physics_RT state (script_replay root_has_physics_block).
-        uint64_t walked_physics = 0;
+        // Step OPC2: roots walked because record t - 1's block did not match
+        // the live graph (script_replay copy_with_fresh_tails), and the
+        // force and joint blocks whose tails the reused roots' copies
+        // emitted fresh (blocks counted, whether or not the hook wrote one).
+        uint64_t walked_structure = 0, tails = 0;
         uint64_t verified = 0, mismatches = 0;
         std::vector<std::string> notes;
         static constexpr size_t kNotes = 16;
@@ -129,17 +138,18 @@ namespace bmmo::game {
             if (notes.size() < kNotes) notes.push_back(what);
         }
         std::string line(script_reuse_mode mode) const {
-            const uint64_t scripts = reused + walked + walked_unrecorded + walked_physics;
-            char buf[420];
+            const uint64_t scripts = reused + walked + walked_unrecorded + walked_structure;
+            char buf[460];
             std::snprintf(buf, sizeof buf,
                           "script_reuse: mode=%s captures=%llu with_previous=%llu index_failed=%llu scripts=%llu reused=%llu "
-                          "(%.1f%%) walked=%llu unrecorded=%llu physics=%llu verified=%llu mismatches=%llu",
+                          "(%.1f%%) tails=%llu walked=%llu unrecorded=%llu structure=%llu verified=%llu mismatches=%llu",
                           script_reuse_mode_name(mode), static_cast<unsigned long long>(captures),
                           static_cast<unsigned long long>(with_previous), static_cast<unsigned long long>(index_failed),
                           static_cast<unsigned long long>(scripts), static_cast<unsigned long long>(reused),
                           scripts ? 100.0 * static_cast<double>(reused) / static_cast<double>(scripts) : 0.0,
+                          static_cast<unsigned long long>(tails),
                           static_cast<unsigned long long>(walked), static_cast<unsigned long long>(walked_unrecorded),
-                          static_cast<unsigned long long>(walked_physics),
+                          static_cast<unsigned long long>(walked_structure),
                           static_cast<unsigned long long>(verified), static_cast<unsigned long long>(mismatches));
             return buf;
         }

@@ -78,14 +78,16 @@ TEST(ScriptRecordReuse, TheCountersNoteTheFirstMismatchesAndTheLineSaysTheRate) 
     bmmo::game::script_reuse_stats s;
     s.reused = 3;
     s.walked = 1;
-    s.walked_physics = 1;
+    s.walked_structure = 1;
+    s.tails = 7;
     for (int i = 0; i < 20; ++i) s.note("m" + std::to_string(i));
     EXPECT_EQ(s.mismatches, 20u);
     EXPECT_EQ(s.notes.size(), bmmo::game::script_reuse_stats::kNotes);
     const std::string line = s.line(script_reuse_mode::verify);
     EXPECT_NE(line.find("mode=verify"), std::string::npos);
     EXPECT_NE(line.find("reused=3 (60.0%)"), std::string::npos) << line;
-    EXPECT_NE(line.find("physics=1 "), std::string::npos) << line;
+    EXPECT_NE(line.find("structure=1 "), std::string::npos) << line;
+    EXPECT_NE(line.find("(60.0%) tails=7 "), std::string::npos) << line;
     EXPECT_NE(line.find("mismatches=20"), std::string::npos);
     const uint8_t a[] = {1, 2, 3, 4}, b[] = {1, 2, 9, 4}, c[] = {1, 2};
     EXPECT_EQ(bmmo::game::first_difference(a, 4, b, 4), 2u);

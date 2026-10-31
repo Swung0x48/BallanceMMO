@@ -18,10 +18,11 @@ decision of 2026-10-25 (§11). The research of FULL step OPTR (2026-10-30,
 the user's two ideas measured against a frame profile; blocked on the user)
 is the section "Research (step OPTR)"; its option A is built at step OPA
 ("As built (step OPA)"), its option B1 at step OPB ("As built (step
-OPB)") and its option C at step OPC ("As built (step OPC)", the last
-section; exact, but its review's subtree guard leaves 10-16 % of the
-captures reused and no measurable saving - the refinement that recovers it
-is queued there).
+OPB)") and its option C at step OPC ("As built (step OPC)"; exact, but
+its review's subtree guard left 10-16 % of the captures reused and no
+measurable saving) finished at step OPC2 ("As built (step OPC2)", the last
+section: the force and joint tails emitted fresh, 50-86 % reused, exact,
+L12 rewind frames about a quarter shorter on E-cores, on by default).
 
 Base: HEAD 49e2cc8. Line numbers are HEAD's plus RC1's own edits. The profile
 this design rests on is step CPUPROF's ("The rewind-cost profile
@@ -5067,3 +5068,141 @@ wall). The L11 verify session ran before the sampler was added to the driver.
 **Not run / deferred.** A second off / on pair (client 2's figure needs a
 session pair without the slip to be read); `session core off` (the legacy path
 is untouched and refused by the server since B9DX).
+
+## As built (step OPC2, FULL close-out, 2026-10-31): an inactive script's record reused with its force and joint tails emitted fresh (OPC finished)
+
+The user's choice C (2026-10-30, "你决定，按你的推荐来": A, then B1, then C),
+finished. Base 714a9960 (VCPKGU; protocol 23, journal v9). Shared code only
+(`game/script_replay.hpp`, `game/script_record_reuse.hpp`) and its unit test:
+no IVP, physics_RT, engine, protocol, journal or record change (the record's
+bytes are what a walk writes), no host, binding or `rollback.hpp` change, no
+`BallanceMMOClient` member; the server compiles the changed helpers but never
+reuses (it binds no reuse).
+
+**What was built - the refinement OPC's gate round queued.**
+- `script_replay.hpp` `copy_with_fresh_tails` (replaces OPC's
+  `root_has_physics_block`, its subtree walk and its per-generation cache):
+  record t - 1's block is walked in step with the live graph, block by block
+  as `capture_behavior` writes it - the block id must be the live block's, the
+  activation words (16 bytes with the id) and both parameter sections (counts
+  checked against `GetLocalParameterCount` / `GetOutputParameterCount`, the
+  bytes stepped over with `skip_parameters_v2`) are copied, the recorded force
+  and joint tails are skipped and `put_force_and_joint(beh, hooks, out, true)`
+  is run for every force or joint block exactly as the walk runs it (so the
+  RLC joint ledger is fed the same images in the same order), a block that is
+  neither keeps its two zero bytes (a recorded tail there is a structure
+  mismatch), a function block's `u16 0, u16 0`, the child count and each
+  child's presence checked against the graph, the delayed links copied after
+  their count is checked against `delayed_link_count`. The only bytes not
+  copied are the ones read from physics_RT now. Any mismatch, or a block that
+  does not end where record t - 1's ends, cuts the output back and walks the
+  root (`structure=` in the line; the joint `imaged` counter is taken back
+  first, since the walk images again).
+- Every reusable root now goes through it (OPC's no-physics roots too: the
+  structure check is a byte step and a few graph reads, and OPC's cache is
+  gone). The reuse rule (`reusable_root`), the record of t - 1 the engine hands
+  over, the host-write generation and the modes are OPC's, unchanged.
+- Verify walks the root after the copy and compares the walk with the COPY
+  (not with record t - 1's block, whose tails may legitimately differ); the
+  copy is recorded either way, the walk's `imaged` count is taken back (the
+  ledger's note is idempotent on one hash).
+- `script_reuse_stats`: `walked_physics` / `physics=` replaced by
+  `walked_structure` / `structure=` (roots walked because the in-step copy did
+  not match the graph) and `tails=` (force and joint tails the copies emitted
+  fresh, blocks not scripts, outside the `scripts` sum); the line is
+  `... reused=N (x%) tails=T walked=W unrecorded=U structure=S verified=V
+  mismatches=M`. Unit test `ScriptRecordReuse.TheCountersNoteTheFirst
+  MismatchesAndTheLineSaysTheRate` updated (`structure=1 `, `tails=7 `).
+
+**What verify proves here.** Verify cannot see a stale physics tail: the
+copy and the walk read physics_RT at the same instant, so the tails are exact
+by construction only (they are never copied). What the runs below prove is
+the other half: over about 3.8 M verified copies (every check below), the parameter and
+activation bytes of the roots OPC's guard never reused (~80 % of the
+selection: every module with a hinge, a spring or a force) stayed equal to a
+walk while the root was inactive.
+
+**Adaptation.** None to the design's shape. One detail beyond it: the
+in-step walk also checks each block's id and its parameter counts (cheap, and
+a block's id is the only thing that ties a recorded child to a live one).
+
+**Checks (2026-10-31, 09:35-09:50; tools `work/OPC2/`).**
+- Builds: x64 BUILD-OK, DEPS-OK (1543 objects); x86 CLIENT-BUILD-OK, DEPS-OK
+  (`core_host.cpp`, `physics_session_client.cpp` and the core sources
+  recompiled; the slot-13 hack not applied, map.hpp clean); Arch server
+  ARCH-BUILD-OK `ballanced-36c04e3d24c9+bmmo-714a996011bd-dirty`. Unit tests
+  712/712. GCC syntax 33/33 ok.
+- Wire check in verify mode (`BMMO_SCRIPT_REUSE=verify EXTRA="--accept-protocol
+  22" wire_check.sh rVCPKGU rOPC2 rOPC2w`, core_ref_s12's nine arms with h1_150
+  from core_ref_s12h): ALL SAME, sends 36/36 SAME, journals 36/36 IDENTICAL;
+  verify 0 mismatches on all 36, `structure=0` everywhere; reused 72-74 % on
+  the arena arms, cliff 63 %, swing 65 %, l8_cross 63-64 %, h1_150 86 % (OPC's
+  guarded build: 9-16 %); 54606-186435 tails emitted fresh per client.
+- `verify_more.sh` (core_ref_s12 solo1 / solo2, cpu_full `rcb_l8x_on`,
+  `rcb_l12x_on2`, `rcb_h1_on`, 14 replays, verify): every journal IDENTICAL to
+  rVCPKGU's replay and to the live client's; 0 mismatches, structure 0 (solo
+  78 %, L8 65 %, L12 50-51 %, h1 86 % reused).
+- SimTool `--savestate-check` (OPC's `simcheck.sh`): K=2 seed 1 x 40 off / on /
+  verify PASS, K=8 seed 2 x 60 on / verify PASS; verify 0 mismatches over
+  13286 / 18525 copies (78 %; OPC guarded: 6 %).
+- Live, headless, snapshots off, trafo inputs and placement copies on, 150 ms,
+  the four clients in verify mode, the Arch server of this tree (its
+  binary, built 09:40, carries `bmmo-714a996011bd-dirty`; the server log
+  does not print its own id)
+  (`work/OPC2/live.sh`, CPU's `cpu_run.sh`): L11 (`cpu_full/opc2_l11_verify`,
+  drive, sector 1) VERDICT PASS, server replay 2573/2573 matched, every client
+  0 mismatches over 144419-161375 verified copies (80-81 %), resyncs 0,
+  starved 0; L12 (`cpu_full/opc2_l12_verify`, RCB's l12x_on2 crossing recipe)
+  VERDICT PASS, server replay 2986/2986 matched, every client 0 mismatches over
+  80396-83880 copies (50-51 %), resyncs 0, starved 0. Both arms' captures
+  replayed by the same binary with the reuse off and on
+  (`live_offcheck.sh`): 16/16 journals IDENTICAL to the live clients'.
+- Retail L12 (OPC's recipe, `work/OPC2/opc2_retail.py verify`,
+  `scripts/retail/opc2_l12_verify`; the OPC2 x86 build installed in both game
+  copies, each game on E-cores of its own, `net lag 150`, client 1 crossing s2,
+  s3, s4, the Arch server of this tree, snapshots off): 0 mismatches over
+  81810 / 82002 verified copies (72.7 %, structure 0), resyncs 0; FINAL rows
+  against the server (`RT1/rt1_judge.py`): own, mirror and 14 mechanisms
+  bit-equal on both clients (670 / 668 rows each, worst 0 m).
+- The saving on E-cores (decision 33; `work/OPC2/ecore_ab.sh rOPC2 ab1 2`,
+  OPC's `ecore_ab_g.sh`: one binary, `BMMO_SCRIPT_REUSE=off` as before and `on`
+  as after, the same captures, the four clients of an arm at once on E-cores
+  of their own, nothing else running, TWO rounds; off vs on journals
+  IDENTICAL 24/24). Per round the mean of the four clients; the band is the
+  two rounds (`ab_summary.py`):
+
+| | frame p50 off -> on | p99 | p999 (rewind frames) | max | t_max (longest rewind) | t_rep per resim tick | t_cap per frame | t_cap per session |
+|---|---|---|---|---|---|---|---|---|
+| L8 `rcb_l8x_on` | 2.10-2.20 -> 2.03-2.10 | 3.48-3.50 -> 3.28-3.30 | 83.0-85.1 -> 77.6-79.3 | 131-136 -> 125-126 | 50.3-52.3 -> 48.8-49.0 | 1.45-1.51 -> 1.35-1.37 ms | 0.90-0.99 -> 0.82-0.85 ms | 1853-2019 -> 1675-1749 ms |
+| L12 `rcb_l12x_on2` | 3.98-4.15 -> 3.30 | 11.4-11.7 -> 10.0-10.4 | 153-162 -> 119-120 | 200-212 -> 160-165 | 60.8-68.5 -> 50.0-51.8 | 2.23-2.43 -> 1.74-1.75 ms | 2.32-2.43 -> 1.62-1.63 ms | 4369-4589 -> 3057-3071 ms |
+| h1 `rcb_h1_on` | 2.35-2.38 -> 2.28-2.33 | 33.9-34.0 -> 33.1-33.6 | 71.7-71.9 -> 70.8-71.5 | 94.8-95.2 -> 94.0-95.1 | 73.5 -> 71.5-73.0 | 1.17-1.18 -> 1.14 ms | 0.91-0.93 -> 0.86-0.87 ms | 2013-2049 -> 1905-1911 ms |
+
+  Every column's on band lies below its off band (L8 p50 touches at 2.10,
+  h1 t_max overlaps);
+  L12, the level with the most selected scripts (69 with placement copies),
+  saves most: rewind frames 22-26 % shorter (p999), the longest rewind
+  (t_max, ms) 61-69 -> 50-52, t_cap -31 %, t_rep per resim tick -24 %; h1's
+  t_max bands touch (73.5 vs 71.5-73.0), its other columns do not. The saving is outside the run-to-run scatter, so reuse stays ON by
+  default on both hosts (the plan's rule: off only if within scatter). The
+  price the design named - a `capture_joint` image per joint block per tick -
+  is paid by the walk as well, so the copy is never dearer than the walk.
+
+**Not run / deferred.** A retail off / on pair for the retail frame-time
+figure (OPC's retail table was the unguarded implement-round build; this
+step's one retail session is the verify session, whose `core_frame_time`
+p50 4.0 / 4.0 ms includes verify's walk of every copy) - to RTR, the retail
+batch that follows. No `session core off` run (the legacy path is untouched
+and refused by the server since B9DX). L1 (OPC ran it; its five selected
+scripts exercise little) and a mid-session selection change (the index
+matches by id; a joining script walks once) were not run again. OPC's review
+finding 2 (a root run and finished inside one frame by a direct
+CKBehavior::Activate) stands as OPC described it: verify is the check, and
+none of the runs above saw one.
+
+**Gate round.** The review found no blocker. Its two nits are comments
+only: `capture_behavior` now names its layout's other readers
+(`skip_v2_block` / `skip_tail` and `copy_with_fresh_tails`; a field added to
+one and not the others makes every copy fall back to the walk, exact but
+without the saving, `structure=` rising), and the `tails=` counter is
+documented as force and joint blocks re-emitted (a force block whose
+`capture_force` hook fails still counts). No rebuild or rerun (comments only).

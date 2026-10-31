@@ -602,9 +602,13 @@ numbers 1-10 are unchanged.
    reused, built exact (verify 0 mismatches everywhere), but the review's
    guard - a root with a force or joint block is always walked, those bytes
    are physics_RT's state - covers about 80 % of the selected roots, so it
-   reuses 10-16 % and measures no saving; queued: OPC2, a copied block with
-   its force and joint tails re-read fresh ("As built (step OPC)", its gate
-   round).** **RC3 is built and on by default (step B5RX)**: a snapshots-off
+   reuses 10-16 % and measures no saving ("As built (step OPC)", its gate
+   round); finished at FULL step OPC2: a reused root's block is copied in
+   step with the live graph and its force and joint tails are emitted fresh,
+   so the guard is gone - 50-86 % reused, verify 0 mismatches everywhere
+   (wire check, cpu_full, live L11 / L12, retail L12), E-core L12 rewind
+   frames (p999) 153-162 -> 119 ms and t_cap -31 %; on by default ("As built
+   (step OPC2)").** **RC3 is built and on by default (step B5RX)**: a snapshots-off
    session takes a body-set full snapshot for its names and rows only (no
    compare, no rewind; headless `--body-set-corrections` is the control
    arm). The user, 2026-10-28, verbatim: "不对，RC3要保留快照？现在应该尽可能假设
