@@ -256,6 +256,12 @@ namespace {
     // 'session core off' still selects the legacy path for the next session.
     std::atomic<bool> core_on{true};
     std::atomic<bool> core_latched{false};
+    // FULL step RCV: RC2 (b)'s capture cache mode for the NEXT core session
+    // ('session cache off|on|verify'; core_config::capture_cache, read once
+    // in the config block when a session begins).  On by default, as on the
+    // headless client.  Host-local: nothing goes on the wire.
+    std::atomic<uint8_t> capture_cache_next{
+        static_cast<uint8_t>(bmmo::session::rollback_engine::capture_cache_mode::on)};
 
     // ------------------------------------------------------------ the mailbox
     // Design 3.2 "Receive": every Session* opcode's bytes, in arrival order.  A
@@ -1567,8 +1573,10 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // correction, only names and rows.
     config.body_set_corrections = false;
     // RC2 (b) (step RCB, the user's Q-CPU (b)): the capture's per-body read
-    // cache, on as on the headless client.
-    config.capture_cache = bmmo::session::rollback_engine::capture_cache_mode::on;
+    // cache, on as on the headless client; 'session cache off|on|verify'
+    // picks it for the next session (FULL step RCV).
+    config.capture_cache =
+        static_cast<bmmo::session::rollback_engine::capture_cache_mode>(capture_cache_next.load());
     // R1's policy (the legacy frame's order) only stood in for the input
     // rewind: with it a key edge relayed between the frames replays from its
     // tick, so the drive of T + 1 is chosen at post_step(T) as on the
@@ -3661,7 +3669,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
 
 // ---------------------------------------------------------------- the verbs
 
-// session core on|off|status, session force-rollback E:D.
+// session core on|off|status, session force-rollback E:D, session cache
+// off|on|verify|status (FULL step RCV).
 std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     std::istringstream args(rest);
     std::string what, value;
@@ -3701,6 +3710,26 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            mailbox.pushed(), mailbox.dropped(), host.drained,
                            host.starts, host.discarded, host.undecodable, host.beams_made, host.nav_source_differs,
                            host.mute_source_differs);
+    }
+    if (what == "cache") {
+        // FULL step RCV: RC2 (b)'s capture cache (core_config::capture_cache)
+        // for the next core session - off, on (the default) or verify (reads
+        // anyway and counts every cached entry that differs: the status
+        // line's ccache=hits/mismatches v).  A running session keeps the
+        // mode it began with.
+        using mode = bmmo::session::rollback_engine::capture_cache_mode;
+        const auto name = [](uint8_t m) {
+            return m == static_cast<uint8_t>(mode::off) ? "off" : m == static_cast<uint8_t>(mode::verify) ? "verify" : "on";
+        };
+        if (value == "off" || value == "on" || value == "verify") {
+            const mode m = value == "off" ? mode::off : value == "verify" ? mode::verify : mode::on;
+            capture_cache_next.store(static_cast<uint8_t>(m));
+            return std::format("ok session cache {}: the next core session's capture cache{}", value,
+                               core_session_running() ? " (the running session keeps its own mode)" : "");
+        }
+        if (!value.empty() && value != "status") return "error usage: session cache off|on|verify|status";
+        return std::format("ok cache next={} running={}", name(capture_cache_next.load()),
+                           core_session_running() ? 1 : 0);
     }
     if (what == "reload") {
         // Step SP9: the countdown's reload of a level that ran a session (on
@@ -3807,7 +3836,8 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     }
     return "error usage: session core on|off|status | session force-rollback <every>:<depth> | "
            "session force-rollback at <live>:<depth>[,...] | session stall <ms> | "
-           "session drop-birth | session placement | session probes | session activate <script> at b+<n>|<tick>";
+           "session drop-birth | session placement | session probes | session activate <script> at b+<n>|<tick> | "
+           "session cache off|on|verify|status";
 }
 
 // net lag <ms> [up|down] [at <tick>] | net blackout <ms> [up|down] [at <tick>]

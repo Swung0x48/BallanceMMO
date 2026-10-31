@@ -248,7 +248,7 @@ names no server file); the own ball's feed; the legacy retail path
 | step | what | checks |
 |---|---|---|
 | RC1 | the hold-last re-prediction (§2) | §7; quick tier |
-| RC2 | incremental capture for sleeping bodies - **not built, the user's choice 2026-10-28** (the blob has no per-body bytes and IVP no sleep generation; options (a) / (b) kept for later: "As built (step B5RX)", item RC2S); **option (b) built at FULL step RCB (the user's Q-CPU (b), 2026-10-30): mechanisms only, validity by a bit-equal sleeping body read and a barrier at every engine write; measured no headless saving, retail L11 t_cap 8 % lower across builds ("As built (step RCB)")** | the savestate exactness set, the wire check (ALL SAME: no behaviour change), CPU parity, H1 at 150 ms |
+| RC2 | incremental capture for sleeping bodies - **not built, the user's choice 2026-10-28** (the blob has no per-body bytes and IVP no sleep generation; options (a) / (b) kept for later: "As built (step B5RX)", item RC2S); **option (b) built at FULL step RCB (the user's Q-CPU (b), 2026-10-30): mechanisms only, validity by a bit-equal sleeping body read and a barrier at every engine write; measured no headless saving, retail L11 t_cap 8 % lower across builds ("As built (step RCB)"); kept as built by the user (2026-10-30); on retail at step RCV: `session cache off|on|verify`, verify 0 mismatches on L11 and L12, same-build L11 client 1 t_cap -5.7 % ("As built (step RCV)")** | the savestate exactness set, the wire check (ALL SAME: no behaviour change), CPU parity, H1 at 150 ms |
 | RC3 | no body-set full snapshot while snapshots are off - **built at B5RX, the default on every host** (the user's correction of 2026-10-28; the drifts it exposes go to step SFD) | its own drift check, the snapshots-off arms |
 | RC4 | the dormant-script encoding (trafo design 9.4) - **built at B6RC** | script replay exactness, the wire check |
 | RC5 | incremental restore - **not built: stopped at B6RC, left to the orchestrator by the user (2026-10-28), who chose option (c), like RC2** (the restore's whole-world teardown and world-wide numbers: a selective teardown, a wake counter or a per-object blob; "As built (step B6RC)", item RC5); **option (b) not built at FULL step RCB: steps 3 / 11 / 14 are 2-3.5 % of a restore, step 14's unchanged-matrix skip already in since gap P ("As built (step RCB)")** | the savestate checks, the wire check |
@@ -3947,7 +3947,9 @@ isolated A/B).**
   cache's premise is IVP's (an asleep, bit-equal core keeps its extras and
   contacts), the same in the plugin's bridge, which is an inference for the
   retail path. Deferred: a retail `session` verb for the mode, then a ctl
-  session with the cache off and one with verify.
+  session with the cache off and one with verify. [Done at step RCV: `session
+  cache off|on|verify`; verify 0 mismatches on retail L11 and L12, the
+  same-build L11 pair client 1 t_cap -5.7 % ("As built (step RCV)").]
 
 **The CPU axes again (live, the plan's recipes; before = step CPU's table,
 `work/CPU/cpu_table.txt`, measured on rRSX = 16ba27a5, after = rRCB3 = this
@@ -4913,3 +4915,155 @@ E-core A/B above (off vs on journals IDENTICAL 8/8). Not rerun: the live L1 /
 L11 runs and the retail sessions (the fix-up changes which roots are copied,
 not a record byte, and the exact checks above show the bytes unchanged; the
 retail re-measure of a saving that is gone belongs with OPC2).
+
+## As built (step RCV, FULL close-out, 2026-10-31): RC2 (b) on retail - the cache's verb, two verify sessions and a same-build off / on pair
+
+The user's decision 31 (2026-10-30, "RC2 b 那个先维持现状吧"): RC2 (b) stays as
+step RCB built it (mechanisms only, on by default on both hosts); this step
+adds the retail checks RCB deferred ("As built (step RCB)", its last retail
+paragraph: no switch on retail, `verify` run on headless replays only, no
+same-build off session).
+
+**Built (retail only; no shared, headless, server, wire or journal change).**
+- `BallanceMMOClient/session/core_host.cpp`: a file-scope static
+  `capture_cache_next` (an atomic, on by default; no `BallanceMMOClient` data
+  member, the BML layout rule) and the verb `session cache off|on|verify|status`
+  in `core_host_session_verb`. The config block reads the static into
+  `core_config::capture_cache` when a core session begins, so the verb picks
+  the mode of the next core session and every later one in the process until
+  it is changed again (sticky, like `session core`); a running session keeps
+  the mode it began with (the answer says so). `status` prints `ok cache next=<mode> running=0|1`;
+  the hits and mismatches stay on the core's status line (`ccache=hits/mismatches`,
+  `v` in verify; absent when off, as RCB built it).
+- `BallanceMMOClient/automation/client_automation.cpp`: `session cache ...` routed
+  to the core host's verb with the other core verbs.
+- Run driver `.local-tools/work/RCV/rcv_retail.py l11|l12 off|on|verify LABEL`
+  (wraps RT1's `recipe_arm LABEL 0:0 0:0` and RCB's L12 recipe; after start-up
+  each game is pinned to E-cores of its own, client 1 on 16-21 and client 2 on
+  22-27, as OPC did, then `session cache MODE` and `session cache status` go
+  to both before the room starts; the sampler beside the L11 arms;
+  `BMMO_SCRIPT_REUSE` unset, so HEAD's defaults otherwise). The Arch server was
+  rebuilt from this tree (`ballanced-36c04e3d24c9+bmmo-a6bd5d169006-dirty`;
+  snapshots off, trafo inputs and placement on). x86 CLIENT-BUILD-OK. Both
+  changed files are `.cpp`, so no header dependency to check.
+
+**Verify (the exactness check on retail): 0 mismatches on both clients in both
+recipes.**
+
+| session | client 1 `ccache` | client 2 `ccache` | `capture cache (verify)` log lines |
+|---|---|---|---|
+| L12, RT2's SP8-e recipe session 1 (`scripts/retail/rcv_l12_verify`) | 5697/0v | 5751/0v | 0 / 0 |
+| L11, RT1's ctl recipe (`scripts/retail/rcv_l11_verify`) | 65358/0v | 56302/0v | 0 / 0 |
+
+(The mismatch line goes through the rollback world's log, which is bound on
+retail with trace off, under the host's 200-line cap per session; the counter
+is not capped.) So the cache's premise holds on the retail path too: no writer
+outside the engine (PSI listeners, physics_RT scripts, platform writes) left a
+sleeping mechanism bit-equal with different extras or contacts in either
+recipe. L12 verify: resyncs, starved, far 0; rb 3 / resim 72 and 70;
+`core_frame_time` p50 / p99 3.5 / 4.3 and 3.6 / 5.4 ms; `frame_interval` p50
+15.1, p99 17.1 / 17.0 ms; host max 22.4 %.
+
+**FINAL rows (`work/RT1/rt1_judge.py`, `final_fields.py`).**
+- L12 verify: every body bit-equal to the server on both clients (own 1/1,
+  mirror 1/1, mechanisms 14/14; 664 / 661 rows).
+- L11 off, on, verify: mechanisms 23/23 bit-equal on both clients in all
+  three. The other unequal rows are the ones `rt1_ctl`, `rt1_ctl2`, `slx_ctl`
+  and `rcb_ctl` already had: rotation-only rows <= 4.67e-8 on balls and trafo
+  pieces (RT1's FINAL-row x87 read, a report difference), and each own ball's
+  one row at its trafo beam tick (300 / 340: 0.001946 m, pre-existing since
+  `rt1_ctl`).
+- One more, in `rcv_l11_on` only: client 2's own ball differs in position and
+  velocity from tick 1246 to its death at 1589 (172 rows; 7.25e-8 m at 1246,
+  max 4.77e-5 m at 1588), LIVE rows the same as FINAL. Not the cache's: (1) the
+  cache only replaces a sleeping mechanism's extras and contacts in a record
+  (body rows are always read fresh), and in this session none of those cached
+  fields was ever written into the world. Client 2's final status line has
+  `snaps=0 resyncs=0/0 rb=47 sv=47/0/0 ct=0/0 imp=1`: every one of its 47
+  restores went through the IVP savestate blob, which is captured fresh every
+  tick (the cache does not touch it). That path marks every plan item covered
+  (`rollback.hpp:1795-1796`, no resync and no snapshot rows here), and a
+  covered body gets neither its record's extra (`rollback.hpp:1958`, `:2037`)
+  nor its record's contacts (`rollback.hpp:2048`). `ct=0/0` confirms that no
+  record contact was written in the whole session. The one extra write
+  (`imp=1`) is a born-in-window ball's birth half, which is not cacheable (balls
+  never take the cache) and has no t - 1 record to hit anyway. RCB's
+  `rcb_ctl2` session has the same counters (`snaps=0 resyncs=0/0 rb=54
+  sv=54/0/0 ct=0/0 imp=1`). Besides, client 2's last restore before 1246 was
+  the rewind to 1153 (re-simulated 6 ticks), so ticks 1159-1246 were all live
+  steps; (2) every mechanism row is bit-equal to the
+  server's on that client for the whole session; (3) at 1246 the ball rolls at
+  0.37 m/s on the static floor at (310.39, -58.90, -46.31), 54.9 m from the
+  nearest body (`P_Modul_30_Wippe001`); client 1 was dead (1168-1366); (4) not
+  an input either: the r0_keys replay was still feeding (`fed=1298` at 1298),
+  no "own input substituted" rewind lies between 1154 and 1365, and the first
+  difference, 4.78e-6 m/s linear and 7.25e-8 m, is orders of magnitude below
+  one tick of a key's force. It is
+  the own ball alone diverging live on a static floor: the signature of SFD's
+  cause (A) (the own ball's IVP collision bookkeeping differs from every copy
+  of it). On retail that cause is still open: OWNB fixed it on the headless
+  host and queued the retail remainder in the core design's R6 row ("As built
+  (step OWNB)", *Adaptation (retail)*). Retail declares no `own_body_control`,
+  so an own birth inside a rewind window keeps the parking path and its live
+  hull bookkeeping. Client 2's own birth at 212 was inside one (its log:
+  "marked a spawn birth at tick 212 (replayed own birth)"; its `parked=1`
+  counts one ball birth kept parked). Which
+  sessions show it (gate round,
+  `work/RCV/spot.py`: client 2's own ball in the server's rows, ticks
+  1150-1400). All eight L11 ctl sessions pass the spot between 1220 and 1266.
+  - Five take the common path (1300 at (310.4, -58.9, -46.5)), and none of
+    them drifts: `rt1_ctl` and `slx_ctl` (built before the cache existed),
+    `rcb_ctl` (cache on), and `rcv_l11_off` and `rt1_ctl2` (each after its
+    1087 resync).
+  - Three take other paths. `rcb_ctl2` (RCB's build, cache on) drifts from
+    1232, and `rcv_l11_on` drifts from 1246. `rcv_l11_verify` (its world as
+    with the cache off, since verify keeps the fresh reads) passes at z -45.9
+    and does not drift.
+
+  So the drift goes with the path, not the cache mode: it shows in 2 of the 3
+  cache-on sessions and in none of the cache-off-equivalent ones, but both
+  drifting sessions are off the common path, and the cache-on `rcb_ctl` on the
+  common path is clean. The code path and the counters above rule the cache out
+  for these two sessions. No session without the cache has yet taken a
+  drifting path, so a cache-off reproduction is not in hand: the retail world
+  has no offline rollback replay (retail records no network capture, and
+  SimTool's `--replay-session` of a client journal replays the server's view
+  without the rollback engine). The attribution to SFD's cause (A) stays an
+  attribution by signature, queued with that item (R6). Every compared session's
+  client 2 also had its own birth at 212 replayed (and so, on retail, parked),
+  so the state is there in all of them (in `rt1_ctl2` and `rcv_l11_off` until
+  their 1087 resync rebuilt the world from the server's blob); whether it shows
+  depends on the path.
+
+**The same-build A/B (L11 ctl, one session per mode, E-cores; a smoke figure,
+not a band).**
+
+| per client 1 / client 2 | off (`rcv_l11_off`) | on (`rcv_l11_on`) | verify (`rcv_l11_verify`) |
+|---|---|---|---|
+| t_cap ms (session; max single) | 7886 (26) / 9913 (23) | 7439 (27) / 13840 (24) | 8254 (26) / 9990 (24) |
+| ticks + resim (captures, approx.) | 2541 + 132 / 2545 + 174 | 2632 + 335 / 2621 + 118 | 2629 + 470 / 2606 + 102 |
+| t_cap per capture ms | 2.95 / 3.65 | 2.51 / 5.05 | 2.66 / 3.69 |
+| `core_frame_time` p50 / p99 ms | 3.4 / 14.8, 3.3 / 17.0 | 3.0 / 19.2, 3.1 / 17.7 | 3.4 / 18.9, 3.3 / 15.8 |
+| `frame_interval` p99 ms | 17.0 / 19.2 | 22.7 / 20.9 | 22.3 / 17.2 |
+| resyncs | 1 / 1 (client 2 at 1087) | 1 / 0 | 1 / 0 |
+| starved (c1 / c2); held_total (c1 / c2) | 98 / 384; 2 / 0 | 98 / 592; 0 / 592 | 134 / 235; 0 / 235 |
+| `ccache` hits | - | 62183 / 56451 | 65358 / 56302 (0 mismatches) |
+| host max, worst outside process | 20.1 %, 2.3 % | 21.5 %, 2.7 % | (no sampler) |
+
+Read: client 1 (0-2 held records in every arm) is the clean pair: t_cap 7886 ->
+7439 ms (-5.7 %), per capture 2.95 -> 2.51 ms (-15 %), `core_frame_time` p50
+3.4 -> 3.0 ms; verify, which reads everything and compares as well, sits
+between them (2.66). Client 2 is not comparable across these three sessions:
+its t_cap follows its starvation (the known burst-slip, RT1 ctl2's sampler
+evidence), 592 held reports in the on session against 235 in verify and a
+resync at 1087 in off; verify, which does strictly more capture work than on,
+took 9990 ms on the same client at 235 held. RCB's across-builds estimate for
+client 1 was -8 % (4200-4220 -> 3852-3859 ms, P-cores unpinned).
+
+**Adaptations.** The plan names "2-3 retail sessions"; its pass list needs
+four (verify on L11 and L12, off and on on L11), all four were run (each ~97 s
+wall). The L11 verify session ran before the sampler was added to the driver.
+
+**Not run / deferred.** A second off / on pair (client 2's figure needs a
+session pair without the slip to be read); `session core off` (the legacy path
+is untouched and refused by the server since B9DX).

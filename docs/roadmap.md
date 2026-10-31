@@ -588,7 +588,9 @@ numbers 1-10 are unchanged.
    saving (the per-body cost is the name lookup); retail L11's t_cap was 8 %
    lower across builds (not isolated); RC5 (b) not built (steps 3 / 11 / 14 are 2-3.5 % of a restore); the
    CPU axes again - "As built (step RCB)"; whether to keep RC2 (b) is the
-   user's.** **FULL step OPC (OPTR option C): an inactive script's record
+   user's (answered 2026-10-30: kept as built; its retail checks at FULL step
+   RCV - `session cache off|on|verify`, verify 0 mismatches on retail L11 and
+   L12, "As built (step RCV)").** **FULL step OPC (OPTR option C): an inactive script's record
    reused, built exact (verify 0 mismatches everywhere), but the review's
    guard - a root with a force or joint block is always walked, those bytes
    are physics_RT's state - covers about 80 % of the selected roots, so it
