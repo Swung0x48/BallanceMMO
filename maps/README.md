@@ -73,19 +73,54 @@ Three checks in `build_arena_map.py` keep it that way:
 - `check_clipping()` — every component vertex below the road against every
   floor block, **per vertex, not per bounding box**: a mechanism legitimately
   has a box that spans floor blocks its geometry never touches, so a box test
-  reports phantom overlaps here. For the map as committed it reports **426
-  vertices over 9 components** (`P_Modul_01/17/18/19/25/29/34/41`,
-  `PE_Balloon`): the base plates retail itself buries in the 5-thick floor
-  block (see the openings below). Compare against that count; it is not zero
-  and is not meant to be.
+  reports phantom overlaps here. For the map as committed it reports **304
+  vertices over 9 components** (`P_Modul_01/17/18/19/25/29/34/41`, and 8 of
+  `PE_Balloon`'s bridge end, which rests on the road's last metres as in
+  retail): the base plates retail itself buries in the 5-thick floor block
+  (see the openings below). Compare against that count; it is not zero and is
+  not meant to be. (426 before step ARX, 130 of them the balloon's basket
+  buried in the slab - the level end below.)
 - `check_reach()` — how many components have geometry in the band a rolling
   ball sweeps (z = 0 .. 4.5). Returns 32/32.
 - `check_depth_zone()` — the death zone against everything else (below):
   18.97 units of clearance under the lowest component vertex, 150 past the
   footprint on every side, hidden, and still exactly one `PE_Levelende`.
 
-A human playing the arena reached the end and the session recorded a `Finish`
-event at tick 5887, so the level completes.
+### The level end (step ARX, 2026-10-31)
+
+`PE_Balloon Script` finishes the level only when `Ball_Pos_Frame` comes within
+1 of `PE_Balloon_Platform` (its last gate, a `TT Scaleable Proximity` of 1,
+squared, X, Y and Z); the platform's origin is the element's. The ball gets
+there by dropping into the balloon's basket: a 4.6 x 4.6 floor 1.804 below the
+origin, so a ball resting in it is 2.0 - 1.804 = 0.2 from the platform (0.17
+measured on Level 2). Retail stands the balloon on **no floor at all**: in
+Levels 1, 2 and 5 (imported with bbp_ng, `.local-tools/work/ARX/retail_balloon.py`)
+the road ends 22.07 short of the element's origin along its own +x, with no
+floor face nearer, and the element's bridge (surface 0.007 above the road,
+local x 5 .. 27) carries the ball over the gap and onto the deck.
+
+Until step ARX the arena ran its slab on to x = 960 under the whole balloon.
+The basket was buried in it, a ball beamed onto the platform stopped on the
+slab 2.02 above the platform origin, and the level could not be finished,
+vanilla or in a session (FULL step RT3; the "a human reached the end, Finish
+at tick 5887" this README used to cite predates the retail heights). Now the
+last floor block ends at x = 930 - 22.07 = 907.93 (`BALLOON_ROAD_GAP`), the
+balloon is where it was (x 930, y 15, origin on the road, facing -x), and the
+death zone's +x reach follows the footprint (150 past the balloon, to 1092.9).
+Measured: a ball beamed 2.5 above the platform finishes the level in vanilla
+play within 0.2 s (`scripts/retail/arx_vend`), and in a two-copy core session
+(snapshots off) each copy crossed the three checkpoints, dropped into the
+basket and finished; the server recorded both `Finish` events and each copy
+saw both (`scripts/retail/arx_end`). A ball that misses the bridge now falls
+into the death zone, as in retail. A driven ball gets in by itself too: HEAD's
+headless client replaying `core_ref_s12/solo1` (pins skipped) on the new map
+matches its replay on the old one until the ball reaches x = 906.9 (tick
+2236), then rides the sagging bridge (its planks hang down to 4.5 below the
+road) into the basket and stays within 1 of the platform origin from tick
+2298 on (0.32 at its closest, 2304), where on the old map it rolled over the slab and off its end at 960.
+`core_ref_s12/h1_150`, which never comes near the end, replays tick for tick
+the same on both maps; only the journal header's `anchor_surfaces` (the static
+surfaces' hash) differs.
 
 ### Stoppers
 
@@ -277,6 +312,19 @@ Then run the three checks (`ns['check_clipping']()`, `ns['check_reach']()`,
 `ns['check_depth_zone']()`) and compare with the figures above. Export mode 4
 writes every object, hidden ones included, which is what keeps the death zone.
 
+Without a Blender window, `.local-tools/work/ARX/build_export.py` does the same
+in `blender --background` (build, the three checks, the `.blend` and the
+`.nmo`). The map of step ARX was built that way with Blender 5.1.2 and
+bbp_ng 4.4.0 (the extension's `blender_manifest.toml`); use the same pair
+to rebuild it (byte identity of two exports was not checked) - another bbp_ng may order the rail's vertices
+differently and so change the md5 with the builder unchanged. Re-importing both files showed that against the previous
+`.nmo` only `A_Floor_035` (the last road block) and `DepthCubes_01` changed -
+plus `A_Rail_01`, which this bbp_ng writes with the same 106 vertices and 56
+faces as coordinate sets but in a different vertex and face order (the
+unchanged builder gives the same rail order difference, so it is the tool's
+version, not the map). The rail's surface is the same; its polygon order is
+not, so nothing recorded on the previous map replays on this one.
+
 ## Installing it
 
 The retail `Levelinit` script only resolves level numbers 1..13 — a
@@ -327,12 +375,24 @@ right and none of them is obvious.
    at this map's hash and rebuild the server and session client:
 
    ```
-   md5sum "<game>/3D Entities/Level/Level_13.NMO"   # c58a76b97bbb1b66bd824da72c9ec481
+   md5sum "<game>/3D Entities/Level/Level_13.NMO"   # 127961581ba5922fe55e215a97a67a41
    ```
 
-   That is the map as committed (with the death zone and the start plate,
-   2026-10-20). Every rebuild changes the hash, so re-point the entry - and
+   That is the map as committed (step ARX, 2026-10-31: the level end; sha256
+   8164f0b6e9aa3e06...). The one before it (the death zone and the start
+   plate, 2026-10-20) was c58a76b97bbb1b66bd824da72c9ec481 (sha256
+   f484363ae1be8acc...), and every reference capture taken on the arena up to
+   `core_ref_s12` pins that file: `pins.json` pins everything under
+   `3D Entities`, so with the new map installed `e0_replay.py` / `wire_check.sh`
+   refuse those sets (all of them, `l8_cross` included) until they are
+   re-captured. Every rebuild changes the hash, so re-point the entry - and
    rebuild - whenever a new `.nmo` goes into the slot.
+
+   **Until the re-capture (roadmap §4, REF13) the test game dirs keep the
+   previous map.** Ballance-Agent and both two-copy game dirs stay on
+   c58a76b9; `maphack.sh` hashes the Ballance-Agent file and the server's
+   `game_root` reads it, so the server and every copy must switch together -
+   never install this map in only some of them.
 
    **Keep that edit local.** It is a test convenience, not a feature.
 

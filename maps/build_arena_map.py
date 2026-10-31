@@ -132,6 +132,21 @@ RECESS_GAP_X = {
     'P_Modul_29': 6.86,   # plate row, 10 of 14
 }
 
+# The level end stands on no floor at all.  PE_Balloon's basket floor - the
+# 4.6 x 4.6 face the ball comes to rest on - lies 1.804 below the element's
+# origin, and PE_Balloon Script finishes the level only when Ball_Pos_Frame is
+# within 1 (TT Scaleable Proximity, squared, xyz) of PE_Balloon_Platform, whose
+# origin is the element's: a ball resting in the basket is 2.0 - 1.804 = 0.2
+# from it.  In retail the road ends 22.07 short of the origin along the
+# element's own +x (Levels 1, 2 and 5, measured from the imported levels with
+# .local-tools/work/ARX/retail_balloon.py; no floor face within 22 of it), and
+# the element's bridge (its surface 0.007 above the road, local x 5..27) takes
+# the ball over the gap onto the deck.  The arena used to run its slab on to
+# 940 under the whole balloon: the basket was buried in it, a ball stopped on
+# the slab 2.02 above the platform origin, and the level could not finish,
+# with or without a session (FULL step RT3).
+BALLOON_ROAD_GAP = 22.07
+
 # Stoppers (Phys_FloorStopper).  A mechanism with a moving plank needs them:
 # without the stoppers the plank has nothing to come to rest against, which is
 # why the see-saw sat tilted into its own trench instead of lying level.
@@ -461,7 +476,9 @@ def build():
     # --- the road: solid slab, with an opening under each buried base ------
     x_balloon = x_end + BAY_SPAN * 0.75
     road_x0 = x_start - APRON_BACK
-    road_x1 = x_end + BAY_SPAN * 1.5
+    # the road ends where retail's does, BALLOON_ROAD_GAP short of the balloon
+    # (it faces -x, so its bridge reaches back over the road's last metres)
+    road_x1 = x_balloon - BALLOON_ROAD_GAP
     # the start plate carries nothing sunken: everything behind the first bay,
     # which begins right under the spawn, plus a strip south of the lane
     add_floor_block(road_x0, y0 - APRON_SIDE, x_start - road_x0, ARENA_WIDTH + APRON_SIDE)
@@ -474,8 +491,8 @@ def build():
         floor_with_recess(cx - BAY_SPAN / 2, y0, BAY_SPAN, ARENA_WIDTH,
                           None if type_name in RELOCATE
                           else recess_for(type_name, cx, MECH_Y))
-    floor_with_recess(x_end, y0, road_x1 - x_end, ARENA_WIDTH,
-                      recess_for('PE_Balloon', x_balloon, PLAY_Y, -180.0))
+    # nothing under the balloon itself: its basket floor lies 1.8 below the road
+    add_floor_block(x_end, y0, road_x1 - x_end, ARENA_WIDTH)
 
     # --- level start + its resetpoint --------------------------------------
     add_component('PS_FourFlames', 1, (x_start, PLAY_Y, mount_dz('PS_FourFlames')),
@@ -515,10 +532,10 @@ def build():
     add_rail('A_Rail_01', 0.0, RAIL_Y, 160.0)
 
     # --- level end ---------------------------------------------------------
-    # Lifted clear of the road like everything else, so its pillar does not run
-    # through the slab.  The pad floats a little as a result, which does not
-    # stop the level being finished - a human playing it reached the end and
-    # the session recorded a Finish event.
+    # At the retail height (origin on the road surface), facing back down the
+    # lane, with no floor under it: the road stops BALLOON_ROAD_GAP short and
+    # the balloon's own bridge carries the ball onto its deck and into the
+    # basket (see BALLOON_ROAD_GAP).
     add_component('PE_Balloon', sector_count, (x_balloon, PLAY_Y, mount_dz('PE_Balloon')),
                   -180.0, 'PE_Balloon_01')
 

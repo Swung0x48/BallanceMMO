@@ -2720,7 +2720,37 @@ numbers 1-10 are unchanged.
      `PE_Balloon` placed so a resting ball's centre is within 1 m of
      `PE_Balloon_Platform`'s origin (`maps/build_arena_map.py`; re-capture
      nothing that does not reach the airship) - on Level 2 the landing ball's
-     centre is 0.17 m above the platform's origin. **Found (its own item,
+     centre is 0.17 m above the platform's origin. **Fixed at FULL step ARX
+     (2026-10-31), by the floor, not the balloon:** the ball lands in the
+     balloon's basket (a floor 1.804 below the element's origin: 0.2 m from
+     the platform), which the arena's slab buried; retail (Levels 1, 2, 5)
+     ends the road 22.07 short of the origin with no floor under the balloon,
+     and the arena now does the same (`BALLOON_ROAD_GAP`, the last block ends
+     at x 907.93; balloon unchanged; new md5 1279615..., sha256 8164f0b6...;
+     maps/README.md "The level end"). Vanilla finish 0.2 s after the platform
+     beam (`scripts/retail/arx_vend`); one two-copy core session, snapshots
+     off: both copies crossed the chain and finished, the server's Finish
+     events at 624 and 3323, resyncs 0 (`scripts/retail/arx_end`). Not "re-capture
+     nothing that does not reach the airship": every reference set's
+     `pins.json` pins all of `3D Entities`, so with the new map installed
+     every arena set (and `l8_cross`) is refused whatever it reaches;
+     physically, `core_ref_s12/h1_150` replays tick-identical on both maps
+     and `solo1` differs only from tick 2236 (its ball at x 906.9, then into
+     the basket). **Queued (its own item, REF13, before any step that
+     installs this map into a game dir - an arena-end retail run, or the
+     arena for play; the wire check and the pinned replays are not blocked
+     while the game dirs keep the previous map):** re-capture
+     the arena's reference sets on this map - the level-13 arms of
+     `core_ref_s12` (and `l8_cross`, whose pins cover the whole `3D
+     Entities` dir), `core_ref_s12h/h1_150`, `core_ref_wfa/resync_snapoff`;
+     new `pins.json`, `SHA256SUMS`, READMEs, and `wire_check.sh`'s default
+     reference - with the new map installed in Ballance-Agent and both game
+     copies and the server rebuilt from that hash, all together. Until REF13
+     the game dirs keep the previous map (c58a76b9), so every existing set
+     still passes its pins and a slot-13 build (`maphack.sh` hashes the
+     Ballance-Agent file) matches it; install the new map only in all of
+     them at once, for an arena-end run or for REF13 itself.
+     **Found (its own item,
      pre-existing; the legacy display, not physics):** in a core session the
      mod's own sector lags one checkpoint (status 1 / 2 / 3 after the
      crossings to 2 / 3 / 4; vanilla 2 / 3 / 4): the checkpoint hook reads
