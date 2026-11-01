@@ -767,7 +767,9 @@ namespace {
     // the 0.9x lower, the ack when done; rebase_threshold: 33 + what is still
     // to move); the driver moves its origin by what the step returns, before
     // it reads the schedule, as the headless pacer does.  A raise then runs
-    // two frames per slot through SkipRenderForNextTick, a lower waits.
+    // two frames per slot through SkipRenderForNextTick (one skip per raised
+    // tick, so SRT1's every-other-render rule does not reach it), a lower
+    // waits.
     static_assert(bs::fixed_tick_driver::kMaxCatchUpTicks == bs::kPacerRebaseFrames,
                   "the retail rebase threshold is the core's lead_rebase_threshold base");
     class core_pacer_slew final : public bs::pacer_slew {
@@ -3654,7 +3656,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     };
     // FULL step SAXH: a late start's whole ticks - the tick driver's origin
     // moves that many ticks earlier and its pacing catches up (two frames
-    // per slot through SkipRenderForNextTick), as a SessionLead raise does.
+    // per slot through SkipRenderForNextTick; since SRT1 every other one of
+    // those frames is rendered), as a SessionLead raise does.
     p.hooks.catch_up = [this](int ticks) {
         fixed_tick_.slew(ticks);
         logger_->Info("Physics session: catching up %d tick(s) of a late start (the tick driver's slew)", ticks);

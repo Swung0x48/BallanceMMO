@@ -4,6 +4,9 @@ Status: **research only, nothing built** (2026-10-31, base HEAD 4d8d60d4, protoc
 this step are kept as a patch (`.local-tools/work/SRT/srt_diag.patch`, with `srt_diag.hpp`, `srt_retail.hpp`,
 `srt_counters.hpp` and the `patch_*.py` that applied them); the tree was reverted and rebuilt clean. **Blocked on
 the user**: the target's exact terms (section 6, T1-T4) and the approach (section 5).
+**Answered (2026-10-31)** and in progress: Q1 "你决定" (the orchestrator set the target: hard T2' no two consecutive
+renders skipped, T3, T4; T1 reported), Q2 "先a看看" (the cost cuts first, f2 not built: measure, then the user
+decides). Built: SRT1 (f1, the catch-up renders; "As built (step SRT1)" below).
 
 The request (2026-10-30), verbatim: "在全链（所有队列里的任务）最后加一个优化任务，要让这套引擎的运行严格实时", and
 its purpose: "其实目的是让玩家能感知不到回滚导致的卡顿发生。另外，因为这台开发机性能远高于平均水平的玩家，所以即使达成了
@@ -27,7 +30,8 @@ after Process(T) has stepped the world):
 - ahead of the schedule: sleep until the tick's wall-clock slot (the frame's idle time);
 - behind by more than one tick: `SkipRenderForNextTick` - the next Process follows at once, **with no render**, until
   the game is back within one tick. On screen: the last image is held for the whole overrun, then the next image
-  shows the world several ticks further on (a freeze, then a jump);
+  shows the world several ticks further on (a freeze, then a jump). Since SRT1 (f1) a core session never skips two
+  renders in a row: the catch-up shows every other tick (the legacy path is unchanged);
 - behind by more than the catch-up limit (33 ticks + a slew's remainder): the schedule is restarted (a rebase); the
   core session answers a rebase with a resync - a second hitch.
 
@@ -312,3 +316,54 @@ this step's census tools (`srt_diag.patch` re-applied) on the E-core layout of s
   Level_13 change; replays of new `cpu_full` captures take `--pins maps/arena-test/core_ref_s13/pins.json`.
 - Not done: a P-core retail session (the P/E ratio is from the headless pairs); the blob's per-section profile and
   its trigger (SRT2's first task); human-rate key streams on the E-cores (SRT5's pass).
+
+## As built (step SRT1, f1: the catch-up renders)
+
+- **Code** (`BallanceMMOClient/session/fixed_tick.cpp` `on_process`, retail host only): in the "behind by more than
+  one tick" branch a frame skips its render only if the previous counted frame did not; a frame after a skipped one
+  renders without waiting (it does not sleep: it is still behind). The flag is a file-scope static
+  (`previous_render_skipped`), not a member: `fixed_tick_` is a data member of `BallanceMMOClient`, whose layout BML
+  fixes; there is one driver. It applies only with a `pacer` (`core_host_pacer()`, non-null while a core session
+  runs): without one - the legacy path, and a core session before its running phase - every behind frame skips as
+  before. The ticks, their order and the rebase rule are unchanged; the SessionLead slew (`lead_slew::advance`)
+  gains a tick only while less than one frame is due, so a raise is a single skip and is not changed beyond a kept
+  render's cost; a SAXH late start (`slew(N)`, the origin moved N ticks at once) does catch up with every other
+  frame rendered. No shared, headless or server file changed (no wire, GCC or headless check is reached).
+- **Measured** (the `srt_ctl` recipe = `work/SRT/srt_retail.py arm`, RT1's ctl, L11, 0 ms, two copies on E-cores
+  16-21 / 22-27, snapshots off, the deployed defaults; `srt_diag.patch` re-applied for the run and reverted; run
+  `scripts/retail/srt1_ctl`; `work/SRT1/skip_runs.py`, `work/SRT/rcensus.py`):
+
+  | | longest run of skipped renders | longest render-to-render gap | key-to-present p99 / max | frames over 15.15 (tick+render) | renders kept after a skip |
+  |---|---|---|---|---|---|
+  | before `srt_ctl` c1 / c2 | 167 / 125 frames | 2459 / 2366 ms | 2166 / 2094, max 2556 / 2485 ms | 72 / 35 | - |
+  | before `srt_ctl2` c1 / c2 | 837 / 145 frames | 12637 / 2113 ms | 12334 / 1806, max 12725 / 2197 ms | 59 / 88 | - |
+  | after `srt1_ctl` c1 / c2 | **1 / 1** (173 / 268 skips, every one single) | 277 / 219 ms (one long rewind or resync frame, not skips) | **120 / 128, max 419 / 360 ms** | 163 / 52 | 173 / 268 |
+
+  T2' (no two consecutive renders skipped) holds on both clients. The remaining long gaps are single frames (a
+  rewind, client 1's resync re-step of 51 ticks), the work SRT2-SRT4 cut. The share of presses over two ticks is
+  11.4-13.0 % (before: `srt_ctl` 11.1-11.7 %, `srt_ctl2` 14.6 / 35.0 %): f1 shows the catch-up but does not shorten
+  it, so T3 is not met (SRTJ's judgement after the cost cuts). Frames over 15.15 ms (tick + render, T1, reported) rise where the game is behind
+  (client 1: 163, 140 of them "core" frames of the blob window): a kept render adds its ~0.6 ms to a frame that was
+  already at the budget - the cost the option table named.
+- **FINAL rows against the server** (`work/RTR/judge_run.sh`, `rt1_judge.py`, `final_fields.py`): RTR's `rtr_ctl`
+  signature exactly - mechanisms 23/23 bit-equal on both clients, mirrors worst position 0 m (rotation-only rows
+  <= 2.98e-8), trafo pieces worst position 0 m (rotation-only rows <= 2.97e-8, RT1's x87 read), the own balls'
+  one row at the trafo beams 300 / 340 (0.001946 m); the server journal replays 2568/2568, 0 checkpoint mismatches.
+- **Resync (T4, not met, pre-existing).** Client 1 resynced at 752 ("own unphysicalize stamped tick 752 echoed
+  moved by the server (applied 766)"): section 3.4's E-core slip (the savestate blob 133 085 bytes at the resync,
+  the window of section 3.3). Client 1 was about 22-26 ticks behind its schedule at 700-751 (wall ticks less
+  counted ticks, against its 200-500 baseline); f1's kept renders in 560-752 (96 renders, 81.7 ms = 5.4 ticks) are
+  a fifth of that, and an own pair moved by even two ticks resyncs (`srt_ctl2`: 750 -> 752). The same signature
+  and cause as the old policy's E-core runs (client 1 resynced in 3 of 4: RTR twice, `srt_ctl2`; not in
+  `srt_ctl`, whose client 2 rebased), f1's share bounded at 5.4 of the 22-26 ticks. Its cause is SRT2's (a3).
+- **The render span confirms the skips** (the census's r0 / r1): every frame the driver did not skip rendered and
+  every skipped one did not, but the last row of each client (the session ended before its render), so
+  `SkipRenderForNextTick` skips the render of the frame that calls it, as assumed.
+- **Not covered by this run:** the orchestrator's target layout (150 ms, four members, L12 / the arena) - the
+  pass rule names the `srt_ctl` recipe; SRTJ judges the set.
+- **Assumed: a cheap, unsynchronised present.** The ~0.6 ms a kept render costs was measured on the test copies,
+  which run `UnlockFrameRate 1` / `SetMaxFrameRate 1200` (BML.cfg). With a present that blocks on vblank (VSync
+  forced by the driver) a kept render can cost up to 16.7 ms; a catch-up whose ticks cost more than ~8.3 ms each
+  would then run two ticks per 33.3 ms, below the 66 Hz schedule, and end in a rebase where the old all-skip policy
+  converged. Not measured here; SRTJ measures it on a present-blocking setup (a host-side refinement, still
+  presentation only, would keep the render only when the previous render span was short).

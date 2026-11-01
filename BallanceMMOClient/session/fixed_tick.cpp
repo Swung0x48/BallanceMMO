@@ -7,9 +7,17 @@
 namespace bmmo::session {
     namespace {
         constexpr double kTickSeconds = 1.0 / kTickRate;
+
+        // FULL step SRT1 (realtime-design section 5 item 1, f1): whether the
+        // previous counted frame skipped its render.  File-scope, not a
+        // member: the driver is a data member of BallanceMMOClient, whose
+        // layout BML fixes (no member may be added to it, nor grow inside
+        // it); there is one driver.
+        bool previous_render_skipped = false;
     }
 
     void fixed_tick_driver::enable(IBML* bml) {
+        previous_render_skipped = false;
         auto* time = bml->GetTimeManager();
         time->SetTimeScaleFactor(1.0f);
         time->SetMinimumDeltaTime(kFixedDeltaMs);
@@ -83,6 +91,8 @@ namespace bmmo::session {
         }
         const double elapsed = std::chrono::duration<double>(now - origin_).count();
         const double expected = elapsed * kTickRate;
+        const bool skipped_before = previous_render_skipped;
+        previous_render_skipped = false;
         if (static_cast<double>(ticks_) + max_catch_up < expected) {
             // Far behind (level load, debugger): fast-forwarding would render
             // nothing for seconds, so restart the schedule from here.
@@ -91,9 +101,23 @@ namespace bmmo::session {
             ++rebases_;
         } else if (static_cast<double>(ticks_) + 1.0 < expected) {
             // Behind by more than one tick: skip the next render so the loop
-            // reaches Process again as soon as possible.
-            bml->SkipRenderForNextTick();
-            ++skipped_renders_;
+            // reaches Process again as soon as possible.  In a core session
+            // (FULL step SRT1, f1) never two in a row: a frame after a
+            // skipped one renders, without waiting, so a long catch-up shows
+            // every other tick instead of holding one image for its whole
+            // length (srt_ctl: 167 frames, 2.5 s).  Presentation only: the
+            // ticks and their order are unchanged; each kept render (~0.6 ms
+            // on the E-cores) slows the catch-up by that.  A raise of the
+            // SessionLead slew gains only while less than a frame is due, so
+            // it is not affected beyond that.  Without a pacer (the legacy
+            // path) every such frame skips, as before.
+            if (pacer && skipped_before) {
+                // render this frame; the next one may skip again
+            } else {
+                bml->SkipRenderForNextTick();
+                ++skipped_renders_;
+                previous_render_skipped = true;
+            }
         } else if (static_cast<double>(ticks_) > expected) {
             // Ahead: wait until this tick's wall-clock slot begins.
             const double due = static_cast<double>(ticks_) * kTickSeconds;

@@ -7,8 +7,9 @@
 // CKContext::Process advance the scripts and physics by exactly one tick
 // regardless of the wall clock.  Pacing keeps the tick count aligned with
 // real time: when the game falls behind, rendering is skipped so the Player
-// loop calls Process again immediately; when it is ahead, the game thread
-// waits for the next tick boundary.
+// loop calls Process again immediately (in a core session never two renders
+// in a row, FULL step SRT1: a catch-up shows every other tick); when it is
+// ahead, the game thread waits for the next tick boundary.
 
 #include <chrono>
 #include <cstdint>
@@ -48,7 +49,8 @@ namespace bmmo::session {
         // that this behaviour frame represents (0 for the first frame after
         // enable).  Applies the delta clamp and the wall-clock pacing; with a
         // `pacer` (a core session, step R5) its step moves the origin first
-        // and its threshold replaces kMaxCatchUpTicks.
+        // and its threshold replaces kMaxCatchUpTicks, and a catch-up never
+        // skips two renders in a row (FULL step SRT1).
         uint64_t on_process(IBML* bml, pacer_slew* pacer = nullptr);
 
         // Moves the schedule's origin by `ticks` (positive: earlier, the
