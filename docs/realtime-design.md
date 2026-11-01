@@ -1011,6 +1011,59 @@ the setting. **Open, not root-caused; queued in roadmap.md section 4 item 5 (FUL
 code, so it cannot be its cause; whether an earlier build does the same is not shown (no earlier run had two balls
 born overlapping).
 
+**As built (step OVX, 2026-11-01): root-caused, the fix blocked on the user.** Base a4c12289 (R6H). Probe added
+(kept, diagnostics only, inert without the variable): `BMMO_SPAWN_GHOST_TRACE=<file>` (`physics_state.cpp`,
+`spawn_ghost_trace*`) appends the spawn-ghost listener's per-PSI decisions (every player ball's group, movement
+state, overlap element and pairs with other player balls; "rechecked" / "not close" with the pair count before and
+after) and the own group's adoption (`adopt_group_now`, before / after), each line stamped with the IVP clock.
+- *Reproductions.* Retail: `.local-tools/work/OVX/ovx_retail.py` = `srtj_retail.py ctl_h` with the trace and the
+  hull probe, Arch server of a4c12289 + the trace. `scripts/retail/ovx_r1` reproduces SRTJ's numbers exactly (the
+  recipe is deterministic up to the server's world: the server rows at 506-508 of ovx_r1 and ovx_r2 are equal):
+  client 2's own ball 0.03459 m off the server at 508, its mirror 0.01605 m, 46 own rows differing (rt1_judge: own
+  0/1, mirror 0/1). Headless (`maps/arena-test/cpu_full/ovx_repro1`: L11, 2 clients, `--beam 60.951 9.095 -12.578`
+  at 300 / 340, latency 150, trafo inputs + placement on): the same two-balls-out-of-one-trafo overlap (the server
+  pushes the newborn at 508: v 1.146 m/s up), and the owner's rows equal the server's from the birth - headless
+  does NOT show it (`.local-tools/work/OVX/probe_arm.sh`: offline replays of the captures and of the server
+  journal with both probes).
+- *Neither of SRTJ's two candidates.* The live retail birth does exactly what the server's clone does: the trace of
+  client 2 at the birth PSI (IVP clock 0x1.d00000e8p+3) has the group adopted in the PreSimulate pass (pairs 0 ->
+  0, the body not yet simulated), then "resumed", `close_by` true, "rechecked Ball_Stone pairs 0 -> 1" - the
+  server's replay of the same journal logs the same line at the same clock. **The cause is the replays.** All three
+  rewinds that cross the birth (anchors 496, 498, 504) log the newborn's resume and recheck one tick late, at
+  0x1.d0f83ef8p+3 (508's first PSI): on retail an own birth inside a rewind's window keeps the parking path
+  (`session_host_world.hpp` `keeps_parked` ~601: `own_birth_destroyable` is false because
+  `client_core_lifecycle.cpp` `destroyable_own_birth` ~2591 remakes a scripted own birth only with
+  `own_body_control`, which retail does not declare - OWNB's "Adaptation (retail)", rewind-cost-design.md), so the
+  body is held out of collision detection through its birth tick's step (no overlap-tree node: the listener does
+  not see it at 507) and re-posed after the step at its live record of 507 (`rollback.hpp` ~2263-2285, ~2009).
+  Its group is then "not present" at 507's PSIs, comes back at 508's first PSI, is resumed and rechecked there:
+  the contact the server had in 507 acts at 508 in every replay, and the FINAL rows keep it. The live rows hide
+  it because the live mirror is a prediction far from the contact.
+- *The fix measured (option A, a prototype, `.local-tools/work/OVX/ovx_optionA.patch`, not in the tree).*
+  `destroyable_own_birth` also takes the scripted path on a host with `own_body_in_replay` (retail since EL8; the
+  BEAMF precedent, `beam_remakes_body`): the restore takes the scripted own birth out and the replay's drain makes
+  it again at its birth tick (`remake_own_body`, the server's clone's way), as OWNB does headless. Retail
+  `scripts/retail/ovx_r2` (same recipe): the replays' recheck at 0x1.d00000e8p+3 (507), and rt1_judge FINAL rows:
+  client 2 own 1/1 bit-equal (1876/1876 rows), mirror 0 m (the four known rotation-only rows <= 2.1e-8 at
+  1068-1074), mechanisms 23/23, pieces 0 m (the known 21/49 signature); client 1 the same. Unit tests 736/736
+  with the patch's test case (`ScriptedOwnBirthInsideTheWindowIsRemade` for the retail capabilities); the wire
+  check rR6H -> the patch's x64 build over core_ref_s14: ALL SAME (headless declares own body control: unchanged).
+- *Why it is the user's choice (not applied).* The design deferred this remake to R6 ("the R6 step removes the
+  parking of an own birth inside a window when it declares own body control", OWNB), EL8's capability itself
+  leaves it out ("Own births in the window whose life is alive now and whose name was not revived stay on the
+  parking path", `reconcile_own_lives`' comment, client_core_lifecycle.cpp ~1738), and option A has a
+  player-visible trade-off: a bridge-made own ball loses Sound_Manager's six collision / contact listeners
+  (BEAMF-S, the user's (b): re-arm them, designed in R6D item 1, not built). Today that silence follows only
+  automation beams; with option A it follows every own birth a rewind crosses - in ovx_r2 5 of the 8 scripted own
+  births (both level-start spawns, the trafo at 507, 1367, 2299) - and lasts until Sound_Manager switches its blocks
+  Off and On for the next game-made ball, so with a remote player present the own ball would be silent for most of
+  a session from its first spawn (the documented mechanism above; not measured here). The patch widens only the
+  scripted path: a moved own birth keeps R6H's rule (forced only), so R6H-SUP's options stay open. Options: (A) the patch now, with BEAMF-S's
+  silence widened to those births until R6D's re-arm lands; (A') the patch together with R6D item 1's re-arm
+  (pulls that item forward into this step); (B) keep the parked body but put it into collision detection at its
+  Physicalize pose before its birth tick's step (no silence, but its live hull bookkeeping stays - OWNB's cause 2
+  - so not shown bit-exact); (C) leave it to R6B / R6P's own body control (the residual stays until then).
+
 ### For the user (blocked_on_user)
 
 - **Is the target met?** T2' and T4: yes, everywhere (L11 / L12 retail at 150 ms, scripted and human-rate keys;

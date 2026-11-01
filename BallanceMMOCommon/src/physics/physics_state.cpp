@@ -4212,6 +4212,50 @@ namespace bmmo::physics {
                     if (table->GetElementValue(row, 0, &matrix)) add(matrix);
         }
 
+        // Step OVX's trace (BMMO_SPAWN_GHOST_TRACE=<file>, lines appended):
+        // the listener's decisions per PSI and the own group's adoption, with
+        // each player ball's overlap element and its pairs with other player
+        // balls.  Diagnostics only, inert without the variable.
+        const char* spawn_ghost_trace_file() {
+            static const char* file = std::getenv("BMMO_SPAWN_GHOST_TRACE");
+            return file && *file ? file : nullptr;
+        }
+        int spawn_ghost_trace_pairs(IVP_Real_Object* object) {
+            IVP_OV_Element* e = object ? object->get_ov_element() : nullptr;
+            if (!e) return -1;
+            int n = 0;
+            for (int k = 0; k < e->collision_fvector.len(); ++k) {
+                IVP_Collision* c = e->collision_fvector.element_at(k);
+                if (!c) continue;
+                IVP_Real_Object* objects[2] = {nullptr, nullptr};
+                c->get_objects(objects);
+                IVP_Real_Object* other = objects[0] == object ? objects[1] : objects[0];
+                if (other && other != object && airship_is_player(other)) ++n;
+            }
+            return n;
+        }
+        std::string spawn_ghost_trace_body(IVP_Real_Object* object) {
+            char text[400];
+            const IVP_OV_Element* e = object ? object->get_ov_element() : nullptr;
+            IVP_Core* core = object ? object->get_core() : nullptr;
+            const IVP_U_Point* p = core ? core->get_position_PSI() : nullptr;
+            std::snprintf(text, sizeof(text), "%s[%s] ms=%d pairs=%d pos=%a,%a,%a ov=%a,%a,%a r=%a",
+                          object && object->get_name() ? object->get_name() : "?", player_ball_group(object).c_str(),
+                          core ? static_cast<int>(core->movement_state) : -1, spawn_ghost_trace_pairs(object),
+                          p ? p->k[0] : 0.0, p ? p->k[1] : 0.0, p ? p->k[2] : 0.0,
+                          e ? static_cast<double>(e->center.k[0]) : 0.0, e ? static_cast<double>(e->center.k[1]) : 0.0,
+                          e ? static_cast<double>(e->center.k[2]) : 0.0, e ? static_cast<double>(e->radius) : -1.0);
+            return text;
+        }
+        void spawn_ghost_trace(IVP_Environment* environment, const std::string& line) {
+            const char* file = spawn_ghost_trace_file();
+            if (!file) return;
+            if (FILE* f = std::fopen(file, "ab")) {
+                std::fprintf(f, "t=%a %s\n", environment ? environment->get_current_time().get_seconds() : -1.0, line.c_str());
+                std::fclose(f);
+            }
+        }
+
         // The pair rule: two player balls collide only when neither is a
         // ghost.  Every other pair: IVP_TRUE (the meta filter ANDs).
         class spawn_ghost_filter : public IVP_Collision_Filter {
@@ -4243,6 +4287,7 @@ namespace bmmo::physics {
         public:
             CKIpionManager* physics = nullptr;
             IVP_Environment* environment = nullptr;
+            int trace_after = 0;   // step OVX's trace only: PSIs still traced after a recheck (this world's)
             void event_PSI(IVP_Event_PSI*) override {
                 spawn_ghost_state_t* state = find_spawn_ghost_state(physics);
                 if (!state || !state->enabled || !physics) return;
@@ -4328,6 +4373,13 @@ namespace bmmo::physics {
                     const char* ny = y->get_name();
                     return std::strcmp(nx ? nx : "", ny ? ny : "") < 0;
                 });
+                const bool tracing = spawn_ghost_trace_file() != nullptr;
+                if (tracing && (!recheck.empty() || trace_after > 0)) {
+                    std::string line = "psi recheck=" + std::to_string(recheck.size());
+                    for (const auto& [group, object]: balls) line += " | " + spawn_ghost_trace_body(object);
+                    spawn_ghost_trace(environment, line);
+                    trace_after = recheck.empty() ? trace_after - 1 : 6;
+                }
                 for (IVP_Real_Object* object: recheck) {
                     const IVP_OV_Element* e = object->get_ov_element();
                     if (!e) continue;
@@ -4344,9 +4396,18 @@ namespace bmmo::physics {
                             break;
                         }
                     }
-                    if (!close_by) continue;
-                    object->recheck_collision_filter();
-                    ++state->rechecks;
+                    // One path, traced or not (the trace only reads).
+                    const int before = tracing ? spawn_ghost_trace_pairs(object) : 0;
+                    if (close_by) {
+                        object->recheck_collision_filter();
+                        ++state->rechecks;
+                    }
+                    if (tracing) {
+                        const char* name = object->get_name();
+                        spawn_ghost_trace(environment, std::string("psi ") + (close_by ? "rechecked " : "not close ") +
+                                          (name ? name : "?") + " pairs " + std::to_string(before) + " -> " +
+                                          std::to_string(spawn_ghost_trace_pairs(object)));
+                    }
                 }
             }
             void environment_will_be_deleted(IVP_Environment*) override {
@@ -4476,6 +4537,8 @@ namespace bmmo::physics {
             const std::string wanted = group ? bounded(group, IVP_NO_COLL_GROUP_STRING_LEN * 4) : std::string();
             if (wanted.size() >= IVP_NO_COLL_GROUP_STRING_LEN) return false;
             out.player_pairs_before = count_player_pairs(object);
+            if (spawn_ghost_trace_file())
+                spawn_ghost_trace(object->get_environment(), "adopt before " + spawn_ghost_trace_body(object));
             object->change_nocoll_group_ident(wanted.empty() ? nullptr : wanted.c_str());
             // The pairs the insertion made under the old group are re-asked
             // only when the group changed and the body has an overlap-tree
@@ -4487,6 +4550,8 @@ namespace bmmo::physics {
             }
             const spawn_ghost_state_t* state = find_spawn_ghost_state(physics);
             out.ghost = state && state->enabled ? (spawn_ghost_is_ghost(*state, object) ? 1 : 0) : 0;
+            if (spawn_ghost_trace_file())
+                spawn_ghost_trace(object->get_environment(), "adopt after " + spawn_ghost_trace_body(object));
             return true;
         }
 

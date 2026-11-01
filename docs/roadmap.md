@@ -1336,6 +1336,21 @@ numbers 1-10 are unchanged.
    replay of the server journal with the same probe), and a headless arm
    with two balls born overlapping out of one trafo for a deterministic
    reproduction (`realtime-design.md` "Judged (step SRTJ)").
+   **Root-caused at FULL step OVX (2026-11-01); the fix is the user's
+   choice.** Neither candidate: the live birth equals the server's clone
+   (trace `BMMO_SPAWN_GHOST_TRACE`: resumed + rechecked at 507's first
+   PSI on both). Every rewind that crosses the birth keeps the retail own
+   birth on the parking path (`destroyable_own_birth` remakes a scripted
+   own birth only with own body control), so the replays hold it out of
+   collision detection through 507's step and it is rechecked at 508.
+   Option A (`destroyable_own_birth` also for `own_body_in_replay`,
+   `.local-tools/work/OVX/ovx_optionA.patch`) measured: client 2's own
+   ball FINAL rows bit-equal (`scripts/retail/ovx_r2`), but every own
+   birth a rewind crosses becomes a bridge-made body and loses
+   Sound_Manager's listeners (BEAMF-S) until R6D's re-arm exists. Options
+   A / A' (with R6D item 1's re-arm) / B (insert the parked body at its
+   birth tick, not shown exact) / C (leave to R6B / R6P):
+   `realtime-design.md` "As built (step OVX)".
    **Queued (FULL step R6H, root-caused; the fix is the user's choice): a
    superseded own Physicalize whose body this client made.** A beam's
    Physicalize that reaches the server behind the same player's newer
