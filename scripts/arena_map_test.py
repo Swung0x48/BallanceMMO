@@ -837,6 +837,7 @@ def run_case(args, sector, case_dir):
                    '--server', f'{connect_host}:{connect_port}',
                    '--name', f'Arena{i}',
                    '--level', str(args.level),
+                   *(['--map', args.map] if args.map else []),
                    '--seconds', str(seconds),
                    '--trace',
                    '--journal', str(case_dir / f'client{i}.bmjr'),
@@ -2248,6 +2249,7 @@ def replay(args, journal, out_dir):
     """The gold-standard check: the server's journal must replay bit for bit."""
     exe = pathlib.Path(args.bin).resolve() / f'BallanceMMOSimTool{EXE}'
     proc = subprocess.run([str(exe), '--root', args.root, '--replay-session', journal,
+                           *(['--map', args.map] if getattr(args, 'map', '') else []),
                            '--report-every', '5000'],
                           capture_output=True, text=True, cwd=out_dir, timeout=1800)
     summary = [l for l in (proc.stdout + proc.stderr).splitlines() if l.startswith('summary:')]
@@ -2800,6 +2802,12 @@ def main():
     ap.add_argument('--bin', default=str(REPO / 'build-agent/BallanceMMOServer'))
     ap.add_argument('--root', default='', help='Ballance data directory (required for a run)')
     ap.add_argument('--level', type=int, default=13)
+    ap.add_argument('--map', default='auto',
+                    help='step CMAP: the custom map loaded into --level\'s slot, as BML+ loads one (the clients announce it '
+                         'by md5, the server runs it from its custom_maps directory, the journal replays take it). '
+                         '"auto" (default): the arena, <root>/ModLoader/Maps/BMMO_Mechanism_Arena.nmo, for level 13 '
+                         '(this harness\'s map; the slot itself holds the original Level 13 since CMAP), none otherwise; '
+                         '"none": the slot\'s own file')
     ap.add_argument('--sectors', default='1,2,3,4')
     ap.add_argument('--players', type=int, default=4)
     ap.add_argument('--seconds', type=int, default=60)
@@ -2922,6 +2930,14 @@ def main():
         return selftest()
     if not args.root and not args.report_only:
         ap.error('--root is required')
+    # Step CMAP: the arena is a BML+ custom map now, no longer installed as Level_13.NMO.
+    if args.map == 'auto':
+        arena = pathlib.Path(args.root) / 'ModLoader' / 'Maps' / 'BMMO_Mechanism_Arena.nmo' if args.root else None
+        args.map = str(arena) if args.level == 13 and arena is not None and arena.is_file() else ''
+    elif args.map == 'none':
+        args.map = ''
+    if args.map:
+        print('custom map: %s in slot %d' % (args.map, args.level))
     args.links = dict(parse_link(s) for s in args.link)
     args.drop_downs = dict(parse_drop_down(s) for s in args.drop_down)
     args.expect_refused = parse_expect_refused(args.expect_refused)

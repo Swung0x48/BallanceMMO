@@ -478,6 +478,10 @@ private:
 	std::string automation_load_level(int level);
 	bmmo::game::level_request level_request_;
 	void process_level_request();
+	// Step CMAP: a level request through the menus that loads `custom_map` (a file path, empty = the slot's own
+	// file) into `level`'s slot on BML+'s custom-map patch (game/custom_map.hpp); its state is file-scope
+	// statics of client_automation.cpp.  The automation's 'map' verb and the session reload use it.
+	std::string begin_level_request(int level, const std::string& custom_map = {});
 
 	// Deterministic session clock and physics state view (design 3.1, M1).
 	bmmo::session::fixed_tick_driver fixed_tick_;

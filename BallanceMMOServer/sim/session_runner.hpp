@@ -288,13 +288,15 @@ namespace bmmo::sim {
         // either the same length or empty.
         // `sector_lead` is the session's (SessionStart's): the lead the
         // trafo deadline is queued within (trafo-replication design 2.2).
+        // `map_file` (step CMAP): the custom map the world loads into `level`'s slot, empty for the slot's own file.
         // `world_options` the session's session::WORLD_* bits (SessionStart
         // carries the same), fixed for the session's life: the world is
         // built with them and the journal's header records them.
         void create_session(uint32_t session, int level, const std::vector<std::pair<uint32_t, uint8_t>>& players,
                             uint32_t input_delay, uint32_t start_base, float spawn_impulse,
                             const std::string& note = {}, std::vector<std::string> names = {},
-                            uint32_t sector_lead = 0, uint32_t world_options = 0, uint8_t mechanism_slots = 0);
+                            uint32_t sector_lead = 0, uint32_t world_options = 0, uint8_t mechanism_slots = 0,
+                            std::filesystem::path map_file = {});
         // `reason` goes into the journal as `end: <reason>` before it closes.
         void destroy_session(uint32_t session, const std::string& reason = {});
         // `name` is the player's display name for the journal's PLAYER record.

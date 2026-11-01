@@ -41,5 +41,10 @@ namespace bmmo::session {
         // scripts' level reference captured (read-only), for the sets a
         // session with the trafo as an input builds; the line to log.
         std::string trafo_scripts_loaded(CKContext* context);
+        // Step CMAP: the custom map the current level was loaded from (OnLoadObject: a "...\Maps\<name>.nmo"
+        // file, BML+'s custom-map loading or the automation's 'map' verb); empty for a slot's own file.  The
+        // reload of a level that ran a union loads it again (core_host.cpp).
+        void set_loaded_custom_map(const std::string& file);
+        const std::string& loaded_custom_map();
     }
 }

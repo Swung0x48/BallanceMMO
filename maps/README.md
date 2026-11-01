@@ -327,28 +327,61 @@ not, so nothing recorded on the previous map replays on this one.
 
 ## Installing it
 
-The retail `Levelinit` script only resolves level numbers 1..13 — a
-`Level_14.NMO` is simply never loaded — and the server refuses a physics room
-whose map is not a hash-verified original level (`server.cpp`, `is_original_level()`).
-So a custom map has to occupy one of the 13 slots:
+Since FULL step CMAP (2026-11-01; the user: "BML+ already loads custom maps - why replace a file? Restore the files
+and load the map with the custom-map loader") the arena is a **BML+ custom map**: it is never installed as a level
+slot's file, and every game directory keeps its original `Level_13.NMO` (md5 `9b5be1ca6a92ce56683fa208dd3453b4`,
+the canonical hash). Put the map where BML+ lists custom maps:
 
 ```bash
-cd "<game>/3D Entities/Level"
-cp Level_13.NMO Level_13.NMO.orig
-cp /d/repos/BallanceMMO/maps/BMMO_Mechanism_Arena.nmo Level_13.NMO
+mkdir -p "<game>/ModLoader/Maps"
+cp /d/repos/BallanceMMO/maps/BMMO_Mechanism_Arena.nmo "<game>/ModLoader/Maps/"
 ```
 
-Restore with `mv Level_13.NMO.orig Level_13.NMO`.
+and load it from BML+'s main-menu **Custom Maps** button. BML+ 0.3.12 patches the retail loader
+(`Levelinit_build / Load LevelXX`: a `Custom Level` switch straight to `Object Load` with the map's file) and loads
+the map *into a level slot*: `ModLoader/Configs/BML.cfg`, `CustomMap / LevelNumber`, picks it (0 = a random slot
+2..11 on each load). The slot still decides the start ball, the music, the sky and every slot-keyed rule - in slot
+13 the ball spawns as `Ball_Stone`, which is what every arena measurement assumes - so set `I LevelNumber 13` (the
+test game dirs have it since CMAP). Nothing else is needed: a custom map is geometry plus Virtools groups only; the
+engine instantiates each mechanism's script from the matching prefab under `3D Entities/PH/`.
 
-Nothing else is needed: a custom map is geometry plus Virtools groups only. The
-engine instantiates each mechanism's script from the matching prefab under
-`3D Entities/PH/`, which is what makes `P_Modul_01_MF Script`,
-`P_Modul_18_MF Script`, `PC_TwoFlames_MF Script` and friends show up in the
-headless engine's active-roots list once the level is in game.
+The mod reports such a map as a custom map (`OnLoadObject`: a file under `...\Maps\`, type `CustomMap`, its md5,
+the slot from `CurrentLevel[0,0]`; ModLoader.log: `Current map: BMMO_Mechanism_Arena; type: 2; md5: 1279615...`).
+Physics sessions run it (step CMAP):
 
-Note that the level slot decides the starting ball: in slot 13 the ball spawns
-as `Ball_Stone`.
+- **The server** accepts a custom map when it holds a file of that md5 in `physics.custom_maps` (default
+  `<game_root>/ModLoader/Maps`; it logs each map it found at start-up) and every room member loaded it into the same
+  slot (otherwise the start is refused with the members' slots named); its world loads that file into the slot.
+- **The headless client** takes `--map FILE` with `--level 13` and announces the map the way the mod does;
+  **SimTool** takes `--map FILE` in every mode that boots a world - a custom-map session's journals replay only
+  with it (`--replay-session` without it is refused at the placement signature, or warns at the anchor hash).
+  Without BML+, the headless engine points `Load LevelXX`'s `3D Entities\Level\` prefix at a copy of the map named
+  as the slot's file (`<temp>/bmmo-custom-maps/<md5>/Level_13.nmo`): no script graph change, no CK object, so the
+  world is the one the slot's own load path builds (checked: SimTool `--level 13` with the arena as `Level_13.NMO`
+  and with `--map` print the same hashes; `core_ref_s13/solo1`'s server journal replays 2891/2891 with `--map` on the
+  original slot, and is refused without it).
+- **The harness** `scripts/arena_map_test.py` takes `--map` (default `auto`: this arena for `--level 13`, from
+  `<root>/ModLoader/Maps`; `--map none` runs the original slot) and passes it to the clients and its journal replay.
+- **The retail automation** has `map <slot> <file>`: BML+'s own patch armed as its `LoadMap` arms it (the file,
+  `Custom Level`, the row, `CurrentLevel[0,0]`; BML+ has no public call), then the menus as for a slot
+  (`.local-tools/work/r3/r3_retail.py` `level_command` sends it for level 13). The session reload of a level that ran
+  a union (SP9) loads the custom map again, not the slot's file.
 
+The slot-13 hack (`.local-tools/maphack.sh`, a local edit of `original_map_hashes[13]`) is retired.
+
+**As built (step CMAP), where it departs from the plan's wording.** (1) Only the retail mod goes through BML+'s own
+patch; the headless engine has no BML+ and redirects the slot's file prefix instead (above) - the alternative,
+installing a copy of BML+'s patch in the headless graph, would create CK objects before the level loads and move
+every level object's id. (2) The automation arms BML+'s patch the way its `LoadMap` does but then starts the level
+through `Menu_Start` (`level_request`, as for a slot) instead of `LoadMap`'s own three sends; it does not publish
+BML+'s `CustomMapName` data-share entry (nothing in BMMO reads it). (3) No protocol or journal change: the journal
+header names only the slot, so a custom-map journal replays with `--map` (a wrong or missing file is caught by the
+placement signature / anchor hash). (4) The server rescans `physics.custom_maps` at every custom-map physics start
+(an original level does not touch the directory), so a map added later needs no restart; the md5s are cached by path,
+size and modification time, so a rescan reads only new or changed files. A `--map` path given to the headless client
+or SimTool may be relative to the caller's directory (it is made absolute before the engine changes into `Bin`); the
+retail reload hands BML+ back the path string it loaded (UTF-8 from BML+ 0.3.4), not the ANSI copy made for the md5. (5) The harness's `--map auto` keeps "level 13 = the arena" for every
+existing recipe; the original Level 13 needs `--map none`.
 
 ## Playing it yourself, alongside the headless clients
 
@@ -366,46 +399,27 @@ right and none of them is obvious.
    `.bmodp` files out of `ModLoader/Mods` and put the mod's four runtime DLLs
    (`GameNetworkingSockets`, `abseil_dll`, `libcrypto-3`, `libprotobuf`) in
    there beside it.
-3. **The server only starts a physics room on a hash-verified original level**
-   (`server.cpp`, `is_original_level()`), and all room members must report the
-   same map. The headless clients fabricate the canonical hash for their
-   `--level`; a real client computes the file's hash honestly, so the two
-   disagree and the room is refused. For a local play session, point slot 13's
-   entry in `original_map_hashes` (`BallanceMMOCommon/include/entity/map.hpp`)
-   at this map's hash and rebuild the server and session client:
+3. **Load the map through BML+'s Custom Maps menu** (above), with `CustomMap / LevelNumber` 13 so the slot matches
+   the headless clients' `--level 13 --map ...`. Until FULL step CMAP the map was installed as `Level_13.NMO` and
+   slot 13's entry of `original_map_hashes` was pointed at its hash in a local server build (the "slot-13 hack",
+   `maphack.sh`); neither is needed now - the server knows the map by md5 from its `ModLoader/Maps`.
 
-   ```
-   md5sum "<game>/3D Entities/Level/Level_13.NMO"   # 127961581ba5922fe55e215a97a67a41
-   ```
-
-   That is the map as committed (step ARX, 2026-10-31: the level end; sha256
-   8164f0b6e9aa3e06...). The one before it (the death zone and the start
-   plate, 2026-10-20) was c58a76b97bbb1b66bd824da72c9ec481 (sha256
-   f484363ae1be8acc...), and every reference capture taken on the arena up to
-   `core_ref_s12` pins that file: `pins.json` pins everything under
-   `3D Entities`, so with the new map installed `e0_replay.py` / `wire_check.sh`
-   refuse those sets (all of them, `l8_cross` included). Every rebuild changes
-   the hash, so re-point the entry - and rebuild - whenever a new `.nmo` goes
-   into the slot.
-
-   **The test game dirs carry this map since FULL step REF13 (2026-10-31).**
-   Ballance-Agent and both two-copy game dirs were switched together, the
-   server and the slot-13 builds rebuilt from its hash, and the reference set
-   re-captured on it (`maps/arena-test/core_ref_s13`, the wire check's
-   default). `maphack.sh` hashes the Ballance-Agent file and the server's
-   `game_root` reads it, so the server and every copy must switch together -
-   never install a map in only some of them. To replay an older set, put the
-   previous map (kept at `.local-tools/work/ARX/Level_13.NMO.pre-ARX`) back in
-   Ballance-Agent.
-
-   **Keep that edit local.** It is a test convenience, not a feature.
+   The map as committed is step ARX's (2026-10-31: the level end), md5 `127961581ba5922fe55e215a97a67a41`, sha256
+   `8164f0b6e9aa3e06...`. The one before it (the death zone and the start plate, 2026-10-20) was
+   c58a76b97bbb1b66bd824da72c9ec481 (sha256 f484363ae1be8acc...). The reference set
+   `maps/arena-test/core_ref_s14` (the wire check's default since CMAP) pins `3D Entities` and `ModLoader/Maps`;
+   `core_ref_s13` and every older arena set pin the arena as `3D Entities/Level/Level_13.NMO` and are REFUSED with
+   the original file in the slot - to replay one, put that set's map back as `Level_13.NMO` in Ballance-Agent
+   (`.local-tools/work/CMAP/backup/Level_13.NMO.arena-127961581`, `.local-tools/work/ARX/Level_13.NMO.pre-ARX`) and
+   restore the original afterwards. Every rebuild of the map changes its md5: re-copy it into every game dir's
+   `ModLoader/Maps` together (the server reads Ballance-Agent's).
 
 Then start a server and some bots (one of them `--host --expect N`, counting
 yourself), and in game:
 
 ```
 /mmo connect 127.0.0.1:26676
-/mmo auto level 13      # drives the menus into the slot, no level unlock needed
+# load BMMO_Mechanism_Arena from the main menu's Custom Maps (BML.cfg CustomMap LevelNumber 13)
 /mmo room list
 /mmo room join <id>
 /mmo room ready         # last - the host starts the moment everyone is ready

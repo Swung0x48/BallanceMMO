@@ -32,6 +32,10 @@ namespace bmmo::sim {
         int width = 1024;
         int height = 768;
         bool verbose = false;
+        // Step CMAP: a custom map (a level file outside the slots, the arena) loaded into the requested slot
+        // instead of the slot's own file - the slot still picks the ball, music and sky (game/custom_map.hpp).
+        // Empty: the slot's file.  Fixed for the engine's life.
+        std::filesystem::path map_file;
         std::function<void(const std::string&)> log;  // optional sink
     };
 
@@ -83,6 +87,9 @@ namespace bmmo::sim {
         bool finish_load(const std::string& resolved_file, std::string& error);
         void drain_player_commands();
         void advance_level_request();
+        // Step CMAP: points Load LevelXX's file prefix at a copy of options_.map_file named as `level`'s slot
+        // file (game/custom_map.hpp); false with `error` when it cannot.
+        bool redirect_level_file(int level, std::string& error);
 
         engine_options options_;
         CKContext* context_ = nullptr;
@@ -92,5 +99,7 @@ namespace bmmo::sim {
         uint64_t ticks_ = 0;
         bool startup_acquired_ = false;
         bmmo::game::level_request level_request_;
+        bool map_redirect_pending_ = false;   // step CMAP: a custom map's request not redirected yet
+        int map_redirect_waited_ = 0;
     };
 }

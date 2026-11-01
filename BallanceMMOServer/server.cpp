@@ -38,6 +38,7 @@
 #include <session/mechanism_units.hpp>
 #include <session/spawn_impulse.hpp>
 #include <session/start_handshake.hpp>
+#include <session/custom_maps.hpp>   // step CMAP: custom maps by md5
 #include <cmath>
 #endif
 
@@ -900,6 +901,17 @@ public:
             std::lock_guard lk(state_mutex_);
             end_physics_session(session, "simulation failed: " + reason);
         };
+        // Step CMAP: the custom maps a session may run, resolved before the first world chdir's into Bin.
+        custom_maps_dir_ = config_.physics_custom_maps.empty()
+            ? root / "ModLoader" / "Maps"
+            : std::filesystem::path(config_manager::resolve_path(config_.physics_custom_maps.c_str()));
+        {
+            std::error_code abs_ec;
+            auto absolute_dir = std::filesystem::absolute(custom_maps_dir_, abs_ec);
+            if (!abs_ec) custom_maps_dir_ = std::move(absolute_dir);
+        }
+        for (const auto& f: bmmo::session::scan_custom_maps(custom_maps_dir_, &custom_map_md5s_))
+            Printf("Physics sessions: custom map %s (md5 %s).", f.path.string(), bmmo::md5::to_hex(f.md5));
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
                "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s).",
@@ -997,7 +1009,9 @@ public:
         return out;
     }
 
-    uint32_t start_physics_session(const bmmo::server_room& r, const bmmo::map& map) {
+    // `map_file` (step CMAP): the custom map the world loads into map.level's slot; empty for an original level.
+    uint32_t start_physics_session(const bmmo::server_room& r, const bmmo::map& map,
+                                   const std::filesystem::path& map_file = {}) {
         physics_session_state s;
         s.id = next_session_id_++;
         s.room = r.id;
@@ -1110,8 +1124,11 @@ public:
         // server and every client take their first step from their anchor under
         // one tick number instead of the server being `start_base` steps ahead
         // of them at every number for the rest of the session.
+        if (!map_file.empty())
+            note += Sprintf("; custom map %s (md5 %s) in slot %d", map_file.filename().string(),
+                            map.get_hash_string(), map.level);
         runner_->create_session(id, map.level, players, input_delay, start_base, spawn_impulse, note, std::move(names),
-                                sector_lead, world_options, mechanism_slots);
+                                sector_lead, world_options, mechanism_slots, map_file);
         return id;
     }
 
@@ -3113,10 +3130,37 @@ public:
 #if BMMO_BUILD_SIM
                     if (!runner_) { send_room_event(c, event_type::RequestDenied, error_code::PhysicsUnavailable, room); break; }
                     const int level = client_it->second.current_map.level;
-                    if (!client_it->second.current_map.is_original_level() || level < 1 || level > 13) {
-                        send_room_event(c, event_type::RequestDenied, error_code::MapMismatch, room, c, 0,
-                                "physics sessions need an original level");
+                    // Step CMAP: an original level, or a custom map the server has (BML+'s custom-map
+                    // loading; the world loads the same file into the same slot).
+                    std::filesystem::path map_file;
+                    std::string map_reason;
+                    // Only a custom map consults the directory (rescanned so a new map needs no restart; the
+                    // cache re-reads only files whose size or time changed).
+                    const auto& requested_map = client_it->second.current_map;
+                    std::vector<bmmo::session::custom_map_file> known_maps;
+                    if (requested_map.type == bmmo::map_type::CustomMap && !requested_map.is_original_level())
+                        known_maps = bmmo::session::scan_custom_maps(custom_maps_dir_, &custom_map_md5s_);
+                    if (!bmmo::session::physics_map_accepted(requested_map, known_maps, map_file, map_reason)) {
+                        send_room_event(c, event_type::RequestDenied, error_code::MapMismatch, room, c, 0, map_reason);
                         break;
+                    }
+                    // The slot is part of a custom map's world (its ball, its level rules): BML+ picks it from
+                    // CustomMap.LevelNumber (0 = random), so every member must have loaded the map into one slot.
+                    if (!map_file.empty()) {
+                        std::string slots;
+                        bool same_slot = true;
+                        for (const auto& m: r->members)
+                            if (auto mi = clients_.find(m.id); mi != clients_.end()) {
+                                if (mi->second.current_map.level != level) same_slot = false;
+                                slots += Sprintf("%s%s %d", slots.empty() ? "" : ", ", mi->second.name,
+                                                 mi->second.current_map.level);
+                            }
+                        if (!same_slot) {
+                            send_room_event(c, event_type::RequestDenied, error_code::MapMismatch, room, c, 0,
+                                    "the members loaded the custom map into different level slots (" + slots
+                                    + "; BML+ CustomMap.LevelNumber)");
+                            break;
+                        }
                     }
                     if (auto mods = check_physics_mods(*r); mods != error_code::None) {
                         send_room_event(c, event_type::RequestDenied, mods, room);
@@ -3135,7 +3179,7 @@ public:
                     }
                     auto err = rooms_.start(c, msg.mode);
                     if (err != error_code::None) { send_room_event(c, event_type::RequestDenied, err, room); break; }
-                    const uint32_t session = start_physics_session(*r, client_it->second.current_map);
+                    const uint32_t session = start_physics_session(*r, client_it->second.current_map, map_file);
                     send_room_event(c, event_type::RequestAccepted, error_code::None, room, c);
                     for (const auto& m: r->members)
                         send_room_event(m.id, event_type::SessionStarting, error_code::None, room, c);
@@ -4472,6 +4516,10 @@ protected:
     // destroyed after it: the runner's posted closes run (the pool joins)
     // once the runner is gone.
     std::unique_ptr<bmmo::session::io_pool> io_pool_;
+    // Step CMAP: physics.custom_maps resolved (default <game_root>/ModLoader/Maps); scanned at each custom-map
+    // start, the md5s cached by path, size and modification time.
+    std::filesystem::path custom_maps_dir_;
+    bmmo::session::custom_map_md5_cache custom_map_md5s_;
     // Declared last so it is destroyed first: its thread calls back into
     // the members above.
     std::unique_ptr<bmmo::sim::session_runner> runner_;

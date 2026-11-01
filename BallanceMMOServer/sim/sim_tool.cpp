@@ -2,7 +2,7 @@
 //
 //   BallanceMMOSimTool --root <game dir> [--level N] [--ticks N] [--level-at N]
 //   BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--dump-diverge]
-//   BallanceMMOSimTool --root <game dir> --replay-session <file.bmjr> [--list] [--write-journal <out.bmjr>]
+//   BallanceMMOSimTool --root <game dir> --replay-session <file.bmjr> [--list] [--write-journal <out.bmjr>] [--map FILE]
 //   BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S] [--spawn-ball T]
 //       [--ticks K] [--report-every R]
 //   BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK [--ticks N]
@@ -111,6 +111,7 @@ void ivp_srand(int seed);
 namespace {
     struct arguments {
         std::string root;
+        std::string map;                  // --map FILE (step CMAP): a custom map in the level slot
         std::string replay;
         // --replay-session <file.bmjr>: the session black box (design 9.15).
         // --list prints the file and simulates nothing (no --root needed);
@@ -892,6 +893,14 @@ namespace {
             const std::string arg = argv[i];
             const auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
             const char* v = nullptr;
+            // Step CMAP: a custom map loaded into the level's slot (every mode that boots a world; a custom-map
+            // session's journals replay only with it - the header's anchor hash tells a wrong file).  Its own
+            // statement: the chain below is at MSVC's nesting limit (C1061).
+            if (arg == "--map") {
+                if (!(v = next())) return false;
+                out.map = std::filesystem::absolute(v).string();   // the engine chdir's into <root>/Bin
+                continue;
+            }
             if (arg == "--root") { if (!(v = next())) return false; out.root = v; }
             else if (arg == "--replay") { if (!(v = next())) return false; out.replay = v; }
             else if (arg == "--replay-session") { if (!(v = next())) return false; out.replay_session = v; }
@@ -2259,6 +2268,7 @@ namespace {
     std::unique_ptr<bmmo::sim::physics_world> create_session_world(const arguments& args, float spawn_impulse) {
         bmmo::sim::world_options options;
         options.game_root = args.root;
+        options.map_file = args.map;   // step CMAP
         options.level = args.level > 0 ? args.level : 1;
         options.seed = 1;
         options.spawn_impulse = spawn_impulse;
@@ -5253,6 +5263,7 @@ namespace {
         }
         bmmo::sim::world_options options;
         options.game_root = args.root;
+        options.map_file = args.map;   // step CMAP
         options.level = level;
         options.seed = 1;
         options.boot_ticks = args.boot_ticks;
@@ -6243,6 +6254,7 @@ namespace {
 
         bmmo::sim::world_options options;
         options.game_root = args.root;
+        options.map_file = args.map;   // step CMAP
         options.level = header.level > 0 ? header.level : (args.level > 0 ? args.level : 1);
         options.seed = header.seed;
         options.spawn_impulse = header.spawn_impulse;
@@ -6308,7 +6320,8 @@ namespace {
         // Wrong game data is the first thing to check when everything diverges
         // from the very first tick, so it is checked before the very first tick.
         if (header.anchor_hash != 0 && header.anchor_hash != world->anchor_hash())
-            std::printf("warning: anchor hash %016llx, journal says %016llx (different game data or engine build)\n",
+            std::printf("warning: anchor hash %016llx, journal says %016llx (different game data or engine build;"
+                        " a custom-map session replays only with --map FILE)\n",
                 static_cast<unsigned long long>(world->anchor_hash()),
                 static_cast<unsigned long long>(header.anchor_hash));
         if (header.anchor_surfaces != 0 && header.anchor_surfaces != world->anchor_surfaces())
@@ -10167,6 +10180,7 @@ int main(int argc, char** argv) {
     if (args.spawn_test > 0) return run_spawn_test(args);
     bmmo::sim::engine_options options;
     options.game_root = args.root;
+    options.map_file = args.map;   // step CMAP
     options.verbose = args.verbose;
     options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
 

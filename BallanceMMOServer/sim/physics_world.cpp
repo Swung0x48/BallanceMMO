@@ -116,6 +116,7 @@ namespace bmmo::sim {
     bool physics_world::boot(std::string& error) {
         engine_options eo;
         eo.game_root = options_.game_root;
+        eo.map_file = options_.map_file;   // step CMAP
         eo.log = options_.log;
         engine_ = headless_engine::create(eo, error);
         if (!engine_) return false;

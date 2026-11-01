@@ -271,6 +271,10 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
             current_map_.name = bmmo::string_utils::ansi_to_utf8(current_map_.name);
         }
         utils::md5_from_file(path, current_map_.md5);
+        // Step CMAP: the session reload hands this back to the loader, so keep the string it loaded (UTF-8 on
+        // BML+ >= 0.3.4), not the ANSI copy made for the md5.
+        bmmo::session::retail::set_loaded_custom_map(
+            current_map_.type == bmmo::map_type::CustomMap ? std::string(filename) : std::string());
         static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_))->GetElementValue(0, 0, &current_map_.level);
         current_level_mode_ = bmmo::level_mode::Speedrun;
         did_not_finish_ = false;

@@ -66,6 +66,7 @@ bool config_manager::load() {
         YAML::Node physics = config_["physics"];
         physics_enabled = yaml_load_value(physics, "enabled", physics_enabled);
         physics_game_root = yaml_load_value(physics, "game_root", physics_game_root);
+        physics_custom_maps = yaml_load_value(physics, "custom_maps", physics_custom_maps);
         physics_snapshot_interval = yaml_load_value(physics, "snapshot_interval", physics_snapshot_interval);
         physics_full_snapshot_interval = yaml_load_value(physics, "full_snapshot_interval", physics_full_snapshot_interval);
         physics_input_delay = yaml_load_value(physics, "input_delay", physics_input_delay);
@@ -274,6 +275,8 @@ void config_manager::save(bool reload_values) {
                    "# - Ban list style: \"uuid: reason\".\n"
                    "# - Mute list style: \"- uuid\".\n"
                    "# - Physics sessions (collision-overhaul): enabled, game_root (directory containing base.cmo),\n"
+                   "#   custom_maps (directory of the custom maps a physics session may run, known by md5 - a\n"
+                   "#     client loads them through BML+'s custom-map menu; empty = <game_root>/ModLoader/Maps),\n"
                    "#   snapshot_interval (ticks), full_snapshot_interval (ticks; both 100000 by default = snapshots\n"
                    "#     off: clients read 255 or more as off and keep only the full snapshot of a body-set change\n"
                    "#     for its names; 2 and 66 turn the correction fallback back on), maximum_physics_rooms,\n"

@@ -54,6 +54,9 @@ public:
     // collision-overhaul physics sessions (docs/rooms-and-sessions-protocol.md section 3)
     bool physics_enabled = false;
     std::string physics_game_root;                 // directory containing base.cmo
+    // Step CMAP: the custom maps a physics session may run (BML+'s custom-map loading): every *.nmo / *.cmo
+    // under this directory, known by md5; empty = <game_root>/ModLoader/Maps, where BML+ lists them.
+    std::string physics_custom_maps;
     // Ticks between snapshots.  Off by default since FULL step DEP (roadmap
     // 4.7 "on pass: snapshots off in the deployed configuration"; goal 2):
     // 100000, the value every snapshots-off check ran with; SessionStart

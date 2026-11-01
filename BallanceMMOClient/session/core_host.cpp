@@ -1959,7 +1959,12 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
         const CKMessageType exit_level = messages->AddMessageType(const_cast<CKSTRING>("Exit Level"));
         messages->SendMessageSingle(exit_level, level_object);
         messages->SendMessageSingle(exit_level, all_balls);
-        level_request_.begin(level);
+        // Step CMAP: a level loaded from a custom map reloads that file into the same slot (BML+'s patch), not
+        // the slot's own file.
+        if (const std::string& custom = bmmo::session::retail::loaded_custom_map(); !custom.empty())
+            logger_->Info("Physics session %u: the reload loads the custom map %s into slot %d", msg.session,
+                          custom.c_str(), level);
+        begin_level_request(level, bmmo::session::retail::loaded_custom_map());
         level_life.reloading = true;
         level_life.level = level;
         level_life.started = clock_type::now();

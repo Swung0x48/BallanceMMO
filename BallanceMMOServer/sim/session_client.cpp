@@ -72,6 +72,7 @@
 #include <session/input_relay.hpp>
 #include <session/lifecycle.hpp>
 #include <session/journal.hpp>
+#include <utility/md5.hpp>
 #include <session/io_pool.hpp>
 #include <session/bridge_recipe.hpp>
 #include <session/lead_slew.hpp>
@@ -111,6 +112,9 @@ namespace {
         std::string server = "127.0.0.1:26676";
         std::string name = "Headless";
         int level = 1;
+        // --map FILE (step CMAP): a custom map (BML+'s custom-map loading) loaded into --level's slot; the client
+        // announces it as a custom map by the file's md5 instead of the slot's canonical hash.
+        std::string map;
         std::string record;
         std::string journal;          // --journal <file.bmjr>: the session black box (design 9.15)
         // How often the box records this client's OWN world, in ticks.  The
@@ -535,7 +539,7 @@ namespace {
     constexpr int kLaneSteerOff = -2;       // keep_lane_key: the steer does not act this frame
 
     void usage() {
-        std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N]\n"
+        std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N] [--map FILE]\n"
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS | --stall-ms TICK:MS]\n"
                   "       [--resync-at TICK | --resync-at s<SECTOR>+<TICKS>] [--record-by-tick]\n"
@@ -606,6 +610,7 @@ namespace {
             else if (arg == "--server") { if (!(v = next())) return false; out.server = v; }
             else if (arg == "--name") { if (!(v = next())) return false; out.name = v; }
             else if (arg == "--level") { if (!(v = next())) return false; out.level = std::atoi(v); }
+            else if (arg == "--map") { if (!(v = next())) return false; out.map = std::filesystem::absolute(v).string(); }   // the engine chdir's into Bin
             else if (arg == "--record") { if (!(v = next())) return false; out.record = v; }
             else if (arg == "--journal") { if (!(v = next())) return false; out.journal = v; }
             else if (arg == "--replay-scripts") out.replay_scripts = true;
@@ -1038,6 +1043,7 @@ namespace {
         bool boot_engine() {
             bmmo::sim::engine_options eo;
             eo.game_root = args_.root;
+            eo.map_file = args_.map;   // step CMAP: a custom map in --level's slot
             eo.log = [](const std::string& text) { logf("[engine] %s", text.c_str()); };
             std::string error;
             release_proximity("the engine reboots");
@@ -2401,6 +2407,13 @@ namespace {
             msg.content.map.type = bmmo::map_type::OriginalLevel;
             msg.content.map.level = args_.level;
             bmmo::hex_chars_from_string(msg.content.map.md5, bmmo::map::original_map_hashes[std::clamp(args_.level, 0, 13)]);
+            // Step CMAP: a custom map is announced as the retail mod announces one BML+ loaded (OnLoadObject: type
+            // CustomMap, the file's md5, the slot it went into); the server runs it if it has a file of that md5.
+            if (!args_.map.empty()) {
+                msg.content.map.type = bmmo::map_type::CustomMap;
+                if (!bmmo::md5::of_file(args_.map, msg.content.map.md5))
+                    logf("--map: cannot read %s; the server will refuse the map", args_.map.c_str());
+            }
             msg.content.sector = 1;
             msg.content.type = bmmo::current_map_state::EnteringMap;
             trace_send(&msg, sizeof(msg), k_nSteamNetworkingSend_Reliable);

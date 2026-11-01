@@ -324,6 +324,7 @@ written on first run):
 physics:
   enabled: true
   game_root: C:/path/to/a/full/Ballance/data/directory   # base.cmo, Textures, Sounds, 3D Entities, ...
+  custom_maps: ''                 # custom maps a room may run, by md5; empty = <game_root>/ModLoader/Maps (step CMAP)
   snapshot_interval: 2
   input_delay: 6
   maximum_physics_rooms: 1        # one physics world costs roughly one core
@@ -358,6 +359,24 @@ physics:
   20; `event_rate_limit: 0` turns it off, which is worth doing on levels
   where a sector reset wakes more than 20 mechanisms at once (each one is a
   `BodyRevived` event and they all land in the same second).
+- **Custom maps** (FULL step CMAP, 2026-11-01). A physics room runs an
+  original level (its slot's canonical md5) or a custom map a player loaded
+  through BML+'s Custom Maps menu, when the server holds a file with that
+  map's md5 in `physics.custom_maps` (a directory, searched 8 levels deep for
+  `*.nmo` / `*.cmo`; default `<game_root>/ModLoader/Maps`, where BML+ lists
+  them on a game copy). The server logs every map it found at start-up
+  (`Physics sessions: custom map <path> (md5 ...)`) and rescans at each
+  custom-map start (md5s cached by path, size and modification time);
+  a map it does not have is refused with "the server does not have this
+  custom map (md5 ...)". BML+ loads a custom map into a level slot
+  (`BML.cfg`, `CustomMap / LevelNumber`; 0 = a random slot 2..11): every
+  member must have the same slot, or the start is refused with each member's
+  slot named. The world loads the file into that slot (the slot keeps its
+  ball, music and rules). No level file is replaced anywhere: the slot-13
+  hack of the test setup (`original_map_hashes[13]` edited, the arena
+  installed as `Level_13.NMO`) is retired. Offline tools: the headless client
+  and SimTool take `--map FILE` (with `--level N`); a custom-map session's
+  journal replays only with it.
 
 ## Session journals (the black box)
 

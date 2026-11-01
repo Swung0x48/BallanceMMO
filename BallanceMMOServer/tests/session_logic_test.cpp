@@ -907,3 +907,77 @@ TEST(LeadSlew, FramesFromEOnAreTheClientsOwnAndTheSlewIsOverByThen) {
     EXPECT_EQ(sent.at(E), 'o');
     EXPECT_EQ(sent.at(E - 1), 'h');
 }
+
+// ---- Step CMAP: custom maps by md5 (session/custom_maps.hpp, utility/md5.hpp) ----
+#include <session/custom_maps.hpp>
+#include <filesystem>
+#include <fstream>
+
+TEST(CustomMaps, Md5MatchesRfc1321Vectors) {
+    uint8_t d[16];
+    bmmo::md5::of_bytes("", 0, d);
+    EXPECT_EQ(bmmo::md5::to_hex(d), "d41d8cd98f00b204e9800998ecf8427e");
+    bmmo::md5::of_bytes("abc", 3, d);
+    EXPECT_EQ(bmmo::md5::to_hex(d), "900150983cd24fb0d6963f7d28e17f72");
+    const std::string long_text = "12345678901234567890123456789012345678901234567890123456789012345678901234567890";
+    bmmo::md5::of_bytes(long_text.data(), long_text.size(), d);
+    EXPECT_EQ(bmmo::md5::to_hex(d), "57edf4a22be3c955ac49da2e2107b67a");
+    // Fed in pieces across the 64-byte block boundary: the same digest.
+    bmmo::md5::hasher h;
+    h.update(long_text.data(), 7);
+    h.update(long_text.data() + 7, 60);
+    h.update(long_text.data() + 67, long_text.size() - 67);
+    h.finish(d);
+    EXPECT_EQ(bmmo::md5::to_hex(d), "57edf4a22be3c955ac49da2e2107b67a");
+}
+
+TEST(CustomMaps, PhysicsAcceptsOriginalLevelsAndKnownCustomMapsOnly) {
+    const auto dir = std::filesystem::temp_directory_path() / "bmmo_cmap_test";
+    std::filesystem::create_directories(dir / "sub");
+    { std::ofstream(dir / "sub" / "Arena.NMO", std::ios::binary) << "abc"; }
+    { std::ofstream(dir / "notes.txt", std::ios::binary) << "abc"; }
+    const auto known = bmmo::session::scan_custom_maps(dir);
+    ASSERT_EQ(known.size(), 1u);
+    EXPECT_EQ(bmmo::md5::to_hex(known[0].md5), "900150983cd24fb0d6963f7d28e17f72");
+
+    std::filesystem::path file;
+    std::string reason;
+    bmmo::map original{.type = bmmo::map_type::OriginalLevel, .level = 13};
+    bmmo::hex_chars_from_string(original.md5, bmmo::map::original_map_hashes[13]);
+    EXPECT_TRUE(bmmo::session::physics_map_accepted(original, known, file, reason));
+    EXPECT_TRUE(file.empty());
+
+    bmmo::map custom{.type = bmmo::map_type::CustomMap, .level = 13};
+    std::memcpy(custom.md5, known[0].md5, sizeof(custom.md5));
+    EXPECT_TRUE(bmmo::session::physics_map_accepted(custom, known, file, reason));
+    EXPECT_EQ(file, known[0].path);
+    custom.level = 0;   // BML+'s slot must be a real one
+    EXPECT_FALSE(bmmo::session::physics_map_accepted(custom, known, file, reason));
+    custom.level = 13;
+    custom.md5[0] ^= 1;   // a custom map the server does not have
+    EXPECT_FALSE(bmmo::session::physics_map_accepted(custom, known, file, reason));
+    EXPECT_NE(reason.find("does not have"), std::string::npos);
+    // The arena installed as a slot's file (the retired slot-13 hack): not an original level, not a custom map.
+    bmmo::map slot_hack{.type = bmmo::map_type::OriginalLevel, .level = 13};
+    std::memcpy(slot_hack.md5, known[0].md5, sizeof(slot_hack.md5));
+    EXPECT_FALSE(bmmo::session::physics_map_accepted(slot_hack, known, file, reason));
+
+    // The server's cached scan: the same md5s; a changed file is read again; a removed one leaves the cache.
+    bmmo::session::custom_map_md5_cache cache;
+    auto cached = bmmo::session::scan_custom_maps(dir, &cache);
+    ASSERT_EQ(cached.size(), 1u);
+    EXPECT_EQ(bmmo::md5::to_hex(cached[0].md5), "900150983cd24fb0d6963f7d28e17f72");
+    EXPECT_EQ(cache.entries.size(), 1u);
+    cached = bmmo::session::scan_custom_maps(dir, &cache);
+    ASSERT_EQ(cached.size(), 1u);
+    EXPECT_EQ(bmmo::md5::to_hex(cached[0].md5), "900150983cd24fb0d6963f7d28e17f72");
+    { std::ofstream(dir / "sub" / "Arena.NMO", std::ios::binary) << "abcd"; }   // size changes
+    cached = bmmo::session::scan_custom_maps(dir, &cache);
+    ASSERT_EQ(cached.size(), 1u);
+    EXPECT_EQ(bmmo::md5::to_hex(cached[0].md5), "e2fc714c4727ee9395f324cd2e7f331f");
+    std::error_code ec;
+    std::filesystem::remove(dir / "sub" / "Arena.NMO", ec);
+    EXPECT_TRUE(bmmo::session::scan_custom_maps(dir, &cache).empty());
+    EXPECT_TRUE(cache.entries.empty());
+    std::filesystem::remove_all(dir, ec);
+}

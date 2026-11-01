@@ -12,11 +12,17 @@
 bool EditScript(CKLevel* level, const CGameConfig& config, const char* resolvedFile);
 
 #include <physics/physics_state.hpp>
+#include <game/custom_map.hpp>
+#include <utility/md5.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <mutex>
+#include <system_error>
 #include <string_view>
 
 namespace bmmo::sim {
@@ -126,6 +132,12 @@ namespace bmmo::sim {
         std::unique_ptr<headless_engine> engine(new headless_engine);
         engine->options_ = options;
         engine->options_.game_root = root;
+        // Step CMAP: a relative custom-map path names a file relative to the caller's directory, not Bin's.
+        if (!engine->options_.map_file.empty()) {
+            std::error_code map_error;
+            const auto absolute_map = std::filesystem::absolute(options.map_file, map_error);
+            if (!map_error) engine->options_.map_file = absolute_map;
+        }
         // The retail scripts use paths relative to the Player's working
         // directory (<root>/Bin): "..\\Database.tdb", "..\\Sounds\\...".
         {
@@ -432,11 +444,74 @@ namespace bmmo::sim {
 
     void headless_engine::request_level(int level) {
         level_request_.begin(level);
-        log("level " + std::to_string(level) + " requested through the menus");
+        map_redirect_pending_ = !options_.map_file.empty();
+        map_redirect_waited_ = 0;
+        log("level " + std::to_string(level) + " requested through the menus"
+            + (options_.map_file.empty() ? std::string() : " (custom map " + options_.map_file.string() + ")"));
+    }
+
+    // Step CMAP (game/custom_map.hpp): the headless half of a custom map.  The map is copied (once per content)
+    // to <temp>/bmmo-custom-maps/<md5>/<the slot's file name>, and Load LevelXX's "3D Entities\Level\" prefix
+    // is pointed at that directory, so the slot's own load path opens the map: no graph change, no CK object.
+    bool headless_engine::redirect_level_file(int level, std::string& error) {
+        bmmo::game::level_loader loader;
+        if (!bmmo::game::find_level_loader(context_, loader, error)) return false;
+        CKDataArray* all_levels = data_array("AllLevel");
+        char cell[260] = {};
+        if (!all_levels || level < 1 || level > all_levels->GetRowCount()
+                || all_levels->GetElementStringValue(level - 1, 0, cell, sizeof(cell)) <= 0 || !cell[0]) {
+            error = "AllLevel has no file name for level " + std::to_string(level);
+            return false;
+        }
+        uint8_t digest[16];
+        if (!bmmo::md5::of_file(options_.map_file, digest)) {
+            error = "cannot read the custom map " + options_.map_file.string();
+            return false;
+        }
+        std::error_code ec;
+        const auto dir = std::filesystem::temp_directory_path(ec) / "bmmo-custom-maps" / bmmo::md5::to_hex(digest);
+        if (ec) { error = "no temp directory: " + ec.message(); return false; }
+        std::filesystem::create_directories(dir, ec);
+        const auto copy = dir / cell;
+        uint8_t present[16] = {};
+        if (!bmmo::md5::of_file(copy, present) || std::memcmp(present, digest, sizeof(digest)) != 0) {
+            // Several clients of one host may load the map at once: each writes its own file and renames it
+            // over the shared name (same content either way).
+            static std::atomic<uint64_t> staging_serial{0};
+            const uint64_t stamp = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())
+                ^ (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this)) << 1) ^ staging_serial.fetch_add(1);
+            const auto staged = dir / (std::string(cell) + "." + std::to_string(stamp) + ".part");
+            std::filesystem::copy_file(options_.map_file, staged, std::filesystem::copy_options::overwrite_existing, ec);
+            if (!ec) std::filesystem::rename(staged, copy, ec);
+            if (ec && !(bmmo::md5::of_file(copy, present) && std::memcmp(present, digest, sizeof(digest)) == 0)) {
+                error = "cannot place the custom map at " + copy.string() + ": " + ec.message();
+                return false;
+            }
+        }
+        std::string prefix = dir.string();
+        if (prefix.empty() || (prefix.back() != '/' && prefix.back() != '\\'))
+            prefix += static_cast<char>(std::filesystem::path::preferred_separator);
+        loader.prefix->SetStringValue(const_cast<CKSTRING>(prefix.c_str()));
+        log("custom map: level " + std::to_string(level) + " loads " + options_.map_file.string() + " (md5 "
+            + bmmo::md5::to_hex(digest) + ") as " + (prefix + cell));
+        return true;
     }
 
     void headless_engine::advance_level_request() {
         if (!level_request_.pending()) return;
+        if (map_redirect_pending_) {
+            // Levelinit.nmo is loaded during the boot; wait for it if the request came first.
+            std::string redirect_error;
+            if (redirect_level_file(level_request_.level, redirect_error)) {
+                map_redirect_pending_ = false;
+            } else if (bmmo::game::find_root_script(context_, "Levelinit_build") || ++map_redirect_waited_ > 600) {
+                level_request_.error = "custom map: " + redirect_error;
+                log("menu: level request failed: " + level_request_.error);
+                return;
+            } else {
+                return;
+            }
+        }
         using status = bmmo::game::level_request::status;
         const bool was_pressed = level_request_.start_pressed;
         switch (level_request_.step(context_)) {
@@ -457,6 +532,7 @@ namespace bmmo::sim {
 
     bool headless_engine::load_level(int level, std::string& error) {
         error.clear();
+        if (!options_.map_file.empty() && !redirect_level_file(level, error)) return false;
         CKDataArray* current_level = data_array("CurrentLevel");
         if (!current_level) {
             error = "CurrentLevel array is unavailable (composition not booted yet?)";

@@ -293,9 +293,10 @@ namespace bmmo::sim {
                                         const std::vector<std::pair<uint32_t, uint8_t>>& players,
                                         uint32_t input_delay, uint32_t start_base, float spawn_impulse,
                                         const std::string& note, std::vector<std::string> names,
-                                        uint32_t sector_lead, uint32_t world_option_bits, uint8_t mechanism_slots) {
+                                        uint32_t sector_lead, uint32_t world_option_bits, uint8_t mechanism_slots,
+                                        std::filesystem::path map_file) {
         post([this, session, level, players, input_delay, start_base, spawn_impulse, note,
-              names = std::move(names), sector_lead, world_option_bits, mechanism_slots] {
+              names = std::move(names), sector_lead, world_option_bits, mechanism_slots, map_file = std::move(map_file)] {
             auto& s = sessions_[session];
             s = std::make_unique<session_state>();
             s->id = session;
@@ -311,6 +312,7 @@ namespace bmmo::sim {
             world_options options;
             options.game_root = config_.game_root;
             options.level = level;
+            options.map_file = map_file;   // step CMAP
             options.seed = config_.seed;
             options.trace = config_.trace;
             options.spawn_impulse = spawn_impulse;
@@ -330,7 +332,7 @@ namespace bmmo::sim {
             };
             std::string error;
             log("[session " + std::to_string(session) + "] booting level " + std::to_string(level) + " from "
-                + config_.game_root.string());
+                + config_.game_root.string() + (map_file.empty() ? std::string() : " with the custom map " + map_file.string()));
             s->world = physics_world::create(options, error);
             world_ready_info info;
             info.session = session;

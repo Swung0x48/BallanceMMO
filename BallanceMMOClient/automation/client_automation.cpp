@@ -3,6 +3,8 @@
 
 #include "BallanceMMOClient.h"
 #include "session/session_journal_client.hpp"
+#include "session/core_host.hpp"
+#include <game/custom_map.hpp>
 #include <cfloat>
 
 #include <algorithm>
@@ -278,6 +280,24 @@ std::string BallanceMMOClient::automation_dump_script(const std::string& name) {
         automation_dump_behavior(behavior, 0, 6, out);
     }
     return out.empty() ? "error no behavior named " + name : "ok " + out;
+}
+
+// Step CMAP: the custom map of the pending menu request (empty: the slot's own file) and the one the current
+// level was loaded from (OnLoadObject).  File-scope: no BallanceMMOClient member (BML's layout).
+namespace {
+    std::string g_request_custom_map;
+    std::string g_loaded_custom_map;
+}
+
+void bmmo::session::retail::set_loaded_custom_map(const std::string& file) { g_loaded_custom_map = file; }
+const std::string& bmmo::session::retail::loaded_custom_map() { return g_loaded_custom_map; }
+
+std::string BallanceMMOClient::begin_level_request(int level, const std::string& custom_map) {
+    g_request_custom_map = custom_map;
+    level_request_.begin(level);
+    return custom_map.empty() ? "ok level " + std::to_string(level) + " requested through the menus"
+                              : "ok custom map " + custom_map + " requested in slot " + std::to_string(level)
+                                    + " through the menus";
 }
 
 std::string BallanceMMOClient::automation_load_level(int level) {
@@ -863,6 +883,36 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         return "ok replaying " + std::to_string(replay_source_.frames.size()) + " frames into " + out_path;
     }
     if (verb == "net") return core_host_net_verb(rest);   // GNS fake lag / loss (session/core_host.cpp)
+    // Step CMAP: 'map <slot> <file>' - a custom map loaded as BML+'s map menu loads one (its CustomMapName
+    // aside): BML+'s own Load LevelXX patch armed with the file and the slot, then the menus as for a slot.
+    if (verb == "map") {
+        std::istringstream args(rest);
+        int level = 0;
+        args >> level;
+        std::string file;
+        std::getline(args, file);
+        while (!file.empty() && file.front() == ' ') file.erase(0, 1);
+        if (level < 1 || level > 13 || file.empty()) return "error usage: map <slot 1..13> <file>";
+        // The path in the encoding the loader hands CK (and OnLoadObject hands back): UTF-8 from BML+ 0.3.4
+        // on, ANSI before; the command file's text is read in the same encoding.
+        bool utf8_paths = false;
+#ifdef BMMO_USE_BML_PLUS
+        utf8_paths = loader_version_ >= BMLVersion{ 0, 3, 4 };
+#endif
+        std::error_code ec;
+        std::filesystem::path path = std::filesystem::absolute(
+            utf8_paths ? std::filesystem::path(std::u8string(file.begin(), file.end())) : std::filesystem::path(file), ec);
+        if (ec || !std::filesystem::is_regular_file(path, ec)) return "error no such map file: " + file;
+        path.make_preferred();   // CK and the mod's OnLoadObject read "\Maps\"
+        std::string loader_path;
+        if (utf8_paths) {
+            const std::u8string u8 = path.u8string();
+            loader_path.assign(u8.begin(), u8.end());
+        } else {
+            loader_path = path.string();
+        }
+        return begin_level_request(level, loader_path);
+    }
     if (verb == "level") {
         std::istringstream args(rest);
         std::string mode;
@@ -870,8 +920,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         args >> level >> mode;
         if (level < 1 || level > 13) return "error usage: level <1..13> [direct]";
         if (mode == "direct") return automation_load_level(level);
-        level_request_.begin(level);
-        return "ok level " + std::to_string(level) + " requested through the menus";
+        return begin_level_request(level);
     }
     return "error unknown command " + verb;
 }
@@ -880,16 +929,34 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
 void BallanceMMOClient::process_level_request() {
     if (!level_request_.pending()) return;
     using status = bmmo::game::level_request::status;
+    // Step CMAP: a custom map's request arms BML+'s patch before every step, so the Menu_Start press that
+    // sends "Load Level" finds it armed (BML+ clears it at OnStartLevel).
+    if (!g_request_custom_map.empty()) {
+        std::string error;
+        if (!bmmo::game::arm_bml_custom_level(m_bml->GetCKContext(), g_request_custom_map, level_request_.level, error)) {
+            level_request_.error = "custom map: " + error;
+            g_request_custom_map.clear();
+            GetLogger()->Warn("Automation: level request failed: %s", level_request_.error.c_str());
+            return;
+        }
+    }
     const bool was_pressed = level_request_.start_pressed;
     switch (level_request_.step(m_bml->GetCKContext())) {
     case status::start_pressed:
         if (!was_pressed) GetLogger()->Info("Automation: pressed Start in Menu_Main");
         break;
     case status::level_selected:
-        GetLogger()->Info("Automation: selected level %d in Menu_Start", level_request_.level);
+        if (!g_request_custom_map.empty())
+            GetLogger()->Info("Automation: selected slot %d in Menu_Start for the custom map %s", level_request_.level,
+                              g_request_custom_map.c_str());
+        else
+            GetLogger()->Info("Automation: selected level %d in Menu_Start", level_request_.level);
+        g_request_custom_map.clear();
         break;
     case status::failed:
         GetLogger()->Warn("Automation: level request failed: %s", level_request_.error.c_str());
+        if (!g_request_custom_map.empty()) bmmo::game::disarm_bml_custom_level(m_bml->GetCKContext());
+        g_request_custom_map.clear();
         break;
     default:
         break;

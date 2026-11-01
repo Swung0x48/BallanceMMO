@@ -63,6 +63,8 @@ namespace bmmo::sim {
     struct world_options {
         std::filesystem::path game_root;
         int level = 1;
+        // Step CMAP: a custom map loaded into `level`'s slot (engine_options::map_file); empty = the slot's file.
+        std::filesystem::path map_file;
         int seed = 1;
         // Spawn kick speed, m/s (design 9.10); 0 disables (solo sessions and
         // debug/replay worlds that never set it stay bit-exact with a
