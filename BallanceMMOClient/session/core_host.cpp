@@ -633,7 +633,8 @@ namespace {
         // 'session drop-birth' (a testing tool, R1 (c)): the next own
         // Physicalize the core sends is kept off the wire (hooks.
         // filter_event, every copy), so the server has no body for our ball
-        // and own_body_backstop has something to do.
+        // and the own echo's deadline has something to do (the never-made
+        // re-report, R6P; own_body_backstop until R6V).
         int drop_births_armed = 0;
         uint64_t births_dropped = 0;
         // 'session hold-event TYPE:N:MS|TYPE:N:drop|off' (FULL step R6H, a
@@ -2176,8 +2177,9 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // and answered by that echo, a resync only past the reach; an in-window
     // scripted own birth taken out and remade at its birth tick);
     // the own corrections (R4, late-player part one: a held notice of our
-    // own substituted tick amends the tick's record and replays from it),
-    // own_body_backstop on.  The lead (R5, late-player part two) is the
+    // own substituted tick amends the tick's record and replays from it)
+    // (own_body_backstop, on here until FULL step R6V, is deleted: decision
+    // 6 (a)).  The lead (R5, late-player part two) is the
     // capability `slew`, not a switch: the core amends, forces and slews
     // a SessionLead, the tick driver moves its schedule (core_host_pacer).
     bs::core_config config;
@@ -2211,7 +2213,6 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     config.lifecycle_rewind = true;   // R3
     config.own_echoes = true;   // R3
     config.own_corrections = true;   // R4
-    config.own_body_backstop = true;
     // FULL step R6P (late-player design 3.3 / 3.5, core design 6.2 R6 row):
     // the own echoes' moves on - R6S built the switch off, R6B declared
     // own_body_control with it off.
@@ -4941,12 +4942,12 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         if (value == "on" || value == "off") return "error unknown command session core " + value;
         if (!value.empty() && value != "status") return "error usage: session core [status]";
         return std::format("ok core={} latched={} made={} error='{}' sessions={} host_phase={} frames={} refused={} "
-                           "backstops={} births_dropped={} unmatched_resyncs={} mailbox: pushed={} "
+                           "births_dropped={} unmatched_resyncs={} mailbox: pushed={} "
                            "dropped={} drained={} starts={} discarded={} undecodable={} beams_made={} nav_source_differs={} "
                            "mute_source_differs={} stray={}",
                            "on", core_latched.load() ? 1 : 0, host.core ? 1 : 0,
                            host.core_error, host.sessions_seen, host_phase_name(host.phase), host.frames, host.refused,
-                           host.core ? host.core->own_body_backstops() : 0, host.births_dropped,
+                           host.births_dropped,
                            host.core ? host.core->unmatched_resyncs() : 0,
                            mailbox.pushed(), mailbox.dropped(), host.drained,
                            host.starts, host.discarded, host.undecodable, host.beams_made, host.nav_source_differs,
@@ -5775,11 +5776,11 @@ std::string BallanceMMOClient::core_host_status_text() {
     const auto& q = bmmo::game::script_replay::queue_stats();
     const auto& d = bmmo::game::script_replay::dormancy();
     return std::format("session={} phase={} core=1 tick={} assigned={} held={} keys_known={} own_phys={} "
-                       "backstops={} refused={} unmatched_resyncs={} {} cbq={}/{}/{}/{}/{}/{}/{} cbqx={}/{} "
+                       "refused={} unmatched_resyncs={} {} cbq={}/{}/{}/{}/{}/{}/{} cbqx={}/{} "
                        "dorm={}/{}/{}/{}/{}",
                        core.session_id(), host_phase_name(host.phase), core.current_tick(), core.assigned() ? 1 : 0,
                        core.holding() ? 1 : 0, host.navigation_known ? 1 : 0, core.own_physicalized() ? 1 : 0,
-                       core.own_body_backstops(), host.refused, core.unmatched_resyncs(), core.status_text(h),
+                       host.refused, core.unmatched_resyncs(), core.status_text(h),
                        q.rebuilt, q.removed, q.held, q.unhold_clamped, q.rebuild_fail, q.hold_fail, q.no_record,
                        q.captured, q.holds, d.from_ledger, d.healed, d.walked, d.guard_trips, d.restored_built);
 }

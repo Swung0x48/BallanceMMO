@@ -127,7 +127,6 @@ namespace bmmo::session {
         s.have_snapshot_ = true;
         s.last_snapshot_tick_ = snapshot.tick;
         ++s.snapshots_applied_;
-        if (config.own_body_backstop) check_own_body(snapshot);
         if (config.rollback) {
             for (const auto& body: snapshot.bodies)
                 if (body.kind == bmmo::session::body_kind::Mechanism) {
@@ -325,60 +324,12 @@ namespace bmmo::session {
         }
     }
 
-    // ------------------------------------------------- own_body_backstop
-    // Every snapshot carries a ball row for each physicalized player, awake
-    // or not.  Ours missing while our ball is physicalized here says the
-    // server has no body for us: its copy of the last Physicalize never
-    // arrived or was rejected, and no retail script reports it again.  After
-    // about a second of snapshots it is reported once more, with the pose
-    // the ball has now and without the spawn flag (the body was kicked, or
-    // deliberately not, already): the retail mod's check_own_body (design
-    // 4.1 own_body_backstop, R1).
-    //
-    // While the own echoes are acted on (R3), an own birth still waiting
-    // for its echo is theirs: its answer is the echo, or the deadline
-    // (expire_own_echoes: re-reported while current, then a resync).  A
-    // backstop re-report beside it leaves that record `sent` (send_event
-    // keeps no own_life), so the deadline would still give the birth up,
-    // re-report it again and resync: two answers to one lost event.  So
-    // the count waits until no birth is pending (the echoes' answer, made
-    // or given up, ends the wait).
-    void session_client_core::check_own_body(const bmmo::session_snapshot_msg& snapshot) {
-        bool present = false;
-        for (const auto& body: snapshot.bodies)
-            if (body.kind == bmmo::session::body_kind::Ball && body.owner == s.own_id_) { present = true; break; }
-        // FULL step R6P: a re-report waiting for its echo is a birth too.
-        bool awaiting_echo = !s.own_rereports_.empty();
-        if (acting_on_echoes())
-            for (const auto& life: s.own_life_)
-                if (!life.retired && life.what == own_life::kind::birth && life.state == own_life::verdict::sent) {
-                    awaiting_echo = true;
-                    break;
-                }
-        if (present || !s.own_physicalized_ || !s.own_last_birth_.valid || s.resync_pending_ || awaiting_echo) {
-            s.snapshots_without_own_ = 0;
-            return;
-        }
-        if (++s.snapshots_without_own_ < 30) return;
-        const auto now = platform_.now(clock_site::own_backstop);
-        if (s.own_backstops_ > 0 && now - s.last_backstop_ < std::chrono::seconds(2)) return;
-        const own_ball_view own = platform_.own_ball();
-        if (own.entity.empty() || !own.physicalized) return;
-        s.last_backstop_ = now;
-        s.snapshots_without_own_ = 0;
-        ++s.own_backstops_;
-        bmmo::session_event_msg event;
-        event.tick = current_tick() + 1;
-        event.type = bmmo::session::event_type::Physicalize;
-        event.ball_type = s.own_last_birth_.ball_type;
-        event.flags = static_cast<uint8_t>(s.own_last_birth_.flags & ~bmmo::session::PHYSICALIZE_FLAG_SPAWN);
-        for (int k = 0; k < 3; ++k) event.position[k] = static_cast<float>(own.state.position[k]);
-        quaternion_rows(own.state.rotation, event.rotation);
-        event.recipe = s.own_last_birth_.recipe;
-        send_event(event);
-        logf("the server has no body for our ball (%llu); Physicalize re-reported at tick %u",
-             static_cast<unsigned long long>(s.own_backstops_), event.tick);
-    }
+    // (own_body_backstop, the retail mod's check_own_body re-reporting our
+    // Physicalize after 30 snapshots without our row, was deleted at FULL step
+    // R6V - decision 6 (a): it counted snapshots, which are off and assumed
+    // absent, and the own echoes' deadline (expire_own_echoes) with the
+    // never-made re-report at the current pose (re_report_current, R6P)
+    // answers the same failure.)
 
     // ------------------------------------------------------------ the relay
     void session_client_core::on_session_remote_input(const bmmo::session_remote_input_msg& msg) {

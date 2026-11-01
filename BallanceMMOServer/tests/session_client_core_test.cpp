@@ -121,7 +121,6 @@ namespace bmmo::session {
         BMMO_CORE_STEP(drain_pending_deaths)
         BMMO_CORE_STEP(probe_candidates)
         BMMO_CORE_STEP(settle_held_tick)
-        BMMO_CORE_STEP(check_own_body)
         BMMO_CORE_STEP(poll_own_trafo)
         BMMO_CORE_STEP(hold_pending_trafo)
         BMMO_CORE_STEP(apply_trafo_inputs)
@@ -6432,102 +6431,34 @@ namespace {
         EXPECT_FALSE(state_of(core).remotes_.at(4).physicalized);
     }
 
-    // own_body_backstop (design 4.1; R1): 30 snapshots in a row without a
-    // body of ours, while ours is physicalized, re-report the last own
-    // Physicalize without the spawn flag; at most every 2 s; a snapshot with
-    // our row, or no birth to report, counts for nothing.
-    TEST(SessionClientCoreR1, OwnBodyBackstopReReportsAfter30Snapshots) {
+    // FULL step R6V (decision 6 (a)): own_body_backstop is deleted.  A run
+    // of snapshots without a body of ours, while ours is physicalized and no
+    // birth waits for its echo, sends nothing: a lost own Physicalize is
+    // answered by the own echoes' deadline and the never-made re-report
+    // (re_report_current), never by counting snapshots.
+    TEST(SessionClientCoreR1, SnapshotsWithoutOurRowReReportNothing) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});
         run_to_tick_125(core, fake);
-        core.config.rollback = false;   // the ladder: no rollback needed to see the counts
-        core.config.own_body_backstop = true;
+        core.config.rollback = false;   // the ladder: no rollback needed to see the sends
         state_of(core).own_physicalized_ = true;
         fake.own_physical = true;
-        state_of(core).own_last_birth_.valid = true;
-        state_of(core).own_last_birth_.ball_type = 1;
-        state_of(core).own_last_birth_.flags = bmmo::session::PHYSICALIZE_FLAG_SPAWN;
-        uint32_t tick = 100;
         const auto physicalizes = [&fake]() {
             int n = 0;
             for (const auto& [bytes, mode]: fake.sent) {
                 if (mode != send_mode::reliable_no_nagle) continue;
                 bmmo::session_event_msg msg;
                 msg.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-                if (msg.deserialize() && msg.type == bmmo::session::event_type::Physicalize) {
-                    EXPECT_EQ(msg.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN, 0) << "no spawn flag";
-                    EXPECT_EQ(msg.tick, 126u);
-                    EXPECT_EQ(msg.ball_type, 1u);
-                    ++n;
-                }
+                if (msg.deserialize() && msg.type == bmmo::session::event_type::Physicalize) ++n;
             }
             return n;
         };
-        for (int i = 0; i < 29; ++i) core.on_session_snapshot(snapshot_message(9, ++tick, false, {ball_row(4, 1.0, true)}));
-        EXPECT_EQ(physicalizes(), 0);
-        core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
-        EXPECT_EQ(physicalizes(), 1);
-        EXPECT_EQ(core.own_body_backstops(), 1u);
-        for (int i = 0; i < 31; ++i) core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
-        EXPECT_EQ(core.own_body_backstops(), 1u) << "the 2 s limiter";
-        fake.advance(std::chrono::milliseconds(2000));
-        core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
-        EXPECT_EQ(core.own_body_backstops(), 2u);
-        // Our row comes back: the count starts over.
-        for (int i = 0; i < 29; ++i) core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
-        core.on_session_snapshot(snapshot_message(9, ++tick, false, {ball_row(3, 1.0, true)}));
-        fake.advance(std::chrono::milliseconds(2000));
-        core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
-        EXPECT_EQ(core.own_body_backstops(), 2u);
-        // The ball unphysicalized: nothing to report.
-        steps{core}.report_unphysicalize(126);
+        const int before = physicalizes();
+        uint32_t tick = 100;
         for (int i = 0; i < 40; ++i) core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
-        EXPECT_EQ(core.own_body_backstops(), 2u);
-        EXPECT_EQ(physicalizes(), 2);
-        // A core reused for another session counts, and limits, from scratch.
-        ASSERT_FALSE(core.begin(start_message(9, 3), bmmo::session::core_config{}).refused);
-        EXPECT_EQ(core.own_body_backstops(), 0u);
-        EXPECT_TRUE(state_of(core).last_backstop_ == std::chrono::steady_clock::time_point{});
-    }
-
-    // R3: own_body_backstop beside the acted-on own echoes.  While an own
-    // birth still waits for its echo (verdict sent) the backstop does not
-    // count: the echo or its deadline answers it (expire_own_echoes), and a
-    // backstop re-report beside it would be a second Physicalize at the
-    // server.  Once the birth is answered the backstop counts from scratch;
-    // with the own echoes off (R1, R2) a pending birth gates nothing.
-    TEST(SessionClientCoreR1, OwnBodyBackstopWaitsForAPendingOwnEcho) {
-        for (const bool echoes: {true, false}) {
-            SCOPED_TRACE(echoes ? "own echoes on" : "own echoes off");
-            flow_fake fake;
-            session_client_core core(fake.make_flow(), session_capabilities{});
-            run_to_tick_125(core, fake);
-            core.config.own_body_backstop = true;
-            core.config.own_echoes = echoes;
-            state_of(core).own_physicalized_ = true;
-            fake.own_physical = true;
-            state_of(core).own_last_birth_.valid = true;
-            state_of(core).own_last_birth_.ball_type = 1;
-            state_of(core).own_life_ = {own_birth(122)};
-            uint32_t tick = 100;
-            for (int i = 0; i < 40; ++i) steps{core}.check_own_body(snapshot_message(9, ++tick, false, {}));
-            EXPECT_EQ(core.own_body_backstops(), echoes ? 0u : 1u);
-            EXPECT_EQ(state_of(core).snapshots_without_own_, echoes ? 0u : 10u);
-            if (!echoes) continue;
-            // A retired record, or one already answered, waits for nothing.
-            state_of(core).own_life_[0].state = client_core_state::own_life::verdict::missing;
-            for (int i = 0; i < 29; ++i) steps{core}.check_own_body(snapshot_message(9, ++tick, false, {}));
-            EXPECT_EQ(core.own_body_backstops(), 0u) << "counted from scratch";
-            steps{core}.check_own_body(snapshot_message(9, ++tick, false, {}));
-            EXPECT_EQ(core.own_body_backstops(), 1u);
-            // A beam's record (no deadline of its own) gates nothing either.
-            auto beam = own_birth(130);
-            beam.what = client_core_state::own_life::kind::beam;
-            state_of(core).own_life_ = {beam};
-            fake.advance(std::chrono::milliseconds(2000));
-            for (int i = 0; i < 30; ++i) steps{core}.check_own_body(snapshot_message(9, ++tick, false, {}));
-            EXPECT_EQ(core.own_body_backstops(), 2u);
-        }
+        fake.advance(std::chrono::milliseconds(2000));
+        for (int i = 0; i < 40; ++i) core.on_session_snapshot(snapshot_message(9, ++tick, false, {}));
+        EXPECT_EQ(physicalizes(), before) << "no snapshot-driven re-report";
     }
 
     // drive_from_newest_relay (R1): with the policy, the step of T drives a

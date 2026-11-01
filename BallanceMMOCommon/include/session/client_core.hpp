@@ -1040,19 +1040,10 @@ namespace bmmo::session {
         // ---- R1 (design 4.1, the retail host's policies and readers) ----
         // (mirror_start_from_row's row cache was deleted at R3: with the
         // lifecycle rewind a late birth is made at its stamp in a replay.)
-        // own_body_backstop: the last own Physicalize sent (what a re-report
-        // carries but the pose), the snapshots in a row that named no body of
-        // ours while ours was physicalized, the last re-report, and the count
-        // (the retail mod's last_physicalize / snapshots_without_own /
-        // physicalize_resends, PSC check_own_body).
-        struct own_last_birth {
-            bool valid = false;
-            uint8_t ball_type = 0, flags = 0;
-            bmmo::session::ball_recipe recipe;
-        } own_last_birth_;
-        uint32_t snapshots_without_own_ = 0;
-        clock_type::time_point last_backstop_{};
-        uint64_t own_backstops_ = 0;
+        // (own_body_backstop's state - the last own Physicalize, the
+        // snapshots without our row, the 2 s limiter and the count - was
+        // deleted at FULL step R6V with the policy, decision 6 (a): the own
+        // echoes' deadline and the never-made re-report answer that failure.)
         // (The snapshots' acked_input_tick for the retail starvation
         // detector went with the detector at R4: the relay header's `acked`
         // is read in note_held_section, with snapshots off too.)
@@ -1212,17 +1203,14 @@ namespace bmmo::session {
         // true (headless; --no-own-birth-move is the control arm); the
         // retail host sets it false until R6P.
         bool own_birth_move = true;
-        // Retail policy (design 4.1; R1), off by default (the headless
-        // client never sets it).  `own_body_backstop`: 30 snapshots in a row
-        // without a body of ours while our ball is physicalized re-report its
-        // last Physicalize (without the spawn flag, at most every 2 s; design
-        // 7.1 decision 2: retail-only until R6); while the own echoes are
-        // acted on, not while an own birth still waits for its echo (R3:
-        // the echo or its deadline answers that one).  (The other R1 policy,
-        // `mirror_start_from_row` - a mirror made live started from its
-        // player's newest snapshot row, the 9.17 workaround - was deleted at
-        // R3 with the retail lifecycle rewind on, design 4.2.)
-        bool own_body_backstop = false;
+        // (Design 4.1's two R1 retail policies are gone: `mirror_start_from_row`
+        // - a mirror made live started from its player's newest snapshot row,
+        // the 9.17 workaround - at R3 with the retail lifecycle rewind on, and
+        // `own_body_backstop` - 30 snapshots without a body of ours re-report
+        // its last Physicalize - at FULL step R6V, decision 6 (a): it counted
+        // snapshots, which are off and assumed absent, and the own echoes'
+        // deadline (expire_own_echoes) with the never-made re-report
+        // (re_report_current) answers the same failure.)
         // Step DX6: consecutive starved input reports that ask for a resync
         // (kStarvedResyncReports; 0 = never).  Headless
         // --starved-resync-reports N.
@@ -1344,8 +1332,10 @@ namespace bmmo::session {
 
     // A body's quaternion (x, y, z, w) as the rows of the 3x3 rotation a
     // Physicalize event carries (rotation[r * 3 + k] = row r), the formula of
-    // VxQuaternion::ToMatrix (R1: the own_body_backstop's re-report; until
-    // R3 also a mirror started from a snapshot row).
+    // VxQuaternion::ToMatrix (R1; the lifecycle code's poses from a body
+    // state, e.g. the never-made re-report at the current pose; the
+    // own_body_backstop's re-report used it until R6V, a mirror started
+    // from a snapshot row until R3).
     inline void quaternion_rows(const double q[4], float rows[9]) {
         const float x = static_cast<float>(q[0]), y = static_cast<float>(q[1]);
         const float z = static_cast<float>(q[2]), w = static_cast<float>(q[3]);
@@ -1701,9 +1691,8 @@ namespace bmmo::session {
         bool recorded_body_state(const std::string& entity, uint32_t tick, bmmo_physics_body_state& out) const {
             return s.rollback_.recorded_body_state(entity, tick, out);
         }
-        // What the retail host reads (R1): the own_body_backstop's
-        // re-reports and the resync requests sent.
-        uint64_t own_body_backstops() const { return s.own_backstops_; }
+        // What the retail host reads (R1): the resync requests sent (the
+        // own_body_backstop's count went with the policy at R6V).
         uint64_t resyncs_sent() const { return s.resyncs_sent_; }
         // Session-core design 7.1 decision 1 (step B2SW): the resyncs asked
         // for by kUnmatchedSnapshotRun snapshots in a row with no record of
@@ -2180,8 +2169,6 @@ namespace bmmo::session {
         void unphysicalize_mirror(const std::string& entity);
         // True when the mirror's body was made.
         bool physicalize_remote(const client_core_state::pending_birth& event, uint32_t first_tick);
-        // The snapshot path's retail policy (R1): own_body_backstop.
-        void check_own_body(const bmmo::session_snapshot_msg& snapshot);
         // The mechanisms a record tracks (step P): the platform's movable
         // bodies but the balls (is_ball), in the platform's order.
         std::vector<std::string> movable_mechanisms() const;

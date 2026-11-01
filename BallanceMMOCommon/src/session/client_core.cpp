@@ -494,12 +494,8 @@ namespace bmmo::session {
         s.pending_deaths_.clear();
         s.life_batch_ = client_core_state::life_rewind_batch{};   // step SRT3
         s.life_events_coalesced_ = s.input_rewinds_carried_ = 0;
-        // R1: the retail policies' and readers' state, and no frame
-        // prepared (post_step refuses one no pre_step of this session made).
-        s.own_last_birth_ = {};
-        s.snapshots_without_own_ = 0;
-        s.own_backstops_ = 0;
-        s.last_backstop_ = {};
+        // (R1's own_body_backstop state, reset here until FULL step R6V,
+        // went with the policy.)
         // Step B2SW (U30): the run of unmatched snapshots and the resyncs it
         // asked for are this session's (the retail host's copy reset both here).
         s.consecutive_unmatched_ = 0;

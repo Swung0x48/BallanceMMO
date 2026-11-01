@@ -5380,7 +5380,7 @@ file-scope `snapshots_next` (false by default; `session snapshots
 on|off|status`, next-session semantics like `session cache`; no
 `BallanceMMOClient` member). The one effect left of an un-migrated server
 (2 / 66) on a DEP retail client is the snapshot bytes it receives and
-journals; `own_body_backstop` (retail only) still reads their ball rows for
+journals; `own_body_backstop` (retail only; deleted at FULL step R6V) still reads their ball rows for
 the own body's presence - a re-reported Physicalize, not a correction - and
 is dormant with the server's snapshots off. The legacy path is untouched.
 

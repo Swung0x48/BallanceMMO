@@ -2242,12 +2242,6 @@ namespace bmmo::session {
         if (spawn) event.flags |= bmmo::session::PHYSICALIZE_FLAG_SPAWN;
         event.recipe = report.recipe;
         send_event(event);
-        // own_body_backstop (R1): what a re-report carries.
-        s.own_last_birth_.valid = true;
-        s.own_last_birth_.ball_type = event.ball_type;
-        s.own_last_birth_.flags = event.flags;
-        s.own_last_birth_.recipe = event.recipe;
-        s.snapshots_without_own_ = 0;
         // The birth as the history keeps it: what the server makes when
         // its echo says it applied the event later (record_own_birth).
         record_own_birth(event, report.entity);
@@ -2261,9 +2255,6 @@ namespace bmmo::session {
         event.tick = tick;
         event.type = bmmo::session::event_type::Unphysicalize;
         send_event(event);
-        // The ball is meant to be gone now (own_body_backstop, R1).
-        s.own_last_birth_.valid = false;
-        s.snapshots_without_own_ = 0;
         logf("own ball unphysicalized at tick %u", tick);
     }
 
@@ -2403,10 +2394,6 @@ namespace bmmo::session {
         std::copy(std::begin(beam.rotation), std::end(beam.rotation), up.rotation);
         up.recipe = beam.recipe;
         send_event(up);
-        // The server's copy is a fresh body now, not kicked (own_body_backstop,
-        // R1: a re-report carries no spawn flag either).
-        s.own_last_birth_.flags = static_cast<uint8_t>(s.own_last_birth_.flags & ~bmmo::session::PHYSICALIZE_FLAG_SPAWN);
-        s.snapshots_without_own_ = 0;
         logf("--beam: %s to (%.3f,%.3f,%.3f), reported to the server for tick %u and %s", name.c_str(),
              s.beam_position_[0], s.beam_position_[1], s.beam_position_[2], beam.origin,
              !navigated ? "moved here now (no navigation replica)"
@@ -3219,7 +3206,8 @@ namespace bmmo::session {
     // FULL step R6P (the user's Q-R6-NEVER (a); core design "As built (step
     // R6D)" item 3.1): a birth the server never made (REJECTED, MISSING)
     // while its life is current.  Its Physicalize goes out again for now + 1
-    // at the ball's CURRENT pose (the live body's, as check_own_body did -
+    // at the ball's CURRENT pose (the live body's, as the deleted
+    // own_body_backstop's check_own_body did -
     // not the stamp's, so the server's ball is made where ours is, with no
     // pull-back), without the spawn flag (the body was kicked, or not,
     // long ago), with the life's recipe; recorded in own_rereports_ (origin

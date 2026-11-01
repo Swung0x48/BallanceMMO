@@ -3555,7 +3555,7 @@ agree. The P senders were checked: a beam sends U then P of one origin
 (`apply_requested_beam`), a respawn's P follows its death; the bare-P sender
 `re_report_own_birth` (a birth the server never made) means "the body is
 made here" too and is replaced alike on the server and every receiver. The
-`own_body_backstop` re-report (`check_own_body`) fires only when the
+`own_body_backstop` re-report (`check_own_body`; deleted at FULL step R6V) fires only when the
 server's snapshot has no row for the ball, i.e. the server has no body, so
 the branch does not fire for it on the server, nor on a receiver that
 followed the server (and it never fires with snapshots off).
@@ -3735,7 +3735,7 @@ at the birth, where the script's force comes after it and is queued), and
 the retail and headless REPLAYED arms drive the made ball from the
 records; so this is the model's limit, not a failure of the R6P path.
 
-**The own_body_backstop measurement (core design §7.1 decision 2).**
+**The own_body_backstop measurement (core design §7.1 decision 2; the backstop was deleted at FULL step R6V).**
 `check_own_body` (client_core_messages.cpp:130) runs on every applied
 non-resync snapshot; with snapshots off those are only the names-only full
 snapshots of body-set changes (9-13 a session), while it needs 30

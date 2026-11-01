@@ -42,7 +42,9 @@ namespace bmmo::session {
         journal_ms,           // a TICK record's ms
         journal_start,        // core::client_journal::open: the origin of journal_ms
         journal_utc,          // core::client_journal::open: the header's utc_ms (system clock, in ms)
-        own_backstop,         // the retail own_body_backstop: the 2 s re-report limiter (R1)
+        retired_own_backstop, // RETIRED at FULL step R6V (read by nobody): the retail own_body_backstop's 2 s
+                              // re-report limiter (R1), deleted with the policy; the value stays reserved so the
+                              // later sites keep their numbers (the capture format: never renumber)
         resync_hold,          // poll_resync_hold: the hold engaged, its deadline (step A3)
         resync_release,       // poll_resync_hold: the hold released, its length
         resync_hold_timeout,  // poll_resync_hold: the deadline check

@@ -3107,7 +3107,11 @@ notes still resolve.
    core for both hosts; the body kept on retail, a new capability
    `own_life_take_out` that only headless declares); the A6 drop analogue's
    jump 78.8 m -> 2.73 m with one resync; Q-R1 held 2 on retail (a forced
-   bodiless window). Left for R6V: the backstop (decision 6). R6 also removes
+   bodiless window). **R6 and R7 done at FULL step R6V (2026-11-01;
+   session-client-core-design.md "As built (step R6V)"):** the backstop
+   deleted (decision 6 (a)); R6B's and R6P's retail arms and the R7 row's
+   reruns (three launches per copy, the L11 ctl session on E-cores, R3, R4)
+   on the final build, every FINAL row as before. R6 also removes
    the retail beam's own residual (measured at EG0,
    rollback-engine-gaps-design As built EG0): the owner writes its body in
    place where the server makes a fresh one, and the body carries its lane
