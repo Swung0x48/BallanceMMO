@@ -1310,6 +1310,32 @@ numbers 1-10 are unchanged.
    (late-player-design.md "As built (step HLX)"). **Decided (a) (the user,
    2026-10-31, decision 47):** the late U stays dropped and the protocol-6
    supersede rule stays; no change, no log.
+   **Queued (FULL step SRTJ, not root-caused): an own ball born
+   overlapping another player's ball diverges from the server from its
+   birth tick.** In SRTJ's retail L11 ctl session with human-rate keys at
+   150 ms (`srtj_ctl_h`, recipe `.local-tools/work/SRTJ/srtj_retail.py
+   ctl_h`) client 2's own ball came out of its trafo at 507 about 1.5 m
+   from client 1's stone ball, still at the same exit since ~460: in the
+   server's world the overlap is resolved in step 507 (its spawn-ghost
+   listener counted the birth "resumed solid" and rechecked it,
+   `physics_state.cpp` ~4242-4352, `++state->resumed` 4281,
+   `recheck_collision_filter` 4348); in client 2's world neither ball
+   moves at 507 and the contact acts at 508, live and replayed alike.
+   Client 2's own ball is off the server's by 3.46 cm at 508 and 2.0-2.8
+   cm through 598 (until its beam at 600 remakes it), its mirror of
+   client 1's ball 1.1-1.6 cm at 508-518; client 1 (where that ball is a
+   mirror) is bit-equal to the server. No spawn ghost applies at 507.
+   Open between: the own newborn not rechecked at 507's first PSI, or
+   rechecked with the two overlap-tree spheres found apart (`close_by`) -
+   the class of SFD's cause (A), the own ball's collision bookkeeping
+   differing from its copies. SRTJ changed no code, so it is not SRTJ's;
+   whether a build from before the cost cuts does the same is not shown
+   (no earlier run had two balls born overlapping). First step: the
+   overlap elements and the listener's recheck decision at the birth PSI
+   in both worlds (`BMMO_HULL_PROBE=Ball` on client 2 against a SimTool
+   replay of the server journal with the same probe), and a headless arm
+   with two balls born overlapping out of one trafo for a deterministic
+   reproduction (`realtime-design.md` "Judged (step SRTJ)").
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire

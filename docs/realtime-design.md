@@ -6,8 +6,12 @@ this step are kept as a patch (`.local-tools/work/SRT/srt_diag.patch`, with `srt
 the user**: the target's exact terms (section 6, T1-T4) and the approach (section 5).
 **Answered (2026-10-31)** and in progress: Q1 "你决定" (the orchestrator set the target: hard T2' no two consecutive
 renders skipped, T3, T4; T1 reported), Q2 "先a看看" (the cost cuts first, f2 not built: measure, then the user
-decides). Built: SRT1 (f1, the catch-up renders; "As built (step SRT1)" below), SRT3 (a1, one lifecycle rewind per
-frame; "As built (step SRT3)" below).
+decides). Built: SRT1 (f1, the catch-up renders; "As built (step SRT1)" below), SRT2 (a3's cause found: the retail
+own ball's in-place beam), BEAMF (the beam as a fresh body, which removed SRT2's blob window), SRT3 (a1, one
+lifecycle rewind per frame), SRT4 (a2, sparse capture of replayed ticks), SRT2B (a3's remainder, the capture's
+entity lookup scope on retail); each has its "As built" note below. **Judged after the cost cuts: SRTJ** ("Judged
+(step SRTJ)", the last section): T2' and T4 met on every run, T1 and T3 not; **blocked on the user** for f2 and for
+whether the target is met.
 
 The request (2026-10-30), verbatim: "在全链（所有队列里的任务）最后加一个优化任务，要让这套引擎的运行严格实时", and
 its purpose: "其实目的是让玩家能感知不到回滚导致的卡顿发生。另外，因为这台开发机性能远高于平均水平的玩家，所以即使达成了
@@ -827,3 +831,212 @@ orchestrator pulled this part of Stage C's R6B forward (plan section BEAMF) so S
   BALA's gate-round build, rebuildable from cf7bcaed if that commit is the gate tree. Those figures stay as
   recorded, their binaries are gone. The other three (rD0g, rDEPg, rH1Xg; gate builds of 9286cad2, d5010dfc,
   eed4d158) are cited by no note.
+
+## Judged (step SRTJ: the target after the cost cuts, for the user's f2 decision)
+
+The user's Q2 answer (2026-10-31), verbatim: "先a看看" - measure what the cost cuts reach, then decide on f2. The
+target (SRT1's section, set by the orchestrator under Q1 "你决定"): **hard** T2' no two consecutive renders skipped
+because of session work, T3 the own ball's key-to-screen time never above two ticks (30.3 ms) because of session
+work, T4 no rebase or resync caused by a slip; T1 (a tick's work + its render <= 15.15 ms, every frame) reported.
+Judged on HEAD 606d37f6 (SRT1, SRT2 / BEAMF, SRT3, SRT4, SRT2B built; no f2), the E-core layout, snapshots off, the
+deployed defaults (trafo inputs, placement, union, session clock), the Arch server rebuilt from HEAD.
+
+- **Method.** The census build of section 2 again (`srt_diag.patch` applied to HEAD: its three `rollback.hpp`
+  hunks that no longer apply after SRT4 ported by `work/SRTJ/port_diag.py`, the whole diff kept as
+  `work/SRTJ/srtj_diag.patch`; x64 `build-agent-rSRTJd`, x86 installed for the runs; reverted, both trees rebuilt
+  clean and HEAD's x86 build re-installed in both copies). Headless (`work/SRTJ/srtj_axes.sh`, SRT's recipes):
+  four clients, 150 ms, 40 s, each pinned to 3 E-cores of its own (16-18 / 19-21 / 22-24 / 25-27): L12
+  `l12x_on2`, L11 `l11x` (HL's `work/H2/l11_args.txt` without the loss), the arena `h1_on`, and each again with
+  **human-rate keys** (`*_h`): client N plays `work/SRTJ/rec/humanN.bmrc`, four 63 s windows of the applied keys of
+  the user's trial round 1 (`work/TRIAL1/rounds/round1-holdlast`, server journal; `work/SRTJ/human_records.py`:
+  the two players from their first press and the same two 4000 ticks later; 1.59 / 0.94 / 0.92 / 3.25 key changes a
+  second, mean 1.7 - the trial's 1.3-1.5). Retail (`work/SRTJ/srtj_retail.py`, SRT's `srt_retail.py` under it:
+  copies on E-cores 16-21 / 22-27, census CSVs, checkpoint ticks 1): `ctl` = RT1's L11 ctl arm (beams 300 / 520 /
+  750 / 1100 and 340 / 600, `r0_keys.bmrc`) **with `net lag 150` on both** (the target's latency; the arm itself is
+  0 ms), `ctl_h` the same with copy 1 / 2 playing `human0` / `human1`, `l12` = RT2's SP8-e (net lag 150, sector
+  commands, no key record), `l12_h` the same with `human0` / `human1` armed. Judge: `work/SRTJ/srtj_judge.py`
+  (T1 counts, T2' longest run of skipped renders, T3 `rcensus.key_to_present` - presses spread evenly through the
+  session on a 0.25 ms grid, to the end of the render that first shows the step that read them, flip and scan-out
+  not included -, T4, and the f2 classification below); `judge_retail.txt`, `judge_headless.txt`,
+  `judge_retail_before.txt` (the same judge over SRT's / SRT1's / SRT2B's stored census sessions).
+- **What "because of session work" leaves at the bottom.** With no frame over budget the pacing alone (a key waits
+  for the next poll, then that frame's sleep and render) gives key-to-present p50 22.8, p99 31.9-32.0, max 45.6-57
+  ms and 3.3 % of presses over 30.3 ms, 0-0.06 % over 45.45 (SRT2B's `srt2b_after`, HEAD's code, the ctl arm at
+  0 ms, where the rewinds are 2-3 ticks deep and the worst frame 18.5-31.6 ms). So T3 is read on p99 / max / the
+  share over 45.45 ms against that floor, not on the raw share over 30.3 ms. The floor was measured at 0 ms on L11
+  ctl; the retail target sessions run at 150 ms (and L12), so it is the nearest measured floor, not one of the same
+  setting: a session's p99 near 31-32 ms is read as "at the floor", not as an equal measurement.
+
+### Retail (two copies; E-cores; snapshots off)
+
+| session | client | T1 frames > 15.15 / 30.3 / 45.45 (share) | max frame | T2' longest skipped run (renders skipped) | T3 key-to-present p50 / p99 / max (ms), > 30.3 / > 45.45 | T4 resyncs / rebases | rewinds; per replayed tick; restore |
+|---|---|---|---|---|---|---|---|
+| **before** `srt_ctl` (SRT, 0 ms) | c1 / c2 | 72/9/5 (2.8 %), 35/10/8 | 96.9, 254.5 | 167 (218), 125 (149) | 23.5 / 2166 / 2556, 23.4 / 2094 / 2485; 11.7 / 8.1 %, 11.1 / 7.3 % | 0/0, 1/1 | 30, 58; 3.76, 3.79 ms; 7.5, 5.2 ms |
+| before `srt_ctl2` (SRT, 0 ms) | c1 / c2 | 59/20/19, 88/16/12 | 277, 209 | 837 (840), 145 (285) | p99 12334, 1806; max 12725, 2197; 35.0 / 32.7 %, 14.6 / 11.0 % | 0/0, 1/0 (by the logs: the copy with the 837-frame run is client 2, the resync was client 1's) | 2.80-6.25 ms; 7.3-11.2 ms |
+| before `srt1_ctl` (SRT1, 0 ms) | c1 / c2 | 163/21/13, 52/12/12 | 270, 206 | 1 (173), 1 (268) | p99 120, 128; max 419, 360; 11.4 / 3.8 %, 13.0 / 2.9 % | 1/0, 0/0 | - |
+| before `srt_l12` (SRT, 150 ms) | c1 / c2 | 9/3/1, 10/3/1 | 50.0, 50.8 | 5 (7), 6 (8) | 22.8 / 31.6 / 112.8, 22.8 / 31.8 / 130.8; 3.2 / 0.50 %, 3.1 / 0.57 % | 0/0, 0/0 | 3, 3; 1.39 ms; 1.9 ms |
+| after `srt2b_after` (HEAD, ctl at 0 ms; SRT2B's run) | c1 / c2 | 14/1/0, 8/0/0 | 31.6, 18.5 | 1 (1), 0 (0) | 22.8 / 32.0 / 57.0, 22.8 / 31.9 / 45.6; 3.4 / 0.06 %, 3.3 / 0.00 % | 0/0, 0/0 | 30, 49 (2-3 ticks deep) |
+| **after `srtj_ctl`** (150 ms, scripted) | c1 / c2 | 35/6/0 (1.4 %), 43/9/0 (1.7 %) | 40.7, 42.7 | **1** (10), **1** (15) | 22.9 / 43.2 / 102.4, 22.9 / 46.7 / 87.5; 4.9 / 0.81 %, 5.4 / 1.13 % | **0/0, 0/0** | 31, 42; 0.75, 0.77 ms; 2.3 ms |
+| **after `srtj_ctl_h`** (150 ms, human keys) | c1 / c2 | 92/10/0 (2.1 %), 109/22/0 (2.5 %) | 40.2, 40.0 | **1** (19), **1** (32) | 22.9 / 44.9 / 103.7, 22.9 / 48.3 / 104.3; 5.6 / 0.93 %, 6.1 / 1.37 % | **0/0, 0/0** | 83, 106 in 64 s; 0.69, 0.70 ms; 2.1, 2.3 ms |
+| **after `srtj_l12`** (150 ms, scripted) | c1 / c2 | 9/0/0, 9/1/0 (0.6 %) | 29.8, 31.9 | **1** (1), **1** (1) | 22.8 / 31.1 / 64.0, 22.8 / 31.1 / 65.8; 2.9 / 0.11 %, 2.8 / 0.12 % | **0/0, 0/0** | 3, 3; 0.62 ms; 1.8 ms |
+| **after `srtj_l12_h`** (150 ms, human keys) | c1 / c2 | 38/4/0 (2.4 %), 86/3/0 (5.5 %) | 37.4, 38.3 | **1** (8), **1** (5) | 22.9 / 46.5 / 78.4, 22.9 / 48.0 / 76.3; 5.9 / 1.13 %, 9.8 / 1.70 % | **0/0, 0/0** | 28, 72 in 23 s; 0.80, 0.69 ms; 1.8, 1.9 ms |
+
+- The over-budget frames now are one rewind each (SRT3: no frame held two) of 21-26 replayed ticks at 0.62-0.80 ms
+  plus a 1.5-5 ms restore, 25-43 ms in all, and, on L12, the **sector activations** (ticks 34, 231, 388-391,
+  686-688: 14.6-18.8 ms of core work with no rewind and a normal 1.5-1.8 ms capture; 6 per client scripted, 10 / 14
+  with human keys - a5, not addressed by any step: SRT measured 15.0-16.0 ms). The live frame without a rewind is
+  3.3-3.8 ms p50 of work, 4.4-5.7 ms p99. No frame over 45.45 ms in any after session (before: 1-19 per client).
+- **Per replayed tick 0.62-0.80 ms** (before 1.39 on L12, 2.80-6.25 on L11 ctl): of it capture 0.33-0.49 (SRT4's
+  light records and the whole every 8th), scripts 0.07-0.08, the step 0.04-0.07, the rest 0.16-0.20.
+- **Present-blocking (SRT1's open assumption): not reached.** The copies run `UnlockFrameRate 0` /
+  `SetMaxFrameRate 240` (BML.cfg; SRT1's note named 1 / 1200, which is `Ballance-Agent`'s). One more ctl session
+  with `SetMaxFrameRate 0` ("turn on VSync", BML's comment) on both copies (`srtj_ctl_vsync`, restored to 240 after)
+  rendered exactly as before: render p50 0.63-0.64, p99 1.09-1.46 ms, the same T1 / T2' / T3 / T4 figures as
+  `srtj_ctl` (35/4/0 and 46/8/0, longest skipped run 1, key p99 42.7 / 46.4, 0 resyncs / rebases). The display is
+  60 Hz and the game windowed (800x600): the render time is unchanged (p50 0.64 ms), so the present did not appear
+  to block (no present-wait time was measured), and whether a blocking present (a driver-forced VSync, a full-screen game) breaks
+  f1's catch-up stays unmeasured; producing one needs a driver setting this step may not change (no system
+  setting is changed, section 2).
+
+### Headless (four clients pooled, E-cores, 150 ms)
+
+| arm | frames | T1 frames > 15.15 / 30.3 / 45.45 (share) | max frame | longest run behind > 1 tick (frames) | T4 resyncs / rebases | rewinds; per replayed tick; restore | before (SRT, section 3.1) |
+|---|---|---|---|---|---|---|---|
+| L12 `l12x_on2` | 6382 | 57/45/29 (0.9 %) | 60.6 | 7 | 0 / 0 | 57 (none two in a frame); 1.37 ms; 2.9 ms | 54/54/44, max 294, 21 frames with 2-6 rewinds, 1.87 ms a tick |
+| L11 `l11x` | 6911 | 43/23/13 (0.6 %) | 61.9 | 3 | 0 / 0 | 43; 1.25 ms; 2.6 ms | - (no SRT L11 arm) |
+| arena `h1_on` | 8462 | 125/49/16 (1.5 %) | 80.8 | 13 | 0 / 0 | 144; 0.82 ms; 4.2 ms | 117/93/68, max 110 |
+| L12 human `l12x_h` | 6703 | 405/300/20 (6.0 %) | 73.4 | 9 | 0 / 0 | 404 in 26 s; 1.03 ms; 3.1 ms | - |
+| L11 human `l11x_h` | 7266 | 432/55/0 (5.9 %) | 41.3 | 4 | 0 / 0 | 432; 0.73 ms; 2.8 ms | - |
+| arena human `h1_h` | 8206 | 288/0/0 (3.5 %) | 26.8 | 1 | 0 / 0 | 494; 0.44 ms; 2.0 ms | - |
+
+Every harness VERDICT PASS, the server journal replayed N/N with 0 checkpoint mismatches, starved / far 0. Every
+headless frame over 15.15 ms is a rewind frame (but one `post` frame in `l12x_h`). The headless frame is dearer than
+retail's for the same rewind (the scripted L12 rewind frame 54-61 ms: replay 36-45 + post_step 11-14 ms; the
+replayed tick's "rest" 0.54 ms includes the headless-only blob diff of the first 8 rewinds, section 3.1), so the
+retail rows are the player-facing ones. Human-rate keys multiply the rewinds by 3-8 (4-5 a second per client with
+three human remotes, section 3.5's estimate), and so T1's count; they do not deepen a rewind (d 21-30).
+
+### Per criterion and level (after; met = on every client of every session of that level)
+
+| criterion | L11 retail (ctl, 150 ms) | L12 retail (150 ms) | headless L11 / L12 / arena | before |
+|---|---|---|---|---|
+| **T2'** no two consecutive renders skipped | **met** (longest run 1, scripted and human) | **met** (1) | n/a (no render; behind > 1 tick for at most 3-13 frames in a row) | not met: runs of 125-837 frames (SRT); met since SRT1 |
+| **T3** key-to-screen never above two ticks because of session work | **not met**: p99 43-48 ms, max 87-104 ms, 0.8-1.4 % of presses over 45.45 (floor 0-0.06 %) | **not met**: scripted p99 31.1 (= the floor) but max 64-66 ms, 0.11-0.12 % over 45.45; human p99 46.5-48.0, max 76-78, 1.1-1.7 % | n/a (no screen); frames over 30.3 ms (a key polled in one waits its length): 23-300 per arm | L11 p99 1.8-12.3 s, max 2.2-12.7 s (SRT); 120-128 / 360-419 ms (SRT1); L12 p99 31.6-31.8, max 113-131 ms |
+| **T4** no rebase / resync from a slip | **met** (0 / 0) | **met** | **met** (0 / 0 on all 24 clients) | not met: 1 rebase + 2 resyncs in SRT's two E-core ctl runs, 1 resync in SRT1's |
+| T1 (reported) every frame <= 15.15 ms | not met: 1.4-2.5 % of frames, max 40-43 ms | not met: 0.6 % scripted (activations + 3 rewinds), 2.4-5.5 % human, max 30-38 ms | not met: 0.6-6.0 %, max 27-81 ms | L11 1.4-6.3 %, max 96-277 ms; L12 0.6 %, max 50-51 ms |
+
+**Not met: T1 and T3**, on every level, scripted and human. What the cost cuts reached: the worst retail frame
+from 96-277 ms (L11) / 50 ms (L12) to 30-43 ms; no frame over 45.45 ms; T2' and T4 met; per replayed tick 2.2-8x
+cheaper. What is left is the single rewind at 150 ms: d = 21-26 ticks x 0.62-0.80 ms + restore 1.5-5 ms + the live
+frame ~3.7 ms + render ~0.6 ms = 25-43 ms, i.e. about two ticks - so a key pressed during one waits up to three
+frames (the T3 tail), and a frame inside 15.15 ms needs the rewind itself under ~11 ms (15.15 - 3.7 - 0.6): **at
+d = 24 that is <= ~0.37 ms per replayed tick including the restore's share, about half of today's**, or a cheaper
+restore and live frame. On L12, also the sector activations (15-19 ms with no rewind: a5).
+
+### What f2 would still buy (bounded)
+
+f2 (section 4's row): a correction that does not touch the own ball waits, and is applied later from the same
+anchor - deeper. Without a second world it cannot be split across frames, so it can only **batch**: several
+deferred corrections share one deeper rewind.
+
+- **Which frames it could touch** (`srtj_judge.py`: each over-budget rewind frame's reasons from the client log's
+  `rollback to tick` lines; "own" = a reason naming the own ball or life; "near" = the corrected remote ball came
+  within 8 m of the own ball between the anchor and the frame, from the client journal's rows - f2's conditions (1)
+  / (2) force those; "far" = everything else, an UPPER bound, since a remote touching a mechanism the own ball rides
+  is not seen): retail L11 ctl 26 / 34 of the 35 / 43 over-budget frames far, human 78 / 94 of 92 / 109, L12
+  scripted 1 of 9 (the rest are activations and near rewinds), human 26 / 68 of 38 / 86. No "own" frame in any
+  after session. What f2 can never defer: the max over-budget frame that is not "far" is 29.8-40.7 ms on every
+  retail client - **T3's tail does not move with f2**; T1's max falls only where the max frame was itself far
+  (2 of 8 clients, below) and then only to that kept maximum.
+- **What batching does to them** (`work/SRTJ/f2_model.py`, physics-free, on the retail census: the far corrections
+  deferred; a batch opened by the first, joined by every far correction within D ticks, applied at the deadline as
+  one rewind of depth d0 + D at the client's measured restore and per-tick cost, plus the live frame and render;
+  `f2_model.txt`): D = 10 ticks: ctl 34 -> 25 and 26 -> 20 rewinds of 30.5-34.7 ms, human 78 -> 56 and 94 -> 56 of
+  27.9-34.3 ms, L12 human 26 -> 18 and 68 -> 46 of 28.2-37.0 ms; frames over 15.15 down 0-35 % (17-35 % where far
+  corrections exist; L12 scripted 9 -> 9), frames over 30.3
+  ms UP (ctl 9 -> 27, 6 -> 22; human 10 -> 22, 22 -> 35; L12 human 4 -> 18, 3 -> 25); the max rises on no client
+  and falls on two whose max frame was a far correction (ctl client 2 42.7 -> 35.1, ctl_h client 2 40.0 -> 34.3 ms,
+  -5.7 to -7.6 ms; L12 human client 1 37.4 -> 37.0), unchanged on the rest. D = 25: over 15.15 down 0-54 % (34-54 %
+  where far corrections exist), every batch 36.5-48.9 ms, the max up by 3.4-11.5 ms on every client (L12 human
+  37.4 -> 48.9), so frames over 45.45 come back. The model leaves out the forced applies of condition (2) and the re-evaluation
+  replays, so it is the most f2 could reach.
+- So on the frames left over **f2 trades fewer over-budget frames for deeper ones**: it cannot bring a single frame
+  inside 15.15 ms (a deferred correction is still one whole rewind in one frame), it does not touch the non-far
+  29.8-40.7 ms frames that set T3's tail, and with a deferral long enough to batch it makes the remaining frames
+  longer (over 30.3 and 45.45 ms) - the opposite of T3. Its gain is T1's count (0 to -54 %), and at a short
+  deferral (D = 10) T1's max on the two clients whose max frame was far (-5.7 / -7.6 ms); never T3.
+
+### A FINAL-row divergence the human-key L11 run exposed (not a target figure; for the orchestrator's queue)
+
+`rt1_judge.py` / `BEAMF/rowdiff.py` on the after sessions (`work/SRTJ/final_rows.txt`): `srtj_ctl` and
+`srtj_l12_h` keep the known signature (positions 0 m in every class, mechanisms 23/23 and 14/14 bit-equal,
+rotation-only rows <= 2.1e-8, pieces from 460 as RTR), but **`srtj_ctl_h` client 2's own ball differs in position
+from the server's from tick 507 to 598: 3.46 cm at 508, 2.0-2.8 cm through 598** (until its beam at 600 remakes it),
+and its mirror of client 1's ball 1.1-1.6 cm at 508-518; client 1's world is bit-equal to the server in both balls.
+`work/SRTJ/rowticks.py` and the journals' rows: client 2's own ball came out of its trafo (stone, physicalized at
+507, the game's trafo script live, `make_own` in the replays that cross 507) about 1.5 m from client 1's stone
+ball, which had come out of the same trafo at ~460 and still sat at its exit (both players were beamed into that
+trafo by the recipe, 300 / 340, and the human keys did not drive them away) - the two balls overlap at the birth.
+In the server's world the overlap is resolved in step 507 (the newborn moves (-0.030, +0.028, +0.021) m from its
+event pose, client 1's ball is pushed (+0.010, -0.002, -0.017) m: the server's received row at 507); in client 2's
+world neither moves at 507 (own ball (60.9513, 8.0814, -12.5775) = the event pose less one tick of fall; the
+mirror continues its own motion), and the live row and the final row of 507 agree, so the live birth and the
+replayed birth do the same thing and both differ from the server and from client 1 (where this ball is a mirror,
+born by the remote path: bit-equal). In client 2's final rows the own ball first rises at 508 (8.0814 -> 8.0972):
+the contact acts one tick late. **Symptom**: an own ball born overlapping another ball diverges from the server
+from its birth tick, by centimetres, until the next remake. **Where, as far as measured**: a trafo's new ball is
+inserted with its pairs to other player balls refused (the spawn ghost's pair filter, `physics_state.cpp`
+`spawn_ghost_filter`), and the spawn-ghost layer's PSI listener makes them at the next PSI start - the body "came
+to a solid group", is "resumed solid" and rechecked (`recheck_collision_filter`) when its overlap-tree sphere meets
+another player ball's (`spawn_ghost_listener::event_PSI`, `physics_state.cpp` ~4242-4352: `++state->resumed` 4281, the recheck 4348; steps SPGH / SPGH2). The
+server did that here: its log's cumulative counters went from "2 births, 1 resumed solid, 2 solidified, 0
+rechecks" at 467 (client 1's trafo ball, nothing near) to "2 resumed solid, ... 1 rechecks" at 507 - this birth,
+rechecked, so the pair existed in step 507. In client 2's world the own ball read solid after the frame (no "own
+ball ... is a spawn ghost" transition logged at 507, so it was not left a first-life ghost and no overlap wait was
+counted: 0 in the session) but its pair with the mirror acted only at 508. So either the resumed own newborn was
+not rechecked at 507's first PSI or the recheck's `close_by` test (the two overlap-tree spheres) failed for it -
+the own newborn's collision bookkeeping (its overlap element) differing from the server's clone, i.e. the class of
+SFD's cause (A) (the own ball's collision state differing from every copy of it from its birth tick; a known
+residual waiting for the user), here on retail and visible as a position because the newborn is in contact. The
+spawn ghost was checked: no ghost applies at 507 (the trafo exit is outside the 6 spawn areas; the own ball was
+solid from 340, the mirror from 322, in client 2's log). **Not established**: which of the two (no recheck, or a
+recheck that found the spheres apart), what in the own-birth path makes the overlap element differ, and whether a
+pre-cost-cut build does the same (no earlier run had two balls born overlapping; SRT3 / SRT4 / SRT2B change
+neither the birth nor the step: the rows 508-518 come from the replay anchored at 504, a whole record, no rebase).
+What would settle it: a probe of the overlap elements and of the listener's recheck decision at the birth PSI in
+both worlds (OWNB's `BMMO_HULL_PROBE=Ball` rows on client 2 against a SimTool replay of the server journal with the
+same probe), and a headless arm with two balls born overlapping out of one trafo (a deterministic reproduction).
+Left for the orchestrator's queue (world agreement, beside (A)); this recipe (`srtj_retail.py ctl_h`) reproduces
+the setting. **Open, not root-caused; queued in roadmap.md section 4 item 5 (FULL step SRTJ).** This step changed no
+code, so it cannot be its cause; whether an earlier build does the same is not shown (no earlier run had two balls
+born overlapping).
+
+### For the user (blocked_on_user)
+
+- **Is the target met?** T2' and T4: yes, everywhere (L11 / L12 retail at 150 ms, scripted and human-rate keys;
+  every headless arm). T3: no - the key-to-screen p99 is 43-48 ms with human keys (31.1 ms, the pacing's own floor,
+  only on the scripted L12 session) and the max 64-104 ms, because one rewind at 150 ms is 25-43 ms on the E-cores.
+  T1 (reported): 0.6-5.5 % of retail frames over 15.15 ms, none over 45.45.
+- **f2?** By the bound above it buys T1's count (0 to -54 %; at D = 10 also T1's max on 2 of 8 clients, -5.7 /
+  -7.6 ms) and makes the remaining frames longer (at D = 25 the max +3.4 to +11.5 ms); it does not move T3. The options as measured: (i) take the target as met in its hard part T2' / T4 and relax T3 to the
+  measured tail (e.g. "p99 <= 50 ms, never over ~105 ms at 150 ms"); (ii) more cost cuts aimed at T3 - the single
+  rewind under ~11 ms needs about half today's replayed-tick cost (SRT4's options (b) deeper sparse capture, (c) the
+  replayed tick's non-capture bookkeeping, (e) a cheaper whole record) plus the L12 activations (a5); this scales
+  with the machine as section 4.1 says; (iii) f2 as designed (measured above: fewer over-budget frames, the
+  remaining ones as long or longer, T3's tail unchanged); (iv) a different budget mechanism (none feasible without a second world, section 4
+  b / c). The choice and the target's final terms are the user's.
+
+### Checks run, artifacts, not done
+
+- Builds: x64 BUILD-OK DEPS-OK and x86 CLIENT-BUILD-OK with the census patch (`build-agent-rSRTJd`); the patch
+  reverted and both trees rebuilt clean (BUILD-OK, CLIENT-BUILD-OK, build id `...bmmo-606d37f62095`), HEAD's x86
+  build re-installed in both copies; the Arch server built from HEAD (ARCH-BUILD-OK). No product file changed: no
+  unit test, GCC check or wire check was due (the step's only tree change is this note and the status lines).
+- Live (one at a time, sampler beside: host max 17.8-27.9 %, worst outside process 1.0-3.5 %): 6 headless arms
+  (`maps/arena-test/cpu_full/srtj_E_*`, census CSVs `work/SRTJ/live/`), 5 retail sessions (`scripts/retail/srtj_ctl`,
+  `srtj_ctl_h`, `srtj_l12`, `srtj_l12_h`, `srtj_ctl_vsync`). The plan section's run set (L11 / L12 / arena headless,
+  retail L11 ctl and L12, scripted and human) set the count, not the quick tier's two-run cap; the vsync session is
+  SRT1's deferred present-blocking check.
+- Not covered: four members on retail (two copies; the headless arms carry the four-member count), a retail arena
+  session (it needs the slot-13 builds, CMAP retires that), a present that blocks on vblank (above), a P-core
+  retail session.
