@@ -951,11 +951,16 @@ namespace bmmo::session {
             msg.first_tick = s.input_history_.front().first;
             for (const auto& [t, fr]: s.input_history_) msg.frames.push_back(fr);
             remember_sent(msg);
+            // Step EVI (protocol 25): our own P / U / Sector / Trafo events
+            // ride the datagram until it no longer carries their stamp's
+            // frame (event_piggyback.hpp).
+            s.own_piggyback_.prune(s.input_history_.back().first);
+            s.own_piggyback_.attach(msg);
             msg.serialize();
             platform_.send(msg.raw.str(), send_mode::unreliable_no_delay);
             ++s.inputs_sent_;
-            // The unreliable copies of our recent lifecycle events, one per
-            // frame (send_event; protocol 6).
+            // The unreliable copies of our recent BodyRevived / Finish
+            // events, one per frame (send_event; protocol 6; DX8's schedule).
             s.own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
                 platform_.send(bytes, send_mode::unreliable_no_delay);
             });

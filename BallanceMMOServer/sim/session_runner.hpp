@@ -640,6 +640,12 @@ namespace bmmo::sim {
                           uint64_t anchor_surfaces, uint32_t first_tick, uint64_t anchor_placement = 0);
 
         void run();
+        // ONE FIFO queue for every command, run in posting order.  Relied on
+        // (step EVI, protocol 25): the server's handle_session_input posts a
+        // datagram's piggybacked events (submit_event) before its frames
+        // (submit_input), so a frame never reaches the simulation thread
+        // ahead of an event stamped at it; a second queue or any reordering
+        // here would make piggybacked events late again.
         void post(std::function<void()> command);
         void step(session_state& s);
         void emit_snapshot(session_state& s, bool full);

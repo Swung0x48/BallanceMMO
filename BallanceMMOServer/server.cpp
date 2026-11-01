@@ -33,6 +33,7 @@
 #include "sim/assign_copies.hpp"
 #include <physics/physics_state.hpp>
 #include <session/lifecycle.hpp>
+#include <session/event_piggyback.hpp>   // step EVI: the input datagram's events (protocol 25)
 #include <session/input_relay.hpp>
 #include <session/member_lives.hpp>
 #include <session/mechanism_units.hpp>
@@ -2657,8 +2658,21 @@ public:
     // when the age matters - every member's queued datagrams would otherwise
     // read late together - so a long age is kept, clamped to 10 s; only a
     // missing or negative timestamp degrades to "now".
-    void handle_session_input(HSteamNetConnection c, const bmmo::session_input_msg& msg,
+    //
+    // Protocol 25 (FULL step EVI, late-player-design.md §3.4 option (b)): the
+    // datagram's piggybacked lifecycle events go through the event intake
+    // (handle_session_event: the events_seen dedupe first - a piggybacked
+    // copy and the reliable one are one key, the second counted in
+    // duplicate_events - then the BodyRevived drop, the per-second rate
+    // limit and the guards, exactly as a reliable copy) BEFORE the frames
+    // are submitted: both post to the runner's queue in this order, so a
+    // present frame T always comes with the events stamped T (this relies
+    // on the runner's one FIFO command queue, session_runner::post).  Receivers
+    // never depend on copy order (lifecycle.hpp, step HLX): a piggybacked
+    // copy may come before or after the reliable one.
+    void handle_session_input(client_data_collection::iterator client_it, const bmmo::session_input_msg& msg,
                               SteamNetworkingMicroseconds received) {
+        const HSteamNetConnection c = client_it->first;
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto arrival = std::chrono::steady_clock::now();
@@ -2667,7 +2681,9 @@ public:
         if (received > 0 && age > 0)
             arrival -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::microseconds(age < kMaxAge ? age : kMaxAge));
-        runner_->submit_input(msg.session, c, msg.first_tick, msg.frames, arrival);
+        bmmo::session::take_input_datagram(
+                msg, [&](bmmo::session_event_msg& event) { handle_session_event(client_it, event); },
+                [&] { runner_->submit_input(msg.session, c, msg.first_tick, msg.frames, arrival); });
     }
 
     static void copy_name(char* out, size_t size, const std::string& text) {
@@ -2684,10 +2700,21 @@ public:
         // goes by `tick`.
         msg.origin_tick = msg.tick;
         msg.state = 0;
-        // The member sends every event several times (protocol 6): the first
-        // arrival is the event, the rest are nothing - not a rate-limit hit,
-        // not a second submit, not a second relay.
-        if (!s.events_seen.first(bmmo::session::lifecycle_key_of(msg, c))) {
+        // The member sends every event several times (protocol 6; from
+        // protocol 25 also inside every input datagram that carries its
+        // frame): the first arrival is the event, the rest are nothing - not
+        // a rate-limit hit, not a second submit, not a second relay.  The
+        // dedupe-then-rate order is the shared event_intake_admit
+        // (event_piggyback.hpp), which the unit test exercises: the
+        // per-second rate window (design 9.4) counts each event once.  A
+        // BodyRevived passes the dedupe without counting toward the window.
+        auto& guard = s.guards[c];
+        const uint32_t rate_limit = config_.physics_event_rate_limit;   // 0 = no limit
+        const auto intake = bmmo::session::event_intake_admit(
+                s.events_seen, bmmo::session::lifecycle_key_of(msg, c),
+                msg.type != bmmo::session::event_type::BodyRevived, guard.events_in_window, guard.window_start,
+                std::chrono::steady_clock::now(), rate_limit);
+        if (intake == bmmo::session::event_intake::duplicate) {
             ++s.duplicate_events;
             return;
         }
@@ -2697,7 +2724,6 @@ public:
         // relayed, counted, and the first of each member noted in the log
         // and the journal.
         if (msg.type == bmmo::session::event_type::BodyRevived) {
-            auto& guard = s.guards[c];
             if (guard.revived_ignored++ == 0) {
                 const std::string text = Sprintf("BodyRevived from %s ignored (world option proximity union): %s at %u",
                                                  client_it->second.name, msg.name.c_str(), msg.tick);
@@ -2715,16 +2741,9 @@ public:
         event.sector = msg.sector;
         event.name = msg.name;
         {
-            // Design 9.4.  Rate limit: hard reject.  Everything else: log + count.
-            auto& guard = s.guards[c];
-            const uint32_t rate_limit = config_.physics_event_rate_limit;   // 0 = no limit
-            const auto now = std::chrono::steady_clock::now();
-            if (now - guard.window_start > std::chrono::seconds(1)) {
-                guard.window_start = now;
-                guard.events_in_window = 0;
-            }
-            ++guard.events_in_window;
-            if (rate_limit != 0 && guard.events_in_window > rate_limit) {
+            // Design 9.4.  Rate limit: hard reject (counted above, after the
+            // dedupe).  Everything else: log + count.
+            if (intake == bmmo::session::event_intake::rate_limited) {
                 if (guard.events_in_window == rate_limit + 1) {
                     ++s.rejected_events;
                     Printf("Physics session %u: %s sends more than %u events per second; dropping the excess.",
@@ -4384,7 +4403,7 @@ protected:
             }
             case bmmo::SessionInput: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::session_input_msg>(networking_msg);
-                handle_session_input(networking_msg->m_conn, msg, networking_msg->m_usecTimeReceived);
+                handle_session_input(client_it, msg, networking_msg->m_usecTimeReceived);
                 break;
             }
             case bmmo::SessionEvent: {

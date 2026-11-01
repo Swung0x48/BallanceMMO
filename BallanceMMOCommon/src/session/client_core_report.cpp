@@ -270,7 +270,7 @@ namespace bmmo::session {
             static_cast<unsigned long long>(rs.sparse_unanchored),
             static_cast<unsigned long long>(rs.sparse_verified), static_cast<unsigned long long>(rs.sparse_verify_mismatches),
             static_cast<unsigned long long>(rs.sparse_verify_float), static_cast<unsigned long long>(rs.sparse_verify_stale));
-        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu superseded=%llu/%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
+        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu piggy=%llu/%llu/%llu/%zu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu superseded=%llu/%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                      "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu unmatched_run=%d/%llu far=%llu frozen=%llu globals=%llu/%llu/%llu/%llu/%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu parked=%llu missing=%llu lives=%llu/%llu/%llu/%llu/%llu/%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
@@ -284,6 +284,14 @@ namespace bmmo::session {
                      static_cast<long long>(s.frames_since_anchor_),
                      static_cast<unsigned long long>(s.inputs_sent_), static_cast<unsigned long long>(s.events_sent_),
                      static_cast<unsigned long long>(s.events_received_), static_cast<unsigned long long>(s.event_dups_),
+                     // piggy=carried/dropped/expired/max_bytes (FULL step EVI, protocol
+                     // 25): own event copies put into input datagrams, copies the
+                     // byte budget left out (kInputDatagramBudget), entries whose
+                     // window ended, and the largest input datagram assembled.
+                     static_cast<unsigned long long>(s.own_piggyback_.counters().carried),
+                     static_cast<unsigned long long>(s.own_piggyback_.counters().dropped),
+                     static_cast<unsigned long long>(s.own_piggyback_.counters().expired),
+                     s.own_piggyback_.counters().max_bytes,
                      // echo=acked/moved/superseded/rejected/missing: our own events as the
                      // server echoed them back (protocol 9).
                      static_cast<unsigned long long>(s.own_echo_acked_), static_cast<unsigned long long>(s.own_echo_moved_),

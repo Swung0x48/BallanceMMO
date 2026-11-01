@@ -2698,6 +2698,108 @@ stamped a few ticks ahead, as with `sector_lead`. That delays the owner's own
 ball by those ticks in the retail game, where the scripts expect it at once.
 If A0j fails, this is the next lever.
 
+*As built (step EVI, FULL, 2026-11-01): option (b) - the own lifecycle events
+ride the input datagram, protocol 25.* **The wire**: `session_input_msg`
+(`message/session_input_msg.hpp`) ends, after the frames, with `nevents` u8
+(at most `MAX_INPUT_EVENTS` = 16, `entity/session.hpp`) and per event a u16
+length and the event's whole serialized `session_event_msg` (its opcode
+included: the very bytes of its reliable copy). `nevents` is required: a
+protocol-24 datagram (it ends after the frames) does not parse, nor does a
+count over the cap, a length past the end, or an event that does not parse
+as a `session_event_msg`. **Adapted**: the plan named protocol 24 (the next
+free number at e9101c68); SAXH took 24 (17972046), so EVI is **25**; the
+wire check ran on `core_ref_s14` (CMAP's set; `core_ref_s13` is refused since
+CMAP) with `--accept-protocol 24`. Journal version unchanged (v9). **The
+client core** (`session/event_piggyback.hpp`, `client_core.cpp`
+`put_event_on_wire`, both datagram builders - `flush_inputs` and the frame
+path of `client_core_frame.cpp`): the reliable no-Nagle copy still goes; a
+Physicalize, Unphysicalize, Sector or Trafo then goes into the piggyback list
+instead of DX8's separate unreliable copies, and every input datagram carries
+the live entries, newest last. An entry's window is fixed by the first
+datagram after its send: it rides while the datagram's newest frame is at or
+before `max(stamp, that datagram's newest frame) + 7` - for an event stamped
+L or L + 1 (the own births and deaths) and for the lead-stamped Sector and
+Trafo exactly the datagrams that carry the stamp's frame (every one of them,
+from the send on: the lead-stamped ones from their send, about lead + 8
+datagrams); **adapted** for an event released after its window (a held event,
+R6H's `hold-event`; `core_ref_s14`'s a6m_snapoff c2 releases a Physicalize
+stamped 2482 at 2501): it rides the eight datagrams after its send, never
+fewer than DX8's seven copies, instead of none. BodyRevived and Finish keep
+the reliable copy plus DX8's repeats (`kOwnEventRepeats` and its schedule
+unchanged; the server relay's `kLifecycleEventRepeats` 6 untouched). The
+list is cleared with the session and at a renumbering (a resync's or the
+first assignment's new base: the stamps are the old numbering's, their
+reliable copies went; an event sent in that gap gets its reliable copy alone,
+where DX8's copies went on through the assignment - none occurred in the 44
+reference replays, the resync arms included: trace_diff's never-carried count
+is 0; if one matters, the entry can instead ride the eight datagrams after the
+new base like a late-released one). **Trafo rides** and **the lead-stamped types start at
+the send**: the budget never binds. Measured sizes (unit test
+`SessionInputMsg.PiggybackedEventSizesFitTheBudget`): an 8-frame datagram 326
+B with no event (325 before: the `nevents` byte), Unphysicalize 24 B, Sector
+28, Trafo 38, a retail-shaped Physicalize 140; 8 frames + U + P + Sector +
+Trafo = 564 B against the 1100-byte budget (`kInputDatagramBudget`); over it
+the oldest piggybacked event is left out of that datagram only (it stays for
+the next; the reliable copy travels) and counted. Status line: ` piggy=
+carried/dropped/expired/max_bytes` after `events=`. **The server**
+(`server.cpp` `handle_session_input`, through `take_input_datagram` of
+`event_piggyback.hpp`): every piggybacked event goes through
+`handle_session_event` - the `events_seen` dedupe first (a piggybacked copy
+and the reliable one are one key: the second counts in `duplicate_events`),
+then the per-second rate limit (one count per event after the dedupe; a
+BodyRevived passes the dedupe without counting and is dropped as before) -
+both in one shared function, `event_intake_admit` of `event_piggyback.hpp`
+(the window itself `event_rate_admit`, moved out of the function unchanged),
+which the server and the intake unit test both call - then the guards -
+BEFORE `runner_->submit_input`; both post to the runner's ONE FIFO command
+queue (`session_runner::post`, whose comment says the order is relied on), so
+a present frame T always comes with its events. HLX's invariant holds: no
+receiver depends on which copy came first.
+**Checks**: unit tests 758/758 (new: `SessionInputMsg.PiggybackedEventsRoundTrip`
+0..4 events and every truncation, `...SizesFitTheBudget`,
+`...PreviousProtocolAndForgedEventsRefused`, `EventPiggyback.WindowAndBudgetDrop`
+(the window, a late-released event, the budget drop),
+`EventPiggyback.ServerIntakeEventsBeforeFramesDedupeAndRateOnce` (a
+piggybacked P before its frame, the next datagram's copy and the reliable
+duplicate counted as duplicates, the rate limit counting each event once,
+P / U of one origin in either order); `SessionClientCoreFlow.EventsAndInputsGoOut`
+rewritten for the piggyback); GCC syntax 33/33 (server.cpp is not in that
+list: the Arch build compiled it, ARCH-BUILD-OK); x64 BUILD-OK, x86
+CLIENT-BUILD-OK. **The model** (`.local-tools/work/EVI/lcm_model.py`, DX8's
+extended with the piggyback rule: on time if the reliable copy passed or any
+datagram carrying the stamp's frame passed before the server's step; no
+coalescing assumption - the event is inside the datagram), late per 1000
+events at 10 % loss, old / DX8 / EVI: burst 1 9.1 / 0.1 / 0; burst 2 50 / 2.7
+/ 0-0.01; burst 3 35 / 2.4-3.7 / 0.04-0.06; burst 4 50 / 26 / 0.04-0.12;
+bursts 6 and 8 50 / 34-39 / 1.2-1.5 (what remains: every one of the eight
+datagrams carrying the frame lost, and the reliable copy - the frame itself
+is then substituted). F3's and DX8's recorded runs: 86 events, late 2 / 0 /
+0 (F3 seed 1 c2's beam at 700 and DX8 burst-2 c0's death at 864 on time).
+**The wire check** rLBD -> rEVI over `core_ref_s14`: 45 journals IDENTICAL,
+0 coverage-short; 44 send traces DIFFERENCES by design, all 44 EXPLAINED by
+`.local-tools/work/EVI/trace_diff.py` (old minus the unreliable copies of the
+piggybacked events = new line for line, except the SessionReady and every
+input datagram, grown by 1 + the bytes of the events in their windows; every
+event carried in 8 to 74 datagrams); `piggy=` over the 44 replays: dropped
+0, largest datagram 621 B. **Live** (two runs, the QUICK cap): F3's recipe
+(`swing_snapoff`, 150 ms, 10 % loss, burst 2, seed 0 - DX8's cell;
+`.local-tools/work/EVI/evi_run.sh`, `maps/arena-test/evi_lcm/b2_seed0`): 0
+late member events (52; S5 margin local + 1 0..3, lead 35..37), resyncs 0/0
+on all four, far 0, own echoes moved 0, VERDICT PASS (server replay
+3899/3899), `piggy=` dropped 0, largest 500 B; one retail two-copy L11
+session (`.local-tools/work/EVI/evi_retail.py`, `scripts/retail/evi_l11`:
+`net lag 150` on both copies, six own beams alternating between the copies,
+each with an uplink blackout of its copy, 60 / 90 ms, armed one tick before
+the beam - the reliable copy and the first datagrams carrying the stamp's
+frame lost): all 14 member events late 0, S5 margin 0..2, resyncs 0/0,
+echoes 7/7 acked, 0 moved, FINAL rows bit-equal to the server (own 1/1,
+mirror 1/1, mech 15/15 on both copies), server replay 1382/1382, `piggy=`
+56 / 0 dropped / largest 499 B. **Deferred** (QUICK's two-run cap): F3's
+live seed sweep old vs new (seeds 0 / 1 / 2, bursts 1 / 2 / 4; the old arm
+needs HEAD's binaries against a protocol-24 Arch server of HEAD's tree - a
+DX8 binary cannot join a protocol-25 server), late member events, S5 margins
+and resyncs per run, for the close-out's batches.
+
 ### 3.5 Retail mod
 
 - **Remote events at T'** work as today; `event.tick` drives the impulse

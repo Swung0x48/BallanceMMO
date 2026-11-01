@@ -17,6 +17,9 @@
 #include <message/message_all.hpp>
 #include <message/message_utils.hpp>
 #include <session/lifecycle.hpp>
+#include <session/event_piggyback.hpp>
+
+#include <cstdio>
 
 namespace {
 
@@ -149,7 +152,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(24u, bmmo::session::PHYSICS_PROTOCOL_VERSION);   // step RK3H: the frame-9 hold (22); step WFA: the force block aliases (23); step SAXH: the start handshake (24)
+    EXPECT_EQ(25u, bmmo::session::PHYSICS_PROTOCOL_VERSION);   // step RK3H: the frame-9 hold (22); step WFA: the force block aliases (23); step SAXH: the start handshake (24); step EVI: events on the input datagram (25)
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -447,9 +450,10 @@ TEST(SessionInputMsg, DeserializeRejectsFrameCountAboveCap) {
     msg.frames.clear();
     ASSERT_TRUE(msg.serialize());
     std::string payload = stream_payload(msg.raw);
-    payload.resize(payload.size() - sizeof(uint8_t));
+    payload.resize(payload.size() - 2 * sizeof(uint8_t));   // count and (protocol 25) nevents
     const uint8_t forged_count = static_cast<uint8_t>(bmmo::session::MAX_INPUT_FRAMES + 1);
     payload.append(reinterpret_cast<const char*>(&forged_count), sizeof(forged_count));
+    payload.push_back(0);   // nevents 0
 
     bmmo::session_input_msg parsed{};
     parsed.raw.write(payload.data(), static_cast<std::streamsize>(payload.size()));
@@ -462,13 +466,206 @@ TEST(SessionInputMsg, DeserializeRejectsFrameCountLargerThanRemaining) {
     msg.frames.clear();
     ASSERT_TRUE(msg.serialize());
     std::string payload = stream_payload(msg.raw);
-    payload.resize(payload.size() - sizeof(uint8_t));
-    const uint8_t forged_count = 3; // within the cap, but no frame data follows
+    payload.resize(payload.size() - 2 * sizeof(uint8_t));   // count and (protocol 25) nevents
+    const uint8_t forged_count = 3; // within the cap, but no frame data follows (the nevents byte is read as frame data)
     payload.append(reinterpret_cast<const char*>(&forged_count), sizeof(forged_count));
+    payload.push_back(0);
 
     bmmo::session_input_msg parsed{};
     parsed.raw.write(payload.data(), static_cast<std::streamsize>(payload.size()));
     EXPECT_FALSE(parsed.deserialize());
+}
+
+// ---------------------------------------------------------------------
+// session_input_msg's piggybacked lifecycle events (protocol 25, FULL step
+// EVI; late-player-design.md §3.4 option (b))
+// ---------------------------------------------------------------------
+
+namespace {
+
+std::string event_bytes(bmmo::session::event_type type, uint32_t stamp, int32_t sector = 0) {
+    bmmo::session_event_msg e{};
+    e.session = 3;
+    e.tick = stamp;
+    e.origin_tick = stamp;
+    e.type = type;
+    e.sector = sector;
+    if (type == bmmo::session::event_type::Physicalize) {
+        // The retail ball's recipe shape: one sphere, its surface, no meshes.
+        e.ball_type = 1;
+        e.recipe.mass = 1.f;
+        e.recipe.collision_surface = "Ball_Wood";
+        e.recipe.balls = {{{0.f, 0.f, 0.f}, 2.f}};
+    }
+    if (type == bmmo::session::event_type::Trafo) {
+        e.ball_type = 2;
+        e.position[0] = 10.f;
+    }
+    e.serialize();
+    return e.raw.str();
+}
+
+bmmo::session_input_msg input_with_frames(size_t n, uint32_t first_tick = 100) {
+    bmmo::session_input_msg msg{};
+    msg.session = 3;
+    msg.first_tick = first_tick;
+    for (size_t i = 0; i < n; ++i) {
+        bmmo::session::input_frame f{};
+        f.keys = static_cast<uint8_t>(i + 1);
+        msg.frames.push_back(f);
+    }
+    return msg;
+}
+
+} // namespace
+
+// Round trip with 0..n events: the frames as before, each event's bytes
+// exactly as its reliable copy, in order; wire_size is the serialized size.
+TEST(SessionInputMsg, PiggybackedEventsRoundTrip) {
+    using bmmo::session::event_type;
+    const std::vector<std::string> all = {
+        event_bytes(event_type::Unphysicalize, 120), event_bytes(event_type::Physicalize, 120),
+        event_bytes(event_type::Sector, 155, 3), event_bytes(event_type::Trafo, 156)};
+    for (size_t n = 0; n <= all.size(); ++n) {
+        auto msg = input_with_frames(bmmo::session::MAX_INPUT_FRAMES);
+        msg.events.assign(all.begin(), all.begin() + static_cast<std::ptrdiff_t>(n));
+        size_t bytes = 0;
+        for (const auto& e: msg.events) bytes += e.size();
+        auto parsed = round_trip(msg);
+        EXPECT_EQ(msg.size(), bmmo::session_input_msg::wire_size(msg.frames.size(), bytes, n)) << n;
+        EXPECT_EQ(parsed.first_tick, 100u);
+        ASSERT_EQ(parsed.frames.size(), bmmo::session::MAX_INPUT_FRAMES);
+        EXPECT_EQ(parsed.frames.back().keys, static_cast<uint8_t>(bmmo::session::MAX_INPUT_FRAMES));
+        ASSERT_EQ(parsed.events.size(), n);
+        for (size_t i = 0; i < n; ++i) EXPECT_EQ(parsed.events[i], all[i]);
+        // Every piggybacked event parses as the session_event_msg it was.
+        for (const auto& b: parsed.events) {
+            auto e = bmmo::message_utils::deserialize<bmmo::session_event_msg>(const_cast<char*>(b.data()),
+                                                                               static_cast<int>(b.size()));
+            EXPECT_EQ(e.session, 3u);
+        }
+    }
+    // Every truncation of a datagram with events is refused.
+    auto msg = input_with_frames(2);
+    msg.events = {all[0], all[1]};
+    expect_rejects_every_truncation(msg);
+}
+
+// The measured sizes the budget is judged against (the "As built" note
+// quotes them): an 8-frame datagram with no event, and each own event type
+// as the client core sends it (a retail-shaped one-sphere Physicalize).  A
+// beam pair plus a Sector and a Trafo stays far under the 1100-byte budget,
+// so the Trafo rides too and the lead-stamped types start at the send.
+TEST(SessionInputMsg, PiggybackedEventSizesFitTheBudget) {
+    using bmmo::session::event_type;
+    const size_t base = bmmo::session_input_msg::wire_size(bmmo::session::MAX_INPUT_FRAMES, 0, 0);
+    EXPECT_EQ(base, 326u) << "opcode 4 + session 4 + first_tick 4 + count 1 + 8 x 39 + nevents 1";
+    EXPECT_EQ(event_bytes(event_type::Unphysicalize, 1).size(), 24u);
+    EXPECT_EQ(event_bytes(event_type::Sector, 1, 2).size(), 28u);
+    EXPECT_EQ(event_bytes(event_type::Trafo, 1).size(), 38u);
+    const size_t p = event_bytes(event_type::Physicalize, 1).size();
+    EXPECT_GE(p, 100u) << p;
+    EXPECT_LE(p, 160u) << p;
+    const size_t all = base + 4 * sizeof(uint16_t) + 24 + 28 + 38 + p;
+    EXPECT_LT(all, bmmo::session::kInputDatagramBudget) << all;
+    std::printf("[ sizes    ] input datagram, 8 frames, no event: %zu B; U 24, Sector 28, Trafo 38, P %zu; "
+                "8 frames + U + P + Sector + Trafo: %zu B (budget %zu)\n",
+                base, p, all, bmmo::session::kInputDatagramBudget);
+}
+
+// "The previous protocol refused": a protocol-24 datagram ends after the
+// frames (no nevents byte) and does not parse; nor does a count over
+// MAX_INPUT_EVENTS, nor an event whose bytes are not a session_event_msg.
+TEST(SessionInputMsg, PreviousProtocolAndForgedEventsRefused) {
+    auto msg = input_with_frames(3);
+    ASSERT_TRUE(msg.serialize());
+    std::string payload = stream_payload(msg.raw);
+    {
+        std::string old = payload.substr(0, payload.size() - 1);   // what a protocol-24 build wrote
+        bmmo::session_input_msg parsed{};
+        parsed.raw.write(old.data(), static_cast<std::streamsize>(old.size()));
+        EXPECT_FALSE(parsed.deserialize());
+    }
+    {
+        std::string forged = payload.substr(0, payload.size() - 1);
+        forged.push_back(static_cast<char>(bmmo::session::MAX_INPUT_EVENTS + 1));
+        bmmo::session_input_msg parsed{};
+        parsed.raw.write(forged.data(), static_cast<std::streamsize>(forged.size()));
+        EXPECT_FALSE(parsed.deserialize());
+    }
+    {
+        auto bad = input_with_frames(1);
+        bad.events = {std::string(4, static_cast<char>(1))};   // not a SessionEvent
+        ASSERT_TRUE(bad.serialize());
+        const std::string bytes = stream_payload(bad.raw);
+        bmmo::session_input_msg parsed{};
+        parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        EXPECT_FALSE(parsed.deserialize());
+    }
+}
+
+// The client core's piggyback list (session/event_piggyback.hpp): an event
+// rides every datagram until the datagram's newest frame passes stamp + 7;
+// over the budget the OLDEST event is left out of that datagram only, and
+// counted.
+TEST(EventPiggyback, WindowAndBudgetDrop) {
+    using bmmo::session::event_type;
+    bmmo::session::event_piggyback list;
+    EXPECT_TRUE(bmmo::session::event_rides_input(event_type::Physicalize));
+    EXPECT_TRUE(bmmo::session::event_rides_input(event_type::Unphysicalize));
+    EXPECT_TRUE(bmmo::session::event_rides_input(event_type::Sector));
+    EXPECT_TRUE(bmmo::session::event_rides_input(event_type::Trafo));
+    EXPECT_FALSE(bmmo::session::event_rides_input(event_type::BodyRevived));
+    EXPECT_FALSE(bmmo::session::event_rides_input(event_type::Finish));
+
+    const std::string u = event_bytes(event_type::Unphysicalize, 121);
+    const std::string p = event_bytes(event_type::Physicalize, 121);
+    list.push(u, 121, event_type::Unphysicalize);
+    list.push(p, 121, event_type::Physicalize);
+    // Newest frame 120 (sent before the stamp's frame) .. 128 = 121 + 7:
+    // carried (frame 121 is in every one of these datagrams but the first).
+    for (uint32_t newest = 120; newest <= 128; ++newest) {
+        list.prune(newest);
+        auto msg = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, newest - 7);
+        EXPECT_EQ(list.attach(msg), 0u);
+        ASSERT_EQ(msg.events.size(), 2u) << newest;
+        EXPECT_EQ(msg.events[0], u);
+        EXPECT_EQ(msg.events[1], p);
+    }
+    list.prune(129);   // frame 121 is no longer in any datagram
+    EXPECT_EQ(list.pending(), 0u);
+    EXPECT_EQ(list.counters().expired, 2u);
+    EXPECT_EQ(list.counters().carried, 18u);
+    // An event released after its window (a held event: stamped 100, sent
+    // when the newest frame is 140) rides the eight datagrams after its
+    // send, 140 .. 147, never fewer than DX8's seven copies.
+    list.push(u, 100, event_type::Unphysicalize);
+    for (uint32_t newest = 140; newest <= 148; ++newest) {
+        list.prune(newest);
+        auto late = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, newest - 7);
+        list.attach(late);
+        EXPECT_EQ(late.events.size(), newest <= 147 ? 1u : 0u) << newest;
+    }
+    EXPECT_EQ(list.pending(), 0u);
+
+    // The budget: two events that do not both fit; the older one is left out
+    // of this datagram (it stays in the list) and counted.
+    bmmo::session::event_piggyback tight;
+    tight.push(u, 200, event_type::Unphysicalize);
+    tight.push(p, 200, event_type::Physicalize);
+    auto msg = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, 193);
+    const size_t budget = bmmo::session_input_msg::wire_size(msg.frames.size(), p.size(), 1);
+    EXPECT_EQ(tight.attach(msg, budget), 1u);
+    ASSERT_EQ(msg.events.size(), 1u);
+    EXPECT_EQ(msg.events[0], p);
+    EXPECT_EQ(tight.counters().dropped, 1u);
+    EXPECT_EQ(tight.pending(), 2u);
+    EXPECT_LE(tight.counters().max_bytes, budget);
+    ASSERT_TRUE(msg.serialize());
+    EXPECT_LE(msg.size(), budget);
+    auto roomy = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, 194);
+    EXPECT_EQ(tight.attach(roomy), 0u);
+    EXPECT_EQ(roomy.events.size(), 2u);
 }
 
 // ---------------------------------------------------------------------
@@ -1800,4 +1997,141 @@ TEST(SessionStartHandshakeMsgs, RoundTrip) {
     // Distinct sizes on the wire (the harness proxy anchors a burst on one).
     EXPECT_NE(t.raw.str().size(), a.raw.str().size());
     EXPECT_NE(t.raw.str().size(), k.raw.str().size());
+}
+
+// The server's intake of an input datagram with piggybacked events (protocol
+// 25, FULL step EVI; server.cpp handle_session_input / handle_session_event,
+// which this target cannot link): take_input_datagram hands every event to
+// the event intake BEFORE the frames are submitted, so a piggybacked P
+// stamped T reaches the runner's queue ahead of frame T; each event goes
+// through event_intake_admit, the server's own dedupe-then-rate function
+// (handle_session_event calls it: the events_seen dedupe on
+// lifecycle_key_of(msg, connection) first - origin = the stamp on the uplink
+// - then the per-second rate window), so the reliable duplicate is counted as
+// a duplicate and the rate limit sees each event once, as before protocol 25;
+// P and U of one origin are two events in either order (HLX: receivers never
+// depend on copy order).
+namespace {
+    struct intake_mirror {
+        struct window {
+            uint32_t in_window = 0;
+            std::chrono::steady_clock::time_point start{};
+        };
+        bmmo::session::event_seen seen;
+        std::map<uint32_t, window> windows;   // per member, as server.cpp s.guards[c]
+        uint32_t limit = 0;
+        uint64_t duplicates = 0, rate_limited = 0;
+        std::vector<std::string> log;   // what reached the runner's queue, in order
+
+        void take_event(bmmo::session_event_msg& msg, uint32_t connection, std::chrono::steady_clock::time_point now) {
+            msg.origin_tick = msg.tick;
+            msg.state = 0;
+            auto& w = windows[connection];
+            const auto intake = bmmo::session::event_intake_admit(
+                    seen, bmmo::session::lifecycle_key_of(msg, connection),
+                    msg.type != bmmo::session::event_type::BodyRevived, w.in_window, w.start, now, limit);
+            if (intake == bmmo::session::event_intake::duplicate) {
+                ++duplicates;
+                return;
+            }
+            if (intake == bmmo::session::event_intake::rate_limited) {
+                ++rate_limited;
+                return;
+            }
+            if (msg.type == bmmo::session::event_type::BodyRevived) return;   // dropped, not submitted
+            log.push_back(std::string(bmmo::session::event_type_name(static_cast<int>(msg.type))) + "@"
+                          + std::to_string(msg.tick));
+        }
+        void take_datagram(const bmmo::session_input_msg& msg, uint32_t connection, std::chrono::steady_clock::time_point now) {
+            bmmo::session::take_input_datagram(
+                    msg, [&](bmmo::session_event_msg& e) { take_event(e, connection, now); },
+                    [&] { log.push_back("frames " + std::to_string(msg.first_tick) + ".."
+                                        + std::to_string(msg.first_tick + msg.frames.size() - 1)); });
+        }
+    };
+}
+
+TEST(EventPiggyback, ServerIntakeEventsBeforeFramesDedupeAndRateOnce) {
+    using bmmo::session::event_type;
+    const auto t0 = std::chrono::steady_clock::time_point(std::chrono::seconds(100));
+    intake_mirror server;
+    server.limit = 2;
+    // A piggybacked P stamped 121 in the datagram whose newest frame is 121:
+    // taken before the frames 114..121.
+    auto dgram = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, 114);
+    const std::string p = event_bytes(event_type::Physicalize, 121);
+    dgram.events = {p};
+    ASSERT_TRUE(dgram.serialize());
+    const std::string wire = stream_payload(dgram.raw);
+    bmmo::session_input_msg parsed{};
+    parsed.raw.write(wire.data(), static_cast<std::streamsize>(wire.size()));
+    ASSERT_TRUE(parsed.deserialize());
+    server.take_datagram(parsed, 7, t0);
+    ASSERT_EQ(server.log.size(), 2u);
+    EXPECT_EQ(server.log[0], "physicalize@121");
+    EXPECT_EQ(server.log[1], "frames 114..121");
+    // The next datagram carries it again: a duplicate, not a second event.
+    auto next = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, 115);
+    next.events = {p};
+    server.take_datagram(next, 7, t0);
+    // The reliable copy arrives after: counted as a duplicate.
+    bmmo::session_event_msg reliable{};
+    reliable.raw.write(p.data(), static_cast<std::streamsize>(p.size()));
+    ASSERT_TRUE(reliable.deserialize());
+    server.take_event(reliable, 7, t0);
+    EXPECT_EQ(server.duplicates, 2u);
+    EXPECT_EQ(server.windows[7].in_window, 1u) << "the rate limit saw the event once";
+    EXPECT_EQ(server.log.size(), 3u);   // the second datagram's frames only
+    // Another player's identical bytes are its own event.
+    server.take_event(reliable, 8, t0);
+    EXPECT_EQ(server.log.back(), "physicalize@121");
+    // Over the limit (2 per second): the third distinct event is dropped,
+    // its copies stay duplicates of nothing - and do not count again.
+    auto u = input_with_frames(1, 122);
+    u.events = {event_bytes(event_type::Unphysicalize, 122)};
+    server.take_datagram(u, 7, t0);
+    EXPECT_EQ(server.windows[7].in_window, 2u);
+    auto s3 = input_with_frames(1, 123);
+    s3.events = {event_bytes(event_type::Sector, 158, 2)};
+    server.take_datagram(s3, 7, t0);
+    EXPECT_EQ(server.rate_limited, 1u);
+    server.take_datagram(s3, 7, t0);   // its piggybacked copy: a duplicate, not a second excess
+    EXPECT_EQ(server.rate_limited, 1u);
+    EXPECT_EQ(server.duplicates, 3u);
+
+    // P and U of one origin (a beam): two events in either order, each once.
+    for (int order = 0; order < 2; ++order) {
+        intake_mirror beam;
+        auto d = input_with_frames(2, 199);
+        const std::string bu = event_bytes(event_type::Unphysicalize, 200);
+        const std::string bp = event_bytes(event_type::Physicalize, 200);
+        d.events = order == 0 ? std::vector<std::string>{bu, bp} : std::vector<std::string>{bp, bu};
+        beam.take_datagram(d, 7, t0);
+        ASSERT_EQ(beam.log.size(), 3u) << order;
+        EXPECT_EQ(beam.log[2], "frames 199..200");
+        // The reliable copies, in the other order: duplicates both.
+        for (const auto& b: order == 0 ? std::vector<std::string>{bp, bu} : std::vector<std::string>{bu, bp}) {
+            bmmo::session_event_msg r{};
+            r.raw.write(b.data(), static_cast<std::streamsize>(b.size()));
+            ASSERT_TRUE(r.deserialize());
+            beam.take_event(r, 7, t0);
+        }
+        EXPECT_EQ(beam.duplicates, 2u) << order;
+        EXPECT_EQ(beam.windows[7].in_window, 2u) << order;
+    }
+
+    // A BodyRevived passes the dedupe without counting toward the window
+    // (the server drops it after the dedupe); its copy is a duplicate.
+    intake_mirror revive;
+    revive.limit = 1;
+    bmmo::session_event_msg br{};
+    const std::string brb = event_bytes(event_type::BodyRevived, 300);
+    br.raw.write(brb.data(), static_cast<std::streamsize>(brb.size()));
+    ASSERT_TRUE(br.deserialize());
+    revive.take_event(br, 7, t0);
+    revive.take_event(br, 7, t0);
+    EXPECT_EQ(revive.windows[7].in_window, 0u);
+    EXPECT_EQ(revive.duplicates, 1u);
+    EXPECT_EQ(revive.rate_limited, 0u);
+    EXPECT_TRUE(revive.log.empty());
 }

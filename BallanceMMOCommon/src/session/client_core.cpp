@@ -454,6 +454,7 @@ namespace bmmo::session {
         s.pending_relay_.clear();
         s.event_seen_.clear();
         s.own_event_repeats_.clear();
+        s.own_piggyback_.clear();
         s.remote_last_physicalize_.clear();
         s.remote_last_unphysicalize_.clear();
         s.own_physicalized_ = false;
@@ -887,6 +888,7 @@ namespace bmmo::session {
         s.pending_relay_.clear();
         s.event_seen_.clear();
         s.own_event_repeats_.clear();
+        s.own_piggyback_.clear();
         s.remote_last_physicalize_.clear();
         s.remote_last_unphysicalize_.clear();
         // The status line (E10: the core's text, the host prints it).
@@ -1163,6 +1165,9 @@ namespace bmmo::session {
             reset_held_epoch("the new base");
             s.frames_since_anchor_ = 0;
             s.input_history_.clear();
+            // Step EVI: the piggybacked events' stamps are the old
+            // numbering's; their reliable copies went out already.
+            s.own_piggyback_.clear();
             s.corrector_.clear();
             for (auto& [name, corrector]: s.mechanism_correctors_) corrector.clear();
             for (auto& [id, remote]: s.remotes_) remote.corrector.clear();
@@ -1232,6 +1237,7 @@ namespace bmmo::session {
         if (msg.first_tick != 0) {
             s.frames_since_anchor_ = 0;
             s.input_history_.clear();
+            s.own_piggyback_.clear();   // step EVI: stamps of the anchor-relative numbering
             // Same as the resync above: the frames recorded under the
             // anchor-relative numbering name ticks the server never
             // asked us for, and nothing can match them again.
@@ -1386,6 +1392,14 @@ namespace bmmo::session {
             platform_.send(bytes, send_mode::unreliable_no_delay);
         });
         if (s.input_history_.empty()) return;
+        // Step EVI (protocol 25): our live piggybacked events ride each
+        // datagram (their window judged by the newest frame we have).  One
+        // prune for every chunk below is exact only because input_history_
+        // holds at most MAX_INPUT_FRAMES frames while assigned (the frame
+        // path caps it each frame, client_core_frame.cpp; the assignment
+        // clears it), i.e. one datagram; with more, started
+        // entries would be judged against the last chunk's newest frame.
+        s.own_piggyback_.prune(s.input_history_.back().first);
         size_t index = 0;
         while (index < s.input_history_.size()) {
             bmmo::session_input_msg msg;
@@ -1396,6 +1410,7 @@ namespace bmmo::session {
                 ++index;
             }
             remember_sent(msg);
+            s.own_piggyback_.attach(msg);
             msg.serialize();
             platform_.send(msg.raw.str(), send_mode::unreliable_no_delay);
             ++s.inputs_sent_;
@@ -1438,12 +1453,23 @@ namespace bmmo::session {
         // step it, and be applied a tick late (the server logs it: "late
         // by 1", seen on BodyRevived and Physicalize).
         platform_.send(bytes, send_mode::reliable_no_nagle);
-        // ...and again, unreliably, on the next ticks (flush_inputs): the
-        // server takes the first copy to arrive.  Step DX8 (D4 (b')): the
-        // own schedule - L + 1, L + 2, L + 3, then every other tick
-        // (lifecycle.hpp kOwnEventRepeats): the server steps an own event's
-        // stamp L + 1 as soon as frame L + 1 is in, whichever datagram
-        // carries it first must carry a copy too.
+        // Step EVI (protocol 25, late-player design 3.4 option (b)): a
+        // Physicalize, Unphysicalize, Sector or Trafo rides every input
+        // datagram from now until its stamp + 7 (event_piggyback.hpp) - the
+        // server steps an own event's stamp as soon as that frame is in,
+        // and every datagram carrying the frame carries the event, which
+        // the server takes before the frames.  The bytes say the type and
+        // the stamp (`tick`: a client sends origin = stamp).
+        bmmo::session_event_msg parsed;
+        parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (parsed.deserialize() && bmmo::session::event_rides_input(parsed.type)) {
+            s.own_piggyback_.push(bytes, parsed.tick, parsed.type);
+            return;
+        }
+        // Every other type (BodyRevived, Finish) again, unreliably, on the
+        // next ticks (flush_inputs): the server takes the first copy to
+        // arrive.  Step DX8 (D4 (b')): the own schedule - L + 1, L + 2,
+        // L + 3, then every other tick (lifecycle.hpp kOwnEventRepeats).
         s.own_event_repeats_.push(bytes, {0u}, bmmo::session::kOwnEventRepeats, bmmo::session::kOwnEventRepeatSpacing,
                                   bmmo::session::kOwnEventRepeatsDense);
     }

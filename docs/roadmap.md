@@ -3280,7 +3280,18 @@ notes still resolve.
    DX8)"): modelled late lone events at 10 % loss 9.1 -> 0.1 per 1000
    (burst 1), about 50 -> 2.7 (burst 2), with the copies coalesced into
    the input datagrams as the proxy logs show for 83 of 86 events (an
-   upper bound on the gain); step 22 stays queued for the rest.
+   upper bound on the gain); step 22 stays queued for the rest. Step 21's
+   protocol work built at FULL step EVI (protocol 25, late-player-design.md
+   3.4 "As built (step EVI)"): the own Physicalize / Unphysicalize /
+   Sector / Trafo ride every input datagram that carries the stamp's frame
+   (the server takes them before the frames), DX8's separate copies of
+   those types gone; modelled late events at 10 % loss 0 (burst 1),
+   0-0.01 (burst 2), 0.04-0.12 (bursts 3 and 4), 1.2-1.5 per 1000 (bursts
+   6 and 8: all eight datagrams carrying the frame lost, and the reliable
+   copy); live F3 recipe (burst 2) and a lossy retail L11 session: 0 late,
+   0 resyncs, 0 moved births. Deferred to the close-out's batches: F3's live
+   seed sweep old vs new. Step 22 (the moved own death) stays queued (ODM);
+   the retail multi-tick own-absence measurement is Stage C's (decision 21).
 
 **Stage D - the original levels.**
 

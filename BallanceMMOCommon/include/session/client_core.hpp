@@ -92,6 +92,7 @@
 #include "rollback.hpp"
 #include "sector_union.hpp"
 #include "trafo_input.hpp"
+#include "event_piggyback.hpp"
 #include "../entity/session.hpp"
 #include "../message/session_assign_msg.hpp"
 #include "../message/session_end_msg.hpp"
@@ -794,6 +795,10 @@ namespace bmmo::session {
         // our own are repeated unreliably on the next ticks (flush_inputs).
         bmmo::session::event_seen event_seen_;
         bmmo::session::event_repeats own_event_repeats_;
+        // Protocol 25 (FULL step EVI): our own Physicalize / Unphysicalize /
+        // Sector / Trafo events ride every input datagram from their send
+        // until stamp + 7 (event_piggyback.hpp) instead of own_event_repeats_.
+        bmmo::session::event_piggyback own_piggyback_;
         uint64_t event_dups_ = 0, events_superseded_ = 0;
         // Protocol 9: echoes of our own events (process_own_echo).
         uint64_t own_echo_acked_ = 0, own_echo_moved_ = 0, own_echo_superseded_ = 0, own_echo_rejected_ = 0;

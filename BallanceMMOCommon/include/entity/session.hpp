@@ -191,7 +191,18 @@ namespace bmmo::session {
     //      superseded start answers CLOCK_ACK_STARTED and the server commits
     //      that start (START_AT_FLAG_COMMIT).  No journal version: nothing the
     //      journal records changed.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 24;
+    //  25  lifecycle events on the input datagram (FULL step EVI, plan step
+    //      21's protocol work; late-player-design.md §3.4 option (b), "As
+    //      built (step EVI)"): session_input_msg ends with nevents u8 and
+    //      each piggybacked event's whole serialized session_event_msg (u16
+    //      length + bytes); the client core carries its own Physicalize,
+    //      Unphysicalize, Sector and Trafo events in every input datagram
+    //      from the send until stamp + 7 (every datagram that carries the
+    //      stamp's frame) instead of DX8's separate unreliable copies, and the
+    //      server takes them through the event intake before the frames.  A
+    //      protocol-24 input datagram (no nevents) is refused.  No journal
+    //      version: nothing the journal records changed.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 25;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -422,6 +433,10 @@ namespace bmmo::session {
     // forged count can never make a reader allocate unbounded memory.
     constexpr size_t MAX_PLAYERS_PER_SESSION = 64;
     constexpr size_t MAX_INPUT_FRAMES = 8;
+    // Lifecycle events one input datagram may carry (protocol 25, step EVI);
+    // the sender's byte budget (session/event_piggyback.hpp kInputDatagramBudget) binds
+    // long before this cap does.
+    constexpr size_t MAX_INPUT_EVENTS = 16;
     constexpr size_t MAX_RELAY_FRAMES = 32;     // frames per member in one relayed datagram (the window's cap)
     constexpr size_t MAX_BODIES_PER_SNAPSHOT = 1024;
     constexpr size_t MAX_NAME = 64;

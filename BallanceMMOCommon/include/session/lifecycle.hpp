@@ -298,6 +298,9 @@ namespace bmmo::session {
     // old schedule is kept (a superset: no loss pattern makes an event later
     // than before, bursts included); the tail stays at spacing 2 for the
     // burst reason above.  The span is 11 ticks.
+    // Protocol 25 (FULL step EVI): only BodyRevived and Finish still take
+    // this schedule; an own Physicalize, Unphysicalize, Sector or Trafo
+    // rides the input datagram instead (session/event_piggyback.hpp).
     inline constexpr int kOwnEventRepeats = 7;
     inline constexpr int kOwnEventRepeatsDense = 3;   // the first three one tick apart
     inline constexpr int kOwnEventRepeatSpacing = 2;

@@ -1389,9 +1389,14 @@ namespace {
     }
 
     // send_event: stamped with the session, origin = stamp, counted; the
-    // host's filter may keep it; on the wire it goes reliable no-Nagle and is
-    // repeated unreliably by flush_inputs once assigned, beside the inputs
-    // (one datagram per MAX_INPUT_FRAMES), each remembered in the sent ring.
+    // host's filter may keep it; on the wire it goes reliable no-Nagle.
+    // Protocol 25 (FULL step EVI): a Physicalize / Unphysicalize / Sector /
+    // Trafo then rides every input datagram (one per MAX_INPUT_FRAMES) until
+    // the datagram's newest frame passes its stamp + 7; a BodyRevived / Finish
+    // is repeated unreliably by flush_inputs (DX8's schedule) as before.  The
+    // events sent before the first assignment are the anchor numbering's: the
+    // renumbering drops them from the piggyback list (their reliable copies
+    // went).  Each datagram's frames are remembered in the sent ring.
     TEST(SessionClientCoreFlow, EventsAndInputsGoOut) {
         flow_fake fake;
         session_platform p = fake.make_flow();
@@ -1424,27 +1429,64 @@ namespace {
         EXPECT_EQ(fake.sent[sent_before].first, held_bytes);
         EXPECT_EQ(fake.sent[sent_before + 1].second, send_mode::reliable_no_nagle);
 
-        core.on_session_assign(assign_message(9, 120));   // flushes: two repeats each, no input yet
+        core.on_session_assign(assign_message(9, 120));   // flushes: no input yet, the anchor's events dropped
         const size_t after_assign = fake.sent.size();
-        EXPECT_EQ(after_assign, sent_before + 4);
-        for (size_t i = sent_before + 2; i < after_assign; ++i)
-            EXPECT_EQ(fake.sent[i].second, send_mode::unreliable_no_delay);
+        EXPECT_EQ(after_assign, sent_before + 2);
+        EXPECT_EQ(state_of(core).own_piggyback_.pending(), 0u);
         for (uint32_t t = 120; t < 120 + bmmo::session::MAX_INPUT_FRAMES + 3; ++t) {
             bmmo::session::input_frame frame;
             frame.keys = static_cast<uint8_t>(t);
             state_of(core).input_history_.push_back({t, frame});
         }
+        // A Physicalize stamped 125 after the assignment, and a BodyRevived.
+        bmmo::session_event_msg birth;
+        birth.tick = 125;
+        birth.type = bmmo::session::event_type::Physicalize;
+        core.send_event(birth);
+        const std::string birth_bytes = birth.raw.str();
+        bmmo::session_event_msg revived;
+        revived.tick = 125;
+        revived.type = bmmo::session::event_type::BodyRevived;
+        revived.name = "P_Modul_01";
+        core.send_event(revived);
+        ASSERT_EQ(fake.sent.size(), after_assign + 2);   // the two reliable copies
+        EXPECT_EQ(state_of(core).own_piggyback_.pending(), 1u);
         const uint64_t inputs_before = state_of(core).inputs_sent_;
         steps{core}.flush_inputs();
         EXPECT_EQ(state_of(core).inputs_sent_, inputs_before + 2);
+        // The BodyRevived's unreliable copy first, then the two datagrams.
+        ASSERT_EQ(fake.sent.size(), after_assign + 5);
+        EXPECT_EQ(fake.sent[after_assign + 2].first, revived.raw.str());
+        EXPECT_EQ(fake.sent[after_assign + 2].second, send_mode::unreliable_no_delay);
         const auto first = decode<bmmo::session_input_msg>(fake.sent[fake.sent.size() - 2].first);
         const auto second = decode<bmmo::session_input_msg>(fake.sent.back().first);
         EXPECT_EQ(first.first_tick, 120u);
         EXPECT_EQ(first.frames.size(), static_cast<size_t>(bmmo::session::MAX_INPUT_FRAMES));
         EXPECT_EQ(second.first_tick, 120u + bmmo::session::MAX_INPUT_FRAMES);
         EXPECT_EQ(second.frames.size(), 3u);
+        // The birth rides both datagrams, as its reliable copy's very bytes;
+        // stamped 125 but sent when the newest frame was 130, its window is
+        // max(125, 130) + 7 = 137 (the eight datagrams after its send).
+        ASSERT_EQ(first.events.size(), 1u);
+        EXPECT_EQ(first.events[0], birth_bytes);
+        ASSERT_EQ(second.events.size(), 1u);
+        EXPECT_EQ(second.events[0], birth_bytes);
         EXPECT_EQ(state_of(core).sent_inputs_.size(), static_cast<size_t>(bmmo::session::MAX_INPUT_FRAMES) + 3);
         EXPECT_EQ(state_of(core).sent_inputs_.at(121).keys, 121);
+        // Up to newest 137 it still rides; from 138 on it is gone.
+        for (uint32_t t = 131; t <= 138; ++t) {
+            bmmo::session::input_frame frame;
+            frame.keys = static_cast<uint8_t>(t);
+            state_of(core).input_history_.push_back({t, frame});
+            while (state_of(core).input_history_.size() > bmmo::session::MAX_INPUT_FRAMES)
+                state_of(core).input_history_.pop_front();
+            steps{core}.flush_inputs();
+            const auto msg = decode<bmmo::session_input_msg>(fake.sent.back().first);
+            EXPECT_EQ(msg.first_tick + msg.frames.size() - 1, t);
+            EXPECT_EQ(msg.events.size(), t <= 137 ? 1u : 0u) << t;
+        }
+        EXPECT_EQ(state_of(core).own_piggyback_.pending(), 0u);
+        EXPECT_EQ(state_of(core).own_piggyback_.counters().expired, 1u);
     }
 
     // SessionEnd: another session's is only logged; ours goes idle, in
