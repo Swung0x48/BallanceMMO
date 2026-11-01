@@ -267,7 +267,8 @@ namespace bmmo::session {
             return;
         }
         const uint32_t anchor = tick - 1;
-        if (tick == 0 || !s.rollback_.knows_tick(anchor) || now - anchor > window_rewind_reach(tick)) {
+        // (rewindable, step SRT4: a light anchor needs its whole base too.)
+        if (tick == 0 || !s.rollback_.rewindable(anchor) || now - anchor > window_rewind_reach(tick)) {
             ++s.trafo_missed_;
             logf("trafo: input of %u at tick %u (%s) cannot be replayed at local tick %u (outside the history or the reach): "
                  "resync (trafo_missed %llu)", player, tick, why, now, static_cast<unsigned long long>(s.trafo_missed_));

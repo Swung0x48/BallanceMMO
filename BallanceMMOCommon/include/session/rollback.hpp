@@ -895,6 +895,25 @@ namespace bmmo::session {
         // taken), and - verify only - those whose cached entries differed
         // from the fresh read.
         uint64_t capture_cache_hits = 0, capture_cache_mismatches = 0;
+        // Step SRT4 (realtime-design 4 a2): replayed ticks recorded sparse
+        // (bodies, navigation, clock and globals only: no extras, contacts,
+        // scripts or blob), with the time those light captures took; rewinds
+        // whose anchor was such a record and restored the nearest full one
+        // before it (`rebased`, with the extra ticks they replayed), and
+        // those that found none in the history (refused as unmatched);
+        // verify mode's compares of the
+        // anchor a rebased rewind re-simulated with the record it would have
+        // restored, and their differences.
+        uint64_t sparse_light = 0, sparse_light_us = 0, sparse_rebased = 0, sparse_extra_ticks = 0, sparse_unanchored = 0;
+        // (sparse_verify_float: the anchors that differed in float script
+        // parameters only - not a mismatch, as in the replay's own check;
+        // sparse_verify_stale: anchors not compared, a tick up to them
+        // replayed with other inputs or lifetimes than its record had.)
+        uint64_t sparse_verified = 0, sparse_verify_mismatches = 0, sparse_verify_float = 0, sparse_verify_stale = 0;
+        // (Review of step SRT4, finding 1: the whole records replays made and
+        // the time they took - with sparse_light_us, a replayed tick's
+        // capture share, measured at any k.)
+        uint64_t replay_whole = 0, replay_whole_us = 0;
         uint64_t unmatched = 0;        // snapshot tick not in the history
         uint64_t captures_never_made = 0;   // a deferred record (capture_now false) no amend_record captured
         uint64_t too_far = 0;          // a snapshot or a rewind deeper than max_resim_ticks: refused, nothing written
@@ -1095,8 +1114,13 @@ namespace bmmo::session {
                 world.on_correction(correction);
             };
             tick_state* at = find(snapshot.tick);
-            if (!at) {
+            // Step SRT4: a snapshot's rows land on the record of their tick,
+            // which must be whole; the core runs sparse capture only in a
+            // session without snapshots (snapshots_run()), so a light record
+            // here is a caller's mistake: unmatched, as a record not held.
+            if (!at || !at->full) {
                 ++stats_.unmatched;
+                if (at) ++stats_.sparse_unanchored;
                 report(7);
                 return false;
             }
@@ -1263,6 +1287,11 @@ namespace bmmo::session {
                                 const std::function<bool(const std::string& entity, uint32_t tick, input_frame& out)>& input_at,
                                 const std::function<void(uint8_t)>& report, const std::string& reason,
                                 const resync_spec* rs = nullptr, resync_outcome* ro = nullptr, uint32_t deep = 0) {
+            // Step SRT4: verify's anchor is this replay's.
+            struct sparse_on_exit {
+                rollback_engine& e;
+                ~sparse_on_exit() { e.verify_pending_ = false; }
+            } sparse_exit{*this};
             tick_state* at = find(anchor);
             if (!at) return false;
             // RC2 (b)'s barrier (step RCB, review finding 1): the restore
@@ -2571,7 +2600,26 @@ namespace bmmo::session {
                 // live frames did (above).
                 state.tracked = std::move(step_tracked);
                 state.inputs = std::move(inputs);
-                capture(world, state);
+                capture_replayed(world, state, recorded, current_tick);
+                // Step SRT4, verify mode: the light anchor this rebased
+                // rewind asked for, re-simulated from the whole record before
+                // it, against the record a rewind to it would have restored
+                // with every tick captured (the old record, captured whole).
+                // A tick up to the anchor replayed with other inputs or
+                // lifetimes than its record had (a relayed frame that differs
+                // from the prediction, whose own rewind - anchored before
+                // this one's - is still to run: SRT3 keeps an input
+                // correction older than a lifecycle anchor apart) leaves the
+                // anchor's record stale by design: not compared, counted.
+                if (verify_pending_ && recorded && static_cast<int32_t>(t - verify_anchor_) <= 0
+                        && (!same_inputs(state.inputs, recorded->inputs)
+                            || state.tracked.generations != recorded->tracked.generations))
+                    verify_stale_ = true;
+                if (verify_pending_ && t == verify_anchor_) {
+                    verify_pending_ = false;
+                    if (recorded && verify_stale_) ++stats_.sparse_verify_stale;
+                    else if (recorded) verify_sparse_anchor(world, *recorded, state);
+                }
                 // Step DX1: the deferred bodies not yet born at this tick are
                 // marked in its record (tick_state::unborn).
                 for (const auto& [born, names]: deferred_rechecks)
@@ -2797,6 +2845,59 @@ namespace bmmo::session {
         enum class capture_cache_mode : uint8_t { off, on, verify };
         void set_capture_cache(capture_cache_mode mode) { capture_cache_ = mode; }
         capture_cache_mode capture_cache() const { return capture_cache_; }
+        // Step SRT4 (realtime-design 4 a2 / 5 item 4): sparse capture of
+        // replayed ticks.  `every` <= 1 (the default: the SimTool, the unit
+        // tests' engines, a session with snapshots) records every replayed
+        // tick whole, as before.  Otherwise a replay records whole only the
+        // ticks that are a multiple of `every`, its last tick, a tick whose
+        // tracked set, body set or lifetimes differ from the record of the
+        // tick before (a birth record: its extras are what a later restore
+        // re-poses the body with) and one that carries snapshot rows; the
+        // others light (tick_state::full).  A
+        // live record is always whole.  `verify`: the light ticks are
+        // captured whole all the same (still marked light, so every
+        // decision is the sparse one), and a rebased rewind compares the
+        // anchor it re-simulated with that record (sparse_verified /
+        // sparse_verify_mismatches).  At most kSparseCaptureMax: the
+        // deepest standard reach's anchor (kReachCapTicks) then still has
+        // a whole record in the deepest history (kReachHistoryTicks).
+        static constexpr uint32_t kSparseCaptureMax = static_cast<uint32_t>(kReachHistoryTicks) - kReachCapTicks;
+        void set_sparse_capture(uint32_t every, bool verify) {
+            sparse_every_ = std::min(every, kSparseCaptureMax);
+            sparse_verify_ = verify && sparse_every_ > 1;
+        }
+        uint32_t sparse_capture() const { return sparse_every_ > 1 ? sparse_every_ : 1u; }
+        bool sparse_capture_verify() const { return sparse_verify_; }
+        // The tick a rewind to `anchor` restores: `anchor` when its record
+        // is whole, else the newest whole record before it; false when the
+        // history has neither (or not `anchor` at all).
+        bool restore_base(uint32_t anchor, uint32_t& base) const {
+            if (!find_const(anchor)) return false;
+            for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+                if (static_cast<int32_t>(it->tick - anchor) > 0 || !it->full) continue;
+                base = it->tick;
+                return true;
+            }
+            return false;
+        }
+        // Whether rewind_to can anchor at `anchor` (review of step SRT4,
+        // finding 2): its record is in the history and so is a whole record
+        // at or before it.  The core's reach checks ask this, not
+        // knows_tick: a light anchor deeper than the standard reach (an
+        // exact resync's re-step window reaches the whole history, step A3)
+        // may have lost its whole base, and a check that let it through
+        // would see rewind_to refuse it, past every fallback the check
+        // itself takes.  Without sparse capture the same as knows_tick.
+        bool rewindable(uint32_t anchor) const {
+            uint32_t base = anchor;
+            return restore_base(anchor, base);
+        }
+        // Whether the record of `tick` is whole (a rewind or a resync
+        // anchored there restores it as it is).
+        bool restorable(uint32_t tick) const {
+            const tick_state* at = find_const(tick);
+            return at && at->full;
+        }
         // Log which branch every body of a restore took (capped at 16).
         void set_trace_plan(bool enable) { trace_plan_ = enable; }
 
@@ -2958,10 +3059,13 @@ namespace bmmo::session {
         // resync reach, for a correction inside an exact resync's re-step
         // (the client core's window_rewind_reach) and for a forced rewind
         // deeper than max_resim_ticks (force_rewind, step A4); 0 =
-        // max_resim_ticks.
+        // max_resim_ticks.  `restored` (step SRT4, review finding 4): set to
+        // the tick whose record the rewind restored - `anchor`, or the whole
+        // record before a light one - when it ran.
         bool rewind_to(const rollback_world& world, uint32_t anchor, uint32_t current_tick,
                        const std::function<bool(const std::string& entity, uint32_t tick, input_frame& out)>& input_at,
-                       const std::string& reason, uint32_t reach = 0) {
+                       const std::string& reason, uint32_t reach = 0, uint32_t* restored = nullptr) {
+            if (restored) *restored = anchor;
             if (!find(anchor)) {
                 ++stats_.unmatched;
                 return false;
@@ -2979,6 +3083,37 @@ namespace bmmo::session {
                 ++stats_.too_far;
                 return false;
             }
+            // Step SRT4 (realtime-design 4 a2): an anchor recorded light is
+            // restored from the newest whole record before it, and the ticks
+            // between are replayed with the rest - the inputs, lifecycle
+            // events, trafo inputs and sector passes of those ticks are the
+            // ones their records were made with (every hook of a replayed
+            // tick reads the core's logs by tick), so the replay arrives at
+            // the anchor's state and goes on as a rewind to it would.  The
+            // limit stays the requested anchor's (a decision of the caller's
+            // reach, unchanged); the replay may run up to
+            // kSparseCaptureMax - 1 ticks deeper.  No whole record in the
+            // history before it (a re-step deeper than the standard reach,
+            // its base already retired): refused as unmatched - the core's
+            // reach checks ask rewindable() first, so their own fallbacks
+            // run instead.
+            uint32_t base = anchor;
+            if (!restore_base(anchor, base)) {
+                ++stats_.unmatched;
+                ++stats_.sparse_unanchored;
+                if (world.log && sparse_logs_++ < 8)
+                    world.log("sparse capture: the rewind to tick " + std::to_string(anchor) + " (" + reason
+                              + ") finds no whole record at or before it in the history: refused");
+                return false;
+            }
+            if (base != anchor) {
+                ++stats_.sparse_rebased;
+                stats_.sparse_extra_ticks += anchor - base;
+                verify_pending_ = sparse_verify_;
+                verify_stale_ = false;
+                verify_anchor_ = anchor;
+            }
+            if (restored) *restored = base;
             // NOT stats_.mismatched: that counts authoritative snapshots this
             // engine disagreed with, and it is read as the measure of how far
             // the client is from the server.  A rewind the caller asked for is
@@ -2986,8 +3121,8 @@ namespace bmmo::session {
             ++stats_.rewinds;
             const std::map<std::string, row_ref> no_rows;
             auto no_report = [](uint8_t) {};
-            return restore_and_replay(world, anchor, current_tick, no_rows, input_at, no_report, reason, nullptr, nullptr,
-                                      limit);
+            return restore_and_replay(world, base, current_tick, no_rows, input_at, no_report, reason, nullptr, nullptr,
+                                      std::max(limit, current_tick - base));
         }
 
         // The resync re-step (resync design 2.6.4, 4.1; step A3): the
@@ -3005,6 +3140,19 @@ namespace bmmo::session {
             out = {};
             if (!find(anchor)) {
                 ++stats_.unmatched;
+                return false;
+            }
+            // Step SRT4: the server's state lands on the client's record of
+            // S (its scripts localize the server's), so S must be whole.  It
+            // always is: S is the record anchor_resync made after the
+            // re-assign dropped the history - the first of the new history,
+            // so no replay re-records it (a replay re-records the ticks after
+            // its anchor, and no anchor precedes S).  Refused if not.
+            if (!restorable(anchor)) {
+                ++stats_.unmatched;
+                ++stats_.sparse_unanchored;
+                if (world.log && sparse_logs_++ < 8)
+                    world.log("sparse capture: the resync anchor " + std::to_string(anchor) + " is recorded light: refused");
                 return false;
             }
             if (static_cast<int32_t>(current_tick - anchor) < 0 || current_tick - anchor > resync_reach()) {
@@ -3102,6 +3250,17 @@ namespace bmmo::session {
             // Step OPC: rollback_world::script_writes when this record's
             // scripts were captured (0 without the hook).  In memory only.
             uint64_t script_writes = 0;
+            // Step SRT4 (realtime-design 4 a2): false for a replayed tick
+            // recorded sparse - its bodies, navigation, clock, globals,
+            // inputs, tracked set, rows and unborn marks, but no extras,
+            // contacts, scripts or blob.  Never restored: a rewind anchored
+            // at it restores the nearest full record before it and replays
+            // the difference (rewind_to); never the capture cache's or the
+            // script reuse's source.  In verify mode a sparse record is
+            // captured whole all the same (and still marked false), so the
+            // anchor a rebased rewind re-simulates is compared with it.  In
+            // memory only.
+            bool full = true;
         };
 
 
@@ -3455,12 +3614,144 @@ namespace bmmo::session {
             return names;
         }
 
-        void capture(const rollback_world& world, tick_state& state) {
+        // Step SRT4 (realtime-design 4 a2): a replayed tick's record, whole or
+        // light (set_sparse_capture's rule).  `recorded` is the tick's record
+        // before this replay (null when there was none).
+        void capture_replayed(const rollback_world& world, tick_state& state, const tick_state* recorded,
+                              uint32_t current_tick) {
+            const uint32_t t = state.tick;
+            bool whole = sparse_every_ <= 1 || t == current_tick || t % sparse_every_ == 0
+                      || !recorded || !recorded->rows.empty();
+            const tick_state* before = whole ? nullptr : find_const(t - 1);
+            if (!whole && !before) whole = true;
+            // A birth, an end, a mechanism the replay adds, a remote of the
+            // window: the record a later restore takes a birth from.
+            if (!whole)
+                whole = state.tracked.own_entity != before->tracked.own_entity
+                     || state.tracked.remote_entities != before->tracked.remote_entities
+                     || state.tracked.mechanisms != before->tracked.mechanisms
+                     || state.tracked.generations != before->tracked.generations;
+            const auto started = std::chrono::steady_clock::now();
+            if (whole) {
+                capture(world, state, true);
+                ++stats_.replay_whole;
+                stats_.replay_whole_us += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
+                return;
+            }
+            capture(world, state, sparse_verify_);
+            // The body set must be the one of t - 1 too (a tracked name whose
+            // body appeared or went without a lifetime change).
+            bool same_set = state.bodies.size() == before->bodies.size();
+            auto b = before->bodies.cbegin();
+            for (auto a = state.bodies.cbegin(); same_set && a != state.bodies.cend(); ++a, ++b)
+                same_set = a->first == b->first;
+            if (!same_set) {
+                if (!sparse_verify_) capture(world, state, true);
+                state.full = true;
+                return;
+            }
+            state.full = false;
+            ++stats_.sparse_light;
+            stats_.sparse_light_us += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
+        }
+
+        // Step SRT4: two ticks' inputs bit-equal, entity by entity.
+        static bool same_inputs(const std::map<std::string, input_frame>& a, const std::map<std::string, input_frame>& b) {
+            if (a.size() != b.size()) return false;
+            for (auto x = a.cbegin(), y = b.cbegin(); x != a.cend(); ++x, ++y) {
+                if (x->first != y->first) return false;
+                const input_frame& f = x->second;
+                const input_frame& g = y->second;
+                if (f.keys != g.keys || f.ball_type != g.ball_type || f.flags != g.flags || !same_bits(f.cam_right, g.cam_right)
+                        || !same_bits(f.cam_up, g.cam_up) || !same_bits(f.cam_dir, g.cam_dir))
+                    return false;
+            }
+            return true;
+        }
+
+        // Step SRT4, verify mode: `old` is the record a rewind to its tick
+        // would have restored had every replayed tick been captured whole
+        // (verify captures light ticks whole); `fresh` the same tick
+        // re-simulated from the whole record before it.  Any difference is
+        // counted and logged (capped): the replay from the earlier record
+        // did not arrive at the anchor's state.
+        void verify_sparse_anchor(const rollback_world& world, const tick_state& old, const tick_state& fresh) {
+            ++stats_.sparse_verified;
+            std::string what;
+            const auto add = [&what](const std::string& part) { what += (what.empty() ? "" : "; ") + part; };
+            for (const auto& [entity, body]: old.bodies) {
+                const auto it = fresh.bodies.find(entity);
+                if (it == fresh.bodies.end()) add("body " + entity + " missing");
+                else if (!same_body_state(body, it->second)) {
+                    const bmmo_physics_body_state& f = it->second;
+                    char buf[200];
+                    std::snprintf(buf, sizeof(buf), " dp=(%.3g,%.3g,%.3g) dv=(%.3g,%.3g,%.3g)%s", f.position[0] - body.position[0],
+                                  f.position[1] - body.position[1], f.position[2] - body.position[2],
+                                  static_cast<double>(f.linear[0]) - body.linear[0], static_cast<double>(f.linear[1]) - body.linear[1],
+                                  static_cast<double>(f.linear[2]) - body.linear[2],
+                                  f.simulated != body.simulated ? " sleep differs" : "");
+                    add("body " + entity + buf);
+                }
+            }
+            for (const auto& [entity, body]: fresh.bodies)
+                if (!old.bodies.count(entity)) add("body " + entity + " added");
+            if (old.extras.size() != fresh.extras.size()) add("extras (count)");
+            for (const auto& [entity, extra]: old.extras) {
+                const auto it = fresh.extras.find(entity);
+                if (it == fresh.extras.end() || !same_extra(extra, it->second))
+                    add(std::string(it == fresh.extras.end() ? "extras (presence)" : extra_difference(extra, it->second)) + " of "
+                        + entity);
+            }
+            if (old.contacts.size() != fresh.contacts.size()) add("contacts (count)");
+            for (const auto& [entity, contacts]: old.contacts) {
+                const auto it = fresh.contacts.find(entity);
+                if (it == fresh.contacts.end() || !same_contacts(contacts, it->second)) add("contacts of " + entity);
+            }
+            std::string script_floats;
+            if (old.have_scripts != fresh.have_scripts) add("scripts (presence)");
+            else if (old.have_scripts && old.scripts != fresh.scripts) {
+                bool logical = true;
+                std::string where = world.diff_scripts ? world.diff_scripts(old.scripts, fresh.scripts, logical) : "bytes";
+                // Float parameters only (the replay's own script check counts
+                // them apart too: script_float_mismatches): counted, not a
+                // mismatch.
+                if (!where.empty() && logical) add("scripts: " + where);
+                else if (!where.empty()) script_floats = where;
+            }
+            if (old.have_savestate != fresh.have_savestate) add("blob (presence)");
+            else if (old.have_savestate && old.savestate != fresh.savestate) {
+                const std::string where = world.diff_savestate ? world.diff_savestate(old.savestate, fresh.savestate).where
+                                                               : std::string("bytes");
+                if (!where.empty()) add("blob: " + where);
+            }
+            if (!script_floats.empty()) {
+                ++stats_.sparse_verify_float;
+                if (world.log && sparse_verify_float_logs_++ < 4)
+                    world.log("sparse capture (verify): tick " + std::to_string(old.tick)
+                              + " re-simulated from the whole record before it differs from its record in float script"
+                                " parameters only: " + script_floats);
+            }
+            if (what.empty()) return;
+            ++stats_.sparse_verify_mismatches;
+            if (world.log && sparse_verify_logs_++ < 8)
+                world.log("sparse capture (verify): tick " + std::to_string(old.tick)
+                          + " re-simulated from the whole record before it differs from its record: "
+                          + (what.size() > 1500 ? what.substr(0, 1500) + "..." : what));
+        }
+
+        // `whole` false (step SRT4, a light record of a replayed tick: see
+        // tick_state::full): the bodies, navigation, clock and globals only -
+        // one body read per tracked name, no extras, contacts, scripts or
+        // blob - and no cache or script-reuse source looked up.
+        void capture(const rollback_world& world, tick_state& state, bool whole = true) {
             struct scope {
                 const rollback_world& w;
                 explicit scope(const rollback_world& world) : w(world) { if (w.capture_scope) w.capture_scope(true); }
                 ~scope() { if (w.capture_scope) w.capture_scope(false); }
             } lookups(world);
+            state.full = whole;
             // RC2 (b) (step RCB; rewind-cost design, "As built (step B5RX)",
             // item RC2S option (b)): the record of the tick before is the
             // cache's source - the previous tick's capture, live or replayed
@@ -3478,10 +3769,13 @@ namespace bmmo::session {
             // cache's mode.
             const tick_state* previous = nullptr;
             const tick_state* scripts_previous = nullptr;
-            if (capture_cache_ != capture_cache_mode::off || world.capture_scripts_from)
+            // Step SRT4: a light record of t - 1 holds neither extras,
+            // contacts nor scripts (in verify mode it does, but every
+            // decision is the sparse one), so it serves neither.
+            if (whole && (capture_cache_ != capture_cache_mode::off || world.capture_scripts_from))
                 for (auto it = history_.rbegin(); it != history_.rend(); ++it)
                     if (&*it != &state && it->tick == state.tick - 1) {
-                        if (it->write_generation == engine_writes_) {
+                        if (it->full && it->write_generation == engine_writes_) {
                             if (capture_cache_ != capture_cache_mode::off) previous = &*it;
                             scripts_previous = &*it;
                         }
@@ -3495,6 +3789,11 @@ namespace bmmo::session {
                 // A tracked name the world no longer knows must not survive an
                 // amendment: a later rollback would write the body back.
                 else { state.bodies.erase(entity); state.extras.erase(entity); state.contacts.erase(entity); return; }
+                if (!whole) {
+                    state.extras.erase(entity);
+                    state.contacts.erase(entity);
+                    return;
+                }
                 // RC2 (b): a body asleep at t - 1 and now, whose fresh body
                 // read is bit-equal to the record of t - 1's (pose, velocity,
                 // sleep and collision flags), takes that record's leapfrog
@@ -3578,6 +3877,14 @@ namespace bmmo::session {
             bmmo_physics_globals globals{};
             state.have_globals = world.get_globals && world.set_globals && world.get_globals(globals);
             state.globals = state.have_globals ? globals : bmmo_physics_globals{};
+            if (!whole) {
+                state.script_writes = 0;
+                state.have_scripts = false;
+                state.scripts.clear();
+                state.have_savestate = false;
+                state.savestate.clear();
+                return;
+            }
             if (replay_scripts_ && world.capture_scripts_from) {
                 // Step OPC: the record of t - 1 serves only when its scripts
                 // were captured under the host-write generation of now.
@@ -3732,6 +4039,17 @@ namespace bmmo::session {
         bool replay_scripts_ = true;
         bool exact_restore_ = true;
         capture_cache_mode capture_cache_ = capture_cache_mode::off;   // RC2 (b)
+        // Step SRT4: set_sparse_capture (<= 1: off), its verify mode, and
+        // the capped log lines of the sparse path.
+        uint32_t sparse_every_ = 0;
+        bool sparse_verify_ = false;
+        uint32_t sparse_logs_ = 0;
+        // Verify mode: the light anchor of the rebased rewind under way,
+        // compared when its replay re-records it (cleared when it ends).
+        bool verify_pending_ = false, verify_stale_ = false;
+        uint32_t verify_anchor_ = 0;
+        uint32_t sparse_verify_logs_ = 0;
+        uint32_t sparse_verify_float_logs_ = 0;
         // RC2 (b): bumped by every write the engine makes into the world
         // (restore_and_replay on entry and exit, a re-creation, a birth
         // re-pose, a row re-application); a record serves the cache only

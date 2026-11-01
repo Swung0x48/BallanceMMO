@@ -1212,6 +1212,17 @@ namespace bmmo::session {
         // both hosts; off is the before arm, verify the exactness check
         // (headless --capture-cache off|on|verify).
         rollback_engine::capture_cache_mode capture_cache = rollback_engine::capture_cache_mode::on;
+        // Step SRT4 (realtime-design 4 a2): a replay records every
+        // sparse_capture-th tick whole (and its last, and every birth
+        // record), the others light (rollback_engine::set_sparse_capture);
+        // 1 = every tick whole (the before arm).  Only in a session whose
+        // snapshots do not run (snapshots_run(): a snapshot's rows land on
+        // the record of their tick, which must be whole).  Both hosts;
+        // headless --sparse-capture N.  verify: the light ticks captured
+        // whole all the same and every rebased rewind's anchor compared
+        // (headless --sparse-capture-verify).
+        uint32_t sparse_capture = 8;
+        bool sparse_capture_verify = false;
     };
 
     // (legacy_calls, the transitional back-calls of design 6.1 "Linking while
@@ -1863,7 +1874,7 @@ namespace bmmo::session {
         bool rewind_world(uint32_t anchor, uint32_t now,
                           const std::function<bool(const std::string& entity, uint32_t tick,
                                                    bmmo::session::input_frame& out)>& input_at,
-                          const std::string& reason, uint32_t reach = 0);
+                          const std::string& reason, uint32_t reach = 0, uint32_t* restored = nullptr);
 
         // Part two's forced own frames (E5; design 1.3 steps 11 and 21).
         // The forced frame of `tick` (a SessionLead's (c, E)), taken: the

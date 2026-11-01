@@ -6262,3 +6262,119 @@ TEST(RollbackEngine, ScriptReuseGetsTheRecordOfTheTickBeforeOnlyWithNoWriteInBet
     record(8);
     EXPECT_EQ(handed.back(), next - 2) << "then the record of t - 1 again";
 }
+
+// Step SRT4 (realtime-design 4 a2 / 5 item 4): sparse capture of replayed
+// ticks.  A replay records whole only every k-th tick and its last; a later
+// rewind anchored at a light record restores the whole record before it and
+// replays the difference, arriving at the world a k = 1 engine leaves; the
+// verify mode captures the light ticks anyway and finds the re-simulated
+// anchor equal to its record.
+TEST(RollbackEngine, SparseCaptureRecordsEveryKthReplayedTickWholeAndRebasesALightAnchor) {
+    const auto run = [](uint32_t every, bool verify, fake_world& world, rollback_engine& engine) {
+        world.savestates = true;
+        world.bodies["Own"].linear[0] = 1.0f;
+        world.bodies["Plate"].position[0] = 40.0;
+        world.bodies["Plate"].linear[1] = -0.5f;
+        engine.set_sparse_capture(every, verify);
+        rollback_tracked tracked;
+        tracked.own_entity = "Own";
+        tracked.mechanisms = {"Plate"};
+        auto w = world.adapter();
+        for (uint32_t tick = 1; tick <= 12; ++tick) {
+            w.step();
+            engine.record(w, tick, tracked, {});
+        }
+        EXPECT_TRUE(engine.rewind_to(w, 2, 12, no_input, "first"));
+        EXPECT_TRUE(engine.rewind_to(w, 6, 12, no_input, "second"));
+    };
+    fake_world control_world;
+    rollback_engine control;
+    run(1, false, control_world, control);
+    EXPECT_EQ(control.sparse_capture(), 1u);
+    EXPECT_EQ(control.stats().sparse_light, 0u);
+    EXPECT_EQ(control.stats().resim_ticks, 16u);
+
+    fake_world world;
+    rollback_engine engine;
+    run(4, false, world, engine);
+    // The first replay (3..12): whole at 4, 8 and its last tick 12; the
+    // second (rebased from 6 onto 4, 5..12): light at 5, 6, 7, 9, 10, 11.
+    EXPECT_EQ(engine.stats().sparse_light, 13u);
+    EXPECT_EQ(engine.stats().sparse_rebased, 1u);
+    EXPECT_EQ(engine.stats().sparse_extra_ticks, 2u);
+    EXPECT_EQ(engine.stats().resim_ticks, 18u);
+    EXPECT_TRUE(engine.knows_tick(6));
+    EXPECT_FALSE(engine.restorable(6));
+    EXPECT_TRUE(engine.restorable(8));
+    EXPECT_TRUE(engine.restorable(12));
+    uint32_t base = 0;
+    ASSERT_TRUE(engine.restore_base(7, base));
+    EXPECT_EQ(base, 4u);
+    bmmo_physics_core_extra extra{};
+    EXPECT_FALSE(engine.recorded_extra("Plate", 6, extra)) << "a light record holds no extras";
+    EXPECT_TRUE(engine.recorded_extra("Plate", 8, extra));
+    EXPECT_EQ(engine.recorded_savestate(6), nullptr);
+    bmmo_physics_body_state body{};
+    EXPECT_TRUE(engine.recorded_body_state("Plate", 6, body)) << "...but its bodies";
+    EXPECT_EQ(world.serialize(), control_world.serialize()) << "the rebased replay arrives at the k = 1 world";
+
+    fake_world verified_world;
+    rollback_engine verified;
+    run(4, true, verified_world, verified);
+    EXPECT_TRUE(verified.sparse_capture_verify());
+    EXPECT_FALSE(verified.restorable(6)) << "verify decides as sparse does";
+    EXPECT_NE(verified.recorded_savestate(6), nullptr) << "...and captures the light ticks whole all the same";
+    EXPECT_EQ(verified.stats().sparse_rebased, 1u);
+    EXPECT_EQ(verified.stats().sparse_verified, 1u);
+    EXPECT_EQ(verified.stats().sparse_verify_mismatches, 0u);
+    EXPECT_EQ(verified_world.serialize(), control_world.serialize());
+}
+
+// Step SRT4: a light anchor whose whole record before it has left the
+// history is refused as a record not held (sparse_unanchored); the live
+// records are always whole, and a snapshot's tick must be whole too.
+TEST(RollbackEngine, SparseCaptureRefusesALightAnchorWithNoWholeRecordBeforeIt) {
+    fake_world world;
+    world.savestates = true;
+    world.bodies["Own"].linear[0] = 1.0f;
+    bmmo::session::rollback_thresholds thresholds;
+    thresholds.history_ticks = 12;
+    rollback_engine engine(thresholds);
+    engine.set_sparse_capture(4, false);
+    rollback_tracked tracked;
+    tracked.own_entity = "Own";
+    auto w = world.adapter();
+    for (uint32_t tick = 1; tick <= 12; ++tick) {
+        w.step();
+        engine.record(w, tick, tracked, {});
+        EXPECT_TRUE(engine.restorable(tick)) << "a live record is whole";
+    }
+    ASSERT_TRUE(engine.rewind_to(w, 1, 12, no_input, "replay"));
+    EXPECT_FALSE(engine.restorable(2));
+    EXPECT_FALSE(engine.restorable(3));
+    for (uint32_t tick = 13; tick <= 14; ++tick) {
+        w.step();
+        engine.record(w, tick, tracked, {});
+    }
+    // The history is 3..14; 3 is light and nothing whole comes before it.
+    EXPECT_FALSE(engine.knows_tick(2));
+    EXPECT_TRUE(engine.knows_tick(3));
+    uint32_t base = 0;
+    EXPECT_FALSE(engine.restore_base(3, base));
+    EXPECT_FALSE(engine.rewindable(3)) << "the core's reach checks see the refusal coming";
+    EXPECT_TRUE(engine.rewindable(5));
+    const uint64_t unmatched = engine.stats().unmatched;
+    EXPECT_FALSE(engine.rewind_to(w, 3, 14, no_input, "too old", 13));
+    EXPECT_EQ(engine.stats().sparse_unanchored, 1u);
+    EXPECT_EQ(engine.stats().unmatched, unmatched + 1);
+    // Anchored at 5 (light), the whole record of 4 serves.
+    ASSERT_TRUE(engine.restore_base(5, base));
+    EXPECT_EQ(base, 4u);
+    uint32_t restored = 0;
+    EXPECT_TRUE(engine.rewind_to(w, 5, 14, no_input, "rebased", 0, &restored));
+    EXPECT_EQ(restored, 4u) << "the caller learns the tick the replay ran from";
+    EXPECT_EQ(engine.stats().sparse_rebased, 1u);
+    EXPECT_FALSE(engine.restorable(5));
+    EXPECT_TRUE(engine.restorable(8));
+    EXPECT_TRUE(engine.restorable(14)) << "the replay's last tick is whole";
+}

@@ -488,7 +488,8 @@ namespace bmmo::session {
         // re-step (step A3: window_rewind_reach): the re-step ran on the
         // relayed frames it had, and these are the ones it lacked.
         const uint32_t anchor = tick - 1;
-        if (current_tick() - anchor > window_rewind_reach(tick) || !s.rollback_.knows_tick(anchor)) {
+        // (rewindable, step SRT4: a light anchor needs its whole base too.)
+        if (current_tick() - anchor > window_rewind_reach(tick) || !s.rollback_.rewindable(anchor)) {
             ++s.relay_late_;
             return;
         }

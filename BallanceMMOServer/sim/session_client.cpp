@@ -355,6 +355,11 @@ namespace {
         // per-body read cache (core_config::capture_cache); on by default.
         bmmo::session::rollback_engine::capture_cache_mode capture_cache =
             bmmo::session::rollback_engine::capture_cache_mode::on;
+        // --sparse-capture N / --sparse-capture-verify (step SRT4): every
+        // N-th replayed tick recorded whole (core_config::sparse_capture;
+        // 0 = the core's default, 1 = every tick), and the verify mode.
+        uint32_t sparse_capture = 0;
+        bool sparse_capture_verify = false;
         int hold_event_type = -1;
         uint32_t hold_event_nth = 0;
         int hold_event_ms = 0;
@@ -542,6 +547,7 @@ namespace {
                   "       [--body-set-corrections]   (snapshots off: a body-set change's full snapshot still corrects, as before RC3; the control arm)\n"
                   "       [--accept-protocol N]      (test only: also take a SessionStart of physics protocol N - a reference capture's replay)\n"
                   "       [--capture-cache off|on|verify]   (RC2 (b): the capture's per-body read cache; default on, verify = read anyway and count differences)\n"
+                  "       [--sparse-capture N] [--sparse-capture-verify]   (SRT4: every N-th replayed tick recorded whole, default the core's; 1 = every tick; verify = capture anyway and compare each rebased rewind's anchor)\n"
                   "       [--start-sector N] [--beam X Y Z TICK] [--beam2 X Y Z TICK] [--keep-lane Z] [--keep-lane-dwell N]\n"
                   "       [--brake-tap N:P]   (while the record holds UP: DOWN instead for N frames in every P)\n"
                   "       [--keep-lane-tap N:M]   (the steer's key pressed N frames, released M, repeating)\n"
@@ -800,6 +806,8 @@ namespace {
                 else if (m == "verify") out.capture_cache = mode::verify;
                 else return false;
             }
+            else if (arg == "--sparse-capture") { if (!(v = next())) return false; out.sparse_capture = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+            else if (arg == "--sparse-capture-verify") out.sparse_capture_verify = true;
             else if (arg == "--accept-protocol") { if (!(v = next())) return false; out.accept_protocol = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--trafo-no-resets") out.trafo_no_resets = true;
             else if (arg == "--leave-at") { if (!(v = next())) return false; out.leave_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
@@ -2207,6 +2215,14 @@ namespace {
             c.reach_ticks = args_.reach_ticks;
             c.body_set_corrections = args_.body_set_corrections;
             c.capture_cache = args_.capture_cache;
+            if (args_.sparse_capture) c.sparse_capture = args_.sparse_capture;
+            // Step SRT4 (review finding 5): --dump-savestate (and its
+            // BMMO_DUMP_FINAL_LAG final/ set) and --compare-scripts read the
+            // blob and the scripts of every record, which a light record
+            // lacks: every replayed tick recorded whole while they run,
+            // unless --sparse-capture asks otherwise.
+            else if (!args_.dump_savestate_dir.empty() || !args_.compare_scripts_dir.empty()) c.sparse_capture = 1;
+            c.sparse_capture_verify = args_.sparse_capture_verify;
             c.accept_protocol = args_.accept_protocol;
             return c;
         }

@@ -522,3 +522,123 @@ this step's census tools (`srt_diag.patch` re-applied) on the E-core layout of s
   session (the Arch server would first need rebuilding from HEAD; the replays above run the same client code over
   the captured inbound stream, deterministically); the retail two-copy session the plan section's header names (its
   pass list asks an x86 compile, done).
+
+## As built (step SRT4, a2: sparse capture of replayed ticks)
+
+- **Code** (shared engine and core only; no protocol, journal format, engine-change or server change; the legacy
+  retail path untouched). `rollback.hpp`: `rollback_engine::set_sparse_capture(k, verify)` (engine default off: the
+  SimTool and the unit tests' engines record as before); a replay records tick `t` **whole** when `k <= 1`, `t` is a
+  multiple of `k`, `t` is the replay's last tick, the record of `t` had snapshot rows, there was no record of `t` or
+  `t - 1`, or `t`'s tracked set, lifetimes or body set differ from the record of `t - 1` (a birth record: its extras
+  are what a later restore re-poses the body with); otherwise **light** (`capture_replayed`, `capture(.., whole)`,
+  `tick_state::full`). A light record keeps the bodies (one `get_body` per tracked name), navigation, clock, globals,
+  inputs, tracked set, rows and unborn marks, and drops the extras, contacts, scripts and blob. Live records are
+  always whole (`record` / `amend_record` unchanged; the deferred-capture path `awaiting_capture_` needed nothing).
+  `rewind_to` restores the newest whole record at or before a light anchor (`restore_base`) and replays the
+  difference - every hook of a replayed tick reads the core's logs by tick (lifecycle queues, trafo inputs, relayed
+  rings, recorded sector passes), so the ticks before the anchor replay as recorded; the reach and history checks
+  stay the requested anchor's, and the replay may run up to `k - 1` ticks deeper. RC2 (b)'s cache and OPC's script
+  reuse take only a whole record of `t - 1`. `on_snapshot` and `resync` refuse a light record (never reached: below).
+  Core: `core_config::sparse_capture` (8) / `sparse_capture_verify`, set at SessionStart only when `snapshots_run()`
+  is false (a snapshot's rows land on the record of their tick); `rewind_for_sectors` starts the union's
+  re-derivation at the restored base + 1 (`union_records_` of the base); status section ` sparse=k[v]
+  light=records/ms whole=records/ms rebased=rewinds+extra ticks unanch=N verify=compared/differing/float/stale`
+  (only while on; `whole` = the replays' whole records, added by the review's fix-up).
+  Headless `--sparse-capture N`, `--sparse-capture-verify`.
+- **Adaptations.** (1) **FINAL rows stay on every tick**: a light record keeps its bodies (FINAL rows, `recorded_body*`,
+  the window's body sets and the birth test need them), so no journal-format note is needed - the design expected
+  FINAL rows only where captured. (2) **k = 8 is also the ceiling** (`kSparseCaptureMax = kReachHistoryTicks -
+  kReachCapTicks`): the deepest standard anchor (120) then still has a whole record in the deepest history (128). A
+  rewind whose base has left the history (only a correction inside an exact resync's re-step window, whose reach is
+  the whole history - `window_rewind_reach`, step A3 - or a forced rewind deeper than the standard reach can ask for
+  one) is refused by the engine as unmatched (`sparse_unanchored`, 0 in every run below). The core's reach checks
+  therefore ask `rollback_engine::rewindable(anchor)` (the record and a whole base before it) instead of
+  `knows_tick` - the held own notice (`client_core_held.cpp`), the late relayed frame (`client_core_messages.cpp`),
+  the trafo input (`client_core_trafo.cpp`) and the sector rewind (`sector_rewind_reachable`) - so such a correction
+  takes the fallback its check already has (a late own notice counted `subst_late`, a late relayed frame
+  `relay_late`, a trafo input `trafo_missed` and a resync, a sector move past the reach a resync) instead of running
+  into the refusal (review finding 2). `replay_corrected_inputs` has no pre-check: a refused remote-only correction
+  there is counted `inrew_missed` and, with snapshots off, its error stays, as for any correction out of the history
+  before this step; only an anchor 121-127 ticks deep inside a re-step window can meet it. (3) **No materialize for a resync**: S is always whole - `anchor_resync` records it after the re-assign
+  drops the history, as the first record of the new history, and a replay re-records only the ticks after its anchor
+  - so the engine only refuses a light S defensively. (4) **Verify mode** (capture anyway; each rebased rewind
+  compares its re-simulated anchor with the record a k = 1 engine would have restored): differences in float script
+  parameters only are counted apart (`float`, as the replay's own script check does; all of them `PE_Balloon Script /
+  TT Set Dynamic Position: local 1 (Old Position)` - the balloon, exception c), and an anchor up to which a tick was
+  replayed with other inputs or lifetimes than its record had is not compared (`stale`: a relayed frame differing
+  from the prediction whose own, older input rewind is still to run - SRT3 keeps an input correction older than a
+  lifecycle anchor apart; first seen as h123_150 tick 602 / h1_150 652, a newborn mirror's first relayed frame,
+  dv 0.184 m/s). In those stale cases the rebased replay applies the pending older correction before its own rewind
+  does, which the dense path does not: the intermediate state after the lifecycle rewind differs from the dense one,
+  and the two paths converge only because the pending correction's own rewind (or, below, its drop) leaves the world
+  where the dense path's later rewind does - the final records agree (journals IDENTICAL), the in-frame state between
+  the two rewinds is not compared. (5) **A frame's lifecycle rewind drops the pending replays from its restored base**
+  (`rewind_to`'s `restored`, `rewind_world`'s, `flush_life_rewinds`): a rebased replay read every correction after
+  the base (the rings by tick, the amended own records), so a pending input or own replay from a tick in (base,
+  anchor] is carried too instead of running a second time (review finding 4). (6) **Not in the control arms**: k = 1
+  with `body_set_corrections` (its full snapshots still land on the records of their ticks, review finding 3) and in
+  a headless run with `--dump-savestate` / `BMMO_DUMP_FINAL_LAG` / `--compare-scripts` unless `--sparse-capture` is
+  given (they read every record's blob and scripts, review finding 5). (7) `capture_replayed` captures a tick twice
+  when its body set changed without a lifetime change (light first, then whole): time only, rare, left (review
+  finding 6).
+- **k by measurement** (the stored `cpu_full/srt_E_l12x_on2` captures, the four clients pinned to E-cores of their
+  own, `--replay-free-cost-clock`, one binary at a time, `work/SRT4/e_run.sh` + `cost.py`; journals IDENTICAL to the
+  live ones in every arm): per replayed tick (stats, t_rep / resim, the headless-only blob diff included) and the
+  reach meter's replay ms per tick (B5RX: what a retail client would measure):
+
+    | k | rewinds | replayed ticks (rebased + extra) | per replayed tick | meter per tick | per rewind (replay + restore) | light capture |
+    |---|---|---|---|---|---|---|
+    | 1 (twice) | 54 | 1237 | 1.86 / 1.89 ms | 1.58-1.72 ms | 43 + 2.3 ms | - |
+    | 2 | 54 | 1242 (5 + 5) | 1.70 ms | 1.41-1.51 ms | 39 + 2.4 ms | 0.19 ms |
+    | 4 | 54 | 1246 (7 + 9) | 1.42 ms | 1.11-1.19 ms | 33 + 2.4 ms | 0.19 ms |
+    | 8 | 54 | 1257 (12 + 20) | **1.19 ms** | **0.89-0.95 ms** | **28 + 2.4 ms** | 0.19 ms |
+
+  Each step of k pays; the extra ticks of a rebased rewind (20 of 1257 at k = 8) cost less than the captures saved,
+  so k = 8, the ceiling of (2), is the default. Retail L12 on E-cores (`scripts/retail/srt4_l12`, RT2's SP8-e recipe
+  through `work/RTR/rtr_retail.py l12`, net lag 150 on both, games on 16-21 / 22-27, snapshots off, the Arch server
+  rebuilt from this tree): **0.60 / 0.57 ms** a replayed tick (t_rep 42 / 40 ms over 70 ticks, meter 0.592 / 0.566;
+  before, SRT's `srt_l12`: 1.39 / 1.39), 3 rewinds per client, 1 rebased (+1 tick), light 59 records at 0.09 ms,
+  resyncs 0 / 0, rebases 0 / 0; `worst_bodies.py` server vs each client (balloon excluded) printed its header only,
+  which means no tick with a comparable body row (it prints every compared body, an exact one as `never`), so the
+  retail run shows no FINAL-row exactness either way - it is a smoke test; the reach
+  cap rose from the floor 48 to 73 / 76 (the meter's cheaper replay; history 128, inside (2)).
+- **The pass rule's per-tick figures are not met: 0.6 ms headless L12 (measured 1.19, meter 0.89-0.95) and 0.4 ms
+  retail L12 (measured 0.57-0.60).** Cause, measured on this build (the review's fix-up added `replay_whole` /
+  `replay_whole_us`, the status section's `whole=records/ms`; `srt_E_l12x_on2` replayed again at k = 8 on E-cores,
+  `work/SRT4/e/srt_E_l12x_on2/k8g`, journals IDENTICAL): t_rep 1625 ms over 1257 replayed ticks = 1.29 ms a tick
+  (this run; 1.19 the earlier one - the scatter of a timed replay), of which the light records 189 ms (1019 records,
+  0.19 ms each; 0.15 ms a replayed tick), the whole records 634 ms (238 records - the last tick of every rewind, the
+  multiples of k, the births - **2.66 ms each**; 0.50 ms a replayed tick) and the rest of the replayed tick, which is
+  not capture (the step, the scripts, inputs, births, the tracked set, the hooks), 802 ms = **0.64 ms a replayed
+  tick**. So (i) the headless 0.6 ms cannot be met by any capture cut: the non-capture remainder alone is above it
+  (it is pre-existing: the same code at k = 1); (ii) a whole record costs 2.66 ms here against about 1.2 ms of
+  capture in a k = 1 replayed tick (1.86-1.89 less the 0.64 remainder); the probable cause, not separated by a
+  measurement, is that the record of t - 1 is light for every whole record but a birth's, so neither RC2 (b)'s
+  capture cache nor OPC's script reuse has a source (`capture`: `it->full`) and the fifth of the ticks that stays
+  whole pays the uncached price - this step's own residual; (iii) the
+  retail split was not re-measured on this build (the one retail run preceded the counter); SRT's census put the
+  retail non-capture remainder at about 0.28 ms, a light record there costs 0.09 ms. Options (not chosen here): (a) take the figures as measured and let
+  SRTJ judge the hard gates (T2' / T3 / T4) on them; (b) a k above 8 by deepening the history (kReachHistoryTicks =
+  120 + k; at k = 16 an estimated 0.48 ms retail, more memory and up to 15 extra ticks per rebased rewind); (c) a
+  step on the replayed tick's non-capture bookkeeping (0.64 ms headless measured above; its own split needs SRT's
+  diag patch re-applied); (d) SRT2B's per-body read cut lowers the whole captures that remain; (e) keep in a light
+  record what the cache and the script reuse need of t - 1 (the extras of the sleeping bodies, the scripts), so the
+  whole records after it are cached again - a costlier light record against cheaper whole ones, not measured.
+- **Checks** (x64 BUILD-OK, `build-agent-rSRT4c`; x86 CLIENT-BUILD-OK, DEPS-OK; GCC `linux_test_syntax.sh` 33/33
+  ok; `BallanceMMOMessageTests` 726/726, two new: `SparseCaptureRecordsEveryKthReplayedTickWholeAndRebasesALightAnchor`,
+  `SparseCaptureRefusesALightAnchorWithNoWholeRecordBeforeIt`):
+  - The wire check on core_ref_s13 (`EXTRA=--replay-free-cost-clock`, rSRT3 vs rSRT4, then rSRT4c in "-" mode over
+    the same old traces): 45/45 sends SAME, 45/45 journals IDENTICAL; no arm's journal changes. Sparse capture ran in
+    every arm (e.g. swing_snapoff c2: 1025 light records, 21 rebased rewinds + 76 ticks; resync_snapoff c1: 959 /
+    16 + 63), 0 unanchored.
+  - Verify mode: core_ref_s13 at k = 8 403 anchors compared, **0 mismatches** (179 float / balloon, 10 stale); at
+    k = 2 224 compared, 0 mismatches (101 float, 2 stale); HL run 16's three arms (`hl_full/r16_*`) 154 compared, 0
+    mismatches (22 float); `srt_E_l12x_on2` 12 compared, 0. Every verify replay's journals IDENTICAL.
+  - HL run 16's three arms replayed by rSRT4c (k = 8, free clock): 12/12 journals IDENTICAL to the live ones.
+  - SimTool `--savestate-check` (OPC's RK2 recipe, K = 2 seed 1 x 40): PASS 40/40 on rSRT3 and rSRT4c (the SimTool's
+    engines keep k = 1, so it does not reach the sparse path).
+  - The review's fix-up (findings 2-5, the whole-record counter; `build-agent-rSRT4d`): x64 BUILD-OK DEPS-OK, x86
+    CLIENT-BUILD-OK DEPS-OK, GCC 33/33 ok, 726/726 tests (the refusal test also asks `rewindable` and `restored`), the
+    wire check on core_ref_s13 against rSRT3's traces (`EXTRA=--replay-free-cost-clock`, "-" mode, `rSRT4w_old`):
+    44/44 sends SAME, 45/45 journals IDENTICAL, swing_snapoff c2's sparse figures unchanged (1025 light, 21 rebased
+    + 76).

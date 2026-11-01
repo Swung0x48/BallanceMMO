@@ -263,7 +263,7 @@ namespace bmmo::session {
     bool session_client_core::sector_rewind_reachable(uint32_t tick) const {
         if (tick == 0) return false;
         const uint32_t now = current_tick();
-        return s.rollback_.knows_tick(tick - 1) && s.union_records_.count(tick - 1)
+        return s.rollback_.rewindable(tick - 1) && s.union_records_.count(tick - 1)
             && static_cast<int32_t>(now - (tick - 1)) >= 0
             && now - (tick - 1) <= s.rollback_.thresholds().max_resim_ticks;
     }
@@ -316,11 +316,18 @@ namespace bmmo::session {
         const uint32_t anchor = anchor_tick - 1;
         bool ok = false;
         auto& rd = s.rederive_;
-        if (sector_rewind_reachable(anchor_tick)) {
+        // Step SRT4 (realtime-design 4 a2): the replay starts at the tick
+        // after the record the rewind restores - the anchor's, or the whole
+        // record before a light one (rollback_engine::restore_base) - so
+        // the union is re-derived from there: the ticks before the anchor
+        // re-derive the passes they had (the late stamps are all later).
+        uint32_t base = anchor;
+        if (!s.rollback_.restore_base(anchor, base)) base = anchor;
+        if (sector_rewind_reachable(anchor_tick) && s.union_records_.count(base)) {
             rd.active = false;
             rd.live_tick = now;
             // The live passes of the window: replaced by the re-derived ones.
-            rd.r.start(s.union_records_.at(anchor), stamp_log(), s.pass_log_, anchor_tick);
+            rd.r.start(s.union_records_.at(base), stamp_log(), s.pass_log_, base + 1);
             auto input_at = [this](const std::string& name, uint32_t tick, bmmo::session::input_frame& out) {
                 return recorded_input_at(name, tick, out);
             };

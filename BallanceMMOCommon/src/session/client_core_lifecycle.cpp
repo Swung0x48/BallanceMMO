@@ -486,15 +486,20 @@ namespace bmmo::session {
         bool rolled = false;
         {
             const scope_guard keep_cells = keep_live_cells();
-            rolled = rewind_world(batch.anchor, now, input_at, batch.reason);
+            // Step SRT4 (review finding 4): the replay ran from `restored` -
+            // the anchor, or the whole record before a light one - and read
+            // every correction after it, so a pending replay from there on
+            // is carried too.
+            uint32_t restored = batch.anchor;
+            rolled = rewind_world(batch.anchor, now, input_at, batch.reason, 0, &restored);
             if (rolled) {
                 ++s.life_rewinds_;
                 s.life_rewind_depth_ += now - batch.anchor;
-                drop_carried_own_replay(batch.anchor, false);
+                drop_carried_own_replay(restored, false);
                 // A remote's input correction from at or after the anchor
                 // + 1 was in the rings this replay read (the relay's frames
                 // land there on arrival): replayed already, not again.
-                drop_carried_input_replay(batch.anchor);
+                drop_carried_input_replay(restored);
             }
         }
         if (batch.events > 1) {

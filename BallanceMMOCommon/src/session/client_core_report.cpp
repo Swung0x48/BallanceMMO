@@ -251,6 +251,18 @@ namespace bmmo::session {
             " ccache=%llu/%llu%s", static_cast<unsigned long long>(rs.capture_cache_hits),
             static_cast<unsigned long long>(rs.capture_cache_mismatches),
             cache_mode == rollback_engine::capture_cache_mode::verify ? "v" : "");
+        // Step SRT4 (realtime-design 4 a2): sparse=k[v] light=records/ms
+        // whole=records/ms (the replays' whole records) rebased=rewinds+extra ticks unanch=refused
+        // verify=compared/differing/float script parameters only/stale (not compared) - only while sparse capture is on.
+        const std::string sparse = s.rollback_.sparse_capture() <= 1 ? std::string() : textf(
+            " sparse=%u%s light=%llu/%.0f whole=%llu/%.0f rebased=%llu+%llu unanch=%llu verify=%llu/%llu/%llu/%llu",
+            s.rollback_.sparse_capture(), s.rollback_.sparse_capture_verify() ? "v" : "",
+            static_cast<unsigned long long>(rs.sparse_light), static_cast<double>(rs.sparse_light_us) / 1000.0,
+            static_cast<unsigned long long>(rs.replay_whole), static_cast<double>(rs.replay_whole_us) / 1000.0,
+            static_cast<unsigned long long>(rs.sparse_rebased), static_cast<unsigned long long>(rs.sparse_extra_ticks),
+            static_cast<unsigned long long>(rs.sparse_unanchored),
+            static_cast<unsigned long long>(rs.sparse_verified), static_cast<unsigned long long>(rs.sparse_verify_mismatches),
+            static_cast<unsigned long long>(rs.sparse_verify_float), static_cast<unsigned long long>(rs.sparse_verify_stale));
         return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu superseded=%llu/%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
@@ -476,7 +488,7 @@ namespace bmmo::session {
                      // starved reports now, the longest run, and the resyncs
                      // the starved rule asked for.
                      s.starved_run_, s.starved_run_max_, static_cast<unsigned long long>(s.starved_resyncs_),
-                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str());
+                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str()) + sparse;
     }
 
 }

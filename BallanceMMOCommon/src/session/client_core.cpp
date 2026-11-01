@@ -362,6 +362,12 @@ namespace bmmo::session {
         s.reach_max_ = s.rollback_.thresholds().max_resim_ticks;
         s.session_ = msg.session;
         s.snapshot_interval_ = msg.snapshot_interval;
+        // Step SRT4: sparse capture of replayed ticks, in a session without
+        // snapshots only (core_config::sparse_capture) - and not in the
+        // body-set-corrections control arm, whose full snapshots still land
+        // on the records of their ticks (review finding 3).
+        s.rollback_.set_sparse_capture(snapshots_run() || config.body_set_corrections ? 1u : config.sparse_capture,
+                                       config.sparse_capture_verify);
         s.input_delay_ = msg.input_delay;
         s.sector_lead_ = msg.sector_lead;
         s.seed_ = msg.seed;
@@ -1244,10 +1250,10 @@ namespace bmmo::session {
     bool session_client_core::rewind_world(uint32_t anchor, uint32_t now,
                                            const std::function<bool(const std::string& entity, uint32_t tick,
                                                                     bmmo::session::input_frame& out)>& input_at,
-                                           const std::string& reason, uint32_t reach) {
+                                           const std::string& reason, uint32_t reach, uint32_t* restored) {
         const uint64_t frozen_before = s.rollback_.stats().frozen;
         const uint64_t globals_before = s.rollback_.stats().globals_failures;
-        const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason, reach);
+        const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason, reach, restored);
         if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen", true);
         // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused
         // write of the physics globals dropped the history the same way.

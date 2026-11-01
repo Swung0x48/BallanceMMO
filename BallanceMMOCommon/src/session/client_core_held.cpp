@@ -207,7 +207,8 @@ namespace bmmo::session {
         // finds its record and amends it).
         const uint32_t anchor = tick - 1;
         const uint32_t reach = window_rewind_reach(tick);
-        const bool reachable = current_tick() - anchor <= reach && s.rollback_.knows_tick(anchor);
+        // (rewindable, step SRT4: a light anchor needs its whole base too.)
+        const bool reachable = current_tick() - anchor <= reach && s.rollback_.rewindable(anchor);
         if (!reachable) {
             ++s.subst_late_;
             if (s.subst_late_logs_++ < 8)
