@@ -3,7 +3,6 @@
 // from the /mmo room subcommand in BallanceMMOClient.cpp; here we render the
 // room_state roster / list and the room_event notifications.
 #include "../BallanceMMOClient.h"
-#include "session_journal_client.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -219,10 +218,7 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
             // server drops that player from the session world here, so a replay
             // of our file has to drop it too.
             utils_.run_on_game_thread([this, subject = msg.subject] {
-                if (core_host_leave_player(subject)) return;   // a session the shared core runs (R1)
-                if (physics_session_.session == 0) return;
-                bmmo::session::client_journal::instance().leave_player(
-                        physics_session_.current_tick(), subject);
+                core_host_leave_player(subject);   // a session the shared core runs (R1; FULL step LGD: the only one)
             });
             if (msg.actor == msg.subject)  // left on their own
                 SendIngameMessage(std::format("{} left the room.", get_username(msg.subject)));

@@ -58,22 +58,22 @@ of what the code does.
   receive the server's state of one tick once (rows, the portable script
   record, the union), apply it as that tick and re-step to their own tick.
   This is not a per-tick correction and stays after snapshots are off.
-- The retail legacy session path gets nothing new and is deleted at R7.
+- The retail legacy session path got nothing new and is **deleted** (R7:
+  FULL steps LGM and LGD, 2026-11-01; the core design's "As built (step
+  LGD)").
 - **The retail session core is on by default** (the user, 2026-10-27, told
   that S10 turned the server's placement on by default and that a member
   without the core is then refused from the session: "最终应该是要开启的？
-  那就全部开启", then "core在正式客户端开启吧"). `session core off` still
-  selects the legacy path for the next session until R7 deletes it, and
-  every server refuses that session (next point).
+  那就全部开启", then "core在正式客户端开启吧"). Since FULL step LGD it is
+  the only session path: the switch is gone and `session core on|off` is an
+  unknown command.
 - **Clients without the session core are refused** (the user, 2026-10-28,
   answer 7 of the seven quoted in §4 item 3, verbatim: "直接拒绝，不要继续兼容
   非session core的客户端" - refuse it outright, stop keeping clients without
   the session core compatible). The server refuses a physics session to a
   member whose SessionReady does not come from the session core, whatever
   the session's world options (step B9DX, item LGX; the core design's "As
-  built (step B9DX)"); the legacy code still compiles until R7 deletes it,
-  but no check, run or deferred item is spent on `session core off` any
-  more.
+  built (step B9DX)"); the legacy code is deleted since FULL step LGD (R7).
 - **Host logic is written once** (the user, 2026-10-27, asked why Stage C -
   one core - does not come first, told that the core is already shared and
   that what is still written two or three times is the per-host glue, e.g.
@@ -283,8 +283,8 @@ numbers 1-10 are unchanged.
        path at FULL step LGM**: the core host records with
        `capture_level_file_counters` (its own Sequencer record, the same frames
        as the legacy capture) and restores with `restore_level_file_counters`,
-       then logs the retail census itself; the legacy pair stays the legacy
-       anchor's until LGD deletes it; (c) the placement's
+       then logs the retail census itself; the legacy pair was deleted with
+       the legacy path at FULL step LGD; (c) the placement's
        release - **done at SP10**: `game/sector_placement.hpp`
        `release_placement(placement, context, why, log)`, called by PW's
        destructor (no log), SC's `release_placement` and CH's

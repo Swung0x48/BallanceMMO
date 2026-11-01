@@ -14,10 +14,10 @@
 // pending, at most every kJournalCheckpointGap ticks), LOCAL checkpoints carry
 // the ball owners, and the header's first tick is the tick base.
 //
-// Named bmmo::session::core::client_journal: the retail mod already has a
+// Named bmmo::session::core::client_journal: the retail mod had a
 // bmmo::session::client_journal (its legacy singleton,
-// BallanceMMOClient/session/session_journal_client.hpp), which stays until R7
-// and is compiled into the same DLL as this one.
+// BallanceMMOClient/session/session_journal_client.hpp) compiled into the same
+// DLL until R7 (FULL step LGD deleted it).
 //
 // Single threaded like the rest of the core: the host feeds the network in
 // between frames, so there is no lock anywhere near the writer.  CK-free.

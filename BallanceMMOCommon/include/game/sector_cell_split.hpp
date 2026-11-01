@@ -34,9 +34,10 @@
 // manager itself, which must read the chain's own [0][1].  Once per world at
 // its anchor: the server's world (destroyed with its session, never handed
 // back), the headless client's (handed back when the next session begins:
-// base.cmo's chain survives a level exit), the retail mod's with the session
-// core on (handed back at session end; the legacy path, core off, keeps the
-// cell it polls).  The copy and the parameter are new CK objects: everything
+// base.cmo's chain survives a level exit), the retail mod's core host (handed
+// back at session end; the legacy path that kept the cell it polls was
+// deleted at R7, FULL step LGD).  The copy and the parameter are new CK
+// objects: everything
 // made after the anchor gets other CK_IDs, which reorders a journal
 // checkpoint's body list (list_bodies), never the simulation.
 //

@@ -413,9 +413,9 @@ namespace bmmo::session {
     // the pacer still wants its idle ticks).  The gate is rollback state.
     //
     // Every world of the session core and the server's runs this one.  The
-    // gate-free sector_union stays the legacy retail path's: it is held by
-    // value in physics_session_state, which keeps its layout until R7
-    // (session-client-core design 3.2), and that path gets no feature.
+    // gate-free sector_union was the legacy retail path's (held by value in
+    // physics_session_state, deleted at R7, FULL step LGD); the base class
+    // keeps its interface.
     class gated_sector_union : public sector_union {
     public:
         pass tick(uint32_t tick, bool manager_active) { return tick_gated(tick, manager_active, &gate_); }

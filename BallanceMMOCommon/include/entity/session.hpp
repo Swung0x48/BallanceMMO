@@ -333,14 +333,15 @@ namespace bmmo::session {
     // hosts declare CAP_PLACEMENT in every SessionReady (the host capability
     // session_capabilities::placement, set unconditionally by the headless
     // host and the retail core host, with or without
-    // WORLD_PLACEMENT_CLONES), and the legacy retail path (session core off)
-    // declares no capability at all (caps 0).  A session with
+    // WORLD_PLACEMENT_CLONES), and a client without the session core (the
+    // legacy retail path, deleted at R7, FULL step LGD) declares no
+    // capability at all (caps 0).  A session with
     // WORLD_TRAFO_INPUTS still refuses a core member that does not run the
     // trafo inputs (the headless --no-trafo-cap / --no-script-replay arms).
     // A refused member leaves the session, not the room.
     enum class ready_refusal : uint8_t {
         none = 0,
-        no_session_core,   // no CAP_PLACEMENT: the legacy retail path
+        no_session_core,   // no CAP_PLACEMENT: a client without the session core
         no_trafo_inputs,   // WORLD_TRAFO_INPUTS without CAP_TRAFO_INPUTS
     };
     inline ready_refusal session_ready_refusal(uint32_t caps, uint32_t world_options) {

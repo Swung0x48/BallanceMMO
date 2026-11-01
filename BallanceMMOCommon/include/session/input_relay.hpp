@@ -363,7 +363,8 @@ namespace bmmo::session {
     // re-predicts the tail with what it knows now and its re-captured record
     // holds it: a later arrival equal to it is no news.  Null before the
     // first relayed frame (the birth state or no input, as before) and for
-    // an empty ring.  The legacy retail path keeps relay_frame_or_earlier.
+    // an empty ring.  relay_frame_or_earlier stays its building block (the
+    // legacy retail path, its other caller, is gone since FULL step LGD).
     inline const input_frame* relay_frame_or_newest(const std::map<uint32_t, input_frame>& ring, uint32_t tick) {
         if (const input_frame* frame = relay_frame_or_earlier(ring, tick)) return frame;
         if (ring.empty() || tick < ring.rbegin()->first) return nullptr;

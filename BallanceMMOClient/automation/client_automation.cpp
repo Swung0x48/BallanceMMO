@@ -2,9 +2,9 @@
 // Every command runs on the game thread from OnProcess and answers one line.
 
 #include "BallanceMMOClient.h"
-#include "session/session_journal_client.hpp"
 #include "session/core_host.hpp"
 #include <game/custom_map.hpp>
+#include <game/navigation_graph.hpp>   // the navgraph verb (FULL step LGD: no longer through physics_session.hpp)
 #include <cfloat>
 
 #include <algorithm>
@@ -367,70 +367,29 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
                 || rest.rfind("hold", 0) == 0       // FULL step AHN (and R6H's hold-event)
                 || rest.rfind("force-own-move", 0) == 0)   // FULL step R6H
             return core_host_session_verb(rest);
-        // FULL step LGM: the core host answers trace / rollback (its own settings, read at a core session's
-        // start); the legacy state keeps its copies until LGD.
-        if (rest == "trace on") { physics_session_.trace = true; physics_session_.rollback.set_verbose(true); return core_host_session_verb(rest); }
-        if (rest == "trace off") { physics_session_.trace = false; physics_session_.rollback.set_verbose(false); return core_host_session_verb(rest); }
-        if (rest == "rollback on") { physics_session_.rollback_enabled = true; return core_host_session_verb(rest); }
-        if (rest == "rollback off") { physics_session_.rollback_enabled = false; return core_host_session_verb(rest); }
-        return "ok " + (core_host_running() ? core_host_status_text() : physics_session_status_text());
+        // The core host answers trace / rollback (its own settings, read at a core session's start; FULL step
+        // LGM); FULL step LGD: the legacy session's copies are gone.
+        if (rest == "trace on" || rest == "trace off" || rest == "rollback on" || rest == "rollback off")
+            return core_host_session_verb(rest);
+        return "ok " + core_host_status_text();
     }
     if (verb == "journal") {
-        // The session black box (session/session_journal_client.hpp).  The verb
-        // and the BML property Gameplay/SessionJournal are ONE setting: "on" and
+        // The session black box (the session core's journal).  The verb and
+        // the BML property Gameplay/SessionJournal are ONE setting: "on" and
         // "off" write the property, and a session reads it once when it starts,
-        // so the switch arms or disarms the NEXT session.  The one thing that
-        // happens immediately is "off" closing an open file: someone who types
-        // it wants the recording to stop now (the menu tick never touches a
-        // running session).  "mark" is the one a player uses: it leaves a note
-        // and a body checkpoint at the tick where something looked wrong.
-        // FULL step LGM: with the switch on (or a core session) core_host_journal
-        // answers every action from the session core's journal; this legacy
-        // singleton answers only with the switch off.
-        auto& journal = bmmo::session::client_journal::instance();
+        // so the switch arms or disarms the NEXT session.  "mark" is the one a
+        // player uses: it leaves a note and a body checkpoint at the tick where
+        // something looked wrong.  core_host_journal answers every action
+        // (FULL step LGM); FULL step LGD: the legacy black box is gone.
         std::istringstream args(rest);
         std::string action;
         args >> action;
         std::string text;
         std::getline(args, text);
         if (!text.empty() && text.front() == ' ') text.erase(0, 1);
-        // The session core's journal (R1; FULL step LGM: every action, status and on included, with the
-        // switch on or a core session); the legacy black box below only with the switch off.
-        if (std::string answer; core_host_journal(action, text, answer)) return answer;
-        if (action.empty() || action == "status") return "ok " + journal.status();
-        if (action == "on") {
-            journal.set_enabled(true);
-            // The property is the setting: the next session start reads it
-            // again, so the verb has to move it too or that read would undo
-            // this answer.  Nothing can be opened mid-session - the header
-            // needs the anchor, which is long past.
-            config_manager_["session_journal"]->SetBoolean(true);
-            return journal.recording()
-                    ? "ok journal on (SessionJournal=true), already recording to " + journal.path().string()
-                    : "ok journal on (SessionJournal=true), recording starts with the next session";
-        }
-        if (action == "off") {
-            // A capped file is still open, and "journal status" keeps printing
-            // it: close it on the open flag, not on recording(), or the answer
-            // would deny a file the next status line still shows.
-            const bool was_open = journal.open();
-            const bool was_recording = journal.recording();
-            const std::string path = journal.path().string();
-            journal.set_enabled(false);
-            config_manager_["session_journal"]->SetBoolean(false);
-            if (was_open) journal.end(physics_session_.current_tick(), "recording turned off");
-            if (!was_open) return "ok journal off (SessionJournal=false), nothing was being recorded";
-            return was_recording ? "ok journal off (SessionJournal=false), closed " + path
-                                 : "ok journal off (SessionJournal=false), closed the capped " + path;
-        }
-        if (action == "mark") {
-            if (text.empty()) return "error usage: journal mark <text>";
-            if (!journal.recording()) return "error no session journal is open";
-            const uint32_t tick = physics_session_.current_tick();
-            journal.mark(tick, text, physics_view_.list_bodies());
-            return std::format("ok mark at tick {}: {}", tick, text);
-        }
-        return "error usage: journal on|off|status|mark <text>";
+        std::string answer;
+        core_host_journal(action, text, answer);
+        return answer;
     }
     if (verb == "mmo") {
         OnFullCommand(rest);
@@ -471,7 +430,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
             status_->toggle();
             return std::string("ok panel ") + (ping_->visible_ ? "shown" : "hidden");
         }
-        return "ok " + (core_host_running() ? core_host_overlay_text() : physics_session_overlay_text());   // FULL step LGM
+        return "ok " + (core_host_running() ? core_host_overlay_text() : std::string{});   // FULL step LGD: no session, no block
     }
     if (verb == "screenshot") {
         auto* render_context = m_bml->GetRenderContext();
@@ -489,10 +448,9 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // and every entry's now=0 is a block whose target the session emptied.
         // FULL step ESCX: a core session adds its own mute and the ESC menu
         // overlay (session/menu_overlay.hpp).
-        // FULL step LGM: the core host's own edits while a core session exists (core_host_pause_status).
-        if (core_host_running()) return "ok " + core_host_pause_status();
-        const std::string overlay = bmmo::session::retail::menu_overlay_status(m_bml->GetCKContext());
-        return "ok " + pause_scripts_status() + (overlay.empty() ? "" : " " + overlay);
+        // The core host's own edits (core_host_pause_status, FULL step LGM); FULL step LGD: also without a
+        // session (nothing applied then), the legacy members' line is gone.
+        return "ok " + core_host_pause_status();
     }
     if (verb == "objects") {
         auto* context = m_bml->GetCKContext();
@@ -609,7 +567,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     }
     if (verb == "navgraph") {
         // What the session's key detection sees right now: the same reader
-        // physics_session_frame runs until every leaf has a key.  A session
+        // the core host's frame runs until every leaf has a key.  A session
         // whose status says keys_known=0 is diagnosed here, not by guessing
         // which mod rewired Ball Navigation.
         const auto graph = bmmo::game::read_navigation_graph(m_bml->GetCKContext());
@@ -668,9 +626,6 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // stamped ahead, sent, and run here at that tick, like a crossed
         // checkpoint - the server activates at the same tick.
         if (std::string answer; core_host_sector(sector, answer)) return answer;   // the shared core's session (R1)
-        if (physics_session_hold_sector(sector, "automation"))
-            return std::format("ok sector {} held for tick {} (Sector event sent ahead)", sector,
-                               physics_session_.last_sector_due);
         auto* context = m_bml->GetCKContext();
         CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
         CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
@@ -684,9 +639,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     if (verb == "beam") {
         // beam <x> <y> <z>: put the current ball there at rest, so it falls
         // onto a mechanism.  The headless replay does the same with --beam at
-        // the same frame.  In a physics session the server's copy of the ball
-        // is moved with it (physics_session_report_beam), or the next snapshot
-        // would simply drag this one back.
+        // the same frame.  In a physics session the core makes the beam (below,
+        // core_host_beam) so the server's copy of the ball moves with it.
         std::istringstream args(rest);
         double x = 0, y = 0, z = 0;
         if (!(args >> x >> y >> z)) return "error usage: beam <x> <y> <z> [at <tick>]";
@@ -711,9 +665,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         const float still[3] = {0.0f, 0.0f, 0.0f};
         if (!physics_view_.set_body_state(ball->GetName(), position, upright, still, still, true, error))
             return "error " + error;
-        const std::string reported = physics_session_report_beam(ball->GetName(), position);
-        return std::format("ok beamed {} to ({:.3f},{:.3f},{:.3f}) at frame {}{}", ball->GetName(), x, y, z,
-                           record_frames_, reported);
+        return std::format("ok beamed {} to ({:.3f},{:.3f},{:.3f}) at frame {}", ball->GetName(), x, y, z,
+                           record_frames_);
     }
     if (verb == "array") {
         // array <name>: every cell of a CKDataArray (diagnostics).

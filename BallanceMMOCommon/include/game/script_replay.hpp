@@ -352,9 +352,9 @@ namespace bmmo::game {
         // the scripts the trafo frame runs, in its order (sets by player id,
         // the copied order inside a set), and each one's built state - its
         // block bytes right after the set was built.  Kept beside the
-        // selection, never in it: `selection` is held by the legacy retail
-        // state (physics_session_state::script_ids), whose layout stays as it
-        // is until R7 (session-core design 3.2).
+        // selection, never in it: `selection` was held by the legacy retail
+        // state (physics_session_state::script_ids, deleted at R7, FULL step
+        // LGD) and its layout was left as it is.
         struct trafo_part {
             std::vector<CK_ID> scripts;
             std::map<CK_ID, std::vector<uint8_t>> built;
@@ -1133,9 +1133,9 @@ namespace bmmo::game {
         // the host records each pending activation of these after a live
         // frame and the replay re-issues it, as it does the sector manager's
         // (game/session_host_support.hpp manager_activations).  A list the
-        // host keeps beside the selection, not in it: `selection` is held by
-        // the legacy retail state (physics_session_state::script_ids), whose
-        // layout stays as it is until R7 (design 3.2).
+        // host keeps beside the selection, not in it: `selection` was held by
+        // the legacy retail state (physics_session_state::script_ids, deleted
+        // at R7, FULL step LGD) and its layout was left as it is.
         static std::vector<CK_ID> trafo_activations(CKContext* context, const selection& sel) {
             std::vector<CK_ID> out;
             if (!context) return out;

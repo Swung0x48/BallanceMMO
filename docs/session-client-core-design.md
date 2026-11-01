@@ -4146,7 +4146,9 @@ snapshots off is `… 100000 100000 4.2`.
   sector placement S10 turned the server's `physics.placement_clones` on by
   default and the server refuses a member without the core).
 - No new feature is added to the legacy path.
-- R7 deletes it.
+- R7 deletes it. **Done at FULL step LGD (2026-11-01):** the legacy path, its
+  member state and the switch are gone; `session core on|off` is answered as
+  an unknown command ("As built (step LGD)" at the end of this document).
 
 | step | what | checks that close it |
 |---|---|---|
@@ -4157,7 +4159,7 @@ snapshots off is `… 100000 100000 4.2`.
 | **R4** part one | `own_corrections` on: held notices amend the own records and rewind. The starvation detector is deleted. LPD §1.4 is corrected. | Two clients, snapshots off, `net lag 150`, client 2 `net blackout 300 up` at tick 1500 (the A1 analogue): `subst recv` equals the server's S2 count for that client; `subst rew` > 0; no resync; client 2's own ball 0.0000 m from the server's journal after the episode settles (A1's criterion); client 1 unaffected (its numbers within the R3 band). |
 | **R5** part two (needs `slew`) | `fixed_tick_driver::slew(ticks)` in `on_process` (2x through `SkipRenderForNextTick`, 0.9x by waiting), `kMaxCatchUpTicks` + \|slew\| (LPD §2.4 "Retail"). The forced frames through `force_own`. The retail host declares `slew`, so `caps` = `CAP_LEAD`. | Two clients, snapshots off, client 2 `net lag` +300 ms uplink persistent from tick 1500 (the A5u analogue), server lead flag on: exactly one raise, `lead_adj` 1, the ack sent, no resync, client 2's substitutions after the raise within the A0 band; client 1's `lead_adj` 0. |
 | **R6** part three (needs `own_body_control`) | `own_birth_move` on, once the own-body capability exists on retail: `unmake_own` / `make_own` under the retail Physicalize block. That is a bridge and script-edit job of its own, after LPD step 21's measurement of a multi-tick own absence on retail. Until then this step does not start and the §2.3 fallback stands. The §1.2 switch `own_birth_move` (not built at E7) is built here first, off, before the retail host declares `own_body_control`: with the capability alone `move_own_birth` would start moving own births at once. With the capability the core also takes an own birth the scripts made inside a rewind's window out at the restore and remakes it at its birth tick (step OWNB, `rewind-cost-design.md` "As built (step OWNB)", `destroyable_own_birth` / `own_birth_remade`); until then retail parks it and the replayed birth carries its later hull state (measured at OWNB: `time_of_next_reset` 16 against the clone's 0). **Revised at FULL step R6D (the research; "As built (step R6D)" below).** LPD step 21's measurement is done (R6M: every absence the 48 reach admits passes, no depth cap) and the live bridge-made own body is safe (BEAMF and R6D item 1), so the row splits in two steps. **R6B** (after R6S): `core_host.cpp:1775` `caps.own_body_control = true` with `config.own_birth_move = false`; with the switch off only branch (1) changes - `destroyable_own_birth` (`client_core_lifecycle.cpp:2585-2596`) returns `scripted_own_life`, so `keeps_parked` (`session_host_world.hpp:599-605`) lets the restore take an in-window scripted own birth out and the replay remake it at its birth tick (`destroy_moved_own_birth` :2598-2629, `apply_own_due` :1966-1990, `remake_own_body` :2316-2359; no new core code) - plus the host's re-arm of the own ball's collision-sound blocks after any frame whose `host.own_bodies_made` (CH:407, :3855) advanced (live beam, `settle_own_due`, a rewind that remade the body, the resync's remake; never inside a replay): the two physics_RT prototypes that hold an IVP listener (Physics Collision Detection `{0x7435488d,0x201d1188}`, Physics Continuous Contact `{0x199e4cf1,0x545a78fe}`) collected once at the anchor (CK only, a helper beside `outside_force_blocks`, `navigation_graph.hpp:144`) and tested at every re-arm: `GetTarget()` the current own entity, the block On (`IsActive()`, and for Collision Detection a stale listener in local 0) - an Off block is never switched on; a Collision Detection block is reset through `CallCallbackFunction(CKM_BEHAVIORRESET)` (its own callback deletes the stale listener inside physics_RT, `PhysicsCollisionDetection.cpp:305-328`), then both get `ActivateInput(0)`; a still-queued entry is an outside entry gap Q4 holds, never rebuilds (R6D note item 1). R6B's pass adds OVX's arm (`scripts/retail/ovx_r1`) and "sound after a remake". **Built at FULL step R6S:** `core_config::own_birth_move` (default true; retail `config.own_birth_move = false`, core_host.cpp beside `own_body_backstop`), "As built (step R6S)" below; branch (2) with the switch off resyncs (the user's R6H-SUP (b), decision 57). **R6P**: `config.own_birth_move = true`; branch (4) `move_own_birth` (:2973) takes the capability path for a moved birth; branch (2) a superseded birth goes to `move_own_birth(made=false)` (the history without it, no resync - R6H-SUP (b)); branch (3) the never-made design of Q-R6-NEVER (a) (new core logic, both hosts: R6D's note; a re-report that is itself rejected / missing ends in the resync, with `resync_own_life`'s take-out :2909-2914 behind a capability retail does not declare, so retail keeps the body); the backstop deleted (decision 6). | An A6m analogue: the client 2 own Physicalize held 300 ms (a retail `hold-event` verb through `hooks.filter_event`), `net lag 50`: the owner 0.0000 m from T'+48, no resync. (R6D: R6B's own pass - `ovx_r1` own and mirror bit-equal from the birth tick, sound after a remake and after a beam, no block Off before a re-arm On after it, a queued sound entry carried by the held count across a rewind; R6P's - this arm, the R6H-SUP arm, a rejected birth's re-report.) |
-| **R7** close | Delete the legacy retail session code and the `core` switch; core on always. Shrink `physics_session_state` to the host state of §3.2. | Three launches without a hang; R1 (b), R3 and R4 rerun on the final binary within their bands; `retail_run.py` solo checkpoint and sector run green. |
+| **R7** close | Delete the legacy retail session code and the `core` switch; core on always. Shrink `physics_session_state` to the host state of §3.2. **Built at FULL steps LGM (the core host's borrowings moved) and LGD (the deletion; `physics_session_state` deleted outright - the §3.2 host state is CH's file-scope `retail_host`, nothing of the struct was host state; "As built (step LGD)").** | Three launches without a hang; R1 (b), R3 and R4 rerun on the final binary within their bands; `retail_run.py` solo checkpoint and sector run green. (LGD: R1 (b) is a snapshots-on run, replaced by its snapshots-off counterpart the L11 ctl session (plan §0.1); `retail_run.py` never existed - the solo run is `.local-tools/work/LGD/lgd_solo.py`, one copy.) |
 
 The R steps do not require each other's measurements to be good, only to be
 built. R5 and R6 wait on their capability work; R1-R4 do not.
@@ -8203,3 +8205,104 @@ and the server are byte-identical (wire check below).
   journal 2592/2592 (SimTool with `--map` the arena file), 0 resyncs; the clients' 17 local Ball_Stone pieces are
   client-only rows because r3's server runs trafo_inputs off. The slot-13 hack was not needed (retired at CMAP: the
   arena is a custom map).
+
+**As built (step LGD, 2026-11-01): R7 part two - the legacy retail session path deleted.** Base 218ab482 (LGM).
+Retail code only, plus two comments in BallanceMMOCommon headers; no IVP, physics_RT, engine, protocol or journal
+change; the headless client and the server are byte-identical (wire check below).
+- **Deleted files.** BallanceMMOClient/session/physics_session_client.cpp (PSC, 3646 lines: the legacy session, its
+  handlers, the pause / N1 / N2 / N3 / N4 / level-counter halves, the legacy rollback binding the OPB / OPC notes call
+  "the legacy PSC binding", `session_journal_client` use), session/physics_session.hpp (`physics_session_state`),
+  session/session_journal_client.{hpp,cpp} (the legacy black box; after PSC nothing read it but the SessionJournal
+  property callback, the legacy `journal` branch and room_client's PlayerLeft line); CMakeLists.txt's four entries.
+- **`physics_session_state` "shrunk" = deleted (adaptation).** The R7 row says shrink it to the host state of §3.2;
+  that state has lived in CH's file-scope `retail_host` (and the statics beside it) since R0 because
+  BallanceMMOClient takes no data member, and nothing of the struct was read by the core path after LGM, so there was
+  nothing left to keep: the struct, its header and the member go. No principle touched.
+- **BallanceMMOClient members removed (a layout change).** `physics_session_` (the struct above), `pause_clock_[2]`,
+  `pause_scripts_[8]` / `pause_scripts_count_` / `pause_scripts_failed_`, `death_reset_[4]` / `death_reset_count_` /
+  `death_reset_failed_`, `sector_deactivate_[2]` / `sector_deactivate_count_` / `sector_deactivate_failed_`,
+  `sector_activate_` / `sector_activate_failed_`, `level_sequencers_` / `level_sequencers_frames_`, and about 70
+  legacy method declarations (`physics_session_*`, `handle_session_*`, `pause_*`, `death_reset_*`,
+  `sector_deactivate_*`, `sector_activate_*`, `checkpoint_phase_*`, `capture_level_sequencers`,
+  `proximity_countdowns_restore`); `PHYSICS_SESSION_COUNTDOWN` stays (CH's countdown). The class only shrank; every
+  object of the x86 target that includes BallanceMMOClient.h was rebuilt (17 of 27: the other 10 - command_pipe,
+  game_repository, physics_view, fixed_tick, input_injector, utils and four Common sources - do not include it,
+  checked with `ninja -t deps`; the two deleted sources' stale objects are no longer in the link), so no stale object ships the old layout. **Three launches per copy without a hang**
+  (below): the reserved-array fallback the plan allowed was not needed.
+- **Call sites.** Each is a plain core-host call now: the checkpoint hook (`on_sector_changed` ->
+  `core_host_on_sector`, audit D7's legacy branch gone), `OnPhysicalize` / `OnUnphysicalize`, the level exit and the
+  disconnect (`core_host_end_local`; the legacy `pause_clock_restore` / `pause_scripts_restore` on the exit went with
+  the members - CH restores its own pause chain at its end), the finish, `process_physics_session` out of OnProcess,
+  `capture_level_sequencers` out of OnProcess (CH's `core_host_capture_level_counters` records the same frames;
+  `core_host_map_loaded` clears and arms it, so OnLoadObject's own clears went), `/mmo room session` and the
+  automation's `session` (CH's status line, also without a session: `session=0 phase=idle core=1`), the F3 panel and
+  `panel` (CH's block, empty without a session), `pausechain` (`core_host_pause_status` always; nothing applied
+  without a session), `journal` (`core_host_journal` answers every action, as it did with the switch on),
+  `session trace|rollback` (CH's settings only), `sector` (`core_host_sector`, else the by-hand run without a
+  session), `beam` (`core_host_beam`, else the plain write without a session - the legacy re-report is gone),
+  room_client's PlayerLeft (`core_host_leave_player`). The SessionJournal property callback keeps its early return (it
+  stops the reconnect; the core reads the property at each session start). on_message's six Session* cases went: the
+  opcodes reach CH's mailbox through `core_host_offer` at the top of on_message; one that arrives outside a session
+  (no latch: e.g. a SessionRemoteInput on the unreliable channel arriving after the reliable SessionEnd, which the
+  legacy handlers had queued silently) is swallowed by `core_host_offer` and counted (`stray=` at the end of
+  `session core status`) - without that it fell to on_message's default and was logged as `[ERROR] Invalid message
+  with opcode 67` (the review's finding on lgd_arena: 3 lines in client 2's log; the gate rerun lgd_arena_g: 0); CH's
+  drain gives the protocol-mismatch message for an undecodable SessionStart (the legacy case's words). `retail::level_proximities()` (core_host.hpp) went with its last caller.
+- **The switch.** `core_on`, `retail::core_enabled()` and every `core_on` test in CH's verbs (`activate`,
+  `force-rollback`'s note, `hold-event`, `core_host_journal`) are gone; `core_host_offer` latches every SessionStart.
+  `session core on|off` answers `error unknown command session core on|off` (the dispatcher's unknown-verb shape;
+  adaptation: the plan names `off`, `on` is no verb either); `session core [status]` keeps its status line with
+  `core=on` fixed, because the retail drivers read it. Older run drivers that still send `session core on`
+  (r3_retail.py, r4_retail.py) only log the answer.
+- **BallanceMMOCommon: nothing only the legacy path reached.** A census of every identifier and include of the
+  deleted files against the remaining tree (work/LGD/census.py, census_headers.py): every Common header they included
+  has other includers, and no Common function lost its last caller - `relay_frame_or_earlier` (rewind-cost-design.md
+  :116) is `relay_frame_or_newest`'s building block (input_relay.hpp:368) and a unit test's; the 44 single-file names
+  are locals, fields and comment words. Comments updated: input_relay.hpp (relay_frame_or_earlier's other caller
+  gone), client_journal.hpp (the legacy `client_journal` deleted), and the ones that still named the deleted file or
+  struct as current (sector_activation.hpp, script_replay.hpp, sector_union.hpp, sector_cell_split.hpp,
+  entity/session.hpp's refusal notes).
+- **Verified (tier full, work/LGD).** x86 CLIENT-BUILD-OK, DEPS-OK (249 objects); x64 BUILD-OK, DEPS-OK; unit tests
+  747/747; GCC syntax 33/33; wire check `rLGM -> rLGD` on core_ref_s14 (the default since CMAP, not the plan's s13)
+  ALL SAME: 44 sends SAME, 45 journals IDENTICAL. Retail, the Arch server rebuilt from this tree
+  (`ballanced-36c04e3d24c9+bmmo-218ab482bc6a-dirty`), snapshots off:
+  (1) **three launches per copy** (work/LGD/lgd_launch.py, scripts/retail/lgd_launch): Player.exe through explorer,
+  cwd Bin, both copies each round; every round both reached the menu (`ping` 1.2-1.6 s after the launch), loaded
+  Level 11, joined a core session (assigned on both, `core=1`, the server's "ready" lines with this build id), closed
+  the room and exited on `quit` within 30 s; every ModLoader.log shows the mod's start-up lines in order with no gap
+  (Loading Mod BallanceMMOClient, Random block hooked, the trafo level reference at the Balls.nmo load, Random block
+  hooked (8), ping), no RTSS / d3d8 crash; `session core off` and `session core on` -> `error unknown command`.
+  (2) **The L11 ctl session** (`rtr_retail.py arm lgd_ctl 0:0 0:0`, E-cores pinned): mechanisms 23/23 bit-equal over
+  27089 rows on both copies; own / mirror / trafo-piece rows position-exact, the unequal ones rotation only (<= 2.98e-8,
+  the FINAL-row x87 read; pieces 19/49 bit-equal, the same 19/49 as LGM's run - the LGM residual is a stable count,
+  not a regression of either step); the server journal 2577/2577; resyncs 0/0, rebases 0, starved 0, far 0. Frame
+  figures (E-cores): `core_frame_time` p50 / p99 / max 2.7 / 11.3 / 21.3 and 2.6 / 11.5 / 21.2 ms, `frame_interval`
+  15.1 / 16.6 / 24.1 and 15.1 / 16.6 / 22.5 ms - no worse than `rtr_ctl`'s (2.9 / 17.6 / 151.4, 2.9 / 14.7 / 254.2;
+  15.1 / 19.8 / 152.7, 15.1 / 17.2 / 254.8).
+  (3) **R3 = the arena run** (`r3_retail.py arena lgd_arena`, BMMO_JOURNAL_FINAL_CHECKPOINTS=1): mechanisms 23/23
+  bit-equal over 16596 rows, own / mirror rotation only (<= 3.63e-8); `echo=13/0/0/0/0`, `ownlife=0/0/0/0/0`,
+  `overtaken=0`, resyncs 0 on both, the server's S5 lines 12 Physicalize / 10 Unphysicalize (6 / 5 per player), as
+  `r3_arena_1`; the server journal 2591/2591 (SimTool with `--map` the arena file); the 2788 server-only mechanism
+  rows and the clients' first session line at tick 38 / 44 are LGM's `lgm_arena2` pattern exactly (r3's server runs
+  trafo_inputs and placement_clones off).
+  (4) **R4 = the blackout run** (`r4_retail.py blackout lgd_blackout`, client 2 `net blackout 300 up at 1500`):
+  client 2 `subst=13/0/13/0/0/0`, the server's S2 `ticks=1501..1513 n=13 src=1500` (recv 13 = S2 13, EQUAL), as
+  `r4_blackout_1`; resyncs 0/0 and rebases 0 on both; both own balls 0.000000 m (LOCAL against FULL) inside the
+  episode and from T_off + 48 = 1561 on, except client 1's mark trap at 2610 (0.481 m, the R4 note's) and client 2
+  from 2254 on - its ball entered the airship zone at 2253 (server log; the balloon's exception c, not compared; this
+  arena's r0_keys run now reaches it, the R4-era arena had no airship zone) - which rt1_judge's FINAL comparison leaves
+  out: own / mirror positions exact, rotation only (<= 4.68e-8 before 2253), mechanisms 34/34 bit-equal over 23857
+  rows; the server journal 2583/2583.
+  (5) **The solo checkpoint and sector run** (work/LGD/lgd_solo.py, scripts/retail/lgd_solo2; one copy, explorer
+  launch; `retail_run.py` does not exist and retail_two_client_test.py has no one-copy mode): Level 11 alone in a core
+  session; the ball beamed (stamped) onto PC_TwoFlames_MF (sector 2 at 328) and then onto PC_TwoFlames_MF001, placed
+  by the level once sector 2 ran (sector 3 at 634), then `sector 4` held for 670 (the union ran it at 670): every
+  FINAL row bit-equal (own 1/1 over 339 rows, mechanisms 65/65 over 13841 rows, no rotation difference), the server
+  journal 881/881, `session core off` unknown, `pausechain` N1 2/resolved and N2 2/resolved, `journal mark` "(session
+  core)". (scripts/retail/lgd_solo is the driver's first attempt, which looked for the second checkpoint at the first
+  flame and so crossed only one; not a product failure.)
+  (6) **Gate rerun** (after the review's fix-up: `core_host_offer` swallows stray Session* messages; comments): x86
+  CLIENT-BUILD-OK, DEPS-OK; the arena run again (`r3_retail.py arena lgd_arena_g`): no `Invalid message` line in
+  either log, `echo=13/0/0/0/0`, `overtaken=0`, resyncs 0, mechanisms 23/23 bit-equal over 16527 rows on both, own /
+  mirror position-exact (0 m), the server journal 2584/2584. The x64 tree saw comment changes only (not rebuilt).
+- **Deferred:** R6V repeats these reruns once R6 has landed (plan §1).

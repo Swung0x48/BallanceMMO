@@ -28,8 +28,9 @@
 // with checkpoint_activation_hold below, re-hold it every frame (keep(), the
 // rule of session/checkpoint_hold_rule.hpp) and hand the retail source back
 // at the session's end.  The server's world holds once (hold_checkpoint_
-// activation) and never resets a level.  The legacy retail path keeps its own
-// copy (physics_session_client.cpp N3) until R7 deletes it.
+// activation) and never resets a level.  The legacy retail path's own copy
+// (physics_session_client.cpp N3) was deleted with that path at R7 (FULL
+// step LGD).
 //
 // Only the public CK2 API is used: the header compiles against the Virtools
 // SDK (client mod) and against the Ballanced engine (headless server).
@@ -133,8 +134,8 @@ namespace bmmo::game {
     // re-held), and the retail source handed back at the session's end.  One
     // implementation for the headless host and the retail core host (moved
     // from the legacy retail copy, physics_session_client.cpp
-    // sector_activate_resolve / _apply / _restore, which the legacy path
-    // keeps until R7).
+    // sector_activate_resolve / _apply / _restore, deleted with the legacy
+    // path at R7, FULL step LGD).
     class checkpoint_activation_hold {
     public:
         // At the anchor: the block found and its Script input fed the hold's

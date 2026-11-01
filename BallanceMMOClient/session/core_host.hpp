@@ -12,18 +12,10 @@
 
 class CKContext;
 
-namespace bmmo::game {
-    class proximity_countdown_state;   // game/script_state.hpp
-}
-
 namespace bmmo::session {
     struct session_platform;   // session/client_platform.hpp
 
     namespace retail {
-        // 'session core on|off' (the transition switch of design 6.2): on by
-        // default since 2026-10-27, and nothing in the legacy session path
-        // reads it.
-        bool core_enabled();
         // Step RK3: a core session past its anchor switches this level's
         // tutorial off (the world option session clock on Level 1) - the
         // core activates the tutorial's exit at its frame, so the main
@@ -34,9 +26,6 @@ namespace bmmo::session {
         // the automation's 'pausechain' (session/menu_overlay.hpp); empty
         // while no core session runs.
         std::string menu_overlay_status(CKContext* context);
-        // Step Q: the level's proximity countdowns as loaded (a file-scope
-        // static of core_host.cpp; both paths' anchors restore them).
-        bmmo::game::proximity_countdown_state& level_proximities();
         // Step T4: OnLoadObject of 3D Entities\Balls.nmo - the trafo
         // scripts' level reference captured (read-only), for the sets a
         // session with the trafo as an input builds; the line to log.

@@ -4,7 +4,6 @@
 // #include <fstream>
 #include "CommandMMO.h"
 #include "BallanceMMOClient.h"
-#include "session/session_journal_client.hpp"
 
 IMod* BMLEntry(IBML* bml) {
     BallanceMMOClient::init_socket();
@@ -235,14 +234,11 @@ void BallanceMMOClient::OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CK
     if (isMap) {
         logger_->Info("Initializing peer objects...");
         objects_.init_players();
-        // Design 9.26: the mechanism Sequencer counters as loaded, before any
-        // of the level's scripts ran; the session anchor restores them.  The
-        // behaviours are not enumerable from this hook yet, so the next
-        // frames record them (capture_level_sequencers).
-        level_sequencers_.clear();
-        bmmo::session::retail::level_proximities().clear();   // step Q
-        level_sequencers_frames_ = 30;
-        core_host_map_loaded();   // step SP9: a fresh level (session/core_host.cpp)
+        // Design 9.26 / step Q: the level file's Sequencer counters and
+        // proximity countdowns are recorded on the next frames by the core
+        // host (core_host_capture_level_counters, armed here); step SP9: a
+        // fresh level (session/core_host.cpp).
+        core_host_map_loaded();
         boost::regex name_pattern("^.*\\\\(Level|Maps)\\\\(.*).[cn]mo$", boost::regex::icase);
         std::string path(filename);
         boost::smatch matched;
@@ -349,95 +345,40 @@ void BallanceMMOClient::on_sector_changed(bool checkpoint, bool own_cell) {
     if (!update_current_sector()) return;
     max_sector_ = std::max(current_sector_.load(), max_sector_.load());
     if (connected()) send_current_sector();
-    // FULL step LGM: the checkpoint hook routed straight to the core host (audit D7: with the split in
-    // force a checkpoint never gets here, see above); the legacy branch only without a core session.
-    if (!core_host_on_sector(current_sector_, checkpoint)) physics_session_on_sector(current_sector_, checkpoint);
+    // The checkpoint hook routed straight to the core host (FULL step LGM; audit D7: with the split in force a
+    // checkpoint never gets here, see above).  FULL step LGD: no legacy branch behind it.
+    core_host_on_sector(current_sector_, checkpoint);
     if (current_level_mode_ != bmmo::level_mode::Highscore) return;
     extra_life_received_ = false;
 }
 
 void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(true); }
 
-// The BML physicalization hooks (FULL step LGM: moved here from
-// session/physics_session_client.cpp): a session the shared core runs takes
-// them (session/core_host.cpp, step R1), the legacy path's halves otherwise.
+// The BML physicalization hooks: a session the shared core runs takes them
+// (session/core_host.cpp, step R1); FULL step LGD: nothing else does.
 void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity, float mass,
                                       const char* collGroup, CKBOOL startFrozen, CKBOOL enableColl, CKBOOL calcMassCenter,
                                       float linearDamp, float rotDamp, const char* collSurface, VxVector massCenter,
                                       int convexCnt, CKMesh** convexMesh, int ballCnt, VxVector* ballCenter,
                                       float* ballRadius, int concaveCnt, CKMesh** concaveMesh) {
-    if (core_host_on_physicalize(target, fixed, friction, elasticity, mass, collGroup, startFrozen, enableColl,
-                                 calcMassCenter, linearDamp, rotDamp, collSurface, massCenter, convexCnt, convexMesh,
-                                 ballCnt, ballCenter, ballRadius, concaveCnt, concaveMesh))
-        return;
-    physics_session_on_physicalize(target, fixed, friction, elasticity, mass, collGroup, startFrozen, enableColl,
-                                   calcMassCenter, linearDamp, rotDamp, collSurface, massCenter, convexCnt, convexMesh,
-                                   ballCnt, ballCenter, ballRadius, concaveCnt, concaveMesh);
+    core_host_on_physicalize(target, fixed, friction, elasticity, mass, collGroup, startFrozen, enableColl,
+                             calcMassCenter, linearDamp, rotDamp, collSurface, massCenter, convexCnt, convexMesh,
+                             ballCnt, ballCenter, ballRadius, concaveCnt, concaveMesh);
 }
 
 void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
-    if (core_host_on_unphysicalize(target)) return;
-    physics_session_on_unphysicalize(target);
-}
-
-// Design 9.26: the frames right after a map load, until the level's mechanism
-// Sequencers have been seen once (their counters are the file's until the
-// sector scripts run, which happens after Gameplay_Ingame's init).
-void BallanceMMOClient::capture_level_sequencers() {
-    if (level_sequencers_frames_ <= 0) return;
-    --level_sequencers_frames_;
-    const int recorded = level_sequencers_.capture_new(m_bml->GetCKContext());
-    if (recorded > 0) {
-        logger_->Info("Physics session: %d mechanism Sequencer counter(s) recorded from the level file (%s)",
-                      recorded, level_sequencers_.describe().c_str());
-    } else if (level_sequencers_frames_ == 0 && level_sequencers_.size() == 0) {
-        logger_->Info("Physics session: no mechanism Sequencer in this level");
-    }
-    // Step Q: the TT Scaleable Proximity countdowns, the same way (the
-    // values are logged once, at the anchor).
-    auto& proximities = bmmo::session::retail::level_proximities();
-    if (const int added = proximities.capture_new(m_bml->GetCKContext()); added > 0)
-        logger_->Info("Physics session: %d proximity countdown(s) recorded from the level file (%zu in all)",
-                      added, proximities.size());
-}
-
-// Step Q: both paths' anchors, right after the Sequencer counters.  The
-// record covers only the frames above, the engine's every load tick: a level
-// proximity born later is not restored here but is on the server, so it is
-// counted and warned about rather than left silent.
-void BallanceMMOClient::proximity_countdowns_restore() {
-    const auto& proximities = bmmo::session::retail::level_proximities();
-    CKContext* context = m_bml->GetCKContext();
-    int differed = 0;
-    std::string before;
-    const int restored = proximities.restore(context, &differed, &before);
-    int unrecorded = 0, other_owner = 0;
-    std::string other_names;
-    proximities.census(context, unrecorded, other_owner, &other_names);
-    logger_->Info("Physics session: %d of %zu proximity countdown(s) restored to the level file's (%s); "
-                  "%d differed (%s); %d not a level object's, left alone (%s)",
-                  restored, proximities.size(), proximities.describe().c_str(), differed, before.c_str(),
-                  other_owner, other_names.c_str());
-    if (unrecorded > 0)
-        logger_->Warn("Physics session: %d level proximity countdown(s) appeared after the record window and keep "
-                      "this client's phase (the engine records on every load tick): this level needs a longer window",
-                      unrecorded);
+    core_host_on_unphysicalize(target);
 }
 
 void BallanceMMOClient::OnPostExitLevel() {
     // Step SP9: a core session's own reload (its countdown on a level that ran
     // a session) leaves the level and goes on; any other exit ends a session.
-    if (!core_host_reload_exit()) {
-        core_host_end_local("left the level");   // FULL step LGM: the core host's session first, then the legacy one
-        physics_session_end_local("left the level");
-    }
+    if (!core_host_reload_exit()) core_host_end_local("left the level");
     core_host_release_placement("the level exit");   // step SP10: the sector placement's copies go with the level
     // The guard's callback hangs on a level script, so the teardown destroys it
     // with the script; disabling it here hands the time factor back anyway.
     std::string error;
     physics_view_.set_clock_guard(false, 0.001f, 0, 0, error);
-    pause_clock_restore();
-    pause_scripts_restore();
     ball_nav_active_ = false;
     countdown_restart_ = false;
     force_hs_calibration_ = false;
@@ -532,11 +473,9 @@ void BallanceMMOClient::OnPostStartMenu()
 }
 
 void BallanceMMOClient::OnProcess() {
-    capture_level_sequencers();
-    core_host_capture_level_counters();   // FULL step LGM (HU1 (b)): the core host's own record, the same frame
+    core_host_capture_level_counters();   // FULL step LGM (HU1 (b)): the level file's counters, the core host's record
     process_command_file();
     fixed_tick_.on_process(m_bml, core_host_pacer());
-    process_physics_session();
     core_host_process();
     process_command_pipe();
     process_room_requests();
@@ -732,7 +671,7 @@ void BallanceMMOClient::update_compensation_lives_label() {
 
 // may give wrong values of extra points
 void BallanceMMOClient::OnLevelFinish() {
-    if (!core_host_on_finish()) physics_session_on_finish();   // FULL step LGM: the core host's session first
+    core_host_on_finish();   // the core host's session (FULL step LGD: no legacy one behind it)
     if (!connected() || spectator_mode_)
         return;
 
@@ -831,11 +770,10 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
     else if (prop == config_manager_["session_journal"]) {
         // Purely local recording: without this branch the reconnect below would
         // drop the running physics session (cleanup() ends it) just because a
-        // player unticked the black box in the mod menu.  Flipping the flag is
-        // the whole effect - the next session start reads the property again,
-        // and a file already open keeps recording to the end of its session
-        // (only "journal off" from the command bar closes one early).
-        bmmo::session::client_journal::instance().set_enabled(prop->GetBoolean());
+        // player unticked the black box in the mod menu.  The property is the
+        // setting: the next session start reads it (the core host), and a file
+        // already open keeps recording to the end of its session.  FULL step
+        // LGD: the legacy black box this branch also flipped is gone.
         return;
     }
     if (connected() || connecting()) {
@@ -1199,7 +1137,7 @@ void BallanceMMOClient::init_commands() {
             if (msg.target == k_HSteamNetConnection_Invalid) { SendIngameMessage(std::format("Error: player \"{}\" not found.", w), bmmo::ansi::BrightRed); return; }
         }
         else if (sub == "close") { msg.action = bmmo::room::action::Close; }
-        else if (sub == "session") { SendIngameMessage(core_host_running() ? core_host_status_text() : physics_session_status_text()); return; }
+        else if (sub == "session") { SendIngameMessage(core_host_status_text()); return; }
         else { SendIngameMessage(std::format("Error: unknown room subcommand \"{}\". Try list|create|join|leave|ready|start|kick|close|status|session.", sub), bmmo::ansi::BrightRed); return; }
         pending.action = msg.action;
         msg.serialize();
@@ -1220,7 +1158,7 @@ void BallanceMMOClient::init_commands() {
         }
         SendIngameMessage(dispatch_automation_command(line));
     });
-    // The session black box (session/session_journal_client.hpp), straight from
+    // The session black box (the session core's journal, the 'journal' verb), straight from
     // the command bar: "/mmo journal mark the ball went through the floor"
     // leaves a note and a body checkpoint at the tick it was typed at.
     console_.register_command("journal", [&] {
@@ -1934,7 +1872,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
 }
 
 // Game thread. The countdown cue, shared by the countdown_msg handler and the
-// physics session lead-in (session/physics_session_client.cpp).
+// physics session lead-in (session/core_host.cpp).
 void BallanceMMOClient::play_countdown_sound(bmmo::countdown_type type) {
     using ct = bmmo::countdown_type;
     switch (type) {
@@ -2494,57 +2432,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
             handle_room_event(msg);
         break;
     }
-    case bmmo::SessionStart: {
-        bmmo::session_start_msg msg{};
-        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        if (msg.deserialize()) {
-            handle_session_start(std::move(msg));
-        } else {
-            // A SessionStart this build cannot read comes from a server of
-            // another physics protocol (entity/session.hpp): say so instead of
-            // sitting in a room where nothing starts.
-            logger_->Error("Physics session: the server's SessionStart could not be decoded; it runs a different "
-                           "physics protocol than this mod (%u)", bmmo::session::PHYSICS_PROTOCOL_VERSION);
-            SendIngameMessage("Physics session refused: the server runs a different physics protocol than this mod. "
-                              "Update the mod or the server.", bmmo::ansi::BrightRed);
-        }
-        break;
-    }
-    case bmmo::SessionAssign: {
-        bmmo::session_assign_msg msg{};
-        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        if (msg.deserialize())
-            handle_session_assign(msg);
-        break;
-    }
-    case bmmo::SessionSnapshot: {
-        bmmo::session_snapshot_msg msg{};
-        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        if (msg.deserialize())
-            handle_session_snapshot(std::move(msg));
-        break;
-    }
-    case bmmo::SessionRemoteInput: {
-        bmmo::session_remote_input_msg msg{};
-        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        if (msg.deserialize())
-            handle_session_remote_input(std::move(msg));
-        break;
-    }
-    case bmmo::SessionEvent: {
-        bmmo::session_event_msg msg{};
-        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        if (msg.deserialize())
-            handle_session_event(std::move(msg));
-        break;
-    }
-    case bmmo::SessionEnd: {
-        bmmo::session_end_msg msg{};
-        msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);
-        if (msg.deserialize())
-            handle_session_end(msg);
-        break;
-    }
+    // The Session* opcodes never get here: core_host_offer (at the top of
+    // on_message) puts a latched session's into the core host's mailbox and
+    // swallows, counted, one that arrives outside a session (FULL step LGD:
+    // the legacy session's handlers that took them here are gone).
     case bmmo::MapNames: {
         bmmo::map_names_msg msg{};
         msg.raw.write(reinterpret_cast<char*>(network_msg->m_pData), network_msg->m_cbSize);

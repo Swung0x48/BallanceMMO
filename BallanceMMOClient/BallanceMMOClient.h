@@ -19,7 +19,6 @@
 #include "session/fixed_tick.hpp"
 #include "session/input_injector.hpp"
 #include "physics/physics_view.hpp"
-#include "session/physics_session.hpp"
 #include "session/core_host.hpp"
 #include <game/menu_driver.hpp>
 #include <game/script_state.hpp>
@@ -417,8 +416,8 @@ private:
 				connection_half = ping_text_;
 			}
 		}
-		// FULL step LGM: a core session's block from the core host, the legacy path's otherwise.
-		const std::string text = connection_half + (core_host_running() ? core_host_overlay_text() : physics_session_overlay_text());
+		// A core session's block from the core host; nothing without a session (FULL step LGD: the legacy path is gone).
+		const std::string text = connection_half + (core_host_running() ? core_host_overlay_text() : std::string{});
 		if (text == shown) return;
 		if (ping_->update(text, false)) {
 			shown = text;
@@ -513,265 +512,14 @@ private:
 	void process_tick_record();
 	bool gameplay_ingame_script_active();
 
-	// Physics session (design 8.5): session/physics_session_client.cpp.
-	bmmo::session::physics_session_state physics_session_;
-	// The retail pause chain writes the physics time factor itself (0 on pause,
-	// 2.0 on unpause, via Event_handler's "Pause Level"/"Unpause Level" ->
-	// "Set Physics Globals").  During a session both blocks are rewritten to
-	// the factor the run already has, so the menu's write is a no-op and the
-	// world keeps stepping; the retail values go back when the session ends.
-	struct pause_clock_write {
-		CK_ID behavior = 0;
-		float retail = 0.0f;
-		float applied = 0.0f;
-	};
-	pause_clock_write pause_clock_[2];   // [0] Pause Level, [1] Unpause Level
-	bool pause_clock_resolve();
-	void pause_clock_apply(float factor);
-	void pause_clock_restore();
-	// The same two chains also stop and restart the level's gameplay scripts:
-	// "Pause Level" deactivates Gameplay_Events and Gameplay_Ingame, and
-	// "Unpause Level" re-activates both.  A session must not let the menu do
-	// that - the level's per-frame world work, the BallManager death test
-	// included, lives in Gameplay_Ingame - so the target of each of those
-	// blocks is emptied while the session runs.  Both blocks read their target
-	// as an object parameter and act on nothing when it is null, so the chain
-	// itself (its links, its delays, the cursor and music blocks) stays exactly
-	// as retail left it; the retail targets go back when the session ends.
-	struct pause_script_write {
-		CK_ID block = 0;         // the Deactivate/Activate Script block
-		const char* chain = nullptr;   // the pause chain it belongs to
-		int input = 0;           // its "Script" input
-		CK_ID retail = 0;        // the script it pointed at
-		bool applied = false;
-	};
-	static constexpr int PAUSE_SCRIPT_WRITES = 8;
-	pause_script_write pause_scripts_[PAUSE_SCRIPT_WRITES];
-	int pause_scripts_count_ = 0;
-	// A graph the resolver could not fully account for is left alone for the
-	// whole session, with the failure logged once (pause_scripts_resolve).
-	bool pause_scripts_failed_ = false;
-	bool pause_scripts_resolve();
-	void pause_scripts_apply();
-	void pause_scripts_restore();
-	// The automation's read of the above ("pausechain"): the level scripts that
-	// decide whether the world is running, and what each recorded block points
-	// at now.
-	std::string pause_scripts_status();
-	// Design 9.25/9.28, neutralization N1: Gameplay_Ingame runs
-	// Gameplay_SectorManager from two places, and both deactivate and
-	// re-activate the player's whole sector in one frame.  The server never
-	// makes that per-player edit (its world activates the union of everyone's
-	// sectors and deactivates nothing), so a client in a session must not
-	// either: the re-activation re-enters each module's
-	// "Set Physics Ball Joint.Create" while the body guard keeps the bodies
-	// where the server has them, and since the referential entities have just
-	// been put back at their IC the new anchors are wherever the mechanism
-	// started - findings/A2 section 5.5.
-	//
-	//   * BallManager / Deactivate Ball  -> a death resets the sector (9.25).
-	//   * Init Ingame / activate Scripts -> a LEVEL RESET does (9.28).  The
-	//     reset is what a lost last life and the ESC menu's "restart level"
-	//     both reach: Menu_Dead / Menu_Pause send "Reset Level",
-	//     Event_handler / reset Level restores the module referentials to
-	//     their ICs and re-activates Gameplay_Ingame, whose Init Ingame runs
-	//     this block.  Missing it left the Level 11 sandbag's rope hanging off
-	//     its joints for the rest of the session: every snapshot corrected it,
-	//     which cost ten times the normal physics work and read as a freeze
-	//     (build/manual-test-927-20260911, client 5, reset at tick 25838 and
-	//     rope corrections from 25844 on, error growing 3 m -> 5 m).
-	//
-	// Both are found by name rather than by group path, so a third call site in
-	// this script would be neutralized too.  Each block's "Script" target is
-	// emptied for the session exactly like the pause chains' - Execute Script
-	// activates its Out at once on a null script, so the respawn chain behind
-	// the first and the four Activate Scripts behind the second run unchanged.
-	// Sector 1 stays activated across a reset because the modules' MF scripts
-	// are not in Logic_Scripts, the array the reset's "deactivate Scripts"
-	// iterates, so nothing stopped them in the first place.
-	struct death_reset_write {
-		CK_ID block = 0;         // an Execute Script block running Gameplay_SectorManager
-		const char* chain = nullptr;   // the group it sits in, for the log and "pausechain"
-		int input = 0;           // its "Script" input
-		CK_ID retail = 0;        // the script it pointed at (Gameplay_SectorManager)
-		bool applied = false;
-		// Init Ingame's call site is not only the level reset's - it is also
-		// what activates the sector the FIRST time, and the anchor happens when
-		// Gameplay_Ingame starts, before its Init Ingame chain has got that far.
-		// Emptying it at the anchor therefore skipped the session's own sector
-		// activation and left the client with no mechanism bodies at all (a run
-		// whose status line read mechanisms=15/0 and whose journal carried no
-		// LOCAL row for P_Modul_26_Sack).  A deferred write waits until this
-		// client actually simulates a mechanism, which is exactly "the sector
-		// is up, nothing may reset it now".  Deactivate Ball's is not deferred:
-		// it can only run on a death, and 9.25's behaviour is kept as it was.
-		bool deferred = false;
-	};
-	static constexpr int DEATH_RESET_WRITES = 4;
-	death_reset_write death_reset_[DEATH_RESET_WRITES];
-	int death_reset_count_ = 0;
-	bool death_reset_failed_ = false;
-	bool death_reset_resolve();
-	void death_reset_apply();
-	void death_reset_apply(bool sector_up);   // the retail core host passes "the sector is up" itself
-	void death_reset_restore();
-	// Design 9.25, neutralization N2: crossing a checkpoint runs
-	// Gameplay_Events / activate Sektor, which writes both IngameParameter[0][1]
-	// (activate) and [0][2] (deactivate the previous sector).  The server's world
-	// is activate-only - it unions the sectors of every player
-	// (physics_world::update_sectors) - so the client's deactivation would tear
-	// down and rebuild bodies the server keeps simulating.  The deactivate write
-	// is fed a session-owned constant 0 instead ("deactivate nothing": the
-	// SectorManager's own Test skips the whole chain on 0), and its original
-	// source goes back at session end.
-	struct sector_deactivate_write {
-		CK_ID block = 0;           // the Set Cell block writing IngameParameter[0][2]
-		const char* chain = nullptr;   // the group it sits in, for the log
-		int input = 0;             // its "Value" input
-		CK_ID retail_source = 0;   // the parameter it read (direct source)
-		CK_ID retail_shared = 0;   // or the input it shared its source with
-		CK_ID retail_real = 0;     // what GetRealSource() answered before we moved it
-		CK_ID zero = 0;            // our constant int parameter, destroyed on restore
-		bool applied = false;
-	};
-	// [0] the checkpoint's (Gameplay_Events / activate Sektor), [1] the level
-	// reset's (Event_handler / reset Level).  Design 9.28b: the reset writes the
-	// deactivate cell too and then runs Gameplay_SectorManager, which is what
-	// actually tears the sector down - the module MF scripts included, so the
-	// sandbag stops being driven.  Neutralizing only the re-activation left the
-	// sector dead; both halves have to go.
-	static constexpr int SECTOR_DEACTIVATE_WRITES = 2;
-	sector_deactivate_write sector_deactivate_[SECTOR_DEACTIVATE_WRITES];
-	int sector_deactivate_count_ = 0;
-	bool sector_deactivate_failed_ = false;
-	bool sector_deactivate_resolve();
-	bool sector_deactivate_resolve_one(CKBehavior* script, const char* script_name, const char* group_name);
-	void sector_deactivate_apply();
-	void sector_deactivate_restore();
-	// Sector activation as an input, neutralization N3: the checkpoint chain's
-	// own run of Gameplay_SectorManager (Gameplay_Events / activate Sektor ->
-	// Execute Script) is fed a session-owned script parameter holding no script,
-	// so the chain keeps its shape (Execute Script activates its Out at once on a
-	// null script) but activates nothing; physics_session_on_sector then stamps
-	// the Sector event ahead and physics_session_frame runs the manager at that
-	// tick.  Today's path - activate the moment the ball crosses the line and
-	// report it, the server activating a one-way trip later - put every
-	// mechanism of the sector out of phase for the rest of the session
-	// (docs/lockstep-without-snapshots.md).  The original source goes back at
-	// session end, like the deactivate write's.
-	struct sector_activate_write {
-		CK_ID block = 0;           // the Execute Script block running Gameplay_SectorManager
-		const char* chain = nullptr;   // the group it sits in, for the log
-		int input = 0;             // its "Script" input
-		CK_ID retail_source = 0;   // the parameter it read (direct source)
-		CK_ID retail_shared = 0;   // or the input it shared its source with
-		CK_ID retail_real = 0;     // what GetRealSource() answered before we moved it
-		CK_ID none = 0;            // our script parameter holding no script, destroyed on restore
-		bool applied = false;
-	};
-	sector_activate_write sector_activate_;
-	bool sector_activate_failed_ = false;
-	bool sector_activate_resolve();
-	// N4, the checkpoint chain's own phase cell (game/checkpoint_phase.hpp): the
-	// chain behind N3 keeps writing CurrentLevel[0][4], the cell the modules of a
-	// stamped pass branch on in their first frame; its writes (and the checkpoint
-	// scripts' reads) move to a private copy for the session.  Its state is a
-	// file-scope static in physics_session_client.cpp, not a member: this class
-	// does not survive members being added (see apply_pending_ping_text).
-	void checkpoint_phase_resolve();
-	void checkpoint_phase_restore();
-	int checkpoint_phase_keep();   // the per-frame keep, for the retail core host
-	void sector_activate_apply();
-	void sector_activate_restore();
-	// Stamp `sector`'s activation sector_lead() ticks ahead of this frame's step,
-	// send the event, and hand it to the union, which runs the manager at that
-	// tick (session/sector_union.hpp).  False when the hold is not in place (no
-	// running assigned session, or N3 failed): the caller then does what it did
-	// before.
-	bool physics_session_hold_sector(int sector, const char* why);
-	// One pass of the union: run Gameplay_SectorManager for `sector`,
-	// deactivating nothing - what the server's update_sectors() and the
-	// automation's `sector` verb write.
-	void physics_session_run_sector(int sector, uint32_t tick, const char* how);
-	// Whether Gameplay_SectorManager is walking right now: what the union's
-	// pacer is counted with, once per step.
-	bool physics_session_sector_manager_active();
-	void handle_session_start(bmmo::session_start_msg msg);
-	void handle_session_assign(const bmmo::session_assign_msg& msg);
-	void handle_session_snapshot(bmmo::session_snapshot_msg msg);
-	void handle_session_event(bmmo::session_event_msg msg);
-	void handle_session_remote_input(bmmo::session_remote_input_msg msg);
-	void handle_session_end(const bmmo::session_end_msg& msg);
-	void physics_session_begin(const bmmo::session_start_msg& msg);
+	// FULL step LGD (R7): the legacy physics session (session/physics_session_client.cpp, its
+	// physics_session_state member and the pause / N1 / N2 / N3 / checkpoint-phase / level-counter
+	// members it kept) is gone; a session is the shared core's, run by the core host below, whose
+	// state is file-scope statics in session/core_host.cpp.
 	// Seconds of the "3 - 2 - 1 - Go!" lead-in in front of the level restart
-	// that opens a physics session.
+	// that opens a physics session (the core host's countdown).
 	static constexpr int PHYSICS_SESSION_COUNTDOWN = 3;
-	void physics_session_countdown();
-	void physics_session_end_local(const std::string& reason);
-	void process_physics_session();
-	void physics_session_anchor();
-	// The mechanism Sequencer counters as the level file has them (design 9.26):
-	// recorded on the first frames after the map loads (the load hook runs
-	// before the level's behaviours can be enumerated), written back at the
-	// anchor.  `level_sequencers_frames_` counts the frames still allowed to
-	// look; the level's mechanism scripts run only after Gameplay_Ingame's init,
-	// long after that.
-	bmmo::game::sequencer_state level_sequencers_;
-	int level_sequencers_frames_ = 0;
-	void capture_level_sequencers();
-	// Step Q: the level's proximity countdowns (session/core_host.hpp
-	// level_proximities, recorded in capture_level_sequencers) written back.
-	void proximity_countdowns_restore();
-	// The session black box: session/session_journal_client.hpp.
-	void physics_session_journal_begin();
-	// Design 9.26 phase alignment: the world stands at the anchor until the
-	// tick base arrives, so its first step and the server world's first step
-	// carry the same tick number.  hold_until_assigned() waits inside the
-	// anchor frame (no frame runs meanwhile), polling the queued assignment;
-	// release_hold() ends it, from the assignment or from the deadline.
-	void physics_session_hold_until_assigned();
-	void physics_session_release_hold(const char* why);
-	// SessionAssign is queued by the network thread and applied by the game
-	// thread at a frame boundary (or inside the hold's own loop).
-	void physics_session_drain_assignments();
-	void physics_session_apply_assign(uint32_t session, uint32_t first_tick);
-	void physics_session_frame();
-	void physics_session_flush_inputs();
-	void physics_session_send_event(bmmo::session_event_msg& event);
-	void physics_session_apply_queues();
-	// Design 9.25: which local body a mechanism row names, re-resolved when the
-	// dictionary or the local body set changed (mechanism_tracking.hpp).
-	void physics_session_resolve_mechanisms(uint32_t tick);
-	void physics_session_cache_ball_row(uint32_t tick, const bmmo::session::body_state& body);
-	void physics_session_apply_event(const bmmo::session_event_msg& event);
-	void physics_session_apply_snapshot(const bmmo::session_snapshot_msg& snapshot);
-	void physics_session_check_own_body(const bmmo::session_snapshot_msg& snapshot, uint32_t own_id);
-	// The automation `beam` verb inside a session: re-report the own ball's life
-	// at the new pose so the server's copy moves too (design 9.25 follow-up).
-	std::string physics_session_report_beam(const std::string& entity, const double position[3]);
-	void physics_session_drive_remotes();
-	void physics_session_attach_remote_navigation(uint32_t player);
-	void physics_session_attach_own_navigation(const std::string& ball_name, uint8_t ball_type);
-	void physics_session_zero_retail_forces();
-	bmmo::session::rollback_world physics_session_rollback_world();
-	bool physics_session_rollback(const bmmo::session_snapshot_msg& snapshot);
-	void physics_session_check_input_starvation();
-	void physics_session_request_resync(const char* reason);
-	void physics_session_apply_resync(const bmmo::session_snapshot_msg& snapshot);
-	float physics_session_ball_force(uint8_t ball_type) const;
-	void physics_session_log_correction(const std::string& name, uint32_t tick, double error, const char* action);
-	void physics_session_on_sector(int sector, bool checkpoint);
-	void physics_session_on_finish();
-	// FULL step LGM: the legacy halves of the BML hooks OnPhysicalize / OnUnphysicalize (BallanceMMOClient.cpp asks
-	// the core host first).  Methods only: this class takes no new data member.
-	void physics_session_on_physicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity, float mass,
-	                                    const char* collGroup, CKBOOL startFrozen, CKBOOL enableColl, CKBOOL calcMassCenter,
-	                                    float linearDamp, float rotDamp, const char* collSurface, VxVector massCenter,
-	                                    int convexCnt, CKMesh** convexMesh, int ballCnt, VxVector* ballCenter,
-	                                    float* ballRadius, int concaveCnt, CKMesh** concaveMesh);
-	void physics_session_on_unphysicalize(CK3dEntity* target);
-	std::string physics_session_status_text();
-	std::string physics_session_overlay_text();
+
 	// The retail host of the shared session-client core (session/core_host.cpp,
 	// docs/session-client-core-design.md 3.2; steps R0, R1): the mailbox, the
 	// platform, the session a core runs (its start, countdown, anchor, hold,
@@ -874,7 +622,7 @@ private:
 	std::atomic_int32_t current_sector_ = 0, max_sector_ = 0;
 	// Whether IngameParameter[0][1] holds THIS ball's sector.  In a physics
 	// session the cell is shared: the sector union's pass writes the sector a
-	// peer entered (physics_session_run_sector), and a respawn's or a
+	// peer entered (the core host's union pass), and a respawn's or a
 	// calibration's read of the cell would report that as our own.  The own
 	// checkpoint chain and the level's own start make the cell ours again.
 	std::atomic_bool sector_cell_is_own_ = true;
@@ -1027,9 +775,7 @@ private:
 		if (ingame_parameter_array_ != 0) {
 			// A union pass wrote a peer's sector into the cell and nothing of
 			// ours has since: not a change of this ball's sector.
-			if (!sector_cell_is_own_
-					&& (physics_session_.phase == bmmo::session::physics_session_state::phase_type::running
-						|| core_host_session_running()))
+			if (!sector_cell_is_own_ && core_host_session_running())
 				return false;
 			static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(ingame_parameter_array_))->GetElementValue(0, 1, &sector);
 			if (sector == current_sector_) return false;
@@ -1484,8 +1230,7 @@ private:
 		// `down` means the game itself is going away, and we are already on
 		// the game thread, so run_on_game_thread() executes this inline.
 		utils_.run_on_game_thread([this, down] {
-			core_host_end_local("disconnected");   // FULL step LGM: the core host's session first, then the legacy one
-			physics_session_end_local("disconnected");
+			core_host_end_local("disconnected");
 			toggle_own_spirit_ball(false);
 			objects_.destroy_all_objects();
 			local_state_handler_.reset();

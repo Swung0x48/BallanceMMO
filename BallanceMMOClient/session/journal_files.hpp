@@ -5,9 +5,9 @@
 // journal_path / journal_prepare and the LOCAL checkpoint cadence), so it no
 // longer borrows the legacy black box's statics
 // (session_journal_client.hpp client_journal::directory / file_name / prune /
-// kCheckpointTicks / kKeepFiles, which that legacy path keeps until LGD).  The
-// same values and the same file names as the legacy copies: a core session's
-// journal and a legacy one share the directory and the pruning.
+// kCheckpointTicks / kKeepFiles; FULL step LGD deleted that legacy black box).
+// The same values and the same file names as the legacy copies had, so the
+// journals of older builds share the directory and the pruning.
 
 #include <algorithm>
 #include <chrono>

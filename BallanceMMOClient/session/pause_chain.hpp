@@ -3,8 +3,8 @@
 // FULL step LGM (R7 part one): the retail pause chain's two session edits as
 // the core host's own (session/core_host.cpp, a file-scope instance), so the
 // core host no longer borrows the legacy path's BallanceMMOClient members
-// pause_clock_ / pause_scripts_ (physics_session_client.cpp keeps its own
-// copies until LGD deletes that path).  The pause chain is retail's alone: the
+// pause_clock_ / pause_scripts_ (FULL step LGD deleted that path and its
+// copies).  The pause chain is retail's alone: the
 // headless client and the server's world have no pause menu, so this is no
 // shared helper.  The rules, the checks and the log lines are the legacy
 // copies' (BallanceMMOClient::pause_clock_* and pause_scripts_*), moved as

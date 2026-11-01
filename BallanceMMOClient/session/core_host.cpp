@@ -101,10 +101,10 @@ namespace {
     // run of Gameplay_SectorManager held, by the shared helper both session
     // clients use (game/sector_activation.hpp checkpoint_activation_hold):
     // made at the core anchor, kept every frame (platform script_guards),
-    // handed back at the session's end.  It replaces the BallanceMMOClient
-    // members sector_activate_ / sector_activate_failed_ on this path (the
-    // legacy path keeps them until R7; LGD removes them).  File scope:
-    // BallanceMMOClient keeps its layout.
+    // handed back at the session's end.  It replaced the BallanceMMOClient
+    // members sector_activate_ / sector_activate_failed_ (FULL step LGD
+    // deleted them with the legacy path).  File scope: BallanceMMOClient
+    // takes no data member.
     bmmo::game::checkpoint_activation_hold core_checkpoint_hold;
     // FULL step SLG: the own sectors core_host_report_own_sector has
     // reported in this core session (each once, as the core stamps each
@@ -154,9 +154,9 @@ namespace {
     // handed back at the session's end.  File scope, as above.
     bmmo::retail::menu_key_mask core_menu_keys;
     // FULL step LGM (R7 part one): what the core host borrowed from the
-    // legacy path's BallanceMMOClient members until now, as its own file-scope
-    // state (the legacy path keeps its own copies until LGD deletes it, and
-    // the members stay, dead on this path, until then):
+    // legacy path's BallanceMMOClient members until then, as its own
+    // file-scope state (FULL step LGD deleted the legacy path, its copies and
+    // the members named below):
     //   * the pause chain's clock and script edits (session/pause_chain.hpp;
     //     retail's alone - no other host has a pause menu), for
     //     pause_clock_* / pause_scripts_*;
@@ -393,17 +393,18 @@ namespace {
         report_precision_53& operator=(const report_precision_53&) = delete;
     };
 
-    // ------------------------------------------------------------ the switch
-    // Written on the game thread (the verb), read by the network thread
-    // (core_host_offer): atomic.  `core_latched` is the switch as a session's
-    // SessionStart found it, read once there (on the network thread, where
-    // the arrival order is made): that session's messages go to the mailbox
-    // up to its SessionEnd, and the verb refuses a change meanwhile.  On by
-    // default (the user, 2026-10-27, once the server's placement defaulted on
-    // at S10 and refuses a member without the core: "core在正式客户端开启吧");
-    // 'session core off' still selects the legacy path for the next session.
-    std::atomic<bool> core_on{true};
+    // ------------------------------------------------------------ the latch
+    // FULL step LGD (R7): the 'session core on|off' switch is gone with the
+    // legacy path - every session is the core's.  `core_latched` is set by a
+    // SessionStart on the network thread (where the arrival order is made):
+    // that session's messages go to the mailbox up to its SessionEnd; a
+    // Session* message outside a session is swallowed by core_host_offer and
+    // counted in `core_stray` (e.g. a relayed input on the unreliable channel
+    // that overtook nothing but arrived after the reliable SessionEnd).  A
+    // latch whose SessionEnd never came stays until the next SessionStart, as
+    // it did with the switch on; the drain discards what reaches no session.
     std::atomic<bool> core_latched{false};
+    std::atomic<uint64_t> core_stray{0};
     // FULL step RCV: RC2 (b)'s capture cache mode for the NEXT core session
     // ('session cache off|on|verify'; core_config::capture_cache, read once
     // in the config block when a session begins).  On by default, as on the
@@ -428,17 +429,15 @@ namespace {
     };
     class core_mailbox {
     public:
-        // The legacy queue's cap (physics_session_state::kMaxQueuedSnapshots,
-        // 64), the core host's own value since FULL step LGM.
-        // TODO(LGD): physics_session_state::kMaxQueuedSnapshots goes with the
-        // legacy path; until then the two must stay equal.
+        // The snapshot cap: the legacy queue's 64 (its kMaxQueuedSnapshots),
+        // the core host's own value since FULL step LGM; the legacy queue is
+        // gone since FULL step LGD.
         static constexpr size_t kMaxSnapshots = 64;
 
         void push(int code, const void* data, size_t size) {
             std::lock_guard lk(mutex_);
             if (code == bmmo::SessionSnapshot) {
-                // The legacy queue's cap (PSH kMaxQueuedSnapshots), on the
-                // snapshot entries only: the oldest one goes.
+                // The cap, on the snapshot entries only: the oldest one goes.
                 if (snapshots_ >= kMaxSnapshots) {
                     for (auto it = entries_.begin(); it != entries_.end(); ++it)
                         if (it->code == bmmo::SessionSnapshot) {
@@ -498,10 +497,10 @@ namespace {
 
     // ------------------------------------------------------------ host state
     // The retail platform's own state (design 3.2 "Game objects", "Camera",
-    // the anchor's script replay), kept apart from the legacy
-    // physics_session_state, which keeps its layout until R7.
+    // the anchor's script replay): the host state of design 3.2 (FULL step
+    // LGD: the legacy physics_session_state is gone, nothing of it remains).
     struct retail_host {
-        // The core, made at each SessionStart with the switch on (R1: a fresh
+        // The core, made at each SessionStart (R1: a fresh
         // core per session, so no state of the last one carries over); the
         // login id is given to it before each begin (design 3.2, E11).
         std::unique_ptr<bs::session_client_core> core;
@@ -1328,8 +1327,8 @@ namespace {
 
     // Step Q: the level's TT Scaleable Proximity countdowns as the level file
     // has them, recorded beside the Sequencer counters after the map load and
-    // written back at both paths' anchors (game/script_state.hpp).  Here, not
-    // beside level_sequencers_, because BallanceMMOClient takes no new member.
+    // written back at the anchor (game/script_state.hpp).  File scope:
+    // BallanceMMOClient takes no data member.
     bmmo::game::proximity_countdown_state level_proximity_state;
 
     // ------------------------------------------------------------ the level's lifetime
@@ -1801,10 +1800,6 @@ namespace {
     }
 }
 
-bool bmmo::session::retail::core_enabled() {
-    return core_on.load();
-}
-
 // Step RK3: a core session past its anchor that switches this level's
 // tutorial off (record-format-gaps-design.md 8 row K3 = C4).
 bool bmmo::session::retail::core_tutorial_owned() {
@@ -1818,10 +1813,6 @@ std::string bmmo::session::retail::menu_overlay_status(CKContext* context) {
     if (!core_session_running()) return {};
     return std::format("core_muted={} ", host.input_muted ? 1 : 0) + core_menu_overlay.status(context) + " "
            + core_menu_keys.status();
-}
-
-bmmo::game::proximity_countdown_state& bmmo::session::retail::level_proximities() {
-    return level_proximity_state;
 }
 
 // Step T4 (trafo-replication design 2.4 step 6, T1's level reference):
@@ -1844,26 +1835,26 @@ std::string bmmo::session::retail::trafo_scripts_loaded(CKContext* context) {
 
 // ---------------------------------------------------------------- network thread
 
-// Design 3.2 "Receive": every Session* message of a session whose SessionStart
-// found the switch on goes into the mailbox as its bytes, SessionStart first,
-// so the game thread sees them in arrival order.  From R1 the core runs such
-// a session, so the legacy handlers never see its messages (true: the caller
-// stops there).  With the switch off and no session latched: two atomic
-// loads, false.
+// Design 3.2 "Receive": every Session* message from a SessionStart up to its
+// SessionEnd goes into the mailbox as its bytes, SessionStart first, so the
+// game thread sees them in arrival order (true: the caller stops there).
+// FULL step LGD: with the legacy path gone every session is the core's, and a
+// Session* message outside a latched session (a relayed input or snapshot on
+// the unreliable channel arriving after the reliable SessionEnd) is swallowed
+// here and counted (`stray=` in 'session core status') instead of reaching
+// on_message's default, which would log it as an invalid opcode.  Any other
+// message: false.
 bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
-    if (!core_on.load() && !core_latched.load()) return false;
     const auto* raw = reinterpret_cast<const bmmo::general_message*>(network_msg->m_pData);
     if (raw->code == bmmo::SessionStart) {
-        // The switch read once per session, here.
-        const bool on = core_on.load();
-        core_latched.store(on);
-        if (!on) return false;
+        // Every session is the core's (FULL step LGD): latched here.
+        core_latched.store(true);
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         return true;
     }
-    if (!core_latched.load()) return false;
     switch (raw->code) {
     case bmmo::SessionEnd:
+        if (!core_latched.load()) { core_stray.fetch_add(1); return true; }
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         core_latched.store(false);
         return true;
@@ -1872,10 +1863,11 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
     case bmmo::SessionRemoteInput:
     case bmmo::SessionEvent:
     case bmmo::SessionLead:
-    case bmmo::SessionResyncState:   // step A3 (protocol 10): the core path alone; the legacy one ignores it
-    case bmmo::SessionMember:        // step M1 (protocol 18): the core path alone
-    case bmmo::SessionStartAt:       // FULL step SAXH (protocol 24): the core path alone
+    case bmmo::SessionResyncState:   // step A3 (protocol 10)
+    case bmmo::SessionMember:        // step M1 (protocol 18)
+    case bmmo::SessionStartAt:       // FULL step SAXH (protocol 24)
     case bmmo::SessionStartStatus:
+        if (!core_latched.load()) { core_stray.fetch_add(1); return true; }
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         return true;
     default:
@@ -2179,8 +2171,8 @@ void BallanceMMOClient::core_host_map_loaded() {
 }
 
 // FULL step LGM (HU1 (b)): one frame of the record window after a map load
-// (OnProcess, right after the legacy capture_level_sequencers, so both read
-// the same frame): the Sequencer counters and the proximity countdowns the
+// (OnProcess; the legacy capture_level_sequencers read the same frames until
+// FULL step LGD deleted it): the Sequencer counters and the proximity countdowns the
 // level file has, by the shared capture the server's world and the headless
 // client call.  The anchor restores them (core_host_anchor).
 void BallanceMMOClient::core_host_capture_level_counters() {
@@ -4669,55 +4661,37 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
 
 // ---------------------------------------------------------------- the verbs
 
-// session core on|off|status, session force-rollback E:D, session cache
+// session core [status], session force-rollback E:D, session cache
 // off|on|verify|status (FULL step RCV), session snapshots on|off|status
-// (FULL step DEP).
+// (FULL step DEP).  FULL step LGD: 'session core on|off' is no verb any more.
 std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     std::istringstream args(rest);
     std::string what, value;
     args >> what >> value;
     // FULL step LGM: 'session trace on|off' and 'session rollback on|off', the
     // core host's own settings (read at each core session's start; not reset
-    // per session).  The automation sets the legacy state's copies too.
+    // per session).
     if ((what == "trace" || what == "rollback") && (value == "on" || value == "off")) {
         (what == "trace" ? core_trace : core_rollback) = value == "on";
         return "ok session " + what + " " + value;
     }
     if (what == "core") {
-        if (value == "on" || value == "off") {
-            const bool on = value == "on";
-            // The switch takes effect between sessions only: not while the
-            // legacy path or the core runs one.  A session latched to the
-            // mailbox that no one runs (its SessionStart came and the host
-            // gave it up - not in the level, no physics view, no core - and
-            // its SessionEnd not yet, which a member that left the room may
-            // never get) does not hold the switch: the latch stays, so that
-            // session's remaining messages are still dropped, and the next
-            // SessionStart reads the switch again.  A lost connection ends
-            // the latch.
-            if (physics_session_.phase != bs::physics_session_state::phase_type::idle)
-                return "error the switch takes effect between sessions: end this one first";
-            if (host.phase != retail_host::phase_type::idle
-                    || (host.core && host.core->session_phase() != bs::client_core_state::phase::idle))
-                return "error the switch takes effect between sessions: the core runs one";
-            if (!connected()) core_latched.store(false);
-            core_on.store(on);
-            if (!on) return "ok session core off: the next session runs on the legacy path";
-            return "ok session core on: the next session runs on the shared core (step R5: snapshot rollback, the "
-                   "input and lifecycle rewinds, the own echoes, the own corrections, the lead slew)";
-        }
-        if (!value.empty() && value != "status") return "error usage: session core on|off|status";
+        // FULL step LGD (R7): the legacy session path and its switch are gone;
+        // 'session core on|off' is answered as the dispatcher answers a verb it
+        // does not know.  The status line stays (core=on, always).
+        if (value == "on" || value == "off") return "error unknown command session core " + value;
+        if (!value.empty() && value != "status") return "error usage: session core [status]";
         return std::format("ok core={} latched={} made={} error='{}' sessions={} host_phase={} frames={} refused={} "
                            "backstops={} births_dropped={} unmatched_resyncs={} mailbox: pushed={} "
                            "dropped={} drained={} starts={} discarded={} undecodable={} beams_made={} nav_source_differs={} "
-                           "mute_source_differs={}",
-                           core_on.load() ? "on" : "off", core_latched.load() ? 1 : 0, host.core ? 1 : 0,
+                           "mute_source_differs={} stray={}",
+                           "on", core_latched.load() ? 1 : 0, host.core ? 1 : 0,
                            host.core_error, host.sessions_seen, host_phase_name(host.phase), host.frames, host.refused,
                            host.core ? host.core->own_body_backstops() : 0, host.births_dropped,
                            host.core ? host.core->unmatched_resyncs() : 0,
                            mailbox.pushed(), mailbox.dropped(), host.drained,
                            host.starts, host.discarded, host.undecodable, host.beams_made, host.nav_source_differs,
-                           host.mute_source_differs);
+                           host.mute_source_differs, core_stray.load());
     }
     if (what == "hold") {
         // FULL step AHN: how the next session's anchor hold waits - frozen
@@ -4839,9 +4813,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     }
     if (what == "activate") {
         // Step RT2: 'session activate <root script> at b+N|<tick>' (the
-        // after_rewinds hook), armed before or during a core session.  Core
-        // off: refused (only a core session fires or clears it).
-        if (!core_on.load()) return "error session activate needs the session core on";
+        // after_rewinds hook), armed before or during a core session.
         std::string at, when;
         args >> at >> when;
         const bool relative = when.rfind("b+", 0) == 0;
@@ -4865,8 +4837,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         host.force_every = static_cast<uint32_t>(every);
         host.force_depth = static_cast<uint32_t>(depth);
         if (!host.force_every) return "ok forced rollbacks off";
-        return std::format("ok a forced rewind {} ticks deep every {} ticks{}", host.force_depth, host.force_every,
-                           core_on.load() ? "" : " (only with session core on: the legacy path has no forced rollback)");
+        return std::format("ok a forced rewind {} ticks deep every {} ticks", host.force_depth, host.force_every);
     }
     if (what == "stall") {
         // A testing tool (R1 (c)): the game thread stands still for <ms>, so
@@ -4883,7 +4854,6 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         // FULL step R6H: 'session hold-event TYPE:N:MS|TYPE:N:drop|off' (the
         // headless --hold-event; hooks.filter_event).  'off' stops further
         // holds; an event held already still goes out at its time.
-        if (!core_on.load()) return "error session hold-event needs the session core on";
         if (value == "off") {
             host.event_hold.disarm();
             return std::format("ok hold-event off ({} still held, released at their time)", host.event_hold.held());
@@ -5447,15 +5417,12 @@ bool BallanceMMOClient::core_host_sector(int sector, std::string& answer) {
     return true;
 }
 
-// The 'journal' verb with the switch on or a core session: the core's journal
-// (design 1.2).  FULL step LGM: every action is answered here - 'status' and
-// 'on' too, which fell to the legacy black box before - so the verb reaches
-// the legacy singleton only with the switch off and no core session.  The
-// verb and the BML property Gameplay/SessionJournal are one setting, read
-// once at each session start.
+// The 'journal' verb: the core's journal (design 1.2).  Every action is
+// answered here (FULL step LGM; since LGD there is no legacy black box to fall
+// back to).  The verb and the BML property Gameplay/SessionJournal are one
+// setting, read once at each session start.
 bool BallanceMMOClient::core_host_journal(const std::string& action, const std::string& text, std::string& answer) {
     const bool session = host.phase != retail_host::phase_type::idle && host.core;
-    if (!session && !core_on.load()) return false;
     const bool property = config_manager_["session_journal"]->GetBoolean();
     if (!session) {
         // No core session: nothing is open; the setting is the property.
