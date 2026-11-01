@@ -1994,6 +1994,13 @@ namespace {
             p.script_guards = [this](uint32_t, bool resolved) {
                 for (const auto& chain: reset_guard_.apply(engine_->context(), resolved))
                     logf("the sector reset in %s (Execute Script -> Gameplay_SectorManager) is neutralized", chain.c_str());
+                // N3 kept, as the retail mod keeps it (FULL step N3K,
+                // host-platform audit D3): a level reset that handed the
+                // checkpoint's Execute Script its retail source back is held
+                // again before the frame's scripts run.
+                if (checkpoint_hold_.keep(engine_->context()))
+                    logf("the level's checkpoint sector activation in activate Sektor was held again (its Script input "
+                         "read the retail source)");
                 if (const int again = checkpoint_phase_.keep(engine_->context()))
                     logf("the checkpoint chain's phase cell: %d target(s) handed back to CurrentLevel were moved to the copy again", again);
                 // N2 kept, as the retail mod keeps it (step B2SW).
@@ -2042,7 +2049,13 @@ namespace {
             // The manager's and the trafo scripts' (step P: host support's
             // record_pending, the selection's `activations`).
             p.record_pending_activation = [this](uint32_t tick) {
-                manager_activations_.record_pending(engine_->context(), sector_manager_id_, script_activations_, tick);
+                // FULL step N3K (host-platform audit D3): and a manager run
+                // outside every union pass counted, the first 20 logged.
+                const uint64_t outside = manager_activations_.outside_passes();
+                manager_activations_.record_pending(engine_->context(), sector_manager_id_, script_activations_, tick,
+                                                    &checkpoint_hold_);
+                if (manager_activations_.outside_passes() != outside && manager_activations_.outside_passes() <= 20)
+                    logf("%s", manager_activations_.outside_pass_line().c_str());
             };
             // Step RO1: the order this live frame ran the replay's scripts in
             // (host-local, session/script_order.hpp).
@@ -2536,6 +2549,11 @@ namespace {
             script_activations_.clear();
             script_reset_ticks_.clear();
             reset_guard_.restore(engine_->context());
+            // FULL step N3K: the previous session's checkpoint hold handed
+            // back, like the reset guard (base.cmo's Gameplay_Events survives
+            // a level exit, and a held block no longer names the manager).
+            if (!checkpoint_hold_.restore(engine_->context()))
+                logf("the previous checkpoint hold could not be handed back to its retail source; its parameter stays");
             checkpoint_held_ = false;
             // The previous session's split handed back, like the reset guard:
             // base.cmo's chain survives a level exit, and a split it still
@@ -2743,7 +2761,9 @@ namespace {
             resetpoint_seen_ = level_resetpoint();
             {
                 std::string hold_error;
-                checkpoint_held_ = bmmo::game::hold_checkpoint_activation(engine_->context(), hold_error) != nullptr;
+                // FULL step N3K: the shared helper, which records what it
+                // replaced for keep() and restore().
+                checkpoint_held_ = checkpoint_hold_.apply(engine_->context(), hold_error);
                 if (checkpoint_held_)
                     logf("the level's checkpoint sector activation is held: a crossing is stamped %u ticks ahead",
                          static_cast<unsigned>(core_.sector_lead_ticks()));
@@ -4694,6 +4714,10 @@ namespace {
             // (the binding's columns - the ones the records carry - not the
             // census's: the two are found apart; step RK2's review)
             h.written_cell_columns = written_columns_.size();
+            // FULL step N3K (host-platform audit D3).
+            h.manager_unpassed = static_cast<int64_t>(manager_activations_.outside_passes());
+            h.manager_unpassed_handed_back = manager_activations_.outside_passes_handed_back();
+            h.checkpoint_reholds = checkpoint_hold_.reholds();
             return h;
         }
         void report() {
@@ -4824,6 +4848,7 @@ namespace {
         int restore_traces_ = 0;
         VxVector resetpoint_seen_;           // CurrentLevel[0,3]'s position as last seen: a move is an own crossing
         bool checkpoint_held_ = false;       // the level's checkpoint manager run is held
+        bmmo::game::checkpoint_activation_hold checkpoint_hold_;   // N3, kept every frame (FULL step N3K)
         CK_ID sector_manager_id_ = 0;
         bmmo::game::script_replay::selection scripts_;       // the script replay's scripts and satellites (game/script_replay.hpp)
         std::vector<CK_ID> script_activations_;              // the selected scripts whose activations are recorded (steps P, A1)

@@ -155,6 +155,15 @@ namespace bmmo::session {
         // printed in the status line's array_reads section.
         int unrecorded_array_reads = -1;
         uint64_t written_cell_columns = 0;
+        // FULL step N3K (host-platform audit D3): the live frames that ran
+        // Gameplay_SectorManager outside a union pass this session (host
+        // support's manager_activations::outside_passes; -1: the host does
+        // not count them) and the checkpoint hold's re-holds
+        // (game/sector_activation.hpp checkpoint_activation_hold::reholds),
+        // printed in the status line's n3 section.
+        int64_t manager_unpassed = -1;
+        uint64_t manager_unpassed_handed_back = 0;   // of those, the hold handed back (D3's signature)
+        uint64_t checkpoint_reholds = 0;
     };
 
     // What a host's localize_scripts met (step A3; game/script_replay.hpp

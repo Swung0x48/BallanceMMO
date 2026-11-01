@@ -782,7 +782,9 @@ this design's text and the code was found.
   - the pause targets (713-840);
   - N1 death/level reset (887-1016);
   - N2 deactivate pin (1036-1172);
-  - N3 activate hold (1191-1289);
+  - N3 activate hold (1191-1289; the core path holds it with the shared
+    `checkpoint_activation_hold` since FULL step N3K, the legacy path keeps
+    this copy until R7);
   - the Sequencer restore and the Random block hook.
 
   They are handed back at session end. They are `script_guards` and anchor
@@ -7938,3 +7940,159 @@ capability does not start moving own births at once.
   No live run: with the switch's default the headless client is unchanged
   (the wire check) and retail declares no `own_body_control` before R6B, so
   the retail switch is inert.
+
+**As built (step N3K, 2026-11-01): N3 kept by one helper on both clients (AUD-2, host-platform audit D3).**
+- **The helper.** `bmmo::game::checkpoint_activation_hold`
+  (game/sector_activation.hpp): `apply()` at the anchor finds the Execute
+  Script of Gameplay_Events / activate Sektor that runs
+  Gameplay_SectorManager (`checkpoint_activation_block`, unchanged), records
+  the input's direct, shared and real source, feeds it the hold's parameter
+  (`feed_checkpoint_hold`, now shared with the server's
+  `hold_checkpoint_activation`, whose behaviour is unchanged); `keep()` every
+  frame re-holds an input that reads its retail source again and leaves any
+  other source alone (true: re-held; it bumps the script-write generation);
+  `restore()` hands the retail source back where the input still reads the
+  hold's parameter and destroys it; `held()`, `failed()`, `reholds()`,
+  `state()`. The keep rule is CK-free and unit-tested
+  (session/checkpoint_hold_rule.hpp: `classify_checkpoint_hold`,
+  `keep_checkpoint_hold`, the legacy PSC:1278-1281 cases).
+- **Headless (SC).** The anchor holds through `checkpoint_hold_.apply`
+  (`checkpoint_held_` = its result, the existing log lines); the platform's
+  `script_guards` calls `keep()` every frame ("the level's checkpoint sector
+  activation in activate Sektor was held again ..."); a new session hands the
+  previous hold back first, like the reset guard (a behaviour change, below).
+- **Retail core host (CH).** A file-scope static `core_checkpoint_hold`
+  replaces `sector_activate_resolve / _apply / _restore` and every
+  `sector_activate_.block && !sector_activate_failed_` test (anchor, end,
+  `poll_sector`, `script_guards`, `core_host_on_sector`,
+  `core_host_own_sector_from_stamps`, `core_host_sector`). The members
+  `sector_activate_` / `sector_activate_failed_` (BallanceMMOClient.h) stay
+  in place, written only by the legacy path, until LGD removes them;
+  `physics_session_hold_sector` (the legacy `sector` verb fallback) still
+  reads them and returns false outside a legacy session, as before.
+  Adaptations: the hold's log line takes the lead from the core
+  (`core.sector_lead_ticks()`; it read the legacy `physics_session_.sector_
+  lead()`), the search uses the shared `find_root_script` /
+  `find_behavior_in_tree` (PSC: `GetScriptByName` / `ScriptHelper::
+  FindFirstBB`), and a refusal's text names "the hold's parameter" where PSC
+  said "the session's parameter".
+- **The diagnostic (behaviour-neutral, shared).** session_host_world.hpp
+  `outside_pass_watch`: each live pending activation of the manager is marked
+  in `manager_activations::record_pending` with the hold's state at that
+  moment (the host passes its helper); the next live frame settles it - the
+  consuming frame ran no union pass -> counted. The core never tells a host
+  "inside a pass" (`set_union_pass` is B1's re-derivation slot), but a pass's
+  own flags are consumed by its frame, so the pass slot of the consuming tick
+  is the test. Both hosts log the first 20 runs ("manager ran outside a union
+  pass at tick T (activate [0][1]=A, deactivate [0][2]=D, reset R;
+  checkpoint hold: held | handed back | foreign source | not held)") and both
+  status lines carry ` n3: manager_unpassed=N handed_back=H rehold_count=M`
+  (`host_counters`, appended at the end; a host that does not count prints
+  nothing). D3's signature is a run marked `handed back` (without the keep)
+  or a "held again" line (with it); the level start's run (hold `held`) is
+  every session's baseline of 1.
+- **Measured** (quick tier; x64 build, x86 mod and the Arch server of build id
+  `ballanced-36c04e3d24c9+bmmo-f9afd1e818c3-dirty`; snapshots off):
+  - Unit tests 747/747 (new: `OutsidePassWatch.CountsOnlyFramesWithoutAPass`,
+    `CheckpointHold.KeepReholdsAHandedBackInputAndLeavesAForeignSourceAlone`);
+    GCC syntax every line ok; x64 BUILD-OK, x86 CLIENT-BUILD-OK (DEPS-OK on
+    both).
+  - Wire check `rGHF` -> `rN3K` on `core_ref_s14` (the plan named s13; s14 is
+    the default reference since CMAP): ALL SAME, 44 sends SAME, 44 journals
+    IDENTICAL. No arm of the set resets the level (its README names no
+    `--reset-level-at`; `cmap_reload` is a retail session restart outside the
+    set). Every replayed client logs one run outside a union pass per anchor
+    (fan_dr's client 3 two: tick 10, and 1038 after its re-anchor, the count
+    cleared between): the level start's activation at the anchor's third
+    frame, cells [0][1] 1 and [0][2] 1, reset, hold `held` - Init Ingame's,
+    which the activation record already re-issues. The solo pair (solo1,
+    solo2) replayed with both builds: sends SAME (2435, 2467), journals
+    IDENTICAL to each other and to the live ones (under the build-id
+    exclusion).
+  - Live (`maps/arena-test/n3k_full/reset600`, four clients on the arena,
+    client 3 `--reset-level-at 600`; the harness ran its default four start
+    sectors as four sessions - pass `--sectors 1` to `n3k_run.sh` for one, the
+    four share the capture paths so only the last session's captures were
+    kept): on all four sessions client 3's input stayed
+    held through the reset - no "held again" line, `rehold_count=0`, and the
+    reset's own manager activation at 639 (cells 0 / 0, reset; "Gameplay_
+    SectorManager is told to reset at tick 638") marked with hold `held`; the
+    other clients `manager_unpassed=1` (the level start), client 3 `2`. FINAL
+    rows of the last session's four captures (replayed with
+    `--final-checkpoints`, client 3 with its `--reset-level-at 600`) against the
+    server journal at tolerance 0: 1148 / 1155 / 1169 / 1182 ticks, all agree.
+  - The reset-then-crossing control, offline: client 3's capture replayed with
+    the run's reset and an extra own beam onto sector 2's flame (220, 4, 15) at
+    1000 (the drive's balls cross no checkpoint in 40 s): own ball back at 845,
+    the crossing at 1031 stamped for 1041 by the core's poll, the union's
+    "sector +2 at tick 1041"; no run outside a pass at the crossing
+    (`manager_unpassed=2`: the level start and the reset's own), no re-hold.
+    The same replay with `rGHF` (no keep, no diagnostic): its journal
+    IDENTICAL to `rN3K`'s (14288 records). So the headless "Reset Level" does
+    not hand the input back: **D3 stays unobserved**; the helper landed under
+    the written-once rule. The pass line's "a held again line at the reset"
+    could not show (nothing was handed back); the unit test carries the
+    re-hold path.
+- **Retail, the gate round** (`scripts/retail/n3k_retail_g`, `n3k_retail.py`,
+  L11, two copies, core on, the Arch server above with snapshots off; 74 s):
+  both copies log "the checkpoint's sector activation (Gameplay_Events/
+  activate Sektor -> Execute Script Gameplay_SectorManager) is held" at the
+  anchor (no refusal); client 1's `restart` at tick 294, own ball back at
+  567; its beam onto sector 2's flame stamped and run by the union on both
+  copies ("sector +2 at tick 641 ... stamped 641"). Status lines: client 1
+  `n3: manager_unpassed=2 handed_back=0 rehold_count=0`, client 2 `1 / 0 / 0`;
+  client 1's second run is the reset's own at 342 (cells 0 / 0, reset, hold
+  `held`), the same signature as the headless 639. FINAL rows against the
+  server journal at tolerance 0: 482 / 482 ticks on both copies, all agree,
+  with `--prefix P_` (23 mechanism bodies, `P_Modul_26_Rope`, `_Rope001`,
+  `_Sack`, `_Sack001` among them at 481 ticks) and `--prefix P_Modul_26
+  --from 342` (318 ticks) - the reset neither tore the sandbags down nor
+  rebuilt them (memory: level-reset joint rebuild). Retail re-held nothing
+  either: its `restart` path did not hand the input back.
+- **The reset's own run, named** (the review's finding 2): it is
+  `Event_handler :: reset Level`'s own Execute Script -> Gameplay_SectorManager,
+  call site D of design 9.28 / 9.28b (collision-overhaul-design, the 9.28
+  table), not the checkpoint chain and not RK3R. Of the four call sites the
+  graph has (that design's grep over the 110 root scripts), Deactivate Ball and
+  Init Ingame / activate Scripts are N1-emptied (both logged "the sector reset
+  in ... is neutralized" before the restart: retail 08:28:52 and 08:28:57, the
+  restart at 08:28:58), activate Sektor is N3-held (the mark read `held`), and
+  Exit Level is not on the reset path; D is the one left. Its signature
+  matches: the chain writes the sector cell [0][1] to 0 and its [0][2] Set
+  Cell is N2-pinned to 0 (logged "the sector deactivation in Event_handler/
+  reset Level ... is pinned to 0"), so the run reads 0 / 0 and the manager's
+  own `Test (Not Equal, B = 0)` skips the teardown - 9.28b's reason it is left
+  running. It runs in the resetting world only, by design: the reset is that
+  player's; it deactivates and activates nothing (the FINAL rows above and the
+  headless four bit-equal). It reaches the counter because it is a manager run
+  no pass started, like the level start's, so the counter's baseline is 1 per
+  anchor plus 1 per level reset. **The pass reads D3's own count** (the
+  review's fix): `outside_pass_watch` also counts the runs whose mark found
+  the hold `handed back` (`handed_back()`, host support's
+  `outside_passes_handed_back()`, the status line's ` n3: manager_unpassed=N
+  handed_back=H rehold_count=M`); `handed_back` is 0 in every run of the step
+  (headless reset600 and the replays, retail both copies), so D3 is
+  unobserved on both hosts.
+- **Headless behaviour beyond `keep()`** (the review's finding 3; neither is
+  reached by a core_ref_s14 arm, so ALL SAME does not exercise them):
+  (1) a new headless session hands the previous session's hold back before its
+  anchor (`checkpoint_hold_.restore` beside the reset guard's), and `apply()`
+  restores first, so a second anchor on the same graph (base.cmo's
+  Gameplay_Events survives a level exit) holds again - before N3K it found no
+  block ("no Execute Script in activate Sektor runs Gameplay_SectorManager":
+  the held block no longer names the manager), `checkpoint_held_` went false
+  and that session's crossings were reported after the fact; (2) `apply()`
+  refuses an input with no usable source (no real source, or one not a
+  CK_ID-sized parameter), which `hold_checkpoint_activation` accepted - the
+  rule PSC's resolve had, so the hold can always be handed back. No log under
+  maps/arena-test shows the old second-anchor refusal ("was NOT held").
+- **`restore()` checks the parameter is still its own** (the review's nit): a
+  level unloaded since the anchor may have handed `none_`'s id to another
+  object; `hold_parameter()` answers only an object named `BMMO_SectorHold`,
+  so restore never destroys a stranger (PSC's legacy copy keeps its old
+  pattern; LGD deletes it).
+- **Not run (deferred to the FULL batch):** a control on a diagnostic-only
+  retail build (no keep): retail's run above re-held nothing and found the
+  hold `held` at every mark, so the control would show the same (as the
+  headless `rGHF` replay did); and a retail crossing in the frame of the
+  reset, which neither host has been driven into.

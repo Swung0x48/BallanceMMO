@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -49,6 +50,7 @@
 #include "host_backend.hpp"
 #include "navigation_graph.hpp"
 #include "script_replay.hpp"
+#include "sector_activation.hpp"
 
 namespace bmmo::game {
 
@@ -292,6 +294,7 @@ namespace bmmo::game {
             override_ = {};
             for (auto& writes: cell_writes_) writes.clear();
             cell_writes_replayed_ = 0;
+            outside_.clear();   // FULL step N3K
         }
         // The union's live pass of `tick` (platform record_activation), with
         // the cells as run_sector left them: the tick's pass slot.
@@ -322,14 +325,35 @@ namespace bmmo::game {
         // [0][1] writes too.
         size_t forget_pending(uint32_t from, uint32_t to) {
             for (auto& writes: cell_writes_) writes.forget(from != 0 ? from - 1 : 0, to - 1);
+            outside_.forget(from, to);   // FULL step N3K
             return slots_.forget_pending(from, to);
         }
         const bmmo::session::activation_slots& slots() const { return slots_; }
+        // FULL step N3K (host-platform audit D3): the live frames that ran
+        // the manager outside a union pass this session, and the last one as
+        // a log line.
+        uint64_t outside_passes() const { return outside_.count(); }
+        // Those whose frame found the checkpoint hold handed back - D3's
+        // signature; the rest are the level's own runs (Init Ingame at the
+        // level start, Event_handler / reset Level at a level reset).
+        uint64_t outside_passes_handed_back() const { return outside_.handed_back(); }
+        std::string outside_pass_line() const {
+            const auto& r = outside_.last();
+            char text[256];
+            std::snprintf(text, sizeof(text),
+                          "manager ran outside a union pass at tick %u (activate [0][1]=%d, deactivate [0][2]=%d, reset %d; "
+                          "checkpoint hold: %s) - run %llu",
+                          r.tick, r.activation.activate, r.activation.deactivate, r.activation.reset ? 1 : 0,
+                          bmmo::session::checkpoint_hold_state_name(static_cast<bmmo::session::checkpoint_hold_state>(r.hold_state)),
+                          static_cast<unsigned long long>(outside_.count()));
+            return text;
+        }
         // Every record at a tick >= `tick` dropped - both slots, the script
         // activations and the explosion referentials (a resync's re-assign,
         // step A3, G-a).  Returns the ticks the manager's slots dropped.
         size_t forget_from(uint32_t tick) {
             const size_t n = slots_.forget_from(tick);
+            outside_.forget_from(tick);   // FULL step N3K
             for (auto& writes: cell_writes_) writes.forget_from(tick);   // steps N02R, N01R
             scripts_by_tick_.erase(scripts_by_tick_.lower_bound(tick), scripts_by_tick_.end());
             referential_by_tick_.erase(referential_by_tick_.lower_bound(tick), referential_by_tick_.end());
@@ -339,8 +363,16 @@ namespace bmmo::game {
         // frame of `tick` that consumes it): the manager's pending activation
         // (a script outside the replay asked for it) and every pending
         // activation of `scripts` (session_script_activations).
-        void record_pending(CKContext* context, CK_ID manager_id, const std::vector<CK_ID>& scripts, uint32_t tick) {
+        // FULL step N3K (host-platform audit D3): and the diagnostic - the
+        // previous frame's pending activation settled against that frame's
+        // union pass (outside_pass_watch), this frame's marked with the
+        // checkpoint hold's state (`hold`: the host's N3 hold, null when it
+        // has none).  The host logs a counted run (outside_passes(),
+        // outside_pass_line()).
+        void record_pending(CKContext* context, CK_ID manager_id, const std::vector<CK_ID>& scripts, uint32_t tick,
+                            const checkpoint_activation_hold* hold = nullptr) {
             if (!context) return;
+            outside_.settle(slots_, tick);
             // Step N02R: IngameParameter[0][2] as the live frame of tick - 1
             // left it - a change from what that frame started with is a write
             // of a chain no replay runs (session_host_world.hpp
@@ -350,8 +382,10 @@ namespace bmmo::game {
             for (int i = 0; i < kWrittenCells; ++i)
                 if (int value = 0; read_written_cell(context, i, value)) cell_writes_[i].after_frame(tick - 1, value);
             if (auto* manager = manager_id ? CKBehavior::Cast(context->GetObject(manager_id)) : nullptr;
-                    manager && (manager->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME))
+                    manager && (manager->GetFlags() & CKBEHAVIOR_ACTIVATENEXTFRAME)) {
                 slots_.record_pending(tick, read(context, (manager->GetFlags() & CKBEHAVIOR_RESETNEXTFRAME) != 0));
+                outside_.mark(tick, static_cast<uint8_t>(hold ? hold->state(context) : bmmo::session::checkpoint_hold_state::not_held));
+            }
             std::vector<script_activation> pending;
             for (CK_ID id: scripts) {
                 auto* script = CKBehavior::Cast(context->GetObject(id));
@@ -507,6 +541,7 @@ namespace bmmo::game {
             CK_ID frame = 0, parent = 0;
             VxMatrix local;
         } override_;
+        bmmo::session::outside_pass_watch outside_;   // FULL step N3K (host-platform audit D3)
     };
 
     // The script replay's selection of the session core's world, both hosts

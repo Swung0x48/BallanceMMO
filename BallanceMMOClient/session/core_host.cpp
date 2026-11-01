@@ -93,6 +93,15 @@ namespace {
     // keeps the cell it polls).  File scope: BallanceMMOClient keeps its
     // layout.
     bmmo::game::sector_cell_split core_chain_cell;
+    // FULL step N3K (host-platform audit D3; AUD-2): N3, the checkpoint's
+    // run of Gameplay_SectorManager held, by the shared helper both session
+    // clients use (game/sector_activation.hpp checkpoint_activation_hold):
+    // made at the core anchor, kept every frame (platform script_guards),
+    // handed back at the session's end.  It replaces the BallanceMMOClient
+    // members sector_activate_ / sector_activate_failed_ on this path (the
+    // legacy path keeps them until R7; LGD removes them).  File scope:
+    // BallanceMMOClient keeps its layout.
+    bmmo::game::checkpoint_activation_hold core_checkpoint_hold;
     // FULL step SLG: the own sectors core_host_report_own_sector has
     // reported in this core session (each once, as the core stamps each
     // once); cleared by reset_session_state at a session's start and end
@@ -2658,7 +2667,9 @@ void BallanceMMOClient::core_host_anchor() {
     }
     death_reset_restore();
     sector_deactivate_restore();
-    sector_activate_restore();
+    if (!core_checkpoint_hold.restore(m_bml->GetCKContext()))   // FULL step N3K
+        logger_->Warn("Physics session: the Script input of activate Sektor could not be handed back to its retail "
+                      "source; the session's parameter is left in place");
     checkpoint_phase_restore();
     const bool death_neutralized = death_reset_resolve();
     const bool sector_neutralized = sector_deactivate_resolve();
@@ -2667,13 +2678,27 @@ void BallanceMMOClient::core_host_anchor() {
                       "longer run Gameplay_SectorManager (a death and a level reset), and %d chain(s) activate a "
                       "sector without deactivating anything (a checkpoint and a level reset)",
                       death_reset_count_, sector_deactivate_count_);
-    sector_activate_resolve();
+    // Sector activation as an input (N3; FULL step N3K: the shared helper):
+    // the checkpoint's run of the manager is held, so it can be stamped ahead
+    // and run at the stamped tick.
+    {
+        std::string hold_error;
+        if (core_checkpoint_hold.apply(m_bml->GetCKContext(), hold_error))
+            logger_->Info("Physics session: the checkpoint's sector activation (Gameplay_Events/activate Sektor -> "
+                          "Execute Script Gameplay_SectorManager) is held: a crossed checkpoint stamps its Sector event "
+                          "%u ticks ahead and the manager runs at that tick",
+                          static_cast<unsigned>(core.sector_lead_ticks()));
+        else
+            logger_->Error("Physics session: the checkpoint's sector activation was NOT taken over (%s): this client "
+                           "will activate a sector the moment its ball crosses the line, the server a trip later, and "
+                           "the sector's mechanisms run out of phase", hold_error.c_str());
+    }
     checkpoint_phase_resolve();
     // Step B2SX: the held chain's [0][1] write to a private cell, which the
     // core's own sector poll reads (platform poll_sector); the manager reads
     // only the union's passes.  Only where the hold is in force.
     core_chain_cell.restore(m_bml->GetCKContext());
-    if (sector_activate_.block && !sector_activate_failed_) {
+    if (core_checkpoint_hold.held()) {
         const std::string trouble = core_chain_cell.apply(m_bml->GetCKContext());
         if (trouble.empty())
             logger_->Info("Physics session: the checkpoint chain's sector cell is split: %s",
@@ -3059,7 +3084,9 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
                       "close; the level's key-reading blocks read no key until both are over");
     death_reset_restore();
     sector_deactivate_restore();
-    sector_activate_restore();
+    if (!core_checkpoint_hold.restore(m_bml->GetCKContext()))   // FULL step N3K
+        logger_->Warn("Physics session: the Script input of activate Sektor could not be handed back to its retail "
+                      "source; the session's parameter is left in place");
     checkpoint_phase_restore();
     if (!core_chain_cell.restore(m_bml->GetCKContext()))   // step B2SX
         logger_->Warn("Physics session: the checkpoint chain's sector cell could not be handed back to IngameParameter; "
@@ -3302,7 +3329,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // reports through request_sector).
     p.poll_sector = [this](uint32_t) {
         bs::sector_poll poll;
-        if (sector_activate_.block && !sector_activate_failed_) {
+        if (core_checkpoint_hold.held()) {
             if (core_chain_cell.applied()) {
                 // Step B2SX: the chain's own copy, which no pass writes.
                 int cell = 0;
@@ -3510,7 +3537,10 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.script_guards = [this](uint32_t, bool resolved) {
         death_reset_apply(resolved);
         sector_deactivate_apply();
-        sector_activate_apply();
+        // N3 kept (FULL step N3K: the shared helper's keep, the legacy
+        // sector_activate_apply's rule and line).
+        if (core_checkpoint_hold.keep(m_bml->GetCKContext()))
+            logger_->Info("Physics session: the checkpoint's sector activation in activate Sektor was held again");
         if (const int again = checkpoint_phase_keep())
             logger_->Info("Physics session: the checkpoint chain's phase cell: %d target(s) handed back to "
                           "CurrentLevel were moved to the copy again", again);
@@ -3743,7 +3773,13 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // record_pending, the selection's `activations`).
     p.record_pending_activation = [this](uint32_t tick) {
         CKBehavior* manager = bmmo::game::find_root_script(m_bml->GetCKContext(), "Gameplay_SectorManager");
-        host.activations.record_pending(m_bml->GetCKContext(), manager ? manager->GetID() : 0, host.script_activations, tick);
+        // FULL step N3K (host-platform audit D3): and a manager run outside
+        // every union pass counted, the first 20 logged.
+        const uint64_t outside = host.activations.outside_passes();
+        host.activations.record_pending(m_bml->GetCKContext(), manager ? manager->GetID() : 0, host.script_activations, tick,
+                                        &core_checkpoint_hold);
+        if (host.activations.outside_passes() != outside && host.activations.outside_passes() <= 20)
+            logger_->Warn("Physics session: %s", host.activations.outside_pass_line().c_str());
     };
     // Step RO1: the order this live frame ran the replay's scripts in.
     p.record_script_order = [this](uint32_t tick) {
@@ -4238,6 +4274,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         h.probes_relatched = proximity_host.union_.relatched();
         h.unrecorded_array_reads = array_reads_host.unrecorded;   // step RK2
         h.written_cell_columns = written_columns_host.size();   // the binding's (step RK2's review)
+        h.manager_unpassed = static_cast<int64_t>(host.activations.outside_passes());   // FULL step N3K
+        h.manager_unpassed_handed_back = host.activations.outside_passes_handed_back();
+        h.checkpoint_reholds = core_checkpoint_hold.reholds();
         return h;
     };
     // Step WG4 (world agreement 2.5): the proximity union's place, live
@@ -4980,7 +5019,7 @@ bool BallanceMMOClient::core_host_on_unphysicalize(CK3dEntity* target) {
 bool BallanceMMOClient::core_host_on_sector(int sector, bool checkpoint) {
     if (!core_session_running()) return false;
     auto& core = *host.core;
-    if (checkpoint && core.assigned() && sector_activate_.block && !sector_activate_failed_) {
+    if (checkpoint && core.assigned() && core_checkpoint_hold.held()) {
         core.request_sector(sector, "checkpoint");
         return true;
     }
@@ -5005,7 +5044,7 @@ bool BallanceMMOClient::core_host_on_sector(int sector, bool checkpoint) {
 // after it leaves the sector reported, its timestamp early by the move).  Without the split the chain writes [0][1]
 // itself and the hook's read stays right.
 bool BallanceMMOClient::core_host_own_sector_from_stamps() const {
-    return core_session_running() && core_chain_cell.applied() && sector_activate_.block && !sector_activate_failed_;
+    return core_session_running() && core_chain_cell.applied() && core_checkpoint_hold.held();
 }
 
 // Once per frame after post_step: the own stamps whose tick the core has
@@ -5144,7 +5183,7 @@ bool BallanceMMOClient::core_host_sector(int sector, std::string& answer) {
         answer = "error session core: not assigned (no tick to hold the sector for)";
         return true;
     }
-    if (!sector_activate_.block || sector_activate_failed_) return false;
+    if (!core_checkpoint_hold.held()) return false;   // FULL step N3K
     const uint32_t due = core.current_tick() + 1 + core.sector_lead_ticks();
     core.request_sector(sector, "automation");
     answer = std::format("ok sector {} held for tick {} (Sector event sent ahead; session core)", sector, due);
@@ -5189,6 +5228,9 @@ std::string BallanceMMOClient::core_host_status_text() {
     h.probes_relatched = proximity_host.union_.relatched();
     h.unrecorded_array_reads = array_reads_host.unrecorded;   // step RK2
     h.written_cell_columns = written_columns_host.size();   // the binding's (step RK2's review)
+    h.manager_unpassed = static_cast<int64_t>(host.activations.outside_passes());   // FULL step N3K
+    h.manager_unpassed_handed_back = host.activations.outside_passes_handed_back();
+    h.checkpoint_reholds = core_checkpoint_hold.reholds();
     // Gap Q (step B7EG): the PreSimulate queue's part of the records and
     // of every replay: rebuilt/removed/held/unhold_clamped/rebuild_fail/
     // hold_fail/no_record.

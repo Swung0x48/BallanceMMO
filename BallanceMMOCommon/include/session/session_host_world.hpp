@@ -19,6 +19,7 @@
 // the navigation attach) is game/session_host_support.hpp.  Moved from the
 // headless client (session_client.cpp at 0ea2e05) at E9, verbatim.
 
+#include "checkpoint_hold_rule.hpp"
 #include "client_platform.hpp"
 #include "rollback.hpp"
 #include "rollback_binding.hpp"
@@ -130,6 +131,81 @@ namespace bmmo::session {
             while (!by_tick_.empty() && by_tick_.begin()->first + 4096 < tick) by_tick_.erase(by_tick_.begin());
         }
         std::map<uint32_t, entry> by_tick_;
+    };
+
+    // FULL step N3K (host-platform audit D3), a diagnostic: the frames whose
+    // manager run no union pass started.  A pending activation (the frame
+    // before's scripts asked for it: Init Ingame at the level start,
+    // Event_handler, or a checkpoint chain whose held Execute Script was
+    // handed its retail source back) runs the manager in the frame that
+    // consumes it; when that frame's union pass ran too, the pass started the
+    // manager from its beginning with its own cells, otherwise the frame ran
+    // it outside every pass - in this world alone, at a tick no stamp named.
+    // The host marks each live pending activation (record_pending) with the
+    // checkpoint hold's state at that moment; the mark is settled at the
+    // next live frame's record_pending, once the consuming frame has run its
+    // pass or not.  Behaviour-neutral: it reads the slots and counts.
+    class outside_pass_watch {
+    public:
+        struct run {
+            uint32_t tick = 0;                 // the frame that consumed the activation
+            manager_activation activation;     // the cells and reset flag it ran with
+            uint8_t hold_state = 0;            // the hold's state at the mark (session/checkpoint_hold_rule.hpp)
+        };
+        void clear() {
+            marked_ = false;
+            count_ = 0;
+            handed_back_ = 0;
+            last_ = {};
+        }
+        // A live pending activation for the frame of `tick`.
+        void mark(uint32_t tick, uint8_t hold_state) {
+            marked_ = true;
+            mark_tick_ = tick;
+            mark_state_ = hold_state;
+        }
+        // After a live frame, before this frame's own mark (`now` the tick
+        // its pending activation would run at): the previous mark settled
+        // once its frame has run.  True when that frame ran the manager
+        // outside a pass (counted; last() holds it).
+        bool settle(const activation_slots& slots, uint32_t now) {
+            if (!marked_ || static_cast<int32_t>(now - mark_tick_) <= 0) return false;
+            marked_ = false;
+            const activation_slots::entry* e = slots.find(mark_tick_);
+            if (!e || !e->have_pending || e->have_pass) return false;   // forgotten, or a pass started it
+            ++count_;
+            // D3's own signature (the step's review): the checkpoint's
+            // Execute Script read its retail source again when the frame
+            // asked for the run.  Every other counted run is one of the
+            // level's own (Init Ingame at the level start, Event_handler /
+            // reset Level at a level reset), the hold not involved.
+            if (mark_state_ == static_cast<uint8_t>(checkpoint_hold_state::handed_back)) ++handed_back_;
+            last_.tick = mark_tick_;
+            last_.activation = e->pending;
+            last_.hold_state = mark_state_;
+            return true;
+        }
+        // A resync's re-assign (forget_from) or a level walk's
+        // (forget_pending) dropped the marked slot: nothing to settle.
+        void forget_from(uint32_t tick) {
+            if (marked_ && static_cast<int32_t>(mark_tick_ - tick) >= 0) marked_ = false;
+        }
+        void forget(uint32_t from, uint32_t to) {
+            if (marked_ && static_cast<int32_t>(mark_tick_ - from) >= 0 && static_cast<int32_t>(mark_tick_ - to) <= 0)
+                marked_ = false;
+        }
+        uint64_t count() const { return count_; }
+        // The counted runs whose mark found the hold handed back (D3).
+        uint64_t handed_back() const { return handed_back_; }
+        const run& last() const { return last_; }
+
+    private:
+        bool marked_ = false;
+        uint32_t mark_tick_ = 0;
+        uint8_t mark_state_ = 0;
+        uint64_t count_ = 0;
+        uint64_t handed_back_ = 0;
+        run last_;
     };
 
     // Step N02R (roadmap 4 item 4, the user's (b) of 2026-10-28; resync

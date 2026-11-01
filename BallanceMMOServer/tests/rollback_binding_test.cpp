@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include <session/checkpoint_hold_rule.hpp>
 #include <session/rollback_binding.hpp>
 #include <session/session_host_world.hpp>
 #include <session/script_order.hpp>
@@ -1346,4 +1347,131 @@ TEST(RollbackBinding, TheSessionCoresWorldHasThePhysicsGlobals) {
     bmmo_physics_globals read{};
     EXPECT_TRUE(world.get_globals(read));
     EXPECT_DOUBLE_EQ(read.gravity[1], -20.0);
+}
+
+// FULL step N3K (host-platform audit D3): the diagnostic - a live pending
+// activation whose consuming frame ran no union pass is counted once its
+// frame has run (the next live frame's settle), with the hold's state at the
+// mark; a pass at that tick, a forgotten slot or a frame not run yet counts
+// nothing.
+TEST(OutsidePassWatch, CountsOnlyFramesWithoutAPass) {
+    bmmo::session::activation_slots slots;
+    bmmo::session::outside_pass_watch watch;
+    bmmo::session::manager_activation pending;
+    pending.activate = 3;
+    pending.deactivate = 2;
+    const auto handed_back = static_cast<uint8_t>(bmmo::session::checkpoint_hold_state::handed_back);
+    const auto held = static_cast<uint8_t>(bmmo::session::checkpoint_hold_state::held);
+    // After frame 99: pending for 100, marked.  Settled after frame 100.
+    EXPECT_FALSE(watch.settle(slots, 100));
+    slots.record_pending(100, pending);
+    watch.mark(100, handed_back);
+    EXPECT_FALSE(watch.settle(slots, 100)) << "frame 100 has not run yet";
+    EXPECT_TRUE(watch.settle(slots, 101)) << "frame 100 ran it without a pass";
+    EXPECT_EQ(watch.count(), 1u);
+    EXPECT_EQ(watch.last().tick, 100u);
+    EXPECT_EQ(watch.last().activation.activate, 3);
+    EXPECT_EQ(watch.last().activation.deactivate, 2);
+    EXPECT_EQ(watch.last().hold_state, handed_back);
+    EXPECT_EQ(watch.handed_back(), 1u) << "D3's signature: the hold handed back at the mark";
+    EXPECT_FALSE(watch.settle(slots, 102)) << "settled once";
+    // A pending activation the frame's own pass started (Init Ingame's in
+    // the frame of a pass, say): not counted.
+    slots.record_pending(110, pending);
+    watch.mark(110, held);
+    bmmo::session::manager_activation pass;
+    pass.reset = true;
+    pass.activate = 4;
+    slots.set_pass(110, pass);
+    EXPECT_FALSE(watch.settle(slots, 111));
+    // A slot a resync's re-assign forgot: nothing to settle.
+    slots.record_pending(120, pending);
+    watch.mark(120, held);
+    slots.forget_from(115);
+    watch.forget_from(115);
+    EXPECT_FALSE(watch.settle(slots, 121));
+    // A level walk's forget_pending (inclusive) drops the mark too.
+    slots.record_pending(130, pending);
+    watch.mark(130, held);
+    slots.forget_pending(125, 130);
+    watch.forget(125, 130);
+    EXPECT_FALSE(watch.settle(slots, 131));
+    // A forgotten pending slot found at settle (the mark kept): not counted.
+    slots.record_pending(140, pending);
+    watch.mark(140, held);
+    slots.forget_pending(140, 140);
+    EXPECT_FALSE(watch.settle(slots, 141));
+    EXPECT_EQ(watch.count(), 1u);
+    // A level's own run outside a pass with the hold in force (Init Ingame
+    // at the level start, Event_handler / reset Level): counted, not D3.
+    slots.record_pending(150, pending);
+    watch.mark(150, held);
+    EXPECT_TRUE(watch.settle(slots, 151));
+    EXPECT_EQ(watch.count(), 2u);
+    EXPECT_EQ(watch.handed_back(), 1u);
+    watch.clear();
+    EXPECT_EQ(watch.count(), 0u);
+    EXPECT_EQ(watch.handed_back(), 0u);
+}
+
+// FULL step N3K (AUD-2): the checkpoint hold's keep rule, the legacy retail
+// copy's (physics_session_client.cpp sector_activate_apply): an input that
+// reads the hold's parameter is left alone, one handed its retail source
+// back is re-held, any other source - none, or a foreign one - is left alone.
+namespace {
+    struct fake_parameter {
+        uint32_t id = 0;
+        uint32_t GetID() const { return id; }
+    };
+    struct fake_input {
+        fake_parameter* real = nullptr;
+        int set_calls = 0;
+        int refuse = 0;   // what SetDirectSource answers (CK_OK = 0)
+        fake_parameter* GetRealSource() { return real; }
+        int SetDirectSource(fake_parameter* p) {
+            ++set_calls;
+            if (refuse == 0) real = p;
+            return refuse;
+        }
+    };
+}
+
+TEST(CheckpointHold, KeepReholdsAHandedBackInputAndLeavesAForeignSourceAlone) {
+    using bmmo::session::checkpoint_hold_state;
+    fake_parameter none{50}, retail{7}, other{9};
+    fake_input input;
+    bool reheld = true;
+    // Ours: nothing to do.
+    input.real = &none;
+    EXPECT_EQ(bmmo::session::keep_checkpoint_hold(input, none, retail.id, reheld), checkpoint_hold_state::held);
+    EXPECT_FALSE(reheld);
+    EXPECT_EQ(input.set_calls, 0);
+    // A level reset handed the retail source back: re-held.
+    input.real = &retail;
+    EXPECT_EQ(bmmo::session::keep_checkpoint_hold(input, none, retail.id, reheld), checkpoint_hold_state::handed_back);
+    EXPECT_TRUE(reheld);
+    EXPECT_EQ(input.set_calls, 1);
+    EXPECT_EQ(input.real, &none);
+    // Held again: the next frame's keep does nothing.
+    EXPECT_EQ(bmmo::session::keep_checkpoint_hold(input, none, retail.id, reheld), checkpoint_hold_state::held);
+    EXPECT_FALSE(reheld);
+    EXPECT_EQ(input.set_calls, 1);
+    // A foreign source (another edit's parameter) is left alone.
+    input.real = &other;
+    EXPECT_EQ(bmmo::session::keep_checkpoint_hold(input, none, retail.id, reheld), checkpoint_hold_state::foreign);
+    EXPECT_FALSE(reheld);
+    EXPECT_EQ(input.real, &other);
+    // No source at all: left alone.
+    input.real = nullptr;
+    EXPECT_EQ(bmmo::session::keep_checkpoint_hold(input, none, retail.id, reheld), checkpoint_hold_state::foreign);
+    EXPECT_FALSE(reheld);
+    EXPECT_EQ(input.set_calls, 1);
+    // A refused re-hold is not reported as one.
+    input.real = &retail;
+    input.refuse = 1;
+    EXPECT_EQ(bmmo::session::keep_checkpoint_hold(input, none, retail.id, reheld), checkpoint_hold_state::handed_back);
+    EXPECT_FALSE(reheld);
+    // No hold in force: nothing is ours.
+    EXPECT_EQ(bmmo::session::classify_checkpoint_hold(7, 0, 7), checkpoint_hold_state::not_held);
+    EXPECT_STREQ(bmmo::session::checkpoint_hold_state_name(checkpoint_hold_state::handed_back), "handed back");
 }

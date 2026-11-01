@@ -60,7 +60,7 @@ was measured here.
 | `outside_forces` (CP:529) | n/a | SC:2057 `read_forces<physics_direct>` | CH:2516 `read_forces<physics_view>` | same |
 | `movable_bodies` (CP:536) | n/a | SC:4172 `movable_body_names` (physics_direct.hpp:231: `body.movable`, table order) | CH:2522 the same filter written inline over `list_bodies` | same (two copies of one filter) |
 | `note_script_resets` (CP:539) | n/a | SC:2061 | CH:2530 | same |
-| `script_guards` (CP:543) | once at the anchor, never kept (PW:329-397: N3 hold, N2 pin, depth test, N4, chain cell; no N1: the server's retail ball never dies) | SC:1930 N1 `reset_guard_.apply` (game/sector_reset_guard.hpp), N4 keep, N2 `repin_checkpoint_deactivation`, chain cell keep, tutorial hold keep, depth test keep - **no N3 keep** | CH:2536 N1 `death_reset_apply` (PSC:986, retail's own copy), N2 `sector_deactivate_apply` (PSC:1124), **N3 `sector_activate_apply`** (PSC:1266), N4, chain cell, tutorial hold, depth test | **D3** |
+| `script_guards` (CP:543) | once at the anchor, never kept (PW:329-397: N3 hold, N2 pin, depth test, N4, chain cell; no N1: the server's retail ball never dies) | SC:1930 N1 `reset_guard_.apply` (game/sector_reset_guard.hpp), N4 keep, N2 `repin_checkpoint_deactivation`, chain cell keep, tutorial hold keep, depth test keep - **no N3 keep** (since N3K: `checkpoint_hold_.keep`) | CH:2536 N1 `death_reset_apply` (PSC:986, retail's own copy), N2 `sector_deactivate_apply` (PSC:1124), **N3 `sector_activate_apply`** (PSC:1266), N4, chain cell, tutorial hold, depth test | **D3** |
 
 ## 3. Writing the world: bodies, sectors, the resync
 
@@ -225,7 +225,19 @@ records, physics_state.hpp:426-431), which is the design question to settle
 with it.
 
 **D3. The checkpoint hold (N3) is re-applied every frame only on retail,
-and N1-N3 are retail's own copies (by reading; never observed).** CH:2539
+and N1-N3 are retail's own copies (by reading; never observed).** **N3 half
+done (FULL step N3K, 2026-11-01); N1 retail onto `sector_reset_guard` is
+LGM's.** Both session clients hold N3 with one helper
+(game/sector_activation.hpp `checkpoint_activation_hold`: `apply` at the
+anchor, `keep()` every frame from `script_guards`, `restore` at the end; the
+keep rule CK-free in session/checkpoint_hold_rule.hpp); the diagnostic this
+entry asked for is at `manager_activations::record_pending` (a manager run no
+union pass started, counted on both status lines as `n3:
+manager_unpassed=`, the first 20 logged with the hold's state). A
+`--reset-level-at` run, a reset-then-crossing replay and a retail two-copy
+session with a mid-session `restart` and a crossing showed neither host's
+reset hands the input back (`handed_back=0`, `rehold_count=0`): D3 stays
+unobserved (session-client-core design, "As built (step N3K)"). CH:2539
 `sector_activate_apply()` (PSC:1266) re-holds the Script input when "a level
 reset handed the retail source back" (PSC:1264); SC holds once at the
 anchor (SC:2637, the shared `hold_checkpoint_activation`,
@@ -361,9 +373,9 @@ always a table ball. None, by reading.
 - No check was run (a docs-only step: no build, no test, no replay; the
   FULL plan's AUD row is "offline, docs only").
 - D2 is done (FULL step GHF: built, and its savestate difference measured before and after).
-- D3-D4 are by reading and were never observed; D2 was too until GHF; D3 needs a diagnostic line
-  before a `--reset-level-at` run can test it (above); D2 and D4 need a run
-  built for them.
+- D3-D4 are by reading and were never observed; D2 was too until GHF; D3's diagnostic line exists
+  since N3K and its headless and retail reset runs did not observe it either (the N3 helper landed
+  anyway, N1 at LGM; above); D4 needs a run built for it.
 - The IVP sources and physics_RT are out of scope: every host reaches the
   same bridge functions (`physics_direct` in process, `physics_view` through
   the plugin), so a difference below the bridge is not a host difference.

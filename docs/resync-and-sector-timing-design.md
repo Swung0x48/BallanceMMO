@@ -4042,3 +4042,20 @@ three are taken in a different form, with the reason.
 - **Q5, numbers:** protocol 10 and journal version 4 are taken by whichever
   of this track, the trafo replication and the sector placement lands first;
   the next takes the next number.
+
+**As built (step N3K, 2026-11-01): the own N3 activation's hold kept on both clients.** The hold this
+design's rules take as given ("the own N3 activation: held, stamped ahead and sent ahead") is made, kept every
+frame and handed back by one helper on the headless client and the retail core host
+(game/sector_activation.hpp `checkpoint_activation_hold`; the headless host held it once at the anchor before,
+retail re-held it with its own copy). Nothing in the union, the stamps, the re-derivation or the two activation
+slots changed (wire check on core_ref_s14 ALL SAME, journals IDENTICAL). A diagnostic now counts the manager's
+runs that no union pass started (host support's `manager_activations::record_pending`, `outside_pass_watch`
+in session_host_world.hpp): one per anchor (Init Ingame's), one more in a world that resets its level
+(Event_handler / reset Level's own run, design 9.28b's call site D, cells 0 / 0: the N2 pin makes it skip the
+teardown) - neither from the checkpoint chain; D3's own signature, a run whose frame found the hold handed
+back, is counted apart (`handed_back=`) and was 0 everywhere. A `--reset-level-at` run, a reset-then-crossing
+replay and a retail two-copy session with a mid-session `restart` and a crossing (L11, FINAL rows bit-equal to
+the server on both copies, the sandbags included) showed the reset does not hand the hold back, so the
+crossing after it was stamped and run by the union (sector +2 at the stamped tick) in that world as in every
+other. Details and numbers: the
+session-client-core design, "As built (step N3K)".

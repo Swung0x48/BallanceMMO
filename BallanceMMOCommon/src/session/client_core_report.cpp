@@ -254,6 +254,13 @@ namespace bmmo::session {
         // Step SRT4 (realtime-design 4 a2): sparse=k[v] light=records/ms
         // whole=records/ms (the replays' whole records) rebased=rewinds+extra ticks unanch=refused
         // verify=compared/differing/float script parameters only/stale (not compared) - only while sparse capture is on.
+        // FULL step N3K (host-platform audit D3): the manager's runs outside
+        // every union pass and the checkpoint hold's re-holds, from a host
+        // that counts them (both session clients; every other status line is
+        // the text it was).
+        const std::string n3 = h.manager_unpassed < 0 ? std::string() : textf(
+            " n3: manager_unpassed=%lld handed_back=%llu rehold_count=%llu", static_cast<long long>(h.manager_unpassed),
+            static_cast<unsigned long long>(h.manager_unpassed_handed_back), static_cast<unsigned long long>(h.checkpoint_reholds));
         const std::string sparse = s.rollback_.sparse_capture() <= 1 ? std::string() : textf(
             " sparse=%u%s light=%llu/%.0f whole=%llu/%.0f rebased=%llu+%llu unanch=%llu verify=%llu/%llu/%llu/%llu",
             s.rollback_.sparse_capture(), s.rollback_.sparse_capture_verify() ? "v" : "",
@@ -488,7 +495,7 @@ namespace bmmo::session {
                      // starved reports now, the longest run, and the resyncs
                      // the starved rule asked for.
                      s.starved_run_, s.starved_run_max_, static_cast<unsigned long long>(s.starved_resyncs_),
-                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str()) + sparse;
+                     trafo.c_str(), probes.c_str(), arrays.c_str(), outside.c_str(), drain.c_str(), coalesced.c_str(), ccache.c_str()) + sparse + n3;
     }
 
 }
