@@ -3114,7 +3114,9 @@ replaced by §6.1, which runs before step 12.
 Steps 7-11 are built (0b5de5f, 53d8ecc, b134bcb, 177c337). Their meter,
 patience and Sector samples are replaced by the steps below. Each step is one
 implement-and-review pass, closed by its measurement. All of them come before
-step 12, and each builds and runs on its own. Line numbers are 177c337's.
+step 12, and each builds and runs on its own. Line numbers are 177c337's;
+HEAD's, what was built since and five couplings this section predates are in
+§6.2, which the steps (built as FULL steps LB0-LB5) read first.
 Both flags stay off in deployments until R5 closes.
 
 **R0. Harness: twins, new arms, host clock, clock skew.**
@@ -3133,7 +3135,7 @@ Both flags stay off in deployments until R5 closes.
   - sim/session_client.cpp: C8 `--resync-at`.
 - Tests:
   - the harness self-check: H9 labels lp11_a9c's span 245-760 and nothing in
-    lp11_a0_off;
+    lp11_a0_off (replaced by a new-run criterion, §6.2.5);
   - session_logic_test: the skewed clock moves deadlines only inside its
     span, and is the identity when off.
 - Close: dry runs of A0h, A5p and A9h8 at HEAD produce full reports, and H9
@@ -3176,7 +3178,7 @@ Both flags stay off in deployments until R5 closes.
     a resync and moved by `rebase`, measured only at the first assignment.
 - Close: A0 off, A0h off and A0j off.
   - The live would-cut is ≤ 0.5 % of member-ticks in A0; the replay gives
-    58-61 on `at`.
+    58-61 on `at` (replaced by a new-run criterion, §6.2.5).
   - The gap's p99 is ≤ 2 ticks outside the deaths and respawns.
   - A0h's baselines equal the members' control slack q50 within one tick,
     and its would-cut is within A0's + 0.2 %.
@@ -3391,6 +3393,434 @@ After R5, step 12 gives the raised members the reach their lead needs (A5u,
 A10, A9h20), and step 14 removes the bound on raises decided before a level's
 last sector is entered.
 
+### 6.2 Revision 3 at HEAD (step LBD)
+
+Step LBD (FULL close-out, 2026-11-01; docs only, no code, no build) re-bases
+§6.1 onto HEAD f6539309 (protocol 24, journal v9). §6.1 cites 177c337's lines
+and was written before SAXH, R12, B1/B2, G5/UOFF, DX6, DX8, HLX and the
+realtime track (SRT1-SRT4, SRT2B, SRTJ). Its steps R0-R5 are built as the FULL
+steps **LB0-LB5** (`.local-tools/work/CBD/plan_cbd.md` §4.B) - not the
+session-client core's steps R3-R5, which are the retail core host's. LB0-LB5
+read this section first. Where §6.1 and this section differ, this section
+holds; where this section and the code differ, the code holds and the LB
+step's "As built" says so.
+
+**The legacy retail path is gone.** Step LGD (c1c6cbe7) deleted
+`physics_session_client.cpp`, `physics_session.hpp` and the 'session core'
+switch, so every reference to them in §1.4, §2-§3 and the §6 table (steps 3,
+6, 15, 16, 21, 24) is void. Client-side rows name the shared core
+(`BallanceMMOCommon/src/session/client_core*.cpp`), the retail host
+(`BallanceMMOClient/session/core_host.cpp`, `fixed_tick.cpp`) or the headless
+host (`BallanceMMOServer/sim/session_client.cpp`, which keeps only the
+harness flags).
+
+#### 6.2.1 Built since 177c337
+
+| plan step | built by | commit | what revision 3 takes from it |
+|---|---|---|---|
+| 12, the per-client reach | REACH; R12 (protocol 13, the server's wait `w` in every relay header, the cap from the client's own rewind cost, B = 3 ticks); B5RX (the headless savestate diff out of the meter); LBR (measured on the reference machine) | c1563b6b, 02fe6591, 92836bdd, f6539309 | §7 q1 resolved (R12), q8 closed (LBR: caps 94-120 headless, 76-90 retail L11, 73 / 76 retail L12, against a need of 53-73). R3 must keep `w`'s meaning: (a) below. |
+| 13, 14, 23 in substance | resync B1 (a late or moved Sector stamp rewinds and re-derives), B2 (a raise of a Sector-rewinding client bounded by its reach), the own Sector move (`move_own_sector`, client_core_frame.cpp:275; the `Sector && moved` branch of `process_own_echo`, client_core_lifecycle.cpp:2919) | 64be32ec, 3fbc4022 | R5 is a check against B2 first: (e) below. |
+| 16, 17 | origin keys, the re-stamp and the relay at acceptance (protocol 9; server.cpp `on_event_accepted` :2918) | 7ab910ce | none |
+| 18, in part | REJECTED / SUPERSEDED echoes exist; the per-player budget did not replace the rate limit: `handle_session_event` (server.cpp:2677) still hard-drops past `physics_event_rate_limit` per second (:2720), after the `events_seen` dedupe | 7ab910ce and later | EVI meets this guard (its row) |
+| 19 | the owner's birth move (`move_own_birth`, client_core_lifecycle.cpp:3431) | 760edb2f; on retail R6B c4ded305, R6P e08f01a9 | (d) below |
+| 20 | the lifecycle barrier deleted | 5e2431e6 | none |
+| 25 | the exact resync on the wire (protocol 10, resync A3) | 93c13f60 | A3L is judged by the late client's exact resync ("Also recorded" below) |
+| §7 q4, BodyRevived | G5 inside WG3 (protocol 16: BodyRevived is no input), UOFF (the union unconditional) | 51cf0b5c, f5047594 | §7 q4 closed; §3.4's "BodyRevived stays reliable plus repeats" is moot |
+| 15, retail part two | session core R5 (the core host slews for a SessionLead, `CAP_LEAD`) | b64fe493 | a retail cell can be raised (LB4, LBM) |
+| part of 21 | DX8 (own lifecycle copies at L+1, L+2, L+3, then every other tick; a late event beyond the reach asks for a resync) | d01e4898 | EVI is the rest of 21 |
+| - | SAXH (protocol 24: the start as a handshake, the scheduled instant X, a joiner's correction), SAXC (an answer in flight is not missing; a stale start status dropped) | 17972046, 6916f406 | (b) below |
+| - | B2SX (the server stamps each datagram's arrival where its network thread receives it; a catch-up step judges each frame by its tick's deadline; `input_buffer` keeps the stamp per stored frame, timeline.hpp:111-139, :221-235) | 75103f25 | R1's `at` is that stamp ("Further couplings" below) |
+| - | RL1 / RL1b (a re-anchor's base from the fixed deadline schedule, `reanchor_tick`, session_runner.cpp:171) | 3daa19af, 2ff5c6b1 | R1/R4's `rebase` (below) |
+| - | DX6 (a client that stays starved asks for a resync, F2-a (b)) | 8f0883a1 | LB4 / LBM count it ("Also recorded") |
+| - | HLX (a Physicalize always replaces a living body of the same entity) | 4d8d60d4 | none for R0-R5; EVI keeps its invariant |
+| - | SRT3 (one rewind per frame for the drain's lifecycle events), SRT4 (sparse capture of replayed ticks), SRT2B / BEAMF (the retail blob window and the in-place beam gone) | 68448554, 0f8de55c, 606d37f6, 4cdbf0f7 | (c) and (d) below |
+| R0's C8 | `--resync-at` (sim/session_client.cpp:750), beside C7 `--stall-ms` (:763) and C6 `--hold-event` (:781) | 93c13f60 (C8) | struck from R0 |
+| R5's "`create_session` takes S" | `create_session(..., sector_lead, ...)` (session_runner.cpp:292, `s->sector_lead` :305; server.cpp:1130 passes it), built for the trafo deadlines (:1472) | 074f6d5e | struck from R5 |
+
+Not built at HEAD: R0 (but C8), R1-R5 (no `arrival_ring`, `lateness_baseline`,
+`relative_meter`, `lead_sector_path_sample`, `level_sector_count`; revision 2's
+reference code is live), H11 (`physics.test_clock_skew` exists nowhere),
+the revision-3 arms (`scripts/arena_map_test.py` `ARM_FAMILY` :1613 has A0,
+A0J, A1-A9C only), plan steps 21's piggyback (EVI) and 22 (ODM).
+`physics.patience` / `physics.lead_adjust` default false
+(config_manager.hpp:92, :100).
+
+§7 at HEAD: q1 resolved (R12); q4 closed (G5); q5 answered (R6M); q6
+answered by the user (decision 11, DB2 (a): keep revision 3's rule, judged on
+LBM's A9h20 / A10 / A10x); q8 closed (LBR); q7 and q9 stay open for LB1 and
+LB5; q2 and q3 unchanged. The user's DB3 (decision 9) is (b): a raise is not
+bounded by the raised client's reach, and what does not fit is that client's
+own cost - LBR found nothing that does not fit except a headless L12 client
+with the trafo inputs at the cap floor.
+
+#### 6.2.2 HEAD pointers for §6.1
+
+Every §6.1 bullet, at HEAD f6539309 (session_runner.cpp has moved by about +2
+lines since the list in `.local-tools/work/FULL/plan.md` step LBD was
+written; lateness.hpp and lead.hpp have not).
+
+**R0 (LB0).**
+
+- `scripts/arena_map_test.py`: H9, H10, H12, the arms and the S1 parsing are
+  new; the arm table is `ARM_FAMILY` (:1613), the verdict's family lookup
+  :1723.
+- H11 `physics.test_clock_skew`: new. A `runner_config` flag
+  (session_runner.hpp:41-; `scheduled_start` :83 is SAXH's neighbour) applied
+  to `s.scheduler` (session_state's `tick_scheduler`, session_runner.hpp:571)
+  only; (b) below says what the handshake does with it.
+- C8 `--resync-at`: struck (built, sim/session_client.cpp:750).
+
+**R1 (LB1).**
+
+- The ring and the baseline per member live in `session_state`
+  (session_runner.hpp:432), beside `lateness_entry` (:449-452, the meter
+  :450).
+- Written in `submit_input` (session_runner.cpp:827) before
+  `buffer->second.submit(first_tick, frames, arrival)` (:840); `at` is the
+  `arrival` argument (B2SX: the network thread's stamp, server.cpp
+  `handle_session_input` :2660, `runner_->submit_input` :2670), `seen` the
+  posted command's `clock::now()`. Not for the lookahead garbage: the guard
+  :845-848.
+- Created where the input buffer is (`create_session`'s start members :389,
+  `add_now`'s late joiner :502), erased in `remove_player` (:542; the entries
+  :656-661, a dropped rejoin's buffer :566-567).
+- `player_ready` (:675-739: the S1 reset line :696-712, `meter.reset` :714,
+  the lead's `reassigned` :719, the waiver's :723-726) clears the ring; the
+  baseline's start follows (b) below.
+- The online would-cut runs at the step test (:1810-1814: `patience_members`
+  then `patience_step_test`); the waiver's after-the-fact evaluation after
+  `step(s)` (:1868).
+- The S1 quorum line every 660 ticks beside `observe_lateness`'s summary
+  (`kLatenessSummaryTicks` :1502, :1560) and `report_patience` (called at
+  :1885).
+
+**R2 (LB2).**
+
+- lateness.hpp: `relative_meter` is new; revision 2's `lateness_meter` (:161)
+  and `patience_member_of` (:620-634) stay untouched until R3 / R4.
+- session_runner.cpp: L and L' after each step (after :1868) and at a cut
+  frame's arrival (submit_input's cut bookkeeping :853-864).
+
+**R3 (LB3).**
+
+- lateness.hpp: `patience_member` :593-610 (the statistics fields :597-600),
+  `patience_lead_ticks` :587, `patience_member_of` :620, `patience_assign_leads`
+  :656, `patience_step_test` :707 (the patience-off branch :710-725, unchanged
+  byte for byte), `patience_waiver` :759 (`substituted` :763, `sample` :772),
+  `server_wait_ticks` :810 ((a) below), `server_wait_meter` :825.
+- session_runner.cpp: `patience_members` :1671 (its patience-off branch
+  :1676-1687 unchanged), `patience_lead` :1698 (goes), the waiver call
+  :876-879 (moves to LB1's after-the-fact evaluation), the step test :1810-1814
+  (passes M and M2), the wake-up :1815-1821 and :1895 (unchanged), the cut
+  bookkeeping :853-864 and :1823-1840 (unchanged), the step's
+  `waiver.substituted()` :1307 (unchanged), R12's `step_waits` :1842-1854
+  ((a) below), `report_patience` :1717 and `log_patience_on` :1745.
+- patience_test.cpp: deleted - LeadIsR01LessTheMarginAndNeverPastTheDeadline
+  :210, StatisticsLessMemberGetsTheLatestPatienceAmongTheOthers :219,
+  MemberOfMapsTheMeterLikeTheRunner :273,
+  WithoutStatisticsTheFirstMissWaitsForTheDeadline :486,
+  LateAssignedMemberIsCappedAtTheOthersScheduleUntilItsReference :497;
+  rewritten - StepTestWaitsUntilTheEarliestPatience :297,
+  WaiverStartsAtASubstitutionAndEndsInsidePatience :386,
+  StructurallyLastMemberIsNeverStuckSubstituted :425,
+  BlackoutWaitsOnceAtPatienceWithTheWaiverAndEveryTickWithout :450,
+  SoloBlackoutNeverStepsBeforePatience :513,
+  SharedOutageStepsAtTheLatestPatience :530; kept -
+  SettledIsArrivedOrBelowTheCursor :196,
+  StepTestWithPatienceOffIsTheDeadlineRule :255,
+  StepTestNeedsARealFrameToSkipAWaivedOrReanchoredMember :332,
+  SteadyLinksAreNeverCutOff :405, and R12's `ServerWait.*` :32, :47 ((a));
+  `run_sim` :103.
+
+**R4 (LB4).**
+
+- lateness.hpp: `lateness_median` :89-94, the `kReference*` constants
+  :164-165 and :182, `kQualifyingMaxLate` :166, the deadline reference
+  constants :191-192, `window_` / `reference_samples_` (:230-231, :524-525),
+  `adopt_reference` :382, `wants_deadline_reference` :390,
+  `adopt_deadline_reference` :391, `reference_source` :397, `wants_fallback`
+  :406, `close_window` :459, `set_reference` :486,
+  `lateness_settle_reference` :560-570; the states :123, :133.
+- session_runner.cpp: `observe_lateness` :1504 (the fallback block
+  :1516-1526, the reference line :1527-1533), `player_ready` :675,
+  `apply_lead_decision` :1608.
+- "server.cpp passes the assigned lead with the assignment": today
+  `set_player_lead` (session_runner.cpp:775; server.cpp:2545, at SessionReady)
+  carries the FIRST assignment's lead (`lead_player::assigned_lead`,
+  lead.hpp:131). A re-anchor's lead is `reanchor_tick`'s (session_runner.cpp
+  :171, RL1's fixed-schedule rule), so the rebase delta comes from there, not
+  from a new server argument (further couplings, below).
+- lateness_test.cpp: `measured_meter` :126; the reference tests
+  ReferenceFromFourQualifyingWindows :164, PersistentShiftRaisesExactlyOnce
+  :203, TwoAndAHalfSecondShiftRaisesExactlyOnce :240,
+  ReferenceIsFrozenUntilTheNextAssignment :458,
+  AcknowledgedRaiseRestoresAndALowerFollowsTheReturn :483,
+  LowerNeverTakesTheOffsetBelowZero :519, NoLowerWithoutAnOffset :532,
+  StructurallyLateMemberTakesTheOthersMedian :597, ResetKeepsOnlyTheOffset
+  :635. lead_test.cpp: `meter_rig` :494-528 (its users from :530 on),
+  the three `LatenessReference` tests :792 (the solo one, rewritten
+  as the absolute rule), :823, :836.
+
+**R5 (LB5).**
+
+- lead.hpp: `lead_sector_margin` :76-95 (today the 8 newest event samples,
+  not buckets), `shift` :90-92 and its call :328 (in `lead_acknowledge`
+  :320-330), `kLeadSectorReachTicks` :117, `lead_player::rewinds_sectors`
+  :128, c_est :58-62 and :148-152, `lead_sector_sample` :181-187,
+  `lead_sector_bound` :193-197 (B2's bound), `lead_decide` :231 (the bound's
+  use :249-256).
+- physics_world.{hpp,cpp}: `level_sector_count()` is new, beside
+  `active_sectors()` / `sectors()` (physics_world.hpp:360-365).
+- session_runner.cpp: the union-complete test is new; `create_session` takes S
+  (struck, above); the path samples go into `submit_input` where the lead's
+  `received` is fed (:870-873); `submit_event`'s sampling is :1019-1030 (the
+  call :1029); the S1 lead line beside `apply_lead_decision` :1608.
+- The `window:` line's receipt margin (q9): no longer in session_client.cpp but
+  in the core - measured where a remote event arrives
+  (`on_session_event`, client_core_lifecycle.cpp:53; the Sector apply is in
+  `apply_event` :844, its late-stamp branch :917-930) and printed by
+  `window_text` (client_core_report.cpp:72).
+- lead_test.cpp: `LeadSector.AnEventLateAtTheServerIsNoSample` :1104 kept;
+  B2's tests ASectorRewindingClientIsNotCappedByTheMargin :667,
+  TheRewindReachBoundsARaise :689, TheBoundIsTheMarginPlusTheClientsRewindReach
+  :720 kept or restated per pair;
+  AnAckedRaiseSpendsTheSectorMarginAndTheSectorCapDoesNotLatch :981 rewritten
+  when `shift` goes (an ack clears the pairs).
+
+#### 6.2.3 The five couplings §6.1 predates
+
+**(a) R3 and R12's server wait.** R12 (02fe6591) made the server say its
+wait: in the run loop, right after the step test passed, `step_waits[i] =
+server_wait_ticks(to_deadline, members[i], config_.patience, paced)`
+(session_runner.cpp:1842-1854, `paced` = another member's real frame for T is
+in); `step()` feeds it to the member's `server_wait_meter` (:1287), which
+journals a WAIT record when the value changes (:1289-1295) and puts the
+largest of the last four 60-tick windows into every relay header
+(`applied_input::wait`, protocol 13); every client adds it to its reach
+(`p99 + 8 + w`). `server_wait_ticks` (lateness.hpp:810) reads `p.lead`, the
+field R3 replaces. **The rule LB3 builds:** `w` keeps its meaning - how much
+longer the step test would have held T for p's missing frame, in ticks, never
+negative. Under the quorum, `w_p = max(0, to_deadline - lead_p)` with
+`lead_p = max(0, A_p - R_p(T) - M, A_p - R'_p(T) - M2)` over the timers that
+exist at the step (the earlier patience holds; R and R' clamped at 0 as in
+§2.6), `lead_p = 0` when no timer exists, p has no baseline, or no counted
+member's frame is in (p waits the deadline), and `w_p = 0` while p is waived
+and another member paces T. It is computed from the same `patience_member`
+view the step test just passed (one view per step, as today), for members
+that have their frame too (their R_p is the others'), and stays an
+over-statement on held or re-anchored ticks (the safe side, as R12 says).
+The patience-off branch (`if (!patience) return max(0, to_deadline)`, :812)
+stays byte-identical, so flags-off journals' WAIT records and every flags-off
+relay header are unchanged (LB3's flags-off wire check). The two
+`ServerWait.*` tests keep their meaning: TheStepTestsHoldForAMissingFrame
+sets `p.lead` (or its successor) directly and keeps all seven expectations;
+TheHeaderCarriesTheLargestOfFourWindows is untouched. LB3 records the
+`reach:` lines' `w` for the A0 twin pair (on vs off): with patience on it
+should fall from about 23 (the deadline) toward the quorum's few ticks, which
+shallows every client's reach.
+
+**(b) SAXH.** Since SAXH (17972046, protocol 24; lockstep-without-snapshots
+"As built (FULL step SAXH)") the start members start at the scheduled
+instant X (`session_runner::start_at` :741, `runner_config::scheduled_start`
+:83; `start_scheduled` / `start_origin`, session_runner.hpp:569-570). A late
+joiner's first assignment carries no instant, so it starts on arrival; once
+its first clock ack is in, server.cpp (`handle_session_clock_ack` :2237, the
+correction :2266-2283) sends it a `SessionStartAt` with
+`START_AT_FLAG_CORRECTION` (entity/session.hpp:400), which the client acks
+(`CLOCK_ACK_START`, client_core.cpp:980-986; it lands in server.cpp :2253)
+and applies by catching up the whole ticks it started late
+(`apply_start_correction` :951, `start_lateness_ticks`, at most
+`kStartMaxCatchUpTicks` = 33, start_handshake.hpp:180). Before that catch-up
+every frame of the joiner arrives late by its start lateness, so a baseline
+measured over it would be frozen too late and every later frame would read
+early (its relative lateness under-stated by up to 33 ticks for the whole
+session). The runner knows nothing of this: `assign_had_instant` (server.cpp
+:696, set :1994) and `corrected` (:697) live in server.cpp. **The rule LB1
+builds:** a new server -> runner call (say `player_start_settled(session,
+player, epoch)`) starts the member's baseline window: for start members at
+`start_at` (the schedule's X), for a member whose assignment carried an
+instant (`assign_had_instant` true; at a first assignment only a joiner
+whose connection already has a fresh estimate, which today never happens) at
+the end of `send_session_assign`, after :1994 has set the flag (not beside
+`runner_->player_ready`: both call sites call it BEFORE `send_session_assign`,
+:2557/:2558 and :2633/:2634, so a call there would read no entry or the
+previous assignment's flag; equivalently the call passes `assign.start_us != 0`
+itself), and otherwise at the arrival of the `CLOCK_ACK_START` that
+answers its correction (server.cpp :2253, `corrected[c] == epoch`). An ack is
+not proof the correction was applied: the client sends it (client_core.cpp:981)
+before the checks at :982-984 that drop a correction whose epoch is no longer
+its assignment (a newer assignment overtook it) or that came before any release
+it timed. So the window starts only on an ack whose epoch is the member's
+current assignment at the server (`notices[c].epoch`, the epoch `corrected[c]`
+names); an ack for an overtaken epoch starts nothing and the window waits for
+the newer assignment's instant, its correction's ack or the timeout. With the
+epochs equal the client's drop cannot fire (`release_local_known_` and
+`release_epoch_` are set when the assignment arrives, :934-936 / :944-946,
+before any ack of it leaves; only a new session clears them, :605); LB1 states
+that as a unit test of the runner's rule rather than trusting it; samples
+before it feed the ring but not the baseline, and a correction ack that has
+not come 660 ticks after the assignment starts the window anyway, logged
+(`baseline-start=timeout`). A datagram sent before the catch-up that arrives
+after the ack is one of a few among 264 and moves the median by at most a
+fraction of a tick. A resync
+keeps the baseline (§2.8), so the rule matters at the first assignment only.
+**R2's test (h) is restated:** two members, one a late joiner whose frames
+arrive 12 ticks early AFTER its correction and 20 ticks late before it (a
+lossy assignment): no raise for either, and the joiner's baseline equals its
+post-correction slack median. **H11.** `physics.test_clock_skew` skews the
+scheduler's clock only; the handshake's `server_us` and every assignment
+instant (`e->arrival_local(assign.server_us)`, server.cpp:1992) stay on the
+true clock, so a resync or join inside a skew span would get an instant the
+skewed schedule disagrees with by the skew. LB0 keeps the H11 arms' resyncs
+and joins outside the span (A9h8, A9h20 have none by design; `--resync-at`
+and the join cue are placed before the span or after it); skewing
+`server_us` too would change the handshake's clock estimate, which is not
+what H11 injects (a host clock fault seen by the scheduler). The start-time
+cause SAX / SAXE measured is gone (SAXH), so no arm targets a late start.
+
+**(c) A CPU slip reads as uplink lateness.** RTR's E-core L11 ctl client 1 ran
+about 14 ticks behind at 600-660 (realtime-design §3.4) and its frames reached
+the server late exactly as a slow uplink's would: the server cannot tell the
+two apart, and revision 3 does not try. After SRT2 (the blob window, stopped
+for the user, its remainder built by SRT2B and BEAMF) the slip is gone on the
+reference machine: SRTJ's retail ctl sessions had no frame over 45.45 ms, the
+longest run of skipped renders 1, and 0 resyncs / 0 rebases from a slip (T4
+met on every retail and headless session, realtime-design "Judged (step
+SRTJ)"); the headless clients were behind by more than one tick for at most
+3-13 frames in a row. A slip today is a transient of 1-3 ticks per rewind
+frame. **The rule LB2 / LB4 build:** none special. A slipping member is a
+late member: patience (R3) cuts it only past M (a 1-3-tick transient is
+inside it), the meter (R2) raises it only after 132 ticks of relative misses
+(660 for a minority or a shared shift), so a transient raises nobody. RTR's
+slip (14 ticks behind from about 600 until its resync at 749-750, some 150
+ticks) would have met the relative rule's 132-tick persistence; that slip no
+longer occurs on the reference machine (SRTJ). A slip that does persist that long is
+raised like an uplink: the raise gives its frames the time at the server;
+its own catch-up stays its pacer's (headless pacer, retail `fixed_tick`; the
+SessionLead slew adds k ticks to it, the 2x / 0.9x slew of §2.4); and its
+rewinds get deeper by k, which LBR's caps cover (73-120 against a need of
+53-73; the one host at the floor is a headless L12 client with the trafo
+inputs, §7 q8). A client too slow to keep up at all is its own capacity failure;
+DX6's starve resync is its remedy (decision 21). **Which arm shows it:** A9c
+(`--stall-ms`, sim/session_client.cpp:763) is the only slip arm; LBM adds the
+retail E-core L11 ctl session with both flags on and reports whether the
+slipping copy is raised and with what result.
+
+**(d) SRT3.** SRT3 (68448554, realtime-design "As built (step SRT3)")
+coalesced the drain's late lifecycle events: in `pre_step`
+(client_core_frame.cpp) the drain runs with `s.life_batch_.collecting` set,
+`rewind_for_lifecycle` (client_core_lifecycle.cpp:572) adds a joining event
+to the batch (`joins_life_batch` :630; `settle_life_batch_before` :649 flushes
+early before a death that reads a batched player's body), and
+`flush_life_rewinds` (:660) runs the frame's one rewind at :558. What SRT3
+deliberately did NOT merge ("not merged: ... an own echo's moved birth"): the
+own echoes run after the flush (`process_own_echoes` :569), and
+`move_own_birth` (:3431) still calls `rewind_world` on its own (:3504), as do
+the Sector rewind (`rewind_for_sectors` :582, its `rewind_world` :341) and an
+input correction older than the lifecycle anchor (`replay_corrected_inputs`
+:590). So §6's plan steps 21 and 22 meet two different things. **EVI**
+changes the uplink only: a receiver still gets every remote event through the
+relay and `on_session_event` -> the drain, which SRT3 already batches; EVI
+adds no client rewind site. **ODM's death move** is an own echo, so it runs
+in `process_own_echoes`, after the flush. **The rule ODM builds:** its
+three branches never call `rewind_world` themselves; they add their anchor
+(D - 1, the replacing birth's tick, or the pair's T - 1) to the frame's
+lifecycle batch, and the frame's flush moves from after the drain to after
+`process_own_echoes` (the collecting window spans both), so a frame's late
+remote events and its own moved death share one restore and one replay.
+That is a departure from SRT3's "not merged" list, and ODM must show it is
+safe the way SRT3 did: `rewind_for_spawn_forgets` (:561) and
+`drain_pending_deaths` (:565) run between the drain and the own echoes, and
+what they read or rewind must not be changed by the moved flush (each either
+flushes the batch first or is shown not to read what its replay changes),
+with the coalesced counter (`coalesced: life=`) and the
+`--replay-free-cost-clock` wire check. `move_own_birth` may join under the
+same change; if ODM keeps it apart, it says why, and it stays one more
+rewind in such a frame (SRTJ measured no frame with two).
+
+**(e) B2 against R5.** B2 (3fbc4022) already bounds a raise of a client that
+rewinds a late remote Sector by its reach, not by the margin alone:
+`lead_sector_bound = max(worst margin - 1 + 48, 0)` for
+`lead_player::rewinds_sectors` (lead.hpp:193-197), which the server sets from
+`CAP_RESYNC_STATE` (session_runner.cpp:784), which every core with the
+rollback on declares (client_core.cpp:703, `resync_state = config.rollback`),
+and every deployed client is such a core (B9DX refuses the rest; LGD deleted
+the legacy path). At 150 ms the margin is the path model's
+`S - up_q - down_p = 15` (§8.2), so B2's bound is 15 - 1 + 48 = 62 against
+A5u's k = 20. Under the always-on union (UOFF) the bound therefore binds a deployed client's raise
+only after its margin has fallen below `k - 47`. **The rule LB5 builds:**
+first the check - the S1 lead lines of LB4's A5u / A5p pair and of the A10
+family give, per raised member, the worst margin, B2's bound and whether
+`cap=sector` ever bound (expected: never for a `rewinds_sectors` member);
+then only the delta: per-pair path samples from every datagram replacing the
+pooled event samples (q9: a sender's own lateness no longer bounds p),
+`level_sector_count()` and the union-complete rule (no bound at all once
+every level sector is requested at a stamp <= N), `shift` and its call
+removed (an acknowledgment clears every pair with p), and B2's `+
+kLeadSectorReachTicks` kept inside the per-pair bound for a `rewinds_sectors`
+member. The margin-alone bound is left for a core with the rollback off
+(`--no-rollback`, a test configuration), the only client that does not
+rewind sectors.
+
+#### 6.2.4 Further couplings found while re-basing
+
+- **R1's `at` is B2SX's stamp.** Since B2SX (75103f25) the server stamps each
+  datagram where its network thread receives it and passes it with the frames
+  (`submit_input`'s `arrival`); `input_buffer` keeps it per stored frame
+  (first emplace only, `arrivals_`, timeline.hpp:123) and a catch-up take
+  judges each frame by its tick's deadline (:221-235). The ring's `at` is the
+  same stamp, recorded for every frame of the datagram (stale ones too, which
+  `arrivals_` does not keep). Patience acts only before a tick's deadline,
+  where a present frame arrived before it, so B2SX's cutoff never disagrees
+  with the step test; after the deadline the cutoff decides, as today.
+- **RL1 makes R1/R4's `rebase` delta zero for every deployed member.** RL1
+  takes a re-anchor's base from the fixed deadline schedule (`reanchor_tick`
+  :171, `tick_at(now, lead)`), so a resynced member's frames get the start's
+  budget again; members without the resync state keep a 3-tick floor (RL1b),
+  and since B9DX every deployed member has it (a core with the rollback off
+  is a test configuration). `rebase(delta)` is therefore the
+  difference between the re-anchor's lead and the start's, which is 0 but
+  for that floor; LB4 computes it from `reanchor_tick`'s lead, not from a new
+  server argument.
+- **A resync is a re-assignment for SAXH too.** `resync_member`
+  (server.cpp:2601) puts the member into `s.late` (:2631), so a resync whose
+  assignment carried no instant (the estimate older than 10 s,
+  `clock_estimate::fresh`, start_handshake.hpp:107) gets the same correction
+  after its first ack as a joiner (HXP's `stale_resync` cell: "correction
+  sent", +5.95 ms, nothing caught up). The baseline is kept through a
+  resync (§2.8), so (b)'s start rule touches a resync only through the
+  frames between its arrival and its correction, which a kept baseline
+  does not re-measure; the meter reads them as that member's lateness for
+  at most the ack's round trip (well under the 132-tick persistence).
+
+#### 6.2.5 Also recorded
+
+- **M = 4 and M2 = 10** come from the lp11 replays (pre-protocol-22 data,
+  plan.md C2) and carry over as stated constants (§2.6 names M2
+  `kQuorumWideMarginTicks`; neither exists in the code yet). LB1's live would-cut re-measures them (§7 q7); they are re-derived
+  from arrival data only if LB1 misses its bound - from the current
+  reference set `core_ref_s14` (the plan named `core_ref_s13`; s14 is the
+  newest set at HEAD and replaces it here).
+- **Under "assume no snapshots"** plan step 5's targeted snapshots and A3L's
+  "snapshots-applied Δ 0" leave the criteria: A3L is judged by the late
+  client's exact resync (A3, protocol 10).
+- **DX6's starve resync** (8f0883a1; the core's `note_starved_report`,
+  client_core_held.cpp:143, after `config.starved_resync_reports` reports in a
+  row) is today's remedy for a persistently late member (F2-a (b), decision
+  21's accepted cost). LB4 and LBM count it per member against the flags-off
+  twin: a raise should make it rarer.
+- **The close criteria that read lp11 replays are replaced** by the same
+  quantity on a new run. R1's "the replay gives 58-61 on `at`": LB1's own A0
+  off run gives the would-cut on `at` from its ring after the fact, beside the
+  live one on `seen`, both <= 0.5 % of member-ticks, and the pair is recorded
+  as the new reference. R0's H9 self-check ("labels lp11_a9c's span 245-760
+  and nothing in lp11_a0_off"): H9 labels exactly the span H11 injected into
+  LB0's A9h8 dry run, and nothing in its A0h twin.
+- **Protocol.** R0-R5 change no wire format (SessionLead exists since step
+  10); the flags-off wire check stays ALL SAME through LB0-LB5. HEAD is
+  protocol 24 (SAXH took it); plan step 21's piggyback (EVI) takes the next
+  free number, 25 at HEAD, not the 24 its row names.
+
 ## 7. Open questions
 
 1. **The deeper per-client reach.** Can a late client afford a reach of up to
@@ -3423,7 +3853,9 @@ last sector is entered.
    (no `as_newest` sample). A4 measures how many; the birth stamp lead (§3.4)
    is the fallback for its events.
 4. **BodyRevived.** Does it still do anything under the sector union, or can
-   it be retired?
+   it be retired? **Closed (step G5 in WG3, 51cf0b5c, protocol 16; UOFF
+   f5047594; §6.2.1)**: retired - BodyRevived is no input under the union,
+   which is unconditional since UOFF.
 5. **Retail input rewind.** Parts one and three on retail are only partial
    until the input-rewind card lands. Whether the retail scripts tolerate a
    multi-tick own absence is measured in step 21. **Answered (FULL step
@@ -3440,7 +3872,8 @@ last sector is entered.
    at once. It would send no SessionLead and force no range, and it would
    change neither `input_delay` nor any member's relative lead. Is that within
    the principles? A shared shift is not one player. Decide after A9h20 and
-   A10.
+   A10. **Answered (DB2 (a), decision 11; judged on LBM's A9h20 / A10 / A10x;
+   §6.2.1).**
 7. **M as a constant.** M = 4 and M2 = 10 come from the lp11 replay, at 150 ms
    with uniform jitter compressed by the redundancy, on backdated arrivals.
    R1's live would-cut on `seen` re-measures them; revisit with deployment
