@@ -2598,7 +2598,7 @@ server's world (plan step 19).
 | 3 | late birth after an on-time death, or overtaken by a later beam | superseded at acceptance; SUPERSEDED echo to the owner; never relayed |
 | 3 | echo past the owner's reach | resync of the owner |
 | 3 | own record retired before the echo | records retire only when `!knows_tick(min(T, applied)-1)`; by then the echo is past the reach anyway, and §3.3 step 1 applies |
-| 3 | multi-tick own absence (T..T'-1) confusing the retail scripts | to be measured in plan step 21; the server already runs these ticks without the ball |
+| 3 | multi-tick own absence (T..T'-1) confusing the retail scripts | to be measured in plan step 21; the server already runs these ticks without the ball. **Measured (FULL step R6M, "As built (step R6M)"):** no script acts on the bodiless ball for any absence up to 48 ticks lived through, or for any absence inside a replay whose rewind fits the reach, on retail and headless; the only bound is the existing reach (a replayed move whose echo arrives at local tick T + K needs a rewind of depth K + 1 <= 48, so n <= K <= 47 and, with a real echo, n <= 47 - the relay lag; beyond it the existing resync) |
 | 3 | determinism | one rule (`max(stamp, N)`) taken on the thread that owns N; every receiver sees one applied tick per event and one origin order; the impulse comes from the applied tick everywhere |
 | 3 | a resync with snapshots off is not exact (step 20) | the server sends its state at its tick S and the client applies it at its base B > S, its history gone; the server steps S..B-1 on substitutes the client is never told about, and with snapshots off nothing corrects the gap: the owner's ball stays 10-50 m off after a resync past the reach (lp4_a3, lp19b). The A6 1500 criterion "own ball 0.0000 48 ticks after the resync" fails by construction until plan step 25; the drop arm's own error can too once the owner's ball is back |
 
@@ -3240,7 +3240,13 @@ last sector is entered.
    it be retired?
 5. **Retail input rewind.** Parts one and three on retail are only partial
    until the input-rewind card lands. Whether the retail scripts tolerate a
-   multi-tick own absence is measured in step 21.
+   multi-tick own absence is measured in step 21. **Answered (FULL step
+   R6M, "As built (step R6M)")**: they do, for every absence of 1-48 ticks
+   lived through live, and for every absence inside a replay whose rewind
+   fits the reach (depth = K + 1 <= 48 for an echo at T + K, so
+   n <= K <= 47; with a real echo n <= 47 - the relay lag; measured at
+   K = n and K > n); R6P needs no depth cap beyond the reach
+   `move_own_birth` already checks.
 6. **A shift every member shares.** Revision 3 raises every member for it,
    after 660 ticks of a shared absolute majority (A10, A10x, A9h20), and
    nobody for a shorter one (lp11_a9c, A9h8). Re-anchoring the server's
@@ -3592,3 +3598,192 @@ in any of its arms (`pair_order.py`). One live smoke run (swing recipe,
 `--loss-seed 1`, Arch server rebuilt from this tree): a split pair occurred
 again (client 3, 701), `superseded=1/1`, PASS, every client's confirmed FINAL
 rows bit-equal to the server.
+
+## As built (step R6M, FULL close-out, 2026-11-01): plan step 21's measurement - how long retail tolerates its own ball absent
+
+Measurement only, at HEAD 7a13ac5c; no code changed. Binaries: the x86 mod
+of HEAD (incremental build, `CLIENT-BUILD-OK`, physics_RT id
+`ballanced-36c04e3d24c9+bmmo-7a13ac5c6508`), the Arch server rebuilt from
+HEAD with the same id (`ARCH-BUILD-OK`), HEAD's x64 SimTool and headless
+client (`build-agent-rOVX`). Every live run snapshots off unless named;
+trafo_inputs and placement_clones on. Tools and outputs:
+`.local-tools/work/R6M/` (`off_arms.sh` + `off_judge.py` the SimTool arms,
+`hl_arms.sh` the headless arms, `r6m_retail.py` the retail sessions,
+`own_rows.py` the own ball around each birth, `hull_cmp_notime.py` OWNB's
+hull comparison without the clock fields); the retail runs under
+`scripts/retail/r6m_*`.
+
+**The absence measured.** R6H's forced own move (`session force-own-move
+<n> [after <k>]`, headless `--force-own-move N[:K]`) runs
+`move_own_birth`'s capability path: the scripted body taken out at the
+birth T, the records without it T..T'-1, the bridge's make at T' = T + n.
+K = 0: the client lives through the absence (LIVE, the "live frame of T'"
+branch of `move_own_birth`); K >= n: the absence lies inside the rewind's
+replay (REPLAYED). K = n is the shortest rewind that contains the absence
+(the make lands at the replay's end); a real echo arrives after the client
+passed T' (§3.3), so its case is K > n: the rewind makes the ball at T'
+inside the replay and then replays T'..now from records made with the
+scripted body. Both were measured (the K > n arms headless only, added at
+the step's gate round). The take-out and the make are the ones R6P will
+use. The rewind's depth is K + 1 (its anchor is the birth's tick - 1,
+`client_core_lifecycle.cpp` 3089-3101), so the bound is on K, not on n: a
+move is replayed when K + 1 <= 48, whatever n <= K.
+
+| arm | absences n | result |
+|---|---|---|
+| retail L1 solo, LIVE (spawn and respawns, `key up` held across) | 1, 2, 4, 8, 16, 32, 48 | all pass |
+| retail L1 solo, REPLAYED (`after n`) | 1, 2, 4, 8, 16, 32 | all pass |
+| retail L1 solo, REPLAYED | 48 | refused: `past the reach (depth 49)` (the reach is 48; a replayed n needs a rewind of n + 1) |
+| retail L11 two copies, copy 2's trafo-made stone ball (507 -> 554), REPLAYED | 47 (rewind 48) | pass; copy 1 unaffected |
+| headless arena (core_ref_s14/solo1 replayed offline from its capture), LIVE | 1, 2, 4, 8, 16, 32, 48 | all pass |
+| headless, REPLAYED K = n | 1, 2, 4, 8, 16, 32, 47 | all pass; 48:48 refused past the reach |
+| headless, REPLAYED K > n (n:K = 1:10, 4:20, 8:20, 16:40, 30:47, 1:47; `hl_arms_kgtn.sh`, `--final-checkpoints`) | 1, 4, 8, 16, 30 | all pass: made at T', rewind 11-48 ticks, no own FINAL row inside T..T'-1, no death / BallOff; the made ball's FINAL rows follow the control's at the same offset after the make (`hl_kgtn_judge.py`: 4 mm at +0, 0.11 m at +10, 0.30 m at +40, \|v\| +0.03..0.09 - the earlier force start below); 2:48 and 8:48 refused `past the reach (depth 49)` |
+| SimTool arena `--ball-off` at the spawn and at the trafo birth | 1, 2, 4, 8, 16, 32, 48 | pass (the mid-life situations below) |
+
+**The largest absence tolerated:** live 48 (every n measured); replayed,
+any n whose rewind fits the reach - depth = (now - T) + 1 <= 48, i.e.
+n <= K <= 47, and with a real echo K = n + the relay lag, so n <= 47 - lag.
+The reach, not a script, is the bound. Every absence the reach admits
+passes, so R6P needs no depth cap beyond the reach `move_own_birth`
+already checks (its past-the-reach resync); risk row 3 and open question
+5 are answered.
+
+**What "pass" was, per retail arm.**
+
+- The process survives (no dump; every session collected normally).
+- Controllable within one tick of the make: the own ball's LOCAL rows
+  (checkpoints every 2 ticks) accelerate from the first row after T'
+  at the same rate as a scripted birth's, the key force starting 2 ticks
+  earlier relative to the birth (below) (|v| +1.29..+1.44 per 2 ticks under the
+  held key; `r6m_l1d` live 8/16/32/48: T' = 229/628/1043/1474). A replayed
+  move shows as the one jump §3.3 predicts: the rows up to T' are the live
+  life's, the next ones the made ball's from the birth pose (rep16: 620,
+  then 622 back at (54.166, 17.562, -153.072) with the same acceleration).
+- No death, trafo or checkpoint on the bodiless ball: no BallOff, Dead or
+  Unphysicalize inside T..T'-1 in any part; each made ball's roll-off death
+  came 185 ticks after its make (414-229, 813-628, 1228-1043), the
+  control's 406-221 = 185.
+- No OnPhysicalize / OnUnphysicalize for the bridge's take-out and make:
+  one "own ball ... physicalized" report per scripted birth, none for the
+  make (`core_host_on_physicalize` reports no own birth there).
+- Camera: the screenshots 0.4 s after each birth (inside the live 48
+  absence too: `r6m_l1d/live48_c1.bmp`) show the camera at the resetpoint
+  with the entity at its birth pose, as the control's.
+- IVP bookkeeping (`BMMO_HULL_PROBE=Ball` on copy 1) - PARTLY met: the
+  made body's `created` line and first PSI equal a scripted birth's at the
+  same pose
+  (entries, overlap element, hull, mass; clock fields left out); from the
+  second PSI on the hull's gradient fields and the velocity differ, and
+  with those left out the rest (core, entries, overlap element) is equal on
+  all 9 lines (`hull_cmp_nohull.py`): the made ball moves faster - the key
+  force reaches it at T', where a scripted birth gets it at T + 2 (v_x 0.887
+  one row earlier). On retail the made body is driven from T' by the core's
+  navigation replica ("own ball ... driven by the navigation replica",
+  `cbq=0`); in SimTool the SetPhysicsForce entry queued during the absence
+  is applied at the make; the headless K > n arms show the same (FINAL
+  rows |v| 0.632 against the control's 0.605 at the make's own row).
+  Within one host the ball is controllable in both cases, but the made
+  ball is not the scripted birth's ball shifted by n: its force starts 2
+  ticks earlier relative to the birth. OPEN CHECK for R6D / R6P: whether
+  the server's moved birth at T' starts the key force at T' (as the
+  client's make does) or at T' + 2 (as a scripted birth does). The forced
+  move arms cannot show it - the server moved nothing in them - and if
+  the two sides differ, a real moved birth starts with a 2-tick force
+  offset between the worlds.
+- Not measured: sound. A bridge-made own body lacks Sound_Manager's
+  listener blocks (BEAMF-S, R6D item 1 / R6B); neither the screenshot nor
+  the log shows it, so it stays R6B's check.
+
+**SimTool, the arena record (`work/a4/r0_keys.bmrc`, the only key record on
+disk), `--ball-off FROM FROM+n` at nine situations (the spawn 205, mid-roll
+with the key held 400, a key change inside the absence 615, before the
+checkpoint 775 and 786, before the stone trafo 912 and at its stone birth
+1083 (beam 240 6 43 at 900), on the see-saw 1060 (beam 405 7 43 at 1000),
+in the fan 515 (beam 80 6 43 at 500)), n = 1..48, each against its
+control.** No crash, assert or "is not physicalized" warning in any of the
+63 arms. Queued while the ball had no body: the outside producers 26418
+(Physics WakeUp), 26414 and 26432 (SetPhysicsForce) of Gameplay_Ingame, a
+fourth one 27403 (Physics WakeUp, Gameplay_Ingame, at the spawn), and at
+the trafo birth four Sound_Manager blocks 6271, 6471, 6489, 6507 (Physics
+Collision Detection); every one was consumed at the make (`sim=1`, the
+queue empty). No trigger fired on the bodiless entity: the stone trafo did
+not fire while the entity sat above it (the control fires at 917; with the
+absence it fires 10 ticks after the make), the checkpoint at x = 220 was
+not taken, the see-saw only froze (n = 48). At the spawn and the trafo
+birth (the situations a moved birth produces) the made ball accelerated as
+the control's. The mid-life situations are EG0's `--ball-off` model, not a
+moved birth: the body comes back at rest and the held key's persistent
+SetPhysicsForce went with the old body, so the ball stays still until the
+key changes (`roll` n = 8: 0.01 m/s, asleep from 429 until the key edge at
+620). A moved own birth never takes a body out mid-life (its absence starts
+at the birth, where the script's force comes after it and is queued), and
+the retail and headless REPLAYED arms drive the made ball from the
+records; so this is the model's limit, not a failure of the R6P path.
+
+**The own_body_backstop measurement (core design §7.1 decision 2).**
+`check_own_body` (client_core_messages.cpp:130) runs on every applied
+non-resync snapshot; with snapshots off those are only the names-only full
+snapshots of body-set changes (9-13 a session), while it needs 30
+consecutive snapshots without the own row. `backstops=0` in every retail
+session since DEP (`dep_smoke`, `rtr_*`, `r6h_*`, `ovx_r1/r2`,
+`srtj_ctl_h`, every R6M session). With `session drop-birth` on copy 2's
+beam Physicalize (the ball beamed onto the start plate at 340 and living
+on): snapshots on (`r6m_snap2`, server 2/66) - "the server has no body for
+our ball (1); Physicalize re-reported at tick 402", backstops=1; snapshots
+off (`r6m_snapoff`) - backstops=0, and the server had no ball for that
+player from 340 to the session's end (581 client checkpoint ticks without a
+server row). A dropped birth is answered by the echo deadline instead
+(check_own_body waits while a birth awaits its echo); a beam's Physicalize
+is not. What to do with it is the user's decision (R6V builds it); the
+options as measured: keep it as is (it fires only with snapshots on), let
+the body-set change's full snapshot alone trigger the re-report with
+snapshots off, or retire it (events are reliable and a rejection is
+echoed).
+
+**Adaptations.**
+- The slot-13 hack the plan names is retired (step CMAP): the arena is a
+  BML+ custom map; SimTool takes `--map`.
+- The 9.11 recordings (`mech_L*.bmrc`) are not on disk and `--ball-off`
+  exists only in `--replay` (not in `--drop`), so the offline arms ran on
+  the arena record alone; L1-L13 offline are not covered (the retail L1 /
+  L11 and headless arena arms run the same path live).
+- `--describe-script` dumps a level's graph at load, not a state mid-run;
+  the "cells that differ" check was made on what the scripts did instead
+  (the event log, the PreSimulate queue, the ball identity, the triggers),
+  per arm against its control.
+- `force-own-move` needs a running core: armed before the room start it is
+  refused ("no session core runs"), so the L11 copy-2 spawn arm did not
+  run; the L1 arms cover live spawns.
+- L1 gives four balls and the held key spends one every ~6 s, so the L1
+  arms ran as four sessions of four births.
+- Retail launches: 10 (8 informative; `r6m_l1b` stopped on a driver error
+  after 57 s, `r6m_l1c` is the Level 1 reset below) against the
+  plan's 4-6.
+
+**Seen, outside this measurement: no respawn after a Level 1 reset in
+`r6m_l1c` - RK3R's known limit, not a regression.** In `r6m_l1c` the
+automation sent `restart` (the ESC menu's Reset Level path) 11 times in
+one session. Each time it ran PauseLevel, PreResetLevel, PostResetLevel,
+StartLevel and "input live from tick 401 (ingame script 0, paused 0)",
+and then there was no own spawn and no BallNavActive for 25 s. The cause
+is RK3R (FULL plan §1, decided 2026-10-29: not handled - the tutorial is
+skipped only at the server's countdown restart): a Level 1 reset
+re-activates Gameplay_Tutorial, and its opening waits for the player's
+Enter before the camera and the ball come. The evidence:
+- `esck_l1` (2026-10-31): `pausechain` reads `tutorial_script=0` before
+  its reset and `tutorial_script=1` after it.
+- `esck_l1` and `rt2_l1trace2` (2026-10-30): the ball came back only
+  after a `key enter`. CamNavActive came at the press, and the spawn
+  followed about 3 s later (`esck_l1` tick 1646, `rt2_l1trace2` tick 933).
+- `rt2_l1` and `rt2_l1esc` (2026-10-30, before ESCX): the same
+  no-respawn. Their only Enter after the reset came while the pause menu
+  was open, and before ESCX the pause menu deactivates the tutorial.
+- `r6m_l1c` sent no `key enter` at all (`r6m_retail.py` holds `key up`).
+So the behaviour is the same on the builds before this step, and nothing
+needs queueing beyond RK3R and its recording check RK3R-rec. The "ingame
+script 0" in the "input live" line is read at StartLevel, before the reset
+re-activates the scripts (`esck_l1`'s later `pausechain` reads
+`ingame_script=1`); it is not the cause. No in-session restart on the
+arena exists on disk to compare with: `cmap_reload_fix`'s `restart` ran
+after its session 1 had ended, and its respawn at 212 is session 2's
+start.

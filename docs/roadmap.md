@@ -3059,7 +3059,15 @@ notes still resolve.
    - **First item of R6 (the user, 2026-10-30):** plan step 21's
      measurement - how long retail tolerates its own ball being absent for
      several ticks - moves here from Stage B; step 21's protocol work stays
-     in Stage B.
+     in Stage B. **Measured (FULL step R6M, 2026-11-01; late-player-design.md
+     "As built (step R6M)"):** every absence of 1-48 ticks lived through
+     live, and every absence inside a replay whose rewind fits the reach
+     (depth K + 1 <= 48 for an echo at T + K, measured at K = n and K > n),
+     passes on retail and headless; the bound is the 48 reach
+     `move_own_birth` already checks, so R6P needs no depth cap. Open for
+     R6D / R6P: the made ball's key force starts at T' (2 ticks earlier
+     than a scripted birth's); whether the server's moved birth does the
+     same is unchecked.
    - **A non-blocking retail anchor hold (the user, 2026-10-31, FULL step
      SAXH's question):** today the retail anchor hold (design 2.3) is a
      blocking loop inside OnProcess, so the screen stays black while the
