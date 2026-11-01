@@ -2142,6 +2142,20 @@ public:
                                   r.confirmed, r.total,
                                   Sprintf("waiting for the other players to confirm the start (%u / %u confirmed; "
                                           "missing: %s)", r.confirmed, r.total, member_names(r.missing).c_str()));
+            if (r.notice_in_flight) {
+                // FULL step SAXC: the deadline passed with only members whose
+                // answer may still be in flight unconfirmed (the server's log
+                // only: the players are told nothing new; a commit or the
+                // postponement follows).
+                std::string waits;
+                for (const auto m: r.in_flight)
+                    waits += Sprintf(" %s (confirmed start %u; until %+lld ms)",
+                                     get_client_name(static_cast<HSteamNetConnection>(m)),
+                                     s.handshake.confirmed_seq(m),
+                                     static_cast<long long>((s.handshake.answer_in_flight_until(m) - now) / 1000));
+                Printf("Physics session %u: start handshake: start %u's deadline passed; not counted missing while "
+                       "their answer may still be in flight:%s", id, s.handshake.seq(), waits.c_str());
+            }
             for (const auto m: r.refuse) refused.emplace_back(id, static_cast<HSteamNetConnection>(m));
             if (!r.refuse.empty())
                 send_start_status(s, bmmo::session::start_status_phase::refused, r.total - r.refuse.size(), r.total,

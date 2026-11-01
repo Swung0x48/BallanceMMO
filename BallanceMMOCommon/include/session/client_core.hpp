@@ -543,6 +543,10 @@ namespace bmmo::session {
         uint32_t started_epoch_ = 0;
         clock_type::time_point started_effective_{};
         uint64_t clock_acks_sent_ = 0, start_messages_late_ = 0, start_catch_up_ticks_ = 0;
+        // FULL step SAXC: SessionStartStatus messages that came after this
+        // member's own start (not shown), and whether this anchor logged one.
+        uint64_t start_statuses_stale_ = 0;
+        bool start_status_stale_logged_ = false;
         uint32_t tick_base_ = 0;
         int64_t frames_since_anchor_ = -1;
         std::deque<std::pair<uint32_t, bmmo::session::input_frame>> input_history_;
@@ -1450,7 +1454,11 @@ namespace bmmo::session {
         void on_session_lead(const bmmo::session_lead_msg& msg);
         // FULL step SAXH (protocol 24): the start handshake's server messages.
         void on_session_start_at(const bmmo::session_start_at_msg& msg);
-        void on_session_start_status(const bmmo::session_start_status_msg& msg);
+        // FULL step SAXC: true when the status is shown (start_notice); false
+        // when it is not this session's or came after this member's own start
+        // (stale: logged once, counted) - a host's wait panel follows it.
+        bool on_session_start_status(const bmmo::session_start_status_msg& msg);
+        uint64_t start_statuses_stale() const { return s.start_statuses_stale_; }
         // During the hooks.numbering_restarted call of a scheduled start's
         // release (clock_site::assign_release): the start instant the pacer's
         // origin takes instead of now.  Empty otherwise.

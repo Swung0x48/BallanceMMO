@@ -1664,6 +1664,126 @@ TEST(StartHandshake, AnEarlierStartReportedLaterIsCommittedInstead) {
     EXPECT_FALSE(g.poll(30, members).commit);
 }
 
+// FULL step SAXC (the user's decision 60, HXP's `commit` cell at 150 ms
+// each way): a member that confirmed start 1 and runs on it because start 2
+// reached it after start 1's instant answers CLOCK_ACK_STARTED no sooner
+// than X1 + rtt, after start 2's deadline above 200 ms of round trip.  It is
+// not missing while that answer may be in flight: start 2 waits past its
+// deadline (no second postponement naming a running member) and the answer
+// commits start 1; without the answer the start is postponed at the bound.
+TEST(StartHandshake, AnAnswerInFlightIsNotMissing) {
+    using namespace bmmo::session;
+    constexpr int64_t rtt = 300'000;
+    const std::vector<uint32_t> members = {1, 2, 3};
+    const auto setup = [&](start_handshake& h, start_schedule& first, start_schedule& second) {
+        h.begin(0);
+        for (const auto m: members)
+            for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, rtt));
+        ASSERT_TRUE(h.poll(10, members).send_start);
+        first = h.schedule();
+        h.start_acked(1, 1);
+        h.start_acked(3, 1);
+        auto r = h.poll(first.deadline_us, members);
+        ASSERT_TRUE(r.postponed) << "member 2 missed start 1";
+        EXPECT_EQ(r.missing, std::vector<uint32_t>{2});
+        EXPECT_TRUE(r.in_flight.empty()) << "start 1 has no earlier start";
+        second = h.schedule();
+        h.start_acked(2, 2);
+        h.start_acked(3, 2);
+        EXPECT_EQ(h.confirmed_seq(1), 1u);
+        EXPECT_EQ(h.confirmed_seq(3), 2u);
+    };
+    start_handshake h;
+    start_schedule first, second;
+    setup(h, first, second);
+    // The bound: start 1's instant + member 1's round trip + a window's
+    // slack, but no later than start 2's instant minus the guard's slack.
+    const int64_t until = h.answer_in_flight_until(1);
+    EXPECT_EQ(until, std::min(first.x_us + rtt + kStartWindowSlackUs, second.x_us - kStartGuardSlackUs));
+    EXPECT_GT(first.x_us + rtt, second.deadline_us) << "the HXP case: the earliest answer lands after the deadline";
+    EXPECT_GT(until, first.x_us + rtt) << "...and before the bound";
+    EXPECT_EQ(h.answer_in_flight_until(3), 0) << "confirmed the current start";
+    auto r = h.poll(second.deadline_us, members);
+    EXPECT_FALSE(r.send_start) << "not postponed";
+    EXPECT_FALSE(r.postponed);
+    EXPECT_FALSE(r.start_now);
+    EXPECT_TRUE(r.missing.empty()) << "a running member is not named";
+    EXPECT_EQ(r.in_flight, std::vector<uint32_t>{1});
+    EXPECT_TRUE(r.notice_in_flight);
+    EXPECT_EQ(r.confirmed, 2u);
+    EXPECT_FALSE(h.poll(second.deadline_us + 1, members).notice_in_flight) << "said once per start";
+    EXPECT_EQ(h.postpones(), 1);
+    // The answer lands: start 1 is committed - one postponement in all.
+    h.started_on(1, 1);
+    r = h.poll(first.x_us + rtt + 1, members);
+    ASSERT_TRUE(r.start_now);
+    EXPECT_TRUE(r.commit);
+    EXPECT_EQ(r.commit_seq, 1u);
+    EXPECT_EQ(h.postpones(), 1);
+    EXPECT_TRUE(r.refuse.empty());
+
+    // A late confirmation of start 2 itself starts it normally.
+    start_handshake g;
+    setup(g, first, second);
+    ASSERT_FALSE(g.poll(second.deadline_us, members).send_start);
+    g.start_acked(1, 2);
+    r = g.poll(second.deadline_us + 1, members);
+    EXPECT_TRUE(r.start_now);
+    EXPECT_FALSE(r.commit);
+
+    // No answer: at the bound the member is missing and the start is
+    // postponed as before, still before start 2's instant.
+    start_handshake k;
+    setup(k, first, second);
+    const int64_t bound = k.answer_in_flight_until(1);
+    EXPECT_FALSE(k.poll(bound - 1, members).send_start);
+    r = k.poll(bound, members);
+    ASSERT_TRUE(r.send_start);
+    EXPECT_TRUE(r.postponed);
+    EXPECT_EQ(r.missing, std::vector<uint32_t>{1});
+    EXPECT_TRUE(r.in_flight.empty());
+    EXPECT_EQ(k.postpones(), 2);
+    EXPECT_LT(bound + rtt / 2, second.x_us + rtt / 2) << "the postponement reaches member 1 before its instant of start 2";
+}
+
+// FULL step SAXC: a truly missing member is postponed against and refused
+// as before; a member whose answer may be in flight beside it is not named,
+// and one that confirmed start 1 and then went silent is missing once its
+// answer can no longer be in flight - refused at the same postponement.
+TEST(StartHandshake, ATrulyMissingMemberIsStillRefused) {
+    using namespace bmmo::session;
+    constexpr int64_t rtt = 300'000;
+    const std::vector<uint32_t> members = {1, 2, 3};
+    start_handshake h;
+    h.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, rtt));
+    ASSERT_TRUE(h.poll(10, members).send_start);
+    h.start_acked(1, 1);   // member 1: start 1 only, then silent
+    h.start_acked(2, 1);   // member 2: every start; member 3: none
+    auto r = h.poll(h.schedule().deadline_us, members);
+    ASSERT_TRUE(r.postponed);
+    EXPECT_EQ(r.missing, std::vector<uint32_t>{3});
+    h.start_acked(2, 2);
+    r = h.poll(h.schedule().deadline_us, members);
+    ASSERT_TRUE(r.postponed) << "member 3 is truly missing: postponed at the deadline as before";
+    EXPECT_EQ(r.missing, std::vector<uint32_t>{3}) << "member 1's answer may be in flight: not named";
+    EXPECT_EQ(r.in_flight, std::vector<uint32_t>{1});
+    EXPECT_EQ(h.postpones(), 2);
+    for (int p = 3; p <= kStartMaxPostpones; ++p) {
+        h.start_acked(2, h.seq());
+        r = h.poll(h.schedule().deadline_us, members);
+        ASSERT_TRUE(r.postponed) << p;
+        EXPECT_EQ(r.missing, (std::vector<uint32_t>{1, 3})) << "start 1's answer can no longer be in flight";
+        EXPECT_TRUE(r.in_flight.empty());
+    }
+    h.start_acked(2, h.seq());
+    r = h.poll(h.schedule().deadline_us, members);
+    EXPECT_EQ(r.refuse, (std::vector<uint32_t>{1, 3})) << "past the bound: refused as before";
+    ASSERT_TRUE(r.send_start);
+    EXPECT_FALSE(r.postponed);
+}
+
 // The gate round of SAXH (review finding 3): the two clocks drift, so a
 // sample older than kClockEstimateMaxAgeUs is replaced by any newer one and
 // an estimate whose best sample is that old is not fresh.

@@ -7396,7 +7396,10 @@ shared file, no wire or journal change, the core unchanged):
   was handled), else "starting in about N ms" of the notice; the counts and
   the missing / refused members are read from the server's
   SessionStartStatus (`confirmed` / `total`, the names in its text) before
-  the core gets it; the members and names from the SessionStart and the
+  the core gets it (FULL step SAXC: after it, and only when the core showed
+  it - `on_session_start_status` returns false for a status after this
+  member's own start, lockstep-without-snapshots.md "As built (FULL step
+  SAXC)"); the members and names from the SessionStart and the
   client's player list. **Adaptation:** the core exposes no start instant or
   confirmed set, and an accessor would have been a shared-file change; the
   host reads the messages it already decodes instead (no decision moves out

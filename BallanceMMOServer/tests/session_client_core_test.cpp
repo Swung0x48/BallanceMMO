@@ -9944,6 +9944,63 @@ namespace {
         EXPECT_FALSE(core.holding());
     }
 
+    // FULL step SAXC (the user's decision 61, HXP's `commit` client 1): a
+    // SessionStartStatus that arrives after this member's own start - the
+    // reliable status held behind a retransmit - is stale: not shown (the
+    // host's wait panel follows the answer), logged once, counted; one that
+    // arrives while the hold lasts is shown as before.
+    TEST(SessionClientCoreFlow, StartStatusAfterTheStartIsStale) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        std::vector<std::string> notices;
+        platform.hooks.notice = [&notices](const std::string& text) { notices.push_back(text); };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_anchor(core, fake);
+        bmmo::session_start_status_msg status;
+        status.session = 9;
+        status.phase = static_cast<uint8_t>(bmmo::session::start_status_phase::waiting_start);
+        status.text = "waiting for the other players to confirm the start (1 / 2 confirmed; missing: b)";
+        EXPECT_TRUE(core.on_session_start_status(status)) << "anchored, holding: shown";
+        ASSERT_FALSE(notices.empty());
+        EXPECT_EQ(notices.back(), status.text);
+        auto assign = assign_message(9, 120);
+        assign.flags = bmmo::session::ASSIGN_FLAG_SCHEDULED;
+        assign.server_us = 777;
+        core.on_session_assign(assign);
+        bmmo::session_start_at_msg start;
+        start.session = 9;
+        start.first_tick = 120;
+        start.seq = 1;
+        start.server_us = 900;
+        start.start_us = fake_us(fake.clock + std::chrono::milliseconds(100));
+        core.on_session_start_at(start);
+        // Before the start: a postponement's status is shown.
+        status.phase = static_cast<uint8_t>(bmmo::session::start_status_phase::postponed);
+        status.text = "start postponed (1 of 3): b did not confirm the start in time; starting in about 677 ms";
+        EXPECT_TRUE(core.on_session_start_status(status));
+        EXPECT_EQ(notices.back(), status.text);
+        EXPECT_EQ(core.start_statuses_stale(), 0u);
+        // Another session's: neither shown nor counted.
+        bmmo::session_start_status_msg other;
+        other.session = 10;
+        other.phase = status.phase;
+        other.text = status.text;
+        EXPECT_FALSE(core.on_session_start_status(other));
+        EXPECT_EQ(core.start_statuses_stale(), 0u);
+        fake.advance(std::chrono::milliseconds(100));
+        EXPECT_FALSE(core.poll_hold().held);
+        EXPECT_EQ(notices.back(), "started.");
+        const size_t shown = notices.size();
+        // After the start: stale.
+        status.text = "start postponed (2 of 3): a did not confirm the start in time; starting in about 677 ms";
+        EXPECT_FALSE(core.on_session_start_status(status));
+        status.text = "a started on an earlier start time (start 1): everyone starts on it now";
+        EXPECT_FALSE(core.on_session_start_status(status));
+        EXPECT_EQ(notices.size(), shown) << "nothing shown after the start";
+        EXPECT_EQ(notices.back(), "started.");
+        EXPECT_EQ(core.start_statuses_stale(), 2u);
+    }
+
     // The gate round of SAXH (review finding 2): a member still holding
     // when the server commits an earlier start (another member started on
     // it) starts at once and catches up the whole ticks since its instant;

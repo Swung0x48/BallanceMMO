@@ -605,6 +605,7 @@ namespace bmmo::session {
         s.release_local_known_ = false;
         s.corrected_ = false;
         s.started_seq_ = 0;
+        s.start_status_stale_logged_ = false;   // FULL step SAXC
         // The anchor signature this world reports (step S5; 0 without the
         // capability: not compared) - the journal header holds it too.
         const uint64_t placement = caps_.placement ? report.placement : 0;
@@ -1072,9 +1073,30 @@ namespace bmmo::session {
                      + std::to_string(in_ms) + " ms.");
     }
 
-    void session_client_core::on_session_start_status(const bmmo::session_start_status_msg& msg) {
-        if (msg.session != s.session_) return;
+    // FULL step SAXC (the user's decision 61, HXP's finding (1)): the status
+    // travels reliable only and carries no start sequence, so a retransmit
+    // can bring it after this member's own start (HXP `commit` client 1: both
+    // postponement lines and the commit's after "started.").  The start is
+    // this member's state change and the status only explains a wait: one
+    // that arrives once the anchor hold is over - released on a scheduled
+    // start, an unscheduled assignment, the timeout or the host's give-up -
+    // is stale, not shown (the host's wait panel follows the answer), logged
+    // once per anchor and counted.  No clock is read (the captures' clock
+    // sequence is unchanged); a status that comes between a start's instant
+    // and the hold's next poll is still shown.
+    bool session_client_core::on_session_start_status(const bmmo::session_start_status_msg& msg) {
+        if (msg.session != s.session_) return false;
+        if (s.phase_ == client_core_state::phase::running && s.frames_since_anchor_ >= 0 && !s.held_) {
+            ++s.start_statuses_stale_;
+            if (!s.start_status_stale_logged_) {
+                s.start_status_stale_logged_ = true;
+                logf("start handshake: stale start status after the start (not shown; later ones counted): %s",
+                     msg.text.c_str());
+            }
+            return false;
+        }
         start_notice(msg.text);
+        return true;
     }
 
     void session_client_core::start_notice(const std::string& text) {

@@ -2998,8 +2998,31 @@ numbers 1-10 are unchanged.
      cell; every cell within one tick, 0 late events, FINAL rows exact),
      with `--outage` (a wall-clock outage in the proxy) and a process-exit
      hang watcher on by default (not reproduced in 10 runs;
-     lockstep-without-snapshots.md "As built (FULL step HXP)"). **Queued
-     (root-caused, pre-existing in SAXH's protocol 24):** (1) a start
+     lockstep-without-snapshots.md "As built (FULL step HXP)"). **Built at
+     FULL step SAXC (2026-11-01, the user's decisions 60 / 61), each with
+     an open residual:** (1) a status after the member's own start is not
+     shown (the shared core; the retail wait panel follows it). **Open,
+     root-caused, waiting on a user decision:** a status that overtakes a
+     newer start before the member's start is still shown (HXP `m_start`
+     client 2, reproduced in SAXC's `m_start`: "start postponed (1 of 3)"
+     after "new start time") - the status has no start sequence, so the
+     client cannot tell it from a postponement of the start it holds;
+     options: a sequence in the status (a protocol change), status copies
+     on the start's schedule, or accept. (2) option (a): a member whose
+     answer may still be in flight is not counted missing until min(X_j +
+     its rtt + 160 ms, X_k - 60 ms) - HXP's `commit` cell now has one
+     postponement and no running member named. **Open, root-caused,
+     recorded for the user:** the cap X_k - 60 ms leaves a postponement
+     sent at the end of the wait 60 ms of loss margin instead of the
+     guard's rtt/2 + 60 ms, so a burst over 60 ms (before SAXC: over 210
+     ms at a 300 ms round trip) after a lost answer can let one member
+     start on k while the running member's late report commits j - the
+     pre-existing commit-earlier race, at a lower threshold; options: keep
+     (the measured cells), cap at X_k - 182 ms (keeps the margin, ~40 ms of
+     useful wait at 300 ms: defeats (a)), or resync a member already
+     running on a later start when an earlier one is committed
+     (lockstep-without-snapshots.md "As built (FULL step SAXC)"). **Were
+     queued (root-caused, pre-existing in SAXH's protocol 24):** (1) a start
      status line can reach a member after its state change - the server
      sends `SessionStartStatus` reliable only, so an outage that drops a
      reliable `SessionStartAt` copy holds the status behind its retransmit

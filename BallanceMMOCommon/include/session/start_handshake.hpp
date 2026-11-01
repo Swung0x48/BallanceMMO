@@ -32,8 +32,11 @@
 //   confirmation missing at the deadline (X - guard): the start moves for
 //   everyone (a new seq) rather than anyone starting late; after
 //   kStartMaxPostpones the missing members are refused (as a placement
-//   mismatch is) and the rest start.  A member a postponement reached only
-//   after the old instant has started on the old start: it answers the new
+//   mismatch is) and the rest start.  A member whose answer may still be in
+//   flight (it confirmed an earlier start it may run on) is not missing
+//   until start_answer_in_flight_until (FULL step SAXC).  A member a
+//   postponement reached only after the old instant has started on the old
+//   start: it answers the new
 //   one CLOCK_ACK_STARTED (that seq), and the server commits the earliest
 //   such start for everyone (START_AT_FLAG_COMMIT: a member still holding
 //   starts at once and catches up; started_on).
@@ -128,6 +131,29 @@ namespace bmmo::session {
     // A start postponed this many times refuses the members still missing.
     inline constexpr int kStartMaxPostpones = 3;
 
+    // FULL step SAXC (the user's decision 60, HXP's finding (1)(a)): the
+    // answer of a member that confirmed an earlier start j may still be in
+    // flight at start k's deadline.  If k reached it only after its instant
+    // of j (a lost or late copy), it runs on j and answers k
+    // CLOCK_ACK_STARTED - on the server's clock no sooner than X_j plus its
+    // round trip (its instant is X_j + rtt/2 there, the answer's trip back
+    // another rtt/2), i.e. D_{k-1} + 1.5 rtt + 60 ms, after k's deadline
+    // D_{k-1} + rtt + 160 ms for a round trip above 200 ms.  Until then, plus
+    // one window's slack (the copies of k and the answer each a chance), it
+    // is not counted missing: neither named nor counted toward a refusal,
+    // and a start whose only unconfirmed members are such waits past its
+    // deadline instead of being postponed.  The wait never runs past X_k
+    // minus the guard's slack, so a postponement sent at its end still
+    // reaches every member before its instant of k on a lossless link (its
+    // instant is X_k + rtt/2 on the server's clock, the postponement's trip
+    // rtt/2).  The price: that postponement has 60 ms of loss margin, not
+    // the rtt/2 + 60 ms one sent at the deadline has (a residual, roadmap
+    // section 4, the HXP bullet).
+    inline int64_t start_answer_in_flight_until(int64_t confirmed_x_us, int64_t member_rtt_us, int64_t current_x_us) {
+        return std::min(confirmed_x_us + std::max<int64_t>(0, member_rtt_us) + kStartWindowSlackUs,
+                        current_x_us - kStartGuardSlackUs);
+    }
+
     struct start_schedule {
         int64_t x_us = 0;          // the start instant, server clock
         int64_t deadline_us = 0;   // every confirmation by then, or the start moves
@@ -182,6 +208,12 @@ namespace bmmo::session {
             // Say who is missing (once per phase, kStartMissingNoticeUs in).
             bool notice_missing = false;
             std::vector<uint32_t> missing;
+            // FULL step SAXC: the unconfirmed members whose answer may still
+            // be in flight (start_answer_in_flight_until): not missing.  The
+            // start's deadline passed with only these unconfirmed: it waits
+            // (notice_in_flight once per start, for the server's log).
+            std::vector<uint32_t> in_flight;
+            bool notice_in_flight = false;
             uint32_t confirmed = 0, total = 0;
         };
 
@@ -194,6 +226,8 @@ namespace bmmo::session {
             seq_ = 0;
             postpones_ = 0;
             start_acks_.clear();
+            confirmed_seq_.clear();
+            in_flight_noticed_ = false;
             schedules_.clear();
             committed_seq_ = 0;
             commit_pending_ = false;
@@ -203,7 +237,7 @@ namespace bmmo::session {
         void add_sample(uint32_t member, const clock_sample& c, int64_t at_us = 0) { clocks_[member].add(c, at_us); }
         // A confirmation of start message `seq`; an older seq's is void.
         void start_acked(uint32_t member, uint32_t seq) {
-            if (phase_ == phase::start && seq == seq_) start_acks_.insert(member);
+            if (phase_ == phase::start && seq == seq_) confirm(member);
         }
         // The member already STARTED on start message `seq` (CLOCK_ACK_STARTED:
         // a later start reached it after that one's instant).  It cannot
@@ -214,7 +248,7 @@ namespace bmmo::session {
         void started_on(uint32_t member, uint32_t seq) {
             if (phase_ == phase::idle || seq == 0 || seq > seq_ || !schedules_.count(seq)) return;
             if (phase_ == phase::start && seq == seq_) {   // the current one: a confirmation
-                start_acks_.insert(member);
+                confirm(member);
                 return;
             }
             if (committed_seq_ != 0 && seq >= committed_seq_) return;
@@ -228,6 +262,24 @@ namespace bmmo::session {
         void forget(uint32_t member) {
             clocks_.erase(member);
             start_acks_.erase(member);
+            confirmed_seq_.erase(member);
+        }
+        // FULL step SAXC: the newest start this member confirmed (0: none).
+        uint32_t confirmed_seq(uint32_t member) const {
+            const auto it = confirmed_seq_.find(member);
+            return it == confirmed_seq_.end() ? 0 : it->second;
+        }
+        // Until when (server clock) the current start's answer of `member`
+        // may still be in flight - it confirmed an earlier start, which it
+        // may run on (start_answer_in_flight_until) - or 0: not in flight.
+        int64_t answer_in_flight_until(uint32_t member) const {
+            if (phase_ != phase::start) return 0;
+            const uint32_t j = confirmed_seq(member);
+            if (j == 0 || j >= seq_) return 0;
+            const auto sch = schedules_.find(j);
+            const auto* e = estimate(member);
+            if (sch == schedules_.end() || !e) return 0;
+            return start_answer_in_flight_until(sch->second.x_us, e->best.rtt_us, schedule_.x_us);
         }
 
         const clock_estimate* estimate(uint32_t member) const {
@@ -295,18 +347,31 @@ namespace bmmo::session {
             // phase::start
             for (const auto m: members) {
                 if (start_acks_.count(m)) ++r.confirmed;
+                else if (now_us < answer_in_flight_until(m)) r.in_flight.push_back(m);   // FULL step SAXC
                 else r.missing.push_back(m);
             }
-            if (r.missing.empty()) {
+            if (r.missing.empty() && r.in_flight.empty()) {
                 phase_ = phase::started;
                 committed_seq_ = seq_;
                 r.start_now = true;
                 return r;
             }
             if (now_us < schedule_.deadline_us) {
-                if (!missing_noticed_ && now_us - phase_began_us_ >= kStartMissingNoticeUs) {
+                if (!r.missing.empty() && !missing_noticed_ && now_us - phase_began_us_ >= kStartMissingNoticeUs) {
                     missing_noticed_ = true;
                     r.notice_missing = true;
+                }
+                return r;
+            }
+            if (r.missing.empty()) {
+                // FULL step SAXC: past the deadline, only members whose
+                // answer may still be in flight are unconfirmed - wait for
+                // it (a CLOCK_ACK_STARTED commits their start); once it can
+                // no longer be in flight they are missing and the start is
+                // postponed as before.
+                if (!in_flight_noticed_) {
+                    in_flight_noticed_ = true;
+                    r.notice_in_flight = true;
                 }
                 return r;
             }
@@ -329,10 +394,17 @@ namespace bmmo::session {
         }
 
     private:
+        void confirm(uint32_t member) {
+            start_acks_.insert(member);
+            auto& c = confirmed_seq_[member];
+            c = std::max(c, seq_);
+        }
+
         void plan(int64_t now_us, const std::vector<uint32_t>& members) {
             phase_ = phase::start;
             phase_began_us_ = now_us;
             missing_noticed_ = false;
+            in_flight_noticed_ = false;
             ++seq_;
             start_acks_.clear();
             schedule_ = plan_start(now_us, worst_rtt_us(members));
@@ -342,6 +414,7 @@ namespace bmmo::session {
         phase phase_ = phase::idle;
         int64_t phase_began_us_ = 0, assign_sent_us_ = 0;
         bool missing_noticed_ = false;
+        bool in_flight_noticed_ = false;
         uint32_t seq_ = 0;
         int postpones_ = 0;
         start_schedule schedule_{};
@@ -349,6 +422,7 @@ namespace bmmo::session {
         uint32_t committed_seq_ = 0, committed_by_ = 0;
         bool commit_pending_ = false;
         std::set<uint32_t> start_acks_;
+        std::map<uint32_t, uint32_t> confirmed_seq_;   // FULL step SAXC: each member's newest confirmed start
         std::map<uint32_t, clock_estimate> clocks_;
     };
 }

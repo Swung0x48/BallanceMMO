@@ -17,8 +17,9 @@
 // Display only: every decision stays the core's.  The panel reads what the
 // host is told - the core's start-handshake notices (hooks.notice), the
 // server's SessionStartStatus (counts, the missing members' names in its
-// text) and a SessionStartAt the core took (its notice came while it was
-// handled) - and the SessionStart's member list.
+// text; only one the core showed - step SAXC: a status after this member's
+// own start is stale) and a SessionStartAt the core took (its notice came
+// while it was handled) - and the SessionStart's member list.
 
 #include <algorithm>
 #include <cctype>

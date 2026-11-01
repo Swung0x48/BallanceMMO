@@ -2872,7 +2872,9 @@ harness only.
   split over two reads and a NUL is, the process alive 0.5 s later is dumped
   and ended, one that exits in time is not flagged).
 - **Wait lines (the plan's "each wait line in the client logs at its state
-  change"): not met for two members, pre-existing, root-caused, queued.**
+  change"): not met for two members, pre-existing, root-caused, queued**
+  (the `commit` case closed at FULL step SAXC: a status after the member's
+  own start is not shown; the `m_start` case stays, SAXC's note).
   Every member whose link no outage cut logged each `SessionStartStatus`
   line in the pass it arrived, in the server's order. Two did not:
   - `m_start` client 2 shows "new start time" (start 2 accepted, capture pass
@@ -2902,7 +2904,8 @@ harness only.
   needs the sequence); or accept (a status is an explanation, the client's
   own state lines are at its state change).
 - **Reported for the user's decision (does not block HXP): a commit always
-  costs a second postponement at this latency.** A member that a
+  costs a second postponement at this latency.** (The user chose (a); built
+  at FULL step SAXC, its note below.) A member that a
   postponement reached after its instant answers no sooner than X1 + rtt on
   the server's clock = D1 + 1.5 rtt + 60 ms (`plan_start`: X1 = D1 + rtt/2 +
   60 ms), and the new deadline is D1 + rtt + 160 ms: for a round trip over
@@ -2923,6 +2926,109 @@ harness only.
   - `stale_resync` client 1's last 10 FINAL rows (3452-3462) lack the balls
     of clients 3 and 2, reborn as spawn ghosts at server ticks 3451 / 3459
     just before the session ended: the session's tail, not the resync.
+
+**As built (FULL step SAXC, 2026-11-01; no protocol change): HXP's two start
+findings fixed as the user chose (decisions 60 / 61, "按你的推荐来").**
+- **(1)(a) an answer that may still be in flight is not missing**
+  (`session/start_handshake.hpp`, the server's `start_handshake`; the
+  server's main loop in `server.cpp` `check_start_handshakes` only logs it).
+  The handshake keeps each member's newest confirmed start
+  (`confirmed_seq_`, set by `start_acked` and by a `CLOCK_ACK_STARTED` of the
+  current start). At start k's deadline a member that has not confirmed k
+  but confirmed an earlier start j may run on j (k reached it after its
+  instant of j) and then answers `CLOCK_ACK_STARTED` no sooner than X_j plus
+  its round trip. The bound (`start_answer_in_flight_until`,
+  `answer_in_flight_until`): until min(X_j + the member's own estimated rtt
+  + 160 ms (one window's slack: the copies of k and of the answer), X_k - 60
+  ms) such a member is `in_flight`, not `missing` - not named in a wait or
+  postponement line, not counted toward a refusal. A start whose deadline
+  passed with only such members unconfirmed waits (the server logs "start
+  k's deadline passed; not counted missing while their answer may still be
+  in flight: NAME (confirmed start j; until +N ms)" once per start); the
+  answer commits j as before, a late confirmation of k starts k, and at the
+  bound the member is missing and k is postponed as before. **Adaptation:**
+  the plan's "such a start waits one window longer" is capped at X_k minus
+  the guard's 60 ms slack (with equal round trips the uncapped bound would be
+  X_k itself): a postponement sent at the end of the wait still reaches every
+  member before its instant of k on a lossless link (its instant is X_k +
+  rtt/2 on the server's clock, the postponement's trip rtt/2), so no member
+  starts on k while the wait lasts and every other path - a member that never
+  confirmed anything, the refusal after the third postponement, the commit -
+  is unchanged. **The trade-off (a residual, the gate's review):** that
+  postponement has 60 ms of loss margin where one sent at the deadline had
+  the guard's rtt/2 + 60 ms (210 ms at a 300 ms round trip), below the 122
+  ms burst (8 lost copies) the window is sized for. If the running member's
+  answer is lost past the bound and a burst longer than 60 ms then holds the
+  postponement from another member, that member starts on k and reports it
+  (`started_on` commits k), and the running member's late report of j
+  commits j "instead" while k is already running - two starts. The
+  commit-earlier mechanism is pre-existing (it needed a burst over 210 ms
+  before SAXC); only the threshold drops. The alternative cap, X_k - 60 -
+  122 ms, keeps the margin but leaves about 40 ms of useful wait at a 300 ms
+  round trip, which defeats (1)(a); not chosen here - recorded for the user
+  (roadmap section 4, the HXP bullet). A
+  member whose confirmation of j itself was lost is not exempted (the server
+  cannot know it may run on j): named as before.
+- **(2) a status after the member's own start is stale** (the shared core,
+  both hosts; `client_core.cpp` `on_session_start_status`, now returning
+  whether it was shown). A `SessionStartStatus` that arrives once this
+  member's anchor hold is over - released at its scheduled start, by an
+  unscheduled assignment, the timeout or the host's give-up - is not shown:
+  logged once per anchor as "stale start status after the start (not shown;
+  later ones counted): TEXT", counted (`start_statuses_stale()`). The retail
+  host updates its wait panel (`hold_panel.hpp`) only with a status the core
+  showed (`core_host.cpp`, `SessionStartStatus`). No clock is read (the
+  captures' clock sequence is unchanged), so a status between a start's
+  instant and the hold's next poll is still shown. **Not covered (the decided
+  rule is "after its own start"):** HXP's `m_start` client 2 case - "start
+  postponed (1 of 3)" arriving after the client accepted start 2 from an
+  unreliable copy but before it started - is still shown: without a start
+  sequence in the status the client cannot tell a postponement of the start
+  it holds from the one that produced it (options as HXP listed them: a
+  sequence in the status (protocol), status copies on the start's schedule,
+  or accept).
+- **Checks.** Unit tests 753/753 (new: `StartHandshake.AnAnswerInFlightIsNotMissing`
+  - HXP's commit at 300 ms round trip: no second postponement, the running
+  member not named, the answer commits start 1, a late confirmation starts
+  start 2, no answer postpones at the bound before start 2's instant;
+  `StartHandshake.ATrulyMissingMemberIsStillRefused` - a member that never
+  confirms is postponed at each deadline and refused after the third as
+  before, a member silent after start 1 is not named while in flight and
+  refused with it once its answer cannot be in flight;
+  `SessionClientCoreFlow.StartStatusAfterTheStartIsStale`). x64 BUILD-OK,
+  x86 CLIENT-BUILD-OK (every includer of the changed headers rebuilt), GCC
+  syntax 33/33, the Arch server rebuilt (ballanced-36c04e3d24c9+bmmo-13a3f39bf540-dirty).
+  The wire check on `core_ref_s14` (rR6V vs rSAXC): ALL SAME (no capture
+  reaches a postponement). Live (`maps/arena-test/saxc/<cell>`, HXP's
+  harness and recipes, 150 ms each way, snapshots off, trafo_inputs and
+  placement_clones on, clients pinned to E-cores):
+  - `commit` (`--outage 2:size81:300:down --outage 1:size81+400:290:down`):
+    one postponement (Arena2), then "start 2's deadline passed; not counted
+    missing ...: Arena1 (confirmed start 1; until +145 ms)", the answer
+    landed and start 1 was committed (-339 ms) - no second postponement, no
+    running member named, 0 refusals (HXP: postponed 2 of 3 naming Arena1);
+    client 1 logged one stale status and showed nothing after "started."
+    (HXP: both postponements and the commit's line); server replay
+    4073/4073, FINAL rows of all four 0.0000 m (own, mirror, body; the
+    balloon span excluded), start skew 7.06 ms.
+  - `refuse` (`--outage 3:size81:3500:down`, a member truly dropped): postponed
+    1, 2, 3 of 3 naming Arena3, refused, the three on start 5 within 1.00 ms -
+    as HXP; server replay 3894/3894.
+  - `m_start2` (`--drop-down 0:size81:8 --outage 1:size81:60:both`): all four
+    on start 1, skew 0.03 ms, nothing after "started.", server replay
+    4074/4074. `m_start` (the same plus `--outage 2:size81:200:both`): one
+    postponement, all four on start 2, skew 1.15 ms, nothing shown after
+    "started." on any client; client 2 again showed "start postponed (1 of
+    3)" after "new start time" (before its start: not covered, above);
+    server replay 4044/4044.
+  - Retail (`scripts/retail/saxc_r1`, L11, two copies, copy 2 `net lag 150`
+    both ways: round trips 1.9 / 308.7 ms): both copies on start 1, released
+    0.81 / 1.59 ms after their instants, nothing shown after "started.", no
+    stale status (none arrived late), 0 resyncs, 0 rebases. The copies'
+    instants are 156.5 ms apart on the host's one clock: SAXH's design puts
+    each member at X + its half round trip (above, SAXH's note), 153.4 ms
+    apart here; the 3.1 ms left is the offset estimate's error (under a
+    tick). `.local-tools/work/SAXC/` holds the run scripts and the judges.
 
 ### The lifecycle events, repeated (2026-10-21, protocol 6)
 

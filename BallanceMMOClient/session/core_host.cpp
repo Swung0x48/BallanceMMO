@@ -3712,8 +3712,12 @@ void BallanceMMOClient::core_host_dispatch(int code, const std::string& bytes) {
     case bmmo::SessionStartStatus: {
         bmmo::session_start_status_msg msg{};
         if (decode(msg)) {
-            hold_panel_ui.status(msg.phase, msg.confirmed, msg.total, msg.text);   // FULL step AHN (display only)
-            core.on_session_start_status(msg);
+            // FULL step AHN (display only); step SAXC: the panel follows the
+            // core's answer - a status after this member's own start is
+            // stale and not shown (the core's notice sets the line, the
+            // panel's status the counts and the members' marks).
+            if (core.on_session_start_status(msg))
+                hold_panel_ui.status(msg.phase, msg.confirmed, msg.total, msg.text);
         }
         break;
     }
