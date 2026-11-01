@@ -227,7 +227,12 @@ with it.
 **D3. The checkpoint hold (N3) is re-applied every frame only on retail,
 and N1-N3 are retail's own copies (by reading; never observed).** **N3 half
 done (FULL step N3K, 2026-11-01); N1 retail onto `sector_reset_guard` is
-LGM's.** Both session clients hold N3 with one helper
+LGM's.** **N1 half done (FULL step LGM, 2026-11-01):** the retail core host
+neutralizes N1 with `sector_reset_guard` itself (a file-scope instance: resolve
+at the anchor, `apply(resolved)` from `script_guards`, restore at the end) and
+pins N2 with `pin_checkpoint_deactivation` / `repin_` / `unpin_` as SC does; the
+legacy path keeps PSC's copies until LGD (session-client-core design, "As
+built (step LGM)"). Both clients now keep N1-N4 with one helper each. Both session clients hold N3 with one helper
 (game/sector_activation.hpp `checkpoint_activation_hold`: `apply` at the
 anchor, `keep()` every frame from `script_guards`, `restore` at the end; the
 keep rule CK-free in session/checkpoint_hold_rule.hpp); the diagnostic this
@@ -293,7 +298,14 @@ union's units) get IDs in a different order per host. No effect found: each
 edit touches its own blocks, the copies keep their order relative to each
 other, and the script order a replay runs is recorded live per host (RO1).
 **Already queued: HU1 inventory (d)** (docs/roadmap.md §4 item 1), Stage C
-(R6 / R7).
+(R6 / R7). **Written down at FULL step LGM (O2: not unified):** CH: hull
+templates, trafo quiesce, clock reset, clock guard, pause clock and scripts, ESC
+overlay and keys, N1-N4 handed back, N1, N2, N3, N4, chain cell, tutorial exit
+and hold, depth test, level counters, placement, hash, collision filter,
+selection, `core.anchor`; SC: hull templates, clock reset, level counters,
+placement, hash, collision filter, selection, N1, N3, N2, depth test, N4, chain
+cell, tutorial exit and hold. LGM moved CH's implementations in place and kept
+its order.
 
 **D6. The trafo set hooks: two implementations (by reading equivalent).**
 `has_body` through `GetPhysicsObject` (sim/trafo_hooks.hpp:27) against the
@@ -316,7 +328,15 @@ the union). The hook path stamps first only when the split failed (logged ERROR 
 the anchor, CH:1845); outside the hold the hook reports at T - 1 where SC
 reports at T. Every world applies the stamp it is sent, so no two worlds
 differ; the sector starts one tick earlier relative to the crossing.
-**Candidate: none needed (cleanup at R7**, when the legacy hook path goes).
+**Candidate: none needed (cleanup at R7**, when the legacy hook path goes). **FULL step LGM
+(2026-11-01):** the checkpoint hook calls `core_host_on_sector` directly
+(BallanceMMOClient.cpp `on_sector_changed`) and the legacy branch only when it
+declines; `physics_session_on_sector` no longer forwards, so the legacy branch
+is isolated for LGD and `core_host_on_sector` stays. SLG (0a99124a) had already
+narrowed what the hook passes on: with the split and the hold in force a
+checkpoint returns before the hook reports, so `core_host_on_sector` sees a
+checkpoint only when the split or the hold failed - this entry's "stamps first
+only then".
 
 **D8. The server kicks a spawn by `p.slot`, the clients by join order.**
 PW:955 `spawn_direction_index(seed, p.slot, tick)`; SC:3207 and CH:3758

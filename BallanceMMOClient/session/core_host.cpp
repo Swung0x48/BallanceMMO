@@ -58,6 +58,7 @@
 #endif
 
 #include <game/array_reads.hpp>
+#include <game/checkpoint_phase.hpp>
 #include <game/depth_test.hpp>
 #include <game/force_block_alias.hpp>
 #include <game/host_backend.hpp>
@@ -66,7 +67,9 @@
 #include <game/proximity_union.hpp>
 #include <game/sector_activation.hpp>
 #include <game/sector_cell_split.hpp>
+#include <game/sector_deactivate_pin.hpp>
 #include <game/sector_placement.hpp>
+#include <game/sector_reset_guard.hpp>
 #include <game/session_host_support.hpp>
 #include <game/trafo_sets.hpp>
 #include <game/tutorial_exit.hpp>
@@ -83,9 +86,10 @@
 #include <session/session_host_world.hpp>
 
 #include "core_host.hpp"
+#include "journal_files.hpp"
 #include "menu_keys.hpp"
 #include "menu_overlay.hpp"
-#include "session_journal_client.hpp"
+#include "pause_chain.hpp"
 
 namespace {
     // Step B2SX (game/sector_cell_split.hpp): the checkpoint chain's own
@@ -149,6 +153,130 @@ namespace {
     // is let go).  Resolved with the overlay, kept by the same frame guard,
     // handed back at the session's end.  File scope, as above.
     bmmo::retail::menu_key_mask core_menu_keys;
+    // FULL step LGM (R7 part one): what the core host borrowed from the
+    // legacy path's BallanceMMOClient members until now, as its own file-scope
+    // state (the legacy path keeps its own copies until LGD deletes it, and
+    // the members stay, dead on this path, until then):
+    //   * the pause chain's clock and script edits (session/pause_chain.hpp;
+    //     retail's alone - no other host has a pause menu), for
+    //     pause_clock_* / pause_scripts_*;
+    //   * N1, the retail sector resets of Gameplay_Ingame neutralized, by the
+    //     helper the headless client uses (game/sector_reset_guard.hpp), for
+    //     death_reset_*; `core_reset_failed`: its resolve was refused;
+    //   * N2, the two chains' [0][2] Set Cells pinned to 0, by the shared
+    //     helper's chain list (game/sector_deactivate_pin.hpp
+    //     pin_checkpoint_deactivation, as the headless client calls it), for
+    //     sector_deactivate_*; `core_deactivate_failed`: not both pinned;
+    //   * N4, the checkpoint chain's phase cell split
+    //     (game/checkpoint_phase.hpp), for physics_session_client.cpp's own
+    //     static behind checkpoint_phase_resolve / keep / restore;
+    //   * Gameplay_SectorManager's id for the union pacer's per-tick read (the
+    //     headless client's sector_manager_active, re-found when the id no
+    //     longer names that script), for physics_session_sector_manager_active;
+    //   * the level file's Sequencer counters (HU1 (b): game/script_state.hpp
+    //     capture_level_file_counters / restore_level_file_counters, as the
+    //     server's world and the headless client call them), recorded on the
+    //     frames after a map load like the member level_sequencers_ the legacy
+    //     anchor reads; the proximity countdowns were this file's already
+    //     (level_proximity_state);
+    //   * 'session trace on|off' and 'session rollback on|off', read at a core
+    //     session's start, for physics_session_.trace / rollback_enabled.
+    bmmo::retail::pause_chain core_pause_chain;
+    bmmo::game::sector_reset_guard core_reset_guard;
+    bool core_reset_failed = false;
+    std::vector<bmmo::game::deactivate_pin> core_deactivate_pins;
+    bool core_deactivate_failed = false;
+    bmmo::game::checkpoint_phase_split core_checkpoint_phase;
+    CK_ID core_manager_id = 0;
+    bmmo::game::sequencer_state core_level_sequencers;
+    int core_level_counter_frames = 0;
+    constexpr int kLevelCounterFrames = 30;   // the legacy capture's window (BallanceMMOClient::OnLoadObject)
+    bool core_trace = false;
+    bool core_rollback = true;
+
+    // ---- FULL step LGM: the host halves of the moved edits (the legacy
+    // members' rules and log lines, physics_session_client.cpp) ----
+
+    void core_log_line(logger_wrapper* logger, int severity, const std::string& line) {
+        if (severity >= 2) logger->Error("Physics session: %s", line.c_str());
+        else if (severity == 1) logger->Warn("Physics session: %s", line.c_str());
+        else logger->Info("Physics session: %s", line.c_str());
+    }
+
+    // N1 kept: every call site's target emptied (a deferred one only once the
+    // sector is up) and kept empty; each newly emptied one logged.
+    void core_reset_apply(CKContext* context, logger_wrapper* logger, bool sector_up) {
+        for (const std::string& chain: core_reset_guard.apply(context, sector_up)) {
+            CK_ID retail = 0;
+            for (const auto& site: core_reset_guard.sites())
+                if (site.chain == chain) { retail = site.retail; break; }
+            logger->Info("Physics session: the sector reset in %s (Execute Script -> %u) is neutralized", chain.c_str(),
+                         static_cast<unsigned>(retail));
+        }
+    }
+
+    // N1 resolved at the anchor (the legacy death_reset_resolve): both call
+    // sites or nothing, then the non-deferred one emptied at once.  The
+    // legacy resolve's own apply read the legacy session's mechanism count,
+    // which is 0 on this path: "the sector is up" is false here too.
+    bool core_reset_resolve(CKContext* context, logger_wrapper* logger) {
+        const std::string trouble = core_reset_guard.resolve(context);
+        if (!trouble.empty()) {
+            core_reset_failed = true;
+            logger->Error("Physics session: the retail sector resets were NOT neutralized (%s): a death or a level "
+                          "reset will reset this client's sector and rebuild the mechanisms' joints under the body "
+                          "guard", trouble.c_str());
+            return false;
+        }
+        core_reset_failed = false;
+        core_reset_apply(context, logger, false);
+        return true;
+    }
+
+    void core_reset_restore(CKContext* context) {
+        core_reset_guard.restore(context);
+        core_reset_failed = false;
+    }
+
+    // N2 resolved at the anchor (the legacy sector_deactivate_resolve): both
+    // chains' [0][2] Set Cells pinned to 0, in the legacy order (the
+    // checkpoint's, then the level reset's), by the shared chain list.
+    bool core_deactivate_resolve(CKContext* context, logger_wrapper* logger) {
+        std::string report;
+        int chains = 0;
+        bmmo::game::deactivate_chains(chains);
+        const int pinned = bmmo::game::pin_checkpoint_deactivation(context, report, &core_deactivate_pins);
+        core_deactivate_failed = pinned < chains;
+        if (core_deactivate_failed)
+            logger->Error("Physics session: the sector deactivation was NOT pinned in every chain (%s): such a chain "
+                          "will reset this client's sector and stop its mechanisms", report.c_str());
+        else
+            logger->Info("Physics session: the sector deactivation (Set Cell -> IngameParameter[0][2]) is pinned to 0: "
+                         "%s", report.c_str());
+        return !core_deactivate_failed;
+    }
+
+    void core_deactivate_restore(CKContext* context, logger_wrapper* logger) {
+        // Destroying a constant an input still reads would leave a dangling
+        // source behind: such an input keeps it (unpin_deactivate_cell).
+        if (const int left = bmmo::game::unpin_checkpoint_deactivation(context, core_deactivate_pins))
+            logger->Warn("Physics session: %d Value input(s) of the sector deactivation could not be handed back to "
+                         "their retail source; the session's constant is left in place", left);
+        core_deactivate_failed = false;
+    }
+
+    // Whether Gameplay_SectorManager is walking right now (the union pacer's
+    // read, once per step): the id found once and re-found whenever it no
+    // longer names a root script of that name (a level load recycles ids).
+    bool core_manager_active(CKContext* context) {
+        auto* manager = CKBehavior::Cast(core_manager_id ? context->GetObject(core_manager_id) : nullptr);
+        if (!manager || manager->GetParent() || !manager->GetName()
+                || std::strcmp(manager->GetName(), "Gameplay_SectorManager") != 0) {
+            manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
+            core_manager_id = manager ? manager->GetID() : 0;
+        }
+        return manager && manager->IsActive();
+    }
 }
 
 
@@ -300,7 +428,11 @@ namespace {
     };
     class core_mailbox {
     public:
-        static constexpr size_t kMaxSnapshots = bs::physics_session_state::kMaxQueuedSnapshots;
+        // The legacy queue's cap (physics_session_state::kMaxQueuedSnapshots,
+        // 64), the core host's own value since FULL step LGM.
+        // TODO(LGD): physics_session_state::kMaxQueuedSnapshots goes with the
+        // legacy path; until then the two must stay equal.
+        static constexpr size_t kMaxSnapshots = 64;
 
         void push(int code, const void* data, size_t size) {
             std::lock_guard lk(mutex_);
@@ -998,29 +1130,27 @@ namespace {
         return host.navigation.leaves.empty() ? 0.0f : host.navigation.leaves.front().force_value;
     }
 
-    // The next tick the world steps, when a session is running and numbered:
-    // the core's with the switch on and a core session running, the legacy
-    // state's otherwise.  The 'replay session' feed reads it at the input
-    // poll, before the step.
-    bool next_session_tick(const bs::physics_session_state& legacy, uint32_t& tick) {
+    // The next tick the world steps, when a core session is running and
+    // numbered.  The 'replay session' feed reads it at the input poll, before
+    // the step.  (FULL step LGM: the legacy session's numbering is no longer
+    // read here - a legacy session cannot start since B9DX, the server
+    // refusing a member without the core.)
+    bool next_session_tick(uint32_t& tick) {
         if (host.core && host.core->session_phase() == bs::client_core_state::phase::running) {
             if (!host.core->assigned() || host.core->holding()) return false;
             tick = host.core->next_tick();
             return true;
         }
-        if (legacy.phase != bs::physics_session_state::phase_type::running || !legacy.assigned || legacy.hold_active)
-            return false;
-        tick = legacy.tick_base + static_cast<uint32_t>(std::max<int64_t>(legacy.frames_since_anchor, 0));
-        return true;
+        return false;
     }
 
     // The tick the world stepped last (the 'net' verbs' "from tick" and
-    // their 'at <tick>'): the core's with a core session running, the legacy
-    // state's otherwise.
-    uint32_t session_tick_now(const bs::physics_session_state& legacy) {
+    // their 'at <tick>'): the core's with a core session, 0 otherwise (FULL
+    // step LGM: no legacy fallback, as above).
+    uint32_t session_tick_now() {
         if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle)
             return host.core->current_tick();
-        return legacy.current_tick();
+        return 0;
     }
 
     std::string join_flags(bool up, bool down) {
@@ -1213,7 +1343,7 @@ namespace {
     // reloads it - the pause menu's "Exit Level", then the menus' level start
     // (game/menu_driver.hpp, the automation's 'level N') - and "Go!" restarts
     // once the new load is in play and past the Sequencer capture window
-    // (capture_level_sequencers), which makes the anchor exactly the measured
+    // (core_host_capture_level_counters), which makes the anchor exactly the measured
     // path: a fresh load, then the restart.  A clean level restarts as before.
     // File-scope (BallanceMMOClient takes no member); outlives sessions.
     struct level_lifetime {
@@ -1855,16 +1985,16 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // capability `slew`, not a switch: the core amends, forces and slews
     // a SessionLead, the tick driver moves its schedule (core_host_pacer).
     bs::core_config config;
-    config.journal_checkpoint_ticks = static_cast<uint32_t>(bs::client_journal::kCheckpointTicks);
+    config.journal_checkpoint_ticks = static_cast<uint32_t>(bmmo::retail::journal_files::kCheckpointTicks);
     if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
         const long value = std::strtol(env, nullptr, 10);
-        if (value >= 1 && value <= static_cast<long>(bs::client_journal::kCheckpointTicks))
+        if (value >= 1 && value <= static_cast<long>(bmmo::retail::journal_files::kCheckpointTicks))
             config.journal_checkpoint_ticks = static_cast<uint32_t>(value);
     }
     config.journal_final_checkpoints = diag_final_checkpoints();   // FULL step RT1 diagnostics, off by default
     config.level = msg.map.level > 0 ? msg.map.level : 1;
-    config.verbose = physics_session_.trace;   // 'session trace on|off' (not reset per session)
-    config.trace = physics_session_.trace;
+    config.verbose = core_trace;   // 'session trace on|off' (not reset per session; FULL step LGM: the core host's own)
+    config.trace = core_trace;
     config.restore_recheck = true;
     config.two_pass_recheck = false;
     config.restore_impulses = true;
@@ -1879,7 +2009,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     config.savestate = true;
     config.script_diff_logs = diag_script_diff_logs(8);   // BMMO_SCRIPT_DIFF_LOGS (step EG0 diagnostics)
     config.trace_plan = diag_trace_plan();                  // BMMO_TRACE_PLAN (step EG0 diagnostics), off by default
-    config.rollback = physics_session_.rollback_enabled;   // 'session rollback on|off'
+    config.rollback = core_rollback;   // 'session rollback on|off' (FULL step LGM: the core host's own)
     config.correct = true;
     config.input_rewind = true;   // R2
     config.lifecycle_rewind = true;   // R3
@@ -2009,17 +2139,23 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
 
 // Step SP9: the reload's level is ready for the restart - the map load seen
 // since the exit, the Sequencer / proximity capture window after it passed
-// (capture_level_sequencers), the menus' request done and the level in play.
+// (core_host_capture_level_counters), the menus' request done and the level in play.
 bool BallanceMMOClient::core_host_reload_ready() {
     // No pause test: the restart opens the pause menu itself and runs from a
     // paused level as the clean path's "Go!" does (review of SP9).
-    return level_life.loaded && level_sequencers_frames_ <= 0 && !level_request_.pending() && m_bml->IsIngame()
+    return level_life.loaded && core_level_counter_frames <= 0 && !level_request_.pending() && m_bml->IsIngame()
         && gameplay_ingame_script_active()
         && clock_type::now() >= level_life.loaded_at + std::chrono::milliseconds(level_life.delay_ms);
 }
 
 // Step SP9: OnLoadObject(isMap) - a fresh level: no session ran on it.
 void BallanceMMOClient::core_host_map_loaded() {
+    // FULL step LGM (HU1 (b)): the level file's counters as loaded, recorded
+    // by core_host_capture_level_counters on the frames after this hook (the
+    // behaviours are not enumerable from it yet), the legacy capture's window.
+    core_level_sequencers.clear();
+    level_proximity_state.clear();
+    core_level_counter_frames = kLevelCounterFrames;
     // Step SP10: copies a missed exit left are recorded leftovers of the
     // previous level: released before any anchor of this one.
     // Step WG4: a proximity union still recorded here (the session's end and
@@ -2040,6 +2176,75 @@ void BallanceMMOClient::core_host_map_loaded() {
     level_life.loaded_at = clock_type::now();
     logger_->Info("Physics session %u: the reload's map load %.3f s after the exit", host.session,
                   seconds_since(level_life.started));
+}
+
+// FULL step LGM (HU1 (b)): one frame of the record window after a map load
+// (OnProcess, right after the legacy capture_level_sequencers, so both read
+// the same frame): the Sequencer counters and the proximity countdowns the
+// level file has, by the shared capture the server's world and the headless
+// client call.  The anchor restores them (core_host_anchor).
+void BallanceMMOClient::core_host_capture_level_counters() {
+    if (core_level_counter_frames <= 0) return;
+    --core_level_counter_frames;
+    bmmo::game::capture_level_file_counters(m_bml->GetCKContext(), core_level_sequencers, level_proximity_state,
+                                            [this](const std::string& line) {
+                                                logger_->Info("Physics session: %s (session core's record)", line.c_str());
+                                            });
+    if (core_level_counter_frames == 0 && core_level_sequencers.size() == 0)
+        logger_->Info("Physics session: no mechanism Sequencer in this level (session core's record)");
+}
+
+// FULL step LGM: the automation's 'pausechain' read while a core session
+// exists - the legacy line's fields (BallanceMMOClient::pause_scripts_status)
+// from the core host's own edits: whether the menu is open, whether the world
+// scripts are still active, the time factor, the mute (the core's), the pause
+// chain's entries, N1's call sites and N2's pins with what each block reads
+// now; then the ESC menu overlay's status (FULL step ESCX) once the core runs
+// the session.
+std::string BallanceMMOClient::core_host_pause_status() {
+    CKContext* context = m_bml->GetCKContext();
+    const auto active = [](CKBehavior* script) { return script && script->IsActive() ? 1 : 0; };
+    float factor = -1.0f;
+    {
+        float value = 0.0f, delta = 0.0f;
+        std::string error;
+        if (physics_view_.get_clock(value, delta, error)) factor = value;
+    }
+    std::string out = std::format(
+            "paused={} ingame_script={} events_script={} tutorial_script={} muted={} time_factor={:.6f} "
+            "entries={} failed={}",
+            m_bml->IsPaused() ? 1 : 0, active(m_bml->GetScriptByName("Gameplay_Ingame")),
+            active(m_bml->GetScriptByName("Gameplay_Events")), active(m_bml->GetScriptByName("Gameplay_Tutorial")),
+            host.input_muted ? 1 : 0, factor, core_pause_chain.scripts_count(),
+            core_pause_chain.scripts_failed() ? 1 : 0);
+    out += std::format(" death_reset={}/{} sector_keep={}/{}", core_reset_guard.count(),
+                       core_reset_failed ? "failed" : "resolved", core_deactivate_pins.size(),
+                       core_deactivate_failed ? "failed" : "resolved");
+    for (const auto& pin: core_deactivate_pins) {
+        auto* block = CKBehavior::Cast(context->GetObject(pin.block));
+        const bool set_cell = block && block->IsUsingFunction() && block->GetPrototypeName()
+                           && std::strcmp(block->GetPrototypeName(), "Set Cell") == 0;
+        CKBehavior* chain = set_cell ? block->GetParent() : nullptr;
+        int sector_value = -1;
+        if (set_cell)
+            if (CKParameterIn* input = block->GetInputParameter(pin.input))
+                if (CKParameter* param = input->GetRealSource())
+                    if (param->GetGUID() == CKPGUID_INT) param->GetValue(&sector_value);
+        out += std::format(" [{}/keep=applied/now={}]", chain && chain->GetName() ? chain->GetName() : "?",
+                           sector_value);
+    }
+    for (const auto& site: core_reset_guard.sites()) {
+        CK_ID now = 0;
+        auto* block = CKBehavior::Cast(context->GetObject(site.block));
+        if (block && block->IsUsingFunction() && block->GetPrototypeName()
+                && std::strcmp(block->GetPrototypeName(), "Execute Script") == 0)
+            if (CKParameterIn* input = block->GetInputParameter(1))
+                if (CKParameter* param = input->GetRealSource()) param->GetValue(&now);
+        out += std::format(" [{}={}/{}/now={}]", site.chain, site.retail, site.applied ? "applied" : "resolved", now);
+    }
+    out += core_pause_chain.scripts_entries(context);
+    const std::string overlay = bmmo::session::retail::menu_overlay_status(context);
+    return overlay.empty() ? out : out + " " + overlay;
 }
 
 // Step SP10 (sector placement design 2.5 "Level exit", "Orphans"): the copies
@@ -2125,11 +2330,11 @@ void BallanceMMOClient::core_host_countdown() {
 // otherwise the mailbox drained and the countdown's or the restart's checks
 // (the legacy process_physics_session).
 void BallanceMMOClient::core_host_process() {
-    // Step SP9: a legacy session running on this level makes it dirty too
-    // (it runs the union as well); read here, so the legacy path is unchanged.
-    if (physics_session_.phase == bs::physics_session_state::phase_type::running) level_life.ran_union = true;
+    // (Step SP9 also marked the level dirty here while a legacy session ran;
+    // FULL step LGM drops that read of the legacy state: a legacy session
+    // cannot start since B9DX, and a core anchor marks its own level.)
     if (!host.net_pending.empty()) {
-        const uint32_t tick = session_tick_now(physics_session_);
+        const uint32_t tick = session_tick_now();
         for (auto it = host.net_pending.begin(); it != host.net_pending.end();) {
             if (tick < it->at) { ++it; continue; }
             const auto action = *it;
@@ -2332,12 +2537,12 @@ void BallanceMMOClient::core_host_net_expire() {
     if (host.blackout_up && now >= host.blackout_up_until) {
         utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Send, 0.0f);
         host.blackout_up = false;
-        logger_->Info("Automation: net blackout (up) over at tick %u", session_tick_now(physics_session_));
+        logger_->Info("Automation: net blackout (up) over at tick %u", session_tick_now());
     }
     if (host.blackout_down && now >= host.blackout_down_until) {
         utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Recv, 0.0f);
         host.blackout_down = false;
-        logger_->Info("Automation: net blackout (down) over at tick %u", session_tick_now(physics_session_));
+        logger_->Info("Automation: net blackout (down) over at tick %u", session_tick_now());
     }
 }
 
@@ -2636,14 +2841,20 @@ void BallanceMMOClient::core_host_anchor() {
         logger_->Warn("Physics session: clock guard has no pause sensor (Gameplay_Ingame)");
     else if (!physics_view_.set_clock_guard(true, 0.001f, guard_id, pause_id, error))
         logger_->Warn("Physics session: clock guard: %s", error.c_str());
-    if (!pause_clock_resolve())
+    // The pause chain's clock and script edits (FULL step LGM: the core
+    // host's own, session/pause_chain.hpp; the legacy members' rule, order and
+    // lines).
+    const bmmo::retail::pause_chain::log_fn pause_log = [this](int severity, const std::string& line) {
+        core_log_line(logger_, severity, line);
+    };
+    if (!core_pause_chain.clock_resolve(m_bml->GetScriptByName("Event_handler"), pause_log))
         logger_->Warn("Physics session: the pause chain's time factor block was not found");
     else {
         float factor = 0.0f, delta = 0.0f;
-        if (physics_view_.get_clock(factor, delta, error)) pause_clock_apply(factor);
+        if (physics_view_.get_clock(factor, delta, error)) core_pause_chain.clock_apply(m_bml->GetCKContext(), factor);
     }
-    pause_scripts_restore();
-    pause_scripts_resolve();
+    core_pause_chain.scripts_restore(m_bml->GetCKContext());
+    core_pause_chain.scripts_resolve(m_bml->GetCKContext(), m_bml->GetScriptByName("Event_handler"), pause_log);
     // FULL step ESCX (RK3E): the rest of the vanilla pause taken out - the
     // ESC re-pause, the tutorial's stop, the points timer's (menu_overlay.hpp).
     for (const std::string& line: core_menu_overlay.resolve(m_bml->GetCKContext())) {
@@ -2665,19 +2876,25 @@ void BallanceMMOClient::core_host_anchor() {
                 logger_->Error("Physics session: ESC menu %s", line.size() > 6 ? line.c_str() + 6 : line.c_str());
         }
     }
-    death_reset_restore();
-    sector_deactivate_restore();
+    // N1, N2 (FULL step LGM: the shared helpers the headless client uses,
+    // game/sector_reset_guard.hpp and game/sector_deactivate_pin.hpp, in
+    // file-scope state), N3 and N4 handed back from a previous anchor first,
+    // then made again - the legacy order.
+    core_reset_restore(m_bml->GetCKContext());
+    core_deactivate_restore(m_bml->GetCKContext(), logger_);
     if (!core_checkpoint_hold.restore(m_bml->GetCKContext()))   // FULL step N3K
         logger_->Warn("Physics session: the Script input of activate Sektor could not be handed back to its retail "
                       "source; the session's parameter is left in place");
-    checkpoint_phase_restore();
-    const bool death_neutralized = death_reset_resolve();
-    const bool sector_neutralized = sector_deactivate_resolve();
+    if (core_checkpoint_phase.applied() && !core_checkpoint_phase.restore(m_bml->GetCKContext()))
+        logger_->Warn("Physics session: a checkpoint phase target could not be handed back to CurrentLevel; the "
+                      "session's copy is left in place");
+    const bool death_neutralized = core_reset_resolve(m_bml->GetCKContext(), logger_);
+    const bool sector_neutralized = core_deactivate_resolve(m_bml->GetCKContext(), logger_);
     if (death_neutralized && sector_neutralized)
         logger_->Info("Physics session: retail world resets neutralized: %d sector reset(s) in Gameplay_Ingame no "
                       "longer run Gameplay_SectorManager (a death and a level reset), and %d chain(s) activate a "
                       "sector without deactivating anything (a checkpoint and a level reset)",
-                      death_reset_count_, sector_deactivate_count_);
+                      static_cast<int>(core_reset_guard.count()), static_cast<int>(core_deactivate_pins.size()));
     // Sector activation as an input (N3; FULL step N3K: the shared helper):
     // the checkpoint's run of the manager is held, so it can be stamped ahead
     // and run at the stamped tick.
@@ -2693,7 +2910,18 @@ void BallanceMMOClient::core_host_anchor() {
                            "will activate a sector the moment its ball crosses the line, the server a trip later, and "
                            "the sector's mechanisms run out of phase", hold_error.c_str());
     }
-    checkpoint_phase_resolve();
+    // N4, the checkpoint chain's phase cell split (game/checkpoint_phase.hpp;
+    // FULL step LGM: the core host's own split, the legacy resolve's lines).
+    {
+        const std::string trouble = core_checkpoint_phase.apply(m_bml->GetCKContext());
+        if (trouble.empty())
+            logger_->Info("Physics session: the checkpoint chain's phase cell is split: %s",
+                          core_checkpoint_phase.describe().c_str());
+        else
+            logger_->Error("Physics session: the checkpoint chain's phase cell was NOT split (%s): a crossing 3 ticks "
+                           "after a sector pass can cancel that pass's module Physicalize on this client",
+                           trouble.c_str());
+    }
     // Step B2SX: the held chain's [0][1] write to a private cell, which the
     // core's own sector poll reads (platform poll_sector); the manager reads
     // only the union's passes.  Only where the hold is in force.
@@ -2750,12 +2978,27 @@ void BallanceMMOClient::core_host_anchor() {
             logger_->Error("Physics session: the depth test was NOT pinned (%s): the level's block runs here, refused by "
                            "the body guard", trouble.c_str());
     }
+    // The level file's counters (HU1 (b), FULL step LGM: the shared restore
+    // the server's world and the headless client call, on this host's own
+    // record; the Sequencers first, then the proximity countdowns), and the
+    // retail census the other hosts do not log: a level proximity born after
+    // the record window keeps this client's phase.
     {
-        const int restored = level_sequencers_.restore(m_bml->GetCKContext());
-        logger_->Info("Physics session: %d of %zu mechanism Sequencer counter(s) restored to the level file's (%s)",
-                      restored, level_sequencers_.size(), level_sequencers_.describe().c_str());
+        CKContext* context = m_bml->GetCKContext();
+        bmmo::game::restore_level_file_counters(context, core_level_sequencers, level_proximity_state,
+                                                [this](const std::string& line) {
+                                                    logger_->Info("Physics session: %s", line.c_str());
+                                                });
+        int unrecorded = 0, other_owner = 0;
+        std::string other_names;
+        level_proximity_state.census(context, unrecorded, other_owner, &other_names);
+        logger_->Info("Physics session: proximity countdowns: %d not a level object's, left alone (%s)", other_owner,
+                      other_names.c_str());
+        if (unrecorded > 0)
+            logger_->Warn("Physics session: %d level proximity countdown(s) appeared after the record window and keep "
+                          "this client's phase (the engine records on every load tick): this level needs a longer "
+                          "window", unrecorded);
     }
-    proximity_countdowns_restore();
     // Step SP10 (sector placement design 2.3, 2.4): after the Sequencer and
     // proximity restores (a copy inherits its source's level-file counters),
     // before the hash, the selection and every pass.  The core decides
@@ -2969,9 +3212,11 @@ void BallanceMMOClient::core_host_frame() {
         if (guard_id && pause_id) physics_view_.set_clock_guard(true, 0.001f, guard_id, pause_id, error);
         {
             float factor = 0.0f, delta = 0.0f;
-            if (physics_view_.get_clock(factor, delta, error)) pause_clock_apply(factor);
+            if (physics_view_.get_clock(factor, delta, error)) core_pause_chain.clock_apply(m_bml->GetCKContext(), factor);
         }
-        pause_scripts_apply();
+        core_pause_chain.scripts_apply(m_bml->GetCKContext(), [this](int severity, const std::string& line) {
+            core_log_line(logger_, severity, line);
+        });
         // FULL step ESCX (RK3E): the overlay kept; while the menu is open
         // (the mute's own test below) the ESC block's Key State is held.
         core_menu_overlay.apply(m_bml->GetCKContext(), m_bml->IsIngame() && m_bml->IsPaused());
@@ -3069,8 +3314,8 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
         ++level_life.abandoned;
     }
     std::string error;
-    pause_clock_restore();
-    pause_scripts_restore();
+    core_pause_chain.clock_restore(m_bml->GetCKContext());   // FULL step LGM: the core host's own edits
+    core_pause_chain.scripts_restore(m_bml->GetCKContext());
     logger_->Info("Physics session: ESC menu overlay at the end: %s",
                   core_menu_overlay.status(m_bml->GetCKContext()).c_str());
     // FULL step ESCX: handed back; with the menu open the ESC hold stays
@@ -3082,12 +3327,14 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     if (core_menu_keys.end(m_bml->GetCKContext()))
         logger_->Info("Physics session: ESC menu keys: the session ended with the menu open or a key held across its "
                       "close; the level's key-reading blocks read no key until both are over");
-    death_reset_restore();
-    sector_deactivate_restore();
+    core_reset_restore(m_bml->GetCKContext());   // FULL step LGM: N1, N2 and N4 the core host's own
+    core_deactivate_restore(m_bml->GetCKContext(), logger_);
     if (!core_checkpoint_hold.restore(m_bml->GetCKContext()))   // FULL step N3K
         logger_->Warn("Physics session: the Script input of activate Sektor could not be handed back to its retail "
                       "source; the session's parameter is left in place");
-    checkpoint_phase_restore();
+    if (core_checkpoint_phase.applied() && !core_checkpoint_phase.restore(m_bml->GetCKContext()))
+        logger_->Warn("Physics session: a checkpoint phase target could not be handed back to CurrentLevel; the "
+                      "session's copy is left in place");
     if (!core_chain_cell.restore(m_bml->GetCKContext()))   // step B2SX
         logger_->Warn("Physics session: the checkpoint chain's sector cell could not be handed back to IngameParameter; "
                       "the session's copy is left in place");
@@ -3315,7 +3562,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         return physics_view_.list_bodies();
     };
     p.sector_manager_active = [this]() {
-        const bool active = physics_session_sector_manager_active();
+        const bool active = core_manager_active(m_bml->GetCKContext());   // FULL step LGM: the core host's own read
         if (core_manager_trace_due) {   // step RT2: the live pass's read only
             core_manager_trace_due = false;
             logger_->Info("Physics session: sector manager: tick %u %s", core_manager_trace_tick,
@@ -3535,13 +3782,17 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // N1-N3 kept neutralized, and N4's split kept (design 1.3 step 4; the
     // clock guard and the pause edits stay host code at the top of the frame).
     p.script_guards = [this](uint32_t, bool resolved) {
-        death_reset_apply(resolved);
-        sector_deactivate_apply();
+        // N1 and N2 kept (FULL step LGM: the shared helpers the headless
+        // client's guard keeps them with, in the core host's own state).
+        core_reset_apply(m_bml->GetCKContext(), logger_, resolved);
+        if (const int again = bmmo::game::repin_checkpoint_deactivation(m_bml->GetCKContext(), core_deactivate_pins))
+            logger_->Info("Physics session: the chains' sector deactivation: %d input(s) handed back were re-pinned to 0",
+                          again);
         // N3 kept (FULL step N3K: the shared helper's keep, the legacy
         // sector_activate_apply's rule and line).
         if (core_checkpoint_hold.keep(m_bml->GetCKContext()))
             logger_->Info("Physics session: the checkpoint's sector activation in activate Sektor was held again");
-        if (const int again = checkpoint_phase_keep())
+        if (const int again = core_checkpoint_phase.keep(m_bml->GetCKContext()))   // N4 (FULL step LGM: CH's own split)
             logger_->Info("Physics session: the checkpoint chain's phase cell: %d target(s) handed back to "
                           "CurrentLevel were moved to the copy again", again);
         if (core_chain_cell.keep(m_bml->GetCKContext()))   // step B2SX
@@ -4257,11 +4508,11 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         // Step IOX: no file-system call on the game thread - the directory is
         // created and the old journals pruned by the journal's writer strand,
         // just before it creates this file (journal_prepare below).
-        return bs::client_journal::directory()
-             / bs::client_journal::file_name(header.session, header.level, header.own_player);
+        return bmmo::retail::journal_files::directory()
+             / bmmo::retail::journal_files::file_name(header.session, header.level, header.own_player);
     };
     p.journal_prepare = [](const std::filesystem::path& directory) {
-        bs::client_journal::prune(directory, bs::client_journal::kKeepFiles - 1);
+        bmmo::retail::journal_files::prune(directory, bmmo::retail::journal_files::kKeepFiles - 1);
     };
 
     // ---- reports and hooks ----
@@ -4425,6 +4676,13 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     std::istringstream args(rest);
     std::string what, value;
     args >> what >> value;
+    // FULL step LGM: 'session trace on|off' and 'session rollback on|off', the
+    // core host's own settings (read at each core session's start; not reset
+    // per session).  The automation sets the legacy state's copies too.
+    if ((what == "trace" || what == "rollback") && (value == "on" || value == "off")) {
+        (what == "trace" ? core_trace : core_rollback) = value == "on";
+        return "ok session " + what + " " + value;
+    }
     if (what == "core") {
         if (value == "on" || value == "off") {
             const bool on = value == "on";
@@ -4616,7 +4874,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         // rebases, which a session answers with a resync (either path).
         const long ms = std::strtol(value.c_str(), nullptr, 10);
         if (ms <= 0 || ms > 10000) return "error usage: session stall <ms> (1..10000)";
-        const uint32_t before = session_tick_now(physics_session_);
+        const uint32_t before = session_tick_now();
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         logger_->Info("Automation: the game thread stalled %ld ms at tick %u", ms, before);
         return std::format("ok stalled {} ms at tick {}", ms, before);
@@ -4718,7 +4976,7 @@ std::string BallanceMMOClient::core_host_net_verb(const std::string& rest) {
         if (at >= 0) {
             host.net_pending.push_back({lag, ms, up, down, static_cast<uint32_t>(at)});
             return std::format("ok net {} {} ms ({}) armed for tick {} (now {})", what, ms, join_flags(up, down), at,
-                               session_tick_now(physics_session_));
+                               session_tick_now());
         }
     }
     if (what == "lag") {
@@ -4729,7 +4987,7 @@ std::string BallanceMMOClient::core_host_net_verb(const std::string& rest) {
         if (!ok) return "error GNS refused the fake lag";
         if (up) host.lag_up_ms = value;
         if (down) host.lag_down_ms = value;
-        const uint32_t tick = session_tick_now(physics_session_);
+        const uint32_t tick = session_tick_now();
         logger_->Info("Automation: net lag %d ms (%s) from tick %u", value, join_flags(up, down).c_str(), tick);
         return std::format("ok net lag {} ms ({}) from tick {}: up {} ms, down {} ms", value, join_flags(up, down), tick,
                            host.lag_up_ms, host.lag_down_ms);
@@ -4758,7 +5016,7 @@ std::string BallanceMMOClient::core_host_net_verb(const std::string& rest) {
                                   &timeout, &size) == k_ESteamNetworkingGetConfigValue_OK
                 && timeout > 0 && ms >= timeout)
             warning = std::format(" - at least GNS's connected timeout ({} ms): the connection will drop", timeout);
-        const uint32_t tick = session_tick_now(physics_session_);
+        const uint32_t tick = session_tick_now();
         logger_->Info("Automation: net blackout %ld ms (%s) from tick %u%s", ms, join_flags(up, down).c_str(), tick,
                       warning.c_str());
         return std::format("ok net blackout {} ms ({}) from tick {}{}", ms, join_flags(up, down), tick, warning);
@@ -4809,9 +5067,8 @@ void BallanceMMOClient::core_host_feed_replay_keys(unsigned char* state) {
     auto& r = host.replay;
     if (!r.armed) return;
     uint32_t tick = 0;
-    if (!next_session_tick(physics_session_, tick)) {
-        if (r.started && physics_session_.phase != bs::physics_session_state::phase_type::running
-                && host.phase != retail_host::phase_type::running) {
+    if (!next_session_tick(tick)) {
+        if (r.started && host.phase != retail_host::phase_type::running) {   // FULL step LGM: the core's phase alone
             r.armed = false;
             logger_->Info("Automation: replay session: the session ended after %llu frames",
                           static_cast<unsigned long long>(r.fed));
@@ -5190,10 +5447,57 @@ bool BallanceMMOClient::core_host_sector(int sector, std::string& answer) {
     return true;
 }
 
-// 'journal off|mark' with a core session: the core's journal (design 1.2).
+// The 'journal' verb with the switch on or a core session: the core's journal
+// (design 1.2).  FULL step LGM: every action is answered here - 'status' and
+// 'on' too, which fell to the legacy black box before - so the verb reaches
+// the legacy singleton only with the switch off and no core session.  The
+// verb and the BML property Gameplay/SessionJournal are one setting, read
+// once at each session start.
 bool BallanceMMOClient::core_host_journal(const std::string& action, const std::string& text, std::string& answer) {
-    if (host.phase == retail_host::phase_type::idle || !host.core) return false;
+    const bool session = host.phase != retail_host::phase_type::idle && host.core;
+    if (!session && !core_on.load()) return false;
+    const bool property = config_manager_["session_journal"]->GetBoolean();
+    if (!session) {
+        // No core session: nothing is open; the setting is the property.
+        if (action.empty() || action == "status") {
+            answer = std::format("ok journal={} recording=0 (no session journal is open; session core)",
+                                 property ? "on" : "off");
+            return true;
+        }
+        if (action == "on" || action == "off") {
+            config_manager_["session_journal"]->SetBoolean(action == "on");
+            answer = action == "on" ? "ok journal on (SessionJournal=true), recording starts with the next session"
+                                    : "ok journal off (SessionJournal=false), nothing was being recorded";
+            return true;
+        }
+        if (action == "mark") {
+            answer = text.empty() ? "error usage: journal mark <text>" : "error no session journal is open";
+            return true;
+        }
+        answer = "error usage: journal on|off|status|mark <text>";
+        return true;
+    }
     auto& journal = host.core->journal();
+    if (action.empty() || action == "status") {
+        auto& writer = journal.writer();
+        if (!writer.is_open())
+            answer = std::format("ok journal={} recording=0 (no session journal is open; session core)",
+                                 property ? "on" : "off");
+        else
+            answer = std::format("ok journal={} recording={} capped={} bytes={} path={} (session core)",
+                                 property ? "on" : "off", journal.journalling() ? 1 : 0, writer.capped() ? 1 : 0,
+                                 writer.bytes(), writer.path().string());
+        return true;
+    }
+    if (action == "on") {
+        // The property is the setting: nothing can be opened mid-session (the
+        // header needs the anchor, which is long past).
+        config_manager_["session_journal"]->SetBoolean(true);
+        answer = journal.journalling()
+                       ? "ok journal on (SessionJournal=true), already recording to " + journal.writer().path().string()
+                       : "ok journal on (SessionJournal=true), recording starts with the next session";
+        return true;
+    }
     if (action == "mark") {
         if (text.empty()) { answer = "error usage: journal mark <text>"; return true; }
         if (!journal.journalling()) { answer = "error no session journal is open"; return true; }
@@ -5211,7 +5515,8 @@ bool BallanceMMOClient::core_host_journal(const std::string& action, const std::
                      : "ok journal off (SessionJournal=false), nothing was being recorded";
         return true;
     }
-    return false;
+    answer = "error usage: journal on|off|status|mark <text>";
+    return true;
 }
 
 // The 'session' verb and the /mmo session line while a core session runs:

@@ -367,11 +367,13 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
                 || rest.rfind("hold", 0) == 0       // FULL step AHN (and R6H's hold-event)
                 || rest.rfind("force-own-move", 0) == 0)   // FULL step R6H
             return core_host_session_verb(rest);
-        if (rest == "trace on") { physics_session_.trace = true; physics_session_.rollback.set_verbose(true); return "ok session trace on"; }
-        if (rest == "trace off") { physics_session_.trace = false; physics_session_.rollback.set_verbose(false); return "ok session trace off"; }
-        if (rest == "rollback on") { physics_session_.rollback_enabled = true; return "ok session rollback on"; }
-        if (rest == "rollback off") { physics_session_.rollback_enabled = false; return "ok session rollback off"; }
-        return "ok " + physics_session_status_text();
+        // FULL step LGM: the core host answers trace / rollback (its own settings, read at a core session's
+        // start); the legacy state keeps its copies until LGD.
+        if (rest == "trace on") { physics_session_.trace = true; physics_session_.rollback.set_verbose(true); return core_host_session_verb(rest); }
+        if (rest == "trace off") { physics_session_.trace = false; physics_session_.rollback.set_verbose(false); return core_host_session_verb(rest); }
+        if (rest == "rollback on") { physics_session_.rollback_enabled = true; return core_host_session_verb(rest); }
+        if (rest == "rollback off") { physics_session_.rollback_enabled = false; return core_host_session_verb(rest); }
+        return "ok " + (core_host_running() ? core_host_status_text() : physics_session_status_text());
     }
     if (verb == "journal") {
         // The session black box (session/session_journal_client.hpp).  The verb
@@ -382,6 +384,9 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // it wants the recording to stop now (the menu tick never touches a
         // running session).  "mark" is the one a player uses: it leaves a note
         // and a body checkpoint at the tick where something looked wrong.
+        // FULL step LGM: with the switch on (or a core session) core_host_journal
+        // answers every action from the session core's journal; this legacy
+        // singleton answers only with the switch off.
         auto& journal = bmmo::session::client_journal::instance();
         std::istringstream args(rest);
         std::string action;
@@ -389,9 +394,10 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         std::string text;
         std::getline(args, text);
         if (!text.empty() && text.front() == ' ') text.erase(0, 1);
-        if (action.empty() || action == "status") return "ok " + journal.status();
-        // A session the shared core runs writes the core's journal (R1).
+        // The session core's journal (R1; FULL step LGM: every action, status and on included, with the
+        // switch on or a core session); the legacy black box below only with the switch off.
         if (std::string answer; core_host_journal(action, text, answer)) return answer;
+        if (action.empty() || action == "status") return "ok " + journal.status();
         if (action == "on") {
             journal.set_enabled(true);
             // The property is the setting: the next session start reads it
@@ -465,7 +471,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
             status_->toggle();
             return std::string("ok panel ") + (ping_->visible_ ? "shown" : "hidden");
         }
-        return "ok " + physics_session_overlay_text();
+        return "ok " + (core_host_running() ? core_host_overlay_text() : physics_session_overlay_text());   // FULL step LGM
     }
     if (verb == "screenshot") {
         auto* render_context = m_bml->GetRenderContext();
@@ -483,6 +489,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         // and every entry's now=0 is a block whose target the session emptied.
         // FULL step ESCX: a core session adds its own mute and the ESC menu
         // overlay (session/menu_overlay.hpp).
+        // FULL step LGM: the core host's own edits while a core session exists (core_host_pause_status).
+        if (core_host_running()) return "ok " + core_host_pause_status();
         const std::string overlay = bmmo::session::retail::menu_overlay_status(m_bml->GetCKContext());
         return "ok " + pause_scripts_status() + (overlay.empty() ? "" : " " + overlay);
     }

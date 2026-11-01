@@ -442,9 +442,8 @@ void BallanceMMOClient::physics_session_countdown() {
 }
 
 void BallanceMMOClient::physics_session_end_local(const std::string& reason) {
-    // A session the shared core runs ends the same way (the level left, the
-    // connection lost; session/core_host.cpp, R1): nothing when there is none.
-    core_host_end_local(reason);
+    // (A session the shared core runs is ended by the callers first since FULL
+    // step LGM: core_host_end_local, session/core_host.cpp.)
     auto& s = physics_session_;
     std::string error;
     pause_clock_restore();
@@ -2733,16 +2732,15 @@ std::string BallanceMMOClient::physics_session_report_beam(const std::string& en
 
 // ---------------------------------------------------------------- BML hooks
 
-void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity, float mass,
-                                      const char* collGroup, CKBOOL startFrozen, CKBOOL enableColl, CKBOOL calcMassCenter,
-                                      float linearDamp, float rotDamp, const char* collSurface, VxVector massCenter,
-                                      int convexCnt, CKMesh** convexMesh, int ballCnt, VxVector* ballCenter,
-                                      float* ballRadius, int concaveCnt, CKMesh** concaveMesh) {
-    // A session the shared core runs (session/core_host.cpp, step R1).
-    if (core_host_on_physicalize(target, fixed, friction, elasticity, mass, collGroup, startFrozen, enableColl,
-                                 calcMassCenter, linearDamp, rotDamp, collSurface, massCenter, convexCnt, convexMesh,
-                                 ballCnt, ballCenter, ballRadius, concaveCnt, concaveMesh))
-        return;
+// The legacy half of the BML hook OnPhysicalize (FULL step LGM: the hook itself
+// is BallanceMMOClient.cpp's, which asks core_host_on_physicalize first).
+void BallanceMMOClient::physics_session_on_physicalize(CK3dEntity* target, CKBOOL fixed, float friction,
+                                                       float elasticity, float mass, const char* collGroup,
+                                                       CKBOOL startFrozen, CKBOOL enableColl, CKBOOL calcMassCenter,
+                                                       float linearDamp, float rotDamp, const char* collSurface,
+                                                       VxVector massCenter, int convexCnt, CKMesh** convexMesh,
+                                                       int ballCnt, VxVector* ballCenter, float* ballRadius,
+                                                       int concaveCnt, CKMesh** concaveMesh) {
     auto& s = physics_session_;
     if (s.phase != phase_type::running || !target) return;
     // Every birth, the own ball's included (recorded again below with its
@@ -2919,8 +2917,8 @@ void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float fr
                   event.rotation[5], event.rotation[6], event.rotation[7], event.rotation[8]);
 }
 
-void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
-    if (core_host_on_unphysicalize(target)) return;   // a session the shared core runs (R1)
+// The legacy half of the BML hook OnUnphysicalize (FULL step LGM, as above).
+void BallanceMMOClient::physics_session_on_unphysicalize(CK3dEntity* target) {
     auto& s = physics_session_;
     if (s.phase != phase_type::running || !target) return;
     CK3dObject* ball = get_current_ball();
@@ -2938,7 +2936,8 @@ void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
 }
 
 void BallanceMMOClient::physics_session_on_sector(int sector, bool checkpoint) {
-    if (core_host_on_sector(sector, checkpoint)) return;   // a session the shared core runs (R1)
+    // (A session the shared core runs takes the hook first since FULL step LGM:
+    // on_sector_changed calls core_host_on_sector.)
     auto& s = physics_session_;
     if (s.phase != phase_type::running) return;
     // A crossed checkpoint with the chain's manager run held (N3): the
@@ -3015,7 +3014,7 @@ void BallanceMMOClient::physics_session_run_sector(int sector, uint32_t tick, co
 }
 
 void BallanceMMOClient::physics_session_on_finish() {
-    if (core_host_on_finish()) return;   // a session the shared core runs (R1)
+    // (A core session's: OnLevelFinish calls core_host_on_finish first since FULL step LGM.)
     auto& s = physics_session_;
     if (s.phase != phase_type::running) return;
     bmmo::session_event_msg event;
@@ -3547,7 +3546,7 @@ float BallanceMMOClient::physics_session_ball_force(uint8_t ball_type) const {
 // worth watching live rather than in a log: how far the relay is behind, and
 // whether the corrections are converging.
 std::string BallanceMMOClient::physics_session_overlay_text() {
-    if (core_host_running()) return core_host_overlay_text();   // a session the shared core runs (R1)
+    // (A core session's block: the callers ask core_host_overlay_text since FULL step LGM.)
     auto& s = physics_session_;
     if (s.phase == phase_type::idle) return {};
     const char* phase = "idle";
@@ -3587,7 +3586,7 @@ std::string BallanceMMOClient::physics_session_overlay_text() {
 }
 
 std::string BallanceMMOClient::physics_session_status_text() {
-    if (core_host_running()) return core_host_status_text();   // a session the shared core runs (R1)
+    // (A core session's line: the callers ask core_host_status_text since FULL step LGM.)
     auto& s = physics_session_;
     const char* phase = "idle";
     switch (s.phase) {

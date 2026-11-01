@@ -2364,7 +2364,8 @@ logged as an error and left out, the others still apply):
 The own ball's neutral input while the menu is open was already built
 (`host.input_muted`, core_host.cpp, recorded as `paused` frames with keys 0)
 and is unchanged. The automation's `pausechain` gains, in a core session,
-`core_muted=` (the core's mute; the line's `muted=` is the legacy path's)
+`core_muted=` (the core's mute; the line's `muted=` is the legacy path's - since FULL step LGM the
+line of a core session is the core host's own, `muted=` the core's too)
 and the overlay line (`esc`, `esc_state`, `esc_writes`, `openings`,
 `tutorial=k/n`, `timer=k/n` re-pointed).
 

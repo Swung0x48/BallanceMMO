@@ -8096,3 +8096,110 @@ capability does not start moving own births at once.
   hold `held` at every mark, so the control would show the same (as the
   headless `rGHF` replay did); and a retail crossing in the frame of the
   reset, which neither host has been driven into.
+
+**As built (step LGM, 2026-11-01): R7 part one - the retail core host borrows nothing of the legacy path.** Before
+the legacy retail session can be deleted (LGD), every piece of it the core host (CH, session/core_host.cpp) still
+called or read moved onto a shared helper or into CH's own file-scope state; the legacy path (PSC,
+session/physics_session_client.cpp) keeps its own copies, unchanged in behaviour, until LGD deletes it. No
+BallanceMMOClient data member was added (methods only); no BallanceMMOCommon file changed, so the headless client
+and the server are byte-identical (wire check below).
+- **N1, the retail sector resets (death and level reset).** CH runs `bmmo::game::sector_reset_guard`
+  (game/sector_reset_guard.hpp, the headless client's helper, SC:1995) in the static `core_reset_guard`:
+  `core_reset_resolve` at the anchor (both call sites or nothing, the legacy refusal line), `core_reset_apply` from
+  `script_guards` with the core's `resolved` (the deferred Init Ingame site only once the sector is up),
+  `core_reset_restore` at the anchor's pre-restore and the session's end. The legacy resolve's own first apply read
+  the legacy session's mechanism count (0 on the core path), so CH applies with "the sector is up" false there, as
+  before. Same log lines ("the sector reset in <chain> (Execute Script -> <id>) is neutralized"). Differences from
+  PSC's copy, none reached on a real level: the shared walk finds Gameplay_Ingame as a root script
+  (`find_root_script`) where PSC asked BML's `GetScriptByName`, and it has no 4-entry table limit.
+- **N2, the chains' [0][2] deactivation.** CH pins with game/sector_deactivate_pin.hpp
+  `pin_checkpoint_deactivation` / `repin_checkpoint_deactivation` / `unpin_checkpoint_deactivation` (the headless
+  client's calls) into the static `core_deactivate_pins`, in the legacy order (activate Sektor, then reset Level);
+  `core_deactivate_failed` when fewer than both are pinned. The pin itself was already the shared one (B2SW); the
+  difference is the lookup (`find_root_script` + `find_direct_child` against BML's `GetScriptByName` +
+  `ScriptHelper::FindFirstBB` without hierarchy, both direct children) and the log: one line naming both chains'
+  outcome ("is pinned to 0: Gameplay_Events/activate Sektor: pinned; Event_handler/reset Level: pinned") and one
+  count line on a re-pin, where PSC logs one line per chain.
+- **N4, the checkpoint chain's phase cell.** CH's own `checkpoint_phase_split` static (`core_checkpoint_phase`;
+  PSC keeps its file-scope one): apply at the anchor, `keep()` in `script_guards`, restore at the anchor's
+  pre-restore and the end, the legacy lines.
+- **The pause chain (clock and scripts).** Retail's alone (no other host has a pause menu), so no shared helper:
+  session/pause_chain.hpp `bmmo::retail::pause_chain`, the legacy `pause_clock_*` / `pause_scripts_*` rules,
+  checks (a recorded block re-resolved by prototype, parent chain, input type and size) and lines moved as they are,
+  in the static `core_pause_chain`. The `pausechain` verb answers from it while a core session exists
+  (`core_host_pause_status`: the legacy line's fields, `muted=` now the core's mute, N1's sites and N2's pins with
+  what each block reads now, then ESCX's overlay status).
+- **The manager-active read** (the union pacer's, once per step): `core_manager_active`, the manager's id found once
+  and re-found when it no longer names a root script `Gameplay_SectorManager` (the headless client caches it the
+  same way, SC:1883; PSC scanned every behavior each tick).
+- **The level file's counters (HU1 (b)).** CH records them itself: `core_host_capture_level_counters`, called from
+  OnProcess right after the legacy `capture_level_sequencers` (the same frame), runs the shared
+  `capture_level_file_counters` into its static `core_level_sequencers` and the proximity record CH owned already
+  (`level_proximity_state`) for the 30 frames `core_host_map_loaded` opens; the anchor calls the shared
+  `restore_level_file_counters` and then logs the retail census the other hosts do not (level proximities born after
+  the window, owners outside the level), which the legacy restore logged. `core_host_reload_ready` waits on CH's
+  window. The member `level_sequencers_` / `level_sequencers_frames_` are the legacy anchor's alone now.
+- **The journal files, the mailbox cap, trace / rollback.** session/journal_files.hpp (`kCheckpointTicks` 660,
+  `kKeepFiles` 10, `directory`, `file_name`, `prune`: the legacy black box's statics, same values and names)
+  replaces CH's use of session_journal_client.hpp, whose include CH dropped; the mailbox's snapshot cap is CH's own
+  64 (the legacy `kMaxQueuedSnapshots`); `session trace|rollback on|off` set CH's `core_trace` / `core_rollback`
+  through `core_host_session_verb` (the automation still sets the legacy state's copies), read at a core
+  session's start where `physics_session_.trace` / `rollback_enabled` were read.
+- **The legacy state reads dropped from CH.** `session_tick_now()` / `next_session_tick()` read the core alone (0 /
+  false without a core session) - the `net ... at <tick>` arming, the `net` and `stall` log ticks and the `replay
+  session` feed lose their legacy-session fallback; SP9's "a running legacy session marks the level dirty" read is
+  gone (a legacy session cannot start since B9DX). One read stays: `session core on|off` refuses while a legacy
+  session runs (core_host.cpp:4696, `core_host_session_verb`); it goes with the switch at LGD.
+- **The entry points.** The mod asks the core host first at each call site and the legacy function only when it
+  declines; the forwarding inside the PSC functions is gone: the checkpoint hook (`on_sector_changed`,
+  BallanceMMOClient.cpp:354 `core_host_on_sector` else `physics_session_on_sector`), the level exit and the
+  disconnect (`core_host_end_local` then `physics_session_end_local`, BallanceMMOClient.cpp:431,
+  BallanceMMOClient.h:1487), the level finish (:735), `/mmo room session` (:1202), the F3 panel
+  (BallanceMMOClient.h:421) and the automation's `session` / `panel` / `pausechain`. The BML hooks `OnPhysicalize` /
+  `OnUnphysicalize` (not in the plan's census; they lived in PSC) are BallanceMMOClient.cpp dispatchers now (:364,
+  :378): `core_host_on_physicalize` / `core_host_on_unphysicalize`, else the legacy halves, renamed
+  `physics_session_on_physicalize` / `physics_session_on_unphysicalize`, bodies unchanged. The `journal` verb asks
+  `core_host_journal` before anything else, and that answers every action (status, on, off, mark) whenever the switch
+  is on or a core session exists (status in a session: recording, capped, bytes, path of the core's journal); the
+  legacy black box answers only with the switch off. `sector` and `beam` were the core's first already
+  (`core_host_sector`'s by-hand fallback without the hold is the designed one). `room_client.cpp:222`'s PlayerLeft
+  asks `core_host_leave_player` first (unchanged); `update_current_sector` reads the legacy phase OR the core's
+  (unchanged; LGD drops the first half).
+- **SLG and audit D7.** SLG (0a99124a) had already narrowed the hook: with the chain's [0][1] split and the hold in
+  force (`core_host_own_sector_from_stamps`), a checkpoint returns before the hook reports anything, and the core's
+  poll stamps the crossing; so `core_host_on_sector` now sees non-checkpoint reports (the level start, the counter)
+  and, only when the split or the hold failed at the anchor, a checkpoint - D7's "stamps first only then". D7's
+  cleanup is the legacy branch alone, isolated in `physics_session_on_sector` for LGD; `core_host_on_sector` stays.
+- **Each host's anchor order after the move (D5 / HU1 (d), written down, not unified).** CH: hull templates, trafo
+  quiesce (`trafo_anchor`), session clock reset, clock guard, pause clock, pause scripts, ESC overlay, ESC keys; N1,
+  N2, N3, N4 handed back; N1 resolve, N2 pin, N3 hold, N4 split, chain cell split, tutorial exit, tutorial hold,
+  depth test; level counters (+ census); placement; hash; collision filter; selection (+ proximity rewiring);
+  `core.anchor`. SC: hull templates, session clock reset, level counters, placement, hash, collision filter,
+  selection (+ proximity rewiring); N1 resolve, N3 hold, N2 pin, depth test, N4 split, chain cell split, tutorial
+  exit, tutorial hold. LGM moved implementations in place and kept CH's order.
+- **Dead on the core path, left for LGD:** the members `pause_clock_`, `pause_scripts_*`, `death_reset_*`,
+  `sector_deactivate_*`, `sector_activate_*` (N3K), `level_sequencers_` / `level_sequencers_frames_` (still written
+  by the legacy capture), `physics_session_.trace` / `rollback_enabled` (still written by the automation); PSC's
+  methods behind them, `pause_scripts_status`, `physics_session_sector_manager_active`, `capture_level_sequencers`,
+  `proximity_countdowns_restore`, session_journal_client.* (read by PSC, the SessionJournal property callback and the
+  legacy `journal` branch only).
+- **Verified.** x86 CLIENT-BUILD-OK, DEPS-OK; x64 BUILD-OK, DEPS-OK; unit tests 747/747; GCC syntax 33/33; wire check
+  `rOCK -> rLGM` on core_ref_s14 (the default since CMAP, not the plan's s13) ALL SAME: 44 sends SAME, 44 journals
+  IDENTICAL. Retail, two copies, the Arch server of this tree (snapshots off): (1) L11 with a mid-session `restart`
+  (N3K's recipe plus the verbs, work/LGM/lgm_retail.py, scripts/retail/lgm_l11_restart): every FINAL row bit-equal on
+  both copies (own 1/1, mirror 1/1, mechanisms 54/54 over 12453 rows, the sandbags and the 666 ticks after the reset at
+  tick 296 included; the own ball back at 556), the server journal replays 955/955, 0 resyncs; `pausechain` after the reset shows Init Ingame's site
+  emptied (`activate Scripts=31597/applied/now=0`) and both N2 pins at 0; `journal status|mark|on`, `sector 3` and the
+  stamped `beam` answered "(session core)"; the sector 2 crossing and sector 3 ran at 641 / 696 on both copies; n3:
+  manager_unpassed=2 handed_back=0 rehold_count=0 (N3K's numbers). (2) The L11 ctl session (`rtr_retail.py arm
+  lgm_ctl 0:0 0:0`): mechanisms 23/23 bit-equal, the unequal own / mirror / piece rows rotation only (<= 3.07e-8, the
+  FINAL-row x87 read RTR recorded; positions exact), server journal 2576/2576, 0 resyncs; the anchor's held / pinned /
+  neutralized / emptied lines the same as `rtr_ctl`'s (N2's two lines now one). Its trafo pieces were 19/49 bit-equal
+  against `rtr_ctl`'s 22/49 (first divergence piece12@460 / piece01@462 against piece01@460), all rotation only at 0 m;
+  that is one run per build, not a measured spread - LGM touches no trafo code - and a repeat ctl pair (old and new
+  build) is queued for the FULL batch to settle it. (3) The arena (`r3_retail.py arena`,
+  run again with BMMO_JOURNAL_FINAL_CHECKPOINTS=1 as lgm_arena2: two trafos, two death-zone deaths and respawns, the
+  stamped beams): mechanisms 23/23 bit-equal over 16619 rows, own / mirror rotation only (<= 3.63e-8), the server
+  journal 2592/2592 (SimTool with `--map` the arena file), 0 resyncs; the clients' 17 local Ball_Stone pieces are
+  client-only rows because r3's server runs trafo_inputs off. The slot-13 hack was not needed (retired at CMAP: the
+  arena is a custom map).

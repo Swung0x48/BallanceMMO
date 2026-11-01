@@ -417,7 +417,8 @@ private:
 				connection_half = ping_text_;
 			}
 		}
-		const std::string text = connection_half + physics_session_overlay_text();
+		// FULL step LGM: a core session's block from the core host, the legacy path's otherwise.
+		const std::string text = connection_half + (core_host_running() ? core_host_overlay_text() : physics_session_overlay_text());
 		if (text == shown) return;
 		if (ping_->update(text, false)) {
 			shown = text;
@@ -761,6 +762,14 @@ private:
 	void physics_session_log_correction(const std::string& name, uint32_t tick, double error, const char* action);
 	void physics_session_on_sector(int sector, bool checkpoint);
 	void physics_session_on_finish();
+	// FULL step LGM: the legacy halves of the BML hooks OnPhysicalize / OnUnphysicalize (BallanceMMOClient.cpp asks
+	// the core host first).  Methods only: this class takes no new data member.
+	void physics_session_on_physicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity, float mass,
+	                                    const char* collGroup, CKBOOL startFrozen, CKBOOL enableColl, CKBOOL calcMassCenter,
+	                                    float linearDamp, float rotDamp, const char* collSurface, VxVector massCenter,
+	                                    int convexCnt, CKMesh** convexMesh, int ballCnt, VxVector* ballCenter,
+	                                    float* ballRadius, int concaveCnt, CKMesh** concaveMesh);
+	void physics_session_on_unphysicalize(CK3dEntity* target);
 	std::string physics_session_status_text();
 	std::string physics_session_overlay_text();
 	// The retail host of the shared session-client core (session/core_host.cpp,
@@ -825,6 +834,10 @@ private:
 	void core_host_map_loaded();   // OnLoadObject(isMap): a fresh level (the flag cleared)
 	bool core_host_reload_exit();   // OnPostExitLevel: the exit is the reload's own (the session goes on)
 	void core_host_release_placement(const char* why);   // step SP10: the copies released (level exit, map load)
+	// FULL step LGM: the level file's counters recorded on the frames after a map load (HU1 (b)), and the
+	// 'pausechain' read from the core host's own edits.
+	void core_host_capture_level_counters();
+	std::string core_host_pause_status();
 	CKDataArray* current_level_array() {
 		return current_level_array_ ? static_cast<CKDataArray*>(m_bml->GetCKContext()->GetObject(current_level_array_)) : nullptr;
 	}
@@ -1471,6 +1484,7 @@ private:
 		// `down` means the game itself is going away, and we are already on
 		// the game thread, so run_on_game_thread() executes this inline.
 		utils_.run_on_game_thread([this, down] {
+			core_host_end_local("disconnected");   // FULL step LGM: the core host's session first, then the legacy one
 			physics_session_end_local("disconnected");
 			toggle_own_spirit_ball(false);
 			objects_.destroy_all_objects();

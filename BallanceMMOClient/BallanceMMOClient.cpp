@@ -349,12 +349,36 @@ void BallanceMMOClient::on_sector_changed(bool checkpoint, bool own_cell) {
     if (!update_current_sector()) return;
     max_sector_ = std::max(current_sector_.load(), max_sector_.load());
     if (connected()) send_current_sector();
-    physics_session_on_sector(current_sector_, checkpoint);
+    // FULL step LGM: the checkpoint hook routed straight to the core host (audit D7: with the split in
+    // force a checkpoint never gets here, see above); the legacy branch only without a core session.
+    if (!core_host_on_sector(current_sector_, checkpoint)) physics_session_on_sector(current_sector_, checkpoint);
     if (current_level_mode_ != bmmo::level_mode::Highscore) return;
     extra_life_received_ = false;
 }
 
 void BallanceMMOClient::OnPostCheckpointReached() { on_sector_changed(true); }
+
+// The BML physicalization hooks (FULL step LGM: moved here from
+// session/physics_session_client.cpp): a session the shared core runs takes
+// them (session/core_host.cpp, step R1), the legacy path's halves otherwise.
+void BallanceMMOClient::OnPhysicalize(CK3dEntity* target, CKBOOL fixed, float friction, float elasticity, float mass,
+                                      const char* collGroup, CKBOOL startFrozen, CKBOOL enableColl, CKBOOL calcMassCenter,
+                                      float linearDamp, float rotDamp, const char* collSurface, VxVector massCenter,
+                                      int convexCnt, CKMesh** convexMesh, int ballCnt, VxVector* ballCenter,
+                                      float* ballRadius, int concaveCnt, CKMesh** concaveMesh) {
+    if (core_host_on_physicalize(target, fixed, friction, elasticity, mass, collGroup, startFrozen, enableColl,
+                                 calcMassCenter, linearDamp, rotDamp, collSurface, massCenter, convexCnt, convexMesh,
+                                 ballCnt, ballCenter, ballRadius, concaveCnt, concaveMesh))
+        return;
+    physics_session_on_physicalize(target, fixed, friction, elasticity, mass, collGroup, startFrozen, enableColl,
+                                   calcMassCenter, linearDamp, rotDamp, collSurface, massCenter, convexCnt, convexMesh,
+                                   ballCnt, ballCenter, ballRadius, concaveCnt, concaveMesh);
+}
+
+void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
+    if (core_host_on_unphysicalize(target)) return;
+    physics_session_on_unphysicalize(target);
+}
 
 // Design 9.26: the frames right after a map load, until the level's mechanism
 // Sequencers have been seen once (their counters are the file's until the
@@ -403,7 +427,10 @@ void BallanceMMOClient::proximity_countdowns_restore() {
 void BallanceMMOClient::OnPostExitLevel() {
     // Step SP9: a core session's own reload (its countdown on a level that ran
     // a session) leaves the level and goes on; any other exit ends a session.
-    if (!core_host_reload_exit()) physics_session_end_local("left the level");
+    if (!core_host_reload_exit()) {
+        core_host_end_local("left the level");   // FULL step LGM: the core host's session first, then the legacy one
+        physics_session_end_local("left the level");
+    }
     core_host_release_placement("the level exit");   // step SP10: the sector placement's copies go with the level
     // The guard's callback hangs on a level script, so the teardown destroys it
     // with the script; disabling it here hands the time factor back anyway.
@@ -506,6 +533,7 @@ void BallanceMMOClient::OnPostStartMenu()
 
 void BallanceMMOClient::OnProcess() {
     capture_level_sequencers();
+    core_host_capture_level_counters();   // FULL step LGM (HU1 (b)): the core host's own record, the same frame
     process_command_file();
     fixed_tick_.on_process(m_bml, core_host_pacer());
     process_physics_session();
@@ -704,7 +732,7 @@ void BallanceMMOClient::update_compensation_lives_label() {
 
 // may give wrong values of extra points
 void BallanceMMOClient::OnLevelFinish() {
-    physics_session_on_finish();
+    if (!core_host_on_finish()) physics_session_on_finish();   // FULL step LGM: the core host's session first
     if (!connected() || spectator_mode_)
         return;
 
@@ -1171,7 +1199,7 @@ void BallanceMMOClient::init_commands() {
             if (msg.target == k_HSteamNetConnection_Invalid) { SendIngameMessage(std::format("Error: player \"{}\" not found.", w), bmmo::ansi::BrightRed); return; }
         }
         else if (sub == "close") { msg.action = bmmo::room::action::Close; }
-        else if (sub == "session") { SendIngameMessage(physics_session_status_text()); return; }
+        else if (sub == "session") { SendIngameMessage(core_host_running() ? core_host_status_text() : physics_session_status_text()); return; }
         else { SendIngameMessage(std::format("Error: unknown room subcommand \"{}\". Try list|create|join|leave|ready|start|kick|close|status|session.", sub), bmmo::ansi::BrightRed); return; }
         pending.action = msg.action;
         msg.serialize();

@@ -279,7 +279,12 @@ numbers 1-10 are unchanged.
        (`BallanceMMOClient::capture_level_sequencers` /
        `proximity_countdowns_restore`): shared with the legacy path, which
        gets nothing new, and it logs a census the headless hosts do not -
-       onto the helper at R7 when the legacy path goes; (c) the placement's
+       onto the helper at R7 when the legacy path goes - **done for the core
+       path at FULL step LGM**: the core host records with
+       `capture_level_file_counters` (its own Sequencer record, the same frames
+       as the legacy capture) and restores with `restore_level_file_counters`,
+       then logs the retail census itself; the legacy pair stays the legacy
+       anchor's until LGD deletes it; (c) the placement's
        release - **done at SP10**: `game/sector_placement.hpp`
        `release_placement(placement, context, why, log)`, called by PW's
        destructor (no log), SC's `release_placement` and CH's
