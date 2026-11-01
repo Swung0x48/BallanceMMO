@@ -355,6 +355,35 @@ namespace bmmo::session {
         };
         union_rederivation rederive_;
         bool last_rewind_rederived_ = false;   // read by the host's live-cells guard (adopt mode)
+        // Step SRT3 (realtime-design 4 a1): the late lifecycle events of
+        // one drain, rewound for once (flush_life_rewinds) instead of one
+        // rewind each.  `collecting` only while pre_step drains; `pending`
+        // once an event inside the reach joined; `anchor` the lowest of
+        // their stamps - 1; `players` the players with an event in it (an
+        // Unphysicalize of one of them, or an event that would not join,
+        // flushes it first: those read what the earlier events' replay
+        // left); `checks` the births and deaths whose "the replay did not
+        // reach it" fallback runs after the rewind, in the drain's order.
+        struct life_rewind_batch {
+            struct check {
+                uint32_t player = 0, stamp = 0, origin = 0;
+                bool death = false;
+                bool had_body = false;   // a death: apply_event's note of the removal follows it
+                std::string entity;
+            };
+            bool collecting = false;
+            bool pending = false;
+            uint32_t anchor = 0;
+            uint32_t events = 0;
+            std::string reason;
+            std::set<uint32_t> players;
+            std::vector<check> checks;
+        };
+        life_rewind_batch life_batch_;
+        // Late lifecycle events that rode along in another event's rewind
+        // (SRT3), and remote input corrections a lifecycle rewind already
+        // replayed (dropped instead of replayed again).
+        uint64_t life_events_coalesced_ = 0, input_rewinds_carried_ = 0;
         // Sector rewinds made and missed (a resync each), and the live passes
         // a re-derivation did not reproduce at their tick (moved or forgotten).
         uint64_t sector_rewinds_ = 0, sector_rewinds_missed_ = 0, sector_rewind_depth_ = 0;
@@ -1856,6 +1885,9 @@ namespace bmmo::session {
         // Another rewind from `anchor` carried a waiting own-only replay
         // (any anchor when `server_rows`): dropped instead of run.
         void drop_carried_own_replay(uint32_t anchor, bool server_rows);
+        // Step SRT3: the frame's lifecycle rewind from `anchor` replayed a
+        // pending input correction already (any kind): dropped.
+        void drop_carried_input_replay(uint32_t anchor);
         // The newest relay header is of our own epoch (the status line).
         bool held_header_current() const {
             return s.held_header_known_ && s.held_header_epoch_ == s.tick_base_;
@@ -1995,8 +2027,22 @@ namespace bmmo::session {
         void journal_member_lives();
         void apply_event(const bmmo::session_event_msg& event);
         void make_remote_birth(const bmmo::session_event_msg& event);
-        void rewind_for_lifecycle(const bmmo::session_event_msg& event);
-        void rewind_for_lifecycle(uint32_t player, uint32_t event_tick);
+        // True when the event's rewind joined the frame's batch (step SRT3:
+        // it runs in flush_life_rewinds, and the caller's "the replay did
+        // not reach it" fallback with it).
+        bool rewind_for_lifecycle(const bmmo::session_event_msg& event);
+        bool rewind_for_lifecycle(uint32_t player, uint32_t event_tick);
+        // Step SRT3: a late lifecycle event stamped `event_tick` would join
+        // the frame's batch (collecting, late, past the exact resync's
+        // anchor, inside the history and the standard reach - the two
+        // refusals rollback_engine::rewind_to makes with no reach).
+        bool joins_life_batch(uint32_t event_tick) const;
+        // Step SRT3: the drain's next event of `player` (an Unphysicalize
+        // when `death`) reads what the batch's replay would have left, or
+        // would not join it: the batch rewinds first.
+        void settle_life_batch_before(uint32_t player, uint32_t stamp, bool death);
+        // Step SRT3: the batch's one rewind, then each event's fallback.
+        void flush_life_rewinds();
         bool unphysicalize_remote(uint32_t player, uint32_t tick);
         // Step DX11 (J4): a remote's death applied with its rewind - a late
         // one inside the history removed in the replay at its stamp (the

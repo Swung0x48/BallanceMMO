@@ -470,6 +470,8 @@ namespace bmmo::session {
         s.resync_join_ = false;   // step A5
         s.life_log_.clear();
         s.pending_deaths_.clear();
+        s.life_batch_ = client_core_state::life_rewind_batch{};   // step SRT3
+        s.life_events_coalesced_ = s.input_rewinds_carried_ = 0;
         // R1: the retail policies' and readers' state, and no frame
         // prepared (post_step refuses one no pre_step of this session made).
         s.own_last_birth_ = {};

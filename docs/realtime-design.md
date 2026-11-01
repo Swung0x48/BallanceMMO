@@ -6,7 +6,8 @@ this step are kept as a patch (`.local-tools/work/SRT/srt_diag.patch`, with `srt
 the user**: the target's exact terms (section 6, T1-T4) and the approach (section 5).
 **Answered (2026-10-31)** and in progress: Q1 "你决定" (the orchestrator set the target: hard T2' no two consecutive
 renders skipped, T3, T4; T1 reported), Q2 "先a看看" (the cost cuts first, f2 not built: measure, then the user
-decides). Built: SRT1 (f1, the catch-up renders; "As built (step SRT1)" below).
+decides). Built: SRT1 (f1, the catch-up renders; "As built (step SRT1)" below), SRT3 (a1, one lifecycle rewind per
+frame; "As built (step SRT3)" below).
 
 The request (2026-10-30), verbatim: "在全链（所有队列里的任务）最后加一个优化任务，要让这套引擎的运行严格实时", and
 its purpose: "其实目的是让玩家能感知不到回滚导致的卡顿发生。另外，因为这台开发机性能远高于平均水平的玩家，所以即使达成了
@@ -440,3 +441,84 @@ this step's census tools (`srt_diag.patch` re-applied) on the E-core layout of s
   bodies). The row's "<= 2 ms a tick through the windows" does not name its statistic; measured with (a): p50
   2.12-2.19, p99 3.43-3.77, max 2.5-3.2 ms for the blob alone. Which statistic is the target is set with the
   user's answer above.
+
+## As built (step SRT3, a1: one rewind per frame)
+
+- **Code** (shared core only; no protocol, journal, engine or server change): `client_core_frame.cpp` `pre_step` drains
+  with `s.life_batch_.collecting` set and calls `flush_life_rewinds()` right after the drain, where the last of the
+  sequential rewinds used to run (before the own echoes, an exact resync's apply, the Sector rewind and the input
+  replay). `client_core_lifecycle.cpp`: `rewind_for_lifecycle` returns whether the event joined the batch
+  (`joins_life_batch`: collecting, late, past a pending exact resync's anchor, its anchor recorded and inside the
+  standard reach - exactly the two refusals `rollback_engine::rewind_to` makes with no reach, so a joined event can
+  never be refused by the batch's rewind, and a deep one is refused alone as before); the batch keeps the lowest
+  anchor, the reasons, the players, and the "the replay did not reach it" fallbacks of `make_remote_birth` /
+  `remove_remote` (`checks`), which `flush_life_rewinds` runs after its one rewind (a frozen world only). Counters:
+  `life=` counts real rewinds; the new status section ` coalesced: life=N input=M` (only when non-zero) counts the
+  events that rode along and the input replays carried.
+- **Where the batch rewinds early** (`settle_life_batch_before`): before an Unphysicalize of a player that has an
+  event in the batch (it reads the mirror's body and entity, which that event's replay changes - a P then U of one
+  player in one drain), and before any lifecycle event that will not join (applied live or refused between rewinds
+  that ran before and after it). A Physicalize that joins reads nothing a replay changes (queued for the replay), so
+  a beam pair's U and P and every other player's events stay in one rewind - the measured L12 tick-521 frame (three
+  beam pairs, six rewinds) is one.
+- **The input replay carried** (`client_core_held.cpp` `drop_carried_input_replay`, beside DX's
+  `drop_carried_own_replay`): an input correction pending at the flush whose earliest tick the lifecycle anchor
+  subsumes (`replay_subsumes`) was replayed by that rewind already - the relayed frame is in its ring from arrival,
+  an own substituted frame amended in its record - so it is dropped, counted as carried (`window_inrew_src_` still
+  names its source). Not merged (each keeps its rewind, as before): a late Sector set (its re-derivation starts at
+  its own anchor; after the lifecycle replay, as before), an own echo's moved birth (`move_own_birth`), an exact
+  resync's apply, and an input correction older than the lifecycle anchor. In the measured sets no frame held two.
+- **Adaptations.** (1) The life log's remote Unphysicalize entry gets its generation at the apply, not after its own
+  replay (the field is read for own lives only). (2) **The pass rule's replays need `--replay-free-cost-clock`**
+  (B5RC's flag): a capture records each rewind's three cost clock reads (`rewind_start`, `rewind_replay`,
+  `rewind_end`) in order, so a strict replay by a coalescing build diverges at the first coalesced frame by
+  construction ("expected a clock read at journal_ms, the capture has one at rewind_start"; every core_ref_s13 arm
+  at the start pile, srt_E_l12x_on2 at 230). Those reads decide only the reach's cap; the journals below are
+  IDENTICAL with them free, so no cap decision moved. (3) `.local-tools/wire_check.sh`'s coverage test accepts a
+  free-clock replay's last line when the client log shows the capture's end marker. **From SRT3 on, core_ref_s13
+  (and every older set, and any capture of a pre-SRT3 binary) is replayed with `EXTRA=--replay-free-cost-clock` on
+  both sides** when OLD and NEW are both SRT3 or later (`NEW_EXTRA=` alone when OLD predates SRT3): a strict replay
+  is COVERAGE-SHORT on both sides by construction (`wire_check.sh`'s header says so). Until a later REF step
+  re-captures the set with an SRT3-or-later binary (queued: core_ref_s14), these replays do not cross-check the
+  cost-based reach cap.
+- **Review fix (gate round).** The batch's early flush (`settle_life_batch_before`) runs at the top of `apply_event`,
+  before the event is journalled and logged (`log_life`), not inside the Unphysicalize branch after it: flushed after
+  `log_life`, the rewind's reconcile (`reconcile_remote_lives`) would find the not-yet-applied death (no entity yet)
+  in its player's window and queue it as a reconciled death - a window [P0, U1, P1, U2] with U2 flushing - so the
+  replay would remove the mirror, `note_life_skipped` would then mark U2 skipped and a second rewind follow, leaving
+  a life log the sequential path never wrote. The sequential path ran the earlier events' rewinds before the event
+  was logged; the flush now does too. The calls in `remove_remote` / `make_remote_birth` stay (no-ops then; the
+  overtaken birth's `remove_remote` still flushes the birth that just joined, as its own rewind ran then). Not
+  exercised by the measured sets (their journals were IDENTICAL before the fix). A carried input correction does
+  not count in `resync_window_rewinds_`: that counter counts input rewinds that ran past the standard reach, and a
+  carried one runs none.
+- **Checks** (x64 BUILD-OK, `build-agent-rSRT3`; x86 CLIENT-BUILD-OK, `#deps` VALID; GCC `linux_test_syntax.sh` 33/33
+  ok; `BallanceMMOMessageTests` 724/724):
+  - `cpu_full/srt_E_l12x_on2` replayed by rSRT3 (free clock): 4/4 journals **IDENTICAL** to the live ones (rSRT2,
+    same flag: 4/4 IDENTICAL). Client 0: rollbacks 25 -> 15, one "6 late events taken by one rewind to tick 500"
+    (`rollback to tick 500 (...6 reasons...), re-simulated 21 ticks`), `coalesced: life=8 input=2`.
+  - HL run 16's three arms (`hl_full/r16_l11_cross`, `r16_swing_s0`, `r16_swing_s1`, 10 % loss): 12/12 journals
+    IDENTICAL to the live ones; rollbacks per client 13-19 -> 8-13 (l11), 38-64 -> 29-55 (swing); 5-7 events
+    coalesced and 2-7 input replays carried per swing client.
+  - The wire check on core_ref_s13 (`NEW_EXTRA=--replay-free-cost-clock wire_check.sh - rSRT3 rSRT3wf rSRT3w_old`):
+    44/44 sends SAME, 45/45 journals IDENTICAL (fan_dr's rejoin included), 44/44 replays to the end marker. A strict
+    run first: every arm COVERAGE-SHORT at its first coalesced frame (above). solo1 / solo2 strict: IDENTICAL.
+  - **The frame** (the census tools: `srt_diag.patch` applied to this tree for `build-agent-rSRT3d`, reverted and
+    rebuilt; `work/SRT3/e_pair.sh`: the four `srt_E_l12x_on2` captures at once, each pinned to E-cores of its own,
+    free clock; `SRT/census.py`), same host, one binary at a time, SRT's diag build `rSRTd` as before:
+
+    | | rewind frames (with > 1 rewind) | rewinds | replayed ticks | max rewind frame per client (ms) | max one-rewind frame (ms) | restore per rewind |
+    |---|---|---|---|---|---|---|
+    | before (rSRTd) | 54 (21) | 88 | 1958 | 301.5 / 197.3 / 204.4 / 195.7 (tick 521, 4-6 rewinds, d 84-126) | 66.9 / 70.5 / 76.6 / 66.6 | 3.44 ms |
+    | after (rSRT3d) | 54 (**0**) | 54 | 1237 | **75.9 / 77.7 / 79.8 / 74.9** (one rewind, d 21-22) | the same | 2.55 ms |
+
+    Every rewind frame holds one rewind, so the max frame of a rewind is one rewind's time (the pass clause). Per
+    replayed tick 1.93 -> 2.08 ms (capture 1.37 -> 1.42; SRT4's cut). The largest frames of the replay are not
+    rewinds: tick 230 (82-136 ms wall with 9-10 ms of thread CPU in the first pair: the thread waiting, "host" in
+    the census; the old build 55-58 ms wall with 9-12 ms CPU). A second pair (`old2` / `new2`) has 9-10 ms wall
+    there on every client of both builds, with the max rewind frame 73.0-78.2 ms (new) and 195.8-299.5 ms (old)
+    again: noise of four processes starting at once, not session work.
+- **Not run (deferred to SRTJ, which measures live E-core sessions and retail anyway):** a live E-core headless
+  session (the Arch server would first need rebuilding from HEAD; the replays above run the same client code over
+  the captured inbound stream, deterministically); the retail two-copy session the plan section's header names (its
+  pass list asks an x86 compile, done).

@@ -383,15 +383,15 @@ namespace bmmo::session {
     // no snapshots" never came).  As the late Sector path: not while a
     // resync is pending (its state covers it) and not for a stamp at or
     // before this numbering's first tick (a late joiner's catch-up).
-    void session_client_core::rewind_for_lifecycle(const bmmo::session_event_msg& event) {
-        rewind_for_lifecycle(event.player, event.tick);
+    bool session_client_core::rewind_for_lifecycle(const bmmo::session_event_msg& event) {
+        return rewind_for_lifecycle(event.player, event.tick);
     }
-    void session_client_core::rewind_for_lifecycle(uint32_t player, uint32_t event_tick) {
+    bool session_client_core::rewind_for_lifecycle(uint32_t player, uint32_t event_tick) {
         // lifecycle_rewind off (R1, retail until R3): the change stays where
         // the drain made it, at the live tick.
-        if (!config.rollback || !config.lifecycle_rewind || event_tick == 0) return;
+        if (!config.rollback || !config.lifecycle_rewind || event_tick == 0) return false;
         const uint32_t now = current_tick();
-        if (static_cast<int32_t>(event_tick - now) > 0) return;   // not late: nothing to replay
+        if (static_cast<int32_t>(event_tick - now) > 0) return false;   // not late: nothing to replay
         // Step A3 (resync design 2.6.2): a late change before the synthetic
         // anchor of a pending exact resync - the ticks (R, base - 1] the
         // stall never ran, drained at base - is covered by the server's
@@ -399,30 +399,137 @@ namespace bmmo::session {
         if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(event_tick - s.resync_base_) < 0) {
             logf("lifecycle event of %u stamped tick %u precedes the resync's anchor %u: the server's state covers it", player,
                  event_tick, s.resync_base_ - 1);
-            return;
+            return false;
+        }
+        const std::string reason = "ball of " + std::to_string(player) + " born at tick "
+                                 + std::to_string(event_tick);
+        // Step SRT3 (realtime-design 4 a1): inside the drain, an event the
+        // rewind would take joins the frame's batch - one restore to the
+        // lowest anchor and one replay for all of them (flush_life_rewinds).
+        // The last of N sequential rewinds replayed with every event known
+        // already (the reconcile queues the window's logged events at each
+        // restore), so the N - 1 before it only cost.  One that would be
+        // refused is never batched (apply_event flushed the batch before it:
+        // settle_life_batch_before) and is refused below as before.
+        if (joins_life_batch(event_tick)) {
+            auto& b = s.life_batch_;
+            const uint32_t anchor = event_tick - 1;
+            if (!b.pending || static_cast<int32_t>(anchor - b.anchor) < 0) b.anchor = anchor;
+            b.reason += (b.pending ? "; " : "") + reason;
+            b.pending = true;
+            ++b.events;
+            b.players.insert(player);
+            return true;
         }
         auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
             return recorded_input_at(entity, tick, out);
         };
-        const std::string reason = "ball of " + std::to_string(player) + " born at tick "
-                                 + std::to_string(event_tick);
         const scope_guard keep_cells = keep_live_cells();
         if (rewind_world(event_tick - 1, now, input_at, reason)) {
             ++s.life_rewinds_;
             s.life_rewind_depth_ += now - (event_tick - 1);
             drop_carried_own_replay(event_tick - 1, false);
-            return;
+            return false;
         }
         ++s.life_rewinds_missed_;
         if (s.resync_pending_ || static_cast<int32_t>(event_tick - s.tick_base_) <= 0) {
             logf("lifecycle event of %u stamped tick %u is outside the rollback history at local tick %u: "
                  "applied live, %s", player, event_tick, now,
                  s.resync_pending_ ? "the pending resync covers it" : "before this numbering");
-            return;
+            return false;
         }
         logf("lifecycle event of %u stamped tick %u is outside the rollback history at local tick %u: "
              "applied live, resync", player, event_tick, now);
         request_resync("a late lifecycle event beyond the reach", true);
+        return false;
+    }
+
+    bool session_client_core::joins_life_batch(uint32_t event_tick) const {
+        if (!s.life_batch_.collecting || !config.rollback || !config.lifecycle_rewind || event_tick == 0) return false;
+        const uint32_t now = current_tick();
+        if (static_cast<int32_t>(event_tick - now) > 0) return false;
+        if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(event_tick - s.resync_base_) < 0) return false;
+        const uint32_t anchor = event_tick - 1;
+        return s.rollback_.knows_tick(anchor) && now - anchor <= s.rollback_.thresholds().max_resim_ticks;
+    }
+
+    // Step SRT3: before the drain applies an event of `player` stamped
+    // `stamp`, the batch rewinds when the sequential path would have had
+    // its replay run first and the event reads what it left: an
+    // Unphysicalize of a player with an event in the batch (it reads the
+    // mirror's body and entity, which that replay changes), and any
+    // lifecycle event that will not join the batch (applied live, or
+    // refused and resynced, between rewinds that ran before and after it).
+    // A Physicalize that joins reads nothing a replay changes (it is queued
+    // for the replay), so a beam pair's Unphysicalize and Physicalize, and
+    // every other player's events, stay in one rewind.
+    void session_client_core::settle_life_batch_before(uint32_t player, uint32_t stamp, bool death) {
+        const auto& b = s.life_batch_;
+        if (!b.collecting || !b.pending) return;
+        if ((death && b.players.count(player)) || !joins_life_batch(stamp)) flush_life_rewinds();
+    }
+
+    // Step SRT3: the batch's one rewind (rewind_for_lifecycle's, from the
+    // lowest anchor), then the fallbacks make_remote_birth and
+    // remove_remote ran after each event's own rewind: a birth or death the
+    // replay did not apply (a frozen world sets the bodies and replays
+    // nothing) is applied live now, in the drain's order.
+    void session_client_core::flush_life_rewinds() {
+        if (!s.life_batch_.pending) return;
+        client_core_state::life_rewind_batch batch;
+        std::swap(batch, s.life_batch_);
+        s.life_batch_.collecting = batch.collecting;
+        const uint32_t now = current_tick();
+        auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
+            return recorded_input_at(entity, tick, out);
+        };
+        bool rolled = false;
+        {
+            const scope_guard keep_cells = keep_live_cells();
+            rolled = rewind_world(batch.anchor, now, input_at, batch.reason);
+            if (rolled) {
+                ++s.life_rewinds_;
+                s.life_rewind_depth_ += now - batch.anchor;
+                drop_carried_own_replay(batch.anchor, false);
+                // A remote's input correction from at or after the anchor
+                // + 1 was in the rings this replay read (the relay's frames
+                // land there on arrival): replayed already, not again.
+                drop_carried_input_replay(batch.anchor);
+            }
+        }
+        if (batch.events > 1) {
+            s.life_events_coalesced_ += batch.events - 1;
+            logf("lifecycle: %u late events taken by one rewind to tick %u%s", batch.events, batch.anchor,
+                 rolled ? "" : " (refused)");
+        }
+        for (const auto& c: batch.checks) {
+            if (!c.death) {
+                for (auto it = s.pending_births_.begin(); it != s.pending_births_.end();)
+                    if (it->player == c.player) {
+                        logf("remote physicalize of %u: the replay did not reach tick %u, made live", c.player, c.stamp);
+                        physicalize_remote(*it, live_first_tick(c.stamp));
+                        it = s.pending_births_.erase(it);
+                    } else ++it;
+                continue;
+            }
+            for (auto it = s.pending_deaths_.begin(); it != s.pending_deaths_.end(); ++it)
+                if (it->player == c.player && it->tick == c.stamp && !it->reconciled) {
+                    s.pending_deaths_.erase(it);
+                    logf("remote unphysicalize of %u: the replay did not reach tick %u, removed live", c.player, c.stamp);
+                    unphysicalize_remote(c.player, c.stamp);
+                    if (c.had_body)
+                        note_life_made(c.player, bmmo::session::event_type::Unphysicalize, c.stamp, c.origin, c.entity,
+                                       live_first_tick(c.stamp));
+                    break;
+                }
+        }
+        if (rolled) return;
+        // Not reachable after joins_life_batch (rewind_to refuses only the
+        // two cases it tests), kept as rewind_for_lifecycle's miss path.
+        s.life_rewinds_missed_ += batch.events;
+        logf("lifecycle: the rewind to tick %u for %u late event(s) was refused at local tick %u: applied live, %s",
+             batch.anchor, batch.events, now, s.resync_pending_ ? "the pending resync covers them" : "resync");
+        if (!s.resync_pending_) request_resync("a late lifecycle event beyond the reach", true);
     }
 
     // ------------------------------------------------------------ events
@@ -458,6 +565,9 @@ namespace bmmo::session {
     // before.
     bool session_client_core::remove_remote(uint32_t player, uint32_t stamp, uint32_t origin, bool& replayed) {
         replayed = false;
+        // Step SRT3: it reads the mirror's body, which an earlier event of
+        // this player in the batch changes in its replay.
+        settle_life_batch_before(player, stamp, true);
         const auto remote = s.remotes_.find(player);
         if (remote == s.remotes_.end()) return false;
         const uint32_t now = current_tick();
@@ -468,7 +578,20 @@ namespace bmmo::session {
             death.tick = stamp;
             death.origin = origin;
             s.pending_deaths_.push_back(death);
-            rewind_for_lifecycle(player, stamp);
+            if (rewind_for_lifecycle(player, stamp)) {
+                // Step SRT3: in the frame's batch - the fallback below runs
+                // after its one rewind (flush_life_rewinds); joined, the
+                // rewind replays past the stamp (a frozen world aside).
+                client_core_state::life_rewind_batch::check c;
+                c.player = player;
+                c.stamp = stamp;
+                c.origin = origin;
+                c.death = true;
+                c.entity = remote->second.entity;
+                s.life_batch_.checks.push_back(c);
+                replayed = true;
+                return true;
+            }
             replayed = true;
             for (auto it = s.pending_deaths_.begin(); it != s.pending_deaths_.end(); ++it)
                 if (it->player == player && it->tick == stamp && !it->reconciled) {
@@ -496,11 +619,23 @@ namespace bmmo::session {
     // ball knocked 0.8 m back at the first replay and 11-17 m from the
     // server's through the start pile).
     void session_client_core::make_remote_birth(const bmmo::session_event_msg& event) {
+        // Step SRT3: a birth that will not join the frame's batch is made or
+        // refused after the batch's rewind, as after the earlier events' own.
+        settle_life_batch_before(event.player, event.tick, false);
         const uint32_t now = current_tick();
         if (config.rollback && config.lifecycle_rewind && event.tick != 0 && static_cast<int32_t>(event.tick - now) <= 0
                 && s.rollback_.knows_tick(event.tick - 1)) {
             s.pending_births_.push_back(pending_birth::of(event));
-            rewind_for_lifecycle(event);
+            if (rewind_for_lifecycle(event)) {
+                // Step SRT3: the fallback below runs after the batch's
+                // rewind (flush_life_rewinds).
+                client_core_state::life_rewind_batch::check c;
+                c.player = event.player;
+                c.stamp = event.tick;
+                c.origin = event.origin_tick;
+                s.life_batch_.checks.push_back(c);
+                return;
+            }
             // The replay made it at its tick; if it did not get that
             // far, make it now.
             for (auto it = s.pending_births_.begin(); it != s.pending_births_.end();)
@@ -520,6 +655,15 @@ namespace bmmo::session {
 
     void session_client_core::apply_event(const bmmo::session_event_msg& event) {
         if (event.player == 0 || event.player == s.own_id_) return;
+        // Step SRT3 (review finding 1): the batch's rewind, when this event
+        // needs it run first (settle_life_batch_before), runs before the
+        // event is logged - as the sequential path's rewinds of the earlier
+        // events did.  After log_life, the flushing rewind's reconcile would
+        // read this not-yet-applied event (no entity) in its player's window
+        // and queue it.  The later calls in remove_remote / make_remote_birth
+        // find the batch settled already (or the event joining).
+        if (event.type == bmmo::session::event_type::Physicalize || event.type == bmmo::session::event_type::Unphysicalize)
+            settle_life_batch_before(event.player, event.tick, event.type == bmmo::session::event_type::Unphysicalize);
         journal_.lifecycle_event(event.player, event);
         // Step A3: the remote lifecycle by applied tick (life_log_).
         if (event.type == bmmo::session::event_type::Physicalize || event.type == bmmo::session::event_type::Unphysicalize)
@@ -634,6 +778,9 @@ namespace bmmo::session {
                     !fresh && static_cast<int32_t>(event.origin_tick - death->second.origin) > 0)
                 death->second = applied_death{event.origin_tick, event.tick};
             {
+                // Step SRT3: the body and entity read below are what an
+                // earlier event of this player in the frame's batch leaves.
+                settle_life_batch_before(event.player, event.tick, true);
                 const auto remote = s.remotes_.find(event.player);
                 if (remote == s.remotes_.end()) {
                     note_life_skipped(event.player, event.type, event.tick, event.origin_tick);
@@ -652,9 +799,21 @@ namespace bmmo::session {
                 else note_life_made(event.player, event.type, event.tick, event.origin_tick, entity, live_first_tick(event.tick));
                 bool replayed = false;
                 remove_remote(event.player, event.tick, event.origin_tick, replayed);
-                if (had_body)
+                if (had_body) {
+                    // Step SRT3: in the frame's batch `replayed` is the
+                    // promise of its rewind (the stamp is inside it); its
+                    // fallback notes the live tick again if the replay did
+                    // not get there.  (The entry's generation is read for
+                    // own lives only; a remote's is the value now.)
                     note_life_made(event.player, event.type, event.tick, event.origin_tick, entity,
                                    replayed ? event.tick : live_first_tick(event.tick));
+                    auto& checks = s.life_batch_.checks;
+                    if (replayed && s.life_batch_.pending && !checks.empty() && checks.back().death
+                            && checks.back().player == event.player && checks.back().stamp == event.tick) {
+                        checks.back().had_body = true;
+                        checks.back().entity = entity;
+                    }
+                }
             }
             break;
         }

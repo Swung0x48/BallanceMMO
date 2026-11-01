@@ -540,7 +540,14 @@ namespace bmmo::session {
         // This tick's events first - a relayed Sector event stamped for it
         // among them - then the union's pass, then the step: the order the
         // server's session_runner::step keeps.
+        // Step SRT3 (realtime-design 4 a1): the drain's late lifecycle
+        // events share one rewind (rewind_for_lifecycle joins them,
+        // flush_life_rewinds runs it right after the drain - where the last
+        // of their rewinds ran before, ahead of everything below).
+        s.life_batch_.collecting = true;
         drain_due_events(frame_tick);
+        s.life_batch_.collecting = false;
+        flush_life_rewinds();
         // Step A3: a mirror an exact resync made from its row at S whose
         // death the old numbering applied past the re-step (Delta > 0) dies
         // again at its tick here, live (the replay drains the others).

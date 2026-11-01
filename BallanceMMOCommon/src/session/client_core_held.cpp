@@ -619,6 +619,32 @@ namespace bmmo::session {
         drop_pending_rewind();
     }
 
+    // Step SRT3 (realtime-design 4 a1): the frame's lifecycle rewind
+    // replayed from `anchor` with every input correction noted before it -
+    // a remote's corrected frame is in its ring from its arrival, our own
+    // substituted frames are amended in their records - so a pending input
+    // replay whose earliest tick it subsumes would replay the same frames
+    // from a later anchor: dropped, counted as carried (inrew counts the
+    // replays that ran).  Corrections noted after the flush set the pending
+    // replay again and run in replay_corrected_inputs as before.
+    void session_client_core::drop_carried_input_replay(uint32_t anchor) {
+        if (!s.input_rewind_pending_ || !bmmo::session::replay_subsumes(anchor, s.input_rewind_tick_)) return;
+        const bool own = s.input_rewind_own_;
+        const bool has_own = s.input_rewind_has_own_ || own;
+        const bool has_remote = !s.input_rewind_entities_.empty() || !own;
+        if (has_own) {
+            ++s.subst_subsumed_;
+            s.subst_saved_ += s.input_rewind_own_amends_;
+            s.own_replay_pacer_.ran();
+        }
+        if (has_remote) {
+            ++s.input_rewinds_carried_;
+            for (const auto& [id, remote]: s.remotes_)
+                if (s.input_rewind_entities_.count(remote.entity)) ++s.window_inrew_src_[id];
+        }
+        drop_pending_rewind();
+    }
+
     // ------------------------------------------------- the forced own frames
     // A tick a SessionLead forced (late-player design 2.4): the server
     // applies `held` here and drops our frame as stale, so the own ball is
