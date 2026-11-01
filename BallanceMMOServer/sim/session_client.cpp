@@ -1852,6 +1852,11 @@ namespace {
             p.spawn_ghost_birth = [this](const std::string& group) {
                 return bmmo::physics::spawn_ghost_birth(engine_->physics(), group.c_str());
             };
+            // FULL step GHF: a leaver's group forgotten at the leave's tick,
+            // as the server's remove_player does.
+            p.spawn_ghost_forget = [this](const std::string& group) {
+                return bmmo::physics::spawn_ghost_forget(engine_->physics(), group.c_str());
+            };
             p.airship_zone_box = [this](double box[6]) {
                 bmmo::physics::airship_zone_box zone;
                 bmmo::physics::airship_zone_get(engine_->physics(), zone);

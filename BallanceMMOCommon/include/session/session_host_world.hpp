@@ -504,6 +504,8 @@ namespace bmmo::session {
         // of every replayed tick, the core's (empty when the session does
         // not run the union).
         world.place_probes = hooks.place_probes;
+        // FULL step GHF: the point after it, before the tick's births.
+        world.before_births = hooks.before_replayed_births;
         // Step B1: a window-born body whose sector pass the replay's union
         // re-derivation moved or forgot is no missing birth.
         world.birth_moved = hooks.birth_moved;

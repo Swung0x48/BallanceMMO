@@ -116,7 +116,7 @@ was measured here.
 | the trafo set hooks (not a CP field) | `sim/trafo_hooks.hpp` (`has_body` by `GetPhysicsObject`, `restore_originals` set) | the same header | CH:1073 `make_retail_trafo_hooks` (`has_body` through the bridge, `restore_originals` empty; the anchor quiesces before `reset_session_clock`, CH:1801, whose restore does it) | same by two routes (HU1 queue (a)) |
 | `airship_zone`, `airship_zone_contains`, `airship_zone_box` (CP:741-746) | PW:469 `airship_zone_set(true, "")` (no own group) | SC:1777 / 1786 / 1809 | CH:2924 / 2933 / 2934 | design (exception c: the balloon is per world) |
 | `show_ghost` (CP:755) | n/a | empty (draws nothing) | CH:2959 | display only |
-| `spawn_ghost`, `spawn_ghost_state`, `spawn_ghost_birth` (CP:764-773) | PW:487 `spawn_ghost_set(true, kSpawnGhostRespawns, kSpawnGhostRadius)`; PW:932 a SPAWN birth; **PW:829 `spawn_ghost_forget` at a leave** | SC:1791 / 1803 / 1806; no forget | CH:2983 / 2995 / 2996; no forget | **D2** |
+| `spawn_ghost`, `spawn_ghost_state`, `spawn_ghost_birth` (CP:764-773) | PW:487 `spawn_ghost_set(true, kSpawnGhostRespawns, kSpawnGhostRadius)`; PW:932 a SPAWN birth; **PW:829 `spawn_ghost_forget` at a leave** | SC:1791 / 1803 / 1806; no forget | CH:2983 / 2995 / 2996; no forget | **D2** (done: GHF) |
 | `show_spawn_ghost` (CP:777) | n/a | empty | CH:2997 | display only |
 
 ## 6. Rollback binding and hooks
@@ -194,7 +194,7 @@ item 9 (R6, retail own-body control).** Design 2.3 settles today's state;
 nothing new here. **Update (FULL steps BEAMF and R6D, 2026-11-01).** The beam is no longer an in-place write on retail: BEAMF made the stamp a fresh body on every host that fills `make_own` / `unmake_own` (`beam_remakes_body`; retail through `own_body_in_replay`), and measured the beam rows exact (L11 `srt_ctl`), the guard, the own group and the next OnUnphysicalize unchanged (R6D's L11 census session `scripts/retail/r6d_l11` shows the same: remakes at 300 / 750 / 1100, the trafo / death reported at 302 / 752 / 1157). What a bridge-made own body changes in the retail game is listed in core design "As built (step R6D)" item 1: only Sound_Manager's six collision-sound listener blocks, which the retail host re-arms (BEAMF-S (b)). The remaining part of D1 - the in-window scripted birth parked (OVX), the moved / never-made births resynced - is planned per branch there: R6B (`own_body_control` on, `own_birth_move` off: the in-window remake) and R6P (`own_birth_move` on: moves, superseded births out of the history, Q-R6-NEVER (a)).
 
 **D2. A leaver's spawn-ghost group: the server forgets it, the clients keep
-it (by reading; never observed).** PW:829 `spawn_ghost_forget(manager,
+it (by reading; never observed).** **Done (FULL step GHF, 2026-11-01):** every client's core now drops the group at the removal's tick, live and in every replay that needs it (platform operation `spawn_ghost_forget`, bridge API v32); measured: fan_dr's savestates at 1010 show the clients' kept `P#3` record before the step and none after, the live cell's and the retail run's worlds agree - world-agreement-gaps-design.md "As built (step GHF)". The text below is the audit's reading, kept. PW:829 `spawn_ghost_forget(manager,
 p.group)` at `remove_player`; no client path calls it (no platform
 operation exists for it: grep of `BallanceMMOCommon/src/session`, SC and CH
 finds none), and the core's member removal only closes the life
@@ -360,7 +360,8 @@ always a table ball. None, by reading.
 
 - No check was run (a docs-only step: no build, no test, no replay; the
   FULL plan's AUD row is "offline, docs only").
-- D2-D4 are by reading and were never observed; D3 needs a diagnostic line
+- D2 is done (FULL step GHF: built, and its savestate difference measured before and after).
+- D3-D4 are by reading and were never observed; D2 was too until GHF; D3 needs a diagnostic line
   before a `--reset-level-at` run can test it (above); D2 and D4 need a run
   built for them.
 - The IVP sources and physics_RT are out of scope: every host reaches the

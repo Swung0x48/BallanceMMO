@@ -130,6 +130,9 @@ namespace bmmo::session {
         BMMO_CORE_STEP(keep_live_cells)
         BMMO_CORE_STEP(join_rank)
         BMMO_CORE_STEP(check_outside_forces)
+        BMMO_CORE_STEP(forget_spawn_groups)
+        BMMO_CORE_STEP(rewind_for_spawn_forgets)
+        BMMO_CORE_STEP(spawn_forgets_after_resync)
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -8943,6 +8946,248 @@ namespace {
         EXPECT_EQ(core.mirrors_outside_lives(), 0u);
         EXPECT_EQ(core.member_life_outside(), 0u);
         EXPECT_EQ(core.session_phase(), client_core_state::phase::running);
+    }
+
+    // ------------------------------- a leaver's spawn ghost group (FULL step GHF)
+    // host-platform audit D2: the group of a life a SessionMember `removed`
+    // closed is forgotten in this world at the removal's tick R (the server's
+    // remove_player), live when R is ahead, late at the next frame's place
+    // otherwise, again in every replay that steps R, and after a restore of
+    // a record captured before the live forget.
+
+    struct forget_fixture {
+        flow_fake fake;
+        std::unique_ptr<session_client_core> core;
+        explicit forget_fixture(bool bind = true) {
+            session_platform p = fake.make_flow();
+            if (bind)
+                p.spawn_ghost_forget = [this](const std::string& group) {
+                    fake.calls.push_back("spawn_ghost_forget:" + group);
+                    return true;
+                };
+            core = std::make_unique<session_client_core>(std::move(p), session_capabilities{});
+            run_to_tick_125(*core, fake);
+            state_of(*core).spawn_ghost_active_ = true;   // the fake binds no spawn_ghost install
+        }
+        size_t forgets(size_t from, const std::string& group = "P#4") const {
+            const auto calls = since(fake.calls, from);
+            return static_cast<size_t>(std::count(calls.begin(), calls.end(), "spawn_ghost_forget:" + group));
+        }
+        void replay(uint32_t anchor, uint32_t now) {
+            state_of(*core).spawn_forget_cursor_valid_ = false;   // as rewind_world does before its restore
+            const auto& hooks = steps{*core}.world_hooks();
+            for (uint32_t t = anchor + 1; t <= now; ++t) hooks.before_replayed_births(t);
+        }
+    };
+
+    // R still ahead: forgotten live at R, once; a copy of the removal queues
+    // nothing more; the next frames call nothing.
+    TEST(SessionClientCoreSpawnForget, LiveAtTheRemovalsTickOnce) {
+        forget_fixture x;
+        auto& core = *x.core;
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 130));
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 130));   // a copy
+        EXPECT_EQ(state_of(core).spawn_forgets_.size(), 1u);
+        const size_t from = x.fake.calls.size();
+        for (uint32_t t = 126; t < 130; ++t) steps{core}.forget_spawn_groups(t);
+        EXPECT_EQ(x.forgets(from), 0u) << "not before R";
+        steps{core}.forget_spawn_groups(130);
+        EXPECT_EQ(x.forgets(from), 1u);
+        const auto calls = since(x.fake.calls, from);
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:spawn ghost: P#4 of p12 life 1 forgotten at tick 130 (removed at server tick 130, live)"),
+                  calls.end());
+        for (uint32_t t = 131; t < 140; ++t) steps{core}.forget_spawn_groups(t);
+        EXPECT_EQ(x.forgets(from), 1u) << "never twice";
+        EXPECT_EQ(state_of(core).spawn_forgets_on_time_, 1u);
+        EXPECT_EQ(state_of(core).spawn_forgets_late_, 0u);
+    }
+
+    // R past (the usual case: the message comes a lead and a trip after R):
+    // forgotten at the next frame's place; a replay from before R forgets it
+    // again exactly at R, once; a replay that restores a record of
+    // [R, the live frame) forgets it before its first tick, once; a replay
+    // restoring a record that has it calls nothing.
+    TEST(SessionClientCoreSpawnForget, LateLiveThenOnceInEveryReplayThatNeedsIt) {
+        forget_fixture x;
+        auto& core = *x.core;
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 120));
+        size_t from = x.fake.calls.size();
+        steps{core}.forget_spawn_groups(126);
+        EXPECT_EQ(x.forgets(from), 1u) << "live, late";
+        EXPECT_EQ(state_of(core).spawn_forgets_late_, 1u);
+        ASSERT_EQ(state_of(core).spawn_forgets_.size(), 1u);
+        EXPECT_EQ(state_of(core).spawn_forgets_[0].lack_end, 126u);
+        // A restore of the record of 123 (captured before the live forget).
+        from = x.fake.calls.size();
+        x.replay(123, 125);
+        EXPECT_EQ(x.forgets(from), 1u) << "restored without it: forgotten before the first replayed tick";
+        {
+            const auto calls = since(x.fake.calls, from);
+            EXPECT_NE(std::find(calls.begin(), calls.end(),
+                                "log:0:spawn ghost: P#4 of p12 life 1 forgotten at tick 124 (removed at server tick 120, "
+                                "replay, restored without it)"),
+                      calls.end());
+        }
+        EXPECT_EQ(state_of(core).spawn_forgets_[0].lack_end, 124u);
+        // A restore of the record of 124: re-captured with it.
+        from = x.fake.calls.size();
+        x.replay(124, 125);
+        EXPECT_EQ(x.forgets(from), 0u);
+        // A restore from before R: once, at R.
+        from = x.fake.calls.size();
+        const auto& hooks = steps{core}.world_hooks();
+        state_of(core).spawn_forget_cursor_valid_ = false;
+        for (uint32_t t = 117; t < 120; ++t) hooks.before_replayed_births(t);
+        EXPECT_EQ(x.forgets(from), 0u) << "not before R";
+        EXPECT_FALSE(state_of(core).spawn_forgets_[0].in_world) << "the restore put the leaver's record back";
+        hooks.before_replayed_births(120);
+        EXPECT_EQ(x.forgets(from), 1u) << "at R";
+        for (uint32_t t = 121; t <= 125; ++t) hooks.before_replayed_births(t);
+        EXPECT_EQ(x.forgets(from), 1u) << "once in the replay";
+        EXPECT_EQ(state_of(core).spawn_forgets_[0].lack_end, 120u);
+        // The live frame after it: in the world already.
+        from = x.fake.calls.size();
+        steps{core}.forget_spawn_groups(126);
+        EXPECT_EQ(x.forgets(from), 0u);
+        EXPECT_EQ(state_of(core).spawn_forgets_replayed_, 1u);
+        EXPECT_EQ(state_of(core).spawn_forgets_restored_, 1u);
+    }
+
+    // A replay before the live frame forgot it (a rewind earlier in the same
+    // pre_step, from an anchor at or after R): forgotten there; the live
+    // place then calls nothing.
+    TEST(SessionClientCoreSpawnForget, AReplayBeforeTheLiveFrameForgetsItOnce) {
+        forget_fixture x;
+        auto& core = *x.core;
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 120));
+        const size_t from = x.fake.calls.size();
+        x.replay(122, 125);
+        EXPECT_EQ(x.forgets(from), 1u);
+        steps{core}.forget_spawn_groups(126);
+        EXPECT_EQ(x.forgets(from), 1u);
+    }
+
+    // A removal of a life never added calls nothing; when its addition comes
+    // (the removal came first), the forget is queued then and applied once.
+    TEST(SessionClientCoreSpawnForget, NeverForAnUnknownLifeUntilItIsAdded) {
+        forget_fixture x;
+        auto& core = *x.core;
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 13, 1, 2, 121));
+        EXPECT_TRUE(state_of(core).spawn_forgets_.empty());
+        size_t from = x.fake.calls.size();
+        steps{core}.forget_spawn_groups(126);
+        x.replay(118, 125);
+        EXPECT_EQ(x.forgets(from, "P#2"), 0u);
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 13, 1, 2, 110));
+        ASSERT_EQ(state_of(core).spawn_forgets_.size(), 1u);
+        EXPECT_EQ(state_of(core).spawn_forgets_[0].until, 121u);
+        from = x.fake.calls.size();
+        steps{core}.forget_spawn_groups(126);
+        steps{core}.forget_spawn_groups(127);
+        EXPECT_EQ(x.forgets(from, "P#2"), 1u);
+        // Our own id in a removal is ignored (no entry).
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 3, 1, 2, 126));
+        EXPECT_EQ(state_of(core).spawn_forgets_.size(), 1u);
+    }
+
+    // A resync's server state at an anchor at or after R holds the forget:
+    // nothing is called for it, live or in a replay from at or after the
+    // anchor; a removal that comes after such a state likewise.
+    TEST(SessionClientCoreSpawnForget, AServerStateHoldsIt) {
+        forget_fixture x;
+        auto& core = *x.core;
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 14, 1, 5, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 120));
+        steps{core}.spawn_forgets_after_resync(122);
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 14, 1, 5, 121));
+        size_t from = x.fake.calls.size();
+        steps{core}.forget_spawn_groups(126);
+        x.replay(123, 125);
+        EXPECT_EQ(x.forgets(from, "P#4") + x.forgets(from, "P#5"), 0u);
+        EXPECT_EQ(state_of(core).spawn_forgets_server_, 1u);
+    }
+
+    // The rule off in this world, or the host without the operation:
+    // nothing is called, and nothing breaks.
+    TEST(SessionClientCoreSpawnForget, NothingWithoutTheRuleOrTheOperation) {
+        {
+            forget_fixture x(false);
+            x.core->on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+            x.core->on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 120));
+            const size_t from = x.fake.calls.size();
+            steps{*x.core}.forget_spawn_groups(126);
+            EXPECT_EQ(x.forgets(from), 0u);
+        }
+        {
+            forget_fixture x;
+            state_of(*x.core).spawn_ghost_active_ = false;
+            x.core->on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+            x.core->on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 120));
+            const size_t from = x.fake.calls.size();
+            steps{*x.core}.forget_spawn_groups(126);
+            x.replay(118, 125);
+            EXPECT_EQ(x.forgets(from), 0u);
+            // Nothing forgotten, nothing counted (the session's end line).
+            EXPECT_EQ(state_of(*x.core).spawn_forgets_late_ + state_of(*x.core).spawn_forgets_on_time_
+                          + state_of(*x.core).spawn_forgets_replayed_ + state_of(*x.core).spawn_forgets_restored_,
+                      0u);
+        }
+    }
+
+    // A body of the freed order born at or after R before the removal came
+    // (an unreliable repeat that overtook it): the world rewinds to R - 1 -
+    // outside this fixture's history, so a resync is asked for.
+    TEST(SessionClientCoreSpawnForget, AReTakenOrderRewindsToTheRemoval) {
+        forget_fixture x;
+        auto& core = *x.core;
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 14, 1, 4, 121));
+        // Its mirror, born at 122 (a non-spawn birth made before the removal came).
+        auto& taker = state_of(core).remotes_[14];
+        taker.entity = "Ball_0_BMMO_14";
+        taker.physicalized = true;
+        taker.born_tick = 122;
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 121));
+        ASSERT_EQ(state_of(core).spawn_forgets_.size(), 1u);
+        EXPECT_TRUE(state_of(core).spawn_forgets_[0].taken);
+        const size_t from = x.fake.calls.size();
+        steps{core}.rewind_for_spawn_forgets();
+        const auto calls = since(x.fake.calls, from);
+        std::string listed;
+        for (const std::string& call: calls) listed += call + " | ";
+        EXPECT_NE(std::find(calls.begin(), calls.end(),
+                            "log:0:resync requested (a re-taken order's spawn ghost record beyond the reach) at tick 125"),
+                  calls.end()) << listed;
+        EXPECT_FALSE(state_of(core).spawn_forgets_[0].taken);
+        EXPECT_EQ(state_of(core).spawn_forget_rewinds_, 1u);
+    }
+
+    // A re-taken entry whose R an earlier replay of the same pre_step
+    // already stepped (flush_life_rewinds' rewind from before R): the
+    // replay forgot it at R before the taker's birth, so no second rewind.
+    TEST(SessionClientCoreSpawnForget, AReplayAcrossTheRemovalSettlesAReTakenOrder) {
+        forget_fixture x;
+        auto& core = *x.core;
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 12, 1, 4, 110));
+        core.on_session_member(member_message(bmmo::session::MEMBER_ADDED, 14, 1, 4, 121));
+        auto& taker = state_of(core).remotes_[14];
+        taker.entity = "Ball_0_BMMO_14";
+        taker.physicalized = true;
+        taker.born_tick = 122;
+        core.on_session_member(member_message(bmmo::session::MEMBER_REMOVED, 12, 1, 4, 121));
+        ASSERT_EQ(state_of(core).spawn_forgets_.size(), 1u);
+        ASSERT_TRUE(state_of(core).spawn_forgets_[0].taken);
+        const size_t from = x.fake.calls.size();
+        x.replay(119, 125);
+        EXPECT_EQ(x.forgets(from), 1u) << "at R in the replay";
+        EXPECT_FALSE(state_of(core).spawn_forgets_[0].taken);
+        steps{core}.rewind_for_spawn_forgets();
+        EXPECT_EQ(state_of(core).spawn_forget_rewinds_, 0u);
     }
 
     // A member message is taken while loading (not dropped like an event),

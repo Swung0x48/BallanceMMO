@@ -3969,6 +3969,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     };
     p.spawn_ghost_state = [this](const std::string& name) { return physics_view_.spawn_ghost_state(name.c_str()); };
     p.spawn_ghost_birth = [this](const std::string& group) { return physics_view_.spawn_ghost_birth(group.c_str()); };
+    // FULL step GHF: a leaver's group forgotten at the leave's tick (bridge v32).
+    p.spawn_ghost_forget = [this](const std::string& group) { return physics_view_.spawn_ghost_forget(group.c_str()); };
     p.show_spawn_ghost = [this](const std::string& name, bool own, bool ghost) {
         if (own) {
             show_own_spawn_ghost(m_bml->GetCKContext(), name, ghost);

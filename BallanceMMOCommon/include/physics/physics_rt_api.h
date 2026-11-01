@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 31u  /* v31: the record capture's entity lookup scope, with a verify mode (FULL step SRT2B) (v30: a named hull compiled from a template body (FULL step H1X) (v29: a savestate blob's physics globals read for a resync re-step (step H7X) (v28: the physics globals - time factor and gravity - read and written for a rollback (record-format-gaps design C3, step RK1) (v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) ) ) ) ) */
+#define BMMO_PHYSICS_API_VERSION 32u  /* v32: a leaver's spawn ghost group forgotten (FULL step GHF) (v31: the record capture's entity lookup scope, with a verify mode (FULL step SRT2B) (v30: a named hull compiled from a template body (FULL step H1X) (v29: a savestate blob's physics globals read for a resync re-step (step H7X) (v28: the physics globals - time factor and gravity - read and written for a rollback (record-format-gaps design C3, step RK1) (v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) ) ) ) ) ) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -853,6 +853,16 @@ typedef struct bmmo_physics_api_v2 {
      * manager.  BMMO bridge code over CKContext's public lookups: no engine
      * change. */
     int32_t (*lookup_scope)(void* ipion_manager, int32_t begin, uint32_t flags, bmmo_physics_lookup_totals* totals);
+
+    /* ---- v32: a leaver's spawn ghost group forgotten (FULL step GHF;
+     * physics_state.hpp spawn_ghost_forget) ----
+     * `group` ("P#<join order>") of a member that left: its spawn ghost
+     * record dropped, so the next member that takes the join order begins
+     * its first life as a ghost however its first body is made - as the
+     * server's remove_player does, in every world at the leave's tick
+     * before its events and its step.  1 when a record was dropped, 0 when
+     * the group had none or the rule is off. */
+    int32_t (*spawn_ghost_forget)(void* ipion_manager, const char* group);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

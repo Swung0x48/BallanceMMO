@@ -1010,6 +1010,8 @@ reached for it. Within a tick, PLAYER records are applied in file order before
 the tick's inputs and events (a rejoin writes PLAYER(-) then PLAYER(+) at one
 tick). `ensure_player` stays for old journals.
 
+*The spawn ghost's records (FULL step GHF):* a life this section closes also drops its group from the world's spawn ghost records at R, as the server's `remove_player` does - see "As built (step GHF)" in section 12.
+
 ### 2.9 Interplay with the other designs and the audit fixes
 
 | item | interplay |
@@ -6534,3 +6536,96 @@ re-run: SimTool is not on the wire check's path, and the helpers' removal
 changes no executed code. Kept, recorded: `--replay-session` of a journal
 without the bit still replays (with the note) rather than refusing - the only
 such journals are pre-UOFF ones, whose replays are for inspection.
+
+### As built (step GHF, FULL close-out, 2026-11-01): a leaver's spawn-ghost group forgotten in every world at the server's tick (AUD-1)
+
+host-platform-audit.md §9 D2: the server dropped a leaver's group from its spawn ghost records
+(`physics_world::remove_player`, `spawn_ghost_forget(manager, p.group)`, step SPGH2) and no client did, so a
+member that takes the freed join order with a first birth that is not SPAWN-flagged was a ghost in the server's
+world and solid (the `resumed` path) in every client's, and every client's savestate kept a `spawn_ghost` record
+the server's blob no longer had. Now every world drops it at the same place of the removal's tick R.
+
+- **The server's place.** `session_runner::finish_leave` runs `remove_player` (which forgets after the leaver's
+  clones are unphysicalized) at tick R: either in `step` after the proximity union's `place_probes` and before R's
+  events and `tick()`, or from `remove_player`'s post between two steps with `tick_index()` = R, the next tick to
+  step - the same place. SessionMember `removed` carries R (section 2.8).
+- **The operation.** `physics_state.hpp` `spawn_ghost_forget` returns whether a record was dropped. The platform
+  operation `spawn_ghost_forget(group)` (`client_platform.hpp`, optional like `spawn_ghost_birth`, but a host that
+  binds `spawn_ghost` must bind it). The headless client binds `bmmo::physics::spawn_ghost_forget` directly, as its
+  other spawn ghost operations do (the plan said through `physics_direct`, which carries none of them: adapted).
+  The retail host binds `physics_view::spawn_ghost_forget`, a new bridge entry appended to the table:
+  **`BMMO_PHYSICS_API_VERSION` 32** (the plan said 31; v31 was taken by SRT2B's lookup scope: adapted).
+- **The core** (`client_core_lifecycle.cpp`, "a leaver's spawn ghost group"). `queue_spawn_forget` at a
+  SessionMember `removed` of a known life, and at the `added` of a life whose removal came first
+  (`early_removals_`); never for an unknown life, never twice for a life (a copy is `member_copies_` before it).
+  The entry carries the group `P#<join order>`, R, `in_world` and `lack_end` (the records of [R, lack_end) were
+  captured without the forget).
+  - Live (`forget_spawn_groups`, `pre_step`): after `place_probes`, before `apply_held_lifecycle` - the server's
+    place - every entry due (R at or before the frame's tick) and not in the world; on time when R is the frame's
+    tick, otherwise late with `lack_end` = the frame's tick.
+  - Replays (`forget_spawn_groups_replayed`, at the engine's new point `rollback_world::before_births` -
+    `core_world_hooks::before_replayed_births`, bound by `bind_session_world` - right after the replayed tick's
+    `place_probes` and before the engine makes the tick's recorded births again (`insert_birth`, `recreate_body`)
+    and before `pre_step`: the server's `finish_leave` place, since IVP's collision filter reads the record when a
+    ball enters the world; the first build ran it in `before_replayed_tick`, i.e. in `pre_step` after those
+    births - the review's finding, fixed in the gate round): at R itself, once per replay (the restore before R put the leaver's record back); and before a
+    replay's first tick when its restored record is one of [R, lack_end), or when the forget was never applied.
+    A replay's first tick is told by a cursor dropped at every `pre_step` and before every restore
+    (`rewind_world`, the resync's `rollback_.resync`, `on_snapshot`), so a restore from an earlier full record than
+    the anchor (SRT4's light records) is seen at its real first tick.
+  - A resync's server state at an anchor at or after R holds the forget: the replay's first tick under
+    `resync_restoring_` and `spawn_forgets_after_resync` (a re-step of no tick) mark it, and a removal that comes
+    after such a state is marked at queueing.
+  - How a pending removal is carried: it is never applied with a rewind of its own. The message comes a lead and a
+    trip after R, so the live forget is late in practice (fan_dr's replay 2 ticks, the live cell at 150 ms 21,
+    retail at lag 0 2); the records of [R, the live frame) keep the leaver's record, and the entry stays (until
+    `history_ticks` + 2 past `lack_end`) so any restore into them is fixed up before its first replayed tick. This
+    is exact because no body of the group can exist in that span: the taker's `added` goes out after the leaver's
+    `removed` on the same reliable stream and its events are parked until its `added`. If an unreliable repeat
+    overtook that (or a held test message), `queue_spawn_forget` finds a mirror of the order born at or after R by
+    another life and marks the entry `taken`: `rewind_for_spawn_forgets` (pre_step, after the drain's lifecycle
+    rewinds) rewinds to R - 1 like a late death, the replay drops the group at R and makes the taker's birth after
+    it; beyond the reach, a resync A replay that steps R (an earlier rewind of the same `pre_step`) settles a `taken`
+    entry, so no second rewind follows.
+  - Only with the rule on in this world (`spawn_ghost_active_`) and the operation bound. One log line per forget
+    ("spawn ghost: P#k of pX life L forgotten at tick T (removed at server tick R, live | live, late | replay |
+    replay, restored without it)") and the counters in the session's end line ("leavers' groups: ...", counting
+    only forgets the operation ran); a host that runs the rule without the operation says so once at the rule's
+    install; no journal line, no record change, no protocol change.
+- **What stays by construction.** A client's records of [R, the message's arrival) still hold the leaver's group
+  (the live cell: ticks 837-857, the message applied at 858). No body of the group exists there, so no collision
+  differs, and a restore into them is fixed up (above).
+- **The non-SPAWN first birth on a freed order cannot be made by the harnesses.** Every joiner's first birth is the
+  level-start spawn, SPAWN-flagged, which makes it a ghost in every world with or without the forget (the live
+  cell's joiner took P#2 with a spawn birth at 1395; the retail rejoiner took P#1 at 1524; fan_dr's rejoin took P#4).
+  The unit tests and the savestate equality carry that case.
+- **Checks** (x64 BUILD-OK, DEPS-OK 1543; x86 CLIENT-BUILD-OK; GCC syntax 33/33 ok; Arch server rebuilt, no
+  slot-13 hack). Unit tests 744/744, seven new (`SessionClientCoreSpawnForget`: live at R once and never twice for
+  a copy; late live then once in a replay crossing R and once after a restore of [R, lack_end), none after one
+  that has it; a replay before the live frame; never for an unknown life until it is added; a server state holds
+  it; nothing without the rule or the operation; a re-taken order rewinds (resync outside the history)). The wire
+  check rR6S -> rGHF over core_ref_s14: ALL SAME, 45 journals IDENTICAL (fan_dr, the only arm with a leave: c0-c2
+  forget P#3 live, late, at 1004 for R 1002; its rejoin takes P#4, so no journal moves). Savestates (SimTool
+  `--savestate-describe`, the server journal's replay with `BMMO_REPLAY_SAVESTATE_DUMP`, the captures' replays with
+  `--dump-savestate`) at fan_dr's tick 1010: rGHF server and c0-c2 the same three groups (P#0-P#2); rR6S's clients
+  four (P#3 `seen=1 present=0 solid=0` kept), its server three. The live cell `maps/arena-test/ghf_full/ghf_cell`
+  (3 clients + a late joiner, 150 ms, client 2 left at its tick 800 after the three balls solidified, R 837; the
+  joiner took join order 2 at server tick 1131): the final records (`BMMO_DUMP_FINAL_LAG=100`) equal the server's
+  spawn ghost section from 858 on in c0 and c1, and at the joiner's birth tick 1395, 1396 and 1400 in c0, c1 and the
+  joiner (three groups, the same bytes); FINAL rows (`--tolerance 0`, bit-equal): c2 and the joiner agree throughout outside the airship
+  elements (`PE_`, exception c); c0 and c1 agree until their own balls enter the airship zone (2254, 2078: out of the
+  sync, exception c); rR6S's replays of the same captures are IDENTICAL to rGHF's, so nothing there is this step's.
+  Retail L11 two-copy (`scripts/retail/ghf_retail`, the VCPKGU recipe: client 2 disconnects, reconnects and joins
+  the running room as a late joiner): client 1 logs the forget once (P#1, R 343, live, late at 345; end line "1
+  removals queued ... 1 live late ... 1 records dropped"); the leaver never sees its own removal (its rejoin is a new
+  session on the server's state); FINAL rows of both copies' three journals bit-equal to the server's
+  (`first_divergence.py --final --tolerance 0`).
+- **Gate round** (the review's findings): the replayed forget moved from `before_replayed_tick` to the new
+  `before_births` point (above); the end line's counters count only forgets the operation ran (the rule off or the
+  operation unbound counted before); a replay that steps R clears a `taken` entry (no second rewind); a host with
+  the rule and no forget logs it once. Rerun: x64 BUILD-OK (DEPS-OK 1543), x86 CLIENT-BUILD-OK, GCC syntax 33/33,
+  unit tests 745/745 (`SessionClientCoreSpawnForget` eight, the new one a replay across R settling a re-taken order;
+  `RollbackEngine.TheProbePlacePoint...` now also pins `before_births` between `place_probes` and the re-creation),
+  wire check rR6S -> rGHF over core_ref_s14 ALL SAME, 45 journals IDENTICAL (fan_dr's c0-c2 forget P#3 live, late
+  at 1004 as before). No live run again: the step's two were spent in the first round, and the move only touches a
+  replay crossing R, which the engine test pins; the replay branches still never ran outside the fixture.

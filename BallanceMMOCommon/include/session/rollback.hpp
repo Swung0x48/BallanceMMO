@@ -340,6 +340,13 @@ namespace bmmo::session {
         // replayed tick, by every replay path (input, lifecycle, snapshot
         // and resync rewinds all run this loop).
         std::function<void(uint32_t tick, const std::function<bool(const std::string& entity)>& held_out)> place_probes;
+        // Optional (FULL step GHF): a replayed tick's point right after the
+        // proximity union's place point and before the tick's births (the
+        // window-born insertions and re-creations, then pre_step): the
+        // server's finish_leave position of the tick, where a leaver's spawn
+        // ghost group is forgotten.  Called once per replayed tick, by every
+        // replay path, whether or not place_probes is bound.
+        std::function<void(uint32_t tick)> before_births;
         // Optional: the mechanism bodies the world has now - the very list
         // the caller's live records track as `mechanisms`.  Asked after each
         // replayed step.  The replay re-records every tick with the live
@@ -2256,6 +2263,9 @@ namespace bmmo::session {
                         return item.repose_tick != 0 && static_cast<int32_t>(item.repose_tick - at) >= 0;
                     });
                 }
+                // FULL step GHF: the tick's point before its births (the
+                // server's finish_leave, after its place_probes).
+                if (world.before_births) world.before_births(t);
                 // The bodies born at this tick, made again before its scripts
                 // and step (the live Physicalize ran in this frame's script
                 // pass, before its step).

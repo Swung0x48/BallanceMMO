@@ -1162,6 +1162,11 @@ namespace bmmo::physics {
         return api_->spawn_ghost_birth(manager_, group) == 1;
     }
 
+    bool physics_view::spawn_ghost_forget(const char* group) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->spawn_ghost_forget) return false;
+        return api_->spawn_ghost_forget(manager_, group) == 1;
+    }
+
     int physics_view::own_group_queue(const char* entity_name, const char* group, uint32_t behavior_id,
                                       std::string& error) const {
         error.clear();

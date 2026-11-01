@@ -1509,7 +1509,9 @@ TEST(RollbackEngine, ABodyBornInsideTheWindowIsReCreatedAtItsBirthTickWhenTheWor
 // Step G3 (world-agreement-gaps-design.md 2.5, U3): the proximity union's
 // place point of a replayed tick comes once per tick, before anything of it -
 // the window-born re-creation and pre_step - and names a body the replay
-// still holds out (born at that tick or later) as held out.
+// still holds out (born at that tick or later) as held out.  FULL step GHF:
+// the births' point (before_births, a leaver's spawn ghost forget) right
+// after it, before the re-creation.
 TEST(RollbackEngine, TheProbePlacePointComesFirstInEveryReplayedTickWithTheHeldOutBodies) {
     fake_world world;
     world.savestates = true;
@@ -1536,6 +1538,7 @@ TEST(RollbackEngine, TheProbePlacePointComesFirstInEveryReplayedTickWithTheHeldO
         world.calls.push_back("place@" + std::to_string(tick) + (held_out("Prop") ? " held" : " free")
                               + (held_out("Remote") ? " remote-held" : ""));
     };
+    w.before_births = [&world](uint32_t tick) { world.calls.push_back("births@" + std::to_string(tick)); };
     rollback_tracked before;
     before.remote_entities = {"Remote"};
     rollback_tracked after = before;
@@ -1560,11 +1563,12 @@ TEST(RollbackEngine, TheProbePlacePointComesFirstInEveryReplayedTickWithTheHeldO
     ASSERT_TRUE(engine.on_snapshot(w, snapshot, 6, entity_now, no_input));
     std::vector<std::string> order;
     for (const std::string& call: world.calls)
-        if (call.rfind("place@", 0) == 0 || call.rfind("pre_step@", 0) == 0 || call.rfind("recreate ", 0) == 0)
+        if (call.rfind("place@", 0) == 0 || call.rfind("pre_step@", 0) == 0 || call.rfind("recreate ", 0) == 0
+            || call.rfind("births@", 0) == 0)
             order.push_back(call);
     const std::vector<std::string> expected = {
-        "place@3 held", "pre_step@3", "place@4 held", "recreate Prop@4", "pre_step@4",
-        "place@5 free", "pre_step@5", "place@6 free", "pre_step@6"};
+        "place@3 held", "births@3", "pre_step@3", "place@4 held", "births@4", "recreate Prop@4", "pre_step@4",
+        "place@5 free", "births@5", "pre_step@5", "place@6 free", "births@6", "pre_step@6"};
     EXPECT_EQ(order, expected);
 }
 

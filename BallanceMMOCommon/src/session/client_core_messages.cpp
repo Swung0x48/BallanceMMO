@@ -187,6 +187,7 @@ namespace bmmo::session {
             rollback_world snapshot_world = world();
             if (s.trafo_active_)
                 snapshot_world.row_on_breach_only = [this](const std::string& entity) { return s.trafo_pieces_.count(entity) != 0; };
+            s.spawn_forget_cursor_valid_ = false;   // FULL step GHF: its replay begins at its restore
             const bool rolled = s.rollback_.on_snapshot(snapshot_world, snapshot, current_tick(), entity_of, input_at);
             settle_unreplayed_lives(current_tick());   // step EL7: the reconcile's events no replay applied
             settle_own_due();                          // step EL8: the own ball's

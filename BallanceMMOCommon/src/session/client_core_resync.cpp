@@ -677,12 +677,16 @@ namespace bmmo::session {
             resync_world.forget_births_after = [this](uint32_t tick, const std::vector<std::string>& entities) {
                 platform_.forget_births_after(tick, entities);
             };
+            s.spawn_forget_cursor_valid_ = false;   // FULL step GHF
             ok = s.rollback_.resync(resync_world, anchor, now, spec, input_at, restored,
                                     "resync from the server's tick " + std::to_string(anchor));
             // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused
             // write of the physics globals dropped the history: not applied.
             if (s.rollback_.stats().globals_failures != globals_before) ok = false;
             s.resync_restoring_ = false;
+            // FULL step GHF: a leaver's group forgotten at or before the
+            // anchor is in the server's state.
+            if (ok) spawn_forgets_after_resync(anchor);
             // Step RSX: an own death the revive queued that no replay applied
             // (a re-step stopped before it), made live as after a rewind.
             settle_own_due();

@@ -534,6 +534,7 @@ namespace bmmo::session {
     // (session_runner::step).
     void session_client_core::pre_step() {
         frame_.prepared = true;
+        s.spawn_forget_cursor_valid_ = false;   // FULL step GHF: a replay from here on begins at its restore
         frame_.f = s.frames_since_anchor_ + 1;
         const uint32_t frame_tick = s.tick_base_ + static_cast<uint32_t>(std::max<int64_t>(frame_.f - 1, 0));
         frame_.tick = frame_tick;
@@ -555,6 +556,9 @@ namespace bmmo::session {
         drain_due_events(frame_tick);
         s.life_batch_.collecting = false;
         flush_life_rewinds();
+        // FULL step GHF: a leaver's order another life re-took before the
+        // removal came, rewound to the removal's tick (like a late death).
+        rewind_for_spawn_forgets();
         // Step A3: a mirror an exact resync made from its row at S whose
         // death the old numbering applied past the re-step (Delta > 0) dies
         // again at its tick here, live (the replay drains the others).
@@ -596,6 +600,10 @@ namespace bmmo::session {
         // step 8, own births and deaths in the behaviour pass): the server's
         // point, before its leavers and its events.
         if (s.probes_active_) place_probes(frame_tick, {}, false);
+        // FULL step GHF (host-platform audit D2): the leavers' spawn ghost
+        // groups due, where the server's finish_leave drops them - after the
+        // placement, before the tick's events and its step.
+        forget_spawn_groups(frame_tick);
         // The body changes stamped for this very tick, the own beam among
         // them: after the rewinds above, so none of them undoes one, and
         // before the union's pass and the step, where the server applies

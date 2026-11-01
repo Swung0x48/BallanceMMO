@@ -278,6 +278,9 @@ namespace bmmo::session {
             journal_.note("member +p" + std::to_string(entry.id) + " life " + std::to_string(entry.life) + " join "
                           + std::to_string(entry.join_order) + " (server tick " + std::to_string(msg.tick) + ")");
             journal_member_lives();
+            // FULL step GHF: an early removal forgets its group only now,
+            // with the life it closes known (its join order).
+            if (life.until) queue_spawn_forget(life);
             if (s.phase_ != client_core_state::phase::running) return;
             // Step T3 (trafo-replication design 2.4): its piece set, outside
             // any replay ("a player first seen in a message").
@@ -317,6 +320,186 @@ namespace bmmo::session {
         journal_.note("member -p" + std::to_string(entry.id) + " life " + std::to_string(entry.life) + " (server tick "
                       + std::to_string(msg.tick) + ")");
         journal_member_lives();
+        queue_spawn_forget(*known);   // FULL step GHF
+    }
+
+    // ------------------------------------------- a leaver's spawn ghost group
+    // FULL step GHF (host-platform audit D2; world-agreement-gaps design
+    // "As built (step GHF)").  The server drops a leaver's group from its
+    // spawn ghost records at remove_player (physics_world.cpp, step SPGH2):
+    // in session_runner::step that is finish_leave at tick R - after the
+    // proximity union's placement, before R's events and R's step - and the
+    // SessionMember `removed` it sends carries R.  Every client's world
+    // drops it at the same place of R: live when R is still ahead (the
+    // message comes a lead and a trip after R, so live it is late in
+    // practice), else live at the next frame's place, the records of
+    // [R, that frame) captured without it; every replay that steps R drops
+    // it again there (a restore before R put the leaver's record back), and
+    // a replay that restores a record of [R, that frame) drops it before
+    // its first replayed tick.  A resync's server state at an anchor at or
+    // after R holds it already.  No journal line and no record change: the
+    // journals move only where a world's collisions do (a member that takes
+    // the freed order with a first birth that is not a spawn - a ghost in
+    // every world now, as in the server's).
+    //
+    // The order this needs: no body of the group born at or after R before
+    // the forget.  The members' messages and events are reliable and
+    // ordered, the taker's `added` goes out after the leaver's `removed`
+    // and its events are parked until its `added`, so its body never comes
+    // first - except through an unreliable repeat that overtook the
+    // reliable copy (or a held test message): then the entry is `taken`
+    // and the world rewinds to R - 1 (rewind_for_spawn_forgets; a resync
+    // beyond the reach), and the replay drops the group at R and makes the
+    // taker's body again after it.
+    void session_client_core::queue_spawn_forget(const bmmo::session::member_life& life) {
+        if (!life.until) return;
+        for (const auto& f: s.spawn_forgets_)
+            if (f.player == life.entry.id && f.life == life.entry.life) return;   // never twice for a life
+        client_core_state::spawn_group_forget f;
+        f.player = life.entry.id;
+        f.life = life.entry.life;
+        f.group = "P#" + std::to_string(life.entry.join_order);
+        f.until = life.until;
+        ++s.spawn_forgets_queued_;
+        // A server state (a resync's) at an anchor at or after R has the
+        // record dropped already: nothing to do in the world as it stands.
+        if (s.spawn_forget_server_state_ && static_cast<int32_t>(f.until - s.spawn_forget_server_anchor_) <= 0) {
+            f.in_world = true;
+            f.lack_end = s.spawn_forget_server_anchor_;
+            ++s.spawn_forgets_server_;
+        }
+        // A body of the order born at or after R by another life: this world
+        // stepped it with the leaver's record (see above).
+        if (!f.in_world)
+            for (const auto& [id, remote]: s.remotes_) {
+                if (!remote.physicalized || static_cast<int32_t>(remote.born_tick - f.until) < 0) continue;
+                const auto* owner = bmmo::session::member_life_at(s.lives_, id, remote.born_tick);
+                if (!owner || owner->entry.join_order != life.entry.join_order) continue;
+                if (owner->entry.id == f.player && owner->entry.life == f.life) continue;
+                f.taken = true;
+                logf("spawn ghost: %s of p%u life %u (removed at server tick %u) was re-taken by p%u life %u, born at tick "
+                     "%u before the removal came: the world rewinds to tick %u", f.group.c_str(), f.player,
+                     static_cast<unsigned>(f.life), f.until, id, static_cast<unsigned>(owner->entry.life), remote.born_tick,
+                     f.until - 1);
+                break;
+            }
+        s.spawn_forgets_.push_back(std::move(f));
+    }
+
+    // True when the operation ran (the rule on and the operation bound),
+    // whether or not the world still had a record to drop.
+    bool session_client_core::apply_spawn_forget(const client_core_state::spawn_group_forget& f, uint32_t tick,
+                                                 const char* where) {
+        if (!s.spawn_ghost_active_ || !platform_.spawn_ghost_forget) return false;
+        const bool dropped = platform_.spawn_ghost_forget(f.group);
+        if (dropped) ++s.spawn_forgets_dropped_;
+        logf("spawn ghost: %s of p%u life %u forgotten at tick %u (removed at server tick %u, %s)%s", f.group.c_str(),
+             f.player, static_cast<unsigned>(f.life), tick, f.until, where, dropped ? "" : ": no record");
+        return true;
+    }
+
+    // The live frame's forgets, at the server's place of the tick: after
+    // the rewinds and the proximity union's placement, before the tick's
+    // body changes (pre_step).  An entry no restore can reach any more
+    // goes.
+    void session_client_core::forget_spawn_groups(uint32_t tick) {
+        for (auto& f: s.spawn_forgets_) {
+            if (f.in_world || static_cast<int32_t>(f.until - tick) > 0) continue;
+            const bool on_time = f.until == tick;
+            if (apply_spawn_forget(f, tick, on_time ? "live" : "live, late"))
+                ++(on_time ? s.spawn_forgets_on_time_ : s.spawn_forgets_late_);
+            f.in_world = true;
+            f.lack_end = tick;
+        }
+        const uint32_t keep = config.rollback ? static_cast<uint32_t>(s.rollback_.thresholds().history_ticks) + 2u : 0u;
+        s.spawn_forgets_.erase(std::remove_if(s.spawn_forgets_.begin(), s.spawn_forgets_.end(),
+            [tick, keep](const client_core_state::spawn_group_forget& f) {
+                return f.in_world && !f.taken && static_cast<int32_t>(tick - f.lack_end) > static_cast<int32_t>(keep);
+            }), s.spawn_forgets_.end());
+    }
+
+    // A replayed tick's forgets, at the engine's point before its births
+    // (core_world_hooks::before_replayed_births, after the union's
+    // placement: the server's finish_leave place).  The tick after the last
+    // one seen continues a replay; any other begins one (the cursor is
+    // dropped at every live frame and before every restore), and its
+    // anchor's record was just restored.
+    void session_client_core::forget_spawn_groups_replayed(uint32_t tick) {
+        const bool first = !s.spawn_forget_cursor_valid_ || tick != s.spawn_forget_cursor_ + 1;
+        s.spawn_forget_cursor_ = tick;
+        s.spawn_forget_cursor_valid_ = true;
+        if (s.spawn_forgets_.empty()) return;
+        const uint32_t anchor = tick - 1;
+        for (auto& f: s.spawn_forgets_) {
+            if (first) {
+                if (static_cast<int32_t>(f.until - anchor) > 0) {
+                    // Restored before R: the leaver's record is back, as it
+                    // was then; dropped again when the replay steps R.
+                    f.in_world = false;
+                } else if (s.resync_restoring_) {
+                    // The server's state at the anchor holds it.
+                    if (!f.in_world || static_cast<int32_t>(f.lack_end - anchor) > 0) f.lack_end = anchor;
+                    f.in_world = true;
+                } else if (!f.in_world || static_cast<int32_t>(anchor - f.lack_end) < 0) {
+                    // A record of [R, lack_end) came back: captured before
+                    // the live forget.
+                    if (apply_spawn_forget(f, tick, "replay, restored without it")) ++s.spawn_forgets_restored_;
+                    f.in_world = true;
+                    f.lack_end = tick;
+                }
+            }
+            if (tick == f.until) {
+                if (apply_spawn_forget(f, tick, "replay")) ++s.spawn_forgets_replayed_;
+                f.in_world = true;
+                f.lack_end = f.until;
+                // A replay that stepped R made every later birth of the
+                // window after the forget: a re-taken order is settled (an
+                // earlier rewind of the same pre_step, flush_life_rewinds).
+                f.taken = false;
+            }
+        }
+    }
+
+    // An entry whose order was re-taken before it came (queue_spawn_forget):
+    // the world back to R - 1, like a late death; the replay drops the group
+    // at R and makes the taker's birth again after it.  Beyond the reach a
+    // resync brings the server's records.  In pre_step, after the drain's
+    // lifecycle rewinds.
+    void session_client_core::rewind_for_spawn_forgets() {
+        for (auto& f: s.spawn_forgets_) {
+            if (!f.taken) continue;
+            f.taken = false;
+            const uint32_t now = current_tick();
+            ++s.spawn_forget_rewinds_;
+            if (config.rollback && static_cast<int32_t>(f.until - now) <= 0) {
+                auto input_at = [this](const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) {
+                    return recorded_input_at(entity, tick, out);
+                };
+                const scope_guard keep_cells = keep_live_cells();
+                if (rewind_world(f.until - 1, now, input_at,
+                                 "spawn ghost group " + f.group + " forgotten at tick " + std::to_string(f.until)))
+                    continue;
+            }
+            if (!s.resync_pending_) {
+                logf("spawn ghost: %s forgotten at tick %u is outside the rollback history at local tick %u: resync",
+                     f.group.c_str(), f.until, now);
+                request_resync("a re-taken order's spawn ghost record beyond the reach", true);
+            }
+        }
+    }
+
+    // After a resync applied the server's state of `anchor` (the replay's
+    // first tick saw it too; this also covers a re-step of no tick): an
+    // entry at or before the anchor is in that state.
+    void session_client_core::spawn_forgets_after_resync(uint32_t anchor) {
+        s.spawn_forget_server_anchor_ = anchor;
+        s.spawn_forget_server_state_ = true;
+        for (auto& f: s.spawn_forgets_) {
+            if (static_cast<int32_t>(f.until - anchor) > 0) continue;
+            if (!f.in_world || static_cast<int32_t>(f.lack_end - anchor) > 0) f.lack_end = anchor;
+            f.in_world = true;
+            f.taken = false;
+        }
     }
 
     // The PLAYER records of the lives: an add waits until every older life

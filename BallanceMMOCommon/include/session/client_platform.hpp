@@ -182,6 +182,10 @@ namespace bmmo::session {
         // replay, made at their tick (drain_pending_lives; with the deaths
         // the reconcile of an ended life queued, step EL7).
         std::function<void(uint32_t tick)> before_replayed_tick;
+        // FULL step GHF: a replayed tick's point before its births
+        // (rollback_world::before_births): a leaver's spawn ghost group
+        // forgotten where the server's finish_leave does it.
+        std::function<void(uint32_t tick)> before_replayed_births;
         // The mirrors a replayed tick drives, with their generation
         // (rollback_world::replay_remotes).
         std::function<void(uint32_t tick, std::map<std::string, uint32_t>& out)> replay_remotes;
@@ -791,6 +795,18 @@ namespace bmmo::session {
         // before the body was made (own_physicalized, own_birth_seen); the
         // core decides which births are spawns.
         std::function<bool(const std::string& group)> spawn_ghost_birth;
+        // FULL step GHF (host-platform audit D2): a member left - `group`'s
+        // record dropped (physics_state.hpp spawn_ghost_forget), as the
+        // server's remove_player does, so the next member that takes the
+        // join order begins its first life as a ghost in every world.  The
+        // core calls it for a life a SessionMember `removed` closed, at the
+        // removal's tick before its events (live) and again in every replay
+        // that re-makes that tick or restores a record from before the live
+        // call (session_client_core::forget_spawn_groups); true when a
+        // record was dropped.  Optional like spawn_ghost_birth, but a host
+        // that binds spawn_ghost must bind it too, or its world keeps a
+        // record the server's dropped.
+        std::function<bool(const std::string& group)> spawn_ghost_forget;
         // Optional, display only: a ball (`own`: this client's own ball, else
         // a mirror) drawn translucent while it is a spawn ghost, or as
         // itself again.

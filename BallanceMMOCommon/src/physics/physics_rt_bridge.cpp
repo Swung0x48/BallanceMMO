@@ -862,6 +862,11 @@ namespace {
         return bmmo::physics::spawn_ghost_birth(static_cast<CKIpionManager*>(manager), group) ? 1 : 0;
     }
 
+    // v32 (FULL step GHF): a leaver's spawn ghost group forgotten.
+    int32_t api_spawn_ghost_forget(void* manager, const char* group) {
+        return bmmo::physics::spawn_ghost_forget(static_cast<CKIpionManager*>(manager), group) ? 1 : 0;
+    }
+
     // v27 (step RLC): a joint block's constraint image (physics_state.cpp).
     int32_t api_joint_block_get(void* manager, uint32_t behavior_id, bmmo_physics_joint_image* out, char* error,
                                 uint32_t error_size) {
@@ -1101,6 +1106,7 @@ namespace {
         api_savestate_globals,
         api_hull_template,
         api_lookup_scope,
+        api_spawn_ghost_forget,
     };
 }
 

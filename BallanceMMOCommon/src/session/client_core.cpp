@@ -100,6 +100,13 @@ namespace bmmo::session {
         world_hooks_.place_probes = [this](uint32_t tick, const std::function<bool(const std::string&)>& held_out) {
             if (s.probes_active_) place_probes(tick, held_out, true);
         };
+        // FULL step GHF: a leaver's spawn ghost group dropped at its
+        // removal's tick (and after a restore of a record from before the
+        // live forget) at the server's place of the tick - after the union's
+        // placement, before the engine makes the tick's recorded births
+        // again (insert_birth, recreate_body) and before pre_step: IVP's
+        // collision filter reads the record when a ball enters the world.
+        world_hooks_.before_replayed_births = [this](uint32_t tick) { forget_spawn_groups_replayed(tick); };
         // Every decision the engine takes about a snapshot, straight into
         // the box: no log parsing needed to know what this client did.
         world_hooks_.on_correction = [this](const bmmo::session::rollback_correction& c) { journal_.rollback_correction(c); };
@@ -387,6 +394,11 @@ namespace bmmo::session {
         }
         s.parked_events_.clear();
         s.early_removals_.clear();
+        s.spawn_forgets_.clear();   // FULL step GHF
+        s.spawn_forget_cursor_valid_ = false;
+        s.spawn_forget_server_state_ = false;
+        s.spawn_forgets_queued_ = s.spawn_forgets_on_time_ = s.spawn_forgets_late_ = s.spawn_forgets_replayed_ = 0;
+        s.spawn_forgets_restored_ = s.spawn_forgets_server_ = s.spawn_forgets_dropped_ = s.spawn_forget_rewinds_ = 0;
         s.member_messages_ = s.member_copies_ = s.events_parked_ = s.parked_applied_ = 0;
         s.member_life_outside_ = s.mirrors_outside_lives_ = s.own_other_life_echoes_ = s.catchup_unknown_lives_ = 0;
         s.own_join_order_ = -1;
@@ -644,6 +656,11 @@ namespace bmmo::session {
             else if (r == 1)
                 logf("spawn ghost on: %.0f spawn areas of %.3f m (the level start and the resetpoints), respawns %s", info[0],
                      info[1], bmmo::session::kSpawnGhostRespawns ? "included" : "excluded");
+            // FULL step GHF: a host with the rule but no forget keeps every
+            // leaver's group the server drops (host-platform-audit D2).
+            if (s.spawn_ghost_active_ && !platform_.spawn_ghost_forget)
+                logf("spawn ghost: this host cannot forget a leaver's group (no spawn_ghost_forget): its records keep "
+                     "every leaver's group the server drops");
         }
         // Step T3 (design 2.4): every member's piece set and the own one, by
         // player id, after the host's quiesce (its anchor work): the server
@@ -840,6 +857,14 @@ namespace bmmo::session {
                      "layer: %.0f solidified, %.0f pair rechecks, %.0f overlap waits, %.0f births, %.0f resumed solid",
                      static_cast<unsigned long long>(s.spawn_ghost_transitions_),
                      static_cast<unsigned long long>(s.spawn_ghost_births_), info[2], info[3], info[4], info[5], info[6]);
+            // FULL step GHF: the leavers' groups forgotten (not journaled).
+            logf("spawn ghost: leavers' groups: %llu removals queued, forgotten %llu live on time, %llu live late, %llu in "
+                 "replays at their tick, %llu after a restore, %llu by a server state, %llu records dropped, %llu rewinds "
+                 "for a re-taken order",
+                 static_cast<unsigned long long>(s.spawn_forgets_queued_), static_cast<unsigned long long>(s.spawn_forgets_on_time_),
+                 static_cast<unsigned long long>(s.spawn_forgets_late_), static_cast<unsigned long long>(s.spawn_forgets_replayed_),
+                 static_cast<unsigned long long>(s.spawn_forgets_restored_), static_cast<unsigned long long>(s.spawn_forgets_server_),
+                 static_cast<unsigned long long>(s.spawn_forgets_dropped_), static_cast<unsigned long long>(s.spawn_forget_rewinds_));
         }
         s.spawn_ghost_active_ = false;
         s.own_spawn_ghost_ = false;
@@ -1256,6 +1281,7 @@ namespace bmmo::session {
                                            const std::string& reason, uint32_t reach, uint32_t* restored) {
         const uint64_t frozen_before = s.rollback_.stats().frozen;
         const uint64_t globals_before = s.rollback_.stats().globals_failures;
+        s.spawn_forget_cursor_valid_ = false;   // FULL step GHF: the replay below begins at its restore
         const bool rolled = s.rollback_.rewind_to(world(), anchor, now, input_at, reason, reach, restored);
         if (s.rollback_.stats().frozen != frozen_before) request_resync("local physics clock frozen", true);
         // C3 (record-format-gaps design 2.3 step 6, step RK1): a refused

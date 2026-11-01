@@ -4656,10 +4656,10 @@ namespace bmmo::physics {
         return 2;
     }
 
-    void spawn_ghost_forget(CKIpionManager* physics, const char* group) {
+    bool spawn_ghost_forget(CKIpionManager* physics, const char* group) {
         spawn_ghost_state_t* state = physics ? find_spawn_ghost_state(physics) : nullptr;
-        if (!state || !state->enabled || !group || !*group) return;
-        state->groups.erase(bounded(group, IVP_NO_COLL_GROUP_STRING_LEN));
+        if (!state || !state->enabled || !group || !*group) return false;
+        return state->groups.erase(bounded(group, IVP_NO_COLL_GROUP_STRING_LEN)) != 0;
     }
 
     bool spawn_ghost_record_get(CKIpionManager* physics, std::vector<spawn_ghost_record>& out) {

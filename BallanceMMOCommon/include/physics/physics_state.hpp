@@ -496,12 +496,13 @@ namespace bmmo::physics {
     // A member left (the server's remove_player, after its ball is gone):
     // `group`'s state is dropped, so the next member that takes the join
     // order begins its first life as a ghost however its first body is made
-    // (step SPGH2 review: a leave ends a life).  The server's world only: a
-    // late joiner and a resynced member take the server's records through the
-    // one state transfer; the members, which are not told of a leave yet,
-    // follow with world agreement's member messages (M0/M1).  Nothing when
-    // the rule is off.
-    void spawn_ghost_forget(CKIpionManager* physics, const char* group);
+    // (step SPGH2 review: a leave ends a life).  In every world at the
+    // leave's tick (FULL step GHF, bridge API v32): the server's
+    // remove_player, and every client's core for a life its SessionMember
+    // `removed` closed, at the same place of that tick (before its events
+    // and its step).  True when the group had a record (it is gone now);
+    // false when it had none or the rule is off (nothing changed).
+    bool spawn_ghost_forget(CKIpionManager* physics, const char* group);
 
     // One group's spawn ghost state, as the IVP savestate records it.
     struct spawn_ghost_record {

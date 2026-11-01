@@ -465,6 +465,28 @@ namespace bmmo::session {
         std::string own_spawn_ghost_entity_;         // the entity shown translucent
         uint64_t spawn_ghost_transitions_ = 0;       // ghost -> solid seen after a frame (own and mirrors)
         uint64_t spawn_ghost_births_ = 0;            // step SPGH2: spawn births marked (live and replayed)
+        // FULL step GHF (host-platform audit D2): a leaver's group dropped
+        // from this world's spawn ghost records at its removal's tick, as
+        // the server's remove_player does (forget_spawn_groups).  One entry
+        // per life a SessionMember `removed` closed; kept while a restore
+        // can still land before the tick its forget reached the records.
+        struct spawn_group_forget {
+            uint32_t player = 0;
+            uint16_t life = 0;
+            std::string group;          // "P#<join order>"
+            uint32_t until = 0;         // the removal's server tick: before its events and its step
+            bool in_world = false;      // the world as it stands has the record dropped
+            uint32_t lack_end = 0;      // with in_world: the records of [until, lack_end) were captured without it
+            bool taken = false;         // another life of the order had a body born at or after `until` when it came
+        };
+        std::vector<spawn_group_forget> spawn_forgets_;
+        uint32_t spawn_forget_cursor_ = 0;           // the last tick before_replayed_tick ran for
+        bool spawn_forget_cursor_valid_ = false;     // false: the next replayed tick begins a replay
+        uint32_t spawn_forget_server_anchor_ = 0;    // the anchor of the last server state applied (a resync)
+        bool spawn_forget_server_state_ = false;
+        uint64_t spawn_forgets_queued_ = 0, spawn_forgets_on_time_ = 0, spawn_forgets_late_ = 0;
+        uint64_t spawn_forgets_replayed_ = 0, spawn_forgets_restored_ = 0, spawn_forgets_server_ = 0;
+        uint64_t spawn_forgets_dropped_ = 0, spawn_forget_rewinds_ = 0;
         bool own_physicalized_ = false;
         bool assigned_ = false;
         uint32_t last_assign_first_tick_ = 0;  // the assignment applied last: its redundant copies are ignored
@@ -1863,6 +1885,26 @@ namespace bmmo::session {
         // Step SPGH2: a spawn birth of `group` marked in this world's rule
         // (platform spawn_ghost_birth), when the rule is on.
         void note_spawn_birth(const std::string& group, uint32_t tick, const char* where);
+        // FULL step GHF (host-platform audit D2, world-agreement-gaps design
+        // "As built (step GHF)"): the forgets of the spawn ghost groups of
+        // the lives a SessionMember `removed` closed.  queue_spawn_forget:
+        // the entry, at the removal (or at the addition of a life whose
+        // removal came first).  forget_spawn_groups: the live frame's, at
+        // the server's place (after the proximity union's placement, before
+        // the tick's events), for every entry due and not in the world.
+        // forget_spawn_groups_replayed: a replayed tick's, before its births
+        // (core_world_hooks::before_replayed_births) - at the entry's own tick, and at a replay's first tick when the
+        // restored record predates the live forget.  rewind_for_spawn_forgets:
+        // an entry whose order another life had re-taken before the removal
+        // came, rewound to the tick before it (resync beyond the reach).
+        // spawn_forgets_after_resync: a server state at an anchor at or
+        // after an entry's tick holds its forget already.
+        void queue_spawn_forget(const bmmo::session::member_life& life);
+        bool apply_spawn_forget(const client_core_state::spawn_group_forget& f, uint32_t tick, const char* where);
+        void forget_spawn_groups(uint32_t tick);
+        void forget_spawn_groups_replayed(uint32_t tick);
+        void rewind_for_spawn_forgets();
+        void spawn_forgets_after_resync(uint32_t anchor);
         // Whether `tick` is at or after the tick the own ball left the sync.
         bool own_out_of_sync_at(uint32_t tick) const {
             return s.own_airship_tick_ != 0 && static_cast<int32_t>(tick - s.own_airship_tick_) >= 0;
