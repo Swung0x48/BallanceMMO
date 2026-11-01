@@ -1193,6 +1193,179 @@ change; no protocol, journal or capture-format change.
   hitch each of a headless session's first 8 such rewinds really costs is
   not budgeted by the headless cap; retail never pays it.
 
+**As built (step LBR, FULL close-out, 2026-11-01): the reach on the reference
+machine after the realtime cuts; open question 8 closed by measurement.** No
+code change: no build, no protocol, journal or capture-format change. Measured
+on HEAD ebad5f80, in which SRT3 (one rewind per frame) and SRT4 (sparse capture,
+k = 8) are committed (realtime-design "As built (step SRT3)" / "(step SRT4)").
+The x64 binary is `build-agent-rRTD` (byte-equal to `rSAXC`, the last code
+commit; RTD changed docs only). The x86 build is SAXC's, as RTD installed it in
+both copies (cmp-equal to the x86 out dir). The Arch server is RTD's build of
+SAXC's tree (`ballanced-36c04e3d24c9+bmmo-6916f406899b`, the same code as
+HEAD). Every performance figure follows decision 33: each client is pinned to
+E-cores of its own (16-18, 19-21, 22-24, 25-27; retail 16-21 / 22-27), the
+server runs in WSL and snapshots are off.
+
+- **The audit: sparse records against the depth gates.**
+  - *What the engine does.* `rewind_to` (`rollback.hpp`, `rewind_to`)
+    compares the REQUESTED anchor's depth with the limit (`max_resim_ticks`,
+    or the caller's `reach`). It then restores from `restore_base`, which is
+    the anchor or the newest whole record before it, at most
+    `kSparseCaptureMax - 1` = 7 ticks deeper. It replays from there.
+  - *The cost meter already counts the restored record's ticks.* Its tick
+    count is the `stats.resim_ticks` delta (`rewind_timer`; incremented once
+    per replayed tick), and that delta includes the rebased extra ticks. Its ms
+    per tick is therefore per tick actually replayed.
+  - *Every core gate compares the requested anchor*:
+    - the input and own replay (`client_core_frame.cpp`
+      `replay_corrected_inputs`, `own_replay_pacer::due`);
+    - `force_rewind`;
+    - `sector_rewind_reachable`;
+    - the held notice (`client_core_held.cpp`, `window_rewind_reach`);
+    - the late relayed frame (`client_core_messages.cpp`);
+    - the trafo input (`client_core_trafo.cpp`);
+    - the lifecycle gates (`client_core_lifecycle.cpp`: `joins_life_batch`,
+      `move_own_birth`, the forced own move).
+  - **The requested anchor is the right depth, so nothing is built.**
+    1. *The reach is a promise about the age of a correction, not about the
+       restore.* Its floor is the server's Sector bound: `lead.hpp`
+       `kLeadSectorReachTicks == kReachFloorTicks` (`lead_test.cpp`
+       static_assert), so every client takes a Sector stamp up to 48 deep, and
+       the server's raise arithmetic (`lead_sector_bound`) counts on that. A
+       gate on the restored depth would refuse a stamp 42-48 deep whenever its
+       anchor is a light record (7 of every 8 replayed ticks) and would resync.
+       The need it covers, `p99 + 8 + w`, is also measured in requested depth.
+    2. *The restored record is always in the history.* Two kinds of gate check
+       for it:
+       - The gates that can reach past the standard reach ask
+         `rewindable()`, which looks for the restored record itself.
+       - The lifecycle gates ask `knows_tick` within the standard reach. Their
+         base is at most 48 + 7 = 55 ticks deep while the history is 96, and
+         at most 120 + 7 = 127 once it is 128 (`kSparseCaptureMax =
+         kReachHistoryTicks - kReachCapTicks`).
+    3. *The rebased replay is exact.* SRT4's verify mode found 0 mismatches
+       (403 + 224 + 154 + 12 anchors), and its wire check had 45/45 journals
+       IDENTICAL. Gating on the restored depth would only refuse corrections
+       that dense capture takes, so sparse capture would change behaviour.
+  - *The one consequence (stated, not changed).* The cap formula reserves
+    nothing for the extra ticks. A rewind requested at depth = cap replays up
+    to cap + 7 ticks, so it can exceed B by up to 7 x the replay ms per tick:
+    3.1 ms on headless arena E-cores (0.44 ms) and 3.4-4.0 ms on retail L11
+    (0.49-0.57 ms), about 7-9 % of 45.45 ms. This decides no correction: whether
+    a correction is taken depends on the requested depth alone. Every host and
+    level below has the reach (53-55) 20-67 ticks under its cap (the verdict
+    table), except headless L11 (cap 54-64) and headless L12 (the floor).
+- **(1) Offline: the E-core captures replayed by HEAD.** Tool: `work/LBR/e_run.sh`,
+  which is SRT4's `e_run.sh` with `core_ref_s14`'s pins, four clients at once,
+  each on E-cores of its own, `--replay-free-cost-clock`. The census is
+  `work/LBR/census.txt`. Every replay ran to its end (rc 0) and all 28
+  journals are IDENTICAL to the live ones. Each row gives the cap as
+  `cap (replay ms per tick)` per client c0-c3. "Before" is the status line of
+  the binary that captured the arm (SRT's census build for `srt_E_*`, SRTJ's
+  for `srtj_E_*`, CMAP's unpinned live run for `a5u_lead`):
+
+    | arm | before | after (HEAD, E-cores) | restore after |
+    |---|---|---|---|
+    | `srt_E_l12x_on2` (L12, trafo on) | 48 x4 (1.71-1.82) | 48 x4 (0.93-0.99) | 2.20-2.30 ms |
+    | `srtj_E_l12x_on2` | 48 x4 (1.06-1.11) | 48 x4 (0.93-0.99) | 2.22-2.31 ms |
+    | `srtj_E_l12x_h` (human keys) | 48 x4 (1.01-1.06) | 48 x4 (0.99-1.02) | 2.80-3.07 ms |
+    | `srtj_E_l11x` | 55 / 57 / 54 / 57 (0.74-0.79) | 58 / 56 / 54 / 59 (0.73-0.79) | 1.79-2.09 ms |
+    | `srtj_E_l11x_h` | 62 / 60 / 57 / 63 (0.68-0.74) | 64 / 60 / 57 / 63 (0.67-0.75) | 2.33-2.50 ms |
+    | `srt_E_l8x_on` | 48 x4 (0.98-1.04) | 76 / 77 / 80 / 77 (0.55-0.57) | 1.26-1.50 ms |
+    | `core_ref_s14/a5u_lead` (arena) | 120 x4 (0.25-0.26, unpinned) | 102 / 101 / 102 / 104 (0.42-0.43) | 1.60-1.98 ms |
+
+  Not replayed: the arena arms `srt_E_h1_on`, `srtj_E_h1_on` and
+  `srtj_E_h1_h`. They pin the arena as `Level_13.NMO`, and since CMAP the
+  slot holds the original again, so `core_ref_s14/a5u_lead` stands in for
+  them. Rebased rewinds: from 1 (+1 tick) up to 85 (+325) per client, and 0
+  unanchored.
+
+  Reading: SRT3 / SRT4 lifted L8 off the floor and leave L11 at 54-64. The
+  headless L12 trafo-on pile still costs 0.93-1.02 ms a replayed tick on
+  E-cores, a cap of 42-46 by the formula, so it stays at the floor 48.
+  Retail L12 measured 0.57-0.60 ms and caps 73 / 76 (SRT4's `srt4_l12`). The
+  realtime-design §4 row d note ("cap=48 on every E-core client") now holds
+  for headless L12 only.
+- **(2) Live: `a5u_lead`'s recipe on E-cores** (`work/LBR/lbr_run.sh` is
+  CMAP's `s14_run.sh` with `work/SRT/pin_clients.py`; store
+  `maps/arena-test/lbr`). The recipe is 4 clients, 60 s, 150 ms, the arena as
+  a custom map, `--drive --arm A5u --sectors 1 --keep-lane --event
+  2:1500:step=300:dir=up`, and the server with trafo_inputs and
+  placement_clones on and snapshots off. All four clients were pinned on both
+  runs. Host load max 13.2 / 15.3 %.
+
+    | run | c2's raise | c2 relay lag (p99 / max) | c2 reach lines | c2 cap (over the session -> end) | relay_late / far / resyncs / starve resyncs (all clients) | server journal |
+    |---|---|---|---|---|---|---|
+    | `a5u_lead` (patience and lead on) | k = +20, N 1616, applied at 1636, slew complete at 1676, lead offset +20 | 41-42 / 43 (22 before the raise) | 24 lines; 52-53 after the raise (p99 41-42 + 8 + wait 2-3) | 103 -> 120 -> 105 -> 97 (0.30-0.44 ms a tick, restore 1.2-2.2 ms) | 0 / 0 / 0 / 0 (c2 starve_run max 185: its event's substitutions before the raise) | 4097/4097 |
+    | `a5u_twin` (both off) | none | 42 / 43, and the other three members are at 41-43 too (the server waits for c2's frames until the deadline, §2.6's shared cost) | 52-54 (the deepest 72 at 1473, the step's own tick - the harness's 1500 counts from base 27 - where the windows' lag rose to 40-41 while the four-window wait still read the 23 of the start) | 120 -> 98 (0.25-0.44) | 0 / 0 / 0 / 0 | 4038/4038 |
+
+  Every client's final cap: 95 / 94 / 97 / 97 (lead on) and 96 / 97 / 98 / 98
+  (the twin), with mechanisms 52/52 (c3 52/44; core_ref_s14's c3 52/43). The
+  raised member's relay lag is 42, not §2.5's 52-64, because the base header
+  lag at 150 ms is 22 today (REACH's "normally 22") where §2.5 assumed C's
+  32-44.
+- **(3) Retail x86, two copies on L11 on E-cores** (`work/LBR/lbr_retail.py`
+  is R12's recipe on RTD's helpers; `scripts/retail/lbr_l11`). The recipe is
+  `net lag 150` on both copies, the key record on both, and client 1 `session
+  force-rollback 30:48`. Results:
+  - Session: 62 s, ticks to 4417. The reach is 53-55 (p99 22-23 + 8 +
+    wait 23), history 128.
+  - **Cap 83-90 on client 1** (167 rewinds, 144 of them forced 48 deep;
+    0.48-0.53 ms a replayed tick, restore 1.43-1.64 ms). **Cap 76-77 on
+    client 2** (37 natural rewinds; 0.57 ms, restore 1.44-1.59 ms).
+  - Resyncs 0, far 0, relay late 0, mechanisms 15/15. Sparse rebased
+    121 + 492 ticks on client 1. Host load max 19.9 %.
+  - Client 1's `forced=144/1` (`unmatched=1`) matches R12's `143/1`: one
+    forced rewind before the history held its anchor. It is a property of the
+    harness verb and pre-existing.
+  - Before SRT3 / SRT4 (R12, 2026-10-27, unpinned) the caps were 94 / 90.
+    The E-core pinning raises the per-tick cost, and the cuts more than offset
+    it on L12 (SRT4).
+- **Verdict.** The need is `p99 + 8 + w`, with p99 the raised member's relay
+  lag (42 after a +20 raise) and w the server's wait, the smallest slack of
+  the session. The wait depends on the session, so the verdict takes two
+  values of w:
+  - **w = 3.** This is the measured value in a raised session. With patience
+    on (`a5u_lead`) every member reads wait 3 from tick 501 on. With both
+    flags off (`a5u_twin`) the late member's frames use up the slack, and
+    every member reads 3 from 1660. The need is 42 + 8 + 3 = 53.
+  - **w = 23.** This is the wait when nobody is late and patience is off. It
+    is the server's default (`physics_patience = false`, config_manager.hpp:92)
+    and the retail run's (the reach lines read `p99 22-24 + 8 + wait 22-23`
+    all session). No run had patience off and lead_adjust on, so whether the
+    slack comes back to 23 after a raise is not measured. The conservative
+    need therefore takes w = 23: 42 + 8 + 23 = 73. The twin's transient
+    corroborates the combination: 72 = 41 + 8 + 23 at its step tick 1473,
+    where the windows' lag had risen while the wait still read 23.
+
+  | host | cap on E-cores | margin over 53 (w = 3) | margin over 73 (w = 23) |
+  |---|---|---|---|
+  | headless x64, arena (the A5u recipe), live | 94-120 | 41-67 | 21-47 |
+  | headless x64, arena, offline | 101-104 | 48-51 | 28-31 |
+  | retail x86, L11 | 76-90 | 23-37 | 3-17 |
+  | retail x86, L12 (SRT4) | 73 / 76 | 20 / 23 | 0 / 3 |
+
+  Every cap covers both needs, so no raise is bound by the reach. Both live
+  runs and the retail run had relay_late 0 and resyncs 0. **Open question 8
+  is closed** (§7).
+
+  Retail L12 with patience off has no margin, so the decision for a raise
+  the reach cannot cover is DB3 (b) (answered: keep the full raise and accept
+  that client's relay_late / resync as its own cost). At that depth the
+  rebased replay (cap + 7 ticks, see the audit) can exceed the 45.45 ms
+  budget by up to 7 x 0.48-0.57 ms = 3.4-4.0 ms. That is a hitch; it does not
+  decide whether a correction is taken. DB1's target (a), patience on, would
+  put retail at the w = 3 row.
+
+  Only one host sits at the floor: a headless x64 client on L12 with the
+  trafo inputs, cap 48 on E-cores (0.93-1.02 ms a replayed tick; the formula
+  gives 42-46). There the formula's reach for a raised member (53 with
+  w = 3) is above the cap. The measured depths are below it: the raised
+  relay lag is max 43, and a held notice is h + w + 1 = 42 + 3 + 1 = 46 deep.
+  With w = 23 a held notice would be 66 deep and late. On that client this is
+  DB3 (b)'s accepted cost. The deployed client is retail, and its cap there
+  is 73-76.
+
 ### 2.6 The session stops waiting for one player
 
 Part one makes a late frame harmless to the server's state. It does not stop
@@ -3280,6 +3453,29 @@ last sector is entered.
    until then? A bound would leave p partly substituted instead of partly
    relay_late; both costs are p's alone. Step 14 now matters only for raises
    decided before a level's last sector is entered, so it stays after 12.
+   **Closed (FULL step LBR, 2026-11-01, §2.5 "As built (step LBR)")**:
+   step 12 / R12 built the per-client reach. It was measured on the reference
+   machine after the realtime cuts (SRT3, SRT4), every client on E-cores of
+   its own, snapshots off:
+   - **What the raise needs.** A5u's full raise is k = +20, and it puts the
+     raised member's relay lag p99 at 41-42 (max 43), not 52-64. The base
+     lag at 150 ms is 22 today. The need is p99 + 8 + w. With the wait
+     measured in a raised session (w = 3), it is 53. With the default
+     server's wait when nobody is late (patience off, w = 23), it is 73.
+   - **Headless x64 cap.** The cap is 94-120 live and 101-104 offline on the
+     arena.
+   - **Retail x86 cap.** The cap is 76-90 on L11; SRT4 measured 73 / 76 on
+     L12.
+   - **Result.** Both live runs (lead on, and the both-off twin) and the
+     retail run had relay_late 0 and resyncs 0.
+   - **Answer.** No bound of the raise by the reach is needed, and the
+     deployment gate need not wait. Every cap covers 73, but retail L12 with
+     patience off has a margin of 0-3. The one host at the floor is a
+     headless client on L12 with the trafo inputs (0.93-1.02 ms a replayed
+     tick on E-cores). Its measured raised depths are below the floor of 48
+     (relay lag 43; a held notice 46 deep with w = 3). Anything that does not
+     fit there, and retail L12's zero margin, is DB3 (b)'s accepted cost. The
+     deployed retail client is not at the floor there.
 9. **Sector event lows.** Before any shift, some receivers' event samples sit
    2-6 ticks below the path model's 15: lp11_a9 reads 9, a5s 12 and 12, a5d
    13 and 12, and a4 13, at tick 1320. They are per receiver, not per sender:
