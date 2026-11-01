@@ -2139,6 +2139,12 @@ namespace bmmo::session {
         void commit_own_birth(const own_birth_report& report);
         void beam_own_ball(uint32_t tick);
         bool write_beam(const std::string& name, const double position[3], uint32_t tick);
+        // FULL step BEAMF (the user's Q-R6-BEAM (a), decision 49.4): the
+        // host fills make_own / unmake_own (own_body_control, or
+        // own_body_in_replay - the retail host), so a beam's stamp takes the
+        // own body out and makes it fresh at the beam pose, live and in
+        // every replay, as the server does; never an in-place write.
+        bool beam_remakes_body() const { return caps_.own_body_control || caps_.own_body_in_replay; }
         void record_own_birth(const bmmo::session_event_msg& event, const std::string& entity);
         // `tick` and `live` (step EL8, design 2.3.4): a replayed tick tests
         // the generation of the live record of tick - 1, a live frame the

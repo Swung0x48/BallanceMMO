@@ -1766,8 +1766,11 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     caps.own_body_control = false;   // the game's Physicalize block owns the own ball (design 2.3)
     // Step EL8 (rollback-engine gaps design 2.3.4 "RC capability"): make_own /
     // unmake_own on the bridge, called by the core from restore_lives and the
-    // replay's drain only - an own life ending inside a window is revived and
-    // removed again at its death; every body so made is gone by `now`.
+    // replay's drain - an own life ending inside a window is revived and
+    // removed again at its death; every body so made is gone by `now`.  FULL
+    // step BEAMF (the user's Q-R6-BEAM (a)): the core also calls them live at
+    // an own beam's stamp - the fresh body the server makes, not an in-place
+    // write (session_client_core::beam_remakes_body).
     caps.own_body_in_replay = true;
     caps.slew = true;                // R5: the tick driver slews (core_host_pacer), SessionReady caps = CAP_LEAD
     // FULL step AHN: the anchor hold returns to the host loop (the world
@@ -3797,8 +3800,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // arm_own_capture, own_birth_capture: empty (the own births come from
     // OnPhysicalize, and the game's Physicalize block owns the own ball:
     // design 2.3).  make_own, unmake_own (step EL8, own_body_in_replay):
-    // inside a rewind only, through host support's make_own_body /
-    // unmake_own_body - the headless client's code - on the bridge.  The
+    // inside a rewind, and live at an own beam's stamp (FULL step BEAMF),
+    // through host support's make_own_body / unmake_own_body - the headless
+    // client's code - on the bridge.  The
     // replica: a revived life gets a navigation when the replica is not on
     // it (attach_revive_navigation), destroyed with the body at its
     // replayed death; any other take-out shuts the replica's leaves first,

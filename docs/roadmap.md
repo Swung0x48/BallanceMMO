@@ -2955,7 +2955,14 @@ answered. SRT2 (a3, 2026-10-31) stopped for the user: the blob window is
 the retail own ball's in-place beam (an overlap element of 1255.5 m),
 options (a)-(d) in `realtime-design.md` "As built (step SRT2)"; its
 leftover, SRT2b (the per-body read cut of the moving trafo pile, and the
-statistic the 2 ms is judged on), is queued in the realtime track. The item numbers below are kept (9 = C, 8 = B, 10 = D) so older
+statistic the 2 ms is judged on), is queued in the realtime track. The user
+chose the beam's rule (decision 49 item 4, Q-R6-BEAM (a): a fresh body, in
+the shared core); FULL step BEAMF built it (`realtime-design.md` "As built
+(step BEAMF)": the window gone, the own ball's beam rows exact on retail;
+known residual BEAMF-S, the own ball's sounds silent after an automation
+beam until the next game-made ball - Sound_Manager's six listener blocks
+stay bound to the deleted body - queued with R6D item 1 / R6B's sound
+check; its options, (a) leave or (b) re-arm, wait for the user). The item numbers below are kept (9 = C, 8 = B, 10 = D) so older
 notes still resolve.
 
 **Stage C - close the core (goal 1).**

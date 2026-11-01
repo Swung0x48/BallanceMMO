@@ -2025,9 +2025,10 @@ namespace bmmo::session {
     // unmake_own, body_state, write_body, own_driven_entity, bind_world,
     // keep_live_cells), the configuration (rollback, own_echoes) and the
     // back-calls (own_ball, recorded_input_at).  Without own_body_control
-    // (design 2.3) the own body is never made or taken out: the beam's stamp
-    // is an in-place write, and an echo the history cannot carry is a
-    // re-report or a resync.
+    // (design 2.3) an own birth is never made or taken out live, and an echo
+    // the history cannot carry is a re-report or a resync.  The beam's stamp
+    // is the fresh body on every host that can make the own body (FULL step
+    // BEAMF, beam_remakes_body).
 
     // ------------------------------------------------- own reports (step 19)
     // The own ball's Physicalize as the event log reported it for `tick`:
@@ -2126,8 +2127,8 @@ namespace bmmo::session {
     }
 
     // The own ball beamed in place, upright and at rest (no rebuild: a
-    // ball without the navigation replica, or a host without own body
-    // control).
+    // ball without the navigation replica, or a host that cannot make the
+    // own body - beam_remakes_body; no host of ours since FULL step BEAMF).
     bool session_client_core::write_beam(const std::string& name, const double position[3], uint32_t tick) {
         const double rotation[4] = {0.0, 0.0, 0.0, 1.0};
         const float still[3] = {0.0f, 0.0f, 0.0f};
@@ -2158,9 +2159,17 @@ namespace bmmo::session {
     // server's checkpoint of `tick` is, and the lifetime stays the same:
     // the body has the same name, recipe and group on every side.
     //
-    // Without own body control (design 2.3) the record is kept the same
-    // way, but its stamp is an in-place write (write_beam), live and in
-    // every replay that crosses it.  On both capability settings a
+    // FULL step BEAMF (the user's Q-R6-BEAM (a), decision 49.4: "a, and
+    // in the core"): this is the one rule on every host that can make the
+    // own body (beam_remakes_body: own_body_control, or the retail host's
+    // own_body_in_replay) - the stamp takes the body out and makes it
+    // fresh at the beam pose, live and in every replay that crosses it.
+    // The in-place write it replaced (write_beam through the bridge's
+    // optimized beam) left the retail own ball an overlap element sized by
+    // the moved distance per PSI (1255.5 m against the server's 4 m: the
+    // blob window of realtime-design "As built (step SRT2)").  Only a host
+    // with neither capability still writes the stamp in place.  On every
+    // capability setting a
     // navigated beam is a move within one life and keeps the generation
     // (rollback-engine gaps design 1.3 invariant B, 2.4; step B8EG item
     // EGB): bumped at the request, after the record of `tick`, it made
@@ -2218,7 +2227,7 @@ namespace bmmo::session {
         logf("--beam: %s to (%.3f,%.3f,%.3f), reported to the server for tick %u and %s", name.c_str(),
              s.beam_position_[0], s.beam_position_[1], s.beam_position_[2], beam.origin,
              !navigated ? "moved here now (no navigation replica)"
-             : caps_.own_body_control ? "rebuilt here at that tick" : "moved here at that tick (no own body control)");
+             : beam_remakes_body() ? "rebuilt here at that tick" : "moved here at that tick (no own body control)");
         if (navigated) s.own_life_.push_back(std::move(beam));
     }
 
@@ -2357,8 +2366,12 @@ namespace bmmo::session {
     // replay reaches it.  A lifetime that ended since is never made again
     // (own_life_current) and retires.
     //
-    // Without own body control (design 2.3) a beam's stamp is the in-place
-    // write instead, and nothing is ever moved (no remake is due).
+    // A beam's stamp is the same on every host that can make the own body
+    // (FULL step BEAMF, beam_remakes_body: the retail host too, which
+    // declares own_body_in_replay, not own_body_control); only a host with
+    // neither writes it in place (write_beam).  Without own body control
+    // nothing is ever moved (no remake is due: the echo of a moved beam
+    // stays a resync, move_own_birth - Stage C's R6).
     void session_client_core::apply_own_lives(uint32_t tick, const char* where, bool live) {
         for (auto& life: s.own_life_) {
             if (life.retired) continue;
@@ -2386,7 +2399,7 @@ namespace bmmo::session {
                 continue;
             }
             if (beam_stamp) {
-                if (!caps_.own_body_control) {
+                if (!beam_remakes_body()) {
                     if (life.made) {
                         const double position[3] = {life.position[0], life.position[1], life.position[2]};
                         write_beam(life.entity, position, tick);

@@ -4243,7 +4243,9 @@ namespace {
         EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 1u) << "not bumped";
     }
 
-    // Design 5.1 "Beam", without own body control: the record kept, and its
+    // Design 5.1 "Beam", on a host that cannot make the own body (neither
+    // own_body_control nor own_body_in_replay; no host of ours since FULL
+    // step BEAMF): the record kept, and its
     // stamp one write_body live at T+1 and one in a forced replay that
     // crosses T+1.  The generation is not bumped (rollback-engine gaps
     // design 2.4, B-U1, step B8EG item EGB): a beam is a move within one
@@ -4311,6 +4313,89 @@ namespace {
             EXPECT_EQ(since(fake.calls, from), expected);
         }
         EXPECT_EQ(state_of(core).generations_.at("Ball_Wood"), 1u) << "the in-place move: a new lifetime";
+        EXPECT_TRUE(state_of(core).own_life_.empty());
+    }
+
+    // FULL step BEAMF (the user's Q-R6-BEAM (a), decision 49.4): the retail
+    // host's capabilities - own_body_in_replay without own_body_control -
+    // beam the way the server does: the stamp takes the body out and makes
+    // it fresh at the beam pose (make_own, muted), live at T+1 and again in
+    // a forced replay that crosses T+1; never an in-place write.  The
+    // generation is not bumped (one life), the log line is the headless
+    // one.  Without a navigation replica it is still moved at once.
+    TEST(SessionClientCoreOwnLives, BeamRemadeAtItsStampWithTheRetailCapabilities) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_capabilities caps;
+        caps.own_lifecycle = bmmo::session::own_lifecycle_source::host_hooks;
+        caps.own_body_in_replay = true;
+        own_matrices matrices;
+        session_platform platform = replay_platform(fake, bound);
+        matrices.install(platform, fake.calls);
+        session_client_core core(platform, caps);
+        bound = &core;
+        run_to_tick_125(core, fake);
+        record_ticks(core, 118, 125);
+        state_of(core).own_physicalized_ = true;
+        fake.driven = "Ball_Wood";
+        const double position[3] = {711.0, 4.0, 43.0};
+        core.request_beam(position);
+        size_t from = fake.calls.size();
+        steps{core}.apply_requested_beam(125);
+        {
+            const std::vector<std::string> expected = {
+                "own_ball", "own_driven_entity", "ball_recipe_of:Ball_Wood", "send:1", "send:1",
+                "log:0:--beam: Ball_Wood to (711.000,4.000,43.000), reported to the server for tick 126 and rebuilt here "
+                "at that tick"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_EQ(state_of(core).generations_.count("Ball_Wood"), 0u) << "not bumped: one life";
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        from = fake.calls.size();
+        steps{core}.apply_held_lifecycle(126);
+        {
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "write_body:"), 0u) << "never the in-place write";
+            EXPECT_EQ(count_prefix(calls, "make_own:Ball_Wood:P#2:126"), 1u);
+            EXPECT_EQ(count_prefix(calls, "make_own:"), 1u);
+            const auto mute = std::find(calls.begin(), calls.end(), std::string("mute_event_log:on"));
+            const auto made = std::find(calls.begin(), calls.end(), std::string("make_own:Ball_Wood:P#2:126"));
+            const auto unmute = std::find(calls.begin(), calls.end(), std::string("mute_event_log:off"));
+            EXPECT_TRUE(mute < made && made < unmute) << "made inside the event log's mute";
+        }
+        ASSERT_EQ(fake.own_specs.size(), 1u);
+        EXPECT_EQ(fake.own_specs[0].position[0], 711.0f);
+        EXPECT_FALSE(fake.own_specs[0].kick);
+        EXPECT_FALSE(fake.own_specs[0].with_replica);
+        state_of(core).frames_since_anchor_ = 7;   // the frame of 126 ran
+        record_ticks(core, 126, 126);
+        from = fake.calls.size();
+        {
+            const auto forced = core.force_rewind(3);
+            EXPECT_TRUE(forced.rolled);
+        }
+        {
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "write_body:"), 0u) << "the replayed stamp is never an in-place write";
+            const auto stamp = std::find(calls.begin(), calls.end(), std::string("pre_step:126"));
+            const auto made = std::find(calls.begin(), calls.end(), std::string("make_own:Ball_Wood:P#2:126"));
+            ASSERT_NE(stamp, calls.end());
+            ASSERT_NE(made, calls.end()) << "re-made by the replayed stamp";
+            EXPECT_LT(stamp, made);
+            EXPECT_LT(made, std::find(stamp, calls.end(), std::string("step"))) << "before the stamp's step";
+            EXPECT_EQ(count_prefix(calls, "make_own:"), 1u);
+        }
+        EXPECT_EQ(fake.own_specs.size(), 2u);
+        EXPECT_EQ(state_of(core).generations_.count("Ball_Wood"), 0u);
+
+        // No navigation replica: moved at once, nothing kept (as without
+        // the capability: the retail force controllers drive it).
+        state_of(core).own_life_.clear();
+        fake.driven.clear();
+        core.request_beam(position);
+        from = fake.calls.size();
+        steps{core}.apply_requested_beam(126);
+        EXPECT_EQ(count_prefix(since(fake.calls, from), "write_body:Ball_Wood:711.000000:wake"), 1u);
         EXPECT_TRUE(state_of(core).own_life_.empty());
     }
 

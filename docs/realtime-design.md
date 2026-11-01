@@ -442,6 +442,114 @@ this step's census tools (`srt_diag.patch` re-applied) on the E-core layout of s
   2.12-2.19, p99 3.43-3.77, max 2.5-3.2 ms for the blob alone. Which statistic is the target is set with the
   user's answer above.
 
+## As built (step BEAMF: the own ball's beam as a fresh body in the shared core)
+
+The user's answer to SRT2's options (decision 49 item 4, Q-R6-BEAM, verbatim "a，并且合到core内"): the beam's stamp is
+a fresh body - unmake + make, the server's way - and it lives in the shared client core, used by both hosts. The
+orchestrator pulled this part of Stage C's R6B forward (plan section BEAMF) so SRTJ measures without the window.
+
+- **Built (core).** `session_client_core::beam_remakes_body()` (`client_core.hpp`, beside `write_beam`): true when
+  the host fills `make_own` / `unmake_own`, i.e. declares `own_body_control` (headless) or `own_body_in_replay`
+  (retail, since EL8). `apply_own_lives`' beam-stamp branch (`client_core_lifecycle.cpp`, "if (beam_stamp)") now
+  tests it instead of `own_body_control`: on both hosts the stamp takes the own body out and makes it fresh at the
+  beam pose (`remake_own_body`: `make_own` inside the event log's mute, no kick, no replica), live at T+1 and in every
+  replay that crosses T+1 (the same branch with `live = false`); never an in-place write. `beam_own_ball`'s log line
+  takes the same test ("rebuilt here at that tick" on retail too). `write_beam` stays for a host with neither
+  capability (none of ours) and for a ball without the navigation replica (`own_driven_entity` empty: headless
+  `--no-rollback`, or retail before the navigation graph is known - the game's force controllers drive it then).
+  Retail gets no new platform operation: its `make_own` / `unmake_own` (core_host.cpp, host support's
+  `make_own_body` / `unmake_own_body`, the headless client's code on the bridge) were EL8's; only their comments say
+  "also live at a beam's stamp". No `BallanceMMOClient` data member, no protocol or journal change (the server
+  already applies the beam's Unphysicalize + Physicalize pair as a fresh body), no IVP or physics_RT change.
+- **Not changed (R6's).** `own_body_control` keeps meaning the own BIRTHS: moved / rejected / missing / superseded
+  echoes (`move_own_birth`, `resync_own_life`), `destroyable_own_birth` (OWNB) and the resync's remake. On retail a
+  MOVED beam echo therefore still resyncs (`move_own_birth`'s no-control branch), as before this step; a moved or
+  never-made beam is not reached by the automation recipes (no such echo in either run below). Making it follow the
+  headless move path would, for a never-made beam, take the retail player's body out with no remake - Q-R6-NEVER's
+  open question - so it is left to R6B / R6P.
+- **The premise (R6D's question, for the beam only), checked in the code and the runs.** The bridge's `physicalize`
+  (`physics_state.cpp:1864`) goes through `CKIpionManager::CreatePhysicsObjectOnParameters`, so the fresh body is in
+  the manager's entity table the Physicalize / Unphysicalize blocks use; `unphysicalize` (`:1977`) is the block's own
+  `delete_silently` (`Physicalize.cpp:243`). So the next trafo and the next death of a bridge-made own ball go through
+  the game's blocks as for a script-made one: measured in both runs - client 1's beam into the trafo at 300, then
+  "own ball unphysicalized at tick 302" (the trafo), its beam at 1100, then the death at 1157, each reported by
+  `OnUnphysicalize`; client 2's at 340 / 342. The body guard (#6) is keyed by the entity and the own group is set by
+  `make_own_body`. **Cosmetic, found:** the own ball's collision-sound listeners (`PhysicsCollDetectionListener`,
+  `PhysicsCollisionDetection.cpp:80-200`, and `PhysicsContinuousContact.cpp:70`) are bound to the IVP object;
+  deleting the body nulls their object (`event_collision_object_deleted`, `:193-196`) and nothing re-arms them until
+  the game's scripts physicalize the next ball (trafo / death / respawn). So after an automation beam the own ball's
+  hit and roll sounds are silent until then (from the code; not listened to). No simulation effect (a listener only
+  reads the contact and fires a behaviour output), the `beam` verb is automation-only (no human play path beams the
+  own ball), and it is the same kind of "script bound to the ball's physics object" R6D lists for the live own
+  births: noted there for R6D / R6M, not handled here.
+- **Known residual BEAMF-S: the own ball's sounds after a beam (review round, the census).** What is bound to the
+  ball's physics object rather than its entity, listed and not guessed: physics_RT has exactly two behaviours that
+  install a listener on an IVP object (`PhysicsCollisionDetection.cpp`, `PhysicsContinuousContact.cpp`; nothing
+  else calls `add_listener_collision`), and EG0's census (`SimTool --root <game> --level 11 --list-callback-blocks
+  --dump-at 600`, `work/BEAMF/cb/l11_600.txt`: 144 blocks of the ten queueing prototypes in game, 28 outside the
+  selection) names 14 that target the current ball (`Ball_Wood#42240`): Gameplay_Ingame's SetPhysicsForce 26354,
+  26392, 26414, 26432, 26447 and Physics WakeUp 25094, 26418, 27403 (zero-force controllers on retail, whose
+  navigation leaves are zeroed - rollback-engine-gaps 2.2's outside producers, DX3's recorded difference; a WakeUp
+  only wakes, and the remake leaves no bodiless frame), and Sound_Manager's Physics Collision Detection 6271, 6471,
+  6489, 6507 and Physics Continuous Contact 6619, 6675 - the only listeners on the ball, all in the sound script,
+  and their callbacks only set the block's outputs (`PhysicsCollisionDetection.cpp:124-189`,
+  `PhysicsContinuousContact.cpp:96-200`: no write into IVP). Why they go silent: deleting the old body calls
+  `event_collision_object_deleted`, which unhooks the listener and nulls its object (`:190-197`) but leaves it in
+  the block's local 0; the block's On input makes a new listener only while local 0 is null (`:267-287`), so it
+  stays silent until Sound_Manager switches the block Off (`:289-299`, which deletes it) and On again for the next
+  game-made ball (trafo, death, respawn). No crash path: a nulled listener gets no more callbacks and its
+  destructor checks the object (`:99-101`, ContinuousContact `:83-84`). So the simulation is unaffected (the FINAL
+  rows above), only the automation `beam` verb reaches it, and nothing of R6D's open design was needed for the
+  fresh body itself (guard, group, OnUnphysicalize measured above). The options are the user's (put through the
+  orchestrator's decision list, not chosen here): (a) leave it, the test verb only; (b) re-arm Sound_Manager's six
+  blocks on a bridge-made own ball (an Off / On of the blocks, or a listener re-bind in the bridge), built with R6D
+  item 1's survey and checked by R6B's "sound after a remake" live check. Queued as R6D item 1 / R6B (roadmap §4
+  item 9).
+- **Checks** (x64 BUILD-OK DEPS-OK, `build-agent-rBEAMF`; x86 CLIENT-BUILD-OK DEPS-OK, `#deps 46 (VALID)` on an
+  unchanged includer of `client_core.hpp`; GCC `linux_test_syntax.sh` 33/33 ok; `BallanceMMOMessageTests` 727/727,
+  the new `SessionClientCoreOwnLives.BeamRemadeAtItsStampWithTheRetailCapabilities`: retail's capabilities, the stamp
+  is `make_own` inside the mute live at T+1 and again in a forced replay crossing T+1, no `write_body`):
+  - wire check on core_ref_s13 (`EXTRA=--replay-free-cost-clock wire_check.sh - rBEAMF rBEAMFw rSRT4dw_new`):
+    45/45 sends SAME, 45/45 journals IDENTICAL (`fan_dr` and `h123_150` beam the headless own ball: the headless beam
+    path is unchanged); HL run 16's three arms (`hl_full/r16_l11_cross`, `r16_swing_s0`, `r16_swing_s1`) replayed by
+    rBEAMF (free clock): 12/12 journals IDENTICAL, 12/12 end markers.
+  - retail L11 `srt_ctl` (SRT2's recipe: `work/BEAMF/beamf_retail.py`, RT1's arm '0:0 0:0', client 1 beams at
+    300 / 520 / 750 / 1100, client 2 at 340 / 600; each game on E-cores of its own, 16-21 / 22-27; the Arch server of
+    this tree, snapshots off), two sessions: `beamf_r1` (with OWNB's `BMMO_HULL_PROBE=Ball`, one probe file per copy)
+    and `beamf_r2` (no probe). Both: resyncs 0 / 0, rebases 0 / 0, starved 0, the server journal's replay 2576/2576
+    and 2583/2583; every beam's "own body ... made for tick N (made)" at its stamp.
+
+    | run | rb / resim (c1, c2) | t_rest | t_rep | t_max | t_cap total / max (ms), c1 and c2 |
+    |---|---|---|---|---|---|
+    | srt1_ctl (SRT1, in-place beam; c1 resynced once) | - | 223 / 406 | 1011 / 656 | 261 / 122 | 6922 / 28, 8878 / 23 |
+    | srt2_proto (SRT2's option (a) prototype) | 33/79, 57/144 | 67 / 112 | 174 / 293 | 18 / 12 | 4268 / 12, 4123 / 4 |
+    | beamf_r1 (probe on) | 31/67, 48/132 | 62 / 95 | 129 / 245 | 13 / 23 | 4043 / 7, 3995 / 3 |
+    | beamf_r2 | 30/71, 50/128 | 60 / 100 | 115 / 202 | 10 / 11 | 4099 / 4, 4032 / 3 |
+
+    No blob window: the largest live capture is 3-7 ms (srt1_ctl: 23-28, the window), the largest rewind 10-23 ms
+    (122-261). The checker counts and blob sizes per capture were not re-measured (SRT2's diag patch no longer applies
+    after SRT4's capture change and was not ported); the window's cause is measured directly instead, below.
+  - The own ball's collision bookkeeping against the other worlds (`work/BEAMF/probe_ov.py`, `probe_cmp.py`; the
+    server's from a SimTool `--replay-session` of `beamf_r1`'s server journal with the same probe): at every beam the
+    owner's fresh body, the server's clone and the other client's mirror have the same overlap element - centre the
+    beam pose, radius **4.0000 m** in all three (SRT2: 1255.5 m in the owner's world only) - and the owner's probe
+    rows (hull gradient and values, hull entries, overlap element, core speed and position) are byte-identical to the
+    server clone's at every probed PSI after each of the six beams (8 PSIs at 520 / 600 / 1100, 4 at the trafo beams
+    300 / 340 / 750 until the trafo takes the ball). The other client's mirror equals both except its live rows at
+    the trafo tick (the mirror predicted on before the owner's trafo Unphysicalize arrived; its FINAL rows are exact).
+  - FINAL rows against the server (`work/RT1/rt1_judge.py`, `work/BEAMF/rowdiff.py`), both runs: mechanisms 23/23
+    bit-equal; the own ball's beam rows **exact** - SRT2's / RTR's 0.001946 m (lin 0.064, ang 0.081) at the trafo
+    beams 300 / 340 and srt2_proto's 0.00114 m at 750 are 0 m with equal velocities; every differing own, mirror and
+    piece row is rotation-only, at most 2.98e-8 (own / mirror) and 4.2e-8 (pieces), at the same ticks as srt2_proto's
+    mirror rows (298, 906-962, 1436-1524, 1974-2062, 2332-2390: RTR's known signature, not a beam's).
+- **Deferred (the plan section's two retail sessions are spent):** EG0's arena beam (`work/EG0/eg0_retail.py`, 8.6 mm
+  / 0.879 m/s at 1300; needs the slot-13 maphack builds), FANX's paper-plate beam (1.7 cm) and RTR's stall recipe
+  (`rtr_retail.py stall`, 0.981 m at 598) were not re-run; each is an in-place-beam residual of the mechanism this
+  step removes and is expected at 0, to be confirmed in a later retail batch (R6B's list carries all three). A retail
+  replay that crosses an own beam's stamp was not reached live (both runs' rewinds are 2-3 ticks deep and none
+  anchors before an own stamp): the replayed stamp is covered by the unit test and by the headless arms, whose core
+  and restore path are the same; a forced-rollback arm (`rt1_retail.py arm LABEL E:D 0:0`) would reach it on retail.
+
 ## As built (step SRT3, a1: one rewind per frame)
 
 - **Code** (shared core only; no protocol, journal, engine or server change): `client_core_frame.cpp` `pre_step` drains

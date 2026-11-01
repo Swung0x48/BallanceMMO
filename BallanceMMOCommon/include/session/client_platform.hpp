@@ -698,8 +698,10 @@ namespace bmmo::session {
         // captured before the step, consumed by this call.  Required with
         // event_log.
         std::function<own_birth_pose(const std::string& entity, uint32_t tick)> own_birth_capture;
-        // With own_body_control only (design 2.3), and called inside the
-        // core's mute of the event log (mute_event_log): the own body made
+        // With own_body_control or own_body_in_replay (design 2.3), and
+        // called inside the core's mute of the event log (mute_event_log);
+        // with either, also live at an own beam's stamp (FULL step BEAMF:
+        // the fresh body the server makes, on every host): the own body made
         // again (own_body_spec), a body still there taken out first; and the
         // own body taken out, the entity put at the pose its Physicalize
         // carried (false and `error`: not taken out).  The host shuts down
@@ -901,10 +903,14 @@ namespace bmmo::session {
         // Step EL8 (rollback-engine gaps design 2.3.4): the host fills
         // make_own / unmake_own (and entity_matrix / set_entity_matrix) and
         // the core may call them from restore_lives and the replay's drain
-        // only - an own life ending inside a window is revived at the restore
+        // - an own life ending inside a window is revived at the restore
         // and removed again at its replayed death, an own life born in the
         // window is remade at its stamp.  Every body made so is gone again at
         // a tick <= now.  Without it such a life is unrevivable (counted).
+        // FULL step BEAMF: either flag also makes an own beam's stamp the
+        // fresh body (make_own after unmake_own's take-out, live and in the
+        // replay), never an in-place write (session_client_core::
+        // beam_remakes_body).
         // own_body_control implies nothing here: a host declares both.
         bool own_body_in_replay = false;
         // Step T3 (trafo-replication design 2.14): the host builds the
