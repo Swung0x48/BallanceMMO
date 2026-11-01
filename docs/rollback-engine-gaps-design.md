@@ -1709,6 +1709,15 @@ cross-referenced (one comment above `retail_recipe` in
 from its hunks). Files of T3's set touched by this step: `sim_tool.cpp`
 (its own region and call sites, as above) and that one comment.
 
+**Update (FULL step R6B, 2026-11-01): the 1300 beam exact on retail.**
+EG0's arm rerun on the R6B build (`eg0_retail.py r6b_eg0 0`, the arena as
+BML+'s custom map since CMAP, no slot-13 hack, snapshots off): the own
+ball's LIVE rows equal the server's at every tick but 2716, the `journal
+mark` row (0.4804 m there in the baseline `eg0_ctl` too); the stamp at 1300
+needs no correction (was dp 0.0086 m, dv 0.879 m/s). The beam has been the
+fresh body since BEAMF; R6B adds the in-window own-birth remake. Core design
+"As built (step R6B)".
+
 ## As built (step B7EG, 2026-10-28): gap Q (G2-G4); Q5 and gap L not built
 
 - **G2, engine change #20 and bridge API v23** (`docs/engine-changes.md` #20

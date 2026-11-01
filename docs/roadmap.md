@@ -1374,6 +1374,42 @@ numbers 1-10 are unchanged.
    handled as a moved pair (a resync without own body control); (b) left
    to R6B / R6P's own body control, where a superseded birth is taken out
    of the history (session-client-core-design.md "As built (step R6H)").
+   **SRTJ-OV closed at FULL step R6B (2026-11-01, the user's C):** retail
+   declares own body control; `scripts/retail/r6b_ovx1` (the `ovx_r1`
+   recipe) own ball and mirror bit-equal from the birth tick (4
+   rotation-only rows <= 2.1e-8, as option A), every replay rechecks the
+   507 birth at the live PSI's clock (core design "As built (step R6B)").
+   **Queued (FULL step R6B, root-caused, pre-existing; the fix is the
+   user's choice): an own re-Physicalize that finds its body alive.** In
+   RTR's stall recipe (L11) client 1's paper ball, made at 767 by its trafo,
+   is physicalized again at 843 with no Unphysicalize reported between (the
+   paper trafo's script while client 2's ball ran through the same trafo
+   from 800). Retail's Physicalize block finds the body alive and keeps it
+   (physics_RT `Physicalize.cpp` ~105-117, the body guard of engine change
+   #6), but the host reports the Physicalize (`core_host_on_physicalize`)
+   and the server, since HLX, replaces a living body at a Physicalize
+   (`physics_world.cpp` ~921-938, "found its body alive: the old body
+   replaced"): the server's clone is a fresh body at rest at 843, the owner
+   keeps its rolling one - own ball 4.6 cm off at 844, 0.2309 m at 856, 8
+   mm at rest after 958 (`scripts/retail/r6b_stall`; HEAD's build without
+   R6B `r6b_stall_head` gives the same numbers to the digit; RTR's
+   pre-HLX `rtr_stall` has no "found alive" line at 843). What a later
+   rewind across 843 does with R6B is UNMEASURED (none crossed it in the
+   run) and is no agreement either way: the core records the 843
+   Physicalize as a made, unmoved own birth (`scripted_own_life`,
+   `client_core_lifecycle.cpp` 2753-2759) although the game kept the 767
+   body; if the engine's restore asks `destroy_own_birth` for it, the own
+   ball - alive at an anchor in [767, 842] - is taken out at the restore
+   and missing from the replay of anchor+1..842, where the server had the
+   rolling 767 body; if it does not (the body's birth record is 767,
+   before the anchor), nothing is remade and the owner keeps its rolling
+   body against the server's fresh one. Options: (a) the owner
+   remakes its own body at such a Physicalize live (make_own / unmake_own,
+   the server's rule - both hosts); (b) the server and receivers keep a
+   living body at a Physicalize the owner's game made nothing for (a flag
+   on the event; narrows HLX); (c) the owner does not report a Physicalize
+   that made no body (no event: the server's clone and the mirrors keep
+   their body, as the owner's game does).
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire

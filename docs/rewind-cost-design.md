@@ -1984,6 +1984,16 @@ other places:
   mism 0; 5-8 own-birth remakes per client, births recreated 59 / exact 59,
   parked 0.
 
+**Retail closed (FULL step R6B, 2026-11-01).** Retail declares
+`own_body_control` (with `own_birth_move` off), so an own birth the scripts
+made inside a window is remade at its birth tick there too; the parked
+body's later hull state (`time_of_next_reset` 16 against the clone's 0) is
+gone: in `scripts/retail/r6b_ovx1` every remake of client 2's 2299 respawn
+and the final one of its 507 trafo birth are SAME as the server clone at
+creation and through the 9 PSIs probed (SimTool replay of the server journal
+with `BMMO_HULL_PROBE=Ball`); L11 ctl sessions `parked=0`. The same-build
+control is `session own-births parked`. Core design "As built (step R6B)".
+
 ## As built (step B6RC)
 
 Step B6RC is the batch of RC4 and RC5. Base d97920e (protocol 13, journal

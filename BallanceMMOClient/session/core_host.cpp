@@ -419,6 +419,15 @@ namespace {
     // session (it then follows the server's interval, as before DEP).
     // Host-local: nothing goes on the wire.
     std::atomic<bool> snapshots_next{false};
+    // FULL step R6B: core_config::own_births_parked ('session own-births
+    // parked|remade', a test verb: the same-build control arm of the
+    // in-window own-birth remake).  Off (remade) by default: with
+    // own_body_control an own birth the scripts made inside a rewind's
+    // window is taken out at the restore and made again at its birth tick
+    // (OWNB); parked keeps it on the parking path as before R6B.  Read at
+    // every SessionStart and applied to a running core at once (the core
+    // reads the field at each restore).  Host-local: nothing on the wire.
+    std::atomic<bool> own_births_parked_next{false};
 
     // ------------------------------------------------------------ the mailbox
     // Design 3.2 "Receive": every Session* opcode's bytes, in arrival order.  A
@@ -545,6 +554,18 @@ namespace {
         // (the guard's log line says what a rewind did).
         std::set<std::string> revive_navigations;
         uint64_t own_bodies_made = 0, own_bodies_unmade = 0;
+        // FULL step R6B (BEAMF-S (b), core design "As built (step R6D)" item
+        // 1): Sound_Manager's Physics Collision Detection / Physics
+        // Continuous Contact blocks - the only IVP listeners on the own ball
+        // - collected at the anchor and re-armed after a frame whose
+        // own_bodies_made advanced (a bridge-made own body has none bound).
+        // `sound_rearm_check`: frames left until the re-arm's bind check.
+        std::vector<uint32_t> sound_blocks;
+        uint64_t sound_made_seen = 0;
+        uint64_t sound_rearms = 0, sound_rearmed = 0, sound_skipped_off = 0, sound_skipped_target = 0,
+                 sound_skipped_queued = 0, sound_reset_failed = 0;
+        uint64_t sound_checks = 0, sound_bound = 0, sound_unbound = 0;
+        int sound_rearm_check = 0;
         bool own_group_set = false;
         bool body_guard = false;
         std::string body_guard_entity;
@@ -1204,6 +1225,13 @@ namespace {
         host.navigation = {};
         host.navigation_known = false;
         host.outside_force_blocks.clear();   // step DX3: read again with the graph
+        // FULL step R6B: read again at the anchor; the counters are the session's.
+        host.sound_blocks.clear();
+        host.sound_made_seen = host.own_bodies_made;   // the counter is the process's, not reset per session
+        host.sound_rearms = host.sound_rearmed = host.sound_skipped_off = host.sound_skipped_target = 0;
+        host.sound_skipped_queued = host.sound_reset_failed = 0;
+        host.sound_checks = host.sound_bound = host.sound_unbound = 0;
+        host.sound_rearm_check = 0;
         host.own_replica = {};
         host.revive_navigations.clear();
         host.own_group_set = false;
@@ -1241,6 +1269,144 @@ namespace {
         host.beam_in_flight_armed = 0;
         host.nav_source_differs = host.mute_source_differs = 0;
         host.mirror_births.clear();
+    }
+
+    // ---- FULL step R6B: the own ball's collision-sound listeners re-armed
+    // (BEAMF-S (b); core design "As built (step R6D)" item 1).  A host
+    // nature, not a core decision: the headless world plays no sound.
+    // Sound_Manager's Physics Collision Detection and Physics Continuous
+    // Contact blocks hold the only IVP listeners on the own ball.  A body the
+    // bridge makes (a beam's stamp, an in-window birth's remake, a revive, a
+    // resync's remake) has none: a Collision Detection listener of the old
+    // body is unhooked and its object nulled but stays in the block's local 0
+    // (so the block's Create makes nothing), a Continuous Contact's contact
+    // data dies with the old body (local 1 nulled).  CK API only.
+    const CKGUID kSoundCollisionGuid(0x7435488d, 0x201d1188);   // physics_RT: Physics Collision Detection
+    const CKGUID kSoundContactGuid(0x199e4cf1, 0x545a78fe);     // physics_RT: Physics Continuous Contact
+
+    // The two prototypes' blocks of Sound_Manager, at any depth, in block
+    // order (depth first); empty without the script.  Read once at the
+    // anchor; each block is tested again at every re-arm.
+    std::vector<uint32_t> sound_listener_blocks(CKContext* context) {
+        std::vector<uint32_t> out;
+        CKBehavior* root = bmmo::game::find_root_script(context, "Sound_Manager");
+        if (!root) return out;
+        std::vector<CKBehavior*> stack{root};
+        while (!stack.empty()) {
+            CKBehavior* behavior = stack.back();
+            stack.pop_back();
+            if (behavior != root) {
+                const CKGUID guid = behavior->GetPrototypeGuid();
+                if (guid == kSoundCollisionGuid || guid == kSoundContactGuid) out.push_back(behavior->GetID());
+            }
+            for (int i = behavior->GetSubBehaviorCount(); i-- > 0;)
+                if (CKBehavior* sub = behavior->GetSubBehavior(i)) stack.push_back(sub);
+        }
+        return out;
+    }
+
+    // After a frame whose own_bodies_made advanced, outside any replay (the
+    // end of core_host_frame): every collected block whose target is the
+    // CURRENT own entity (a trafo changes it) and that is On (IsActive; the
+    // Off input leaves a block inactive, and an ActivateInput on it would
+    // switch back on what the script switched off - death, level end, ball
+    // switch).  A Collision Detection block needs its stale listener in
+    // local 0 (a null local 0 on an active block: its Create's callback is
+    // still queued and binds to the current body anyway - re-arming it would
+    // queue a second one, whose Execute news a listener unconditionally);
+    // it is reset through its own CK callback (CKM_BEHAVIORRESET deletes the
+    // listener inside physics_RT, no cross-module delete), then both kinds
+    // get ActivateInput(0): their next live execution queues the callback,
+    // which binds to the current body at that frame's PreSimulate.  A still
+    // queued entry a rewind meets is an outside entry gap Q4 holds.
+    void sound_rearm(CKContext* context, const bmmo::physics::physics_view& view, logger_wrapper* logger,
+                     const std::string& own_entity, uint32_t tick) {
+        auto* own = own_entity.empty() ? nullptr
+                  : CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(own_entity.c_str()),
+                                                                           CKCID_3DENTITY, nullptr));
+        if (!own || !view.has_body(own_entity.c_str())) {
+            logger->Info("Physics session core: sound re-arm at tick %u skipped: own entity '%s' %s", tick,
+                         own_entity.c_str(), own ? "has no body" : "not found");
+            return;
+        }
+        ++host.sound_rearms;
+        uint32_t rearmed = 0, off = 0, target = 0, queued = 0, failed = 0, gone = 0;
+        for (const uint32_t id: host.sound_blocks) {
+            auto* behavior = CKBehavior::Cast(context->GetObject(id));
+            if (!behavior) {
+                ++gone;
+                continue;
+            }
+            if (behavior->GetTarget() != own) {
+                ++target;
+                continue;
+            }
+            if (!behavior->IsActive()) {
+                ++off;
+                continue;
+            }
+            if (behavior->GetPrototypeGuid() == kSoundCollisionGuid) {
+                void* listener = nullptr;
+                behavior->GetLocalParameterValue(0, &listener);
+                if (!listener) {
+                    ++queued;
+                    continue;
+                }
+                behavior->CallCallbackFunction(CKM_BEHAVIORRESET);
+                listener = nullptr;
+                behavior->GetLocalParameterValue(0, &listener);
+                if (listener) {   // the reset route failed on this CK2: leave the block as it is
+                    ++failed;
+                    continue;
+                }
+            }
+            behavior->ActivateInput(0, TRUE);
+            ++rearmed;
+        }
+        host.sound_rearmed += rearmed;
+        host.sound_skipped_off += off;
+        host.sound_skipped_target += target;
+        host.sound_skipped_queued += queued;
+        host.sound_reset_failed += failed;
+        if (rearmed) host.sound_rearm_check = 3;   // the bind check three frames on
+        if (host.sound_rearms <= 32 || failed)
+            logger->Info("Physics session core: sound re-arm at tick %u on %s: %u of %zu blocks re-armed, %u off, %u "
+                         "another target, %u queued, %u reset failed, %u gone (re-arm %llu)", tick, own_entity.c_str(),
+                         rearmed, host.sound_blocks.size(), off, target, queued, failed, gone,
+                         static_cast<unsigned long long>(host.sound_rearms));
+    }
+
+    // Three frames after a re-arm: whether the re-armed blocks' listeners
+    // are bound (Collision Detection local 0, Continuous Contact local 1
+    // non-null) - the evidence that the remade ball sounds again.
+    // `counted`: true after a re-arm (the counters), false at the session's
+    // end (a census, logged only).
+    void sound_bind_check(CKContext* context, logger_wrapper* logger, const std::string& own_entity, uint32_t tick,
+                          bool counted = true) {
+        auto* own = own_entity.empty() ? nullptr
+                  : CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(own_entity.c_str()),
+                                                                           CKCID_3DENTITY, nullptr));
+        uint32_t bound = 0, unbound = 0, off = 0;
+        for (const uint32_t id: host.sound_blocks) {
+            auto* behavior = CKBehavior::Cast(context->GetObject(id));
+            if (!behavior || !own || behavior->GetTarget() != own) continue;
+            if (!behavior->IsActive()) {
+                ++off;
+                continue;
+            }
+            void* local = nullptr;
+            behavior->GetLocalParameterValue(behavior->GetPrototypeGuid() == kSoundCollisionGuid ? 0 : 1, &local);
+            (local ? bound : unbound)++;
+        }
+        if (counted) {
+            ++host.sound_checks;
+            host.sound_bound += bound;
+            host.sound_unbound += unbound;
+        }
+        if (!counted || host.sound_checks <= 32 || unbound)
+            logger->Info("Physics session core: sound listeners %s at tick %u on %s: %u bound, %u unbound, %u off",
+                         counted ? "after a re-arm" : "at the session's end", tick, own_entity.c_str(), bound, unbound,
+                         off);
     }
 
     // Step BMX: the shared mirror rule checked on the spirit ball about to
@@ -1903,7 +2069,17 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     ++host.sessions_seen;
     if (host.phase != retail_host::phase_type::idle) core_host_end_local("replaced by a new session");
     bs::session_capabilities caps;
-    caps.own_body_control = false;   // the game's Physicalize block owns the own ball (design 2.3)
+    // FULL step R6B (core design 2.3 / 6.2 R6 row, "As built (step R6D)"
+    // item 2): own body control - make_own / unmake_own are the bridge's
+    // (below).  With core_config::own_birth_move off (R6S) it changes one
+    // branch: an own birth the scripts made inside a rewind's window is taken
+    // out at the restore and made again at its birth tick, as the server
+    // makes its clone (destroyable_own_birth, OWNB's remake), instead of
+    // parked.  A live own birth stays the game's Physicalize block's; a
+    // moved one still resyncs and a never-made one is still re-reported and
+    // resynced (R6P turns those over); a superseded one resyncs (R6S,
+    // R6H-SUP (b)).  'session own-births parked' is the control arm.
+    caps.own_body_control = true;
     // Step EL8 (rollback-engine gaps design 2.3.4 "RC capability"): make_own /
     // unmake_own on the bridge, called by the core from restore_lives and the
     // replay's drain - an own life ending inside a window is revived and
@@ -1968,9 +2144,11 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // that differs from the prediction replays from its tick), the
     // lifecycle rewind (a late remote birth is made at its stamp inside a
     // replay, a late death rewinds) and the own echoes acted on with the
-    // design 2.3 fallback this host's capabilities select (no own body
-    // control: a moved own birth is the snapshots' or a resync, a rejected
-    // or missing one re-reported while current, a superseded one nothing);
+    // answers this host's capabilities and switches select (own body
+    // control since FULL step R6B with own_birth_move off: a moved own birth
+    // is the snapshots' or a resync, a rejected or missing one re-reported
+    // while current and resynced, a superseded one resynced; an in-window
+    // scripted own birth taken out and remade at its birth tick);
     // the own corrections (R4, late-player part one: a held notice of our
     // own substituted tick amends the tick's record and replays from it),
     // own_body_backstop on.  The lead (R5, late-player part two) is the
@@ -2012,6 +2190,9 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // declares own_body_control (the beam and the in-window scripted birth)
     // while a moved / never-made own birth keeps today's resync.
     config.own_birth_move = false;
+    // FULL step R6B: 'session own-births parked' keeps the in-window
+    // scripted own birth on the parking path (the control arm).
+    config.own_births_parked = own_births_parked_next.load();
     // RC3 (step B5RX, the user: work as if snapshots did not exist): with
     // the session's snapshots off, a body-set change's full snapshot is no
     // correction, only names and rows.
@@ -3290,6 +3471,21 @@ void BallanceMMOClient::core_host_frame() {
     // pre_step, before its after_rewinds hook arms the line again).
     core_manager_trace_due = false;
     host.core->pre_step();
+    // FULL step R6B (BEAMF-S (b)): a frame that made an own body through the
+    // bridge (a live beam, a rewind's remake, settle_own_due, a resync's
+    // remake - the drain and pre_step above, every replay finished) re-arms
+    // the own ball's collision-sound blocks once; three frames later the
+    // binding is checked.  Never inside a replay: Sound_Manager is outside
+    // the script selection.
+    if (core_session_running() && !host.sound_blocks.empty()) {
+        if (host.own_bodies_made != host.sound_made_seen) {
+            host.sound_made_seen = host.own_bodies_made;
+            sound_rearm(m_bml->GetCKContext(), physics_view_, logger_, host.core->own_body_entity(),
+                        host.core->current_tick());
+        } else if (host.sound_rearm_check > 0 && --host.sound_rearm_check == 0) {
+            sound_bind_check(m_bml->GetCKContext(), logger_, host.core->own_body_entity(), host.core->current_tick());
+        }
+    }
 }
 
 // The host's session ends (the legacy physics_session_end_local): the script
@@ -3306,6 +3502,20 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
         ++level_life.abandoned;
     }
     std::string error;
+    // FULL step R6B: the own ball's collision-sound blocks at the end (bound
+    // to its body, or off) - the session's last word on BEAMF-S (b).
+    if (host.core && !host.sound_blocks.empty()) {
+        sound_bind_check(m_bml->GetCKContext(), logger_, host.core->own_body_entity(), host.core->current_tick(), false);
+        logger_->Info("Physics session core: sound re-arms %llu (blocks re-armed %llu, off %llu, another target %llu, "
+                      "queued %llu, reset failed %llu; checks %llu: bound %llu, unbound %llu)",
+                      static_cast<unsigned long long>(host.sound_rearms), static_cast<unsigned long long>(host.sound_rearmed),
+                      static_cast<unsigned long long>(host.sound_skipped_off),
+                      static_cast<unsigned long long>(host.sound_skipped_target),
+                      static_cast<unsigned long long>(host.sound_skipped_queued),
+                      static_cast<unsigned long long>(host.sound_reset_failed),
+                      static_cast<unsigned long long>(host.sound_checks), static_cast<unsigned long long>(host.sound_bound),
+                      static_cast<unsigned long long>(host.sound_unbound));
+    }
     core_pause_chain.clock_restore(m_bml->GetCKContext());   // FULL step LGM: the core host's own edits
     core_pause_chain.scripts_restore(m_bml->GetCKContext());
     logger_->Info("Physics session: ESC menu overlay at the end: %s",
@@ -3664,8 +3874,13 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         host.outside_force_blocks.clear();
         for (CK_ID id: bmmo::game::outside_force_blocks(m_bml->GetCKContext()))
             host.outside_force_blocks.push_back(static_cast<uint32_t>(id));
-        logger_->Info("Physics session: %zu navigation leaves at tick %u, keys %d/%d/%d/%d", graph.leaves.size(), tick,
-                      graph.leaves[0].key, graph.leaves[1].key, graph.leaves[2].key, graph.leaves[3].key);
+        // FULL step R6B: the own ball's collision-sound blocks (re-armed on a
+        // bridge-made own body, sound_rearm).
+        host.sound_blocks = sound_listener_blocks(m_bml->GetCKContext());
+        host.sound_made_seen = host.own_bodies_made;
+        logger_->Info("Physics session: %zu navigation leaves at tick %u, keys %d/%d/%d/%d; %zu sound listener blocks",
+                      graph.leaves.size(), tick, graph.leaves[0].key, graph.leaves[1].key, graph.leaves[2].key,
+                      graph.leaves[3].key, host.sound_blocks.size());
         return true;
     };
     // The bridge's event log: created / deleted / script_wakeup to the core
@@ -4895,6 +5110,28 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            "refused so far)", n, k, host.core->current_tick(), host.core->forced_own_moves(),
                            host.core->forced_own_moves_refused());
     }
+    if (what == "own-births") {
+        // FULL step R6B: 'session own-births parked|remade' (a test verb,
+        // core_config::own_births_parked - the same-build control arm of the
+        // in-window own-birth remake): for the next session and, at once, for
+        // a running core (the core reads the field at each restore).  The
+        // status adds the sound re-arm's counters (BEAMF-S (b)).
+        if (value == "parked" || value == "remade") {
+            own_births_parked_next.store(value == "parked");
+            if (core_session_running()) host.core->config.own_births_parked = value == "parked";
+            return std::format("ok session own-births {}: the next core session{}", value,
+                               core_session_running() ? " and the running one from its next restore" : "");
+        }
+        if (!value.empty() && value != "status") return "error usage: session own-births parked|remade|status";
+        return std::format("ok own-births next={} running={} own_bodies_made={} unmade={} sound: blocks={} rearms={} "
+                           "rearmed={} off={} target={} queued={} reset_failed={} checks={} bound={} unbound={}",
+                           own_births_parked_next.load() ? "parked" : "remade",
+                           core_session_running() ? (host.core->config.own_births_parked ? "parked" : "remade") : "none",
+                           host.own_bodies_made, host.own_bodies_unmade, host.sound_blocks.size(), host.sound_rearms,
+                           host.sound_rearmed, host.sound_skipped_off, host.sound_skipped_target,
+                           host.sound_skipped_queued, host.sound_reset_failed, host.sound_checks, host.sound_bound,
+                           host.sound_unbound);
+    }
     if (what == "drop-birth") {
         // A testing tool (R1 (c)): the next own Physicalize of this core
         // session never reaches the server (hooks.filter_event).
@@ -4908,6 +5145,7 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
            "session drop-birth | session hold-event TYPE:N:MS|TYPE:N:drop|off | session force-own-move <n> [after <k>] | "
            "session placement | session probes | session activate <script> at b+<n>|<tick> | "
            "session cache off|on|verify|status | session snapshots on|off|status | "
+           "session own-births parked|remade|status | "
            "session hold blocking|nonblocking|status | session hold shots DIR|off";
 }
 

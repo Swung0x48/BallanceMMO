@@ -5653,7 +5653,11 @@ in-place body keeps its floor contact, which the server's fresh body
 lacks"; the contact the moved core keeps with the trafo plate acts for a
 few PSIs after the write. Queued where it already was: roadmap §4 item 9
 (R6, retail own-body control, which removes the retail beam's own residual);
-the host-platform audit (AUD) lists it.
+the host-platform audit (AUD) lists it. **Closed (BEAMF, measured at R6B,
+2026-11-01):** the retail beam is the fresh body since BEAMF; FANX's recipe
+rerun on the R6B build (`scripts/retail/r6b_fanx`, `beam_scan.py`): dv, dw
+and dp 0 at every own beam stamp and the ticks after it (242, 590-598, 884,
+1232-1240), both copies' own rows equal to the server's (was 1.7 cm by 620).
 
 **Deferred**: "BMMO_NoBall imported by name" is shown by the code path only
 (`script_replay.hpp` `find_by_name` with the parent class): no import held
