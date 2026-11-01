@@ -2947,6 +2947,31 @@ numbers 1-10 are unchanged.
      exact in the controlled cell; **open (the user's decision):** a member
      whose assignment loses b datagrams still starts b passes (b ticks) late
      for the session with `lead_adjust` off (4 and 8 ticks measured).
+   - **FULL step HXP (2026-11-01; harness only):** SAXH's and SAXE's
+     deferred start-handshake cells ran (10 live runs: the assignment and
+     the start message x burst 4 / 8 and 60 / 200 ms outages, a COMMIT, a
+     refusal, the stale-estimate resync, DFR's random cells, SAXE's clean
+     cell; every cell within one tick, 0 late events, FINAL rows exact),
+     with `--outage` (a wall-clock outage in the proxy) and a process-exit
+     hang watcher on by default (not reproduced in 10 runs;
+     lockstep-without-snapshots.md "As built (FULL step HXP)"). **Queued
+     (root-caused, pre-existing in SAXH's protocol 24):** (1) a start
+     status line can reach a member after its state change - the server
+     sends `SessionStartStatus` reliable only, so an outage that drops a
+     reliable `SessionStartAt` copy holds the status behind its retransmit
+     while the next start's unreliable copies arrive first ("new start
+     time" before "start postponed", 45 ms), and a client shows a stale
+     status after it started (the message has no start sequence); options:
+     the client qualifies a status that arrives after its start, a
+     sequence in the status (protocol), status copies on the start's
+     schedule, or accept. (2) **The user's decision:** a COMMIT above 200
+     ms round trip always costs a second postponement that names the member
+     already running (its `CLOCK_ACK_STARTED` lands after the new deadline
+     D1 + rtt + 160 ms), and that answer lost for more than a window would
+     refuse a running member; options (a) not count a member missing while
+     its answer can be in flight (one window longer), (b) size the new
+     deadline from X1 + rtt + slack (every postponement longer), (c) accept
+     and document.
    - **FULL step HLX (2026-10-31; HL run 15's `swing_s1` failure):** a
      beam's Physicalize applied in a drain before its same-origin
      Unphysicalize was a no-op on the live mirror (the entity is kept, the

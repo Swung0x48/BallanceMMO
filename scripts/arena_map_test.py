@@ -54,6 +54,20 @@ The late-player additions (docs/late-player-design.md 5.1, H1-H8):
                                        (the client's --rejoin-at T[:MS], step
                                        TRL); its second life's journal is
                                        client{N}.rejoin1.bmjr
+  --outage N:ANCHOR[+DELAY]:MS[:up|down|both]
+                                       (FULL step HXP) a time-shaped outage on client
+                                       N's link before or after tick 0: from the
+                                       first downlink datagram ANCHOR names (the
+                                       --drop-down anchors: an index or sizeA-B),
+                                       DELAY ms later (default 0), every datagram
+                                       of the direction (default down) is dropped
+                                       for MS ms of wall clock; repeatable
+  --no-hang-dump / --hang-dump-after S (FULL step HXP) every client process is
+                                       watched: one still alive S s (default 20)
+                                       after its log's "exit code N" line is
+                                       minidumped (client<i>.hang.dmp, symbolized
+                                       into client<i>.hang.dmp.txt by sym_dump.py),
+                                       ended, and a FAIL line says so
   --server-log PATH                    an external server's log, copied and read
   --control DIR                        a control run (repeatable): the band the
                                        criteria compare with
@@ -170,6 +184,9 @@ class DelayProxy:
         # the first one of a..b bytes), that one and the next count - 1
         # downlink datagrams are dropped, once.  Counted apart from the loss.
         self.drop_down = None
+        # --outage (FULL step HXP): Outage objects, each a wall-clock window
+        # opened by a downlink anchor; drops counted by each Outage.
+        self.outages = []
         self.down_seen = 0
         self.forced_left = 0
         self.forced_dropped = 0
@@ -230,9 +247,23 @@ class DelayProxy:
                 # without --drop-down (SAXE review: skipping the draws shifted
                 # the pattern, and a burst of 4 became one of 8).
                 forced = False
-                if sock is self.back and self.drop_down is not None:
+                idx = None
+                if sock is self.back:
                     idx = self.down_seen
                     self.down_seen += 1
+                if self.outages:
+                    o_dir = 'up' if sock is self.front else 'down'
+                    o_now = time.monotonic()
+                    for o in self.outages:
+                        dropped = o.drops(o_dir, idx, len(data), o_now)
+                        if self.log and o.just_fired:
+                            self.log.write('# outage: %s anchored at downlink datagram %d (%d B) at %.6f\n'
+                                           % (o.spec, o.fired[0], o.fired[1], o.fired[2]))
+                        if dropped and not forced:
+                            forced = True
+                            if self.log:
+                                self.log.write('%.6f %s %d outage -\n' % (o_now, o_dir, len(data)))
+                if sock is self.back and self.drop_down is not None:
                     if self.forced_fired is None and drop_anchor_matches(self.drop_down[0], idx, len(data)):
                         self.forced_fired = (idx, len(data))
                         self.forced_left = self.drop_down[1]
@@ -242,9 +273,9 @@ class DelayProxy:
                     if self.forced_left > 0:
                         self.forced_left -= 1
                         self.forced_dropped += 1
-                        forced = True
-                        if self.log:
+                        if self.log and not forced:
                             self.log.write('%.6f down %d drop -\n' % (time.monotonic(), len(data)))
+                        forced = True
                 if self.burst_left.get(sock, 0) > 0:
                     self.burst_left[sock] -= 1
                     if forced:
@@ -340,6 +371,183 @@ def drop_anchor_matches(anchor, idx, size):
     if anchor[0] == 'index':
         return idx == anchor[1]
     return anchor[1] <= size <= anchor[2]
+
+
+class Outage(object):
+    """--outage N:ANCHOR[+DELAY]:MS[:up|down|both] (FULL step HXP): a
+    time-shaped outage, which --drop-down (a count of datagrams) and --event
+    (keyed to a client tick, so never before tick 0) cannot make.  The anchor
+    is the --drop-down one, matched on the downlink: the first downlink
+    datagram it names opens the window DELAY ms after its receipt; every
+    datagram of the direction(s) received in [open, open + MS) is dropped
+    (the anchor itself too when DELAY is 0 and the downlink is one of them).
+    One-shot.  Times are the proxy's time.monotonic() at receipt."""
+
+    def __init__(self, anchor, ms, dirs='down', delay_ms=0.0, spec=''):
+        self.anchor = anchor
+        self.ms = float(ms)
+        self.delay_ms = float(delay_ms)
+        self.dir_name = dirs
+        self.dirs = ('up', 'down') if dirs == 'both' else (dirs,)
+        self.spec = spec
+        self.fired = None          # (downlink index, size, receipt time) of the anchor
+        self.open_at = None
+        self.just_fired = False
+        self.dropped = {'up': 0, 'down': 0}
+
+    def drops(self, direction, idx, size, now):
+        """Whether the datagram moving in `direction` ('up' = client to
+        server), the `idx`-th of the downlink (None on the uplink), of `size`
+        bytes and received at `now`, is dropped."""
+        self.just_fired = False
+        if self.fired is None and direction == 'down' and drop_anchor_matches(self.anchor, idx, size):
+            self.fired = (idx, size, now)
+            self.open_at = now + self.delay_ms / 1000.0
+            self.just_fired = True
+        if self.open_at is None or direction not in self.dirs:
+            return False
+        if self.open_at <= now < self.open_at + self.ms / 1000.0:
+            self.dropped[direction] += 1
+            return True
+        return False
+
+    def as_dict(self):
+        return {'spec': self.spec, 'fired_at': list(self.fired[:2]) if self.fired else None,
+                'dropped_up': self.dropped['up'], 'dropped_down': self.dropped['down']}
+
+
+def parse_outage(spec):
+    """'N:ANCHOR[+DELAY]:MS[:up|down|both]' -> (N, Outage)."""
+    parts = spec.split(':')
+    if len(parts) not in (3, 4):
+        raise ValueError('--outage wants N:ANCHOR[+DELAY]:MS[:up|down|both], got %r' % spec)
+    index = int(parts[0])
+    anchor_text, _, delay = parts[1].strip().partition('+')
+    ms = float(parts[2])
+    dirs = parts[3].strip() if len(parts) == 4 else 'down'
+    if dirs not in ('up', 'down', 'both'):
+        raise ValueError('--outage direction must be up, down or both in %r' % spec)
+    if ms <= 0:
+        raise ValueError('--outage MS must be > 0 in %r' % spec)
+    anchor, _ = parse_drop_down('%d:%s:1' % (index, anchor_text))[1]
+    return index, Outage(anchor, ms, dirs, float(delay) if delay else 0.0, spec)
+
+
+RE_EXIT_LINE = re.compile(rb'(?:^|\n)exit code (-?\d+)')
+
+
+def write_minidump(pid, path):
+    """A minidump of process `pid` (thread stacks, thread info, handles,
+    unloaded modules - the flags of SAXH's hang_dump.py) into `path`.
+    Returns (ok, last error, bytes written); (False, -1, -1) off Windows."""
+    if sys.platform != 'win32':
+        return False, -1, -1
+    import ctypes
+    import ctypes.wintypes as wt
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    dbghelp = ctypes.WinDLL('dbghelp', use_last_error=True)
+    k32.OpenProcess.restype = wt.HANDLE
+    k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    # Our own child: all access (WithHandleData wants PROCESS_DUP_HANDLE too).
+    h = k32.OpenProcess(0x1F0FFF, False, pid)
+    if not h:
+        return False, ctypes.get_last_error(), -1
+    k32.CreateFileW.restype = wt.HANDLE
+    k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, wt.LPVOID, wt.DWORD, wt.DWORD, wt.HANDLE]
+    fh = k32.CreateFileW(str(path), 0x40000000, 0, None, 2, 0x80, None)   # GENERIC_WRITE, CREATE_ALWAYS
+    if not fh or fh == wt.HANDLE(-1).value:
+        err = ctypes.get_last_error()
+        k32.CloseHandle(h)
+        return False, err, -1
+    dbghelp.MiniDumpWriteDump.argtypes = [wt.HANDLE, wt.DWORD, wt.HANDLE, ctypes.c_int, wt.LPVOID, wt.LPVOID,
+                                          wt.LPVOID]
+    ok = bool(dbghelp.MiniDumpWriteDump(h, pid, fh, 0x1000 | 0x20 | 0x4, None, None, None))
+    err = ctypes.get_last_error()
+    k32.CloseHandle(fh)
+    k32.CloseHandle(h)
+    return ok, err, (os.path.getsize(path) if os.path.exists(path) else -1)
+
+
+class HangWatch(object):
+    """FULL step HXP: the process-exit hang (a session client that logged
+    'exit code N' and whose process did not end - SAXH hs3's joiner for
+    240 s, RC1d's resync_at150_down d15_brake client 1).  Follows client i's
+    log; once the exit line is there and the process still lives `after_s`
+    seconds later, writes a minidump of it (`dump`), symbolizes it with
+    scripts/sym_dump.py into `dump`.txt next to it, then ends the process so
+    the run's own checks go on.  The verdict fails the run on it."""
+
+    def __init__(self, index, proc, log_path, dump_path, after_s, symbolize=True):
+        self.index, self.proc, self.log_path, self.dump_path = index, proc, log_path, dump_path
+        self.after_s = after_s
+        self.symbolize = symbolize   # False: the selftest (no symbol lookup for a stand-in)
+        self.logged_code = None
+        self.hang = None
+        self.running = True
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def run(self):
+        offset, tail = 0, b''
+        while self.running and self.logged_code is None:
+            try:
+                with open(self.log_path, 'rb') as log:
+                    log.seek(offset)
+                    data = log.read()
+            except OSError:
+                data = b''
+            if data:
+                offset += len(data)
+                text = tail + data.replace(b'\0', b'')
+                m = RE_EXIT_LINE.search(text)
+                if m:
+                    self.logged_code = int(m.group(1))
+                    break
+                # From the last line start only: a tail cut mid-line would
+                # let RE_EXIT_LINE's '^' take 'exit code N' inside a longer
+                # line for the exit line (and dump a live client).
+                tail = text[text.rfind(b'\n') + 1:]
+            elif self.proc.poll() is not None:
+                return            # ended without the line (a crash, a kill): not a hang
+            time.sleep(0.2)
+        if self.logged_code is None:
+            return
+        seen = time.monotonic()
+        while self.running and self.proc.poll() is None and time.monotonic() - seen < self.after_s:
+            time.sleep(0.2)
+        if self.proc.poll() is not None or not self.running:
+            return
+        after = time.monotonic() - seen
+        ok, err, size = write_minidump(self.proc.pid, self.dump_path)
+        if not ok and self.proc.poll() is not None:
+            return                # it ended while the dump was being taken: not a hang
+        print('  HANG: client%d (pid %d) still alive %.0f s after its "exit code %d" line: minidump %s (%s, %d bytes)'
+              % (self.index, self.proc.pid, after, self.logged_code, self.dump_path,
+                 'ok' if ok else 'FAILED %d' % err, size), flush=True)
+        self.hang = {'after_s': round(after, 1), 'pid': self.proc.pid, 'logged_exit_code': self.logged_code,
+                     'dump': str(self.dump_path) if ok else None, 'dump_error': None if ok else err,
+                     'symbolized': None}
+        self.proc.terminate()
+        if ok and self.symbolize:
+            sym = str(self.dump_path) + '.txt'
+            try:
+                with open(sym, 'wb') as out:
+                    # Not -I: the 'minidump' package lives in the user's site-packages.
+                    rc = subprocess.run([sys.executable, '-X', 'utf8', str(REPO / 'scripts' / 'sym_dump.py'),
+                                         str(self.dump_path)], stdout=out, stderr=subprocess.STDOUT, timeout=300,
+                                        creationflags=FLAGS).returncode
+                if rc == 0:
+                    self.hang['symbolized'] = sym
+                else:
+                    print('  HANG: client%d symbolizing failed: sym_dump.py exit %d (see %s)' % (self.index, rc, sym),
+                          flush=True)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                print('  HANG: client%d symbolizing failed: %s' % (self.index, e), flush=True)
+
+    def close(self):
+        self.running = False
+        # A hang being symbolized gets its time (sym_dump's own cap is 300 s).
+        self.thread.join(timeout=320 if self.hang else 2)
 
 
 def parse_link(spec):
@@ -760,6 +968,7 @@ def run_case(args, sector, case_dir):
     handles, children, proxies = [], [], []
     clients = {}
     proxy_of, watches = {}, []
+    hang_watches = {}
     proxy_stats = {}
     server = None
     case_started = time.time()
@@ -809,7 +1018,9 @@ def run_case(args, sector, case_dir):
             # A proxy per client, kept by index: its own link, and the place
             # an event on that client's link happens.
             drop_down = args.drop_downs.get(i)
-            if link['latency_ms'] > 0 or link['loss_pct'] > 0 or link['jitter_ms'] > 0 or link_events or drop_down:
+            outages = [parse_outage(spec)[1] for spec in args.outage if parse_outage(spec)[0] == i]
+            if (link['latency_ms'] > 0 or link['loss_pct'] > 0 or link['jitter_ms'] > 0 or link_events or drop_down
+                    or outages):
                 pport = args.port + 400 + i
                 proxy = DelayProxy(pport, server_addr, link['latency_ms'], link['loss_pct'], link['jitter_ms'],
                                    link['loss_burst'], args.loss_seed,
@@ -817,6 +1028,7 @@ def run_case(args, sector, case_dir):
                 proxy.events = link_events
                 proxy.index = i
                 proxy.drop_down = drop_down
+                proxy.outages = outages
                 proxies.append(proxy)
                 proxy_of[i] = proxy
                 connect_host, connect_port = '127.0.0.1', pport
@@ -899,6 +1111,8 @@ def run_case(args, sector, case_dir):
                                  stdout=cf, stderr=subprocess.STDOUT, creationflags=FLAGS)
             clients[i] = p
             children.append(p)
+            if args.hang_dump:
+                hang_watches[i] = HangWatch(i, p, log_path, case_dir / f'client{i}.hang.dmp', args.hang_dump_after)
 
         host_started = time.monotonic()
         for i in range(args.players):
@@ -938,6 +1152,8 @@ def run_case(args, sector, case_dir):
                 p.terminate()
         for w in watches:
             w.close()
+        for w in hang_watches.values():
+            w.close()
         for h in handles:
             h.close()
         # What each link event did, from the proxy that ran it.
@@ -964,6 +1180,8 @@ def run_case(args, sector, case_dir):
             if q.drop_down is not None:
                 proxy_stats.setdefault('drop_down', []).append(
                     {'client': q.index, 'fired_at': q.forced_fired, 'dropped': q.forced_dropped})
+            for o in q.outages:
+                proxy_stats.setdefault('outage', []).append(dict(o.as_dict(), client=q.index))
         for q in proxies:
             q.close()
 
@@ -978,6 +1196,13 @@ def run_case(args, sector, case_dir):
         for d in proxy_stats['drop_down']:
             print('  proxy drop-down: client%d %s' % (
                 d['client'], 'fired at downlink datagram %d (%d B), dropped %d' % (d['fired_at'][0], d['fired_at'][1], d['dropped'])
+                if d['fired_at'] else 'NEVER FIRED (no downlink datagram matched the anchor)'))
+    if 'outage' in proxy_stats:
+        result['proxy_outage'] = proxy_stats['outage']
+        for d in proxy_stats['outage']:
+            print('  proxy outage: client%d %s: %s' % (
+                d['client'], d['spec'], 'anchored at downlink datagram %d (%d B), dropped %d up / %d down'
+                % (d['fired_at'][0], d['fired_at'][1], d['dropped_up'], d['dropped_down'])
                 if d['fired_at'] else 'NEVER FIRED (no downlink datagram matched the anchor)'))
     if 'bytes_down' in proxy_stats:
         result['proxy_bytes_down'] = proxy_stats['bytes_down']
@@ -1008,10 +1233,17 @@ def run_case(args, sector, case_dir):
             continue
         text = (case_dir / f'client{i}.log').read_text(errors='replace')
         statuses = [s for s in text.splitlines() if s.startswith('status:')]
-        result['clients'].append({
+        row = {
             'exit_code': p.returncode,
             'metrics': status_metrics(statuses[-1]) if statuses else None,
-        })
+        }
+        hang = hang_watches[i].hang if i in hang_watches else None
+        if hang:
+            # The process was ended by the watcher: its own exit code is the
+            # one it logged; the hang is a row of its own.
+            row['exit_code'] = hang['logged_exit_code']
+            row['hang'] = hang
+        result['clients'].append(row)
     result['interaction'] = interaction_report(case_dir, args.players)
     # H5: an external server's log next to the clients', so the report can
     # read its late events and barrier lines.
@@ -2282,6 +2514,10 @@ def verdict(case, event_clients=(), expect_refused=None):
     problems, warnings = [], []
     expect_refused = expect_refused or {}
     for i, c in enumerate(case['clients']):
+        if c.get('hang'):
+            h = c['hang']
+            problems.append(f'client{i} process-exit hang: alive {h["after_s"]:.0f} s after its "exit code '
+                            f'{h["logged_exit_code"]}" line (dump {h["dump"] or "FAILED"})')
         if i in expect_refused:
             text = expect_refused[i]
             try:
@@ -2729,6 +2965,167 @@ def selftest():
     check('drop-down keeps the seed\'s loss draws aligned',
           plain[0] == forced_run[0] and plain[1] == forced_run[1] and forced_run[3] == 4,
           'same before %s, same after %s, forced %d' % (plain[0] == forced_run[0], plain[1] == forced_run[1], forced_run[3]))
+    # HXP: --outage parses, and on a synthetic stream drops exactly the
+    # datagrams of its direction inside its wall-clock window.
+    _, o = parse_outage('1:size81:60')
+    _, o2 = parse_outage('2:size60-70+400:200:both')
+    _, o3 = parse_outage('0:5:30:up')
+    check('parse_outage',
+          (o.anchor, o.ms, o.dirs, o.delay_ms) == (('size', 81, 81), 60.0, ('down',), 0.0)
+          and (o2.anchor, o2.ms, o2.dirs, o2.delay_ms) == (('size', 60, 70), 200.0, ('up', 'down'), 400.0)
+          and (o3.anchor, o3.dirs) == (('index', 5), ('up',)),
+          str([(x.anchor, x.ms, x.dirs, x.delay_ms) for x in (o, o2, o3)]))
+    bad = 0
+    for spec in ('1:size81', '1:size81:0', '1:size81:60:sideways', 'x:size81:60'):
+        try:
+            parse_outage(spec)
+        except ValueError:
+            bad += 1
+    check('parse_outage refuses bad specs', bad == 4, '%d of 4 refused' % bad)
+
+    def outage_stream(outage, stream):
+        """stream: (t_ms, dir, size) -> the indices of the dropped ones."""
+        down = 0
+        dropped = []
+        for k, (t_ms, d, size) in enumerate(stream):
+            idx = None
+            if d == 'down':
+                idx, down = down, down + 1
+            if outage.drops(d, idx, size, 1000.0 + t_ms / 1000.0):
+                dropped.append(k)
+        return dropped
+    # Every 10 ms a downlink datagram (30 B) and an uplink one (20 B); the
+    # anchor (81 B) at 100 ms; a second 81 B at 300 ms must not re-anchor.
+    stream = []
+    for t in range(0, 600, 10):
+        stream.append((t, 'down', 81 if t in (100, 300) else 30))
+        stream.append((t + 5, 'up', 20))
+    win = lambda lo, hi, d: [k for k, (t, dd, _) in enumerate(stream) if dd in d and lo <= t < hi]
+    got = outage_stream(parse_outage('0:size81:60')[1], stream)
+    check('outage: down for 60 ms from the anchor', got == win(100, 160, ('down',)), str(got))
+    got = outage_stream(parse_outage('0:size81:60:up')[1], stream)
+    check('outage: up only, anchored on the downlink', got == win(100, 160, ('up',)), str(got))
+    got = outage_stream(parse_outage('0:size81+202:100:both')[1], stream)
+    check('outage: +DELAY, both directions, one-shot', got == win(302, 402, ('up', 'down')), str(got))
+    got = outage_stream(parse_outage('0:size90:60')[1], stream)
+    check('outage: an anchor that never matches drops nothing', got == [], str(got))
+    # Through the proxy: the anchored downlink datagram and the ones right
+    # after it go, the ones well after the window pass; the rng draws stay
+    # those of the same seed without the outage (the --drop-down rule).
+    server3 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server3.bind(('127.0.0.1', 0))
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.bind(('127.0.0.1', 0))
+    port3 = probe.getsockname()[1]
+    probe.close()
+    proxy3 = DelayProxy(port3, server3.getsockname(), 0.0)
+    proxy3.outages = [parse_outage('0:size81:150')[1]]
+    client3 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client3.bind(('127.0.0.1', 0))
+    server3.settimeout(0.5)
+    client3.settimeout(0.05)
+    client3.sendto(b'hello', ('127.0.0.1', port3))
+    _, caddr = server3.recvfrom(64)
+    for k, n_bytes in enumerate([30, 81, 48, 48]):        # inside the window: 1, 2, 3 go
+        server3.sendto(bytes([k]) * n_bytes, caddr)
+    time.sleep(0.4)                                        # well past it: 4, 5 pass
+    for k, n_bytes in ((4, 48), (5, 81)):
+        server3.sendto(bytes([k]) * n_bytes, caddr)
+    got = []
+    t_end = time.monotonic() + 0.4
+    while time.monotonic() < t_end:
+        try:
+            data, _ = client3.recvfrom(128)
+            got.append(data[0])
+        except (socket.timeout, ConnectionResetError):
+            pass
+    proxy3.close()
+    server3.close()
+    client3.close()
+    oo = proxy3.outages[0]
+    check('outage through the proxy drops the window, and only it',
+          got == [0, 4, 5] and oo.fired[:2] == (1, 81) and oo.dropped == {'up': 0, 'down': 3},
+          'got %s, fired %s, dropped %s' % (got, oo.fired, oo.dropped))
+    plain_o, outage_run = lossy_run(None), None
+
+    def lossy_outage_run():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        srv.bind(('127.0.0.1', 0))
+        pr = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        pr.bind(('127.0.0.1', 0))
+        lport = pr.getsockname()[1]
+        pr.close()
+        px = DelayProxy(lport, srv.getsockname(), 0.0, loss_pct=30.0, jitter_ms=1.0, loss_burst=2)
+        px.rng = random.Random(4242)
+        px.outages = [parse_outage('0:size51:40')[1]]
+        cl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        cl.bind(('127.0.0.1', 0))
+        srv.settimeout(0.5)
+        caddr = None
+        for _ in range(20):
+            cl.sendto(b'hello', ('127.0.0.1', lport))
+            try:
+                _, caddr = srv.recvfrom(64)
+                break
+            except socket.timeout:
+                pass
+        draws_up = px.rng.getstate()
+        for k, n_bytes in enumerate([30, 30, 51] + [48] * 20):
+            srv.sendto(bytes([k]) * n_bytes, caddr)
+            time.sleep(0.003)
+        time.sleep(0.1)
+        px.close()
+        srv.close()
+        cl.close()
+        return draws_up, px.rng.getstate(), px.outages[0].dropped['down']
+    outage_run = lossy_outage_run()
+    check('outage keeps the seed\'s loss draws aligned',
+          plain_o[0] == outage_run[0] and plain_o[1] == outage_run[1] and outage_run[2] >= 1,
+          'same before %s, same after %s, outage dropped %d' % (plain_o[0] == outage_run[0],
+                                                                plain_o[1] == outage_run[1], outage_run[2]))
+    # HXP: the hang watcher end to end (HangWatch.run on a log written in
+    # chunks): a mid-line 'exit code 4' cut where a chunk ends is not the
+    # exit line; the exit line split over two reads and a NUL is; a process
+    # still alive after_s later is dumped and ended; one that exits is not
+    # flagged.  The verdict fails a hung client (its logged exit code stands).
+    import tempfile
+    check('exit line pattern', not RE_EXIT_LINE.search(b'warning: an exit code 4 path\n')
+          and [int(m.group(1)) for m in RE_EXIT_LINE.finditer(b'status: tick=5\nexit code 0\n')] == [0], '')
+    with tempfile.TemporaryDirectory() as tmp:
+        def watch(seconds, chunks, after_s):
+            log = pathlib.Path(tmp) / ('client%d.log' % seconds)
+            log.write_bytes(b'')
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(%d)' % seconds],
+                                     stdin=subprocess.DEVNULL, creationflags=FLAGS)
+            try:
+                w = HangWatch(seconds, child, log, pathlib.Path(tmp) / ("client%d.hang.dmp" % seconds), after_s,
+                              symbolize=False)
+                for chunk in chunks:
+                    with open(log, 'ab') as f:
+                        f.write(chunk)
+                    time.sleep(0.5)   # each chunk its own read (the watcher polls every 0.2 s)
+                w.thread.join(timeout=20)
+                try:   # the watcher's terminate() does not wait for the end
+                    return w, child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    return w, None
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait()
+        # 'exit code 4 ' + 52 B = the last 64 bytes of the first chunk: the
+        # old 64-byte tail began at 'exit' and took it for a line start.
+        hung, hung_rc = watch(30, [b'status: ' + b'A' * 100 + b'exit code 4 ' + b'B' * 52,
+                                   b'\nstatus: tick=5\nex\0it co', b'de 0\n'], 0.5)
+        # Exits about 0.5 s after its line, inside its 4 s: not a hang.
+        clean, _ = watch(1, [b'status: tick=5\nexit code 0\n'], 4.0)
+        dumped = hung.hang is not None and (sys.platform != 'win32' or (
+            hung.hang['dump'] is not None and os.path.getsize(hung.hang['dump']) > 0))
+        check('hang watcher end to end',
+              hung.logged_code == 0 and dumped and hung_rc is not None and not hung.thread.is_alive()
+              and clean.logged_code == 0 and clean.hang is None,
+              'hung: code %r hang %r rc %r; clean: code %r hang %r' % (hung.logged_code, hung.hang, hung_rc,
+                                                                      clean.logged_code, clean.hang))
     # DX7: --expect-refused judges the named client by its session-end reason only.
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -2750,6 +3147,10 @@ def selftest():
               and any('client1 not refused' in p for p in p_text)
               and any('client2 not refused' in p for p in p_wrong) and any('client1 resolved no' in p for p in p_wrong),
               str((p_plain, p_ok, w_ok, p_text, p_wrong)))
+        case['clients'][2]['hang'] = {'after_s': 20.4, 'logged_exit_code': 0, 'dump': 'client2.hang.dmp'}
+        p_hang, _ = verdict(case, (), parse_expect_refused(['1']))
+        check('verdict fails a process-exit hang',
+              len(p_hang) == 1 and 'client2 process-exit hang' in p_hang[0], str(p_hang))
     print('selftest: %s' % ('PASS' if not failures else 'FAIL - ' + ', '.join(failures)))
     return 1 if failures else 0
 
@@ -2879,6 +3280,17 @@ def main():
                     help='step SAXE: client N\'s proxy drops COUNT consecutive downlink datagrams once, from the '
                          'one ANCHOR names - a 0-based downlink datagram index, or sizeA / sizeA-B (the first '
                          'downlink datagram of A..B bytes); a deterministic burst, apart from --loss-pct; repeatable')
+    ap.add_argument('--outage', action='append', default=[], metavar='N:ANCHOR[+DELAY]:MS[:up|down|both]',
+                    help='FULL step HXP: a time-shaped outage on client N\'s link: from the first downlink '
+                         'datagram ANCHOR names (the --drop-down anchors), DELAY ms later (default 0), every '
+                         'datagram of the direction (default down; up = client to server) is dropped for MS ms of '
+                         'wall clock; works before tick 0, unlike --event; repeatable')
+    ap.add_argument('--no-hang-dump', dest='hang_dump', action='store_false',
+                    help='FULL step HXP: do not watch the client processes for the process-exit hang (on by '
+                         'default: a client alive --hang-dump-after s after its "exit code" line is minidumped '
+                         'into client<i>.hang.dmp, symbolized into .txt, ended, and the verdict fails)')
+    ap.add_argument('--hang-dump-after', type=float, default=20.0, metavar='S',
+                    help='FULL step HXP: seconds after the "exit code" line before a live client counts as hung')
     ap.add_argument('--link', action='append', default=[], metavar='N:lat=,loss=,burst=,jitter=',
                     help='H1: client N\'s own link, over the shared one; repeatable')
     ap.add_argument('--event', action='append', default=[], metavar='N:T:KIND=MS[:dur=MS][:dir=D][:until=T2]',
@@ -2940,6 +3352,8 @@ def main():
         print('custom map: %s in slot %d' % (args.map, args.level))
     args.links = dict(parse_link(s) for s in args.link)
     args.drop_downs = dict(parse_drop_down(s) for s in args.drop_down)
+    for spec in args.outage:
+        parse_outage(spec)              # a bad spec fails here, not in a proxy thread
     args.expect_refused = parse_expect_refused(args.expect_refused)
     args.events = [parse_event(s) for s in args.event]
     if args.event_client >= 0 or args.event_tick:

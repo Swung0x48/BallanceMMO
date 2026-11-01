@@ -2593,6 +2593,17 @@ their age so the client starts on schedule (a protocol and client-core
 change); (4) `physics.lead_adjust` on, re-anchoring a late member (a session
 default changes); (5) a GNS submodule patch that sends in the caller's thread
 (a third-party fork).
+The deferred clean controlled cell ran at FULL step HXP, adapted to protocol
+24: SAXH's two trailing i64s made the reliable SessionAssign 67 bytes (51 +
+16) and its copies 64, so `size51` no longer matches anything and the cell is
+`--drop-down 0:size60-70:4`, which is also HXP's assignment burst-4 cell. It
+ran alone, at 0 % loss, in HXP's `saxe_clean` run (below, after SAXH's note;
+HXP's `m_assign` ran it beside two outage cells, so that run's skew is not
+this cell's): the reliable copy (downlink datagram 18, 67 B) and copies 1-3
+dropped, client 0 started on start 1 with the others (its estimate from 3
+clock samples, theirs from 7; skew 0.84 ms over the four), 0 resyncs, 0 late
+events, server replay 4055/4055, FINAL rows exact. DFR's random cells b1/2/4
+ran as HXP runs of their own (`dfr_b1_s2`, `dfr_b2_s1`, `dfr_b4_s0`).
 
 **As built (FULL step SAXH, 2026-10-31; protocol 24): the session start as a
 handshake (Q-SAX; the user: start once the handshake has passed).** SAXE's
@@ -2752,6 +2763,166 @@ the client in `client_core.cpp` `on_session_assign` / `on_session_start_at` /
     armed (`.local-tools/work/SAXH/hang_dump.py`); the same process-exit
     hang is recorded once before SAXH (rewind-cost-design.md, RC1d's
     resync_at150_down d15_brake run, client 1).
+
+**As built (FULL step HXP, 2026-11-01): SAXH's deferred cells, a wall-clock
+outage in the proxy, the process-exit hang watched.** No product code; the
+harness only.
+- `scripts/arena_map_test.py --outage N:ANCHOR[+DELAY]:MS[:up|down|both]`
+  (`Outage`): from the first downlink datagram ANCHOR names (the
+  `--drop-down` anchors: an index or `sizeA-B`), DELAY ms after its receipt
+  (default 0), every datagram of the direction (default down; `up` = client
+  to server) is dropped for MS ms of wall clock - the time-shaped outage
+  `--drop-down` (a count) and `--event` (a client tick, never before tick 0)
+  cannot make. One-shot; a dropped datagram still takes the loss rule's draws
+  (SAXE's alignment rule); `outage` lines in the proxy log, `proxy_outage` in
+  the summary; selftest on a synthetic stream (each direction, `+DELAY`, an
+  anchor that never fires), through the proxy, and the draw alignment.
+  **Adaptation:** `+DELAY` is not in the plan's spelling. The COMMIT cell needs
+  a member's start message through and its postponement lost until after its
+  instant; at protocol 24 the postponement's copies are 76 bytes like start
+  1's and its reliable copy rides a coalesced datagram (190 bytes in `hs2`),
+  so no anchor names it, while its time after the start message is fixed by
+  `plan_start` (the deadline, ~465 ms at 150 ms each way).
+- The process-exit hang (`HangWatch`, on by default, `--no-hang-dump`,
+  `--hang-dump-after S`, default 20): every client process is followed; one
+  still alive S seconds after its log's `exit code N` line is minidumped
+  (`write_minidump`, dbghelp with SAXH's `hang_dump.py` flags, by the child's
+  pid - it replaces `hang_dump.py`'s process lookup), ended, and symbolized
+  by `scripts/sym_dump.py` (SAXH's walker, moved into scripts/: dbghelp
+  against the PDBs beside the binaries; cdb is broken on this machine) into
+  `client<i>.hang.dmp.txt`; the client's row keeps the exit code it logged and
+  the verdict FAILs with "process-exit hang". Checked end to end on a
+  stand-in process (dumped, symbolized, ended 2.3 s after its line; one that
+  exits is not flagged) and the symbolizer on a real rN3K session client
+  dumped mid-replay (its frames resolved to functions and source lines).
+- **Measured** (`maps/arena-test/hxp/<cell>`, HEAD 911b1621: rN3K's x64, the
+  Arch server built from HEAD without the slot-13 hack; swing_snapoff's
+  layout, 4 clients, 150 ms each way, snapshots off, trafo_inputs and
+  placement_clones on; the clients pinned to E-cores of their own, decision
+  33; `.local-tools/work/HXP/pin_clients.py` pins each client within one
+  0.2 s poll of its process start: in `m_start2` / `saxe_clean`, timed, the
+  four were pinned 0-1.3 s before their connect lines and 6-7 s before the
+  assignment, whose clock samples open the start-skew window).
+  **Adaptation:** the matrix cells ran side by side, one perturbation per
+  member per run (each member's cell is its own; the start skew is then
+  judged with all of them at once): 8 live runs for 12 cells, then, at the
+  review, two cells that a neighbour's postponement had hidden ran again
+  alone (`m_start2`, `saxe_clean`): 10 live runs, inside the plan's 10-12.
+  Each cell's evidence is the run named here.
+  - `m_assign` (the assignment, `size60-70`): client 0 `--drop-down` burst 4,
+    client 1 an outage of 60 ms (both directions; 4 downlink datagrams),
+    client 2 one of 200 ms (14; one clock sample by the 400 ms cap): all four
+    on start 1, the instant each one disturbed, skew 9.45 ms (client 2 +9 ms:
+    its offset from that one sample; clients 0, 1 and 3 within 0.96 ms) -
+    the evidence for the assignment's 60 ms and 200 ms cells. Burst 8 is
+    SAXH's `hs1`, as recorded; burst 4 is `saxe_clean` (below).
+  - `saxe_clean` (SAXE's clean controlled cell, burst 4 on the assignment,
+    alone, 0 % loss): client 0 started on start 1 with the others, skew 0.84
+    ms, 0 resyncs, server replay 4055/4055 (the SAXE note above).
+  - `m_start` (the start message, `size81`): client 0 burst 8, client 1 60
+    ms, client 2 200 ms - it missed the deadline: "start postponed (1 of 3):
+    Arena2 ...", all four on start 2, skew 2.79 ms. The evidence for the
+    200 ms start cell (the postponement path) only: start 2 came through
+    clean, so the other two cells were not judged on the start they
+    disturbed.
+  - `m_start2` (the start message, without client 2's cell): client 0 burst
+    8 (8 datagrams from the reliable copy at downlink datagram 35), client 1
+    60 ms (3 up / 4 down): both confirmed in time, all four on start 1 - the
+    start both cells disturbed - skew 0.03 ms, 0 resyncs, server replay
+    4048/4048, FINAL rows exact - the evidence for the start message's burst
+    8 and 60 ms cells. Burst 4 (and 16) is SAXH's `hs2`, as recorded.
+  - `commit`: client 2 `--outage 2:size81:300` (misses the deadline),
+    client 1 `--outage 1:size81+400:290` (start 1 through, the postponement's
+    copies dropped until after its instant): client 1 started on start 1 and
+    answered starts 2 and 3 `CLOCK_ACK_STARTED`; the server "start 1 committed
+    (Arena1 started on it); its instant is -335 ms from now"; clients 0, 2 and
+    3 released at once, 336 ms after start 1's instant, and caught up 22 ticks
+    - every member on the committed start (effective start of 0, 1, 3 within
+    3.4 ms).
+  - `refuse`: client 3 `--outage 3:size81:3500`: postponed 1, 2, 3 of 3
+    naming Arena3, then "Arena3 refused: did not confirm the session start in
+    time; the others start without that player"; the three on start 5 within
+    0.10 ms; client 3 exited 0 with "session 1 ended: refused: this client did
+    not confirm the session start in time ..." (`--expect-refused`: PASS).
+  - `stale_resync`: client 2 `--client-arg-for "2:--resync-at 900"`
+    (**adaptation:** the client's forced-resync knob instead of an `--event`
+    stall: the stale path needs only a resync more than 10 s after the last
+    clock sample, and the knob gives exactly one): re-anchored at 923, 13.2 s
+    in (the start's clock samples 14 s old), then "Arena2's base 923 was due
+    at ... correction sent" - which the server sends only when the member's
+    current assignment carried no instant (`assign_had_instant`, SAXH's gate
+    round), so the resync started on arrival; the client "base 923
+    started +5.95 ms after it was due" (under a tick: nothing caught up). One
+    resync, the forced one (the harness's FAIL "client2 resyncs" is that one).
+  - DFR's random cells, 10 % loss: `dfr_b1_s2`, `dfr_b2_s1`, `dfr_b4_s0`
+    (burst / seed as DFR): 0 resyncs, 0 late events, skew 0.75 / 0.02 / 1.88
+    ms - no worse than DFR (0 / 0).
+  Every run: 0 late member events (server `S5 event` late=0), no resync but
+  the forced one, the harness's server replay N/N (4039, 3893, 4050, 3918,
+  4074, 3789, 3885, 3710, 4048, 4055), FINAL rows exact on every playing
+  client (H4's `final_cmp.py`: own, mirror and body 0.0000 m; the balloon and
+  airship spans excluded; `stale_resync` client 2 replayed with its
+  `--resync-at 900`), each member's start within one tick of the others
+  (0.02-9.45 ms on E-cores). SLX's drain drive: 0 in every final status line
+  (`drain_drive` absent, no "drain drive:" line) - the branch is still
+  unexercised by a headless session. The process-exit hang: not reproduced
+  in 10 runs (40 client processes watched); the watcher stays on by default
+  (its selftest runs `HangWatch` end to end on a stand-in process: a
+  mid-line `exit code 4` where a read ends is not the exit line, the line
+  split over two reads and a NUL is, the process alive 0.5 s later is dumped
+  and ended, one that exits in time is not flagged).
+- **Wait lines (the plan's "each wait line in the client logs at its state
+  change"): not met for two members, pre-existing, root-caused, queued.**
+  Every member whose link no outage cut logged each `SessionStartStatus`
+  line in the pass it arrived, in the server's order. Two did not:
+  - `m_start` client 2 shows "new start time" (start 2 accepted, capture pass
+    2150) 45 ms before "start postponed (1 of 3)" (pass 2178). Cause: the
+    server sends the status reliable only (`server.cpp` `send_start_status`,
+    `k_nSteamNetworkingSend_Reliable`, no copies), and the reliable stream
+    was blocked behind start 1's reliable `SessionStartAt` copy, which the
+    200 ms outage dropped (downlink datagram 30). Start 2's unreliable copies
+    (76 B, passes 2150 / 2158 / 2170) got through first; the retransmit at
+    pass 2178 released start 1's reliable copy (ignored, an older start),
+    the status and start 2's reliable copy together
+    (`.local-tools/work/HXP/start_msgs.py` on `capture2.bmic`; `proxy2.log`
+    from 198765.521).
+  - `commit` client 1 shows both postponement lines and the commit's line
+    after "started." - by the cell's construction: its outage dropped them
+    (and start 2's and 3's reliable copies), and the retransmit after it
+    delivered all of them in one pass (2177). The client shows a status
+    unconditionally (`client_core.cpp` `on_session_start_status`), and
+    `session_start_status_msg` carries no start sequence, so a client cannot
+    tell a line that is stale for it.
+  Both are SAXH's protocol-24 design, unchanged by HXP (no product code;
+  HEAD's binaries). Queued in roadmap section 4 with the options: the client
+  qualifies or drops a status that arrives after its own start (shared core,
+  no protocol change; it cannot tell which start a status refers to); a
+  start sequence in the status (protocol); unreliable copies of the status
+  on the `SessionStartAt` schedule (server, plus a client-side dedupe that
+  needs the sequence); or accept (a status is an explanation, the client's
+  own state lines are at its state change).
+- **Reported for the user's decision (does not block HXP): a commit always
+  costs a second postponement at this latency.** A member that a
+  postponement reached after its instant answers no sooner than X1 + rtt on
+  the server's clock = D1 + 1.5 rtt + 60 ms (`plan_start`: X1 = D1 + rtt/2 +
+  60 ms), and the new deadline is D1 + rtt + 160 ms: for a round trip over
+  200 ms the `CLOCK_ACK_STARTED` lands after it, so the server postpones
+  once more naming the member that already runs ("start postponed (2 of 3):
+  Arena1 did not confirm the start in time", shown to every player) and
+  commits when the answer lands, before the third deadline. A
+  `CLOCK_ACK_STARTED` lost for more than a window would let the third
+  postponement refuse a running member. Options: (a) a member whose answer
+  can still be in flight is not counted missing for one more window (fixes
+  the line and the risk; such a start waits one window longer); (b) size the
+  new deadline from X1 + rtt + slack (same effect; every postponement lasts
+  longer); (c) accept and document (no cost; the misleading line and the
+  refusal risk stay). Queued in roadmap section 4.
+- **Minor, observed:**
+  - A resync's correction is logged "(the late join's correction)" - the one
+    label of the `START_AT_FLAG_CORRECTION` path (client_core.cpp:987).
+  - `stale_resync` client 1's last 10 FINAL rows (3452-3462) lack the balls
+    of clients 3 and 2, reborn as spawn ghosts at server ticks 3451 / 3459
+    just before the session ended: the session's tail, not the resync.
 
 ### The lifecycle events, repeated (2026-10-21, protocol 6)
 

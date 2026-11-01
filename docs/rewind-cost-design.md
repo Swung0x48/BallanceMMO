@@ -943,7 +943,12 @@ the Arch server rebuilt from this tree, journal build id
     all four clients logged their final status and `exit code 0` - but whose
     harness raised `TimeoutExpired` because client 1's process had not
     exited 240 s after its last log line: a process-exit hang after the
-    session, not investigated; attempt 2 moved the run by hand out of its
+    session, not investigated - seen once more at SAXH (hs3's joiner); since
+    FULL step HXP the harness watches every client for it and minidumps and
+    symbolizes one still alive 20 s after its `exit code` line
+    (`arena_map_test.py`'s hang watcher, on by default; not reproduced in
+    HXP's 10 runs, lockstep-without-snapshots.md "As built (FULL step HXP)");
+    attempt 2 moved the run by hand out of its
     working directory `t3x_rc1d_resync_at150_down_d15_brake_r1`, which no
     longer exists), and the six d0_ud cells. What the first round's cells
     did and did not hold (`fixup/switches.py` on the server journals):
