@@ -67,6 +67,7 @@
 #include <vector>
 
 #include <session/client_core.hpp>
+#include <session/event_hold.hpp>
 #include <session/spawn_impulse.hpp>
 // After client_core.hpp: the message headers are not self-contained.
 #include <message/session_lead_msg.hpp>
@@ -9554,5 +9555,309 @@ namespace {
         EXPECT_FALSE(core.holding());
         for (size_t i = sends; i < fake.sent.size(); ++i)
             EXPECT_NE(static_cast<uint8_t>(fake.sent[i].first[0]), static_cast<uint8_t>(bmmo::SessionClockAck));
+    }
+}
+
+// FULL step R6H: the own-event hold both hosts run (session/event_hold.hpp) and
+// the forced own move (session_client_core::force_own_move).
+namespace {
+    using bmmo::session::event_hold;
+    using bmmo::session::event_hold_spec;
+    using bmmo::session::event_send_verdict;
+
+    TEST(EventHold, ParsesTheHeadlessSpec) {
+        event_hold_spec spec;
+        ASSERT_TRUE(bmmo::session::parse_event_hold("physicalize:2:300", spec));
+        EXPECT_EQ(spec.type, 0);
+        EXPECT_EQ(spec.nth, 2u);
+        EXPECT_EQ(spec.ms, 300);
+        EXPECT_FALSE(spec.drop);
+        ASSERT_TRUE(bmmo::session::parse_event_hold("Unphysicalize:1:drop", spec));
+        EXPECT_EQ(spec.type, 1);
+        EXPECT_TRUE(spec.drop);
+        EXPECT_EQ(spec.ms, 0);
+        ASSERT_TRUE(bmmo::session::parse_event_hold("5:0:10", spec));
+        EXPECT_EQ(spec.type, 5);
+        EXPECT_EQ(spec.nth, 1u) << "N below 1 is 1";
+        EXPECT_FALSE(bmmo::session::parse_event_hold("physicalize:2", spec));
+        EXPECT_FALSE(bmmo::session::parse_event_hold("bogus:1:300", spec));
+        EXPECT_FALSE(bmmo::session::parse_event_hold("physicalize:1:0", spec)) << "no delay and no drop";
+        EXPECT_FALSE(bmmo::session::parse_event_hold("off", spec));
+    }
+
+    // The N-th own event of the type is held, released at its time (the clock
+    // read only while one is held), the others go out at once; a drop never
+    // goes out; what the session's end finds held is discarded, said aloud.
+    TEST(EventHold, HoldsTheNthReleasesAtItsTimeDropsAndDiscards) {
+        flow_fake fake;
+        event_hold hold;
+        std::vector<std::string> lines;
+        hold.set_log([&lines](const std::string& line) { lines.push_back(line); });
+        session_client_core* bound = nullptr;
+        int clock_reads = 0;
+        auto clock = std::chrono::steady_clock::time_point{std::chrono::milliseconds(5000)};
+        auto now = [&clock_reads, &clock]() {
+            ++clock_reads;
+            return clock;
+        };
+        session_platform p = fake.make_flow();
+        p.hooks.filter_event = [&hold, &bound, &now](const bmmo::session_event_msg& event) {
+            return hold.hold(*bound, event, now);
+        };
+        session_client_core core(std::move(p), session_capabilities{});
+        bound = &core;
+        run_to_tick_125(core, fake);
+        event_hold_spec spec;
+        ASSERT_TRUE(bmmo::session::parse_event_hold("unphysicalize:2:300", spec));
+        hold.arm(spec);
+        auto sends = [&fake]() { return fake.sent.size(); };
+
+        size_t before = sends();
+        steps{core}.report_unphysicalize(126);   // #1: out at once
+        EXPECT_EQ(sends(), before + 1);
+        EXPECT_EQ(clock_reads, 0) << "no clock read for an event let through";
+        before = sends();
+        steps{core}.report_unphysicalize(127);   // #2: held
+        EXPECT_EQ(sends(), before);
+        EXPECT_EQ(clock_reads, 1);
+        EXPECT_EQ(hold.seen(), 2u);
+        ASSERT_EQ(hold.held(), 1u);
+        ASSERT_FALSE(lines.empty());
+        EXPECT_EQ(lines.back(), "hold-event: own unphysicalize #2 stamped tick 127 held at tick 125 for 300 ms");
+        steps{core}.report_unphysicalize(128);   // #3: out at once
+        EXPECT_EQ(sends(), before + 1);
+
+        clock += std::chrono::milliseconds(299);
+        hold.release_due(core, now);
+        EXPECT_EQ(hold.held(), 1u) << "not yet";
+        EXPECT_EQ(clock_reads, 2);
+        clock += std::chrono::milliseconds(1);
+        before = sends();
+        hold.release_due(core, now);
+        EXPECT_EQ(hold.held(), 0u);
+        ASSERT_EQ(sends(), before + 1) << "the held bytes, once";
+        EXPECT_EQ(lines.back(), "hold-event: own unphysicalize stamped tick 127 (held at tick 125) released at tick 125");
+        EXPECT_EQ(hold.released(), 1u);
+        const int reads = clock_reads;
+        hold.release_due(core, now);
+        EXPECT_EQ(clock_reads, reads) << "nothing held: no clock read";
+
+        // A drop: never sent, no clock read.
+        ASSERT_TRUE(bmmo::session::parse_event_hold("unphysicalize:1:drop", spec));
+        hold.arm(spec);
+        before = sends();
+        steps{core}.report_unphysicalize(129);
+        EXPECT_EQ(sends(), before);
+        EXPECT_EQ(clock_reads, reads);
+        EXPECT_EQ(hold.held(), 0u);
+        EXPECT_EQ(hold.dropped(), 1u);
+        EXPECT_EQ(lines.back(), "hold-event: own unphysicalize #1 stamped tick 129 dropped at tick 125: it never leaves this client");
+        steps{core}.report_unphysicalize(130);   // #2 of the drop spec: out
+        EXPECT_EQ(sends(), before + 1);
+
+        // Another type is never counted; a held one the end finds is discarded.
+        ASSERT_TRUE(bmmo::session::parse_event_hold("physicalize:1:1000", spec));
+        hold.arm(spec);
+        steps{core}.report_unphysicalize(131);
+        EXPECT_EQ(hold.seen(), 0u);
+        steps{core}.report_physicalize("Ball_Wood", 132);
+        EXPECT_EQ(hold.held(), 1u);
+        hold.discard();
+        EXPECT_EQ(hold.held(), 0u);
+        EXPECT_EQ(lines.back(), "hold-event: own physicalize stamped tick 132 (held at tick 125) discarded: the session ended first");
+        // disarm: nothing held any more.
+        hold.disarm();
+        before = sends();
+        steps{core}.report_physicalize("Ball_Wood", 133);
+        EXPECT_EQ(sends(), before + 1);
+    }
+
+    // A held event whose time comes with no session running is discarded,
+    // said aloud (the safety net behind hooks.ending).
+    TEST(EventHold, NoSessionRunningDiscards) {
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        event_hold hold;
+        std::vector<std::string> lines;
+        hold.set_log([&lines](const std::string& line) { lines.push_back(line); });
+        event_hold_spec spec;
+        ASSERT_TRUE(bmmo::session::parse_event_hold("sector:1:50", spec));
+        hold.arm(spec);
+        auto event = event_message(3, bmmo::session::event_type::Sector, 40, 40);
+        event.serialize();
+        const auto at = std::chrono::steady_clock::time_point{std::chrono::milliseconds(100)};
+        EXPECT_EQ(hold.hold(core, event, [at]() { return at; }), event_send_verdict::hold);
+        const size_t before = fake.calls.size();
+        hold.release_due(core, [at]() { return at + std::chrono::milliseconds(50); });
+        EXPECT_EQ(hold.held(), 0u);
+        EXPECT_EQ(lines.back(), "hold-event: own sector stamped tick 40 (held at tick 0) discarded: no session running");
+        EXPECT_EQ(count_prefix(since(fake.calls, before), "send:"), 0u);
+    }
+
+    // A test-only core entry: the next own birth record moved as if its echo
+    // said "made at origin + n", K ticks after the birth, through the
+    // capability path with and without own_body_control (the retail
+    // capabilities: own_body_in_replay only).
+    struct forced_move_fixture {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        own_matrices matrices;
+        std::unique_ptr<session_client_core> core;
+        explicit forced_move_fixture(bool control) {
+            session_capabilities caps;
+            caps.own_body_control = control;
+            caps.own_body_in_replay = true;
+            if (!control) caps.own_lifecycle = bmmo::session::own_lifecycle_source::host_hooks;   // retail's
+            session_platform platform = replay_platform(fake, bound);
+            matrices.install(platform, fake.calls);
+            core = std::make_unique<session_client_core>(platform, caps);
+            bound = core.get();
+            run_to_tick_125(*core, fake);
+            // Records 118..125 with the own ball tracked (no inputs: the fake world drives nothing).
+            for (uint32_t tick = 118; tick <= 125; ++tick) {
+                bmmo::session::rollback_tracked tracked;
+                tracked.own_entity = "Ball_Wood";   // own_polls off: the fake world has no nav_poll
+                state_of(*core).rollback_.record(core->platform().bind_world(bmmo::session::core_world_hooks{}), tick,
+                                                 tracked, {});
+            }
+            fake.bodies_there = {"Ball_Wood"};
+        }
+    };
+
+    TEST(SessionClientCoreForcedOwnMove, KZeroTheAbsenceIsLiveAndTheBodyIsMadeAtTPrime) {
+        for (const bool control: {false, true}) {
+            SCOPED_TRACE(control ? "own body control" : "retail capabilities");
+            forced_move_fixture f(control);
+            auto& core = *f.core;
+            ASSERT_TRUE(core.force_own_move(4, 0));
+            steps{core}.report_physicalize("Ball_Wood", 122);   // T = 122, T' = 126
+            ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+            EXPECT_TRUE(state_of(core).own_life_[0].force_pending);
+            EXPECT_FALSE(state_of(core).force_own_move_.armed) << "one-shot";
+            const size_t from = f.fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(f.fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "unmake_own:Ball_Wood:125"), 1u) << "the body out at once";
+            EXPECT_EQ(count_prefix(calls, "make_own:"), 0u) << "T' not reached: no body in the replay";
+            EXPECT_EQ(count_prefix(calls, "pre_step:122"), 1u) << "rewound to T - 1";
+            EXPECT_EQ(count_prefix(calls, "log:0:forced own move: own birth stamped 122 moved to 126 at local tick 125 (3 "
+                                          "ticks after the birth; test override"), 1u);
+            EXPECT_EQ(count_prefix(calls, "log:0:own physicalize stamped 122 moved to 126 by the server at local tick 125: "
+                                          "rewound to 121 ("), 1u);
+            EXPECT_EQ(count_prefix(calls, "send:"), 0u) << "nothing on the wire";
+            const auto& life = state_of(core).own_life_[0];
+            EXPECT_TRUE(life.forced);
+            EXPECT_EQ(life.state, client_core_state::own_life::verdict::moved);
+            EXPECT_EQ(life.applied, 126u);
+            EXPECT_FALSE(life.applied_live);
+            EXPECT_FALSE(state_of(core).own_physicalized_);
+            EXPECT_EQ(core.forced_own_moves(), 1u);
+            for (uint32_t tick = 122; tick <= 125; ++tick) {
+                SCOPED_TRACE(tick);
+                EXPECT_EQ(state_of(core).rollback_.recorded_own_entity(tick), std::string()) << "no own body T..T'-1";
+            }
+            EXPECT_EQ(state_of(core).rollback_.recorded_own_entity(121), std::string("Ball_Wood"));
+            // The live frame of 126 makes it, once, before that tick's step.
+            const size_t live = f.fake.calls.size();
+            steps{core}.apply_held_lifecycle(126);   // live_own_lives(126) inside
+            const auto made = since(f.fake.calls, live);
+            EXPECT_EQ(count_prefix(made, "make_own:Ball_Wood:"), 1u);
+            EXPECT_EQ(count_prefix(made, "make_own:Ball_Wood:P#2:126"), 1u) << "at T'";
+            EXPECT_TRUE(state_of(core).own_life_[0].applied_live);
+            // A real ack of the birth afterwards changes nothing.
+            core.on_session_event(own_echo(122, 122, 0));
+            const size_t ack = f.fake.calls.size();
+            steps{core}.process_own_echoes();
+            EXPECT_EQ(count_prefix(since(f.fake.calls, ack), "keep_live_cells:"), 0u);
+            EXPECT_EQ(count_prefix(since(f.fake.calls, ack), "make_own:"), 0u);
+        }
+    }
+
+    TEST(SessionClientCoreForcedOwnMove, KPastNTheAbsenceIsInsideTheReplay) {
+        for (const bool control: {false, true}) {
+            SCOPED_TRACE(control ? "own body control" : "retail capabilities");
+            forced_move_fixture f(control);
+            auto& core = *f.core;
+            // T = 120 with the live tick at 125: K 5 >= n 2, T' = 122.
+            ASSERT_TRUE(core.force_own_move(2, 5));
+            steps{core}.report_physicalize("Ball_Wood", 120);
+            state_of(core).frames_since_anchor_ = 5;   // tick 124: not due yet
+            size_t from = f.fake.calls.size();
+            steps{core}.process_own_echoes();
+            EXPECT_EQ(count_prefix(since(f.fake.calls, from), "unmake_own:"), 0u) << "not before origin + K";
+            EXPECT_TRUE(state_of(core).own_life_[0].force_pending);
+            state_of(core).frames_since_anchor_ = 6;   // tick 125 = origin + K
+            from = f.fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(f.fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "unmake_own:Ball_Wood:125"), 1u);
+            EXPECT_EQ(count_prefix(calls, "make_own:"), 1u) << "made once";
+            const auto make = std::find_if(calls.begin(), calls.end(),
+                                           [](const std::string& c) { return c.rfind("make_own:", 0) == 0; });
+            ASSERT_NE(make, calls.end());
+            EXPECT_EQ(*make, "make_own:Ball_Wood:P#2:122") << "at T', in the replay";
+            const auto pre122 = std::find(calls.begin(), calls.end(), std::string("pre_step:122"));
+            const auto step122 = std::find(pre122, calls.end(), std::string("step"));
+            EXPECT_TRUE(pre122 < make && make < step122) << "before the step of T'";
+            const auto& life = state_of(core).own_life_[0];
+            EXPECT_TRUE(life.applied_live);
+            EXPECT_EQ(life.applied, 122u);
+            for (uint32_t tick = 120; tick <= 121; ++tick) {
+                SCOPED_TRACE(tick);
+                EXPECT_EQ(state_of(core).rollback_.recorded_own_entity(tick), std::string()) << "no own body T..T'-1";
+            }
+            for (uint32_t tick = 122; tick <= 125; ++tick) {
+                SCOPED_TRACE(tick);
+                EXPECT_EQ(state_of(core).rollback_.recorded_own_entity(tick), std::string("Ball_Wood"));
+            }
+            // A later restore across T' takes the body out, whatever own_body_control says.
+            bool destroyed = false;
+            EXPECT_TRUE(steps{core}.destroy_moved_own_birth("Ball_Wood", 122, destroyed));
+            EXPECT_TRUE(destroyed);
+        }
+    }
+
+    TEST(SessionClientCoreForcedOwnMove, RefusedPastTheReachOrWhileAResyncIsPending) {
+        {
+            forced_move_fixture f(false);
+            auto& core = *f.core;
+            ASSERT_TRUE(core.force_own_move(4, 0));
+            state_of(core).resync_pending_ = true;
+            steps{core}.report_physicalize("Ball_Wood", 122);
+            const size_t from = f.fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(f.fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "log:0:forced own move: own birth stamped 122 -> 126 refused at local tick 125: "
+                                          "a resync is pending"), 1u);
+            EXPECT_EQ(count_prefix(calls, "unmake_own:"), 0u);
+            EXPECT_EQ(count_prefix(calls, "keep_live_cells:"), 0u);
+            EXPECT_EQ(core.forced_own_moves_refused(), 1u);
+            EXPECT_FALSE(state_of(core).own_life_[0].force_pending);
+            EXPECT_FALSE(state_of(core).own_life_[0].forced);
+        }
+        {
+            forced_move_fixture f(false);
+            auto& core = *f.core;
+            ASSERT_TRUE(core.force_own_move(4, 0));
+            steps{core}.report_physicalize("Ball_Wood", 110);   // T - 1 = 109 never recorded
+            const size_t from = f.fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(f.fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "log:0:forced own move: own birth stamped 110 -> 114 refused at local tick 125: "
+                                          "past the reach"), 1u);
+            EXPECT_EQ(count_prefix(calls, "send:"), 0u) << "no resync asked for";
+            EXPECT_FALSE(state_of(core).resync_pending_);
+            bool destroyed = false;
+            state_of(core).own_life_[0].applied = 114;
+            EXPECT_FALSE(steps{core}.destroy_moved_own_birth("Ball_Wood", 114, destroyed)) << "not forced: inert";
+        }
+        {
+            flow_fake fake;
+            session_client_core core(fake.make_flow(), session_capabilities{});
+            run_to_tick_125(core, fake);
+            core.config.rollback = false;
+            EXPECT_FALSE(core.force_own_move(4, 0)) << "no rollback";
+            EXPECT_FALSE(state_of(core).force_own_move_.armed);
+        }
     }
 }

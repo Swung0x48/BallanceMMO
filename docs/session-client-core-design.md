@@ -7533,3 +7533,115 @@ its IVP object and stay silent after a beam until the next game-made ball
 on the ball, no simulation effect, the automation verb only; the user's
 option (a) leave / (b) re-arm, queued with R6D item 1 and R6B's sound check). Details, numbers and what was deferred:
 `realtime-design.md` "As built (step BEAMF)".
+
+**As built (step R6H, 2026-11-01): the `hold-event` verb shared with the
+headless client, and a forced own move.** The R6 row's tooling (§7.1
+decision 4; FULL plan step R6H). Shared core, the headless client and the
+retail host; no protocol, journal, engine or server change.
+
+- **One hold for both hosts.** `BallanceMMOCommon/include/session/event_hold.hpp`
+  (header-only): `event_hold_spec` + `parse_event_hold` (the headless
+  `parse_hold_event`, moved), and `event_hold` with `arm` / `disarm` /
+  `restart_count`, `hold(core, event, now)` (hooks.filter_event's verdict),
+  `release_due(core, now)` and `discard()` (hooks.ending). The log lines and
+  journal notes are the headless client's texts verbatim. Adaptation: `now` is
+  a clock *functor*, not a time - `hold` calls it only when it actually holds an
+  event and `release_due` only while one is held, the moments the headless
+  client always read `hold_event_stamp` / `hold_event_release`; an eager read
+  would add inbound-capture reads and every replayed capture would diverge.
+  (The first wire check of the step diverged in a6m_snapoff c2 for the opposite
+  reason - the headless spec was parsed but never armed into the helper -, which
+  is how the capture sites show any change of the hold's behaviour.)
+- **Headless** (`session_client.cpp`): `arguments::hold_event` is the spec;
+  `make_platform` sets the log sink and arms it; `filter_event` / `ending` /
+  `release_held_events` call the helper; the anchor restarts the count where
+  `hold_event_seen_ = 0` was. New `--force-own-move N[:K]`, armed once at the
+  first anchor.
+- **Retail** (`core_host.cpp`; state in the file-scope `retail_host`, no
+  `BallanceMMOClient` member): `session hold-event TYPE:N:MS|TYPE:N:drop|off`
+  (core on; armed before or during a session, the count restarts at each
+  session's anchor, right before `core.anchor`, where the headless client
+  restarts it - review finding 3; `off` stops further holds and lets an event held already go
+  at its time), chained in `hooks.filter_event` after `drop-birth`'s verdict,
+  `release_due` polled from every `core_host_process` (OnProcess) while
+  something is held, `hooks.ending` discards (it was unset on retail). `session
+  force-own-move <n> [after <k>]` (a running core session). Both verbs had to be
+  added to the `session` prefix list in `automation/client_automation.cpp`
+  (`hold` already matched `hold-event`; `force-own-move` did not - the first
+  retail run's verb fell through to the status line).
+- **The forced own move** (`session_client_core::force_own_move(n, after)`,
+  `client_core_lifecycle.cpp`): one-shot, armed in the core state (cleared by
+  `begin`); `record_own_birth` attaches it to the next own birth record
+  (`own_life::force_pending`, `force_n`, `force_due = origin + after`);
+  `process_own_echoes` runs `apply_forced_own_moves` after the real echoes.
+  When the live tick reaches `force_due` the birth is refused, logged and
+  journaled (`forced own move: own birth stamped T -> T' refused at local tick
+  ...: <why>`, counted) when its life has ended, the server answered it
+  otherwise than with an ack, a resync is pending, or T-1 is past the reach -
+  never falling into `resync_own_life`; otherwise it is marked `forced` and
+  `moved` (a later ack finds nothing to answer), the note `forced own move: own
+  birth stamped T moved to T' at local tick ... (K ticks after the birth; test
+  override[, no own body control])` is logged and journaled, and
+  `move_own_birth(life, T', true)` runs its capability path:
+  `move_own_birth` tests `!caps_.own_body_control && !life.forced`. Nothing goes
+  on the wire. `destroyable_own_birth` honours `forced` without the capability,
+  so a later rewind anchored in the gap takes the body out at its restore and
+  the replay makes it at T' (not the parking path). `retire_own_lives` keeps a
+  pending one until its tick and refuses one whose life ended first;
+  `set_aside_unanswered` (a SessionAssign's resync or renumbering) refuses a
+  pending one aloud ("a SessionAssign renumbered the history first") before
+  the births go, instead of losing it silently (review finding 4).
+- **Checks.** Unit tests (`EventHold.*`, `SessionClientCoreForcedOwnMove.*`:
+  hold / release at its time / drop / discard / the N-th count / no session,
+  the lazy clock; K 0 and K >= n with and without own body control - the
+  records without the own entity T..T'-1, one `make_own` at T' before T''s step,
+  the refusals): 736/736. Wire check on core_ref_s14 ALL SAME (44/44 sends,
+  45/45 journals IDENTICAL, a6m_snapoff c2's hold notes included). Offline,
+  core_ref_s14/solo1 replayed with `--replay-free-cost-clock --force-own-move 4`
+  (spawn 212 moved to 216 at once, "made again live at that tick", the body made
+  live before 216) and `8:12` (moved at 224, 13 records changed, made in the
+  replay before 220). Retail (Arch server of this tree, snapshots off,
+  `.local-tools/work/R6H/r6h_retail.py`): **s1** (`scripts/retail/r6h_s1b`,
+  L11, copy 2 `net lag 50` + `session hold-event physicalize:3:300`, the trafo
+  birth): held at 507 for 300 ms, released at 526, the server's echo moved it
+  507 -> 527 (`late=20`), client 2 logged `own birth moved 507 -> 527 at
+  local tick 535: no own body control, no snapshots, resync`, resynced
+  (base 543, re-stepped 542 -> 561); FINAL rows from 543 on: own 1/1, mirror
+  1/1, mechanisms 15/15 bit-equal on both clients (trafo pieces 25/32
+  bit-equal at 0 m position error on both - client 1, which held nothing,
+  too, and SRTJ's `srtj_ctl_h` control shows the same piece signature, 20/49:
+  pre-existing, not R6H's). **s2** (`scripts/retail/r6h_s2b`, L1 solo):
+  `session force-own-move 4` took the spawn 221 -> 225 at once ("own body
+  Ball_Wood taken out at tick 221", "made at ... before tick 225 (live, moved
+  birth)" - the absence live, Gameplay_Ingame driving a bodiless ball for 4
+  ticks), `session force-own-move 8 after 12` took the respawn 1826 -> 1834
+  at local tick 1838 ("taken out at tick 1838", the rewind to 1825 made it in
+  the replay before 1834, 13 records changed); the ball rolled after both, no
+  crash through tick ~3700. (The recipe's third part, a hold on the next
+  respawn, found no respawn: the second fall was the last life, GameOver -
+  s1 covers the hold.) The first two retail runs of the step (`r6h_s1`,
+  `r6h_s2`) tested the wrong things: `physicalize:2` was the trafo beam's
+  own Physicalize (a retail beam sends its pair Unphysicalize + Physicalize
+  at the beam tick, and the hold counts it), and the `force-own-move` verb
+  was not dispatched yet.
+
+  **Residual r6h_s1 (root-caused, queued in roadmap §4 item 5; the fix is the
+  user's choice): a superseded own Physicalize whose body this client made.**
+  Holding client 2's beam Physicalize (stamped 340) 300 ms put it behind its
+  trafo's Unphysicalize at 342: the server superseded it, never applied
+  (`session_runner.cpp` ~1009, server.log "superseded, never applied"), and
+  client 2 took the echo as "nothing to do" without own body control
+  (`process_own_echo`, the premise of late-player design 2.3 that nothing
+  was made). Since BEAMF the retail beam remakes the body at its stamp, so
+  client 2's world applied it: its spawn ghost (from the 220 spawn) went
+  solid at 340, the server's never did. At the trafo birth 507 the server
+  made client 2's stone ball a spawn ghost (server.log "is a spawn ghost at
+  tick 507") and client 2 made it solid: in the server's world it falls
+  through client 1's ball resting at the exit (centres 1.03 m apart at 508,
+  0.017 m at 520), in client 2's it lands on it (1.14-1.15 m): own ball off
+  0.106 m at 508, 1.13 m at 520, 17 m later. Not SRTJ-OV (`srtj_ctl_h`: both
+  balls solid, the server "2 resumed solid ... 1 rechecks" at 507, the own
+  ball 2-3.5 cm off). Options: (a) a superseded own Physicalize whose body
+  this client made (a beam's, `beam_remakes_body`) handled as a moved pair -
+  a resync without own body control; (b) left to R6B / R6P's own body
+  control, where a superseded birth is taken out of the history.

@@ -281,6 +281,15 @@ namespace bmmo::session {
             bool origin_live = false;   // the live run has made the origin's change (a birth: the scripts did)
             bool applied_live = false;  // ...and the body at `applied`
             bool retired = false;       // its lifetime ended before a replay could make it again
+            // FULL step R6H (session_client_core::force_own_move, a test
+            // tool): `force_pending` - this birth is moved to origin +
+            // `force_n` once the live tick reaches `force_due`; `forced` - it
+            // was, through move_own_birth's capability path whatever
+            // own_body_control says (destroyable_own_birth honours it too).
+            bool force_pending = false;
+            bool forced = false;
+            uint32_t force_n = 0;
+            uint32_t force_due = 0;
             // The missing-echo deadline and its uplink gate (expire_own_echoes).
             bmmo::session::own_echo_deadline echo_deadline;
             bool moved() const { return made && applied != origin; }
@@ -523,6 +532,15 @@ namespace bmmo::session {
         std::map<std::string, uint32_t> generations_;
         uint64_t amend_failures_ = 0;
         std::vector<own_life> own_life_;   // struct own_life, beside beam_own_ball
+        // FULL step R6H: session_client_core::force_own_move armed for the
+        // next own birth record (record_own_birth), and what came of it.
+        struct forced_own_move_arm {
+            bool armed = false;
+            uint32_t n = 0;
+            uint32_t after = 0;
+        };
+        forced_own_move_arm force_own_move_;
+        uint64_t forced_own_moves_ = 0, forced_own_moves_refused_ = 0;
         // Our own events' echoes, handled in the frame (process_own_echoes).
         std::vector<bmmo::session_event_msg> own_echoes_;
         // ...and those queued before the last SessionAssign: they answer
@@ -1533,6 +1551,25 @@ namespace bmmo::session {
         };
         forced_rewind force_rewind(uint32_t depth);
 
+        // ---- a forced own move (FULL step R6H, a test tool) ----
+        // The next own birth record (record_own_birth) is handled `after`
+        // ticks after the birth as if its echo had said "made at origin +
+        // `n`" (late-player design 3.3, move_own_birth): the body out, the
+        // records without it from T to T'-1, the body made again at T' -
+        // through the capability path whatever own_body_control says (a test
+        // override, logged and journaled as "forced own move"), so a host
+        // without the capability (retail: own_body_in_replay) runs the path
+        // a moved own birth will take there.  `after` 0: at once, while the
+        // client has not reached T' (the absence is live); `after` >= `n`:
+        // the absence lies inside the rewind's replay.  Nothing goes on the
+        // wire: the server keeps its body from T.  One-shot; refused (logged,
+        // counted) past the reach, while a resync is pending, or when the
+        // birth's life has ended or the server moved it by then.  Returns
+        // false when it cannot be armed (no rollback, n 0).
+        bool force_own_move(uint32_t n, uint32_t after);
+        uint64_t forced_own_moves() const { return s.forced_own_moves_; }
+        uint64_t forced_own_moves_refused() const { return s.forced_own_moves_refused_; }
+
         // ---- numbering and resync ----
         // `owed`: the own correction needs this resync; one the limiter
         // holds back is asked again by the frame (retry_owed_resync).
@@ -2180,6 +2217,10 @@ namespace bmmo::session {
         void resync_own_life(own_life& life, bool made, uint32_t applied, const std::string& why);
         void re_report_own_birth(const own_life& life, uint32_t now);
         void move_own_birth(own_life& life, uint32_t applied, bool made);
+        // FULL step R6H: the armed forced moves whose tick has come
+        // (process_own_echoes, after the real echoes).
+        void apply_forced_own_moves();
+        void refuse_forced_own_move(own_life& life, const std::string& why);
 
         session_platform platform_;
         session_capabilities caps_;

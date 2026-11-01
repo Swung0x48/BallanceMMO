@@ -4041,3 +4041,19 @@ joint ledger as the headless client's `joints:` line
 matrix, first material's alpha and blending, shown / in frustum and whether a
 ghost pin holds it, after every live frame's post_step and before every
 replayed tick. Off by default; nothing is decided from either.
+
+## As built (step R6H, FULL close-out, 2026-11-01): the retail `hold-event` verb; Q-R1 moved to R6P
+
+§7.4's Q-R1 needed a retail `hold-event` verb (FULL plan §4 C8). Step R6H
+built it as the headless `--hold-event`'s own helper
+(`session/event_hold.hpp`; `session hold-event TYPE:N:MS|TYPE:N:drop|off`
+through `hooks.filter_event`, released from OnProcess, discarded by
+`hooks.ending`; session-client-core-design.md "As built (step R6H)"). Q-R1
+itself is not run here: with a released hold the server makes the ball at T'
+and today's retail fallback resyncs (no own body control, no snapshots), so
+nothing queues against a bodiless ball and `cbq` held stays 0 by design. Q-R1
+runs in R6P (3), whose drop arm (`hold-event physicalize:N:drop`) leaves the
+ball bodiless while Gameplay_Ingame drives - the A6 drop's state (§2.2.4).
+Counting note for every retail recipe: a retail beam sends its pair
+(Unphysicalize + Physicalize at the beam tick), and that Physicalize is counted
+by the hold like a birth's.

@@ -1336,6 +1336,24 @@ numbers 1-10 are unchanged.
    replay of the server journal with the same probe), and a headless arm
    with two balls born overlapping out of one trafo for a deterministic
    reproduction (`realtime-design.md` "Judged (step SRTJ)").
+   **Queued (FULL step R6H, root-caused; the fix is the user's choice): a
+   superseded own Physicalize whose body this client made.** A beam's
+   Physicalize that reaches the server behind the same player's newer
+   Unphysicalize is superseded there and never applied
+   (`session_runner.cpp` ~1009); the client takes the echo as "nothing to
+   do" without own body control (`process_own_echo`), but since BEAMF the
+   retail beam has already remade the body at its stamp. In R6H's first
+   retail run (`scripts/retail/r6h_s1`, `hold-event physicalize:2:300` held
+   client 2's beam Physicalize 340 behind its trafo's Unphysicalize 342)
+   client 2's spawn ghost went solid at 340 and the server's never did, so
+   the trafo birth at 507 was a spawn ghost on the server and solid on
+   client 2: the server's ball fell through client 1's (0.017 m apart at
+   520), client 2's landed on it (own ball 0.106 m off at 508, 1.13 m at
+   520, 17 m later; no resync, snapshots off). Not SRTJ-OV (both balls
+   solid there, cm-level). Options: (a) such a superseded Physicalize
+   handled as a moved pair (a resync without own body control); (b) left
+   to R6B / R6P's own body control, where a superseded birth is taken out
+   of the history (session-client-core-design.md "As built (step R6H)").
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire

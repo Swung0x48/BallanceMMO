@@ -72,6 +72,7 @@
 #include <game/tutorial_exit.hpp>
 #include <session/bridge_recipe.hpp>
 #include <session/client_core.hpp>
+#include <session/event_hold.hpp>
 #include <session/spawn_impulse.hpp>
 
 #include <BML/Bui.h>   // FULL step AHN: BML+'s ImGui context
@@ -473,6 +474,14 @@ namespace {
         // and own_body_backstop has something to do.
         int drop_births_armed = 0;
         uint64_t births_dropped = 0;
+        // 'session hold-event TYPE:N:MS|TYPE:N:drop|off' (FULL step R6H, a
+        // testing tool; the headless --hold-event's helper,
+        // session/event_hold.hpp): the N-th own event of TYPE leaves MS ms
+        // late, or never (hooks.filter_event after drop-birth), released
+        // from every OnProcess, discarded at the session's end
+        // (hooks.ending).  Armed before or during a core session; the count
+        // restarts at each session's anchor (as the headless client's).
+        bmmo::session::event_hold event_hold;
 
         // 'beam <x> <y> <z> at <tick>' (a testing tool, R2 (a)): a beam of
         // the running core session stamped exactly <tick>, so two runs of
@@ -2120,6 +2129,10 @@ void BallanceMMOClient::core_host_process() {
         }
     }
     core_host_net_expire();
+    // FULL step R6H: 'session hold-event' - a held own event whose time has
+    // come goes out (the clock is read only while one is held).
+    if (host.core && host.event_hold.pending())
+        host.event_hold.release_due(*host.core, []() { return std::chrono::steady_clock::now(); });
     // FULL step AHN (review finding 1): the anchor hold thawed for a
     // SessionStart or this session's SessionEnd it would not handle inside
     // OnRender: drained here first, before a frame of the still-holding core.
@@ -2840,6 +2853,9 @@ void BallanceMMOClient::core_host_anchor() {
             logger_->Info("Physics session %u: anchor bodies [%zu/%zu]: %s", host.session, i + 1, pieces,
                           bodies.substr(i * kPiece, kPiece).c_str());
     }
+    // FULL step R6H: 'session hold-event' counts from the anchor, where the
+    // headless client restarts its count (the spec stays armed).
+    host.event_hold.restart_count();
     core.anchor(report);
     logger_->Info("Physics session %u: anchored (hash %016llx surfaces %016llx), waiting for the tick assignment",
                   core.session_id(), static_cast<unsigned long long>(hash.pose), static_cast<unsigned long long>(hash.surfaces));
@@ -4331,6 +4347,17 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         logger_->Info("Automation: own Physicalize stamped %u kept off the wire (session drop-birth)", event.tick);
         return bs::event_send_verdict::drop;
     };
+    // FULL step R6H: 'session hold-event' (session/event_hold.hpp, the
+    // headless --hold-event's helper) after drop-birth's; what it still
+    // holds at the session's end is discarded, said aloud (hooks.ending).
+    host.event_hold.set_log([this](const std::string& line) { logger_->Info("%s", line.c_str()); });
+    const auto filter_drop = p.hooks.filter_event;
+    p.hooks.filter_event = [this, filter_drop](const bmmo::session_event_msg& event) {
+        const bs::event_send_verdict verdict = filter_drop(event);
+        if (verdict != bs::event_send_verdict::send || !host.core) return verdict;
+        return host.event_hold.hold(*host.core, event, []() { return std::chrono::steady_clock::now(); });
+    };
+    p.hooks.ending = [this]() { host.event_hold.discard(); };
     // The own body guard lifted after the journal closed (design 2.2
     // hooks.ended).
     p.hooks.ended = [this]() {
@@ -4549,6 +4576,52 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
         logger_->Info("Automation: the game thread stalled %ld ms at tick %u", ms, before);
         return std::format("ok stalled {} ms at tick {}", ms, before);
     }
+    if (what == "hold-event") {
+        // FULL step R6H: 'session hold-event TYPE:N:MS|TYPE:N:drop|off' (the
+        // headless --hold-event; hooks.filter_event).  'off' stops further
+        // holds; an event held already still goes out at its time.
+        if (!core_on.load()) return "error session hold-event needs the session core on";
+        if (value == "off") {
+            host.event_hold.disarm();
+            return std::format("ok hold-event off ({} still held, released at their time)", host.event_hold.held());
+        }
+        bs::event_hold_spec spec;
+        if (!bs::parse_event_hold(value, spec))
+            return "error usage: session hold-event TYPE:N:MS|TYPE:N:drop|off (TYPE physicalize, unphysicalize, sector, "
+                   "finish, bodyrevived, trafo or 0-5; N 1-based)";
+        host.event_hold.arm(spec);
+        if (spec.drop)
+            return std::format("ok own {} #{} of {} dropped (never sent)", bs::event_type_name(spec.type), spec.nth,
+                               core_session_running() ? "this session from now" : "the next session");
+        return std::format("ok own {} #{} of {} held {} ms", bs::event_type_name(spec.type), spec.nth,
+                           core_session_running() ? "this session from now" : "the next session", spec.ms);
+    }
+    if (what == "force-own-move") {
+        // FULL step R6H: 'session force-own-move <n> [after <k>]' (the
+        // headless --force-own-move N[:K]; session_client_core::
+        // force_own_move): the next own birth moved n ticks late, k ticks
+        // after it, through the capability path whatever own_body_control
+        // says.  Nothing on the wire: this client parts from the server.
+        if (!core_session_running()) return "error session force-own-move: no session core runs";
+        std::string after_word, after_value;
+        args >> after_word >> after_value;
+        char* end = nullptr;
+        const unsigned long n = std::strtoul(value.c_str(), &end, 10);
+        const bool n_ok = !value.empty() && end && !*end && n >= 1 && n <= 1000;
+        unsigned long k = 0;
+        bool k_ok = after_word.empty();
+        if (after_word == "after" && !after_value.empty()) {
+            end = nullptr;
+            k = std::strtoul(after_value.c_str(), &end, 10);
+            k_ok = end && !*end && k <= 1000;
+        }
+        if (!n_ok || !k_ok) return "error usage: session force-own-move <n> [after <k>] (n 1-1000, k 0-1000)";
+        if (!host.core->force_own_move(static_cast<uint32_t>(n), static_cast<uint32_t>(k)))
+            return "error session force-own-move: not armed (the core runs without rollback)";
+        return std::format("ok the next own birth is moved {} ticks late, {} ticks after it (at tick {}; {} done, {} "
+                           "refused so far)", n, k, host.core->current_tick(), host.core->forced_own_moves(),
+                           host.core->forced_own_moves_refused());
+    }
     if (what == "drop-birth") {
         // A testing tool (R1 (c)): the next own Physicalize of this core
         // session never reaches the server (hooks.filter_event).
@@ -4559,7 +4632,8 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     }
     return "error usage: session core on|off|status | session force-rollback <every>:<depth> | "
            "session force-rollback at <live>:<depth>[,...] | session stall <ms> | "
-           "session drop-birth | session placement | session probes | session activate <script> at b+<n>|<tick> | "
+           "session drop-birth | session hold-event TYPE:N:MS|TYPE:N:drop|off | session force-own-move <n> [after <k>] | "
+           "session placement | session probes | session activate <script> at b+<n>|<tick> | "
            "session cache off|on|verify|status | session snapshots on|off|status | "
            "session hold blocking|nonblocking|status | session hold shots DIR|off";
 }

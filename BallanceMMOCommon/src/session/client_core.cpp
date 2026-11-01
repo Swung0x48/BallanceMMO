@@ -415,6 +415,7 @@ namespace bmmo::session {
         s.generations_.clear();
         s.amend_failures_ = 0;
         s.own_life_.clear();
+        s.force_own_move_ = client_core_state::forced_own_move_arm{};   // FULL step R6H
         clear_own_window_state();   // step EL8
         s.own_echoes_.clear();
         s.own_echoes_stale_.clear();

@@ -2254,6 +2254,15 @@ namespace bmmo::session {
         birth.group = s.own_group_;
         birth.spawn = (event.flags & bmmo::session::PHYSICALIZE_FLAG_SPAWN) != 0;
         birth.origin_live = birth.applied_live = true;
+        // FULL step R6H: an armed forced move takes this birth.
+        if (s.force_own_move_.armed) {
+            birth.force_pending = true;
+            birth.force_n = s.force_own_move_.n;
+            birth.force_due = birth.origin + s.force_own_move_.after;
+            s.force_own_move_ = client_core_state::forced_own_move_arm{};
+            logf("forced own move: own birth of %s stamped %u will be moved to %u at local tick %u", entity.c_str(),
+                 birth.origin, birth.origin + birth.force_n, birth.force_due);
+        }
         s.own_life_.push_back(std::move(birth));
     }
 
@@ -2475,8 +2484,11 @@ namespace bmmo::session {
     // makes nothing in a replay (it is not moved), so keeping it is free.
     void session_client_core::retire_own_lives() {
         const uint32_t now = current_tick();
+        for (auto& life: s.own_life_)
+            if (life.retired && life.force_pending) refuse_forced_own_move(life, "its life ended first");
         s.own_life_.erase(std::remove_if(s.own_life_.begin(), s.own_life_.end(), [this, now](const own_life& life) {
             if (life.retired) return true;
+            if (life.force_pending) return false;   // FULL step R6H: kept until its tick
             if (life.what == own_life::kind::birth && life.state == own_life::verdict::sent
                     && static_cast<int32_t>(now - life.origin) < static_cast<int32_t>(client_core_state::kOwnRecordKeepTicks))
                 return false;
@@ -2510,6 +2522,11 @@ namespace bmmo::session {
     // round trip or two, and an old entry answers nothing any more.
     void session_client_core::set_aside_unanswered(own_life::aside why) {
         const uint32_t now = current_tick();
+        // FULL step R6H (review finding 4): a forced move still pending is
+        // refused aloud - the records it would move go with the old
+        // numbering (both callers drop the births next).
+        for (auto& life: s.own_life_)
+            if (life.force_pending) refuse_forced_own_move(life, "a SessionAssign renumbered the history first");
         for (const auto& life: s.own_life_) {
             if (life.retired || life.what != own_life::kind::birth || life.state != own_life::verdict::sent) continue;
             own_life aside = life;
@@ -2567,7 +2584,12 @@ namespace bmmo::session {
     // stamp unless own_births_parked keeps it on the parking path.
     const client_core_state::own_life* session_client_core::destroyable_own_birth(const std::string& entity,
                                                                                   uint32_t birth_tick) const {
-        if (!caps_.own_body_control) return nullptr;
+        if (!caps_.own_body_control) {
+            // FULL step R6H: a forced move ran the capability path; a later
+            // restore across its applied tick takes its body out the same way.
+            const own_life* moved = moved_own_life(entity, birth_tick);
+            return moved && moved->forced ? moved : nullptr;
+        }
         if (const own_life* moved = moved_own_life(entity, birth_tick)) return moved;
         if (config.own_births_parked) return nullptr;
         return scripted_own_life(entity, birth_tick);
@@ -2624,6 +2646,7 @@ namespace bmmo::session {
             for (const auto& msg: echoes) process_own_echo(msg, false);
         }
         expire_own_echoes();
+        apply_forced_own_moves();
     }
 
     // An echo of one of our own events (protocol 9), counted by what the
@@ -2948,7 +2971,7 @@ namespace bmmo::session {
     // needs nothing; a rejected one is re-reported while current, and the
     // client resyncs (resync_own_life).
     void session_client_core::move_own_birth(own_life& life, uint32_t applied, bool made) {
-        if (!caps_.own_body_control) {
+        if (!caps_.own_body_control && !life.forced) {
             const std::string head = std::string("own ") + (life.what == own_life::kind::beam ? "beam" : "birth")
                                    + " moved " + std::to_string(life.origin) + " -> "
                                    + (made ? std::to_string(applied) : std::string("never"));
@@ -3019,6 +3042,80 @@ namespace bmmo::session {
              made ? (life.applied_live ? ", made again in the replay" : ", made again live at that tick")
                   : alive ? ", removed from the history" : ", its life has ended since: removed from the history");
         journal_.note(reason + ": rewound to " + std::to_string(anchor));
+    }
+
+    // ------------------------------------------------- forced own move
+    // FULL step R6H (a test tool, core design 6.2 R6 row): the next own
+    // birth record moved as if its echo said "made at origin + n", `after`
+    // ticks after the birth (record_own_birth attaches it, process_own_echoes
+    // applies it through apply_forced_own_moves).
+    bool session_client_core::force_own_move(uint32_t n, uint32_t after) {
+        if (!config.rollback || n == 0) {
+            ++s.forced_own_moves_refused_;
+            logf("forced own move: not armed (%s)", !config.rollback ? "no rollback: no history to move a birth in" : "n is 0");
+            return false;
+        }
+        s.force_own_move_.armed = true;
+        s.force_own_move_.n = n;
+        s.force_own_move_.after = after;
+        logf("forced own move: armed at local tick %u for the next own birth: moved %u ticks late, %u ticks after the birth%s",
+             current_tick(), n, after, caps_.own_body_control ? "" : " (no own body control: the capability path forced)");
+        return true;
+    }
+
+    void session_client_core::refuse_forced_own_move(own_life& life, const std::string& why) {
+        life.force_pending = false;
+        ++s.forced_own_moves_refused_;
+        const std::string head = "forced own move: own birth stamped " + std::to_string(life.origin) + " -> "
+                               + std::to_string(life.origin + life.force_n) + " refused at local tick "
+                               + std::to_string(current_tick()) + ": " + why;
+        logf("%s", head.c_str());
+        journal_.note(head);
+    }
+
+    // Each armed birth whose tick has come: refused past the reach, while a
+    // resync is pending, when its life has ended or the server has moved it
+    // (each its own path: a resync, never this test's); otherwise moved
+    // through move_own_birth's capability path (life.forced), the same
+    // records, take-out and remake a moved own birth takes with own body
+    // control.  The server's echo of the birth (an ack) finds no record left
+    // to answer (the state is `moved`), so nothing else changes.
+    void session_client_core::apply_forced_own_moves() {
+        const uint32_t now = current_tick();
+        for (size_t i = 0; i < s.own_life_.size(); ++i) {
+            own_life& life = s.own_life_[i];
+            if (!life.force_pending || static_cast<int32_t>(now - life.force_due) < 0) continue;
+            const uint32_t anchor = life.origin - 1;
+            const uint32_t applied = life.origin + life.force_n;
+            if (life.retired || life.what != own_life::kind::birth || !own_life_current(life, now, true)) {
+                refuse_forced_own_move(life, "its life has ended since");
+                continue;
+            }
+            if (life.state != own_life::verdict::sent && life.state != own_life::verdict::acked) {
+                refuse_forced_own_move(life, "the server has answered it otherwise (not an ack)");
+                continue;
+            }
+            if (s.resync_pending_) {
+                refuse_forced_own_move(life, "a resync is pending");
+                continue;
+            }
+            if (!config.rollback || static_cast<int32_t>(now - anchor) < 0
+                    || now - anchor > s.rollback_.thresholds().max_resim_ticks || !s.rollback_.knows_tick(anchor)) {
+                refuse_forced_own_move(life, "past the reach (depth " + std::to_string(static_cast<int>(now - anchor)) + ")");
+                continue;
+            }
+            life.force_pending = false;
+            life.forced = true;
+            life.state = own_life::verdict::moved;
+            ++s.forced_own_moves_;
+            const std::string head = "forced own move: own birth stamped " + std::to_string(life.origin) + " moved to "
+                                   + std::to_string(applied) + " at local tick " + std::to_string(now) + " ("
+                                   + std::to_string(now - life.origin) + " ticks after the birth; test override"
+                                   + (caps_.own_body_control ? "" : ", no own body control") + ")";
+            logf("%s", head.c_str());
+            journal_.note(head);
+            move_own_birth(life, applied, true);
+        }
     }
 
 }

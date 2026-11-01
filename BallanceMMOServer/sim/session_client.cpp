@@ -59,6 +59,7 @@
 #include <physics/physics_savestate.hpp>
 #include <physics/physics_direct.hpp>
 #include <session/client_core.hpp>
+#include <session/event_hold.hpp>
 #include <session/rollback_binding.hpp>
 #include <session/rollback_binding_scripts.hpp>
 #include <session/session_host_world.hpp>
@@ -364,10 +365,15 @@ namespace {
         // 0 = the core's default, 1 = every tick), and the verify mode.
         uint32_t sparse_capture = 0;
         bool sparse_capture_verify = false;
-        int hold_event_type = -1;
-        uint32_t hold_event_nth = 0;
-        int hold_event_ms = 0;
-        bool hold_event_drop = false;
+        // (FULL step R6H: the spec and its parser are session/event_hold.hpp's,
+        // shared with the retail 'session hold-event' verb.)
+        bmmo::session::event_hold_spec hold_event;
+        // --force-own-move N[:K] (FULL step R6H, a test tool): the first own
+        // birth after the anchor is moved inside the history as if its echo
+        // said "made at origin + N", K ticks after the birth
+        // (session_client_core::force_own_move).  0: off.
+        uint32_t force_own_move = 0;
+        uint32_t force_own_move_after = 0;
         // Harness knobs (design 9.25): no level has a mechanism at its
         // resetpoint, so a recorded run that keeps the ball near the spawn
         // never touches one.  --start-sector activates a later sector at the
@@ -544,6 +550,7 @@ namespace {
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS | --stall-ms TICK:MS]\n"
                   "       [--resync-at TICK | --resync-at s<SECTOR>+<TICKS>] [--record-by-tick]\n"
                   "       [--hold-event TYPE:N:MS|TYPE:N:drop]   (the N-th own event of TYPE leaves MS ms late, or never)\n"
+                  "       [--force-own-move N[:K]]   (test: the first own birth after the anchor moved N ticks late, K ticks after it)\n"
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
                   "       [--reach N]   (the rollback's reach pinned at N ticks, 48..120; default: per client, from the relay lag)\n"
                   "       [--starved-resync-reports N]   (N starved input reports in a row ask for a resync; 0 = never; default 330)\n"
@@ -581,25 +588,6 @@ namespace {
     // The event type names (--hold-event, the own-echo lines) are the core's
     // since E7 (session/lifecycle.hpp).
     using bmmo::session::event_type_name;
-
-    // TYPE:N:MS or TYPE:N:drop, TYPE a name (physicalize, unphysicalize,
-    // sector, finish, bodyrevived) or its number.
-    bool parse_hold_event(const std::string& spec, arguments& out) {
-        const size_t a = spec.find(':');
-        const size_t b = a == std::string::npos ? std::string::npos : spec.find(':', a + 1);
-        if (b == std::string::npos) return false;
-        std::string type = spec.substr(0, a);
-        for (char& c: type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        out.hold_event_type = -1;
-        for (int t = 0; t <= 5; ++t)   // 5: trafo (step T3)
-            if (type == event_type_name(t) || type == std::to_string(t)) out.hold_event_type = t;
-        if (out.hold_event_type < 0) return false;
-        out.hold_event_nth = static_cast<uint32_t>(std::max(1, std::atoi(spec.substr(a + 1, b - a - 1).c_str())));
-        const std::string what = spec.substr(b + 1);
-        out.hold_event_drop = what == "drop";
-        out.hold_event_ms = out.hold_event_drop ? 0 : std::atoi(what.c_str());
-        return out.hold_event_drop || out.hold_event_ms > 0;
-    }
 
     bool parse(int argc, char** argv, arguments& out) {
         for (int i = 1; i < argc; ++i) {
@@ -787,7 +775,18 @@ namespace {
             }
             else if (arg == "--hold-event") {
                 if (!(v = next())) return false;
-                if (!parse_hold_event(v, out)) return false;
+                if (!bmmo::session::parse_event_hold(v, out.hold_event)) return false;
+            }
+            else if (arg == "--force-own-move") {
+                // N[:K] (FULL step R6H)
+                if (!(v = next())) return false;
+                const std::string spec = v;
+                const size_t colon = spec.find(':');
+                const long n = std::atol(spec.c_str());
+                const long k = colon == std::string::npos ? 0 : std::atol(spec.c_str() + colon + 1);
+                if (n < 1 || n > 1000 || k < 0 || k > 1000) return false;
+                out.force_own_move = static_cast<uint32_t>(n);
+                out.force_own_move_after = static_cast<uint32_t>(k);
             }
             else if (arg == "--capture-inbound") { if (!(v = next())) return false; out.capture_inbound = v; }
             else if (arg == "--replay-inbound") { if (!(v = next())) return false; out.replay_inbound = v; }
@@ -1969,12 +1968,14 @@ namespace {
             };
             // Step A3: the frames a resync hold did not run are not owed.
             p.hooks.resync_hold_ended = [this](std::chrono::steady_clock::duration held) { origin_ += held; };
+            // FULL step R6H: the hold is session/event_hold.hpp's, shared with
+            // the retail 'session hold-event' verb.
+            event_hold_.set_log([this](const std::string& line) { logf("%s", line.c_str()); });
+            if (args_.hold_event.armed()) event_hold_.arm(args_.hold_event);
             p.hooks.filter_event = [this](const bmmo::session_event_msg& event) {
-                if (!hold_event(event)) return bmmo::session::event_send_verdict::send;
-                return args_.hold_event_drop ? bmmo::session::event_send_verdict::drop
-                                             : bmmo::session::event_send_verdict::hold;
+                return event_hold_.hold(core_, event, [this]() { return wall_now(bmmo::sim::wall_site::hold_event_stamp); });
             };
-            p.hooks.ending = [this]() { discard_held_events(); };
+            p.hooks.ending = [this]() { event_hold_.discard(); };
             // The frame's (E9): the platform half of the core's pre_step and
             // post_step (shared-core design 1.3, 2.2), each what frame() did
             // there.  pre_step: the sector resets kept neutralized, the
@@ -2822,7 +2823,13 @@ namespace {
                      static_cast<unsigned>(core_.sector_lead_ticks()));
             }
             rebases_ = 0;
-            hold_event_seen_ = 0;
+            event_hold_.restart_count();
+            // FULL step R6H: --force-own-move, armed once (the first own birth
+            // after the first anchor).
+            if (args_.force_own_move && !force_own_move_armed_) {
+                force_own_move_armed_ = true;
+                core_.force_own_move(args_.force_own_move, args_.force_own_move_after);
+            }
             // The phase, the pacer's origin (hooks.numbering_restarted), the
             // hold, SessionReady and the journal (shared-core design E3:
             // session_client_core::anchor).
@@ -3909,51 +3916,12 @@ namespace {
             return out;
         }
 
-        // --hold-event: true when this event is the one to hold back.  Held
-        // here, before the reliable copy and before the repeat queue, so the
-        // one gate covers every path the event leaves by; the bytes go out
-        // whole at the release (release_held_events), the repeats after them.
-        bool hold_event(const bmmo::session_event_msg& event) {
-            if (args_.hold_event_type < 0 || static_cast<int>(event.type) != args_.hold_event_type) return false;
-            if (++hold_event_seen_ != args_.hold_event_nth) return false;
-            if (args_.hold_event_drop) {
-                logf("hold-event: own %s #%u stamped tick %u dropped at tick %u: it never leaves this client",
-                     event_type_name(args_.hold_event_type), hold_event_seen_, event.tick, current_tick());
-                core_.journal().note("hold-event: dropped " + std::string(event_type_name(args_.hold_event_type)) + " stamped "
-                             + std::to_string(event.tick));
-                return true;
-            }
-            held_events_.push_back(held_event{event.raw.str(), event.tick, current_tick(),
-                                              wall_now(bmmo::sim::wall_site::hold_event_stamp) + std::chrono::milliseconds(args_.hold_event_ms)});
-            logf("hold-event: own %s #%u stamped tick %u held at tick %u for %d ms",
-                 event_type_name(args_.hold_event_type), hold_event_seen_, event.tick, current_tick(), args_.hold_event_ms);
-            core_.journal().note("hold-event: held " + std::string(event_type_name(args_.hold_event_type)) + " stamped "
-                         + std::to_string(event.tick) + " for " + std::to_string(args_.hold_event_ms) + " ms");
-            return true;
-        }
-
-        // Called on every pass of the main loop, so a release is late by one
-        // poll at most, not by a frame.
+        // --hold-event (FULL step R6H: session/event_hold.hpp): called on
+        // every pass of the main loop, so a release is late by one poll at
+        // most, not by a frame.  The clock is read only while something is
+        // held.
         void release_held_events() {
-            if (held_events_.empty()) return;
-            const auto now = wall_now(bmmo::sim::wall_site::hold_event_release);
-            for (auto it = held_events_.begin(); it != held_events_.end();) {
-                if (now < it->release) { ++it; continue; }
-                if (core_.session_phase() != phase::running) {
-                    // the session's end clears the list (discard_held_events), so this is a safety net;
-                    // said aloud either way, so a hold never ends silently.
-                    logf("hold-event: own %s stamped tick %u (held at tick %u) discarded: no session running",
-                         event_type_name(args_.hold_event_type), it->stamp, it->held_at);
-                    it = held_events_.erase(it);
-                    continue;
-                }
-                if (!core_.assigned()) { ++it; continue; }   // a session but no tick base yet: wait for it
-                core_.release_event(it->bytes);
-                logf("hold-event: own %s stamped tick %u (held at tick %u) released at tick %u",
-                     event_type_name(args_.hold_event_type), it->stamp, it->held_at, current_tick());
-                core_.journal().note("hold-event: released stamped " + std::to_string(it->stamp));
-                it = held_events_.erase(it);
-            }
+            event_hold_.release_due(core_, [this]() { return wall_now(bmmo::sim::wall_site::hold_event_release); });
         }
 
         // apply_blend (the legacy blend's frame half, post_step step 27) moved
@@ -4687,14 +4655,7 @@ namespace {
         }
 
         // SessionEnd (session_client_core::end): what --hold-event still
-        // holds is discarded, said aloud (hooks.ending)...
-        void discard_held_events() {
-            for (const auto& held: held_events_)
-                logf("hold-event: own %s stamped tick %u (held at tick %u) discarded: the session ended first",
-                     event_type_name(args_.hold_event_type), held.stamp, held.held_at);
-            held_events_.clear();
-        }
-
+        // holds is discarded, said aloud (hooks.ending: event_hold::discard)...
         // ...and, after the journal closed, the own body guard is lifted
         // (hooks.ended; legacy_calls::own_body_guard_off until E11); the core
         // takes every mirror's navigation and body out after it (E6;
@@ -5012,16 +4973,11 @@ namespace {
         // Step BMX: the mirrors' clones, one per player and ball type
         // (remote_entity), forgotten when the engine reboots.
         bmmo::game::mirror_clones mirror_clones_;
-        // --hold-event: how many own events of the held type were made, and
-        // the one held back until its release time.
-        struct held_event {
-            std::string bytes;
-            uint32_t stamp = 0;
-            uint32_t held_at = 0;
-            clock_type::time_point release{};
-        };
-        uint32_t hold_event_seen_ = 0;
-        std::vector<held_event> held_events_;
+        // --hold-event (FULL step R6H: the shared helper): how many own events
+        // of the held type were made, and the ones held back until their
+        // release time.
+        bmmo::session::event_hold event_hold_;
+        bool force_own_move_armed_ = false;   // --force-own-move armed (once)
         bool paused_once_ = false;
         bool resync_at_done_ = false;   // --resync-at fired
         bool have_first_base_ = false;  // --record-by-tick: the first assigned base
