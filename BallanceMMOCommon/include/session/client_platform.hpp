@@ -252,6 +252,11 @@ namespace bmmo::session {
         // platform's place_probes.  Empty unless the host places (every
         // session runs the union since step UOFF).
         std::function<void(uint32_t tick, const std::function<bool(const std::string& entity)>& held_out)> place_probes;
+        // FULL step SRT2B: the capture's read shortcuts are verified this
+        // session (core_config::capture_cache == verify): bind_session_world
+        // then opens the capture's entity lookup scope in its verify mode
+        // (rollback_binding_options::capture_lookup_verify).
+        bool capture_verify = false;
     };
 
     // The own ball as the host sees it after a step (design 2.2 own_ball;

@@ -244,6 +244,8 @@ namespace bmmo::session {
         s.rollback_.set_replay_scripts(config.script_replay);
         s.rollback_.set_exact_restore(config.savestate);
         s.rollback_.set_capture_cache(config.capture_cache);   // RC2 (b), step RCB
+        // FULL step SRT2B: 'verify' checks the capture's lookup scope too.
+        world_hooks_.capture_verify = config.capture_cache == rollback_engine::capture_cache_mode::verify;
         s.rollback_.set_script_log_cap(config.script_diff_logs);
         s.rollback_.set_trace_plan(config.trace_plan);
         // Step D0 (FULL): the final-state diagnostic.  A ball is keyed by its

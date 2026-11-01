@@ -158,6 +158,10 @@ namespace bmmo::physics {
         bool savestate_globals(const uint8_t* data, size_t size, bmmo_physics_globals& out, std::string& error) const;
         // ---- bridge API v30 (FULL step H1X): a named hull compiled from a template body ----
         bool hull_template(const char* surface, const char* mesh, bmmo_physics_hull_template& out, std::string& error) const;
+        // ---- bridge API v31 (FULL step SRT2B): the record capture's entity lookup scope ----
+        // (physics_state.hpp entity_lookup_scope_begin; rollback_world::capture_scope).  A bridge
+        // without the entry leaves every lookup a scan, as before.
+        void lookup_scope(bool on, bool verify = false, bmmo_physics_lookup_totals* totals = nullptr) const;
 
         // ---- bridge API v6 (design 9.10): spawn impulse, deterministic Random block ----
         // Impulse direction_ws * speed * mass at the body's mass centre; applied

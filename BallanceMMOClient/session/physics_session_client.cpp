@@ -3058,6 +3058,9 @@ bmmo::session::rollback_world BallanceMMOClient::physics_session_rollback_world(
     // since the anchor must not cost the whole restore.
     o.restore_clock = false;
     o.savestate_flags = 0u;
+    // The legacy path is not changed (refused since B9DX): no capture lookup
+    // scope, which physics_view offers since bridge API v31 (FULL step SRT2B).
+    o.capture_lookup_scope = false;
     o.own_key_codes = s.own_key_codes;
     o.own_key_blocks = s.own_key_blocks;
     o.own_key_count = s.own_key_count;

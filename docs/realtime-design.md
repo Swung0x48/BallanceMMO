@@ -750,3 +750,80 @@ orchestrator pulled this part of Stage C's R6B forward (plan section BEAMF) so S
     wire check on core_ref_s13 against rSRT3's traces (`EXTRA=--replay-free-cost-clock`, "-" mode, `rSRT4w_old`):
     44/44 sends SAME, 45/45 journals IDENTICAL, swing_snapoff c2's sparse figures unchanged (1025 light, 21 rebased
     + 76).
+
+## As built (step SRT2B, a3's remainder: the moving trafo pile's per-body reads)
+
+- **Which cut, and why: the pile's reads batched (the capture's entity lookup scope on retail), not one combined
+  read per piece.** Each of a moving piece's three bridge reads (`get_body_state`, `get_core_extra`, `contacts_get`;
+  `rollback.hpp` `capture()`'s `grab`) resolves the piece's name with `find_entity` (`physics_state.cpp`), which
+  without a scope is CK's `GetObjectByNameAndParentClass` - a scan of the context's objects; the fills themselves
+  are a few field copies and a walk of the body's friction synapses. The headless client has served those lookups
+  from one pass over the 3D entities since TR3 (`entity_lookup_scope_begin` / `_end`, installed as
+  `rollback_world::capture_scope` by `rollback_binding.hpp` for a backend with `lookup_scope`), but the retail
+  backend (`physics_view`, the plugin's C API) had no such entry, so a retail capture scanned the context about
+  110 times (the verify run below: 226 416 served lookups in 2048 captures). A combined read would have cut those
+  scans to one per body (a third); the scope cuts them to one table built per capture and serves every other lookup
+  of the capture with it (the own ball's, the mirrors', the navigation replicas'), leaves `capture()` and the RC2 (b)
+  cache exactly as they are, and is the code the headless client and every wire check already run. A combined read
+  was not built: the measured remainder (below) does not call for it.
+- **Code** (no protocol, journal, record, IVP or physics_RT change; bridge API v31). `physics_rt_api.h`:
+  `lookup_scope(manager, begin, flags, totals)` appended to `bmmo_physics_api_v2`, `bmmo_physics_lookup_totals`,
+  `BMMO_LOOKUP_SCOPE_VERIFY`; `physics_rt_bridge.cpp` `api_lookup_scope`. `physics_state.cpp`: the scope takes a
+  `verify` flag at its outermost begin - every lookup the table serves also scans, the scan's answer is returned,
+  a difference is counted - and keeps running totals per thread (`entity_lookup_totals()`: scopes, built, served,
+  verified, mismatches); without verify `find_entity` is unchanged. `physics_view::lookup_scope(on, verify,
+  totals)` (stateless: no member, the BML layout rule; a bridge without the entry leaves every lookup a scan) and
+  `physics_direct::lookup_scope` with the same signature. `rollback_binding.hpp`: `rollback_binding_options::
+  capture_lookup_scope` (default on) and `capture_lookup_verify`; in verify the hook logs each new mismatch (at
+  most 16 lines) and a summary every 1024 scopes ("lookup scope (verify): ..."). The session core turns verify on
+  with its capture cache's verify mode (`core_world_hooks::capture_verify`, set from `core_config::capture_cache`
+  in `client_core.cpp`; `bind_session_world` passes it): retail 'session cache verify', headless `--capture-cache
+  verify`. The legacy retail path (`physics_session_client.cpp`) sets `capture_lookup_scope = false` and so keeps
+  scanning: nothing new for it. Unit test `RollbackBinding.CaptureLookupScopeInstalledOffAndVerified`.
+- **Exact by construction, verified.** The table holds, for each name, the first 3D entity in the order
+  `GetObjectListByType(CKCID_3DENTITY, TRUE)` lists them, which is the scan's answer on Ballanced's CK2 (TR3's own
+  live check against the scan, `docs/engine-changes.md` T4's notes: 1.1-1.5 M lookups per client, 0 different). On
+  the retail CK2.dll it was not yet shown: the verify run (`srt2b_verify`, both copies 'session cache verify')
+  checked every served lookup of the whole session against the scan - **0 mismatches** on both clients (a new
+  mismatch logs at once, at most 16 lines, and none was logged; the summary at 2048 scopes: 226 416 / 228 082
+  lookups verified, 2042 of the 2048 scopes built a table), and RC2 (b)'s cache 0 mismatches (55 785 / 55 696 hits).
+- **The statistic, before / after** (SRT2's recipe with the SRT census, `work/SRT2B/srt2b_retail.py LABEL [verify]`:
+  RT1's L11 ctl arm '0:0 0:0', client 1 beams at 300 / 520 / 750 / 1100, client 2 at 340 / 600, each game on
+  E-cores of its own, 16-21 / 22-27, the Arch server of HEAD 230042c6, snapshots off; the census build = the
+  `BallanceMMOClient/*` hunks of `work/SRT/srt_diag.patch`, whose `d_cap_us` is the in-tree `capture_us` per frame;
+  `work/SRT2/livecap.py DIR 450 1250`: live frames, no rewind in the frame):
+
+  | run | client | capture p50 / p99 / max (ms), 450-1250 | frames over 2 ms | whole session p50 / p99 / max | t_cap total / max |
+  |---|---|---|---|---|---|
+  | srt2b_before (HEAD + census) | c1 | 2.15 / 2.96 / 4.15 | 517 / 789 | 1.54 / 2.75 / 4.15 | 4159 / 4 |
+  | | c2 | 2.08 / 2.69 / 2.96 | 451 / 780 | 1.49 / 2.59 / 2.96 | 3990 / 3 |
+  | srt2b_after (SRT2B + census) | c1 | 1.54 / 2.04 / 2.65 | 8 / 789 | 1.37 / 1.89 / 3.04 | 3505 / 3 |
+  | | c2 | 1.53 / 1.89 / 2.32 | 3 / 782 | 1.35 / 1.79 / 2.32 | 3456 / 2 |
+
+  A cut of 0.55-0.61 ms at p50 and 0.80-0.92 ms at p99 through the pile. SRT2's split (scripts about 0.7, blob
+  about 0.55 ms) leaves about 0.3 ms for the body reads now (an estimate from the totals, not a section profile:
+  SRT2's section diag no longer applies). Both runs: resyncs 0 / 0, rebases 0 / 0, starved 0; rb / resim 31/72,
+  47/129 (before) and 30/80, 49/128 (after). As the plan section says, the 2 ms is not gated here; SRTJ judges the
+  hard gates with these captures.
+- **FINAL rows against the server** (`work/RT1/rt1_judge.py`, all three runs): worst position 0 m in every class,
+  mechanisms 23/23 bit-equal, every differing own / mirror / piece row rotation-only at the ticks of RTR's known
+  signature (298, the pieces from 460), the same before and after (pieces bit-equal 21/49 in both, 19/49 in the
+  verify run).
+- **Checks.** x64 BUILD-OK DEPS-OK (`build-agent-rSRT2B`), x86 CLIENT-BUILD-OK DEPS-OK; `BallanceMMOMessageTests`
+  728/728; GCC `linux_test_syntax.sh` 33/33 ok; the wire check on core_ref_s13 (`EXTRA=--replay-free-cost-clock
+  wire_check.sh - rSRT2B rSRT2Bw rBEAMFw_new`): 45/45 sends SAME, 45/45 journals IDENTICAL (the headless path had
+  the scope already; verify off leaves `find_entity` as it was); SimTool `--savestate-check` (OPC's RK2 recipe,
+  K = 2 seed 1 x 40, rSRT2B): PASS 40/40, every summary line equal to rSRT4c's but the timing line; HL run 16's three
+  arms (`hl_full/r16_l11_cross`, `r16_swing_s0`, `r16_swing_s1`) replayed by rSRT2B (`work/SRT2B/replay_set.sh`,
+  free clock): 12/12 journals IDENTICAL to the live ones.
+- **Adaptation:** three retail sessions instead of the section's 1-2 (before, after, and a separate verify session,
+  since verify scans every lookup again and would have spoiled the after figure). Disk: D: was full at the slim
+  copy; nine build copies were removed with `clean.sh`. Six of them ARE cited by design notes as the binaries
+  behind a measurement (the review's correction; the earlier text called them uncited, which was wrong):
+  rB2SWb (rollback-engine-gaps 1945/1954, resync-and-sector-timing 3002/3081, record-format-gaps 902) and rB2SWc
+  (session-client-core 6544) - dirty intermediates of step B2SW (commits 1c0e2d29..0d078b5d), not rebuildable
+  exactly; rDX3b, rDX3c, rDX3d (rollback-engine-gaps 3613-3741) - dirty gate-round intermediates of step DX3,
+  the nearest commit is da5ba844 (the final tree, not any of the three); rBALA2 (rewind-cost 2463-2950) - step
+  BALA's gate-round build, rebuildable from cf7bcaed if that commit is the gate tree. Those figures stay as
+  recorded, their binaries are gone. The other three (rD0g, rDEPg, rH1Xg; gate builds of 9286cad2, d5010dfc,
+  eed4d158) are cited by no note.

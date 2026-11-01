@@ -496,6 +496,7 @@ namespace bmmo::session {
         binding.replay_remotes = hooks.replay_remotes;
         binding.replay_mechanisms = hooks.replay_mechanisms;
         binding.on_correction = hooks.on_correction;
+        binding.capture_lookup_verify = hooks.capture_verify;   // FULL step SRT2B
         rollback_world world = bind_rollback_world(backend, binding);
         world.remote_generation = hooks.remote_generation;   // step GL1
         world.after_step = o.after_replayed_step;   // step N02R

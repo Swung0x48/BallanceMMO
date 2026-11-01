@@ -867,6 +867,11 @@ namespace bmmo::physics {
         return true;
     }
 
+    void physics_view::lookup_scope(bool on, bool verify, bmmo_physics_lookup_totals* totals) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->lookup_scope) return;
+        api_->lookup_scope(manager_, on ? 1 : 0, verify ? BMMO_LOOKUP_SCOPE_VERIFY : 0u, totals);
+    }
+
     bool physics_view::step_physics(float delta_ms, std::string& error) const {
         error.clear();
         if (!available()) { error = "physics bridge is not initialized"; return false; }

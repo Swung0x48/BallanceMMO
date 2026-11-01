@@ -213,9 +213,16 @@ namespace bmmo::physics {
     // name in the order GetObjectByNameAndParentClass scans, so a lookup
     // finds what the scan would.  Only for a stretch that creates, destroys
     // and renames no object (a capture reads only); scopes nest.  Without a
-    // scope every lookup scans the context as before.
-    void entity_lookup_scope_begin(CKIpionManager* physics);
+    // scope every lookup scans the context as before.  `verify` (FULL step
+    // SRT2B; it holds for the whole outermost scope): every lookup the table
+    // serves also scans, the scan's answer is returned and a difference is
+    // counted (entity_lookup_totals).  The headless client always had the
+    // scope; since SRT2B the retail mod has it too (bridge API v31).
+    void entity_lookup_scope_begin(CKIpionManager* physics, bool verify = false);
     void entity_lookup_scope_end(CKIpionManager* physics);
+    // Every scope this thread ended since the process started
+    // (bmmo_physics_lookup_totals).
+    bmmo_physics_lookup_totals entity_lookup_totals();
     // Beam the body and overwrite its core speeds (pending async pushes are
     // dropped).  Any array may be null to leave that part untouched.  `wake`
     // wakes the body; otherwise a simulated body is frozen.  The CK entity's

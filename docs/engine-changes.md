@@ -1330,6 +1330,22 @@ for a backend that has it (a test backend without it keeps the RK1
 behaviour). No format change (wire, record, journal); a late joiner's
 re-step results change, by design.
 
+## Bridge notes: the record capture's entity lookup scope (bridge API v31, no engine change)
+
+FULL step SRT2B (`docs/realtime-design.md`, "As built (step SRT2B)"). Not an
+engine change: nothing under `submodule/Ballanced` moved. The lookup scope
+the headless client has used since TR3 (`entity_lookup_scope_begin` / `_end`
+in `physics_state.cpp`: between them, every by-name entity lookup past the
+12th is answered from one pass over `GetObjectListByType(CKCID_3DENTITY,
+TRUE)` instead of a `GetObjectByNameAndParentClass` scan) is exported as
+`lookup_scope(manager, begin, flags, totals)`, appended to
+`bmmo_physics_api_v2`, so the retail mod's record capture gets it too
+(`physics_view::lookup_scope`). `BMMO_LOOKUP_SCOPE_VERIFY` makes every
+served lookup scan as well and return the scan's answer, counting a
+difference (`bmmo_physics_lookup_totals`); measured on the retail CK2.dll:
+0 mismatches of 226 416 and 228 082 lookups. Reads only; no simulation,
+record, journal or wire byte changes.
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

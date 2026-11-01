@@ -1126,6 +1126,11 @@ namespace bmmo::physics {
             int depth = 0;
             int lookups = 0;
             bool built = false;
+            // FULL step SRT2B: the outermost begin's verify (every served
+            // lookup scanned too, the scan's answer returned).
+            bool verify = false;
+            // Running totals on this thread (entity_lookup_totals).
+            bmmo_physics_lookup_totals totals{};
             std::vector<std::pair<std::string_view, CK3dEntity*>> slots;   // empty view: a free slot
             static size_t hash(std::string_view s) {
                 uint64_t h = 1469598103934665603ull;
@@ -1181,8 +1186,20 @@ namespace bmmo::physics {
                         scope.add(std::string_view(object_name), static_cast<CK3dEntity*>(object));
                     }
                     scope.built = true;
+                    ++scope.totals.built;
                 }
-                return scope.find(std::string_view(name));
+                CK3dEntity* served = scope.find(std::string_view(name));
+                ++scope.totals.served;
+                if (scope.verify) {
+                    // FULL step SRT2B: the table's premise checked against
+                    // the scan it stands for; the scan's answer is kept.
+                    CK3dEntity* scanned = CK3dEntity::Cast(physics->m_Context->GetObjectByNameAndParentClass(
+                        const_cast<CKSTRING>(name.c_str()), CKCID_3DENTITY, nullptr));
+                    ++scope.totals.verified;
+                    if (scanned != served) ++scope.totals.mismatches;
+                    return scanned;
+                }
+                return served;
             }
             // ParentClass: balls are CK3dObjects, frames plain CK3dEntities.
             return CK3dEntity::Cast(physics->m_Context->GetObjectByNameAndParentClass(
@@ -1308,12 +1325,13 @@ namespace bmmo::physics {
         return total;
     }
 
-    void entity_lookup_scope_begin(CKIpionManager* physics) {
+    void entity_lookup_scope_begin(CKIpionManager* physics, bool verify) {
         entity_lookup_scope& scope = lookup_scope();
         if (scope.depth++ == 0) {
             scope.physics = physics;
             scope.lookups = 0;
             scope.built = false;
+            scope.verify = verify;
         }
     }
 
@@ -1324,8 +1342,12 @@ namespace bmmo::physics {
             scope.physics = nullptr;
             scope.lookups = 0;
             scope.built = false;
+            scope.verify = false;
+            ++scope.totals.scopes;
         }
     }
+
+    bmmo_physics_lookup_totals entity_lookup_totals() { return lookup_scope().totals; }
 
     bool get_body_state(CKIpionManager* physics, const char* entity_name, body_state& out,
                         std::string& error) {

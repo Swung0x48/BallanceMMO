@@ -44,6 +44,15 @@ namespace bmmo::session {
         // which is refused since step B9DX and gets nothing new).
         bool physics_globals = false;
         uint32_t savestate_flags = 0;              // bmmo::physics::SAVESTATE_* bits for set_savestate
+        // The record capture's entity lookup scope (rollback_world::
+        // capture_scope), installed for a backend that has one.  FULL step
+        // SRT2B: the retail backend has it since bridge API v31; the legacy
+        // retail path (refused since B9DX, nothing new for it) turns it off.
+        // `capture_lookup_verify`: every lookup the scope's table serves is
+        // checked against the scan it stands for (the scan's answer is used)
+        // and each difference is logged - the session core's 'cache verify'.
+        bool capture_lookup_scope = true;
+        bool capture_lookup_verify = false;
 
         // Navigation polling of the own ball (the key codes and Key Event
         // blocks the replica reads in live frames; the backend is called with
@@ -91,9 +100,39 @@ namespace bmmo::session {
         // (pose, leapfrog extras, contacts): a backend that can serve those
         // lookups from one pass over the world for the capture's duration
         // says so (the headless one; step TR3: with every member's trafo
-        // pieces tracked, the per-lookup scans were a third of a capture).
-        if constexpr (requires(Backend& x) { x.lookup_scope(true); }) {
-            world.capture_scope = [b](bool on) { b->lookup_scope(on); };
+        // pieces tracked, the per-lookup scans were a third of a capture;
+        // the retail one since FULL step SRT2B, bridge API v31: its moving
+        // trafo pieces' three scans each were the capture's largest part).
+        if constexpr (requires(Backend& x, bmmo_physics_lookup_totals* t) { x.lookup_scope(true, false, t); }) {
+            if (o.capture_lookup_scope && o.capture_lookup_verify) {
+                // Verify: the scope's premise (the table answers what the
+                // scan would) checked lookup by lookup.  The totals are the
+                // backend's running ones (the world is rebuilt per engine
+                // call): a new mismatch is logged, at most 16 lines, and a
+                // summary every 1024 scopes.
+                const auto log = o.log;
+                world.capture_scope = [b, log](bool on) {
+                    bmmo_physics_lookup_totals totals{};
+                    b->lookup_scope(on, true, &totals);
+                    if (on || !log) return;
+                    thread_local uint64_t logged_mismatches = 0;
+                    if (totals.mismatches > logged_mismatches && logged_mismatches < 16) {
+                        logged_mismatches = totals.mismatches;
+                        log("lookup scope (verify): " + std::to_string(totals.mismatches)
+                            + " lookups the table answered differently from the scan (of "
+                            + std::to_string(totals.verified) + " verified)");
+                    }
+                    if (totals.scopes % 1024 == 0)
+                        log("lookup scope (verify): " + std::to_string(totals.scopes) + " scopes, "
+                            + std::to_string(totals.built) + " built, " + std::to_string(totals.served) + " served, "
+                            + std::to_string(totals.verified) + " verified, " + std::to_string(totals.mismatches)
+                            + " mismatches");
+                };
+            } else if (o.capture_lookup_scope) {
+                world.capture_scope = [b](bool on) { b->lookup_scope(on, false, nullptr); };
+            }
+        } else if constexpr (requires(Backend& x) { x.lookup_scope(true); }) {
+            if (o.capture_lookup_scope) world.capture_scope = [b](bool on) { b->lookup_scope(on); };
         }
         world.get_body = [b](const std::string& entity, bmmo_physics_body_state& out) {
             std::string error;

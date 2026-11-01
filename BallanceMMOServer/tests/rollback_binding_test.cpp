@@ -374,6 +374,66 @@ TEST(RollbackBinding, NavPollAlwaysReachesTheBackendAndRearmsWhenHandedBack) {
     EXPECT_EQ(count_calls(backend, "poll_"), 4) << "every call reaches the backend";
 }
 
+// FULL step SRT2B: the capture's entity lookup scope (bridge API v31).  A
+// backend with lookup_scope(on, verify, totals) gets capture_scope unless
+// the caller turns it off (the legacy retail path); verify passes the flag
+// and logs a mismatch the backend's running totals report.
+struct scope_backend : fake_backend {
+    std::vector<std::pair<bool, bool>> scopes;   // (on, verify)
+    bmmo_physics_lookup_totals totals{};
+    void lookup_scope(bool on, bool verify = false, bmmo_physics_lookup_totals* out = nullptr) const {
+        auto* self = const_cast<scope_backend*>(this);
+        self->scopes.push_back({on, verify});
+        if (!on) ++self->totals.scopes;
+        if (out) *out = totals;
+    }
+};
+
+TEST(RollbackBinding, CaptureLookupScopeInstalledOffAndVerified) {
+    {
+        fake_backend plain;
+        rollback_world world = bind_rollback_world(plain, rollback_binding_options{});
+        EXPECT_FALSE(world.capture_scope) << "a backend without a scope gets none";
+    }
+    {
+        scope_backend backend;
+        rollback_world world = bind_rollback_world(backend, rollback_binding_options{});
+        ASSERT_TRUE(world.capture_scope);
+        world.capture_scope(true);
+        world.capture_scope(false);
+        ASSERT_EQ(backend.scopes.size(), 2u);
+        EXPECT_TRUE(backend.scopes[0].first);
+        EXPECT_FALSE(backend.scopes[0].second);
+        EXPECT_FALSE(backend.scopes[1].first);
+    }
+    {
+        scope_backend backend;
+        rollback_binding_options o;
+        o.capture_lookup_scope = false;
+        rollback_world world = bind_rollback_world(backend, o);
+        EXPECT_FALSE(world.capture_scope) << "the legacy retail path keeps scanning";
+    }
+    {
+        scope_backend backend;
+        std::vector<std::string> logs;
+        rollback_binding_options o;
+        o.capture_lookup_verify = true;
+        o.log = [&](const std::string& line) { logs.push_back(line); };
+        rollback_world world = bind_rollback_world(backend, o);
+        ASSERT_TRUE(world.capture_scope);
+        world.capture_scope(true);
+        world.capture_scope(false);
+        EXPECT_TRUE(backend.scopes[0].second) << "verify reaches the backend";
+        EXPECT_TRUE(logs.empty()) << "no mismatch, no summary yet";
+        backend.totals.verified = 40;
+        backend.totals.mismatches = 1;
+        world.capture_scope(true);
+        world.capture_scope(false);
+        ASSERT_EQ(logs.size(), 1u);
+        EXPECT_NE(logs[0].find("1 lookups the table answered differently"), std::string::npos) << logs[0];
+    }
+}
+
 TEST(RollbackBinding, NavInputPassesTheActiveFlag) {
     fake_backend backend;
     rollback_world world = bind_rollback_world(backend, rollback_binding_options{});

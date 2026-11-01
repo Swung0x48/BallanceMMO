@@ -362,6 +362,16 @@ namespace {
         return 1;
     }
 
+    // v31 (FULL step SRT2B): the record capture's entity lookup scope.
+    int32_t api_lookup_scope(void* manager, int32_t begin, uint32_t flags, bmmo_physics_lookup_totals* totals) {
+        if (!manager) return 0;
+        CKIpionManager* physics = static_cast<CKIpionManager*>(manager);
+        if (begin) bmmo::physics::entity_lookup_scope_begin(physics, (flags & BMMO_LOOKUP_SCOPE_VERIFY) != 0);
+        else bmmo::physics::entity_lookup_scope_end(physics);
+        if (totals) *totals = bmmo::physics::entity_lookup_totals();
+        return 1;
+    }
+
     int32_t api_step_physics(void* manager, float delta_ms, char* error, uint32_t error_size) {
         if (!manager) {
             set_error(error, error_size, "null argument");
@@ -1090,6 +1100,7 @@ namespace {
         api_set_physics_globals,
         api_savestate_globals,
         api_hull_template,
+        api_lookup_scope,
     };
 }
 
