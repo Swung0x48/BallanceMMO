@@ -2948,7 +2948,11 @@ Stage D.** Stage A closed at FULL step DEP (d5010dfc, 2026-10-31; the
 headline met at HL run 16). Before Stage C, the realtime track
 (`docs/realtime-design.md`, FULL step SRT, f8ad8e87) waits for the user's
 target terms (Q1) and approach (Q2); its steps SRT1-SRT5 are placed once
-answered. The item numbers below are kept (9 = C, 8 = B, 10 = D) so older
+answered. SRT2 (a3, 2026-10-31) stopped for the user: the blob window is
+the retail own ball's in-place beam (an overlap element of 1255.5 m),
+options (a)-(d) in `realtime-design.md` "As built (step SRT2)"; its
+leftover, SRT2b (the per-body read cut of the moving trafo pile, and the
+statistic the 2 ms is judged on), is queued in the realtime track. The item numbers below are kept (9 = C, 8 = B, 10 = D) so older
 notes still resolve.
 
 **Stage C - close the core (goal 1).**

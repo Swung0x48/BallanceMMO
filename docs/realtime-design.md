@@ -367,3 +367,76 @@ this step's census tools (`srt_diag.patch` re-applied) on the E-core layout of s
   would then run two ticks per 33.3 ms, below the 66 Hz schedule, and end in a rebase where the old all-skip policy
   converged. Not measured here; SRTJ measures it on a present-blocking setup (a host-side refinement, still
   presentation only, would keep the render only when the previous render span was short).
+
+## As built (step SRT2, a3: the IVP blob window - stopped for the user)
+
+- **The trigger is the own ball's in-place beam, not the trafo pile.** Section 3.3's hypothesis (a pile's collision
+  state grown per client) is wrong. Per capture (a section profile of `physics_savestate_capture.cpp` and
+  `get_savestate`, one row per call, run `scripts/retail/srt2_diag`, the `srt_ctl` recipe on E-cores 16-21 / 22-27,
+  snapshots off; `work/SRT2/srt2_diag_proto.patch`, `capstat.py`): the window opens at exactly the tick of the
+  automation `beam` verb's own beam - client 1 at 520 and 1100, client 2 at 600 - and closes when the own ball is
+  unphysicalized (client 1's resync at 752 and death at 1168, client 2's resync, tick base 1205 from old tick 1166). In it the collision
+  checkers jump from 218-609 to a per-row maximum of 21 971 (client 2) and 24 458 (client 1) (all plain mindists
+  under 121 OO watchers; `cap_*.csv` count 2), one object holds up to 21 604 / 23 837 hull entries (count 13), and
+  the blob grows from 145-190 KB to 2.5-2.8 MB (not 137 KB: that was a resync blob);
+  the capture is 9-12 ms: collisions 4.7-4.9 ms, hull lists 1.9-2.2, `write_world` 1.6-1.7, the rest under 0.7.
+  The object is the own ball (`Ball_Stone`, its world's unsuffixed retail ball): its overlap element's radius is
+  **1255.5 m** (every other ball 4-12 m), so its watchers hold a mindist to every ledge of every floor and rail of
+  the level (A01-A05). The same ball's copies have 4.0-4.6 m on the server (`Ball_Stone_BMMO_3594538873`, a SimTool
+  replay of the server journal with `BMMO_REPLAY_SAVESTATE_DUMP`) and 10.5-11.8 m as the mirror in the other client.
+- **Cause.** Retail has no own body control, so the core beams the own ball in place (`write_beam`,
+  `client_core_lifecycle.cpp:1967`, through `platform_.write_body` -> `physics_view::set_body_state` with the
+  default `recheck = false`). That is IVP's optimized beam (`beam_object_to_new_position(..., IVP_TRUE)`,
+  `physics_state.cpp:1773`), which sets `current_speed = moved_distance * i_delta_time` ("simulate speed",
+  `ivp_calc_next_psi_solver.cxx:289`) and jumps the hull by the distance (`jump_add_hull(diff, moved_distance)`,
+  `:300-307`); the hull jump fires the overlap synapse inside the same call (`check_hull_synapses`, `:323`), whose
+  recheck sizes the element by `get_coll_range_in_world` = 0.1 s x speed + radius (`ivp_mindist.cxx:827`,
+  `ivp_range_manager.cxx:120-123`) while the simulated speed is still set - IVP zeroes `current_speed` only at the
+  end of the call (`:328`). Client 2's beam
+  at 600 moved the ball 189.6 m in one PSI: 12 515 m/s, 1251.5 m + 4.0 m = the 1255.5 m read. The element's hull
+  budget (1253 m of travel) is then not used up at 0.5 m/s, so it stays until the body goes. The server and the
+  other worlds rebuild the ball (Unphysicalize + Physicalize, a fresh body) and never see it.
+- **What it causes.** The 9-13 ms live capture of section 3.3, the replayed ticks' 2.8-6.2 ms (82-89 % capture),
+  the 25-55 ms restores near L11's sector-2 pass (a 2.5 MB blob restored), and through them RTR's E-core slip and
+  own-pair resync of section 3.4 (this run: both clients rebased and resynced once, 752 and 1166). Positions are not
+  affected: the FINAL rows against the server keep RTR's signature (own ball worst 0.001946 m only at the trafo
+  beams 300 / 340, pieces and mirrors 0 m, mechanisms 23/23). It is per-world IVP collision bookkeeping over a
+  body whose positions agree, which the plan routes to the user. It is a retail-only mechanism of Stage C's R6 (the
+  in-place beam): it is of the same kind as SFD's cause (A) but does NOT explain it - (A) is a headless own ball,
+  different from its birth tick, and the headless client has own body control and never calls `write_beam`
+  (`client_core_lifecycle.cpp:2226`, it remakes the body). (A) stays open.
+- **The beam also makes IVP state depend on the pre-beam pose.** The simulated speed, the hull jump and so the
+  overlap radius all scale with the moved distance, not with the beam's target. The replay re-applies the own-life
+  beam stamp (`client_core_lifecycle.cpp:2228`, when `!caps_.own_body_control`); a replay that diverges before the
+  stamp beams from a slightly different pose and builds a different element and hull budget than the live world did.
+- **Option (a), prototyped (not committed):** the in-place beam through IVP's unoptimized path (`recheck = true`,
+  `current_speed = 0`, the overlap element rechecked at once). Run `scripts/retail/srt2_proto` (same recipe): no
+  window (at most 722 checkers and 191 KB; the blob p50 0.52-0.53 ms, max 2.5-3.2 ms); resyncs 0 / 0, rebases 0 / 0, renders skipped
+  2 / 0 (before 133 / 289); the own ball's overlap element then equals the server's fresh copy and the other
+  client's mirror at 625 and 700 (radius 4.161 / 4.188 m, the same centre, 248 / 193 checkers in all three worlds);
+  the FINAL rows keep the same signature (positions bit-equal but one own row per in-place beam: 0.00195 m at
+  300 / 340 and, reached now that client 1 did not resync at 752, 0.00114 m at its beam 750 - R6's residual;
+  every other differing row rotation-only, <= 3.85e-8); the server journal replays 2572/2572. The beam verb is
+  the only caller of `write_beam` (`client_core_lifecycle.cpp:2019`, `:2228`): in human play the trafo and the
+  death respawn rebuild the ball, so the window needs an in-place write of a far displacement - also any
+  snapshot or blend correction through `write_body` (the same optimized path), not reached with snapshots off. Live capture through 450-1250:
+  p50 2.12-2.19, p99 3.43-3.77 ms (before 2.59-11.10 / 12.9-14.3) - the rest is the pile's per-body reads
+  (scripts 0.7 + blob 0.55 + per-body 0.8-1.4 ms: 50-100 moving trafo pieces, three bridge reads each, the RC2 (b)
+  cache serving only sleeping bodies), so the pass rule's 2 ms needs a further per-body cut whichever option is
+  chosen. Option (a) removes the speed's and the radius's dependence on the pre-beam pose; the hull jump
+  (`jump_add_hull`, common to both IVP paths) still advances by the moved distance (not measured).
+- **The options for the user** (none chosen): (a) the beam with `recheck = true`, scoped to `write_beam` (a flag on
+  the platform hook or a hook of its own: `physics_state.hpp:224-233` reserves `recheck` for snap teleports; the
+  prototype gated every retail `write_body` and isolated the beam only because snapshots were off) - window and
+  resync gone, the own ball's collision state equal to the other worlds', positions unchanged in the one run; it
+  changes what the beam does. (b) the same in the shared bridge for every optimized pose write in
+  `write_body_state` (every host and the server; not measured) - zeroing `current_speed` after the write, as first
+  proposed, would do nothing: IVP already zeroes it (`:328`) after the radius is fixed. (c) retail own body control,
+  the ball rebuilt like headless (Stage C's R6, roadmap item 9; when depends on the stage order). (d) leave it (only
+  the test `beam` verb reaches it in human play) and change the recipe; the pass rule on `srt_ctl` as written then
+  cannot be met.
+- **Left for a step of its own (SRT2b, queued in the realtime track):** the per-body read cut of the moving trafo
+  pile (`rollback.hpp:3494-3566`, three bridge reads per moving piece; the RC2 (b) cache serves only sleeping
+  bodies). The row's "<= 2 ms a tick through the windows" does not name its statistic; measured with (a): p50
+  2.12-2.19, p99 3.43-3.77, max 2.5-3.2 ms for the blob alone. Which statistic is the target is set with the
+  user's answer above.
