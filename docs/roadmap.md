@@ -1307,7 +1307,9 @@ numbers 1-10 are unchanged.
    then distinguishes a copy that lost its place from a death the respawn
    replaced). Not seen: `.local-tools/work/HLX/cross_origin.py` finds 0 of
    294 remote deaths in the `hl_full` and `core_ref_s13` client journals
-   (late-player-design.md "As built (step HLX)").
+   (late-player-design.md "As built (step HLX)"). **Decided (a) (the user,
+   2026-10-31, decision 47):** the late U stays dropped and the protocol-6
+   supersede rule stays; no change, no log.
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire
@@ -2936,8 +2938,9 @@ numbers 1-10 are unchanged.
      and the approach for rollbacks a player must not feel; it also owns
      RTR's E-core L11 own-pair resync; `realtime-design.md` §6), the
      retail anchor hold made non-blocking (queued into Stage C with R6, the
-     user's answer to SAXH; SAXE's open decision itself was answered by
-     SAXH's start handshake, `lockstep-without-snapshots.md`), D3 Q5 (the
+     user's answer to SAXH; built by FULL step AHN, 2026-10-31; SAXE's open
+     decision itself was answered by SAXH's start handshake,
+     `lockstep-without-snapshots.md`), D3 Q5 (the
      PreSimulate entries in the resync record,
      item 4, deferred), and the Stage C items (R6's in-place beam residual,
      item 9). The one state transfer (the exact resync) is the only state a
@@ -2998,6 +3001,25 @@ notes still resolve.
      150 ms), and SAXH's wait lines only appear at the start. Render while
      behaviours and physics are frozen, keeping the rule that the frame after
      the hold is the world's first step; it removes the whole black wait.
+     **Built (FULL step AHN, 2026-10-31; the user's approved plan, decisions
+     51-52):** the behavioural rate limit freezes the world, the hold is
+     polled from `OnRender`, BML's message area and the wait panel (the
+     chosen first mockup) show over the level; the world at the release
+     equals the anchor frame's end on every hold, FINAL rows exact
+     (session-client-core-design.md "As built (FULL step AHN)"; the
+     postponed-start, ESC and screenshot re-check rows deferred to FULL, with
+     a SessionEnd during a hold and a minimised window during a hold). The
+     exact resync's hold (A3) still blocks.
+   - **AHN's queued residual (pre-existing, 2026-10-31):** in the blocking
+     anchor hold (`session hold blocking`, the A/B control) a committed late
+     start's `catch_up` slew, made while the tick driver is held, is
+     overwritten by the loop's `set_hold(false)` (`fixed_tick.cpp`: `slew`
+     moves the origin, `set_hold(false)` resets it to now less the counted
+     ticks), so such a start stays late by the slew. The non-blocking arm
+     (the default) releases the driver before the slew and does not have it.
+     LGD removes the blocking arm (keeping `session hold status|shots`),
+     which closes it; should LGD keep the arm, `set_hold(false)` must keep a
+     slew taken while held.
 
 **Stage B - the run-ahead policy (goal 3, the persistent late case).**
 

@@ -73,6 +73,9 @@
 #include <session/bridge_recipe.hpp>
 #include <session/client_core.hpp>
 #include <session/spawn_impulse.hpp>
+
+#include <BML/Bui.h>   // FULL step AHN: BML+'s ImGui context
+#include "hold_panel.hpp"
 #include <session/client_platform.hpp>
 #include <session/io_pool.hpp>
 #include <session/rollback_binding_scripts.hpp>
@@ -315,6 +318,25 @@ namespace {
             snapshots_ = 0;
             return out;
         }
+        // FULL step AHN (review): the entries before the first one `stop`
+        // names; it and every later entry stay, in order.  `stopped` says
+        // whether one was named.
+        template <class Stop>
+        std::deque<mailbox_entry> take_until(const Stop& stop, bool& stopped) {
+            std::lock_guard lk(mutex_);
+            std::deque<mailbox_entry> out;
+            stopped = false;
+            while (!entries_.empty()) {
+                if (stop(entries_.front())) {
+                    stopped = true;
+                    break;
+                }
+                if (entries_.front().code == bmmo::SessionSnapshot && snapshots_ > 0) --snapshots_;
+                out.push_back(std::move(entries_.front()));
+                entries_.pop_front();
+            }
+            return out;
+        }
         uint64_t pushed() const {
             std::lock_guard lk(mutex_);
             return pushed_;
@@ -550,6 +572,242 @@ namespace {
         double rotation[4] = {};
     };
     std::map<std::string, ghost_pin> ghost_pins;
+
+    // FULL step AHN (session-client-core-design.md 2.3 `nonblocking_hold`,
+    // "As built (step AHN)"): the anchor hold without the blocking loop.  At
+    // the anchor frame's end the world is frozen - CKTimeManager's
+    // behavioural rate limited to 0.001 Hz, so the Player loop skips
+    // CKContext::Process (no behaviour, no manager pre/post-process, no IVP
+    // step, no OnProcess) while it keeps rendering - and OnProcess returns.
+    // The hold is polled from IMod::OnRender (BML+'s post-render callback):
+    // the mailbox drained every 1 ms for up to 15 ms of each rendered frame,
+    // then one ImGui frame in BML+'s context (BML's own UI through its
+    // OnProcess, the message area included, and the wait panel,
+    // session/hold_panel.hpp).  At the release the limits and the render
+    // options go back, the world is captured again and compared with the
+    // anchor's (one line per release), the tick driver starts from the start
+    // instant and the first pre_step runs, as the blocking hold's tail did.
+    // 'session hold blocking' keeps the blocking loop (the A/B control).
+    struct hold_digest {
+        bool ok = false;
+        std::string error;
+        uint64_t pose = 0, surfaces = 0;
+        uint64_t blob = 0;
+        size_t blob_size = 0;
+        uint64_t record = 0;
+        size_t record_size = 0;
+        uint64_t e3d = 0, e2d = 0, arrays = 0;
+        int e3d_count = 0, e2d_count = 0, array_count = 0;
+        int main_ticks = 0;
+
+        bool same_world(const hold_digest& o) const {
+            return ok && o.ok && pose == o.pose && surfaces == o.surfaces && blob == o.blob && blob_size == o.blob_size
+                && record == o.record && record_size == o.record_size && e3d == o.e3d && e2d == o.e2d
+                && arrays == o.arrays && main_ticks == o.main_ticks;
+        }
+        // The parts that differ (empty: none).
+        std::string diff(const hold_digest& o) const {
+            std::string out;
+            const auto add = [&](bool differs, const char* what) {
+                if (!differs) return;
+                if (!out.empty()) out += ",";
+                out += what;
+            };
+            add(!ok || !o.ok, "capture");
+            add(pose != o.pose || surfaces != o.surfaces, "hash");
+            add(blob != o.blob || blob_size != o.blob_size, "blob");
+            add(record != o.record || record_size != o.record_size, "script-record");
+            add(e3d != o.e3d, "3d");
+            add(e2d != o.e2d, "2d");
+            add(arrays != o.arrays, "arrays");
+            add(main_ticks != o.main_ticks, "ticks");
+            return out;
+        }
+        std::string describe() const {
+            return std::format("hash {:016x}/{:016x} blob {:016x} ({} B) script record {:016x} ({} B) 3d {:016x} ({}) "
+                               "2d {:016x} ({}) arrays {:016x} ({}) main ticks {}{}",
+                               pose, surfaces, blob, blob_size, record, record_size, e3d, e3d_count, e2d, e2d_count,
+                               arrays, array_count, main_ticks, ok ? "" : " ERROR " + error);
+        }
+    };
+
+    uint64_t hold_fnv(const void* data, size_t n, uint64_t h = 1469598103934665603ull) {
+        const auto* p = static_cast<const unsigned char*>(data);
+        for (size_t i = 0; i < n; ++i) {
+            h ^= p[i];
+            h *= 1099511628211ull;
+        }
+        return h;
+    }
+
+    // The exactness criterion of the freeze: the world hash (pose and
+    // surfaces), the IVP savestate blob, the selection's script record, every
+    // 3D entity's world matrix and visibility, every 2D entity's rect,
+    // visibility and colour, every data array's cells and the time manager's
+    // tick count - read only.
+    hold_digest hold_capture(CKContext* ctx, const bmmo::physics::physics_view& view,
+                             const bmmo::game::script_replay::selection& ids, const bmmo::game::script_replay_hooks& hooks,
+                             CKTimeManager* tm) {
+        hold_digest s;
+        s.ok = true;
+        bmmo::physics::world_hash hash;
+        std::string error;
+        if (view.capture(hash, error)) {
+            s.pose = hash.pose;
+            s.surfaces = hash.surfaces;
+        } else {
+            s.ok = false;
+            s.error += "hash: " + error + "; ";
+        }
+        std::vector<uint8_t> bytes;
+        error.clear();
+        if (view.savestate_get(bytes, error)) {
+            s.blob = hold_fnv(bytes.data(), bytes.size());
+            s.blob_size = bytes.size();
+        } else {
+            s.ok = false;
+            s.error += "savestate: " + error + "; ";
+        }
+        bytes.clear();
+        if (bmmo::game::script_replay::capture(ctx, ids, hooks, bytes)) {
+            s.record = hold_fnv(bytes.data(), bytes.size());
+            s.record_size = bytes.size();
+        } else {
+            s.ok = false;
+            s.error += "script record failed; ";
+        }
+        {
+            const int n = ctx->GetObjectsCountByClassID(CKCID_3DENTITY);
+            CK_ID* list = ctx->GetObjectsListByClassID(CKCID_3DENTITY);
+            uint64_t h = 1469598103934665603ull;
+            for (int i = 0; i < n; ++i) {
+                auto* e = static_cast<CK3dEntity*>(ctx->GetObject(list[i]));
+                if (!e) continue;
+                const VxMatrix& m = e->GetWorldMatrix();
+                const CKBOOL visible = e->IsVisible();
+                h = hold_fnv(&list[i], sizeof(CK_ID), h);
+                h = hold_fnv(&m, sizeof(VxMatrix), h);
+                h = hold_fnv(&visible, sizeof(visible), h);
+            }
+            s.e3d = h;
+            s.e3d_count = n;
+        }
+        {
+            const int n = ctx->GetObjectsCountByClassID(CKCID_2DENTITY);
+            CK_ID* list = ctx->GetObjectsListByClassID(CKCID_2DENTITY);
+            uint64_t h = 1469598103934665603ull;
+            for (int i = 0; i < n; ++i) {
+                auto* e = static_cast<CK2dEntity*>(ctx->GetObject(list[i]));
+                if (!e) continue;
+                VxRect r;
+                e->GetRect(r);
+                const CKBOOL visible = e->IsVisible();
+                h = hold_fnv(&list[i], sizeof(CK_ID), h);
+                h = hold_fnv(&r, sizeof(r), h);
+                h = hold_fnv(&visible, sizeof(visible), h);
+                if (CKMaterial* mat = e->GetMaterial()) {
+                    const VxColor c = mat->GetDiffuse();
+                    h = hold_fnv(&c, sizeof(c), h);
+                }
+            }
+            s.e2d = h;
+            s.e2d_count = n;
+        }
+        {
+            const int n = ctx->GetObjectsCountByClassID(CKCID_DATAARRAY);
+            CK_ID* list = ctx->GetObjectsListByClassID(CKCID_DATAARRAY);
+            uint64_t h = 1469598103934665603ull;
+            for (int i = 0; i < n; ++i) {
+                auto* a = static_cast<CKDataArray*>(ctx->GetObject(list[i]));
+                if (!a) continue;
+                const int rows = a->GetRowCount(), cols = a->GetColumnCount();
+                h = hold_fnv(&list[i], sizeof(CK_ID), h);
+                h = hold_fnv(&rows, sizeof(rows), h);
+                for (int r = 0; r < rows; ++r)
+                    for (int c = 0; c < cols; ++c) {
+                        CKDWORD* cell = a->GetElement(r, c);
+                        if (!cell) continue;
+                        const CK_ARRAYTYPE type = a->GetColumnType(c);
+                        if (type == CKARRAYTYPE_STRING) {
+                            const char* str = reinterpret_cast<const char*>(*cell);
+                            if (str) h = hold_fnv(str, std::strlen(str), h);
+                        } else if (type == CKARRAYTYPE_PARAMETER) {
+                            // The cell holds the column's CKParameterOut: its
+                            // value bytes, read without an update (review
+                            // finding 5: the pointer alone missed a change).
+                            auto* p = reinterpret_cast<CKParameter*>(static_cast<uintptr_t>(*cell));
+                            const void* data = p ? p->GetReadDataPtr(FALSE) : nullptr;
+                            const int size = p ? p->GetDataSize() : 0;
+                            if (data && size > 0) h = hold_fnv(data, static_cast<size_t>(size), h);
+                        } else {
+                            h = hold_fnv(cell, sizeof(CKDWORD), h);
+                        }
+                    }
+            }
+            s.arrays = h;
+            s.array_count = n;
+        }
+        s.main_ticks = tm->GetMainTickCount();
+        return s;
+    }
+
+    struct anchor_freeze_state {
+        bool nonblocking = true;       // 'session hold blocking|nonblocking': read at a SessionStart (caps)
+        std::string shot_dir;          // 'session hold shots DIR': back-buffer dumps at 0.3 s and 1 s into a hold
+        bool active = false;           // frozen: from the anchor frame's end to the release
+        uint32_t session = 0;
+        CKDWORD saved_limits = 0;
+        float saved_beh_rate = 0.0f;
+        CKDWORD saved_render = 0;
+        bool render_changed = false;
+        bool driver_released = false;  // the tick driver released by hooks.numbering_restarted
+        bool driver_at_instant = false;
+        bool notice_seen = false;      // a start-handshake notice came while a message was handled
+        clock_type::time_point armed_at{}, last_frame{};
+        uint64_t frames = 0, polls = 0;
+        std::vector<double> gaps;      // ms between the hold's rendered frames
+        hold_digest at_anchor;         // inside the anchor (core_host_anchor's end)
+        hold_digest at_first;          // the first hold frame: the anchor frame's end, the freeze's reference
+        double anchor_capture_ms = 0.0;
+        size_t next_shot = 0;
+        // Totals (this process): holds armed, releases whose world equals
+        // the anchor's, those that differ, holds that ended unreleased.
+        uint64_t holds = 0, equal = 0, different = 0, ended = 0;
+        // The review's finding 1: a SessionStart or this session's SessionEnd
+        // is never handled inside OnRender (core_host_end_local's teardown -
+        // the script and IC restores, the trafo sets destroyed, the
+        // navigation, the time manager - would run in the middle of
+        // CKRenderContext::Render).  While frozen the drain stops before one
+        // (`drain_frozen`, `fence_waiting`), the hold frame thaws, and the
+        // next OnProcess drains it (`drain_next_process`) as the blocking
+        // loop did.  `deferred` counts those holds.
+        bool drain_frozen = false, fence_waiting = false, drain_next_process = false;
+        uint64_t deferred = 0;
+        std::string last;
+    };
+    anchor_freeze_state anchor_freeze;
+    bmmo::retail::hold_panel hold_panel_ui;
+    constexpr double kHoldShotSeconds[] = {0.3, 1.0};
+
+    // The hold's screenshots ('session hold shots DIR'): one post-sprite
+    // callback, registered for the hold and removed at the thaw, dumps the
+    // back buffer of the frame a shot is due in (BML's ImGui drawn by then).
+    // ahn_r2 used one temporary callback per shot: they fired 0.4-0.7 s
+    // after they were added while the world was frozen.
+    struct hold_shot_request {
+        bool registered = false;
+        bool pending = false;
+        std::string path;
+        clock_type::time_point written_at{};
+        bool written = false;
+    } hold_shot;
+    void hold_shot_cb(CKRenderContext* rc, void*) {
+        if (!hold_shot.pending) return;
+        hold_shot.pending = false;
+        rc->DumpToFile(const_cast<CKSTRING>(hold_shot.path.c_str()), nullptr, VXBUFFER_BACKBUFFER);
+        hold_shot.written_at = clock_type::now();
+        hold_shot.written = true;
+    }
 
     CK3dEntity* ghost_entity(CKContext* context, const std::string& name) {
         return context ? CK3dEntity::Cast(context->GetObjectByNameAndParentClass(const_cast<CKSTRING>(name.c_str()),
@@ -1512,7 +1770,10 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // removed again at its death; every body so made is gone by `now`.
     caps.own_body_in_replay = true;
     caps.slew = true;                // R5: the tick driver slews (core_host_pacer), SessionReady caps = CAP_LEAD
-    caps.nonblocking_hold = false;   // the anchor hold blocks inside OnProcess
+    // FULL step AHN: the anchor hold returns to the host loop (the world
+    // frozen, polled from OnRender) unless 'session hold blocking' asked
+    // for the blocking loop inside OnProcess (the A/B control).
+    caps.nonblocking_hold = anchor_freeze.nonblocking;
     caps.whole_frame = false;
     caps.own_lifecycle = bs::own_lifecycle_source::host_hooks;   // OnPhysicalize / OnUnphysicalize
     // Step T4: the per-player trafo piece sets (trafo-replication design
@@ -1544,6 +1805,18 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     }
     auto& core = *host.core;
     core.set_own_id(db_.get_client_id());
+    {
+        // FULL step AHN: the wait panel's members (display only).
+        std::vector<bmmo::retail::hold_panel::member> members;
+        for (const auto& player: msg.players) {
+            bmmo::retail::hold_panel::member m;
+            m.own = player.id == db_.get_client_id();
+            const auto state = m.own ? std::nullopt : db_.get(static_cast<HSteamNetConnection>(player.id));
+            m.name = m.own ? get_display_nickname() : state ? state->name : std::format("player {}", player.id);
+            members.push_back(std::move(m));
+        }
+        hold_panel_ui.reset(0, std::move(members));
+    }
     // The core's configuration (design 3.2 "core_config"): every field set
     // here.  The engine runs as the legacy path's does - its defaults, the
     // exact restore (savestate) on with the binding's lenient flags 0, no
@@ -1838,18 +2111,20 @@ void BallanceMMOClient::core_host_process() {
                           action.ms, direction.c_str(), action.at, tick, outcome.c_str());
         }
     }
-    if (host.blackout_up || host.blackout_down) {
-        const auto now = clock_type::now();
-        auto* utils = SteamNetworkingUtils();
-        if (host.blackout_up && now >= host.blackout_up_until) {
-            utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Send, 0.0f);
-            host.blackout_up = false;
-            logger_->Info("Automation: net blackout (up) over at tick %u", session_tick_now(physics_session_));
-        }
-        if (host.blackout_down && now >= host.blackout_down_until) {
-            utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Recv, 0.0f);
-            host.blackout_down = false;
-            logger_->Info("Automation: net blackout (down) over at tick %u", session_tick_now(physics_session_));
+    core_host_net_expire();
+    // FULL step AHN (review finding 1): the anchor hold thawed for a
+    // SessionStart or this session's SessionEnd it would not handle inside
+    // OnRender: drained here first, before a frame of the still-holding core.
+    if (anchor_freeze.drain_next_process) {
+        anchor_freeze.drain_next_process = false;
+        core_host_drain();
+        if (core_session_running() && host.core->holding()) {
+            // Not reachable: the drain stopped only before an entry that ends
+            // this session.  Should the core still hold, the thaw frame has
+            // run the world out of the hold; the session cannot start exact.
+            logger_->Warn("Physics session %u: the anchor hold was thawed for a session message that did not end "
+                          "the session", host.session);
+            core_host_end_local("the anchor hold was interrupted");
         }
     }
     if (core_session_running()) {
@@ -1918,7 +2193,24 @@ void BallanceMMOClient::core_host_process() {
 // it; every other entry goes to the core while it has a session, or is
 // decoded (to check the copy), counted and dropped.
 void BallanceMMOClient::core_host_drain() {
-    auto entries = mailbox.take();
+    // FULL step AHN (review finding 1): inside the frozen anchor hold's
+    // OnRender the drain stops before a SessionStart (always a replacement)
+    // or a SessionEnd naming the core's session (the one on_session_end ends
+    // on); both wait in the mailbox for the next OnProcess.  A SessionEnd of
+    // another session goes on to the core, which ignores it.  Where the
+    // entry is handled moves, not what the core decides.
+    std::deque<mailbox_entry> entries;
+    if (anchor_freeze.drain_frozen) {
+        const uint32_t own_session = host.core ? host.core->session_id() : 0;
+        entries = mailbox.take_until([own_session](const mailbox_entry& e) {
+            if (e.code == bmmo::SessionStart) return true;
+            if (e.code != bmmo::SessionEnd) return false;
+            bmmo::session_end_msg msg{};
+            return decode_bytes(e.bytes, msg) && msg.session == own_session;
+        }, anchor_freeze.fence_waiting);
+    } else {
+        entries = mailbox.take();
+    }
     // Without the input rewind (R1; R2 turns it on), a relayed frame that reaches
     // the core after a snapshot of the same batch is stored after that
     // snapshot's replay ran on the prediction, and nothing replays it again
@@ -1988,6 +2280,268 @@ void BallanceMMOClient::core_host_drain() {
         }
         core_host_dispatch(entry.code, entry.bytes);
     }
+}
+
+// FULL step AHN: IMod::OnRender (BML+'s post-render callback) - while the
+// anchor hold is frozen, the frame that polls it.
+void BallanceMMOClient::OnRender(CK_RENDER_FLAGS) {
+    core_host_hold_frame();
+}
+
+// The blackouts of 'net blackout' end at a frame boundary (core_host_process)
+// and, while the anchor hold is frozen and no OnProcess runs, in the frame
+// that polls it (core_host_hold_frame); the blocking hold still stretches one.
+void BallanceMMOClient::core_host_net_expire() {
+    if (!host.blackout_up && !host.blackout_down) return;
+    const auto now = clock_type::now();
+    auto* utils = SteamNetworkingUtils();
+    if (host.blackout_up && now >= host.blackout_up_until) {
+        utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Send, 0.0f);
+        host.blackout_up = false;
+        logger_->Info("Automation: net blackout (up) over at tick %u", session_tick_now(physics_session_));
+    }
+    if (host.blackout_down && now >= host.blackout_down_until) {
+        utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Recv, 0.0f);
+        host.blackout_down = false;
+        logger_->Info("Automation: net blackout (down) over at tick %u", session_tick_now(physics_session_));
+    }
+}
+
+// The anchor frame's end with `nonblocking_hold` (design 2.3): the world
+// frozen and the hold left to core_host_hold_frame.  What runs between here
+// and the release: the rest of this OnProcess (the command pipe, the room
+// and level requests, the tick record, the local input poll, the legacy
+// display's update, the message queue - as the blocking hold ran them after
+// its release), then rendered frames only.  No behaviour frame runs, nothing
+// is recorded or sent but the mailbox's answers (the core's acknowledgements),
+// so the frame after the release is the world's first step.
+void BallanceMMOClient::core_host_hold_arm() {
+    auto& f = anchor_freeze;
+    CKContext* ctx = m_bml->GetCKContext();
+    CKTimeManager* tm = m_bml->GetTimeManager();
+    const auto t0 = clock_type::now();
+    f.at_anchor = hold_capture(ctx, physics_view_, host.script_ids, host.script_hooks, tm);
+    f.anchor_capture_ms = std::chrono::duration<double, std::milli>(clock_type::now() - t0).count();
+    f.frames = f.polls = 0;
+    f.gaps.clear();
+    f.next_shot = 0;
+    f.driver_released = f.driver_at_instant = false;
+    f.drain_frozen = f.fence_waiting = f.drain_next_process = false;
+    f.saved_limits = tm->GetLimitOptions();
+    f.saved_beh_rate = tm->GetBehavioralRateLimit();
+    tm->SetBehavioralRateLimit(0.001f);   // one behaviour loop per 1000 s
+    tm->ChangeLimitOptions(CK_RATE_NOP, CK_BEHRATE_LIMIT);
+    f.render_changed = false;
+    if (CKRenderContext* rc = m_bml->GetRenderContext()) {
+        // The foreground sprites (the HUD and the level's start screens) out
+        // of the hold's frames, so the level is seen behind the panel.
+        f.saved_render = rc->GetCurrentRenderOptions();
+        rc->ChangeCurrentRenderOptions(0, CK_RENDER_FOREGROUNDSPRITES);
+        f.render_changed = true;
+    }
+    if (!f.shot_dir.empty())
+        if (CKRenderContext* rc = m_bml->GetRenderContext()) {
+            hold_shot.pending = hold_shot.written = false;
+            rc->AddPostSpriteRenderCallBack(hold_shot_cb, nullptr, FALSE);
+            hold_shot.registered = true;
+        }
+    f.session = host.session;
+    f.armed_at = clock_type::now();
+    f.active = true;
+    ++f.holds;
+    hold_panel_ui.armed(host.core ? static_cast<int>(host.core->config.level) : 0,
+                        "level synchronized, waiting for the server.", f.armed_at);
+    logger_->Info("Physics session %u: anchor hold armed (non-blocking: the world frozen, the level rendered; limits "
+                  "%08lx -> %08lx, behavioural rate %.3f -> 0.001; foreground sprites off); anchor %s (captured in "
+                  "%.2f ms)", host.session, static_cast<unsigned long>(f.saved_limits),
+                  static_cast<unsigned long>(tm->GetLimitOptions()), f.saved_beh_rate, f.at_anchor.describe().c_str(),
+                  f.anchor_capture_ms);
+}
+
+// The world thawed: the behaviour loop's limits and the render options back.
+// Idempotent; every way out of a frozen hold passes here (the release, the
+// session's end, a replacing SessionStart), or the game would stay frozen.
+void BallanceMMOClient::core_host_hold_unfreeze(const char* why) {
+    auto& f = anchor_freeze;
+    if (!f.active) return;
+    f.active = false;
+    CKTimeManager* tm = m_bml->GetTimeManager();
+    tm->SetBehavioralRateLimit(f.saved_beh_rate);
+    tm->ChangeLimitOptions(CK_RATE_NOP, static_cast<CK_FRAMERATE_LIMITS>(f.saved_limits & CK_BEHRATE_MASK));
+    if (f.render_changed)
+        if (CKRenderContext* rc = m_bml->GetRenderContext()) rc->SetCurrentRenderOptions(f.saved_render);
+    f.render_changed = false;
+    if (hold_shot.registered) {
+        if (CKRenderContext* rc = m_bml->GetRenderContext()) rc->RemovePostSpriteRenderCallBack(hold_shot_cb, nullptr);
+        hold_shot.registered = hold_shot.pending = false;
+    }
+    const CKDWORD limits = tm->GetLimitOptions();
+    logger_->Info("Physics session %u: anchor hold thawed (%s): limits %08lx, behavioural rate %.3f", f.session, why,
+                  static_cast<unsigned long>(limits), tm->GetBehavioralRateLimit());
+    if ((limits & CK_BEHRATE_MASK) != (f.saved_limits & CK_BEHRATE_MASK))
+        logger_->Warn("Physics session %u: the behaviour loop's limits did not come back (%08lx, were %08lx)", f.session,
+                      static_cast<unsigned long>(limits), static_cast<unsigned long>(f.saved_limits));
+}
+
+// One rendered frame of the frozen anchor hold: the mailbox polled every
+// 1 ms for up to 15 ms (the blocking loop's resolution) with the blocking
+// loop's exits - released (the start instant or the tick base), the
+// connection lost (core.release_hold), the 10 s timeout - then BML's message
+// queue, one ImGui frame (BML's UI and the wait panel) and the armed
+// screenshots.  At the release: thawed, the world compared with the
+// anchor's, the tick driver released (from the start instant when
+// hooks.numbering_restarted gave it) and the first pre_step.
+void BallanceMMOClient::core_host_hold_frame() {
+    auto& f = anchor_freeze;
+    if (!f.active) return;
+    const auto frame_start = clock_type::now();
+    if (f.frames > 0) f.gaps.push_back(std::chrono::duration<double, std::milli>(frame_start - f.last_frame).count());
+    f.last_frame = frame_start;
+    if (f.frames++ == 0) {
+        // The freeze's reference: the world at the anchor frame's end.  The
+        // rest of the anchor frame's OnProcess (the legacy display's update -
+        // the other players' name labels, 2D - among others) ran since the
+        // anchor's capture, as it ran after the blocking hold; that part is
+        // logged, not judged.
+        f.at_first = hold_capture(m_bml->GetCKContext(), physics_view_, host.script_ids, host.script_hooks,
+                                  m_bml->GetTimeManager());
+        const std::string moved = f.at_first.diff(f.at_anchor);
+        if (!moved.empty())
+            logger_->Info("Physics session %u: anchor hold: the rest of the anchor frame (after core_host_anchor) "
+                          "changed: %s; the freeze is judged from the first hold frame: %s", f.session, moved.c_str(),
+                          f.at_first.describe().c_str());
+    }
+    enum class outcome { held, released, ended, deferred } out = outcome::held;
+    while (true) {
+        ++f.polls;
+        core_host_net_expire();   // no OnProcess runs while frozen
+        f.drain_frozen = true;
+        core_host_drain();
+        f.drain_frozen = false;
+        if (f.fence_waiting) {
+            out = outcome::deferred;   // a SessionStart / this session's SessionEnd: the next OnProcess's
+            break;
+        }
+        if (!f.active || !host.core || host.phase != retail_host::phase_type::running) {
+            out = outcome::ended;   // ended or replaced meanwhile (core_host_end_local thawed it)
+            break;
+        }
+        if (!host.core->holding()) {
+            out = outcome::released;
+            break;
+        }
+        if (!connected()) {
+            host.core->release_hold("the connection was lost");
+            out = outcome::released;
+            break;
+        }
+        const auto state = host.core->poll_hold();
+        if (state.timed_out) {
+            SendIngameMessage("Physics session: the server did not assign a tick base; starting out of phase.",
+                              bmmo::ansi::BrightYellow);
+            out = outcome::released;
+            break;
+        }
+        if (!state.held) {
+            out = outcome::released;
+            break;
+        }
+        if (clock_type::now() - frame_start >= std::chrono::milliseconds(15)) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    {
+        std::lock_guard lk(ingame_msg_mtx_);
+        while (!ingame_msg_queue_.empty()) {
+            m_bml->SendIngameMessage(ingame_msg_queue_.front().c_str());
+            ingame_msg_queue_.pop();
+        }
+    }
+    {
+        // One ImGui frame in BML+'s context: BML's own UI (the message area)
+        // drawn by its built-in mod, and the wait panel while held; BML's
+        // post-sprite render draws it.  At the release one more frame without
+        // the panel, so it is gone at the start.
+        Bui::ImGuiContextScope scope;
+        if (ImGui::GetCurrentContext()) {
+            ImGui::NewFrame();
+            if (IMod* bml_mod = m_bml->FindMod("BML")) bml_mod->OnProcess();
+            if (out == outcome::held) hold_panel_ui.draw(clock_type::now(), connected() ? get_ping() : 0);
+            ImGui::Render();
+        }
+    }
+    if (hold_shot.written) {
+        hold_shot.written = false;
+        logger_->Info("Physics session %u: anchor hold screenshot %s written %.3f s into the hold", f.session,
+                      hold_shot.path.c_str(), std::chrono::duration<double>(hold_shot.written_at - f.armed_at).count());
+    }
+    if (out == outcome::held) {
+        const double held_s = std::chrono::duration<double>(clock_type::now() - f.armed_at).count();
+        if (hold_shot.registered && !hold_shot.pending && f.next_shot < std::size(kHoldShotSeconds)
+                && held_s >= kHoldShotSeconds[f.next_shot]) {
+            hold_shot.path = std::format("{}/hold_s{}_{}ms.bmp", f.shot_dir, f.session,
+                                         static_cast<int>(kHoldShotSeconds[f.next_shot] * 1000.0 + 0.5));
+            hold_shot.pending = true;
+            logger_->Info("Physics session %u: anchor hold screenshot %s due at %.3f s into the hold (frame %llu)",
+                          f.session, hold_shot.path.c_str(), held_s, static_cast<unsigned long long>(f.frames));
+            ++f.next_shot;
+        }
+        return;
+    }
+    if (out == outcome::ended) {
+        ++f.ended;
+        core_host_hold_unfreeze("the session ended during the hold");
+        return;
+    }
+    if (out == outcome::deferred) {
+        // The world thawed with the core still holding: the next
+        // CKContext::Process runs, and its OnProcess (core_host_process)
+        // drains the waiting SessionStart / SessionEnd first, which ends this
+        // session (core_host_end_local) outside the render.
+        ++f.deferred;
+        f.fence_waiting = false;
+        f.drain_next_process = true;
+        logger_->Info("Physics session %u: anchor hold: a SessionStart or this session's SessionEnd arrived %.3f s into "
+                      "the hold; the world thawed and the next OnProcess handles it", f.session,
+                      std::chrono::duration<double>(clock_type::now() - f.armed_at).count());
+        core_host_hold_unfreeze("a session message waits for the next OnProcess");
+        return;
+    }
+    core_host_hold_unfreeze("released");
+    const auto t0 = clock_type::now();
+    const hold_digest now = hold_capture(m_bml->GetCKContext(), physics_view_, host.script_ids, host.script_hooks,
+                                         m_bml->GetTimeManager());
+    const double capture_ms = std::chrono::duration<double, std::milli>(clock_type::now() - t0).count();
+    const bool equal = now.same_world(f.at_first);
+    ++(equal ? f.equal : f.different);
+    std::vector<double> sorted = f.gaps;
+    std::sort(sorted.begin(), sorted.end());
+    const double p50 = sorted.empty() ? 0.0 : sorted[sorted.size() / 2];
+    const double mx = sorted.empty() ? 0.0 : sorted.back();
+    f.last = std::format("{} after {:.3f} s, {} frame(s) rendered, frame_interval n={} p50={:.2f} max={:.2f} ms, "
+                         "{} poll(s)", equal ? "EQUAL" : "DIFFERENT",
+                         std::chrono::duration<double>(t0 - f.armed_at).count(), f.frames, sorted.size(), p50, mx,
+                         f.polls);
+    logger_->Info("Physics session %u: anchor hold released (non-blocking): world at the release %s to the anchor "
+                  "frame's end; release capture %.2f ms; tick driver from %s", f.session, f.last.c_str(), capture_ms,
+                  f.driver_released ? (f.driver_at_instant ? "the start instant" : "the release") : "the release (set_hold)");
+    if (!equal) {
+        logger_->Warn("Physics session %u: anchor hold: differs in %s", f.session, now.diff(f.at_first).c_str());
+        logger_->Warn("Physics session %u: anchor hold: anchor frame's end %s", f.session, f.at_first.describe().c_str());
+        logger_->Warn("Physics session %u: anchor hold: release           %s", f.session, now.describe().c_str());
+    } else {
+        logger_->Info("Physics session %u: anchor hold: %s", f.session, now.describe().c_str());
+    }
+    if (!host.core || host.phase != retail_host::phase_type::running) return;
+    // The driver's schedule continues from the start instant (released by
+    // hooks.numbering_restarted) or from now: the wait is not lag, and
+    // `rebases` must not move.
+    fixed_tick_.set_hold(false);
+    host.last_rebases = fixed_tick_.rebases();
+    if (host.core->session_phase() != bs::client_core_state::phase::running) return;
+    // The tick base's frame (design 1.3 "the anchor frame"), as the blocking
+    // hold's tail: the next CKContext::Process steps it.
+    core_manager_trace_due = false;
+    host.core->pre_step();
 }
 
 // The anchor frame (the legacy physics_session_anchor): the session clock
@@ -2282,7 +2836,14 @@ void BallanceMMOClient::core_host_anchor() {
     logger_->Info("Physics session %u: anchored (hash %016llx surfaces %016llx), waiting for the tick assignment",
                   core.session_id(), static_cast<unsigned long long>(hash.pose), static_cast<unsigned long long>(hash.surfaces));
     SendIngameMessage("Physics session: level synchronized, waiting for the server.", bmmo::ansi::BrightGreen);
-    // The blocking hold (design 2.3): no behaviour frame runs, nothing is
+    // FULL step AHN: the non-blocking hold (the default): the world frozen
+    // here and the hold polled from OnRender (core_host_hold_frame) while the
+    // level renders and the wait panel shows.
+    if (core.capabilities().nonblocking_hold && core.holding()) {
+        core_host_hold_arm();
+        return;
+    }
+    // The blocking hold (design 2.3; 'session hold blocking'): no behaviour frame runs, nothing is
     // recorded or sent, so the next frame is the world's first step.
     while (host.core && host.phase == retail_host::phase_type::running && host.core->holding()) {
         core_host_drain();
@@ -2447,6 +3008,7 @@ void BallanceMMOClient::core_host_frame() {
 // driver off.  Nothing while no core session runs.
 void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     if (host.phase == retail_host::phase_type::idle) return;
+    core_host_hold_unfreeze("the session ended");   // FULL step AHN: never left frozen
     // Step SP9: a reload in progress is the session's no longer (the menus'
     // load goes on; the level it makes is a fresh one either way).
     if (level_life.reloading) {
@@ -2605,12 +3167,23 @@ void BallanceMMOClient::core_host_dispatch(int code, const std::string& bytes) {
     }
     case bmmo::SessionStartAt: {   // FULL step SAXH (protocol 24)
         bmmo::session_start_at_msg msg{};
-        if (decode(msg)) core.on_session_start_at(msg);
+        if (decode(msg)) {
+            // FULL step AHN: a start the core took (it told the player)
+            // gives the wait panel its countdown's instant (display only).
+            anchor_freeze.notice_seen = false;
+            core.on_session_start_at(msg);
+            if (anchor_freeze.notice_seen && !(msg.flags & bmmo::session::START_AT_FLAG_CORRECTION) && msg.start_us != 0)
+                hold_panel_ui.start_instant(clock_type::time_point{std::chrono::duration_cast<clock_type::duration>(
+                    std::chrono::microseconds(msg.start_us))});
+        }
         break;
     }
     case bmmo::SessionStartStatus: {
         bmmo::session_start_status_msg msg{};
-        if (decode(msg)) core.on_session_start_status(msg);
+        if (decode(msg)) {
+            hold_panel_ui.status(msg.phase, msg.confirmed, msg.total, msg.text);   // FULL step AHN (display only)
+            core.on_session_start_status(msg);
+        }
         break;
     }
     case bmmo::SessionEnd: {
@@ -3653,6 +4226,21 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // must not look like a hang); the core has logged them already.
     p.hooks.notice = [this](const std::string& text) {
         SendIngameMessage("Physics session: " + text, bmmo::ansi::BrightGreen);
+        hold_panel_ui.notice(text, clock_type::now());   // FULL step AHN: the wait panel's state line
+        anchor_freeze.notice_seen = true;
+    };
+    // FULL step AHN: the non-blocking hold's release - the tick driver's
+    // schedule starts from the start instant (release_origin, a scheduled
+    // start released at its instant) or from now (an unscheduled tick base,
+    // the timeout), before a late start's catch_up slews it.  The blocking
+    // hold keeps its set_hold(false) at its loop's end.
+    p.hooks.numbering_restarted = [this](bs::clock_site site) {
+        if (!anchor_freeze.active) return;
+        if (site != bs::clock_site::assign_release && site != bs::clock_site::hold_timeout) return;
+        const auto at = host.core ? host.core->release_origin() : std::nullopt;
+        fixed_tick_.release_hold_at(at ? *at : clock_type::now());
+        anchor_freeze.driver_released = true;
+        anchor_freeze.driver_at_instant = at.has_value();
     };
     // FULL step SAXH: a late start's whole ticks - the tick driver's origin
     // moves that many ticks earlier and its pacing catches up (two frames
@@ -3791,6 +4379,35 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
                            mailbox.pushed(), mailbox.dropped(), host.drained,
                            host.starts, host.discarded, host.undecodable, host.beams_made, host.nav_source_differs,
                            host.mute_source_differs);
+    }
+    if (what == "hold") {
+        // FULL step AHN: how the next session's anchor hold waits - frozen
+        // and polled from OnRender (nonblocking, the default) or the blocking
+        // loop inside OnProcess (the A/B control); host-local, read at the
+        // SessionStart (caps.nonblocking_hold).  'shots DIR|off': back-buffer
+        // dumps at 0.3 s and 1 s into each non-blocking hold (the automation
+        // verbs run from OnProcess, which a frozen hold does not call).
+        if (value == "blocking" || value == "nonblocking") {
+            anchor_freeze.nonblocking = value == "nonblocking";
+            return std::format("ok session hold {}: from the next SessionStart{}", value,
+                               host.phase != retail_host::phase_type::idle ? " (the running session keeps its hold)" : "");
+        }
+        if (value == "shots") {
+            std::string dir;
+            std::getline(args, dir);
+            while (!dir.empty() && (dir.front() == ' ' || dir.front() == '\t')) dir.erase(dir.begin());
+            if (dir.empty() || dir == "off") {
+                anchor_freeze.shot_dir.clear();
+                return std::string("ok session hold shots off");
+            }
+            anchor_freeze.shot_dir = dir;
+            return "ok session hold shots " + dir + " (0.3 s and 1 s into each non-blocking hold)";
+        }
+        if (!value.empty() && value != "status") return "error usage: session hold blocking|nonblocking|status | session hold shots DIR|off";
+        return std::format("ok hold={} active={} holds={} equal={} different={} ended={} shots='{}' last='{}'",
+                           anchor_freeze.nonblocking ? "nonblocking" : "blocking", anchor_freeze.active ? 1 : 0,
+                           anchor_freeze.holds, anchor_freeze.equal, anchor_freeze.different, anchor_freeze.ended,
+                           anchor_freeze.shot_dir, anchor_freeze.last);
     }
     if (what == "cache") {
         // FULL step RCV: RC2 (b)'s capture cache (core_config::capture_cache)
@@ -3934,7 +4551,8 @@ std::string BallanceMMOClient::core_host_session_verb(const std::string& rest) {
     return "error usage: session core on|off|status | session force-rollback <every>:<depth> | "
            "session force-rollback at <live>:<depth>[,...] | session stall <ms> | "
            "session drop-birth | session placement | session probes | session activate <script> at b+<n>|<tick> | "
-           "session cache off|on|verify|status | session snapshots on|off|status";
+           "session cache off|on|verify|status | session snapshots on|off|status | "
+           "session hold blocking|nonblocking|status | session hold shots DIR|off";
 }
 
 // net lag <ms> [up|down] [at <tick>] | net blackout <ms> [up|down] [at <tick>]

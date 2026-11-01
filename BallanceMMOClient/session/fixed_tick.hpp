@@ -65,6 +65,13 @@ namespace bmmo::session {
         // not lag the pacing tries to catch up with (which would count as a
         // rebase and ask the session for a resync).
         void set_hold(bool hold);
+        // FULL step AHN: the non-blocking anchor hold's release - the hold
+        // ends and the schedule's origin is `at` less the ticks counted so
+        // far, so the next frame is due at `at` (the scheduled start instant,
+        // session_client_core::release_origin, when the release was the
+        // start's; else now).  The hold frame that polls the release may run
+        // some ms after the instant; the pacing then catches up from it.
+        void release_hold_at(std::chrono::steady_clock::time_point at);
         bool held() const { return held_; }
 
         uint64_t ticks() const { return ticks_; }

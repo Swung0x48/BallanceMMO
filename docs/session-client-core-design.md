@@ -571,7 +571,7 @@ struct session_capabilities {
 |---|---|---|---|
 | `own_body_control` | yes | **no** | (Acting on echoes at all needs `own_echoes`, §1.2; off, every case below is only counted.) `move_own_birth` and `resync_own_life` never touch the own body. **Moved** (made at T' ≠ T): no rewind of the own ball; with snapshots on, the snapshot rollback reconciles it, since the server's ball exists from T'; with snapshots off, `request_resync("own birth moved: no own body control", owed)`. **Rejected or missing** (never made), and only while `own_life_current(life)`: the Physicalize is re-reported at `current + 1` without the spawn flag (LPD §3.5: "the REJECTED echo makes it immediate"), then the self-resync. **Superseded: nothing.** A superseded birth was overtaken by a newer accepted event of the same player (lifecycle.hpp:384-407); re-reporting it would bring a ball back after our own death, at the server and at every remote. `destroy_body`'s moved-own-life branch is inert. **Beam:** the record is kept (§1.3 step 29), but its stamp is applied with `write_body(entity, beam pose, zero velocity, wake)` instead of `unmake_own` + `make_own`: live at T+1 (`live_own_lives`, pre_step step 8) and in every replay that crosses it (`before_replayed_tick`), with the generation bumped at the request as SC:1436 does. That is what removed headless's 540 m (the move outside the replays, SC:1406-1412). The in-place body keeps its floor contact, which the server's fresh body lacks; no resync is asked for, because a resync rebuild writes in place too (`write_body`) and could not remove it. R1/R3 report the own ball's error after each beam. |
 | `slew` | yes | yes since R5 (**no** before: "As built (step R5)") | SessionReady `caps` = 0 (no `CAP_LEAD`), so the server never decides a lead for this client (LPD plan step 10: "no decision without CAP_LEAD"). A SessionLead that arrives anyway is a protocol error: counted, journaled, not applied, not acknowledged. |
-| `nonblocking_hold` | yes | **no** | Same state machine and 10 s deadline (`kAnchorHoldTimeout`, SC:84-88; retail PSC:1537-1559). The host blocks in a 1 ms loop around `poll_hold()` and drains the whole mailbox inside it, as the headless loop does between polls. Retail today drains only the assignment queue. It is needed only at the anchor: the core has no other hold. |
+| `nonblocking_hold` | yes | yes since AHN (**no** before: "As built (FULL step AHN)"; `session hold blocking` keeps the old loop) | Same state machine and 10 s deadline (`kAnchorHoldTimeout`, SC:84-88; retail PSC:1537-1559). Without it (retail before AHN, and with `session hold blocking`) the host blocks in a 1 ms loop around `poll_hold()` inside `OnProcess` and drains the whole mailbox inside it, as the headless loop does between polls. With it the retail host freezes the world (the behavioural rate limit) and polls the hold from `OnRender` while the level renders, draining the mailbox up to a SessionStart or this session's SessionEnd, which thaw the world and wait for the next `OnProcess`. It names the anchor hold only; since step A3 the core has a second hold, the exact resync's (`poll_resync_hold`, retail: a blocking loop in `OnProcess`, not changed by AHN). |
 | `whole_frame` | with `--replay-scripts` | **no** | `bind_world` leaves `whole_frame` empty, and the engine replays with `script_replay::execute_frame` (RBB:203-216 and `rollback_binding_scripts.hpp:76-82`), as both do today. |
 | `own_lifecycle` | `event_log` | `host_hooks` | Not a gap: two ways to learn the same fact. Retail must capture in `OnPhysicalize`, because it applies the spawn offset with `SetWorldMatrix` before the body exists (PSC:2714-2893). |
 
@@ -835,7 +835,7 @@ this design's text and the code was found.
 | own birth capture | headless: PreSimulate capture + event-log `created` (SC:1834-1910, 2302); retail: `OnPhysicalize` before the body exists, with the spawn offset (PSC:2714-2893) | `own_lifecycle_source` (§2.3) |
 | own body re-made / taken out | headless can (SC:1522-1588); retail cannot | `own_body_control` |
 | SessionLead | headless `CAP_LEAD`; retail `caps=0` (PSC:1461-1465) | `slew` (built for retail at R5) |
-| anchor hold | headless non-blocking; retail blocks inside `OnProcess` | `nonblocking_hold`; one state machine |
+| anchor hold | headless non-blocking; retail since AHN: the world frozen, polled from `OnRender` (before AHN, and with `session hold blocking`: blocks inside `OnProcess`) | `nonblocking_hold`; one state machine |
 | whole-frame replay | headless `--replay-scripts` only | `whole_frame` |
 | `restore_clock`, savestate flags | headless args; retail false / 0 (PSC:3026-3030; the clock guard replaces the clock rewind) | `core_config` values set by each host |
 | navigation leaf rule | retail drops unbound leaves that other mods graft (PSC:1718-1734, the black-box bug of 9.15); headless needs every leaf keyed | `discover_navigation`, host |
@@ -7303,3 +7303,198 @@ lines as ms a tick), `timing.py`; runs `scripts/retail/rtr_*`. Eight game runs
   every pinned control run) is SRT's subject
   (a tick's work against 15.15 ms on an average machine); the arms' rebases
   are their forced rewinds' known cost.
+
+**As built (FULL step AHN, 2026-10-31): the retail anchor hold made
+non-blocking - the level renders and the wait panel shows while the world
+stays frozen.** The user's approved plan (decisions 51-52; the side agent's
+research `.local-tools/work/AHN/`), retail only (`BallanceMMOClient`; no
+shared file, no wire or journal change, the core unchanged):
+- **The freeze.** `caps.nonblocking_hold` is true by default (§2.3's row).
+  At the end of the anchor frame (`core_host_anchor`, after `core.anchor`,
+  when the hold is armed) `core_host_hold_arm` limits CKTimeManager's
+  behavioural rate to 0.001 Hz (`SetBehavioralRateLimit(0.001f)`,
+  `ChangeLimitOptions(CK_RATE_NOP, CK_BEHRATE_LIMIT)`) and turns the
+  foreground sprites off, and returns. The Player loop then skips
+  `CKContext::Process` - no behaviour, no manager pre/post-process (the IVP
+  step, the input manager), no `OnProcess` - while it keeps rendering. The
+  hold is polled from `IMod::OnRender` (`core_host_hold_frame`): the mailbox
+  drained every 1 ms for up to 15 ms of each rendered frame with the blocking
+  loop's exits (released; the connection lost -> `core.release_hold`; the
+  10 s timeout and its "did not assign a tick base" line), BML's message
+  queue, then one ImGui frame in BML+'s context (`Bui::ImGuiContextScope`,
+  `NewFrame`, `FindMod("BML")->OnProcess()` - BML's own UI, the message
+  area included - the wait panel, `Render`). At the release
+  (`core_host_hold_unfreeze`, idempotent and also called from
+  `core_host_end_local`, so no way out leaves the game frozen) the limits
+  and render options go back, the world is captured and compared, the tick
+  driver is released and the first `pre_step` runs, as the blocking hold's
+  tail did. The rule of design 2.3 holds: no behaviour frame runs, nothing is
+  recorded or sent during the hold but the mailbox's own answers (the start
+  handshake's acknowledgements, as in the blocking loop), so the frame after
+  the release is the world's first step. CK / BML+ / ImGui only (BMLPlus.dll
+  exports), no OS API (the user's portability rule).
+- **The tick driver from the start instant.** Retail now fills
+  `hooks.numbering_restarted`: while the freeze stands, at
+  `clock_site::assign_release` / `hold_timeout` it releases the driver with
+  the origin at `core.release_origin()` (a scheduled start released at its
+  instant) or now (`fixed_tick_driver::release_hold_at`), before a late
+  start's `catch_up` slews it - so the polling's slack (a release found up
+  to a few ms into the next poll) does not move the schedule. The blocking
+  arm keeps `set_hold(false)` at its loop's end (and with it a pre-existing
+  quirk: a committed start's `catch_up` slew made while the driver is held
+  is overwritten by that `set_hold(false)`; the non-blocking arm does not
+  have it).
+- **The wait panel** (`session/hold_panel.hpp`, the user's chosen first
+  version, `.local-tools/work/AHN/imgui_wait_mockup.svg`): centred near the
+  top, dark, gold border; "BallanceMMO" and "Level N · M players · lag X ms"
+  (X: the connection's ping, `get_ping()`); the current state line with a
+  live countdown and a progress bar; every member with a check mark once
+  confirmed; a separator; the previous state line ("Earlier: ...") and
+  "Keys are ignored until the start. The level begins for everyone at the
+  same instant." in grey; English; drawn only while held (one ImGui frame
+  without it at the release, so it is gone at the start). Display only:
+  the state line is the core's `hooks.notice` text; the countdown's instant
+  is the SessionStartAt the core took (its notice came while the message
+  was handled), else "starting in about N ms" of the notice; the counts and
+  the missing / refused members are read from the server's
+  SessionStartStatus (`confirmed` / `total`, the names in its text) before
+  the core gets it; the members and names from the SessionStart and the
+  client's player list. **Adaptation:** the core exposes no start instant or
+  confirmed set, and an accessor would have been a shared-file change; the
+  host reads the messages it already decodes instead (no decision moves out
+  of the core). The check marks change once per server status line (one
+  per state change, or a second into a phase), not per acknowledgement.
+- **What runs between the anchor and the release:** the rest of the anchor
+  frame's `OnProcess` (the command pipe, room and level requests, tick
+  record, local input poll, the legacy display's update, the message queue)
+  - as the blocking hold ran it after its release - then rendered frames
+  only. The automation command file is not read during the hold (as in the
+  blocking loop: a verb waits for the start); `net blackout` now also ends
+  in the hold's frames (`core_host_net_expire`). ESC: ignored until the
+  start - the game's ESC handling is a behaviour script and the input
+  manager is refreshed in `CKContext::Process`, neither of which runs while
+  frozen; a key pressed and released inside the hold is not seen by the
+  level (whether BML's own UI, which the hold's frames run and whose ImGui
+  input comes from the window's messages, reacts to a key meanwhile is not
+  verified); a key held across the
+  release reaches the first frame, where the session's ESC handling (ESCX
+  overlay, ESCK key mask) applies as at any other frame. Not run live (no
+  safe way to inject a key into a frozen copy: the automation verbs run
+  from `OnProcess`, and an OS keystroke may land in another window).
+- **The exactness criterion, logged at every release** (one line:
+  "anchor hold released (non-blocking): world at the release EQUAL|DIFFERENT
+  to the anchor frame's end after S s, F frame(s) rendered, frame_interval
+  n= p50= max=, P poll(s); release capture; tick driver from ..."): the world
+  hash (pose + surfaces), the IVP savestate blob, the selection's script
+  record, every 3D entity's matrix and visibility, every 2D entity's rect,
+  visibility and colour, every data array's cells and the time manager's
+  tick count, captured at the first hold frame (the anchor frame's end) and
+  at the release (~1.9 ms each). The capture inside `core_host_anchor` is
+  compared with the first frame's for information only: in `ahn_r2` (copy
+  2, session 1) the 2D part changed between the anchor call and the anchor
+  frame's end while the freeze itself was EQUAL - consistent with the other
+  players' name labels, which `objects_.update` (`game_objects.h:254`, 266;
+  in `OnProcess` after `core_host_process`) updates after
+  `core_host_anchor`, as it does after the blocking hold (the entity was not
+  traced by name); `ahn_r1`'s one DIFFERENT hold (2D only, judged from the
+  anchor call, before the first-frame capture existed) is read as the same
+  change. **Adaptation:** the reference is the anchor
+  frame's end, not the anchor call.
+- **`session hold blocking|nonblocking|status`** (retail-only, host-local,
+  read at the SessionStart; default nonblocking) is the A/B switch; `session
+  hold shots DIR|off` dumps the back buffer 0.3 s and 1 s into each
+  non-blocking hold (the `screenshot` verb runs from `OnProcess`, which a
+  frozen hold does not call). LGD (R7) removes the `blocking` value and
+  the blocking arm with it (an A/B control only; it also takes the queued
+  late-start residual below away) and keeps `status` and `shots` (test
+  tools).
+- **Measured** (`scripts/retail/ahn_r1`, `ahn_r2`; L11, two copies, each on
+  6 E-cores of its own (LP 16-21 / 22-27), `net lag 150` both, the Arch
+  server of HEAD with snapshots off, trafo inputs and placement on; judged by
+  `.local-tools/work/AHN/ahn_judge.py`). `ahn_r2` A/B: session 1 copy 1
+  blocking / copy 2 non-blocking, session 2 swapped. The non-blocking holds:
+  EQUAL after 1.412 / 1.371 s, 58 / 63 frames rendered, frame_interval p50
+  27.5 / 23.9 ms, max 31.7 / 25.3 ms (the blocking hold is one frame of the
+  hold's length), released 0.15 / 0.92 ms after the start instant (the
+  blocking arm 0.42 / 1.36 ms). The copies' start instants differ by 3.96 /
+  5.94 ms (the server's clock-offset estimates, inside SAXH's measured 7.2 ms),
+  their releases by 3.69 / 5.50 ms. FINAL rows bit-equal to the server for
+  both copies in both sessions (`final_cmp.py`: own, mirror, bodies 0.0000 m);
+  0 rebases; one resync, on copy 2 of session 1, caused by the harness - its
+  3 s `net blackout down` meant to postpone the start was read only after the
+  start (the command file is not read during the level restart nor the
+  frozen hold) and cut the running session's input ("a late Sector event
+  beyond the reach" at 258). `ahn_r1` (both copies non-blocking in both
+  sessions: the A/B verb was not yet routed): four holds 1.36-2.17 s, 83-128
+  frames, frame_interval p50 16.2-16.6 ms, max 17.8-63.4 ms, the start
+  instants 0.44 / 2.77 ms apart, every FINAL row exact, 0 resyncs, 0
+  rebases. An offline level load after the sessions (`exitlevel`, `level 11`
+  through the menus, no session): no hold armed, the level plays (level time
+  and the ball moving), the `screenshot` verb answered from `OnProcess`.
+  The panel and the message area are visible over the level in the hold's
+  frames (`ahn_r2/holdshots_A`, `holdshots_B`); those dumps used one
+  temporary post-sprite callback per shot, which fired 0.4-0.7 s late while
+  frozen (written ~1.0 s into the hold for the 0.3 s request, after the
+  release for the 1 s one); the shots now use one callback registered for
+  the hold that logs the instant it wrote, and the panel's layout no longer
+  shrinks below 480 px (at 800 x 600 the shrunk panel overlapped its own
+  lines) - both built, not run live (the step's two live runs were spent).
+- **Not done in this step:** the "start postponed" row (the harness's
+  blackout is now triggered from the countdown's " - 1" line, before the
+  level restart; not run), the ESC row (above), and the shots / layout
+  re-check: deferred to the FULL batch. The resync hold (the second blocking
+  loop in `OnProcess`, step A3, `core.poll_resync_hold()`) is not in scope
+  (decision 1, Q-C1); the same freeze would serve it - the loop would arm
+  the freeze and return, `OnRender` would drain and poll
+  `poll_resync_hold()`, and the thaw would run the rest of that frame's
+  `OnProcess` tail (the frame's `pre_step`) - but there the hold starts in
+  the middle of a running frame (after `post_step`, before `pre_step`), so
+  the thaw has to resume that frame's tail from `OnRender`, which the anchor
+  hold does not need.
+- **The review's fix-up (gate round).** (1) A session's end is never handled
+  inside `OnRender`: in the frozen hold `core_host_drain` takes the mailbox
+  only up to a SessionStart (always a replacement) or a SessionEnd naming
+  the core's session (`core_mailbox::take_until`; the core's own test,
+  `msg.session == session_id`, read to place the entry, not to decide it);
+  the hold frame then thaws the world with the core still holding, and the
+  next `OnProcess` (`core_host_process`, before anything else of the
+  session) drains it, so `core_host_end_local` / `core_host_session_start`
+  run where the blocking loop ran them, not in the middle of
+  `CKRenderContext::Render`. The thaw lets one behaviour frame run before
+  that `OnProcess`; the session ends in it, so the world it moves is no
+  session's. A SessionEnd of another session still goes to the core in the
+  hold (ignored there). The core can end itself inside another message
+  (a SessionMember re-announced with another join order,
+  `client_core_lifecycle.cpp:265`): that `end()` still runs in `OnRender`
+  (a protocol inconsistency only), and the
+  host's `end_local` follows in the next `OnProcess` (its "core session
+  ended" safety net). Built only: no live run reached a SessionEnd during a
+  hold (the placement refusal of one member is the likely one) - a FULL
+  row. (2) The hold is polled only while the game renders. The retail
+  Player.exe (BallancePlayer, `Update` at 0x405000; disassembly in
+  `.local-tools/work/AHN/player_loop_probe.out`) calls `Render` whenever
+  `GetTimeToWaitForLimits` allows, with no focus or state test (its only
+  `GetMessageA` loop is the splash window's), so losing the focus or
+  alt-tabbing keeps the hold polled; `CKRenderContext::Render` returns
+  before the managers' `OnPostRender` only when the context is inactive or
+  its viewport is empty, which a minimised window may cause (not verified:
+  a FULL row). If it does, the start confirmation waits for the window to
+  come back: the server postpones the start for everyone and, after its
+  postponement limit (`start_handshake.hpp:128`), refuses the missing
+  member and the rest start. The 10 s deadline is wall-clock
+  (`hold_deadline_`): at the first poll after the window comes back, a
+  committed start whose instant passed is released late and caught up,
+  else a passed deadline releases the hold out of phase (the "did not
+  assign a tick base" line). The blocking loop polled regardless. (4) BML's own UI runs on the input
+  manager's state of the anchor frame (not refreshed while frozen): a BML
+  hotkey whose press edge fell in that frame sees it again in every hold
+  frame, and a BML command typed into its command bar during the hold (its
+  ImGui input comes from the window's messages) runs; one that moves the
+  world shows as DIFFERENT at the release. (5) The digest's data arrays
+  hash a parameter column's value bytes (`GetReadDataPtr(FALSE)`), not the
+  parameter's pointer. **Residual, queued (roadmap §4 Stage C, the AHN
+  bullet):** in the blocking arm a committed late start's `catch_up` slew,
+  made while the driver is held, is overwritten by the loop's
+  `set_hold(false)` (`fixed_tick.cpp` `slew` vs `set_hold`), so that start
+  stays late by the slew; pre-existing, absent from the non-blocking arm,
+  removed with the blocking arm at LGD.

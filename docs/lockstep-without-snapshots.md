@@ -2674,7 +2674,10 @@ the client in `client_core.cpp` `on_session_assign` / `on_session_start_at` /
   resyncs, 0 rebases, rows equal to the server's; the lines reached BML at the
   right moments (ModLoader.log: waiting at +0.33 s after the anchor, starting
   in about 680 ms at +0.7 s, started at +1.4 s). **Not met: the player does not
-  SEE them while the session waits.** The retail anchor hold is the blocking
+  SEE them while the session waits** (closed by FULL step AHN, 2026-10-31: the
+  retail anchor hold freezes the world and keeps rendering, the lines show in
+  BML's message area and in a wait panel; session-client-core-design.md "As
+  built (FULL step AHN)"). The retail anchor hold is the blocking
   loop inside the anchor frame (design 2.3), so the game renders nothing until
   the start; the queued lines show in the message area at once after the
   first frame. Tried (not kept; `.local-tools/work/SAXH/core_host_with_hold_render_experiment.patch`):

@@ -343,7 +343,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
                 || rest.rfind("placement", 0) == 0 || rest.rfind("probes", 0) == 0
                 || rest.rfind("activate", 0) == 0   // FULL step RT2
                 || rest.rfind("cache", 0) == 0      // FULL step RCV
-                || rest.rfind("snapshots", 0) == 0) // FULL step DEP
+                || rest.rfind("snapshots", 0) == 0  // FULL step DEP
+                || rest.rfind("hold", 0) == 0)      // FULL step AHN
             return core_host_session_verb(rest);
         if (rest == "trace on") { physics_session_.trace = true; physics_session_.rollback.set_verbose(true); return "ok session trace on"; }
         if (rest == "trace off") { physics_session_.trace = false; physics_session_.rollback.set_verbose(false); return "ok session trace off"; }

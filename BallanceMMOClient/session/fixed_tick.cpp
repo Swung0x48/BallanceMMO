@@ -46,6 +46,12 @@ namespace bmmo::session {
             std::chrono::duration<double>(static_cast<double>(ticks_) * kTickSeconds));
     }
 
+    void fixed_tick_driver::release_hold_at(std::chrono::steady_clock::time_point at) {
+        held_ = false;
+        origin_ = at - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(static_cast<double>(ticks_) * kTickSeconds));
+    }
+
     void fixed_tick_driver::disable(IBML* bml) {
         if (!enabled_) return;
         enabled_ = false;

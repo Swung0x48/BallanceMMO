@@ -121,6 +121,7 @@ set(BMMO_CLIENT_HDR
         session/physics_session.hpp
         session/core_host.hpp
         session/menu_overlay.hpp
+        session/hold_panel.hpp
         session/session_journal_client.hpp
 )
 set(BMMO_CLIENT_SRC

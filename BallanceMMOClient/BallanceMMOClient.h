@@ -204,6 +204,8 @@ private:
 	void OnExitGame() override;
 	//void OnUnload() override;
 	void OnProcess() override;
+	// FULL step AHN: the frozen anchor hold's frame (core_host_hold_frame).
+	void OnRender(CK_RENDER_FLAGS flags) override;
 	void OnStartLevel() override;
 	void OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
 	void OnPostCheckpointReached() override;
@@ -770,6 +772,11 @@ private:
 	void core_host_drain();
 	void core_host_countdown();
 	void core_host_anchor();
+	// FULL step AHN: the non-blocking anchor hold (session/core_host.cpp).
+	void core_host_hold_arm();
+	void core_host_hold_frame();
+	void core_host_hold_unfreeze(const char* why);
+	void core_host_net_expire();
 	void core_host_frame();
 	void core_host_end_local(const std::string& reason);
 	bool core_host_running() const;   // a core session is between its SessionStart and its end
