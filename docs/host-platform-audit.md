@@ -53,7 +53,7 @@ was measured here.
 | `own_ball` (CP:491) | n/a | SC:2022 CurrentLevel[0][1], `ball_type_of` (SC:2983, its own copy of the ball table) | CH:2357 `get_current_ball()`, `ball_row_of` (CH:613, reads the table each call) | same |
 | `own_replica_name` (CP:501) | n/a | SC:2033 | CH:2408 | same |
 | `discover_navigation` (CP:505) | PW:1038 every leaf keyed (`complete`) | SC:2005 every leaf keyed; installs the OWNB Physicalize hook (SC:2019) | CH:2412 unbound leaves dropped and renumbered, >= 4 leaves | **D12** (none with the mod alone) |
-| `drain_body_events` (CP:511) | n/a | SC:3675: `recipe` lines go to the birth log (`local_births_.add`), the rest to the core | CH:2435: no recipes (the retail birth log is fed by OnPhysicalize, CH:3625) | **D4** |
+| `drain_body_events` (CP:511) | n/a | SC:3675: `recipe` lines go to the birth log (`local_births_.add`), the rest to the core | CH:2435: no recipes (the retail birth log is fed by OnPhysicalize, CH:3625); R6D: the log carries them, the host drops them | **D4** |
 | `reportable_wakeup` (CP:514) | n/a (PW applies BodyRevived unless the union is on, PW:1008) | SC:2041 not `is_ball`, not own, not `is_mirror_name` ("_BMMO_"), not an explosion piece | CH:2457 the same with `"_Peer_"` | same (the name tests sit behind `is_ball`) |
 | `observe_input` (CP:516) | n/a | SC:3706 keys from `frame_keyboard_`, `nav_active` = any graph leaf's Key Event active (SC:3216), never paused | CH:2471 keys only with the input hook and no mute; `nav_active` from the replica's key blocks, else the graph's; `paused` = the mute | same* (the leaves are the same blocks; PAUSED is retail-only by design, CP:267) |
 | `own_camera_rows` (CP:520) | n/a | SC:2046 | CH:2507 | same |
@@ -191,7 +191,7 @@ death beam 8.6 mm / 0.879 m/s off the server at 1300; FANX's beam off the
 paper trafo plate 1.7 cm off by 620 (roadmap Stage C item 9). With snapshots
 off every moved own birth on retail is a resync. **Already queued: Stage C
 item 9 (R6, retail own-body control).** Design 2.3 settles today's state;
-nothing new here.
+nothing new here. **Update (FULL steps BEAMF and R6D, 2026-11-01).** The beam is no longer an in-place write on retail: BEAMF made the stamp a fresh body on every host that fills `make_own` / `unmake_own` (`beam_remakes_body`; retail through `own_body_in_replay`), and measured the beam rows exact (L11 `srt_ctl`), the guard, the own group and the next OnUnphysicalize unchanged (R6D's L11 census session `scripts/retail/r6d_l11` shows the same: remakes at 300 / 750 / 1100, the trafo / death reported at 302 / 752 / 1157). What a bridge-made own body changes in the retail game is listed in core design "As built (step R6D)" item 1: only Sound_Manager's six collision-sound listener blocks, which the retail host re-arms (BEAMF-S (b)). The remaining part of D1 - the in-window scripted birth parked (OVX), the moved / never-made births resynced - is planned per branch there: R6B (`own_body_control` on, `own_birth_move` off: the in-window remake) and R6P (`own_birth_move` on: moves, superseded births out of the history, Q-R6-NEVER (a)).
 
 **D2. A leaver's spawn-ghost group: the server forgets it, the clients keep
 it (by reading; never observed).** PW:829 `spawn_ghost_forget(manager,
@@ -269,7 +269,7 @@ has a birth entry on SC only. Every body the core makes itself is a ball
 was found; (a) needs a level script that physicalizes one entity twice in a
 frame, not looked for. **Candidate: Stage C item AUD-3** - one feed rule
 (`put` or `add`, one source) in host support, decided with R6, which moves
-the retail own births onto the bridge anyway.
+the retail own births onto the bridge anyway. **Census (FULL step R6D, 2026-11-01; core design "As built (step R6D)" item 4).** The retail event log carries the `recipe` lines (engine change #19 runs in the retail plugin; `drain_body_events`, CH:3405-3422 at 735b7fb9, drops them - so §2's "no recipes" is the host's choice, not the plugin's). Two retail sessions with a diagnostic line per recipe line and per `put` (L11 two copies: 81 / 81 and 79 / 79; L12 sectors 2-4: 15 / 15 on both) matched 1:1 by name and tick: no host-made level body outside a mute ((b): none), no entity twice in one frame ((a): none); SimTool free runs L1-L13 (level load and the start sector only): no recipe line twice in a tick. Not exercised: the replayed-birth route (no replay or reconcile put in either session). Decision 7's premise ("(a) if the retail log has no recipe lines") is false, so the feed's source (two feeds with one rule, or the recipe lines on both hosts with no plugin change) is back with the user; AUD3 waits on it.
 
 **D5. The anchor sequence is written per host in a different order (by
 reading).** §8's row: retail edits N1-N4, the tutorial and the depth test

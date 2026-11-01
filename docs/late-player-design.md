@@ -3684,7 +3684,9 @@ already checks (its past-the-reach resync); risk row 3 and open question
   rows |v| 0.632 against the control's 0.605 at the make's own row).
   Within one host the ball is controllable in both cases, but the made
   ball is not the scripted birth's ball shifted by n: its force starts 2
-  ticks earlier relative to the birth. OPEN CHECK for R6D / R6P: whether
+  ticks earlier relative to the birth. OPEN CHECK for R6D / R6P (R6D answered it by reading - the
+  server's moved clone gets the force at T' too, from the same input frames: core design "As built (step
+  R6D)"; R6P's A6m arm measures it): whether
   the server's moved birth at T' starts the key force at T' (as the
   client's make does) or at T' + 2 (as a scripted birth does). The forced
   move arms cannot show it - the server moved nothing in them - and if
