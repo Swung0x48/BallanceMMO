@@ -1154,6 +1154,20 @@ namespace bmmo::session {
         // live body's beamed back to its birth pose.  Headless
         // --own-births-parked (the control arm).
         bool own_births_parked = false;
+        // FULL step R6S (design 1.2, 6.2 R6 row): the own echoes' moves.
+        // With own body control and this switch off, every own-echo answer
+        // takes the no-capability outcome - a moved birth is left to the
+        // snapshots or resynced (move_own_birth), a never-made one is
+        // re-reported while current and resynced without the body's
+        // take-out (resync_own_life) - except a SUPERSEDED birth, which
+        // resyncs (never "nothing to do" with the control: the user's
+        // R6H-SUP (b), decision 57).  So a host that declares the capability
+        // with the switch off changes only the beam's stamp, the in-window
+        // scripted own birth (destroyable_own_birth) and a superseded
+        // birth's answer (a resync, above).  Default
+        // true (headless; --no-own-birth-move is the control arm); the
+        // retail host sets it false until R6P.
+        bool own_birth_move = true;
         // Retail policy (design 4.1; R1), off by default (the headless
         // client never sets it).  `own_body_backstop`: 30 snapshots in a row
         // without a body of ours while our ball is physicalized re-report its
@@ -2182,6 +2196,10 @@ namespace bmmo::session {
         // own body out and makes it fresh at the beam pose, live and in
         // every replay, as the server does; never an in-place write.
         bool beam_remakes_body() const { return caps_.own_body_control || caps_.own_body_in_replay; }
+        // FULL step R6S: the own echoes move own births inside the history
+        // (move_own_birth's capability path, resync_own_life's take-out /
+        // remake) only with own body control AND core_config::own_birth_move.
+        bool own_births_move() const { return caps_.own_body_control && config.own_birth_move; }
         void record_own_birth(const bmmo::session_event_msg& event, const std::string& entity);
         // `tick` and `live` (step EL8, design 2.3.4): a replayed tick tests
         // the generation of the live record of tick - 1, a live frame the

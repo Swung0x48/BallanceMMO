@@ -1877,6 +1877,10 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     config.own_echoes = true;   // R3
     config.own_corrections = true;   // R4
     config.own_body_backstop = true;
+    // FULL step R6S: the own echoes' moves off until R6P, explicitly - R6B
+    // declares own_body_control (the beam and the in-window scripted birth)
+    // while a moved / never-made own birth keeps today's resync.
+    config.own_birth_move = false;
     // RC3 (step B5RX, the user: work as if snapshots did not exist): with
     // the session's snapshots off, a body-set change's full snapshot is no
     // correction, only names and rows.

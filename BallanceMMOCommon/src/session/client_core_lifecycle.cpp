@@ -2753,7 +2753,9 @@ namespace bmmo::session {
                         : superseded ? own_life::verdict::superseded : own_life::verdict::moved;
             // Design 2.3: without own body control a superseded birth needs
             // nothing, its pair's moved Unphysicalize included (with the
-            // control the pair resyncs as it always did).
+            // control the pair resyncs as it always did; with the control
+            // and own_birth_move off, FULL step R6S, a lone one resyncs in
+            // move_own_birth).
             if (superseded && !caps_.own_body_control) {
                 move_own_birth(*life, msg.tick, made);
                 return;
@@ -2899,7 +2901,9 @@ namespace bmmo::session {
         const std::string head = std::string("own ") + what + " moved " + std::to_string(life.origin) + " -> "
                                + (made ? std::to_string(applied) : std::string("never"));
         if (life.what == own_life::kind::birth && own_life_current(life, now, true)) {
-            if (!caps_.own_body_control) {
+            // FULL step R6S: with the control but own_birth_move off, the
+            // no-capability answer (the body kept, a re-report).
+            if (!own_births_move()) {
                 if (!made && life.state != own_life::verdict::superseded) re_report_own_birth(life, now);
             } else {
                 bmmo_physics_body_state state{};
@@ -2935,7 +2939,8 @@ namespace bmmo::session {
         std::copy(std::begin(life.rotation), std::end(life.rotation), again.rotation);
         again.recipe = life.recipe;
         journal_.note("own birth stamped " + std::to_string(life.origin) + " never made: re-reported for tick "
-                      + std::to_string(now + 1) + " (no own body control)");
+                      + std::to_string(now + 1)
+                      + (caps_.own_body_control ? " (own_birth_move off)" : " (no own body control)"));
         send_event(again);
     }
 
@@ -2969,21 +2974,31 @@ namespace bmmo::session {
     // is the snapshot rollback's to reconcile when snapshots run (the
     // server's ball exists from T'), a resync otherwise; a superseded one
     // needs nothing; a rejected one is re-reported while current, and the
-    // client resyncs (resync_own_life).
+    // client resyncs (resync_own_life).  With the control and
+    // core_config::own_birth_move off (FULL step R6S) the same, but for a
+    // superseded birth: a resync (R6H-SUP (b), decision 57).
     void session_client_core::move_own_birth(own_life& life, uint32_t applied, bool made) {
-        if (!caps_.own_body_control && !life.forced) {
+        if (!own_births_move() && !life.forced) {
             const std::string head = std::string("own ") + (life.what == own_life::kind::beam ? "beam" : "birth")
                                    + " moved " + std::to_string(life.origin) + " -> "
                                    + (made ? std::to_string(applied) : std::string("never"));
+            // FULL step R6S: the capability with the switch off answers as
+            // without it, the journal naming the switch - but a superseded
+            // birth resyncs (R6H-SUP (b), decision 57: the body this client
+            // made stays, the server has none).
+            const char* why = caps_.own_body_control ? "own_birth_move off" : "no own body control";
             if (made && snapshots_run()) {
-                journal_.note(head + ": no own body control, left to the snapshots");
+                journal_.note(head + ": " + why + ", left to the snapshots");
                 return;
             }
-            if (!made && life.state == own_life::verdict::superseded) {
+            if (!made && life.state == own_life::verdict::superseded && !caps_.own_body_control) {
                 journal_.note(head + ": superseded, no own body control: nothing to do");
                 return;
             }
-            resync_own_life(life, made, applied, made ? "no own body control, no snapshots" : "no own body control");
+            resync_own_life(life, made, applied, std::string(why) + (made ? ", no snapshots"
+                                                                     : life.state == own_life::verdict::superseded
+                                                                           ? ", superseded"
+                                                                           : ""));
             return;
         }
         const uint32_t now = current_tick();

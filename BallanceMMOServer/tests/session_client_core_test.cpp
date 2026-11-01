@@ -4808,6 +4808,114 @@ namespace {
         }
     }
 
+    // FULL step R6S (design 1.2, 6.2 R6 row): core_config::own_birth_move.
+    // With own body control and the switch ON (the headless default) a
+    // moved / rejected / superseded own birth is answered inside the
+    // history (a rewind, no resync); with the switch OFF (the retail host
+    // until R6P) every answer is the no-capability one - the body never
+    // touched, a moved birth left to the snapshots or resynced, a rejected
+    // one re-reported while current and resynced - but a SUPERSEDED birth
+    // resyncs (the user's R6H-SUP (b), decision 57: never "nothing to do"
+    // with the control), its pair too; the log and the journal name the
+    // switch.  The in-window scripted birth stays destroyable either way.
+    TEST(SessionClientCoreOwnLives, OwnBirthMoveSwitch) {
+        enum class echo_case { moved, moved_snapshots, rejected, superseded, superseded_pair };
+        for (const bool move: {true, false})
+            for (const echo_case which: {echo_case::moved, echo_case::moved_snapshots, echo_case::rejected,
+                                         echo_case::superseded, echo_case::superseded_pair}) {
+                SCOPED_TRACE(std::string(move ? "own_birth_move on" : "own_birth_move off") + ", case "
+                             + std::to_string(static_cast<int>(which)));
+                flow_fake fake;
+                session_client_core* bound = nullptr;
+                session_capabilities caps;
+                caps.own_body_control = true;
+                session_client_core core(replay_platform(fake, bound), caps);
+                bound = &core;
+                run_to_tick_125(core, fake);
+                record_ticks(core, 118, 125);
+                core.config.own_birth_move = move;   // after begin()
+                const bool snapshots = which == echo_case::moved_snapshots;
+                core.config.snapshots = snapshots;
+                state_of(core).snapshot_interval_ = snapshots ? 2 : 255;
+                state_of(core).own_life_ = {own_birth(122)};
+                state_of(core).own_physicalized_ = true;
+                state_of(core).own_body_entity_ = "Ball_Wood";
+                state_of(core).own_ball_entities_ = {"Ball_Wood"};
+                fake.bodies_there = {"Ball_Wood"};
+                // The capability's other half does not depend on the switch.
+                EXPECT_TRUE(steps{core}.world_hooks().own_birth_destroyable("Ball_Wood", 122))
+                    << "the in-window scripted birth is remade either way";
+                if (which == echo_case::superseded_pair) state_of(core).own_moved_unphysicalize_ = {122};
+                const bool moved = which == echo_case::moved || which == echo_case::moved_snapshots;
+                const uint8_t verdict = moved ? bmmo::session::EVENT_STATE_MOVED
+                                      : which == echo_case::rejected ? bmmo::session::EVENT_STATE_REJECTED
+                                                                     : bmmo::session::EVENT_STATE_SUPERSEDED;
+                core.on_session_event(own_echo(moved ? 124 : 122, 122, verdict));
+                const size_t from = fake.calls.size();
+                const size_t sent_from = fake.sent.size();
+                steps{core}.process_own_echoes();
+                const auto calls = since(fake.calls, from);
+                const bool rewound = std::find(calls.begin(), calls.end(), std::string("now:rewind_start")) != calls.end();
+                const std::vector<std::string> resync_tail = {
+                    "now:resync_limiter", "send:0", "log:0:resync requested (own birth: resync) at tick 125"};
+                if (move) {
+                    // Today's capability answers (MovedEcho, RejectedEcho,
+                    // SupersededEcho): a rewind, or the pair's resync with
+                    // the body out; never the no-capability notes.
+                    for (const auto& c: calls) EXPECT_EQ(c.find("own_birth_move off"), std::string::npos) << c;
+                    if (which == echo_case::superseded_pair) {
+                        EXPECT_FALSE(rewound);
+                        EXPECT_EQ(state_of(core).own_moves_resynced_, 1u);
+                        EXPECT_NE(std::find(calls.begin(), calls.end(), std::string("unmake_own:Ball_Wood:125")), calls.end());
+                    } else {
+                        EXPECT_TRUE(rewound);
+                        EXPECT_EQ(state_of(core).own_moves_resynced_, 0u);
+                        EXPECT_EQ(state_of(core).life_rewinds_, 1u);
+                    }
+                    continue;
+                }
+                std::vector<std::string> expected;
+                switch (which) {
+                case echo_case::moved_snapshots:
+                    break;   // left to the snapshots: nothing called
+                case echo_case::moved:
+                    expected = {"log:0:own birth moved 122 -> 124 at local tick 125: own_birth_move off, no snapshots, resync"};
+                    break;
+                case echo_case::rejected:
+                    expected = {"send:1",
+                                "log:0:own birth moved 122 -> never at local tick 125: own_birth_move off, resync"};
+                    break;
+                case echo_case::superseded:
+                    expected = {"log:0:own birth moved 122 -> never at local tick 125: own_birth_move off, superseded, resync"};
+                    break;
+                case echo_case::superseded_pair:
+                    expected = {"log:0:own birth moved 122 -> never at local tick 125: its Unphysicalize was moved too (an "
+                                "own pair, plan step 22), resync"};
+                    break;
+                }
+                if (which != echo_case::moved_snapshots) expected.insert(expected.end(), resync_tail.begin(), resync_tail.end());
+                EXPECT_EQ(calls, expected);
+                EXPECT_FALSE(rewound);
+                EXPECT_EQ(state_of(core).life_rewinds_, 0u);
+                EXPECT_EQ(state_of(core).own_moves_resynced_, which == echo_case::moved_snapshots ? 0u : 1u);
+                EXPECT_TRUE(state_of(core).own_physicalized_) << "the body is never touched";
+                EXPECT_EQ(state_of(core).own_body_entity_, "Ball_Wood");
+                EXPECT_EQ(fake.sent.size() - sent_from, which == echo_case::rejected ? 2u
+                                                        : which == echo_case::moved_snapshots ? 0u : 1u)
+                    << "a re-report only for a rejected birth, then the resync request";
+                if (which == echo_case::rejected) {
+                    const auto again = decode<bmmo::session_event_msg>(fake.sent[sent_from].first);
+                    EXPECT_EQ(again.type, bmmo::session::event_type::Physicalize);
+                    EXPECT_EQ(again.tick, 126u);
+                }
+                ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+                EXPECT_EQ(state_of(core).own_life_[0].retired, which != echo_case::moved_snapshots);
+                // Nothing moved: a later restore across 124 finds no moved birth.
+                bool destroyed = false;
+                EXPECT_FALSE(steps{core}.destroy_moved_own_birth("Ball_Wood", 124, destroyed));
+            }
+    }
+
     // Design 5.1 "Own echoes": an own pair the server applied late as a
     // whole, with own body control: the birth's MOVED echo after its
     // Unphysicalize's, and the Unphysicalize's after a birth already moved

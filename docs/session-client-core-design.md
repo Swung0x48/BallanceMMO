@@ -215,7 +215,13 @@ since today the same paths hang off `args_.rollback`:
   or missing echoes. Off, the echoes are counted and journaled only, as
   retail does today;
 - `own_birth_move`: `move_own_birth`. It also needs the own-body capability
-  (§2.3).
+  (§2.3). Built at FULL step R6S (`core_config::own_birth_move`, default true,
+  `session_client_core::own_births_move()` = the capability AND the switch);
+  unlike the other switches it is a no-capability answer, not a skipped path:
+  with the capability and the switch off every own-echo answer is the
+  §2.3 no-control one but a superseded birth, which resyncs (R6H-SUP (b)).
+  Headless `--no-own-birth-move`; the retail host sets it false until R6P.
+  "As built (step R6S)" below.
 
 A switch off **skips** the newer path; it never selects older retail code.
 The R steps (§6.2) turn the switches on one by one for retail.
@@ -4148,7 +4154,7 @@ snapshots off is `… 100000 100000 4.2`.
 | **R3** lifecycle | `lifecycle_rewind` and `own_echoes` on, `mirror_start_from_row` deleted. Own echoes processed by the core with the `own_body_control` fallback (moved → snapshot or resync; rejected/missing → re-report while current; superseded → nothing). | Two clients, snapshots off, `net lag 150`, with deaths in the arena's death zone, a respawn and a trafo per client (scripted by key record and `beam`). Mirror birth pose at its stamp 0.0000 m against the owner's checkpoint; life rewinds > 0; `overtaken` and `superseded` as the server's S-lines; resyncs only from the capability fallback, each one logged with its reason (the request itself says "own birth: resync"; the reason is the client log's "own birth moved T -> T' at local tick N: <reason>, resync" line just before it, E7); the server journal exact. |
 | **R4** part one | `own_corrections` on: held notices amend the own records and rewind. The starvation detector is deleted. LPD §1.4 is corrected. | Two clients, snapshots off, `net lag 150`, client 2 `net blackout 300 up` at tick 1500 (the A1 analogue): `subst recv` equals the server's S2 count for that client; `subst rew` > 0; no resync; client 2's own ball 0.0000 m from the server's journal after the episode settles (A1's criterion); client 1 unaffected (its numbers within the R3 band). |
 | **R5** part two (needs `slew`) | `fixed_tick_driver::slew(ticks)` in `on_process` (2x through `SkipRenderForNextTick`, 0.9x by waiting), `kMaxCatchUpTicks` + \|slew\| (LPD §2.4 "Retail"). The forced frames through `force_own`. The retail host declares `slew`, so `caps` = `CAP_LEAD`. | Two clients, snapshots off, client 2 `net lag` +300 ms uplink persistent from tick 1500 (the A5u analogue), server lead flag on: exactly one raise, `lead_adj` 1, the ack sent, no resync, client 2's substitutions after the raise within the A0 band; client 1's `lead_adj` 0. |
-| **R6** part three (needs `own_body_control`) | `own_birth_move` on, once the own-body capability exists on retail: `unmake_own` / `make_own` under the retail Physicalize block. That is a bridge and script-edit job of its own, after LPD step 21's measurement of a multi-tick own absence on retail. Until then this step does not start and the §2.3 fallback stands. The §1.2 switch `own_birth_move` (not built at E7) is built here first, off, before the retail host declares `own_body_control`: with the capability alone `move_own_birth` would start moving own births at once. With the capability the core also takes an own birth the scripts made inside a rewind's window out at the restore and remakes it at its birth tick (step OWNB, `rewind-cost-design.md` "As built (step OWNB)", `destroyable_own_birth` / `own_birth_remade`); until then retail parks it and the replayed birth carries its later hull state (measured at OWNB: `time_of_next_reset` 16 against the clone's 0). **Revised at FULL step R6D (the research; "As built (step R6D)" below).** LPD step 21's measurement is done (R6M: every absence the 48 reach admits passes, no depth cap) and the live bridge-made own body is safe (BEAMF and R6D item 1), so the row splits in two steps. **R6B** (after R6S): `core_host.cpp:1775` `caps.own_body_control = true` with `config.own_birth_move = false`; with the switch off only branch (1) changes - `destroyable_own_birth` (`client_core_lifecycle.cpp:2585-2596`) returns `scripted_own_life`, so `keeps_parked` (`session_host_world.hpp:599-605`) lets the restore take an in-window scripted own birth out and the replay remake it at its birth tick (`destroy_moved_own_birth` :2598-2629, `apply_own_due` :1966-1990, `remake_own_body` :2316-2359; no new core code) - plus the host's re-arm of the own ball's collision-sound blocks after any frame whose `host.own_bodies_made` (CH:407, :3855) advanced (live beam, `settle_own_due`, a rewind that remade the body, the resync's remake; never inside a replay): the two physics_RT prototypes that hold an IVP listener (Physics Collision Detection `{0x7435488d,0x201d1188}`, Physics Continuous Contact `{0x199e4cf1,0x545a78fe}`) collected once at the anchor (CK only, a helper beside `outside_force_blocks`, `navigation_graph.hpp:144`) and tested at every re-arm: `GetTarget()` the current own entity, the block On (`IsActive()`, and for Collision Detection a stale listener in local 0) - an Off block is never switched on; a Collision Detection block is reset through `CallCallbackFunction(CKM_BEHAVIORRESET)` (its own callback deletes the stale listener inside physics_RT, `PhysicsCollisionDetection.cpp:305-328`), then both get `ActivateInput(0)`; a still-queued entry is an outside entry gap Q4 holds, never rebuilds (R6D note item 1). R6B's pass adds OVX's arm (`scripts/retail/ovx_r1`) and "sound after a remake". **R6P**: `config.own_birth_move = true`; branch (4) `move_own_birth` (:2973) takes the capability path for a moved birth; branch (2) a superseded birth goes to `move_own_birth(made=false)` (the history without it, no resync - R6H-SUP (b)); branch (3) the never-made design of Q-R6-NEVER (a) (new core logic, both hosts: R6D's note; a re-report that is itself rejected / missing ends in the resync, with `resync_own_life`'s take-out :2909-2914 behind a capability retail does not declare, so retail keeps the body); the backstop deleted (decision 6). | An A6m analogue: the client 2 own Physicalize held 300 ms (a retail `hold-event` verb through `hooks.filter_event`), `net lag 50`: the owner 0.0000 m from T'+48, no resync. (R6D: R6B's own pass - `ovx_r1` own and mirror bit-equal from the birth tick, sound after a remake and after a beam, no block Off before a re-arm On after it, a queued sound entry carried by the held count across a rewind; R6P's - this arm, the R6H-SUP arm, a rejected birth's re-report.) |
+| **R6** part three (needs `own_body_control`) | `own_birth_move` on, once the own-body capability exists on retail: `unmake_own` / `make_own` under the retail Physicalize block. That is a bridge and script-edit job of its own, after LPD step 21's measurement of a multi-tick own absence on retail. Until then this step does not start and the §2.3 fallback stands. The §1.2 switch `own_birth_move` (not built at E7) is built here first, off, before the retail host declares `own_body_control`: with the capability alone `move_own_birth` would start moving own births at once. With the capability the core also takes an own birth the scripts made inside a rewind's window out at the restore and remakes it at its birth tick (step OWNB, `rewind-cost-design.md` "As built (step OWNB)", `destroyable_own_birth` / `own_birth_remade`); until then retail parks it and the replayed birth carries its later hull state (measured at OWNB: `time_of_next_reset` 16 against the clone's 0). **Revised at FULL step R6D (the research; "As built (step R6D)" below).** LPD step 21's measurement is done (R6M: every absence the 48 reach admits passes, no depth cap) and the live bridge-made own body is safe (BEAMF and R6D item 1), so the row splits in two steps. **R6B** (after R6S): `core_host.cpp:1775` `caps.own_body_control = true` with `config.own_birth_move = false`; with the switch off only branch (1) changes - `destroyable_own_birth` (`client_core_lifecycle.cpp:2585-2596`) returns `scripted_own_life`, so `keeps_parked` (`session_host_world.hpp:599-605`) lets the restore take an in-window scripted own birth out and the replay remake it at its birth tick (`destroy_moved_own_birth` :2598-2629, `apply_own_due` :1966-1990, `remake_own_body` :2316-2359; no new core code) - plus the host's re-arm of the own ball's collision-sound blocks after any frame whose `host.own_bodies_made` (CH:407, :3855) advanced (live beam, `settle_own_due`, a rewind that remade the body, the resync's remake; never inside a replay): the two physics_RT prototypes that hold an IVP listener (Physics Collision Detection `{0x7435488d,0x201d1188}`, Physics Continuous Contact `{0x199e4cf1,0x545a78fe}`) collected once at the anchor (CK only, a helper beside `outside_force_blocks`, `navigation_graph.hpp:144`) and tested at every re-arm: `GetTarget()` the current own entity, the block On (`IsActive()`, and for Collision Detection a stale listener in local 0) - an Off block is never switched on; a Collision Detection block is reset through `CallCallbackFunction(CKM_BEHAVIORRESET)` (its own callback deletes the stale listener inside physics_RT, `PhysicsCollisionDetection.cpp:305-328`), then both get `ActivateInput(0)`; a still-queued entry is an outside entry gap Q4 holds, never rebuilds (R6D note item 1). R6B's pass adds OVX's arm (`scripts/retail/ovx_r1`) and "sound after a remake". **Built at FULL step R6S:** `core_config::own_birth_move` (default true; retail `config.own_birth_move = false`, core_host.cpp beside `own_body_backstop`), "As built (step R6S)" below; branch (2) with the switch off resyncs (the user's R6H-SUP (b), decision 57). **R6P**: `config.own_birth_move = true`; branch (4) `move_own_birth` (:2973) takes the capability path for a moved birth; branch (2) a superseded birth goes to `move_own_birth(made=false)` (the history without it, no resync - R6H-SUP (b)); branch (3) the never-made design of Q-R6-NEVER (a) (new core logic, both hosts: R6D's note; a re-report that is itself rejected / missing ends in the resync, with `resync_own_life`'s take-out :2909-2914 behind a capability retail does not declare, so retail keeps the body); the backstop deleted (decision 6). | An A6m analogue: the client 2 own Physicalize held 300 ms (a retail `hold-event` verb through `hooks.filter_event`), `net lag 50`: the owner 0.0000 m from T'+48, no resync. (R6D: R6B's own pass - `ovx_r1` own and mirror bit-equal from the birth tick, sound after a remake and after a beam, no block Off before a re-arm On after it, a queued sound entry carried by the held count across a rewind; R6P's - this arm, the R6H-SUP arm, a rejected birth's re-report.) |
 | **R7** close | Delete the legacy retail session code and the `core` switch; core on always. Shrink `physics_session_state` to the host state of §3.2. | Three launches without a hang; R1 (b), R3 and R4 rerun on the final binary within their bands; `retail_run.py` solo checkpoint and sector run green. |
 
 The R steps do not require each other's measurements to be good, only to be
@@ -7876,3 +7882,59 @@ rebuilt) and item 3.2 (a re-report that itself fails).
   live remake is safe, the sound re-armed); 5 (a) (item 3's tie); 6 (a)
   (R6M: `backstops=0` in every snapshots-off session since DEP). Open: 7
   (above).
+
+**As built (step R6S, 2026-11-01): the `own_birth_move` switch.** The §1.2
+switch, built before R6B declares `own_body_control` on retail, so the
+capability does not start moving own births at once.
+- **Core.** `core_config::own_birth_move` (`client_core.hpp`, beside
+  `own_births_parked`; default true = the headless behaviour) and
+  `session_client_core::own_births_move()` = `caps_.own_body_control &&
+  config.own_birth_move` (beside `beam_remakes_body`). Two sites read it in
+  place of the bare capability (`client_core_lifecycle.cpp`):
+  `move_own_birth`'s no-capability branch (`!own_births_move() &&
+  !life.forced`) and `resync_own_life`'s body branch (`!own_births_move()`:
+  the body kept, a never-made birth re-reported while current and not
+  superseded, no take-out / remake). So with the capability and the switch
+  off: a moved birth is left to the snapshots when they run, else resynced; a
+  rejected / missing one is re-reported at `current + 1` (no spawn flag) and
+  resynced; the moved-pair rule (`own_moved_unphysicalize_`) resyncs as
+  before, without taking the body out. **Adapted (the user's R6H-SUP (b),
+  decision 57; R6D's branch (2)):** the plan's first text said "superseded:
+  nothing"; with the control a superseded birth is never "nothing to do" - it
+  goes to `resync_own_life` (no re-report: the server overtook it). A host
+  without the capability keeps "nothing" - retail until R6B declares it (the
+  R6H-SUP symptom the user left to R6B / R6P). The log and journal name the switch: "own birth moved T ->
+  T': own_birth_move off, no snapshots, resync" / "..., left to the
+  snapshots" / "own birth moved T -> never: own_birth_move off[, superseded],
+  resync", and the re-report's journal note "own birth stamped T never
+  made: re-reported for tick N (own_birth_move off)" (the gate review's
+  fix-up); the no-capability texts are unchanged. What the switch does not
+  touch: `destroyable_own_birth` (the in-window scripted birth's take-out and
+  remake, OWNB), the beam's stamp (`beam_remakes_body`), and R6H's forced
+  moves (`life.forced` still takes the capability path).
+- **Hosts.** Headless `--no-own-birth-move` (the control arm,
+  `session_client.cpp` args); retail `config.own_birth_move = false`
+  explicitly (`core_host.cpp`, beside `own_body_backstop`; inert until R6B
+  sets `own_body_control`, so no retail behaviour changes here).
+- **Checks.** x64 BUILD-OK (deps valid), `BallanceMMOMessageTests` 737/737
+  with `SessionClientCoreOwnLives.OwnBirthMoveSwitch` (per switch value:
+  moved with and without snapshots, rejected, superseded, superseded pair -
+  on: today's rewinds / the pair's resync with the take-out; off: the exact
+  no-capability call lists, one resync each, the body untouched, a re-report
+  only for the rejected one, the in-window scripted birth still
+  destroyable); GCC syntax 33/33 ok; x86 CLIENT-BUILD-OK; the wire check
+  rR6D -> rR6S over `core_ref_s14` (the default since CMAP; the plan named
+  `core_ref_s13`): 44/44 sends SAME, 45/45 journals IDENTICAL, `WIRE-CHECK:
+  ALL SAME`. The stored A6m arm (`core_ref_s14/a6m_snapoff` client 2,
+  `--hold-event physicalize:2:300`) replayed with `--no-own-birth-move`:
+  "own birth moved 2482 -> 2501 at local tick 2509: own_birth_move off, no
+  snapshots, resync" in the log and the journal note, `resyncs=0/0` before
+  it, the one owner resync; the replay then diverges at that resync's clock
+  read (`resync_limiter`, the capture has the switch-on rewind's
+  `rewind_start`), as any replay of a changed decision must - the resync
+  itself is exercised live by R6B / R6P's runs, not here. After the gate
+  review's fix-up (the re-report note, a header comment) every one of these
+  was rerun on the final build with the same result (DEPS-OK on both trees).
+  No live run: with the switch's default the headless client is unchanged
+  (the wire check) and retail declares no `own_body_control` before R6B, so
+  the retail switch is inert.

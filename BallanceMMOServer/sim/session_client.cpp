@@ -298,6 +298,10 @@ namespace {
         // --own-births-parked (step OWNB's control arm): an own birth the
         // scripts made inside a rewind's window keeps the parking path.
         bool own_births_parked = false;
+        // --no-own-birth-move (FULL step R6S's control arm): the core's
+        // own_birth_move off - with own body control, a moved / never-made
+        // own birth answered as without it (resync), a superseded one resynced.
+        bool own_birth_move = true;
         // Step DX6 (F2-a): --starved-resync-reports N (the core's
         // starved_resync_reports, 0 = never) and --stall-after-ready MS (a
         // test knob: the process sleeps MS ms right after it sent its
@@ -728,6 +732,7 @@ namespace {
             else if (arg == "--trace-plan") out.trace_plan = true;
             else if (arg == "--remote-births-parked") out.remote_births_parked = true;
             else if (arg == "--own-births-parked") out.own_births_parked = true;
+            else if (arg == "--no-own-birth-move") out.own_birth_move = false;
             else if (arg == "--starved-resync-reports") {
                 if (!(v = next())) return false;
                 out.starved_resync_reports = static_cast<uint32_t>(std::max(0, std::atoi(v)));
@@ -2211,6 +2216,7 @@ namespace {
             c.trace_plan = args_.trace_plan;
             c.remote_births_parked = args_.remote_births_parked;
             c.own_births_parked = args_.own_births_parked;
+            c.own_birth_move = args_.own_birth_move;
             c.starved_resync_reports = args_.starved_resync_reports;
             c.rollback = args_.rollback;
             c.correct = args_.correct;
