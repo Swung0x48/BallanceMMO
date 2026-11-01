@@ -7351,7 +7351,20 @@ shared file, no wire or journal change, the core unchanged):
   live countdown and a progress bar; every member with a check mark once
   confirmed; a separator; the previous state line ("Earlier: ...") and
   "Keys are ignored until the start. The level begins for everyone at the
-  same instant." in grey; English; drawn only while held (one ImGui frame
+  same instant." in grey. **Revised by step AHNP (2026-11-01, done with the
+  user watching):** ahn_r2's fixed 480 px was too narrow for BML+'s font
+  (the title row and the countdown overlapped, the grey lines were clipped);
+  the panel is now measured in the font: as wide as its widest row needs
+  (at least 480 px x scale, at most 92 % of the screen; a row that still does
+  not fit wraps), its text scaled with the screen's height (1.3x at 768
+  lines, 1.1x at 600); a warm near-black with a gold border and a bronze
+  title band (the dark blue read as out of place); the title band holds
+  "BallanceMMO" and "Level N" only; the separator and both grey lines are
+  removed (the user: too wordy); the ping is a small grey "ping X ms" at the
+  panel's foot; a waiting member is a grey ring, a confirmed one a green
+  check, a refused one a red cross. Screenshots `scripts/retail/ahnp_r3/
+  holdshots_A` (1024 x 768, waiting) and `holdshots_B` (800 x 600, the
+  countdown); English; drawn only while held (one ImGui frame
   without it at the release, so it is gone at the start). Display only:
   the state line is the core's `hooks.notice` text; the countdown's instant
   is the SessionStartAt the core took (its notice came while the message
