@@ -4066,3 +4066,23 @@ ball bodiless while Gameplay_Ingame drives - the A6 drop's state (§2.2.4).
 Counting note for every retail recipe: a retail beam sends its pair
 (Unphysicalize + Physicalize at the beam tick), and that Physicalize is counted
 by the hold like a birth's.
+
+## As built (step R6P, FULL close-out, 2026-11-01): Q-R1 on retail
+
+§7.4's Q-R1 ran at R6P. Its recipe as the plan wrote it (the drop arm,
+`hold-event physicalize:3:drop`, keys held, `force-rollback 13:24`;
+`scripts/retail/r6p_q1`) no longer reaches it: with the user's Q-R6-NEVER
+(a) the retail ball keeps its body when its Physicalize is never made, so no
+steering block runs on a bodiless ball (`cbq=0/0/0/0/0/0/0`, `cbqx=0/114`,
+`sv=114/0/0`, no refusal). A moved birth is bodiless only inside its
+replay, where Gameplay_Ingame (outside the selection) does not run. The
+bodiless window was made live with R6H's forced move instead
+(`scripts/retail/r6p_q1f2`: `session force-own-move 40 after 4`, the trafo
+birth 507 out at 511 and made at 547, the up key's edges at 518 / 528 / 534
+inside it, `force-rollback 13:24`): "PreSimulate queue: 2 entries of scripts
+the replay does not run held out of the replay from tick 520",
+`cbq=0/0/2/0/0/0/0` (held 2, unhold_clamped 0 - both put back at their
+recorded indices, the pre-rewind order; no rebuild, no hold or rebuild
+failure), `cbqx=0/93`, `sv=93/0/0`, no refusal. The part of #20 that moves
+entries has now run in Player.exe. (The forced move is a test override the
+server never hears of: that run's own ball is off the server by design.)

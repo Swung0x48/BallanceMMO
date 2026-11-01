@@ -2071,15 +2071,23 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     bs::session_capabilities caps;
     // FULL step R6B (core design 2.3 / 6.2 R6 row, "As built (step R6D)"
     // item 2): own body control - make_own / unmake_own are the bridge's
-    // (below).  With core_config::own_birth_move off (R6S) it changes one
-    // branch: an own birth the scripts made inside a rewind's window is taken
-    // out at the restore and made again at its birth tick, as the server
-    // makes its clone (destroyable_own_birth, OWNB's remake), instead of
-    // parked.  A live own birth stays the game's Physicalize block's; a
-    // moved one still resyncs and a never-made one is still re-reported and
-    // resynced (R6P turns those over); a superseded one resyncs (R6S,
-    // R6H-SUP (b)).  'session own-births parked' is the control arm.
+    // (below).  An own birth the scripts made inside a rewind's window is
+    // taken out at the restore and made again at its birth tick, as the
+    // server makes its clone (destroyable_own_birth, OWNB's remake), instead
+    // of parked.  A live own birth stays the game's Physicalize block's.
+    // FULL step R6P (core_config::own_birth_move on, below): a moved own
+    // birth is moved inside the history (the body out live, the rewind to
+    // its stamp, the body made again at the server's tick), a superseded one
+    // taken out of the history (R6H-SUP (b)), a never-made one re-reported
+    // once at the ball's current pose and answered by that re-report's echo
+    // (Q-R6-NEVER (a)); a resync only past the reach.  'session own-births
+    // parked' is the control arm of the in-window remake.
     caps.own_body_control = true;
+    // FULL step R6P (Q-R6-NEVER (a) item 3.2): NOT own_life_take_out - the
+    // game owns the life (Gameplay_Ingame goes on driving the ball the
+    // Physicalize block made), so a current life the server never made is
+    // never taken out live; the core keeps the body and resyncs.
+    caps.own_life_take_out = false;
     // Step EL8 (rollback-engine gaps design 2.3.4 "RC capability"): make_own /
     // unmake_own on the bridge, called by the core from restore_lives and the
     // replay's drain - an own life ending inside a window is revived and
@@ -2145,9 +2153,10 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // lifecycle rewind (a late remote birth is made at its stamp inside a
     // replay, a late death rewinds) and the own echoes acted on with the
     // answers this host's capabilities and switches select (own body
-    // control since FULL step R6B with own_birth_move off: a moved own birth
-    // is the snapshots' or a resync, a rejected or missing one re-reported
-    // while current and resynced, a superseded one resynced; an in-window
+    // control since FULL step R6B, own_birth_move on since R6P: a moved own
+    // birth moved inside the history, a superseded one taken out of it, a
+    // rejected or missing one re-reported once at the ball's current pose
+    // and answered by that echo, a resync only past the reach; an in-window
     // scripted own birth taken out and remade at its birth tick);
     // the own corrections (R4, late-player part one: a held notice of our
     // own substituted tick amends the tick's record and replays from it),
@@ -2186,10 +2195,10 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     config.own_echoes = true;   // R3
     config.own_corrections = true;   // R4
     config.own_body_backstop = true;
-    // FULL step R6S: the own echoes' moves off until R6P, explicitly - R6B
-    // declares own_body_control (the beam and the in-window scripted birth)
-    // while a moved / never-made own birth keeps today's resync.
-    config.own_birth_move = false;
+    // FULL step R6P (late-player design 3.3 / 3.5, core design 6.2 R6 row):
+    // the own echoes' moves on - R6S built the switch off, R6B declared
+    // own_body_control with it off.
+    config.own_birth_move = true;
     // FULL step R6B: 'session own-births parked' keeps the in-window
     // scripted own birth on the parking path (the control arm).
     config.own_births_parked = own_births_parked_next.load();

@@ -2536,6 +2536,19 @@ If A0j fails, this is the next lever.
   With snapshots off, the mod requests a resync of itself.
 - **"Server has no ball for us"** (2565-2601) keeps its snapshot-driven
   re-report as a backstop. The REJECTED echo makes it immediate.
+- **As built (FULL step R6P, 2026-11-01): retail part three.** The retail
+  core host runs the headless answers: own body control (R6B) with
+  `own_birth_move` on. A moved own birth is moved inside the history (the
+  body out live, the rewind to T-1, the body made at T'); a superseded one
+  is taken out of the history; a rejected / missing one (the user's
+  Q-R6-NEVER (a)) is re-reported once at the ball's current pose and that
+  re-report's echo answers it as a move T -> R'' (a resync past the reach,
+  always for a missing one, whose deadline is 192 ticks), the body kept on
+  retail (`own_life_take_out` false); a resync only past the reach. Measured
+  on L11 (session-client-core-design.md "As built (step R6P)"): the A6m
+  analogue moved 507 -> 527, 0 m and no resync; the A6 drop analogue (row
+  24): no stall, one resync after the re-report's ack, the jump 2.73 m (was
+  78.8 m), every FINAL row bit-equal after it; past the reach one resync.
 
 ### 3.6 Every whole-session cost found in report B
 

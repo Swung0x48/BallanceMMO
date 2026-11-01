@@ -261,8 +261,13 @@ namespace bmmo::session {
             enum class verdict : uint8_t { sent, acked, moved, rejected, superseded, missing };
             // Why a birth sits in own_unanswered_: its echo was given up as
             // missing (expire_own_echoes), or it was still unanswered when a
-            // resync renumbered the history it lived in.
-            enum class aside : uint8_t { none, missing, resync };
+            // resync renumbered the history it lived in.  FULL step R6P
+            // (review finding 1): `replaced` - a re-report the server made
+            // at `applied` while a resync was in flight or after one set it
+            // aside: answered already, kept only until no resync is in
+            // flight or pending, then a resync of its own unless the newest
+            // base passed `applied` (settle_replaced_rereports).
+            enum class aside : uint8_t { none, missing, resync, replaced };
             kind what = kind::birth;
             verdict state = verdict::sent;
             aside why = aside::none;
@@ -292,6 +297,16 @@ namespace bmmo::session {
             uint32_t force_due = 0;
             // The missing-echo deadline and its uplink gate (expire_own_echoes).
             bmmo::session::own_echo_deadline echo_deadline;
+            // FULL step R6P (the user's Q-R6-NEVER (a); core design "As
+            // built (step R6D)" item 3): a never-made birth (REJECTED,
+            // MISSING) whose life is current is re-reported once, at the
+            // ball's current pose, and that re-report's echo answers it.
+            // On the original (own_life_): `rereported` - its one re-report
+            // is out and unanswered (kept past its history until then),
+            // `link` the re-report's origin R.  On the re-report
+            // (own_rereports_): `link` the original's origin T.
+            bool rereported = false;
+            uint32_t link = 0;
             bool moved() const { return made && applied != origin; }
         };
 
@@ -554,6 +569,13 @@ namespace bmmo::session {
         std::map<std::string, uint32_t> generations_;
         uint64_t amend_failures_ = 0;
         std::vector<own_life> own_life_;   // struct own_life, beside beam_own_ball
+        // FULL step R6P (Q-R6-NEVER (a)): the re-reports of never-made own
+        // births still waiting for their echo (re_report_current).  A list of
+        // its own, not own_life_ (as own_deaths_): a re-report is a message,
+        // not a body change - the body it speaks for was made at the
+        // original's origin and lives on - so no replay, restore or retire
+        // rule of own_life_ may take it for a birth.
+        std::vector<own_life> own_rereports_;
         // FULL step R6H: session_client_core::force_own_move armed for the
         // next own birth record (record_own_birth), and what came of it.
         struct forced_own_move_arm {
@@ -2276,6 +2298,19 @@ namespace bmmo::session {
         void expire_own_echoes();
         void resync_own_life(own_life& life, bool made, uint32_t applied, const std::string& why);
         void re_report_own_birth(const own_life& life, uint32_t now);
+        // FULL step R6P (Q-R6-NEVER (a)): the one re-report of a never-made
+        // birth at the ball's current pose, kept in own_rereports_, and its
+        // echo's answer for the original (answer_rereport); the re-report's
+        // own missing deadline (expire_rereports).
+        void re_report_current(own_life& life, uint32_t now, const std::string& why);
+        void answer_rereport(size_t index, const bmmo::session_event_msg& msg, bool made, bool superseded);
+        void expire_rereports(uint32_t server_tick);
+        own_life* rereported_original(const own_life& rereport);
+        // FULL step R6P (review finding 1): a re-report made by the server
+        // where a resync's state may not hold it, kept (aside::replaced), and
+        // the resync it owes once no resync is in flight or pending.
+        void keep_replaced_rereport(const own_life& rereport, uint32_t applied, const char* when);
+        void settle_replaced_rereports();
         void move_own_birth(own_life& life, uint32_t applied, bool made);
         // FULL step R6H: the armed forced moves whose tick has come
         // (process_own_echoes, after the real echoes).

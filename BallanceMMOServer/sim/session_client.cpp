@@ -2194,6 +2194,10 @@ namespace {
         bmmo::session::session_capabilities make_capabilities() const {
             bmmo::session::session_capabilities caps;
             caps.own_body_control = true;
+            // FULL step R6P: no game drives this client's ball, so a current
+            // own life the server never made (its one re-report failed too)
+            // is taken out live, the world then agreeing with the server's.
+            caps.own_life_take_out = true;
             caps.own_body_in_replay = true;   // step EL8 (gap L, L3)
             caps.slew = true;
             caps.nonblocking_hold = true;

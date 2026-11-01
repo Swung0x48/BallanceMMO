@@ -3095,7 +3095,16 @@ notes still resolve.
 9. R6 retail own-body control (bridge and script work; after plan step 21's
    measurement; with it late-player part three on retail, the
    `own_body_backstop` measurement and the retail hold-event verb), R7
-   delete the legacy path; three launches without a hang. R6 also removes
+   delete the legacy path; three launches without a hang. **R6's part three
+   built at FULL step R6P (2026-11-01; session-client-core-design.md "As
+   built (step R6P)"):** retail `own_birth_move` on - moved own births moved
+   inside the history (A6m analogue 0 m, no resync), superseded ones taken
+   out of it (R6H-SUP (b), no resync), never-made ones re-reported once at
+   the ball's current pose and answered by that echo (Q-R6-NEVER (a), in the
+   core for both hosts; the body kept on retail, a new capability
+   `own_life_take_out` that only headless declares); the A6 drop analogue's
+   jump 78.8 m -> 2.73 m with one resync; Q-R1 held 2 on retail (a forced
+   bodiless window). Left for R6V: the backstop (decision 6). R6 also removes
    the retail beam's own residual (measured at EG0,
    rollback-engine-gaps-design As built EG0): the owner writes its body in
    place where the server makes a fresh one, and the body carries its lane

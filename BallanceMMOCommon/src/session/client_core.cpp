@@ -427,6 +427,7 @@ namespace bmmo::session {
         s.generations_.clear();
         s.amend_failures_ = 0;
         s.own_life_.clear();
+        s.own_rereports_.clear();   // FULL step R6P
         s.force_own_move_ = client_core_state::forced_own_move_arm{};   // FULL step R6H
         clear_own_window_state();   // step EL8
         s.own_echoes_.clear();
@@ -1224,6 +1225,7 @@ namespace bmmo::session {
             // (an unanswered birth is set aside for its echo).
             set_aside_unanswered(own_life::aside::resync);
             s.own_life_.clear();
+            s.own_rereports_.clear();   // FULL step R6P: set aside above
             clear_own_window_state();   // step EL8
             s.mechanism_tracking_.clear();
             if (platform_.hooks.numbering_restarted) platform_.hooks.numbering_restarted(clock_site::assign_renumber);

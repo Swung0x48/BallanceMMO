@@ -926,7 +926,20 @@ namespace bmmo::session {
     // says how the host waits.
     struct session_capabilities {
         bool own_body_control = false;   // make_own / unmake_own filled
-        bool slew = false;               // the host's pacer applies slew_step (2x raise, 0.9x lower)
+        // FULL step R6P (Q-R6-NEVER (a), core design "As built (step R6D)"
+        // item 3.2): with own_body_control and own_birth_move on, the core
+        // may take a CURRENT own life's body out live when the server has
+        // none for it and the answer is a resync (resync_own_life: a birth
+        // never made whose one re-report failed too, or one sent before a
+        // resync and never made).  The headless client declares it: its
+        // world then agrees with the server's, which has no ball for us.  A
+        // host whose GAME owns the life (retail: Gameplay_Ingame goes on
+        // driving the ball the Physicalize block made) cannot take it away
+        // live, so it leaves this false and the core keeps the body and only
+        // resyncs (until the life's next own event the server has no ball
+        // for this player).
+        bool own_life_take_out = false;
+        bool slew = false;              // the host's pacer applies slew_step (2x raise, 0.9x lower)
         bool nonblocking_hold = false;   // the anchor hold returns to the host loop
         bool whole_frame = false;        // a replayed tick may run a whole engine frame (bind_world fills whole_frame)
         own_lifecycle_source own_lifecycle = own_lifecycle_source::event_log;   // or host_hooks

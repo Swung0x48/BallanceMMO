@@ -2672,6 +2672,7 @@ namespace bmmo::session {
         s.own_life_.erase(std::remove_if(s.own_life_.begin(), s.own_life_.end(), [this, now](const own_life& life) {
             if (life.retired) return true;
             if (life.force_pending) return false;   // FULL step R6H: kept until its tick
+            if (life.rereported) return false;      // FULL step R6P: kept until its re-report is answered
             if (life.what == own_life::kind::birth && life.state == own_life::verdict::sent
                     && static_cast<int32_t>(now - life.origin) < static_cast<int32_t>(client_core_state::kOwnRecordKeepTicks))
                 return false;
@@ -2691,6 +2692,7 @@ namespace bmmo::session {
     void session_client_core::rebase_own_lives() {
         clear_own_window_state();
         set_aside_unanswered(own_life::aside::resync);
+        s.own_rereports_.clear();   // FULL step R6P: set aside above with the births
         s.own_life_.erase(std::remove_if(s.own_life_.begin(), s.own_life_.end(), [this](own_life& life) {
             if (life.what != own_life::kind::beam || static_cast<int32_t>(life.origin - s.tick_base_) < 0) return true;
             life.origin_live = false;
@@ -2717,6 +2719,15 @@ namespace bmmo::session {
             aside.aside_at = now;
             s.own_unanswered_.push_back(std::move(aside));
         }
+        // FULL step R6P: an unanswered re-report is a birth of ours the
+        // server may still make: set aside like one (answer_set_aside).
+        for (const auto& again: s.own_rereports_) {
+            if (again.state != own_life::verdict::sent) continue;
+            own_life aside = again;
+            aside.why = why;
+            aside.aside_at = now;
+            s.own_unanswered_.push_back(std::move(aside));
+        }
         for (auto& msg: s.own_echoes_) s.own_echoes_stale_.push_back(std::move(msg));
         s.own_echoes_.clear();
         while (s.own_unanswered_.size() > 16) s.own_unanswered_.erase(s.own_unanswered_.begin());
@@ -2725,7 +2736,7 @@ namespace bmmo::session {
     // The set-aside birth an echo answers, or null.
     client_core_state::own_life* session_client_core::find_unanswered(uint32_t origin, uint8_t ball_type) {
         for (auto& life: s.own_unanswered_)
-            if (life.origin == origin && life.ball_type == ball_type) return &life;
+            if (life.origin == origin && life.ball_type == ball_type && life.why != own_life::aside::replaced) return &life;
         return nullptr;
     }
 
@@ -2828,6 +2839,7 @@ namespace bmmo::session {
             echoes.swap(s.own_echoes_);
             for (const auto& msg: echoes) process_own_echo(msg, false);
         }
+        settle_replaced_rereports();   // FULL step R6P (review finding 1)
         expire_own_echoes();
         apply_forced_own_moves();
     }
@@ -2871,6 +2883,16 @@ namespace bmmo::session {
         const bool made = !rejected && !superseded;
         const bool moved = made && msg.tick != msg.origin_tick;
         const bool birth = msg.type == bmmo::session::event_type::Physicalize;
+        // FULL step R6P (Q-R6-NEVER (a)): the echo of a never-made birth's
+        // re-report answers the original - its ack too, not only a MOVED
+        // echo, so this comes before the ack branch below.
+        if (birth && !stale && acting)
+            for (size_t i = 0; i < s.own_rereports_.size(); ++i)
+                if (s.own_rereports_[i].origin == msg.origin_tick && s.own_rereports_[i].ball_type == msg.ball_type
+                        && s.own_rereports_[i].state == own_life::verdict::sent) {
+                    answer_rereport(i, msg, made, superseded);
+                    return;
+                }
         own_life* life = nullptr;
         if (birth && !stale && acting)
             for (auto& candidate: s.own_life_)
@@ -2995,6 +3017,16 @@ namespace bmmo::session {
                                                          : "sent before the last resync and never made");
             return;
         }
+        // FULL step R6P (review finding 1): a re-report (link: its original's
+        // T) set aside by a resync and made after all.  The server replaced
+        // its ball at `applied` with the re-report's pose; the resync's state
+        // is of its base - 1, so one made at or past that base is in no state
+        // this client took: kept, and a resync of its own once none is in
+        // flight or pending (settle_replaced_rereports).
+        if (made && life.link != 0 && static_cast<int32_t>(applied - s.tick_base_) >= 0) {
+            keep_replaced_rereport(life, applied, "set aside by a resync");
+            return;
+        }
         logf("own physicalize stamped %u echoed %s by the server (applied %u) at local tick %u: %s, nothing to do",
              life.origin, verdict, applied, current_tick(),
              missing ? "taken out already as missing" : "sent before the last resync");
@@ -3060,8 +3092,249 @@ namespace bmmo::session {
             journal_.lifecycle_event(s.own_id_, never);
             journal_.note("own echo: Physicalize stamped " + std::to_string(life.origin) + " missing at the server's tick "
                           + std::to_string(server_tick));
+            // FULL step R6P (Q-R6-NEVER (a)): while its life is current, the
+            // birth is re-reported at the ball's current pose and that
+            // re-report's echo answers it (re_report_current); no resync
+            // against a world that has no ball of ours yet.
+            if (own_births_move() && own_life_current(life, current_tick(), true) && !life.rereported) {
+                re_report_current(life, current_tick(), "no echo by the server's tick " + std::to_string(server_tick));
+                continue;
+            }
             resync_own_life(life, false, life.origin, "no echo by the server's tick " + std::to_string(server_tick));
         }
+        expire_rereports(server_tick);
+    }
+
+    // FULL step R6P (Q-R6-NEVER (a)): a re-report with no echo past the
+    // same deadline as any birth.  One re-report per life, no loop: the
+    // original is resynced as never made (resync_own_life: the body taken
+    // out only on a host that declares own_life_take_out), and the
+    // re-report is set aside as missing like any birth, so an echo that
+    // comes after all is still answered (answer_set_aside).
+    void session_client_core::expire_rereports(uint32_t server_tick) {
+        for (size_t i = 0; i < s.own_rereports_.size();) {
+            own_life& again = s.own_rereports_[i];
+            if (again.state != own_life::verdict::sent
+                    || !again.echo_deadline.missing(server_tick, s.acked_header_known_, s.header_acked_, again.origin,
+                                                    client_core_state::kOwnEchoDeadlineTicks,
+                                                    client_core_state::kOwnEchoUplinkSettleTicks)) {
+                ++i;
+                continue;
+            }
+            ++s.own_echo_missing_;
+            own_life copy = again;
+            s.own_rereports_.erase(s.own_rereports_.begin() + static_cast<std::ptrdiff_t>(i));
+            copy.state = own_life::verdict::missing;
+            own_life aside = copy;
+            aside.why = own_life::aside::missing;
+            aside.aside_at = current_tick();
+            s.own_unanswered_.push_back(aside);
+            while (s.own_unanswered_.size() > 16) s.own_unanswered_.erase(s.own_unanswered_.begin());
+            bmmo::session_event_msg never;
+            never.tick = never.origin_tick = copy.origin;
+            never.type = bmmo::session::event_type::Physicalize;
+            never.state = static_cast<uint8_t>(bmmo::session::EVENT_STATE_REJECTED);
+            never.ball_type = copy.ball_type;
+            std::copy(std::begin(copy.position), std::end(copy.position), never.position);
+            std::copy(std::begin(copy.rotation), std::end(copy.rotation), never.rotation);
+            never.recipe = copy.recipe;
+            journal_.lifecycle_event(s.own_id_, never);
+            journal_.note("own echo: Physicalize stamped " + std::to_string(copy.origin) + " (the re-report of "
+                          + std::to_string(copy.link) + ") missing at the server's tick " + std::to_string(server_tick));
+            if (own_life* original = rereported_original(copy)) {
+                original->rereported = false;
+                resync_own_life(*original, false, original->origin,
+                                "its re-report for tick " + std::to_string(copy.origin) + " has no echo by the server's tick "
+                                    + std::to_string(server_tick) + " either");
+            } else {
+                logf("own birth stamped %u: its re-report for tick %u has no echo by the server's tick %u; the original's "
+                     "record is gone, resync", copy.link, copy.origin, server_tick);
+                request_resync("own birth: resync", true);
+            }
+        }
+    }
+
+    // FULL step R6P: the original a re-report speaks for, while it waits.
+    client_core_state::own_life* session_client_core::rereported_original(const own_life& rereport) {
+        for (auto& life: s.own_life_)
+            if (!life.retired && life.rereported && life.origin == rereport.link && life.link == rereport.origin
+                    && life.entity == rereport.entity && life.generation == rereport.generation)
+                return &life;
+        return nullptr;
+    }
+
+    // FULL step R6P (review finding 1): a re-report the server made at
+    // `applied` (it replaced its ball there with the re-report's pose,
+    // physics_world's "found its body alive") where the state of a resync -
+    // in flight, pending, or the one that set it aside - may not hold it.
+    // Kept in own_unanswered_ as aside::replaced (find_unanswered skips it:
+    // it is answered) until settle_replaced_rereports.
+    void session_client_core::keep_replaced_rereport(const own_life& rereport, uint32_t applied, const char* when) {
+        own_life kept = rereport;
+        kept.state = own_life::verdict::moved;
+        kept.applied = applied;
+        kept.why = own_life::aside::replaced;
+        kept.aside_at = current_tick();
+        s.own_unanswered_.push_back(kept);
+        while (s.own_unanswered_.size() > 16) s.own_unanswered_.erase(s.own_unanswered_.begin());
+        const std::string head = "own birth stamped " + std::to_string(rereport.link) + ": its re-report for tick "
+                               + std::to_string(rereport.origin) + " made at " + std::to_string(applied) + " (" + when
+                               + ")";
+        logf("%s at local tick %u: kept until no resync is in flight or pending", head.c_str(), current_tick());
+        journal_.note(head + ": kept until the resync is done");
+    }
+
+    // FULL step R6P (review finding 1): the kept re-reports, once no resync
+    // is in flight or pending.  The newest base past `applied`: that
+    // resync's state (of base - 1) holds the server's replaced ball, nothing
+    // to do.  Otherwise no state this client took holds it: a resync (owed
+    // to the limiter if it holds it back).
+    void session_client_core::settle_replaced_rereports() {
+        if (s.resync_in_flight_ || s.resync_pending_) return;
+        bool owed = false;
+        uint32_t newest = 0;
+        for (size_t i = 0; i < s.own_unanswered_.size();) {
+            const own_life& kept = s.own_unanswered_[i];
+            if (kept.why != own_life::aside::replaced) {
+                ++i;
+                continue;
+            }
+            const bool covered = static_cast<int32_t>(kept.applied - s.tick_base_) < 0;
+            logf("own birth stamped %u: its re-report for tick %u made at %u, the tick base %u: %s", kept.link,
+                 kept.origin, kept.applied, s.tick_base_,
+                 covered ? "the resync's state holds it, nothing to do" : "no state holds it, resync");
+            if (!covered) {
+                owed = true;
+                newest = kept.applied;
+                ++s.own_moves_resynced_;
+            }
+            s.own_unanswered_.erase(s.own_unanswered_.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+        if (!owed) return;
+        journal_.note("own birth: a re-report made at " + std::to_string(newest) + ", past the tick base "
+                      + std::to_string(s.tick_base_) + ": resync");
+        request_resync("own birth: a re-report made past the resync base", true);
+    }
+
+    // FULL step R6P (the user's Q-R6-NEVER (a); core design "As built (step
+    // R6D)" item 3.1): a birth the server never made (REJECTED, MISSING)
+    // while its life is current.  Its Physicalize goes out again for now + 1
+    // at the ball's CURRENT pose (the live body's, as check_own_body did -
+    // not the stamp's, so the server's ball is made where ours is, with no
+    // pull-back), without the spawn flag (the body was kicked, or not,
+    // long ago), with the life's recipe; recorded in own_rereports_ (origin
+    // R, linked to the original's T), the original kept with its verdict
+    // and the link back.  No resync yet: the re-report's echo answers the
+    // original (answer_rereport) - made at R'', a move T -> R'' with the
+    // re-report's pose (a resync only past the reach); never made, the
+    // resync.  Once per life: the original's `rereported` stays set until
+    // the answer, and the answers never re-report again.
+    void session_client_core::re_report_current(own_life& life, uint32_t now, const std::string& why) {
+        own_life again = life;   // entity, generation, ball type, recipe, group
+        again.what = own_life::kind::birth;
+        again.state = own_life::verdict::sent;
+        again.why = own_life::aside::none;
+        again.aside_at = 0;
+        again.origin = again.applied = now + 1;
+        again.made = true;
+        again.spawn = false;
+        again.origin_live = again.applied_live = true;
+        again.retired = false;
+        again.force_pending = again.forced = false;
+        again.echo_deadline = bmmo::session::own_echo_deadline{};
+        again.rereported = false;
+        again.link = life.origin;
+        bmmo_physics_body_state state{};
+        const bool there = platform_.body_state(life.entity, state);
+        if (there) {
+            for (int k = 0; k < 3; ++k) again.position[k] = static_cast<float>(state.position[k]);
+            quaternion_rows(state.rotation, again.rotation);
+        }
+        life.rereported = true;
+        life.link = again.origin;
+        bmmo::session_event_msg event;
+        event.tick = again.origin;
+        event.type = bmmo::session::event_type::Physicalize;
+        event.ball_type = again.ball_type;
+        std::copy(std::begin(again.position), std::end(again.position), event.position);
+        std::copy(std::begin(again.rotation), std::end(again.rotation), event.rotation);
+        event.recipe = again.recipe;
+        s.own_rereports_.push_back(again);
+        while (s.own_rereports_.size() > 16) s.own_rereports_.erase(s.own_rereports_.begin());
+        const std::string head = "own birth stamped " + std::to_string(life.origin) + " never made ("
+                               + why + "): re-reported for tick " + std::to_string(again.origin);
+        logf("%s at local tick %u at %s (%.3f,%.3f,%.3f); its echo answers it", head.c_str(), now,
+             there ? "the ball's current pose" : "its stamp's pose (no body)", static_cast<double>(again.position[0]),
+             static_cast<double>(again.position[1]), static_cast<double>(again.position[2]));
+        journal_.note(head + (there ? " at the ball's current pose" : " at its stamp's pose (no body)"));
+        send_event(event);
+    }
+
+    // FULL step R6P (Q-R6-NEVER (a), core design "As built (step R6D)" item
+    // 3.2): the echo of a re-report answers its original.  Made at R''
+    // (acked or moved): the original is a move T -> R'' with the
+    // re-report's pose and flags - no spawn flag, so the body is made at
+    // rest and unkicked as the server made it - through move_own_birth
+    // (the history without the body T..R''-1, the rewind to T-1, the body
+    // made at R''; past the reach, a resync once the server's ball
+    // exists).  Superseded (a newer accepted P / U of ours ended the life):
+    // the original goes the superseded way (move_own_birth, never made).
+    // Rejected: one re-report per life, so a resync (resync_own_life; the
+    // body out only with own_life_take_out).
+    void session_client_core::answer_rereport(size_t index, const bmmo::session_event_msg& msg, bool made, bool superseded) {
+        const own_life again = s.own_rereports_[index];
+        s.own_rereports_.erase(s.own_rereports_.begin() + static_cast<std::ptrdiff_t>(index));
+        const bool moved = made && msg.tick != msg.origin_tick;
+        const char* verdict = !made ? (superseded ? "superseded" : "rejected") : moved ? "moved" : "acked";
+        if (made && !moved) {
+            ++s.own_echo_acked_;
+        } else {
+            if (!made && !superseded) ++s.own_echo_rejected_;
+            else if (superseded) ++s.own_echo_superseded_;
+            else ++s.own_echo_moved_;
+            if (moved) ++s.own_birth_echo_moved_;
+            journal_.lifecycle_event(s.own_id_, msg);
+        }
+        const std::string head = "own birth stamped " + std::to_string(again.link) + ": its re-report for tick "
+                               + std::to_string(again.origin) + " echoed " + verdict + " (applied "
+                               + std::to_string(msg.tick) + ")";
+        journal_.note(head);
+        // FULL step R6P (review finding 1): made while a resync is in flight
+        // (the original's late made echo asked for it, or anything else did).
+        // That resync replaces the history, so no move; but its base may not
+        // have reached the tick the server replaced its ball at, and a second
+        // request now would be dropped (request_resync while one is in
+        // flight): kept, settled once that resync is done.
+        if (made && (s.resync_in_flight_ || s.resync_pending_)) {
+            if (own_life* original = rereported_original(again)) {
+                original->rereported = false;
+                original->retired = true;
+            }
+            keep_replaced_rereport(again, msg.tick, "a resync in flight");
+            return;
+        }
+        own_life* original = rereported_original(again);
+        if (!original) {
+            logf("%s at local tick %u: the original's record is gone, nothing to do", head.c_str(), current_tick());
+            return;
+        }
+        logf("%s at local tick %u", head.c_str(), current_tick());
+        original->rereported = false;
+        if (made) {
+            std::copy(std::begin(again.position), std::end(again.position), original->position);
+            std::copy(std::begin(again.rotation), std::end(again.rotation), original->rotation);
+            original->spawn = false;
+            original->state = own_life::verdict::moved;
+            move_own_birth(*original, msg.tick, true);
+            return;
+        }
+        if (superseded) {
+            original->state = own_life::verdict::superseded;
+            move_own_birth(*original, msg.tick, false);
+            return;
+        }
+        resync_own_life(*original, false, original->origin,
+                        "its re-report for tick " + std::to_string(again.origin) + " was rejected too");
     }
 
     // The owner's answer when its history cannot carry what the server
@@ -3091,11 +3364,18 @@ namespace bmmo::session {
             } else {
                 bmmo_physics_body_state state{};
                 const bool there = platform_.body_state(life.entity, state);
-                if (!made) {
+                if (!made && caps_.own_life_take_out) {
                     s.rollback_.move_birth(life.entity, life.generation, life.origin, life.origin, false);
                     if (there) unmake_own_body(life, now, "never made");
                     s.own_physicalized_ = false;
                     s.own_body_entity_.clear();
+                } else if (!made) {
+                    // FULL step R6P (Q-R6-NEVER (a) item 3.2): the host's
+                    // game owns the life (no own_life_take_out): the body
+                    // stays, live and in the history, and only the resync
+                    // goes out.
+                    logf("own birth stamped %u: never made, the body kept (the host cannot take a current life out)",
+                         life.origin);
                 } else if (!there && remake_own_body(life, now, "resync")) {
                     ++s.own_remakes_;
                     s.own_body_entity_ = life.entity;
@@ -3186,6 +3466,18 @@ namespace bmmo::session {
         }
         const uint32_t now = current_tick();
         const uint32_t anchor = life.origin - 1;
+        // FULL step R6P (the user's Q-R6-NEVER (a)): a birth the server never
+        // made (REJECTED; a MISSING one comes through expire_own_echoes)
+        // while its life is current is not taken out of the history: it is
+        // re-reported once at the ball's current pose, and that re-report's
+        // echo answers it (answer_rereport).  A superseded birth is not (a
+        // newer accepted event of ours overtook it), nor a life that has
+        // ended since, nor a forced move.
+        if (!made && life.what == own_life::kind::birth && life.state != own_life::verdict::superseded && !life.forced
+                && !life.rereported && own_life_current(life, now, true)) {
+            re_report_current(life, now, "rejected");
+            return;
+        }
         const char* what = life.what == own_life::kind::beam ? "beam" : "birth";
         const std::string reason = std::string("own ") + what + " moved " + std::to_string(life.origin) + " -> "
                                  + (made ? std::to_string(applied) : std::string("never"));

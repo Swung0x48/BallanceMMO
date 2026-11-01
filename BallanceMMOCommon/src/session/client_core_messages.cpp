@@ -347,7 +347,8 @@ namespace bmmo::session {
         bool present = false;
         for (const auto& body: snapshot.bodies)
             if (body.kind == bmmo::session::body_kind::Ball && body.owner == s.own_id_) { present = true; break; }
-        bool awaiting_echo = false;
+        // FULL step R6P: a re-report waiting for its echo is a birth too.
+        bool awaiting_echo = !s.own_rereports_.empty();
         if (acting_on_echoes())
             for (const auto& life: s.own_life_)
                 if (!life.retired && life.what == own_life::kind::birth && life.state == own_life::verdict::sent) {

@@ -95,6 +95,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(make_unmade_remakes)
         BMMO_CORE_STEP(attach_remote_navigation)
         BMMO_CORE_STEP(process_own_echoes)
+        BMMO_CORE_STEP(retire_own_lives)   // FULL step R6P
         BMMO_CORE_STEP(report_physicalize)
         BMMO_CORE_STEP(report_unphysicalize)
         BMMO_CORE_STEP(commit_own_reports)
@@ -4684,11 +4685,14 @@ namespace {
         }
     }
 
-    // Design 5.1 "Own echoes": a REJECTED birth.  With own body control it
-    // is removed from the history (the body out, a rewind); without, it is
-    // re-reported at the next tick without the spawn flag while its life is
-    // current, and the client resyncs; a life that ended since gets the
-    // resync only.
+    // Design 5.1 "Own echoes": a REJECTED birth.  With own body control and
+    // own_birth_move (FULL step R6P, the user's Q-R6-NEVER (a)) it is
+    // re-reported once at the ball's CURRENT pose (the fake's body reads
+    // 0,0,0; the stamp's pose is 5,0,0), without the spawn flag, the
+    // original kept and linked, no rewind, no resync (the re-report's echo
+    // answers it: NeverMadeReReportAnswered); without the control it is
+    // re-reported at its stamp's pose while its life is current, and the
+    // client resyncs; a life that ended since gets the resync only.
     TEST(SessionClientCoreOwnLives, RejectedEcho) {
         {
             flow_fake fake;
@@ -4700,23 +4704,40 @@ namespace {
             run_to_tick_125(core, fake);
             record_ticks(core, 118, 125);
             state_of(core).own_life_ = {own_birth(122)};
+            state_of(core).own_life_[0].spawn = true;
             state_of(core).own_physicalized_ = true;
             fake.bodies_there = {"Ball_Wood"};
             core.on_session_event(own_echo(122, 122, bmmo::session::EVENT_STATE_REJECTED));
             const size_t from = fake.calls.size();
+            const size_t sent_from = fake.sent.size();
             steps{core}.process_own_echoes();
-            const std::vector<std::string> expected = {
-                "body_state:Ball_Wood", "mute_event_log:on", "unmake_own:Ball_Wood:125", "mute_event_log:off",
-                "keep_live_cells:enter:125", "bind_world", "now:rewind_start", "now:rewind_replay",
-                "pre_step:122", "step", "pre_step:123", "step", "pre_step:124", "step", "pre_step:125", "step", "now:rewind_end",
-                "log:0:own physicalize stamped 122 never made by the server at local tick 125: rewound to 121 (0 records "
-                "changed, removed from the history)",
-                "keep_live_cells:exit:rolled back"};
+            const std::vector<std::string> expected = {"body_state:Ball_Wood", "log:0:own birth stamped 122 never made (rejected): re-reported for tick 126 at local tick 125 at the ball's current pose (0.000,0.000,0.000); its echo answers it", "send:1"};
             EXPECT_EQ(since(fake.calls, from), expected);
             EXPECT_EQ(state_of(core).own_echo_rejected_, 1u);
-            EXPECT_EQ(state_of(core).own_births_removed_, 1u);
-            EXPECT_FALSE(state_of(core).own_physicalized_);
-            EXPECT_TRUE(state_of(core).own_life_.empty() || state_of(core).own_life_[0].retired);
+            EXPECT_EQ(state_of(core).own_births_removed_, 0u);
+            EXPECT_EQ(state_of(core).life_rewinds_, 0u);
+            EXPECT_EQ(state_of(core).own_moves_resynced_, 0u);
+            EXPECT_TRUE(state_of(core).own_physicalized_) << "the body is kept";
+            ASSERT_EQ(fake.sent.size() - sent_from, 1u) << "the re-report, no resync request";
+            const auto again = decode<bmmo::session_event_msg>(fake.sent[sent_from].first);
+            EXPECT_EQ(again.type, bmmo::session::event_type::Physicalize);
+            EXPECT_EQ(again.tick, 126u);
+            EXPECT_EQ(again.flags, 0u) << "no spawn flag";
+            EXPECT_EQ(again.position[0], 0.0f) << "the ball's current pose, not the stamp's";
+            EXPECT_EQ(again.recipe.mass, 1.5f) << "the life's recipe";
+            ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+            const auto& original = state_of(core).own_life_[0];
+            EXPECT_FALSE(original.retired);
+            EXPECT_TRUE(original.rereported);
+            EXPECT_EQ(original.link, 126u);
+            EXPECT_EQ(original.state, client_core_state::own_life::verdict::rejected);
+            ASSERT_EQ(state_of(core).own_rereports_.size(), 1u);
+            EXPECT_EQ(state_of(core).own_rereports_[0].origin, 126u);
+            EXPECT_EQ(state_of(core).own_rereports_[0].link, 122u);
+            EXPECT_FALSE(state_of(core).own_rereports_[0].spawn);
+            // Kept past its history while the re-report waits.
+            steps{core}.retire_own_lives();
+            EXPECT_EQ(state_of(core).own_life_.size(), 1u);
         }
         for (const bool current: {true, false}) {
             flow_fake fake;
@@ -4764,6 +4785,7 @@ namespace {
                 session_client_core* bound = nullptr;
                 session_capabilities caps;
                 caps.own_body_control = control;
+                caps.own_life_take_out = control;   // FULL step R6P: the headless capabilities
                 session_client_core core(replay_platform(fake, bound), caps);
                 bound = &core;
                 run_to_tick_125(core, fake);
@@ -4832,6 +4854,7 @@ namespace {
                 session_client_core* bound = nullptr;
                 session_capabilities caps;
                 caps.own_body_control = true;
+                caps.own_life_take_out = true;   // FULL step R6P: the headless capabilities
                 session_client_core core(replay_platform(fake, bound), caps);
                 bound = &core;
                 run_to_tick_125(core, fake);
@@ -4870,6 +4893,12 @@ namespace {
                         EXPECT_FALSE(rewound);
                         EXPECT_EQ(state_of(core).own_moves_resynced_, 1u);
                         EXPECT_NE(std::find(calls.begin(), calls.end(), std::string("unmake_own:Ball_Wood:125")), calls.end());
+                    } else if (which == echo_case::rejected) {
+                        // FULL step R6P (Q-R6-NEVER (a)): re-reported, answered by its echo.
+                        EXPECT_FALSE(rewound);
+                        EXPECT_EQ(state_of(core).own_moves_resynced_, 0u);
+                        EXPECT_EQ(state_of(core).own_rereports_.size(), 1u);
+                        EXPECT_EQ(fake.sent.size() - sent_from, 1u) << "the re-report alone";
                     } else {
                         EXPECT_TRUE(rewound);
                         EXPECT_EQ(state_of(core).own_moves_resynced_, 0u);
@@ -5025,6 +5054,7 @@ namespace {
                 flow_fake fake;
                 session_capabilities caps;
                 caps.own_body_control = control;
+                caps.own_life_take_out = control;   // FULL step R6P: the headless capabilities
                 session_client_core core(fake.make_flow(), caps);
                 run_to_tick_125(core, fake);
                 // A record of the new numbering with the same origin: never
@@ -5129,9 +5159,11 @@ namespace {
     }
 
     // Design 5.1 "Own echoes": a MISSING birth (no echo past the deadline,
-    // the uplink gate passed).  With own body control the body goes and the
-    // client resyncs; without it the birth is re-reported and the client
-    // resyncs.  Either way it is set aside for a late echo.
+    // the uplink gate passed).  With own body control (and own_birth_move,
+    // FULL step R6P, Q-R6-NEVER (a)) the birth is re-reported once at the
+    // ball's current pose and its echo answers it (no resync yet, the body
+    // kept); without it the birth is re-reported at its stamp's pose and the
+    // client resyncs.  Either way it is set aside for a late echo.
     TEST(SessionClientCoreOwnLives, MissingEcho) {
         for (const bool control: {true, false}) {
             flow_fake fake;
@@ -5154,24 +5186,276 @@ namespace {
             steps{core}.process_own_echoes();
             std::vector<std::string> expected;
             if (control) {
-                for (const char* line: {"body_state:Ball_Wood", "mute_event_log:on", "unmake_own:Ball_Wood:125",
-                                        "mute_event_log:off"})
-                    expected.emplace_back(line);
+                expected = {"body_state:Ball_Wood",
+                            "log:0:own birth stamped 122 never made (no echo by the server's tick 422): re-reported for "
+                            "tick 126 at local tick 125 at the ball's current pose (0.000,0.000,0.000); its echo answers it",
+                            "send:1"};
             } else {
-                expected.emplace_back("send:1");
+                for (const char* line: {"send:1",
+                                        "log:0:own birth moved 122 -> never at local tick 125: no echo by the server's "
+                                        "tick 422, resync",
+                                        "now:resync_limiter", "send:0",
+                                        "log:0:resync requested (own birth: resync) at tick 125"})
+                    expected.emplace_back(line);
             }
-            for (const char* line: {"log:0:own birth moved 122 -> never at local tick 125: no echo by the server's tick "
-                                    "422, resync",
-                                    "now:resync_limiter", "send:0",
-                                    "log:0:resync requested (own birth: resync) at tick 125"})
-                expected.emplace_back(line);
             EXPECT_EQ(since(fake.calls, from), expected) << control;
             EXPECT_EQ(state_of(core).own_echo_missing_, 1u);
-            EXPECT_EQ(state_of(core).own_physicalized_, !control);
+            EXPECT_TRUE(state_of(core).own_physicalized_) << "the body kept either way";
+            EXPECT_EQ(state_of(core).own_moves_resynced_, control ? 0u : 1u);
             ASSERT_EQ(state_of(core).own_unanswered_.size(), 1u);
             EXPECT_EQ(state_of(core).own_unanswered_[0].why, client_core_state::own_life::aside::missing);
-            if (!control) EXPECT_EQ(decode<bmmo::session_event_msg>(fake.sent[sent_from].first).tick, 126u);
+            const auto again = decode<bmmo::session_event_msg>(fake.sent[sent_from].first);
+            EXPECT_EQ(again.tick, 126u);
+            EXPECT_EQ(again.position[0], control ? 0.0f : 5.0f) << "the current pose with the control, else the stamp's";
+            EXPECT_EQ(state_of(core).own_rereports_.size(), control ? 1u : 0u);
         }
+    }
+
+    // FULL step R6P (the user's Q-R6-NEVER (a); core design "As built (step
+    // R6D)" item 3.2): the echo of a never-made birth's re-report answers
+    // the original (the original REJECTED at 122, re-reported for 126 at the
+    // ball's current pose 0,0,0):
+    //   ack, inside the reach    - a move 122 -> 126 with the re-report's
+    //                              pose and no spawn kick: the body out live,
+    //                              the rewind to 121, the body made live at
+    //                              126 (unkicked, at the re-report's pose);
+    //   ack, past the reach      - a resync, the body kept (the server's
+    //                              ball exists now);
+    //   rejected                 - one re-report per life: the resync, the
+    //                              body taken out only with own_life_take_out;
+    //   superseded               - the history without it (a rewind);
+    //   missing (the deadline)   - as rejected, the re-report set aside.
+    TEST(SessionClientCoreOwnLives, NeverMadeReReportAnswered) {
+        enum class answer { ack, ack_past_reach, rejected, superseded, missing };
+        for (const bool take_out: {true, false})
+            for (const answer which: {answer::ack, answer::ack_past_reach, answer::rejected, answer::superseded,
+                                      answer::missing}) {
+                SCOPED_TRACE(std::string(take_out ? "own_life_take_out" : "no take-out (retail)") + ", answer "
+                             + std::to_string(static_cast<int>(which)));
+                flow_fake fake;
+                session_client_core* bound = nullptr;
+                session_capabilities caps;
+                caps.own_body_control = true;
+                caps.own_life_take_out = take_out;
+                session_client_core core(replay_platform(fake, bound), caps);
+                bound = &core;
+                run_to_tick_125(core, fake);
+                if (which != answer::ack_past_reach) record_ticks(core, 118, 125);
+                state_of(core).own_life_ = {own_birth(122)};
+                state_of(core).own_life_[0].spawn = true;
+                state_of(core).own_physicalized_ = true;
+                state_of(core).own_body_entity_ = "Ball_Wood";
+                fake.bodies_there = {"Ball_Wood"};
+                core.on_session_event(own_echo(122, 122, bmmo::session::EVENT_STATE_REJECTED));
+                steps{core}.process_own_echoes();
+                ASSERT_EQ(state_of(core).own_rereports_.size(), 1u);
+                const size_t sent_from = fake.sent.size();
+                const size_t from = fake.calls.size();
+                if (which == answer::missing) {
+                    state_of(core).acked_header_known_ = true;
+                    state_of(core).header_acked_ = 126;
+                    state_of(core).acked_header_tick_ = 127;
+                    steps{core}.process_own_echoes();
+                    EXPECT_TRUE(since(fake.calls, from).empty()) << "the uplink seen, the deadline ahead";
+                    state_of(core).acked_header_tick_ = 426;
+                } else {
+                    const uint8_t verdict = which == answer::rejected     ? bmmo::session::EVENT_STATE_REJECTED
+                                          : which == answer::superseded ? bmmo::session::EVENT_STATE_SUPERSEDED
+                                                                        : 0;
+                    core.on_session_event(own_echo(126, 126, verdict));
+                }
+                steps{core}.process_own_echoes();
+                const auto calls = since(fake.calls, from);
+                const bool rewound = std::find(calls.begin(), calls.end(), std::string("now:rewind_start")) != calls.end();
+                const bool unmade = std::find(calls.begin(), calls.end(), std::string("unmake_own:Ball_Wood:125")) != calls.end();
+                EXPECT_TRUE(state_of(core).own_rereports_.empty()) << "answered";
+                ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+                const auto& original = state_of(core).own_life_[0];
+                EXPECT_FALSE(original.rereported);
+                // Events go out reliable_no_nagle ("send:1"), the resync request reliable ("send:0").
+                const size_t physicalizes = static_cast<size_t>(std::count(calls.begin(), calls.end(), std::string("send:1")));
+                (void)sent_from;
+                switch (which) {
+                case answer::ack: {
+                    EXPECT_TRUE(rewound);
+                    EXPECT_TRUE(unmade) << "the body out live (made again at 126)";
+                    EXPECT_EQ(state_of(core).own_moves_resynced_, 0u);
+                    EXPECT_EQ(state_of(core).own_births_moved_, 1u);
+                    EXPECT_EQ(state_of(core).own_echo_acked_, 1u);
+                    EXPECT_EQ(original.applied, 126u);
+                    EXPECT_TRUE(original.moved());
+                    EXPECT_FALSE(original.spawn) << "the re-report's flags: no spawn kick";
+                    EXPECT_EQ(original.position[0], 0.0f) << "the re-report's pose";
+                    EXPECT_FALSE(original.applied_live);
+                    const size_t specs = fake.own_specs.size();
+                    steps{core}.apply_held_lifecycle(126);
+                    ASSERT_EQ(fake.own_specs.size(), specs + 1) << "made live at 126";
+                    EXPECT_EQ(fake.own_specs.back().tick, 126u);
+                    EXPECT_FALSE(fake.own_specs.back().kick);
+                    EXPECT_EQ(fake.own_specs.back().position[0], 0.0f);
+                    break;
+                }
+                case answer::ack_past_reach: {
+                    const std::vector<std::string> expected = {
+                        "log:0:own birth stamped 122: its re-report for tick 126 echoed acked (applied 126) at local tick 125",
+                        "body_state:Ball_Wood",
+                        "log:0:own birth moved 122 -> 126 at local tick 125: past the reach (depth 4), resync",
+                        "now:resync_limiter", "send:0", "log:0:resync requested (own birth: resync) at tick 125"};
+                    EXPECT_EQ(calls, expected);
+                    EXPECT_EQ(state_of(core).own_moves_resynced_, 1u);
+                    EXPECT_TRUE(state_of(core).own_physicalized_);
+                    break;
+                }
+                case answer::rejected:
+                case answer::missing: {
+                    EXPECT_FALSE(rewound);
+                    EXPECT_EQ(unmade, take_out);
+                    EXPECT_EQ(state_of(core).own_physicalized_, !take_out);
+                    EXPECT_EQ(state_of(core).own_moves_resynced_, 1u);
+                    EXPECT_TRUE(original.retired);
+                    EXPECT_EQ(physicalizes, 0u) << "one re-report per life";
+                    if (which == answer::missing) {
+                        EXPECT_EQ(state_of(core).own_echo_missing_, 1u);
+                        bool aside = false;
+                        for (const auto& life: state_of(core).own_unanswered_)
+                            aside = aside || (life.origin == 126u && life.why == client_core_state::own_life::aside::missing);
+                        EXPECT_TRUE(aside) << "the re-report set aside for a late echo";
+                    } else {
+                        EXPECT_EQ(state_of(core).own_echo_rejected_, 2u);
+                    }
+                    const std::string tail = which == answer::missing
+                        ? "log:0:own birth moved 122 -> never at local tick 125: its re-report for tick 126 has no echo by "
+                          "the server's tick 426 either, resync"
+                        : "log:0:own birth moved 122 -> never at local tick 125: its re-report for tick 126 was rejected "
+                          "too, resync";
+                    EXPECT_NE(std::find(calls.begin(), calls.end(), tail), calls.end());
+                    break;
+                }
+                case answer::superseded:
+                    EXPECT_TRUE(rewound);
+                    EXPECT_TRUE(unmade);
+                    EXPECT_EQ(state_of(core).own_births_removed_, 1u);
+                    EXPECT_EQ(state_of(core).own_moves_resynced_, 0u);
+                    EXPECT_FALSE(state_of(core).own_physicalized_);
+                    break;
+                }
+            }
+    }
+
+    // FULL step R6P (review finding 1): a re-report the server made where a
+    // resync's state may not hold it - the server replaced its ball there
+    // with the re-report's pose.  Set aside by a resync (base 120) and made
+    // at 126: a resync of its own; made at 119, before the base: nothing.
+    // With the resync still pending: kept, settled once it is done - covered
+    // by a newer base (130), or a resync (base still 120).  Made while a
+    // resync is in flight (answer_rereport): no move, the original retired,
+    // the resync once that one is done.
+    TEST(SessionClientCoreOwnLives, ReReportMadePastResyncBase) {
+        using own_life = client_core_state::own_life;
+        const auto set_aside_rereport = [](uint32_t origin, uint32_t link) {
+            own_life aside = own_birth(origin);
+            aside.link = link;
+            aside.spawn = false;
+            aside.why = own_life::aside::resync;
+            return aside;
+        };
+        const std::string resync_lines[] = {"now:resync_limiter", "send:0",
+                                            "log:0:resync requested (own birth: a re-report made past the resync base) "
+                                            "at tick 125"};
+        for (int which = 0; which < 4; ++which) {
+            SCOPED_TRACE("case " + std::to_string(which));
+            flow_fake fake;
+            session_capabilities caps;
+            caps.own_body_control = true;
+            session_client_core core(fake.make_flow(), caps);
+            run_to_tick_125(core, fake);
+            fake.bodies_there = {"Ball_Wood"};
+            const bool early = which == 1;
+            state_of(core).own_unanswered_ = {set_aside_rereport(early ? 118 : 126, early ? 110 : 122)};
+            state_of(core).own_echoes_stale_.push_back(
+                own_echo(early ? 119 : 126, early ? 118 : 126, early ? bmmo::session::EVENT_STATE_MOVED : 0));
+            if (which >= 2) state_of(core).resync_pending_ = true;
+            size_t from = fake.calls.size();
+            steps{core}.process_own_echoes();
+            std::vector<std::string> expected;
+            if (early) {
+                expected = {"log:0:own physicalize stamped 118 echoed moved by the server (applied 119) at local tick 125: "
+                            "sent before the last resync, nothing to do"};
+            } else {
+                expected = {"log:0:own birth stamped 122: its re-report for tick 126 made at 126 (set aside by a resync) "
+                            "at local tick 125: kept until no resync is in flight or pending"};
+                if (which == 0) {
+                    expected.emplace_back("log:0:own birth stamped 122: its re-report for tick 126 made at 126, the tick "
+                                          "base 120: no state holds it, resync");
+                    expected.insert(expected.end(), std::begin(resync_lines), std::end(resync_lines));
+                }
+            }
+            EXPECT_EQ(since(fake.calls, from), expected);
+            if (which < 2) {
+                EXPECT_TRUE(state_of(core).own_unanswered_.empty());
+                EXPECT_EQ(state_of(core).own_moves_resynced_, which == 0 ? 1u : 0u);
+                continue;
+            }
+            ASSERT_EQ(state_of(core).own_unanswered_.size(), 1u) << "kept while the resync is pending";
+            EXPECT_EQ(state_of(core).own_unanswered_[0].why, own_life::aside::replaced);
+            EXPECT_EQ(state_of(core).own_moves_resynced_, 0u);
+            // The pending resync is done: base 130 holds the replacement, 120 not.
+            state_of(core).resync_pending_ = false;
+            if (which == 2) state_of(core).tick_base_ = 130;
+            from = fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(fake.calls, from);
+            if (which == 2) {
+                EXPECT_EQ(calls.front(), "log:0:own birth stamped 122: its re-report for tick 126 made at 126, the tick "
+                                         "base 130: the resync's state holds it, nothing to do");
+                EXPECT_EQ(std::count(calls.begin(), calls.end(), std::string("send:0")), 0);
+            } else {
+                expected = {"log:0:own birth stamped 122: its re-report for tick 126 made at 126, the tick base 120: no "
+                            "state holds it, resync"};
+                expected.insert(expected.end(), std::begin(resync_lines), std::end(resync_lines));
+                EXPECT_EQ(calls, expected);
+            }
+            EXPECT_TRUE(state_of(core).own_unanswered_.empty());
+            EXPECT_EQ(state_of(core).own_moves_resynced_, which == 3 ? 1u : 0u);
+        }
+
+        // The answer_rereport path: the original REJECTED at 122, re-reported
+        // for 126; a resync in flight when the re-report's ack comes.
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_capabilities caps;
+        caps.own_body_control = true;
+        session_client_core core(replay_platform(fake, bound), caps);
+        bound = &core;
+        run_to_tick_125(core, fake);
+        record_ticks(core, 118, 125);
+        state_of(core).own_life_ = {own_birth(122)};
+        state_of(core).own_physicalized_ = true;
+        state_of(core).own_body_entity_ = "Ball_Wood";
+        fake.bodies_there = {"Ball_Wood"};
+        core.on_session_event(own_echo(122, 122, bmmo::session::EVENT_STATE_REJECTED));
+        steps{core}.process_own_echoes();
+        ASSERT_EQ(state_of(core).own_rereports_.size(), 1u);
+        state_of(core).resync_in_flight_ = true;
+        core.on_session_event(own_echo(126, 126, 0));
+        size_t from = fake.calls.size();
+        steps{core}.process_own_echoes();
+        auto calls = since(fake.calls, from);
+        EXPECT_EQ(std::count(calls.begin(), calls.end(), std::string("now:rewind_start")), 0) << "no move";
+        EXPECT_EQ(std::count(calls.begin(), calls.end(), std::string("send:0")), 0) << "no request while one is in flight";
+        EXPECT_TRUE(state_of(core).own_rereports_.empty());
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        EXPECT_TRUE(state_of(core).own_life_[0].retired);
+        EXPECT_FALSE(state_of(core).own_life_[0].rereported);
+        ASSERT_EQ(state_of(core).own_unanswered_.size(), 1u);
+        EXPECT_EQ(state_of(core).own_unanswered_[0].why, own_life::aside::replaced);
+        EXPECT_EQ(state_of(core).own_unanswered_[0].applied, 126u);
+        state_of(core).resync_in_flight_ = false;
+        from = fake.calls.size();
+        steps{core}.process_own_echoes();
+        calls = since(fake.calls, from);
+        EXPECT_EQ(std::count(calls.begin(), calls.end(), std::string("send:0")), 1) << "the resync once that one is done";
+        EXPECT_TRUE(state_of(core).own_unanswered_.empty());
     }
 
     // The own_echoes switch off (design 1.2): an echo is counted and logged
