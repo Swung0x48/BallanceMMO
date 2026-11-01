@@ -3290,8 +3290,16 @@ notes still resolve.
    6 and 8: all eight datagrams carrying the frame lost, and the reliable
    copy); live F3 recipe (burst 2) and a lossy retail L11 session: 0 late,
    0 resyncs, 0 moved births. Deferred to the close-out's batches: F3's live
-   seed sweep old vs new. Step 22 (the moved own death) stays queued (ODM);
-   the retail multi-tick own-absence measurement is Stage C's (decision 21).
+   seed sweep old vs new. Step 22 (the moved own death) built at FULL step
+   ODM (late-player-design.md 3.3 "As built (step ODM)"): a MOVED own
+   Unphysicalize moves the death inside the history (the old body named
+   again in the records to where the server ended it - its applied tick,
+   or an own birth the server applied first - revived at D - 1 and removed
+   there, in the frame's lifecycle batch); the own pair no longer
+   resyncs; a beam keeps its old body to its end. Live lone hold at 50 ms:
+   no resync, the owner 0.0000 m; a true pair live and the retail runs
+   are deferred to the close-out's batches. The retail multi-tick
+   own-absence measurement is Stage C's (decision 21).
 
 **Stage D - the original levels.**
 

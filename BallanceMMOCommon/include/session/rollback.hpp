@@ -3016,6 +3016,53 @@ namespace bmmo::session {
             return changed;
         }
 
+        // FULL step ODM (late-player design 3.3, "The Unphysicalize side"):
+        // the mirror of move_birth.  The own body `entity` of lifetime
+        // `generation` ended live at `from`; the server ended it only at
+        // `until` (a moved own Unphysicalize, or the birth that replaced it
+        // there).  Every record in [from, until) names it again as the own
+        // ball - the name, `polls` and that lifetime's generation - so the
+        // replay of the correction feeds it the own inputs and re-captures
+        // it under the old lifetime, and a later rewind anchored inside the
+        // span finds that life alive and its end at `until` (the generation
+        // change, revive_ended_lives).  The bodies themselves are the
+        // replay's to write.  A record in the span that names another own
+        // entity (a body the live run made there that the server did not
+        // replace this one with) is a conflict: nothing is changed and
+        // false is returned (the caller resyncs).  `input_of(tick, frame)`:
+        // the own input of that tick (the frames this client kept sending
+        // after the live death), put into a record that holds none for the
+        // name.  `changed` counts the records touched.
+        bool extend_life(const std::string& entity, uint32_t generation, uint32_t from, uint32_t until, bool polls,
+                         const std::function<bool(uint32_t tick, input_frame& frame)>& input_of, size_t& changed) {
+            changed = 0;
+            if (entity.empty() || static_cast<int32_t>(until - from) <= 0) return true;
+            const auto in_span = [&](const tick_state& state) {
+                return static_cast<int32_t>(state.tick - from) >= 0 && static_cast<int32_t>(state.tick - until) < 0;
+            };
+            for (const auto& state: history_)
+                if (in_span(state) && !state.tracked.own_entity.empty() && state.tracked.own_entity != entity)
+                    return false;
+            for (auto& state: history_) {
+                if (!in_span(state)) continue;
+                state.tracked.own_entity = entity;
+                state.tracked.own_polls = polls;
+                state.tracked.generations[entity] = generation;
+                input_frame frame{};
+                if (input_of && state.inputs.find(entity) == state.inputs.end() && input_of(state.tick, frame))
+                    state.inputs[entity] = frame;
+                ++changed;
+            }
+            return true;
+        }
+
+        // Whether the record of `tick` lets the own ball poll its keys
+        // (rollback_tracked::own_polls); false without a record.
+        bool recorded_own_polls(uint32_t tick) const {
+            const tick_state* at = find_const(tick);
+            return at && at->tracked.own_polls;
+        }
+
         // Whether the record of `tick` holds a body for `entity`: a relayed
         // frame for a tick at which the name had none drove nothing, and is
         // no reason to replay.

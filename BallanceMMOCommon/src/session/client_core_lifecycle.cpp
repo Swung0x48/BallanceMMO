@@ -1077,6 +1077,7 @@ namespace bmmo::session {
         const uint32_t own_rank = join_rank(s.own_id_, tick);
         for (const auto& life: due) {
             if (own && join_rank(life.player, tick) > own_rank) {
+                apply_moved_own_deaths(tick);   // step ODM: the server's order, U before P
                 apply_own_lives(tick, "replay", false);
                 own = false;
             }
@@ -1099,7 +1100,10 @@ namespace bmmo::session {
             if (!made && (birth.remake || birth.reconciled)) s.pending_births_.push_back(birth);
             s.mechanism_tracking_.mark_dirty();
         }
-        if (own) apply_own_lives(tick, "replay", false);
+        if (own) {
+            apply_moved_own_deaths(tick);   // step ODM
+            apply_own_lives(tick, "replay", false);
+        }
         // Step EL8 (design 2.3.4 "In the replay at D"): the own ball's
         // queued changes last - after the remote events of the tick, before
         // its scripts (live, the retail scripts removed the ball in the
@@ -1805,15 +1809,315 @@ namespace bmmo::session {
     }
 
     // Kept while a rewind can be anchored before the death (the rule of the
-    // other own records, retire_own_lives).
+    // other own records, retire_own_lives) - before its end, for one the
+    // server moved (step ODM: a rewind anchored inside [D, end) revives it
+    // too).
     void session_client_core::retire_own_deaths() {
         const uint32_t now = current_tick();
         s.own_deaths_.erase(std::remove_if(s.own_deaths_.begin(), s.own_deaths_.end(),
                                            [this, now](const client_core_state::own_death& d) {
-                                               return !s.rollback_.knows_tick(d.tick - 1)
-                                                   && static_cast<int32_t>(now - d.tick) > 0;
+                                               const uint32_t end = own_death_end(d);
+                                               return !s.rollback_.knows_tick(end - 1)
+                                                   && static_cast<int32_t>(now - end) > 0;
                                            }),
                             s.own_deaths_.end());
+    }
+
+    // ================================================ own deaths moved
+    // FULL step ODM (plan step 22; late-player design 3.3 "The
+    // Unphysicalize side", 6.2.3 (d)).
+    //
+    // The server applies a late own Unphysicalize at D' > D (MOVED), but a
+    // Physicalize of ours stamped at or after D that it applies first ends
+    // the body there instead: physics_world::apply_event takes the player's
+    // old body out at a Physicalize, and the runner's guard
+    // (lifecycle_unphysicalize_superseded) then drops the late
+    // Unphysicalize unechoed.  So the owner learns the end from its own
+    // records: the earliest of D' and those births' applied ticks (a birth
+    // still unanswered counts at its stamp; its echo, if MOVED, moves the
+    // end with it, move_own_birth).  Adapted from design 3.3, which has the
+    // server echo such a death SUPERSEDED: no server path does.
+    uint32_t session_client_core::own_death_end(const client_core_state::own_death& d) const {
+        if (!d.moved) return d.tick;
+        uint32_t end = d.applied;
+        for (const auto& life: s.own_life_) {
+            if (life.what != own_life::kind::birth || !life.made || life.retired) continue;
+            if (static_cast<int32_t>(life.origin - d.tick) < 0) continue;   // older: the life that died
+            if (static_cast<int32_t>(life.applied - end) < 0) end = life.applied;
+        }
+        return static_cast<int32_t>(end - d.tick) < 0 ? d.tick : end;
+    }
+
+    // A beam's old body: until the stamp, or - its Unphysicalize moved -
+    // the earlier of that and the Physicalize's applied tick (the
+    // Physicalize found the body alive and replaced it: step HLX), and
+    // never past a death of that life after the stamp (a beam keeps the
+    // generation; the death ends the body at the server too, and the late
+    // Unphysicalize then finds no body: measured, a beam into the arena's
+    // death zone died 2 ticks after its stamp, odm/pair1).
+    uint32_t session_client_core::own_beam_end(const own_life& beam) const {
+        if (beam.what != own_life::kind::beam || beam.death_applied == 0) return beam.origin;
+        uint32_t end = beam.death_applied;
+        if (beam.made && static_cast<int32_t>(beam.applied - end) < 0) end = beam.applied;
+        for (const auto& d: s.own_deaths_)
+            if (d.entity == beam.entity && d.generation == beam.generation && static_cast<int32_t>(d.tick - beam.origin) > 0
+                    && static_cast<int32_t>(d.tick - end) < 0)
+                end = d.tick;
+        return static_cast<int32_t>(end - beam.origin) < 0 ? beam.origin : end;
+    }
+
+    // Every moved own death and moved beam whose end lies past what its
+    // records name: the records of [named, end) name the old body again
+    // (rollback_engine::extend_life), and `from` the lowest tick touched
+    // (unchanged when none).  False: a record in a span names another own
+    // entity (nothing is changed for that one; the caller resyncs).
+    // An end a birth gave that the server has answered is final: kept in the
+    // death's record, so the birth's record retiring first (retire_own_lives
+    // erases a retired one at once) cannot widen it again.  Run where the
+    // records are extended and where a birth is acked without a move (review
+    // finding 2: such a birth never reaches extend_moved_deaths).
+    void session_client_core::freeze_moved_death_ends() {
+        for (auto& d: s.own_deaths_) {
+            if (!d.moved) continue;
+            const uint32_t end = own_death_end(d);
+            if (end == d.applied) continue;
+            for (const auto& life: s.own_life_)
+                if (life.what == own_life::kind::birth && life.made && !life.retired && life.applied == end
+                        && life.state != own_life::verdict::sent) {
+                    d.applied = end;
+                    break;
+                }
+        }
+    }
+
+    bool session_client_core::extend_moved_deaths(uint32_t& from) {
+        const auto input_of = [this](uint32_t tick, bmmo::session::input_frame& frame) {
+            const auto it = s.own_inputs_.find(tick);
+            if (it == s.own_inputs_.end()) return false;
+            frame = it->second;
+            return true;
+        };
+        const auto lower = [&from](uint32_t tick) {
+            if (from == 0 || static_cast<int32_t>(tick - from) < 0) from = tick;
+        };
+        bool ok = true;
+        freeze_moved_death_ends();
+        for (auto& d: s.own_deaths_) {
+            if (!d.moved) continue;
+            const uint32_t end = own_death_end(d);
+            const uint32_t named = d.extended == 0 ? d.tick : d.extended;
+            if (static_cast<int32_t>(end - named) <= 0) continue;
+            size_t changed = 0;
+            if (!s.rollback_.extend_life(d.entity, d.generation, named, end, s.rollback_.recorded_own_polls(d.tick - 1),
+                                         input_of, changed)) {
+                ok = false;
+                continue;
+            }
+            d.extended = end;
+            lower(named);
+        }
+        for (auto& beam: s.own_life_) {
+            if (beam.what != own_life::kind::beam || beam.retired || beam.death_applied == 0) continue;
+            const uint32_t end = own_beam_end(beam);
+            // A death of the life capped it: final (the death's record may
+            // retire before the beam's).
+            if (static_cast<int32_t>(end - beam.death_applied) < 0
+                    && (!beam.made || static_cast<int32_t>(end - beam.applied) < 0))
+                beam.death_applied = end;
+            const uint32_t named = beam.death_extended == 0 ? beam.origin : beam.death_extended;
+            if (static_cast<int32_t>(end - named) <= 0) continue;
+            size_t changed = 0;
+            if (!s.rollback_.extend_life(beam.entity, beam.generation, named, end,
+                                         s.rollback_.recorded_own_polls(beam.origin - 1), input_of, changed)) {
+                ok = false;
+                continue;
+            }
+            beam.death_extended = end;
+            lower(named);
+        }
+        return ok;
+    }
+
+    // An own correction joins the frame's lifecycle batch (late-player
+    // design 6.2.3 (d), the rule SRT3 left to ODM): one restore to the
+    // lowest anchor and one replay with the frame's late remote events,
+    // never a rewind_world of its own.  Outside pre_step's collecting
+    // window (a test, a caller outside the frame) the batch is opened and
+    // run here.  False: past the reach or outside the history.
+    bool session_client_core::join_own_correction(uint32_t anchor, const std::string& reason) {
+        if (!config.rollback) return false;
+        const uint32_t now = current_tick();
+        if (static_cast<int32_t>(now - anchor) < 0 || now - anchor > s.rollback_.thresholds().max_resim_ticks
+                || !s.rollback_.knows_tick(anchor))
+            return false;
+        // As rewind_for_lifecycle: a pending exact resync's state of base - 1
+        // covers a change before its base (no rewind, no resync of its own).
+        if (s.resync_pending_ && s.resync_exact_ && static_cast<int32_t>(anchor + 1 - s.resync_base_) < 0) {
+            logf("%s precedes the pending resync's anchor %u: the server's state covers it", reason.c_str(),
+                 s.resync_base_ - 1);
+            return true;
+        }
+        auto& b = s.life_batch_;
+        const bool outside = !b.collecting;
+        if (outside) b.collecting = true;
+        if (!b.pending || static_cast<int32_t>(anchor - b.anchor) < 0) b.anchor = anchor;
+        b.reason += (b.pending ? "; " : "") + reason;
+        b.pending = true;
+        ++b.events;
+        if (outside) {
+            flush_life_rewinds();
+            s.life_batch_.collecting = false;
+        }
+        return true;
+    }
+
+    // The echo of an own Unphysicalize stamped D that the server applied at
+    // D' (MOVED), with own deaths moving (own_deaths_move).  Three cases
+    // (plan step 22):
+    //   (1) lone: no birth of ours ends the body first - the body lives in
+    //       our history until D', the records name it there, and the frame's
+    //       batch rewinds to D - 1: the restore revives the life at the
+    //       record of D - 1 (reconcile_own_lives), the replay drives it from
+    //       own_inputs_ and removes it at D' with the matrix of the live
+    //       death (apply_moved_own_deaths, before the tick's own lives);
+    //   (2) superseded: a birth of ours stamped after D that the server
+    //       applied before D' (its Physicalize replaced the body): the death
+    //       moves to that birth's applied tick instead (own_death_end), or
+    //       nowhere when it was on time;
+    //   (3) a pair: the birth of the same origin (a trafo, a respawn's
+    //       pair) moved too - its echo, MOVED, came first and its body is
+    //       made at T' already (move_own_birth), so the death goes to the
+    //       earlier of D' and T' in the same correction; one not answered
+    //       yet counts at its stamp, so nothing moves until its echo, whose
+    //       move_own_birth then carries the death (extend_moved_deaths).  A
+    //       beam is its own record: the old body lives to own_beam_end.
+    // Past the reach or outside the history: the resync it always was.
+    void session_client_core::move_own_death(const bmmo::session_event_msg& msg) {
+        const uint32_t now = current_tick();
+        const uint32_t stamp = msg.origin_tick;
+        const std::string head = "own death moved " + std::to_string(stamp) + " -> " + std::to_string(msg.tick);
+        const auto resync = [&](const std::string& why) {
+            ++s.own_death_moves_resynced_;
+            logf("%s at local tick %u: %s, resync", head.c_str(), now, why.c_str());
+            journal_.note(head + ": " + why + ", resync");
+            request_resync("own death moved: resync", true);
+        };
+        // Review finding 3: the refusals that need no record changed come
+        // before any is - a rewind of another event before the resync
+        // applies must not revive the body from a half-made correction.
+        const auto unreachable = [&](uint32_t anchor) -> std::string {
+            if (!config.rollback || static_cast<int32_t>(now - anchor) < 0
+                    || now - anchor > s.rollback_.thresholds().max_resim_ticks || !s.rollback_.knows_tick(anchor))
+                return "past the reach (depth " + std::to_string(static_cast<int>(now - anchor)) + ")";
+            return {};
+        };
+        // A beam: its own record carries both halves.
+        for (auto& beam: s.own_life_) {
+            if (beam.what != own_life::kind::beam || beam.retired || beam.origin != stamp) continue;
+            const uint32_t before = own_beam_end(beam);
+            const uint32_t was = beam.death_applied;
+            beam.death_applied = msg.tick;
+            const uint32_t end = own_beam_end(beam);
+            if (end == before) {
+                ++s.own_deaths_kept_;
+                logf("%s (a beam) at local tick %u: its Physicalize (applied %u) replaced the body first: nothing to move",
+                     head.c_str(), now, beam.applied);
+                return;
+            }
+            std::string refused = static_cast<int32_t>(end - now) > 0 ? "the beam's old body ends after the live tick"
+                                                                       : unreachable(before - 1);
+            if (!refused.empty()) {
+                beam.death_applied = was;
+                return resync(refused);
+            }
+            uint32_t from = 0;
+            if (!extend_moved_deaths(from)) return resync("a record of the span names another own body");
+            const std::string why = head + " (a beam pair: the old body until " + std::to_string(end) + ", the new one from "
+                                  + std::to_string(beam.applied) + ")";
+            if (!join_own_correction(before - 1, why)) return resync("past the reach (depth "
+                                                                     + std::to_string(static_cast<int>(now - (before - 1))) + ")");
+            ++s.own_deaths_moved_;
+            ++s.own_pairs_moved_;
+            logf("%s at local tick %u: rewound to %u in the frame's batch", why.c_str(), now, before - 1);
+            journal_.note(why);
+            return;
+        }
+        client_core_state::own_death* death = nullptr;
+        for (auto& d: s.own_deaths_)
+            if (d.tick == stamp) {
+                death = &d;
+                break;
+            }
+        if (!death) {
+            return resync(s.rollback_.knows_tick(stamp - 1) ? "no own death logged at its stamp"
+                                                             : "no record of it (past the history)");
+        }
+        const uint32_t before = own_death_end(*death);
+        const bool was_moved = death->moved;
+        const uint32_t was_applied = death->applied;
+        death->moved = true;
+        death->applied = msg.tick;
+        const uint32_t end = own_death_end(*death);
+        // The pair: a birth of the same origin.
+        const own_life* pair = nullptr;
+        for (const auto& life: s.own_life_)
+            if (life.what == own_life::kind::birth && !life.retired && life.origin == stamp) pair = &life;
+        if (end == before) {
+            ++s.own_deaths_kept_;
+            if (pair && pair->state == own_life::verdict::sent)
+                logf("%s at local tick %u: its pair's birth is unanswered (counted at its stamp): moved with that "
+                     "birth's echo", head.c_str(), now);
+            else
+                logf("%s at local tick %u: a birth of ours ended the body at the server first (applied %u): nothing to move",
+                     head.c_str(), now, end);
+            return;
+        }
+        {
+            const std::string refused = static_cast<int32_t>(end - now) > 0 ? std::string("the body ends after the live tick")
+                                                                             : unreachable(before - 1);
+            if (!refused.empty()) {
+                death->moved = was_moved;
+                death->applied = was_applied;
+                return resync(refused);
+            }
+        }
+        uint32_t from = 0;
+        if (!extend_moved_deaths(from)) return resync("a record of the span names another own body");
+        const bool superseded = end != msg.tick;
+        const std::string why = head + (pair ? " (a pair" : superseded ? " (superseded" : " (lone")
+                              + ": the body until " + std::to_string(end) + ")";
+        if (!join_own_correction(before - 1, why))
+            return resync("past the reach (depth " + std::to_string(static_cast<int>(now - (before - 1))) + ")");
+        ++s.own_deaths_moved_;
+        if (pair && pair->moved()) ++s.own_pairs_moved_;
+        logf("%s at local tick %u: rewound to %u in the frame's batch", why.c_str(), now, before - 1);
+        journal_.note(why);
+    }
+
+    // The moved own deaths queued for a replayed `tick` (own_due::moved):
+    // at our place among the tick's body changes, before the own lives of
+    // that tick - the server applies an Unphysicalize before the
+    // Physicalize of the same origin, and the Physicalize that replaced a
+    // body ends it first.
+    void session_client_core::apply_moved_own_deaths(uint32_t tick) {
+        std::vector<client_core_state::own_due> due;
+        for (auto it = s.own_due_.begin(); it != s.own_due_.end();)
+            if (it->tick == tick && it->death && it->moved) {
+                due.push_back(std::move(*it));
+                it = s.own_due_.erase(it);
+            } else ++it;
+        for (const auto& d: due) {
+            float position[3], rotation[9];
+            pose_of_matrix(d.matrix, position, rotation);
+            std::string error;
+            bool ok = false;
+            {
+                const event_log_mute mute(*this);
+                ok = platform_.unmake_own(d.entity, position, rotation, tick, true, error);
+            }
+            s.mechanism_tracking_.mark_dirty();
+            if (!ok) logf("lives: own %s: the moved death at tick %u: %s", d.entity.c_str(), tick, error.c_str());
+        }
     }
 
     // A renumbering (resync, SessionAssign): the ticks these name are gone.
@@ -1948,19 +2252,22 @@ namespace bmmo::session {
                 logf("lives: own %s not revived: %s (%llu so far)", name.c_str(), why.c_str(),
                      static_cast<unsigned long long>(s.own_revive_failures_));
         };
-        // The first logged death of `entity`'s life `generation` after `after`.
+        // The first logged death of `entity`'s life `generation` after `after`
+        // - at its end: the tick the server ended it, for one it moved
+        // (step ODM, own_death_end).
         const auto death_of = [&](const std::string& entity, uint32_t generation, uint32_t after)
                 -> const client_core_state::own_death* {
             const client_core_state::own_death* found = nullptr;
             for (const auto& d: s.own_deaths_)
-                if (d.entity == entity && d.generation == generation && stamp_in(d.tick, after, now)
-                        && (!found || static_cast<int32_t>(d.tick - found->tick) < 0))
+                if (d.entity == entity && d.generation == generation && stamp_in(own_death_end(d), after, now)
+                        && (!found || static_cast<int32_t>(own_death_end(d) - own_death_end(*found)) < 0))
                     found = &d;
             return found;
         };
         const auto queue_death = [this](const client_core_state::own_death& d) {
             client_core_state::own_due due;
-            due.tick = d.tick;
+            due.tick = own_death_end(d);
+            due.moved = due.tick != d.tick;   // step ODM: before the tick's own lives
             due.death = true;
             due.entity = d.entity;
             std::copy(std::begin(d.matrix), std::end(d.matrix), due.matrix);
@@ -1995,11 +2302,18 @@ namespace bmmo::session {
         // owns it.  Such a life fails below ("its body now was not born
         // after its death"), counted in olives' failed, and keeps today's
         // behaviour (not revived); L-H4 covers it.
-        const auto birth_of = [&](const std::string& entity, uint32_t after) -> const own_life* {
+        //
+        // FULL step ODM: after a death the server moved, the birth that ended
+        // it at the server may be applied at that very tick (a same-name
+        // respawn the late Unphysicalize was superseded by, or the pair's
+        // own birth), and a moved one is that pair's: both count then.  A
+        // moved one is taken out here and made again by apply_own_lives at
+        // its applied tick, after the death (apply_moved_own_deaths).
+        const auto birth_of = [&](const std::string& entity, uint32_t after, bool moved_death) -> const own_life* {
             const own_life* found = nullptr;
             for (const auto& life: s.own_life_)
-                if (life.what == own_life::kind::birth && life.made && !life.moved() && life.entity == entity
-                        && stamp_in(life.applied, after, now)
+                if (life.what == own_life::kind::birth && life.made && (!life.moved() || moved_death)
+                        && life.entity == entity && stamp_in(life.applied, moved_death ? after - 1 : after, now)
                         && (!found || static_cast<int32_t>(life.applied - found->applied) > 0))
                     found = &life;
             return found;
@@ -2020,9 +2334,19 @@ namespace bmmo::session {
             }
             bmmo_physics_body_state there{};
             const bool body_now = platform_.body_state(life.name, there);
-            const own_life* later = body_now ? birth_of(life.name, death->tick) : nullptr;
+            const uint32_t death_end = own_death_end(*death);
+            const own_life* later = body_now ? birth_of(life.name, death_end, death_end != death->tick) : nullptr;
+            // FULL step ODM: the pair's same-name birth moved_own_birth took
+            // out before this rewind (no body now): answered remade at its
+            // applied tick, so the restore does not destroy it again (it
+            // would take the revived old body out, the same name) - the
+            // replay makes it there (apply_own_lives).
+            const own_life* taken_out = nullptr;
+            if (!body_now && death_end != death->tick)
+                if (const own_life* moved = birth_of(life.name, death_end, true); moved && moved->moved()) taken_out = moved;
+            const uint32_t taken_out_at = taken_out ? taken_out->applied : 0;
             if (body_now && !later) {
-                fail(life.name, "its body now was not born after its death at tick " + std::to_string(death->tick));
+                fail(life.name, "its body now was not born after its death at tick " + std::to_string(death_end));
                 continue;
             }
             const own_life later_copy = later ? *later : own_life{};
@@ -2063,7 +2387,7 @@ namespace bmmo::session {
                 fail(life.name, made.found ? "make_own: " + made.error : std::string("no 3D entity of that name"));
                 if (later) {
                     // The later life still comes back at its stamp.
-                    queue_remake(later_copy);
+                    if (!later_copy.moved()) queue_remake(later_copy);   // step ODM: else apply_own_lives'
                     out[life.name].remade_at = later_copy.applied;
                     ++s.own_window_remakes_;
                 }
@@ -2071,9 +2395,11 @@ namespace bmmo::session {
             }
             ++s.own_revives_;
             queue_death(death_copy);
-            out[life.name].revived_until = death_copy.tick;
+            out[life.name].revived_until = death_end;
+            if (taken_out_at) out[life.name].remade_at = taken_out_at;   // step ODM
             if (later) {
-                queue_remake(later_copy);
+                // Step ODM: a moved birth is apply_own_lives' to make again.
+                if (!later_copy.moved()) queue_remake(later_copy);
                 out[life.name].remade_at = later_copy.applied;
                 ++s.own_window_remakes_;
             }
@@ -2081,7 +2407,7 @@ namespace bmmo::session {
                 const std::string remade = later ? ", its later life remade at tick " + std::to_string(later_copy.applied)
                                                  : std::string();
                 logf("lives: own %s (alive at tick %u, generation %u) revived until tick %u%s%s", life.name.c_str(), anchor,
-                     life.generation, death_copy.tick, remade.c_str(),
+                     life.generation, death_end, remade.c_str(),
                      death_copy.has_matrix ? "" : " (no death matrix: the record's pose)");
             }
         }
@@ -2136,8 +2462,8 @@ namespace bmmo::session {
         uint32_t generation = 0;
         if (!s.rollback_.generation_at(entity, anchor, generation)) return {};
         for (const auto& d: s.own_deaths_)
-            if (d.entity == entity && d.generation == generation && static_cast<int32_t>(d.tick - anchor) > 0
-                    && static_cast<int32_t>(d.tick - now) <= 0)
+            if (d.entity == entity && d.generation == generation && static_cast<int32_t>(own_death_end(d) - anchor) > 0
+                    && static_cast<int32_t>(own_death_end(d) - now) <= 0)
                 return entity;
         return {};
     }
@@ -2557,8 +2883,32 @@ namespace bmmo::session {
             const bool beam_stamp = life.what == own_life::kind::beam && life.origin == tick
                                  && (live ? !life.origin_live : life.origin_live);
             const bool remake_due = life.moved() && life.applied == tick && (!live || !life.applied_live);
-            if (!beam_stamp && !remake_due) continue;
-            if (!own_life_current(life, tick, live)) {
+            // FULL step ODM: a beam whose Unphysicalize the server moved
+            // keeps its old body past the stamp, to own_beam_end - where it
+            // goes in a replay, unless the Physicalize remakes it there.
+            const uint32_t beam_end = own_beam_end(life);
+            const bool beam_kept = life.what == own_life::kind::beam && beam_end != life.origin;
+            // (Not where a death of that life ends it: the restore queued
+            // that death, reconcile_own_lives.)
+            const bool beam_death = !live && beam_kept && beam_end == tick && life.origin_live
+                                 && (!life.made || life.applied != beam_end)
+                                 && std::none_of(s.own_deaths_.begin(), s.own_deaths_.end(),
+                                                 [&life, beam_end](const client_core_state::own_death& d) {
+                                                     return d.entity == life.entity && d.generation == life.generation
+                                                         && d.tick == beam_end;
+                                                 });
+            if (!beam_stamp && !remake_due && !beam_death) continue;
+            // FULL step ODM: a same-name moved birth made at the end of a
+            // moved own death - the records of [D, end) carry the old life
+            // (extend_life), so the record of tick - 1 names its generation,
+            // not this birth's: the birth is current there all the same.
+            const bool after_moved_death = !live && remake_due && life.what == own_life::kind::birth
+                && std::any_of(s.own_deaths_.begin(), s.own_deaths_.end(), [&](const client_core_state::own_death& d) {
+                       uint32_t recorded = 0;
+                       return d.moved && d.entity == life.entity && own_death_end(d) == tick
+                           && s.rollback_.generation_at(life.entity, tick - 1, recorded) && recorded == d.generation;
+                   });
+            if (!after_moved_death && !own_life_current(life, tick, live)) {
                 const auto generation = s.generations_.find(life.entity);
                 // Step EL8: a replay never retires (only the live frames
                 // do, live_own_lives / retire_own_lives): the next replay
@@ -2584,6 +2934,9 @@ namespace bmmo::session {
                         write_beam(life.entity, position, tick);
                     }
                     ++s.own_lives_applied_;
+                } else if (beam_kept) {
+                    // FULL step ODM: the old body lives on (beam_death, or
+                    // the remake at the applied tick, ends it).
                 } else if (life.made && life.applied == life.origin) {
                     remake_own_body(life, tick, where);
                 } else {
@@ -2592,6 +2945,10 @@ namespace bmmo::session {
                 }
                 if (live) life.origin_live = true;
                 if (live && life.applied == life.origin) life.applied_live = true;
+            }
+            if (beam_death) {
+                unmake_own_body(life, tick, where);
+                ++s.own_lives_applied_;
             }
             if (remake_due) {
                 if (remake_own_body(life, tick, where)) ++s.own_remakes_;
@@ -2613,7 +2970,17 @@ namespace bmmo::session {
             if (life.retired) continue;
             if (life.what == own_life::kind::beam && life.origin == tick && life.origin_live) return true;
             if (life.moved() && life.applied == tick) return true;
+            // FULL step ODM: a moved beam's old body ends here.
+            if (life.what == own_life::kind::beam && life.origin_live && own_beam_end(life) == tick
+                    && own_beam_end(life) != life.origin)
+                return true;   // (over-reports one capped by a death: apply_own_lives then does nothing)
         }
+        // FULL step ODM (review finding 1): a moved own death alone at its
+        // tick still goes at our join rank among the tick's remote body
+        // changes (drain_pending_lives), never after all of them as
+        // apply_own_due's deaths in place do.
+        for (const auto& d: s.own_due_)
+            if (d.tick == tick && d.death && d.moved) return true;
         return false;
     }
 
@@ -2815,7 +3182,15 @@ namespace bmmo::session {
     // queued before the last SessionAssign, which can only answer the
     // births it set aside, then the rest; then the births whose echo is
     // overdue (expire_own_echoes).
+    //
+    // FULL step ODM (late-player design 6.2.3 (d)): the frame's lifecycle
+    // batch stays open over the echoes (pre_step opened it for the drain),
+    // so a moved own death and the drain's late remote events share one
+    // restore and one replay; it is run (flush_life_rewinds) after the
+    // echoes and before the rest, which acted after the batch's rewind
+    // before the step too.  Called outside pre_step, the echoes open it.
     void session_client_core::process_own_echoes() {
+        s.life_batch_.collecting = true;
         if (!s.own_echoes_stale_.empty()) {
             std::vector<bmmo::session_event_msg> stale;
             stale.swap(s.own_echoes_stale_);
@@ -2826,6 +3201,8 @@ namespace bmmo::session {
             echoes.swap(s.own_echoes_);
             for (const auto& msg: echoes) process_own_echo(msg, false);
         }
+        s.life_batch_.collecting = false;
+        flush_life_rewinds();
         settle_replaced_rereports();   // FULL step R6P (review finding 1)
         expire_own_echoes();
         apply_forced_own_moves();
@@ -2860,15 +3237,25 @@ namespace bmmo::session {
     void session_client_core::process_own_echo(const bmmo::session_event_msg& msg, bool stale) {
         // Step T3: a Trafo input's echo goes the input rewind's way (design
         // 4.6), never the own lives'.
+        // FULL step ODM (late-player design 6.2.3 (d)): the frame's
+        // lifecycle batch is still open here (pre_step), and only a moved
+        // own death joins it.  Every other echo that may act runs after the
+        // batch's rewind, as it did when the batch was flushed right after
+        // the drain: flushed first.  A plain ack with no set-aside birth or
+        // re-report to answer changes a record's state only.
+        const bool rejected = (msg.state & bmmo::session::EVENT_STATE_REJECTED) != 0;
+        const bool superseded = !rejected && (msg.state & bmmo::session::EVENT_STATE_SUPERSEDED) != 0;
+        const bool made = !rejected && !superseded;
+        const bool moved = made && msg.tick != msg.origin_tick;
+        const bool joins = msg.type == bmmo::session::event_type::Unphysicalize && moved && !stale && own_deaths_move();
+        const bool plain_ack = msg.type != bmmo::session::event_type::Trafo && made && !moved
+                            && s.own_unanswered_.empty() && s.own_rereports_.empty();
+        if (!joins && !plain_ack) flush_life_rewinds();
         if (msg.type == bmmo::session::event_type::Trafo) {
             process_trafo_echo(msg, stale);
             return;
         }
         const bool acting = acting_on_echoes();
-        const bool rejected = (msg.state & bmmo::session::EVENT_STATE_REJECTED) != 0;
-        const bool superseded = !rejected && (msg.state & bmmo::session::EVENT_STATE_SUPERSEDED) != 0;
-        const bool made = !rejected && !superseded;
-        const bool moved = made && msg.tick != msg.origin_tick;
         const bool birth = msg.type == bmmo::session::event_type::Physicalize;
         // FULL step R6P (Q-R6-NEVER (a)): the echo of a never-made birth's
         // re-report answers the original - its ack too, not only a MOVED
@@ -2891,7 +3278,10 @@ namespace bmmo::session {
         own_life* aside = birth && !life && acting ? find_unanswered(msg.origin_tick, msg.ball_type) : nullptr;
         if (made && !moved) {
             ++s.own_echo_acked_;
-            if (life) life->state = own_life::verdict::acked;
+            if (life) {
+                life->state = own_life::verdict::acked;
+                freeze_moved_death_ends();   // FULL step ODM (review finding 2)
+            }
             if (aside) answer_set_aside(*aside, true, false, msg.tick, "acked");
             return;
         }
@@ -2919,6 +3309,14 @@ namespace bmmo::session {
                     move_own_sector(msg.sector, msg.origin_tick, msg.tick);
                     return;
                 }
+            }
+            // FULL step ODM: a moved own death moves inside the history.
+            if (joins) {
+                logf("own %s stamped tick %u echoed %s by the server (applied %u, state %02x) at local tick %u",
+                     event_type_name(static_cast<int>(msg.type)), msg.origin_tick, verdict, msg.tick,
+                     static_cast<unsigned>(msg.state), current_tick());
+                move_own_death(msg);
+                return;
             }
             if (moved) ++s.own_moves_other_;
             logf("own %s stamped tick %u echoed %s by the server (applied %u, state %02x) at local tick %u; "
@@ -2952,7 +3350,10 @@ namespace bmmo::session {
                 move_own_birth(*life, msg.tick, made);
                 return;
             }
-            if (std::find(s.own_moved_unphysicalize_.begin(), s.own_moved_unphysicalize_.end(), msg.origin_tick)
+            // FULL step ODM: with own deaths moving, the pair's death moves
+            // with the birth (move_own_birth, extend_moved_deaths).
+            if (!own_deaths_move()
+                    && std::find(s.own_moved_unphysicalize_.begin(), s.own_moved_unphysicalize_.end(), msg.origin_tick)
                     != s.own_moved_unphysicalize_.end()) {
                 resync_own_life(*life, made, msg.tick, "its Unphysicalize was moved too (an own pair, plan step 22)");
                 return;
@@ -3479,13 +3880,36 @@ namespace bmmo::session {
             resync_own_life(life, made, applied, "its life has ended since (plan step 22)");
             return;
         }
+        // FULL step ODM: kept apart from the frame's batch (late-player
+        // design 6.2.3 (d) lets it join): its refusal is resync_own_life's,
+        // which puts the body set back the way the server has it, and its
+        // live take-out below must come after the batch's replay, as it
+        // did.  The batch runs first, so a frame still has one rewind per
+        // correction in the order it had.
+        flush_life_rewinds();
         life.made = made;
         life.applied = made ? applied : life.origin;
         if (life.what == own_life::kind::birth && alive) {
             bmmo_physics_body_state state{};
             if (platform_.body_state(life.entity, state)) unmake_own_body(life, now, "moved");
         }
-        const size_t changed = s.rollback_.move_birth(life.entity, life.generation, life.origin, life.applied, made);
+        // FULL step ODM: a beam whose Unphysicalize was moved keeps its old
+        // body to own_beam_end - the records lose the body from there on,
+        // not from the stamp.  Then a death of ours this birth ends at the
+        // server (its pair, or one it superseded) ends there here too
+        // (own_death_end reads the applied tick just set): its records name
+        // it again, after move_birth took the new body's name out of them.
+        const uint32_t gap_from = life.what == own_life::kind::beam ? own_beam_end(life) : life.origin;
+        const size_t changed = s.rollback_.move_birth(life.entity, life.generation, gap_from, life.applied, made);
+        uint32_t extended_from = 0;
+        if (own_deaths_move() && !extend_moved_deaths(extended_from)) {
+            resync_own_life(life, made, applied, "a record of its death's span names another own body");
+            return;
+        }
+        if (extended_from != 0) {
+            ++s.own_deaths_moved_;
+            ++s.own_pairs_moved_;
+        }
         if (!made) {
             ++s.own_births_removed_;
             if (life.what == own_life::kind::birth) life.retired = true;   // a beam's stamp still takes the old body out

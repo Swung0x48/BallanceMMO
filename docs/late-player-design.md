@@ -2651,6 +2651,151 @@ The mirror is required, even though a dead ball is below the level and
 touches nothing. The body set shapes IVP's overlap tree, and the arena runs
 showed that tree's identity matters for bit-exactness.
 
+*As built (step ODM, FULL, 2026-11-01): the Unphysicalize side (plan step
+22), in the shared core (both hosts; active where own deaths move:
+`own_deaths_move()` = own echoes on, `own_births_move()` and
+`own_body_in_replay` - the headless client and the retail core host).*
+A MOVED echo of an own Unphysicalize stamped D (applied D') goes to
+`move_own_death` (client_core_lifecycle.cpp, "own deaths moved"):
+
+- **The record.** `own_deaths_` (gap L's L3 record) gains `moved`,
+  `applied` and `extended`; `own_death_end` is where the server ended the
+  body. **Adapted:** the design has the server echo a death the respawn
+  overtook as SUPERSEDED; no server path does - `lifecycle_acceptance`
+  supersedes births only, and a Physicalize that finds the player's body
+  alive replaces it (physics_world::apply_event, step HLX) while the
+  runner's guard (`lifecycle_unphysicalize_superseded`) then drops the late
+  Unphysicalize unechoed. So the owner derives it: the end is the earliest
+  of D' and the applied tick of every own birth stamped at or after D (an
+  unanswered one counts at its stamp). Branch (2) is this rule; branch (1)
+  is the case with no such birth before D'; a same-origin birth applied at
+  the stamp (a pair whose Physicalize was on time) leaves nothing to move
+  (`odm=` kept).
+- **The records.** `rollback_engine::extend_life` (rollback.hpp, beside
+  `move_birth`, its mirror) names the old body again in the records of
+  [D, end): the own entity, `own_polls` of the record of D - 1, the old
+  lifetime's generation, and the own input from `own_inputs_` where a
+  record has none. The replay then feeds and re-captures the revived body,
+  and `revive_ended_lives` finds the life's end at `end` (the generation
+  change), so a later rewind anchored inside the span revives it there
+  too. A record in the span that names another own entity refuses
+  (resync). Not an engine change (no IVP or physics_RT source).
+- **The correction.** The anchor (the old end - 1, first D - 1) joins the
+  frame's lifecycle batch (`join_own_correction`; LBD (d)): the restore's
+  `reconcile_own_lives` revives the life at the record of D - 1 (make_own
+  with `ball_recipe_of`'s recipe - **adapted:** not the `own_life_` birth
+  record; the revive path EL8 built already takes the ball table's), and
+  the replay removes it at `end` with the matrix of the live death
+  (`own_due::moved`: `apply_moved_own_deaths` runs it at our place among
+  the tick's body changes, before that tick's own lives - the server's
+  order, U before P). `reconcile_own_lives` reads the end, and for a moved
+  death takes a same-name birth applied AT the end (the respawn that
+  replaced it, or the pair's own birth, also a moved one: taken out and
+  made again by `apply_own_lives` at its applied tick, not queued twice;
+  one `move_own_birth` took out before the rewind is answered remade at
+  its applied tick, so the restore's destroy loop does not take the
+  revived old body of the same name out). A same-name birth's remake at
+  the end is current although the record of end - 1 carries the old
+  lifetime (the extension wrote it). An end a birth the server answered
+  gave, or a death of a beam's life gave, is written into the record
+  (final), so a record retiring first cannot widen it again. A pending
+  exact resync whose base is past the anchor covers the correction (as
+  `rewind_for_lifecycle`).
+- **The pair (3).** With own deaths moving, `process_own_echo` no longer
+  resyncs a pair (`own_moved_unphysicalize_` is kept for the switch-off
+  path). The U's echo comes first in practice (the pair is sent U, P):
+  its end counts the unanswered P at its stamp, so nothing moves until
+  the P's MOVED echo, whose `move_own_birth` re-extends the death
+  (`extend_moved_deaths` after `move_birth`, which has to run first: it
+  takes the new body's name out of the gap) - one rewind for the pair. A
+  P echo that came a frame earlier leaves the U a second rewind. A
+  **beam** has no own death record (its remake is muted and keeps the
+  generation): its `own_life` gains `death_applied` / `death_extended`,
+  `own_beam_end` = the earlier of the U's and the P's applied ticks,
+  capped by a death of that life after the stamp; the replay makes
+  nothing at the stamp, removes the old body at the end if the P comes
+  later, and the remake at the P's tick replaces it; `move_own_birth`
+  strips the records from the end, not from the stamp.
+- **SRT3's batch (LBD (d)).** `pre_step` keeps the batch open from the
+  drain over the own echoes; `process_own_echoes` runs it after the echo
+  loops (before `settle_replaced_rereports`, `expire_own_echoes` and the
+  forced moves, which ran after it before). `rewind_for_spawn_forgets`
+  flushes it first when an entry is taken (it rewinds), and
+  `drain_pending_deaths` when a death is due at the frame's tick (it
+  removes a mirror live, which the batch's restore would revive); with
+  nothing to do neither reads anything the replay changes. Every echo that
+  does not join flushes it first, except a plain ack with no set-aside
+  birth or re-report to answer (a record's state only), so every other
+  echo acts after the batch's rewind exactly as before. `move_own_birth`
+  is **kept apart** (it flushes the batch, then rewinds): its refusal is
+  `resync_own_life`'s, which puts the body set back first, and its live
+  take-out must follow the batch's replay - one rewind per correction, in
+  the old order. The wire check (core_ref_s14: 45 journals IDENTICAL, 44
+  send traces SAME) shows the move changes no capture.
+- Past the reach, outside the history, no death logged at the stamp, an
+  end after the live tick or a conflicting record: the resync
+  (`odm=` resynced). Own echoes off or no rollback: logged as before.
+- Counters: `odm=deaths_moved/pairs_moved/kept/resynced` on the status
+  line after `ownlife=`. Test tool: the hold's `pair:N:MS`
+  (session/event_hold.hpp; headless `--hold-event`, retail `session
+  hold-event`) holds the N-th own Unphysicalize and the same-stamp
+  Physicalize after it, released together, U first.
+- Checks (quick tier): x64 BUILD-OK, x86 CLIENT-BUILD-OK, GCC 33/33, unit
+  tests 767/767 (SessionClientCoreOwnDeaths: lone, superseded, nothing to
+  move, the pair in both orders, the same-name pair in both orders, the
+  beam pair, a beam capped by its death, past the reach / no record / own
+  echoes off;
+  EventHold.HoldsAPairTogether; the old PairResync stays as the
+  switch-off path). Wire check rEVI -> rODM over core_ref_s14
+  (`--accept-protocol 24`), before and after the review fix-up: ALL SAME
+  (45 journals IDENTICAL, 44 send traces SAME); no capture has a moved own
+  death (odm=0/0/0/0 in all 503 status lines). Live (arena, 4 clients, 50 ms,
+  snapshots off): `odm/lone1` (client 2 `--hold-event
+  unphysicalize:1:300`): D 2284 -> D' 2304, rewound to 2283 in the
+  frame's batch, revived until 2304, no resync, the owner's own ball
+  0.0000 m in every compared phase and after D' + 48, server journal
+  4121/4121. `odm/pair1` (client 2 `--beam 74 4 43 600 --hold-event
+  pair:1:300`): the beam landed in the arena's death zone and died 2 ticks
+  after its stamp, so the server superseded the held P by that death - no
+  moved pair, but it found the cap of a beam's end (the end ran to the
+  U's 620, past the death at 603, before the fix; unit-tested since);
+  own 0.0000 m from the correction on, no resync, server 2797/2797. The
+  client-journal SimTool replay of lone1 (chosen over a new forced SimTool
+  arm): 22/22 checkpoints; a client journal carries no TICK hashes.
+- Review fix-up: (1) a moved own death alone at its tick goes at our join
+  rank among the tick's remote body changes (own_lives_due counts it; it
+  fell through to apply_own_due, after every remote change, before);
+  (2) an end a birth of ours gave a moved death is frozen into the
+  death's record also when that birth is acked without a move
+  (freeze_moved_death_ends, run there and by extend_moved_deaths: such a
+  birth never reached the freeze, so once its record went - a retired
+  record is erased at once - the end widened back to D'); (3) move_own_death refuses (the end after
+  the live tick, past the reach) before it changes any record; (4) a unit
+  test drives the join into a batch a late remote event left pending
+  (one rewind, `life_events_coalesced_` 1); (5) `pair:N:drop` is refused
+  (it dropped the U and sent the P). Unit tests SessionClientCoreOwnDeaths
+  MovedDeathAloneAtItsTickGoesAtOurRank, EndFromABirthSurvivesTheBirthsRecord,
+  MovedDeathJoinsTheFramesBatch. Gate rerun: x64 BUILD-OK, unit tests
+  770/770, x86 CLIENT-BUILD-OK, GCC 33/33, wire check rEVI -> rODM ALL
+  SAME (45 journals IDENTICAL, 44 send traces SAME); no live rerun (the
+  quick tier's two live runs were spent; the fix-up acts on moved own
+  deaths only, which no capture has).
+- Evidence limits: in lone1 D..D' (2284-2304) lies inside the own ball's
+  airship span (2068-2481, never compared, step F0) and the client
+  journal's rows there are the live, pre-correction ones, so the revived
+  span itself is not measured: the evidence is no resync, the server
+  journal 4121/4121 and the owner 0.0000 m from 2482 on. No later rewind
+  was anchored inside the span (the re-captured generations of a second
+  correction are unit-reasoned only).
+- Deferred (the quick tier's two live runs): a true moved pair live (a
+  beam to a safe spot with `pair:1:300`), a same-name pair live, a later
+  rewind anchored inside a moved death's span, the superseded case live
+  (it needs a hold longer than the respawn delay, inside the reach), RTR's
+  E-core L11 ctl retail recipe and R6H's retail `session hold-event
+  unphysicalize:N:300` (and `pair:N:MS`) on one copy, FINAL rows bit-equal.
+  For SRTJ's T4 note: a moved own pair handled by a rewind is no longer a
+  resync but still a visible own-ball jump of T' - T ticks.
+
 **An own Sector moved** T → T' stamps the union at T' and rewinds to T-1. The
 replay re-issues the activation (the machinery from
 docs/mechanism-phase-at-sector-activation.md and the 2026-10-22 solo results),

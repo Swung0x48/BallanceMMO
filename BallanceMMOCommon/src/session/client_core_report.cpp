@@ -270,7 +270,7 @@ namespace bmmo::session {
             static_cast<unsigned long long>(rs.sparse_unanchored),
             static_cast<unsigned long long>(rs.sparse_verified), static_cast<unsigned long long>(rs.sparse_verify_mismatches),
             static_cast<unsigned long long>(rs.sparse_verify_float), static_cast<unsigned long long>(rs.sparse_verify_stale));
-        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu piggy=%llu/%llu/%llu/%zu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu overtaken=%llu superseded=%llu/%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
+        return textf("status: phase=%d session=%u tick=%u assigned=%d held=%d frames=%lld inputs=%llu events=%llu/%llu/%llu piggy=%llu/%llu/%llu/%zu echo=%llu/%llu/%llu/%llu/%llu ownlife=%llu/%llu/%llu/%llu/%llu odm=%llu/%llu/%llu/%llu overtaken=%llu superseded=%llu/%llu remake=%llu/%llu mlives=%llu/%llu/%llu/%llu/%llu olives=%llu/%llu/%llu/%llu/%llu snapshots=%llu/%llu/%llu "
                      "life=%llu/%llu inrew=%llu/%llu bodiless=%llu/%llu forced=%llu/%llu own_phys=%d remotes=%zu remote_inputs=%llu relay=%llu/%llu/%llu/%llu/%llu lag=%u/%u subst=%llu/%llu/%llu/%llu/%llu/%llu subst_skip=%llu/%llu/%llu subst_missed=%llu subst_coalesce=%llu/%llu/%llu/%llu acked=%u held_total=%u remote_writes=%llu remote_corr=%llu/%llu/%llu/%llu mechanisms=%zu/%zu mech_blend=%llu mech_hard=%llu mech_max_err=%.4f amend_failures=%llu rebases=%d resyncs=%llu/%llu "
                      "lead_adj=%llu lead_offset=%d slew=%d lead_forced=%llu lead_skip=%llu/%llu/%llu "
                      "rollback: snaps=%llu ok=%llu mism=%llu rb=%llu resim=%llu unmatched=%llu unmatched_run=%d/%llu far=%llu frozen=%llu globals=%llu/%llu/%llu/%llu/%llu imp=%llu ct=%llu/%llu sv=%llu/%llu/%llu births=%llu/%llu/%llu+%llu/%llu/%llu/%llu parked=%llu missing=%llu lives=%llu/%llu/%llu/%llu/%llu/%llu deferred=%llu activations=%llu scr=%llu/%llu/%llu/%llu/%llu t_rest=%.0f t_rep=%.0f t_max=%.0f t_cap=%.0f/%.0f max_err=%.4f last=%s "
@@ -305,6 +305,14 @@ namespace bmmo::session {
                      static_cast<unsigned long long>(s.own_births_moved_), static_cast<unsigned long long>(s.own_births_removed_),
                      static_cast<unsigned long long>(s.own_moves_resynced_), static_cast<unsigned long long>(s.own_remakes_),
                      static_cast<unsigned long long>(s.own_moves_other_),
+                     // odm=deaths_moved/pairs_moved/kept/resynced (FULL step ODM,
+                     // plan step 22): own deaths the server applied late moved
+                     // inside the history, of them pairs (a beam, the same
+                     // origin's birth moved too), moved Unphysicalize echoes with
+                     // nothing to move, and those resynced instead.
+                     static_cast<unsigned long long>(s.own_deaths_moved_), static_cast<unsigned long long>(s.own_pairs_moved_),
+                     static_cast<unsigned long long>(s.own_deaths_kept_),
+                     static_cast<unsigned long long>(s.own_death_moves_resynced_),
                      // overtaken: older remote births relayed after their death
                      // and put back in front of it (dropped or re-ordered).
                      static_cast<unsigned long long>(s.births_overtaken_),

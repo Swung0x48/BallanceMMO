@@ -47,11 +47,16 @@ namespace bmmo::session {
         uint32_t nth = 0;
         int ms = 0;
         bool drop = false;
+        // FULL step ODM: `pair` - the N-th own Unphysicalize and the
+        // Physicalize of the same stamp that follows it (a beam, a trafo, a
+        // respawn's pair) held together and released together, U first.
+        bool pair = false;
         bool armed() const { return type >= 0; }
     };
 
     // TYPE:N:MS or TYPE:N:drop, TYPE a name (physicalize, unphysicalize,
-    // sector, finish, bodyrevived, trafo) or its number.  (The headless
+    // sector, finish, bodyrevived, trafo) or its number, or `pair` (FULL
+    // step ODM: the N-th Unphysicalize with its same-stamp Physicalize).  (The headless
     // client's parse_hold_event, moved here at R6H; `off` is the retail
     // verb's and is not a spec.)
     inline bool parse_event_hold(const std::string& spec, event_hold_spec& out) {
@@ -61,6 +66,8 @@ namespace bmmo::session {
         std::string type = spec.substr(0, a);
         for (char& c: type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         out.type = -1;
+        out.pair = type == "pair";
+        if (out.pair) type = event_type_name(static_cast<int>(event_type::Unphysicalize));
         for (int t = 0; t <= 5; ++t)   // 5: trafo (step T3)
             if (type == event_type_name(t) || type == std::to_string(t)) out.type = t;
         if (out.type < 0) return false;
@@ -68,6 +75,9 @@ namespace bmmo::session {
         const std::string what = spec.substr(b + 1);
         out.drop = what == "drop";
         out.ms = out.drop ? 0 : std::atoi(what.c_str());
+        // A pair is held for a time only: `pair:N:drop` would drop the U
+        // and send its P (review finding 5), so it is refused.
+        if (out.pair && out.drop) return false;
         return out.drop || out.ms > 0;
     }
 
@@ -84,10 +94,12 @@ namespace bmmo::session {
         void arm(const event_hold_spec& spec) {
             spec_ = spec;
             seen_ = 0;
+            pair_open_ = false;
         }
         void disarm() {
             spec_ = event_hold_spec{};
             seen_ = 0;
+            pair_open_ = false;
         }
         // The count of the held type restarts (the headless anchor; the
         // retail session's start).
@@ -104,6 +116,20 @@ namespace bmmo::session {
         // it.  `now` is called only when the event is held.
         template <class Now>
         event_send_verdict hold(session_client_core& core, const bmmo::session_event_msg& event, Now&& now) {
+            // FULL step ODM: the held pair's Physicalize (same stamp), held
+            // with it and released at its time, after it.
+            if (pair_open_ && event.type == event_type::Physicalize) {
+                pair_open_ = false;
+                if (event.tick == pair_stamp_) {
+                    held_.push_back(held_event{event.raw.str(), static_cast<int>(event.type), event.tick,
+                                               core.current_tick(), pair_release_});
+                    log(format("hold-event: own %s stamped tick %u held at tick %u with its pair's unphysicalize",
+                               event_type_name(static_cast<int>(event.type)), event.tick, core.current_tick()));
+                    core.journal().note("hold-event: held physicalize stamped " + std::to_string(event.tick)
+                                        + " with its pair");
+                    return event_send_verdict::hold;
+                }
+            }
             if (spec_.type < 0 || static_cast<int>(event.type) != spec_.type) return event_send_verdict::send;
             if (++seen_ != spec_.nth) return event_send_verdict::send;
             if (spec_.drop) {
@@ -116,6 +142,11 @@ namespace bmmo::session {
             }
             held_.push_back(held_event{event.raw.str(), spec_.type, event.tick, core.current_tick(),
                                        now() + std::chrono::milliseconds(spec_.ms)});
+            if (spec_.pair) {
+                pair_open_ = true;
+                pair_stamp_ = event.tick;
+                pair_release_ = held_.back().release;
+            }
             log(format("hold-event: own %s #%u stamped tick %u held at tick %u for %d ms",
                        event_type_name(spec_.type), seen_, event.tick, core.current_tick(), spec_.ms));
             core.journal().note("hold-event: held " + std::string(event_type_name(spec_.type)) + " stamped "
@@ -186,6 +217,9 @@ namespace bmmo::session {
 
         event_hold_spec spec_;
         uint32_t seen_ = 0;
+        bool pair_open_ = false;            // FULL step ODM: the pair's Physicalize still to come
+        uint32_t pair_stamp_ = 0;
+        clock::time_point pair_release_{};
         std::vector<held_event> held_;
         uint64_t released_ = 0, dropped_ = 0;
         log_sink log_;

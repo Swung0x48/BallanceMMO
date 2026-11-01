@@ -552,20 +552,32 @@ namespace bmmo::session {
         // events share one rewind (rewind_for_lifecycle joins them,
         // flush_life_rewinds runs it right after the drain - where the last
         // of their rewinds ran before, ahead of everything below).
+        // FULL step ODM (late-player design 6.2.3 (d)): the batch stays open
+        // over the own echoes, where a moved own death joins it, and runs
+        // after them (process_own_echoes).  The two steps between run after
+        // it as before: each flushes it first when it has anything to do
+        // (rewind_for_spawn_forgets rewinds; drain_pending_deaths removes a
+        // mirror live, which the batch's restore would revive) and reads
+        // nothing the batch's replay changes when it has not.
         s.life_batch_.collecting = true;
         drain_due_events(frame_tick);
         s.life_batch_.collecting = false;
-        flush_life_rewinds();
         // FULL step GHF: a leaver's order another life re-took before the
         // removal came, rewound to the removal's tick (like a late death).
+        if (std::any_of(s.spawn_forgets_.begin(), s.spawn_forgets_.end(), [](const auto& f) { return f.taken; }))
+            flush_life_rewinds();
         rewind_for_spawn_forgets();
         // Step A3: a mirror an exact resync made from its row at S whose
         // death the old numbering applied past the re-step (Delta > 0) dies
         // again at its tick here, live (the replay drains the others).
+        if (std::any_of(s.pending_deaths_.begin(), s.pending_deaths_.end(),
+                        [frame_tick](const auto& d) { return d.tick == frame_tick; }))
+            flush_life_rewinds();
         drain_pending_deaths(frame_tick);
         // Our own events' echoes: a birth the server made later or never
         // is moved inside the history now, with the rewinds below still
-        // to come in this frame.
+        // to come in this frame.  The batch's rewind runs in it, after the
+        // echoes (step ODM).
         process_own_echoes();
         // The sector resets stay neutralized (the level-reset one once the
         // sector is up: this client has resolved a mechanism of its own).

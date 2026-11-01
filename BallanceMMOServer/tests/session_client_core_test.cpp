@@ -133,6 +133,8 @@ namespace bmmo::session {
         BMMO_CORE_STEP(forget_spawn_groups)
         BMMO_CORE_STEP(rewind_for_spawn_forgets)
         BMMO_CORE_STEP(spawn_forgets_after_resync)
+        BMMO_CORE_STEP(own_death_end)         // FULL step ODM
+        BMMO_CORE_STEP(join_own_correction)   // FULL step ODM
 #undef BMMO_CORE_STEP
         static bmmo::session::input_frame live_drive(const client_core_state::remote_ball& remote, uint32_t tick) {
             return session_client_core::live_drive(remote, tick);
@@ -4990,10 +4992,13 @@ namespace {
     }
 
     // Design 5.1 "Own echoes": an own pair the server applied late as a
-    // whole, with own body control: the birth's MOVED echo after its
-    // Unphysicalize's, and the Unphysicalize's after a birth already moved
-    // inside the history.  Either way a resync (the server's old body lived
-    // on until T'), the body left as it is (the server made it too).
+    // whole, with own body control but no own_body_in_replay (FULL step ODM:
+    // own deaths do not move without it, own_deaths_move): the birth's MOVED
+    // echo after its Unphysicalize's, and the Unphysicalize's after a birth
+    // already moved inside the history.  Either way a resync (the server's
+    // old body lived on until T'), the body left as it is (the server made it
+    // too).  With own deaths moving the pair is one correction and no resync
+    // (SessionClientCoreOwnDeaths.PairMovedWithoutAResync).
     TEST(SessionClientCoreOwnLives, PairResync) {
         for (const bool birth_first: {false, true}) {
             SCOPED_TRACE(birth_first ? "the birth moved first" : "the Unphysicalize first");
@@ -5031,6 +5036,526 @@ namespace {
             EXPECT_TRUE(state_of(core).own_physicalized_);
             EXPECT_EQ(state_of(core).own_moved_unphysicalize_, std::vector<uint32_t>{122});
         }
+    }
+
+    // ---- FULL step ODM (plan step 22; late-player design 3.3 "The
+    // Unphysicalize side"): an own death the server applied late, moved
+    // inside the history by the frame's lifecycle batch.
+
+    session_capabilities odm_caps() {
+        session_capabilities caps;
+        caps.own_body_control = true;
+        caps.own_life_take_out = true;
+        caps.own_body_in_replay = true;
+        return caps;
+    }
+
+    // replay_platform with the core's restore_lives half bound, so a
+    // rewind's restore revives an own life ended in its window.
+    session_platform odm_platform(flow_fake& fake, session_client_core*& core) {
+        session_platform platform = fake.make_flow();
+        platform.bind_world = [&fake, &core](const bmmo::session::core_world_hooks& hooks) {
+            fake.calls.push_back("bind_world");
+            bmmo::session::rollback_world world;
+            world.get_body = [](const std::string&, bmmo_physics_body_state&) { return false; };
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.step = [&fake]() {
+                fake.calls.push_back("step");
+                return true;
+            };
+            world.pre_step = [&fake, &core](uint32_t tick) {
+                fake.calls.push_back("pre_step:" + std::to_string(tick));
+                if (core) steps{*core}.drain_pending_lives(tick);
+            };
+            world.restore_lives = hooks.restore_lives;
+            return world;
+        };
+        // own_body_in_replay needs the matrices (unlogged here: the death's
+        // matrix after frame D is at x = 31 for every entity).
+        platform.entity_matrix = [](const std::string&, float out[16]) {
+            const auto m = own_matrices::at(31.0f);
+            std::copy(m.begin(), m.end(), out);
+            return true;
+        };
+        platform.set_entity_matrix = [](const std::string&, const float*) { return true; };
+        return platform;
+    }
+
+    // Ball_Wood alive over 110..114 (generation 1) and dead from D = 115
+    // (generation 2), its death logged; the session at local tick 125.
+    void odm_setup(session_client_core& core, flow_fake& fake) {
+        run_to_tick_125(core, fake);
+        core.config.rollback = true;
+        auto& s = state_of(core);
+        s.own_ball_entities_ = {"Ball_Wood"};
+        s.own_body_entity_.clear();
+        s.generations_ = {{"Ball_Wood", 2}};
+        own_span(core, 110, 114, "Ball_Wood", true, 7.0, 1);
+        own_span(core, 115, 125, "Ball_Wood", false, 0.0, 2);
+        steps{core}.note_own_death("Ball_Wood", 115, 1);
+    }
+
+    bmmo::session_event_msg own_death_echo(uint32_t applied, uint32_t origin) {
+        auto msg = event_message(3, bmmo::session::event_type::Unphysicalize, applied, origin);
+        msg.state = applied == origin ? 0 : bmmo::session::EVENT_STATE_MOVED;
+        return msg;
+    }
+
+    // Branch (1), lone: D = 115 echoed MOVED to 118, no birth of ours after
+    // it.  No resync: the records of 115..117 name the old life again
+    // (generation 1), one rewind to 114 revives it there (make_own at the
+    // anchor) and the replay removes it at 118 with the death's matrix.
+    TEST(SessionClientCoreOwnDeaths, LoneMovedDeathRewindsAndEndsAtTheAppliedTick) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_client_core core(odm_platform(fake, bound), odm_caps());
+        bound = &core;
+        odm_setup(core, fake);
+        auto& s = state_of(core);
+        core.on_session_event(own_death_echo(118, 115));
+        const size_t from = fake.calls.size();
+        steps{core}.process_own_echoes();
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(count_prefix(calls, "make_own:Ball_Wood:" + s.own_group_ + ":114"), 1u) << "revived at the anchor";
+        const std::vector<std::string> death = {"pre_step:118", "mute_event_log:on", "unmake_own:Ball_Wood:118:death",
+                                                "mute_event_log:off"};
+        EXPECT_NE(std::search(calls.begin(), calls.end(), death.begin(), death.end()), calls.end())
+            << "the death replayed at the applied tick";
+        EXPECT_EQ(count_prefix(calls, "unmake_own:"), 1u);
+        EXPECT_EQ(count_prefix(calls, "send:"), 0u) << "no resync";
+        EXPECT_EQ(s.own_deaths_moved_, 1u);
+        EXPECT_EQ(s.own_pairs_moved_, 0u);
+        EXPECT_EQ(s.own_death_moves_resynced_, 0u);
+        EXPECT_EQ(s.life_rewinds_, 1u);
+        ASSERT_EQ(s.own_deaths_.size(), 1u);
+        EXPECT_TRUE(s.own_deaths_[0].moved);
+        EXPECT_EQ(s.own_deaths_[0].applied, 118u);
+        EXPECT_EQ(s.own_deaths_[0].extended, 118u);
+        for (uint32_t t = 115; t <= 117; ++t) {
+            uint32_t generation = 0;
+            EXPECT_EQ(s.rollback_.recorded_own_entity(t), "Ball_Wood") << t;
+            EXPECT_TRUE(s.rollback_.generation_at("Ball_Wood", t, generation));
+            EXPECT_EQ(generation, 1u) << "the old life's, so a later rewind finds its end at 118: " << t;
+        }
+        EXPECT_EQ(s.rollback_.recorded_own_entity(118), "");
+        uint32_t generation = 0;
+        EXPECT_TRUE(s.rollback_.generation_at("Ball_Wood", 118, generation));
+        EXPECT_EQ(generation, 2u);
+        EXPECT_TRUE(s.own_due_.empty());
+
+        // (A later rewind anchored inside the span finds the life alive
+        // there from the replay's records; this fixture's world has no
+        // bodies to re-capture, so the live arms check it.)
+    }
+
+    // Branch (2), superseded: a respawn of ours stamped 117 the server
+    // applied on time, before the death's applied tick 120 (its Physicalize
+    // replaced the body there; the runner's guard dropped the late
+    // Unphysicalize).  The death moves to 117, not 120: at 117 the death
+    // comes first and the respawn is made again after it.
+    TEST(SessionClientCoreOwnDeaths, SupersededDeathEndsAtTheReplacingBirth) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_client_core core(odm_platform(fake, bound), odm_caps());
+        bound = &core;
+        odm_setup(core, fake);
+        auto& s = state_of(core);
+        own_span(core, 117, 125, "Ball_Wood", true, 40.0, 3);
+        s.generations_ = {{"Ball_Wood", 3}};
+        s.own_body_entity_ = "Ball_Wood";
+        fake.bodies_there = {"Ball_Wood"};
+        auto respawn = own_birth(117, 3);
+        respawn.state = client_core_state::own_life::verdict::acked;
+        respawn.spawn = false;
+        s.own_life_ = {respawn};
+        core.on_session_event(own_death_echo(120, 115));
+        const size_t from = fake.calls.size();
+        steps{core}.process_own_echoes();
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(s.own_deaths_moved_, 1u);
+        EXPECT_EQ(count_prefix(calls, "send:"), 0u) << "no resync";
+        ASSERT_EQ(s.own_deaths_.size(), 1u);
+        EXPECT_EQ(steps{core}.own_death_end(s.own_deaths_[0]), 117u);
+        EXPECT_EQ(s.own_deaths_[0].extended, 117u);
+        EXPECT_EQ(count_prefix(calls, "make_own:Ball_Wood:" + s.own_group_ + ":114"), 1u) << "the old life revived";
+        const std::vector<std::string> order = {"pre_step:117", "mute_event_log:on", "unmake_own:Ball_Wood:117:death",
+                                                "mute_event_log:off", "mute_event_log:on", "make_own:Ball_Wood:P#2:117"};
+        EXPECT_NE(std::search(calls.begin(), calls.end(), order.begin(), order.end()), calls.end())
+            << "at 117 the death, then the respawn made again";
+    }
+
+    // A moved Unphysicalize with nothing to move: the same origin's birth
+    // (a pair) applied at the stamp - the server replaced the body there -
+    // or still unanswered (counted at its stamp until its echo).
+    TEST(SessionClientCoreOwnDeaths, NothingToMoveWhenTheBodyEndedAtItsStamp) {
+        for (const bool answered: {true, false}) {
+            SCOPED_TRACE(answered ? "the pair's birth acked" : "the pair's birth unanswered");
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_client_core core(odm_platform(fake, bound), odm_caps());
+            bound = &core;
+            odm_setup(core, fake);
+            auto& s = state_of(core);
+            auto birth = own_birth(115, 3);
+            if (answered) birth.state = client_core_state::own_life::verdict::acked;
+            s.own_life_ = {birth};
+            core.on_session_event(own_death_echo(118, 115));
+            const size_t from = fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "bind_world"), 0u) << "no rewind";
+            EXPECT_EQ(count_prefix(calls, "send:"), 0u) << "no resync";
+            EXPECT_EQ(s.own_deaths_kept_, 1u);
+            EXPECT_EQ(s.own_deaths_moved_, 0u);
+            EXPECT_EQ(count_prefix(calls, answered ? "log:0:own death moved 115 -> 118 at local tick 125: a birth of ours"
+                                                   : "log:0:own death moved 115 -> 118 at local tick 125: its pair's birth"),
+                      1u);
+        }
+    }
+
+    // Branch (3), a pair (a trafo's old ball and new one, one origin): the
+    // birth's MOVED echo came first and was moved inside the history; the
+    // Unphysicalize's echo now moves the old body's end to 118 too - one
+    // correction, no resync (the resync of "an own pair, plan step 22" is
+    // gone).  The other order: the Unphysicalize first (nothing to move,
+    // its birth unanswered), then the birth's MOVED echo, whose own rewind
+    // carries the death (extend_moved_deaths).
+    TEST(SessionClientCoreOwnDeaths, PairMovedWithoutAResync) {
+        for (const bool birth_first: {true, false}) {
+            SCOPED_TRACE(birth_first ? "the birth moved first" : "the Unphysicalize first");
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_client_core core(odm_platform(fake, bound), odm_caps());
+            bound = &core;
+            odm_setup(core, fake);
+            auto& s = state_of(core);
+            auto paper = own_birth(115, 1);
+            paper.entity = "Ball_Paper";
+            s.generations_["Ball_Paper"] = 1;
+            // Live, the new ball is the own entity from 115 (generation 1).
+            own_span(core, 115, 125, "Ball_Paper", true, 5.0, 1);
+            if (birth_first) {
+                paper.state = client_core_state::own_life::verdict::moved;
+                paper.applied = 118;
+                s.own_life_ = {paper};
+                s.rollback_.move_birth("Ball_Paper", 1, 115, 118, true);   // as move_own_birth left them
+                core.on_session_event(own_death_echo(118, 115));
+            } else {
+                s.own_life_ = {paper};
+                fake.bodies_there = {"Ball_Paper"};
+                core.on_session_event(own_death_echo(118, 115));
+                auto echo = own_echo(118, 115, bmmo::session::EVENT_STATE_MOVED);
+                core.on_session_event(std::move(echo));
+            }
+            const size_t from = fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "send:"), 0u) << "no resync";
+            EXPECT_EQ(s.own_moves_resynced_, 0u);
+            EXPECT_EQ(s.own_death_moves_resynced_, 0u);
+            EXPECT_EQ(s.own_deaths_moved_, 1u);
+            EXPECT_EQ(s.own_pairs_moved_, 1u);
+            EXPECT_EQ(s.life_rewinds_, 1u) << "one correction";
+            ASSERT_EQ(s.own_deaths_.size(), 1u);
+            EXPECT_EQ(s.own_deaths_[0].extended, 118u);
+            EXPECT_EQ(count_prefix(calls, "make_own:Ball_Wood:" + s.own_group_ + ":114"), 1u) << "the old ball revived";
+            const std::vector<std::string> order = {"pre_step:118", "mute_event_log:on", "unmake_own:Ball_Wood:118:death",
+                                                    "mute_event_log:off", "mute_event_log:on", "make_own:Ball_Paper:P#2:118"};
+            EXPECT_NE(std::search(calls.begin(), calls.end(), order.begin(), order.end()), calls.end())
+                << "at 118 the old ball's death, then the new ball: " << ::testing::PrintToString(calls);
+        }
+    }
+
+    // Branch (3) with one name (a respawn's pair of the same ball type):
+    // the records of 115..117 carry the old life (generation 1) once the
+    // death is extended, so the new life's remake at 118 is made all the
+    // same (the record of 117 names the old generation), after the death,
+    // and the old body is revived once.
+    TEST(SessionClientCoreOwnDeaths, SameNamePairRemadeAfterTheDeath) {
+        for (const bool birth_first: {true, false}) {
+            SCOPED_TRACE(birth_first ? "the birth moved first" : "the Unphysicalize first");
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_client_core core(odm_platform(fake, bound), odm_caps());
+            bound = &core;
+            odm_setup(core, fake);
+            auto& s = state_of(core);
+            s.generations_ = {{"Ball_Wood", 3}};
+            own_span(core, 115, 125, "Ball_Wood", true, 5.0, 3);
+            auto respawn = own_birth(115, 3);
+            if (birth_first) {
+                respawn.state = client_core_state::own_life::verdict::moved;
+                respawn.applied = 118;
+                s.own_life_ = {respawn};
+                s.rollback_.move_birth("Ball_Wood", 3, 115, 118, true);   // as move_own_birth left them
+                fake.bodies_there = {"Ball_Wood"};   // made again live at 118
+                core.on_session_event(own_death_echo(118, 115));
+            } else {
+                s.own_life_ = {respawn};
+                fake.bodies_there = {"Ball_Wood"};
+                core.on_session_event(own_death_echo(118, 115));
+                core.on_session_event(own_echo(118, 115, bmmo::session::EVENT_STATE_MOVED));
+            }
+            const size_t from = fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "send:"), 0u) << "no resync";
+            EXPECT_EQ(s.own_deaths_moved_, 1u);
+            EXPECT_EQ(s.own_pairs_moved_, 1u);
+            EXPECT_EQ(s.life_rewinds_, 1u);
+            EXPECT_EQ(count_prefix(calls, "make_own:Ball_Wood:" + s.own_group_ + ":114"), 1u) << "revived once";
+            const std::vector<std::string> order = {"pre_step:118", "mute_event_log:on", "unmake_own:Ball_Wood:118:death",
+                                                    "mute_event_log:off", "mute_event_log:on", "make_own:Ball_Wood:P#2:118"};
+            EXPECT_NE(std::search(calls.begin(), calls.end(), order.begin(), order.end()), calls.end())
+                << "at 118 the old body's death, then the new life: " << ::testing::PrintToString(calls);
+        }
+    }
+
+    // A beam pair: the Physicalize moved to 118 first (the body made again
+    // there), then its Unphysicalize moved to 118 too: the old body lives
+    // over 115..117 (nothing at the stamp), the remake at 118 replaces it.
+    TEST(SessionClientCoreOwnDeaths, BeamPairKeepsTheOldBodyToItsEnd) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_client_core core(odm_platform(fake, bound), odm_caps());
+        bound = &core;
+        run_to_tick_125(core, fake);
+        core.config.rollback = true;
+        auto& s = state_of(core);
+        s.own_ball_entities_ = {"Ball_Wood"};
+        s.own_body_entity_ = "Ball_Wood";
+        s.generations_ = {{"Ball_Wood", 1}};
+        fake.bodies_there = {"Ball_Wood"};
+        own_span(core, 110, 125, "Ball_Wood", true, 7.0, 1);
+        auto beam = own_birth(115, 1);
+        beam.what = client_core_state::own_life::kind::beam;
+        beam.state = client_core_state::own_life::verdict::moved;
+        beam.applied = 118;
+        s.own_life_ = {beam};
+        // As move_own_birth left the records: the body out of 115..117.
+        s.rollback_.move_birth("Ball_Wood", 1, 115, 118, true);
+        EXPECT_EQ(s.rollback_.recorded_own_entity(116), "");
+        core.on_session_event(own_death_echo(118, 115));
+        const size_t from = fake.calls.size();
+        steps{core}.process_own_echoes();
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(count_prefix(calls, "send:"), 0u) << "no resync";
+        EXPECT_EQ(s.own_pairs_moved_, 1u);
+        EXPECT_EQ(s.life_rewinds_, 1u);
+        EXPECT_EQ(s.own_life_[0].death_applied, 118u);
+        EXPECT_EQ(s.own_life_[0].death_extended, 118u);
+        EXPECT_EQ(s.rollback_.recorded_own_entity(116), "Ball_Wood") << "the old body named again";
+        EXPECT_EQ(count_prefix(calls, "unmake_own:"), 0u) << "nothing at the stamp, no death between";
+        const std::vector<std::string> remake = {"pre_step:118", "mute_event_log:on", "make_own:Ball_Wood:P#2:118"};
+        EXPECT_NE(std::search(calls.begin(), calls.end(), remake.begin(), remake.end()), calls.end());
+        EXPECT_EQ(count_prefix(calls, "make_own:"), 1u);
+    }
+
+    // A beam whose Physicalize the server superseded (a death of that life
+    // stamped after it, 117, applied first) and whose Unphysicalize it
+    // moved to 120, past that death: the old body lives over 115..116 and
+    // ends at the death (measured on the arena, odm/pair1), not at 120 -
+    // the records name it to 117 only, the replay makes nothing at the
+    // stamp and removes it once, at 117.
+    TEST(SessionClientCoreOwnDeaths, BeamEndNeverPassesADeathOfItsLife) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_client_core core(odm_platform(fake, bound), odm_caps());
+        bound = &core;
+        run_to_tick_125(core, fake);
+        core.config.rollback = true;
+        auto& s = state_of(core);
+        s.own_ball_entities_ = {"Ball_Wood"};
+        s.own_body_entity_.clear();
+        s.generations_ = {{"Ball_Wood", 2}};
+        own_span(core, 110, 116, "Ball_Wood", true, 7.0, 1);
+        own_span(core, 117, 125, "Ball_Wood", false, 0.0, 2);
+        steps{core}.note_own_death("Ball_Wood", 117, 1);
+        auto beam = own_birth(115, 1);
+        beam.what = client_core_state::own_life::kind::beam;
+        beam.state = client_core_state::own_life::verdict::superseded;
+        beam.made = false;
+        s.own_life_ = {beam};
+        core.on_session_event(own_death_echo(120, 115));
+        const size_t from = fake.calls.size();
+        steps{core}.process_own_echoes();
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(count_prefix(calls, "send:"), 0u) << "no resync";
+        EXPECT_EQ(s.own_life_[0].death_extended, 117u) << "capped by the death";
+        EXPECT_EQ(s.rollback_.recorded_own_entity(116), "Ball_Wood");
+        EXPECT_EQ(count_prefix(calls, "unmake_own:"), 1u) << ::testing::PrintToString(calls);
+        EXPECT_EQ(count_prefix(calls, "unmake_own:Ball_Wood:117:death"), 1u);
+    }
+
+    // Past the reach / outside the history: the resync it always was; own
+    // echoes off: counted and logged as kept, nothing else.
+    TEST(SessionClientCoreOwnDeaths, PastTheReachResyncsAndEchoesOffKeep) {
+        {
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_client_core core(odm_platform(fake, bound), odm_caps());
+            bound = &core;
+            odm_setup(core, fake);
+            auto& s = state_of(core);
+            s.own_deaths_[0].tick = 60;   // a death whose anchor left the history
+            core.on_session_event(own_death_echo(64, 60));
+            const size_t from = fake.calls.size();
+            steps{core}.process_own_echoes();
+            const auto calls = since(fake.calls, from);
+            EXPECT_EQ(count_prefix(calls, "bind_world"), 0u);
+            EXPECT_EQ(count_prefix(calls, "log:0:own death moved 60 -> 64 at local tick 125: past the reach"), 1u);
+            EXPECT_EQ(count_prefix(calls, "send:0"), 1u) << "the resync";
+            EXPECT_EQ(s.own_death_moves_resynced_, 1u);
+            EXPECT_EQ(s.own_deaths_moved_, 0u);
+            // Review finding 3: refused before any record changed.
+            ASSERT_EQ(s.own_deaths_.size(), 1u);
+            EXPECT_FALSE(s.own_deaths_[0].moved);
+            EXPECT_EQ(s.own_deaths_[0].extended, 0u);
+        }
+        {
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_client_core core(odm_platform(fake, bound), odm_caps());
+            bound = &core;
+            odm_setup(core, fake);
+            auto& s = state_of(core);
+            s.own_deaths_.clear();
+            core.on_session_event(own_death_echo(118, 115));
+            const size_t from = fake.calls.size();
+            steps{core}.process_own_echoes();
+            EXPECT_EQ(count_prefix(since(fake.calls, from), "log:0:own death moved 115 -> 118 at local tick 125: no own "
+                                                            "death logged at its stamp, resync"),
+                      1u);
+            EXPECT_EQ(s.own_death_moves_resynced_, 1u);
+        }
+        {
+            flow_fake fake;
+            session_client_core* bound = nullptr;
+            session_client_core core(odm_platform(fake, bound), odm_caps());
+            bound = &core;
+            odm_setup(core, fake);
+            core.config.own_echoes = false;
+            auto& s = state_of(core);
+            core.on_session_event(own_death_echo(118, 115));
+            const size_t from = fake.calls.size();
+            steps{core}.process_own_echoes();
+            const std::vector<std::string> expected = {
+                "log:0:own unphysicalize stamped tick 115 echoed moved by the server (applied 118, state 01) at local tick "
+                "125; kept where we stamped it (only an own Physicalize is moved here)"};
+            EXPECT_EQ(since(fake.calls, from), expected);
+            EXPECT_EQ(s.own_echo_moved_, 1u);
+            EXPECT_FALSE(s.own_deaths_[0].moved);
+            EXPECT_EQ(s.own_deaths_moved_ + s.own_death_moves_resynced_ + s.own_deaths_kept_, 0u);
+        }
+    }
+
+    // Review finding 1: a moved own death alone at its tick (no own life
+    // due there) is applied at our join rank among the tick's remote body
+    // changes - after player 4's (rank 0), before player 6's (rank 3) -
+    // as the server and every mirror world apply it, not after them all.
+    TEST(SessionClientCoreOwnDeaths, MovedDeathAloneAtItsTickGoesAtOurRank) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_client_core core(odm_platform(fake, bound), odm_caps());
+        bound = &core;
+        run_to_tick_125_four(core, fake);
+        auto& s = state_of(core);
+        ASSERT_LT(steps{core}.join_rank(4, 118), steps{core}.join_rank(s.own_id_, 118));
+        ASSERT_LT(steps{core}.join_rank(s.own_id_, 118), steps{core}.join_rank(6, 118));
+        client_core_state::own_due death;
+        death.tick = 118;
+        death.death = true;
+        death.moved = true;
+        death.entity = "Ball_Wood";
+        s.own_due_.push_back(death);
+        auto birth = [](uint32_t player, uint32_t tick) {
+            client_core_state::pending_birth b;
+            b.player = player; b.tick = b.origin = tick;
+            return b;
+        };
+        s.pending_births_ = {birth(6, 118), birth(4, 118)};
+        const size_t from = fake.calls.size();
+        steps{core}.drain_pending_lives(118);
+        const auto calls = since(fake.calls, from);
+        const auto at = [&calls](const std::string& prefix) {
+            for (size_t i = 0; i < calls.size(); ++i)
+                if (calls[i].rfind(prefix, 0) == 0) return static_cast<long>(i);
+            return -1L;
+        };
+        const long four = at("make_mirror:Ball_0_BMMO_4"), own = at("unmake_own:Ball_Wood:118:death"),
+                   six = at("make_mirror:Ball_0_BMMO_6");
+        ASSERT_GE(four, 0);
+        ASSERT_GE(own, 0);
+        ASSERT_GE(six, 0);
+        EXPECT_LT(four, own) << "player 4 (rank 0) first";
+        EXPECT_LT(own, six) << "our death at our rank, before player 6 (rank 3)";
+        EXPECT_EQ(count_prefix(calls, "unmake_own:"), 1u);
+        EXPECT_TRUE(s.own_due_.empty());
+    }
+
+    // Review finding 2: the end a birth of ours gave a moved death (the
+    // respawn stamped 117, unanswered when the death's MOVED echo to 120
+    // came) stays 117 after the birth is acked without a move and its
+    // record goes: frozen into the death's record, never widened to 120.
+    TEST(SessionClientCoreOwnDeaths, EndFromABirthSurvivesTheBirthsRecord) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_client_core core(odm_platform(fake, bound), odm_caps());
+        bound = &core;
+        odm_setup(core, fake);
+        auto& s = state_of(core);
+        own_span(core, 117, 125, "Ball_Wood", true, 40.0, 3);
+        s.generations_ = {{"Ball_Wood", 3}};
+        s.own_body_entity_ = "Ball_Wood";
+        fake.bodies_there = {"Ball_Wood"};
+        auto respawn = own_birth(117, 3);
+        respawn.spawn = false;   // unanswered (sent)
+        s.own_life_ = {respawn};
+        core.on_session_event(own_death_echo(120, 115));
+        steps{core}.process_own_echoes();
+        ASSERT_EQ(s.own_deaths_.size(), 1u);
+        EXPECT_EQ(s.own_deaths_moved_, 1u);
+        EXPECT_EQ(steps{core}.own_death_end(s.own_deaths_[0]), 117u) << "counted at its stamp";
+        EXPECT_EQ(s.own_deaths_[0].applied, 120u) << "not final while the birth is unanswered";
+        core.on_session_event(own_echo(117, 117, 0));   // acked, not moved
+        steps{core}.process_own_echoes();
+        ASSERT_EQ(s.own_life_.size(), 1u);
+        EXPECT_EQ(s.own_life_[0].state, client_core_state::own_life::verdict::acked);
+        s.own_life_[0].retired = true;   // e.g. a trafo after it
+        steps{core}.retire_own_lives();
+        EXPECT_TRUE(s.own_life_.empty());
+        ASSERT_EQ(s.own_deaths_.size(), 1u);
+        EXPECT_EQ(s.own_deaths_[0].applied, 117u);
+        EXPECT_EQ(steps{core}.own_death_end(s.own_deaths_[0]), 117u) << "not widened back to 120";
+    }
+
+    // Review finding 4: a moved own death joins the frame's lifecycle batch
+    // a late remote event opened in the drain (pre_step leaves it pending
+    // over the own echoes): one restore to the lower anchor, one replay.
+    TEST(SessionClientCoreOwnDeaths, MovedDeathJoinsTheFramesBatch) {
+        flow_fake fake;
+        session_client_core* bound = nullptr;
+        session_client_core core(odm_platform(fake, bound), odm_caps());
+        bound = &core;
+        odm_setup(core, fake);
+        auto& s = state_of(core);
+        // As rewind_for_lifecycle leaves it after the drain: a late remote
+        // event's rewind to 116, pending.
+        s.life_batch_.pending = true;
+        s.life_batch_.anchor = 116;
+        s.life_batch_.events = 1;
+        s.life_batch_.reason = "a late remote event";
+        core.on_session_event(own_death_echo(118, 115));
+        const size_t from = fake.calls.size();
+        steps{core}.process_own_echoes();
+        const auto calls = since(fake.calls, from);
+        EXPECT_EQ(s.life_rewinds_, 1u) << "one rewind for both";
+        EXPECT_EQ(s.life_events_coalesced_, 1u);
+        EXPECT_EQ(count_prefix(calls, "log:0:lifecycle: 2 late events taken by one rewind to tick 114"), 1u);
+        EXPECT_EQ(count_prefix(calls, "make_own:Ball_Wood:" + s.own_group_ + ":114"), 1u) << "revived at the lower anchor";
+        EXPECT_EQ(count_prefix(calls, "unmake_own:Ball_Wood:118:death"), 1u);
+        EXPECT_EQ(s.own_deaths_moved_, 1u);
+        EXPECT_FALSE(s.life_batch_.pending);
     }
 
     // Design 5.1 "Own echoes": a moved birth the history cannot carry, with
@@ -10250,6 +10775,48 @@ namespace {
         EXPECT_FALSE(bmmo::session::parse_event_hold("bogus:1:300", spec));
         EXPECT_FALSE(bmmo::session::parse_event_hold("physicalize:1:0", spec)) << "no delay and no drop";
         EXPECT_FALSE(bmmo::session::parse_event_hold("off", spec));
+        EXPECT_FALSE(bmmo::session::parse_event_hold("pair:1:drop", spec)) << "a pair is held, never dropped (step ODM)";
+    }
+
+    // FULL step ODM: `pair:N:MS` holds the N-th own Unphysicalize and the
+    // Physicalize of the same stamp after it, released together, U first; a
+    // Physicalize of another stamp closes the pair and goes out.
+    TEST(EventHold, HoldsAPairTogether) {
+        event_hold_spec spec;
+        ASSERT_TRUE(bmmo::session::parse_event_hold("pair:1:300", spec));
+        EXPECT_EQ(spec.type, 1);
+        EXPECT_TRUE(spec.pair);
+        EXPECT_EQ(spec.ms, 300);
+        flow_fake fake;
+        session_client_core core(fake.make_flow(), session_capabilities{});
+        run_to_tick_125(core, fake);
+        event_hold hold;
+        hold.arm(spec);
+        auto clock = std::chrono::steady_clock::time_point{std::chrono::milliseconds(5000)};
+        auto now = [&clock]() { return clock; };
+        const auto event = [](bmmo::session::event_type type, uint32_t tick) {
+            bmmo::session_event_msg e;
+            e.type = type;
+            e.tick = tick;
+            e.serialize();
+            return e;
+        };
+        EXPECT_EQ(hold.hold(core, event(bmmo::session::event_type::Unphysicalize, 126), now), event_send_verdict::hold);
+        clock += std::chrono::milliseconds(10);
+        EXPECT_EQ(hold.hold(core, event(bmmo::session::event_type::Physicalize, 126), now), event_send_verdict::hold);
+        EXPECT_EQ(hold.held(), 2u);
+        EXPECT_EQ(hold.hold(core, event(bmmo::session::event_type::Physicalize, 140), now), event_send_verdict::send);
+        clock += std::chrono::milliseconds(290);
+        const size_t before = fake.sent.size();
+        hold.release_due(core, now);
+        EXPECT_EQ(hold.held(), 0u) << "both at the Unphysicalize's time";
+        ASSERT_EQ(fake.sent.size(), before + 2);
+        // A Physicalize of another stamp after the held U closes the pair.
+        ASSERT_TRUE(bmmo::session::parse_event_hold("pair:1:300", spec));
+        hold.arm(spec);
+        EXPECT_EQ(hold.hold(core, event(bmmo::session::event_type::Unphysicalize, 150), now), event_send_verdict::hold);
+        EXPECT_EQ(hold.hold(core, event(bmmo::session::event_type::Physicalize, 170), now), event_send_verdict::send);
+        EXPECT_EQ(hold.hold(core, event(bmmo::session::event_type::Physicalize, 150), now), event_send_verdict::send);
     }
 
     // The N-th own event of the type is held, released at its time (the clock

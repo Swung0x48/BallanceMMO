@@ -308,6 +308,12 @@ namespace bmmo::session {
             // (own_rereports_): `link` the original's origin T.
             bool rereported = false;
             uint32_t link = 0;
+            // FULL step ODM (a beam only): the tick the server applied the
+            // beam's Unphysicalize at, when its echo said MOVED (0: at the
+            // stamp, with the Physicalize).  The old body lives until
+            // own_beam_end; `death_extended` is how far the records name it.
+            uint32_t death_applied = 0;
+            uint32_t death_extended = 0;
             bool moved() const { return made && applied != origin; }
         };
 
@@ -866,6 +872,13 @@ namespace bmmo::session {
             uint32_t generation = 0;
             float matrix[16] = {};
             bool has_matrix = false;
+            // FULL step ODM: the echo of its Unphysicalize said MOVED to
+            // `applied`; the body then ends where own_death_end says (the
+            // applied tick, or an own birth the server applied before it),
+            // and the records name it as far as `extended` (0: not yet).
+            bool moved = false;
+            uint32_t applied = 0;
+            uint32_t extended = 0;
         };
         std::vector<own_death> own_deaths_;
         // What the own reconcile queued into the replay, applied at the end
@@ -881,11 +894,24 @@ namespace bmmo::session {
             // (destroy_moved_own_birth): made again from what is known now,
             // so the replay's step is its state (own_birth_remade).
             bool scripted = false;
+            // FULL step ODM: a death the server applied later than it
+            // happened live (own_death_end): applied at our place among the
+            // tick's body changes, before the own lives of that tick (the
+            // server's order: an Unphysicalize before the Physicalize of the
+            // same origin), not after them as a death in place is.
+            bool moved = false;
         };
         std::vector<own_due> own_due_;
         // Step OWNB: own births the scripts made that a restore took out and
         // queued for the replay's drain (destroy_moved_own_birth).
         uint64_t own_births_remade_ = 0;
+        // FULL step ODM (plan step 22): own deaths the server applied late
+        // that a correction moved inside the history, those of them that
+        // were a pair (the same origin's birth moved too, a beam), moved
+        // Unphysicalize echoes with nothing to move (a birth of ours ended
+        // the body at the server first, or the pair's birth echo pending),
+        // and the ones resynced instead (past the reach, no record).
+        uint64_t own_deaths_moved_ = 0, own_pairs_moved_ = 0, own_deaths_kept_ = 0, own_death_moves_resynced_ = 0;
         // Design 9.7 (a): each live tick's CK world matrix of every own
         // entity without a body after that frame (the death sequence and the
         // trafo animation move it, scripts no replay runs), written before
@@ -2279,7 +2305,32 @@ namespace bmmo::session {
         void check_outside_forces(uint32_t tick);
         void write_own_matrices(uint32_t tick);
         void apply_own_due(uint32_t tick);
+        // FULL step ODM: the moved own deaths queued for `tick`, applied
+        // before that tick's own lives (drain_pending_lives).
+        void apply_moved_own_deaths(uint32_t tick);
         void retire_own_deaths();
+        // FULL step ODM (late-player design 3.3 "The Unphysicalize side"):
+        // where the server ended an own body whose Unphysicalize it moved -
+        // the applied tick, or the applied tick of an own birth stamped at or
+        // after the death that the server applied first (its Physicalize
+        // replaced the body: physics_world::apply_event, the runner's guard
+        // drops the late Unphysicalize); a beam's old body likewise.
+        uint32_t own_death_end(const client_core_state::own_death& d) const;
+        uint32_t own_beam_end(const own_life& beam) const;
+        bool own_deaths_move() const { return acting_on_echoes() && own_births_move() && caps_.own_body_in_replay; }
+        // A moved own Unphysicalize's echo (process_own_echo): the death,
+        // or the beam's old body, moved inside the history by the frame's
+        // lifecycle batch (SRT3), or a resync past the reach.
+        void move_own_death(const bmmo::session_event_msg& msg);
+        // The records of every moved own death (and beam) named up to its
+        // current end; false: a record conflicts (the caller resyncs).
+        bool extend_moved_deaths(uint32_t& from);
+        // An end an answered birth of ours gave a moved death, kept in the
+        // death's record (the birth's record may go first).
+        void freeze_moved_death_ends();
+        // The frame's lifecycle batch takes an own correction anchored at
+        // `anchor` (late-player design 6.2.3 (d)); false: past the reach.
+        bool join_own_correction(uint32_t anchor, const std::string& reason);
         void clear_own_window_state();
         bool unmake_own_body(const own_life& life, uint32_t tick, const char* where);
         bool remake_own_body(const own_life& life, uint32_t tick, const char* where);
