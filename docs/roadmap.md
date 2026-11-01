@@ -1413,6 +1413,20 @@ numbers 1-10 are unchanged.
    on the event; narrows HLX); (c) the owner does not report a Physicalize
    that made no body (no event: the server's clone and the mirrors keep
    their body, as the owner's game does).
+   **Closed at FULL step RPA (2026-11-01, the user's decision 62 = option
+   (c), "按你推荐"):** the core's `own_physicalize_keeps_body`
+   (`client_core_lifecycle.cpp`) answers from the bridge (platform
+   `body_state`, the block's own `GetPhysicsObject` test, asked before the
+   block runs); the retail host asks it first in `core_host_on_physicalize`
+   and does none of a birth's work, and `own_physicalized` drops such a
+   report (nothing queued, sent or recorded, no spawn ghost life). The
+   headless host never reaches it (a kept body makes no `created` event).
+   HLX's rule is unchanged for every Physicalize that is sent.
+   `scripts/retail/rpa_stall` (RTR's stall recipe): "physicalized again at
+   tick 843 with its body alive ... not reported" on client 1, no "found its
+   body alive" on the server, client 1's own ball 786/786 FINAL rows
+   bit-equal to the server through the end (was 0.2309 m at 856);
+   session-client-core-design.md "As built (step RPA)".
 
    **Queued (FULL step RTD, root-caused, pre-existing; the fix is the
    user's choice): the ESC menu wakes a resting own ball in its owner's

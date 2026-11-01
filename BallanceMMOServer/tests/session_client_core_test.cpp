@@ -4180,9 +4180,13 @@ namespace {
         report.pose.position[1] = 7.0f;
         report.recipe.mass = 2.5f;
         size_t from = fake.calls.size();
-        core.own_physicalized(report);
+        EXPECT_TRUE(core.own_physicalized(report));
         core.own_unphysicalized(127);
-        EXPECT_TRUE(since(fake.calls, from).empty()) << "queued, not sent";
+        {
+            // FULL step RPA: the bridge asked whether the block keeps a body.
+            const std::vector<std::string> expected = {"body_state:Ball_Wood"};
+            EXPECT_EQ(since(fake.calls, from), expected) << "queued, not sent";
+        }
         EXPECT_EQ(state_of(core).own_reports_.size(), 2u);
         EXPECT_TRUE(state_of(core).own_life_.empty());
         // The drain of the frame that made the body bumps its generation.
@@ -4190,6 +4194,7 @@ namespace {
         steps{core}.commit_own_reports();
         {
             const std::vector<std::string> expected = {
+                "body_state:Ball_Wood",
                 "send:1", "log:0:own ball Ball_Wood physicalized at tick 126 (type 2) pos=" + hex_pos(0.0f, 7.0f, 0.0f),
                 "send:1", "log:0:own ball unphysicalized at tick 127"};
             EXPECT_EQ(since(fake.calls, from), expected);
@@ -4204,6 +4209,71 @@ namespace {
     TEST(SessionClientCoreOwnLives, ReportsFromHooksCommitAfterTheDrainsBump) {
         reports_from_hooks(false);
         reports_from_hooks(true);
+    }
+
+    // FULL step RPA (the user's decision 62): a Physicalize of the own ball
+    // whose body is alive before the block runs (the block keeps it, RTR's
+    // stall recipe at 843) is no birth - logged, nothing queued, sent or
+    // recorded, no spawn ghost life; the same ball without a body is a birth
+    // as before.
+    void rephysicalize_alive_not_reported(bool control) {
+        SCOPED_TRACE(control ? "own body control" : "no own body control");
+        flow_fake fake;
+        session_capabilities caps;
+        caps.own_lifecycle = bmmo::session::own_lifecycle_source::host_hooks;
+        caps.own_body_control = control;
+        session_client_core core(fake.make_flow(), caps);
+        run_to_tick_125(core, fake);
+        bmmo::session::own_birth_report report;
+        report.entity = "Ball_Paper";
+        report.ball_type = 0;
+        report.tick = 843;
+        report.pose.captured = true;
+        report.pose.spawn = true;   // even flagged a spawn: no ghost life, no impulse
+        report.pose.position[0] = 304.3f;
+        fake.bodies_there = {"Ball_Paper"};
+        size_t from = fake.calls.size();
+        const size_t sent_from = fake.sent.size();
+        EXPECT_TRUE(core.own_physicalize_keeps_body("Ball_Paper", 843));
+        EXPECT_FALSE(core.own_physicalized(report));
+        {
+            const std::string kept = "log:0:own ball Ball_Paper physicalized again at tick 843 with its body alive: "
+                                     "the block keeps the body, not reported (no event, no own birth)";
+            const std::vector<std::string> expected = {"body_state:Ball_Paper", kept, "body_state:Ball_Paper", kept};
+            EXPECT_EQ(since(fake.calls, from), expected);
+        }
+        EXPECT_TRUE(state_of(core).own_reports_.empty()) << "nothing queued";
+        steps{core}.commit_own_reports();
+        EXPECT_EQ(fake.sent.size(), sent_from) << "no event";
+        EXPECT_TRUE(state_of(core).own_life_.empty()) << "no own birth recorded";
+        EXPECT_EQ(state_of(core).spawn_ghost_births_, 0u);
+
+        // No body there: the block makes one - queued and, at the commit,
+        // sent and recorded (HLX's rule stays for every Physicalize sent).
+        fake.bodies_there.clear();
+        report.tick = 900;
+        from = fake.calls.size();
+        EXPECT_FALSE(core.own_physicalize_keeps_body("Ball_Paper", 900));
+        EXPECT_TRUE(core.own_physicalized(report));
+        EXPECT_EQ(state_of(core).own_reports_.size(), 1u);
+        steps{core}.commit_own_reports();
+        ASSERT_EQ(fake.sent.size(), sent_from + 1);
+        const auto event = decode<bmmo::session_event_msg>(fake.sent.back().first);
+        EXPECT_EQ(event.type, bmmo::session::event_type::Physicalize);
+        EXPECT_EQ(event.tick, 900u);
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        EXPECT_EQ(state_of(core).own_life_[0].origin, 900u);
+        EXPECT_EQ(state_of(core).own_life_[0].entity, "Ball_Paper");
+
+        // An empty entity is never a kept body (nothing asked).
+        from = fake.calls.size();
+        EXPECT_FALSE(core.own_physicalize_keeps_body("", 901));
+        EXPECT_TRUE(since(fake.calls, from).empty());
+    }
+
+    TEST(SessionClientCoreOwnLives, RephysicalizeWithItsBodyAliveIsNotReported) {
+        rephysicalize_alive_not_reported(false);
+        rephysicalize_alive_not_reported(true);
     }
 
     // Design 5.1 "Beam", with own body control: requested before the frame

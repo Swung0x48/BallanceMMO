@@ -5411,6 +5411,15 @@ bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixe
                           name.c_str(), tick, convexCnt, ballCnt, concaveCnt);
         return true;
     }
+    // FULL step RPA (the user's decision 62): the block is about to keep a
+    // body this ball already has (the core's rule, own_physicalize_keeps_body,
+    // which logs it): no birth here - no birth cell, no report, no group or
+    // spawn impulse - as no body is made.
+    if (core.own_physicalize_keeps_body(name, tick)) {
+        logger_->Info("Physics session: own ball %s physicalized again at tick %u with its body alive: kept, not reported",
+                      name.c_str(), tick);
+        return true;
+    }
     bs::own_birth_report report;
     report.entity = name;
     report.tick = tick;

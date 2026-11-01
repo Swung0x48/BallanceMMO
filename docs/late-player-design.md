@@ -4506,6 +4506,15 @@ the 48-tick reach - "a late lifecycle event beyond the reach", one resync
 (608), rows bit-equal after it: the designed fallback (roadmap section 4,
 the LCM / DX8 class), not HLX's.
 
+**The owner's side (FULL step RPA, 2026-11-01; the user's decision 62).**
+HLX's rule - a Physicalize applied while its body is alive replaces the
+body, on the server and on every receiver - is unchanged for every
+Physicalize that is sent. What changed is what an owner sends: a retail
+own Physicalize whose block finds the body alive (physics_RT keeps it and
+makes nothing) is no longer reported (session-client-core-design.md "As
+built (step RPA)"), so the rule no longer replaces a body the owner's game
+kept (RTR's stall recipe at 843, roadmap section 4 item 5).
+
 ## As built (step R6M, FULL close-out, 2026-11-01): plan step 21's measurement - how long retail tolerates its own ball absent
 
 Measurement only, at HEAD 7a13ac5c; no code changed. Binaries: the x86 mod

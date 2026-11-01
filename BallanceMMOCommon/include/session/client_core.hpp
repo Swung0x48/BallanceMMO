@@ -1534,8 +1534,27 @@ namespace bmmo::session {
         // current_tick() + 1: queued, and committed in order at post_step
         // step 19 (after the drain's generation bump), where the event log's
         // reports (report_physicalize) run.
-        void own_physicalized(const own_birth_report& report);
+        // FULL step RPA (the user's decision 62): a Physicalize that finds the
+        // entity's body alive is no own birth (own_physicalize_keeps_body):
+        // nothing queued, false.
+        bool own_physicalized(const own_birth_report& report);
         void own_unphysicalized(uint32_t tick);
+        // FULL step RPA (the user's decision 62, roadmap section 4 item 5): a
+        // Physicalize block that finds its entity's body alive keeps it and
+        // makes nothing (physics_RT Behaviors/Physicalize.cpp, the
+        // GetPhysicsObject test before CreatePhysicsObjectOnParameters).
+        // Asked by a host_hooks host before the block runs (BMLPlus
+        // broadcasts OnPhysicalize first), answered from the bridge
+        // (platform body_state, get_body_state's GetPhysicsObject): true -
+        // logged, and the host neither reports it nor does any of a birth's
+        // work (birth cell, group, spawn impulse).  Not sent, so the server's
+        // clone and every mirror keep their body, as the owner's game does;
+        // a Physicalize that IS sent still replaces a living body there
+        // (HLX).  An event_log host never needs it: a kept body makes no
+        // created event for post_step's drain to report.  Calling it IS the
+        // decision, not a plain query: a true answer logs "not reported", so
+        // call it only where the Physicalize is then dropped.
+        bool own_physicalize_keeps_body(const std::string& entity, uint32_t tick);
         // Step SPGH2: the live own ball's Physicalize as a host saw it before
         // the block made the body (own_physicalized calls it; a host whose
         // own reports come from the event log calls it from its own hook).

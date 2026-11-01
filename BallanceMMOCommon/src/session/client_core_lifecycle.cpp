@@ -2584,11 +2584,40 @@ namespace bmmo::session {
         logf("own ball unphysicalized at tick %u", tick);
     }
 
-    void session_client_core::own_physicalized(const own_birth_report& report) {
+    bool session_client_core::own_physicalized(const own_birth_report& report) {
+        // FULL step RPA: a Physicalize the block makes no body for is no
+        // birth - no spawn ghost life, nothing queued, nothing sent or
+        // recorded (a host asks first and does none of a birth's work).
+        if (own_physicalize_keeps_body(report.entity, report.tick)) return false;
         own_birth_seen(report.pose, report.tick);
         client_core_state::own_report queued;
         queued.report = report;
         s.own_reports_.push_back(std::move(queued));
+        return true;
+    }
+
+    // FULL step RPA (the user's decision 62 = R6B's option (c); roadmap
+    // section 4 item 5).  physics_RT's Physicalize block keeps a body its
+    // target already has: GetPhysicsObject(ent) non-null -> Out1, no
+    // CreatePhysicsObjectOnParameters (Behaviors/Physicalize.cpp 105-116;
+    // the body guard of engine change #6 only re-syncs a guarded entity's
+    // matrix there).  BMLPlus broadcasts OnPhysicalize before the block
+    // runs, so a body alive now is the body the block will keep: the
+    // bridge's answer is platform body_state (get_body_state,
+    // physics_state.cpp, the same GetPhysicsObject - an entry is only ever
+    // inserted with its IVP object, CKIpionManager.cpp, so the two tests
+    // agree).  RTR's stall recipe: the paper trafo's script physicalized
+    // the own Ball_Paper, alive since its trafo at 767, again at 843; sent,
+    // the server (HLX) replaced its clone with a fresh body at rest while
+    // the owner kept its rolling one (0.2309 m at 856).  Not sent, every
+    // world keeps the 767 body; not recorded, no replay remakes it.
+    bool session_client_core::own_physicalize_keeps_body(const std::string& entity, uint32_t tick) {
+        if (entity.empty()) return false;
+        bmmo_physics_body_state alive{};
+        if (!platform_.body_state(entity, alive)) return false;
+        logf("own ball %s physicalized again at tick %u with its body alive: the block keeps the body, not reported "
+             "(no event, no own birth)", entity.c_str(), tick);
+        return true;
     }
 
     void session_client_core::own_birth_seen(const own_birth_pose& pose, uint32_t tick) {

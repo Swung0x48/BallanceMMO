@@ -8689,3 +8689,58 @@ final build.** Base 7718d551 (AUD3). Decision 6, Q-R6-BACKSTOP (a) (the user, pl
 - **Stale text elsewhere** (outside this note's design; marked, not rewritten): `late-player-design.md`'s R6P
   model note and its backstop measurement section, and `rewind-cost-design.md`'s DEP snapshot paragraph, describe
   the backstop as live; each now carries "(deleted at FULL step R6V)".
+
+**As built (step RPA, 2026-11-01): an own re-Physicalize that finds its body alive is not reported (the user's
+decision 62 = R6B's option (c)).** Base 31bdf29b (ODM). No protocol, journal, server, bridge, physics_RT, IVP or
+engine change; HLX's rule (a Physicalize applied while its body is alive replaces the body, server and receivers,
+late-player-design.md "As built (step HLX)") is unchanged for every Physicalize that is sent.
+- **The cause (R6B, roadmap section 4 item 5).** In RTR's stall recipe (L11) the paper trafo's script runs a
+  Physicalize on client 1's own `Ball_Paper`, alive since its trafo at 767, at 843 (while client 2's ball runs the
+  same trafo). physics_RT's block keeps a body its target already has (`Behaviors/Physicalize.cpp` 105-116:
+  `GetPhysicsObject(ent)` non-null -> Out1, no `CreatePhysicsObjectOnParameters`; engine change #6's guard only
+  re-syncs a guarded entity's matrix there). The retail host reported it all the same, the core recorded it as an
+  own birth, and the server (HLX) replaced its clone with a fresh body at rest: own ball 4.6 cm off at 844, 0.2309
+  m at 856.
+- **How "made no body" is known: the bridge's answer, asked before the block.** BMLPlus broadcasts OnPhysicalize
+  before the block runs (the retail host captures the birth pose there, design 2.3 host_hooks), so a body alive at
+  the hook is the body the block will keep. `session_client_core::own_physicalize_keeps_body(entity, tick)`
+  (`client_core_lifecycle.cpp`, beside `own_physicalized`) asks platform `body_state` - on retail
+  `physics_view::get_body_state` -> the bridge's `get_body_state` (`physics_state.cpp` ~1353), whose test is the
+  block's own `GetPhysicsObject` (plus `m_RealObject`, which never differs: `CKIpionManager.cpp` ~572 inserts an
+  entry only with its IVP object) - and on true logs "own ball X physicalized again at tick N with its body
+  alive: the block keeps the body, not reported (no event, no own birth)".
+- **One rule, in the core.** `own_physicalized(report)` now returns bool: false when `own_physicalize_keeps_body`
+  says so - no `own_birth_seen` (no spawn ghost life), nothing queued, so `commit_own_reports` sends no event and
+  `record_own_birth` records no own_life; true as before otherwise. The retail host asks the core first in
+  `core_host_on_physicalize` (`core_host.cpp`, right after the "not the current ball" return) and returns with a
+  "Physics session: ... kept, not reported" line before any of a birth's work: no birth cell (`SetWorldMatrix`),
+  no `own_group_queue` (its pairs are not re-asked), no spawn impulse, no `core_host_zero_retail_forces`. The
+  server's clone and every mirror keep their body, as the owner's game does; no replay remakes the 843 "birth".
+- **The headless host never reaches it** (`own_lifecycle_source::event_log`): its own Physicalize is reported only
+  from a `created` body event in post_step's drain (`client_core_frame.cpp` ~822-825, `report_physicalize`), and a
+  kept body makes none; its `before_physicalize` (`session_client.cpp` ~3227) already returns for a target with a
+  body (`physics->GetPhysicsObject(target)`, the block's test) and `capture_own_physicalize` for
+  `name == own_body_entity()`. No headless code changed; the swing_s0 smoke logs no "physicalized again" line.
+- **Adapted:** the plan's "one rule in host support" is the core (`session_client_core`), not
+  `game/host_backend.hpp`: the rule decides whether an own birth is reported and recorded, which is the core's;
+  the host only asks it (a host must not re-implement a core decision, section 0), and the core's platform
+  `body_state` is already the bridge's answer on both hosts. The wire reference is core_ref_s14 with
+  `--accept-protocol 24` for the HEAD protocol 25 (as ODM ran it).
+- **Verified:** x64 BUILD-OK, DEPS-OK (1543); unit tests 771/771, new
+  `SessionClientCoreOwnLives.RephysicalizeWithItsBodyAliveIsNotReported` (a body there: logged, false, nothing
+  queued / sent / recorded, no spawn ghost birth even when flagged a spawn; no body: queued, sent and recorded as
+  before; an empty entity asks nothing) and `ReportsFromHooksCommitAfterTheDrainsBump` updated (the one
+  `body_state` ask); x86 CLIENT-BUILD-OK, DEPS-OK (249; `core_host.cpp` and the core's includers rebuilt); GCC
+  syntax all ok; the wire check rODM -> rRPA over core_ref_s14 ALL SAME (44 sends SAME, 45 journals IDENTICAL);
+  the Arch server rebuilt from this tree (ballanced-36c04e3d24c9+bmmo-31bdf29bd017-dirty), snapshots off.
+  - **RTR's stall** (`rtr_retail.py stall rpa_stall`): client 1's log "own ball Ball_Paper physicalized again at
+    tick 843 with its body alive: the block keeps the body, not reported", the server log without "found its body
+    alive" (r6v_stall: 1); client 1's own ball 786/786 FINAL rows bit-equal, worst 0 m through the session end
+    (r6v_stall: 0/1, 0.2309 m at 856), mirror 786/786, mechanisms 23/23 on both, client 2 own 709/709; server
+    journal 1941/1941; pieces 20/32 at 0 m (rotation only, the known band); client 2's stall resync at 1307 is the
+    recipe's.
+  - **The L11 ctl session** (`rtr_retail.py arm rpa_l11 0:0 0:0`): as R6V's `r6v_l11` - own / mirror rows
+    position-exact (742 / 658 and 1004 / 928 equal, the rotation-only rows), mechanisms 23/23 over 27066 rows,
+    pieces 20/49 at 0 m (the known band; R6V 18/49), resyncs 0, server 2575/2575; no "physicalized again" line.
+  - **Headless smoke** (`work/RPA/rpa_run.sh swing_s0`, the swing_snapoff arm with `--loss-seed 0`, 150 ms, 10 %
+    loss, 4 clients, 60 s): VERDICT PASS, server replay 3915/3915, max_err 0, resyncs 0, far 0, starved 0.
