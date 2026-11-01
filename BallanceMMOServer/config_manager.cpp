@@ -83,7 +83,22 @@ bool config_manager::load() {
         physics_lead_adjust = yaml_load_value(physics, "lead_adjust", physics_lead_adjust);
         physics_trafo_inputs = yaml_load_value(physics, "trafo_inputs", physics_trafo_inputs);
         physics_placement_clones = yaml_load_value(physics, "placement_clones", physics_placement_clones);
-        physics_proximity_union = yaml_load_value(physics, "proximity_union", physics_proximity_union);   // step G2
+        // Step UOFF (the user, 2026-10-31): the proximity union is always on;
+        // physics.proximity_union (step G2) is no setting any more.  An old
+        // config.yml still parses: a false is ignored with a note, and the key
+        // is dropped from the file (as require_physics_sha below).
+        if (physics["proximity_union"]) {
+            bool union_on = true;
+            try {
+                union_on = physics["proximity_union"].as<bool>();
+            } catch (const YAML::Exception&) {
+                union_on = false;
+            }
+            if (!union_on)
+                Printf("Note: physics.proximity_union is not true in config.yml and is ignored: the proximity union is "
+                       "always on (step UOFF; the bit-off path is gone). The key is dropped from the file.");
+            physics.remove("proximity_union");
+        }
         physics_player_mechanisms = yaml_load_value(physics, "player_mechanisms", physics_player_mechanisms);   // step Q7
         physics_session_clock = yaml_load_value(physics, "session_clock", physics_session_clock);   // step RK3
         physics_journal_dir = yaml_load_value(physics, "journal_dir", physics_journal_dir);

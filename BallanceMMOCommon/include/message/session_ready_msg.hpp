@@ -35,9 +35,9 @@ namespace bmmo {
         // Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): the
         // mechanism-class signature of the client's proximity rewire
         // (game/proximity_union.hpp signature), after `anchor_placement`;
-        // always filled, 0 when the session does not run the proximity
-        // union.  The server compares it with its own world's under
-        // WORLD_PROXIMITY_UNION, late joiners included.  Required from
+        // always filled, 0 when the client's host cannot place.  The server
+        // compares it with its own world's in every session (the union is
+        // always on since step UOFF), late joiners included.  Required from
         // protocol 16 on; an older client's message still parses (0).
         uint64_t anchor_probes = 0;
 

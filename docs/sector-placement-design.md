@@ -2998,3 +2998,15 @@ headless or server file changed.
   P_Modul_30_Wippe the session moved keeps its pose through a vanilla level
   reset (SP9's gap (1) again: a record started after a session is no fresh
   level). SimTool x64 `build-agent-rWFA`; outputs `work/RT2/sp5d3_*`.
+
+### 12.12 As built (step UOFF, 2026-10-31): the union-off axis is gone
+
+The user removed the proximity union's bit-clear path (world-agreement-gaps
+design, As built (step UOFF)): every session sets `WORLD_PROXIMITY_UNION`,
+`physics.proximity_union` is ignored. §12.10's union axis (`l8x_puoff` and
+the other "union off" arms, which also turned the per-player mechanisms off)
+cannot be run any more; the placement axis is unchanged. The server's anchor
+(the table above) rewires the proximity blocks with the union rules only
+(`game/proximity_union.hpp`; the pre-G1 `rewire_proximity_probes` /
+`rewire_ball_identity_reads` it names moved there at G1 and their bit-clear
+form is deleted). No placement code changed.

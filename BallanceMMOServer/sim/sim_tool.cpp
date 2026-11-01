@@ -223,8 +223,8 @@ namespace {
         int drop_second_ball = -1;
         // Step Q7 (world-agreement-gaps-design.md §7.2 V6, V7):
         // --player-mechanisms K - the drop scene's world copies the
-        // per-player units K times (with --world-options PROXIMITY_UNION;
-        // the bit WORLD_PLAYER_MECHANISMS is implied), and --probe-census
+        // per-player units K times (the bit WORLD_PLAYER_MECHANISMS is
+        // implied; the union is always on since step UOFF), and --probe-census
         // --release-check rewires the clients' class with K slots (V6).
         int mechanism_slots = 0;
         float drop_second_at[3] = {};
@@ -784,7 +784,9 @@ namespace {
             const std::string name = text.substr(start, stop == std::string::npos ? std::string::npos : stop - start);
             if (name == "PLACEMENT_CLONES") out |= bmmo::session::WORLD_PLACEMENT_CLONES;   // step S5's constant
             else if (name == "TRAFO_INPUTS") out |= bmmo::session::WORLD_TRAFO_INPUTS;
-            else if (name == "PROXIMITY_UNION") out |= bmmo::session::WORLD_PROXIMITY_UNION;   // step G2
+            // Step G2's bit; since step UOFF every world runs the union, so the
+            // name is accepted (old recipes pass it) and changes nothing.
+            else if (name == "PROXIMITY_UNION") out |= bmmo::session::WORLD_PROXIMITY_UNION;
             else if (name == "PLAYER_MECHANISMS") out |= bmmo::session::WORLD_PLAYER_MECHANISMS;   // step Q7
             else if (name == "SESSION_CLOCK") out |= bmmo::session::WORLD_SESSION_CLOCK;   // step RK3
             else return false;
@@ -2265,9 +2267,12 @@ namespace {
         options.placement_clones = args.placement;            // step S2
         options.placement_fail_at = args.placement_fail_at;
         options.trafo_inputs = (args.world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0;   // step K0
-        options.proximity_union = (args.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;   // step G2
-        // Step Q7: the per-player units under the union (the drop scene, V7).
-        options.mechanism_slots = options.proximity_union ? static_cast<uint8_t>(args.mechanism_slots) : 0;
+        // Step G2 / UOFF: every world runs the proximity union (no option).
+        // Step Q7: the per-player units, in the drop scene's world only (V7);
+        // --probe-census --release-check (V6) anchors its world unslotted and
+        // makes its own K-slot rewires (the census world never had the bit
+        // before UOFF, so it never had slots).
+        options.mechanism_slots = args.drop_entity.empty() ? 0 : static_cast<uint8_t>(args.mechanism_slots);
         // Step RK3: the Level 1 tutorial's exit (physics_world::tick).
         options.session_clock = (args.world_options & bmmo::session::WORLD_SESSION_CLOCK) != 0;
         options.tutorial_exit_frame = args.tutorial_exit_frame;
@@ -2818,7 +2823,7 @@ namespace {
         for (const auto& [name, line]: lines) text += line;
         const auto& u = world.proximity();
         text += "  union tick=" + std::to_string(tick) + " skipped=" + std::to_string(u.skipped()) + " relatched="
-                + std::to_string(u.relatched()) + (world.proximity_union_on() ? " (bit set)" : " (bit clear)") + "\n";
+                + std::to_string(u.relatched()) + "\n";
         return text;
     }
 
@@ -3829,13 +3834,11 @@ namespace {
             // without this a replayed proximity block measured the frame where
             // the live world's last tick left it (its "Current Distance"
             // differed in 47 of 50 rounds with no pass in the window).
-            // Step G2: under WORLD_PROXIMITY_UNION the union's rule from the
-            // replayed tick's candidates (the restored balls), the hold put
-            // back with the step state (restore_step_state).
-            if (frames) {
-                if (world->proximity_union_on()) world->place_probes();
-                else world->place_proximity_legacy();   // step G1: game/proximity_union.hpp's bit-clear path
-            }
+            // Step G2: the union's rule from the replayed tick's candidates
+            // (the restored balls), the hold put back with the step state
+            // (restore_step_state).  Step UOFF: always (the bit-clear
+            // place_legacy is gone).
+            if (frames) world->place_probes();
         };
         binding_options.on_savestate_restored = [&](bool ok, const std::string& error, const bmmo::session::savestate_outcome&) {
             if (!ok) {
@@ -4936,7 +4939,7 @@ namespace {
                 }
                 // Step G2's review: the proximity union's hold at e (the
                 // frames and the by-name cells) is the straight pass's.
-                if (failure.empty() && world->proximity_union_on()
+                if (failure.empty()
                         && world->capture_step_state().proximity_hold != expected.counters.proximity_hold)
                     failure = "proximity hold: the frames or the by-name cells differ from the straight pass's";
             }
@@ -6263,11 +6266,13 @@ namespace {
         // Step G3: a client journal too - the clients run the same rule at
         // the same point since G3 (a client journal carries the server's
         // world options, client_journal.cpp).  Under the bit a BodyRevived
-        // record is not applied (step G5, physics_world::apply_event).
-        options.proximity_union = (header.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;
+        // record is not applied (step G5, physics_world::apply_event).  Step
+        // UOFF: the world runs the union whatever the header says (the
+        // bit-clear path is gone); a header without the bit is noted below.
+        const bool header_union = (header.world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0;
         // Journal v8 (step Q7, world-agreement-gaps-design.md 5): K slot
         // copies of every per-player unit, bound per tick by join order.
-        options.mechanism_slots = options.proximity_union && (header.world_options & bmmo::session::WORLD_PLAYER_MECHANISMS)
+        options.mechanism_slots = (header.world_options & bmmo::session::WORLD_PLAYER_MECHANISMS)
             ? header.mechanism_slots : 0;
         // Step RK3 (protocol 20): the Level 1 tutorial's exit at frame 10 -
         // the server's world and every client world take it at the same
@@ -6277,10 +6282,13 @@ namespace {
         if (header.world_options != 0) std::printf("journal world options %08x%s%s%s%s%s\n", header.world_options,
                                                    options.trafo_inputs ? " (trafo inputs)" : "",
                                                    options.placement_clones ? " (placement clones)" : "",
-                                                   options.proximity_union ? " (proximity union)" : "",
+                                                   header_union ? " (proximity union)" : "",
                                                    options.mechanism_slots ? " (player mechanisms)" : "",
                                                    options.session_clock ? " (session clock)" : "");
         if (options.mechanism_slots) std::printf("journal mechanism slots %u\n", static_cast<unsigned>(options.mechanism_slots));
+        if (!header_union)
+            std::printf("journal world options without PROXIMITY_UNION: replayed under the union anyway (step UOFF: "
+                        "the bit-clear path is gone; this journal's session did not run it)\n");
         options.log = [](const std::string& text) { std::fprintf(stderr, "%s\n", text.c_str()); };
         auto world = bmmo::sim::physics_world::create(options, error);
         if (!world) {
@@ -6475,13 +6483,13 @@ namespace {
                         dictionary[body.owner] = body.name;
             }
             if (group.tick > last_sim_tick) continue;   // the session's tail
-            // Step G2: under WORLD_PROXIMITY_UNION the union is placed before
-            // the tick's PLAYER and EVENT records, as the server's step does
-            // it before its leavers and its events; not for a group the world
-            // does not step (the anchor era below).
+            // Step G2: the union is placed before the tick's PLAYER and EVENT
+            // records, as the server's step does it before its leavers and
+            // its events; not for a group the world does not step (the anchor
+            // era below).
             const bool anchor_era = !args.legacy_first_step && group.tick < replay_first_tick && !group.has_tick
                 && group.inputs.empty() && group.events.empty();
-            if (options.proximity_union && !anchor_era) world->place_probes();
+            if (!anchor_era) world->place_probes();
             for (const auto& p: group.players) {
                 if (p.added) {
                     if (!world->add_player(p.id, p.join_order, error, p.life))
@@ -9562,18 +9570,8 @@ namespace {
         else if (args.tutorial_exit_frame_given && !(args.world_options & bmmo::session::WORLD_SESSION_CLOCK))
             why = "--tutorial-exit-frame N goes with --world-options SESSION_CLOCK (the exit runs on --level 1 only)";
         else if (args.mechanism_slots && !(args.probe_census && args.probe_release_check)
-                 && !(!args.drop_entity.empty() && (args.world_options & bmmo::session::WORLD_PROXIMITY_UNION)))
-            why = "--player-mechanisms K: with --probe-census --release-check (V6), or the drop scene under --world-options "
-                  "PROXIMITY_UNION (V7)";
-        else if ((args.world_options & bmmo::session::WORLD_PROXIMITY_UNION)
-                 && (args.drop_entity.empty() || args.array_reads || args.probe_census || args.late_sector_check
-                     || !args.late_run.empty() || args.resync_check || args.portable_scripts_check
-                     || args.list_placement))
-            // Step G2: the drop scene (--drop) and its --savestate-check are
-            // the server world's checks under the bit (V2, V4); the censuses
-            // read the bit-clear rewire, and the other modes bind their own
-            // per-tick work without the union's place point.
-            why = "--world-options PROXIMITY_UNION: only with --drop (the drop scene, alone or with --savestate-check)";
+                 && args.drop_entity.empty())
+            why = "--player-mechanisms K: with --probe-census --release-check (V6), or the drop scene (V7)";
         else if ((args.drop_second_ball >= 0 || args.probe_trace || args.drop_kill >= 0) && args.drop_entity.empty())
             why = "--drop-second-ball, --drop-kill and --probe-trace are for the drop scene (--drop)";
         else if (args.drop_kill >= 0
@@ -9585,10 +9583,8 @@ namespace {
         else if (args.late_ball.type >= 0
                  && ((!args.late_sector_check && args.late_run.empty()) || args.late_ball.tick <= args.late_a))
             why = "--late-ball: with --late-sector-check, its tick after A";
-        else if (args.probe_scramble
-                 && (!args.savestate_check || args.drop_entity.empty()
-                     || !(args.world_options & bmmo::session::WORLD_PROXIMITY_UNION)))
-            why = "--probe-scramble: the drop scene's --savestate-check under --world-options PROXIMITY_UNION";
+        else if (args.probe_scramble && (!args.savestate_check || args.drop_entity.empty()))
+            why = "--probe-scramble: the drop scene's --savestate-check";
         else if ((args.world_options & bmmo::session::WORLD_TRAFO_INPUTS)
                  && !(args.array_reads || args.probe_census || (!args.drop_entity.empty() && !args.trafo.any() && args.late_run.empty()
                                           && !args.late_sector_check && !args.resync_check && !args.savestate_check
@@ -9688,7 +9684,7 @@ namespace {
             // alias keeps the anchor table's name (the copies are left out of
             // the walk), and no copy is in the census.
             world->release_proximity();
-            const std::string error = world->rewire_proximity(true, bmmo::game::probe_class::mechanism,
+            const std::string error = world->rewire_proximity(bmmo::game::probe_class::mechanism,
                                                               static_cast<uint8_t>(args.mechanism_slots), &sel);
             const auto copies = world->proximity().copied_blocks();
             bmmo::physics::force_alias::table slotted;
@@ -9785,11 +9781,13 @@ namespace {
         std::printf("release check: the anchor's union %zu blocks, %zu identity reads; mechanism %zu, %zu\n", all, ids,
                     mech, mech_ids);
         released("release 1", world.release_proximity(), all + ids);
-        // The anchor's rewire again (bit clear, every block).
-        std::string error = world.rewire_proximity(false, bmmo::game::probe_class::all);
+        // The anchor's rewire again (every block; step UOFF: under the union
+        // rules, the only ones - the bit-clear rewire this arm used to make
+        // is gone).
+        std::string error = world.rewire_proximity(bmmo::game::probe_class::all);
         {
             const auto r = census();
-            check("rewire bit clear", error.empty() && r.unrewired == 0 && r.probes.size() == all
+            check("rewire every block", error.empty() && r.unrewired == 0 && r.probes.size() == all
                                           && r.identities_on_original == 0 && r.identities.size() == ids
                                           && world.proximity_probe_count() == all
                                           && r.signature_mechanism == first.signature_mechanism
@@ -9802,7 +9800,7 @@ namespace {
         }
         released("release 2", world.release_proximity(), all + ids);
         // The clients' rewire: the mechanism class under the union rules (§2.3).
-        error = world.rewire_proximity(true, bmmo::game::probe_class::mechanism);
+        error = world.rewire_proximity(bmmo::game::probe_class::mechanism);
         {
             const auto r = census();
             const bool no_ball = world.proximity().no_ball() && context->GetObject(world.proximity().no_ball());
@@ -9842,7 +9840,7 @@ namespace {
             // identity read here, so the rounds below tell the unit copies'
             // own objects (which must all go) from that.
             std::vector<int> before = counts();
-            error = world.rewire_proximity(true, bmmo::game::probe_class::mechanism, 0);
+            error = world.rewire_proximity(bmmo::game::probe_class::mechanism, 0);
             const int base_reads = static_cast<int>(world.proximity().identity_count());
             // Step F1 (IDCP): what one identity copy owns - the parameter
             // outputs whose owner it is, and how many of them its own
@@ -9895,7 +9893,7 @@ namespace {
             before = base;
             uint64_t first_signature = 0;
             for (int round = 1; round <= 2; ++round) {
-                error = world.rewire_proximity(true, bmmo::game::probe_class::mechanism, slots);
+                error = world.rewire_proximity(bmmo::game::probe_class::mechanism, slots);
                 const auto& u = world.proximity();
                 if (round == 1) {
                     for (const std::string& line: u.unit_lines()) std::printf("  %s\n", line.c_str());
@@ -9940,7 +9938,7 @@ namespace {
             // refuses the member (server.cpp: anchor_probes differ -> "probe
             // mismatch").
             if (mech_ids > 0) {
-                error = world.rewire_proximity(true, bmmo::game::probe_class::all, slots);
+                error = world.rewire_proximity(bmmo::game::probe_class::all, slots);
                 const auto& u = world.proximity();
                 world.classify_proximity(sel);
                 const size_t control_outside = u.non_mechanism_unit_count();
@@ -9963,7 +9961,7 @@ namespace {
                     const uint64_t server_unguarded = u.signature(bmmo::game::probe_class::mechanism, false);
                     const size_t server_units = u.unit_count();
                     world.release_proximity();
-                    error = world.rewire_proximity(true, bmmo::game::probe_class::mechanism, slots, &reduced);
+                    error = world.rewire_proximity(bmmo::game::probe_class::mechanism, slots, &reduced);
                     const uint64_t client = world.proximity().signature(bmmo::game::probe_class::mechanism);
                     const size_t client_units = world.proximity().unit_count();
                     const size_t client_outside = world.proximity().non_mechanism_unit_count();
@@ -10033,9 +10031,9 @@ int main(int argc, char** argv) {
             "           [--drop-settle N] [--drop-move SECTOR TICK] [--drop-prop ENTITY]\n"
             "           [--drop-player-at X Y Z] [--cells-trace] (mechanism check in a session world; --cells-trace:\n"
             "            IngameParameter[0][1]/[0][2], the union and the physicalized bodies on every change)\n"
-            "           [--drop-second-ball TYPE X Y Z] [--drop-kill TICK [--drop-kill-player 1|2]] [--probe-trace] [--probe-scramble before|after] [--world-options PROXIMITY_UNION]\n"
+            "           [--drop-second-ball TYPE X Y Z] [--drop-kill TICK [--drop-kill-player 1|2]] [--probe-trace] [--probe-scramble before|after]\n"
             "           (step G2: player 2's ball as a second candidate; the union's frames and identity cells\n"
-            "            on every report line; the server's world under the proximity union's rule)\n"
+            "            on every report line; every world runs the proximity union's rule since step UOFF)\n"
             "       any session world: [--n2-pin on|off]  (step B2SW: the checkpoint and level-reset chains'\n"
             "            IngameParameter[0][2] Set Cell pinned to 0 at the anchor, default on; off is the A/B)\n"
             "           [--depth-test-rule on|off]  (FULL step PRX: Gameplay_Ingame/DepthTest's Test pinned and its rule\n"
@@ -10121,7 +10119,8 @@ int main(int argc, char** argv) {
             "       --drop ... | --savestate-check --drop-sector N ... [--globals-trace]  (step K0: the physics time\n"
             "            factor, delta and gravity after every scene tick, and every change)\n"
             "       --world-options BITS  (step K0, a physics_world mode: a number or PLACEMENT_CLONES,TRAFO_INPUTS,\n"
-            "            PROXIMITY_UNION,SESSION_CLOCK,PLAYER_MECHANISMS; the session world's session::WORLD_* bits;\n"
+            "            PROXIMITY_UNION (accepted, no effect: always on since step UOFF),SESSION_CLOCK,PLAYER_MECHANISMS;\n"
+            "            the session world's session::WORLD_* bits;\n"
             "            bit 0 = --placement on; TRAFO_INPUTS only with --array-reads or --drop without the --trafo-* sets;\n"
             "            SESSION_CLOCK: on --level 1 the tutorial's exit before frame 10, step RK3)\n"
             "       --tutorial-exit-frame N  (step RK3, with --world-options SESSION_CLOCK: the exit before frame N)\n");

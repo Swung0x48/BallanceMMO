@@ -249,8 +249,8 @@ namespace bmmo::session {
         // union's place point of a replayed tick (rollback_world::
         // place_probes): the core's candidates of the replayed world at the
         // end of t-1, minus the bodies the replay holds out, handed to the
-        // platform's place_probes.  Empty unless the session runs the union
-        // (WORLD_PROXIMITY_UNION and a host that places).
+        // platform's place_probes.  Empty unless the host places (every
+        // session runs the union since step UOFF).
         std::function<void(uint32_t tick, const std::function<bool(const std::string& entity)>& held_out)> place_probes;
     };
 
@@ -727,8 +727,9 @@ namespace bmmo::session {
         // replay: rollback_world::place_probes): the frames, identity cells
         // and latches of the mechanism blocks the host rewired at its anchor,
         // from the candidates (player, ball entity with a body), sorted by
-        // player id.  Both hosts: proximity_union::place.  No capability: a
-        // session under WORLD_PROXIMITY_UNION needs it, and a host without it
+        // player id.  Both hosts: proximity_union::place.  No capability:
+        // every session needs it (the union, always on since step UOFF), and
+        // a host without it
         // sends no probe signature (anchor_report::probes 0), which the
         // server refuses (design 5) - so it is not in the "missing op" check
         // that every session, the union's or not, runs at construction.

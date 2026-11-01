@@ -251,14 +251,19 @@ namespace bmmo::session {
     // journal header's world_options carries it, SimTool's --replay-session
     // honours it); the clients run it from step G3 (protocol 16:
     // SessionReady's anchor_probes), and the server's default turned on with
-    // it; under the bit BodyRevived is retired (step G5).
+    // it; under the bit BodyRevived is retired (step G5).  Step UOFF (the
+    // user, 2026-10-31): the bit-clear path is gone - the server sets the bit
+    // in every session (physics.proximity_union is ignored), a client core
+    // refuses a SessionStart without it, and every world (SimTool's
+    // included) runs the union whatever a journal header says.  The bit
+    // stays on the wire, always set (no protocol change for it).
     constexpr uint32_t WORLD_PROXIMITY_UNION = 1u << 2;
     // WORLD_PLAYER_MECHANISMS (docs/world-agreement-gaps-design.md 2.10, 5;
     // step Q7, protocol 19): one mechanism responds to every player - every
     // world copies the per-player units (session/mechanism_units.hpp) K
     // times at its anchor (game/proximity_union.hpp) and binds slot k to the
-    // ball of the life holding join order k.  Only with
-    // WORLD_PROXIMITY_UNION (the units are placed by the union's place).
+    // ball of the life holding join order k (the units are placed by the
+    // union's place; WORLD_PROXIMITY_UNION is always set since step UOFF).
     // Bit 4: bit 3 is reserved by the record-format design's
     // WORLD_SESSION_CLOCK (docs/record-format-gaps-design.md).  The server's
     // config physics.player_mechanisms (default on).

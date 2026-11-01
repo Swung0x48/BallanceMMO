@@ -1206,9 +1206,9 @@ namespace bmmo::session {
         uint64_t placement = 0;
         // Step G3 (world agreement 2.3, 5): the mechanism-class signature
         // of the host's proximity rewire (game/proximity_union.hpp
-        // signature) when the session runs the union, else 0: SessionReady's
-        // anchor_probes, which the server compares with its world's under
-        // WORLD_PROXIMITY_UNION.
+        // signature) when the host places, else 0: SessionReady's
+        // anchor_probes, which the server compares with its world's (every
+        // session, since step UOFF).
         uint64_t probes = 0;
     };
 
@@ -1593,11 +1593,12 @@ namespace bmmo::session {
         }
         // Step G3 (world agreement 2.4, 2.5): whether this host rewires the
         // mechanism proximity blocks at its anchor and the core places them
-        // before every live and replayed tick - the session's world option
-        // WORLD_PROXIMITY_UNION and a platform with place_probes.  A host
-        // without the operation sends no signature; the server refuses it.
+        // before every live and replayed tick - a platform with place_probes
+        // (step UOFF: every session runs the union; begin() refuses one
+        // whose WORLD_PROXIMITY_UNION is clear).  A host without the
+        // operation sends no signature; the server refuses it.
         bool proximity_union_active() const {
-            return (s.world_options_ & WORLD_PROXIMITY_UNION) != 0 && static_cast<bool>(platform_.place_probes);
+            return static_cast<bool>(platform_.place_probes);
         }
         // Step Q7 (world-agreement-gaps-design.md 2.10): the number of slots
         // the host copies the per-player mechanism units into at its anchor

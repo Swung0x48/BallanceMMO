@@ -116,13 +116,12 @@ public:
     // host could); off, the server builds no copy (the negative control,
     // design 7.6).  The legacy retail path ends such a session locally.
     bool physics_placement_clones = true;
-    // physics.proximity_union (world-agreement-gaps-design.md 5, step G2):
-    // session::WORLD_PROXIMITY_UNION - the server's world places its
-    // proximity frames, identity cells and latches by the union's rule.
-    // Default on since step G3 (the clients run the rule and send their
-    // probe signature, protocol 16); off is the negative control and what
-    // old journals replay with.
-    bool physics_proximity_union = true;
+    // physics.proximity_union (world-agreement-gaps-design.md 5, step G2) is
+    // gone since step UOFF (the user, 2026-10-31): every session sets
+    // session::WORLD_PROXIMITY_UNION - every world places its proximity
+    // frames, identity cells and latches by the union's rule.  An old
+    // config.yml's key is read, a false ignored with a note, and dropped
+    // (config_manager.cpp).
     // physics.player_mechanisms (world-agreement-gaps-design.md 2.10, 5;
     // step Q7): session::WORLD_PLAYER_MECHANISMS - every world copies the
     // per-player mechanism units K times (K = maximum_members clamped to

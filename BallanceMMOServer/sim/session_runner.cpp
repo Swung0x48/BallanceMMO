@@ -318,11 +318,11 @@ namespace bmmo::sim {
             // Protocol 12 (sector placement design 2.4, step S5).
             options.placement_clones = (world_option_bits & bmmo::session::WORLD_PLACEMENT_CLONES) != 0;
             // Step G2 (world-agreement-gaps-design.md §2.4): the proximity
-            // union's rules; place_probes() runs first in every step.
-            options.proximity_union = (world_option_bits & bmmo::session::WORLD_PROXIMITY_UNION) != 0;
-            // Step Q7 (world-agreement-gaps-design.md §2.10): the units copied
-            // K times at the anchor, under the union only.
-            options.mechanism_slots = options.proximity_union ? s->mechanism_slots : 0;
+            // union's rules (always, since step UOFF: the server sets
+            // WORLD_PROXIMITY_UNION in every session); place_probes() runs
+            // first in every step.  Step Q7 (§2.10): the units copied K
+            // times at the anchor (K is 0 without WORLD_PLAYER_MECHANISMS).
+            options.mechanism_slots = s->mechanism_slots;
             // Step RK3: the Level 1 tutorial's exit at frame 10 (physics_world::tick).
             options.session_clock = (world_option_bits & bmmo::session::WORLD_SESSION_CLOCK) != 0;
             options.log = [this, session](const std::string& text) {
@@ -419,7 +419,7 @@ namespace bmmo::sim {
                 auto& s = *it->second;
                 if (config_.patience && s.running && s.world)
                     report_patience(s, s.world->tick_index(), "session end");
-                if (s.union_on() && s.world) {   // step G2
+                if (s.world) {   // step G2
                     const auto& u = s.world->proximity();
                     const std::string text = "proximity union: skipped " + std::to_string(u.skipped()) + ", relatched "
                         + std::to_string(u.relatched()) + ", candidate set drift " + std::to_string(s.probe_set_drift);
@@ -1234,12 +1234,12 @@ namespace bmmo::sim {
         // Everything the journal costs hangs off this: a capped or absent box
         // does not even capture a hash.
         const bool recording = s.journal.is_open() && !s.journal.capped();
-        // Step G2 (world-agreement-gaps-design.md §2.2, §2.4): under
-        // WORLD_PROXIMITY_UNION the union is placed first, from the balls
-        // with a body at the end of the previous step - before the leavers
-        // below and the tick's events, the point every world can place at.
-        // Nothing between two steps may change that set (the guard).
-        if (s.union_on()) {
+        // Step G2 (world-agreement-gaps-design.md §2.2, §2.4): the union is
+        // placed first, from the balls with a body at the end of the
+        // previous step - before the leavers below and the tick's events,
+        // the point every world can place at.  Nothing between two steps may
+        // change that set (the guard).
+        {
             std::vector<uint32_t> now;
             for (const auto& c: s.world->probe_candidates()) now.push_back(c.player);
             if (s.have_probe_set && now != s.probe_set) {
@@ -1439,7 +1439,7 @@ namespace bmmo::sim {
             if (callbacks_.on_failed) callbacks_.on_failed(s.id, error);
             return;
         }
-        if (s.union_on()) {   // step G2: the candidates of the next step, for its guard
+        {   // step G2: the candidates of the next step, for its guard
             s.probe_set.clear();
             for (const auto& c: s.world->probe_candidates()) s.probe_set.push_back(c.player);
             s.have_probe_set = true;

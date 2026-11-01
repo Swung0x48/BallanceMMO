@@ -102,20 +102,20 @@ namespace bmmo::sim {
         // tick, Trafo events run the sets' scripts in the trafo frame, a
         // piece never collides with a local body.  Off: every world as before.
         bool trafo_inputs = false;
-        // session::WORLD_PROXIMITY_UNION (world-agreement-gaps-design.md
-        // §2.2-§2.4, step G2): the proximity union's rules - the anchor
-        // rewires with the union rules (frames at the first reset point,
-        // BMMO_NoBall, one gating probe per identity read, all or nothing)
-        // and the frames, identity cells and latches are placed by
-        // place_probes() from the candidates (the physicalized clones at the
-        // end of the previous tick) under each block's own metric, with the
-        // hold.  The session runner calls place_probes() first in its step,
-        // before the leavers and the events; tick() places itself only when
-        // nobody did for its tick (SimTool's scenes).  Off: the bit-clear
-        // path (place_legacy inside tick(), step G1), bit for bit.
-        bool proximity_union = false;
+        // The proximity union (session::WORLD_PROXIMITY_UNION,
+        // world-agreement-gaps-design.md §2.2-§2.4, step G2) is not an option
+        // since step UOFF: every world rewires with the union rules (frames
+        // at the first reset point, BMMO_NoBall, one gating probe per
+        // identity read, all or nothing) and places the frames, identity
+        // cells and latches by place_probes() from the candidates (the
+        // physicalized clones at the end of the previous tick) under each
+        // block's own metric, with the hold.  The session runner calls
+        // place_probes() first in its step, before the leavers and the
+        // events; tick() places itself only when nobody did for its tick
+        // (SimTool's scenes).
+        //
         // session::WORLD_PLAYER_MECHANISMS (world-agreement-gaps-design.md
-        // §2.10, step Q7): with the union, the slot count K the anchor copies
+        // §2.10, step Q7): the slot count K the anchor copies
         // every per-player unit into (game/proximity_union.hpp's copy step);
         // place_probes() binds slot k to the clone of the player whose join
         // order is k.  0: no units (G3's single-ball rules).
@@ -246,11 +246,10 @@ namespace bmmo::sim {
             int random_cursor = 0;
             bool callback_pending = false;
             bmmo::session::gated_sector_union sectors;
-            // Step G2, under WORLD_PROXIMITY_UNION: the union's hold section
-            // (proximity_union::capture, §4.2) - the frames where they are
-            // and the by-name cells - put back by restore_step_state, so a
-            // no-candidate tick of a rewound window reads the hold the
-            // straight run read.  Empty with the bit clear.
+            // Step G2: the union's hold section (proximity_union::capture,
+            // §4.2) - the frames where they are and the by-name cells - put
+            // back by restore_step_state, so a no-candidate tick of a rewound
+            // window reads the hold the straight run read.
             std::vector<uint8_t> proximity_hold;
         };
         step_state capture_step_state() const;
@@ -378,30 +377,22 @@ namespace bmmo::sim {
         // step G1: game/proximity_union.hpp): every "TT Scaleable Proximity"
         // whose ObjectA is Ball_Pos_Frame is rewired to a private frame, and
         // every CurrentLevel[0,ActiveBall] read inside such a script to a
-        // private copy of the array.  The world option's bit is clear, so the
-        // union keeps the server's path (place_legacy): every tick each frame
-        // goes to the player ball nearest that block's ObjectB, and each copy
-        // names the player nearest to one of its script's mechanisms (the
-        // retail entity of its ball type where the script tests the name -
-        // the rope bridge P_Modul_29 tears only for "Ball_Stone" - its clone
-        // otherwise).
-        void place_proximity_legacy();
-        // Step G2 (§2.2, §2.4), under WORLD_PROXIMITY_UNION: the candidates
+        // private copy of the array, at the anchor (step UOFF: always under
+        // the union rules; the bit-clear place_legacy path is gone).
+        // Step G2 (§2.2, §2.4): the candidates
         // - every player whose clone is physicalized, in player id order,
         // with the clone's entity name - and the union's place() from them.
         // The session runner calls it first in its step (before the leavers
         // and the events), SimTool's --replay-session before a tick's PLAYER
         // and EVENT records; tick() calls it when nobody did for its tick.
-        // A no-op with the bit clear.
         void place_probes();
         std::vector<bmmo::session::probe_candidate> probe_candidates() const;
-        bool proximity_union_on() const { return options_.proximity_union; }
         // Step G2's review: restore_step_state's hold restores that failed
         // (each also logged); SimTool's savestate rounds fail on a change.
         uint64_t proximity_hold_failures() const { return proximity_hold_failures_; }
         // SimTool's --probe-scramble (step G2's review): every proximity
         // frame moved by dx along x through the hold section (capture,
-        // edit, restore); a no-op with the bit clear.
+        // edit, restore).
         void displace_probe_frames(float dx);
         size_t proximity_probe_count() const { return proximity_.probe_count(); }
         const bmmo::game::proximity_union& proximity() const { return proximity_; }
@@ -409,13 +400,13 @@ namespace bmmo::sim {
         // their world-independent names (game/force_block_alias.hpp).
         const bmmo::physics::force_alias::table& force_aliases() const { return force_aliases_; }
         // SimTool's --probe-census --release-check (§7.2 V5): release the
-        // union, and rewire it again (`union_rules`: §2.3 under the bit, with
-        // `which`; otherwise the anchor's bit-clear rewire of every block).
+        // union, and rewire it again under the union rules (§2.3) with
+        // `which` (step UOFF: the bit-clear rewire is gone).
         int release_proximity();
         // `slots` (step Q7, V6): the per-player units copied that many times
-        // (union rules only; 0 = none).  `sel` (step F1, the UGRD fixture):
-        // a selection in place of the world's own.
-        std::string rewire_proximity(bool union_rules, bmmo::game::probe_class which, uint8_t slots = 0,
+        // (0 = none).  `sel` (step F1, the UGRD fixture): a selection in
+        // place of the world's own.
+        std::string rewire_proximity(bmmo::game::probe_class which, uint8_t slots = 0,
                                      const bmmo::game::script_replay::selection* sel = nullptr);
         // Step F1 (UGRD fixture): the union's mechanism class marked again
         // from `sel` (the server's anchor marks it from its own selection).
@@ -534,9 +525,6 @@ namespace bmmo::sim {
         CK3dEntity* clone_ball(player& p, uint8_t ball_type, std::string& error);
         bmmo::game::mirror_clones mirror_clones_;
         std::string ball_name(uint8_t ball_type) const;
-        // The retail entity of a ball type ("Ball_Stone"), the object the
-        // mechanism scripts compare names against; null if the level has none.
-        CK3dEntity* retail_ball_entity(uint8_t ball_type) const;
 
         world_options options_;
         std::unique_ptr<headless_engine> engine_;

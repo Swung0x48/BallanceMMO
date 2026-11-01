@@ -206,7 +206,7 @@ namespace bmmo::sim {
         uint64_t anchor_placement = 0;
         // Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): the
         // world's mechanism-class probe signature, what a SessionReady's
-        // anchor_probes must carry under WORLD_PROXIMITY_UNION.
+        // anchor_probes must carry (every session, since step UOFF).
         uint64_t anchor_probes = 0;
         std::string error;
     };
@@ -374,7 +374,7 @@ namespace bmmo::sim {
         void describe(uint32_t session);
         // A NOTE record in the session's journal at the tick it will simulate
         // next (from any thread; posted).  Step G5: the first BodyRevived a
-        // member sent under WORLD_PROXIMITY_UNION, dropped.
+        // member sent, dropped (the union, always on since step UOFF).
         void journal_note(uint32_t session, const std::string& text);
 
         // Readable from any thread: the tick the session will simulate next
@@ -542,12 +542,11 @@ namespace bmmo::sim {
             uint64_t trafo_server_resets = 0, trafo_superseded = 0, trafo_rejected = 0;
             uint64_t trafo_life_mismatches = 0;   // step TRL: a Trafo event applied while the id's newest life is another
             bool trafo_on() const { return (world_options & bmmo::session::WORLD_TRAFO_INPUTS) != 0; }
-            // Step G2 (world-agreement-gaps-design.md §2.2, §2.4), under
-            // WORLD_PROXIMITY_UNION: the candidate set (player ids) after the
-            // last step, and the guard: a step whose candidates at its top
-            // differ from it (a ball holder removed between two steps - J-e,
-            // step M1's) counts one in probe_set_drift (required 0).
-            bool union_on() const { return (world_options & bmmo::session::WORLD_PROXIMITY_UNION) != 0; }
+            // Step G2 (world-agreement-gaps-design.md §2.2, §2.4): the
+            // candidate set (player ids) after the last step, and the guard:
+            // a step whose candidates at its top differ from it (a ball
+            // holder removed between two steps - J-e, step M1's) counts one
+            // in probe_set_drift (required 0).
             std::vector<uint32_t> probe_set;
             bool have_probe_set = false;
             uint64_t probe_set_drift = 0;

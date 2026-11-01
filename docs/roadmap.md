@@ -1279,7 +1279,12 @@ numbers 1-10 are unchanged.
    union bit (the deployed default) is the
    design's remedy; no bit-clear fix is designed, and whether the bit-clear
    world path is kept at all is open for the close-out (with R7's legacy
-   removal). Also from WFA, recorded: the retail-only force block
+   removal). *Closed at step UOFF (2026-10-31, the user: "4. a"): the
+   bit-clear path is removed - the server sets the bit in every session and
+   ignores `physics.proximity_union` (an old false is noted and dropped), a
+   client core refuses a SessionStart without the bit, every world (SimTool's
+   included) runs the union; the wire field stays, always set (world
+   agreement design, As built (step UOFF)).* Also from WFA, recorded: the retail-only force block
    `Level/Level_Init` walk 41 (the headless Level_Init holds parameter Ops
    only; most likely BMLPlus's ExecuteBB helper block - the DLL names
    `Level_Init` and exports `CreateSetPhysicsForce` - and the mod's only

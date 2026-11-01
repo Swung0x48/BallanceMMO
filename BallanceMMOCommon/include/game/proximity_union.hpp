@@ -9,28 +9,24 @@
 // every "Get Cell" of CurrentLevel's ActiveBall column inside a script with a
 // rewired block reads a private one-row copy of CurrentLevel instead.  Before
 // the behaviour pass of a tick the frames and the copies' cells are put on a
-// ball of the candidate set:
+// ball of the candidate set by place - §2.2's rule (the server from step G2,
+// the clients from G3): the nearest candidate under the block's own metric
+// (session/proximity_rules.hpp), the lowest player id on a tie, the frame
+// held where it is when there is no candidate; an identity copy takes its
+// gating probe's choice; a body-kind Get Cell's latched output is moved off
+// a ball that has no body any more.
 //
-//   * place_legacy - the server's path with the world option's bit clear
-//     (the code that was physics_world's rewire_proximity_probes /
-//     update_proximity_probes / rewire_ball_identity_reads /
-//     update_ball_identity_reads, moved here unchanged at step G1): the
-//     nearest player clone by full 3D squared distance, the parked retail
-//     ball's Ball_Pos_Frame when there is none; an identity copy names the
-//     player nearest to ANY ObjectB of its script, the retail entity of its
-//     type where the script tests the name, its clone otherwise.
-//   * place - §2.2's rule under the bit (the server from step G2, the
-//     clients from G3): the nearest candidate under the block's own metric
-//     (session/proximity_rules.hpp), the lowest player id on a tie, the
-//     frame held where it is when there is no candidate; an identity copy
-//     takes its gating probe's choice; a body-kind Get Cell's latched output
-//     is moved off a ball that has no body any more.
+// Step UOFF (the user, 2026-10-31): the union is always on.  The bit-clear
+// path - place_legacy (the server's nearest-clone rule from before step G1)
+// and the rewire without the union rules (frames started at Ball_Pos_Frame,
+// no BMMO_NoBall, a refused creation skipping its block) - is gone; every
+// rewire runs §2.3's rules, all or nothing.
 //
 // Names are the same in every world (§2.3): a frame is
 // BMMO_Prox_<owner>_<n>, an identity copy CurrentLevel#BMMOId_<owner>_<n>,
 // n the block's position in the pre-order walk of its root script in
-// sub-behaviour index order (the root is 0); BMMO_NoBall (union rules only)
-// is one body-less entity far below the level.  The objects are still CREATED
+// sub-behaviour index order (the root is 0); BMMO_NoBall is one body-less
+// entity far below the level.  The objects are still CREATED
 // in behaviour-list order, frames first, then the copies, as the server
 // always made them, so the CK ids every later object gets are what they were
 // before step G1.
@@ -98,52 +94,39 @@ namespace bmmo::game {
 
     class proximity_union {
     public:
+        // §2.3's rules (the only ones since step UOFF): the frames start at
+        // the reset point, BMMO_NoBall is made, a read without exactly one
+        // gating probe or a block with Barycenter 1 refuses the whole rewire
+        // (all or nothing: nothing stays rewired).
         struct rewire_options {
-            // false: the server's path with the world option's bit clear (step
-            // G1): the frames start at Ball_Pos_Frame's world matrix, there is
-            // no BMMO_NoBall, a read is rewired whatever its gating probes and
-            // a refused creation skips that block (as the server always did).
-            // true: §2.3 under the bit: the frames start at the reset point,
-            // BMMO_NoBall is made, a read without exactly one gating probe or
-            // a block with Barycenter 1 refuses the whole rewire (all or
-            // nothing: nothing stays rewired).
-            bool union_rules = false;
             // The level's first reset point (ResetPoints row 0; the server's
             // physics_world::resetpoints().front()): the signature's reset
-            // point and the union rules' initial frame position.
+            // point and the frames' initial position.
             float reset[3] = {0.0f, 0.0f, 0.0f};
             // The Physicalize_GameBall names in row order: a candidate's ball
             // type is the longest of them its entity name starts with (by-name
-            // kind, union rules).
+            // kind).
             std::vector<std::string> ball_names;
             // Step Q7 (§2.10, WORLD_PLAYER_MECHANISMS): the session's slot
-            // count K; with the union rules and K >= 1 the rewire first copies
+            // count K; with K >= 1 the rewire first copies
             // every per-player unit K - 1 times (slot 0 is the original) and
             // binds slot k's frames, identity cells and latches to the
             // candidate whose `slot` is k.  0: no units (G3's rules).
             uint8_t slots = 0;
         };
-        // A ball of the bit-clear path, in player id order: the body (the
-        // clone) and the retail entity of its type (null when unknown).
-        struct legacy_ball {
-            CK3dEntity* body = nullptr;
-            CK3dEntity* named = nullptr;
-        };
-
         // Optional: whether an entity has a physics body (place's consistency
         // check, §2.3 Place step 2).  Without it only the entity's existence
         // is checked.
         std::function<bool(CK3dEntity*)> has_body;
 
-        // A client host's options under the bit (step G3): the union rules,
-        // the level's first reset point and the Physicalize_GameBall names,
+        // A client host's options (step G3): the level's first reset point
+        // and the Physicalize_GameBall names,
         // read from the level's arrays the way the server's world reads them
         // at its creation (physics_world: ResetPoints row 0's matrix
         // translation, else CurrentLevel[0][3]'s; the ball table's column 0),
         // so the signature's reset point is the server's.
         static rewire_options level_options(CKContext* context) {
             rewire_options o;
-            o.union_rules = true;
             if (!context) return o;
             const auto array = [context](const char* name) {
                 return CKDataArray::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>(name), CKCID_DATAARRAY));
@@ -212,13 +195,13 @@ namespace bmmo::game {
             // copy (the copies' probes and reads are found by the structural
             // test like the originals, and named by slot).
             std::string error;
-            if (options_.union_rules && options_.slots > 0) {
+            if (options_.slots > 0) {
                 error = copy_units(context, sel);
                 lines_.insert(lines_.end(), unit_lines_.begin(), unit_lines_.end());
             }
             if (error.empty()) error = rewire_probes(context, sel);
             if (error.empty()) error = rewire_identities(context);
-            if (error.empty() && options_.union_rules) error = make_no_ball(context);
+            if (error.empty()) error = make_no_ball(context);
             // §2.10: a slot's identity cell starts on BMMO_NoBall (a Test of a
             // slot that never had a ball is false).
             if (error.empty() && slots_)
@@ -252,77 +235,7 @@ namespace bmmo::game {
                 u.mechanism = selected.count(u.root) != 0 && !session::keep_local_script(u.owner, u.script);
         }
 
-        // ---- the bit-clear path (the server's today, moved) ----
-
-        // Before the scripts of a tick run: each probe frame goes to the
-        // player ball nearest to the block's ObjectB (the mechanism) by 3D
-        // squared distance, so the retail "any ball in range" test fires for
-        // whichever player gets there; with none, to Ball_Pos_Frame.  Then the
-        // ActiveBall cell of every identity copy names the ball of the player
-        // nearest to one of its script's mechanisms - the retail entity of
-        // that player's ball type where the script tests the name
-        // ("Ball_Stone"), the player's clone where it works on the ball itself
-        // (the fan's SetPhysicsForce and box test); with no player around,
-        // `fallback_identity` (the parked retail ball), which is what the
-        // retail script would have read.
-        void place_legacy(CKContext* context, const std::vector<legacy_ball>& balls, CKObject* fallback_identity) {
-            if (!context) return;
-            if (!probes_.empty()) {
-                VxVector fallback(0.0f, 0.0f, 0.0f);
-                if (auto* bpf = CK3dEntity::Cast(context->GetObject(ball_pos_frame_))) bpf->GetPosition(&fallback);
-                for (const probe& p: probes_) {
-                    auto* block = CKBehavior::Cast(context->GetObject(p.block));
-                    auto* frame = CK3dEntity::Cast(context->GetObject(p.frame));
-                    if (!block || !frame) continue;
-                    VxVector target = fallback;
-                    if (!balls.empty()) {
-                        VxVector reference = fallback;
-                        if (auto* object_b = CK3dEntity::Cast(block->GetInputParameterObject(2)))
-                            object_b->GetPosition(&reference);
-                        float best = 0.0f;
-                        bool have = false;
-                        for (const legacy_ball& ball: balls) {
-                            VxVector position;
-                            ball.body->GetPosition(&position);
-                            const float distance = (position - reference).SquareMagnitude();
-                            if (!have || distance < best) {
-                                best = distance;
-                                target = position;
-                                have = true;
-                            }
-                        }
-                    }
-                    frame->SetPosition(&target);
-                }
-            }
-            for (const identity& r: identities_) {
-                auto* array = CKDataArray::Cast(context->GetObject(r.array));
-                if (!array) continue;
-                CKObject* active = fallback_identity;
-                float best = 0.0f;
-                bool have = false;
-                for (const legacy_ball& ball: balls) {
-                    CK3dEntity* entity = r.by_name ? ball.named : ball.body;
-                    if (!entity) continue;
-                    VxVector position;
-                    ball.body->GetPosition(&position);
-                    for (CK_ID reference: r.references) {
-                        auto* mechanism = CK3dEntity::Cast(context->GetObject(reference));
-                        if (!mechanism) continue;
-                        VxVector origin;
-                        mechanism->GetPosition(&origin);
-                        const float distance = (position - origin).SquareMagnitude();
-                        if (have && distance >= best) continue;
-                        best = distance;
-                        have = true;
-                        active = entity;
-                    }
-                }
-                array->SetElementObject(0, r.column, active);
-            }
-        }
-
-        // ---- under the bit (§2.2; the server from G2, the clients from G3) ----
+        // ---- the union's place (§2.2; the server from G2, the clients from G3) ----
 
         // Before the behaviour pass of a tick: frames, identity cells and
         // latches from the candidates (the balls with a body at the end of
@@ -748,7 +661,6 @@ namespace bmmo::game {
             for (const identity& r: identities_) n += r.mechanism ? 1u : 0u;
             return n;
         }
-        bool union_rules() const { return options_.union_rules; }
         CK_ID no_ball() const { return no_ball_; }
         uint64_t skipped() const { return skipped_; }
         uint64_t relatched() const { return relatched_; }
@@ -829,9 +741,8 @@ namespace bmmo::game {
             int column = 1;
             bool by_name = false;
             bool mechanism = false;
-            std::vector<CK_ID> references;   // the bit-clear path: every ObjectB of the script, in probe order
             std::vector<size_t> gating_all;  // the rewired probes with an output linked to its input
-            int gating = -1;                 // union rules: the one gating probe
+            int gating = -1;                 // the one gating probe
             int slot = -1;                   // step Q7: a unit's read: its slot (no hold, §2.10)
         };
 
@@ -984,7 +895,7 @@ namespace bmmo::game {
         // The structural test (§2.3 "Which blocks"; the server's, PW): the
         // prototype and ObjectA's real source holding Ball_Pos_Frame.  The
         // calls are the server's own, in its order (GetValueObject with its
-        // default update), so the bit-clear path reads what it always read.
+        // default update), as the server always read it.
         std::string rewire_probes(CKContext* context, const script_replay::selection& sel) {
             context_ = context;
             if (CKObject* frame = context->GetObjectByNameAndParentClass(const_cast<CKSTRING>("Ball_Pos_Frame"),
@@ -992,9 +903,8 @@ namespace bmmo::game {
                 ball_pos_frame_ = frame->GetID();
             if (!ball_pos_frame_) {
                 lines_.push_back("Ball_Pos_Frame not found; proximity union disabled");
-                return options_.union_rules ? "Ball_Pos_Frame not found" : "";
+                return "Ball_Pos_Frame not found";
             }
-            const VxMatrix origin = CK3dEntity::Cast(context->GetObject(ball_pos_frame_))->GetWorldMatrix();
             const std::set<CK_ID> selected(sel.scripts.begin(), sel.scripts.end());
             const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
             CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
@@ -1033,40 +943,29 @@ namespace bmmo::game {
                 read_input(block, 5, p.exact_max);
                 read_local(block, 2, p.use_outputs);
                 read_local(block, 3, p.axes);
-                if (options_.union_rules && p.barycenter == 1)
+                if (p.barycenter == 1)
                     return "block " + p.owner + "/" + p.script + " #" + std::to_string(p.walk) + " uses Barycenter";
                 p.prior_direct = in->GetDirectSource() ? in->GetDirectSource()->GetID() : 0;
                 p.prior_shared = in->GetSharedSource() ? in->GetSharedSource()->GetID() : 0;
                 auto* frame = CK3dEntity::Cast(context->CreateObject(CKCID_3DENTITY, const_cast<CKSTRING>(p.frame_name.c_str())));
-                if (!frame) {
-                    if (options_.union_rules) return "CreateObject failed for " + p.frame_name;
-                    continue;
-                }
-                if (options_.union_rules) {
+                if (!frame) return "CreateObject failed for " + p.frame_name;
+                {
                     const VxVector start(options_.reset[0], options_.reset[1], options_.reset[2]);
                     frame->SetPosition(&start);
-                } else {
-                    frame->SetWorldMatrix(origin);
                 }
                 p.frame = frame->GetID();
                 CKParameterLocal* parameter = context->CreateCKParameterLocal(const_cast<CKSTRING>(p.frame_name.c_str()),
                                                                               CKPGUID_3DENTITY, TRUE);
                 if (!parameter) {
-                    if (options_.union_rules) {
-                        probes_.push_back(p);   // released with the rest
-                        return "CreateCKParameterLocal failed for " + p.frame_name;
-                    }
-                    continue;
+                    probes_.push_back(p);   // released with the rest
+                    return "CreateCKParameterLocal failed for " + p.frame_name;
                 }
                 p.parameter = parameter->GetID();
                 CK_ID frame_id = p.frame;
                 parameter->SetValue(&frame_id, sizeof(frame_id));
                 if (in->SetDirectSource(parameter) != CK_OK) {
-                    if (options_.union_rules) {
-                        probes_.push_back(p);
-                        return "SetDirectSource failed for " + p.frame_name;
-                    }
-                    continue;
+                    probes_.push_back(p);
+                    return "SetDirectSource failed for " + p.frame_name;
                 }
                 probes_.push_back(p);
             }
@@ -1080,7 +979,7 @@ namespace bmmo::game {
         std::string rewire_identities(CKContext* context) {
             auto* current_level = CKDataArray::Cast(
                 context->GetObjectByNameAndClass(const_cast<CKSTRING>("CurrentLevel"), CKCID_DATAARRAY, nullptr));
-            if (!current_level) return options_.union_rules ? "CurrentLevel not found" : "";
+            if (!current_level) return "CurrentLevel not found";
             current_level_ = current_level->GetID();
             int ball_column = -1;
             for (int c = 0; c < current_level->GetColumnCount(); ++c) {
@@ -1089,7 +988,7 @@ namespace bmmo::game {
             }
             if (ball_column < 0) {
                 lines_.push_back("CurrentLevel has no ActiveBall column; ball identity union disabled");
-                return options_.union_rules ? "CurrentLevel has no ActiveBall column" : "";
+                return "CurrentLevel has no ActiveBall column";
             }
             if (CKObject* ball = current_level->GetElementObject(0, ball_column))
                 initial_entity_ = ball->GetName() ? ball->GetName() : "";
@@ -1143,7 +1042,6 @@ namespace bmmo::game {
                     r.copy_name = "CurrentLevel#BMMOId_" + r.owner + "_" + std::to_string(r.walk) + "_S" + std::to_string(r.slot);
                 }
                 r.column = ball_column;
-                r.references = watched->second;
                 // Gating probes: a rewired probe with an output linked
                 // directly to an input of the Get Cell, in its graph.
                 if (CKBehavior* graph = block->GetParent()) {
@@ -1164,8 +1062,7 @@ namespace bmmo::game {
                     return "identity read " + r.owner + "/" + r.script + " #" + std::to_string(r.walk) + " slot "
                            + std::to_string(r.slot) + " is gated by a probe of slot "
                            + std::to_string(probes_[static_cast<size_t>(r.gating)].slot);
-                if (r.gating_all.size() == 1) {
-                } else if (options_.union_rules)
+                if (r.gating_all.size() != 1)
                     return "identity read " + r.owner + "/" + r.script + " #" + std::to_string(r.walk) + " has "
                            + std::to_string(r.gating_all.size()) + " gating probes";
                 // What the block's consumers want out of the cell decides which
@@ -1185,11 +1082,7 @@ namespace bmmo::game {
                 const std::string suffix = r.copy_name.substr(std::strlen("CurrentLevel"));
                 auto* copy = CKDataArray::Cast(context->CopyObject(current_level, &dependencies,
                                                                    const_cast<CKSTRING>(suffix.c_str())));
-                if (!copy) {
-                    if (options_.union_rules) return "CopyObject failed for " + r.copy_name;
-                    lines_.push_back("CopyObject failed for CurrentLevel; ball identity union disabled for " + script);
-                    continue;
-                }
+                if (!copy) return "CopyObject failed for " + r.copy_name;
                 r.array = copy->GetID();
                 if (copy->GetRowCount() == 0) copy->AddRow();
                 r.prior_direct = target->GetDirectSource() ? target->GetDirectSource()->GetID() : 0;
@@ -1197,21 +1090,15 @@ namespace bmmo::game {
                 CKParameterLocal* parameter = context->CreateCKParameterLocal(const_cast<CKSTRING>(r.copy_name.c_str()),
                                                                               CKPGUID_DATAARRAY, TRUE);
                 if (!parameter) {
-                    if (options_.union_rules) {
-                        destroy(context, r.array);
-                        return "CreateCKParameterLocal failed for " + r.copy_name;
-                    }
-                    continue;   // the copy stays, as the server always left it
+                    destroy(context, r.array);
+                    return "CreateCKParameterLocal failed for " + r.copy_name;
                 }
                 r.parameter = parameter->GetID();
                 CK_ID array_id = r.array;
                 parameter->SetValue(&array_id, sizeof(array_id));
                 if (target->SetDirectSource(parameter) != CK_OK) {
-                    if (options_.union_rules) {
-                        identities_.push_back(r);
-                        return "SetDirectSource failed for " + r.copy_name;
-                    }
-                    continue;
+                    identities_.push_back(r);
+                    return "SetDirectSource failed for " + r.copy_name;
                 }
                 if (r.by_name)
                     if (CKObject* held = copy->GetElementObject(0, ball_column)) r.held = held->GetID();

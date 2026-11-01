@@ -131,7 +131,7 @@ namespace bmmo::sim {
         // anchor builds), then the own name.  Installed always: the force
         // blocks outside units are named by CK_ID too, and a retail
         // process's ids are not this world's.
-        const bool unit_alias = options_.proximity_union && options_.mechanism_slots != 0;
+        const bool unit_alias = options_.mechanism_slots != 0;
         bmmo::physics::set_controller_alias(engine_->physics(), [this, unit_alias](const char* name, std::string& alias) {
             if (options_.trafo_inputs && bmmo::game::trafo_controller_alias(trafo_registry_, name, alias)) return true;
             if (unit_alias && proximity_.controller_alias(name, alias)) return true;
@@ -289,13 +289,11 @@ namespace bmmo::sim {
         // The proximity union (step G1, game/proximity_union.hpp): every
         // block, class `all`.  Before the selection, as the rewire always ran
         // (the CK objects it creates keep their place in the creation order);
-        // classified after it.  With the world option's bit clear the
-        // server's path; under WORLD_PROXIMITY_UNION (step G2) the union
-        // rules (§2.3), all or nothing: a world that cannot rewire cannot
-        // keep P1, so its anchor fails.
+        // classified after it.  The union rules (§2.3; step G2, the only
+        // rules since step UOFF), all or nothing: a world that cannot rewire
+        // cannot keep P1, so its anchor fails.
         {
-            auto union_options = proximity_options();
-            union_options.union_rules = options_.proximity_union;
+            const auto union_options = proximity_options();
             proximity_.has_body = [this](CK3dEntity* entity) {
                 CKIpionManager* manager = physics();
                 PhysicsObject* object = manager && entity ? manager->GetPhysicsObject(entity) : nullptr;
@@ -304,9 +302,7 @@ namespace bmmo::sim {
             const std::string union_error =
                 proximity_.rewire(context, bmmo::game::probe_class::all, {}, union_options);
             for (const std::string& line: proximity_.lines()) log("world: " + line);
-            // Only under the bit: the bit-clear path never failed its anchor
-            // for the rewire (step G1), and keeps not failing it.
-            if (options_.proximity_union && !union_error.empty()) {
+            if (!union_error.empty()) {
                 error = "proximity union (world option) refused: " + union_error;
                 return false;
             }
@@ -321,12 +317,11 @@ namespace bmmo::sim {
         {
             char text[192];
             std::snprintf(text, sizeof(text), "world: proximity union: %zu blocks (mechanism %zu), %zu identity reads "
-                          "(mechanism %zu), signature mechanism %016llx all %016llx, bit %s",
+                          "(mechanism %zu), signature mechanism %016llx all %016llx, bit set",
                           proximity_.probe_count(), proximity_.mechanism_probe_count(), proximity_.identity_count(),
                           proximity_.mechanism_identity_count(),
                           static_cast<unsigned long long>(proximity_.signature(bmmo::game::probe_class::mechanism)),
-                          static_cast<unsigned long long>(proximity_.signature(bmmo::game::probe_class::all)),
-                          options_.proximity_union ? "set" : "clear");
+                          static_cast<unsigned long long>(proximity_.signature(bmmo::game::probe_class::all)));
             log(text);
             // Step F1 (UGRD): units copied outside the mechanism class (a
             // level breaking WG0's census) are counted in the mechanism
@@ -575,9 +570,8 @@ namespace bmmo::sim {
         return true;
     }
 
-    // The union's options with the world option's bit clear (step G1): the
-    // server's path, with the reset point and the ball names the signature
-    // and the union rules take.
+    // The union's options: the reset point and the ball names the signature
+    // and the union rules take, and the session's slot count (step Q7).
     bmmo::game::proximity_union::rewire_options physics_world::proximity_options() const {
         bmmo::game::proximity_union::rewire_options o;
         if (!resetpoints_.empty()) {
@@ -586,21 +580,8 @@ namespace bmmo::sim {
             o.reset[2] = resetpoints_.front().z;
         }
         for (const ball_row& row: ball_rows_) o.ball_names.push_back(row.name);
-        o.slots = options_.proximity_union ? options_.mechanism_slots : 0;   // step Q7
+        o.slots = options_.mechanism_slots;   // step Q7
         return o;
-    }
-
-    // Before the scripts of a tick run: the union's bit-clear path (what
-    // update_proximity_probes / update_ball_identity_reads did, moved into
-    // game/proximity_union.hpp at step G1): the physicalized player clones in
-    // id order, each with the retail entity of its ball type; with none, the
-    // frames go to Ball_Pos_Frame and the copies name the parked retail ball.
-    void physics_world::place_proximity_legacy() {
-        if (!proximity_.probe_count() && !proximity_.identity_count()) return;
-        std::vector<bmmo::game::proximity_union::legacy_ball> balls;
-        for (const auto& [id, p]: players_)
-            if (p.physicalized && p.ball) balls.push_back({p.ball, retail_ball_entity(p.ball_type)});
-        proximity_.place_legacy(engine_->context(), balls, retail_ball());
     }
 
     // Step G2 (§2.2): the candidates of the coming tick - every player
@@ -627,7 +608,6 @@ namespace bmmo::sim {
     // pass, the behaviour pass).  Once per tick: tick() places only when
     // this did not run for its tick.
     void physics_world::place_probes() {
-        if (!options_.proximity_union) return;
         probes_placed_ = true;
         probes_placed_tick_ = tick_;
         if (!proximity_.probe_count() && !proximity_.identity_count()) return;
@@ -635,7 +615,6 @@ namespace bmmo::sim {
     }
 
     void physics_world::displace_probe_frames(float dx) {
-        if (!options_.proximity_union) return;
         std::vector<uint8_t> hold;
         proximity_.capture(hold);
         if (hold.size() < 2) return;
@@ -660,11 +639,10 @@ namespace bmmo::sim {
         return proximity_.release(engine_->context());
     }
 
-    std::string physics_world::rewire_proximity(bool union_rules, bmmo::game::probe_class which, uint8_t slots,
+    std::string physics_world::rewire_proximity(bmmo::game::probe_class which, uint8_t slots,
                                                 const bmmo::game::script_replay::selection* sel) {
         auto options = proximity_options();
-        options.union_rules = union_rules;
-        options.slots = union_rules ? slots : 0;
+        options.slots = slots;
         const std::string error = proximity_.rewire(engine_->context(), which, sel ? *sel : script_selection_, options);
         for (const std::string& line: proximity_.lines()) log("world: " + line);
         return error;
@@ -755,13 +733,6 @@ namespace bmmo::sim {
         std::vector<uint32_t> ids;
         for (const auto& [id, _]: players_) ids.push_back(id);
         return ids;
-    }
-
-    CK3dEntity* physics_world::retail_ball_entity(uint8_t ball_type) const {
-        const std::string name = ball_name(ball_type);
-        if (name.empty()) return nullptr;
-        return CK3dEntity::Cast(engine_->context()->GetObjectByNameAndClass(
-            const_cast<CKSTRING>(name.c_str()), CKCID_3DOBJECT, nullptr));
     }
 
     CK3dEntity* physics_world::clone_ball(player& p, uint8_t ball_type, std::string& error) {
@@ -1041,25 +1012,11 @@ namespace bmmo::sim {
             p.finished = true;
             return true;
         case event_type::BodyRevived: {
-            // Step G5 (world agreement 2.6): under WORLD_PROXIMITY_UNION no
-            // world changes a body because another world's script woke it -
-            // the live server never submits one (server.cpp drops them), and
-            // a journal's replay applies none.
-            if (options_.proximity_union) {
-                ++revived_ignored_;
-                return true;
-            }
-            auto* entity = CK3dEntity::Cast(engine_->context()->GetObjectByNameAndParentClass(
-                const_cast<CKSTRING>(event.name.c_str()), CKCID_3DENTITY, nullptr));
-            if (!entity) {
-                error = "no 3D entity named " + event.name;
-                return false;
-            }
-            PhysicsObject* object = manager->GetPhysicsObject(entity, FALSE);
-            // Not physicalized yet: the retail script physicalizes it during
-            // this tick on this side as well, and a fresh body starts awake.
-            if (!object || !object->m_RealObject) return true;
-            object->m_RealObject->ensure_in_simulation();
+            // Step G5 (world agreement 2.6): under the proximity union (always
+            // on since step UOFF) no world changes a body because another
+            // world's script woke it - the live server never submits one
+            // (server.cpp drops them), and a journal's replay applies none.
+            ++revived_ignored_;
             return true;
         }
         default:
@@ -1087,15 +1044,10 @@ namespace bmmo::sim {
                 log("world: navigation keys known at tick " + std::to_string(tick_) + ": " + keys);
             }
         }
-        // The proximity union: under WORLD_PROXIMITY_UNION placed by the
-        // caller before the tick's events (place_probes, step G2) - here only
-        // when nobody did for this tick (SimTool's scenes); with the bit
-        // clear the server's path, here, after the events (step G1).
-        if (options_.proximity_union) {
-            if (!probes_placed_ || probes_placed_tick_ != tick_) place_probes();
-        } else {
-            place_proximity_legacy();
-        }
+        // The proximity union: placed by the caller before the tick's events
+        // (place_probes, step G2) - here only when nobody did for this tick
+        // (SimTool's scenes).
+        if (!probes_placed_ || probes_placed_tick_ != tick_) place_probes();
         update_sectors();
         // The trafo frame (design 2.5): after the tick's inputs and the
         // union's pass, before the behaviour pass and the step - every
@@ -1285,7 +1237,7 @@ namespace bmmo::sim {
         state.random_cursor = random_cursor_;
         state.callback_pending = callback_pending_;
         state.sectors = sectors_;
-        if (options_.proximity_union) proximity_.capture(state.proximity_hold);   // step G2
+        proximity_.capture(state.proximity_hold);   // step G2
         return state;
     }
 
@@ -1298,7 +1250,7 @@ namespace bmmo::sim {
         // Step G2: the restored tick has not been placed for (tick() places
         // unless the caller does first).
         probes_placed_ = false;
-        if (options_.proximity_union && !state.proximity_hold.empty()) {   // step G2
+        if (!state.proximity_hold.empty()) {   // step G2
             std::string hold_error;
             if (!proximity_.restore(engine_->context(), state.proximity_hold.data(), state.proximity_hold.size(),
                                     hold_error)) {
@@ -1630,7 +1582,7 @@ namespace bmmo::sim {
         };
         if (!bmmo::game::script_replay::capture_portable(engine_->context(), script_selection_, script_hooks_, out.scripts, &e,
                                                          nullptr, options_.trafo_inputs ? &trafo_registry_.part() : nullptr,
-                                                         options_.proximity_union ? &hold : nullptr)) {
+                                                         &hold)) {
             out.scripts.clear();
             if (out.error.empty()) out.error = "portable script record: " + e;
         }

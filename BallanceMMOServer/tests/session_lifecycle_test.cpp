@@ -228,50 +228,6 @@ TEST(OwnEchoDeadline, CountsOnlyOnceTheServerHasOurFramesPastTheOrigin) {
     }
 }
 
-namespace {
-    std::vector<repeat_event_key> ring_with(uint32_t tick, uint8_t ball_type, const std::string& name) {
-        std::vector<repeat_event_key> recent;
-        record_repeat_event(recent, ball_type, name, tick);
-        return recent;
-    }
-}
-
-// One measured burst of the same body: stamps 34437 and 34448, 11 ticks apart.
-TEST(RepeatEventGuard, SameBodyInsideTheWindowIsADuplicate) {
-    const auto recent = ring_with(34437, 1, "P_Modul_01_Pusher");
-    EXPECT_TRUE(repeat_event_duplicate(recent, 1, "P_Modul_01_Pusher", 34448));
-}
-
-TEST(RepeatEventGuard, WindowBoundaryIsInclusive) {
-    const auto recent = ring_with(34437, 1, "P_Modul_01_Pusher");
-    EXPECT_TRUE(repeat_event_duplicate(recent, 1, "P_Modul_01_Pusher", 34437 + kRepeatEventWindow));
-    EXPECT_FALSE(repeat_event_duplicate(recent, 1, "P_Modul_01_Pusher", 34437 + kRepeatEventWindow + 1));
-}
-
-TEST(RepeatEventGuard, OlderStampStillMatchesTheSignedDifference) {
-    // A late event's stamp is behind the entries recorded after it; the guard
-    // must compare the age as a signed difference, not assume newest-last.
-    std::vector<repeat_event_key> recent;
-    record_repeat_event(recent, 1, "P_Ball_Wood_MF", 3064);
-    record_repeat_event(recent, 1, "P_Modul_01_Pusher", 3070);
-    EXPECT_TRUE(repeat_event_duplicate(recent, 1, "P_Ball_Wood_MF", 3064 - 60));
-}
-
-TEST(RepeatEventGuard, DifferentBodyOrBallTypeIsNotADuplicate) {
-    const auto recent = ring_with(34437, 1, "P_Modul_01_Pusher");
-    EXPECT_FALSE(repeat_event_duplicate(recent, 2, "P_Modul_01_Pusher", 34448));
-    EXPECT_FALSE(repeat_event_duplicate(recent, 1, "P_Modul_01_Pusher2", 34448));
-}
-
-TEST(RepeatEventGuard, RingEvictsTheOldestAndStaysCapped) {
-    std::vector<repeat_event_key> recent;
-    for (size_t i = 0; i < kRepeatEventRing + 5; ++i)
-        record_repeat_event(recent, 1, "body" + std::to_string(i), 1000);
-    EXPECT_EQ(recent.size(), kRepeatEventRing);
-    EXPECT_FALSE(repeat_event_duplicate(recent, 1, "body0", 1000));
-    EXPECT_TRUE(repeat_event_duplicate(recent, 1, "body" + std::to_string(kRepeatEventRing + 4), 1000));
-}
-
 // ---------------------------------------------------------------------------
 // Re-anchoring the input buffer (design 9.2).  A resync sends the client a
 // fresh base mid-flight, so the buffer is reset() under a stream that is

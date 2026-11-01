@@ -1508,7 +1508,7 @@ So no build ever reports a number whose fields it does not send.
 | `session_event_msg` | `uint16_t life` after `state` (P_M); 0 from clients |
 | `session_ready_msg` | `uint64_t anchor_probes` appended after SPD's `anchor_placement`, read when protocol ≥ P_G, always filled (P_G) |
 | server `handle_session_ready` | compares `anchor_probes` with the server's mechanism-class signature after the placement compare (SPD §5), late joiners included: "probe mismatch for X (client %016llx, server %016llx)"; late base clamp (§2.7) |
-| server config | `physics_proximity_union`, default on from step G3; the negative control and old-journal replays use off. `physics_player_mechanisms`, default on from step Q7, with the same use of off; K comes from `maximum_members` (§2.10) |
+| server config | `physics_proximity_union`, default on from step G3; **gone since step UOFF** (the user, 2026-10-31): every session sets the bit, an old `config.yml`'s key is ignored with a note (a false) and dropped. `physics_player_mechanisms`, default on from step Q7, with the same use of off; K comes from `maximum_members` (§2.10) |
 | BodyRevived | not sent, and ignored with a NOTE, under the bit (§2.6) |
 | client journal | no layout change: PLAYER(+) at J and PLAYER(-) at R from member messages (§2.8), NOTEs. `announce_player` no longer writes join=255 |
 | server journal | no layout change: a ball leave is now EVENT Unphysicalize at `next` and PLAYER(-) at `next + 1`, the queued shape SimTool already reads; a rejoin is PLAYER(-) then PLAYER(+) at R. The header's `world_options` carries the bit; *revision 3:* the field is in the header since journal v5 (T2), so G2 needs no bump. **Q7 adds K to the header and takes the next free journal version** (v7 is the current one, `journal.hpp:106` at HEAD) |
@@ -6417,3 +6417,120 @@ the union and per-player mechanisms (8 slots) on.
 - rt3_r1's room started a second session ("restarted by the host": the
   driver's second Start while the first was booting); its session 2 is the
   run judged, and the driver now sends one Start.
+
+### As built (step UOFF, 2026-10-31): the bit-clear path removed - the union is always on
+
+The user's decision (2026-10-31, answer 4 of the questions after chain FULL,
+verbatim "4. a"): remove the `proximity_union: false` path. With the bit clear
+the fan's force target disagreed between worlds (the server's `place_legacy` =
+the nearest player's ball, a client = its own ball; WFA's queued "bit-off fan
+target", H5b's WADA bit-off arm), and the deployed default and every headline
+run had the bit on.
+
+- **The wire field stays, always set; no protocol change.** `session::WORLD_
+  PROXIMITY_UNION` (bit 2 of SessionStart's and the journal header's
+  `world_options`) is set by the server in every session (`server.cpp`, the
+  room's world options); SessionReady's `anchor_probes` is compared in every
+  session. A protocol bump was not needed: the only sender of a clear bit is a
+  same-protocol server built before this step with the config false, and the
+  core refuses that session at SessionStart instead (below).
+- **The server.** `physics.proximity_union` is no setting: `config_manager.cpp`
+  reads an old key (a non-bool reads as false), logs "Note:
+  physics.proximity_union is not true in config.yml and is ignored ..." for a
+  false and removes the key from the file (as `require_physics_sha`);
+  `config_manager::physics_proximity_union` is gone. `physics.player_mechanisms`
+  no longer depends on the union (it always holds). The BodyRevived drop is
+  unconditional; the repeat-event guard (`recent_revives`,
+  `dropped_duplicate`, `late_events`) that deduplicated the bit-clear path's
+  BodyRevived bursts and the relay's "never echoed to its owner" clause went
+  with it (a BodyRevived never reaches them), and with them
+  `session/lifecycle.hpp`'s `repeat_event_duplicate` / `record_repeat_event`
+  (and their five `RepeatEventGuard` tests), which nothing else used.
+- **The world** (`physics_world`): `world_options::proximity_union` is gone;
+  the anchor always rewires with the union rules (a refusal fails the anchor,
+  as under the bit), `tick()` places by `place_probes()` when nobody did for
+  its tick, the step state always captures / restores the hold, the portable
+  record always carries the hold section, a BodyRevived event is always
+  ignored (counted). Removed as dead (reachable only with the bit clear):
+  `place_proximity_legacy()`, `proximity_union_on()`, `retail_ball_entity()`
+  (its only user was the legacy place), and the legacy BodyRevived apply
+  (`ensure_in_simulation` on the named body). `rewire_proximity` lost its
+  `union_rules` parameter. The session runner's `union_on()` is gone (the
+  place, the candidate guard and the end-of-session union line always run).
+- **`game/proximity_union.hpp`.** `place_legacy`, `legacy_ball`,
+  `rewire_options::union_rules`, `union_rules()`, the identity reads'
+  `references` (only `place_legacy` read them) and every bit-clear branch of
+  `rewire` / `rewire_probes` / `rewire_identities` (frames started at
+  Ball_Pos_Frame's matrix, no BMMO_NoBall, a refused creation skipping its
+  block, a read with 0 or 2+ gating probes rewired anyway) are gone; the union
+  branches are the old text unchanged, so the rewire and the signature under
+  the bit are what they were (the wire check below).
+- **The client core.** `proximity_union_active()` is the platform's
+  `place_probes` capability alone (a host without it still sends 0 and is
+  refused by the server, §0's fallback); `begin()` refuses a SessionStart
+  whose bit is clear ("session N refused: the server runs without the
+  proximity union ..."), right after the protocol check; the BodyRevived send
+  is gone (a reportable wakeup is counted in `revived_local`; A5's late-join
+  withhold is kept as it was); the begin / anchor log lines and the status
+  line's `probes:` section are printed in every session. No member of
+  `client_core_state` changed (`probes_active_` keeps its meaning: this host
+  places).
+- **The hosts.** The headless client and the retail core already asked the
+  core (`proximity_union_active()`); only comments changed. The legacy retail
+  path is not touched (refused by the server since B9DX).
+- **SimTool.** Every world runs the union: `--world-options PROXIMITY_UNION`
+  is still accepted (old recipes pass it) and changes nothing; the gates that
+  allowed it only with `--drop` and required it for `--probe-scramble` and the
+  drop scene's `--player-mechanisms` are gone; `--replay-session` places
+  before every stepped group whatever the header says (a header without the
+  bit prints "replayed under the union anyway"); the savestate-check binding
+  hook always places; `--probe-census --release-check`'s "rewire bit clear"
+  arm is now "rewire every block" under the union rules (the bit-clear rewire
+  no longer exists). `--player-mechanisms K` gives the world K slots in the
+  drop scene (V7) only: V6's census world anchors unslotted and makes its own
+  K-slot rewires, as before UOFF (the census never had the bit, so never had
+  slots; the review found that handing K to its anchor too failed V6 on L8 /
+  L13). Not adapted, recorded: the other offline modes that
+  stepped a bit-clear world (`--array-reads`, the censuses, `--late-sector-
+  check`, `--late-run`, `--resync-check`, `--portable-scripts-check`,
+  `--list-placement`, the sector scene) now anchor under the union rules; the
+  modes whose replays step bindings without `tick()` (`--late-run`'s
+  re-derivation hook) do not place per replayed tick - as they did not under
+  the bit-clear path either. None of them was re-run at this step (FULL's list).
+- **Tests.** The core tests' `start_message` sets the bit (every server does);
+  the probe-signature test's bit-clear arm became the refusal; the frame
+  table test and A5's late-join test expect no BodyRevived send (one
+  `revived_local` instead; the frame table loses the event's `send:1` and its
+  repeat's `send:2`); the flow tests expect the union's begin and anchor log
+  lines and the status line's `probes:` tail. The message / journal tests
+  keep the field's round trips (the field exists).
+
+Verification (QUICK tier; HEAD e9101c68 + the change, build id
+`ballanced-36c04e3d24c9+bmmo-e9101c68a917-dirty`): x64 BUILD-OK, unit tests
+729/729, GCC syntax every file ok, x86 CLIENT-BUILD-OK; the wire check
+`rDEP` -> `rUOFF` on `core_ref_s13`: 44 send traces SAME, 45 journals
+IDENTICAL, ALL SAME (every reference arm runs with the bit on). Live, the Arch
+server rebuilt from this tree with an old `config.yml` carrying
+`proximity_union: false`: the server logged the note, dropped the key and set
+the bit; one 4-client arena run at 150 ms, snapshots off, trafo inputs and
+placement on (the harness's four sector arms): 4/4 PASS, replays
+3976/3975/4076/4072 ticks matched, 0 checkpoint mismatches, candidate set
+drift 0, every client `probes: active=1 two_bodies=0`, `revived_local`
+54-55, anchor probe signature c7e224f5cf8c631b = the server's, no refusal.
+One two-copy retail L11 session (snapshots off): both cores ran
+(`refused=0`), `probes: active=1`, anchor probe signature 68db2214ab881bbd in
+both = the server's mechanism signature, no "probe mismatch",
+`revived_local` 24 / 26. Runs: `.local-tools/work/UOFF/`
+(`uoff_live.sh`, `s1/`), `scripts/retail/uoff_retail`.
+
+Gate round (after the review: the V6 slot fix above and the dead repeat-guard
+helpers): x64 BUILD-OK (DEPS-OK), unit tests 724/724 (729 less the five
+`RepeatEventGuard` tests), x86 CLIENT-BUILD-OK, GCC syntax 33/33 ok; V6
+(`.local-tools/work/WGQ7/v6_all.py`: `--probe-census --release-check
+--player-mechanisms K`, L1-L13, placement off/on, K = 2 / 8) 52/52 PASS,
+`V6-ALL: PASS` (L8 on K2 signature 516abf05b6df922c, L13 on K8
+c7e224f5cf8c631b). The wire check, the live and the retail runs were not
+re-run: SimTool is not on the wire check's path, and the helpers' removal
+changes no executed code. Kept, recorded: `--replay-session` of a journal
+without the bit still replays (with the note) rather than refusing - the only
+such journals are pre-UOFF ones, whose replays are for inspection.

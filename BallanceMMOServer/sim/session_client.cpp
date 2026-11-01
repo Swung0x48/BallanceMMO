@@ -2659,8 +2659,10 @@ namespace {
             // one copy for every host).
             script_hooks_ = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(engine_->physics()));
             anchor_trafo();
-            // Step G3 (world-agreement-gaps-design.md 2.3, 2.4): under
-            // WORLD_PROXIMITY_UNION the mechanism proximity blocks and their
+            // Step G3 (world-agreement-gaps-design.md 2.3, 2.4): in every
+            // session (the union is always on since step UOFF; the core
+            // refuses a SessionStart without the bit) the mechanism
+            // proximity blocks and their
             // identity reads are rewired right after the selection (after
             // the placement's apply), and the core places them before every
             // live and replayed tick (platform place_probes); the signature

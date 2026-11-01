@@ -986,6 +986,9 @@ namespace {
         msg.spawn_impulse = 3.0f;
         msg.spawn_spacing = 4.2f;
         msg.map.level = 13;
+        // Step UOFF: every server sets the proximity union's bit (a core
+        // refuses a SessionStart without it).
+        msg.world_options = bmmo::session::WORLD_PROXIMITY_UNION;
         bmmo::session::player_entry own, other;
         own.id = own_id; own.join_order = 2; own.life = 1;
         other.id = own_id + 1; other.join_order = 0; other.life = 1;
@@ -1093,7 +1096,8 @@ namespace {
         EXPECT_TRUE(state_of(core).remotes_.empty());
         EXPECT_EQ(state_of(core).phase_, client_core_state::phase::idle) << "loading only once the host requested the level";
         const std::vector<std::string> expected = {
-            "log:0:session 9 starting: level 13, 2 players, join order 2, life 1, seed 11, input delay 4, sector lead 7"};
+            "log:0:session 9 starting: level 13, 2 players, join order 2, life 1, seed 11, input delay 4, sector lead 7",
+            "log:0:session 9: the mechanism proximity blocks follow every ball (world option proximity union), which this host cannot place (no place_probes): the server will refuse its signature"};
         EXPECT_EQ(fake.calls, expected);
         core.level_requested();
         EXPECT_EQ(state_of(core).phase_, client_core_state::phase::loading);
@@ -1129,11 +1133,13 @@ namespace {
             run_to_anchor(core, fake);
             const std::vector<std::string> expected = {
                 "log:0:session 9 starting: level 13, 2 players, join order 2, life 1, seed 11, input delay 4, sector lead 7",
+                "log:0:session 9: the mechanism proximity blocks follow every ball (world option proximity union), which this host cannot place (no place_probes): the server will refuse its signature",
                 "hook:numbering_restarted:anchor_origin",
                 "now:anchor_hold",
                 "log:0:anchored after 12 load ticks: pose 0000000000000051 surfaces 0000000000000052 cores=0 factor=0.000000",
                 "airship_zone:on:P#2",
                 "log:0:airship zone: the level has no airship",
+                "log:0:anchor probe signature 0000000000000000 (world option proximity union)",
                 "send:0"};
             EXPECT_EQ(fake.calls, expected);
             EXPECT_EQ(state_of(core).phase_, client_core_state::phase::running);
@@ -5429,7 +5435,8 @@ namespace {
     // 10 (the mirror's drive of T), 11 (a forced own tick), 12 (the
     // capture armed); then 13 (the forced polling back), 15, 16, 17 (the own
     // ball and its upkeep), 18 (the mirror's corrector), 19 (the event log:
-    // a mechanism's wakeup becomes a BodyRevived, sent), 21 (the input and
+    // a mechanism's wakeup is counted, no BodyRevived - the union, always on
+    // since step UOFF), 21 (the input and
     // the camera rows), 23 (the record and its hook), 25 (the inputs and
     // the event's repeat), 26, 28 (the drive of T + 1), 30 (the amend), 30a,
     // 31 (the window: line the tick closes, with the host's counters), 32
@@ -5489,9 +5496,9 @@ namespace {
             const std::vector<std::string> expected = {
                 "unforce_own:Ball_Wood", "record_pending_activation:127", "discover_navigation:126", "own_ball",
                 "own_body_upkeep:Ball_Wood:body", "body_state:Ball_0_BMMO_4", "drain_body_events:126",
-                "reportable_wakeup:P_Box", "send:1", "reportable_wakeup:P_Box", "observe_input", "own_camera_rows:1.000000", "own_driven_entity",
+                "reportable_wakeup:P_Box", "reportable_wakeup:P_Box", "observe_input", "own_camera_rows:1.000000", "own_driven_entity",
                 "movable_bodies", "note_script_resets:126", "bind_world", "hook:after_record:126", "send:2",
-                "send:2", "poll_sector:126", "drive:Ball_0_BMMO_4:6", "bind_world", "hook:after_amend:126",
+                "poll_sector:126", "drive:Ball_0_BMMO_4:6", "bind_world", "hook:after_amend:126",
                 "counters", "hook:window", "world_hash", "now:journal_ms", "own_ball", "list_bodies",
                 "hook:after_journal:126"};
             EXPECT_EQ(since(fake.calls, from), expected);
@@ -5504,7 +5511,8 @@ namespace {
         EXPECT_EQ(core.next_tick(), 127u);
         EXPECT_EQ(fake.body_event_answers, std::vector<bool>({false, false, false})) << "none was the own ball's";
         EXPECT_EQ(state_of(core).generations_["P_Box"], 1u);
-        EXPECT_EQ(state_of(core).events_sent_, 1u) << "one BodyRevived per name and frame";
+        EXPECT_EQ(state_of(core).events_sent_, 0u) << "no BodyRevived under the proximity union (step UOFF: always)";
+        EXPECT_EQ(core.revived_local(), 1u) << "one per name and frame";
         ASSERT_EQ(state_of(core).input_history_.size(), 1u);
         const auto& input = state_of(core).input_history_.back().second;
         EXPECT_EQ(input.keys, 9) << "the forced tick plays the server's frame, whole";
@@ -5540,8 +5548,9 @@ namespace {
     }
 
     // Step A5: a late joiner's wakeups before its apply are its catch-up
-    // passes', no event of the shared world: not sent (withheld, counted,
-    // logged once).  Any other frame's are BodyRevived as before.
+    // passes', no event of the shared world: withheld (counted, logged
+    // once).  Any other frame's are counted as local wakes (step UOFF: no
+    // BodyRevived is sent in any session).
     TEST(SessionClientCoreFrame, ALateJoinersWakeupsBeforeTheApplyAreWithheld) {
         for (const bool joining: {true, false}) {
             journal_dir dir(joining ? "join_wake_on" : "join_wake_off");
@@ -5562,7 +5571,8 @@ namespace {
             const size_t from = fake.calls.size();
             ASSERT_TRUE(core.post_step(true));
             const auto calls = since(fake.calls, from);
-            EXPECT_EQ(state_of(core).events_sent_ - sent, joining ? 0u : 1u) << joining;
+            EXPECT_EQ(state_of(core).events_sent_ - sent, 0u) << joining;
+            EXPECT_EQ(core.revived_local(), joining ? 0u : 1u) << joining;
             EXPECT_EQ(state_of(core).join_wakes_withheld_, joining ? 1u : 0u) << joining;
             EXPECT_EQ(std::find(calls.begin(), calls.end(),
                                 "log:0:late join: wakeups before the apply are not reported (P_Modul_29_Platte06 at tick 126 first)")
@@ -5792,7 +5802,9 @@ namespace {
         EXPECT_NE(text.find(" lag=40/30 "), std::string::npos) << "the 99th percentile: " << text;
         EXPECT_NE(text.find(" amend_failures=0 rebases=7 resyncs=0/0 "), std::string::npos) << text;
         EXPECT_NE(text.find(" deferred=0 activations=8 scr=0/0/0/0/9 t_rest="), std::string::npos) << text;
-        const std::string tail_text = "input: reports=4 starved=1 (25%) worst=0 lead=0.0 reach=48/48/96 cap=48/0.00/0.000/0 wait=0 starve_run=0/0/0";
+        // Step UOFF: the proximity union's section is in every status line.
+        const std::string tail_text = "input: reports=4 starved=1 (25%) worst=0 lead=0.0 reach=48/48/96 cap=48/0.00/0.000/0 wait=0 starve_run=0/0/0"
+                                      " probes: active=0 places=0/0 two_bodies=0 skipped=0 relatched=0 revived_local=0";
         ASSERT_GE(text.size(), tail_text.size());
         EXPECT_EQ(text.substr(text.size() - tail_text.size()), tail_text) << "the last field, not cut off";
         EXPECT_GT(text.size(), 256u) << "past the first buffer, whole";
@@ -7815,7 +7827,7 @@ namespace {
     void trafo_anchor(session_client_core& core, flow_fake& fake, bool option = true) {
         state_of(core).own_id_ = 3;
         auto start = start_message(9, 3);
-        start.world_options = option ? bmmo::session::WORLD_TRAFO_INPUTS : 0u;
+        start.world_options = bmmo::session::WORLD_PROXIMITY_UNION | (option ? bmmo::session::WORLD_TRAFO_INPUTS : 0u);
         ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
         core.level_requested();
         bmmo::session::anchor_report report;
@@ -7905,9 +7917,9 @@ namespace {
             session_client_core core(fake.make_flow(), caps);
             state_of(core).own_id_ = 3;
             auto start = start_message(9, 3);
-            start.world_options = bmmo::session::WORLD_PLACEMENT_CLONES;
+            start.world_options = bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_PROXIMITY_UNION;
             ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
-            EXPECT_EQ(bmmo::session::WORLD_PLACEMENT_CLONES, core.world_options());
+            EXPECT_EQ(bmmo::session::WORLD_PLACEMENT_CLONES | bmmo::session::WORLD_PROXIMITY_UNION, core.world_options());
             core.level_requested();
             bmmo::session::anchor_report report;
             report.build_id = "build-x";
@@ -8443,17 +8455,28 @@ namespace {
     }
 
     // Step G3 (design 2.4, 5): under WORLD_PROXIMITY_UNION a host that places
-    // sends its rewire's signature in SessionReady; without the world option,
-    // or without place_probes, it sends 0 whatever its report says.
+    // sends its rewire's signature in SessionReady; without place_probes it
+    // sends 0 whatever its report says.  Step UOFF: the union is always on -
+    // a SessionStart without the bit is refused (the old arm 2, the op
+    // without the bit, is that refusal now).
     TEST(SessionClientCoreProbes, SessionReadyCarriesTheProbeSignatureUnderTheBit) {
-        for (const int arm: {0, 1, 2}) {   // 0: bit and op, 1: bit without op, 2: op without bit
+        {
+            flow_fake fake;
+            session_platform p = fake.make_flow();
+            p.place_probes = [](const std::vector<bmmo::session::probe_candidate>&) {};
+            session_client_core core(std::move(p), session_capabilities{});
+            auto start = start_message(9, 3);
+            start.world_options = 0u;
+            EXPECT_TRUE(core.begin(start, bmmo::session::core_config{}).refused) << "a server without the union";
+            EXPECT_TRUE(fake.sent.empty());
+        }
+        for (const int arm: {0, 1}) {   // 0: bit and op, 1: bit without op
             flow_fake fake;
             session_platform p = fake.make_flow();
             if (arm != 1) p.place_probes = [](const std::vector<bmmo::session::probe_candidate>&) {};
             session_client_core core(std::move(p), session_capabilities{});
             state_of(core).own_id_ = 3;
             auto start = start_message(9, 3);
-            start.world_options = arm == 2 ? 0u : bmmo::session::WORLD_PROXIMITY_UNION;
             ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
             EXPECT_EQ(arm == 0, core.proximity_union_active()) << arm;
             core.level_requested();
@@ -8800,7 +8823,7 @@ namespace {
             state_of(core).own_id_ = 3;
             auto start = start_message(9, 3);
             start.map.level = arm == 2 ? 13 : 1;
-            start.world_options = arm == 1 ? 0u : bmmo::session::WORLD_SESSION_CLOCK;
+            start.world_options = bmmo::session::WORLD_PROXIMITY_UNION | (arm == 1 ? 0u : bmmo::session::WORLD_SESSION_CLOCK);
             ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
             EXPECT_EQ(arm == 0 || arm == 3, core.tutorial_off()) << arm;
             for (uint32_t id = 5; id <= 10; ++id) set_test_life(core, id, 63);
@@ -8879,7 +8902,7 @@ namespace {
                 state_of(core).own_id_ = 3;
                 auto start = start_message(9, 3);
                 start.map.level = level;
-                start.world_options = bit ? bmmo::session::WORLD_SESSION_CLOCK : 0u;
+                start.world_options = bmmo::session::WORLD_PROXIMITY_UNION | (bit ? bmmo::session::WORLD_SESSION_CLOCK : 0u);
                 ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
                 EXPECT_EQ(core.tutorial_off(), session_clock_tutorial_off(bit, level)) << level << " " << bit;
             }
@@ -9006,7 +9029,7 @@ namespace {
         session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
         state_of(core).own_id_ = 3;
         auto start = start_message(9, 3);
-        start.world_options = bmmo::session::WORLD_TRAFO_INPUTS;
+        start.world_options = bmmo::session::WORLD_TRAFO_INPUTS | bmmo::session::WORLD_PROXIMITY_UNION;
         start.players[0].life = 2;   // member 4 is in its second life
         ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
         core.level_requested();
@@ -9070,7 +9093,7 @@ namespace {
         session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
         state_of(core).own_id_ = 3;
         auto start = start_message(9, 3);
-        start.world_options = bmmo::session::WORLD_TRAFO_INPUTS;
+        start.world_options = bmmo::session::WORLD_TRAFO_INPUTS | bmmo::session::WORLD_PROXIMITY_UNION;
         start.players[1].life = 2;   // our own entry: the second life
         ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
         core.level_requested();
@@ -9107,7 +9130,7 @@ namespace {
         session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
         state_of(core).own_id_ = 3;
         auto start = start_message(9, 3);
-        start.world_options = bmmo::session::WORLD_TRAFO_INPUTS;
+        start.world_options = bmmo::session::WORLD_TRAFO_INPUTS | bmmo::session::WORLD_PROXIMITY_UNION;
         start.players[1].life = 2;   // our own entry: the second life
         ASSERT_FALSE(core.begin(start, bmmo::session::core_config{}).refused);
         core.level_requested();

@@ -832,14 +832,9 @@ public:
             std::chrono::steady_clock::time_point window_start{};
             double last_position[3] = {};
             bool have_position = false;
-            // Repeat-event guard (design 9.4 hardening).  BodyRevived is a
-            // "this body is back" notification the client re-sends every frame
-            // it still believes a body is missing; the stamps differ (measured:
-            // up to 18 ticks apart inside one burst) while the (ball_type,
-            // name) does not, so the dedup key must not contain the stamp.
-            std::vector<bmmo::session::repeat_event_key> recent_revives;
-            uint64_t dropped_duplicate = 0, late_events = 0;
-            // Step G5: BodyRevived dropped under WORLD_PROXIMITY_UNION.
+            // Step G5: BodyRevived dropped under the proximity union (every
+            // session since step UOFF; the repeat-event guard that deduplicated
+            // the BodyRevived bursts of the bit-clear path went with it).
             uint64_t revived_ignored = 0;
         };
         std::map<HSteamNetConnection, member_guard> guards;
@@ -1060,18 +1055,18 @@ public:
         }
         // Step G2 (world-agreement-gaps-design.md 2.4, 5): the proximity
         // union's rule in the server's world; from step G3 every client runs
-        // it too and SessionReady's anchor_probes is compared (the config's
-        // default on since G3).
-        if (config_.physics_proximity_union) {
-            s.world_options |= bmmo::session::WORLD_PROXIMITY_UNION;
-            Printf("Room %u: every world places the mechanism proximity probes by the union's rule in this session "
-                   "(world option proximity union; BodyRevived retired).", r.id);
-        }
+        // it too and SessionReady's anchor_probes is compared.  Step UOFF
+        // (the user, 2026-10-31): always - the bit is set in every session
+        // (kept on the wire, no protocol change) and physics.proximity_union
+        // is ignored (config_manager.cpp).
+        s.world_options |= bmmo::session::WORLD_PROXIMITY_UNION;
+        Printf("Room %u: every world places the mechanism proximity probes by the union's rule in this session "
+               "(world option proximity union; BodyRevived retired).", r.id);
         // Step Q7 (world-agreement-gaps-design.md 2.10, 5): one mechanism
         // responds to every player - K slot copies of every per-player unit
         // in every world, K the room capacity clamped to [1, 64], fixed for
-        // the session (SessionStart carries it).  With the union only.
-        if (config_.physics_player_mechanisms && (s.world_options & bmmo::session::WORLD_PROXIMITY_UNION)) {
+        // the session (SessionStart carries it).
+        if (config_.physics_player_mechanisms) {
             s.world_options |= bmmo::session::WORLD_PLAYER_MECHANISMS;
             s.mechanism_slots = bmmo::session::units::mechanism_slot_count(
                 config_.maximum_members, static_cast<uint32_t>(bmmo::session::MAX_PLAYERS_PER_SESSION));
@@ -2440,15 +2435,15 @@ public:
             return;
         }
         // Protocol 16 (world-agreement-gaps-design.md 2.3, 5; step G3): under
-        // the proximity union every world rewired the same mechanism blocks,
+        // the proximity union (every session since step UOFF) every world
+        // rewired the same mechanism blocks,
         // or their sensors do not agree.  Late joiners too (the signature
         // does not depend on time).  A member whose host cannot place sends
         // 0.  Either way it "cannot join" (design 2.3): refused - out of the
         // session, not out of the room, and the rest go on (WG3's review: a
         // retail core member before G4 would otherwise end every headless
         // member's session).
-        if (s.world_ready && (s.world_options & bmmo::session::WORLD_PROXIMITY_UNION)
-                && msg.anchor_probes != s.anchor_probes) {
+        if (s.world_ready && msg.anchor_probes != s.anchor_probes) {
             const std::string what = Sprintf("probe mismatch (client %016llx, server %016llx)",
                     static_cast<unsigned long long>(msg.anchor_probes), static_cast<unsigned long long>(s.anchor_probes));
             refuse(what.c_str(), msg.anchor_probes
@@ -2666,11 +2661,11 @@ public:
             return;
         }
         // Step G5 (world-agreement-gaps-design.md 2.6): under the proximity
-        // union every world wakes its own mechanisms, so a BodyRevived is no
-        // input: neither submitted nor relayed, counted, and the first of
-        // each member noted in the log and the journal.
-        if (msg.type == bmmo::session::event_type::BodyRevived
-                && (s.world_options & bmmo::session::WORLD_PROXIMITY_UNION)) {
+        // union (every session since step UOFF) every world wakes its own
+        // mechanisms, so a BodyRevived is no input: neither submitted nor
+        // relayed, counted, and the first of each member noted in the log
+        // and the journal.
+        if (msg.type == bmmo::session::event_type::BodyRevived) {
             auto& guard = s.guards[c];
             if (guard.revived_ignored++ == 0) {
                 const std::string text = Sprintf("BodyRevived from %s ignored (world option proximity union): %s at %u",
@@ -2801,20 +2796,6 @@ public:
                 if (bmmo::session::trafo_is_reset(msg.flags))
                     for (int k = 0; k < 3; ++k) msg.position[k] = event.position[k] = 0.0f;
             }
-        }
-        if (msg.type == bmmo::session::event_type::BodyRevived) {
-            auto& guard = s.guards[c];
-            // Diagnostics only: a late event is legal and must be applied (the
-            // production Level 8 journal carries 126 events at offset -29..-31,
-            // Level 2 five BodyRevived 3058 ticks late).  Lateness is never a
-            // reason to drop anything.
-            const uint32_t now_tick = runner_->current_tick(msg.session);
-            if (static_cast<int32_t>(now_tick - msg.tick) > 0) ++guard.late_events;
-            if (bmmo::session::repeat_event_duplicate(guard.recent_revives, msg.ball_type, msg.name, msg.tick)) {
-                ++guard.dropped_duplicate;
-                return;   // no submit_event, no relay: members must not replay it either
-            }
-            bmmo::session::record_repeat_event(guard.recent_revives, msg.ball_type, msg.name, msg.tick);
         }
         if (msg.type == bmmo::session::event_type::Physicalize) {
             const auto& r = msg.recipe;
@@ -2991,11 +2972,8 @@ public:
                 if (s.trafo_relayed.size() >= 4096) s.trafo_relayed.erase(s.trafo_relayed.begin(), s.trafo_relayed.begin() + 2048);
                 s.trafo_relayed.emplace_back(a.applied, bytes);
             }
-            // BodyRevived is the server's own business (design 3.3: a wake of
-            // a body the server's scripts also run), relayed to the others
-            // and never echoed.
-            for (const auto m: s.members)
-                if (m != owner || msg.type != bmmo::session::event_type::BodyRevived) to.push_back(m);
+            // (A BodyRevived never gets here: dropped above, step G5 / UOFF.)
+            for (const auto m: s.members) to.push_back(m);
         }
         for (const auto m: to)
             send(static_cast<HSteamNetConnection>(m), bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);

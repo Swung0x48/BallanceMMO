@@ -29,9 +29,10 @@
 // The sensors' reference.  In the retail graph every TT Scaleable Proximity
 // in a mechanism script measures Ball_Pos_Frame, not the ball; that frame is
 // a CHILD of the ball entity (parent=Ball_Stone, traced on the replay), so it
-// follows the ball's restored and replayed body without any script.  That is
-// still what a session with WORLD_PROXIMITY_UNION clear runs (a client's
-// sensors watch its own ball only, G-c).  Under the bit (protocol 16,
+// follows the ball's restored and replayed body without any script.  That
+// was what a session with WORLD_PROXIMITY_UNION clear ran (a client's
+// sensors watched its own ball only, G-c) until step UOFF removed that
+// path.  Under the bit (always set since UOFF; protocol 16,
 // docs/world-agreement-gaps-design.md §2.2-§2.5, steps G2-G4) every world
 // rewires the mechanism blocks to private frames BMMO_Prox_<owner>_<n> and
 // their ActiveBall reads to private copies CurrentLevel#BMMOId_<owner>_<n>

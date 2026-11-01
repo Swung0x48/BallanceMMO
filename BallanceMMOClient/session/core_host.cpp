@@ -2209,8 +2209,10 @@ void BallanceMMOClient::core_host_anchor() {
     // placement's apply), as the headless anchor does; the core places them
     // before every live and replayed tick (platform place_probes) and the
     // signature goes into SessionReady.  A refused rewire ends the session
-    // here, as a refused placement does.  With the bit clear nothing is
-    // rewired (a previous anchor's union was released at its session's end).
+    // here, as a refused placement does.  Every session runs the union
+    // since step UOFF (the core refuses a SessionStart without the bit), so
+    // proximity_union_active() is this host's place_probes capability (a
+    // previous anchor's union was released at its session's end).
     uint64_t probe_signature = 0;
     proximity_release(m_bml->GetCKContext(), logger_, "a new anchor");
     if (core.proximity_union_active()) {

@@ -201,12 +201,12 @@ namespace bmmo::session {
             static_cast<unsigned long long>(s.trafo_retired_), s.trafo_log_.size(), trafo_set_list().c_str(),
             static_cast<unsigned long long>(s.trafo_retired_sights_), static_cast<unsigned long long>(s.trafo_unnamed_lives_));
         // Step G3/G5 (world-agreement-gaps-design.md 2.5, 2.6): the
-        // proximity union's section, only in a session under its world
-        // option (every other status line is the text it was): place calls
+        // proximity union's section (every session since step UOFF): place
+        // calls
         // live and in replays, the invariant guard (two bodies of a player),
         // the platform's skipped / relatched counts (host counters), and the
         // script wakes no BodyRevived was sent for.
-        const std::string probes = !(s.world_options_ & WORLD_PROXIMITY_UNION) ? std::string() : textf(
+        const std::string probes = textf(
             " probes: active=%d places=%llu/%llu two_bodies=%llu skipped=%llu relatched=%llu revived_local=%llu",
             s.probes_active_ ? 1 : 0, static_cast<unsigned long long>(s.probe_places_live_),
             static_cast<unsigned long long>(s.probe_places_replayed_), static_cast<unsigned long long>(s.probe_two_bodies_),

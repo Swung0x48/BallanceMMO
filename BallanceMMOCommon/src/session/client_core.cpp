@@ -213,6 +213,18 @@ namespace bmmo::session {
                  msg.protocol, bmmo::session::PHYSICS_PROTOCOL_VERSION);
             return begin_result{true};
         }
+        // Step UOFF (the user, 2026-10-31): the proximity union is always on -
+        // a server of this protocol sets WORLD_PROXIMITY_UNION in every
+        // session.  One that does not is a build from before the step with
+        // physics.proximity_union false: its world places by the removed
+        // bit-clear rule (the nearest player's ball) while this one would
+        // place by the union's, so the two cannot agree - refused, loudly.
+        if (!(msg.world_options & WORLD_PROXIMITY_UNION)) {
+            logf("session %u refused: the server runs without the proximity union (world options %08x), which this "
+                 "client no longer supports (the union is always on)", msg.session,
+                 static_cast<unsigned>(msg.world_options));
+            return begin_result{true};
+        }
         // A box of the previous session is closed with its own numbering,
         // before begin_session resets the tick base under it.
         retire_final_checkpoints("a new session started");
@@ -498,19 +510,17 @@ namespace bmmo::session {
         // places the mechanism proximity blocks by the union's rule; a host
         // that cannot sends no probe signature and the server refuses it.
         s.probes_active_ = proximity_union_active();
-        if (msg.world_options & WORLD_PROXIMITY_UNION)
-            logf("session %u: the mechanism proximity blocks follow every ball (world option proximity union)%s",
-                 s.session_, s.probes_active_ ? "" : ", which this host cannot place (no place_probes): the server will "
-                                                     "refuse its signature");
+        logf("session %u: the mechanism proximity blocks follow every ball (world option proximity union)%s",
+             s.session_, s.probes_active_ ? "" : ", which this host cannot place (no place_probes): the server will "
+                                                 "refuse its signature");
         // Step Q7 (world-agreement-gaps-design.md 2.10): the session's
         // mechanism slot count K; the host copies the per-player units K
-        // times at its anchor when WORLD_PLAYER_MECHANISMS is set (with the
-        // union: the units are placed by its place).
+        // times at its anchor when WORLD_PLAYER_MECHANISMS is set (the units
+        // are placed by the union's place).
         s.mechanism_slots_ = (msg.world_options & WORLD_PLAYER_MECHANISMS) ? msg.mechanism_slots : 0;
         if (msg.world_options & WORLD_PLAYER_MECHANISMS)
-            logf("session %u: one mechanism responds to every player (world option player mechanisms, K = %u slots)%s",
-                 s.session_, static_cast<unsigned>(msg.mechanism_slots),
-                 (msg.world_options & WORLD_PROXIMITY_UNION) ? "" : " - WITHOUT the proximity union: not run");
+            logf("session %u: one mechanism responds to every player (world option player mechanisms, K = %u slots)",
+                 s.session_, static_cast<unsigned>(msg.mechanism_slots));
         // Step RK3 (record-format-gaps-design.md 8 row K3 = C4, option (c)).
         if (msg.world_options & WORLD_SESSION_CLOCK)
             logf("session %u: the Level 1 tutorial is switched off (world option session clock)%s", s.session_,
@@ -677,16 +687,15 @@ namespace bmmo::session {
         if (caps_.placement) ready.caps |= bmmo::session::CAP_PLACEMENT;
         ready.anchor_placement = placement;
         // Protocol 16 (world agreement 2.3, 5; step G3): the mechanism-class
-        // probe signature of this world's rewire, always filled (0 when the
-        // session does not run the union); the server compares it under
-        // WORLD_PROXIMITY_UNION, late joiners included.
+        // probe signature of this world's rewire, always filled (0 when this
+        // host cannot place); the server compares it in every session (step
+        // UOFF), late joiners included.
         ready.anchor_probes = s.probes_active_ ? report.probes : 0;
         if (caps_.placement)
             logf("anchor placement signature %016llx (world option placement clones %s)",
                  static_cast<unsigned long long>(placement), (s.world_options_ & WORLD_PLACEMENT_CLONES) ? "on" : "off");
-        if (s.world_options_ & WORLD_PROXIMITY_UNION)
-            logf("anchor probe signature %016llx (world option proximity union)",
-                 static_cast<unsigned long long>(ready.anchor_probes));
+        logf("anchor probe signature %016llx (world option proximity union)",
+             static_cast<unsigned long long>(ready.anchor_probes));
         ready.serialize();
         platform_.send(ready.raw.str(), send_mode::reliable);
     }

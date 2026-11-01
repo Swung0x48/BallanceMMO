@@ -809,18 +809,11 @@ namespace bmmo::session {
                     return false;
                 }
                 // Step G5 (world agreement 2.6): under the proximity union
-                // every world wakes its mechanisms itself (principle (a)), so
-                // no world's wake is an input of another's: BodyRevived is
-                // not sent; the count stays for the status line.
-                if (s.world_options_ & WORLD_PROXIMITY_UNION) {
-                    ++s.revived_local_;
-                    return false;
-                }
-                bmmo::session_event_msg revived;
-                revived.tick = tick;
-                revived.type = bmmo::session::event_type::BodyRevived;
-                revived.name = name;
-                send_event(revived);
+                // (every session since step UOFF) every world wakes its
+                // mechanisms itself (principle (a)), so no world's wake is an
+                // input of another's: BodyRevived is not sent; the count
+                // stays for the status line.
+                ++s.revived_local_;
             }
             return false;
         });
