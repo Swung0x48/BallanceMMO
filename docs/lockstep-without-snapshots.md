@@ -2763,6 +2763,35 @@ the client in `client_core.cpp` `on_session_assign` / `on_session_start_at` /
     armed (`.local-tools/work/SAXH/hang_dump.py`); the same process-exit
     hang is recorded once before SAXH (rewind-cost-design.md, RC1d's
     resync_at150_down d15_brake run, client 1).
+- **Retail under real loss (FULL step RTD, 2026-11-01).** L11, two copies on
+  SAXC's x86 build, each pinned to E-cores of its own, the Arch server of
+  HEAD (snapshots off, trafo_inputs and placement on). **Adapted:** the
+  retail client cannot black itself out across its start message - the
+  automation's commands and its `net ... at <tick>` actions are served only
+  after the anchor hold's release (`scripts/retail/rtd_saxh`: the blackout
+  ran at 16:30:33.029, after "started."; `rtd_saxh2`, armed `at 1`: the
+  same), so copy 2 connected through HXP's proxy instead
+  (`scripts/arena_map_test.py` DelayProxy on 127.0.0.1:26710, 150 ms each
+  way) with HXP's outage `2:size81:300:down` (`rtd_retail.py saxhp`,
+  `scripts/retail/rtd_saxh3`): the outage fired at downlink datagram 997
+  (81 B) and dropped 17 datagrams. Server: start 1 at +688 ms, "start
+  postponed (1 of 3): Player673_0 did not confirm the start in time", start
+  2 at +677 ms, all confirmed, 0 refusals. Both copies started on start 2
+  (released 2.06 / 0.57 ms after their instants); the wall-clock skew +152.33
+  ms against +150.75 by design (half round trips 3.2 / 304.7 ms): error
+  +1.58 ms (`saxc_retail_judge.py`: PASS). Shown during the wait (the wait
+  panel's lines, logged "(shown to the player)"; `BMMO_HOLD_SHOT` wrote no
+  file, so the evidence is the log): copy 1 "waiting ...", "all players
+  confirmed - starting in about 679 ms", "start postponed (1 of 3) ...",
+  "new start time - starting in about 675 ms", "started."; copy 2 never got
+  start 1 (start 2 accepted at 31.981), then "start postponed (1 of 3) ..."
+  at 32.457, then "started." - the status arrived 476 ms after the newer
+  start it describes: SAXC's open residual (a status that overtakes a newer
+  start before the member's start; roadmap section 4, the HXP bullet). 0
+  lines after "started.", 0 stale-status lines. FINAL rows of both copies
+  bit-equal to the server (own, mirror, 23/23 mechanisms), server 620/620;
+  the two runs without a postponement (rtd_saxh, rtd_saxh2) also bit-equal,
+  servers 631/631 and 624/624.
 
 **As built (FULL step HXP, 2026-11-01): SAXH's deferred cells, a wall-clock
 outage in the proxy, the process-exit hang watched.** No product code; the

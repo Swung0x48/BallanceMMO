@@ -922,6 +922,16 @@ its SessionStart before the join is in `started`. A member whose SessionStart is
 sent after the join gets an entry list that already holds the joiner, plus
 possibly a `SessionMember` copy, which is idempotent.
 
+**Not covered: a retail Exit Level (FULL step RTD, 2026-11-01).** A retail
+member that leaves its level through the menu's Exit Level never reaches
+this leave path: its session ends at `OnPostExitLevel` and
+`core_host_end_local` sends no leave, so the server holds the member until
+the room closes, and the exit chain's own events (the sector's `[0][2]=1`,
+the own ball's Unphysicalize, the trafo resets) are recorded and sent
+first. Root-caused and queued in roadmap.md section 4 item 5 with its
+options (the user's choice); record-format-gaps-design.md "As built (step
+RTD)".
+
 ### 2.8 The core's member lives (part H)
 
 **State.** `players_` (CC:145) becomes a list of lives:

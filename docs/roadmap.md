@@ -1413,6 +1413,43 @@ numbers 1-10 are unchanged.
    on the event; narrows HLX); (c) the owner does not report a Physicalize
    that made no body (no event: the server's clone and the mirrors keep
    their body, as the owner's game does).
+
+   **Queued (FULL step RTD, root-caused, pre-existing; the fix is the
+   user's choice): the ESC menu wakes a resting own ball in its owner's
+   world only.** On the arena (`scripts/retail/rtd_arena`, reproduced to
+   the digit in `rtd_wake`) client 1's own ball, asleep at the spawn on
+   every side, reads awake and rises at 0.0038 m/s from the menu's first
+   muted tick (286; 538) and settles 1.53 mm higher 16 ticks later; the
+   server and client 2's mirror stay asleep (own 0/1 on client 1, worst
+   1.786 mm, mirrors and mechanisms bit-equal). Cause: Menu_Pause's chain
+   sends BallNav deactivate (left to the menu by ESCX); the retail Ball
+   Navigation script in the owner's world shuts every SetPhysicsForce down
+   and so fires its Physics WakeUp on the own ball (5 `script_wakeup
+   Ball_Stone` probe lines at the open, 0 idle / at the close); an own-ball
+   script wake is not reported (`reportable_wakeup`, core_host.cpp, since
+   R0), and every other world applies the PAUSED frame through the replica,
+   whose deactivation wakes nothing without a force controller. Options:
+   (a) keep the retail graph's Physics WakeUp off the own ball in a core
+   session; (b) the replica wakes the ball at a PAUSED edge in every world;
+   (c) report an own-ball script wake the replica did not make as a
+   BodyRevived. record-format-gaps-design.md "As built (step RTD)".
+
+   **Queued (FULL step RTD, root-caused, pre-existing; the fix is the
+   user's choice): Exit Level inside a session.** Through the menu's own
+   keys (`scripts/retail/rtd_l12`) the leaving client's last 17 FINAL rows
+   (11512..11528) record the exit's teardown (0/8 mechanisms, P_Modul_26's
+   sacks 2.98 m; every earlier row bit-equal), and the server is never
+   told (it substituted held frames for the member until the room closed,
+   498 ticks). Cause: the session ends at `OnPostExitLevel` (since M3), ~20
+   ticks after Event_handler's Exit Level chain started (PreExitLevel ~11508)
+   - the chain deactivates the sector with `[0][2]=1` outside a union pass,
+   unphysicalizes the own ball (sent, 11516) and resets the trafo sets
+   (sent, 11520) - and `core_host_end_local` sends no leave. Options: (a)
+   end at `OnPreExitLevel` and send a leave (the ball removed as J4's leave,
+   not by the chain's events); (b) stop recording at PreExitLevel, end at
+   PostExitLevel, send the leave; (c) accept (rows after a leaver's
+   PreExitLevel not compared; the server holds it until the room closes).
+   record-format-gaps-design.md "As built (step RTD)".
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire
@@ -3039,6 +3076,31 @@ numbers 1-10 are unchanged.
      its answer can be in flight (one window longer), (b) size the new
      deadline from X1 + rtt + slack (every postponement longer), (c) accept
      and document.
+   - **Run at RTD (2026-11-01, FULL retail check batch, no product code;
+     SAXC's x86 build, the Arch server of HEAD 6916f406, snapshots off,
+     trafo_inputs and placement on):** 11 two-copy launches
+     (`scripts/retail/rtd_*`): the ESC menu's own paths on L12 with a
+     thunderstorm flash inside a menu period, Options and Menu_YesNo
+     (Restart: No, then Yes; Exit Level: Yes) through their keys
+     (`rtd_l12`); ESCK's L1 / L8 again (`rtd_esck_l1`, ESCK's figures); the
+     arena's level end with the menu open - the "3 keys" hidden while open
+     and latched across the close, a fresh Space goes on (`rtd_arena`); a
+     diagnostic (`rtd_wake`); HLX on retail - 8 beam pairs under blackouts,
+     0 split, rows bit-equal (`rtd_hlx`); SAXH under loss through HXP's
+     proxy (the client cannot black itself out during its anchor hold:
+     `rtd_saxh`, `rtd_saxh2`) - postponed once, the lines shown, both on
+     start 2, skew error +1.58 ms (`rtd_saxh3`); SLG's trailing ball over
+     three crossings and a session 1 again after the server's restart
+     (`rtd_slg3`; `rtd_slg`, `rtd_slg2` driver misses). The game roots'
+     stale GNS DLLs replaced with the 1.6.1 set, the old ones backed up
+     (building-and-deployment.md). 0 same-frame Pause / Unpause pairs,
+     every server journal exact, every FINAL row bit-equal except the two
+     residuals queued in item 5 (the menu's own-ball wake, Exit Level in a
+     session). Met and known: SAXC's overtaking status (copy 2 showed
+     "start postponed" after accepting start 2), one beyond-reach resync
+     in `rtd_hlx` (the LCM class). Notes: record-format-gaps-design.md,
+     late-player-design.md, lockstep-without-snapshots.md and
+     resync-and-sector-timing-design.md "RTD".
    - **FULL step HLX (2026-10-31; HL run 15's `swing_s1` failure):** a
      beam's Physicalize applied in a drain before its same-origin
      Unphysicalize was a no-op on the live mirror (the entity is kept, the

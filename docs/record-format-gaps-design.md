@@ -2444,6 +2444,8 @@ its keys stay neutral until the menu closes either way (the mute), and the
 tutorial's time-factor writes are held (`pause_clock_apply`, RK3H), so
 nothing compared between worlds changes.
 (Answered 2026-10-31 by the user, built at step ESCK below.)
+(The not-run rows were run at FULL step RTD, 2026-11-01: "As built (step
+RTD)" at the end of this document.)
 
 ## As built (step ESCK, FULL close-out, 2026-10-31): while the ESC menu is open its keys reach the menu only
 
@@ -2566,4 +2568,129 @@ the same game processes; 140 s):
 
 **Not run / not covered:** the level end's "3 keys" with the menu open
 (needs a finished level); Options / Menu_YesNo through their keys (left to
-the menus by construction; the anchor's census shows them unwrapped).
+the menus by construction; the anchor's census shows them unwrapped). (Run at FULL step RTD, below.)
+
+## As built (step RTD, FULL close-out, 2026-11-01): ESCX's and ESCK's not-run rows on the final binary
+
+A check batch: no product code changed. The x86 mod is SAXC's build (tree
+13a3f39bf540-dirty, which differs from HEAD 6916f406 by comments only), the
+Arch server rebuilt from HEAD (ballanced-36c04e3d24c9+bmmo-6916f406899b),
+snapshots off, trafo_inputs and placement_clones on, both copies with
+`BMMO_JOURNAL_FINAL_CHECKPOINTS=1`; the judges `rt1_judge.py` (each
+client's FINAL rows against the server's FULL rows), SimTool
+`--replay-session` of every server journal (build-agent-rSAXC) and
+`menu_periods.py`. Driver `.local-tools/work/RTD/rtd_retail.py`, judge
+`.local-tools/work/RTD/rtd_judge.sh`.
+
+- **Menu_Pause's layout** (read from screenshots, `.local-tools/work/RTD/shots`):
+  it opens on Back; Down cycles Back -> Restart Level -> Highscore ->
+  Options -> Exit Level -> Back; Enter selects; ESC inside Options returns
+  to Menu_Pause with Options selected; Menu_YesNo opens on No, Left selects
+  Yes.
+- **L12, the thunderstorm** (`scripts/retail/rtd_l12`, `rtd_retail.py l12`):
+  offline control first (ESC: `paused=1`, ingame / events scripts 0,
+  factor 0; ESC: resumed - vanilla unchanged). In the session each flash's
+  Timer Out draws Gameplay_Blitz's Random again, so the Timer's duration is
+  the flash counter: one flash seen with the menu closed timed the next;
+  the menu opened at tick 8282, the duration changed 48.575 s -> 53.297 s
+  5.9 s later with the menu open (a flash inside the menu period; the
+  pause chain left the storm running, `ingame_script=1`, points 740 -> 716
+  while open), closed at 8915.
+- **Options through the keys**: ESC, Down x3, Enter opened Options
+  (Graphics selected); Down / Up and Shift + Left inside Options reached
+  the menus only - ESCK's mask hid them from Gameplay_Ingame's Cam
+  Navigation on 78 block runs, `Cam_OrientRef` unchanged; ESC back to
+  Menu_Pause, Down x2, Enter on Back closed it (`paused=0`).
+- **Restart Level through Menu_YesNo**: Enter on Restart Level opened the
+  question on No; Enter on No went back to Menu_Pause (the level not
+  reset); Enter, Left, Enter (Yes): PreResetLevel, the own ball out at
+  10450 and born again at 10659 (spawn ghost), N1 / N2's pinned reset
+  ("manager ran outside a union pass ... deactivate [0][2]=0, reset 1"),
+  every FINAL row of both clients bit-equal through it.
+- **Exit Level through Menu_YesNo** (client 1): Down x4, Enter, Left,
+  Enter: PreExitLevel, PostExitLevel, "Physics session 1 ended: left the
+  level", the main menu (`ingame=0`, `session=0`); client 2 played on.
+  **Residual (pre-existing, root-caused; queued in roadmap.md section 4
+  item 5, the fix is the user's):** client 1's last 17 FINAL rows
+  (11512..11528) record the exit's teardown - 0/8 mechanisms there
+  (P_Modul_26's sacks 2.98 m), every earlier row bit-equal. Cause: the
+  session ends at `OnPostExitLevel` (`core_host_end_local("left the
+  level")`, since M3 f7e10607), but Event_handler's Exit Level chain runs
+  for ~20 ticks before it (PreExitLevel at ~11508): it deactivates the
+  sector outside a union pass with `[0][2]=1` (that chain's cell is not one
+  of the two N1 / N2 pin), so the leaving world resets its mechanisms
+  locally while the core still steps and records; it also unphysicalizes
+  the own ball (sent, 11516) and resets the trafo sets (sent, 11520), which
+  every world applies. And the server is never told: `core_host_end_local`
+  sends nothing, so the server kept the member and substituted held frames
+  for it until the room closed (`S2 held player=1684025565
+  ticks=11530..12027`, 498 ticks). Options: (a) end the local session at
+  `OnPreExitLevel` (before the chain) and tell the server the member left
+  (its ball removed there as a leave, J4's path, instead of by the chain's
+  Unphysicalize / trafo events); (b) keep the end at PostExitLevel but stop
+  recording at PreExitLevel and send the leave (the chain's events still go
+  out); (c) accept: the rows of a member that leaves are not compared after
+  its PreExitLevel (a judge rule), and the server holds a level-leaver until
+  the room closes.
+- **The ESC menu and a resting own ball** (the arena,
+  `scripts/retail/rtd_arena`, and the diagnostic `scripts/retail/rtd_wake`).
+  **Residual (pre-existing, root-caused; queued in roadmap.md section 4
+  item 5, the fix is the user's):** opening the menu while the own ball is
+  asleep wakes it in its owner's world only. Client 1's own ball
+  (Ball_Stone at rest at the spawn, flag 2 on every side) reads flag 3 and
+  rises at 0.0038 m/s from the mute's first tick exactly (286; 538 in
+  rtd_wake, the same 2.016043 -> 2.016277 m), and settles again 1.53 mm
+  higher at 302 - the server and client 2's mirror stay asleep (the mirror
+  is bit-equal on client 2). In scope, rows 286..494 and 774..868 differ
+  (worst 1.786 mm; 16 flag rows); rows 870..1028 are the airship (the own
+  ball enters its zone at 870, client1_ModLoader.log: exception c, not
+  compared - `.local-tools/work/RTD/own_rows.py` does not skip them and
+  its `own_arena_c1.txt` shows up to 72.9 m there, which is the balloon,
+  not this residual); every mechanism and mirror row is bit-equal.
+  The probe (`BMMO_HULL_PROBE=Ball_Stone`) logged 5 `script_wakeup
+  Ball_Stone` lines at the menu's open and none idle or at the close.
+  Cause: Menu_Pause's chain sends BallNav deactivate (ESCX left "BallNav
+  (de)activate" to the menu, ff67c6a2); the retail Ball Navigation script,
+  still present in the owner's world beside the replica, sends Shutdown to
+  every SetPhysicsForce and so fires its shared Physics WakeUp on the own
+  ball (`WakeUpFromScript`, engine change #14); an own-ball script wake is
+  not reported to the server (`reportable_wakeup` excludes the own ball,
+  core_host.cpp, since R0 791f75ab), and the other worlds apply the PAUSED
+  frame through the replica, whose deactivation wakes nothing when no force
+  controller exists (`player_navigation::shutdown_all`). Not seen on L1 /
+  L8 / L12 (ESCX, ESCK, this step): their own ball was awake when the menu
+  opened. Consequence: a player who pauses with the ball at rest carries an
+  owner-only offset (1.5 mm here) that nothing corrects with snapshots off
+  and that a later roll carries on. Options: (a) keep the retail graph's
+  Physics WakeUp off the own ball in a core session (the replica already
+  wakes it where its rules say, in every world); (b) the replica wakes the
+  ball at a frame's PAUSED edge in every world (retail's wake on BallNav
+  deactivate, carried by the frame flag; every world's simulation changes
+  at a pause); (c) report an own-ball script wake the replica did not make
+  as a BodyRevived that every world applies at its stamp.
+- **The level end's "3 keys" with the menu open** (the arena, its end since
+  ARX): ESC opened the menu, client 1 was beamed onto PE_Balloon_Platform:
+  LevelFinish with the menu open. Space with the menu open 12 s later:
+  hidden from Gameplay_Events on 20 block runs, the end screen did not go
+  on; Enter on Back held 0.35 s across the close: 30 more hidden runs
+  (latched), `paused=0`, still no score screen 2 s later; a fresh Space:
+  PreEndLevel 29 ms after it and the score screen. (In a session the
+  arena's end also takes a life and respawns the ball at the last
+  checkpoint, as in ARX's run `arx_end` - not this step's.)
+- **The arena itself**: the anchor wrapped 51 blocks as on L1 / L8 / L12;
+  the menu opened and closed.
+- **L1 again after ESCK's read_key fix-up** (`esck_retail.py l1`,
+  `scripts/retail/rtd_esck_l1`): ESCK's figures again - after Back with
+  Enter held `own_phys=0` 1.5 s and 3 s later, 68 hidden runs on
+  Gameplay_Tutorial (38 with the menu open), latch_total 3, one Enter
+  afterwards `own_phys=1`; L8: 119 hidden runs on Gameplay_Ingame,
+  `Cam_OrientRef` unchanged with the menu open and turned after the close.
+  Every FINAL row of both clients bit-equal in both sessions (L1 own,
+  mirror, 8/8 mechanisms; L8 own, mirror, 2/2); servers 1672/1672 and
+  887/887.
+- **Pass figures**: 0 same-frame Unpause / Pause pairs in every run
+  (rtd_l12 6 / 3 PauseLevel / UnpauseLevel, rtd_esck_l1 8 / 5, rtd_arena
+  3 / 2); every server journal replays exact (rtd_l12 12020/12020,
+  rtd_arena 2491/2491, rtd_wake 804/804); FINAL rows bit-equal everywhere
+  except the two residuals above (rtd_l12 client 1's exit rows, the
+  arena's own ball of client 1).

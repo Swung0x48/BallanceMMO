@@ -288,6 +288,29 @@ x86 install) into `ModLoader/Mods`, and into `Bin` where the copy holds them
 there too, with the mod and `physics_RT.dll`; before VCPKGU it copied only
 the latter two.
 
+**The game root's stale runtime DLLs (FULL step RTD, 2026-11-01).** The
+test copies held VCPKGU's 1.6.1 set in `Bin` and `ModLoader/Mods`, but the
+game root of the five `Downloads/Ballance-MMOTest*` copies (`Ballance-MMOTest`,
+`- AHN`, `- Copy`, `- Copy (2)`, `- Copy2`) held an older
+`GameNetworkingSockets.dll` (sha256 c293080aa549..., 2026-07-26) with
+`libcrypto-3.dll` (923aa2180a1a...) and `libprotobuf.dll` (d61418a85a7c...)
+and no abseil, and `Desktop/Ballance-Agent`'s root a 2026-10-19 set (GNS
+8051345b3101..., abseil 9eafac33b445..., libcrypto 57612654f069...,
+libprotobuf 7cf0df73bf5f...). Dead while Player.exe runs with cwd `Bin`, a
+stale-GNS trap otherwise (the flat API binds by name and loads silently).
+Each root now holds the x86 build's set (GameNetworkingSockets.dll
+68034dbfb6ca..., abseil_dll.dll 25d5e1af52f4..., libcrypto-3.dll
+7f286077a0bf..., libprotobuf.dll 68c0fba94937...; abseil added where it was
+absent), and `Bin` of `- Copy (2)` and `- Copy2`, which lacked
+`abseil_dll.dll`, got it (**adapted**: the plan named the roots only; a Bin
+set without abseil is the same mixed-set trap). Every replaced file was
+backed up first under `.local-tools/work/RTD/dll_backup/<copy>/<dir>`
+(VCPKGU's `deploy_other.py` precedent); nothing was deleted. Before /
+after per copy and directory: `.local-tools/work/RTD/dlls_before.txt`,
+`dlls_after.txt` (`rtd_dlls.py list`). `Ballance-MMOTestCopy3` is no test
+copy: listed (its `ModLoader/Mods` holds the 2026-09-08 set, GNS
+8051345b3101...), untouched.
+
 ## Distributing the client mod
 
 Players need, under their game install:

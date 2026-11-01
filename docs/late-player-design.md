@@ -3612,6 +3612,24 @@ in any of its arms (`pair_order.py`). One live smoke run (swing recipe,
 again (client 3, 701), `superseded=1/1`, PASS, every client's confirmed FINAL
 rows bit-equal to the server.
 
+**On retail (FULL step RTD, 2026-11-01; `scripts/retail/rtd_hlx`,
+`.local-tools/work/RTD/rtd_retail.py hlx`).** L11, two copies on SAXC's x86
+build, the Arch server of HEAD (snapshots off, trafo_inputs and placement
+on), `net lag 150` both ways on both copies, each pinned to E-cores of its
+own: client 1 beamed in place eight times (`beam ... at T`, T = 419, 529,
+..., 1189), with a blackout across six of the stamps on client 2's downlink
+(150 / 250 / 350 / 200 / 300 / 400 ms from T + 6 + 2k) and across two on
+client 1's uplink (250 / 350 ms from T - 4). `pair_order.py` on the client
+journals: 8 same-origin remote pairs (client 2's view of client 1), **0
+split** - no P,P,U,U order occurred, so `superseded=0/0`; HLX's unit test
+and its `swing_s1` replay carry the split case. Every FINAL row of both
+clients bit-equal to the server (own, mirror, 15/15 mechanisms), server
+1486/1486. The 250 ms blackout at 537 also covered every repeat of the
+beam stamped 529: the reliable copy arrived at client 2's local 587, past
+the 48-tick reach - "a late lifecycle event beyond the reach", one resync
+(608), rows bit-equal after it: the designed fallback (roadmap section 4,
+the LCM / DX8 class), not HLX's.
+
 ## As built (step R6M, FULL close-out, 2026-11-01): plan step 21's measurement - how long retail tolerates its own ball absent
 
 Measurement only, at HEAD 7a13ac5c; no code changed. Binaries: the x86 mod

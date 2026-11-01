@@ -3857,6 +3857,28 @@ core only (`client_core.hpp`, `client_core_resync.cpp`,
   session, as the core stamps each sector once.
   Headless unaffected (no file under BallanceMMOCommon or the headless
   client changed; no x64 build, wire check or GCC check needed).
+- **SLG's leftovers run (FULL step RTD, 2026-11-01;
+  `scripts/retail/rtd_slg3`, `.local-tools/work/RTD/rtd_retail.py slg`).**
+  Level 2, two copies on SAXC's x86 build, the Arch server of HEAD
+  (snapshots off, trafo_inputs and placement on). (1) **A trailing ball over
+  more than one crossing:** client 1 crossed three checkpoints (stamps 328 /
+  534 / 749, the server's "sector +2 / +3 / +4 at tick T" at the same
+  ticks); then client 2 was beamed over the same three: "own sector 2 / 3 /
+  4 reported at tick 928 / 1034 / 1149 (stamped 928 / 1034 / 1149)", no
+  union pass of its own (the server logs no new sector), client 1 saw
+  "remote player ... entered sector 2 / 3 / 4, stamped for tick 928 / 1034 /
+  1149"; `players` at the end: both own sector 4, each one's peer sector 4.
+  (2) **A session 1 again after the Arch server restarted** (room closed,
+  both disconnected, the server restarted, both reconnected, a new room and
+  session - numbered 1 again): client 1 crossed the first checkpoint again,
+  "own sector 2 reported at tick 328 (stamped 328)", client 2 at 528, the
+  server's "sector +2 at tick 328"; `players` own sector 2 / peer sector 2
+  on both - the reported set was cleared at the session's start, not kept
+  under the reused id. FINAL rows of both clients bit-equal to the server in
+  both sessions (own, mirror, 20/20 and 8/8 mechanisms), servers 1249/1249
+  and 618/618. (`rtd_slg` and `rtd_slg2` were driver misses: the flames of
+  later sectors sit at the origin until their sector runs, so the driver
+  now re-reads them after each crossing.)
 
 ## 9. Open questions
 
