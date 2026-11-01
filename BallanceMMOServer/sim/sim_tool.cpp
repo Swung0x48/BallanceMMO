@@ -2214,6 +2214,9 @@ namespace {
         }
         std::printf("summary: frames=%zu matched=%zu first_divergence=%lld\n",
             record.frames.size(), matched, first_divergence);
+        // FULL step OCK: the surface signature's memo (BMMO_HASH_MEMO) in this
+        // replay, after the summary line the tools compare.
+        std::printf("%s\n", bmmo::physics::describe_surface_memo().c_str());
         std::fflush(stdout);
         return first_divergence < 0 ? 0 : 3;
     }
@@ -6932,6 +6935,9 @@ namespace {
         }
         std::printf("summary: ticks=%zu matched=%zu first_divergence=%lld checkpoints=%zu checkpoint_mismatches=%zu\n",
             simulated, matched, first_divergence, checkpoints, checkpoint_mismatches);
+        // FULL step OCK: the surface signature's memo (BMMO_HASH_MEMO) in this
+        // replay, after the summary line the tools compare.
+        std::printf("%s\n", bmmo::physics::describe_surface_memo().c_str());
         if (pre_first_groups)   // step B2SW (T1 b)
             std::printf("note: %zu group(s) before the first simulated tick applied without a step\n", pre_first_groups);
         if (stopped_at_jump)
@@ -9639,6 +9645,56 @@ namespace {
         }
         const auto census = bmmo::sim::array_census::run(context, sel, args.array_reads_client);
         bmmo::sim::array_census::print(census, world->level(), args.array_reads_client, args.array_reads_all);
+        // FULL step OCK: the written-cells memo's watch list on this level
+        // (step OPB; the hosts' cells_memo line), bound twice like a
+        // session's first two bindings: the first walk, then a hit
+        // (BMMO_CELLS_MEMO=verify walks it again and compares).
+        {
+            bmmo::game::array_reads::cells_memo memo;
+            bmmo::game::array_reads::written_cells(context, sel, memo);
+            bmmo::game::array_reads::written_cells(context, sel, memo);
+            std::printf("%s\n", memo.line().c_str());
+            for (const std::string& note: memo.notes()) std::printf("%s\n", note.c_str());
+        }
+        // FULL step OCK (OPC2's deferral, OPC's review finding 2): the blocks
+        // that run a script inside the calling frame.  Activate Script and
+        // Execute Script go through CKScene::ActivateScript (the target
+        // carries ACTIVATENEXTFRAME at the capture before it runs); "Call
+        // Script" runs its target at once (CKBehavior::Execute, then
+        // Activate(FALSE)), so a selected root it targets can run and finish
+        // between two captures with its words unchanged - the case only
+        // verify sees.  Counted: every Call Script block, and those whose
+        // Script pin resolves to a selected root.
+        {
+            const int count = context->GetObjectsCountByClassID(CKCID_BEHAVIOR);
+            CK_ID* ids = context->GetObjectsListByClassID(CKCID_BEHAVIOR);
+            int blocks = 0, selected = 0, unresolved = 0, activate_script = 0, execute_script = 0;
+            std::string names;
+            for (int i = 0; i < count; ++i) {
+                auto* block = CKBehavior::Cast(context->GetObject(ids[i]));
+                if (!block || !block->IsUsingFunction() || !block->GetPrototypeName()) continue;
+                // The two scene activations, counted for scale (and as the
+                // census's own check that it sees the composition's blocks).
+                if (std::strcmp(block->GetPrototypeName(), "Activate Script") == 0) ++activate_script;
+                if (std::strcmp(block->GetPrototypeName(), "Execute Script") == 0) ++execute_script;
+                if (std::strcmp(block->GetPrototypeName(), "Call Script") != 0) continue;
+                ++blocks;
+                auto* target = CKBehavior::Cast(block->GetInputParameterObject(1));
+                if (!target) { ++unresolved; continue; }
+                if (std::find(sel.scripts.begin(), sel.scripts.end(), target->GetID()) == sel.scripts.end()) continue;
+                ++selected;
+                if (names.size() < 400) {
+                    CKBehavior* root = block;
+                    while (root->GetParent()) root = root->GetParent();
+                    names += std::string(names.empty() ? "" : "; ") + (root->GetName() ? root->GetName() : "?") + " -> "
+                           + (target->GetName() ? target->GetName() : "?");
+                }
+            }
+            std::printf("call_script: level %d blocks=%d targeting_a_selected_root=%d unresolved_target=%d (activate_script=%d "
+                        "execute_script=%d)%s%s\n",
+                        world->level(), blocks, selected, unresolved, activate_script, execute_script,
+                        names.empty() ? "" : " : ", names.c_str());
+        }
         std::fflush(stdout);   // before the world goes: the engine's shutdown may not return through main
         return 0;
     }

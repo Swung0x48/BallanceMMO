@@ -3743,6 +3743,28 @@ GNS lines). (8) The console queue never reached the 16 KiB `[log] writer queue p
 run (2 s stalls hold less than that of the server's lines), so its bound is shown by the unit tests and
 SIO's shared code, not by the live run.
 
+#### As built (step OCK, FULL close-out, 2026-11-01): the replxx console exercised
+
+The note's (6). The Arch server of this tree started once on a pseudo-terminal: `work/OCK/arch_server_pty.sh`
+(arch_server_lp.sh with the launch `sleep 900 | script -qfc '<server> --port 26700 --log <run dir>/server.log'
+<typescript>`; the server on `pts/2`, so `isatty(stdout)` holds and the console queue is `open_sink` into
+replxx; the `--log` file serves the harness), OPA's swing arm with the memo on (`work/OCK/live.sh`). Console
+lines arrive: 175 `[Sim]` lines in the typescript and the same 175 in the `--log` file, timestamped and
+coloured, each followed by replxx's prompt repaint. No `[log] writer queue peak` line in either queue: the
+console queue never reached the first note at 16 KiB (a few lines a second), as in IOX's stalled run (8).
+VERDICT PASS, resyncs 0, starved 0. Step time against the same build with stdout to a file (OPA's memo-on
+arm: p50 448-530, p99 655-788, max 767-1499 us; with an extra `--log` file: 455-525, 643-751, 794-942): the
+typescript on /mnt/d (9P) p50 489-550, p99 951-1292, max 1245-1864 us; a second run with the typescript on
+WSL's ext4 p50 478-546, p99 806-945, max 962-2335 us. The p99 excess goes with the terminal's relay
+(`script` writing every chunk to its typescript, flushed): nothing is written on the runner (`misc.cpp`
+`DebugOutput` appends to the queues; the writer strand calls replxx `print`), and moving the typescript from
+9P to ext4 took about two thirds of it away; the rest is not attributed (one run each). No deployment runs
+this path now (okbc.st gone, decision 43). A rig artifact, not a server difference: the pty script's
+server-pid lookup takes the `bash -c` wrapper, whose descriptors do not hold the journal, so
+`arch_journal_mirror.sh` copied the open journal early, the harness did not wait for the session's end and
+the server replays cover 3258 and 3154 ticks (all matched). The lookup is fixed in
+`.local-tools/work/OCK/arch_server_pty.sh:57` for a later reuse of the script.
+
 ### As built (step WGQ7, 2026-10-29): Q7, per-player mechanism units (protocol 19)
 
 **Protocol and journal.** P_Q is **19** (`PHYSICS_PROTOCOL_VERSION`;

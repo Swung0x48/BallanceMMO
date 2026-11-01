@@ -4493,6 +4493,65 @@ empty, so each event counts once. Rerun after the fix-up (it changes
 builds, the unit tests, the GCC syntax check and the wire check in verify
 mode.
 
+### As built (step OCK, FULL close-out, 2026-11-01): OPA's deferred checks run
+
+Plan FULL, step OCK, row OPA. Base d430ea34 (protocol 24, journal v9). Tooling only: the SimTool's
+`--replay-session` and `--replay` print the `surface_memo:` line (`describe_surface_memo()`) after their
+`summary:` line (`sim/sim_tool.cpp`; the tools pick the `summary:` line by its prefix). No product, IVP,
+engine, protocol or journal change.
+
+**The row's premise, corrected.** The memo's value never reaches a TICK record. `capture_world_hash`
+(`physics_state.cpp:436-440`) puts the environment and the cores into `hash` and `pose` and the surface
+signature into `surfaces`, and the journal's TICK record carries tick, hash, pose, cores, ms and the probe
+only (`journal.hpp:774-786`). So "the journal TICK hash memoized" above means the surface signature
+computed with every hash; its value reaches a journal only as the header's `anchor_surfaces` (which the
+server compares at a member's anchor, `server.cpp:2480`), the retail hold digest (`core_host.cpp`
+`hold_capture`) and an automation record's frames (`.bmrc` v3). A TICK compare checks the pose and core
+hashing, which the memo does not touch; it was run anyway (3 below).
+
+**The x86 SimTool.** `build/sim-x86-a3` rebuilt incrementally with `work/tr1/build_sim_x86.bat` (no
+reconfigure needed; `BMMO_PHYSICS_PORTABLE_MATH` ON). Its `deps_heal` reports DEPS-ZERO on
+`bmmo_portable_math.c.obj` alone, a file with no `#include` (#deps 0 is right: the guard's false positive
+on that tree, not a stale build). RTR's retail sessions' server journals (`scripts/retail/rtr_ctl` L11,
+`rtr_l12` L12) and this step's retail run's two (`scripts/retail/ock_main`, OPB's paragraph below),
+replayed by the x86 and the x64 SimTool with `BMMO_HASH_MEMO` off / on / verify (`work/OCK/opa_replays.sh`,
+`opa_ock_main.sh`): every replay N/N matched (2552, 1548, 2523, 2730 ticks); verify 0 mismatches over
+225838 (L11), 113404 (L12), 180254 and 195305 (ock_main) verified hits; each replay's own journal equal
+tick for tick to the others' and to the Linux server's records (x86 = x64 = Linux, memo off = on = verify).
+
+**The retail plugin's values.** (1) Anchor surfaces: every retail client journal's `anchor_surfaces`
+(RTR L11 and L12 with the memo on, ock_main's two sessions in verify; both copies) equals the Linux
+server's and the x86 SimTool's memo-off replay's (L11 `a34811ce6a4225ed`, L12 `9553ee21c51dbbec`).
+ock_main's second session anchored in the same process without a reload; its anchor value equals the
+fresh one too, but whether it was a memo hit (or a cold full hash after a slot retired by an environment
+deletion) is not observable from the mod. (2) Verify inside the retail plugin: ock_main ran both games
+with `BMMO_HASH_MEMO=verify`. The games' environment reached both DLLs: the mod's lines say
+`cells_memo: mode=verify` and `script_reuse: mode=verify`, and the plugin honoured `BMMO_PHYSICS_STDOUT`
+(read by the same `getenv` path), sending its stderr - where a verify mismatch is written - to
+`scripts/retail/client-N/physics-stdout.log`, where its own `[bmmo]` lines (build id
+`d430ea34af00-dirty`) arrived: 0 `surface_memo mismatch` lines on both copies over both sessions. The hit
+count is still not readable from the mod (no bridge call reads the plugin's counters). (3) TICK hashes,
+retail live against the fresh x86 replay: equal on RTR L11 2295 / 2538 and 2464 / 2552 ticks, L12
+1526 / 1548 on both copies, ock_main session 1 2445 and 2442 / 2523, session 2 1961 and 2204 / 2730. On
+every tick whose hashes differ the poses differ too (the equal counts are identical), in windows of a few
+to about 70 ticks: a client's TICK record is its live world after the frame's corrections
+(`client_core_frame.cpp:1033-1038`), i.e. its prediction windows (L12's 232-253 is the same on both
+copies). No tick has equal poses and unequal hashes.
+
+**Not run.** A per-frame compare of the retail plugin's surface values (an automation `record` replayed by
+the x86 SimTool, `scripts/bmrc_diff.py` compares `surfaces`): a solo record without input keeps one body
+set, so it would show memo hits of that set only - less than the warm anchor of (1).
+
+**The server's step time on Linux.** One swing pair (core_ref_s14's `swing_snapoff` arguments: 4 clients,
+60 s, the arena, 150 ms, 10 % loss; snapshots off; trafo inputs and placement copies on; the clients on
+E-cores of their own, decision 33; host load 7-11 %; `work/OCK/live.sh`), the Arch server of this tree
+(`ballanced-36c04e3d24c9+bmmo-d430ea34af00-dirty`) with `BMMO_HASH_MEMO` off, then on (read from the
+process's environment): both VERDICT PASS, server replays 3885 / 3885 and 4018 / 4018 matched, resyncs 0,
+starved 0. Step time per 660-tick window (`[Sim] step time over ticks`, 5-6 windows): off p50 527-615 us,
+p99 722-807 us, max 803-898 us; on p50 448-530 us, p99 655-788 us, max 767-982 us (one window 1499). A
+third arm, on with an extra `--log` file: p50 455-525, p99 643-751, max 794-942 us. The memo takes about
+80 us (some 15 %) off the server's step p50; one pair, a smoke figure.
+
 ## As built (step OPB, FULL close-out, 2026-10-31): the rollback world's written-cells walk memoized (R.4 row B, option B1)
 
 The user's decision (2026-10-30, OPTR), verbatim: "你决定，按你的推荐来" -
@@ -4664,6 +4723,45 @@ reaching a watched writer or a second session in one process, so with real
 CK data only the hit path (verified against a fresh walk at every bind) and
 the first walk were exercised. No stale case was found, so nothing waits on
 the user.
+
+### As built (step OCK, FULL close-out, 2026-11-01): OPB's deferred checks run
+
+**Dynamic pins on every level.** SimTool `--array-reads --level N --world-options 0x1f` (the live sessions'
+bits) now also binds the memo twice - the first walk, then a hit - and prints its `cells_memo:` line
+(`sim/sim_tool.cpp`, tooling). With `BMMO_CELLS_MEMO=verify`, levels 1-13: 0 dynamic pins on every level,
+0 mismatches; watched blocks / pins L1 2 / 8 (1 array, 0 columns), L2 26 / 104, L3 8 / 32, L4 10 / 40,
+L5 8 / 32, L6 28 / 112, L7 16 / 64, L8 14 / 56, L9 30 / 120, L10 32 / 128, L11 22 / 88, L12 54 / 216,
+L13 40 / 160 (2 arrays and 1 column on L2-L13). L8, L11 and L12 equal what the live runs and the retail
+sessions print (the table above, RTR's logs), so the SimTool's anchor selection is the sessions'.
+
+**The re-walk branches with real CK data.**
+- A second session in one process (`drops`, `first=2`): this step's retail run `scripts/retail/ock_main`
+  (RT1's main recipe through `work/OCK/ock_retail.py`: session 1, room closed, vanilla restart and a paper
+  explosion, session 2 without a reload; L11; both games with `BMMO_CELLS_MEMO=verify`). Client 1's line
+  at session 2's end: `binds=10613 hits=10611 walks=2 (first=2 scripts=0 pins=0 layout=0) drops=1
+  verified=10611 mismatches=0`; client 2 10602 / 10600, drops 1, 0 mismatches. RTR's `rtr_main` (memo on)
+  shows the same drop.
+- A selection that changes mid-session (`scripts`): no real run reaches it. The selection is made once per
+  session (headless `session_client.cpp:2711`, retail `core_host.cpp:2802`) and never edited, and a
+  sector activated mid-session leaves it alone: SRTJ's captures `cpu_full/srtj_E_l11x` (L11, sectors 2 and
+  3) and `srtj_E_l12x_on2` (L12, sectors 3, 4, 6, 8) replayed by HEAD's client with `BMMO_CELLS_MEMO=verify`
+  (`work/OCK/offline.sh`): `scripts=0 pins=0 layout=0`, one walk, 0 mismatches over 3387-3547 (L11) and
+  3119-3290 (L12) verified hits per client; the journals IDENTICAL to the live clients'. The branch fires
+  only when an id resolves to another object or a watched block is gone - a level reload under one
+  selection, which no host does.
+- A repointed watched pin (`pins`) and a changed layout (`layout`): no real run reaches them - 0 dynamic
+  pins on every level, and no host rewire (proximity union, checkpoint phase, depth test) reaches a
+  watched writer's pins on any level measured.
+- A host drop of a valid memo: the second session above.
+
+**The review's three nits**, recovered from run 13's OPB review output (the orchestrator's workflow
+transcript `wf_753478c3-591`, agent "OPB: review"; it found no blocker); all three still stand at HEAD and
+none is a defect: (1) `array_reads.hpp:103` defines `operator==(written_column, written_column)` away
+from the struct (`script_replay.hpp:138`), so a second definition there would collide; (2)
+`core_host.cpp:3131-3132` prints the process-wide `notes()` at every session end, so one mismatch note
+would repeat in every later session's log; (3) `written_cells_memo.hpp:167` counts a watched block that
+no longer resolves as `changed_scripts` (diagnostic only). One tidy-up item for the queue; not done here (no
+product change in this step).
 
 ## As built (step OPC, FULL close-out, 2026-10-31): an inactive script's record reused (R.4 row C)
 
@@ -5212,6 +5310,29 @@ one and not the others makes every copy fall back to the walk, exact but
 without the saving, `structure=` rising), and the `tails=` counter is
 documented as force and joint blocks re-emitted (a force block whose
 `capture_force` hook fails still counts). No rebuild or rerun (comments only).
+
+### As built (step OCK, FULL close-out, 2026-11-01): OPC2's deferral - a script run inside one frame
+
+**Verify on real data across sector activations.** SRTJ's protocol-24 captures replayed by HEAD's headless
+client with `BMMO_SCRIPT_REUSE=verify` (`work/OCK/offline.sh`; the same binary with the defaults as the
+control): `cpu_full/srtj_E_l11x` (L11, sectors 2 and 3 activated mid-session) 79320-82839 verified copies
+per client (70.0-71.3 % reused), `srtj_E_l12x_on2` (L12, sectors 3, 4, 6, 8) 55056-57168 (48.9-49.5 %);
+0 mismatches, `structure=0`, the 8 journals IDENTICAL to the default replay's and to the live clients'.
+Retail (`scripts/retail/ock_main`, two L11 sessions in one process, both games in verify): 283917 and
+283850 verified copies (80.0 / 79.7 %), 0 mismatches.
+
+**The case's count: the game's scripts hold no such case.** OPC's review finding 2 needs a selected root
+run and finished inside one frame. A census of the blocks that start a script (SimTool `--array-reads`, its
+`call_script:` line, levels 1-13 with the session composition): Activate Script 105-131 per level and
+Execute Script 19, both through `CKScene::ActivateScript` (Ballanced `Narratives/Behaviors/ActivateScript.cpp:127/149`,
+`ExecuteScript.cpp:82` -> `CK2/src/CKScene.cpp:277-289`: `ACTIVATENEXTFRAME`, the owner added for the next
+frame), so their target shows `ACTIVATENEXTFRAME` at the capture before it runs and is walked there and at
+the capture after it ran (its recorded words differ); Call Script, the one block that runs a script at once
+(`CallScript.cpp:97/111`: `Execute`, then `Activate(FALSE)`), appears 0 times on every level. The host's own
+activations are covered by the host-write generation (OPC). So the row's "the case's count > 0" cannot be
+met: the count is 0 by census, and a dynamic count is not observable without an engine hook
+(`CKBEHAVIOR_EXECUTEDLASTFRAME` is profile-only on retail and, on Ballanced, accumulates across a rewind's
+replayed ticks, whose scripts the replay runs by `CKBehavior::Execute` directly, `script_replay.hpp:1891/1947`).
 
 ## As built (step DEP, FULL close-out, 2026-10-31): snapshots off by default (SNAP-off) and the deployed config's keys (RCX-cfg)
 
