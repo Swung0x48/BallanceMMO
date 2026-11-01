@@ -1307,7 +1307,9 @@ namespace bmmo::sim {
     bool physics_world::anchor_trafo(std::string& error) {
         CKContext* context = engine_->context();
         CKIpionManager* manager = physics();
-        trafo_hooks_ = make_trafo_hooks(manager, [this](const std::string& line) { log("world: " + line); });
+        // FULL step AUD3: host support's one trafo hooks factory (audit D6).
+        trafo_hooks_ = bmmo::game::trafo_hooks_for(bmmo::physics::physics_direct(manager),
+                                                   [this](const std::string& line) { log("world: " + line); });
         if (trafo_registry_.reference().empty()) {
             // Not seen during the load (never expected: Balls.nmo is part of
             // the composition); the anchor is still before any explosion.

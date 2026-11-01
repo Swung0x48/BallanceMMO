@@ -229,6 +229,38 @@ namespace bmmo::physics {
                           std::string& error) const {
             return bmmo::physics::push_impulse(manager, entity_name, direction_ws, speed, behavior_id, error);
         }
+        // ---- the trafo sets (bridge API v21; game/host_backend.hpp
+        // trafo_hooks_for, FULL step AUD3: the headless half of the one
+        // trafo hooks factory, physics_view's methods under the same names).
+        // Whether the entity has a physics body now: get_body_state's answer,
+        // the rule physics_view::has_body follows through the bridge.
+        bool has_body(const char* entity_name) const {
+            if (!entity_name || !entity_name[0]) return false;
+            bmmo_physics_body_state state{};
+            std::string error;
+            return get_body_state(entity_name, state, error);
+        }
+        bool trafo_set_register(uint32_t player, const uint32_t frames[3], const uint32_t* explosions, int explosion_count,
+                                bmmo_physics_trafo_set_report& out, std::string& error) const {
+            return bmmo::physics::trafo_set_register(manager, player, frames, explosions, explosion_count, out, error);
+        }
+        bool trafo_set_unregister(uint32_t player, std::string& error) const {
+            return bmmo::physics::trafo_set_unregister(manager, player, error);
+        }
+        void trafo_set_seed(uint32_t frame_id, int32_t seed) const { bmmo::physics::trafo_set_seed(manager, frame_id, seed); }
+        int trafo_set_unmake(uint32_t frame_id, std::string& error) const {
+            return bmmo::physics::trafo_set_unmake(manager, frame_id, error);
+        }
+        // The originals' restore the quiesce runs (restore_explosion_pieces):
+        // the headless hosts reset the session clock before the trafo
+        // anchor, so the quiesce restores them itself.  physics_view has no
+        // such method (trafo_hooks_for's trait: the retail clock reset after
+        // the quiesce does it).
+        int restore_trafo_originals() const { return bmmo::physics::restore_trafo_originals(manager); }
+        // The recipes of a muted frame (bridge API v33 on retail; FULL step
+        // AUD3, session_host_world.hpp birth_feed).
+        void set_event_log_keep_muted_recipes(bool keep) const { bmmo::physics::set_event_log_keep_muted_recipes(keep); }
+        std::string drain_muted_recipes() const { return bmmo::physics::drain_muted_recipes(); }
     };
 
     // Every movable body's name in the engine's table order, minus the names

@@ -95,6 +95,8 @@ namespace bmmo::physics {
     // made.  Off by default; everything else stays muted.
     void set_event_log_keep_muted_recipes(bool keep);
     std::string drain_muted_recipes();
+    // The kept buffer's length, not drained (bridge v33's measure, FULL step AUD3).
+    size_t muted_recipes_size();
 
     bool step_physics(CKIpionManager* physics, float delta_ms, std::string& error);
     // Engine change #6: while enabled, the retail Unphysicalize block keeps
@@ -354,6 +356,9 @@ namespace bmmo::physics {
     // destroy again within a session.  Returns the number of objects
     // restored, -1 without a scene.
     int restore_explosion_pieces(CKContext* context);
+    // The same over the manager's context (FULL step AUD3: the headless
+    // backend's half of the trafo sets' restore_originals, physics_direct).
+    int restore_trafo_originals(CKIpionManager* physics);
 
     // ---- bridge API v21: the trafo sets (docs/trafo-replication-design.md
     // 2.4, 2.6, 2.10; game/trafo_sets.hpp) ----

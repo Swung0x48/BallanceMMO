@@ -1167,6 +1167,21 @@ namespace bmmo::physics {
         return api_->spawn_ghost_forget(manager_, group) == 1;
     }
 
+    void physics_view::set_event_log_keep_muted_recipes(bool keep) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->event_log_keep_muted_recipes) return;
+        api_->event_log_keep_muted_recipes(manager_, keep ? 1 : 0);
+    }
+
+    std::string physics_view::drain_muted_recipes() const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->drain_muted_recipes) return {};
+        const int32_t size = api_->drain_muted_recipes(manager_, nullptr, 0);   // measured, not drained
+        if (size <= 0) return {};
+        std::string text(static_cast<size_t>(size) + 1, char{});
+        const int32_t length = api_->drain_muted_recipes(manager_, text.data(), static_cast<uint32_t>(text.size()));
+        text.resize(length > 0 && static_cast<size_t>(length) < text.size() ? static_cast<size_t>(length) : text.size() - 1);
+        return text;
+    }
+
     int physics_view::own_group_queue(const char* entity_name, const char* group, uint32_t behavior_id,
                                       std::string& error) const {
         error.clear();

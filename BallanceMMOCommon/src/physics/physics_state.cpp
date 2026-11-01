@@ -887,6 +887,7 @@ namespace bmmo::physics {
         out.swap(g_event_log.muted_recipes);
         return out;
     }
+    size_t muted_recipes_size() { return g_event_log.muted_recipes.size(); }
 
     std::string drain_event_log(CKIpionManager* physics) {
         IVP_Environment* environment = physics ? physics->GetEnvironment() : nullptr;
@@ -3403,6 +3404,10 @@ namespace bmmo::physics {
     // frames detached and exactly axis-aligned, and Ball_Pos_Frame exactly on
     // its ball, every transform in the chain is an exact operation (products
     // with 0 and 1, one addition) and both engines agree bit for bit.
+    int restore_trafo_originals(CKIpionManager* physics) {
+        return physics ? restore_explosion_pieces(physics->m_Context) : -1;
+    }
+
     int restore_explosion_pieces(CKContext* context) {
         CKScene* scene = context ? context->GetCurrentScene() : nullptr;
         if (!scene) return -1;

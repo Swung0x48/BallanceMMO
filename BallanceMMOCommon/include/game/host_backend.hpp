@@ -16,6 +16,11 @@
 //     joint_block_get / joint_block_set;
 //   * body_names_of: the names of every physicalized entity right now
 //     (list_bodies).
+//   * trafo_hooks_for: the trafo piece sets' hooks (trafo_sets.hpp
+//     trafo_set_hooks) over the backend's has_body, unphysicalize and
+//     trafo_set_* methods (FULL step AUD3, host-platform audit D6; the
+//     headless sim/trafo_hooks.hpp and the retail make_retail_trafo_hooks
+//     before it).
 //
 // Only the public CK2 API and the bridge's C structs: the header compiles in
 // the x86 client target (Virtools SDK) and against Ballanced.
@@ -24,6 +29,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <vector>
 #include <set>
 #include <string>
@@ -35,6 +41,7 @@
 #include <physics/physics_rt_api.h>
 
 #include "script_replay.hpp"
+#include "trafo_sets.hpp"
 
 namespace bmmo::game {
     namespace host_backend_detail {
@@ -101,6 +108,55 @@ namespace bmmo::game {
             if (!host_backend_detail::backend_of(backend).joint_blocks_order(ids, orders, moved, error)) return -1;
             return static_cast<int>(moved);
         };
+        return hooks;
+    }
+
+    namespace host_backend_detail {
+        // Whether the backend restores the trafo originals itself in the
+        // quiesce (restore_trafo_originals): physics_direct does; the retail
+        // physics_view does not, its anchor's session clock reset right after
+        // the quiesce restores them (physics_state.cpp reset_session_clock).
+        template <class B, class = void> struct restores_trafo_originals : std::false_type {};
+        template <class B>
+        struct restores_trafo_originals<B, std::void_t<decltype(std::declval<const B&>().restore_trafo_originals())>>
+            : std::true_type {};
+    }
+
+    // The trafo piece sets' hooks over a backend (FULL step AUD3; audit D6,
+    // roadmap 4 item 1 HU1 (a)): one factory for the server's world, SimTool,
+    // the headless client and the retail host.  has_body is the backend's
+    // (get_body_state's answer on both: the entity found by name, a body
+    // there); restore_originals is the backend's restore_trafo_originals
+    // where it has one, else left empty (the trait above: the retail anchor
+    // restores the originals in its clock reset, so moving the restore into
+    // the quiesce would change what retail does).  `log`: where the sets'
+    // own lines go.
+    template <class Backend>
+    trafo_set_hooks trafo_hooks_for(Backend backend, std::function<void(const std::string&)> log) {
+        using backend_type = std::remove_cv_t<std::remove_reference_t<decltype(host_backend_detail::backend_of(backend))>>;
+        trafo_set_hooks hooks;
+        hooks.has_body = [backend](const std::string& name) {
+            return host_backend_detail::backend_of(backend).has_body(name.c_str());
+        };
+        hooks.unphysicalize = [backend](const std::string& name, std::string& error) {
+            return host_backend_detail::backend_of(backend).unphysicalize(name.c_str(), error);
+        };
+        if constexpr (host_backend_detail::restores_trafo_originals<backend_type>::value)
+            hooks.restore_originals = [backend]() { host_backend_detail::backend_of(backend).restore_trafo_originals(); };
+        hooks.register_set = [backend](uint32_t player, const uint32_t frames[3], const std::vector<uint32_t>& explosions,
+                                       bmmo_physics_trafo_set_report& out, std::string& error) {
+            return host_backend_detail::backend_of(backend).trafo_set_register(
+                player, frames, explosions.data(), static_cast<int>(explosions.size()), out, error);
+        };
+        hooks.unregister_set = [backend](uint32_t player, std::string& error) {
+            return host_backend_detail::backend_of(backend).trafo_set_unregister(player, error);
+        };
+        hooks.seed = [backend](uint32_t frame, int32_t seed) { host_backend_detail::backend_of(backend).trafo_set_seed(frame, seed); };
+        hooks.unmake = [backend](uint32_t frame, std::string& error) {
+            return host_backend_detail::backend_of(backend).trafo_set_unmake(frame, error);
+        };
+        hooks.forces = force_hooks_for(backend);
+        hooks.log = std::move(log);
         return hooks;
     }
 

@@ -1514,7 +1514,9 @@ namespace {
         void anchor_trafo() {
             if (!core_.trafo_active()) return;
             CKIpionManager* physics = engine_->physics();
-            trafo_hooks_ = bmmo::sim::make_trafo_hooks(physics, [](const std::string& line) { logf("trafo: %s", line.c_str()); });
+            // FULL step AUD3: host support's one trafo hooks factory (audit D6).
+            trafo_hooks_ = bmmo::game::trafo_hooks_for(bmmo::physics::physics_direct(physics),
+                                                       [](const std::string& line) { logf("trafo: %s", line.c_str()); });
             // The sets' force controllers by the names every world gives
             // them (physics_savestate.hpp set_controller_alias): a resync's
             // or a join's blob is the server's.
@@ -1645,17 +1647,13 @@ namespace {
                 // The remake, inside the core's mute of the event log: the
                 // pieces' births go into this world's birth log at S (the
                 // revive of a later rewind remakes them from these recipes,
-                // the event's draws), as a replayed tick's births do.
-                bmmo::physics::set_event_log_keep_muted_recipes(true);
-                r.ok = bmmo::game::remake_type_set(context, trafo_registry_, trafo_hooks_, spec.player, spec.life, spec.type,
-                                                   spec.position, spec.seed, 1000.0f / 66.0f, r.error);
-                bmmo::physics::set_event_log_keep_muted_recipes(false);
-                const std::string recipes = bmmo::physics::drain_muted_recipes();
-                bmmo::session::parse_event_log(recipes, [&](const std::string& kind, const std::string& text) {
-                    bmmo::session::local_birth birth;
-                    if (kind != "recipe" || !bmmo::session::parse_recipe_event(text, birth)) return;
-                    if (core_.is_ball(birth.name)) return;
-                    local_births_.add(spec.birth_tick, std::move(birth));
+                // the event's draws), through the one feed (FULL step AUD3,
+                // session_host_world.hpp birth_feed; the retail host's too).
+                bmmo::session::birth_feed feed(local_births_, spec.birth_tick, false,
+                                               [this](const std::string& entity) { return core_.is_ball(entity); });
+                r.ok = bmmo::session::feed_muted_births(bmmo::physics::physics_direct(engine_->physics()), feed, [&]() {
+                    return bmmo::game::remake_type_set(context, trafo_registry_, trafo_hooks_, spec.player, spec.life,
+                                                       spec.type, spec.position, spec.seed, 1000.0f / 66.0f, r.error);
                 });
                 return r;
             };
@@ -2178,9 +2176,10 @@ namespace {
             // the own body guard lifted at the session's end, after the
             // journal closed, and the movable objects' description for the
             // --trace line after a snapshot rollback.
+            // FULL step AUD3 (audit D9): host support's one order - the
+            // sets torn down (step T3), then the guard lifted.
             p.hooks.ended = [this]() {
-                own_body_guard_off();
-                end_trafo_sets();   // step T3
+                bmmo::session::end_session_bodies([this]() { end_trafo_sets(); }, [this]() { own_body_guard_off(); });
             };
             p.hooks.describe_movables = [this]() { return bmmo::physics::describe_movable_objects(engine_->physics()); };
             return p;
@@ -3815,17 +3814,16 @@ namespace {
         // order; an own ball's body made or gone sets its group again.
         void drain_body_events(uint32_t tick, const std::function<bool(const bmmo::session::body_event&)>& each) {
             const std::string events = bmmo::physics::drain_event_log(engine_->physics());
+            // The birth log's one feed (FULL step AUD3, session_host_world.hpp
+            // birth_feed; the retail host's too): what this frame's
+            // Physicalize made each body with (engine change #19), kept by
+            // tick, so a rewind anchored before this tick can make the body
+            // again at it (recreate_body).
+            bmmo::session::birth_feed births(local_births_, tick, false);
             bmmo::session::parse_event_log(events, [&](const std::string& kind, const std::string& name) {
                 if (kind == "recipe") {
-                    // What this frame's Physicalize made the body with (engine
-                    // change #19): kept by tick, so a rewind anchored before
-                    // this tick can make the body again at it (recreate_body).
-                    bmmo::session::local_birth birth;
-                    if (bmmo::session::parse_recipe_event(name, birth)) {
-                        local_births_.add(tick, std::move(birth));
-                    } else if (recipe_parse_logs_++ < 4) {
+                    if (births.line(name) == bmmo::session::birth_feed::result::unparsed && recipe_parse_logs_++ < 4)
                         logf("birth recipe at tick %u could not be parsed: %.120s", tick, name.c_str());
-                    }
                     return;
                 }
                 bmmo::session::body_event event;
@@ -4669,20 +4667,16 @@ namespace {
             // Only a birth the log does not already have at that tick (a
             // replay that agrees with the live frames adds nothing), and not
             // the balls (never destroyed or put back).
+            // The one feed (FULL step AUD3, session_host_world.hpp birth_feed;
+            // the retail host's too).
             if (world.pre_step) {
                 const auto inner = world.pre_step;
                 world.pre_step = [this, inner](uint32_t tick) {
-                    bmmo::physics::set_event_log_keep_muted_recipes(true);
-                    inner(tick);
-                    bmmo::physics::set_event_log_keep_muted_recipes(false);
-                    const std::string recipes = bmmo::physics::drain_muted_recipes();
-                    if (recipes.empty()) return;
-                    bmmo::session::parse_event_log(recipes, [&](const std::string& kind, const std::string& text) {
-                        bmmo::session::local_birth birth;
-                        if (kind != "recipe" || !bmmo::session::parse_recipe_event(text, birth)) return;
-                        if (core_.is_ball(birth.name) || local_births_.find(birth.name, tick)) return;
-                        if (replay_birth_logs_++ < 8) logf("birth log: %s made by the replayed tick %u", birth.name.c_str(), tick);
-                        local_births_.add(tick, std::move(birth));
+                    bmmo::session::birth_feed feed(local_births_, tick, true,
+                                                   [this](const std::string& entity) { return core_.is_ball(entity); });
+                    bmmo::session::feed_muted_births(bmmo::physics::physics_direct(engine_->physics()), feed,
+                                                     [&]() { inner(tick); }, [&](const std::string& entity) {
+                        if (replay_birth_logs_++ < 8) logf("birth log: %s made by the replayed tick %u", entity.c_str(), tick);
                     });
                 };
             }

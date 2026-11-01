@@ -1346,6 +1346,24 @@ difference (`bmmo_physics_lookup_totals`); measured on the retail CK2.dll:
 0 mismatches of 226 416 and 228 082 lookups. Reads only; no simulation,
 record, journal or wire byte changes.
 
+## Bridge notes: the recipes of a muted frame (bridge API v33, no engine change)
+
+FULL step AUD3 (`docs/host-platform-audit.md` D4, "As built (step AUD3)"; the
+user's (b) of decision 59: the birth log fed by the event log's `recipe`
+lines on both client hosts). Not an engine change: nothing under
+`submodule/Ballanced` moved. The event log's muted-recipe buffer the
+headless client has read in process since T3
+(`set_event_log_keep_muted_recipes` / `drain_muted_recipes` in
+`physics_state.cpp`: while the log is muted, a created body's `recipe` entry
+of engine change #19 goes to a buffer of its own) is exported as
+`event_log_keep_muted_recipes(manager, keep)` and `drain_muted_recipes(manager,
+buffer, size)` (a null buffer measures without draining), appended to
+`bmmo_physics_api_v2`, so the retail mod logs a replayed tick's and a resync
+remake's births from the same lines (`physics_view::set_event_log_keep_muted_recipes`
+/ `drain_muted_recipes`, `session_host_world.hpp` `feed_muted_births`). What
+the plugin records, emits or simulates does not change; the mod and the
+plugin are rebuilt together (the API version must match).
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off

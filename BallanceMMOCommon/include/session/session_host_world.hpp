@@ -33,6 +33,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -309,13 +310,21 @@ namespace bmmo::session {
             by_tick_[tick].push_back(std::move(birth));
             while (!by_tick_.empty() && by_tick_.begin()->first + 4096 < tick) by_tick_.erase(by_tick_.begin());
         }
-        // As add, but a birth of the same name at the same tick is replaced
-        // (the retail feed, OnPhysicalize: a Physicalize the scripts repeat
-        // inside one frame describes the body that frame made; R1).
-        void put(uint32_t tick, local_birth&& birth) {
-            for (auto& existing: by_tick_[tick])
-                if (existing.name == birth.name) { existing = std::move(birth); return; }
+        // The one insertion rule (FULL step AUD3, host-platform audit D4; the
+        // user's (b), decision 59): as add, but a birth of a name the tick
+        // already has replaces it - the last Physicalize of a name in a frame
+        // describes the body alive at the frame's end - and takes the last
+        // one's place in the tick's order (birth_order: the order the frame
+        // made its bodies in).  True when an earlier birth was replaced.
+        bool put(uint32_t tick, local_birth&& birth) {
+            auto& births = by_tick_[tick];
+            const auto before = births.size();
+            births.erase(std::remove_if(births.begin(), births.end(),
+                                        [&](const local_birth& b) { return b.name == birth.name; }),
+                         births.end());
+            const bool replaced = births.size() != before;
             add(tick, std::move(birth));
+            return replaced;
         }
         // The birth of `entity` recorded at `tick`, or - tick 0 - its latest.
         const local_birth* find(const std::string& entity, uint32_t tick) const {
@@ -379,6 +388,99 @@ namespace bmmo::session {
     private:
         std::map<uint32_t, std::vector<local_birth>> by_tick_;
     };
+
+    inline bool parse_recipe_event(const std::string& text, local_birth& out);
+    template <class Each> void parse_event_log(const std::string& events, Each&& each);
+
+    // The one feed of the birth log on both client hosts (FULL step AUD3;
+    // host-platform audit D4, the user's (b) of decision 59): the bridge
+    // event log's "recipe" entries (engine change #19), on the headless
+    // client and the retail mod alike - the live frame's from the drained
+    // log, a replayed tick's and a resync remake's from the recipes the
+    // muted log kept (feed_muted_births).  One rule: the births of one frame
+    // go under that frame's tick by local_birth_log::put (the last birth of
+    // a name in the frame wins).  A replayed frame (`replayed`) feeds only
+    // the names the log did not have at that tick before the frame: a replay
+    // that agrees with the live frame adds nothing and never overrides the
+    // live frame's births (a body the replay made where the live frames made
+    // none - a sector activation the live frames cancelled, re-issued in the
+    // replay - gets the Physicalize matrix a later rewind puts it back to).
+    // `skip`: names the caller never logs (the balls of a replayed frame or
+    // a remake: their lifetimes are the core's).  The server's world has no
+    // birth log.
+    class birth_feed {
+    public:
+        enum class result { added, replaced, skipped, unparsed };
+        birth_feed(local_birth_log& log, uint32_t tick, bool replayed,
+                   std::function<bool(const std::string& entity)> skip = nullptr)
+            : log_(log), tick_(tick), replayed_(replayed), skip_(std::move(skip)) {
+            if (replayed_) before_ = log_.birth_order(tick_);
+        }
+        // One "recipe" entry's text (the part after the kind).
+        result line(const std::string& text) {
+            local_birth birth;
+            if (!parse_recipe_event(text, birth)) return result::unparsed;
+            if (skip_ && skip_(birth.name)) return result::skipped;
+            if (replayed_ && std::find(before_.begin(), before_.end(), birth.name) != before_.end()) return result::skipped;
+            last_ = birth.name;
+            return log_.put(tick_, std::move(birth)) ? result::replaced : result::added;
+        }
+        // Every "recipe" entry of an event log text, the other kinds ignored.
+        // `on_added`: each name newly in the log.  Returns the entries kept.
+        size_t text(const std::string& events, const std::function<void(const std::string& entity)>& on_added = nullptr) {
+            size_t kept = 0;
+            parse_event_log(events, [&](const std::string& kind, const std::string& entry) {
+                if (kind != "recipe") return;
+                const result r = line(entry);
+                if (r == result::added || r == result::replaced) ++kept;
+                if (r == result::added && on_added) on_added(last_);
+            });
+            return kept;
+        }
+        // The name of the last entry kept.
+        const std::string& last() const { return last_; }
+
+    private:
+        local_birth_log& log_;
+        uint32_t tick_;
+        bool replayed_;
+        std::function<bool(const std::string&)> skip_;
+        std::vector<std::string> before_;
+        std::string last_;
+    };
+
+    // `body` (a replayed frame's scripts, a resync's remake) run with the
+    // muted event log keeping its recipes, which then go through `feed`
+    // (built before `body`, so a replayed frame's test reads the log as the
+    // live frame left it).  The backend's set_event_log_keep_muted_recipes /
+    // drain_muted_recipes: physics_direct in process, physics_view through
+    // bridge API v33.  Returns what `body` returned.
+    template <class Backend, class Body>
+    auto feed_muted_births(const Backend& backend, birth_feed& feed, Body&& body,
+                           const std::function<void(const std::string& entity)>& on_added = nullptr) {
+        backend.set_event_log_keep_muted_recipes(true);
+        if constexpr (std::is_void_v<decltype(body())>) {
+            body();
+            backend.set_event_log_keep_muted_recipes(false);
+            feed.text(backend.drain_muted_recipes(), on_added);
+        } else {
+            auto out = body();
+            backend.set_event_log_keep_muted_recipes(false);
+            feed.text(backend.drain_muted_recipes(), on_added);
+            return out;
+        }
+    }
+
+    // FULL step AUD3 (host-platform audit D9): hooks.ended's order on every
+    // client host - the session's trafo sets torn down first (their pieces
+    // unphysicalized through the bridge, which the body guard of engine
+    // change #6 never refuses: it covers the Unphysicalize block), then the
+    // own body guard lifted.
+    template <class Teardown, class GuardOff>
+    void end_session_bodies(Teardown&& teardown, GuardOff&& guard_off) {
+        teardown();
+        guard_off();
+    }
 
     // "<name>|fixed=|frozen=|coll=|cmc=|fr=|el=|m=|ld=|rd=|mc=x,y,z|surf=|convex=a/b|balls=x,y,z,r/..|concave=a/b|group=|mtx=16 floats"
     inline bool parse_recipe_event(const std::string& text, local_birth& out) {

@@ -187,7 +187,11 @@ namespace bmmo::physics {
         // ---- bridge API v21: the trafo sets (trafo-replication design 2.4,
         // 2.6, 2.10; game/trafo_sets.hpp trafo_set_hooks, the retail host's
         // half since step T4) ----
-        // Whether the entity has a physics body now.
+        // Whether the entity has a physics body now (get_body_state's answer;
+        // physics_direct::has_body is the same rule, FULL step AUD3).  This
+        // backend has no restore_trafo_originals: the retail anchor's session
+        // clock reset, right after the trafo quiesce, restores the originals
+        // (game/host_backend.hpp trafo_hooks_for leaves the hook empty).
         bool has_body(const char* entity_name) const;
         bool trafo_set_register(uint32_t player, const uint32_t frames[3], const uint32_t* explosions, int explosion_count,
                                 bmmo_physics_trafo_set_report& out, std::string& error) const;
@@ -216,6 +220,12 @@ namespace bmmo::physics {
         // (physics_state.hpp spawn_ghost_forget); true when a record was
         // dropped, false when there was none or the rule is off.
         bool spawn_ghost_forget(const char* group) const;
+        // ---- bridge API v33 (FULL step AUD3): the recipes of a muted frame
+        // (physics_state.hpp set_event_log_keep_muted_recipes /
+        // drain_muted_recipes), the replayed ticks' births of the one
+        // birth-log feed (session_host_world.hpp birth_feed).
+        void set_event_log_keep_muted_recipes(bool keep) const;
+        std::string drain_muted_recipes() const;
         // ---- bridge API v26 (step OWG): the own ball's player group set before
         // its birth tick's PSIs (physics_state.hpp queue_own_group): 1 set now,
         // 2 queued into this frame's PreSimulate pass, 0 with `error`.

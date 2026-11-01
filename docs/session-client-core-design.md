@@ -701,6 +701,19 @@ AUD-3 (the birth log fed by the event log and `add` on headless, by
 OnPhysicalize and `put` on retail). No code changed; no disagreement between
 this design's text and the code was found.
 
+**As built (step AUD3, FULL, 2026-11-01).** Three more rows of host support:
+`session_host_world.hpp` `birth_feed` / `feed_muted_births` (the birth log's
+one feed - the event log's `recipe` lines on both client hosts, one
+insertion rule, the user's (b) of decision 59) and `end_session_bodies`
+(`hooks.ended`'s one order, audit D9); `game/host_backend.hpp`
+`trafo_hooks_for(backend, log)` (the trafo set hooks, audit D6 / HU1 (a)),
+over `physics_direct` (new: `has_body`, `trafo_set_*`,
+`restore_trafo_originals`, the muted recipes) and `physics_view` (new: the
+muted recipes, bridge API v33). The queue above loses the trafo set hooks;
+`host-platform-audit.md` D4 / D6 / D9 "As built (step AUD3)" has the rule,
+the adaptation (bridge v33: the retail replayed-tick recipes needed it) and
+the measurements.
+
 ## 3. What stays in each host
 
 ### 3.1 Headless host (SC shrinks to this)

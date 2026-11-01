@@ -1041,6 +1041,98 @@ TEST(RollbackBinding, EventLogAndRecipeParse) {
     ASSERT_NE(log.find("P_Late", 5000), nullptr);
 }
 
+// FULL step AUD3 (host-platform audit D4; the user's (b), decision 59): the
+// birth log's one feed, the event log's recipe lines on both client hosts.
+// A name physicalized twice in one live frame keeps its last birth, at the
+// last one's place in the tick's order; the other kinds are not births; an
+// unparsable line is reported, not kept.
+namespace {
+    std::string recipe_line(const char* name, float x) {
+        char text[200];
+        std::snprintf(text, sizeof(text), "t=1 recipe %s|m=1|group=G|mtx=1,0,0,0,0,1,0,0,0,0,1,0,%g,0,0,1;", name,
+                      static_cast<double>(x));
+        return text;
+    }
+
+    struct muted_backend {
+        mutable std::vector<std::string> calls;
+        mutable bool keeping = false;
+        mutable std::string kept;
+        void set_event_log_keep_muted_recipes(bool keep) const {
+            keeping = keep;
+            calls.push_back(keep ? "keep on" : "keep off");
+        }
+        std::string drain_muted_recipes() const {
+            calls.push_back("drain");
+            std::string out;
+            out.swap(kept);
+            return out;
+        }
+    };
+}
+
+TEST(BirthFeed, ANameMadeTwiceInOneFrameKeepsItsLastBirth) {
+    bmmo::session::local_birth_log log;
+    bmmo::session::birth_feed feed(log, 120, false);
+    const std::string events = recipe_line("P_Box", 1.0f) + "t=1 created P_Box;" + recipe_line("P_Gate", 2.0f)
+        + "t=1 deleted P_Box;" + recipe_line("P_Box", 3.0f) + "t=1 recipe P_Bad|m=1;";
+    std::vector<std::string> added;
+    EXPECT_EQ(feed.text(events, [&](const std::string& entity) { added.push_back(entity); }), 3u);
+    EXPECT_EQ(added, std::vector<std::string>({"P_Box", "P_Gate"})) << "the second P_Box replaced, not added";
+    const auto* box = log.find("P_Box", 120);
+    ASSERT_NE(box, nullptr);
+    EXPECT_FLOAT_EQ(box->matrix[12], 3.0f) << "the body alive at the frame's end";
+    EXPECT_EQ(box->group, "G");
+    EXPECT_EQ(log.birth_order(120), std::vector<std::string>({"P_Gate", "P_Box"})) << "once, at its last place";
+    EXPECT_EQ(feed.line("P_Bad|m=1"), bmmo::session::birth_feed::result::unparsed);
+    EXPECT_EQ(log.find("P_Bad", 120), nullptr);
+    EXPECT_EQ(log.birth_tick_of("P_Box"), 120u);
+    // put itself: true only when it replaced.
+    EXPECT_FALSE(log.put(121, birth_of("P_Box", 4.0f)));
+    EXPECT_TRUE(log.put(121, birth_of("P_Box", 5.0f)));
+    EXPECT_FLOAT_EQ(log.find("P_Box", 0)->matrix[12], 5.0f);
+}
+
+// A replayed tick's births (the muted log's recipes, feed_muted_births): a
+// name the live frame logged at that tick keeps the live birth, a name it
+// did not is added (and named to on_added), the skipped names (the balls)
+// never; the keep switch wraps the body, the drain follows it, and the
+// body's result is returned.
+TEST(BirthFeed, AReplayedTickAddsOnlyWhatTheLiveFrameLacked) {
+    bmmo::session::local_birth_log log;
+    {
+        bmmo::session::birth_feed live(log, 300, false);
+        live.text(recipe_line("P_Box", 1.0f) + recipe_line("Ball_Wood", 9.0f));
+    }
+    muted_backend backend;
+    bmmo::session::birth_feed replay(log, 300, true, [](const std::string& entity) { return entity.rfind("Ball_", 0) == 0; });
+    std::vector<std::string> added;
+    const bool ok = bmmo::session::feed_muted_births(backend, replay, [&]() {
+        EXPECT_TRUE(backend.keeping) << "the body runs with the muted recipes kept";
+        backend.kept = recipe_line("P_Box", 2.0f) + recipe_line("P_Piece_01", 3.0f) + recipe_line("Ball_Paper", 4.0f)
+            + recipe_line("P_Piece_01", 5.0f);
+        return true;
+    }, [&](const std::string& entity) { added.push_back(entity); });
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(backend.calls, std::vector<std::string>({"keep on", "keep off", "drain"}));
+    EXPECT_FLOAT_EQ(log.find("P_Box", 300)->matrix[12], 1.0f) << "the live frame's birth stays";
+    ASSERT_NE(log.find("P_Piece_01", 300), nullptr);
+    EXPECT_FLOAT_EQ(log.find("P_Piece_01", 300)->matrix[12], 5.0f) << "the frame's rule: its last birth";
+    EXPECT_EQ(log.find("Ball_Paper", 300), nullptr) << "skipped";
+    EXPECT_EQ(added, std::vector<std::string>({"P_Piece_01"}));
+    EXPECT_EQ(log.birth_order(300), std::vector<std::string>({"P_Box", "Ball_Wood", "P_Piece_01"}));
+    // A body that returns nothing (a replayed frame's pre_step).
+    backend.calls.clear();
+    bmmo::session::birth_feed again(log, 301, true);
+    bmmo::session::feed_muted_births(backend, again, [&]() { backend.kept = recipe_line("P_Gate", 6.0f); });
+    EXPECT_NE(log.find("P_Gate", 301), nullptr);
+    EXPECT_EQ(backend.calls, std::vector<std::string>({"keep on", "keep off", "drain"}));
+    // The teardown before the guard (audit D9).
+    std::vector<std::string> order;
+    bmmo::session::end_session_bodies([&]() { order.push_back("teardown"); }, [&]() { order.push_back("guard off"); });
+    EXPECT_EQ(order, std::vector<std::string>({"teardown", "guard off"}));
+}
+
 // Host support's two activation slots per tick (resync design 2.8, step B1,
 // session_host_world.hpp activation_slots): a frame's pending activation and
 // a union pass at one tick are both kept and re-issued pending first, then

@@ -275,7 +275,10 @@ numbers 1-10 are unchanged.
        leaves `restore_originals` empty by design - one
        `trafo_hooks_for(backend)` needs `physics_direct` and
        `physics_view` to agree on those methods and a retail trafo run
-       (with S10 or R6); (b) the retail level-file counters glue
+       (with S10 or R6) - **done at FULL step AUD3** (`game/host_backend.hpp`
+       `trafo_hooks_for`, one `has_body` rule and a backend trait for
+       `restore_originals`; the retail L11 trafo runs `aud3_ctl` /
+       `aud3_arm1`; host-platform-audit D6 "As built (step AUD3)"); (b) the retail level-file counters glue
        (`BallanceMMOClient::capture_level_sequencers` /
        `proximity_countdowns_restore`): shared with the legacy path, which
        gets nothing new, and it logs a census the headless hosts do not -

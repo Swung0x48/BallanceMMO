@@ -287,6 +287,55 @@ was found; (a) needs a level script that physicalizes one entity twice in a
 frame, not looked for. **Candidate: Stage C item AUD-3** - one feed rule
 (`put` or `add`, one source) in host support, decided with R6, which moves
 the retail own births onto the bridge anyway. **Census (FULL step R6D, 2026-11-01; core design "As built (step R6D)" item 4).** The retail event log carries the `recipe` lines (engine change #19 runs in the retail plugin; `drain_body_events`, CH:3405-3422 at 735b7fb9, drops them - so §2's "no recipes" is the host's choice, not the plugin's). Two retail sessions with a diagnostic line per recipe line and per `put` (L11 two copies: 81 / 81 and 79 / 79; L12 sectors 2-4: 15 / 15 on both) matched 1:1 by name and tick: no host-made level body outside a mute ((b): none), no entity twice in one frame ((a): none); SimTool free runs L1-L13 (level load and the start sector only): no recipe line twice in a tick. Not exercised: the replayed-birth route (no replay or reconcile put in either session). Decision 7's premise ("(a) if the retail log has no recipe lines") is false, so the feed's source (two feeds with one rule, or the recipe lines on both hosts with no plugin change) is back with the user; AUD3 waits on it.
+**As built (step AUD3, FULL, 2026-11-01; the user's (b), decision 59).** ONE
+feed on both client hosts: the event log's `recipe` lines, through
+`session_host_world.hpp` `birth_feed` (one insertion rule,
+`local_birth_log::put`: the last birth of a name in a frame wins, at the
+last one's place in the tick's order; a replayed frame adds only names the
+log lacked at that tick before the frame; the balls skipped on a replayed
+frame and a remake) and `feed_muted_births` (a replayed tick's and a resync
+remake's births from the recipes the muted log kept). SC: the live drain
+(`drain_body_events`), the remake (`trafo_reconcile`) and the replay's
+`pre_step` wrapper call it; CH: the same three (`drain_body_events` no
+longer drops the recipe lines; `core_host_on_physicalize` no longer feeds
+the birth log; `trafo_host.birth_tick` / `if_absent` are gone). The
+server's world has no birth log (unchanged). **Adaptation: bridge API v33.**
+The muted log's recipes (`set_event_log_keep_muted_recipes` /
+`drain_muted_recipes`, in-process since T3) were not reachable through the
+bridge, so the retail replayed-tick route the decision names needed two
+accessors (`event_log_keep_muted_recipes`, `drain_muted_recipes`): a bridge
+change (physics_RT.dll rebuilt and installed with the mod), no engine
+change, nothing the plugin emits changes (`docs/engine-changes.md`, "Bridge
+notes: the recipes of a muted frame"). The decision's record said "no plugin
+change" because the live lines exist; the replayed lines did not reach the
+mod without this. Measured: the wire check `rOCK -> rAUD3` on core_ref_s14
+ALL SAME (44 sends, 44 journals identical: no capture has a D4 case - SC's
+`add` -> `put` and the replay rule's snapshot change nothing there); retail
+L11 two copies (`scripts/retail/aud3_ctl`, `rtr_retail.py arm` 0:0 0:0, and
+`aud3_arm1`, forced rewinds 13:24 / 50:12 across both trafo explosions):
+every FINAL row 0 m (mech 23/23 bit-equal, pieces 19/49 and 20/49 bit-equal
+at 0 m, the known pre-existing band: LGD's ctl on the OnPhysicalize feed
+19/49 with the same 7/17, 6/16, 6/16 per set; RTR's arm1 had 40/49 on client
+1 only, both wood sets 16/16 there and 6/16 on its client 2, a one-session
+outlier), births recreated 4/4 and 9/9 (ctl),
+130 and 34 (arm1; RTR's arm1 on the OnPhysicalize feed: 126 and 33),
+recreate failures and mismatches 0 everywhere, no "made by the replayed
+tick" line (as RTR / LGD). Not observed directly: the content of a retail
+muted drain (no replayed tick needed a new name); a same-session
+comparison against the OnPhysicalize feed needs a dual-feed diagnostic
+build (deferred to FULL). **Gate round (review finding 1): the v33 route is
+built, not yet seen to carry a birth.** In both sessions every piece the
+forced rewinds re-made was already in the log from the live frame's recipe
+lines (the 130 / 34 recreated births came from that feed), so the replay
+feed skipped them by its "already at that tick" test, and no run did a
+resync remake - an empty muted drain would have looked the same. A resync
+remake's pieces get their births only from the muted drain (the remake runs
+inside `reconcile_trafo`'s mute). CH now counts what the muted drains carry
+(`counted_muted_recipes` over `physics_view`, file-scope `trafo_host`
+counters) and prints once at the session's end "birth log: muted drains
+replay=R remake=M carried N recipe entries, K names added"; FULL's retail
+runs read it (a forced rewind across an explosion must show N > 0). Built
+(x86 CLIENT-BUILD-OK), not run in AUD3 (its two live runs were spent).
 
 **D5. The anchor sequence is written per host in a different order (by
 reading).** §8's row: retail edits N1-N4, the tutorial and the depth test
@@ -312,7 +361,24 @@ its order.
 bridge's `has_body` (CH:1076); `restore_originals` set on PW/SC and run by
 `quiesce_originals` (trafo_sets.hpp:508), empty on CH, whose
 `reset_session_clock` right after its quiesce does the restore (CH:1801).
-**Already queued: HU1 inventory (a).**
+**Already queued: HU1 inventory (a).** **As built (step AUD3, FULL,
+2026-11-01).** One factory, `game/host_backend.hpp` `trafo_hooks_for(backend,
+log)`, called by PW (`physics_world::anchor_trafo`), SC (`anchor_trafo`), CH
+(`make_retail_trafo_hooks`, now a one-line call over `&physics_view_`) and
+SimTool (`sim/trafo_hooks.hpp`, a wrapper adding the stdout log). `has_body`
+is each backend's under one rule: `physics_direct::has_body` (new) is
+`get_body_state`'s answer, as `physics_view::has_body` is through the bridge
+(the entity found by name, a body there); the old headless lambda differed
+only in not bounding the name to 64 characters and in bypassing the record
+capture's lookup scope - no trafo name reaches either, and the wire check's
+eleven trafo-on arms are ALL SAME. `restore_originals`: a backend trait
+(`host_backend_detail::restores_trafo_originals`) - `physics_direct` has
+`restore_trafo_originals()` (physics_state.cpp, the context's
+`restore_explosion_pieces`; the headless hosts reset the clock before the
+trafo anchor), `physics_view` has none, so the retail hook stays empty and
+the retail restore stays in the session clock reset right after the quiesce
+(moving it would add a second restore on retail). The two `has_body`
+answers never differed in the run: one code path.
 
 **D7. A crossing's stamp by the retail checkpoint hook is one tick earlier
 than by the poll (only when an anchor edit failed).** CH:3791 calls
@@ -354,6 +420,21 @@ session sees it. If the guard (#6) refused a bridge unphysicalize, a retail
 teardown would leave piece bodies in the level after the session (check: a
 retail T4 log's "torn down (N piece bodies removed)" against the sets'
 live pieces). **Candidate: none** (fold into AUD-3's host-support pass).
+**As built (step AUD3, FULL, 2026-11-01).** One order,
+`session_host_world.hpp` `end_session_bodies(teardown, guard_off)`: the sets
+torn down first, then the guard lifted, on SC (`hooks.ended`, which had the
+guard first) and CH (unchanged order). The bridge's `unphysicalize`
+(physics_state.cpp:1999) never consults the guard (#6 covers the
+Unphysicalize block), so either order removed the same bodies; the shared
+one is the safe reading. Retail: "torn down (0 piece bodies removed)" on
+both copies of both L11 sessions, equal to the sets' live pieces then: the
+journals' last piece rows are at 1232 (the first two sets) and 1800 (the
+third), the sessions end at 2582 / 2588, so no piece body lives at the
+teardown (RTR / LGD's runs: 0 too; `.local-tools/work/AUD3/pieces.py`).
+So the run never had a piece to remove: D9 is met by reading the code (the
+bridge `unphysicalize` the teardown uses is outside the #6 guard, so the
+order cannot change what is removed), not by the run; SC's swapped order
+runs after the journal closed, so the wire check cannot see it either.
 
 **D10. The mirror entity: shared clones on PW/SC, spirit balls on CH.**
 PW and SC call `mirror_clones` (one CK copy per player and type, made at

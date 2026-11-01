@@ -867,6 +867,21 @@ namespace {
         return bmmo::physics::spawn_ghost_forget(static_cast<CKIpionManager*>(manager), group) ? 1 : 0;
     }
 
+    // v33 (FULL step AUD3): the recipes of a muted frame kept and drained.
+    int32_t api_event_log_keep_muted_recipes(void* manager, int32_t keep) {
+        (void)manager;
+        bmmo::physics::set_event_log_keep_muted_recipes(keep != 0);
+        return 1;
+    }
+
+    int32_t api_drain_muted_recipes(void* manager, char* buffer, uint32_t buffer_size) {
+        (void)manager;
+        if (!buffer) return static_cast<int32_t>(bmmo::physics::muted_recipes_size());
+        const std::string text = bmmo::physics::drain_muted_recipes();
+        if (buffer_size) std::snprintf(buffer, buffer_size, "%s", text.c_str());
+        return static_cast<int32_t>(text.size());
+    }
+
     // v27 (step RLC): a joint block's constraint image (physics_state.cpp).
     int32_t api_joint_block_get(void* manager, uint32_t behavior_id, bmmo_physics_joint_image* out, char* error,
                                 uint32_t error_size) {
@@ -1107,6 +1122,8 @@ namespace {
         api_hull_template,
         api_lookup_scope,
         api_spawn_ghost_forget,
+        api_event_log_keep_muted_recipes,
+        api_drain_muted_recipes,
     };
 }
 

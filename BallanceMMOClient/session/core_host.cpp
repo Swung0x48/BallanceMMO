@@ -609,6 +609,7 @@ namespace {
         std::map<CK_ID, uint32_t> script_reset_ticks;
         uint64_t script_reset_skips = 0;
         uint32_t restore_logs = 0, savestate_logs = 0, contact_logs = 0, destroy_logs = 0, line_logs = 0;
+        uint32_t recipe_parse_logs = 0;   // FULL step AUD3: the birth feed's unparsed recipe lines (the first 4)
 
         // 'session force-rollback E:D' (hooks.after_rewinds): every E ticks,
         // a rewind D ticks deep.
@@ -1254,6 +1255,7 @@ namespace {
         host.script_reset_ticks.clear();
         host.script_reset_skips = 0;
         host.restore_logs = host.savestate_logs = host.contact_logs = host.destroy_logs = host.line_logs = 0;
+        host.recipe_parse_logs = 0;
         host.forced = 0;
         host.force_once.clear();
         own_sector_reports = {};   // step SLG
@@ -1686,18 +1688,37 @@ namespace {
         // every trafo anchor.
         bmmo::game::trafo_reference loaded_reference;
         std::string loaded_where;
-        // OnPhysicalize's birth tick while a replayed tick or a reconcile's
-        // remake runs (0: the live frame's, current + 1): the headless host
-        // logs a replayed tick's births under that tick, from the event log
-        // it mutes around the replay (session_client.cpp), and a remake's at
-        // the resync's tick.  `if_absent`: only a birth the log does not have
-        // at that tick (a replay that agrees with the live frames adds
-        // nothing).
-        uint32_t birth_tick = 0;
-        bool if_absent = false;
+        // The "made by the replayed tick" lines of the birth log's feed (the
+        // first 8 of a session; FULL step AUD3: the feed is host support's
+        // birth_feed over the event log's recipes, as on the headless host,
+        // no longer OnPhysicalize's birth tick).
         uint32_t replay_birth_logs = 0;
+        // What the muted log's drains carried (AUD3 gate round, review
+        // finding 1): the drains of the replayed ticks and of the resync
+        // remakes, the "recipe" entries they returned and the names the feed
+        // added from them; printed once at the session's end, so a run shows
+        // the bridge v33 route carries the births (entries > 0 across a
+        // rewind over an explosion) and not just an empty text.
+        uint64_t muted_replay_drains = 0, muted_remake_drains = 0, muted_recipes = 0, muted_added = 0;
     };
     trafo_host_state trafo_host;
+
+    // physics_view's muted-recipe pair for host support's feed_muted_births,
+    // counting the "recipe" entries each drain returns (a diagnostic only:
+    // the text goes on to the feed unchanged).
+    struct counted_muted_recipes {
+        const bmmo::physics::physics_view& view;
+        uint64_t& drains;
+        void set_event_log_keep_muted_recipes(bool keep) const { view.set_event_log_keep_muted_recipes(keep); }
+        std::string drain_muted_recipes() const {
+            std::string text = view.drain_muted_recipes();
+            ++drains;
+            bs::parse_event_log(text, [](const std::string& kind, const std::string&) {
+                if (kind == "recipe") ++trafo_host.muted_recipes;
+            });
+            return text;
+        }
+    };
 
     // The savestate's controller alias over the registry (bridge v22, the
     // headless hosts' set_controller_alias lambda): a set's force controller
@@ -1717,26 +1738,17 @@ namespace {
         return 1;
     }
 
-    // The bridge as the retail host reaches it (the headless make_trafo_hooks
-    // with physics_view).  restore_originals is left empty: the anchor runs
-    // the quiesce right before the session clock reset, whose
-    // restore_explosion_pieces is that restore (physics_state.cpp
-    // reset_session_clock), and nothing else calls it.
+    // The bridge as the retail host reaches it: host support's one trafo
+    // hooks factory over physics_view (FULL step AUD3, audit D6:
+    // game/host_backend.hpp trafo_hooks_for, the headless hosts' too).
+    // restore_originals stays empty there (physics_view has no
+    // restore_trafo_originals): the anchor runs the quiesce right before the
+    // session clock reset, whose restore_explosion_pieces is that restore
+    // (physics_state.cpp reset_session_clock), and nothing else calls it.
     bmmo::game::trafo_set_hooks make_retail_trafo_hooks(const bmmo::physics::physics_view& view, logger_wrapper* logger) {
-        bmmo::game::trafo_set_hooks hooks;
-        const bmmo::physics::physics_view* v = &view;
-        hooks.has_body = [v](const std::string& name) { return v->has_body(name.c_str()); };
-        hooks.unphysicalize = [v](const std::string& name, std::string& error) { return v->unphysicalize(name.c_str(), error); };
-        hooks.register_set = [v](uint32_t player, const uint32_t frames[3], const std::vector<uint32_t>& explosions,
-                                 bmmo_physics_trafo_set_report& out, std::string& error) {
-            return v->trafo_set_register(player, frames, explosions.data(), static_cast<int>(explosions.size()), out, error);
-        };
-        hooks.unregister_set = [v](uint32_t player, std::string& error) { return v->trafo_set_unregister(player, error); };
-        hooks.seed = [v](uint32_t frame, int32_t seed) { v->trafo_set_seed(frame, seed); };
-        hooks.unmake = [v](uint32_t frame, std::string& error) { return v->trafo_set_unmake(frame, error); };
-        hooks.forces = bmmo::game::force_hooks_for(v);   // game/host_backend.hpp (step SP10)
-        hooks.log = [logger](const std::string& line) { logger->Info("Physics session: trafo: %s", line.c_str()); };
-        return hooks;
+        return bmmo::game::trafo_hooks_for(&view, [logger](const std::string& line) {
+            logger->Info("Physics session: trafo: %s", line.c_str());
+        });
     }
 
     // The anchor's trafo work (design 2.3 "When the hold is armed"; the
@@ -1789,6 +1801,13 @@ namespace {
     // disarmed.  Idempotent.
     void trafo_teardown(const bmmo::physics::physics_view& view, CKContext* context, logger_wrapper* logger) {
         trafo_host.replay_birth_logs = 0;   // each session's own log budget (a second session in one process, R3)
+        if (trafo_host.muted_replay_drains || trafo_host.muted_remake_drains)
+            logger->Info("Physics session: birth log: muted drains replay=%llu remake=%llu carried %llu recipe entries, %llu names added",
+                         static_cast<unsigned long long>(trafo_host.muted_replay_drains),
+                         static_cast<unsigned long long>(trafo_host.muted_remake_drains),
+                         static_cast<unsigned long long>(trafo_host.muted_recipes),
+                         static_cast<unsigned long long>(trafo_host.muted_added));
+        trafo_host.muted_replay_drains = trafo_host.muted_remake_drains = trafo_host.muted_recipes = trafo_host.muted_added = 0;
         if (!trafo_host.on) return;
         const int bodies = bmmo::game::teardown_trafo_sets(context, trafo_host.registry, trafo_host.hooks);
         std::string error;
@@ -1800,8 +1819,6 @@ namespace {
         trafo_host.hold.disarm();
         trafo_host.registry.clear();
         trafo_host.on = false;
-        trafo_host.birth_tick = 0;
-        trafo_host.if_absent = false;
         logger->Info("Physics session: trafo: the session's sets torn down (%d piece bodies removed)", bodies);
     }
 
@@ -3894,13 +3911,23 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     };
     // The bridge's event log: created / deleted / script_wakeup to the core
     // in order (an own body made or gone sets the own group again); the
-    // diagnostics under trace.  The birth recipes are not kept from here: the
-    // retail birth log is fed by OnPhysicalize (design 2.4).
+    // diagnostics under trace.  The birth recipes go into the birth log
+    // through host support's one feed (FULL step AUD3, the user's (b) of
+    // decision 59: session_host_world.hpp birth_feed, the headless host's
+    // too; OnPhysicalize no longer feeds it): what this frame's Physicalize
+    // made each body with (engine change #19), kept by tick, so a rewind
+    // anchored before this tick can make the body again at it.
     p.drain_body_events = [this](uint32_t tick, const std::function<bool(const bs::body_event&)>& each) {
         const std::string events = physics_view_.drain_event_log();
         const bool trace = host.core && host.core->config.trace;
+        bs::birth_feed births(host.births, tick, false);
         bs::parse_event_log(events, [&](const std::string& kind, const std::string& name) {
             if (name.empty()) return;
+            if (kind == "recipe") {
+                if (births.line(name) == bs::birth_feed::result::unparsed && host.recipe_parse_logs++ < 4)
+                    logger_->Warn("Physics session: birth recipe at tick %u could not be parsed: %.120s", tick, name.c_str());
+                return;
+            }
             bs::body_event event;
             if (kind == "created") event.what = bs::body_event::kind::created;
             else if (kind == "deleted") event.what = bs::body_event::kind::deleted;
@@ -4204,14 +4231,16 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                               bs::trafo_life_label(spec.player, spec.life).c_str(), spec.birth_tick);
             return r;
         }
-        // The remake, inside the core's mute: the pieces' Physicalize
-        // reaches OnPhysicalize, which logs their births at the resync's
-        // tick (the headless host takes them from the muted event log).
-        trafo_host.birth_tick = spec.birth_tick;
-        trafo_host.if_absent = false;
-        r.ok = bmmo::game::remake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.life, spec.type,
-                                           spec.position, spec.seed, 1000.0f / 66.0f, r.error);
-        trafo_host.birth_tick = 0;
+        // The remake, inside the core's mute: the pieces' births go into the
+        // birth log at the resync's tick from the recipes the muted log kept
+        // (bridge API v33), through the one feed (FULL step AUD3,
+        // session_host_world.hpp birth_feed; the headless host's too).
+        bs::birth_feed feed(host.births, spec.birth_tick, false,
+                            [](const std::string& entity) { return host.core && host.core->is_ball(entity); });
+        r.ok = bs::feed_muted_births(counted_muted_recipes{physics_view_, trafo_host.muted_remake_drains}, feed, [&]() {
+            return bmmo::game::remake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.life,
+                                               spec.type, spec.position, spec.seed, 1000.0f / 66.0f, r.error);
+        }, [](const std::string&) { ++trafo_host.muted_added; });
         return r;
     };
     p.retire_trafo_sets = [this](uint32_t now, uint32_t history) {
@@ -4628,21 +4657,24 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             };
         bs::rollback_world world = bs::bind_session_world(physics_view_, hooks, w);
         // Step T4: the births a replayed tick made, in the birth log under
-        // that tick (the headless host's rule, there from the muted event
-        // log): a replay across an explosion physicalizes the set's pieces
-        // again, and OnPhysicalize would log them at the live tick + 1, where
-        // a later rewind would take them for bodies born after its anchor.
-        // Step B2SW (T4 finding c): in every session, the trafo inputs on or
-        // off - without them a replay across an original explosion (step P's
-        // path) or a sector pass makes its bodies again the same way.
+        // that tick: a replay across an explosion physicalizes the set's
+        // pieces again (step B2SW, T4 finding c: in every session, the trafo
+        // inputs on or off - without them a replay across an original
+        // explosion, step P's path, or a sector pass makes its bodies again
+        // the same way).  FULL step AUD3: from the recipes the muted log kept
+        // (bridge API v33) through host support's one feed, the headless
+        // host's rule (session_host_world.hpp birth_feed: only a name the log
+        // lacks at that tick, the balls skipped).
         if (world.pre_step) {
             const auto inner = world.pre_step;
-            world.pre_step = [inner](uint32_t tick) {
-                trafo_host.birth_tick = tick;
-                trafo_host.if_absent = true;
-                inner(tick);
-                trafo_host.birth_tick = 0;
-                trafo_host.if_absent = false;
+            world.pre_step = [this, inner](uint32_t tick) {
+                bs::birth_feed feed(host.births, tick, true,
+                                    [](const std::string& entity) { return host.core && host.core->is_ball(entity); });
+                bs::feed_muted_births(counted_muted_recipes{physics_view_, trafo_host.muted_replay_drains}, feed, [&]() { inner(tick); }, [&](const std::string& entity) {
+                    ++trafo_host.muted_added;
+                    if (trafo_host.replay_birth_logs++ < 8)
+                        logger_->Info("Physics session: birth log: %s made by the replayed tick %u", entity.c_str(), tick);
+                });
             };
         }
         // Step EG0 diagnostics: every destroy_body the binding refuses (a
@@ -4872,13 +4904,16 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.hooks.ending = [this]() { host.event_hold.discard(); };
     // The own body guard lifted after the journal closed (design 2.2
     // hooks.ended).
+    // FULL step AUD3 (audit D9): host support's one order - the sets torn
+    // down (step T4), then the guard lifted.
     p.hooks.ended = [this]() {
-        std::string error;
-        trafo_teardown(physics_view_, m_bml->GetCKContext(), logger_);   // step T4
-        if (!host.body_guard) return;
-        physics_view_.set_body_guard(false, nullptr, error);
-        host.body_guard = false;
-        host.body_guard_entity.clear();
+        bs::end_session_bodies([this]() { trafo_teardown(physics_view_, m_bml->GetCKContext(), logger_); }, [this]() {
+            if (!host.body_guard) return;
+            std::string error;
+            physics_view_.set_body_guard(false, nullptr, error);
+            host.body_guard = false;
+            host.body_guard_entity.clear();
+        });
     };
     return p;
 }
@@ -5359,38 +5394,13 @@ bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixe
     for (int i = 0; i < concaveCnt && concaveMesh; ++i)
         r.concave_meshes.push_back(concaveMesh[i] && concaveMesh[i]->GetName() ? concaveMesh[i]->GetName() : "");
     const std::string name = target->GetName() ? target->GetName() : "";
-    // Step T4: inside a replayed tick or a reconcile's remake (the trafo as
-    // an input), a level object's birth goes under that tick - a replayed
-    // one only when the log lacks it there (trafo_host.birth_tick).
-    uint32_t birth_at = tick;
-    const auto record_birth = [&] {
-        bs::local_birth birth;
-        birth.name = name;
-        birth.group = collGroup ? collGroup : "";
-        birth.recipe = to_bridge_recipe(r);
-        const VxMatrix& m = target->GetWorldMatrix();
-        const VxMatrix& l = target->GetLocalMatrix();
-        for (int row = 0; row < 4; ++row)
-            for (int k = 0; k < 4; ++k) {
-                birth.matrix[row * 4 + k] = m[row][k];
-                birth.local_matrix[row * 4 + k] = l[row][k];
-            }
-        birth.has_parent = target->GetParent() != nullptr;
-        birth.has_local = true;
-        host.births.put(birth_at, std::move(birth));
-    };
+    // FULL step AUD3 (the user's (b), decision 59): the birth log is not fed
+    // from here any more - the bridge event log's recipe line of the body
+    // this Physicalize makes is (drain_body_events; a replayed tick's and a
+    // remake's from the muted log's recipes), the headless host's one feed.
     CK3dObject* ball = get_current_ball();
     if (!ball || target != static_cast<CK3dEntity*>(ball)) {
         // A level object's retail Physicalize during the session.
-        if (trafo_host.birth_tick) {
-            birth_at = trafo_host.birth_tick;
-            if (trafo_host.if_absent) {
-                if (core.is_ball(name) || host.births.find(name, birth_at)) return true;
-                if (trafo_host.replay_birth_logs++ < 8)
-                    logger_->Info("Physics session: birth log: %s made by the replayed tick %u", name.c_str(), birth_at);
-            }
-        }
-        record_birth();
         if (core.config.trace)
             logger_->Info("Physics session: retail physicalize of %s at tick %u (%d convex, %d balls, %d concave)",
                           name.c_str(), tick, convexCnt, ballCnt, concaveCnt);
@@ -5435,7 +5445,8 @@ bool BallanceMMOClient::core_host_on_physicalize(CK3dEntity* target, CKBOOL fixe
                       static_cast<double>(offset[0]), static_cast<double>(offset[1]), static_cast<double>(offset[2]),
                       join_order, tick);
     }
-    record_birth();   // after the offset: the matrix the body is made from
+    // (The birth log takes the body's recipe line, read when the body is
+    // made, i.e. after the offset: FULL step AUD3.)
     // (Step SPGH2: own_physicalized also begins the own spawn ghost life
     // when the core counts the birth a spawn - before the block makes the
     // body, as the server's copy's does at this tick.)
