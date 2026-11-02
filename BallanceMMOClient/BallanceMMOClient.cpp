@@ -486,6 +486,7 @@ void BallanceMMOClient::OnProcess() {
     core_host_process();
     process_command_pipe();
     process_room_requests();
+    room_panel_frame();   // the ImGui room panel (before the not-connected return: a disconnect must unblock)
     process_level_request();
     process_tick_record();
     poll_local_input();
@@ -1092,9 +1093,6 @@ void BallanceMMOClient::init_commands() {
         if (!connected()) { SendIngameMessage("Error: not connected to a server.", bmmo::ansi::BrightRed); return; }
         const auto sub = console_.get_next_word(true);
         bmmo::room_request_msg msg{};
-        // Remembered until the server answers, so its RequestAccepted /
-        // RequestDenied can name the subcommand it belongs to.
-        pending_room_request pending{};
         if (sub.empty() || sub == "status") { print_room_status(); return; }
         else if (sub == "list") {
             msg.action = bmmo::room::action::List;
@@ -1123,7 +1121,6 @@ void BallanceMMOClient::init_commands() {
                 return;
             }
             msg.action = ready ? bmmo::room::action::Ready : bmmo::room::action::Unready;
-            pending.ready = ready;
         }
         else if (sub == "start") {
             msg.action = bmmo::room::action::Start;
@@ -1133,7 +1130,7 @@ void BallanceMMOClient::init_commands() {
                                   m), bmmo::ansi::BrightRed);
                 return;
             }
-            msg.mode = pending.mode = (m == "physics") ? bmmo::room::mode::Physics : bmmo::room::mode::Shadow;
+            msg.mode = (m == "physics") ? bmmo::room::mode::Physics : bmmo::room::mode::Shadow;
         }
         else if (sub == "kick") {
             msg.action = bmmo::room::action::Kick;
@@ -1146,11 +1143,13 @@ void BallanceMMOClient::init_commands() {
         else if (sub == "close") { msg.action = bmmo::room::action::Close; }
         else if (sub == "session") { SendIngameMessage(core_host_status_text()); return; }
         else { SendIngameMessage(std::format("Error: unknown room subcommand \"{}\". Try list|create|join|leave|ready|start|kick|close|status|session.", sub), bmmo::ansi::BrightRed); return; }
-        pending.action = msg.action;
-        msg.serialize();
-        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        push_room_request(pending);
+        // One entry for every room request (session/room_client.cpp): the
+        // outcome names this subcommand.
+        send_room_request(msg.action, msg.room, msg.target, msg.mode, msg.name);
     });
+    // The ImGui room panel (session/room_panel.hpp), toggled in place; its
+    // actions go through the same send_room_request entry as the subcommands.
+    console_.register_command("panel", [&] { room_panel_toggle(); });
     // Any automation verb from the in-game command bar: "/mmo auto record
     // start D:/rec/a.bmrc 2".  Same dispatcher as the command file and the
     // pipe, on the same thread (OnFullCommand is already on the game one), and
@@ -2060,6 +2059,10 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         SendIngameMessage(std::format("BMMO version: {} at {}; local time: {} UTC",
             bmmo::current_version.to_string(), bmmo::string_utils::get_build_time_string(), utc_time_str
         ).c_str());
+
+        // The room panel opens on login with a fresh list (session/room_client.cpp;
+        // the request reports to the panel alone, not the chat).
+        room_panel_on_login();
 
         // The rest of the login sequence reads the status sprite, the current
         // ball and the mod list - all engine state. Hand it to the game thread

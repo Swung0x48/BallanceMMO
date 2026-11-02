@@ -123,6 +123,7 @@ set(BMMO_CLIENT_HDR
         session/pause_chain.hpp
         session/journal_files.hpp
         session/hold_panel.hpp
+        session/room_panel.hpp
 )
 set(BMMO_CLIENT_SRC
         BallanceMMOClient.cpp

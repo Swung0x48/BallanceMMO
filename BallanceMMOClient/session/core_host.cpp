@@ -2274,14 +2274,10 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
         SendIngameMessage("Physics session: you must be in the level to take part.", bmmo::ansi::BrightRed);
         // The server's start barrier waits for this member's SessionReady,
         // which will never come: leaving the room re-runs it without us.
-        bmmo::room_request_msg leave;
-        leave.action = bmmo::room::action::Leave;
-        leave.room = msg.room;
-        leave.serialize();
-        send(leave.raw.str().data(), leave.size(), k_nSteamNetworkingSend_Reliable);
-        // The server acks it (RequestAccepted): queued like the console's, so
-        // the ack reads "Left room #N." and no earlier request takes it.
-        push_room_request(pending_room_request{.action = bmmo::room::action::Leave});
+        // The server acks the leave (RequestAccepted): queued like the
+        // console's (send_room_request), so the ack reads "Left room #N."
+        // and no earlier request takes it.
+        send_room_request(bmmo::room::action::Leave, msg.room);
         logger_->Info("Physics session %u: not in the level, left room %u", msg.session, msg.room);
         return;   // the core stays idle: the session's messages are dropped
     }
@@ -2527,15 +2523,10 @@ void BallanceMMOClient::core_host_pre_exit_level() {
         logger_->Warn("Physics session %u: left the level at tick %u; no room known, no leave sent", session, tick);
         return;
     }
-    bmmo::room_request_msg leave;
-    leave.action = bmmo::room::action::Leave;
-    leave.room = room;
-    leave.serialize();
-    send(leave.raw.str().data(), leave.size(), k_nSteamNetworkingSend_Reliable);
-    // The server acks it (RequestAccepted): queued like the console's "/mmo
-    // room leave", so the player reads "Left room #N." and an earlier request
-    // still unanswered does not take this ack.
-    push_room_request(pending_room_request{.action = bmmo::room::action::Leave});
+    // The server acks the leave (RequestAccepted): queued like the console's
+    // "/mmo room leave" (send_room_request), so the player reads "Left room
+    // #N." and an earlier request still unanswered does not take this ack.
+    send_room_request(bmmo::room::action::Leave, room);
     logger_->Info("Physics session %u: left the level at tick %u, before its exit chain; left room %u", session, tick,
                   room);
 }
