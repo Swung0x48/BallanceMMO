@@ -1616,6 +1616,7 @@ TEST(StartHandshake, AStartedMemberCommitsItsStart) {
     EXPECT_TRUE(r.commit);
     EXPECT_EQ(r.commit_seq, 1u);
     EXPECT_EQ(r.committed_by, 1u);
+    EXPECT_TRUE(r.resync.empty()) << "FULL step SAXR: nobody runs on another start";
     EXPECT_EQ(h.current_phase(), start_handshake::phase::started);
     EXPECT_EQ(h.schedule().x_us, first.x_us) << "start 1's instant is the server's origin";
     EXPECT_FALSE(h.poll(first.deadline_us + 3, members).start_now) << "once";
@@ -1623,6 +1624,13 @@ TEST(StartHandshake, AStartedMemberCommitsItsStart) {
     EXPECT_FALSE(h.poll(first.deadline_us + 4, members).commit);
 }
 
+// FULL step SAXR: before the commit's poll an even earlier report still
+// commits that start instead (the server's schedule has not started); the
+// member that reported the later one runs on it and is resynced onto the
+// committed start rather than sent its commit.  Once the commit is polled
+// the schedule ticks from it and cannot move: a report of any other start
+// resyncs the reporter instead of committing again (StartHandshake.
+// TheCommitEarlierRaceResyncs).
 TEST(StartHandshake, AnEarlierStartReportedLaterIsCommittedInstead) {
     using namespace bmmo::session;
     start_handshake h;
@@ -1637,16 +1645,21 @@ TEST(StartHandshake, AnEarlierStartReportedLaterIsCommittedInstead) {
     ASSERT_TRUE(h.poll(second.deadline_us, members).postponed);
     EXPECT_EQ(h.seq(), 3u);
     h.started_on(2, 2);
+    h.started_on(1, 1);   // member 1 ran on an even earlier one, reported before the poll
     auto r = h.poll(second.deadline_us + 1, members);
     ASSERT_TRUE(r.commit);
-    EXPECT_EQ(r.commit_seq, 2u);
-    h.started_on(1, 1);   // member 1 ran on an even earlier one
-    r = h.poll(second.deadline_us + 2, members);
-    ASSERT_TRUE(r.commit);
     EXPECT_EQ(r.commit_seq, 1u);
+    EXPECT_EQ(r.committed_by, 1u);
     EXPECT_EQ(h.schedule().x_us, first.x_us);
+    ASSERT_EQ(r.resync.size(), 1u) << "member 2 runs on start 2: resynced onto start 1";
+    EXPECT_EQ(r.resync[0].member, 2u);
+    EXPECT_EQ(r.resync[0].ran_on, 2u);
+    EXPECT_TRUE(r.resync[0].known);
+    EXPECT_EQ(r.resync_onto, 1u);
     h.started_on(2, 2);
-    EXPECT_FALSE(h.poll(second.deadline_us + 3, members).commit) << "a later start than the committed one: void";
+    r = h.poll(second.deadline_us + 3, members);
+    EXPECT_FALSE(r.commit) << "a later start than the committed one: no commit";
+    EXPECT_TRUE(r.resync.empty()) << "member 2 is resynced once";
     // A normal start confirmed by everyone commits its own seq: an earlier
     // started report after it still moves it (the members catch up).
     start_handshake g;
@@ -1662,6 +1675,154 @@ TEST(StartHandshake, AnEarlierStartReportedLaterIsCommittedInstead) {
     EXPECT_EQ(g.committed_seq(), 1u);
     g.started_on(1, 1);
     EXPECT_FALSE(g.poll(30, members).commit);
+}
+
+// FULL step SAXR (the user's decision 63; SAXC's residual): the
+// commit-earlier race at a 300 ms round trip.  Member 1 runs on start 1 and
+// its answer is lost past the in-flight bound, so start 2 is postponed at
+// X2 - 60 ms; a burst over 60 ms holds that postponement from member 3,
+// which starts on start 2 and says so - start 2 is committed and the
+// schedule ticks from it.  Member 1's late report of start 1 no longer
+// commits start 1 "instead" (the schedule cannot move): member 1 is resynced
+// onto start 2, once, and nobody stays on another start.  Member 1 is also
+// resynced at the commit itself when its report is lost altogether: it
+// confirmed start 1, start 1's instant has passed and so has its
+// start_may_run_until.  A member that confirmed the committed start holds
+// it (the commit starts it).  The third case (`w`): a member that confirmed
+// a start whose instant has passed while its confirmation of the next one
+// may still be in flight is watched, not resynced - a confirmation of a
+// later start says it held; silent past its bound it is resynced.
+TEST(StartHandshake, TheCommitEarlierRaceResyncs) {
+    using namespace bmmo::session;
+    constexpr int64_t rtt = 300'000;
+    const std::vector<uint32_t> members = {1, 2, 3};
+    start_handshake h;
+    h.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, rtt));
+    ASSERT_TRUE(h.poll(10, members).send_start);
+    const auto first = h.schedule();
+    h.start_acked(1, 1);
+    h.start_acked(3, 1);
+    auto r = h.poll(first.deadline_us, members);
+    ASSERT_TRUE(r.postponed) << "member 2 missed start 1";
+    EXPECT_EQ(r.moved_from_seq, 1u) << "the postponement's status describes start 1";
+    const auto second = h.schedule();
+    h.start_acked(2, 2);
+    h.start_acked(3, 2);
+    // Member 1's answer (it runs on start 1) is lost past the bound.
+    const int64_t bound = h.answer_in_flight_until(1);
+    r = h.poll(bound, members);
+    ASSERT_TRUE(r.postponed);
+    EXPECT_EQ(r.missing, std::vector<uint32_t>{1});
+    EXPECT_EQ(r.moved_from_seq, 2u);
+    EXPECT_EQ(h.seq(), 3u);
+    EXPECT_EQ(bound, second.x_us - kStartGuardSlackUs) << "the cap: 60 ms of margin";
+    // A burst over 60 ms holds start 3 from member 3: it starts on start 2
+    // and reports it once start 3 reaches it.
+    h.started_on(3, 2);
+    r = h.poll(second.x_us + rtt, members);
+    ASSERT_TRUE(r.commit);
+    EXPECT_EQ(r.commit_seq, 2u);
+    EXPECT_EQ(r.committed_by, 3u);
+    ASSERT_EQ(r.resync.size(), 1u) << "member 1 confirmed start 1, past its bound: it may run on it";
+    EXPECT_EQ(r.resync[0].member, 1u);
+    EXPECT_EQ(r.resync[0].ran_on, 1u);
+    EXPECT_FALSE(r.resync[0].known);
+    EXPECT_EQ(r.resync_onto, 2u);
+    EXPECT_EQ(h.schedule().x_us, second.x_us) << "the schedule ticks from start 2";
+    EXPECT_FALSE(h.watched(2)) << "member 2 confirmed the committed start: the commit starts it";
+    EXPECT_FALSE(h.watched(1));
+    // Member 1's late report: no second commit, no second resync.
+    h.started_on(1, 1);
+    EXPECT_FALSE(h.resync_pending());
+    r = h.poll(second.x_us + rtt + 1, members);
+    EXPECT_FALSE(r.commit);
+    EXPECT_FALSE(r.start_now);
+    EXPECT_TRUE(r.resync.empty());
+    EXPECT_EQ(h.committed_seq(), 2u);
+    EXPECT_FALSE(h.watching());
+    r = h.poll(start_may_run_until(second.x_us, rtt) + 1, members);
+    EXPECT_TRUE(r.resync.empty()) << "nobody resynced but the runner";
+
+    // The other order of the same race, the commit by member 3 decided while
+    // member 1 had not confirmed start 1 (its confirmation lost too): the
+    // commit resyncs nobody, and member 1's late report resyncs it.
+    start_handshake g;
+    g.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) g.add_sample(m, make_clock_sample(0, 0, rtt));
+    ASSERT_TRUE(g.poll(10, members).send_start);
+    const auto g1 = g.schedule();
+    g.start_acked(3, 1);
+    ASSERT_TRUE(g.poll(g1.deadline_us, members).postponed);
+    const auto g2 = g.schedule();
+    g.start_acked(2, 2);
+    g.start_acked(3, 2);
+    ASSERT_TRUE(g.poll(g2.deadline_us, members).postponed) << "member 1 never confirmed: missing at the deadline";
+    g.started_on(3, 2);
+    r = g.poll(g2.x_us + rtt, members);
+    ASSERT_TRUE(r.commit);
+    EXPECT_EQ(r.commit_seq, 2u);
+    EXPECT_TRUE(r.resync.empty()) << "nothing says member 1 runs on another start yet";
+    EXPECT_FALSE(g.watched(1)) << "it confirmed nothing";
+    EXPECT_FALSE(g.watched(2)) << "it confirmed the committed start";
+    g.started_on(1, 1);
+    EXPECT_TRUE(g.resync_pending());
+    r = g.poll(g2.x_us + rtt + 1, members);
+    EXPECT_FALSE(r.commit) << "the schedule ticks from start 2: start 1 is not committed";
+    ASSERT_EQ(r.resync.size(), 1u);
+    EXPECT_EQ(r.resync[0].member, 1u);
+    EXPECT_EQ(r.resync[0].ran_on, 1u);
+    EXPECT_TRUE(r.resync[0].known);
+    EXPECT_EQ(r.resync_onto, 2u);
+    g.started_on(1, 1);   // another copy's answer
+    EXPECT_FALSE(g.resync_pending()) << "once";
+    g.forget(1);
+    EXPECT_EQ(g.started_report(1), 0u);
+
+    // A watched member that says nothing: resynced at its bound.  Member 2
+    // confirmed start 2 (instant passed) when member 1's report of start 1
+    // commits it; a report of the committed start or the commit's own
+    // confirmation do not end the watch (a cut catch-up reports it too).
+    start_handshake w;
+    w.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) w.add_sample(m, make_clock_sample(0, 0, rtt));
+    ASSERT_TRUE(w.poll(10, members).send_start);
+    const auto w1 = w.schedule();
+    w.start_acked(1, 1);
+    w.start_acked(3, 1);
+    ASSERT_TRUE(w.poll(w1.deadline_us, members).postponed);
+    const auto w2 = w.schedule();
+    w.start_acked(2, 2);
+    w.start_acked(3, 2);
+    ASSERT_TRUE(w.poll(w.answer_in_flight_until(1), members).postponed);
+    w.start_acked(3, 3);
+    w.started_on(1, 1);
+    r = w.poll(w2.x_us + rtt, members);
+    ASSERT_TRUE(r.commit);
+    EXPECT_EQ(r.commit_seq, 1u);
+    EXPECT_TRUE(r.resync.empty()) << "member 2 is watched, member 3 confirmed start 3 (still ahead)";
+    EXPECT_TRUE(w.watched(2));
+    EXPECT_FALSE(w.watched(3));
+    {
+        auto held = w;   // the same, but member 2 held start 3: its confirmation of start 3 lands
+        held.start_acked(2, 3);
+        EXPECT_FALSE(held.watching());
+        EXPECT_TRUE(held.poll(start_may_run_until(w2.x_us, rtt), members).resync.empty());
+    }
+    w.start_acked(2, 1);   // the commit's confirmation: says nothing
+    w.started_on(2, 1);    // a report of the committed start: says nothing
+    const int64_t until = start_may_run_until(w2.x_us, rtt);
+    EXPECT_TRUE(w.poll(until - 1, members).resync.empty());
+    r = w.poll(until, members);
+    ASSERT_EQ(r.resync.size(), 1u) << "silent past its bound: it may run on start 2";
+    EXPECT_EQ(r.resync[0].member, 2u);
+    EXPECT_EQ(r.resync[0].ran_on, 2u);
+    EXPECT_FALSE(r.resync[0].known);
+    EXPECT_EQ(r.resync_onto, 1u);
+    EXPECT_FALSE(w.watching());
 }
 
 // FULL step SAXC (the user's decision 60, HXP's `commit` cell at 150 ms
@@ -1721,6 +1882,10 @@ TEST(StartHandshake, AnAnswerInFlightIsNotMissing) {
     EXPECT_EQ(r.commit_seq, 1u);
     EXPECT_EQ(h.postpones(), 1);
     EXPECT_TRUE(r.refuse.empty());
+    // FULL step SAXR: HXP's `commit` resyncs nobody - members 2 and 3 hold
+    // start 2 (its instant still ahead) and the commit starts them.
+    EXPECT_LT(first.x_us + rtt + 1, second.x_us);
+    EXPECT_TRUE(r.resync.empty());
 
     // A late confirmation of start 2 itself starts it normally.
     start_handshake g;

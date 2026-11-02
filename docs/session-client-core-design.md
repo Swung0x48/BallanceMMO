@@ -7399,7 +7399,9 @@ shared file, no wire or journal change, the core unchanged):
   the core gets it (FULL step SAXC: after it, and only when the core showed
   it - `on_session_start_status` returns false for a status after this
   member's own start, lockstep-without-snapshots.md "As built (FULL step
-  SAXC)"); the members and names from the SessionStart and the
+  SAXC)"; FULL step SAXR, protocol 26:
+  also before it for a status of an older start than the one the member
+  follows, its note); the members and names from the SessionStart and the
   client's player list. **Adaptation:** the core exposes no start instant or
   confirmed set, and an accessor would have been a shared-file change; the
   host reads the messages it already decodes instead (no decision moves out

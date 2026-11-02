@@ -202,7 +202,14 @@ namespace bmmo::session {
     //      server takes them through the event intake before the frames.  A
     //      protocol-24 input datagram (no nevents) is refused.  No journal
     //      version: nothing the journal records changed.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 25;
+    //  26  SessionStartStatus carries the start it describes (FULL step
+    //      SAXR, the user's decision 64): a trailing u32 `seq` (0 for the
+    //      assignment phase, the current start for a wait, the start a
+    //      postponement or a refusal moved away from, the committed start for
+    //      a commit); the client core drops a status of an older start than
+    //      the one it follows (client_core.cpp on_session_start_status).  No
+    //      journal version: the journal records no status.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 26;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

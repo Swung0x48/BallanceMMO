@@ -152,7 +152,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(25u, bmmo::session::PHYSICS_PROTOCOL_VERSION);   // step RK3H: the frame-9 hold (22); step WFA: the force block aliases (23); step SAXH: the start handshake (24); step EVI: events on the input datagram (25)
+    EXPECT_EQ(26u, bmmo::session::PHYSICS_PROTOCOL_VERSION);   // step RK3H: the frame-9 hold (22); step WFA: the force block aliases (23); step SAXH: the start handshake (24); step EVI: events on the input datagram (25); step SAXR: the start status's sequence (26)
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -1987,6 +1987,7 @@ TEST(SessionStartHandshakeMsgs, RoundTrip) {
     st.confirmed = 2;
     st.total = 3;
     st.text = "start postponed";
+    st.seq = 4;
     st.serialize();
     bmmo::session_start_status_msg st2;
     { const std::string b = st.raw.str(); st2.raw.write(b.data(), static_cast<std::streamsize>(b.size())); }
@@ -1994,6 +1995,18 @@ TEST(SessionStartHandshakeMsgs, RoundTrip) {
     EXPECT_EQ(st2.text, "start postponed");
     EXPECT_EQ(st2.confirmed, 2u);
     EXPECT_EQ(st2.total, 3u);
+    EXPECT_TRUE(st2.has_seq);
+    EXPECT_EQ(st2.seq, 4u) << "protocol 26: the start it describes";
+    // A protocol 24/25 status (no trailing seq) still reads, without one.
+    {
+        const std::string b = st.raw.str();
+        bmmo::session_start_status_msg old;
+        old.raw.write(b.data(), static_cast<std::streamsize>(b.size() - sizeof(uint32_t)));
+        ASSERT_TRUE(old.deserialize());
+        EXPECT_FALSE(old.has_seq);
+        EXPECT_EQ(old.seq, 0u);
+        EXPECT_EQ(old.text, "start postponed");
+    }
     // Distinct sizes on the wire (the harness proxy anchors a burst on one).
     EXPECT_NE(t.raw.str().size(), a.raw.str().size());
     EXPECT_NE(t.raw.str().size(), k.raw.str().size());

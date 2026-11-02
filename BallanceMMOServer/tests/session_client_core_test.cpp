@@ -10611,8 +10611,10 @@ namespace {
         start.server_us = 900;
         start.start_us = fake_us(fake.clock + std::chrono::milliseconds(100));
         core.on_session_start_at(start);
-        // Before the start: a postponement's status is shown.
+        // Before the start: a postponement's status (of start 1, the one
+        // this member follows) is shown.
         status.phase = static_cast<uint8_t>(bmmo::session::start_status_phase::postponed);
+        status.seq = 1;
         status.text = "start postponed (1 of 3): b did not confirm the start in time; starting in about 677 ms";
         EXPECT_TRUE(core.on_session_start_status(status));
         EXPECT_EQ(notices.back(), status.text);
@@ -10636,6 +10638,75 @@ namespace {
         EXPECT_EQ(notices.size(), shown) << "nothing shown after the start";
         EXPECT_EQ(notices.back(), "started.");
         EXPECT_EQ(core.start_statuses_stale(), 2u);
+    }
+
+    // FULL step SAXR (the user's decision 64, protocol 26; HXP `m_start`
+    // client 2): the status carries the start it describes.  A member that
+    // took start 2 from a copy while start 1's postponement status was held
+    // behind a reliable retransmit drops that status before its start: an
+    // older start's, stale - not shown, logged once, counted.  A status of
+    // the start it follows (a wait, the next postponement) is shown, and one
+    // without a sequence (a protocol 24/25 capture) keeps the old rule.
+    TEST(SessionClientCoreFlow, StartStatusOfAnOlderStartIsStale) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        std::vector<std::string> notices;
+        platform.hooks.notice = [&notices](const std::string& text) { notices.push_back(text); };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_anchor(core, fake);
+        auto assign = assign_message(9, 120);
+        assign.flags = bmmo::session::ASSIGN_FLAG_SCHEDULED;
+        assign.server_us = 777;
+        core.on_session_assign(assign);
+        bmmo::session_start_status_msg status;
+        status.session = 9;
+        status.phase = static_cast<uint8_t>(bmmo::session::start_status_phase::waiting_assign);
+        status.seq = 0;
+        status.text = "waiting for the other players to confirm the start (1 / 2 confirmed; missing: b)";
+        EXPECT_TRUE(core.on_session_start_status(status)) << "phase 1, no start yet: shown";
+        // Start 1 never reached this member; start 2 came by a copy.
+        bmmo::session_start_at_msg start;
+        start.session = 9;
+        start.first_tick = 120;
+        start.seq = 2;
+        start.server_us = 900;
+        start.start_us = fake_us(fake.clock + std::chrono::milliseconds(300));
+        core.on_session_start_at(start);
+        ASSERT_TRUE(core.holding());
+        const size_t shown = notices.size();
+        // Then the postponement of start 1 (held behind the retransmit).
+        status.phase = static_cast<uint8_t>(bmmo::session::start_status_phase::postponed);
+        status.seq = 1;
+        status.text = "start postponed (1 of 3): c did not confirm the start in time; starting in about 465 ms";
+        EXPECT_FALSE(core.on_session_start_status(status)) << "an older start's status, before the start: stale";
+        status.phase = static_cast<uint8_t>(bmmo::session::start_status_phase::waiting_assign);
+        status.seq = 0;
+        EXPECT_FALSE(core.on_session_start_status(status)) << "phase 1's status after a start came: stale";
+        EXPECT_EQ(notices.size(), shown) << "nothing shown";
+        EXPECT_EQ(core.start_statuses_stale(), 2u);
+        // A status of the start it follows, and of a newer one, is shown.
+        status.phase = static_cast<uint8_t>(bmmo::session::start_status_phase::waiting_start);
+        status.seq = 2;
+        status.text = "waiting for the other players to confirm the start (2 / 3 confirmed; missing: c)";
+        EXPECT_TRUE(core.on_session_start_status(status)) << "the current start's: shown";
+        EXPECT_EQ(notices.back(), status.text);
+        status.phase = static_cast<uint8_t>(bmmo::session::start_status_phase::postponed);
+        status.seq = 3;
+        status.text = "start postponed (3 of 3): c did not confirm the start in time; starting in about 465 ms";
+        EXPECT_TRUE(core.on_session_start_status(status)) << "a newer start's: shown";
+        // No sequence on the wire (a protocol 24/25 capture): the old rule.
+        status.has_seq = false;
+        status.seq = 0;
+        status.text = "start postponed (1 of 3): c did not confirm the start in time; starting in about 465 ms";
+        EXPECT_TRUE(core.on_session_start_status(status)) << "no sequence: shown before the start, as before";
+        EXPECT_EQ(core.start_statuses_stale(), 2u);
+        // After the start the SAXC rule drops everything, whatever its seq.
+        fake.advance(std::chrono::milliseconds(300));
+        EXPECT_FALSE(core.poll_hold().held);
+        status.has_seq = true;
+        status.seq = 2;
+        EXPECT_FALSE(core.on_session_start_status(status));
+        EXPECT_EQ(core.start_statuses_stale(), 3u);
     }
 
     // The gate round of SAXH (review finding 2): a member still holding

@@ -39,7 +39,10 @@
 //   start: it answers the new
 //   one CLOCK_ACK_STARTED (that seq), and the server commits the earliest
 //   such start for everyone (START_AT_FLAG_COMMIT: a member still holding
-//   starts at once and catches up; started_on).
+//   starts at once and catches up; started_on) - until the server's
+//   schedule ticks: from then on its start is the session's, and a member
+//   known or likely to run on any other start is resynced onto it (FULL
+//   step SAXR, start_resync).
 //
 // Late joiners and resyncs use the same clock estimate: a resync's
 // assignment carries the member's start instant at once when the server's
@@ -158,6 +161,39 @@ namespace bmmo::session {
         int64_t x_us = 0;          // the start instant, server clock
         int64_t deadline_us = 0;   // every confirmation by then, or the start moves
     };
+
+    // FULL step SAXR (the user's decision 63, SAXC's residual): a member
+    // that runs, or may run, on a start other than the committed one.  The
+    // server resyncs it onto the committed start (its schedule's) instead of
+    // leaving it on its own: SAXC's in-flight wait leaves a postponement 60
+    // ms of loss margin, so a burst over 60 ms after a lost answer can let a
+    // member start on k while another's late report commits j (or the
+    // reverse order: k committed, the schedule ticking from it, and j
+    // reported after).  `known`: it said so (CLOCK_ACK_STARTED); else it
+    // may run on `ran_on`: it confirmed that start, whose instant had passed
+    // at the commit (the commit's message reaches it after its own instant
+    // of `ran_on`), and neither its confirmation of a later start nor a
+    // report came by start_may_run_until (start_handshake's watch).
+    struct start_resync {
+        uint32_t member = 0;
+        uint32_t ran_on = 0;
+        bool known = false;
+    };
+    // FULL step SAXR: a member that confirmed start c, whose instant had
+    // passed at the commit of another start, holds a later start (the one
+    // sent to it no later than X_c - 60 ms: SAXC's cap) or runs on c.  Either
+    // way it answers - a confirmation of the later start, or
+    // CLOCK_ACK_STARTED c - no later than X_c plus its round trip; with one
+    // window's slack for lost copies (start_answer_in_flight_until's
+    // uncapped bound), a member that said neither by then may run on c and
+    // is resynced.  Until then it is watched, not resynced: at the commit
+    // the holders' confirmations of the later start are typically still in
+    // flight (the running member's report that commits j rides the same
+    // copies), so resyncing on the schedule alone would resync every holder.
+    inline int64_t start_may_run_until(int64_t confirmed_x_us, int64_t member_rtt_us) {
+        return confirmed_x_us + std::max<int64_t>(0, member_rtt_us) + kStartWindowSlackUs;
+    }
+
     inline start_schedule plan_start(int64_t now_us, int64_t worst_rtt_us) {
         const int64_t rtt = std::max<int64_t>(0, worst_rtt_us);
         const int64_t window = rtt + kStartWindowSlackUs;
@@ -215,6 +251,16 @@ namespace bmmo::session {
             std::vector<uint32_t> in_flight;
             bool notice_in_flight = false;
             uint32_t confirmed = 0, total = 0;
+            // FULL step SAXR: resync these onto `resync_onto` (the committed
+            // start; the server's schedule ticks from it), each once.  With
+            // a commit: they get no SessionStartAt of it.  After the commit:
+            // a member that reported another start.
+            std::vector<start_resync> resync;
+            uint32_t resync_onto = 0;
+            // FULL step SAXR (protocol 26): the start a postponement or a
+            // refusal moved away from (the seq before this poll's new one) -
+            // the start its SessionStartStatus describes.
+            uint32_t moved_from_seq = 0;
         };
 
         // The start members' assignment went out at `now_us`.
@@ -232,23 +278,54 @@ namespace bmmo::session {
             committed_seq_ = 0;
             commit_pending_ = false;
             committed_by_ = 0;
+            started_report_.clear();
+            watch_.clear();
+            resynced_.clear();
+            resync_pending_.clear();
         }
 
         void add_sample(uint32_t member, const clock_sample& c, int64_t at_us = 0) { clocks_[member].add(c, at_us); }
         // A confirmation of start message `seq`; an older seq's is void.
+        // FULL step SAXR: after the commit, a watched member's confirmation
+        // of a start later than the one it may run on, other than the
+        // committed one, says it held that start (the commit started it):
+        // no longer watched.  The commit's own confirmation says nothing -
+        // a member answers every commit copy CLOCK_ACK_START before it
+        // looks whether it holds or runs (client_core.cpp).
         void start_acked(uint32_t member, uint32_t seq) {
             if (phase_ == phase::start && seq == seq_) confirm(member);
+            if (phase_ == phase::started)
+                if (const auto w = watch_.find(member);
+                        w != watch_.end() && seq > w->second.ran_on && seq != committed_seq_)
+                    watch_.erase(w);
         }
         // The member already STARTED on start message `seq` (CLOCK_ACK_STARTED:
         // a later start reached it after that one's instant).  It cannot
         // un-start, so that start is the session's: the earliest such seq
         // is committed (the next poll says so) - the members still holding
         // start at once and catch up the whole ticks since its instant.  A
-        // later report of an even earlier start commits that one instead.
+        // later report of an even earlier start, before the commit's poll,
+        // commits that one instead.  FULL step SAXR: once the commit is
+        // polled the server's schedule ticks from it and cannot move (the
+        // runner keeps an origin it ticks from), so a report of any other
+        // start then resyncs the reporter onto the committed one (the next
+        // poll's `resync`), once per member.
         void started_on(uint32_t member, uint32_t seq) {
             if (phase_ == phase::idle || seq == 0 || seq > seq_ || !schedules_.count(seq)) return;
             if (phase_ == phase::start && seq == seq_) {   // the current one: a confirmation
                 confirm(member);
+                return;
+            }
+            started_report_[member] = seq;
+            if (phase_ == phase::started) {
+                // A report of the committed start keeps a watch open: a
+                // member that ran on another start reports the committed one
+                // once the commit's catch-up ran, even when the catch-up was
+                // cut at kStartMaxCatchUpTicks.
+                if (seq != committed_seq_) {
+                    watch_.erase(member);
+                    queue_resync(start_resync{member, seq, true});
+                }
                 return;
             }
             if (committed_seq_ != 0 && seq >= committed_seq_) return;
@@ -257,12 +334,27 @@ namespace bmmo::session {
             commit_pending_ = true;
         }
         uint32_t committed_seq() const { return committed_seq_; }
-        // A commit the next poll reports (also once the schedule started).
+        // A commit the next poll reports.
         bool commit_pending() const { return commit_pending_; }
+        // FULL step SAXR: a resync the next poll reports, or a member watched
+        // (the server polls while either is open).
+        bool resync_pending() const { return !resync_pending_.empty(); }
+        bool watching() const { return !watch_.empty(); }
+        bool watched(uint32_t member) const { return watch_.count(member) != 0; }
+        // FULL step SAXR: the start this member reported it runs on (0: none).
+        uint32_t started_report(uint32_t member) const {
+            const auto it = started_report_.find(member);
+            return it == started_report_.end() ? 0 : it->second;
+        }
         void forget(uint32_t member) {
             clocks_.erase(member);
             start_acks_.erase(member);
             confirmed_seq_.erase(member);
+            started_report_.erase(member);
+            watch_.erase(member);
+            resync_pending_.erase(std::remove_if(resync_pending_.begin(), resync_pending_.end(),
+                                                 [member](const start_resync& r) { return r.member == member; }),
+                                  resync_pending_.end());
         }
         // FULL step SAXC: the newest start this member confirmed (0: none).
         uint32_t confirmed_seq(uint32_t member) const {
@@ -300,7 +392,7 @@ namespace bmmo::session {
         poll_result poll(int64_t now_us, const std::vector<uint32_t>& members) {
             poll_result r;
             r.total = static_cast<uint32_t>(members.size());
-            if (commit_pending_ && (phase_ == phase::start || phase_ == phase::started)) {
+            if (commit_pending_ && phase_ == phase::start) {
                 commit_pending_ = false;
                 phase_ = phase::started;
                 schedule_ = schedules_.at(committed_seq_);
@@ -309,9 +401,39 @@ namespace bmmo::session {
                 r.commit_seq = committed_seq_;
                 r.committed_by = committed_by_;
                 r.confirmed = r.total;
+                // FULL step SAXR: a member that reported another start runs
+                // on it: resynced onto the committed start rather than sent
+                // its commit.  A member that confirmed another start whose
+                // instant has passed (the commit's message reaches it rtt/2
+                // from now, after its own instant of that start, X + rtt/2)
+                // and nothing later may run on it: watched until
+                // start_may_run_until (it still gets the commit - it may hold
+                // a later start), resynced if nothing says it held.  A member
+                // that confirmed the committed start, a later one still
+                // ahead, or none, holds: the commit starts it.
+                for (const auto m: members) {
+                    if (m == committed_by_) continue;
+                    if (const uint32_t rep = started_report(m); rep != 0 && rep != committed_seq_) {
+                        queue_resync(start_resync{m, rep, true});
+                        continue;
+                    }
+                    const uint32_t c = confirmed_seq(m);
+                    if (c == 0 || c == committed_seq_) continue;
+                    const auto sch = schedules_.find(c);
+                    const auto* e = estimate(m);
+                    if (sch == schedules_.end() || sch->second.x_us > now_us || !e) continue;
+                    watch_[m] = watch_entry{c, start_may_run_until(sch->second.x_us, e->best.rtt_us)};
+                }
+                expire_watches(now_us);
+                take_resyncs(r);
                 return r;
             }
-            if (phase_ == phase::idle || phase_ == phase::started) return r;
+            if (phase_ == phase::started) {
+                expire_watches(now_us);
+                take_resyncs(r);
+                return r;
+            }
+            if (phase_ == phase::idle) return r;
             if (members.empty()) {
                 phase_ = phase::idle;
                 return r;
@@ -379,6 +501,7 @@ namespace bmmo::session {
             // late - the start moves for everyone, or, past the bound, the
             // missing members are refused and the rest get a new instant.
             ++postpones_;
+            r.moved_from_seq = seq_;   // FULL step SAXR: what the status describes
             if (postpones_ > kStartMaxPostpones) r.refuse = r.missing;
             std::vector<uint32_t> rest;
             for (const auto m: members)
@@ -394,6 +517,29 @@ namespace bmmo::session {
         }
 
     private:
+        // FULL step SAXR: each member is resynced by the handshake once (a
+        // resynced member's old start copies may still draw reports).
+        void queue_resync(const start_resync& r) {
+            if (!resynced_.insert(r.member).second) return;
+            resync_pending_.push_back(r);
+        }
+        void expire_watches(int64_t now_us) {
+            for (auto w = watch_.begin(); w != watch_.end();) {
+                if (now_us < w->second.until_us) {
+                    ++w;
+                    continue;
+                }
+                queue_resync(start_resync{w->first, w->second.ran_on, false});
+                w = watch_.erase(w);
+            }
+        }
+        void take_resyncs(poll_result& r) {
+            if (resync_pending_.empty()) return;
+            r.resync = std::move(resync_pending_);
+            resync_pending_.clear();
+            r.resync_onto = committed_seq_;
+        }
+
         void confirm(uint32_t member) {
             start_acks_.insert(member);
             auto& c = confirmed_seq_[member];
@@ -423,6 +569,18 @@ namespace bmmo::session {
         bool commit_pending_ = false;
         std::set<uint32_t> start_acks_;
         std::map<uint32_t, uint32_t> confirmed_seq_;   // FULL step SAXC: each member's newest confirmed start
+        // FULL step SAXR: the start each member reported it runs on
+        // (CLOCK_ACK_STARTED), the members already resynced by the
+        // handshake, and the resyncs the next poll reports.
+        std::map<uint32_t, uint32_t> started_report_;
+        // ...and the members that may run on another start (start_may_run_until).
+        struct watch_entry {
+            uint32_t ran_on = 0;
+            int64_t until_us = 0;
+        };
+        std::map<uint32_t, watch_entry> watch_;
+        std::set<uint32_t> resynced_;
+        std::vector<start_resync> resync_pending_;
         std::map<uint32_t, clock_estimate> clocks_;
     };
 }

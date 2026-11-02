@@ -2792,6 +2792,9 @@ the client in `client_core.cpp` `on_session_assign` / `on_session_start_at` /
   bit-equal to the server (own, mirror, 23/23 mechanisms), server 620/620;
   the two runs without a postponement (rtd_saxh, rtd_saxh2) also bit-equal,
   servers 631/631 and 624/624.
+  (A member on another start than the committed one is resynced, and the
+  status carries its start sequence, from FULL step SAXR on - its note
+  below, after SAXC's.)
 
 **As built (FULL step HXP, 2026-11-01): SAXH's deferred cells, a wall-clock
 outage in the proxy, the process-exit hang watched.** No product code; the
@@ -3058,6 +3061,138 @@ findings fixed as the user chose (decisions 60 / 61, "按你的推荐来").**
     each member at X + its half round trip (above, SAXH's note), 153.4 ms
     apart here; the 3.1 ms left is the offset estimate's error (under a
     tick). `.local-tools/work/SAXC/` holds the run scripts and the judges.
+  (Both residuals closed at FULL step SAXR, its note below.)
+
+**As built (FULL step SAXR, 2026-11-01; protocol 26): SAXC's two residuals
+closed as the user chose (decisions 63 / 64, "按你推荐").**
+- **(a) Decision 63: a member on another start than the committed one is
+  resynced onto it** (`session/start_handshake.hpp` `start_resync`,
+  `start_may_run_until`, the handshake's `started_report_` / `watch_`;
+  `server.cpp` `check_start_handshakes` / `flush_start_resyncs`). SAXC's cap
+  (X_k - 60 ms) stays. At a commit of start j (a CLOCK_ACK_STARTED of j
+  before the commit's poll):
+  - a member that reported another start (its answer) is resynced onto j
+    and gets no SessionStartAt of the commit;
+  - a member that confirmed another start c whose instant has passed (its
+    clock ack and the schedule: the commit reaches it after its own instant
+    of c) may run on c - **watched, not resynced at once**: it still gets
+    the commit (it may hold a later start, which the commit starts), and a
+    confirmation of a start later than c other than j ends the watch (it
+    held); a report of another start resyncs it; silent past
+    `start_may_run_until` = X_c + its rtt + 160 ms (its answer to the start
+    that followed c - sent no later than X_c - 60 ms - has had one window)
+    it is resynced. Neither the commit's own confirmation (a member answers
+    every commit copy CLOCK_ACK_START before it looks whether it holds or
+    runs) nor a report of j (a member whose catch-up the 33-tick cap cut
+    reports j too) ends a watch.
+  - every other member (it confirmed j, a later start still ahead, or
+    none) holds; the commit starts it, as before.
+  Each member is resynced by the handshake once (later reports and copies
+  are ignored); `resync_member` runs once the runner ticks on the committed
+  start (`flush_start_resyncs`, like `start_waiting`: the runner sets its
+  running flag on its own thread after `start_at`), its start copies stop,
+  and the server logs "NAME runs | may run on start c while start j is
+  committed: resynced onto start j (...)" and "NAME resynced at tick B: from
+  start c onto start j". **Adaptation (the code is what it is):** the
+  runner keeps an origin it already ticks from (`session_runner::start_at`
+  ignores a second one), so once the commit is polled the committed start
+  is the session's: a later report of another start - even an earlier one,
+  which SAXH committed "instead" while the members caught up among
+  themselves and the server stayed on the first - now resyncs the reporter
+  onto the committed start (the next poll's `resync`) instead of
+  committing again. Before the poll an even earlier report still commits
+  that start instead, and the member that reported the later one is
+  resynced. **Adaptation (the gate's advice):** "may be running" is a
+  watch, not an immediate resync: at the commit in the race the holders'
+  confirmations of the next start ride back on the very copies the running
+  member's report answers, so resyncing on the schedule alone resynced
+  every holder (found in review before any live run). Rejected: the runner
+  adopting the earlier origin and bursting the difference (it changes
+  SAXH's runner and still leaves a running member past the client's 33-tick
+  cap); the client answering a commit CLOCK_ACK_STARTED and not catching up
+  (it rewrites SAXH's committed-start client path; the bound resyncs such a
+  member anyway).
+- **(b) Decision 64: SessionStartStatus carries the start it describes**
+  (protocol 26, `session_start_status_msg::seq`, a trailing u32; bytes
+  without it - a protocol 24/25 capture - read `has_seq` false and keep
+  SAXC's rule). The server (`send_start_status`) sends 0 for the assignment
+  phase, the current start for a wait, the start a postponement or a
+  refusal moved away from (`poll_result::moved_from_seq`: the poll has
+  already planned the next start when the status is sent), the committed
+  start for a commit (its SessionStartAt goes out first on the same
+  reliable stream, so a holder already follows it). The client core
+  (`on_session_start_status`) keeps SAXC's after-start drop and drops,
+  before the start too, a status of an older start than `start_seq_` (the
+  newest start it has heard of, also raised by one it did not take): not
+  shown, logged once per anchor ("stale start status of start N while this
+  client follows start M"), counted with SAXC's (`start_statuses_stale()`).
+  The retail wait panel needs no change: it updates only on a status the
+  core showed (`core_host.cpp` SessionStartStatus, SAXC).
+- **Checks.** Unit tests 773/773 (new: `StartHandshake.TheCommitEarlierRaceResyncs`
+  - the race at a 300 ms round trip in both orders, the watch ended by a
+  later confirmation and expired on a silent member, each member once;
+  `SessionClientCoreFlow.StartStatusOfAnOlderStartIsStale`; changed:
+  `AnEarlierStartReportedLaterIsCommittedInstead` (an earlier report after
+  the commit's poll resyncs instead of committing), the SAXC tests assert
+  no resync, the status message round trip carries `seq` and reads a
+  protocol 25 status without it). x64 BUILD-OK, x86 CLIENT-BUILD-OK (every
+  includer of the changed headers rebuilt, DEPS-OK), GCC syntax 33/33, the
+  Arch server rebuilt (ballanced-36c04e3d24c9+bmmo-458e86d4ea65-dirty).
+  The wire check on `core_ref_s14` (rRPA vs rSAXR2, `--accept-protocol 24`
+  for both): 45 journals IDENTICAL; the 44 send traces differ only by the
+  login and the SessionReady's protocol field (a rejoin's SessionReady
+  repeats it) - `.local-tools/work/SAXR/trace_diff.py`: ALL EXPLAINED.
+  Live (`maps/arena-test/saxr/<cell>`, HXP's harness through SAXC's run
+  script, 150 ms each way, snapshots off, trafo_inputs and placement_clones
+  on, clients pinned to E-cores):
+  - `race` (constructed: `--outage 2:size81:300:down` misses start 1;
+    `--outage 1:size81+400:290:down --outage 1:size81+680:300:up` - client
+    1 runs on start 1 and its answers are lost past the bound;
+    `--outage 3:size81+1000:450:down` - client 3 confirmed start 2 and
+    loses start 3 past its instant of start 2): postponed 1 (Arena2), then
+    2 at the bound (Arena1); client 3 started on start 2; Arena1's late
+    report committed start 1 (-751 ms); Arena3 watched, then "may run on
+    start 2 while start 1 is committed: resynced onto start 1", base 88 (its
+    commit's catch-up of 31 ticks had already run); server replay
+    4038/4038, FINAL rows of all four 0.0000 m (own, mirror, body; client 3
+    from its base 88; the balloon span excluded), 0 late events. The order
+    "k committed first, j reported after" and the silent-member expiry are
+    the unit test's (the harness cannot place a report against a poll).
+  - `m_start` (HXP's recipe): one postponement, all four on start 2, skew
+    1.8 ms; client 2 logged "stale start status of start 1 while this
+    client follows start 2" and showed "new start time" then "started."
+    (SAXC: "start postponed (1 of 3)" after "new start time"); clients 0, 1
+    and 3 showed the postponement before their new start time, as the
+    server sent it; server replay 3962/3962, FINAL rows 0.0000 m.
+  **Minor (by design, costs one resync, never exactness):** the watch can
+  resync a member that in fact runs on the committed start j. Its
+  confirmation of a start later than c can be lost (clock acks are
+  unreliable and its start copies stop at the commit), and a report of j
+  keeps the watch open (`started_on` in the started phase,
+  `start_handshake.hpp`: a member whose catch-up the 33-tick cap cut
+  reports j too). E.g. j = 2 committed while m's newest confirmation is
+  start 1 (instant passed) and its confirmation of 2 is lost: a late copy
+  of start 3 makes m report STARTED 2, the watch stays, and m is resynced
+  at `start_may_run_until`. The server cannot tell it from a member that
+  ran on start 1 and took the commit's zero catch-up.
+  **Open, root-caused, pre-existing (SAXH's commit path), for the user:**
+  in `race` clients 0 and 2 held start 3 and the commit released them 754
+  ms (49 ticks) after start 1's instant; `catch_up_start` caught up
+  `kStartMaxCatchUpTicks` = 33 ("more than the 33 a catch-up takes (a wrong
+  instant?)") and they run 16 ticks behind the committed start for the
+  session (starved 29 each; exactness is unaffected). It is reached when
+  the running member's answer is lost past the bound - the race (a) is
+  about - since its report then comes back with the next start's copies,
+  about X_k + rtt - 60 ms, up to 1.5 rtt + 160 ms after X_k and so more
+  than 33 ticks after X_j at a 300 ms round trip. Options: resync such a
+  holder instead of committing it (server only, the same path; one state
+  transfer each - every holder in that race), let a commit's catch-up pass
+  the cap (client core; the cap guards against a wrong clock estimate, and
+  a commit's instant is the server's own), or accept. Not run (the step's
+  tier is quick: two live runs): the retail two-copy session (no retail
+  code changed; the panel follows the core's answer) - deferred to FULL.
+  `.local-tools/work/SAXR/` holds the run scripts, the patches and the
+  trace explanation.
 
 ### The lifecycle events, repeated (2026-10-21, protocol 6)
 

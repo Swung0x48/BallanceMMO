@@ -607,6 +607,7 @@ namespace bmmo::session {
         s.corrected_ = false;
         s.started_seq_ = 0;
         s.start_status_stale_logged_ = false;   // FULL step SAXC
+        s.start_status_older_logged_ = false;   // FULL step SAXR
         // The anchor signature this world reports (step S5; 0 without the
         // capability: not compared) - the journal header holds it too.
         const uint64_t placement = caps_.placement ? report.placement : 0;
@@ -1086,6 +1087,16 @@ namespace bmmo::session {
     // once per anchor and counted.  No clock is read (the captures' clock
     // sequence is unchanged); a status that comes between a start's instant
     // and the hold's next poll is still shown.
+    //
+    // FULL step SAXR (the user's decision 64, protocol 26): the status
+    // carries the start it describes, and a member shows only a status of
+    // the start it follows - the newest it has heard of (start_seq_, also
+    // raised by a start message it did not take) or a newer one.  An older
+    // start's status (HXP `m_start` client 2: the postponement of start 1,
+    // held behind a reliable retransmit, after start 2 came by a copy) is
+    // stale before the start too: not shown, logged once per anchor, counted
+    // with the others.  A status without a sequence (a protocol 24/25
+    // capture) keeps the old rule.
     bool session_client_core::on_session_start_status(const bmmo::session_start_status_msg& msg) {
         if (msg.session != s.session_) return false;
         if (s.phase_ == client_core_state::phase::running && s.frames_since_anchor_ >= 0 && !s.held_) {
@@ -1094,6 +1105,15 @@ namespace bmmo::session {
                 s.start_status_stale_logged_ = true;
                 logf("start handshake: stale start status after the start (not shown; later ones counted): %s",
                      msg.text.c_str());
+            }
+            return false;
+        }
+        if (msg.has_seq && msg.seq < s.start_seq_) {
+            ++s.start_statuses_stale_;
+            if (!s.start_status_older_logged_) {
+                s.start_status_older_logged_ = true;
+                logf("start handshake: stale start status of start %u while this client follows start %u (not shown; "
+                     "later ones counted): %s", msg.seq, s.start_seq_, msg.text.c_str());
             }
             return false;
         }

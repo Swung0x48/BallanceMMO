@@ -3052,27 +3052,38 @@ numbers 1-10 are unchanged.
      lockstep-without-snapshots.md "As built (FULL step HXP)"). **Built at
      FULL step SAXC (2026-11-01, the user's decisions 60 / 61), each with
      an open residual:** (1) a status after the member's own start is not
-     shown (the shared core; the retail wait panel follows it). **Open,
-     root-caused, waiting on a user decision:** a status that overtakes a
-     newer start before the member's start is still shown (HXP `m_start`
-     client 2, reproduced in SAXC's `m_start`: "start postponed (1 of 3)"
-     after "new start time") - the status has no start sequence, so the
-     client cannot tell it from a postponement of the start it holds;
-     options: a sequence in the status (a protocol change), status copies
-     on the start's schedule, or accept. (2) option (a): a member whose
+     shown (the shared core; the retail wait panel follows it). **Closed
+     at FULL step SAXR (2026-11-01, the user's decision 64, protocol 26):**
+     a status that overtakes a newer start before the member's start (HXP
+     `m_start` client 2) - SessionStartStatus carries the start it
+     describes and the core drops an older start's as stale (SAXR's
+     `m_start`: client 2 logged "stale start status of start 1 while this
+     client follows start 2" and showed nothing after "new start time").
+     (2) option (a): a member whose
      answer may still be in flight is not counted missing until min(X_j +
      its rtt + 160 ms, X_k - 60 ms) - HXP's `commit` cell now has one
-     postponement and no running member named. **Open, root-caused,
-     recorded for the user:** the cap X_k - 60 ms leaves a postponement
-     sent at the end of the wait 60 ms of loss margin instead of the
-     guard's rtt/2 + 60 ms, so a burst over 60 ms (before SAXC: over 210
-     ms at a 300 ms round trip) after a lost answer can let one member
-     start on k while the running member's late report commits j - the
-     pre-existing commit-earlier race, at a lower threshold; options: keep
-     (the measured cells), cap at X_k - 182 ms (keeps the margin, ~40 ms of
-     useful wait at 300 ms: defeats (a)), or resync a member already
-     running on a later start when an earlier one is committed
-     (lockstep-without-snapshots.md "As built (FULL step SAXC)"). **Were
+     postponement and no running member named. **Closed at FULL step SAXR
+     (the user's decision 63; the cap stays):** the commit-earlier race
+     the cap's 60 ms margin reaches - a member that reported, or may run
+     on (it confirmed a start whose instant had passed and nothing later
+     came by X + its rtt + 160 ms), another start than the committed one is
+     resynced onto it; after the schedule starts a report of another start
+     resyncs the reporter instead of committing again (SAXR's `race`: the
+     member that ran on start 2 resynced at base 88 onto start 1, FINAL
+     rows exact). **Open, root-caused, pre-existing (SAXH's commit path),
+     recorded for the user:** a member still holding when a commit comes
+     more than 33 ticks after the committed instant catches up only
+     `kStartMaxCatchUpTicks` (33) and runs that much later than the
+     committed start for the session (SAXR's `race`: clients 0 and 2
+     released 754 ms = 49 ticks after start 1's instant, 16 ticks short;
+     reached when the running member's answer is lost past the bound,
+     exactly the race above); options: resync such a holder instead of
+     committing it (server only; one state transfer each, every holder in
+     that race), let a commit's catch-up go past the cap (client core; the
+     cap guards against a wrong instant, a commit's is the server's own),
+     or accept (lockstep-without-snapshots.md "As built (FULL step SAXR)").
+     (The SAXC residuals as they stood: lockstep-without-snapshots.md "As
+     built (FULL step SAXC)".) **Were
      queued (root-caused, pre-existing in SAXH's protocol 24):** (1) a start
      status line can reach a member after its state change - the server
      sends `SessionStartStatus` reliable only, so an outage that drops a

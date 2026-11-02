@@ -554,6 +554,9 @@ namespace bmmo::session {
         // member's own start (not shown), and whether this anchor logged one.
         uint64_t start_statuses_stale_ = 0;
         bool start_status_stale_logged_ = false;
+        // FULL step SAXR (protocol 26): whether this anchor logged a status
+        // of an older start than the one it follows (counted with the above).
+        bool start_status_older_logged_ = false;
         uint32_t tick_base_ = 0;
         int64_t frames_since_anchor_ = -1;
         std::deque<std::pair<uint32_t, bmmo::session::input_frame>> input_history_;
@@ -1488,6 +1491,8 @@ namespace bmmo::session {
         // FULL step SAXC: true when the status is shown (start_notice); false
         // when it is not this session's or came after this member's own start
         // (stale: logged once, counted) - a host's wait panel follows it.
+        // FULL step SAXR (protocol 26): also false for a status of an older
+        // start than the one this member follows (stale, logged once, counted).
         bool on_session_start_status(const bmmo::session_start_status_msg& msg);
         uint64_t start_statuses_stale() const { return s.start_statuses_stale_; }
         // During the hooks.numbering_restarted call of a scheduled start's

@@ -702,6 +702,12 @@ public:
         // admitted as start members they would hold the runner's start for
         // their level load while the others run (the review of SAXH).
         std::deque<HSteamNetConnection> start_waiting;
+        // FULL step SAXR (the user's decision 63): the members the start
+        // handshake resyncs onto the committed start (each runs, or may run,
+        // on another start), resynced once the runner ticks
+        // (check_start_handshakes; resync_member needs its schedule).
+        std::vector<bmmo::session::start_resync> start_resync;
+        uint32_t start_resync_onto = 0;
         struct start_repeat {
             HSteamNetConnection to;
             uint32_t first_tick = 0, seq = 0;
@@ -2071,18 +2077,25 @@ public:
         return out;
     }
 
+    // Protocol 26 (FULL step SAXR, the user's decision 64): `seq` is the start
+    // the status describes - 0 for phase 1 (the assignment), the current
+    // start for a wait, the start a postponement or a refusal moved away
+    // from, the committed start for a commit - so a member that already
+    // follows a newer start drops it as stale (client_core.cpp
+    // on_session_start_status).
     void send_start_status(physics_session_state& s, bmmo::session::start_status_phase phase, uint32_t confirmed,
-                           uint32_t total, const std::string& text) {
+                           uint32_t total, uint32_t seq, const std::string& text) {
         bmmo::session_start_status_msg msg;
         msg.session = s.id;
         msg.phase = static_cast<uint8_t>(phase);
         msg.confirmed = static_cast<uint8_t>(std::min<uint32_t>(confirmed, 255));
         msg.total = static_cast<uint8_t>(std::min<uint32_t>(total, 255));
         msg.text = text;
+        msg.seq = seq;
         msg.serialize();
         for (const auto m: s.members)
             if (!s.late.count(m)) send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
-        Printf("Physics session %u: start handshake: %s", s.id, text.c_str());
+        Printf("Physics session %u: start handshake (status of start %u): %s", s.id, seq, text.c_str());
     }
 
     // One SessionStartAt (reliable, then copies one per main-loop pass).
@@ -2128,11 +2141,13 @@ public:
                     join_member(s, c);
                 }
             }
+            flush_start_resyncs(s);
             const auto ph = s.handshake.current_phase();
-            // (A start committed after the schedule started - an earlier
-            // start reported late - is still sent to the members.)
+            // FULL step SAXR: after the start, a member's report of another
+            // start than the committed one is a resync to make, and a member
+            // that may run on another start is watched until its bound.
             if (ph != bmmo::session::start_handshake::phase::assign && ph != bmmo::session::start_handshake::phase::start
-                    && !s.handshake.commit_pending())
+                    && !s.handshake.commit_pending() && !s.handshake.resync_pending() && !s.handshake.watching())
                 continue;
             const auto members = handshake_members(s);
             const auto r = s.handshake.poll(now, members);
@@ -2141,6 +2156,7 @@ public:
                                          ? bmmo::session::start_status_phase::waiting_assign
                                          : bmmo::session::start_status_phase::waiting_start,
                                   r.confirmed, r.total,
+                                  ph == bmmo::session::start_handshake::phase::assign ? 0u : s.handshake.seq(),
                                   Sprintf("waiting for the other players to confirm the start (%u / %u confirmed; "
                                           "missing: %s)", r.confirmed, r.total, member_names(r.missing).c_str()));
             if (r.notice_in_flight) {
@@ -2160,7 +2176,7 @@ public:
             for (const auto m: r.refuse) refused.emplace_back(id, static_cast<HSteamNetConnection>(m));
             if (!r.refuse.empty())
                 send_start_status(s, bmmo::session::start_status_phase::refused, r.total - r.refuse.size(), r.total,
-                                  Sprintf("%s refused: did not confirm the session start in time; the others start "
+                                  r.moved_from_seq, Sprintf("%s refused: did not confirm the session start in time; the others start "
                                           "without %s", member_names(r.refuse).c_str(),
                                           r.refuse.size() == 1 ? "that player" : "them"));
             if (r.send_start) {
@@ -2168,7 +2184,7 @@ public:
                 const int64_t in_ms = (sch.x_us - now) / 1000;
                 if (r.postponed)
                     send_start_status(s, bmmo::session::start_status_phase::postponed, r.confirmed, r.total,
-                                      Sprintf("start postponed (%d of %d): %s did not confirm the start in time; "
+                                      r.moved_from_seq, Sprintf("start postponed (%d of %d): %s did not confirm the start in time; "
                                               "starting in about %lld ms", s.handshake.postpones(),
                                               bmmo::session::kStartMaxPostpones, member_names(r.missing).c_str(),
                                               static_cast<long long>(in_ms)));
@@ -2192,16 +2208,20 @@ public:
                 // A member started on an earlier start (its postponement came
                 // too late): that start is everyone's - the members still
                 // holding start at once and catch up; the server's schedule
-                // starts at that start's instant.
+                // starts at that start's instant.  FULL step SAXR: a member
+                // that runs, or may run, on another start gets no commit - it
+                // is resynced onto this one (below).
                 const auto& sch = s.handshake.schedule();
-                std::string offsets;
                 for (const auto m: members) {
+                    if (std::any_of(r.resync.begin(), r.resync.end(),
+                                    [m](const bmmo::session::start_resync& x) { return x.member == m; }))
+                        continue;
                     const auto* e = s.handshake.estimate(m);
                     if (!e) continue;
                     send_start_at(s, static_cast<HSteamNetConnection>(m), s.start_tick_base, r.commit_seq,
                                   bmmo::session::START_AT_FLAG_COMMIT, sch.x_us, e->arrival_local(sch.x_us));
                 }
-                send_start_status(s, bmmo::session::start_status_phase::postponed, r.total, r.total,
+                send_start_status(s, bmmo::session::start_status_phase::postponed, r.total, r.total, r.commit_seq,
                                   Sprintf("%s started on an earlier start time (start %u): everyone starts on it now",
                                           get_client_name(static_cast<HSteamNetConnection>(r.committed_by)),
                                           r.commit_seq));
@@ -2212,7 +2232,7 @@ public:
                 runner_->start_at(id, origin);
                 if (r.commit)
                     Printf("Physics session %u: start handshake: start %u committed (%s started on it); its instant "
-                           "is %+lld ms from now (the runner keeps an origin it already ticks from).", id, r.commit_seq,
+                           "is %+lld ms from now (the schedule starts from it).", id, r.commit_seq,
                            get_client_name(static_cast<HSteamNetConnection>(r.committed_by)),
                            static_cast<long long>((sch.x_us - now) / 1000));
                 else
@@ -2220,6 +2240,29 @@ public:
                            "starts in %lld ms.", id, r.total, s.handshake.seq(),
                            static_cast<long long>((sch.x_us - now) / 1000));
             }
+            // FULL step SAXR (the user's decision 63): no member stays on
+            // another start than the committed one, whose instant the
+            // schedule ticks from.
+            if (r.commit && s.handshake.watching()) {
+                std::string watched;
+                for (const auto m: members)
+                    if (s.handshake.watched(m))
+                        watched += Sprintf(" %s (confirmed start %u)", get_client_name(static_cast<HSteamNetConnection>(m)),
+                                           s.handshake.confirmed_seq(m));
+                if (!watched.empty())
+                    Printf("Physics session %u: start handshake: may run on another start than %u (watched until "
+                           "they confirm a later one or report):%s", id, r.commit_seq, watched.c_str());
+            }
+            for (const auto& x: r.resync) {
+                Printf("Physics session %u: start handshake: %s %s on start %u while start %u is committed: resynced "
+                       "onto start %u%s.", id, get_client_name(static_cast<HSteamNetConnection>(x.member)),
+                       x.known ? "runs" : "may run", x.ran_on, r.resync_onto, r.resync_onto,
+                       x.known ? " (it said so)"
+                               : " (it confirmed that start, its instant passed, and it confirmed nothing later)");
+                s.start_resync.push_back(x);
+                s.start_resync_onto = r.resync_onto;
+            }
+            flush_start_resyncs(s);
         }
         // Outside the loop (physics_session_member_left may end a session).
         for (const auto& [session, m]: refused) {
@@ -2228,6 +2271,26 @@ public:
             send_session_end(session, m, "refused: this client did not confirm the session start in time (the start "
                                          "handshake's messages did not get through)");
             physics_session_member_left(m);
+        }
+    }
+
+    // FULL step SAXR: the start handshake's resyncs, once the runner ticks on
+    // the committed start (resync_member counts the base on its schedule;
+    // the runner sets its running flag on its own thread after start_at).
+    // The member's start copies stop: it is anchored anew.
+    void flush_start_resyncs(physics_session_state& s) {
+        if (s.start_resync.empty() || !runner_ || !runner_->running(s.id)) return;
+        const auto todo = std::move(s.start_resync);
+        s.start_resync.clear();
+        for (const auto& x: todo) {
+            const auto c = static_cast<HSteamNetConnection>(x.member);
+            if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) continue;
+            s.start_repeats.erase(std::remove_if(s.start_repeats.begin(), s.start_repeats.end(),
+                                                 [c](const physics_session_state::start_repeat& r) { return r.to == c; }),
+                                  s.start_repeats.end());
+            const uint32_t base = resync_member(s, c, 0);
+            Printf("Physics session %u: start handshake: %s resynced at tick %u: from start %u onto start %u.", s.id,
+                   get_client_name(c), base, x.ran_on, s.start_resync_onto);
         }
     }
 
@@ -2257,10 +2320,14 @@ public:
         }
         if (msg.kind == bmmo::session::CLOCK_ACK_STARTED) {
             const uint32_t before = s.handshake.committed_seq();
+            const bool resync_before = s.handshake.resync_pending();
             s.handshake.started_on(c, msg.seq);
             if (s.handshake.committed_seq() != before)
                 Printf("Physics session %u: %s already started on start %u (a later start reached it too late): "
                        "start %u is committed.", s.id, get_client_name(c), msg.seq, msg.seq);
+            else if (!resync_before && s.handshake.resync_pending())
+                Printf("Physics session %u: %s runs on start %u, but the schedule ticks from start %u: it is resynced.",
+                       s.id, get_client_name(c), msg.seq, s.handshake.committed_seq());
             return;
         }
         // A late joiner: its first assignment had no start instant (no
