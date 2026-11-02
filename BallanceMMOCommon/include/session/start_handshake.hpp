@@ -21,10 +21,11 @@
 //   Phase 2 (scheduled start): once every member has a sample (and a few, or
 //   kStartSampleWaitUs after the assignment), the server picks a start
 //   instant X on its own clock (plan_start: the worst member's round trip
-//   plus slack to send the start and hear its confirmation, plus a guard to
-//   postpone in) and sends SessionStartAt to each member with that member's
-//   start instant on its own clock - X plus its offset plus half its round
-//   trip, i.e. where its assignment would have arrived on a lossless link,
+//   plus slack to send the start and hear its confirmation, then at least
+//   twice that round trip to postpone in). Both windows double after each
+//   missing-confirmation round. It sends SessionStartAt to each member with
+//   that member's start instant on its own clock - X plus its offset plus
+//   half its round trip, i.e. where its assignment would have arrived on a lossless link,
 //   so the start base's lead keeps the meaning it had (it was sized from the
 //   round trip).  The member starts its first frame at that local instant
 //   however late the message came, as long as it came before the instant,
@@ -34,10 +35,9 @@
 //   kStartMaxPostpones the missing members are refused (as a placement
 //   mismatch is) and the rest start.  A member whose answer may still be in
 //   flight (it confirmed an earlier start it may run on) is not missing
-//   until start_answer_in_flight_until (FULL step SAXC).  A member a
-//   postponement reached only after the old instant has started on the old
-//   start: it answers the new
-//   one CLOCK_ACK_STARTED (that seq), and the server commits the earliest
+//   until start_answer_in_flight_until, never past the confirmation deadline.
+//   A member whose postponement arrives after the old instant has already
+//   started: it answers the new one CLOCK_ACK_STARTED (that seq), and the server commits the earliest
 //   such start for everyone (START_AT_FLAG_COMMIT: a member still holding
 //   starts at once and catches up; started_on) - until the server's
 //   schedule ticks: from then on its start is the session's, and a member
@@ -127,34 +127,21 @@ namespace bmmo::session {
     // Phase 2: the start message's trip and the confirmation's back take the
     // worst round trip plus this slack (a burst of 8 lost copies at one per
     // main-loop pass is ~122 ms); the guard - the time left after the
-    // deadline for a postponement to reach every member before X - is half
-    // the worst round trip plus its own slack.
+    // deadline for a postponement to reach every member before X - is at
+    // least twice the worst round trip. Both windows back off together.
     inline constexpr int64_t kStartWindowSlackUs = 160'000;
     inline constexpr int64_t kStartGuardSlackUs = 60'000;
     // A start postponed this many times refuses the members still missing.
     inline constexpr int kStartMaxPostpones = 3;
 
-    // FULL step SAXC (the user's decision 60, HXP's finding (1)(a)): the
-    // answer of a member that confirmed an earlier start j may still be in
-    // flight at start k's deadline.  If k reached it only after its instant
-    // of j (a lost or late copy), it runs on j and answers k
-    // CLOCK_ACK_STARTED - on the server's clock no sooner than X_j plus its
-    // round trip (its instant is X_j + rtt/2 there, the answer's trip back
-    // another rtt/2), i.e. D_{k-1} + 1.5 rtt + 60 ms, after k's deadline
-    // D_{k-1} + rtt + 160 ms for a round trip above 200 ms.  Until then, plus
-    // one window's slack (the copies of k and the answer each a chance), it
-    // is not counted missing: neither named nor counted toward a refusal,
-    // and a start whose only unconfirmed members are such waits past its
-    // deadline instead of being postponed.  The wait never runs past X_k
-    // minus the guard's slack, so a postponement sent at its end still
-    // reaches every member before its instant of k on a lossless link (its
-    // instant is X_k + rtt/2 on the server's clock, the postponement's trip
-    // rtt/2).  The price: that postponement has 60 ms of loss margin, not
-    // the rtt/2 + 60 ms one sent at the deadline has (a residual, roadmap
-    // section 4, the HXP bullet).
-    inline int64_t start_answer_in_flight_until(int64_t confirmed_x_us, int64_t member_rtt_us, int64_t current_x_us) {
+    // An answer about an earlier start may still be in flight. Do not name
+    // that member missing early, but never borrow the current start's guard
+    // to wait for it: at the deadline everyone gets a later start. Otherwise
+    // the old SAXC extension reduced the postponement margin to just 60 ms.
+    inline int64_t start_answer_in_flight_until(int64_t confirmed_x_us, int64_t member_rtt_us,
+                                               int64_t confirmation_deadline_us) {
         return std::min(confirmed_x_us + std::max<int64_t>(0, member_rtt_us) + kStartWindowSlackUs,
-                        current_x_us - kStartGuardSlackUs);
+                        confirmation_deadline_us);
     }
 
     struct start_schedule {
@@ -165,8 +152,7 @@ namespace bmmo::session {
     // FULL step SAXR (the user's decision 63, SAXC's residual): a member
     // that runs, or may run, on a start other than the committed one.  The
     // server resyncs it onto the committed start (its schedule's) instead of
-    // leaving it on its own: SAXC's in-flight wait leaves a postponement 60
-    // ms of loss margin, so a burst over 60 ms after a lost answer can let a
+    // leaving it on its own: an outage beyond the postponement guard can let a
     // member start on k while another's late report commits j (or the
     // reverse order: k committed, the schedule ticking from it, and j
     // reported after).  `known`: it said so (CLOCK_ACK_STARTED); else it
@@ -181,7 +167,7 @@ namespace bmmo::session {
     };
     // FULL step SAXR: a member that confirmed start c, whose instant had
     // passed at the commit of another start, holds a later start (the one
-    // sent to it no later than X_c - 60 ms: SAXC's cap) or runs on c.  Either
+    // sent to it before the previous start's guard) or runs on c. Either
     // way it answers - a confirmation of the later start, or
     // CLOCK_ACK_STARTED c - no later than X_c plus its round trip; with one
     // window's slack for lost copies (start_answer_in_flight_until's
@@ -194,10 +180,13 @@ namespace bmmo::session {
         return confirmed_x_us + std::max<int64_t>(0, member_rtt_us) + kStartWindowSlackUs;
     }
 
-    inline start_schedule plan_start(int64_t now_us, int64_t worst_rtt_us) {
+    inline start_schedule plan_start(int64_t now_us, int64_t worst_rtt_us, int postpones = 0) {
         const int64_t rtt = std::max<int64_t>(0, worst_rtt_us);
-        const int64_t window = rtt + kStartWindowSlackUs;
-        const int64_t guard = rtt / 2 + kStartGuardSlackUs;
+        // The last round is the fresh start offered after refusing missing
+        // members. Bound the shift even if the caller keeps polling it.
+        const int64_t factor = int64_t{1} << std::clamp(postpones, 0, kStartMaxPostpones + 1);
+        const int64_t window = (rtt + kStartWindowSlackUs) * factor;
+        const int64_t guard = (2 * rtt + kStartGuardSlackUs) * factor;
         return start_schedule{now_us + window + guard, now_us + window};
     }
 
@@ -245,9 +234,9 @@ namespace bmmo::session {
             bool notice_missing = false;
             std::vector<uint32_t> missing;
             // FULL step SAXC: the unconfirmed members whose answer may still
-            // be in flight (start_answer_in_flight_until): not missing.  The
-            // start's deadline passed with only these unconfirmed: it waits
-            // (notice_in_flight once per start, for the server's log).
+            // be in flight (start_answer_in_flight_until): not missing.
+            // Before the deadline a long wait with only these unconfirmed
+            // is logged once. They cannot extend the confirmation deadline.
             std::vector<uint32_t> in_flight;
             bool notice_in_flight = false;
             uint32_t confirmed = 0, total = 0;
@@ -271,6 +260,7 @@ namespace bmmo::session {
             missing_noticed_ = false;
             seq_ = 0;
             postpones_ = 0;
+            planned_rtt_us_ = 0;
             start_acks_.clear();
             confirmed_seq_.clear();
             in_flight_noticed_ = false;
@@ -292,8 +282,10 @@ namespace bmmo::session {
         // no longer watched.  The commit's own confirmation says nothing -
         // a member answers every commit copy CLOCK_ACK_START before it
         // looks whether it holds or runs (client_core.cpp).
-        void start_acked(uint32_t member, uint32_t seq) {
-            if (phase_ == phase::start && seq == seq_) confirm(member);
+        // received_us is packet arrival on the server clock; a late answer
+        // cannot spend the guard. Zero is for ordering-only tests.
+        void start_acked(uint32_t member, uint32_t seq, int64_t received_us = 0) {
+            if (phase_ == phase::start && seq == seq_ && received_us <= schedule_.deadline_us) confirm(member);
             if (phase_ == phase::started)
                 if (const auto w = watch_.find(member);
                         w != watch_.end() && seq > w->second.ran_on && seq != committed_seq_)
@@ -371,7 +363,7 @@ namespace bmmo::session {
             const auto sch = schedules_.find(j);
             const auto* e = estimate(member);
             if (sch == schedules_.end() || !e) return 0;
-            return start_answer_in_flight_until(sch->second.x_us, e->best.rtt_us, schedule_.x_us);
+            return start_answer_in_flight_until(sch->second.x_us, e->best.rtt_us, schedule_.deadline_us);
         }
 
         const clock_estimate* estimate(uint32_t member) const {
@@ -483,15 +475,8 @@ namespace bmmo::session {
                     missing_noticed_ = true;
                     r.notice_missing = true;
                 }
-                return r;
-            }
-            if (r.missing.empty()) {
-                // FULL step SAXC: past the deadline, only members whose
-                // answer may still be in flight are unconfirmed - wait for
-                // it (a CLOCK_ACK_STARTED commits their start); once it can
-                // no longer be in flight they are missing and the start is
-                // postponed as before.
-                if (!in_flight_noticed_) {
+                if (r.missing.empty() && !in_flight_noticed_
+                        && now_us - phase_began_us_ >= kStartMissingNoticeUs) {
                     in_flight_noticed_ = true;
                     r.notice_in_flight = true;
                 }
@@ -553,7 +538,10 @@ namespace bmmo::session {
             in_flight_noticed_ = false;
             ++seq_;
             start_acks_.clear();
-            schedule_ = plan_start(now_us, worst_rtt_us(members));
+            // A lower RTT sample or a leaver cannot pull a postponed start
+            // earlier. Keep the largest RTT used in this handshake.
+            planned_rtt_us_ = std::max(planned_rtt_us_, worst_rtt_us(members));
+            schedule_ = plan_start(now_us, planned_rtt_us_, postpones_);
             schedules_[seq_] = schedule_;
         }
 
@@ -563,6 +551,7 @@ namespace bmmo::session {
         bool in_flight_noticed_ = false;
         uint32_t seq_ = 0;
         int postpones_ = 0;
+        int64_t planned_rtt_us_ = 0;
         start_schedule schedule_{};
         std::map<uint32_t, start_schedule> schedules_;   // every start message's, by seq
         uint32_t committed_seq_ = 0, committed_by_ = 0;

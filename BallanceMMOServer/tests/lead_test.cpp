@@ -1467,13 +1467,106 @@ TEST(StartHandshake, ScheduleCoversTheWorstRoundTrip) {
     using namespace bmmo::session;
     const auto s = plan_start(1'000'000, 300'000);
     EXPECT_EQ(s.deadline_us, 1'000'000 + 300'000 + kStartWindowSlackUs);
-    EXPECT_EQ(s.x_us, s.deadline_us + 150'000 + kStartGuardSlackUs);
-    EXPECT_GT(s.x_us - s.deadline_us, 150'000) << "a postponement sent at the deadline reaches a member before X";
+    EXPECT_EQ(s.x_us, s.deadline_us + 600'000 + kStartGuardSlackUs);
+    EXPECT_GE(s.x_us - s.deadline_us, 600'000) << "two worst RTTs remain after the confirmation deadline";
     EXPECT_EQ(start_lateness_ticks(0, 0, 66.0), 0);
     EXPECT_EQ(start_lateness_ticks(15'000, 0, 66.0), 0) << "under one tick";
     EXPECT_EQ(start_lateness_ticks(16'000, 0, 66.0), 1);
     EXPECT_EQ(start_lateness_ticks(122'000, 0, 66.0), 8);
     EXPECT_EQ(start_lateness_ticks(0, 50'000, 66.0), 0) << "early: nothing";
+}
+
+TEST(StartHandshake, ConfirmationAndPostponementWindowsBackOffTogether) {
+    using namespace bmmo::session;
+    for (const int64_t rtt: {int64_t{0}, int64_t{1}, int64_t{30'000}, int64_t{300'000}, int64_t{1'000'000}}) {
+        const auto first = plan_start(0, rtt);
+        for (int retry = 0; retry <= kStartMaxPostpones + 1; ++retry) {
+            const int64_t sent = 9'000'000;
+            const auto next = plan_start(sent, rtt, retry);
+            EXPECT_EQ(next.deadline_us - sent, first.deadline_us * (int64_t{1} << retry));
+            EXPECT_EQ(next.x_us - next.deadline_us,
+                      (first.x_us - first.deadline_us) * (int64_t{1} << retry));
+            EXPECT_GE(next.x_us - next.deadline_us, 2 * rtt);
+        }
+    }
+}
+
+TEST(StartHandshake, LostConfirmationsRequireEveryoneToConfirmEachLaterStart) {
+    using namespace bmmo::session;
+    start_handshake h;
+    const std::vector<uint32_t> members{1, 2, 3};
+    const int64_t rtt = 300'000;
+    h.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, m == 3 ? rtt : 20'000));
+    int64_t sent = 10;
+    ASSERT_TRUE(h.poll(sent, members).send_start);
+    const auto initial = h.schedule();
+    for (int retry = 1; retry <= kStartMaxPostpones; ++retry) {
+        const auto old = h.schedule();
+        const auto old_seq = h.seq();
+        h.start_acked(1, old_seq, sent + 20'000);
+        h.start_acked(2, old_seq, sent + 20'000);
+        // Member 3 received the start, but its confirmation was lost.
+        ASSERT_FALSE(h.poll(old.deadline_us - 1, members).send_start);
+        const auto r = h.poll(old.deadline_us, members);
+        ASSERT_TRUE(r.send_start);
+        ASSERT_TRUE(r.postponed);
+        EXPECT_TRUE(r.refuse.empty());
+        EXPECT_EQ(r.missing, std::vector<uint32_t>{3});
+        EXPECT_EQ(h.seq(), old_seq + 1);
+        sent = old.deadline_us;
+        const auto next = h.schedule();
+        EXPECT_GT(next.x_us, old.x_us);
+        EXPECT_GE(old.x_us - sent, 2 * rtt) << "a lost postponement copy still has retransmission time";
+        EXPECT_EQ(next.deadline_us - sent, (initial.deadline_us - 10) * (int64_t{1} << retry));
+        h.start_acked(3, old_seq, sent + 1);
+        const auto stale = h.poll(sent + 1, members);
+        EXPECT_FALSE(stale.start_now) << "an old confirmation cannot release the new start";
+        EXPECT_EQ(stale.confirmed, 0u) << "members 1 and 2 must confirm the new start too";
+    }
+    for (const auto m: members) h.start_acked(m, h.seq(), h.schedule().deadline_us);
+    const auto r = h.poll(h.schedule().deadline_us, members);
+    EXPECT_TRUE(r.start_now);
+    EXPECT_FALSE(r.commit);
+    EXPECT_TRUE(r.refuse.empty());
+}
+
+TEST(StartHandshake, AConfirmationPastTheDeadlineCannotSpendTheGuard) {
+    using namespace bmmo::session;
+    start_handshake h;
+    const std::vector<uint32_t> members{1, 2};
+    h.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, 300'000));
+    ASSERT_TRUE(h.poll(10, members).send_start);
+    const auto first = h.schedule();
+    h.start_acked(1, 1, first.deadline_us);
+    h.start_acked(2, 1, first.deadline_us + 1);
+    const auto r = h.poll(first.deadline_us + 1, members);
+    EXPECT_FALSE(r.start_now);
+    EXPECT_TRUE(r.postponed);
+    EXPECT_EQ(r.missing, std::vector<uint32_t>{2});
+    EXPECT_EQ(h.seq(), 2u);
+}
+
+TEST(StartHandshake, ABetterRttSampleCannotPullThePostponementEarlier) {
+    using namespace bmmo::session;
+    start_handshake h;
+    const std::vector<uint32_t> members{1, 2};
+    h.begin(0);
+    for (const auto m: members)
+        for (int i = 0; i < 4; ++i) h.add_sample(m, make_clock_sample(0, 0, 1'000'000));
+    ASSERT_TRUE(h.poll(10, members).send_start);
+    const auto first = h.schedule();
+    for (const auto m: members) h.add_sample(m, make_clock_sample(0, 0, 1));
+    ASSERT_TRUE(h.poll(first.deadline_us, members).postponed);
+    EXPECT_GT(h.schedule().x_us, first.x_us);
+    EXPECT_EQ(h.schedule().x_us, plan_start(first.deadline_us, 1'000'000, 1).x_us);
+    // A new session starts with a fresh estimate of its scheduling budget.
+    h.begin(0);
+    ASSERT_TRUE(h.poll(kStartSampleWaitUs, members).send_start);
+    EXPECT_EQ(h.schedule().x_us, plan_start(kStartSampleWaitUs, 1).x_us);
 }
 
 TEST(StartHandshake, StartsWhenEveryMemberConfirmed) {
@@ -1679,8 +1772,8 @@ TEST(StartHandshake, AnEarlierStartReportedLaterIsCommittedInstead) {
 
 // FULL step SAXR (the user's decision 63; SAXC's residual): the
 // commit-earlier race at a 300 ms round trip.  Member 1 runs on start 1 and
-// its answer is lost past the in-flight bound, so start 2 is postponed at
-// X2 - 60 ms; a burst over 60 ms holds that postponement from member 3,
+// its answer is lost past the deadline, so start 2 is postponed; an outage
+// longer than the guard holds that postponement from member 3,
 // which starts on start 2 and says so - start 2 is committed and the
 // schedule ticks from it.  Member 1's late report of start 1 no longer
 // commits start 1 "instead" (the schedule cannot move): member 1 is resynced
@@ -1717,8 +1810,9 @@ TEST(StartHandshake, TheCommitEarlierRaceResyncs) {
     EXPECT_EQ(r.missing, std::vector<uint32_t>{1});
     EXPECT_EQ(r.moved_from_seq, 2u);
     EXPECT_EQ(h.seq(), 3u);
-    EXPECT_EQ(bound, second.x_us - kStartGuardSlackUs) << "the cap: 60 ms of margin";
-    // A burst over 60 ms holds start 3 from member 3: it starts on start 2
+    EXPECT_EQ(bound, second.deadline_us) << "the in-flight wait cannot consume the guard";
+    EXPECT_GE(second.x_us - bound, 2 * rtt);
+    // A burst longer than the enlarged guard holds start 3 from member 3: it starts on start 2
     // and reports it once start 3 reaches it.
     h.started_on(3, 2);
     r = h.poll(second.x_us + rtt, members);
@@ -1829,9 +1923,9 @@ TEST(StartHandshake, TheCommitEarlierRaceResyncs) {
 // each way): a member that confirmed start 1 and runs on it because start 2
 // reached it after start 1's instant answers CLOCK_ACK_STARTED no sooner
 // than X1 + rtt, after start 2's deadline above 200 ms of round trip.  It is
-// not missing while that answer may be in flight: start 2 waits past its
-// deadline (no second postponement naming a running member) and the answer
-// commits start 1; without the answer the start is postponed at the bound.
+// not named missing before the deadline while that answer may be in flight.
+// STEX no longer waits past the deadline: the start is postponed, retaining
+// its guard. A later report of an actual start still uses the recovery path.
 TEST(StartHandshake, AnAnswerInFlightIsNotMissing) {
     using namespace bmmo::session;
     constexpr int64_t rtt = 300'000;
@@ -1857,44 +1951,46 @@ TEST(StartHandshake, AnAnswerInFlightIsNotMissing) {
     start_handshake h;
     start_schedule first, second;
     setup(h, first, second);
-    // The bound: start 1's instant + member 1's round trip + a window's
-    // slack, but no later than start 2's instant minus the guard's slack.
+    // The earlier-start answer may arrive after this round's deadline.
+    // Preserve the full guard instead of waiting into it.
     const int64_t until = h.answer_in_flight_until(1);
-    EXPECT_EQ(until, std::min(first.x_us + rtt + kStartWindowSlackUs, second.x_us - kStartGuardSlackUs));
+    EXPECT_EQ(until, std::min(first.x_us + rtt + kStartWindowSlackUs, second.deadline_us));
     EXPECT_GT(first.x_us + rtt, second.deadline_us) << "the HXP case: the earliest answer lands after the deadline";
-    EXPECT_GT(until, first.x_us + rtt) << "...and before the bound";
+    EXPECT_EQ(until, second.deadline_us);
     EXPECT_EQ(h.answer_in_flight_until(3), 0) << "confirmed the current start";
-    auto r = h.poll(second.deadline_us, members);
+    auto r = h.poll(second.deadline_us - 1, members);
     EXPECT_FALSE(r.send_start) << "not postponed";
     EXPECT_FALSE(r.postponed);
     EXPECT_FALSE(r.start_now);
     EXPECT_TRUE(r.missing.empty()) << "a running member is not named";
     EXPECT_EQ(r.in_flight, std::vector<uint32_t>{1});
-    EXPECT_TRUE(r.notice_in_flight);
     EXPECT_EQ(r.confirmed, 2u);
-    EXPECT_FALSE(h.poll(second.deadline_us + 1, members).notice_in_flight) << "said once per start";
     EXPECT_EQ(h.postpones(), 1);
-    // The answer lands: start 1 is committed - one postponement in all.
+    r = h.poll(second.deadline_us, members);
+    ASSERT_TRUE(r.postponed) << "even an in-flight answer cannot spend the guard";
+    EXPECT_EQ(r.missing, std::vector<uint32_t>{1});
+    // A genuinely started member remains covered by the existing recovery.
     h.started_on(1, 1);
     r = h.poll(first.x_us + rtt + 1, members);
     ASSERT_TRUE(r.start_now);
     EXPECT_TRUE(r.commit);
     EXPECT_EQ(r.commit_seq, 1u);
-    EXPECT_EQ(h.postpones(), 1);
+    EXPECT_EQ(h.postpones(), 2);
     EXPECT_TRUE(r.refuse.empty());
     // FULL step SAXR: HXP's `commit` resyncs nobody - members 2 and 3 hold
     // start 2 (its instant still ahead) and the commit starts them.
     EXPECT_LT(first.x_us + rtt + 1, second.x_us);
     EXPECT_TRUE(r.resync.empty());
 
-    // A late confirmation of start 2 itself starts it normally.
+    // A confirmation just before the deadline still starts normally.
     start_handshake g;
     setup(g, first, second);
-    ASSERT_FALSE(g.poll(second.deadline_us, members).send_start);
-    g.start_acked(1, 2);
-    r = g.poll(second.deadline_us + 1, members);
+    ASSERT_FALSE(g.poll(second.deadline_us - 1, members).send_start);
+    g.start_acked(1, 2, second.deadline_us);
+    r = g.poll(second.deadline_us, members);
     EXPECT_TRUE(r.start_now);
     EXPECT_FALSE(r.commit);
+    EXPECT_GE(second.x_us - second.deadline_us, 2 * rtt);
 
     // No answer: at the bound the member is missing and the start is
     // postponed as before, still before start 2's instant.
@@ -1912,9 +2008,8 @@ TEST(StartHandshake, AnAnswerInFlightIsNotMissing) {
 }
 
 // FULL step SAXC: a truly missing member is postponed against and refused
-// as before; a member whose answer may be in flight beside it is not named,
-// and one that confirmed start 1 and then went silent is missing once its
-// answer can no longer be in flight - refused at the same postponement.
+// as before. With STEX, at the deadline even a member that confirmed an
+// earlier start must confirm the current one or be retried with everyone.
 TEST(StartHandshake, ATrulyMissingMemberIsStillRefused) {
     using namespace bmmo::session;
     constexpr int64_t rtt = 300'000;
@@ -1932,8 +2027,8 @@ TEST(StartHandshake, ATrulyMissingMemberIsStillRefused) {
     h.start_acked(2, 2);
     r = h.poll(h.schedule().deadline_us, members);
     ASSERT_TRUE(r.postponed) << "member 3 is truly missing: postponed at the deadline as before";
-    EXPECT_EQ(r.missing, std::vector<uint32_t>{3}) << "member 1's answer may be in flight: not named";
-    EXPECT_EQ(r.in_flight, std::vector<uint32_t>{1});
+    EXPECT_EQ(r.missing, (std::vector<uint32_t>{1, 3})) << "all missing confirmations are retried at the deadline";
+    EXPECT_TRUE(r.in_flight.empty());
     EXPECT_EQ(h.postpones(), 2);
     for (int p = 3; p <= kStartMaxPostpones; ++p) {
         h.start_acked(2, h.seq());

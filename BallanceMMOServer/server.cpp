@@ -2160,17 +2160,16 @@ public:
                                   Sprintf("waiting for the other players to confirm the start (%u / %u confirmed; "
                                           "missing: %s)", r.confirmed, r.total, member_names(r.missing).c_str()));
             if (r.notice_in_flight) {
-                // FULL step SAXC: the deadline passed with only members whose
-                // answer may still be in flight unconfirmed (the server's log
-                // only: the players are told nothing new; a commit or the
-                // postponement follows).
+                // An earlier start's answer may still be in flight. This
+                // wait ends at the deadline, preserving the full guard.
                 std::string waits;
                 for (const auto m: r.in_flight)
                     waits += Sprintf(" %s (confirmed start %u; until %+lld ms)",
                                      get_client_name(static_cast<HSteamNetConnection>(m)),
                                      s.handshake.confirmed_seq(m),
                                      static_cast<long long>((s.handshake.answer_in_flight_until(m) - now) / 1000));
-                Printf("Physics session %u: start handshake: start %u's deadline passed; not counted missing while "
+                Printf("Physics session %u: start handshake: start %u awaiting confirmation before its deadline; "
+                       "not counted missing while "
                        "their answer may still be in flight:%s", id, s.handshake.seq(), waits.c_str());
             }
             for (const auto m: r.refuse) refused.emplace_back(id, static_cast<HSteamNetConnection>(m));
@@ -2315,7 +2314,7 @@ public:
         const int64_t arrival_us = steady_us(arrival);
         s.handshake.add_sample(c, bmmo::session::make_clock_sample(msg.server_us, msg.client_us, arrival_us), arrival_us);
         if (msg.kind == bmmo::session::CLOCK_ACK_START) {
-            s.handshake.start_acked(c, msg.seq);
+            s.handshake.start_acked(c, msg.seq, arrival_us);
             return;
         }
         if (msg.kind == bmmo::session::CLOCK_ACK_STARTED) {
