@@ -10541,7 +10541,7 @@ namespace {
             EXPECT_EQ(ack.server_us, 900);
         }
         ASSERT_EQ(notices.size(), 2u);
-        EXPECT_EQ(notices[1], "all players confirmed - starting in about 100 ms.");
+        EXPECT_EQ(notices[1], "start scheduled - starting in about 100 ms.");
         fake.advance(std::chrono::milliseconds(99));
         EXPECT_TRUE(core.poll_hold().held);
         EXPECT_FALSE(origin.has_value());

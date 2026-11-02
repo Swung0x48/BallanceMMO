@@ -1072,7 +1072,7 @@ namespace bmmo::session {
         logf("start handshake: start %u accepted: the first frame (tick %u) at %lld us of this clock (server %lld us), "
              "in %lld ms", msg.seq, msg.first_tick, static_cast<long long>(msg.start_us),
              static_cast<long long>(msg.start_server_us), static_cast<long long>(in_ms));
-        start_notice(std::string(moved ? "new start time" : "all players confirmed") + " - starting in about "
+        start_notice(std::string(moved ? "new start time" : "start scheduled") + " - starting in about "
                      + std::to_string(in_ms) + " ms.");
     }
 

@@ -3866,6 +3866,19 @@ TheHeaderCarriesTheLargestOfFourWindows is untouched. LB3 records the
 should fall from about 23 (the deadline) toward the quorum's few ticks, which
 shallows every client's reach.
 
+**STEX/STTM update (2026-11-02).** Startup proposals may be postponed repeatedly with exponential windows.
+R1 must use the finally adopted schedule X for start members, not the assignment, first proposal or the time
+`start_at` was called (X can still be in the future). Add multiple-postponement, stale/late-ack and refusal/departure
+tests. The joiner's correction/epoch rule below remains; its timeout must never release a held start member's
+baseline. LB2-LB5 keep their running-policy algorithms. LBM adds a postponed-start control with zero startup-only
+lead adjustments and equal effective play intervals in each twin. CBF owns beyond-guard recovery coverage.
+
+STTM supplies `--notify-tick` live milestones and `--play-seconds` to the headless harness before REFB. Proxy
+episodes and late joins are triggered by actual milestones (10 ms log polling granularity), not by assignment
+timestamps. Missing or skipped targets fail coverage. `--seconds` in arena_map_test.py now measures time after
+the first assigned live frame; startup has a separate total-time allowance. Standalone session_client --seconds
+keeps its original meaning for old recipes/replays. LB0 adds its other arms and parsers on top of this prerequisite.
+
 **(b) SAXH.** Since SAXH (17972046, protocol 24; lockstep-without-snapshots
 "As built (FULL step SAXH)") the start members start at the scheduled
 instant X (`session_runner::start_at` :741, `runner_config::scheduled_start`
@@ -3923,7 +3936,8 @@ and joins outside the span (A9h8, A9h20 have none by design; `--resync-at`
 and the join cue are placed before the span or after it); skewing
 `server_us` too would change the handshake's clock estimate, which is not
 what H11 injects (a host clock fault seen by the scheduler). The start-time
-cause SAX / SAXE measured is gone (SAXH), so no arm targets a late start.
+cause SAX / SAXE measured is mitigated; beyond-guard startup races still belong to CBF.
+H11 itself targets only the running scheduler clock.
 
 **(c) A CPU slip reads as uplink lateness.** RTR's E-core L11 ctl client 1 ran
 about 14 ticks behind at 600-660 (realtime-design §3.4) and its frames reached

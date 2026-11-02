@@ -187,6 +187,10 @@ namespace {
         bool host = false;
         int expect = 2;
         double seconds = 180.0;
+        // Optional harness budget after the first assigned frame. --seconds
+        // remains the total wall-clock limit, including startup.
+        double play_seconds = 0.0;
+        std::vector<uint32_t> notify_ticks;
         bool trace = false;
         // --trace-restore: dump every IVP core field (describe_cores_exact,
         // hex floats, so the comparison is exact) on both sides of a forced
@@ -552,6 +556,7 @@ namespace {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N] [--map FILE]\n"
                   "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS | --stall-ms TICK:MS]\n"
+                  "       [--play-seconds S] [--notify-tick T ...] (play budget after the first assigned frame; live milestones)\n"
                   "       [--resync-at TICK | --resync-at s<SECTOR>+<TICKS>] [--record-by-tick]\n"
                   "       [--hold-event TYPE:N:MS|TYPE:N:drop]   (the N-th own event of TYPE leaves MS ms late, or never;\n"
                   "                                            TYPE pair: the N-th unphysicalize and its same-stamp physicalize,\n"
@@ -663,6 +668,14 @@ namespace {
             else if (arg == "--host") out.host = true;
             else if (arg == "--expect") { if (!(v = next())) return false; out.expect = std::atoi(v); }
             else if (arg == "--seconds") { if (!(v = next())) return false; out.seconds = std::atof(v); }
+            else if (arg == "--play-seconds") { if (!(v = next())) return false; out.play_seconds = std::atof(v); }
+            else if (arg == "--notify-tick") {
+                if (!(v = next())) return false;
+                char* end = nullptr;
+                const auto tick = std::strtoull(v, &end, 10);
+                if (*v == '-' || end == v || *end || tick > UINT32_MAX) return false;
+                out.notify_ticks.push_back(static_cast<uint32_t>(tick));
+            }
             else if (arg == "--keep-lane") { if (!(v = next())) return false; out.keep_lane = true; out.keep_lane_z = std::atof(v); }
             else if (arg == "--keep-lane-dwell") { if (!(v = next())) return false; out.keep_lane_dwell = std::max(0, std::atoi(v)); }
             else if (arg == "--brake-tap") {
@@ -869,6 +882,10 @@ namespace {
             else return false;
         }
         if (out.root.empty()) return false;
+        if (!std::isfinite(out.seconds) || out.seconds <= 0 || !std::isfinite(out.play_seconds)
+                || out.play_seconds < 0) return false;
+        std::sort(out.notify_ticks.begin(), out.notify_ticks.end());
+        out.notify_ticks.erase(std::unique(out.notify_ticks.begin(), out.notify_ticks.end()), out.notify_ticks.end());
         if (!out.capture_inbound.empty() && !out.replay_inbound.empty()) return false;
         if (out.force_rollback_every != 0 && !out.force_rollback_at.empty()) return false;   // one forced-rewind mode
         if (!out.join_cue.empty() && out.host) return false;   // step DX9: the host makes the room
@@ -1133,6 +1150,7 @@ namespace {
 
         int exit_code() const {
             if (inbound_failed_) return 3;
+            if (play_limit_failed_) return 5;
             // Step F0 (review): a --rejoin-at whose Join the server refused
             // never had its next life - not a pass.
             if (rejoin_refused_) return 4;
@@ -1170,8 +1188,16 @@ namespace {
                     room_request(bmmo::room::action::Join, cue_room_);
                 }
                 if (ended_) { stopped = "the client ended the session"; break; }
-                if (std::chrono::duration<double>(wall_now(bmmo::sim::wall_site::run_limit) - started).count() > args_.seconds) {
+                const auto limit_now = wall_now(bmmo::sim::wall_site::run_limit);
+                if (play_started_ && std::chrono::duration<double>(limit_now - *play_started_).count() >= args_.play_seconds) {
+                    logf("play time limit reached (%.3f s after the first assigned frame)",
+                         std::chrono::duration<double>(limit_now - *play_started_).count());
+                    stopped = "the client's play time limit was reached";
+                    break;
+                }
+                if (std::chrono::duration<double>(limit_now - started).count() > args_.seconds) {
                     logf("time limit reached");
+                    play_limit_failed_ = args_.play_seconds > 0;
                     stopped = "the client's time limit was reached";
                     break;
                 }
@@ -1188,6 +1214,11 @@ namespace {
                     break;
                 }
                 const auto now = wall_now(bmmo::sim::wall_site::run_report);
+                if (play_frame_seen_ && !play_started_) {
+                    play_started_ = now;
+                    logf("play time started after %.3f s of startup; budget %.3f s",
+                         std::chrono::duration<double>(now - started).count(), args_.play_seconds);
+                }
                 if (now - last_report_ > std::chrono::seconds(5)) {
                     last_report_ = now;
                     report();
@@ -3693,6 +3724,14 @@ namespace {
             // Step T3 (H8): the leave switches.
             if (core_.assigned()) {
                 const uint32_t now = current_tick();
+                if (args_.play_seconds > 0) play_frame_seen_ = true;
+                // Log only requested milestones, after an actual live frame.
+                // Assignments, postponed starts and replayed frames are not
+                // evidence that the live client reached a requested tick.
+                while (notified_ticks_ < args_.notify_ticks.size() && args_.notify_ticks[notified_ticks_] <= now) {
+                    logf("harness: target %u reached at tick %u", args_.notify_ticks[notified_ticks_], now);
+                    ++notified_ticks_;
+                }
                 // Step F0 (WM0's review nit): a switch whose tick this client
                 // never steps (behind a late joiner's base) fires at once.
                 if (!switches_checked_) {
@@ -4816,6 +4855,9 @@ namespace {
         clock_type::time_point last_ready_sent_{};
         uint32_t room_id_ = 0;
         bool ended_ = false;
+        bool play_frame_seen_ = false, play_limit_failed_ = false;
+        std::optional<clock_type::time_point> play_started_;
+        size_t notified_ticks_ = 0;
         // --rejoin-at (step M0): done once; the lives this run began after a
         // rejoin (names the next journal).
         bool rejoin_done_ = false;

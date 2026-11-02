@@ -74,9 +74,11 @@ The late-player additions (docs/late-player-design.md 5.1, H1-H8):
   --arm NAME                           which arm of 5.2 this is (A0 .. A9c), for
                                        its own criteria; inferred when absent
 
-An event is armed at the client's own tick from its "tick base N assigned" /
-"resynced: tick base N" log line, so it lands on the tick asked for whatever
-the client's start-up took.  Loss draws stay seeded per proxy port and an
+Events and late joins follow explicit live-tick notifications, never an
+assignment or a postponed start. The requested and observed ticks are checked;
+the log watcher polls every 10 ms, with additional OS scheduling latency.
+--seconds is the play budget after the first assigned frame; --startup-timeout
+adds a separate wall-clock allowance. Loss draws stay seeded per proxy port and an
 event takes the same draws as the control for every datagram it sees, so a
 control and an event run lose the same datagrams up to T_on; after it the
 datagrams themselves differ (resends, resyncs), and so do the draws.  A spike
@@ -585,6 +587,8 @@ class LinkEvent(object):
         self.start = None
         self.end = None
         self.armed = []        # (base, monotonic) of every arming, for the report
+        self.observed_tick = None
+        self.observed_until = None
 
     @property
     def t_off(self):
@@ -614,6 +618,7 @@ class LinkEvent(object):
     def as_dict(self):
         return {'client': self.client, 'tick': self.tick, 'kind': self.kind, 'ms': self.ms,
                 'dur_ms': self.dur_ms, 'dir': self.direction, 'until': self.until, 't_off': self.t_off,
+                'observed_tick': self.observed_tick, 'observed_until': self.observed_until,
                 'armed': [{'base': b, 'starts_in_s': round(s - t, 3)} for b, t, s in self.armed]}
 
 
@@ -632,6 +637,7 @@ def parse_event(spec):
 
 
 RE_BASE = re.compile(r'(?:^tick base (\d+) assigned|^resynced: tick base (\d+))')
+RE_TICK_REACHED = re.compile(r'^harness: target (\d+) reached at tick (\d+)$')
 
 
 class ServerReadyCue(object):
@@ -684,18 +690,17 @@ class ServerReadyCue(object):
 
 
 class LogWatch(object):
-    """Follows a client's log as the client writes it and reports every tick
-    base it is given (`tick base N assigned` / `resynced: tick base N`) with
-    the moment it was read.  The client starts frame N right after printing
-    that line, so its tick T is due (T - N) ticks later."""
+    """Report requested milestones after the client actually steps a live tick.
+    Target 0 marks its first assigned frame. Assignment and start proposals
+    deliberately do not move this clock."""
 
-    def __init__(self, path, on_base, done=None):
+    def __init__(self, path, on_tick, done=None):
         self.path = path
-        self.on_base = on_base
+        self.on_tick = on_tick
         # Stops polling once `done()` says nothing is left to arm, so the
         # harness process (whose threads are also the proxies) stays idle.
         self.done = done or (lambda: False)
-        self.bases = []
+        self.ticks = {}
         self.running = True
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
@@ -715,11 +720,12 @@ class LogWatch(object):
                 *lines, pending = pending.split(b'\n')
                 now = time.monotonic()
                 for raw in lines:
-                    m = RE_BASE.search(raw.decode('utf8', 'replace').replace('\x00', '').strip())
+                    m = RE_TICK_REACHED.match(raw.decode('utf8', 'replace').replace('\x00', '').strip())
                     if m:
-                        base = int(m.group(1) or m.group(2))
-                        self.bases.append((base, now))
-                        self.on_base(base, now)
+                        target, actual = map(int, m.groups())
+                        if target not in self.ticks:
+                            self.ticks[target] = (actual, now)
+                            self.on_tick(target, actual, now)
             time.sleep(0.01)
 
     def close(self):
@@ -728,17 +734,30 @@ class LogWatch(object):
 
 
 def arm_events(events):
-    """The on_base callback that arms `events` from a tick base.  An event
-    that has already begun is not moved; one still ahead follows a resync's
-    new numbering."""
-    def on_base(base, now):
+    """Arm once at the observed tick; an until tick is observed independently.
+    A resync skipping the requested tick is recorded and fails coverage."""
+    def on_tick(target, actual, now):
         for ev in events:
-            if ev.start is not None and ev.start <= now:
-                continue
-            ev.start = now + (ev.tick - base) * TICK_S
-            ev.end = now + (ev.until - base) * TICK_S if ev.until else None
-            ev.armed.append((base, now, ev.start))
-    return on_base
+            if ev.tick == target and ev.start is None:
+                ev.observed_tick = actual
+                ev.start = now
+                ev.armed.append((actual, now, now))
+            if ev.until and ev.until == target and ev.end is None:
+                ev.observed_until = actual
+                ev.end = now
+    return on_tick
+
+
+def timing_problems(targets, observed):
+    """Missing/skipped milestones cannot silently pass a shorter run."""
+    problems = []
+    for target in sorted(targets):
+        actual = observed.get(target)
+        if actual is None:
+            problems.append('target tick %d never reached' % target)
+        elif target != 0 and actual != target:
+            problems.append('target tick %d skipped (observed %d)' % (target, actual))
+    return problems
 
 
 DIK_UP, DIK_DOWN, DIK_LEFT, DIK_RIGHT = 200, 208, 203, 205
@@ -995,7 +1014,8 @@ def run_case(args, sector, case_dir):
 
         # Step DX9: a cue joiner (--join-late N:cue) starts with the others.
         late = {i: tick for i, tick in args.join_late.items() if i not in args.join_cue}
-        host_bases = []
+        host_ticks = {}
+        tick_watches, tick_targets = {}, {}
         cue_files = {i: str(case_dir / ('join_cue%d' % i)) for i in sorted(args.join_cue)}
         if cue_files:
             cue_log = pathlib.Path(args.server_log) if args.external_server and args.server_log else case_dir / 'server.log'
@@ -1032,30 +1052,36 @@ def run_case(args, sector, case_dir):
                 proxies.append(proxy)
                 proxy_of[i] = proxy
                 connect_host, connect_port = '127.0.0.1', pport
-            # The events of this client are armed from its own log, and the
-            # host's log also says when a late joiner is due.
+            # Explicit milestones survive arbitrary startup postponements,
+            # pacer stalls and lead slews without extrapolating from an assign.
             stall_events = [ev for ev in args.events if ev.client == i and ev.kind == 'stall']
-            if link_events or (i == 0 and late):
-                def on_base(base, now, armer=arm_events(link_events), host=(i == 0)):
-                    armer(base, now)
-                    if host:
-                        host_bases.append((base, now))
-                def done(events=link_events, host=(i == 0 and bool(late))):
-                    now = time.monotonic()
-                    return all(ev.start is not None and ev.start < now for ev in events) and (not host or host_bases)
-                watches.append(LogWatch(log_path, on_base, done))
+            timed_events = [ev for ev in args.events if ev.client == i and ev.kind != 'stall']
+            targets = {0} | {ev.tick for ev in timed_events} | {ev.until for ev in timed_events if ev.until}
+            if i == 0:
+                targets.update(late.values())
+            tick_targets[i] = targets
+            def on_tick(target, actual, now, armer=arm_events(timed_events), host=(i == 0)):
+                armer(target, actual, now)
+                if host:
+                    host_ticks[target] = (actual, now)
+            watch = LogWatch(log_path, on_tick)
+            tick_watches[i] = watch
+            watches.append(watch)
             cmd = [str(bindir / f'BallanceMMOSessionClient{EXE}'),
                    '--root', args.root,
                    '--server', f'{connect_host}:{connect_port}',
                    '--name', f'Arena{i}',
                    '--level', str(args.level),
                    *(['--map', args.map] if args.map else []),
-                   '--seconds', str(seconds),
+                   '--seconds', str(seconds + args.startup_timeout),
+                   '--play-seconds', str(seconds),
                    '--trace',
                    '--journal', str(case_dir / f'client{i}.bmjr'),
                    # the client's own world at the same cadence as the server's,
                    # so the two can be compared body by body at the same ticks
                    '--checkpoint-ticks', str(args.checkpoint_ticks)]
+            for tick in sorted(targets):
+                cmd += ['--notify-tick', str(tick)]
             if args.client_arg:
                 cmd.extend(args.client_arg)
             if sector > 1:
@@ -1102,6 +1128,9 @@ def run_case(args, sector, case_dir):
                 cmd += ['--window-origin', str(args.window_origin)]
             cmd += member_args(args, i)
             cmd.extend(args.client_arg_for.get(i, []))
+            # Explicit coverage endpoints supplied by a level driver must be
+            # judged too, not merely logged by the client.
+            targets.update(int(cmd[k + 1]) for k, option in enumerate(cmd[:-1]) if option == '--notify-tick')
             if i in cue_files:
                 cmd += ['--join-cue', cue_files[i]]
             # The host waits for the members that start with it; a late joiner
@@ -1114,30 +1143,28 @@ def run_case(args, sector, case_dir):
             if args.hang_dump:
                 hang_watches[i] = HangWatch(i, p, log_path, case_dir / f'client{i}.hang.dmp', args.hang_dump_after)
 
-        host_started = time.monotonic()
         for i in range(args.players):
             if i in late:
                 continue
             launch(i, args.seconds)
             time.sleep(0.4)
-        # --join-late N:T: client N starts when the host reaches tick T, which
-        # the host's tick base and the tick length say; it plays out the rest
-        # of the host's time.
+        # The host must actually reach T. Loading and backoff do not consume
+        # its play budget, nor the late joiner's remaining budget.
         while late:
-            if host_bases:
-                base, at = host_bases[0]
+            if 0 in host_ticks:
+                _, at = host_ticks[0]
                 for i, tick in sorted(late.items()):
-                    if time.monotonic() >= at + (tick - base) * TICK_S:
-                        remaining = args.seconds - (time.monotonic() - host_started)
+                    if tick in host_ticks:
+                        remaining = args.seconds - (time.monotonic() - at)
                         print('  client%d joins late at host tick ~%d (%.0f s left)' % (i, tick, remaining), flush=True)
-                        launch(i, max(15, int(remaining)))
+                        launch(i, max(1, remaining))
                         del late[i]
             if clients[0].poll() is not None:
                 break
             time.sleep(0.01)
 
         for i, p in sorted(clients.items()):
-            p.wait(timeout=args.seconds + 180)
+            p.wait(timeout=args.seconds + args.startup_timeout + 30)
         if server is not None:
             server.stdin.write(b'sessions\nstop\n')
             server.stdin.flush()
@@ -1219,7 +1246,7 @@ def run_case(args, sector, case_dir):
     for e in proxy_stats.get('events', []):
         result.setdefault('link_events', []).append(e)
         for ev in e['events']:
-            print('  proxy event: %s; armed from tick base %s; blacked %d up / %d down, delayed %d up / %d down datagrams'
+            print('  proxy event: %s; observed tick %s; blacked %d up / %d down, delayed %d up / %d down datagrams'
                   % (LinkEvent(ev['client'], ev['tick'], ev['kind'], ev['ms'], ev['dur_ms'], ev['dir'], ev['until']).describe(),
                      ', '.join(str(a['base']) for a in ev['armed']) or 'NEVER',
                      e['blacked_up'], e['blacked_down'], e['delayed_up'], e['delayed_down']))
@@ -1236,6 +1263,16 @@ def run_case(args, sector, case_dir):
         row = {
             'exit_code': p.returncode,
             'metrics': status_metrics(statuses[-1]) if statuses else None,
+        }
+        observed = {tick: actual for tick, (actual, _) in tick_watches[i].ticks.items()}
+        play_start = re.search(r'play time started after ([0-9.]+) s of startup; budget ([0-9.]+) s', text)
+        play_end = re.search(r'play time limit reached \(([0-9.]+) s after the first assigned frame\)', text)
+        row['timing'] = {
+            'targets': sorted(tick_targets[i]), 'observed': observed,
+            'startup_s': float(play_start[1]) if play_start else None,
+            'play_budget_s': float(play_start[2]) if play_start else None,
+            'play_elapsed_s': float(play_end[1]) if play_end else None,
+            'problems': timing_problems(tick_targets[i], observed),
         }
         hang = hang_watches[i].hang if i in hang_watches else None
         if hang:
@@ -2537,6 +2574,7 @@ def verdict(case, event_clients=(), expect_refused=None):
         if c.get('never_started'):
             problems.append(f'client{i} never started')
             continue
+        problems.extend(f'client{i} {problem}' for problem in c.get('timing', {}).get('problems', []))
         m = c['metrics'] or {}
         if c['exit_code'] != 0:
             problems.append(f'client{i} exit {c["exit_code"]}')
@@ -2816,19 +2854,42 @@ def selftest():
                                        'why': "no echo by the server's tick 2293"}]
               and parsed['echo'] == [4, 2, 0, 0, 1] and parsed['ownlife'] == '1/0/1/6/0',
               str((parsed['own_moves'], parsed['echo'], parsed['ownlife'])))
-        # The arming: a log that names tick base 100 arms tick 166 one second on.
-        armed = LinkEvent(0, 166, 'blackout', 100)
+        # Assignments and two postponed starts must not arm a playing fault.
+        armed = LinkEvent(0, 166, 'step', 100, until=200)
         watch_log = pathlib.Path(tmp) / 'watch.log'
         watch_log.write_bytes(b'')
         watch = LogWatch(watch_log, arm_events([armed]))
         with open(watch_log, 'ab') as f:
-            f.write(b'tick base 100 assigned (0 frames since anchor)\n')
+            f.write(b'tick base 100 assigned (0 frames since anchor)\n'
+                    b'start handshake: start 1 accepted\n'
+                    b'start handshake: start 2 accepted\n'
+                    b'harness: target 0 reached at tick 100\n')
+        t0 = time.monotonic()
+        while 0 not in watch.ticks and time.monotonic() - t0 < 2:
+            time.sleep(0.01)
+        check('LogWatch ignores assignments and postponements', 0 in watch.ticks and armed.start is None)
+        with open(watch_log, 'ab') as f:
+            f.write(b'harness: target 166 reached at tick 166\n')
         t0 = time.monotonic()
         while armed.start is None and time.monotonic() - t0 < 2:
             time.sleep(0.01)
-        watch.close()
-        check('LogWatch arms from the tick base', armed.start is not None and abs(armed.start - t0 - 1.0) < 0.1,
+        check('LogWatch arms on the actual tick', armed.start is not None and abs(armed.start - t0) < 0.1,
               'starts %.3f s after the line' % ((armed.start or t0) - t0))
+        original_start = armed.start
+        with open(watch_log, 'ab') as f:
+            f.write(b'resynced: tick base 190\n'
+                    b'harness: target 166 reached at tick 190\n'
+                    b'harness: target 200 reached at tick 200\n')
+        t0 = time.monotonic()
+        while armed.end is None and time.monotonic() - t0 < 2:
+            time.sleep(0.01)
+        watch.close()
+        check('LogWatch ends at the actual until tick and never rearms',
+              armed.end is not None and armed.start == original_start
+              and armed.observed_tick == 166 and armed.observed_until == 200)
+        check('milestone coverage catches missing and skipped ticks',
+              not timing_problems({0, 166}, {0: 100, 166: 166})
+              and len(timing_problems({0, 166, 200}, {0: 100, 166: 190})) == 2)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server.bind(('127.0.0.1', 0))
@@ -3211,7 +3272,10 @@ def main():
                          '"none": the slot\'s own file')
     ap.add_argument('--sectors', default='1,2,3,4')
     ap.add_argument('--players', type=int, default=4)
-    ap.add_argument('--seconds', type=int, default=60)
+    ap.add_argument('--seconds', type=int, default=60,
+                    help='play budget after each client steps its first assigned frame')
+    ap.add_argument('--startup-timeout', type=int, default=180,
+                    help='extra wall-clock allowance for loading and startup; total limit is seconds plus this')
     ap.add_argument('--input-delay', type=int, default=6)
     ap.add_argument('--spawn-impulse', type=float, default=3.0)
     ap.add_argument('--port', type=int, default=32990)
@@ -3340,6 +3404,8 @@ def main():
     args = ap.parse_args()
     if args.selftest:
         return selftest()
+    if args.seconds <= 0 or args.startup_timeout <= 0:
+        ap.error('--seconds and --startup-timeout must be positive')
     if not args.root and not args.report_only:
         ap.error('--root is required')
     # Step CMAP: the arena is a BML+ custom map now, no longer installed as Level_13.NMO.
