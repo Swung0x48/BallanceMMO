@@ -53,6 +53,7 @@
 
 #include "CKAll.h"
 
+#include "material_initial_state.hpp"
 #include "menu_driver.hpp"
 #include "script_replay.hpp"
 
@@ -1024,7 +1025,8 @@ namespace bmmo::game {
             if (!o || o->GetClassID() == CKCID_BEHAVIOR || CKIsChildClassOf(o, CKCID_MESH)) continue;
             auto* so = CKSceneObject::Cast(o);
             if (!so) continue;
-            scene->SetObjectInitialValue(so, CKSaveObjectState(o));
+            auto* material = CKMaterial::Cast(o);
+            scene->SetObjectInitialValue(so, material ? save_material_initial_state(material) : CKSaveObjectState(o));
             ++ics;
         }
 

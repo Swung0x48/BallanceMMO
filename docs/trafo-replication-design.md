@@ -523,6 +523,18 @@ Then, in order:
    - The IC of every copied frame, piece and material is then saved in the
      scene, so the set's `TT Restore IC` and `Restore IC` restore it flat and
      opaque.
+   - Material ICs preserve shared dynamic texture references through
+     `save_material_initial_state`. The copies are static, but retail
+     Balls.nmo textures are dynamic: ordinary `CKSaveObjectState` writes a
+     null texture reference in that combination. The helper enables dynamic
+     references only during serialization and restores the material's object
+     flags before returning; set ownership and teardown stay the same.
+     Without this, the first explosion is textured, but the first death or
+     fade reset clears the texture and later explosions are white.
+     `scripts/test_material_initial_state.cpp` covers the four static/dynamic
+     combinations and repeated restores against the retail DLLs. The retail
+     regression also checks all three piece types after death, Wood after
+     its automatic reset, and session teardown.
    - The builder also keeps the set's **built script state**: a v2 capture of
      its 8 scripts, taken right after the build. §4.5 and §4.7 restore it.
 7. **The bridge.** The host's hooks (2.11) register the set:
