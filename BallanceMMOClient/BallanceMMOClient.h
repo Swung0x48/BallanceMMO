@@ -455,7 +455,7 @@ private:
 		bmmo::room::action action{};
 		bool ready = false;            // Ready / Unready: which one we sent
 		bmmo::room::mode mode{};       // Start: the session kind we asked for
-		bool announce = true;          // false: the outcome (and a timeout) goes to the room panel, not the chat
+		bool announce = true;          // false: do not print the roster after Create / Join or print a command's room list
 		std::chrono::steady_clock::time_point sent{};
 	};
 	static constexpr size_t MAX_PENDING_ROOM_REQUESTS = 16;
@@ -478,8 +478,8 @@ private:
 	// file-scope in session/room_client.cpp - this class takes no data members
 	// (the note at apply_pending_ping_text).  send_room_request is the one
 	// entry every room_request goes through (the /mmo room subcommands, the
-	// panel's actions, the core host's leaves); announce=false keeps the
-	// outcome and a timeout out of the chat - the panel shows them.
+	// panel's actions, the core host's leaves); announce=false suppresses the
+	// extra roster/list print, while outcomes still use BML's message area.
 	void send_room_request(bmmo::room::action action, uint32_t room = 0, uint32_t target = 0,
 	                       bmmo::room::mode mode = bmmo::room::mode::Physics, std::string name = {},
 	                       bool announce = true);

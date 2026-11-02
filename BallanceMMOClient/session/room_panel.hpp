@@ -9,20 +9,18 @@
 // Display and intent only: draw() never touches the network or the engine.
 // It renders the room_state the client already holds and returns at most one
 // action per call; BallanceMMOClient::OnProcess turns that action into the
-// matching room_request. Outcomes (Accepted / Denied), timeouts and room
-// events come back in through notify() and are shown in the feedback lines.
+// matching room_request. Outcomes, timeouts and room events use BML's message
+// area rather than a second event log inside this window.
 //
-// open()/close()/toggle()/notify()/reset() may run on the network thread
-// while draw() runs on the game thread, so every piece of UI state sits
-// behind the panel's mutex. English/ASCII only, like the rest of the mod's
-// in-game text. Drawn in BML+'s ImGui frame; the panel never calls
-// NewFrame/Render itself.
+// open()/close()/toggle()/reset() may run on the network thread while draw()
+// runs on the game thread, so every piece of UI state sits behind the panel's
+// mutex. English/ASCII only, like the rest of the mod's in-game text. Drawn in
+// BML+'s ImGui frame; the panel never calls NewFrame/Render itself.
 
 #include <algorithm>
 #include <cfloat>
 #include <cstdint>
 #include <cstdio>
-#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -71,21 +69,11 @@ namespace bmmo::retail {
             return visible_;
         }
 
-        // One feedback line: a request outcome, a timeout, or a room event.
-        // error=true draws it red, otherwise green.
-        void notify(const std::string& text, bool error = false) {
-            std::lock_guard lk(mtx_);
-            if (feedback_.size() >= MAX_FEEDBACK)
-                feedback_.pop_front();
-            feedback_.push_back({text, error});
-        }
-
-        // Back to the freshly-connected state: closed, no feedback, the
-        // create name cleared, the start mode back at its default.
+        // Back to the freshly-connected state: closed, the create name
+        // cleared, the start mode back at its default.
         void reset() {
             std::lock_guard lk(mtx_);
             visible_ = false;
-            feedback_.clear();
             create_name_[0] = '\0';
             start_mode_ = bmmo::room::mode::Physics;
         }
@@ -93,33 +81,9 @@ namespace bmmo::retail {
         // Game thread, inside BML+'s ImGui frame. Renders the panel when it
         // is visible and returns at most one action.
         action draw(const bmmo::room_state_msg& state, uint32_t own_id,
-                    const std::vector<bmmo::room::action>& pending);
+                    const std::vector<bmmo::room::action>& pending, bool connected);
 
     private:
-        struct feedback_line {
-            std::string text;
-            bool error = false;
-        };
-
-        static constexpr size_t MAX_FEEDBACK = 16;    // remembered
-        static constexpr size_t SHOWN_FEEDBACK = 6;   // on screen at once
-
-        static const char* action_name(bmmo::room::action a) {
-            using room_action = bmmo::room::action;
-            switch (a) {
-                case room_action::List: return "list";
-                case room_action::Create: return "create";
-                case room_action::Join: return "join";
-                case room_action::Leave: return "leave";
-                case room_action::Ready: return "ready";
-                case room_action::Unready: return "unready";
-                case room_action::Start: return "start";
-                case room_action::Kick: return "kick";
-                case room_action::Close: return "close";
-            }
-            return "?";
-        }
-
         static const char* mode_name(bmmo::room::mode m) {
             return m == bmmo::room::mode::Physics ? "physics" : "shadow";
         }
@@ -150,14 +114,13 @@ namespace bmmo::retail {
 
         mutable std::mutex mtx_;
         bool visible_ = false;                       // guarded by mtx_
-        std::deque<feedback_line> feedback_;         // guarded by mtx_
         // +1 for the NUL; ImGui enforces the wire's 32-byte name cap.
         char create_name_[bmmo::room::MAX_ROOM_NAME + 1] = {};  // guarded by mtx_
         bmmo::room::mode start_mode_ = bmmo::room::mode::Physics;  // guarded by mtx_
     };
 
     inline room_panel::action room_panel::draw(const bmmo::room_state_msg& state, uint32_t own_id,
-                                               const std::vector<bmmo::room::action>& pending) {
+                                               const std::vector<bmmo::room::action>& pending, bool connected) {
         using room_action = bmmo::room::action;
         using room_mode = bmmo::room::mode;
         std::lock_guard lk(mtx_);
@@ -177,14 +140,15 @@ namespace bmmo::retail {
 
         const ImVec4 amber(1.0f, 0.827f, 0.416f, 1.0f);
         const ImVec4 green(0.373f, 0.824f, 0.478f, 1.0f);
-        const ImVec4 red(0.95f, 0.36f, 0.33f, 1.0f);
         const ImVec4 grey(0.66f, 0.63f, 0.58f, 1.0f);
 
         const ImGuiIO& io = ImGui::GetIO();
-        ImGui::SetNextWindowSize(ImVec2(620.0f, 0.0f), ImGuiCond_Always);
+        const float ui_scale = std::clamp(io.DisplaySize.y / 768.0f * 1.2f, 1.0f, 3.0f);
+        const float window_width = std::min((connected ? 620.0f : 420.0f) * ui_scale, io.DisplaySize.x * 0.92f);
+        ImGui::SetNextWindowSize(ImVec2(window_width, 0.0f), ImGuiCond_Always);
         // Auto-height, capped so a long roster scrolls inside the window
-        // instead of growing past the screen.
-        ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f, 180.0f),
+        // instead of growing past the screen. Disconnected needs only its notice.
+        ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f * ui_scale, (connected ? 180.0f : 70.0f) * ui_scale),
                                             ImVec2(FLT_MAX, io.DisplaySize.y * 0.85f));
         constexpr int STYLE_COLORS = 18;
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.050f, 0.044f, 0.038f, 0.94f));
@@ -210,32 +174,28 @@ namespace bmmo::retail {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
         bool open = visible_;
         if (ImGui::Begin("BallanceMMO Rooms###bmmo_room_panel", &open, ImGuiWindowFlags_NoSavedSettings)) {
-            // The feedback lines: outcomes, timeouts and room events, newest
-            // at the bottom.
-            if (!feedback_.empty()) {
-                const size_t skip = feedback_.size() > SHOWN_FEEDBACK ? feedback_.size() - SHOWN_FEEDBACK : 0;
-                for (size_t i = skip; i < feedback_.size(); ++i) {
-                    const auto& line = feedback_[i];
-                    ImGui::PushTextWrapPos(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x);
-                    ImGui::TextColored(line.error ? red : green, "%s", line.text.c_str());
-                    ImGui::PopTextWrapPos();
-                }
-                ImGui::Separator();
+            if (!connected) {
+                ImGui::TextColored(amber, "Disconnected");
+                ImGui::TextWrapped("Connect to a server to use this panel.");
+                ImGui::End();
+                ImGui::PopStyleVar(3);
+                ImGui::PopStyleColor(STYLE_COLORS);
+                if (!open) visible_ = false;
+                return result;
             }
-
-            // What the server still owes us an answer for (the client drops
-            // a request after 5 s, and tells us through notify()).
             if (!pending.empty()) {
-                std::string names;
-                for (size_t i = 0; i < pending.size(); ++i) {
-                    if (i > 0) names += ", ";
-                    names += action_name(pending[i]);
-                }
-                ImGui::TextColored(amber, "Waiting for the server: %s (requests time out after 5 s).",
-                                   names.c_str());
-                ImGui::Separator();
+                ImDrawList* draw_list = ImGui::GetWindowDrawList();
+                const float radius = ImGui::GetFontSize() * 0.35f;
+                const float title_height = ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2.0f;
+                const ImVec2 center(ImGui::GetWindowPos().x + ImGui::GetWindowWidth()
+                                        - title_height - ImGui::GetStyle().WindowPadding.x - radius,
+                                    ImGui::GetWindowPos().y + title_height * 0.5f);
+                const float angle = static_cast<float>(ImGui::GetTime() * 4.0);
+                const ImVec4 faint(amber.x, amber.y, amber.z, 0.25f);
+                draw_list->AddCircle(center, radius, ImGui::GetColorU32(faint), 16, ui_scale);
+                draw_list->PathArcTo(center, radius, angle, angle + 4.71f, 16);
+                draw_list->PathStroke(ImGui::GetColorU32(amber), false, 1.2f * ui_scale);
             }
-
             const bool in_room = state.own_room != 0;
 
             if (!in_room) {
@@ -243,7 +203,7 @@ namespace bmmo::retail {
                 ImGui::SeparatorText("Create a room");
                 ImGui::Text("Name:");
                 ImGui::SameLine();
-                ImGui::SetNextItemWidth(280.0f);
+                ImGui::SetNextItemWidth(280.0f * ui_scale);
                 const bool enter = ImGui::InputTextWithHint("##room_name", "room name (optional)",
                                                             create_name_, sizeof(create_name_),
                                                             ImGuiInputTextFlags_EnterReturnsTrue);
@@ -285,9 +245,9 @@ namespace bmmo::retail {
                         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
                     ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
                     ImGui::TableSetupColumn("Map", ImGuiTableColumnFlags_WidthStretch);
-                    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-                    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-                    ImGui::TableSetupColumn("##kick", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+                    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 90.0f * ui_scale);
+                    ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 60.0f * ui_scale);
+                    ImGui::TableSetupColumn("##kick", ImGuiTableColumnFlags_WidthFixed, 56.0f * ui_scale);
                     ImGui::TableHeadersRow();
                     for (const auto& m: state.members) {
                         ImGui::TableNextRow();
@@ -359,22 +319,22 @@ namespace bmmo::retail {
                     }
                     ImGui::EndDisabled();
 
-                    // The start row: one line with the Shadow/Physics
-                    // segmented control (the selected half in the active
-                    // color; Physics is the default) and the Start button.
-                    ImGui::Text("Start:");
-                    ImGui::SameLine();
-                    const ImVec4 active = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
-                    const float inner = ImGui::GetStyle().ItemInnerSpacing.x;
+                    // The mode selector has its own row: two Selectables in a
+                    // two-column table, then the Start button below them.
+                    ImGui::Text("Mode:");
                     const bool shadow = start_mode_ == room_mode::Shadow;
-                    if (shadow) ImGui::PushStyleColor(ImGuiCol_Button, active);
-                    if (ImGui::SmallButton("Shadow")) start_mode_ = room_mode::Shadow;
-                    if (shadow) ImGui::PopStyleColor();
-                    ImGui::SameLine(0.0f, inner);
-                    if (!shadow) ImGui::PushStyleColor(ImGuiCol_Button, active);
-                    if (ImGui::SmallButton("Physics")) start_mode_ = room_mode::Physics;
-                    if (!shadow) ImGui::PopStyleColor();
-                    ImGui::SameLine();
+                    if (ImGui::BeginTable("##start_mode", 2,
+                            ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersInnerV
+                                | ImGuiTableFlags_SizingStretchSame)) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        if (ImGui::Selectable("Shadow", shadow, 0, ImVec2(0.0f, ImGui::GetFrameHeight())))
+                            start_mode_ = room_mode::Shadow;
+                        ImGui::TableNextColumn();
+                        if (ImGui::Selectable("Physics", !shadow, 0, ImVec2(0.0f, ImGui::GetFrameHeight())))
+                            start_mode_ = room_mode::Physics;
+                        ImGui::EndTable();
+                    }
                     ImGui::BeginDisabled(is_pending(room_action::Start));
                     if (ImGui::Button("Start")) {
                         action a;
@@ -407,12 +367,12 @@ namespace bmmo::retail {
                                    in_room ? "" : " Create one above.");
             } else if (ImGui::BeginTable("##room_list", 6,
                     ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-                ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 48.0f);
+                ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 48.0f * ui_scale);
                 ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, 64.0f);
-                ImGui::TableSetupColumn("Phase", ImGuiTableColumnFlags_WidthFixed, 64.0f);
-                ImGui::TableSetupColumn("Mode", ImGuiTableColumnFlags_WidthFixed, 64.0f);
-                ImGui::TableSetupColumn("##join", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+                ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, 64.0f * ui_scale);
+                ImGui::TableSetupColumn("Phase", ImGuiTableColumnFlags_WidthFixed, 64.0f * ui_scale);
+                ImGui::TableSetupColumn("Mode", ImGuiTableColumnFlags_WidthFixed, 64.0f * ui_scale);
+                ImGui::TableSetupColumn("##join", ImGuiTableColumnFlags_WidthFixed, 56.0f * ui_scale);
                 ImGui::TableHeadersRow();
                 for (const auto& r: state.rooms) {
                     ImGui::TableNextRow();
