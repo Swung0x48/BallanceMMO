@@ -208,6 +208,7 @@ private:
 	void OnStartLevel() override;
 	void OnLoadObject(BMMO_CKSTRING filename, BOOL isMap, BMMO_CKSTRING masterName, CK_CLASSID filterClass, BOOL addtoscene, BOOL reuseMeshes, BOOL reuseMaterials, BOOL dynamic, XObjectArray* objArray, CKObject* masterObj) override;
 	void OnPostCheckpointReached() override;
+	void OnPreExitLevel() override;
 	void OnPostExitLevel() override;
 	void OnPreResetLevel() override;
 	void OnCounterActive() override;
@@ -581,6 +582,7 @@ private:
 	bool core_host_reload_ready();   // the reload's level is loaded, past the capture window and in play
 	void core_host_map_loaded();   // OnLoadObject(isMap): a fresh level (the flag cleared)
 	bool core_host_reload_exit();   // OnPostExitLevel: the exit is the reload's own (the session goes on)
+	void core_host_pre_exit_level();   // OnPreExitLevel: the session ends with a room Leave (FULL step RTDF)
 	void core_host_release_placement(const char* why);   // step SP10: the copies released (level exit, map load)
 	// FULL step LGM: the level file's counters recorded on the frames after a map load (HU1 (b)), and the
 	// 'pausechain' read from the core host's own edits.

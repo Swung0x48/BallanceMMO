@@ -60,7 +60,9 @@
 // Not touched: the menu's own work - the cursor, End / Start Music, the
 // Unpause chain's Gameplay_Refresh activation (key bindings; its tutorial
 // time-factor write is held by step DX2), BallNav activate / deactivate (the
-// own replica drives the ball).  A key the menu reads reaches the menu only:
+// own replica drives the ball; since FULL step RTDF the retail Ball
+// Navigation's Physics WakeUp that the deactivate fires acts on no own ball,
+// own_wake_guard.hpp).  A key the menu reads reaches the menu only:
 // step ESCK's key mask (menu_keys.hpp) hides it from the level's scripts.
 //
 // Retail-only (the Virtools SDK of the mod).  File-scope state of

@@ -2359,7 +2359,11 @@ logged as an error and left out, the others still apply):
    overlay: Event_handler #3523 (the menu itself) and Sound_Manager #7190
    (Unpause: the menu's audio) - the menu's own work, left alone with the
    cursor, End / Start Music, BallNav (de)activate and the Unpause chain's
-   Gameplay_Refresh activation (DX2 holds its tutorial write).
+   Gameplay_Refresh activation (DX2 holds its tutorial write). (Amended at
+   FULL step RTDF: BallNav deactivate stays the menu's, but Ball
+   Navigation's shared Physics WakeUp no longer acts on the own ball in a
+   core session - the wake RTD found on a resting own ball; "As built (step
+   RTDF)" below.)
 
 The own ball's neutral input while the menu is open was already built
 (`host.input_muted`, core_host.cpp, recorded as `paused` frames with keys 0)
@@ -2694,3 +2698,120 @@ client's FINAL rows against the server's FULL rows), SimTool
   rtd_arena 2491/2491, rtd_wake 804/804); FINAL rows bit-equal everywhere
   except the two residuals above (rtd_l12 client 1's exit rows, the
   arena's own ball of client 1).
+
+## As built (step RTDF, FULL close-out, 2026-11-01): RTD's two findings as the user chose - decision 65 (a) and decision 66 (a)
+
+The user's answer of 2026-11-01 ("按你推荐": the orchestrator's recommendation,
+(a) for both). Retail-only code (`BallanceMMOClient`): no shared, headless,
+server, wire or record change; no engine change.
+
+- **Decision 65 (a): the ESC menu's wake kept off the own ball.** The place:
+  the per-block function of Gameplay_Ingame's Ball Navigation's shared
+  Physics WakeUp block (#26726 on the arena and on L12), replaced in a core
+  session by `own_wake_guard::wrapper`
+  (`BallanceMMOClient/session/own_wake_guard.hpp`; `CKBehavior::SetFunction`,
+  the precedent of ESCK's `menu_keys.hpp`). It tests the block's target: the
+  own ball (the host's test, `get_current_ball()`, core_host.cpp at the
+  anchor beside ESCK's resolve) -> the block's own path without its queued
+  PreSimulate callback (`PhysicsWakeUp.cpp`: In off, Out on, `CKBR_OK`;
+  `WakeUpFromScript` is never reached); anything else -> the block's own
+  function. Wrapped at the anchor, kept wrapped every frame (the overlay's
+  frame guard), handed back in `core_host_end_local` (its counts logged:
+  `own_wake blocks=1 kept_off=N passed=0 rewraps=0`, also on the
+  automation's `pausechain`). Offline play, every other Physics WakeUp block
+  and the overlay's own behaviour (RK3E: the game runs on, the own ball takes
+  no keys while the menu is open) are unchanged. Why it is safe: the own
+  replica (`ball_navigation.cpp` `create` / `shutdown`) makes every wake its
+  rules make, in every world alike, the owner's included; the key-driven
+  wakes the retail graph also made are the same `ensure_in_simulation` in
+  the same PreSimulate pass, so the only wake that goes is the one no other
+  world made - a BallNav deactivate with no leaf holding a controller (the
+  replica's `shutdown_all` wakes only such a leaf; the retail graph sends
+  Shutdown to every leaf and each Out2 feeds the shared wake).
+- **Decision 66 (a): Exit Level ends the session at OnPreExitLevel with a
+  leave.** `BallanceMMOClient::OnPreExitLevel` (new override of BML's
+  existing virtual; no data member) -> `core_host_pre_exit_level`
+  (core_host.cpp): unless the exit is SP9's reload's (the
+  `core_host_reload_exit` test: reloading, its exit not seen, counting
+  down), `core_host_end_local("left the level")` and then a room Leave for
+  the session's room (`host.room`, the SessionStart's; file-scope host
+  state) - the headless `--leave-room-at` order (J4's path) and the existing
+  "not in the level" leave's message. **Adapted:** the design's "a leave"
+  is the room Leave - the wire has no session-only leave and a new message
+  would be a protocol change the step does not name; so the player is out
+  of the room afterwards (as after `/mmo room leave`; joining it again
+  late-joins a session that still runs; the room's host passes on). The
+  server handles it as every leave (`physics_session_member_left`: the
+  member removed at the runner's next tick, its Unphysicalize and final
+  trafo resets made by the server on its behalf, GHF's spawn-ghost forget).
+  Nothing of the exit chain's teardown is recorded or sent: every host hook
+  tests `core_session_running()`, and the session's script edits, the body
+  guard, the union and the trafo sets are handed back before the chain runs
+  (vanilla teardown). `OnPostExitLevel` keeps its end as a fallback (a no-op
+  after the PreExitLevel end) and still releases the sector placement's
+  copies (62 of 63 "gone already", as at RTD).
+  Exiting through the menu now ends the session with the menu open: ESCX's
+  ESC hold and ESCK's key mask stay pending (their own end rules) and are
+  handed back once the level is left (both runs: "the ESC hold is
+  released", "every key-reading block is handed back" 0.35 / 0.39 s later,
+  at PostExitLevel). SP9's reload is not taken for a leave: its "Exit
+  Level" is queued by `SendMessageSingle` in `core_host_session_start`,
+  which sets `reloading` and the counting-down phase before it returns, so
+  PreExitLevel (a later frame's message delivery) finds the reload
+  (by reading; not run live, see below). `kept_off` counts 5 per BallNav
+  deactivate (the five leaves' Out2: four keyed + the debug leaf), as RTD's
+  5 probe lines.
+- **Review fix-up.** The Leave is queued on the pending room requests
+  (`push_room_request`, as the console's `/mmo room leave`), so the
+  server's RequestAccepted reads "Left room #N." and an earlier request
+  still unanswered does not take this ack; the older "not in the level"
+  Leave of `core_host_session_start` had the same gap and is queued too.
+  The guard's counts are the session's (cleared after the end-of-session
+  log line, not at each anchor, so a level reset or a resync that
+  re-anchors keeps counting). Room membership after Exit Level, for the
+  record: a member of a running session leaves the room; a member whose
+  core is idle (refused, or its session already over) leaves nothing and
+  stays in the room, as before RTDF - `core_host_pre_exit_level` returns
+  at idle. The wrapper reads the block's target when the block runs, the
+  original's PreSimulate callback reads it again; they could differ only
+  if Ball Navigation's target changed between the two in one frame, which
+  no retail path does.
+
+**Checks** (driver `.local-tools/work/RTDF/rtdf_retail.py`, judge
+`rtdf_judge.sh` = RTD's with HEAD's SimTool `build-agent-rSAXR`; x86
+CLIENT-BUILD-OK, DEPS-OK; GCC syntax 33/33 ok; the Arch server
+ballanced-36c04e3d24c9+bmmo-458e86d4ea65-dirty = SAXR's tree, HEAD's server
+code, snapshots off, trafo_inputs and placement_clones on):
+
+- `scripts/retail/rtdf_wake` (rtd_wake's recipe on the arena,
+  `BMMO_HULL_PROBE=Ball_Stone`, then client 1 Exit Level through
+  Menu_YesNo): the own ball asleep at the spawn on the server (flag 2,
+  y = 2.016043 from 400 to 800, the menu open 516..645, closed 657..785);
+  0 `script_wakeup Ball_Stone` probe lines at the open (RTD: 5),
+  `kept_off=10`; client 1 own 675/675 rows bit-equal through the menu and
+  after (RTD: worst 1.786 mm), mirror 675/675, mechanisms 3/3; client 2 all
+  bit-equal to 2094; the server journal replays 2087/2087; 0 same-frame
+  Pause / Unpause pairs. The exit: "On Message PreExitLevel", the session
+  ended and "left room 1" at tick 1562 in the same millisecond; the server
+  "left with a ball: Unphysicalize relayed for tick 1562", removed at 1564;
+  client 1's FINAL rows end at 1560.
+- `scripts/retail/rtdf_l12` (rtd_l12's recipe E alone, Level 12): client 1
+  left at tick 1078 (PreExitLevel; PostExitLevel 0.39 s later); its FINAL
+  rows end at 1076, every one bit-equal (own 433, mirror 433, mechanisms
+  8/8 - RTD: 0/8 over 11512..11528, P_Modul_26's sacks 2.98 m); the server
+  removed the member at 1080 (two ticks; RTD: held 498 ticks until the room
+  closed), the trafo resets of 1079 are the server's own (`(leaver)`),
+  nothing from client 1 after 1078; client 2 ("Swung0x48 left the room",
+  "You are now the room host") bit-equal through 1824 (own 807, mirror 433,
+  mechanisms 8/8); the server journal replays 1817/1817; client 1 in the
+  main menu as at RTD (`ingame=0`, `session=0`); no ERROR line on either
+  copy in either run.
+
+**Not run (the quick tier's two-live-run cap):** rtd_esck_l1 (ESCK's L1
+recipe: the wrapper touches no keyboard read - ESCK's 51 masked blocks and
+the overlay are unchanged), the plan's headless live run, the x64 build,
+unit tests and the wire check (no file under BallanceMMOCommon, the server
+or the headless client changed), the offline control (the guard is
+installed only at a core anchor), and SP9's reload exit under RTDF (a
+second session on the same level in the same game process). For the FULL
+batch.

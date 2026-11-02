@@ -89,6 +89,7 @@
 #include "journal_files.hpp"
 #include "menu_keys.hpp"
 #include "menu_overlay.hpp"
+#include "own_wake_guard.hpp"
 #include "pause_chain.hpp"
 
 namespace {
@@ -153,6 +154,12 @@ namespace {
     // is let go).  Resolved with the overlay, kept by the same frame guard,
     // handed back at the session's end.  File scope, as above.
     bmmo::retail::menu_key_mask core_menu_keys;
+    // FULL step RTDF (decision 65, session/own_wake_guard.hpp): the retail
+    // Ball Navigation's shared Physics WakeUp acts on no own ball - the menu's
+    // BallNav deactivate woke a resting own ball in its owner's world only.
+    // Resolved with the overlay, kept by the same frame guard, handed back at
+    // the session's end.  File scope, as above.
+    bmmo::retail::own_wake_guard core_own_wake;
     // FULL step LGM (R7 part one): what the core host borrowed from the
     // legacy path's BallanceMMOClient members until then, as its own
     // file-scope state (FULL step LGD deleted the legacy path, its copies and
@@ -523,6 +530,9 @@ namespace {
         enum class phase_type { idle, counting_down, restarting, running };
         phase_type phase = phase_type::idle;
         uint32_t session = 0;
+        // FULL step RTDF (decision 66): the room the session runs in (its
+        // SessionStart's), which the level's exit leaves.
+        uint32_t room = 0;
         bool saw_ingame_inactive = false;
         clock_type::time_point restart_deadline{};
         uint64_t last_rebases = 0;
@@ -1996,7 +2006,7 @@ bool bmmo::session::retail::core_tutorial_owned() {
 std::string bmmo::session::retail::menu_overlay_status(CKContext* context) {
     if (!core_session_running()) return {};
     return std::format("core_muted={} ", host.input_muted ? 1 : 0) + core_menu_overlay.status(context) + " "
-           + core_menu_keys.status();
+           + core_menu_keys.status() + " " + core_own_wake.status();
 }
 
 // Step T4 (trafo-replication design 2.4 step 6, T1's level reference):
@@ -2247,6 +2257,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     }
     reset_session_state();
     host.session = msg.session;
+    host.room = msg.room;   // FULL step RTDF
     // FULL step RT1 (RCX-x86): a new session's frame times start empty even
     // when the server reuses the id (a restarted server's session 1), and its
     // first interval does not span the idle time between sessions.
@@ -2268,6 +2279,9 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
         leave.room = msg.room;
         leave.serialize();
         send(leave.raw.str().data(), leave.size(), k_nSteamNetworkingSend_Reliable);
+        // The server acks it (RequestAccepted): queued like the console's, so
+        // the ack reads "Left room #N." and no earlier request takes it.
+        push_room_request(pending_room_request{.action = bmmo::room::action::Leave});
         logger_->Info("Physics session %u: not in the level, left room %u", msg.session, msg.room);
         return;   // the core stays idle: the session's messages are dropped
     }
@@ -2478,6 +2492,52 @@ bool BallanceMMOClient::core_host_reload_exit() {
     logger_->Info("Physics session %u: the reload left the level %.3f s after the exit was sent; the session goes on",
                   host.session, seconds_since(level_life.started));
     return true;
+}
+
+// FULL step RTDF (the user's decision 66, 2026-11-01: option (a) of step
+// RTD's finding).  OnPreExitLevel: leaving the level ends the session here,
+// before Event_handler's Exit Level chain acts, and the member leaves the
+// session's room - the leave the server already handles (its
+// physics_session_member_left: the member removed at the runner's next tick,
+// its ball's Unphysicalize relayed on its behalf, GHF's spawn-ghost forget),
+// J4's path and the headless --leave-room-at's order (the core ended, then
+// the room Leave).  Until RTDF the session ended at OnPostExitLevel, ~20
+// ticks into that chain, so the chain's teardown - the sector deactivated
+// outside a union pass ([0][2]=1), the own ball unphysicalized, the trafo
+// sets reset - was stepped, recorded and sent, and nothing told the server,
+// which held the member's input until the room closed.  Now nothing of the
+// teardown is recorded or sent (every hook tests core_session_running()), the
+// chain runs on the vanilla level (the session's script edits handed back
+// first), and the copies of the sector placement still go at OnPostExitLevel.
+// SP9's reload leaves the level on purpose: its exit is the reload's
+// (core_host_reload_exit's test), not a leave.  There is no session-only
+// leave on the wire (a new message would be a protocol change), so the player
+// is out of the room afterwards, as after a room Leave; joining the room
+// again late-joins a session that still runs.
+void BallanceMMOClient::core_host_pre_exit_level() {
+    if (host.phase == retail_host::phase_type::idle) return;
+    if (level_life.reloading && !level_life.exit_seen && host.phase == retail_host::phase_type::counting_down) {
+        logger_->Info("Physics session %u: the level's exit is the reload's; the session goes on", host.session);
+        return;
+    }
+    const uint32_t session = host.session, room = host.room;
+    const uint32_t tick = host.core ? host.core->current_tick() : 0;
+    core_host_end_local("left the level");
+    if (!room) {
+        logger_->Warn("Physics session %u: left the level at tick %u; no room known, no leave sent", session, tick);
+        return;
+    }
+    bmmo::room_request_msg leave;
+    leave.action = bmmo::room::action::Leave;
+    leave.room = room;
+    leave.serialize();
+    send(leave.raw.str().data(), leave.size(), k_nSteamNetworkingSend_Reliable);
+    // The server acks it (RequestAccepted): queued like the console's "/mmo
+    // room leave", so the player reads "Left room #N." and an earlier request
+    // still unanswered does not take this ack.
+    push_room_request(pending_room_request{.action = bmmo::room::action::Leave});
+    logger_->Info("Physics session %u: left the level at tick %u, before its exit chain; left room %u", session, tick,
+                  room);
 }
 
 // "Go!": the countdown's last step, the restart (the legacy
@@ -3076,6 +3136,18 @@ void BallanceMMOClient::core_host_anchor() {
                 logger_->Error("Physics session: ESC menu %s", line.size() > 6 ? line.c_str() + 6 : line.c_str());
         }
     }
+    // FULL step RTDF (decision 65): Ball Navigation's shared Physics WakeUp
+    // acts on no own ball (own_wake_guard.hpp) - the own replica makes every
+    // wake of the own ball, in every world alike.
+    for (const std::string& line: core_own_wake.resolve(m_bml->GetCKContext(), [this](CK3dEntity* target) {
+             CK3dObject* ball = get_current_ball();
+             return host.phase != retail_host::phase_type::idle && ball && target == static_cast<CK3dEntity*>(ball);
+         })) {
+        if (line.rfind("ok ", 0) == 0)
+            logger_->Info("Physics session: own wake: %s", line.c_str() + 3);
+        else
+            logger_->Error("Physics session: own wake: %s", line.size() > 6 ? line.c_str() + 6 : line.c_str());
+    }
     // N1, N2 (FULL step LGM: the shared helpers the headless client uses,
     // game/sector_reset_guard.hpp and game/sector_deactivate_pin.hpp, in
     // file-scope state), N3 and N4 handed back from a previous anchor first,
@@ -3423,6 +3495,8 @@ void BallanceMMOClient::core_host_frame() {
         // FULL step ESCK: the key mask's open/close transition and latch,
         // every wrapped block still wrapped.
         core_menu_keys.apply(m_bml->GetCKContext());
+        // FULL step RTDF: the own-wake guard's blocks still wrapped.
+        core_own_wake.apply(m_bml->GetCKContext());
         // The tick driver restarted its schedule (a pause, a long stall): our
         // tick numbers no longer line up with the server's.
         if (core.assigned() && fixed_tick_.rebases() != host.last_rebases) {
@@ -3556,6 +3630,10 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     if (core_menu_keys.end(m_bml->GetCKContext()))
         logger_->Info("Physics session: ESC menu keys: the session ended with the menu open or a key held across its "
                       "close; the level's key-reading blocks read no key until both are over");
+    // FULL step RTDF (decision 65): Ball Navigation's Physics WakeUp handed back.
+    logger_->Info("Physics session: %s at the end", core_own_wake.status().c_str());
+    core_own_wake.restore(m_bml->GetCKContext());
+    core_own_wake.clear_counts();   // per session, not per anchor (a reset or resync re-anchors)
     core_reset_restore(m_bml->GetCKContext());   // FULL step LGM: N1, N2 and N4 the core host's own
     core_deactivate_restore(m_bml->GetCKContext(), logger_);
     if (!core_checkpoint_hold.restore(m_bml->GetCKContext()))   // FULL step N3K
@@ -3642,6 +3720,7 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     host.activate_script.clear();
     host.phase = retail_host::phase_type::idle;
     host.session = 0;
+    host.room = 0;
     SendIngameMessage(std::format("Physics session {} over ({}).", session, reason), bmmo::ansi::BrightYellow);
     logger_->Info("Physics session %u ended: %s", session, reason.c_str());
 }

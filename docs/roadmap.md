@@ -1447,6 +1447,15 @@ numbers 1-10 are unchanged.
    session; (b) the replica wakes the ball at a PAUSED edge in every world;
    (c) report an own-ball script wake the replica did not make as a
    BodyRevived. record-format-gaps-design.md "As built (step RTD)".
+   **Closed: decided 2026-11-01 (the user, decision 65: (a)), built at
+   FULL step RTDF** (`BallanceMMOClient/session/own_wake_guard.hpp`, core
+   host only): Ball Navigation's shared Physics WakeUp block runs a wrapper
+   in a core session that skips the queued wake when its target is the own
+   ball (the block's own path otherwise); the own replica's wakes are
+   unchanged. `scripts/retail/rtdf_wake`: 0 own-ball script wakes at the
+   menu's open (was 5), client 1's own ball 675/675 FINAL rows bit-equal
+   through the menu and after (was 1.786 mm), the server journal 2087/2087
+   (record-format-gaps-design.md "As built (step RTDF)").
 
    **Queued (FULL step RTD, root-caused, pre-existing; the fix is the
    user's choice): Exit Level inside a session.** Through the menu's own
@@ -1464,6 +1473,16 @@ numbers 1-10 are unchanged.
    PostExitLevel, send the leave; (c) accept (rows after a leaver's
    PreExitLevel not compared; the server holds it until the room closes).
    record-format-gaps-design.md "As built (step RTD)".
+   **Closed: decided 2026-11-01 (the user, decision 66: (a)), built at
+   FULL step RTDF** (`BallanceMMOClient::OnPreExitLevel` ->
+   `core_host_pre_exit_level`): the session ends at PreExitLevel, before the
+   exit chain, and the client sends a room Leave (J4's path; adapted: the
+   wire has no session-only leave, so the player leaves the room too).
+   `scripts/retail/rtdf_l12`: the leaver's FINAL rows end at 1076 (left at
+   1078) and are all bit-equal (8/8 mechanisms; was 0/8 over 11512..11528),
+   the server removed the member two ticks later (was held 498 ticks), the
+   staying copy bit-equal, the server journal 1817/1817
+   (record-format-gaps-design.md "As built (step RTDF)").
 6. **Record-format gaps** (`record-format-gaps-design.md`; K0 built): K1
    the time factor and gravity per tick (**built, step RK1**: bridge v28,
    the engine puts each tick's factor and gravity back in a rewind, no wire

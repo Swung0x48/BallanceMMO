@@ -370,9 +370,16 @@ void BallanceMMOClient::OnUnphysicalize(CK3dEntity* target) {
     core_host_on_unphysicalize(target);
 }
 
+// FULL step RTDF (decision 66): a session ends when the level's exit starts,
+// before Event_handler's Exit Level chain tears the level down, and the member
+// leaves the room (session/core_host.cpp core_host_pre_exit_level).
+void BallanceMMOClient::OnPreExitLevel() { core_host_pre_exit_level(); }
+
 void BallanceMMOClient::OnPostExitLevel() {
     // Step SP9: a core session's own reload (its countdown on a level that ran
-    // a session) leaves the level and goes on; any other exit ends a session.
+    // a session) leaves the level and goes on; any other exit ends a session
+    // (FULL step RTDF: already at OnPreExitLevel, with a leave; this end is
+    // the fallback for an exit that did not pass there).
     if (!core_host_reload_exit()) core_host_end_local("left the level");
     core_host_release_placement("the level exit");   // step SP10: the sector placement's copies go with the level
     // The guard's callback hangs on a level script, so the teardown destroys it
