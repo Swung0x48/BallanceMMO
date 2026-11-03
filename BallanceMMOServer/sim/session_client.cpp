@@ -1380,9 +1380,22 @@ namespace {
                 return msg.deserialize();
             };
             switch (raw->code) {
-            case bmmo::LoginAcceptedV3: {
+            case bmmo::LoginAcceptedV3:
+            case bmmo::LoginAcceptedV4: {
                 bmmo::login_accepted_v3_msg msg;
-                if (!fill(msg)) return;
+                if (raw->code == bmmo::LoginAcceptedV4) {
+                    bmmo::login_accepted_v4_msg accepted;
+                    if (!fill(accepted)) return;
+                    const auto& info = accepted.server_info;
+                    logf("Server %s; physics sessions: %s (protocol %u)%s%s; rooms: %s, up to %u players, "
+                         "%u physics room(s); trafo inputs: %s; placement clones: %s",
+                         info.version.c_str(), info.physics_available ? "available" : "not available",
+                         info.physics_protocol, info.physics_available ? "" : " - ",
+                         info.physics_unavailable_reason.c_str(), info.rooms_enabled ? "on" : "off",
+                         info.maximum_members, info.maximum_physics_rooms,
+                         info.trafo_inputs ? "on" : "off", info.placement_clones ? "on" : "off");
+                    msg = std::move(accepted);
+                } else if (!fill(msg)) return;
                 for (const auto& [id, data]: msg.online_players)
                     if (data.name == args_.name) core_.set_own_id(id);
                 logf("logged in (own id %u, %zu online)", core_.own_id(), msg.online_players.size());
@@ -2465,6 +2478,7 @@ namespace {
 
         void announce_map() {
             bmmo::current_map_msg msg{};
+            std::memset(&msg.content, 0, sizeof(msg.content));
             msg.content.map.type = bmmo::map_type::OriginalLevel;
             msg.content.map.level = args_.level;
             bmmo::hex_chars_from_string(msg.content.map.md5, bmmo::map::original_map_hashes[std::clamp(args_.level, 0, 13)]);

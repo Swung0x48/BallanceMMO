@@ -484,7 +484,7 @@ private:
 	                       bmmo::room::mode mode = bmmo::room::mode::Physics, std::string name = {},
 	                       bool announce = true);
 	void room_panel_toggle();      // "/mmo panel"
-	void room_panel_on_login();    // LoginAcceptedV3: the panel opens with a fresh list
+	void room_panel_on_login(const std::optional<bmmo::login_server_info>& server_info);
 	// OnProcess, every frame: the panel draws into BML+'s ImGui frame (the one
 	// wrapped around OnProcess - never a frame of our own), its action goes
 	// out and the game's keyboard stays blocked exactly while it is open.

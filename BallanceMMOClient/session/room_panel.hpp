@@ -22,11 +22,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <imgui.h>
 #include <message/room_state_msg.hpp>
+#include <message/login_accepted_v4_msg.hpp>
 
 namespace bmmo::retail {
     class room_panel {
@@ -69,6 +71,11 @@ namespace bmmo::retail {
             return visible_;
         }
 
+        void set_server_info(const std::optional<bmmo::login_server_info>& info) {
+            std::lock_guard lk(mtx_);
+            server_info_ = info;
+        }
+
         // Back to the freshly-connected state: closed, the create name
         // cleared, the start mode back at its default.
         void reset() {
@@ -76,6 +83,7 @@ namespace bmmo::retail {
             visible_ = false;
             create_name_[0] = '\0';
             start_mode_ = bmmo::room::mode::Physics;
+            server_info_.reset();
         }
 
         // Game thread, inside BML+'s ImGui frame. Renders the panel when it
@@ -114,6 +122,7 @@ namespace bmmo::retail {
 
         mutable std::mutex mtx_;
         bool visible_ = false;                       // guarded by mtx_
+        std::optional<bmmo::login_server_info> server_info_;  // LoginAcceptedV4's; guarded by mtx_
         // +1 for the NUL; ImGui enforces the wire's 32-byte name cap.
         char create_name_[bmmo::room::MAX_ROOM_NAME + 1] = {};  // guarded by mtx_
         bmmo::room::mode start_mode_ = bmmo::room::mode::Physics;  // guarded by mtx_
@@ -195,6 +204,22 @@ namespace bmmo::retail {
                 draw_list->AddCircle(center, radius, ImGui::GetColorU32(faint), 16, ui_scale);
                 draw_list->PathArcTo(center, radius, angle, angle + 4.71f, 16);
                 draw_list->PathStroke(ImGui::GetColorU32(amber), false, 1.2f * ui_scale);
+            }
+            if (server_info_) {
+                const auto& info = *server_info_;
+                ImGui::TextColored(amber, "Server %s", info.version.c_str());
+                if (info.physics_available)
+                    ImGui::TextColored(green, "Physics sessions: available (protocol %u)", info.physics_protocol);
+                else {
+                    ImGui::PushStyleColor(ImGuiCol_Text, amber);
+                    ImGui::TextWrapped("Physics sessions: not available - %s", info.physics_unavailable_reason.c_str());
+                    ImGui::PopStyleColor();
+                }
+                ImGui::TextWrapped("Rooms: %s, up to %u players; %u physics room%s at a time",
+                                   info.rooms_enabled ? "on" : "off", info.maximum_members,
+                                   info.maximum_physics_rooms, info.maximum_physics_rooms == 1 ? "" : "s");
+                ImGui::TextWrapped("Trafo inputs: %s   Placement clones: %s",
+                                   info.trafo_inputs ? "on" : "off", info.placement_clones ? "on" : "off");
             }
             const bool in_room = state.own_room != 0;
 

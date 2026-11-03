@@ -3867,7 +3867,7 @@ protected:
                 const bool is_ghost_spectator = bmmo::name_validator::is_spectator(msg.nickname) || is_op(networking_msg->m_conn);
                 if (is_ghost_spectator)
                     ghost_spectator_clients_.insert(networking_msg->m_conn);
-                Printf(bmmo::color_code(bmmo::LoginAcceptedV3),
+                Printf(bmmo::color_code(bmmo::LoginAcceptedV4),
                         "%s (%s; v%s) logged in with cheat mode %s!\n",
                         msg.nickname,
                         uuid_string.substr(0, 8),
@@ -3882,7 +3882,23 @@ protected:
                 }
 
                 // notify this client of other online players
-                bmmo::login_accepted_v3_msg accepted_msg;
+                bmmo::login_accepted_v4_msg accepted_msg;
+                auto& info = accepted_msg.server_info;
+                info.version = bmmo::current_version.to_string();
+#if BMMO_BUILD_SIM
+                info.physics_available = static_cast<bool>(runner_);
+                if (!info.physics_available)
+                    info.physics_unavailable_reason = config_.physics_enabled
+                            ? "physics engine is unavailable" : "physics disabled in the config";
+#else
+                info.physics_unavailable_reason = "server built without physics support";
+#endif
+                info.physics_protocol = bmmo::session::PHYSICS_PROTOCOL_VERSION;
+                info.rooms_enabled = config_.rooms_enabled;
+                info.maximum_members = std::clamp<uint32_t>(config_.maximum_members, 1, bmmo::room::MAX_MEMBERS_PER_MESSAGE);
+                info.maximum_physics_rooms = config_.maximum_physics_rooms;
+                info.trafo_inputs = config_.physics_trafo_inputs;
+                info.placement_clones = config_.physics_placement_clones;
                 accepted_msg.online_players.reserve(clients_.size());
                 for (const auto& [id, data]: clients_) {
                     //if (client_it != it)
@@ -4525,6 +4541,7 @@ protected:
             case bmmo::LatencyData:
             case bmmo::LoginAcceptedV2:
             case bmmo::LoginAcceptedV3:
+            case bmmo::LoginAcceptedV4:
             case bmmo::PlayerConnectedV2:
             case bmmo::HighscoreTimerCalibration:
             case bmmo::NameUpdate:

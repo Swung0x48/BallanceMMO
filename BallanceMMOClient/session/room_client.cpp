@@ -85,12 +85,13 @@ void BallanceMMOClient::room_panel_toggle() {
     SendIngameMessage(room_panel_ui.visible() ? "Room panel opened." : "Room panel closed.");
 }
 
-// LoginAcceptedV3: the panel opens with a fresh list.  The background list
+// LoginAcceptedV3/V4: the panel opens with a fresh list.  The background list
 // does not print the roster in BML's message area (announce=false).  A login
 // inside a level, outside a core session, also opens the pause menu through
 // Gameplay_Events' own ESC Key Event (the user, 2026-11-02), so the level
 // waits behind the panel.
-void BallanceMMOClient::room_panel_on_login() {
+void BallanceMMOClient::room_panel_on_login(const std::optional<bmmo::login_server_info>& server_info) {
+    room_panel_ui.set_server_info(server_info);
     room_panel_ui.open();
     send_room_request(bmmo::room::action::List, 0, 0, bmmo::room::mode::Physics, {}, false);
     utils_.run_on_game_thread([this] {

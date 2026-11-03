@@ -111,6 +111,7 @@ namespace bmmo {
         SessionClockAck,
         SessionStartAt,
         SessionStartStatus,
+        LoginAcceptedV4,
     };
 
     template<typename T, opcode C = None>

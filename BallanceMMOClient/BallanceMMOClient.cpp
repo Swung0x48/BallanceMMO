@@ -2011,8 +2011,17 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         logger_->Warn("Outdated LoginAccepted%s msg received!", (raw_msg->code == bmmo::LoginAcceptedV2) ? "V2" : "");
         break;
     }
-    case bmmo::LoginAcceptedV3: {
-        auto msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(network_msg);
+    case bmmo::LoginAcceptedV3:
+    case bmmo::LoginAcceptedV4: {
+        bmmo::login_accepted_v3_msg msg;
+        std::optional<bmmo::login_server_info> server_info;
+        if (raw_msg->code == bmmo::LoginAcceptedV4) {
+            auto accepted = bmmo::message_utils::deserialize<bmmo::login_accepted_v4_msg>(network_msg);
+            server_info = std::move(accepted.server_info);
+            msg = std::move(accepted);
+        } else {
+            msg = bmmo::message_utils::deserialize<bmmo::login_accepted_v3_msg>(network_msg);
+        }
         std::lock_guard lk(bml_mtx_);
 
         if (logged_in_) {
@@ -2062,7 +2071,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 
         // The room panel opens on login with a fresh list (session/room_client.cpp;
         // the request reports to the panel alone, not the chat).
-        room_panel_on_login();
+        room_panel_on_login(server_info);
 
         // The rest of the login sequence reads the status sprite, the current
         // ball and the mod list - all engine state. Hand it to the game thread

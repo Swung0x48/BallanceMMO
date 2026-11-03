@@ -12,6 +12,7 @@ namespace bmmo {
             case LoginAccepted:
             case LoginAcceptedV2:
             case LoginAcceptedV3:
+            case LoginAcceptedV4:
                 return a::BrightYellow;
             case PlayerDisconnected:
                 return a::BrightYellow | a::Underline;

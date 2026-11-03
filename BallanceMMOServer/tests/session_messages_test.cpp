@@ -53,6 +53,42 @@ void expect_rejects_every_truncation(Msg& msg) {
 
 } // namespace
 
+TEST(LoginAcceptedV4Msg, SerializeDeserializeRoundTrip) {
+    bmmo::login_accepted_v4_msg msg;
+    bmmo::map player_map{};
+    player_map.type = bmmo::map_type::OriginalLevel;
+    player_map.level = 8;
+    for (size_t index = 0; index < sizeof(player_map.md5); ++index)
+        player_map.md5[index] = static_cast<uint8_t>(index + 1);
+    msg.online_players.emplace(10, bmmo::player_status_v3{"Alice", 0, player_map, 3});
+    msg.online_players.emplace(42, bmmo::player_status_v3{"Bob", 1, {}, 0});
+    msg.server_info = {"4.0.0-alpha4", false, "physics disabled in the config", 27, true, 8, 1, true, false};
+
+    auto parsed = round_trip(msg);
+
+    EXPECT_EQ(bmmo::LoginAcceptedV4, parsed.code);
+    ASSERT_EQ(msg.online_players.size(), parsed.online_players.size());
+    for (const auto& [id, player]: msg.online_players) {
+        ASSERT_TRUE(parsed.online_players.contains(id));
+        const auto& actual = parsed.online_players.at(id);
+        EXPECT_EQ(player.name, actual.name);
+        EXPECT_EQ(player.cheated, actual.cheated);
+        EXPECT_EQ(player.map.type, actual.map.type);
+        EXPECT_EQ(player.map.level, actual.map.level);
+        EXPECT_EQ(0, std::memcmp(player.map.md5, actual.map.md5, sizeof(player.map.md5)));
+        EXPECT_EQ(player.sector, actual.sector);
+    }
+    EXPECT_EQ(msg.server_info.version, parsed.server_info.version);
+    EXPECT_EQ(msg.server_info.physics_available, parsed.server_info.physics_available);
+    EXPECT_EQ(msg.server_info.physics_unavailable_reason, parsed.server_info.physics_unavailable_reason);
+    EXPECT_EQ(msg.server_info.physics_protocol, parsed.server_info.physics_protocol);
+    EXPECT_EQ(msg.server_info.rooms_enabled, parsed.server_info.rooms_enabled);
+    EXPECT_EQ(msg.server_info.maximum_members, parsed.server_info.maximum_members);
+    EXPECT_EQ(msg.server_info.maximum_physics_rooms, parsed.server_info.maximum_physics_rooms);
+    EXPECT_EQ(msg.server_info.trafo_inputs, parsed.server_info.trafo_inputs);
+    EXPECT_EQ(msg.server_info.placement_clones, parsed.server_info.placement_clones);
+}
+
 // ---------------------------------------------------------------------
 // session_start_msg
 // ---------------------------------------------------------------------
