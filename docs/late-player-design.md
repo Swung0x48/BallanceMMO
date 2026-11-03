@@ -3661,6 +3661,46 @@ switch, so every reference to them in §1.4, §2-§3 and the §6 table (steps 3,
 host (`BallanceMMOServer/sim/session_client.cpp`, which keeps only the
 harness flags).
 
+**As built (step LB1, 2026-11-02).** Observe only, on 837e24c6 (protocol 26).
+`arrival_ring` keeps the first network-thread `at` and posted-command `seen`
+for 256 ticks, including stale frames but excluding lookahead garbage.
+`lateness_baseline` freezes the median of the first 264 newest-frame samples,
+floored at 3. Reassignments clear the arrival ring and shadow waiver, retain
+the baseline, and retire an outstanding correction's epoch; `rebase(delta)`
+is available for the lead difference (the running re-anchor wiring is LB4).
+
+Startup collection opens at the adopted schedule's X in `start_ticking`,
+not at `player_ready`, a proposal, or the time `start_at` was called. An
+arrival before X cannot sample it. A joiner's assignment instant or current
+epoch correction ack opens its window; the fallback is 660 **simulated
+ticks** after assignment and is never available to a held startup member.
+The server checks both the correction epoch and the current notice epoch;
+the runner checks the epoch again when its posted command executes.
+
+The separate quorum observer evaluates both timers (M = 4, M2 = 10 ticks),
+the clamp and the pacing floor after each step, then the shadow waiver after
+each step and on late arrivals. Since flags-off does not wake on hypothetical timers,
+it also reconstructs timer expiries between posts before counting would-cuts.
+It never changes the step verdict, input buffer, lead, journal or wire.
+Every 660 stepped ticks S1 quorum reports counted members, member-ticks,
+cuts by timer/waiver, normalized gap and `seen-at` p50/p95/p99/max, actual
+patience-wake offsets and sample count, plus each baseline and n q50/q90.
+`physics.arrival_trace` adds per-tick member slacks; default false. Off-mode
+has no patience wakes: `wake-samples=0` is not a measured zero wake delay.
+
+Validation: x64 BUILD-OK / DEPS-OK, x86 CLIENT-BUILD-OK, 784/784 unit tests,
+GCC syntax, Arch build, and protocol-26 `core_ref_s15` wire check ALL SAME.
+Two 60-second runs, A0 off and A0h off, four separately pinned E-core clients,
+snapshots disabled by the harness intervals: each reports 0 would-cuts in
+15,840 member-ticks, with no resync/rebase. The largest ten-second gap p99 is
+1.218 ticks in A0 (including lifecycle ticks); A0h's is 1.999. A0h baselines
+9.252/22.603/35.661/22.607 are within 0.064 ticks of every reported control
+slack q50. `seen-at` p99 is at most 1.004/1.002 ticks. Generic LOCAL-row
+position failures are not confirmed FINAL physics results (LB0's known
+harness limitation). A0j and A8 remain for LBM. The joiner timeout's move to
+simulated ticks came after these two startup-only runs (startup members never
+use it); builds, tests and the wire check were rerun on it.
+
 #### 6.2.1 Built since 177c337
 
 | plan step | built by | commit | what revision 3 takes from it |

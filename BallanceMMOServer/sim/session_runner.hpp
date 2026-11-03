@@ -67,6 +67,7 @@ namespace bmmo::sim {
         // before patience existed.  Stays off in deployments until the lead
         // adjustment (plan step 11) can lift a player patience cuts off.
         bool patience = false;
+        bool arrival_trace = false;
         // Late-player design 2.2-2.3, plan step 10: a lateness decision for a
         // client that declared CAP_LEAD becomes a SessionLead (on_lead), a
         // raise resets that player's input buffer over [N, E), and an
@@ -327,6 +328,7 @@ namespace bmmo::sim {
         // (late-player design 2.1: its reference is measured anew after every
         // assignment).
         void player_ready(uint32_t session, uint32_t player, uint32_t first_tick);
+        void player_start_settled(uint32_t session, uint32_t player, uint32_t epoch);
         // FULL step SAXH (runner_config::scheduled_start): the start handshake
         // is through - the session's schedule starts at `origin` (its tick 0
         // is due there, the start base start_base periods later, exactly as
@@ -441,6 +443,23 @@ namespace bmmo::sim {
             std::map<uint32_t, uint8_t> join_orders;
             std::set<uint32_t> ready;
             std::map<uint32_t, bmmo::session::input_buffer> inputs;
+            struct arrival_entry {
+                bmmo::session::arrival_ring ring;
+                bmmo::session::lateness_baseline baseline;
+                bool waived = false;
+                bool sampled = false;
+                uint32_t newest = 0;
+                std::vector<double> n, slack;
+            };
+            std::map<uint32_t, arrival_entry> arrivals;
+            struct quorum_tick {
+                uint32_t tick = 0;
+                std::vector<bmmo::session::quorum_member> members;
+            };
+            std::deque<quorum_tick> quorum_history;
+            uint64_t quorum_ticks = 0, quorum_member_ticks = 0, quorum_last = 0, quorum_wide = 0, quorum_waived = 0;
+            std::vector<double> quorum_gap, arrival_queue, quorum_wake;
+            std::chrono::steady_clock::time_point patience_wake{};
             // Late-player design 2.1, observe only (plan step 7): every
             // player's lateness meter, fed one sample per uplink datagram and
             // evaluated at every stepped tick.  Nothing acts on it yet: its
@@ -624,6 +643,10 @@ namespace bmmo::sim {
         void queue_trafo(session_state& s, const bmmo::session::trafo_decision& d, const float position[3],
                          std::chrono::steady_clock::time_point arrival, uint64_t token, const char* why);
         void observe_lateness(session_state& s, uint32_t tick);
+        std::vector<bmmo::session::quorum_member> quorum_members(const session_state& s, uint32_t tick) const;
+        void observe_quorum(session_state& s, uint32_t tick,
+                            const std::vector<bmmo::session::quorum_member>& members);
+        void observe_quorum_arrival(session_state& s, uint32_t player, uint32_t tick);
         // What a decision does with lead_adjust on (design 2.3): the plan,
         // the buffer reset, the S1 lead line, the journal note and on_lead.
         void apply_lead_decision(session_state& s, uint32_t player, const bmmo::session::lateness_decision& d,

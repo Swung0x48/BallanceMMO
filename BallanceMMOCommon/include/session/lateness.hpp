@@ -93,6 +93,139 @@ namespace bmmo::session {
         return n % 2 ? values[n / 2] : 0.5 * (values[n / 2 - 1] + values[n / 2]);
     }
 
+    // LB1: first arrivals, including redundant and already stepped frames.
+    class arrival_ring {
+    public:
+        using time_point = std::chrono::steady_clock::time_point;
+        struct entry {
+            uint32_t tick = 0;
+            time_point at{}, seen{};
+            bool as_newest = false;
+            bool used = false;
+        };
+        bool record(uint32_t tick, time_point at, time_point seen, bool newest) {
+            auto& e = entries_[tick % entries_.size()];
+            if (e.used && static_cast<int32_t>(tick - e.tick) <= 0) return false;
+            e = {tick, at, std::max(at, seen), newest, true};
+            return true;
+        }
+        const entry* find(uint32_t tick) const {
+            const auto& e = entries_[tick % entries_.size()];
+            return e.used && e.tick == tick ? &e : nullptr;
+        }
+    private:
+        std::array<entry, 256> entries_{};
+    };
+
+    class lateness_baseline {
+    public:
+        using time_point = arrival_ring::time_point;
+        // Reassignments retain the measurement, but retire an old correction.
+        void assigned(uint32_t epoch, bool startup, uint32_t tick) {
+            epoch_ = epoch;
+            assigned_ = true;
+            startup_ = startup;
+            assigned_tick_ = tick;
+        }
+        void settled(uint32_t epoch, time_point at) {
+            if (!assigned_ || epoch != epoch_ || started_) return;
+            start_ = at;
+            started_ = true;
+        }
+        bool timeout(uint32_t tick, time_point now) {
+            if (!assigned_ || startup_ || started_
+                    || static_cast<int32_t>(tick - assigned_tick_) < 660) return false;
+            settled(epoch_, now);
+            return true;
+        }
+        bool sample(uint32_t tick, double slack, time_point at) {
+            if (!started_ || at < start_ || frozen() || (any_ && static_cast<int32_t>(tick - newest_) <= 0))
+                return false;
+            newest_ = tick;
+            any_ = true;
+            samples_.push_back(slack);
+            if (frozen()) value_ = std::max(3.0, lateness_median(samples_));
+            return true;
+        }
+        void rebase(double delta) {
+            if (frozen()) value_ += delta;
+            else for (auto& sample: samples_) sample += delta;
+        }
+        bool frozen() const { return samples_.size() == 264; }
+        double value() const { return value_; }
+        size_t samples() const { return samples_.size(); }
+        uint32_t epoch() const { return epoch_; }
+    private:
+        std::vector<double> samples_;
+        uint32_t epoch_ = 0, newest_ = 0, assigned_tick_ = 0;
+        time_point start_{};
+        double value_ = 0;
+        bool assigned_ = false, startup_ = true, started_ = false, any_ = false;
+    };
+
+    // Observation only. Times are ticks relative to this tick's deadline.
+    // The two timers' margins: M after the last other counted member, M2
+    // after the counted majority (late-player design 6.1 R1).
+    inline constexpr double kQuorumLastMargin = 4.0;
+    inline constexpr double kQuorumWideMargin = 10.0;
+    struct quorum_member {
+        uint32_t player = 0;
+        bool ready = false, baseline = false, exempt = false, waived = false, arrived = false;
+        double a = 0, seen = 0;
+        bool counted() const { return ready && baseline && !exempt && !waived; }
+    };
+    struct quorum_timer {
+        double last = 0, wide = 0; // leads before the deadline; zero means deadline
+        double lead() const { return std::max(last, wide); }
+    };
+    inline quorum_timer quorum_patience(const std::vector<quorum_member>& members, size_t p, double now) {
+        quorum_timer timer;
+        if (!members[p].counted()) return timer;
+        size_t counted = 0, others = 0;
+        std::vector<double> seen;
+        double latest = 0;
+        for (size_t i = 0; i < members.size(); ++i) {
+            const auto& m = members[i];
+            if (!m.counted()) continue;
+            ++counted;
+            if (i != p) ++others;
+            if (!m.arrived || m.seen > now) continue;
+            seen.push_back(m.a + m.seen);
+            if (i != p) latest = std::max(latest, m.a + m.seen);
+        }
+        size_t other_seen = seen.size();
+        if (members[p].arrived && members[p].seen <= now) --other_seen;
+        if (others && other_seen == others) timer.last = std::max(0.0, members[p].a - latest - kQuorumLastMargin);
+        const size_t majority = (counted + 1) / 2;
+        if (counted >= 4 && seen.size() >= majority) {
+            std::sort(seen.begin(), seen.end());
+            timer.wide = std::max(0.0, members[p].a - std::max(0.0, seen[majority - 1]) - kQuorumWideMargin);
+        }
+        return timer;
+    }
+    // When the quorum would have stepped this tick. Off-mode never sleeps on
+    // these timers, so the expiries between real wakeups are reconstructed:
+    // otherwise a timer that expired before the next post would vanish from
+    // the would-cut count when that post supplied the frame.
+    inline double quorum_step_time(const std::vector<quorum_member>& members) {
+        std::vector<double> events{0};
+        for (const auto& m: members) if (m.arrived && m.seen < 0) events.push_back(m.seen);
+        std::sort(events.begin(), events.end());
+        double earliest = 0;
+        for (const double at: events) {
+            double candidate = at;
+            bool paced = false;
+            for (const auto& m: members) if (m.arrived && m.seen <= at) paced = true;
+            for (size_t i = 0; i < members.size(); ++i) {
+                const auto& m = members[i];
+                if ((m.arrived && m.seen <= at) || (paced && (m.exempt || m.waived))) continue;
+                candidate = std::max(candidate, -quorum_patience(members, i, at).lead());
+            }
+            earliest = std::min(earliest, candidate);
+        }
+        return earliest;
+    }
+
     // The patience margin (design 2.6): a player's patience ends this many
     // ticks AFTER the q01 of its frozen reference, `r01 - 1`, so the margin
     // above its usual tail is `r10 - r01 + 1` ticks, sized from its own spread.

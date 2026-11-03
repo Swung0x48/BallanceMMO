@@ -81,6 +81,7 @@ bool config_manager::load() {
         // delivers deeper than that cannot be replayed.
         physics_relay_window = std::clamp<uint32_t>(physics_relay_window, 1u, 16u);
         physics_patience = yaml_load_value(physics, "patience", physics_patience);
+        physics_arrival_trace = yaml_load_value(physics, "arrival_trace", physics_arrival_trace);
         physics_lead_adjust = yaml_load_value(physics, "lead_adjust", physics_lead_adjust);
         physics_test_clock_skew = yaml_load_value(physics, "test_clock_skew", std::string{});
         physics_trafo_inputs = yaml_load_value(physics, "trafo_inputs", physics_trafo_inputs);

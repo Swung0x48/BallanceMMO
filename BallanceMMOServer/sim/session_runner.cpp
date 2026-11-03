@@ -215,6 +215,8 @@ namespace bmmo::sim {
         const auto schedule_start = now + std::chrono::duration_cast<clock::duration>(
                 std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0));
         s.scheduler.start(schedule_start, s.world->tick_index(), s.input_delay);
+        for (auto& [player, entry]: s.arrivals)
+            entry.baseline.settled(entry.baseline.epoch(), now);
         s.running = true;
         {
             std::lock_guard lk(view_mutex_);
@@ -387,6 +389,7 @@ namespace bmmo::sim {
                 s->join_orders[player] = join_order;
                 s->lives[player] = 1;   // step M1: a member present at the start is in its first life
                 s->inputs[player].reset(first_tick);
+                s->arrivals.try_emplace(player);
                 s->journal.player(first_tick, player, join_order, true,
                                   i < names.size() ? names[i] : std::string{});
             }
@@ -500,6 +503,7 @@ namespace bmmo::sim {
         s.join_orders[player] = join_order;
         s.lives[player] = life;
         s.inputs[player].reset(s.world->tick_index());
+        s.arrivals.try_emplace(player);
         s.cadence.force_full();
         s.journal.player(s.world->tick_index(), player, join_order, true, name, life);
         if (callbacks_.on_player_added) callbacks_.on_player_added(change);
@@ -565,6 +569,7 @@ namespace bmmo::sim {
                 }
                 s.ready.erase(player);
                 s.inputs.erase(player);
+                s.arrivals.erase(player);
                 return;
             }
             // Its last patience counts, before the entry goes.
@@ -654,6 +659,7 @@ namespace bmmo::sim {
             s.players.erase(player);
             s.ready.erase(player);
             s.inputs.erase(player);
+            s.arrivals.erase(player);
             s.lateness.erase(player);
             s.patience.erase(player);
             s.leads.erase(player);
@@ -679,6 +685,11 @@ namespace bmmo::sim {
             auto& s = *it->second;
             if (!s.players.count(player)) return;
             s.ready.insert(player);
+            auto& arrivals = s.arrivals[player];
+            arrivals.ring = {};
+            arrivals.waived = false;
+            arrivals.sampled = false;
+            arrivals.baseline.assigned(first_tick, !s.running, s.world->tick_index());
             // A resync or a late join re-anchors a buffer that may already hold
             // frames: reset() keeps everything at or after first_tick and
             // refuses to move the cursor backwards, so the batch the client
@@ -735,6 +746,16 @@ namespace bmmo::sim {
                 log_patience_on(s);
             }
             wake_.notify_all();
+        });
+    }
+
+    void session_runner::player_start_settled(uint32_t session, uint32_t player, uint32_t epoch) {
+        post([this, session, player, epoch] {
+            const auto s = sessions_.find(session);
+            if (s == sessions_.end()) return;
+            const auto p = s->second->arrivals.find(player);
+            if (p == s->second->arrivals.end() || !s->second->running) return;
+            p->second.baseline.settled(epoch, clock::now());
         });
     }
 
@@ -827,6 +848,7 @@ namespace bmmo::sim {
     void session_runner::submit_input(uint32_t session, uint32_t player, uint32_t first_tick,
                                       std::vector<bmmo::session::input_frame> frames, clock::time_point arrival) {
         post([this, session, player, first_tick, arrival, frames = std::move(frames)] {
+            const auto seen = clock::now();
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
             auto& s = *it->second;
@@ -835,6 +857,24 @@ namespace bmmo::sim {
             // The lookahead the buffer judges this datagram by is the one
             // before it is stored.
             const uint32_t cursor = buffer->second.next_tick();
+            auto& observed = s.arrivals.at(player);
+            for (size_t i = 0; i < frames.size(); ++i) {
+                const uint32_t t = first_tick + static_cast<uint32_t>(i);
+                if (t >= cursor + bmmo::session::input_buffer::kMaxLookahead) continue;
+                const bool newest = i + 1 == frames.size()
+                    && (!observed.sampled || static_cast<int32_t>(t - observed.newest) > 0);
+                if (!observed.ring.record(t, arrival, seen, newest)) continue;
+                if (newest) { observed.sampled = true; observed.newest = t; }
+                if (!s.running || !s.scheduler.started() || t < s.scheduler.first_tick()) continue;
+                if (newest) {
+                    const double slack = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(t), arrival);
+                    observed.baseline.sample(t, slack, arrival);
+                    observed.slack.push_back(slack);
+                    if (observed.baseline.frozen()) observed.n.push_back(observed.baseline.value() - slack);
+                    s.arrival_queue.push_back(bmmo::session::lateness_slack_ticks(seen, arrival));
+                }
+                observe_quorum_arrival(s, player, t);
+            }
             // Step B2SX: the arrival goes with the frames, so the step judges
             // each by its own tick's deadline (input_buffer::take's cutoff).
             buffer->second.submit(first_tick, frames, arrival);
@@ -1668,6 +1708,116 @@ namespace bmmo::sim {
         }
     }
 
+    std::vector<bmmo::session::quorum_member> session_runner::quorum_members(const session_state& s,
+                                                                          uint32_t tick) const {
+        std::vector<bmmo::session::quorum_member> members;
+        for (const auto& [player, buffer]: s.inputs) {
+            const auto& entry = s.arrivals.at(player);
+            bmmo::session::quorum_member m;
+            m.player = player;
+            m.ready = s.ready.count(player) != 0;
+            m.baseline = entry.baseline.frozen();
+            m.a = entry.baseline.value();
+            m.exempt = buffer.held(tick) || (!buffer.has(tick) && buffer.settled(tick));
+            m.waived = entry.waived;
+            if (const auto* frame = entry.ring.find(tick)) {
+                m.arrived = true;
+                m.seen = -bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), frame->seen);
+            }
+            members.push_back(m);
+        }
+        return members;
+    }
+
+    void session_runner::observe_quorum_arrival(session_state& s, uint32_t player, uint32_t tick) {
+        auto& entry = s.arrivals.at(player);
+        if (!entry.waived) return;
+        for (const auto& past: s.quorum_history) {
+            if (past.tick != tick) continue;
+            auto members = past.members;
+            size_t p = members.size();
+            double latest = 0;
+            for (size_t i = 0; i < members.size(); ++i) {
+                auto& m = members[i];
+                if (m.player == player) { p = i; m.waived = false; }
+                const auto other = s.arrivals.find(m.player);
+                if (other == s.arrivals.end()) continue;
+                if (const auto* frame = other->second.ring.find(tick)) {
+                    m.arrived = true;
+                    m.seen = -bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), frame->seen);
+                }
+                if (m.arrived) latest = std::max(latest, m.seen);
+            }
+            if (p < members.size() && members[p].arrived
+                    && members[p].seen <= -bmmo::session::quorum_patience(members, p, latest).lead())
+                entry.waived = false;
+            return;
+        }
+    }
+
+    void session_runner::observe_quorum(session_state& s, uint32_t tick,
+                                       const std::vector<bmmo::session::quorum_member>& members) {
+        const double stepped = bmmo::session::quorum_step_time(members);
+        std::vector<double> normalized;
+        std::string trace = "[session " + std::to_string(s.id) + "] S1 arrival tick=" + std::to_string(tick);
+        size_t counted = 0;
+        for (size_t i = 0; i < members.size(); ++i) {
+            const auto& m = members[i];
+            if (m.counted()) ++counted;
+            if (!m.ready || m.exempt) continue;
+            ++s.quorum_member_ticks;
+            if (m.baseline && m.arrived) normalized.push_back(m.a + m.seen);
+            if ((!m.arrived || m.seen > stepped) && stepped < 0) {
+                const auto timer = bmmo::session::quorum_patience(members, i, stepped);
+                if (m.waived) ++s.quorum_waived;
+                else if (timer.last >= timer.wide) ++s.quorum_last;
+                else ++s.quorum_wide;
+                s.arrivals.at(m.player).waived = true;
+            } else if (!m.arrived || m.seen > 0) {
+                s.arrivals.at(m.player).waived = true;
+            }
+            if (config_.arrival_trace)
+                trace += " player=" + std::to_string(m.player) + " slack="
+                    + (m.arrived ? std::to_string(-m.seen) : "missing")
+                    + " baseline=" + std::to_string(m.a) + " waived=" + std::to_string(m.waived);
+        }
+        s.quorum_history.push_back({tick, members});
+        if (s.quorum_history.size() > 256) s.quorum_history.pop_front();
+        for (const auto& m: members) if (m.arrived) observe_quorum_arrival(s, m.player, tick);
+        if (normalized.size() >= 2) {
+            std::sort(normalized.begin(), normalized.end());
+            s.quorum_gap.push_back(normalized.back() - normalized[normalized.size() - 2]);
+        }
+        if (config_.arrival_trace) log(trace + " counted=" + std::to_string(counted));
+        if (++s.quorum_ticks % 660 != 0) return;
+        const auto quantiles = [](const std::vector<double>& values) {
+            return std::to_string(bmmo::session::lateness_quantile(values, .5)) + "/"
+                + std::to_string(bmmo::session::lateness_quantile(values, .95)) + "/"
+                + std::to_string(bmmo::session::lateness_quantile(values, .99)) + "/"
+                + std::to_string(bmmo::session::lateness_quantile(values, 1));
+        };
+        log("[session " + std::to_string(s.id) + "] S1 quorum tick=" + std::to_string(tick)
+            + " counted=" + std::to_string(counted) + " member-ticks=" + std::to_string(s.quorum_member_ticks)
+            + " would-cut-M=" + std::to_string(s.quorum_last) + " would-cut-M2=" + std::to_string(s.quorum_wide)
+            + " would-cut-waiver=" + std::to_string(s.quorum_waived) + " gap=" + quantiles(s.quorum_gap)
+            + " seen-at=" + quantiles(s.arrival_queue) + " wake=" + quantiles(s.quorum_wake)
+            + " wake-samples=" + std::to_string(s.quorum_wake.size()) + " quantiles=p50/p95/p99/max");
+        for (auto& [player, entry]: s.arrivals) {
+            log("[session " + std::to_string(s.id) + "] S1 quorum player=" + std::to_string(player)
+                + " tick=" + std::to_string(tick) + " baseline=" + std::to_string(entry.baseline.value())
+                + " samples=" + std::to_string(entry.baseline.samples()) + " slack-q50="
+                + std::to_string(bmmo::session::lateness_quantile(entry.slack, .5))
+                + " n-q50=" + std::to_string(bmmo::session::lateness_quantile(entry.n, .5))
+                + " n-q90=" + std::to_string(bmmo::session::lateness_quantile(entry.n, .9)));
+            entry.n.clear();
+            entry.slack.clear();
+        }
+        s.quorum_member_ticks = s.quorum_last = s.quorum_wide = s.quorum_waived = 0;
+        s.quorum_gap.clear();
+        s.arrival_queue.clear();
+        s.quorum_wake.clear();
+    }
+
     std::vector<bmmo::session::patience_member> session_runner::patience_members(const session_state& s,
                                                                                uint32_t tick) const {
         std::vector<bmmo::session::patience_member> members;
@@ -1809,6 +1959,10 @@ namespace bmmo::sim {
                     // every buffer has its frame, or the deadline passed.
                     const auto members = patience_members(s, tick);
                     const auto at = clock::now();
+                    for (auto& [player, entry]: s.arrivals)
+                        if (entry.baseline.timeout(tick, at))
+                            log("[session " + std::to_string(s.id) + "] S1 quorum player=" + std::to_string(player)
+                                + " baseline-start=timeout epoch=" + std::to_string(entry.baseline.epoch()));
                     if (config_.test_clock_skew.enabled() && !s.skew_ended) {
                         const auto& fault = config_.test_clock_skew;
                         const std::string prefix = "[session " + std::to_string(s.id) + "] S1 clock-skew ";
@@ -1831,12 +1985,20 @@ namespace bmmo::sim {
                     const auto verdict = bmmo::session::patience_step_test(members, s.scheduler.due(at),
                             config_.patience ? bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), at) : 0.0,
                             config_.patience);
+                    // LB1, observe only: what the quorum would have done is
+                    // judged after the step (observe_quorum); nothing here waits on it.
+                    const auto observed = quorum_members(s, tick);
+                    if (s.patience_wake != clock::time_point{}) {
+                        s.quorum_wake.push_back(bmmo::session::lateness_slack_ticks(at, s.patience_wake));
+                        s.patience_wake = {};
+                    }
                     if (!verdict.step) {
                         if (verdict.wait) {
                             patience_wait = true;
                             patience_sleep = std::chrono::ceil<std::chrono::milliseconds>(
                                     std::chrono::duration<double, std::micro>(
                                             verdict.wait_ticks * bmmo::session::kLatenessTickMicros));
+                            s.patience_wake = at + patience_sleep;
                         }
                         break;
                     }
@@ -1885,6 +2047,7 @@ namespace bmmo::sim {
                                 std::this_thread::sleep_for(std::chrono::milliseconds(ms));
                             }
                         step(s);
+                        observe_quorum(s, tick, observed);
                         s.step_waits.clear();
                         s.step_us.push_back(static_cast<uint32_t>(
                             std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count()));

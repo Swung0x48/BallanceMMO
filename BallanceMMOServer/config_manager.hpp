@@ -90,6 +90,7 @@ public:
     // whose frames still beat the deadline but not its patience is
     // substituted for as long as its lateness lasts.
     bool physics_patience = false;
+    bool physics_arrival_trace = false;
     // Late-player design 2.2-2.5: a lateness decision for a client that
     // declared CAP_LEAD becomes a SessionLead, a raise resets that player's
     // input buffer over the slew, and a late joiner's first lead and a

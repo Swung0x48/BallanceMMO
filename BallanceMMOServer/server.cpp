@@ -869,6 +869,7 @@ public:
         rc.full_snapshot_interval = std::max<uint32_t>(1, config_.physics_full_snapshot_interval);
         rc.trace = config_.physics_debug_trace;
         rc.patience = config_.physics_patience;
+        rc.arrival_trace = config_.physics_arrival_trace;
         rc.lead_adjust = config_.physics_lead_adjust;
         rc.scheduled_start = true;   // FULL step SAXH: the start handshake names the start instant
         if (!bmmo::session::parse_test_clock_skew(config_.physics_test_clock_skew, rc.test_clock_skew)) {
@@ -2003,6 +2004,7 @@ public:
                 assign.start_us = e->arrival_local(assign.server_us);
         s.assign_sent_us[c] = assign.server_us;
         s.assign_had_instant[c] = assign.start_us != 0;
+        if (assign.start_us != 0) runner_->player_start_settled(s.id, c, first_tick);
         assign.serialize();
         send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_ReliableNoNagle);
         // --assign-volley (test builds): the (e) volley, for the wire to show.
@@ -2319,6 +2321,11 @@ public:
         s.handshake.add_sample(c, bmmo::session::make_clock_sample(msg.server_us, msg.client_us, arrival_us), arrival_us);
         if (msg.kind == bmmo::session::CLOCK_ACK_START) {
             s.handshake.start_acked(c, msg.seq, arrival_us);
+            const auto n = s.notices.find(c);
+            const auto corrected = s.corrected.find(c);
+            if (n != s.notices.end() && n->second.assigned && n->second.epoch == msg.first_tick
+                    && corrected != s.corrected.end() && corrected->second == msg.first_tick)
+                runner_->player_start_settled(s.id, c, msg.first_tick);
             return;
         }
         if (msg.kind == bmmo::session::CLOCK_ACK_STARTED) {

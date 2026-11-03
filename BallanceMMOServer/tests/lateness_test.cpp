@@ -19,6 +19,82 @@
 
 using namespace bmmo::session;
 
+TEST(ArrivalRing, FirstArrivalStaleAndWrap) {
+    arrival_ring ring;
+    const auto at = arrival_ring::time_point{} + std::chrono::seconds(1);
+    EXPECT_TRUE(ring.record(100, at, at + std::chrono::milliseconds(2), true));
+    EXPECT_FALSE(ring.record(100, at + std::chrono::milliseconds(3), at, false));
+    EXPECT_EQ(ring.find(100)->at, at);
+    EXPECT_TRUE(ring.find(100)->as_newest);
+    EXPECT_TRUE(ring.record(99, at, at - std::chrono::milliseconds(1), false));
+    EXPECT_EQ(ring.find(99)->seen, at);
+    EXPECT_FALSE(ring.find(99)->as_newest);
+    EXPECT_TRUE(ring.record(356, at, at, false));
+    EXPECT_EQ(ring.find(100), nullptr);
+    EXPECT_FALSE(ring.record(100, at, at, true));
+    EXPECT_EQ(ring.find(356)->tick, 356u);
+}
+
+TEST(LatenessBaseline, HeldStartupWaitsForAdoptedX) {
+    lateness_baseline baseline;
+    const auto assigned = arrival_ring::time_point{};
+    const auto x = assigned + std::chrono::seconds(40);
+    baseline.assigned(20, true, 20);
+    for (uint32_t t = 0; t < 1000; ++t) {
+        EXPECT_FALSE(baseline.timeout(t, assigned + std::chrono::seconds(t)));
+        EXPECT_FALSE(baseline.sample(t, -30, assigned + std::chrono::seconds(t)));
+    }
+    // Proposals and their acks do not call settled. Only the adopted X does.
+    baseline.settled(20, x);
+    EXPECT_FALSE(baseline.sample(1000, -30, x - std::chrono::microseconds(1)));
+    for (uint32_t t = 0; t < 264; ++t) EXPECT_TRUE(baseline.sample(t, t % 2 ? 12 : 10, x));
+    EXPECT_TRUE(baseline.frozen());
+    EXPECT_EQ(baseline.value(), 11);
+    EXPECT_FALSE(baseline.sample(300, 40, x)); // an acknowledged raise cannot remeasure it
+    baseline.assigned(400, false, 400);
+    baseline.settled(400, x);
+    baseline.rebase(-2);
+    EXPECT_EQ(baseline.value(), 9);
+    EXPECT_FALSE(baseline.sample(401, 50, x));
+}
+
+TEST(LatenessBaseline, JoinCorrectionChecksCurrentEpochAndFloor) {
+    lateness_baseline baseline;
+    const auto at = arrival_ring::time_point{};
+    baseline.assigned(100, false, 100);
+    EXPECT_FALSE(baseline.sample(100, -20, at));
+    baseline.assigned(200, false, 200);
+    baseline.settled(100, at);
+    EXPECT_FALSE(baseline.sample(200, -20, at));
+    baseline.settled(200, at);
+    for (uint32_t t = 200; t < 464; ++t) baseline.sample(t, 12, at);
+    EXPECT_EQ(baseline.value(), 12);
+    lateness_baseline fallback;
+    fallback.assigned(1, false, 1);
+    EXPECT_FALSE(fallback.timeout(660, at + std::chrono::seconds(40)));
+    EXPECT_TRUE(fallback.timeout(661, at + std::chrono::seconds(10)));
+    for (uint32_t t = 0; t < 264; ++t) fallback.sample(t, -20, at + std::chrono::seconds(10));
+    EXPECT_EQ(fallback.value(), 3);
+}
+
+TEST(QuorumObservation, TimersClampAndInterveningExpiry) {
+    std::vector<quorum_member> members(4);
+    for (auto& m: members) { m.ready = m.baseline = m.arrived = true; m.a = 20; m.seen = -20; }
+    members[3].seen = -12;
+    EXPECT_EQ(quorum_step_time(members), -16); // expiry before the last arrival woke the runner
+    members[2].seen = -8;
+    EXPECT_EQ(quorum_step_time(members), -10); // two missing: M2
+    members.resize(2);
+    members[0].seen = -30;
+    members[1].seen = -10;
+    EXPECT_EQ(quorum_step_time(members), -16); // the early peer is clamped at on time
+    members[0].baseline = false;
+    EXPECT_EQ(quorum_step_time(members), -10); // no reference, waits for both real frames
+    members[0].arrived = members[1].arrived = false;
+    members[0].waived = members[1].waived = true;
+    EXPECT_EQ(quorum_step_time(members), 0); // pacing floor
+}
+
 namespace {
     constexpr double kTickMs = 1000.0 / 66.0;
     constexpr uint32_t kBase = 100;          // the assignment's first tick
