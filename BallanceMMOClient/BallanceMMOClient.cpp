@@ -706,6 +706,7 @@ void BallanceMMOClient::OnLevelFinish() {
         if (!array_energy || !array_level || !all_levels)
             return;
         bmmo::level_finish_v2_msg msg{};
+        std::memset(&msg.content, 0, sizeof(msg.content));   // its padding too: it goes out raw
         array_energy->GetElementValue(0, 0, &msg.content.points);
         array_energy->GetElementValue(0, 1, &msg.content.lives);
         array_energy->GetElementValue(0, 5, &msg.content.lifeBonus);

@@ -3755,6 +3755,7 @@ namespace {
                             gameplay->GetLastFrameMessage(index)->GetMsgType());
                     if (!name || std::strcmp(name, "Level_Finish") != 0) continue;
                     bmmo::level_finish_v2_msg finish{};
+                    std::memset(&finish.content, 0, sizeof(finish.content));   // its padding too: it goes out raw
                     finish.content.map = session_map_;
                     if (auto* energy = engine_->data_array("Energy")) {
                         energy->GetElementValue(0, 0, &finish.content.points);
