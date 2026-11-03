@@ -446,6 +446,7 @@ namespace bmmo::sim {
             struct arrival_entry {
                 bmmo::session::arrival_ring ring;
                 bmmo::session::lateness_baseline baseline;
+                bmmo::session::relative_meter relative;
                 bool waived = false;
                 bool sampled = false;
                 uint32_t newest = 0;
@@ -643,6 +644,7 @@ namespace bmmo::sim {
         void queue_trafo(session_state& s, const bmmo::session::trafo_decision& d, const float position[3],
                          std::chrono::steady_clock::time_point arrival, uint64_t token, const char* why);
         void observe_lateness(session_state& s, uint32_t tick);
+        void observe_relative(session_state& s, uint32_t tick, std::chrono::steady_clock::time_point now);
         std::vector<bmmo::session::quorum_member> quorum_members(const session_state& s, uint32_t tick) const;
         void observe_quorum(session_state& s, uint32_t tick,
                             const std::vector<bmmo::session::quorum_member>& members);

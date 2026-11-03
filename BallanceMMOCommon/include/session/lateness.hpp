@@ -51,7 +51,10 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <utility>
 #include <vector>
 
 namespace bmmo::session {
@@ -678,6 +681,190 @@ namespace bmmo::session {
         bool given_up_ = false;
         int offset_ = 0;
         int decisions_ = 0;
+    };
+
+    // Revision 3's meter (late-player design 2.1, LB2): a member's lateness
+    // against the others' (L: their median, L': their earliest) and against
+    // its own baseline (the absolute rule), each judged over 66 samples.
+    inline std::pair<double, double> relative_lateness(const std::vector<double>& normalized, size_t member) {
+        std::vector<double> others;
+        for (size_t index = 0; index < normalized.size(); ++index)
+            if (index != member) others.push_back(std::max(0.0, normalized[index]));
+        std::sort(others.begin(), others.end());
+        return {normalized[member] - others[others.size() / 2], normalized[member] - others.front()};
+    }
+
+    struct relative_decision : lateness_decision {
+        const char* rule = "none";
+    };
+
+    class relative_meter {
+    public:
+        static constexpr size_t kWindow = 66;
+        static constexpr double kAbsoluteMissTicks = 3.0;
+        static constexpr double kLowerMarginTicks = 4.0;
+        static constexpr uint32_t kRaiseTicks = 132;
+        static constexpr uint32_t kMinorityPersistTicks = 660;
+        static constexpr uint32_t kSharedPersistTicks = 660;
+        static constexpr uint32_t kLowerTicks = 660;
+
+        void reset(uint32_t base) {
+            const int offset = offset_;
+            const uint32_t sequence = sequence_;
+            *this = relative_meter{};
+            offset_ = offset;
+            sequence_ = sequence;
+            discard_below_ = base;
+        }
+        bool sample_absolute(uint32_t tick, double slack, double baseline) {
+            if (tick < discard_below_ || (absolute_samples_ && tick <= newest_absolute_)) return false;
+            newest_absolute_ = tick;
+            ++absolute_samples_;
+            slack_.sample(slack);
+            normalized_.sample(baseline - slack);
+            return true;
+        }
+        bool sample_relative(uint32_t tick, double relative, double minority) {
+            if (tick < discard_below_ || (relative_samples_ && tick <= newest_relative_)) return false;
+            newest_relative_ = tick;
+            ++relative_samples_;
+            relative_.sample(relative);
+            minority_.sample(minority);
+            return true;
+        }
+        relative_decision on_tick(uint32_t tick, bool shared) {
+            if (absolute_samples_ != absolute_evaluated_) {
+                absolute_evaluated_ = absolute_samples_;
+                absolute_at_ = tick;
+            }
+            if (relative_samples_ != relative_evaluated_) {
+                relative_evaluated_ = relative_samples_;
+                relative_at_ = tick;
+            }
+            last_tick_ = tick;
+            const bool relative_majority = 2 * relative_misses() > kWindow;
+            const bool minority_majority = 2 * minority_misses() > kWindow;
+            const bool absolute = absolute_majority();
+            if (judge_restore_ && tick >= cooldown_until_) {
+                judge_restore_ = false;
+                if (!relative_majority && !minority_majority && !absolute) unrestored_raises_ = 0;
+            }
+            if (relative_evaluated_ && tick - relative_at_ <= lateness_meter::kFreshTicks) {
+                relative_streak_ = relative_majority ? relative_streak_ + 1 : 0;
+                minority_streak_ = minority_majority ? minority_streak_ + 1 : 0;
+                const bool early = offset_ > 0 && relative_.size() == kWindow
+                    && relative_quantile(.95) < -kLowerMarginTicks && !absolute;
+                lower_streak_ = early ? lower_streak_ + 1 : 0;
+            }
+            if (absolute_evaluated_ && tick - absolute_at_ <= lateness_meter::kFreshTicks)
+                absolute_streak_ = absolute ? absolute_streak_ + 1 : 0;
+            if (pending_.action != lateness_action::none || given_up_ || tick < cooldown_until_) return {};
+            relative_decision decision;
+            decision.action = lateness_action::raise;
+            if (relative_streak_ >= kRaiseTicks) {
+                decision.k = std::max(lateness_meter::kMinRaise, static_cast<int>(std::ceil(relative_quantile(.9))));
+                decision.rule = "relative";
+                decision.streak = relative_streak_;
+            }
+            if (minority_streak_ >= kMinorityPersistTicks) {
+                const int amount = std::max(lateness_meter::kMinRaise, static_cast<int>(std::ceil(minority_quantile(.9))));
+                if (amount > decision.k) {
+                    decision.k = amount;
+                    decision.rule = "minority";
+                    decision.streak = minority_streak_;
+                }
+            }
+            if (absolute_streak_ >= (shared ? kSharedPersistTicks : kRaiseTicks)) {
+                const int amount = static_cast<int>(std::ceil(normalized_.quantile(.5, shared ? kSharedPersistTicks : kRaiseTicks)));
+                if (amount > decision.k) {
+                    decision.k = amount;
+                    decision.rule = shared ? "shared-absolute" : "absolute";
+                    decision.streak = absolute_streak_;
+                }
+            }
+            if (decision.k > 0 && unrestored_raises_ >= lateness_meter::kMaxUnrestoredRaises) {
+                given_up_ = true;
+                decision.action = lateness_action::give_up;
+                return decision;
+            }
+            if (decision.k == 0 && lower_streak_ >= kLowerTicks && !absolute) {
+                decision.k = -std::min({offset_, static_cast<int>(std::floor(-relative_quantile(.95))) - 1,
+                    static_cast<int>(std::floor(slack_quantile(.1))) - static_cast<int>(kAbsoluteMissTicks)});
+                if (decision.k >= 0) return {};
+                decision.action = lateness_action::lower;
+                decision.rule = "lower";
+                decision.streak = lower_streak_;
+            }
+            if (decision.k == 0) return {};
+            decision.id = ++sequence_;
+            pending_ = decision;
+            return decision;
+        }
+        bool acknowledge(uint32_t id, int applied, uint32_t effective) {
+            if (pending_.action == lateness_action::none || pending_.id != id) return false;
+            offset_ = std::max(0, offset_ + lateness_bound_applied(applied, pending_.k));
+            cooldown_until_ = effective + static_cast<uint32_t>(std::abs(pending_.k)) * 2 + lateness_meter::kCooldownTicks;
+            if (pending_.action == lateness_action::raise) {
+                ++unrestored_raises_;
+                judge_restore_ = true;
+            }
+            discard_below_ = effective;
+            relative_.clear();
+            minority_.clear();
+            slack_.clear();
+            normalized_.clear();
+            relative_streak_ = minority_streak_ = absolute_streak_ = lower_streak_ = 0;
+            pending_ = {};
+            return true;
+        }
+        void set_offset(int offset) { offset_ = std::max(0, offset); }
+        int offset() const { return offset_; }
+        size_t relative_misses() const { return relative_.misses(kQuorumLastMargin, false); }
+        size_t minority_misses() const { return minority_.misses(kQuorumLastMargin, false); }
+        size_t absolute_misses() const { return slack_.misses(kAbsoluteMissTicks, true); }
+        bool absolute_majority() const { return 2 * absolute_misses() > kWindow; }
+        double relative_quantile(double quantile) const { return relative_.quantile(quantile); }
+        double minority_quantile(double quantile) const { return minority_.quantile(quantile); }
+        double slack_quantile(double quantile) const { return slack_.quantile(quantile); }
+        lateness_state state() const {
+            if (given_up_) return lateness_state::given_up;
+            if (pending_.action != lateness_action::none) return lateness_state::pending;
+            if (!absolute_samples_) return lateness_state::measuring;
+            return last_tick_ < cooldown_until_ ? lateness_state::cooldown : lateness_state::watching;
+        }
+
+    private:
+        class window {
+        public:
+            explicit window(size_t capacity): capacity_(capacity) {}
+            void sample(double value) {
+                values_.push_back(value);
+                if (values_.size() > capacity_) values_.pop_front();
+            }
+            void clear() { values_.clear(); }
+            size_t size() const { return values_.size(); }
+            double quantile(double quantile, size_t count = kWindow) const {
+                const auto first = values_.end() - static_cast<std::ptrdiff_t>(std::min(count, size()));
+                return lateness_quantile(std::vector<double>(first, values_.end()), quantile);
+            }
+            size_t misses(double threshold, bool below) const {
+                const auto first = values_.end() - static_cast<std::ptrdiff_t>(std::min(kWindow, size()));
+                return static_cast<size_t>(std::count_if(first, values_.end(), [threshold, below](double value) {
+                    return below ? value < threshold : value > threshold;
+                }));
+            }
+        private:
+            size_t capacity_;
+            std::deque<double> values_;
+        };
+        window relative_{kWindow}, minority_{kWindow}, slack_{kSharedPersistTicks}, normalized_{kSharedPersistTicks};
+        uint64_t relative_samples_ = 0, absolute_samples_ = 0, relative_evaluated_ = 0, absolute_evaluated_ = 0;
+        uint32_t newest_relative_ = 0, newest_absolute_ = 0, relative_at_ = 0, absolute_at_ = 0, last_tick_ = 0;
+        uint32_t relative_streak_ = 0, minority_streak_ = 0, absolute_streak_ = 0, lower_streak_ = 0;
+        uint32_t sequence_ = 0, cooldown_until_ = 0, discard_below_ = 0;
+        relative_decision pending_;
+        int offset_ = 0, unrestored_raises_ = 0;
+        bool judge_restore_ = false, given_up_ = false;
     };
 
     // A member that cannot measure its own reference (no qualifying window

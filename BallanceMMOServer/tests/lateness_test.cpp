@@ -19,6 +19,139 @@
 
 using namespace bmmo::session;
 
+namespace relative_tests {
+    struct decision_at {
+        size_t member;
+        uint32_t tick;
+        relative_decision decision;
+    };
+    struct result {
+        std::vector<relative_meter> meters;
+        std::vector<decision_at> decisions;
+    };
+    result run(uint32_t ticks, double baseline, const std::function<double(size_t, uint32_t)>& shift,
+               const std::vector<int>& offsets) {
+        struct event {
+            double at;
+            uint32_t tick;
+            size_t member;
+        };
+        const size_t count = offsets.size();
+        result out{std::vector<relative_meter>(count), {}};
+        std::vector<arrival_ring> rings(count);
+        std::vector<uint32_t> newest(count);
+        std::vector<event> events;
+        for (size_t member = 0; member < count; ++member) {
+            out.meters[member].set_offset(offsets[member]);
+            for (uint32_t tick = 1; tick <= ticks + 66; ++tick)
+                events.push_back({tick - baseline + shift(member, tick), tick, member});
+        }
+        for (uint32_t tick = 1; tick <= ticks; ++tick) events.push_back({double(tick), tick, count});
+        std::sort(events.begin(), events.end(), [](const event& left, const event& right) {
+            return left.at < right.at || (left.at == right.at && left.member < right.member);
+        });
+        const auto time = [](double tick) {
+            return arrival_ring::time_point{} + std::chrono::duration_cast<arrival_ring::time_point::duration>(
+                std::chrono::duration<double, std::micro>(tick * kLatenessTickMicros));
+        };
+        uint32_t stepped = 0;
+        for (const auto& event: events) {
+            if (event.at > ticks) break;
+            if (event.member < count) {
+                const bool as_newest = event.tick > newest[event.member];
+                rings[event.member].record(event.tick, time(event.at), time(event.at), as_newest);
+                if (as_newest) {
+                    newest[event.member] = event.tick;
+                    out.meters[event.member].sample_absolute(event.tick, event.tick - event.at, baseline);
+                }
+            } else stepped = event.tick;
+            if (count > 1 && event.tick <= stepped) {
+                std::vector<double> normalized;
+                for (const auto& ring: rings) {
+                    const auto* frame = ring.find(event.tick);
+                    const double slack = lateness_slack_ticks(time(event.tick), frame ? frame->at : time(event.at));
+                    normalized.push_back(baseline - std::round(slack * 1e6) / 1e6);
+                }
+                for (size_t member = 0; member < count; ++member) {
+                    const auto* frame = rings[member].find(event.tick);
+                    if (!frame || !frame->as_newest) continue;
+                    const auto relative = relative_lateness(normalized, member);
+                    out.meters[member].sample_relative(event.tick, relative.first, relative.second);
+                }
+            }
+            if (event.member < count) continue;
+            const size_t majorities = static_cast<size_t>(std::count_if(out.meters.begin(), out.meters.end(),
+                [](const relative_meter& meter) { return meter.absolute_majority(); }));
+            const bool shared = count >= 2 && 2 * majorities > count;
+            for (size_t member = 0; member < count; ++member) {
+                const auto decision = out.meters[member].on_tick(event.tick, shared);
+                if (decision.action != lateness_action::none) out.decisions.push_back({member, event.tick, decision});
+            }
+        }
+        return out;
+    }
+}
+
+TEST(RelativeMeter, OneLateMemberRaisesOnceByItsRelativeP90) {
+    const auto out = relative_tests::run(1200, 24, [](size_t member, uint32_t) { return member == 0 ? 20.0 : 0.0; }, {0, 0, 0, 0});
+    ASSERT_EQ(out.decisions.size(), 1u);
+    EXPECT_EQ(out.decisions[0].member, 0u);
+    EXPECT_STREQ(out.decisions[0].decision.rule, "relative");
+    EXPECT_EQ(out.decisions[0].decision.k, 20);
+    EXPECT_EQ(out.decisions[0].decision.streak, relative_meter::kRaiseTicks);
+}
+
+TEST(RelativeMeter, SharedDipsDoNotRaiseIncludingAShortAbsoluteMajority) {
+    const auto dip = relative_tests::run(1000, 22, [](size_t, uint32_t tick) { return tick <= 400 ? 15.0 : 0.0; }, {0, 0, 0, 0});
+    EXPECT_TRUE(dip.decisions.empty());
+    const auto absolute = relative_tests::run(515, 12, [](size_t, uint32_t) { return 20.0; }, {0, 0, 0, 0});
+    EXPECT_TRUE(absolute.decisions.empty());
+}
+
+TEST(RelativeMeter, LateMajorityNeeds660TicksAndUsesTheMinorityRule) {
+    const auto out = relative_tests::run(1000, 12, [](size_t member, uint32_t) { return member < 3 ? 20.0 : 0.0; }, {0, 0, 0, 0});
+    ASSERT_EQ(out.decisions.size(), 3u);
+    for (const auto& decision: out.decisions) {
+        EXPECT_LT(decision.member, 3u);
+        EXPECT_STREQ(decision.decision.rule, "minority");
+        EXPECT_EQ(decision.decision.k, 20);
+        EXPECT_EQ(decision.decision.streak, relative_meter::kMinorityPersistTicks);
+        EXPECT_EQ(decision.tick, 701u);
+    }
+}
+
+TEST(RelativeMeter, SoloRaisesByTheAbsoluteMedianAfter132Ticks) {
+    const auto out = relative_tests::run(1000, 12, [](size_t, uint32_t) { return 20.0; }, {0});
+    ASSERT_EQ(out.decisions.size(), 1u);
+    EXPECT_STREQ(out.decisions[0].decision.rule, "absolute");
+    EXPECT_EQ(out.decisions[0].decision.k, 20);
+    EXPECT_EQ(out.decisions[0].decision.streak, relative_meter::kRaiseTicks);
+    EXPECT_EQ(out.decisions[0].tick, 173u);
+}
+
+TEST(RelativeMeter, RecoveryClampsTheReferenceAndLowersWithinOffsetAndSlack) {
+    for (const int offset: {20, 4}) {
+        auto out = relative_tests::run(1000, 22, [](size_t member, uint32_t) { return member == 0 ? -20.0 : 0.0; }, {offset, 0});
+        ASSERT_EQ(out.decisions.size(), 1u);
+        const auto& decision = out.decisions[0];
+        EXPECT_EQ(decision.member, 0u);
+        EXPECT_EQ(decision.decision.action, lateness_action::lower);
+        EXPECT_EQ(decision.decision.k, -std::min(offset, 19));
+        EXPECT_EQ(decision.decision.streak, relative_meter::kLowerTicks);
+        EXPECT_NEAR(out.meters[1].relative_quantile(.5), 0, 1e-9);
+        EXPECT_TRUE(out.meters[0].acknowledge(decision.decision.id, -100, decision.tick));
+        EXPECT_EQ(out.meters[0].offset(), std::max(0, offset - 19));
+        EXPECT_FALSE(out.meters[0].sample_relative(decision.tick - 1, -20, -20));
+        EXPECT_FALSE(out.meters[0].sample_absolute(decision.tick - 1, 42, 22));
+    }
+    const auto slack = relative_tests::run(1000, 6, [](size_t member, uint32_t) { return member == 0 ? 1.0 : 20.0; }, {20, 0, 0});
+    const auto lower = std::find_if(slack.decisions.begin(), slack.decisions.end(),
+        [](const relative_tests::decision_at& decision) { return decision.member == 0; });
+    ASSERT_NE(lower, slack.decisions.end());
+    EXPECT_EQ(lower->decision.action, lateness_action::lower);
+    EXPECT_EQ(lower->decision.k, -2);
+}
+
 TEST(ArrivalRing, FirstArrivalStaleAndWrap) {
     arrival_ring ring;
     const auto at = arrival_ring::time_point{} + std::chrono::seconds(1);

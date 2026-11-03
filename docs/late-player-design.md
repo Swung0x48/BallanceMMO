@@ -3701,6 +3701,24 @@ harness limitation). A0j and A8 remain for LBM. The joiner timeout's move to
 simulated ticks came after these two startup-only runs (startup members never
 use it); builds, tests and the wire check were rerun on it.
 
+**As built (step LB2, 2026-11-03).** Observe only, on d30ce7d3 (protocol 26).
+`relative_meter` runs beside revision 2: relative / minority majorities over
+66 samples, the absolute threshold at 3, persistence 132 / 660, the largest
+eligible k, and the 660-tick lower bounded by both offset and slack. Its
+absolute target uses n over 132 samples, or 660 while shared.
+
+The runner samples L and L' from LB1's ring after a step and on a cut
+frame's arrival, with missing references at their current lower bound. The
+step's saved membership supplies held/cursor exemptions; a shadow waiver
+does not remove a reference. Shared absolute majorities are counted each
+tick. S1 lateness adds the baseline, both relative quantiles, slack
+quantiles, three miss counts and state; `would-raise2` names its rule and k.
+These are server-log fields only, with distinct scalar names for the
+existing parser. Shadow decisions stay pending until reassignment; revision
+2 still drives every lead and patience decision, and `patience_member_of`
+is unchanged. Five shared-clock tests cover the three rules, shared dips,
+recovery, the clamp, and both lower bounds.
+
 #### 6.2.1 Built since 177c337
 
 | plan step | built by | commit | what revision 3 takes from it |

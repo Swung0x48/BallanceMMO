@@ -690,6 +690,7 @@ namespace bmmo::sim {
             arrivals.waived = false;
             arrivals.sampled = false;
             arrivals.baseline.assigned(first_tick, !s.running, s.world->tick_index());
+            arrivals.relative.reset(first_tick);
             // A resync or a late join re-anchors a buffer that may already hold
             // frames: reset() keeps everything at or after first_tick and
             // refuses to move the cursor backwards, so the batch the client
@@ -869,11 +870,14 @@ namespace bmmo::sim {
                 if (newest) {
                     const double slack = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(t), arrival);
                     observed.baseline.sample(t, slack, arrival);
+                    if (observed.baseline.frozen())
+                        observed.relative.sample_absolute(t, slack, observed.baseline.value());
                     observed.slack.push_back(slack);
                     if (observed.baseline.frozen()) observed.n.push_back(observed.baseline.value() - slack);
                     s.arrival_queue.push_back(bmmo::session::lateness_slack_ticks(seen, arrival));
                 }
                 observe_quorum_arrival(s, player, t);
+                observe_relative(s, t, seen);
             }
             // Step B2SX: the arrival goes with the frames, so the step judges
             // each by its own tick's deadline (input_buffer::take's cutoff).
@@ -1541,9 +1545,53 @@ namespace bmmo::sim {
     // view of each member's arrivals without a decision having to happen.
     static constexpr uint32_t kLatenessSummaryTicks = 660;
 
+    void session_runner::observe_relative(session_state& s, uint32_t tick, clock::time_point now) {
+        const auto past = std::find_if(s.quorum_history.rbegin(), s.quorum_history.rend(),
+            [tick](const auto& entry) { return entry.tick == tick; });
+        if (past == s.quorum_history.rend()) return;
+        std::vector<uint32_t> players;
+        std::vector<double> normalized;
+        for (const auto& member: past->members) {
+            if (!member.ready || !member.baseline || member.exempt) continue;
+            const auto entry = s.arrivals.find(member.player);
+            if (entry == s.arrivals.end()) continue;
+            const auto* frame = entry->second.ring.find(tick);
+            players.push_back(member.player);
+            normalized.push_back(member.a - bmmo::session::lateness_slack_ticks(
+                s.scheduler.deadline(tick), frame ? frame->at : now));
+        }
+        if (players.size() < 2) return;
+        for (size_t index = 0; index < players.size(); ++index) {
+            auto& entry = s.arrivals.at(players[index]);
+            const auto* frame = entry.ring.find(tick);
+            if (!frame || !frame->as_newest) continue;
+            const auto relative = bmmo::session::relative_lateness(normalized, index);
+            entry.relative.sample_relative(tick, relative.first, relative.second);
+        }
+    }
+
     void session_runner::observe_lateness(session_state& s, uint32_t tick) {
         using bmmo::session::lateness_action;
         const std::string prefix = "[session " + std::to_string(s.id) + "] S1 ";
+        size_t counted = 0, absolute_majorities = 0;
+        if (!s.quorum_history.empty())
+            for (const auto& member: s.quorum_history.back().members) {
+                if (!member.ready || !member.baseline || member.exempt) continue;
+                ++counted;
+                absolute_majorities += s.arrivals.at(member.player).relative.absolute_majority();
+            }
+        const bool shared = counted >= 2 && 2 * absolute_majorities > counted;
+        for (auto& [player, entry]: s.arrivals) {
+            const auto old = s.lateness.find(player);
+            if (old == s.lateness.end()) continue;
+            entry.relative.set_offset(old->second.meter.offset());
+            const auto decision = entry.relative.on_tick(tick, shared);
+            if (decision.action == lateness_action::raise || decision.action == lateness_action::lower)
+                log(prefix + (decision.action == lateness_action::raise ? "would-raise2" : "would-lower2")
+                    + " player=" + std::to_string(player) + " tick=" + std::to_string(tick)
+                    + " rule=" + decision.rule + " k=" + std::to_string(decision.k)
+                    + " streak=" + std::to_string(decision.streak) + " (observe only: nothing sent)");
+        }
         for (auto& [player, entry]: s.lateness) {
             auto& meter = entry.meter;
             // A member with no qualifying window after eight takes the median
@@ -1616,6 +1664,15 @@ namespace bmmo::sim {
                 text += " ref=none windows=" + std::to_string(meter.windows()) + "/" + std::to_string(meter.qualifying_windows());
             text += " streak=" + std::to_string(meter.raise_streak()) + "/" + std::to_string(meter.lower_streak())
                   + " decisions=" + std::to_string(meter.decisions()) + " offset=" + std::to_string(meter.offset());
+            const auto& arrival = s.arrivals.at(player);
+            const auto& relative = arrival.relative;
+            text += std::string(" state2=") + bmmo::session::lateness_state_name(relative.state())
+                + " baseline=" + (arrival.baseline.frozen() ? fixed2(arrival.baseline.value()) : "none")
+                + " L-q50=" + fixed2(relative.relative_quantile(.5)) + " L-q90=" + fixed2(relative.relative_quantile(.9))
+                + " Lprime-q50=" + fixed2(relative.minority_quantile(.5)) + " Lprime-q90=" + fixed2(relative.minority_quantile(.9))
+                + " slack2-q10=" + fixed2(relative.slack_quantile(.1)) + " slack2-q50=" + fixed2(relative.slack_quantile(.5))
+                + " misses2=" + std::to_string(relative.relative_misses()) + "/" + std::to_string(relative.minority_misses())
+                + "/" + std::to_string(relative.absolute_misses()) + " shared2=" + (shared ? "yes" : "no");
             if (config_.lead_adjust) {
                 const auto l = s.leads.find(player);
                 if (l != s.leads.end()) {
@@ -2048,6 +2105,7 @@ namespace bmmo::sim {
                             }
                         step(s);
                         observe_quorum(s, tick, observed);
+                        observe_relative(s, tick, clock::now());
                         s.step_waits.clear();
                         s.step_us.push_back(static_cast<uint32_t>(
                             std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count()));
