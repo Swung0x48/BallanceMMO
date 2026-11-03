@@ -84,3 +84,17 @@ no lead adjustment. CBF retargets startup faults to the exponential schedule (at
 windows total 6.9 s before refusal, excluding polling/transport), keeps long-outage recovery and the 33-tick
 residual, and runs the deferred matrix. Stage D inherits milestone/endpoint coverage and records intentional
 startup waiting separately from loading and release lateness. T3C's running-time performance target is unchanged.
+
+## Reference refresh (REFB, 2026-11-02)
+
+The current default reference set is `core_ref_s15`, recorded from commit `16f69bd5abbe`
+at protocol 26 using STTM timing. It replaces `core_ref_s14`: 13 scenarios, 46 client captures and 47 client
+journals including a rejoin life. All 54874 server ticks and 27436 checkpoints replay exactly;
+strict client replay matches all sends and journals without a protocol override. The two solo controls also
+match across independent runs. Intended pause/resync cases remain explicitly identified in the set's README.
+
+The arena loads as a custom map; the original Level 13 and all 58 pinned game files are unchanged. The reference
+archive `arena-refs-s15-2026-11-02.tar.gz` contains 366 files (151170058 compressed bytes),
+sha256 `b8535aabb3b95656d27894248051c95b0fa63f693a34850fec4a7803efac9636`. The private workstate release and restore manifest preserve it;
+the dataset's README, SHA256SUMS, command.json and facts.json record provenance and checks. Gameplay code and
+protocol are unchanged by this refresh. The next step is the remainder of LB0; LBM/CBF coverage remains pending.

@@ -3866,6 +3866,11 @@ TheHeaderCarriesTheLargestOfFourWindows is untouched. LB3 records the
 should fall from about 23 (the deadline) toward the quorum's few ticks, which
 shallows every client's reach.
 
+**REFB complete (2026-11-02).** `core_ref_s15` is the protocol-26 default reference set from clean
+commit 16f69bd5abbe, with STTM live-tick triggers and effective play budgets. Its 13 scenarios / 46 captures /
+47 client journals replay strictly, with no protocol override. This refresh supplies the baseline for LB0-LB5;
+it does not enable patience/lead defaults or count as LBM's matrix. See startup-retry-design.md's REFB record.
+
 **STEX/STTM update (2026-11-02).** Startup proposals may be postponed repeatedly with exponential windows.
 R1 must use the finally adopted schedule X for start members, not the assignment, first proposal or the time
 `start_at` was called (X can still be in the future). Add multiple-postponement, stale/late-ack and refusal/departure
