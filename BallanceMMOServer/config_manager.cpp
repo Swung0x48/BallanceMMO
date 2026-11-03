@@ -82,6 +82,7 @@ bool config_manager::load() {
         physics_relay_window = std::clamp<uint32_t>(physics_relay_window, 1u, 16u);
         physics_patience = yaml_load_value(physics, "patience", physics_patience);
         physics_lead_adjust = yaml_load_value(physics, "lead_adjust", physics_lead_adjust);
+        physics_test_clock_skew = yaml_load_value(physics, "test_clock_skew", std::string{});
         physics_trafo_inputs = yaml_load_value(physics, "trafo_inputs", physics_trafo_inputs);
         physics_placement_clones = yaml_load_value(physics, "placement_clones", physics_placement_clones);
         // Step UOFF (the user, 2026-10-31): the proximity union is always on;

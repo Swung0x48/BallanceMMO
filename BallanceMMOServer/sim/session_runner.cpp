@@ -1809,6 +1809,25 @@ namespace bmmo::sim {
                     // every buffer has its frame, or the deadline passed.
                     const auto members = patience_members(s, tick);
                     const auto at = clock::now();
+                    if (config_.test_clock_skew.enabled() && !s.skew_ended) {
+                        const auto& fault = config_.test_clock_skew;
+                        const std::string prefix = "[session " + std::to_string(s.id) + "] S1 clock-skew ";
+                        if (!s.skew_began && tick >= fault.tick) {
+                            s.skew_began = true;
+                            s.skew_started = at;
+                            s.scheduler.inject_clock_skew(at, fault);
+                            log(prefix + "begin tick=" + std::to_string(tick) + " ms=" + std::to_string(fault.ms)
+                                + " percent=" + std::to_string(fault.percent));
+                        }
+                        if (s.skew_began && !s.skew_peaked && at - s.skew_started >= std::chrono::milliseconds(fault.ms)) {
+                            s.skew_peaked = true;
+                            log(prefix + "recover tick=" + std::to_string(tick));
+                        }
+                        if (s.skew_began && !s.skew_ended && at - s.skew_started >= std::chrono::milliseconds(2 * fault.ms)) {
+                            s.skew_ended = true;
+                            log(prefix + "end tick=" + std::to_string(tick));
+                        }
+                    }
                     const auto verdict = bmmo::session::patience_step_test(members, s.scheduler.due(at),
                             config_.patience ? bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), at) : 0.0,
                             config_.patience);

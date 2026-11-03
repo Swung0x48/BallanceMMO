@@ -81,6 +81,7 @@ namespace bmmo::sim {
         // ready).  Off (the SimTool, the tests): the start on the last ready
         // member, as before.
         bool scheduled_start = false;
+        bmmo::session::test_clock_skew test_clock_skew;
         // (The lifecycle barrier is gone, plan step 20: a tick whose input
         // shows a ball the world does not have is stepped without it, and
         // the S4 line says so - session/lifecycle.hpp, bodiless_tracker.)
@@ -569,6 +570,8 @@ namespace bmmo::sim {
             bool start_scheduled = false;
             std::chrono::steady_clock::time_point start_origin{};
             bmmo::session::tick_scheduler scheduler;
+            std::chrono::steady_clock::time_point skew_started{};
+            bool skew_began = false, skew_peaked = false, skew_ended = false;
             bmmo::session::snapshot_cadence cadence;
             // Step R12 (protocol 13, lateness.hpp server_wait_ticks): each
             // member's wait at the step about to run, set by run() from the

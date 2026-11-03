@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "../entity/session.hpp"
+#include "test_clock.hpp"
 
 namespace bmmo::session {
     inline constexpr double kTickSeconds = 1.0 / 66.0;
@@ -388,6 +389,7 @@ namespace bmmo::session {
             first_tick_ = first_tick;
             next_tick_ = first_tick;
             input_delay_ = input_delay;
+            clock_fault_ = {};
         }
         bool started() const { return started_; }
         uint32_t next_tick() const { return next_tick_; }
@@ -397,8 +399,9 @@ namespace bmmo::session {
         // Wall-clock deadline after which `tick` is simulated even without
         // every player's input.
         clock::time_point deadline(uint32_t tick) const {
-            return start_ + tick_offset(tick - first_tick_ + input_delay_);
+            return clock_fault_.real_deadline(start_ + tick_offset(tick - first_tick_ + input_delay_));
         }
+        void inject_clock_skew(clock::time_point now, test_clock_skew spec) { clock_fault_.begin(now, spec); }
         bool due(clock::time_point now) const { return started_ && now >= deadline(next_tick_); }
         // How long the runner may sleep before the next tick becomes due.
         clock::duration until_due(clock::time_point now) const {
@@ -422,6 +425,7 @@ namespace bmmo::session {
         uint32_t first_tick_ = 0;
         uint32_t next_tick_ = 0;
         uint32_t input_delay_ = 0;
+        scheduler_clock_fault clock_fault_;
     };
 
     // Snapshot cadence: a delta every `interval` ticks, a full one every

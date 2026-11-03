@@ -871,6 +871,10 @@ public:
         rc.patience = config_.physics_patience;
         rc.lead_adjust = config_.physics_lead_adjust;
         rc.scheduled_start = true;   // FULL step SAXH: the start handshake names the start instant
+        if (!bmmo::session::parse_test_clock_skew(config_.physics_test_clock_skew, rc.test_clock_skew)) {
+            Printf("Physics sessions: invalid physics.test_clock_skew (expected T:MS:PCT, 0 < PCT < 100).");
+            return;
+        }
         // The headless engine chdir's into the game's Bin directory, so the
         // journal directory has to be resolved against the directory the
         // server was started from before the first world boots.

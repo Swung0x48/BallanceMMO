@@ -3708,6 +3708,40 @@ written; lateness.hpp and lead.hpp have not).
 
 **R0 (LB0).**
 
+*As built (step LB0, 2026-11-02; implementation/checks, not LBM acceptance).* The harness now offers
+`--scenario` recipes for the revision-3 arms, `--clients` as the player-count alias, `--variant lane|swing`,
+and `--twins --twin-flags both|patience|lead`. Twins run sequentially, preserve off/on summaries, and feed the
+off run to the on run's control comparison. An external server requires a `--server-control` Python adapter
+for twins; it receives `start|stop` and JSON flags. STTM's live-tick milestones and play budget are reused.
+Output directories must be new; the harness no longer deletes an existing label's data.
+
+`physics.test_clock_skew: "300:8000:7.5"` is off by default. At the named running tick the scheduler clock
+runs 7.5% fast for 8 seconds and then 7.5% slow for 8 seconds, reaching the true clock continuously. Its inverse
+maps nominal deadlines to real timestamps, keeping input arrival stamps, sleeps and cutoff comparisons on
+one time base. Handshake/assignment clocks and tick_at stay real. Standard clock scenarios reject scripted
+joins/resyncs rather than mixing the two time bases. S1 logs begin/recovery/end ticks. Reports label the complete
+fault span, retain its rows separately from ordinary-arm comparisons, and parse quorum/lateness/sector/arrival
+and decision fields (missing counters are n/a). An observed shared negative slack is not enough by itself to
+label a host-clock fault: normal client cadence and faster server cadence are also required. Non-injected
+observation has the existing S1 summary's 660-tick resolution; injected spans use their exact logged boundaries.
+
+Checks: Windows x64/x86 and Arch builds, GCC syntax, 780 unit tests, 52 existing harness self-checks and seven new
+offline harness tests pass. The full protocol-26 core_ref_s15 wire comparison against rREFB is ALL SAME (44 send
+traces, 45 journals). A0h, A5p and A9h8 recipes were checked offline; the two live slots were A0h and A9h8.
+A0h server replay: 3970/3970 ticks, 1985 checkpoints, no resync/starvation. A9h8: 3975/3975 ticks, 1987 checkpoints;
+host-clock span 300..1356, recovery begins at 845, all client median tick intervals 15 ms. No waiting/lead-adjust
+algorithm or deployed default is changed by LB0.
+
+Findings kept for LB1/LBM: the A9h8 fault triggers the existing 330-consecutive-starved-reports recovery
+(`client_core_held.cpp::note_starved_report`), once per client (request at local tick 934, assigned base 956).
+Thus "no scripted resync in H11" does not guarantee no automatic resync; its post-reanchor samples cannot be
+treated as an uninterrupted clock-only observation. Do not silently disable this recovery or count this run
+as a passed LBM arm. A0h's generic raw LOCAL-checkpoint report flags client 3 at 2.5510 m in B / 2.5555 m in A;
+it is not a FINAL comparison and these smoke runs have no inbound captures to reconstruct FINAL rows. This
+requires later captured FINAL validation, not a claim of a confirmed physical drift or a dismissed error.
+A5p live coverage, real off/on twin runs, and the revision-3 behavior criteria remain with the later steps/LBM.
+In the A8 recipe "client 4" is the fourth member (zero-based index 3), preserving the existing four-client setup.
+
 - `scripts/arena_map_test.py`: H9, H10, H12, the arms and the S1 parsing are
   new; the arm table is `ARM_FAMILY` (:1613), the verdict's family lookup
   :1723.

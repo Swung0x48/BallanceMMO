@@ -392,6 +392,47 @@ TEST(TickScheduler, DeadlinesFollowInputDelay) {
     EXPECT_GT(scheduler.until_due(start), tick_scheduler::clock::duration::zero());
 }
 
+TEST(TickScheduler, TestClockFaultHasBoundedMonotoneDeadlines) {
+    tick_scheduler ordinary, skewed;
+    const auto start = tick_scheduler::clock::time_point(1000s);
+    ordinary.start(start, 0, 0);
+    skewed.start(start, 0, 0);
+    skewed.inject_clock_skew(start + 1s, {66, 8000, 7.5});
+    EXPECT_EQ(skewed.deadline(0), ordinary.deadline(0));
+    EXPECT_EQ(skewed.deadline(66), ordinary.deadline(66));
+    EXPECT_LT(skewed.deadline(330), ordinary.deadline(330));
+    EXPECT_EQ(skewed.deadline(1122), ordinary.deadline(1122)); // full recovery at 17 s
+    EXPECT_EQ(skewed.deadline(1400), ordinary.deadline(1400));
+    for (uint32_t t = 1; t < 1500; ++t) EXPECT_GT(skewed.deadline(t), skewed.deadline(t - 1));
+    // Handshake/re-anchor origins are not shifted by a scheduler test fault.
+    EXPECT_EQ(skewed.tick_at(start + 5s, 20), ordinary.tick_at(start + 5s, 20));
+    skewed.start(start, 0, 0);
+    EXPECT_EQ(skewed.deadline(330), ordinary.deadline(330)); // reset removes the injection
+}
+
+TEST(TickScheduler, TestClockFaultRunsFastThenReturnsAtTheSameRate) {
+    bmmo::session::scheduler_clock_fault fault;
+    const auto start = tick_scheduler::clock::time_point(1000s);
+    EXPECT_EQ(fault.real_deadline(start + 8s), start + 8s);
+    fault.begin(start, {0, 8000, 7.5});
+    EXPECT_EQ(fault.real_deadline(start - 1s), start - 1s);
+    EXPECT_NEAR(std::chrono::duration<double>(fault.real_deadline(start + 8600ms) - start).count(), 8.0, 1e-8);
+    EXPECT_NEAR(std::chrono::duration<double>(fault.real_deadline(start + 12300ms) - start).count(), 12.0, 1e-8);
+    EXPECT_EQ(fault.real_deadline(start + 16s), start + 16s);
+}
+
+TEST(TickScheduler, TestClockFaultParsingRejectsNonMonotoneClocks) {
+    bmmo::session::test_clock_skew spec;
+    EXPECT_TRUE(bmmo::session::parse_test_clock_skew("", spec));
+    EXPECT_FALSE(spec.enabled());
+    ASSERT_TRUE(bmmo::session::parse_test_clock_skew("300:8000:7.5", spec));
+    EXPECT_EQ(spec.tick, 300u);
+    EXPECT_EQ(spec.ms, 8000u);
+    EXPECT_DOUBLE_EQ(spec.percent, 7.5);
+    for (const auto* bad: {"300:8000:100", "300:0:7.5", "-1:8000:7.5", "300:8000:-1", "300:8000:7.5junk"})
+        EXPECT_FALSE(bmmo::session::parse_test_clock_skew(bad, spec)) << bad;
+}
+
 TEST(InputDelayForPing, CoversOneWayPlusJitterAndRespectsTheFloor) {
     // A link with no measurable latency still gets the floor.
     EXPECT_EQ(input_delay_for_ping(0, 6), 6u);

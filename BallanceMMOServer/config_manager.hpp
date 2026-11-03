@@ -98,6 +98,7 @@ public:
     // the clients apply the lead (plan steps 11 and 15); off, the server does
     // exactly what it did before the flag existed.
     bool physics_lead_adjust = false;
+    std::string physics_test_clock_skew; // test only, T:MS:PCT; empty disables
     // Trafo-replication design 2.14 (protocol 11, step T2): the session's
     // world option WORLD_TRAFO_INPUTS - every member's trafo explosion and
     // reset are Trafo events, every world runs every member's piece set.  A

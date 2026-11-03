@@ -125,6 +125,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 # journal_trace / first_divergence, for the event report: the batch scripts
 # run this with python -I, which leaves the script's own directory off the path.
 sys.path.insert(0, str(REPO / 'scripts'))
+import late_player_harness as lph
 FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 EXE = '.exe' if sys.platform == 'win32' else ''
 
@@ -971,7 +972,11 @@ def run_case(args, sector, case_dir):
         'physics:\n'
         '  enabled: true\n'
         f'  game_root: {args.root}\n'
-        '  snapshot_interval: 2\n'
+        f'  snapshot_interval: {100000 if args.scenario else 2}\n'
+        f'  full_snapshot_interval: {100000 if args.scenario else 66}\n'
+        f'  patience: {str(args.patience == "on").lower()}\n'
+        f'  lead_adjust: {str(args.lead_adjust == "on").lower()}\n'
+        f'  test_clock_skew: "{args.test_clock_skew}"\n'
         f'  input_delay: {args.input_delay}\n'
         '  maximum_physics_rooms: 1\n'
         '  event_rate_limit: 0\n'
@@ -990,6 +995,7 @@ def run_case(args, sector, case_dir):
     hang_watches = {}
     proxy_stats = {}
     server = None
+    controller_started = False
     case_started = time.time()
     # Step B2SX: the journals already there, by name and mtime, so a case
     # never takes an earlier one (a mirrored journal lands seconds late).
@@ -1002,6 +1008,9 @@ def run_case(args, sector, case_dir):
     host, _, port = (args.external_server or f'127.0.0.1:{args.port}').partition(':')
     server_addr = (host, int(port))
     try:
+        if args.server_control:
+            lph.server_control(args, 'start', case_dir / 'server-control-start.log')
+            controller_started = True
         if not args.external_server:
             sf = open(case_dir / 'server.log', 'wb')
             handles.append(sf)
@@ -1211,6 +1220,8 @@ def run_case(args, sector, case_dir):
                 proxy_stats.setdefault('outage', []).append(dict(o.as_dict(), client=q.index))
         for q in proxies:
             q.close()
+        if controller_started:
+            lph.server_control(args, 'stop', case_dir / 'server-control-stop.log')
 
     result = {'sector': sector, 'dir': str(case_dir), 'clients': []}
     if 'dropped' in proxy_stats:
@@ -1650,6 +1661,7 @@ def client_phases(phases, base, end):
 ARM_FAMILY = {'A0': 'control', 'A0J': 'control', 'A1': 'burst', 'A2': 'burst', 'A3X': 'burst', 'A4': 'burst',
               'A7': 'burst', 'A9': 'burst', 'A3': 'a3', 'A3L': 'reported', 'A5': 'reported', 'A5U': 'lead',
               'A5S': 'lead', 'A5D': 'a5d', 'A6': 'hold', 'A6M': 'hold', 'A6B': 'hold', 'A8': 'join', 'A9C': 'stall'}
+ARM_FAMILY.update(lph.FAMILIES)
 
 
 def infer_arm(args, source):
@@ -1758,11 +1770,28 @@ def event_report(args, case, case_dir):
     index_of = {pid: i for i, pid in id_of.items() if pid}
     arm = infer_arm(args, ep['source'])
     family = ARM_FAMILY.get(arm, 'burst')
+    s1 = lph.parse_s1(server_log_text(case_dir), server.header['session'])
+    client_cadence = {}
+    for i in range(args.players):
+        path = case_dir / ('client%d.bmjr' % i)
+        client_cadence[i] = lph.cadence(jt.read_journal(path).tick_records()) if path.exists() else None
+    cadence_by_tick = {r['tick']: lph.cadence([g.record for g in server.ticks if g.has_tick
+                                             and r['tick'] - 659 <= g.tick <= r['tick']])
+                       for r in s1.get('lateness') or [] if 'tick' in r}
+    clock_fault = lph.host_clock(s1, client_cadence, {k: v for k, v in cadence_by_tick.items() if v is not None})
+    if family == 'clock' and clock_fault['spans']:
+        t_on, t_off = clock_fault['spans'][0]['first'], clock_fault['spans'][-1]['last'] or last
+        phases = {'B': (first, t_on), 'D': (t_on, t_off + REACH), 'A': (t_off + REACH, last + 1)}
+    outside_faults = clock_fault['spans'] if family != 'clock' else []
+    def fault_overlap(lo, hi):
+        return any(lo <= (span['last'] or last) and hi >= span['first'] for span in outside_faults)
     # A control has no late player: every client is one of "the others".
     late_ids = set() if family == 'control' else {id_of[i] for i in event_clients if id_of.get(i)}
     report = {'episode': ep['describe'], 'source': ep['source'], 'arm': arm, 'family': family,
               'drop': ep.get('drop', False), 't_on': t_on, 't_off': t_off, 'phases': phases,
               'event_clients': event_clients, 'server_journal': case['journal'][-1], 'clients': [],
+              's1': s1, 'host_clock': clock_fault,
+              'requested_flags': {'patience': args.patience, 'lead_adjust': args.lead_adjust},
               'window_origin': getattr(args, 'window_origin', 0), 'input_delay': args.input_delay,
               # A5u/A5s: the uplink step K is judged against
               'step_ms': max([ev.ms for ev in (getattr(args, 'events', None) or []) if ev.kind == 'step'] or [0.0])}
@@ -1875,6 +1904,8 @@ def event_report(args, case, case_dir):
                'echo': log['echo'], 'ownlife': log['ownlife'], 'own_moves': log['own_moves'],
                'status_lead': log['status_lead'], 'never_started': not log['exists'], 'phases': {}}
         report['clients'].append(row)
+        row['host_clock_resync_bases'] = [tick for tick in row['resync_bases'] if fault_overlap(tick, tick)]
+        row['resync_bases'] = [tick for tick in row['resync_bases'] if not fault_overlap(tick, tick)]
         base = row['base'] if row['base'] is not None else first
         # The client's own phases: from its base (a late joiner's B is empty),
         # to a second before its last line, past its exit's own effects.
@@ -1883,7 +1914,10 @@ def event_report(args, case, case_dir):
         row['span'] = [base, end]
         # Substitutions inside the client's span (the ticks before its base
         # are applied held by construction and precede its numbering).
-        mine = [t for t in substituted.get(pid, []) if base <= t <= end]
+        mine_all = [t for t in substituted.get(pid, []) if base <= t <= end]
+        row['clock_outside_substitutions'] = [t for t in mine_all if t < t_on or t > t_off + 2] if family == 'clock' else None
+        row['host_clock_substitutions'] = [t for t in mine_all if fault_overlap(t, t)]
+        mine = [t for t in mine_all if not fault_overlap(t, t)]
         # ...and so are the ones a resync re-anchors: after the old epoch's
         # last counted tick and before the new base (they precede the new
         # numbering; the client is told nothing of them).  Without this the
@@ -1956,6 +1990,8 @@ def event_report(args, case, case_dir):
                                             [[lo, hi if hi < 1 << 31 else None] for lo, hi in spans],
                                             air_counted[owner]])
         row['excluded'] = excluded
+        row['host_clock_rows'] = [[t, *v] for t, v in per_tick.items() if fault_overlap(t, t)]
+        per_tick = {t: v for t, v in per_tick.items() if not fault_overlap(t, t)}
         window_lo, window_hi = t_on - 60, t_off + REACH + 180
         windows30 = []
         for start in range(window_lo - window_lo % 30, window_hi, 30):
@@ -2044,7 +2080,8 @@ def event_report(args, case, case_dir):
 
         # The window: lines, kept raw too: a control's are re-cut on the
         # phases of the arm it is compared with (recut_phases).
-        row['raw_windows'] = log['windows']
+        row['host_clock_windows'] = [w for w in log['windows'] if fault_overlap(w.get('lo', w['tick'] - 59), w['tick'])]
+        row['raw_windows'] = [w for w in log['windows'] if not fault_overlap(w.get('lo', w['tick'] - 59), w['tick'])]
         for p in PHASES:
             lo, hi = cphases[p]
             vals = [v for t, v in per_tick.items() if lo <= t < hi]
@@ -2053,7 +2090,8 @@ def event_report(args, case, case_dir):
                   'oth_max': max([v[1] for v in vals] or [0.0]),
                   'late_mirror_max': max([v[2] for v in vals] or [0.0]),
                   'mech_max': max([v[3] for v in vals] or [0.0])}
-            ph.update(aggregate([w for w in log['windows'] if window_phase(w, cphases) == p], late_ids, index_of))
+            ph.update(aggregate([w for w in log['windows'] if window_phase(w, cphases) == p
+                                 and not fault_overlap(w.get('lo', w['tick'] - 59), w['tick'])], late_ids, index_of))
             row['phases'][p] = ph
         # A snapshot rollback inside the episode's reach repairs the late
         # client by a path the criteria do not test: the run is masked.
@@ -2175,6 +2213,14 @@ def criteria(report, case, controls):
         all(r['exit_code'] == 0 and 'first_divergence=-1' in r['summary'] for r in replays) if replays else None,
         '; '.join(r['summary'] for r in replays) or 'no replay')
     add('all', 'arm', None, '%s (%s criteria)' % (arm, family))
+    clock = report.get('host_clock', {})
+    if family == 'clock':
+        add('server', 'clock fault actually observed', bool(clock.get('label')), str(clock.get('spans', [])))
+    if clock.get('label'):
+        add('all', 'host clock span recorded', all(span['last'] is not None for span in clock['spans']), str(clock['spans']))
+        add('all', 'client cadence stayed on its real clock', clock['client_cadence_normal'], str(clock['client_tick_ms_p50']))
+        add('all', 'ordinary arm criteria use rows outside host clock spans', None,
+            'inside rows/substitutions retained separately; clock arms use their entire injected span')
     for row in report['clients']:
         who = 'client%d' % row['index']
         D = row['phases']['D']
@@ -2420,6 +2466,17 @@ def criteria(report, case, controls):
             add(who, "the stall's ticks substituted and corrected, or a rebase and resync", ok,
                 'substituted in D %d, own after T_off+48 %.4f m, resyncs %d, rebases in D %d' % (
                     row['subst_server']['D'], row['own_after'], resyncs, row['phases']['D']['rebases']))
+        elif family == 'clock':
+            add(who, 'substitutions confined to clock fault span + 2', not row['clock_outside_substitutions'],
+                str(row['clock_outside_substitutions'][:20]))
+            if arm == 'A9H8':
+                add(who, 'lead_adj 0', None if lead_none else sum(v or 0 for v in lead) == 0,
+                    no_lead if lead_none else str(lead))
+        elif family in ('pair', 'minority', 'shared'):
+            decisions = report.get('s1', {}).get('decisions')
+            mine = [d for d in decisions or [] if d.get('player') == row['id'] and d.get('action') == 'would-raise2']
+            add(who, 'one revision-3 raise decision', None if decisions is None else len(mine) == 1,
+                'n/a: revision-3 decision counters not present' if decisions is None else str(mine))
     return out
 
 
@@ -2430,6 +2487,11 @@ def format_report(report, crit):
         '; '.join(report['episode']), report.get('arm', '?'), report['t_on'], report['t_off'], report['phases']['B'][1],
         report['phases']['D'][0], report['phases']['D'][1] - 1, report['phases']['A'][0],
         ('; window grid from tick %d' % report['window_origin']) if report.get('window_origin') else '')]
+    if report.get('host_clock', {}).get('label'):
+        lines.append('host clock: %s; client tick ms p50 %s' %
+                     (report['host_clock']['spans'], report['host_clock']['client_tick_ms_p50']))
+    lines.append('S1 diagnostics: ' + ', '.join('%s=%s' % (key, 'n/a' if rows is None else len(rows))
+                                                for key, rows in report.get('s1', {}).items()))
     for j in report.get('join', []):
         lines.append('join: client%d asked at host tick %d, tick base %s, link %g ms' % (
             j['client'], j['asked'], j['base'], j['latency_ms']))
@@ -3270,8 +3332,8 @@ def main():
                          '"auto" (default): the arena, <root>/ModLoader/Maps/BMMO_Mechanism_Arena.nmo, for level 13 '
                          '(this harness\'s map; the slot itself holds the original Level 13 since CMAP), none otherwise; '
                          '"none": the slot\'s own file')
-    ap.add_argument('--sectors', default='1,2,3,4')
-    ap.add_argument('--players', type=int, default=4)
+    ap.add_argument('--sectors', default=None)
+    ap.add_argument('--players', '--clients', dest='players', type=int, default=None)
     ap.add_argument('--seconds', type=int, default=60,
                     help='play budget after each client steps its first assigned frame')
     ap.add_argument('--startup-timeout', type=int, default=180,
@@ -3296,7 +3358,7 @@ def main():
                     help="where the server writes journals, when it is not ours")
     ap.add_argument('--external-server', default='',
                     help='HOST:PORT of a server to use instead of starting one')
-    ap.add_argument('--latency-ms', type=float, default=0.0,
+    ap.add_argument('--latency-ms', type=float, default=None,
                     help='each way delay added to the affected clients links')
     ap.add_argument('--client-arg', action='append', default=[],
                     help='extra argument passed straight to every session client; repeatable')
@@ -3325,7 +3387,7 @@ def main():
                     help='metres between the beam landing points of successive clients')
     ap.add_argument('--beam-offset', type=int, default=0,
                     help='rotate which bays of the sector --beam-bays auto picks')
-    ap.add_argument('--checkpoint-ticks', type=int, default=660,
+    ap.add_argument('--checkpoint-ticks', type=int, default=None,
                     help='ticks between full body checkpoints in the journals; small '
                          'values make contact measurable with collision_report.py')
     ap.add_argument('--beam-dx', type=float, default=-9.0,
@@ -3397,6 +3459,17 @@ def main():
                     help='the tick the clients\' window: grid starts at (default: T_on of the --event ticks, else the '
                          '--join-late tick; 0 = the plain grid)')
     ap.add_argument('--selftest', action='store_true', help='check the harness\'s own logic offline and exit')
+    ap.add_argument('--scenario', type=str.upper, choices=lph.ARMS, default='')
+    ap.add_argument('--variant', choices=('lane', 'swing'), default='lane')
+    ap.add_argument('--hold', choices=('300', '1500', 'drop'), default='300')
+    ap.add_argument('--patience', choices=('off', 'on'), default='off')
+    ap.add_argument('--lead-adjust', choices=('off', 'on'), default='off')
+    ap.add_argument('--test-clock-skew', default='', metavar='T:MS:PCT')
+    ap.add_argument('--server-control', default='', metavar='PYTHON_SCRIPT',
+                    help='controller called with start/stop and JSON physics flags; required for external-server twins')
+    ap.add_argument('--twins', action='store_true', help='run flags-off and flags-on sequentially and compare')
+    ap.add_argument('--twin-flags', choices=('both', 'patience', 'lead'), default='both')
+    ap.add_argument('--dry-run', action='store_true', help='print the resolved scenario without starting processes')
     ap.add_argument('--report-only', default='',
                     help='redo the event report and criteria of an earlier run directory (give the run\'s own '
                          '--players and event flags, and --control); its server.bmjr, when the batch copied one '
@@ -3404,6 +3477,17 @@ def main():
     args = ap.parse_args()
     if args.selftest:
         return selftest()
+    try:
+        lph.apply_scenario(args)
+        if args.server_control and not args.external_server:
+            raise ValueError('--server-control requires --external-server')
+        if args.twins and not args.dry_run:
+            return lph.twins(args, sys.argv[1:])
+    except ValueError as e:
+        ap.error(str(e))
+    if args.dry_run:
+        print(json.dumps(vars(args), indent=2))
+        return 0
     if args.seconds <= 0 or args.startup_timeout <= 0:
         ap.error('--seconds and --startup-timeout must be positive')
     if not args.root and not args.report_only:
@@ -3463,7 +3547,7 @@ def main():
 
     base = pathlib.Path(args.out) / args.label
     if base.exists():
-        shutil.rmtree(base)
+        ap.error('output already exists; choose another --label or clean it explicitly: ' + str(base))
     base.mkdir(parents=True)
 
     results, failed = [], 0
