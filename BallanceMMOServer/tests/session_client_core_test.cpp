@@ -10812,6 +10812,78 @@ namespace {
         core.on_session_assign(resync2);
         ASSERT_EQ(caught.size(), 2u);
         EXPECT_EQ(caught[1], bmmo::session::kStartMaxCatchUpTicks);
+        for (const auto& sent: fake.sent) {
+            if (static_cast<uint8_t>(sent.first[0]) != static_cast<uint8_t>(bmmo::SessionClockAck)) continue;
+            EXPECT_NE(decode<bmmo::session_clock_ack_msg>(sent.first).kind, bmmo::session::CLOCK_ACK_START_TOO_LATE);
+        }
+    }
+
+    TEST(SessionClientCoreFlow, StartCatchUpAtTheCapAndOverIt) {
+        for (const int ticks: {33, 34}) {
+            for (const int path: {0, 1, 2}) {
+                SCOPED_TRACE(::testing::Message() << "ticks=" << ticks << " path=" << path);
+                flow_fake fake;
+                auto platform = fake.make_flow();
+                std::vector<int> caught;
+                platform.hooks.catch_up = [&caught](int count) { caught.push_back(count); };
+                session_client_core core(std::move(platform), session_capabilities{});
+                run_to_anchor(core, fake);
+                auto assign = assign_message(9, 120);
+                assign.server_us = 5;
+                if (path != 1) assign.flags = bmmo::session::ASSIGN_FLAG_SCHEDULED;
+                core.on_session_assign(assign);
+                const auto late = std::chrono::microseconds((ticks * 1'000'000LL + 65) / 66);
+                bmmo::session_start_at_msg start;
+                start.session = 9;
+                start.first_tick = 120;
+                start.server_us = 6;
+                if (path == 1) {
+                    start.flags = bmmo::session::START_AT_FLAG_CORRECTION;
+                    start.start_us = fake_us(fake.clock - late);
+                    core.on_session_start_at(start);
+                    core.on_session_start_at(start);
+                } else {
+                    start.seq = 3;
+                    start.start_us = fake_us(fake.clock + std::chrono::milliseconds(100));
+                    core.on_session_start_at(start);
+                    fake.advance(std::chrono::milliseconds(100));
+                    if (path == 0) fake.clock += late;
+                    EXPECT_FALSE(core.poll_hold().held);
+                    if (path == 2) {
+                        start.seq = 2;
+                        start.flags = bmmo::session::START_AT_FLAG_COMMIT;
+                        start.start_us = fake_us(fake.clock - late);
+                        core.on_session_start_at(start);
+                        core.on_session_start_at(start);
+                    }
+                    EXPECT_FALSE(core.poll_hold().held);
+                }
+                size_t reports = 0;
+                for (const auto& sent: fake.sent) {
+                    if (static_cast<uint8_t>(sent.first[0]) != static_cast<uint8_t>(bmmo::SessionClockAck)) continue;
+                    const auto ack = decode<bmmo::session_clock_ack_msg>(sent.first);
+                    if (ack.kind != bmmo::session::CLOCK_ACK_START_TOO_LATE) continue;
+                    ++reports;
+                    EXPECT_EQ(sent.second, send_mode::reliable);
+                    EXPECT_EQ(ack.session, 9u);
+                    EXPECT_EQ(ack.first_tick, 120u);
+                    EXPECT_EQ(ack.seq, path == 1 ? 0u : path == 2 ? 2u : 3u);
+                    EXPECT_EQ(ack.late_ticks, static_cast<uint32_t>(ticks));
+                    EXPECT_EQ(ack.server_us, 0);
+                    EXPECT_EQ(ack.client_us, 0);
+                    bmmo::session_clock_ack_msg truncated;
+                    truncated.raw.str(sent.first.substr(0, sent.first.size() - 1));
+                    EXPECT_FALSE(truncated.deserialize());
+                }
+                if (ticks == 33) {
+                    EXPECT_EQ(caught, std::vector<int>{33});
+                    EXPECT_EQ(reports, 0u);
+                } else {
+                    EXPECT_TRUE(caught.empty());
+                    EXPECT_EQ(reports, 1u);
+                }
+            }
+        }
     }
 
     TEST(SessionClientCoreFlow, StartMessageAfterItsInstantIsNotTaken) {

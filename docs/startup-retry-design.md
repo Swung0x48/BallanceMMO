@@ -98,3 +98,13 @@ archive `arena-refs-s15-2026-11-02.tar.gz` contains 366 files (151170058 compres
 sha256 `b8535aabb3b95656d27894248051c95b0fa63f693a34850fec4a7803efac9636`. The private workstate release and restore manifest preserve it;
 the dataset's README, SHA256SUMS, command.json and facts.json record provenance and checks. Gameplay code and
 protocol are unchanged by this refresh. The next step is the remainder of LB0; LBM/CBF coverage remains pending.
+
+## As built (step STK)
+
+Protocol 27 adds a reliable excessive-start-lateness report as a distinct SessionClockAck kind, not a clock sample:
+session, first-tick epoch, start sequence (0 for an unscheduled correction), and lateness in whole ticks. If the
+client needs more than 33 ticks at its scheduled release, initial assignment/correction, or an earlier committed
+start, it reports once instead of doing a partial catch-up. The server removes only that session member through
+SessionEnd and the existing member-left path, with the reason "The connection was lost for too long while the
+session was starting." Room membership and the other players continue unchanged, without a hold or resync.
+At most 33 ticks still catch up as before; resync catch-up retains its cap and mid-session outages are unchanged.

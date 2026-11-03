@@ -198,10 +198,9 @@ namespace bmmo::session {
         const double late = static_cast<double>(started_us - due_us) / 1e6 * tick_rate;
         return late >= 1.0 ? static_cast<int>(std::floor(late)) : 0;
     }
-    // A catch-up is at most this many ticks (half a second): more means the
-    // instant is wrong (a stale or broken clock estimate), and running that
-    // far ahead would only deepen every rewind; the rest is left to the
-    // lead machinery (a resync, Stage B's per-player lead).
+    // A start catch-up is at most this many ticks (half a second): a member
+    // needing more reports it and is refused alone (protocol 27). A resync
+    // still caps its catch-up here and leaves the rest to the lead machinery.
     inline constexpr int kStartMaxCatchUpTicks = 33;
 
     // The server's half: one session's start, from the start members'
@@ -312,8 +311,8 @@ namespace bmmo::session {
             if (phase_ == phase::started) {
                 // A report of the committed start keeps a watch open: a
                 // member that ran on another start reports the committed one
-                // once the commit's catch-up ran, even when the catch-up was
-                // cut at kStartMaxCatchUpTicks.
+                // once the commit's catch-up ran (or it reported excessive
+                // start lateness and is awaiting refusal).
                 if (seq != committed_seq_) {
                     watch_.erase(member);
                     queue_resync(start_resync{member, seq, true});

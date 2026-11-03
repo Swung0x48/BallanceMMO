@@ -537,6 +537,8 @@ namespace bmmo::session {
         clock_type::time_point start_instant_{};
         bool release_at_instant_ = false;
         bool release_local_known_ = false;
+        bool release_is_resync_ = false;
+        bool start_lateness_reported_ = false;
         clock_type::time_point release_local_{};
         uint32_t release_epoch_ = 0;
         bool corrected_ = false;
@@ -1701,9 +1703,9 @@ namespace bmmo::session {
         void apply_session_assign(const bmmo::session_assign_msg& msg);
         void apply_start_correction(uint32_t epoch, int64_t due_us, std::chrono::steady_clock::time_point started,
                                     const char* what);
-        // `ticks` whole ticks of a late start, capped at kStartMaxCatchUpTicks,
-        // through hooks.catch_up; returns the ticks caught up.
-        int catch_up_start(int ticks, const char* what);
+        // Whole ticks of a late start through hooks.catch_up, or a refusal
+        // report above kStartMaxCatchUpTicks; returns the ticks caught up.
+        int catch_up_start(int ticks, uint32_t epoch, uint32_t seq);
         void start_notice(const std::string& text);
         // A held send (hooks.filter_event) goes out now.
         void release_event(const std::string& wire_bytes) { put_event_on_wire(wire_bytes); }

@@ -2310,6 +2310,17 @@ public:
         auto it = physics_sessions_.find(msg.session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
+        if (msg.kind == bmmo::session::CLOCK_ACK_START_TOO_LATE) {
+            const auto notice = s.notices.find(c);
+            if (notice == s.notices.end() || !notice->second.assigned || notice->second.epoch != msg.first_tick
+                    || msg.seq > s.handshake.seq() || msg.late_ticks <= bmmo::session::kStartMaxCatchUpTicks)
+                return;
+            Printf("Physics session %u: %s refused: start %u (base %u) was %u ticks late.", s.id,
+                   get_client_name(c), msg.seq, msg.first_tick, msg.late_ticks);
+            send_session_end(s.id, c, "The connection was lost for too long while the session was starting.");
+            physics_session_member_left(c);
+            return;
+        }
         auto arrival = std::chrono::steady_clock::now();
         constexpr SteamNetworkingMicroseconds kMaxAge = 10000000;
         const SteamNetworkingMicroseconds age = SteamNetworkingUtils()->GetLocalTimestamp() - received;

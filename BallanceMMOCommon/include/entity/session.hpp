@@ -209,7 +209,10 @@ namespace bmmo::session {
     //      a commit); the client core drops a status of an older start than
     //      the one it follows (client_core.cpp on_session_start_status).  No
     //      journal version: the journal records no status.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 26;
+    //  27  SessionClockAck's CLOCK_ACK_START_TOO_LATE is a reliable start
+    //      lateness report, not a clock sample. The member is refused alone.
+    //      No journal version: nothing the journal records changed.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 27;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -428,6 +431,7 @@ namespace bmmo::session {
     // The answer of a member that already STARTED to a start message it got
     // too late: `seq` is the start it started on (the server commits it).
     constexpr uint8_t CLOCK_ACK_STARTED = 2;
+    constexpr uint8_t CLOCK_ACK_START_TOO_LATE = 3;
     // session_start_status_msg::phase (protocol 24).
     enum class start_status_phase : uint8_t {
         waiting_assign = 0,   // waiting for members to confirm their assignment

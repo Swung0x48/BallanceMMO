@@ -415,6 +415,7 @@ namespace bmmo::session {
              static_cast<unsigned>(s.sector_lead_));
         // Fresh runtime state.
         s.assigned_ = false;
+        s.start_lateness_reported_ = false;
         s.held_ = false;
         s.hold_polls_ = 0;
         s.tick_base_ = 0;
@@ -604,6 +605,7 @@ namespace bmmo::session {
         s.start_instant_known_ = false;
         s.release_at_instant_ = false;
         s.release_local_known_ = false;
+        s.release_is_resync_ = false;
         s.corrected_ = false;
         s.started_seq_ = 0;
         s.start_status_stale_logged_ = false;   // FULL step SAXC
@@ -763,7 +765,7 @@ namespace bmmo::session {
             s.started_epoch_ = s.tick_base_;
             s.started_effective_ = late == 0 ? s.start_instant_ : now;
             if (late > 0) {
-                const int caught = catch_up_start(late, "a committed start released after its instant");
+                const int caught = catch_up_start(late, s.started_epoch_, s.started_seq_);
                 s.started_effective_ -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::duration<double>(caught / bmmo::session::kStartTickRate));
             }
@@ -946,6 +948,7 @@ namespace bmmo::session {
         // fresh, else in a correction after this assignment's first ack.
         s.release_local_known_ = true;
         s.release_local_ = platform_.now(clock_site::handshake_lateness);
+        s.release_is_resync_ = true;
         s.release_epoch_ = msg.first_tick;
         s.corrected_ = false;
         if (msg.start_us != 0) apply_start_correction(msg.first_tick, msg.start_us, s.release_local_, "the resync's assignment");
@@ -957,20 +960,34 @@ namespace bmmo::session {
         s.corrected_ = true;
         s.corrected_epoch_ = epoch;
         const int64_t started_us = std::chrono::duration_cast<std::chrono::microseconds>(started.time_since_epoch()).count();
-        const int ticks = bmmo::session::start_lateness_ticks(started_us, due_us, bmmo::session::kStartTickRate);
+        int ticks = bmmo::session::start_lateness_ticks(started_us, due_us, bmmo::session::kStartTickRate);
         logf("start handshake: base %u started %+.2f ms after it was due (%s)%s", epoch,
              static_cast<double>(started_us - due_us) / 1000.0, what,
              ticks > 0 ? (": catching up " + std::to_string(ticks) + " tick(s)").c_str() : "");
         if (ticks <= 0) return;
-        catch_up_start(ticks, what);
-    }
-
-    int session_client_core::catch_up_start(int ticks, const char* what) {
-        if (ticks <= 0) return 0;
-        if (ticks > bmmo::session::kStartMaxCatchUpTicks) {
+        if (s.release_is_resync_ && ticks > bmmo::session::kStartMaxCatchUpTicks) {
             logf("start handshake: %s: %d tick(s) late, more than the %d a catch-up takes (a wrong instant?): "
                  "catching up %d", what, ticks, bmmo::session::kStartMaxCatchUpTicks, bmmo::session::kStartMaxCatchUpTicks);
             ticks = bmmo::session::kStartMaxCatchUpTicks;
+        }
+        catch_up_start(ticks, epoch, 0);
+    }
+
+    int session_client_core::catch_up_start(int ticks, uint32_t epoch, uint32_t seq) {
+        if (ticks <= 0) return 0;
+        if (ticks > bmmo::session::kStartMaxCatchUpTicks) {
+            if (!s.start_lateness_reported_) {
+                s.start_lateness_reported_ = true;
+                bmmo::session_clock_ack_msg report;
+                report.session = s.session_;
+                report.first_tick = epoch;
+                report.kind = bmmo::session::CLOCK_ACK_START_TOO_LATE;
+                report.seq = seq;
+                report.late_ticks = static_cast<uint32_t>(ticks);
+                report.serialize();
+                platform_.send(report.raw.str(), send_mode::reliable);
+            }
+            return 0;
         }
         s.start_catch_up_ticks_ += static_cast<uint64_t>(ticks);
         if (platform_.hooks.catch_up) platform_.hooks.catch_up(ticks);
@@ -1019,7 +1036,7 @@ namespace bmmo::session {
                      s.started_seq_, std::chrono::duration<double, std::milli>(s.started_effective_ - instant).count(),
                      late > 0 ? ("catching up " + std::to_string(late) + " tick(s)").c_str() : "nothing to catch up");
                 s.started_seq_ = msg.seq;
-                const int caught = catch_up_start(late, "a committed earlier start");
+                const int caught = catch_up_start(late, msg.first_tick, msg.seq);
                 s.started_effective_ -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::duration<double>(caught / bmmo::session::kStartTickRate));
             }

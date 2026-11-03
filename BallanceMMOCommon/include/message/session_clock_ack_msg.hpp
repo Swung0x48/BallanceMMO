@@ -14,7 +14,9 @@ namespace bmmo {
     // A start copy's ack (kind CLOCK_ACK_START) also confirms `seq`: the
     // client will start at that message's instant; CLOCK_ACK_STARTED answers
     // a start copy that came after the client had started: `seq` is the
-    // start it started on.
+    // start it started on. Protocol 27: CLOCK_ACK_START_TOO_LATE is instead
+    // reliable, carries late_ticks instead of the timestamps, and is not a
+    // clock sample. seq is 0 for an unscheduled start's correction.
     struct session_clock_ack_msg : public serializable_message {
         uint32_t session = 0;
         uint32_t first_tick = 0;   // the epoch the copy belonged to
@@ -22,6 +24,7 @@ namespace bmmo {
         uint32_t seq = 0;          // CLOCK_ACK_START: the start message's seq
         int64_t server_us = 0;
         int64_t client_us = 0;
+        uint32_t late_ticks = 0;
 
         session_clock_ack_msg() : serializable_message(bmmo::SessionClockAck) {}
 
@@ -31,6 +34,10 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&first_tick), sizeof(first_tick));
             raw.write(reinterpret_cast<const char*>(&kind), sizeof(kind));
             raw.write(reinterpret_cast<const char*>(&seq), sizeof(seq));
+            if (kind == session::CLOCK_ACK_START_TOO_LATE) {
+                raw.write(reinterpret_cast<const char*>(&late_ticks), sizeof(late_ticks));
+                return raw.good();
+            }
             raw.write(reinterpret_cast<const char*>(&server_us), sizeof(server_us));
             raw.write(reinterpret_cast<const char*>(&client_us), sizeof(client_us));
             return raw.good();
@@ -43,6 +50,8 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &first_tick)) return false;
             if (!message_utils::read_variable(raw, &kind)) return false;
             if (!message_utils::read_variable(raw, &seq)) return false;
+            if (kind == session::CLOCK_ACK_START_TOO_LATE)
+                return message_utils::read_variable(raw, &late_ticks);
             if (!message_utils::read_variable(raw, &server_us)) return false;
             if (!message_utils::read_variable(raw, &client_us)) return false;
             if (kind != session::CLOCK_ACK_ASSIGN && kind != session::CLOCK_ACK_START
