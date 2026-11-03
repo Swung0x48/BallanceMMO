@@ -116,11 +116,21 @@ void BallanceMMOClient::room_panel_frame() {
     }
     if (act.valid)
         send_room_request(act.type, act.room, act.target, act.mode, act.name, false);
+    // The block is BML+'s one global switch, which the server list also
+    // drives: its deferred unblock after a connect (server_list::exit_gui,
+    // 500 ms after the click, once Return is up) can land after a fast login
+    // has opened this panel.  So while the panel is open the block is
+    // re-asserted every frame, not only on the visibility change.
+    auto* input = m_bml->GetInputManager();
     const bool visible = room_panel_ui.visible();
-    if (visible != room_panel_input_blocked) {
-        room_panel_input_blocked = visible;
-        m_bml->GetInputManager()->SetBlock(visible);
+    if (visible && !input->IsBlock()) {
+        if (room_panel_input_blocked)
+            logger_->Info("Room panel: the keyboard block was cleared by another UI; re-asserted.");
+        input->SetBlock(true);
+    } else if (!visible && room_panel_input_blocked) {
+        input->SetBlock(false);
     }
+    room_panel_input_blocked = visible;
 }
 
 // Game thread, every frame. Reports the commands whose outcome never arrived
@@ -235,22 +245,19 @@ void BallanceMMOClient::handle_room_request_outcome(const bmmo::room_event_msg& 
     using action = bmmo::room::action;
     const auto request = pop_room_request();
     const bool announce = !request || request->announce;
-    const auto report = [&](const std::string& text, int color, bool = false) {
-        SendIngameMessage(text, color);
-    };
     if (!accepted) {
         if (request && request->action == action::List) {
             // no room_state is coming; do not print the old list on the next push
             std::lock_guard lk(room_state_mtx_);
             room_list_requested_ = false;
         }
-        report(std::format("Error: {} failed: {}{}{}.",
+        SendIngameMessage(std::format("Error: {} failed: {}{}{}.",
                 request ? (announce
                         ? std::format("\"/mmo room {}\"", room_action_name(request->action))
                         : std::format("the room {}", room_action_name(request->action)))
                         : std::string{"the room request"},
                 bmmo::room::error_string(msg.error),
-                msg.reason.empty() ? "" : " - ", msg.reason), bmmo::ansi::BrightRed, true);
+                msg.reason.empty() ? "" : " - ", msg.reason), bmmo::ansi::BrightRed);
         return;
     }
     if (!request)  // we lost track of what this answers; the state push speaks for itself
@@ -259,38 +266,38 @@ void BallanceMMOClient::handle_room_request_outcome(const bmmo::room_event_msg& 
         case action::List:
             break;  // print_room_list() already ran off the room_state
         case action::Create:
-            report(std::format("Created room #{}; you are the host. Use \"/mmo room ready\", "
+            SendIngameMessage(std::format("Created room #{}; you are the host. Use \"/mmo room ready\", "
                     "then \"/mmo room start physics\" once everyone is ready.", msg.room),
                     bmmo::ansi::BrightGreen);
             if (announce) { std::lock_guard lk(room_state_mtx_); room_status_requested_ = true; }
             break;
         case action::Join:
-            report(std::format("Joined room #{}.", msg.room), bmmo::ansi::BrightGreen);
+            SendIngameMessage(std::format("Joined room #{}.", msg.room), bmmo::ansi::BrightGreen);
             if (announce) { std::lock_guard lk(room_state_mtx_); room_status_requested_ = true; }
             break;
         case action::Leave:
-            report(std::format("Left room #{}.", msg.room), bmmo::ansi::BrightYellow);
+            SendIngameMessage(std::format("Left room #{}.", msg.room), bmmo::ansi::BrightYellow);
             break;
         case action::Ready:
         case action::Unready: {
             auto text = room_ready_text(db_.get_client_id());
-            report(text.empty()
+            SendIngameMessage(text.empty()
                     ? std::format("You are{} ready.", request->ready ? "" : " no longer")
                     : text, bmmo::ansi::BrightGreen);
             break;
         }
         case action::Start:
-            report(std::format("Starting a {} session in room #{}.",
+            SendIngameMessage(std::format("Starting a {} session in room #{}.",
                     request->mode == bmmo::room::mode::Physics ? "physics" : "shadow", msg.room),
                     bmmo::ansi::BrightGreen);
             room_panel_ui.close();   // the session starts; the panel goes away
             break;
         case action::Kick:
-            report(std::format("Removed {} from room #{}.",
+            SendIngameMessage(std::format("Removed {} from room #{}.",
                     get_username(msg.subject), msg.room), bmmo::ansi::BrightYellow);
             break;
         case action::Close:
-            report(std::format("Closed room #{}.", msg.room), bmmo::ansi::BrightYellow);
+            SendIngameMessage(std::format("Closed room #{}.", msg.room), bmmo::ansi::BrightYellow);
             break;
     }
 }
@@ -307,7 +314,6 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
         case event_type::PlayerJoined: {
             const auto text = std::format("{} joined the room.", get_username(msg.actor));
             SendIngameMessage(text, bmmo::ansi::BrightGreen);
-
             break;
         }
         case event_type::PlayerLeft:
@@ -322,12 +328,10 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
             if (msg.actor == msg.subject) {  // left on their own
                 const auto text = std::format("{} left the room.", get_username(msg.subject));
                 SendIngameMessage(text);
-
             } else if (msg.actor != own) {   // our own kick is reported by its outcome
                 const auto text = std::format("{} was removed from the room by {}.",
                         get_username(msg.subject), get_username(msg.actor));
                 SendIngameMessage(text, bmmo::ansi::BrightYellow);
-
             }
             break;
         case event_type::HostChanged: {
@@ -335,7 +339,6 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
                     ? std::string{"You are now the room host."}
                     : std::format("{} is now the room host.", get_username(msg.actor));
             SendIngameMessage(text, bmmo::ansi::BrightYellow);
-
             break;
         }
         case event_type::Kicked: {
@@ -349,7 +352,6 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
                 const auto text = std::format("Room #{} was closed by {}.",
                         msg.room, get_username(msg.actor));
                 SendIngameMessage(text, bmmo::ansi::BrightYellow);
-
             }
             break;
         case event_type::ReadyChanged: {
@@ -358,7 +360,6 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
             auto text = room_ready_text(msg.subject);
             if (!text.empty()) {
                 SendIngameMessage(text);
-
             }
             break;
         }
@@ -366,7 +367,6 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
             if (msg.actor != own) {  // the host's own start is reported by its outcome
                 const auto text = std::format("{} started the room session.", get_username(msg.actor));
                 SendIngameMessage(text, bmmo::ansi::BrightGreen);
-
             }
             room_panel_ui.close();   // the session starts; the panel goes away
             break;
@@ -374,7 +374,6 @@ void BallanceMMOClient::handle_room_event(const bmmo::room_event_msg& msg) {
             const auto text = std::format("The room session ended{}{}.",
                     msg.reason.empty() ? "" : ": ", msg.reason);
             SendIngameMessage(text, bmmo::ansi::BrightYellow);
-
             break;
         }
         default:
