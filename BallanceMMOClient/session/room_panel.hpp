@@ -218,8 +218,6 @@ namespace bmmo::retail {
                 ImGui::TextWrapped("Rooms: %s, up to %u players; %u physics room%s at a time",
                                    info.rooms_enabled ? "on" : "off", info.maximum_members,
                                    info.maximum_physics_rooms, info.maximum_physics_rooms == 1 ? "" : "s");
-                ImGui::TextWrapped("Trafo inputs: %s   Placement clones: %s",
-                                   info.trafo_inputs ? "on" : "off", info.placement_clones ? "on" : "off");
             }
             const bool in_room = state.own_room != 0;
 
