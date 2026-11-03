@@ -475,6 +475,16 @@ namespace bmmo::session {
         bool airship_active_ = false;
         bool airship_box_logged_ = false;
         uint32_t own_airship_tick_ = 0;
+        // Step AZX: the own ball's proposed release tick R (0: none), the R
+        // whose echo is still awaited, and every release known by its stamp
+        // (own and relayed), kept for the rollback history's reach.
+        uint32_t own_airship_release_ = 0;
+        uint32_t own_airship_inflight_ = 0;
+        struct airship_release {
+            uint32_t player = 0, tick = 0;
+            bmmo::session::airship_release_state state;
+        };
+        std::vector<airship_release> airship_releases_;
         uint64_t ghosts_shown_ = 0;
         uint64_t own_corrections_out_of_sync_ = 0;   // held notices / forced frames of a tick the own ball had left the sync at
         uint64_t resyncs_own_kept_ = 0;              // resyncs that kept the out-of-sync own ball local
@@ -1955,6 +1965,8 @@ namespace bmmo::session {
         // mirror's place in the airship zone, and the ghosts handed to the
         // host's display (step BALL: the legacy ball stream moves them).
         void airship_frame(uint32_t tick);
+        void prepare_airship_release(uint32_t tick);
+        void apply_airship_releases(uint32_t tick, uint32_t player);
         // Step SPGH: the spawn ghosts' bookkeeping and display after each
         // live frame (the rule itself is the physics layer's).
         void spawn_ghost_frame(uint32_t tick);

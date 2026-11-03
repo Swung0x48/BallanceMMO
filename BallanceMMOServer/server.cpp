@@ -2840,6 +2840,7 @@ public:
         for (int k = 0; k < 9; ++k) event.rotation[k] = msg.rotation[k];
         event.sector = msg.sector;
         event.name = msg.name;
+        event.release = msg.release;
         {
             // Design 9.4.  Rate limit: hard reject (counted above, after the
             // dedupe).  Everything else: log + count.
@@ -3158,6 +3159,7 @@ public:
             case bmmo::session::event_type::Finish: return "Finish";
             case bmmo::session::event_type::BodyRevived: return "BodyRevived";
             case bmmo::session::event_type::Trafo: return "Trafo";
+            case bmmo::session::event_type::AirshipRelease: return "AirshipRelease";
         }
         return "?";
     }

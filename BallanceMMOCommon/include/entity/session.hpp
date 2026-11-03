@@ -212,7 +212,13 @@ namespace bmmo::session {
     //  27  SessionClockAck's CLOCK_ACK_START_TOO_LATE is a reliable start
     //      lateness report, not a clock sample. The member is refused alone.
     //      No journal version: nothing the journal records changed.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 27;
+    //  28  The airship zone is reversible (step AZX, the user's decision 79):
+    //      event_type::AirshipRelease carries the owner's ball state at the
+    //      release tick R it proposed on leaving the zone (no y faces any
+    //      more); accepted only while R is not simulated, refused to the
+    //      owner alone otherwise. The journal's event record appends the
+    //      release state for that type.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 28;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -470,6 +476,17 @@ namespace bmmo::session {
         // flags session/trafo_input.hpp TRAFO_*; position the explosion's
         // referential (zeros for a reset).
         Trafo = 5,
+        // Protocol 28 (step AZX): the owner's ball leaves the airship zone's
+        // ghost span at `tick` in the state `release` - every side remakes
+        // the body there and applies that state.
+        AirshipRelease = 6,
+    };
+
+    struct airship_release_state {
+        double position[3] = {};
+        double rotation[4] = {};
+        float linear[3] = {};
+        float angular[3] = {};
     };
 
     // One type set of the trafo ledger a resync or join state carries

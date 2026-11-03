@@ -1146,15 +1146,9 @@ namespace bmmo::session {
                 journal_.note(text);
             }
         }
-        // The own ball.  The physics layer's latch is one way for the life
-        // (inside the box or not since its first PSI there), so it stays out
-        // of the sync until the ball dies.  Not latched any more while this side still
-        // counts it out of the sync: a rewind to before the entry replayed it
-        // away (the replay may re-enter at another tick - the next frame that
-        // finds the latch takes its own tick then).
         const int own_zone = s.own_physicalized_ && !s.own_body_entity_.empty()
                                  ? platform_.airship_zone_contains(s.own_body_entity_) : -1;
-        if (own_zone != 1) {
+        if (own_zone <= 0) {
             if (s.own_airship_tick_ != 0 && own_zone == 0)
                 logf("airship: the own ball %s is not latched in the airship zone at tick %u any more (a rewind to before "
                      "its entry at %u): back in the sync", s.own_body_entity_.c_str(), tick, s.own_airship_tick_);
@@ -1168,10 +1162,21 @@ namespace bmmo::session {
                               + ", out of the sync from here");
             }
         }
+        if (own_zone != 2) s.own_airship_release_ = 0;
+        else if (s.own_airship_release_ == 0 && s.own_airship_inflight_ == 0) {
+            const uint32_t delay = static_cast<uint32_t>(std::max(1, static_cast<int>(s.input_delay_)
+                    + s.lead_offset_ + std::max(0, s.lead_slew_.outstanding())));
+            s.own_airship_release_ = tick + delay;
+            logf("airship: exit at %u, release proposed for %u (K=%u)", tick, s.own_airship_release_, delay);
+        }
+        const uint32_t keep = static_cast<uint32_t>(s.rollback_.thresholds().history_ticks);
+        s.airship_releases_.erase(std::remove_if(s.airship_releases_.begin(), s.airship_releases_.end(),
+                [tick, keep](const auto& release) { return static_cast<int32_t>(tick - release.tick) > static_cast<int32_t>(keep); }),
+                s.airship_releases_.end());
         // The mirrors.
         for (auto& [id, remote]: s.remotes_) {
             const int in_zone = remote.physicalized ? platform_.airship_zone_contains(remote.entity) : -1;
-            if (in_zone != 1) {
+            if (in_zone <= 0) {
                 if (remote.airship_tick != 0)
                     logf("airship: player %u's ghost %s is out of the zone at tick %u", id, remote.entity.c_str(), tick);
                 remote.airship_tick = 0;
@@ -1196,6 +1201,77 @@ namespace bmmo::session {
             platform_.show_ghost(remote.entity, true);
             if (!remote.ghost_shown) ++s.ghosts_shown_;
             remote.ghost_shown = true;
+        }
+    }
+
+    void session_client_core::prepare_airship_release(uint32_t tick) {
+        if (s.own_airship_release_ != tick || !platform_.airship_zone_contains) return;
+        s.own_airship_release_ = 0;
+        if (!s.own_physicalized_ || platform_.airship_zone_contains(s.own_body_entity_) != 2) return;
+        bmmo_physics_body_state state{};
+        if (!platform_.body_state(s.own_body_entity_, state)) return;
+        bmmo::session_event_msg event;
+        event.type = bmmo::session::event_type::AirshipRelease;
+        event.tick = tick;
+        std::copy_n(state.position, 3, event.release.position);
+        std::copy_n(state.rotation, 4, event.release.rotation);
+        std::copy_n(state.linear, 3, event.release.linear);
+        std::copy_n(state.angular, 3, event.release.angular);
+        s.airship_releases_.push_back({s.own_id_, tick, event.release});
+        s.own_airship_inflight_ = tick;
+        send_event(event);
+    }
+
+    void session_client_core::apply_airship_releases(uint32_t tick, uint32_t player) {
+        for (const auto& release: s.airship_releases_) {
+            if (release.tick != tick || release.player != player) continue;
+            std::string entity;
+            if (release.player == s.own_id_) {
+                if (!s.own_physicalized_) continue;
+                entity = s.own_body_entity_;
+                s.own_airship_tick_ = 0;
+                if (platform_.airship_zone_release) platform_.airship_zone_release(entity, tick, false);
+                own_life body;
+                body.what = own_life::kind::beam;
+                body.entity = entity;
+                body.group = s.own_group_;
+                platform_.ball_recipe_of(entity, body.recipe);
+                for (int axis = 0; axis < 3; ++axis) {
+                    body.position[axis] = static_cast<float>(release.state.position[axis]);
+                    body.rotation[axis * 3 + axis] = 1.0f;
+                }
+                if (!remake_own_body(body, tick, "airship release")) continue;
+            } else {
+                auto remote = s.remotes_.find(release.player);
+                if (remote == s.remotes_.end() || !remote->second.physicalized) continue;
+                entity = remote->second.entity;
+                remote->second.airship_tick = 0;
+                if (platform_.airship_zone_release) platform_.airship_zone_release(entity, tick, false);
+                const event_log_mute mute(*this);
+                platform_.detach_mirror_navigation(entity);
+                remote->second.navigation = false;
+                unphysicalize_mirror(entity);
+                remote->second.physicalized = false;
+                auto body = remote->second.birth;
+                body.player = release.player;
+                body.remake = true;
+                body.flags = 0;
+                std::fill_n(body.rotation, 9, 0.0f);
+                for (int axis = 0; axis < 3; ++axis) {
+                    body.position[axis] = static_cast<float>(release.state.position[axis]);
+                    body.rotation[axis * 3 + axis] = 1.0f;
+                }
+                if (!physicalize_remote(body, tick)) continue;
+            }
+            s.mechanism_tracking_.mark_dirty();
+            bmmo_physics_body_state state{};
+            std::copy_n(release.state.position, 3, state.position);
+            std::copy_n(release.state.rotation, 4, state.rotation);
+            std::copy_n(release.state.linear, 3, state.linear);
+            std::copy_n(release.state.angular, 3, state.angular);
+            if (!world().set_body(entity, state, bmmo::session::wake_mode::wake, false))
+                logf("airship: release of p%u at %u failed", release.player, tick);
+            else logf("airship: release of p%u applied at %u", release.player, tick);
         }
     }
 

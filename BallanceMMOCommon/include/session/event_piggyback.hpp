@@ -45,7 +45,7 @@ namespace bmmo::session {
     // The own event types that ride the input datagram.
     inline bool event_rides_input(event_type t) {
         return t == event_type::Physicalize || t == event_type::Unphysicalize || t == event_type::Sector
-            || t == event_type::Trafo;
+            || t == event_type::Trafo || t == event_type::AirshipRelease;
     }
 
     class event_piggyback {

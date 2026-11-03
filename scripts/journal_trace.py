@@ -91,7 +91,7 @@ CHECKPOINT_FINAL = 16    # client, diagnostic (headless --final-checkpoints, ste
 CHECKPOINT_UNCONFIRMED = 32   # with FINAL only: a remote ball was stepped with a frame not relayed for the tick
 RESYNC_OUTCOMES = {0: "applied", 1: "refused_scripts", 2: "timed_out"}
 
-EVENT_TYPES = {0: "Physicalize", 1: "Unphysicalize", 2: "Sector", 3: "Finish", 4: "BodyRevived", 5: "Trafo"}
+EVENT_TYPES = {0: "Physicalize", 1: "Unphysicalize", 2: "Sector", 3: "Finish", 4: "BodyRevived", 5: "Trafo", 6: "AirshipRelease"}
 CORRECTION_KINDS = {0: "mismatch", 1: "rollback", 2: "hard", 3: "blend", 4: "resync",
                     5: "too_far", 6: "frozen", 7: "unmatched"}
 BODY_KINDS = {0: "ball", 1: "mechanism"}
@@ -331,6 +331,12 @@ class JournalWriter(object):
         buf += _I32.pack(record["sector"])
         _put_str(buf, record.get("name", ""))
         cls._put_recipe(buf, record.get("recipe") or empty_recipe())
+        if record["type"] == 6:
+            release = record["release"]
+            _put_vec(buf, release["position"], 3, _F64)
+            _put_vec(buf, release["rotation"], 4, _F64)
+            _put_vec(buf, release["linear"], 3, _F32)
+            _put_vec(buf, release["angular"], 3, _F32)
         # The stamped tick, trailing so a reader that predates it still parses
         # the record; journal.hpp substitutes `tick` for a zero the same way.
         stamp = record.get("event_tick") or 0
@@ -813,6 +819,9 @@ class JournalReader(object):
         record = {"tick": cursor.u32(), "id": cursor.u32(), "type": cursor.u8(), "ball_type": cursor.u8(),
                   "flags": cursor.u8(), "position": cursor.f32v(3), "rotation": cursor.f32v(9),
                   "sector": cursor.i32(), "name": cursor.string(), "recipe": cls._recipe(cursor)}
+        if record["type"] == 6:
+            record["release"] = {"position": cursor.f64v(3), "rotation": cursor.f64v(4),
+                                 "linear": cursor.f32v(3), "angular": cursor.f32v(3)}
         # `tick` is the tick the world APPLIED the event at, `event_tick` the
         # tick stamped on the event itself (they differ when the event arrived
         # late).  A file written before the field existed has neither the four
@@ -1169,6 +1178,8 @@ def _fmt_event(record):
         record["ball_type"], record["flags"], record["sector"], _fmt_vec(record["position"], "%.3f"))
     if record["name"]:
         text += " name=%s" % record["name"]
+    if record["type"] == 6:
+        text += " release=" + repr(record["release"])
     recipe = record["recipe"]
     if record["type"] == 0 or recipe["convex"] or recipe["balls"] or recipe["concave"]:
         text += " " + _fmt_recipe(recipe)

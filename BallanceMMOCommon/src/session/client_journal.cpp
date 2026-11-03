@@ -180,6 +180,7 @@ namespace bmmo::session::core {
         out.sector = e.sector;
         out.name = e.name;
         out.recipe = to_bridge_recipe(e.recipe);
+        out.release = e.release;
         journal_.event(out);
     }
 

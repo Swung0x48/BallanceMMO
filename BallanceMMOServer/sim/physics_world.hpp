@@ -175,6 +175,7 @@ namespace bmmo::sim {
         uint8_t flags = 0;   // Physicalize: bmmo::session::PHYSICALIZE_FLAG_* (design 9.10)
         float position[3] = {};
         float rotation[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // world matrix rows
+        bmmo::session::airship_release_state release;
         bmmo_physics_ball_recipe recipe{};
         int32_t sector = 0;
         std::string name;   // BodyRevived: the mechanism body

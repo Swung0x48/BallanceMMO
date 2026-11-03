@@ -4513,6 +4513,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         return zone.active ? 1 : 0;
     };
     p.airship_zone_contains = [this](const std::string& name) { return physics_view_.airship_zone_contains(name.c_str()); };
+    p.airship_zone_release = [this](const std::string& entity, uint32_t tick, bool undo) {
+        physics_view_.airship_zone_release(entity.c_str(), tick, undo);
+    };
     p.airship_zone_box = [this](double box[6]) { return physics_view_.airship_zone_get(box); };
     // Step BALL (protocol 17, the user's decision of 2026-10-28 "switch to the old path"):
     // a ghost is the spirit ball handed back to game_objects::update - not

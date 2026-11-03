@@ -772,8 +772,9 @@ namespace bmmo::session {
         // min xyz, max xyz; returns 1 active, 0 no airship / off, -1 error.
         // Optional: a host without it runs no zone (and is not protocol 14's).
         std::function<int(bool enable, const std::string& own_group, double box[6], std::string& error)> airship_zone;
-        // 1: the entity's body is a player ball inside the zone; 0: not; -1: no body.
+        // 1 inside the x/z box; 2 ghost awaiting release outside; 0 solid; -1 no body.
         std::function<int(const std::string& entity)> airship_zone_contains;
+        std::function<void(const std::string& entity, uint32_t tick, bool undo)> airship_zone_release;
         // The zone as it stands: 1 with the box once it is taken (the
         // platform has its body), 0 not yet, -1 off.
         std::function<int(double box[6])> airship_zone_box;

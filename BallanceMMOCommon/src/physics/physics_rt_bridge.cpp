@@ -832,6 +832,10 @@ namespace {
         return bmmo::physics::airship_zone_contains(static_cast<CKIpionManager*>(manager), entity_name);
     }
 
+    void api_airship_zone_release(void* manager, const char* entity_name, uint32_t tick, int32_t undo) {
+        bmmo::physics::airship_zone_release(static_cast<CKIpionManager*>(manager), entity_name, tick, undo != 0);
+    }
+
     // v25: the spawn ghost (step SPGH).
     int32_t api_spawn_ghost_set(void* manager, int32_t enable, int32_t respawns, double radius, double* info_out,
                                 char* error, uint32_t error_size) {
@@ -1124,6 +1128,7 @@ namespace {
         api_spawn_ghost_forget,
         api_event_log_keep_muted_recipes,
         api_drain_muted_recipes,
+        api_airship_zone_release,
     };
 }
 

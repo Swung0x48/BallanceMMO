@@ -914,6 +914,24 @@ namespace bmmo::sim {
         player& p = it->second;
         CKIpionManager* manager = physics();
         switch (event.type) {
+        case event_type::AirshipRelease: {
+            if (!p.physicalized || !p.ball) return true;
+            p.airship_tick = 0;
+            bmmo::physics::airship_zone_release(manager, p.ball->GetName(), event.tick, false);
+            if (p.navigation) p.navigation->shutdown_all();
+            if (!bmmo::physics::unphysicalize(manager, p.ball->GetName(), error)) return false;
+            float position[3];
+            for (int axis = 0; axis < 3; ++axis) position[axis] = static_cast<float>(event.release.position[axis]);
+            const float rotation[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+            p.ball->SetWorldMatrix(matrix_from_pose(position, rotation));
+            if (!bmmo::physics::physicalize(manager, p.ball->GetName(), retail_recipe(p.ball_type), p.group.c_str(), error))
+                return false;
+            if (p.navigation) p.navigation->set_ball(p.ball);
+            body_set_changed_ = true;
+            return bmmo::physics::set_body_state(manager, p.ball->GetName(), event.release.position,
+                    event.release.rotation, event.release.linear, event.release.angular,
+                    bmmo::physics::wake_mode::wake, false, error);
+        }
         case event_type::Physicalize: {
             CK3dEntity* clone = clone_ball(p, event.ball_type, error);
             if (!clone) return false;
@@ -1130,12 +1148,12 @@ namespace bmmo::sim {
         }
         for (auto& [id, p]: players_) {
             const int in_zone = p.physicalized && p.ball ? bmmo::physics::airship_zone_contains(manager, p.ball->GetName()) : -1;
-            if (in_zone == 1 && p.airship_tick == 0) {
+            if (in_zone > 0 && p.airship_tick == 0) {
                 p.airship_tick = tick_;
                 airship_entries_.emplace_back(id, tick_);
                 log("world: airship: player " + std::to_string(id) + "'s ball " + p.ball->GetName()
                     + " is in the airship zone at tick " + std::to_string(tick_) + " (a ghost from here)");
-            } else if (in_zone != 1) {
+            } else if (in_zone <= 0) {
                 p.airship_tick = 0;
             }
         }

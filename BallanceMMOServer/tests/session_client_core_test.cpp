@@ -87,6 +87,10 @@ namespace bmmo::session {
 #define BMMO_CORE_STEP(name) \
         template <class... A> decltype(auto) name(A&&... a) { return c.name(std::forward<A>(a)...); }
         BMMO_CORE_STEP(drain_due_events)
+        BMMO_CORE_STEP(apply_event)
+        BMMO_CORE_STEP(airship_frame)
+        BMMO_CORE_STEP(prepare_airship_release)
+        BMMO_CORE_STEP(apply_airship_releases)
         BMMO_CORE_STEP(apply_held_lifecycle)
         BMMO_CORE_STEP(drain_pending_lives)
         BMMO_CORE_STEP(settle_unreplayed_lives)
@@ -10961,6 +10965,141 @@ namespace {
         for (size_t i = sends; i < fake.sent.size(); ++i)
             EXPECT_NE(static_cast<uint8_t>(fake.sent[i].first[0]), static_cast<uint8_t>(bmmo::SessionClockAck));
     }
+    TEST(SessionClientCoreAirship, ExitWaitsForReleaseAndEverySideAppliesItsStateAtTheStamp) {
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        int zone = 1;
+        bool ghost = false;
+        bmmo_physics_body_state pose{};
+        pose.position[0] = 904.125;
+        pose.position[1] = -12.5;
+        pose.rotation[3] = 1.0;
+        pose.linear[0] = -3.25f;
+        pose.angular[2] = 0.5f;
+        std::vector<bmmo_physics_body_state> applied;
+        platform.airship_zone = [](bool, const std::string&, double*, std::string&) { return 1; };
+        platform.airship_zone_contains = [&zone](const std::string& entity) { return entity == "own" ? zone : 1; };
+        platform.airship_zone_release = [&zone](const std::string&, uint32_t, bool undo) { zone = undo ? 2 : 0; };
+        platform.show_ghost = [&ghost](const std::string&, bool shown) { ghost = shown; };
+        platform.body_state = [&pose](const std::string&, bmmo_physics_body_state& out) { out = pose; return true; };
+        platform.bind_world = [&applied](const bmmo::session::core_world_hooks&) {
+            bmmo::session::rollback_world world;
+            world.set_body = [&applied](const std::string&, const bmmo_physics_body_state& state,
+                                       bmmo::session::wake_mode mode, bool restore) {
+                EXPECT_EQ(mode, bmmo::session::wake_mode::wake);
+                EXPECT_FALSE(restore);
+                applied.push_back(state);
+                return true;
+            };
+            return world;
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_anchor(core, fake);
+        auto& state = state_of(core);
+        state.own_physicalized_ = true;
+        state.own_body_entity_ = "own";
+        state.remotes_[4].entity = "mirror";
+        state.remotes_[4].physicalized = true;
+        steps{core}.airship_frame(126);
+        EXPECT_TRUE(ghost);
+        EXPECT_EQ(state.remotes_[4].airship_tick, 126u);
+        zone = 2;
+        steps{core}.airship_frame(127);
+        EXPECT_EQ(state.own_airship_release_, 131u);
+        zone = 1;
+        steps{core}.airship_frame(128);
+        EXPECT_EQ(state.own_airship_release_, 0u);
+        zone = 2;
+        steps{core}.airship_frame(129);
+        const size_t sends = fake.sent.size();
+        steps{core}.prepare_airship_release(132);
+        steps{core}.apply_airship_releases(132, state.own_id_);
+        EXPECT_EQ(fake.sent.size(), sends);
+        EXPECT_TRUE(applied.empty());
+        EXPECT_EQ(zone, 2);
+        steps{core}.prepare_airship_release(133);
+        ASSERT_EQ(fake.sent.size(), sends + 1);
+        EXPECT_EQ(fake.sent.back().second, send_mode::reliable_no_nagle);
+        auto release = decode<bmmo::session_event_msg>(fake.sent.back().first);
+        EXPECT_EQ(release.type, bmmo::session::event_type::AirshipRelease);
+        EXPECT_EQ(release.tick, 133u);
+        EXPECT_DOUBLE_EQ(release.release.position[1], -12.5);
+        steps{core}.apply_airship_releases(133, state.own_id_);
+        EXPECT_EQ(zone, 0);
+        EXPECT_EQ(state.own_airship_tick_, 0u);
+        ASSERT_FALSE(fake.own_specs.empty());
+        EXPECT_EQ(fake.own_specs.back().tick, 133u);
+        EXPECT_FALSE(fake.own_specs.back().kick);
+        release.player = 4;
+        release.life = 1;
+        steps{core}.apply_event(release);
+        steps{core}.drain_pending_lives(133);
+        ASSERT_EQ(applied.size(), 3u);
+        EXPECT_EQ(std::count(fake.calls.begin(), fake.calls.end(), "unmake_mirror:mirror"), 1);
+        ASSERT_FALSE(fake.specs.empty());
+        EXPECT_FALSE(fake.specs.back().kick);
+        for (const auto& result: applied) {
+            EXPECT_TRUE(std::equal(pose.position, pose.position + 3, result.position));
+            EXPECT_TRUE(std::equal(pose.rotation, pose.rotation + 4, result.rotation));
+            EXPECT_TRUE(std::equal(pose.linear, pose.linear + 3, result.linear));
+            EXPECT_TRUE(std::equal(pose.angular, pose.angular + 3, result.angular));
+        }
+        bmmo::session::lifecycle_acceptance server;
+        const auto verdict = server.accept(4, bmmo::session::event_type::AirshipRelease, 133, 130);
+        EXPECT_FALSE(verdict.rejected);
+        EXPECT_EQ(verdict.applied, 133u);
+    }
+
+    TEST(SessionClientCoreAirship, LateReleaseIsRefusedRewoundAndProposedAgain) {
+        bmmo::session::lifecycle_acceptance server;
+        const auto verdict = server.accept(3, bmmo::session::event_type::AirshipRelease, 123, 124);
+        ASSERT_TRUE(verdict.rejected);
+        EXPECT_EQ(verdict.applied, 123u);
+        flow_fake fake;
+        auto platform = fake.make_flow();
+        int zone = 0;
+        platform.airship_zone_contains = [&zone](const std::string&) { return zone; };
+        platform.airship_zone_release = [&zone](const std::string&, uint32_t tick, bool undo) {
+            EXPECT_EQ(tick, 123u);
+            EXPECT_TRUE(undo);
+            zone = 2;
+        };
+        platform.bind_world = [](const bmmo::session::core_world_hooks&) {
+            bmmo::session::rollback_world world;
+            world.get_body = [](const std::string&, bmmo_physics_body_state&) { return false; };
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.step = []() { return true; };
+            return world;
+        };
+        session_client_core core(std::move(platform), session_capabilities{});
+        run_to_tick_125(core, fake);
+        auto& state = state_of(core);
+        state.airship_active_ = true;
+        state.own_physicalized_ = true;
+        state.own_body_entity_ = "own";
+        state.own_airship_inflight_ = 123;
+        state.airship_releases_.push_back({3, 123, {}});
+        core.config.rollback = true;
+        core.config.lifecycle_rewind = true;
+        for (uint32_t tick = 118; tick <= 125; ++tick)
+            state.rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick,
+                                   bmmo::session::rollback_tracked{}, {});
+        auto refused = event_message(3, bmmo::session::event_type::AirshipRelease, 123, 123);
+        refused.state = bmmo::session::EVENT_STATE_REJECTED;
+        core.on_session_event(std::move(refused));
+        steps{core}.process_own_echoes();
+        EXPECT_EQ(state.life_rewinds_, 1u);
+        EXPECT_TRUE(state.airship_releases_.empty());
+        EXPECT_EQ(state.own_airship_inflight_, 0u);
+        EXPECT_EQ(zone, 2);
+        steps{core}.airship_frame(125);
+        EXPECT_EQ(state.own_airship_release_, 129u);
+        EXPECT_FALSE(server.accept(3, bmmo::session::event_type::AirshipRelease, 129, 128).rejected);
+        state.own_physicalized_ = false;
+        steps{core}.airship_frame(126);
+        EXPECT_EQ(state.own_airship_release_, 0u);
+    }
+
 }
 
 // FULL step R6H: the own-event hold both hosts run (session/event_hold.hpp) and

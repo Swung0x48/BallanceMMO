@@ -61,6 +61,7 @@ namespace bmmo::sim {
             out.sector = e.sector;
             out.name = e.name;
             out.recipe = e.recipe;
+            out.release = e.release;
             return out;
         }
 
@@ -948,6 +949,22 @@ namespace bmmo::sim {
             // its player is superseded: not queued, not relayed to the others.
             const uint32_t next = s.world->tick_index();
             const auto type = event.type;
+            const auto verdict = s.acceptance.accept(player, type, tick, next);
+            if (verdict.rejected) {
+                if (callbacks_.on_event_accepted) {
+                    accepted_event refused;
+                    refused.session = session;
+                    refused.player = player;
+                    refused.origin = refused.applied = tick;
+                    refused.type = type;
+                    refused.rejected = true;
+                    refused.token = token;
+                    refused.intake = arrival;
+                    refused.life = life_of(s, player);
+                    callbacks_.on_event_accepted(refused);
+                }
+                return;
+            }
             // Step F3 (LCM, diagnostic only): how far ahead of the session
             // the event got here, for the S5 line.  deadline() is defined
             // from the scheduler's first tick on (a stamp below it wraps).
@@ -1017,7 +1034,6 @@ namespace bmmo::sim {
                 }
                 return;
             }
-            const auto verdict = s.acceptance.accept(player, type, tick, next);
             const auto accepted = [&](bool superseded) {
                 if (!callbacks_.on_event_accepted) return;
                 accepted_event a;

@@ -633,6 +633,8 @@ namespace bmmo::session {
         // starting pose - with the own ball's group.
         s.own_airship_tick_ = 0;
         s.airship_active_ = false;
+        s.own_airship_release_ = s.own_airship_inflight_ = 0;
+        s.airship_releases_.clear();
         if (platform_.airship_zone) {
             double box[6] = {};
             std::string error;
@@ -884,6 +886,8 @@ namespace bmmo::session {
         }
         s.airship_active_ = false;
         s.own_airship_tick_ = 0;
+        s.own_airship_release_ = s.own_airship_inflight_ = 0;
+        s.airship_releases_.clear();
         s.relay_seen_.clear();
         s.held_seen_.clear();
         s.held_stale_seen_.clear();

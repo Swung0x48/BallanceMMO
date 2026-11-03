@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define BMMO_PHYSICS_API_VERSION 33u  /* v33: the recipes of a muted frame kept and drained (FULL step AUD3) (v32: a leaver's spawn ghost group forgotten (FULL step GHF) (v31: the record capture's entity lookup scope, with a verify mode (FULL step SRT2B) (v30: a named hull compiled from a template body (FULL step H1X) (v29: a savestate blob's physics globals read for a resync re-step (step H7X) (v28: the physics globals - time factor and gravity - read and written for a rollback (record-format-gaps design C3, step RK1) (v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) ) ) ) ) ) ) */
+#define BMMO_PHYSICS_API_VERSION 34u  /* v34: the airship zone's ghost span released at a stamped tick, or the release undone (step AZX) (v33: the recipes of a muted frame kept and drained (FULL step AUD3) (v32: a leaver's spawn ghost group forgotten (FULL step GHF) (v31: the record capture's entity lookup scope, with a verify mode (FULL step SRT2B) (v30: a named hull compiled from a template body (FULL step H1X) (v29: a savestate blob's physics globals read for a resync re-step (step H7X) (v28: the physics globals - time factor and gravity - read and written for a rollback (record-format-gaps design C3, step RK1) (v27: a joint block's constraint read as an image and re-made from one (step RLC) (v26: the own ball's player group before its birth tick's PSIs (step OWG) (v25: the spawn ghost (steps SPGH, SPGH2) (v24: the airship zone (step BALA) (v23: the PreSimulate queue read, rebuilt, held out of a replay and compared in a scope (rollback-engine-gaps design gap Q, engine change #20, step B7EG) (v22: the savestate's controller alias for the retail host (trafo-replication design, step T4) (v21: the trafo sets' registry, seeds, unmake and piece filter (trafo-replication design, step T1) (v20: savestate_set_travelling restores another process's blob (the resync state, resync design A3) (v19: set_body_matrix puts a body where its Physicalize made it (v18: savestate_set names the bodies whose contacts it dropped (v17: the IVP savestate; v16: the collision recheck as a pass of its own; v15: a body's friction contacts, for the rollback restore; v14: the force block's controller and the event-log mute; v13: IVP's freeze bookkeeping) ) ) ) ) ) ) ) ) ) ) ) */
 #define BMMO_PHYSICS_API_SYMBOL "bmmo_physics_api"
 
 /* Everything below crosses the C boundary by value, so every array is inline
@@ -742,7 +742,7 @@ typedef struct bmmo_physics_api_v2 {
      * when it is active, 0 when the level has no airship or it was switched
      * off, -1 with a message.
      * contains: 1 when the entity's body is a player ball inside the zone,
-     * 0 when not, -1 when it has no body. */
+     * 2 outside but still latched, 0 when solid, -1 when it has no body. */
     int32_t (*airship_zone_set)(void* ipion_manager, int32_t enable, const char* own_group, double* box_out,
                                 char* error, uint32_t error_size);
     int32_t (*airship_zone_contains)(void* ipion_manager, const char* entity_name);
@@ -877,6 +877,9 @@ typedef struct bmmo_physics_api_v2 {
      * engine change #19: no engine change. */
     int32_t (*event_log_keep_muted_recipes)(void* ipion_manager, int32_t keep);
     int32_t (*drain_muted_recipes)(void* ipion_manager, char* buffer, uint32_t buffer_size);
+    /* v34 (step AZX): close the entity's open ghost span at `tick` (its
+     * accepted release), or with undo reopen the span released at `tick`. */
+    void (*airship_zone_release)(void* ipion_manager, const char* entity_name, uint32_t tick, int32_t undo);
 } bmmo_physics_api_v2;
 
 /* savestate_set flags: the same values as SAVESTATE_STRICT and

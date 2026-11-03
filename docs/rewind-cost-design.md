@@ -2349,6 +2349,49 @@ as retail does. Retail session teardown hands the level back to vanilla;
 it does not unload the level or reset the airship. Physics protocol stays 27;
 the airship-zone rules are unchanged.
 
+## As built (step AZX)
+
+Protocol **28**, bridge API **34**: BALA's airship box now has only x/z
+faces. Its ghost spans are reversible: the own ball still touches only the
+static level and its local airship; every other world's bookkeeping body
+stays frozen and collision-free, with BALL's legacy stream moving the retail
+ghost. Headless clients draw nothing and add no legacy pose traffic.
+
+An exit at E proposes R=E+K, K=max(1, current input lead including a pending
+positive lead slew). Re-entry before R cancels the proposal. Death and respawn
+use the normal lifecycle unchanged; an ended life's release is stale under
+the existing older-life guards, not a new death-specific release flow. At the
+pre-PSI boundary R the owner reliably reports `AirshipRelease`: double position
+and quaternion, float linear and angular velocity, then predicts solid. The
+existing lifecycle intake accepts only R not yet simulated, relays the stamp
+unchanged. At R, in lifecycle join order, every side INCLUDING the owner
+rebuilds the body through the existing beam/remake path: same ball recipe
+and group, float payload position and identity matrix for creation, then
+the exact payload pose and velocities with `restore_psi_state=false`. No
+spawn impulse or old PSI rotation/contact history survives. The owner applies
+the same double-pose/float-velocity fields that it sends without quantization.
+Remote late arrivals reuse `rewind_for_lifecycle`; an owner-only REJECTED echo
+undoes the predicted release, rewinds from R-1 and proposes again from its
+current tick. Only one release is in flight per owner. Server releases are
+never re-stamped or applied at another tick. Ghost isolation makes the state
+at R final when sent: no ball or movable mechanism in another world can
+change it. The new event and its complete state are journaled and replayed.
+This is a collision boundary only; vanilla boarding still follows FIN.
+
+Validation **PASSED** on 2026-11-03: x64/x86, GCC, 780 tests and the matched
+Arch server. Headless R778: all four clients each have 6516 exact FINAL rows,
+zero mismatches/missing rows; server replay 2649/2649. Retail R599: both
+copies each have 6320 exact FINAL rows and zero mismatches/missing rows;
+copy 2's legacy display matrix moves with alpha 0.7 inside the zone, then
+returns solid. Replay is 1897/1897; a later basket beam still follows FIN.
+The optional reachable late case refuses R778 to the owner only, rewinds,
+accepts R846 and replays 2641/2641. SimTool now includes event type 6 in its
+replay guard and list parser. Final-tree wire differences are attributed to
+protocol readiness, unbounded y, retained ghost spans and releases; existing
+FIN struct-padding noise is measured separately. Details, raw verdicts and
+the deferred pre-existing trace-body diagnostic crash are in
+`.local-tools/work/HANDOFF/reports/AZX.md`.
+
 ## As built (step BALA)
 
 (Step BALL, below SPGH2's note: the relayed pose is retired at protocol 17 -

@@ -385,6 +385,7 @@ namespace bmmo::session {
             // A birth overtaken by a newer accepted P or U: never queued,
             // never relayed to the others; its owner is told (SUPERSEDED).
             bool superseded = false;
+            bool rejected = false;
             // The newer event it lost to, for the log.
             uint32_t by_origin = 0, by_applied = 0;
             event_type by_type = event_type::Physicalize;
@@ -407,6 +408,11 @@ namespace bmmo::session {
         // (lifecycle_unphysicalize_superseded), which every receiver runs too.
         verdict accept(uint32_t player, event_type type, uint32_t origin, uint32_t next_tick) {
             verdict v;
+            if (type == event_type::AirshipRelease) {
+                v.applied = origin;
+                v.rejected = static_cast<int32_t>(origin - next_tick) < 0;
+                return v;
+            }
             v.applied = lifecycle_applied_tick(origin, next_tick);
             if (type != event_type::Physicalize && type != event_type::Unphysicalize) return v;
             auto& p = players_[player];

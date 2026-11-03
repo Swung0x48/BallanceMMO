@@ -194,7 +194,8 @@ namespace bmmo::session {
         // asks for no rewind of its own, so holding it moves nothing else.
         for (auto& event: due) {
             if (event.tick == tick && (event.type == bmmo::session::event_type::Physicalize
-                                       || event.type == bmmo::session::event_type::Unphysicalize)) {
+                                       || event.type == bmmo::session::event_type::Unphysicalize
+                                       || event.type == bmmo::session::event_type::AirshipRelease)) {
                 s.held_lifecycle_.push_back(std::move(event));   // the message is move-only
                 continue;
             }
@@ -857,6 +858,11 @@ namespace bmmo::session {
         if (event.type == bmmo::session::event_type::Physicalize || event.type == bmmo::session::event_type::Unphysicalize)
             log_life(event);
         switch (event.type) {
+        case bmmo::session::event_type::AirshipRelease:
+            s.airship_releases_.push_back({event.player, event.tick, event.release});
+            rewind_for_lifecycle(event);
+            if (event.tick == current_tick() + 1) apply_airship_releases(event.tick, event.player);
+            break;
         case bmmo::session::event_type::Physicalize: {
             // A birth older by origin than a death of the same player this
             // client applied already (the death's relay overtook it): the
@@ -1041,7 +1047,11 @@ namespace bmmo::session {
                 if (!life.retired && life.made && life.what == own_life::kind::birth && life.spawn && !life.moved()
                     && life.origin == tick)
                     note_spawn_birth(life.group.empty() ? s.own_group_ : life.group, tick, "replayed own birth");
-        if (s.pending_births_.empty() && s.pending_deaths_.empty() && !own_lives_due(tick)) {
+        const bool own_release = std::any_of(s.airship_releases_.begin(), s.airship_releases_.end(),
+                [this, tick](const auto& release) { return release.tick == tick && release.player == s.own_id_; });
+        const bool remote_release = std::any_of(s.airship_releases_.begin(), s.airship_releases_.end(),
+                [this, tick](const auto& release) { return release.tick == tick && release.player != s.own_id_; });
+        if (s.pending_births_.empty() && s.pending_deaths_.empty() && !own_lives_due(tick) && !own_release && !remote_release) {
             apply_own_due(tick);
             return;
         }
@@ -1051,6 +1061,14 @@ namespace bmmo::session {
             pending_birth birth;
         };
         std::vector<due_life> due;
+        for (const auto& release: s.airship_releases_)
+            if (release.tick == tick && release.player != s.own_id_) {
+                due_life life;
+                life.player = release.player;
+                life.origin = tick;
+                life.type = bmmo::session::event_type::AirshipRelease;
+                due.push_back(std::move(life));
+            }
         for (auto it = s.pending_births_.begin(); it != s.pending_births_.end();)
             if (it->tick == tick) {
                 due_life life;
@@ -1073,13 +1091,18 @@ namespace bmmo::session {
             return bmmo::session::lifecycle_apply_before(join_rank(a.player, tick), a.origin, a.type,
                                                          join_rank(b.player, tick), b.origin, b.type);
         });
-        bool own = own_lives_due(tick);
+        bool own = own_lives_due(tick) || own_release;
         const uint32_t own_rank = join_rank(s.own_id_, tick);
         for (const auto& life: due) {
             if (own && join_rank(life.player, tick) > own_rank) {
                 apply_moved_own_deaths(tick);   // step ODM: the server's order, U before P
                 apply_own_lives(tick, "replay", false);
+                apply_airship_releases(tick, s.own_id_);
                 own = false;
+            }
+            if (life.type == bmmo::session::event_type::AirshipRelease) {
+                apply_airship_releases(tick, life.player);
+                continue;
             }
             if (life.type == bmmo::session::event_type::Unphysicalize) {
                 const event_log_mute mute(*this);
@@ -1103,6 +1126,7 @@ namespace bmmo::session {
         if (own) {
             apply_moved_own_deaths(tick);   // step ODM
             apply_own_lives(tick, "replay", false);
+            apply_airship_releases(tick, s.own_id_);
         }
         // Step EL8 (design 2.3.4 "In the replay at D"): the own ball's
         // queued changes last - after the remote events of the tick, before
@@ -3034,6 +3058,10 @@ namespace bmmo::session {
         }
         apply_own_lives(frame_tick, "live", true);
         retire_own_lives();
+        if (s.own_airship_release_ == frame_tick) {
+            prepare_airship_release(frame_tick);
+            apply_airship_releases(frame_tick, s.own_id_);
+        }
     }
 
     // A record retires once the live run has made all of it and the
@@ -3264,6 +3292,23 @@ namespace bmmo::session {
     // is not kept, and the echo is counted, journaled and logged as kept
     // where we stamped it.
     void session_client_core::process_own_echo(const bmmo::session_event_msg& msg, bool stale) {
+        if (msg.type == bmmo::session::event_type::AirshipRelease) {
+            if (stale || msg.origin_tick != s.own_airship_inflight_) return;
+            s.own_airship_inflight_ = 0;
+            if (msg.state & bmmo::session::EVENT_STATE_REJECTED) {
+                flush_life_rewinds();
+                s.airship_releases_.erase(std::remove_if(s.airship_releases_.begin(), s.airship_releases_.end(),
+                        [&msg, this](const auto& release) { return release.player == s.own_id_ && release.tick == msg.origin_tick; }),
+                        s.airship_releases_.end());
+                if (platform_.airship_zone_release) platform_.airship_zone_release(s.own_body_entity_, msg.origin_tick, true);
+                s.own_airship_tick_ = msg.origin_tick;
+                journal_.lifecycle_event(s.own_id_, msg);
+                logf("airship: release at %u refused: rewind to ghost and re-propose", msg.origin_tick);
+                rewind_for_lifecycle(msg);
+                ++s.own_echo_rejected_;
+            } else ++s.own_echo_acked_;
+            return;
+        }
         // Step T3: a Trafo input's echo goes the input rewind's way (design
         // 4.6), never the own lives'.
         // FULL step ODM (late-player design 6.2.3 (d)): the frame's

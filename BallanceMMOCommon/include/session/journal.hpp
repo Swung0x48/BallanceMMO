@@ -238,6 +238,7 @@ namespace bmmo::session {
         int32_t sector = 0;
         std::string name;
         bmmo_physics_ball_recipe recipe{};   // zeroed for non-Physicalize events
+        airship_release_state release;
     };
 
     struct journal_tick_record {
@@ -760,6 +761,12 @@ namespace bmmo::session {
             journal_detail::write_i32(payload, e.sector);
             journal_detail::write_str(payload, e.name);
             journal_detail::write_recipe(payload, e.recipe);
+            if (e.type == event_type::AirshipRelease) {
+                journal_detail::write_f64_array(payload, e.release.position, 3);
+                journal_detail::write_f64_array(payload, e.release.rotation, 4);
+                journal_detail::write_f32_array(payload, e.release.linear, 3);
+                journal_detail::write_f32_array(payload, e.release.angular, 3);
+            }
             // Appended after the recipe so a reader that predates the field
             // still parses the record and reads the stamp as the applied tick.
             // Verbatim: a stamp of 0 is a real stamp (a client's anchor frame),
@@ -1164,6 +1171,12 @@ namespace bmmo::session {
                     e.sector = in.i32();
                     e.name = in.str();
                     if (!in.ok || !journal_detail::read_recipe(in, e.recipe)) break;
+                    if (e.type == event_type::AirshipRelease) {
+                        in.f64_array(e.release.position, 3);
+                        in.f64_array(e.release.rotation, 4);
+                        in.f32_array(e.release.linear, 3);
+                        in.f32_array(e.release.angular, 3);
+                    }
                     // A file written before the stamp was split off the applied
                     // tick has the two the same way round for everything but a
                     // late event, which it cannot express.

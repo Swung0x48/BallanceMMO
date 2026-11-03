@@ -33,6 +33,8 @@
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <limits>
+#include <set>
 #include <mutex>
 #include <iterator>
 #include <array>
@@ -3668,8 +3670,6 @@ namespace bmmo::physics {
         // airship at its starting pose).  Binary fractions: the box is the
         // same double in every world once its faces are on the 1/8 m grid.
         constexpr double kAirshipMarginSide = 3.0;
-        constexpr double kAirshipMarginBelow = 4.5;
-        constexpr double kAirshipMarginAbove = 5.0;
         constexpr double kAirshipGrid = 8.0;   // faces on multiples of 1/8 m, rounded outward
 
         class airship_zone_filter;
@@ -3687,19 +3687,19 @@ namespace bmmo::physics {
             bool ready = false;
             double min[3] = {}, max[3] = {};
             char own_group[IVP_NO_COLL_GROUP_STRING_LEN] = {};
-            // The own ball's latch (one way for the life): the IVP clock of
-            // the first PSI its core was in the box, and of the first PSI it
-            // had no body after that (open while alive).  Clock values, so a
+            // Per player group, its ghost spans: the IVP clock of the first
+            // PSI its core was in the box, and of its release (step AZX) or
+            // the first PSI it had no body after that (open until then).  Clock values, so a
             // rollback's restore - which puts the clock back - reads the
             // latch as it stood at its anchor, and a replay re-enters at the
             // same PSI (same clock) and rechecks there as the live run did.
-            struct own_life {
+            struct span {
                 double entered = 0.0;
                 double gone = 0.0;
                 bool open = true;
-                bool asleep_logged = false;   // step ASL: its first PSI asleep logged
+                uint32_t release_tick = 0;
             };
-            std::vector<own_life> own_lives;
+            std::map<std::string, std::vector<span>> spans;
             uint64_t own_rechecks = 0;
             uint64_t own_contacts_dropped = 0;   // step BALX: friction contacts the latch PSI dropped (stats only, read by nothing, like own_rechecks)
             uint64_t frozen = 0;
@@ -3768,15 +3768,17 @@ namespace bmmo::physics {
             if (!core || !state.ready) return false;
             const IVP_U_Point* p = core->get_position_PSI();
             for (int k = 0; k < 3; ++k)
-                if (!(p->k[k] >= state.min[k] && p->k[k] <= state.max[k])) return false;
+                if (k != 1 && !(p->k[k] >= state.min[k] && p->k[k] <= state.max[k])) return false;
             return true;
         }
         double airship_now(const IVP_Environment* environment) {
             return environment ? const_cast<IVP_Environment*>(environment)->get_current_time().get_seconds() : 0.0;
         }
-        // The own life latched at `now`, or null.
-        const airship_zone_state::own_life* airship_own_life(const airship_zone_state& state, double now) {
-            for (const auto& life: state.own_lives)
+        // The group's ghost span at `now`, or null.
+        const airship_zone_state::span* airship_life(const airship_zone_state& state, const std::string& group, double now) {
+            const auto found = state.spans.find(group);
+            if (found == state.spans.end()) return nullptr;
+            for (const auto& life: found->second)
                 if (life.entered <= now && (life.open || now < life.gone)) return &life;
             return nullptr;
         }
@@ -3797,7 +3799,7 @@ namespace bmmo::physics {
                 const bool own = airship_is_own(state, ball);
                 const bool other_airship = airship_body(other);
                 if (!own && other_airship) return false;
-                if (own ? airship_own_life(state, now) != nullptr || airship_in_box(state, ball) : airship_in_box(state, ball)) {
+                if (airship_life(state, player_ball_group(ball), now) || airship_in_box(state, ball)) {
                     if (!own) return false;
                     IVP_Core* core = other->get_core();
                     if (!other_airship && core && !core->physical_unmoveable) return false;
@@ -3907,17 +3909,17 @@ namespace bmmo::physics {
         };
 
         // At the start of every PSI (after IVP revived the cores woken since
-        // the last one, before the controllers and the integration): every
-        // simulated player ball that is not the own one and whose core is in
-        // the box is taken out of the simulation - its pairs rechecked
-        // (the filter now refuses every partner), then frozen.  A ghost woken
-        // since (the navigation's Physics WakeUp on a key edge) is frozen
-        // again before it moves.  The candidates come sorted by their group
-        // ("P#<join order>", the same in every world), then name, so two
-        // entering in one PSI are frozen in one order everywhere.  The balls
-        // are read from the manager's whole object table
-        // (player_balls_in_detection, step ASL): a latched own ball that
-        // falls asleep keeps its body, and its latch.
+        // the last one, before the controllers and the integration): a player
+        // ball whose core is in the box opens a ghost span if it has none (a
+        // later one a rollback took back is forgotten first) and has its pairs
+        // rechecked at that PSI (live, and again when a replay reaches it).
+        // While its span is open a ball that is not the own one is frozen - a
+        // ghost woken since is frozen again before it moves - and the own ball
+        // collides with the static level and its own airship only.  A span
+        // closes at its stamped release (airship_zone_release) or at the
+        // first PSI its group has no body.  The balls come from the manager's
+        // whole object table sorted by group (player_balls_in_detection), one
+        // order in every world.
         class airship_zone_listener : public IVP_Listener_PSI {
         public:
             CKIpionManager* physics = nullptr;
@@ -3926,72 +3928,38 @@ namespace bmmo::physics {
                 airship_zone_state* state = find_airship_state(physics);
                 if (!state || !state->enabled || !physics) return;
                 if (!state->ready && !airship_take_box(physics, *state)) return;
-                std::vector<IVP_Real_Object*> ghosts;
-                IVP_Real_Object* own = nullptr;
-                for (const auto& entry: player_balls_in_detection(physics)) {
-                    IVP_Real_Object* object = entry.second;
-                    if (airship_is_own(*state, object)) {
-                        if (!own) own = object;
-                        continue;
+                const double now = airship_now(environment);
+                std::set<std::string> present;
+                for (const auto& [group, object]: player_balls_in_detection(physics)) {
+                    present.insert(group);
+                    auto& spans = state->spans[group];
+                    if (airship_in_box(*state, object) && !airship_life(*state, group, now)) {
+                        spans.erase(std::remove_if(spans.begin(), spans.end(),
+                                [now](const airship_zone_state::span& life) { return life.entered > now; }), spans.end());
+                        spans.push_back(airship_zone_state::span{now, 0.0, true});
+                    }
+                    const auto* life = airship_life(*state, group, now);
+                    if (!life) continue;
+                    if (life->entered == now) {
+                        object->recheck_collision_filter();
+                        if (airship_is_own(*state, object)) {
+                            ++state->own_rechecks;
+                            airship_own_drop_contacts(*state, object, now);
+                        }
                     }
                     IVP_Core* core = object->get_core();
-                    if (!core || !IVP_MTIS_SIMULATED(core->movement_state)) continue;
-                    if (airship_in_box(*state, object)) ghosts.push_back(object);
+                    if (!airship_is_own(*state, object) && core && IVP_MTIS_SIMULATED(core->movement_state)) {
+                        object->disable_simulation();
+                        ++state->frozen;
+                    }
                 }
-                // The own ball first (one ball, before the ghosts: one order
-                // in every replay).  Its latch opens at the first PSI its core
-                // is in the box - a later one of a life a rollback took back
-                // is forgotten first - and at the PSI it opened its pairs are
-                // rechecked (live, and again when a replay reaches that PSI):
-                // a contact it had with another ball or a mechanism is
-                // dropped where every other world freezes its copy.  No body
-                // (a death): the life's latch closes at this PSI.
-                if (state->own_group[0]) {
-                    const double now = airship_now(environment);
-                    if (own && airship_in_box(*state, own)) {
-                        if (!airship_own_life(*state, now)) {
-                            auto& lives = state->own_lives;
-                            lives.erase(std::remove_if(lives.begin(), lives.end(),
-                                                       [now](const airship_zone_state::own_life& l) { return l.entered > now; }),
-                                        lives.end());
-                            lives.push_back(airship_zone_state::own_life{now, 0.0, true});
-                            while (lives.size() > 16) lives.erase(lives.begin());
-                        }
-                        const auto* life = airship_own_life(*state, now);
-                        if (life && life->entered == now) {
-                            own->recheck_collision_filter();
-                            ++state->own_rechecks;
-                            airship_own_drop_contacts(*state, own, now);
-                        }
-                    } else if (!own) {
-                        for (auto& life: state->own_lives)
+                for (auto& [group, spans]: state->spans)
+                    if (!present.count(group))
+                        for (auto& life: spans)
                             if (life.entered <= now && (life.open || now < life.gone)) {
                                 life.open = false;
                                 life.gone = now;
                             }
-                    }
-                    // Step ASL: a latched own ball asleep (its core frozen, so
-                    // out of m_MovableObjects) keeps its latch; its first such
-                    // PSI in the life is logged (stdout only: no state, no
-                    // decision reads it).
-                    IVP_Core* own_core = own ? own->get_core() : nullptr;
-                    if (own_core && !IVP_MTIS_SIMULATED(own_core->movement_state))
-                        for (auto& life: state->own_lives)
-                            if (life.entered <= now && (life.open || now < life.gone) && !life.asleep_logged) {
-                                life.asleep_logged = true;
-                                const char* name = own->get_name();
-                                std::printf("[bmmo] airship: the own ball %s is asleep in its latch at clock %.6f "
-                                            "(latched at %.6f; %s m_MovableObjects): the latch holds\n",
-                                            name ? name : "?", now, life.entered,
-                                            physics->m_MovableObjects.index_of(own) < 0 ? "not in" : "still in");
-                            }
-                }
-                if (ghosts.empty()) return;
-                for (IVP_Real_Object* object: ghosts) {
-                    object->recheck_collision_filter();
-                    object->disable_simulation();
-                    ++state->frozen;
-                }
             }
             void environment_will_be_deleted(IVP_Environment*) override {
                 if (airship_zone_state* state = find_airship_state(physics))
@@ -4054,10 +4022,10 @@ namespace bmmo::physics {
             }
             if (!any) return false;
             for (int k = 0; k < 3; ++k) {
-                const double below = k == 1 ? kAirshipMarginBelow : kAirshipMarginSide;
-                const double above = k == 1 ? kAirshipMarginAbove : kAirshipMarginSide;
-                state.min[k] = std::floor(lo[k] * kAirshipGrid) / kAirshipGrid - below;
-                state.max[k] = std::ceil(hi[k] * kAirshipGrid) / kAirshipGrid + above;
+                state.min[k] = k == 1 ? -std::numeric_limits<double>::infinity()
+                                     : std::floor(lo[k] * kAirshipGrid) / kAirshipGrid - kAirshipMarginSide;
+                state.max[k] = k == 1 ? std::numeric_limits<double>::infinity()
+                                     : std::ceil(hi[k] * kAirshipGrid) / kAirshipGrid + kAirshipMarginSide;
             }
             state.ready = true;
             return true;
@@ -4084,7 +4052,7 @@ namespace bmmo::physics {
         state.ready = false;
         if (!state.platform) return true;   // no airship: the zone stays off
         std::snprintf(state.own_group, sizeof(state.own_group), "%s", own_group ? own_group : "");
-        state.own_lives.clear();
+        state.spans.clear();
         if (state.environment != environment) {
             // A new environment (a level loaded since): the old one's filter
             // and listener went with it (environment_will_be_deleted).
@@ -4139,7 +4107,28 @@ namespace bmmo::physics {
         IVP_Real_Object* real = object->m_RealObject;
         if (!airship_is_player(real)) return 0;
         if (airship_in_box(*state, real)) return 1;
-        return airship_is_own(*state, real) && airship_own_life(*state, airship_now(physics->GetEnvironment())) ? 1 : 0;
+        return airship_life(*state, player_ball_group(real), airship_now(physics->GetEnvironment())) ? 2 : 0;
+    }
+
+    void airship_zone_release(CKIpionManager* physics, const char* entity_name, uint32_t tick, bool undo) {
+        auto* state = physics ? find_airship_state(physics) : nullptr;
+        if (!state || !state->enabled) return;
+        CK3dEntity* entity = find_entity(physics, bounded(entity_name, BMMO_PHYSICS_NAME_SIZE));
+        PhysicsObject* object = entity ? physics->GetPhysicsObject(entity) : nullptr;
+        if ((!object || !object->m_RealObject) && !undo) return;
+        const std::string group = object && object->m_RealObject ? player_ball_group(object->m_RealObject) : state->own_group;
+        auto& spans = state->spans[group];
+        const double now = airship_now(physics->GetEnvironment());
+        for (auto entry = spans.begin(); entry != spans.end(); ++entry) {
+            auto& life = *entry;
+            if (undo ? life.release_tick == tick : life.entered <= now && (life.open || now < life.gone)) {
+                life.open = undo;
+                if (!undo) life.gone = now;
+                life.release_tick = undo ? 0 : tick;
+                if (undo) spans.erase(std::next(entry), spans.end());
+                return;
+            }
+        }
     }
 
     // ---- bridge API v25: the spawn ghost (steps SPGH, SPGH2) ----

@@ -5379,6 +5379,7 @@ namespace {
             case bmmo::session::event_type::Finish: return "Finish";
             case bmmo::session::event_type::BodyRevived: return "BodyRevived";
             case bmmo::session::event_type::Trafo: return "Trafo";
+            case bmmo::session::event_type::AirshipRelease: return "AirshipRelease";
         }
         return "unknown";
     }
@@ -5439,6 +5440,7 @@ namespace {
         for (int k = 0; k < 3; ++k) out.position[k] = e.position[k];
         for (int k = 0; k < 9; ++k) out.rotation[k] = e.rotation[k];
         out.recipe = e.recipe;
+        out.release = e.release;
         out.sector = e.sector;
         out.name = e.name;
         // The tick the world was handed in the event, not necessarily the one
@@ -5541,6 +5543,12 @@ namespace {
                     e.sector = in.i32();
                     e.name = in.str();
                     if (!in.ok || !bmmo::session::journal_detail::read_recipe(in, e.recipe)) break;
+                    if (e.type == bmmo::session::event_type::AirshipRelease) {
+                        in.f64_array(e.release.position, 3);
+                        in.f64_array(e.release.rotation, 4);
+                        in.f32_array(e.release.linear, 3);
+                        in.f32_array(e.release.angular, 3);
+                    }
                     e.event_tick = in.size - in.pos >= 4 ? in.u32() : e.tick;
                     e.origin_tick = in.size - in.pos >= 4 ? in.u32() : e.event_tick;
                     e.state = in.size - in.pos >= 1 ? in.u8() : 0;
@@ -6593,7 +6601,7 @@ namespace {
             }
             for (const auto* entry: ordered) {
                 const auto& e = *entry;
-                if (static_cast<uint8_t>(e.type) > static_cast<uint8_t>(bmmo::session::event_type::Trafo)) {
+                if (static_cast<uint8_t>(e.type) > static_cast<uint8_t>(bmmo::session::event_type::AirshipRelease)) {
                     // A newer writer's event type: the world would not know
                     // what to do with it, and guessing would be worse.
                     std::printf("tick %u: event type %u from p%u is unknown to this build, skipped\n", e.tick,

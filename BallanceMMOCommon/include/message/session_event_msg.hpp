@@ -36,6 +36,7 @@ namespace bmmo {
         float position[3] = {};             // Physicalize; Trafo: the explosion's referential (zeros for a reset)
         float rotation[9] = {};             // Physicalize: world matrix rows (right, up, dir)
         session::ball_recipe recipe;        // Physicalize
+        session::airship_release_state release;   // AirshipRelease
         int32_t sector = 0;                 // Sector
         std::string name;                   // BodyRevived, <= MAX_NAME
 
@@ -144,6 +145,12 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&t), sizeof(t));
 
             switch (type) {
+                case session::event_type::AirshipRelease:
+                    raw.write(reinterpret_cast<const char*>(release.position), sizeof(release.position));
+                    raw.write(reinterpret_cast<const char*>(release.rotation), sizeof(release.rotation));
+                    raw.write(reinterpret_cast<const char*>(release.linear), sizeof(release.linear));
+                    raw.write(reinterpret_cast<const char*>(release.angular), sizeof(release.angular));
+                    break;
                 case session::event_type::Physicalize:
                     raw.write(reinterpret_cast<const char*>(&ball_type), sizeof(ball_type));
                     raw.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
@@ -182,10 +189,16 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &tick)) return false;
             uint8_t t = 0;
             if (!message_utils::read_variable(raw, &t)) return false;
-            if (t > static_cast<uint8_t>(session::event_type::Trafo)) return false;
+            if (t > static_cast<uint8_t>(session::event_type::AirshipRelease)) return false;
             type = static_cast<session::event_type>(t);
 
             switch (type) {
+                case session::event_type::AirshipRelease:
+                    if (!raw.read(reinterpret_cast<char*>(release.position), sizeof(release.position))) return false;
+                    if (!raw.read(reinterpret_cast<char*>(release.rotation), sizeof(release.rotation))) return false;
+                    if (!raw.read(reinterpret_cast<char*>(release.linear), sizeof(release.linear))) return false;
+                    if (!raw.read(reinterpret_cast<char*>(release.angular), sizeof(release.angular))) return false;
+                    break;
                 case session::event_type::Physicalize:
                     if (!message_utils::read_variable(raw, &ball_type)) return false;
                     if (!message_utils::read_variable(raw, &flags)) return false;

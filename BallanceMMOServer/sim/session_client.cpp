@@ -1880,6 +1880,9 @@ namespace {
             p.airship_zone_contains = [this](const std::string& name) {
                 return bmmo::physics::airship_zone_contains(engine_->physics(), name.c_str());
             };
+            p.airship_zone_release = [this](const std::string& entity, uint32_t tick, bool undo) {
+                bmmo::physics::airship_zone_release(engine_->physics(), entity.c_str(), tick, undo);
+            };
             // Step SPGH: the spawn ghost over this world (physics_state.hpp);
             // no display (show_spawn_ghost stays empty: nothing is drawn).
             p.spawn_ghost = [this](bool enable, bool respawns, double radius, double info[7], std::string& error) {

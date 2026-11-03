@@ -1201,6 +1201,11 @@ namespace bmmo::physics {
         return api_->airship_zone_contains(manager_, entity_name);
     }
 
+    void physics_view::airship_zone_release(const char* entity_name, uint32_t tick, bool undo) const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->airship_zone_release) return;
+        api_->airship_zone_release(manager_, entity_name, tick, undo ? 1 : 0);
+    }
+
     bool physics_view::set_controller_alias(int32_t (*alias)(void* user, const char* name, char* out, uint32_t out_size),
                                             void* user, std::string& error) const {
         error.clear();

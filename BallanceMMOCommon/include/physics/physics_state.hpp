@@ -416,15 +416,13 @@ namespace bmmo::physics {
     //   * such a ball whose core is inside the box collides with nothing,
     //     and at the start of every PSI it is taken out of the simulation
     //     (its pairs rechecked away, then frozen): a ghost, still there,
-    //     which no synced body depends on.  Positional, so a rollback's
-    //     restore and replay re-derive it with no state of their own;
+    //     which no synced body depends on, until its stamped release;
     //   * the own ball, from the first PSI its core is inside the box until
-    //     its body is gone (one way, like the ghost's freeze: the life's
-    //     latch), collides with the static level and its own airship only
+    //     its accepted release or its body is gone, collides with the static level and its own airship only
     //     (no other ball, no movable mechanism); at that first PSI its pairs
     //     are rechecked, so a contact it had is dropped where the other
     //     worlds freeze its copy.  The latch is kept as IVP clock intervals
-    //     ([entered, gone)), which a rollback's restore puts back with the
+    //     ([entered, release/death)), which a rollback's restore puts back with the
     //     clock: a replay re-enters at the same PSI and rechecks again there.
     // `out` says whether it is on (the level has an airship) and the box
     // when it is already taken.  enable = false switches it off.
@@ -438,11 +436,10 @@ namespace bmmo::physics {
                           std::string& error);
     // The zone as it stands (`ready` once the box is taken).
     bool airship_zone_get(CKIpionManager* physics, airship_zone_box& out);
-    // 1 when `entity`'s body is a player ball inside the zone (a ghost when
-    // it is not the own ball; the own ball: latched this life, inside the
-    // box or not), 0 when it is not (or the zone is off), -1 when it has no
-    // body.
+    // 1 inside the x/z box; 2 for a latched ball outside, still awaiting its
+    // stamped release; 0 solid (or off); -1 no body. No y faces.
     int airship_zone_contains(CKIpionManager* physics, const char* entity_name);
+    void airship_zone_release(CKIpionManager* physics, const char* entity_name, uint32_t tick, bool undo);
 
     // ---- bridge API v25: the spawn ghost (steps SPGH, SPGH2; the user's
     // rule of 2026-10-28, docs/rewind-cost-design.md "As built (step SPGH)"
