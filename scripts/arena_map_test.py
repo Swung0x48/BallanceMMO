@@ -1462,7 +1462,7 @@ def read_client_log(path):
     """What the report needs from one client log."""
     out = {'own_id': 0, 'bases': [], 'windows': [], 'subst': None, 'lead_adj': None, 'holds': [], 'stalls': [],
            'last_tick': 0, 'input_delays': [], 'status_lead': None, 'exists': path.exists(),
-           'echo': None, 'ownlife': None, 'own_moves': [],
+           'echo': None, 'ownlife': None, 'own_moves': [], 'own_deaths': [],
            # step F0: one entry per life (a --rejoin-at's next life is the
            # second): its assigned base, its join import (the server's first
            # state, not a resync), where that import's re-step ended, and the
@@ -1527,6 +1527,10 @@ def read_client_log(path):
             if m:
                 out['ownlife'] = m.group(1)
         m = RE_OWN_MOVE.match(line)
+        death = re.match(r'^own death moved (\d+) -> (\d+) (.+) at local tick (\d+): (.+)', line)
+        if death:
+            out['own_deaths'].append(dict(origin=int(death[1]), applied=int(death[2]),
+                                           kind=death[3], at=int(death[4]), outcome=death[5]))
         if m:
             out['own_moves'].append({'origin': int(m.group(1)), 'applied': int(m.group(2)) if m.group(2) else None,
                                      'at': int(m.group(3)), 'how': 'rewound'})
@@ -1712,6 +1716,76 @@ def server_log_text(case_dir):
     return ''
 
 
+def relay_samples(path):
+    import journal_trace as jt
+    import struct
+    reader = jt.JournalReader(path.read_bytes())
+    offset = len(jt.MAGIC) + 4
+    _, payload, offset = reader._next(offset)
+    current = reader._header(payload)['first_tick']
+    samples = []
+    while offset < len(reader.data):
+        record = reader._next(offset)
+        if record is None:
+            break
+        tag, payload, offset = record
+        if tag == jt.TAG_TICK:
+            current = struct.unpack_from('<I', payload)[0]
+        elif tag == jt.TAG_INPUT:
+            tick, sender, _, flags = struct.unpack_from('<IIBB', payload)
+            if flags & jt.INPUT_RELAYED and current > tick:
+                samples.append([tick, current, current - tick, sender])
+    return samples
+
+
+def relay_start_hold(report, row, controls):
+    episodes = report.get('relay_episodes') or [dict(tick=report['t_on'], clients=report['event_clients'])]
+    margins = [(episode['tick'], 10 if len(report['clients']) >= 4
+                and 2 <= len(episode['clients']) <= len(report['clients']) / 2 else 4) for episode in episodes]
+    bands = [rep for rep in controls if rep.get('arm') == 'A0' and rep.get('lead_adjust') == 'off']
+    twins = [rep for rep in controls if rep.get('arm') == report.get('arm') and rep.get('lead_adjust') == 'off']
+    lo, hi = report['phases']['D']
+    majority_raise = report.get('arm', '').upper() == 'A3M' and row['index'] == 0
+    effective = [lead['e'] for member in report['clients'] if member['index'] in report['event_clients']
+                 for lead in member.get('leads', []) if lead['k'] > 0] if majority_raise else []
+    last_effective = max(effective) if effective else None
+    if majority_raise:
+        hi = row['span'][1] + 1
+    samples = [sample for sample in row.get('relay_samples', []) if lo <= sample[0] < hi]
+    output = []
+    for sender in [None] + sorted({sample[3] for sample in samples}):
+        def edge(reports):
+            values = []
+            for rep in reports:
+                member = next((member for member in rep['clients'] if member['index'] == row['index']), None)
+                if member is None:
+                    continue
+                source = next((member['index'] for member in report['clients'] if member['id'] == sender), None)
+                source_id = next((member['id'] for member in rep['clients'] if member['index'] == source), None)
+                values.extend(sample[2] for sample in member.get('relay_samples', [])
+                              if (rep.get('arm') == 'A0' or lo <= sample[0] < hi)
+                              and (sender is None or sample[3] == source_id))
+            return sorted(values)[min(len(values) - 1, int(.99 * len(values)))] if values else None
+        band, twin = edge(bands), edge(twins)
+        selected = [sample for sample in samples if sender is None or sample[3] == sender]
+        excess = [sample for sample in selected if band is not None and sample[2] > band]
+        if majority_raise:
+            bad = [sample for sample in excess if last_effective is not None
+                   and sample[0] < last_effective and sample[2] > band + 22]
+            rest = sorted(sample[2] for sample in selected
+                          if last_effective is not None and sample[0] >= last_effective + 48)
+        else:
+            bad = [sample for sample in excess if not any(start <= sample[0] < start + margin
+                   and sample[2] <= band + margin for start, margin in margins)]
+            rest = sorted(sample[2] for sample in selected
+                          if not any(start <= sample[0] < start + margin for start, margin in margins))
+        p99 = rest[min(len(rest) - 1, int(.99 * len(rest)))] if rest else None
+        ok = None if band is None or p99 is None or (not majority_raise and twin is None) else not bad and p99 <= (band if majority_raise else min(band, twin))
+        output.append(dict(source=sender, ok=ok, margins=margins, band=band, twin=twin, rest_p99=p99,
+                           excess=len(excess), bad=bad[:20], samples=len(selected), last_effective=last_effective))
+    return output
+
+
 def airship_spans(text):
     """Step F0: player -> [(zone tick, next birth tick)) from the server log:
     a ball in its airship span is per-world (BALA) and never compared."""
@@ -1846,8 +1920,12 @@ def event_report(args, case, case_dir):
                 counted_through[int(m.group(1))] = int(m.group(2))
             m = RE_LEAD_SENT.search(line)
             if m and int(m.group(1)) in index_of and first <= int(m.group(7)) <= last:
+                sector_bound = re.search(r'\bsector-bound=(-?\d+)', line)
+                offset = re.search(r'\boffset=(\d+)', line)
                 leads.append({'player': int(m.group(1)), 'client': index_of[int(m.group(1))], 'id': int(m.group(2)),
                               'k': int(m.group(3)),
+                              'sector_bound': int(sector_bound[1]) if sector_bound else None,
+                              'offset': int(offset[1]) if offset else None,
                               # the meter's k before a cap cut it (= k when uncapped)
                               'decided': int(m.group(4)) if m.group(4) is not None else int(m.group(3)),
                               'binding': m.group(6), 'n': int(m.group(7)), 'held_from': int(m.group(8)),
@@ -1888,6 +1966,8 @@ def event_report(args, case, case_dir):
     # Step F0: the airship spans per player (server log): never compared.
     airship = airship_spans(server_log_text(case_dir))
     report['lead_adjust'] = lead_mode(server_log_text(case_dir))
+    report['relay_episodes'] = [dict(tick=tick, clients=sorted({event.client for event in args.events if event.tick == tick}))
+                                for tick in sorted({event.tick for event in args.events})]
     for i in range(args.players):
         log = logs[i]
         pid = id_of.get(i, 0)
@@ -1902,7 +1982,9 @@ def event_report(args, case, case_dir):
                'subst_client': log['subst'], 'lead_adj': log['lead_adj'],
                'holds': log['holds'], 'stalls': log['stalls'], 'input_delays': log['input_delays'],
                'echo': log['echo'], 'ownlife': log['ownlife'], 'own_moves': log['own_moves'],
-               'status_lead': log['status_lead'], 'never_started': not log['exists'], 'phases': {}}
+               'own_deaths': log.get('own_deaths', []),
+               'status_lead': log['status_lead'], 'never_started': not log['exists'], 'phases': {},
+               'relay_samples': relay_samples(path) if path.exists() else []}
         report['clients'].append(row)
         row['host_clock_resync_bases'] = [tick for tick in row['resync_bases'] if fault_overlap(tick, tick)]
         row['resync_bases'] = [tick for tick in row['resync_bases'] if not fault_overlap(tick, tick)]
@@ -1928,6 +2010,7 @@ def event_report(args, case, case_dir):
         mine = [t for t in mine if not any(lo < t < b for lo, b in unnumbered)]
         row['subst_server'] = {p: sum(1 for t in mine if cphases[p][0] <= t < cphases[p][1]) for p in PHASES}
         row['subst_total'] = len(mine)
+        row['substituted_ticks'] = mine
         row['subst_outside_event'] = sum(1 for t in mine if not t_on <= t <= t_off + 2)
         runs = []
         for t in mine:
@@ -2258,6 +2341,8 @@ def criteria(report, case, controls):
                         None if edge is None else D['inrew_late'] <= edge, '%d vs <= %s%s' % (D['inrew_late'], edge, note))
                 lag_phases = ('D', 'A') if family == 'lead' else ('D',)
                 for p in lag_phases:
+                    if p == 'D':
+                        continue
                     st_all = row['phases'][p]['lag']
                     edge, note = band(row['index'], lambda c: c[p]['lag']['p99'])
                     add(who, 'relay lag p99 in %s within control' % p, None if edge is None else st_all['p99'] <= edge,
@@ -2268,8 +2353,10 @@ def criteria(report, case, controls):
                             None if edge is None else st['p99'] <= edge, '%d vs <= %s%s' % (st['p99'], edge, note))
             else:
                 add(who, 'mechanism error / rollbacks / relay lag within control', None, 'no --control given')
-            add(who, 'relay lag above the band only in the first two ticks of the episode', None,
-                'not decidable here: the window: line gives lag per 60-tick window, not per tick')
+            for result in relay_start_hold(report, row, controls):
+                relay_rule = 'A3m band + 22 until last E, band from E + 48' if arm.upper() == 'A3M' else 'one initial patience hold'
+                add(who, 'relay lag in D: %s (source %s)' % (relay_rule, result['source']),
+                    result['ok'], str(result))
             if family == 'control':
                 # A0/A0j: substituted ticks per player <= HEAD + 0.5 % of the
                 # ticks (the controls given are the HEAD runs), moved births 0.
@@ -2318,6 +2405,11 @@ def criteria(report, case, controls):
                 'own after T_off+48 %.4f m; relay_late B/D/A %s; resyncs %d; subst %d (outside the window %d)' % (
                     row['own_after'], '/'.join(str(row['phases'][p]['relay_late']) for p in PHASES), resyncs,
                     row['subst_total'], row['subst_outside_event']))
+        elif family == 'lead' and arm == 'A5UB' and row['index'] == 0:
+            add(who, 'spike client cut only inside the spike, not raised',
+                None if 'substituted_ticks' not in row else all(2100 <= tick <= 2168 for tick in row['substituted_ticks'])
+                and not row.get('leads') and (lead_none or sum(v or 0 for v in lead) == 0),
+                'subst runs %s; leads %s' % (row['subst_runs'], row.get('leads')))
         elif family == 'lead':
             # K from the server's S1 lead line (plan step 10), judged against
             # the uplink step; the client's lead_adj counts what it applied.
@@ -2397,6 +2489,17 @@ def criteria(report, case, controls):
                      '(server has it %d, client %d), own error %.4f m; %d mismatched from T_on+48 in all' % (
                          nv['at'], nv['from'], nv['mismatch'], nv['compared'], nv['server_has'], nv['client_has'],
                          nv['own_err'], row['own_presence_mismatch'])))
+            elif arm == 'A6M' and any('unphysicalize' in value.lower() or 'pair:' in value.lower()
+                                      for value in report.get('episode', [])):
+                deaths = row.get('own_deaths', [])
+                paired = any(hold['type'].lower() == 'physicalize' for hold in row['holds'])
+                add(who, 'ODM superseded death kept' if paired else 'ODM lone death moved inside history',
+                    any(('nothing to move' if paired else 'rewound to') in death['outcome'] for death in deaths),
+                    str(deaths))
+                add(who, 'ODM owner no resync', resyncs == 0, str(row['resync_bases']))
+                add(who, 'ODM branch converges after move or resync', row['own_after'] < ZERO_M
+                    and row['own_presence_mismatch'] == 0,
+                    'own after %.4f m; presence mismatches %d' % (row['own_after'], row['own_presence_mismatch']))
             elif arm == 'A6M':
                 # The move inside the reach (plan step 19): the owner rewinds
                 # to T-1 and makes its ball again at T', no resync.
@@ -2449,12 +2552,15 @@ def criteria(report, case, controls):
                     'printed input delay %d vs the founders\' %d (status lead %s; asked tick %d, base %s)' % (
                         row['input_delays'][0], session_d, row['status_lead'], info['asked'], info['base']))
             elif info and row['input_delays']:
-                rtt = int(math.ceil(2.0 * info['latency_ms'] / 1000.0 / TICK_S))
-                want = report.get('input_delay', 0) + rtt + 2
+                measured = next((sample for sample in report.get('s1', {}).get('lateness') or []
+                                 if sample.get('player') == row['id'] and isinstance(sample.get('rtt'), (int, float))
+                                 and 'assigned' in sample), {})
+                rtt = int(math.ceil(measured.get('rtt', 0) / 1000.0 / TICK_S))
+                want = session_d + rtt + 2
                 add(who, 'joiner lead == D + ceil(rtt) + 2 (lead_adjust %s)' % (mode or 'unknown: the on rule'),
-                    row['input_delays'][0] == want,
-                    'printed input delay %d vs %d + %d + 2 = %d (status lead %s; asked tick %d, base %s)' % (
-                        row['input_delays'][0], report.get('input_delay', 0), rtt, want, row['status_lead'],
+                    None if not measured else measured['assigned'] == want,
+                    'assigned lead %s vs %d + %d + 2 = %d (status lead %s; asked tick %d, base %s)' % (
+                        measured.get('assigned'), session_d, rtt, want, row['status_lead'],
                         info['asked'], info['base']))
             else:
                 add(who, 'joiner lead', None, 'no session line or no --join-late for it')
@@ -2472,11 +2578,55 @@ def criteria(report, case, controls):
             if arm == 'A9H8':
                 add(who, 'lead_adj 0', None if lead_none else sum(v or 0 for v in lead) == 0,
                     no_lead if lead_none else str(lead))
+            elif arm == 'A9H20':
+                decisions = [decision for decision in report.get('s1', {}).get('decisions') or []
+                             if decision.get('player') == row['id']]
+                proposals = [decision for decision in decisions if decision['action'] == 'raise']
+                acks = [decision for decision in decisions if decision['action'] == 'lead-ack']
+                resets = [decision for decision in decisions if decision['action'] == 'reset']
+                sent = [lead for lead in row.get('leads', []) if lead['k'] > 0]
+                raises = [decision for decision in proposals if any(decision['tick'] + 1 == lead['n'] for lead in sent)]
+                assigned = next((sample['assigned'] for sample in report.get('s1', {}).get('lateness') or []
+                                 if sample.get('player') == row['id'] and 'assigned' in sample), None)
+                add(who, 'A9h20 every raise is a rule decision within caps',
+                    all(any(decision['tick'] + 1 == lead['n'] and decision['k'] >= lead['k']
+                            and decision.get('rule') in ('relative', 'minority', 'absolute', 'shared-absolute')
+                            for decision in proposals) and assigned is not None and lead.get('offset') is not None
+                        and assigned + lead['offset'] + lead['k'] <= 80
+                        and lead.get('sector_bound') is not None and lead['k'] <= lead['sector_bound'] for lead in sent),
+                    'decisions %s; sent %s' % (raises, sent))
+                add(who, 'A9h20 raises only inside the fault span',
+                    all(t_on <= decision['tick'] <= t_off for decision in raises), str(raises))
+                cooldown = 132 + 2 * max([decision['k'] for decision in raises] or [0])
+                deadline = t_off + cooldown + 660 + 66
+                lowered = [ack for ack in acks if t_off <= ack['tick'] <= deadline and ack.get('offset', 81) <= 2]
+                settled = [sample for sample in report.get('s1', {}).get('lateness') or []
+                           if sample.get('player') == row['id'] and t_off <= sample.get('tick', 0) <= deadline
+                           and sample.get('offset', 81) <= 2]
+                add(who, 'A9h20 offset <= 2 within cooldown + 660 + 66 after fault',
+                    bool(lowered or settled),
+                    'deadline %d; acks %s' % (deadline, acks))
+                add(who, 'A9h20 no raise or resync after fault end + 48',
+                    not any(decision['tick'] > t_off + 48 for decision in raises + resets),
+                    'end+48 %d; resets %s' % (t_off + 48, resets))
+                add(who, 'A9h20 resyncs and relay_late inside fault (reported)', None,
+                    'resets %s; relay_late D %d' % (resets, row['phases']['D']['relay_late']))
         elif family in ('pair', 'minority', 'shared'):
             decisions = report.get('s1', {}).get('decisions')
-            mine = [d for d in decisions or [] if d.get('player') == row['id'] and d.get('action') == 'would-raise2']
+            mine = [d for d in decisions or [] if d.get('player') == row['id'] and d.get('action') in ('raise', 'would-raise2')]
             add(who, 'one revision-3 raise decision', None if decisions is None else len(mine) == 1,
                 'n/a: revision-3 decision counters not present' if decisions is None else str(mine))
+            rule = {'pair': 'relative', 'minority': 'minority', 'shared': 'shared-absolute'}[family]
+            low, high = (30, 32) if arm == 'A10X' else ((20, 22) if arm == 'A10' else (20, 24))
+            sent = [lead for lead in row.get('leads', []) if lead['k'] > 0]
+            add(who, 'one sent raise by %s, k in [%d, %d]' % (rule, low, high),
+                None if report.get('lead_adjust') != 'on' else len(sent) == 1 and low <= sent[0]['k'] <= high
+                and any(decision.get('rule') == rule and decision['tick'] + 1 == sent[0]['n'] for decision in mine),
+                'sent %s; decisions %s' % (sent, mine))
+            if arm == 'A10X':
+                add(who, 'A10x at most one resync before shared raise',
+                    None if report.get('lead_adjust') != 'on' else resyncs <= 1,
+                    '%d resyncs; bases %s' % (resyncs, row['resync_bases']))
     return out
 
 

@@ -41,6 +41,56 @@ class Recipes(unittest.TestCase):
 
 
 class ClockDiagnostics(unittest.TestCase):
+    def test_rule_decision_is_not_overwritten_by_the_sent_cap(self):
+        parsed = harness.parse_s1('[session 1] S1 raise player=7 tick=100 k=79 rule=shared-absolute offset=0; '
+                                  'lead player=7 id=1 k=53 decided=79 N=101\n'
+                                  '[session 1] S1 lead-ack player=7 id=1 applied=53 tick=120 offset=53\n')
+        self.assertEqual(parsed['decisions'][0]['k'], 79)
+        self.assertEqual(parsed['decisions'][1]['offset'], 53)
+
+    def test_relay_allowance_is_bounded_in_time_and_height(self):
+        import arena_map_test as arena
+        members = [dict(index=index, id=10 + index, relay_samples=[]) for index in range(4)]
+        report = dict(arm='A5P', lead_adjust='on', clients=members, event_clients=[2, 3],
+                      t_on=100, phases={'D': [100, 168]})
+        band = dict(report, arm='A0', lead_adjust='off', clients=[dict(member, relay_samples=[[100, 122, 22, 11]])
+                                                                 for member in members])
+        twin = dict(band, arm='A5P')
+        member = dict(members[0], relay_samples=[[100, 132, 32, 11], [109, 132, 23, 11], [110, 132, 22, 11]])
+        self.assertTrue(all(result['ok'] for result in arena.relay_start_hold(report, member, [band, twin])))
+        for sample in ([110, 133, 23, 11], [100, 133, 33, 11]):
+            member['relay_samples'][0] = sample
+            self.assertFalse(arena.relay_start_hold(report, member, [band, twin])[0]['ok'])
+        report['event_clients'] = [2]
+        member['relay_samples'] = [[100, 126, 26, 11], [104, 126, 22, 11]]
+        self.assertTrue(arena.relay_start_hold(report, member, [band, twin])[0]['ok'])
+        member['relay_samples'][0] = [104, 127, 23, 11]
+        self.assertFalse(arena.relay_start_hold(report, member, [band, twin])[0]['ok'])
+        report['relay_episodes'] = [dict(tick=100, clients=[2]), dict(tick=130, clients=[0])]
+        member['relay_samples'] = [[100, 126, 26, 11], [130, 156, 26, 11], [140, 162, 22, 11]]
+        self.assertTrue(arena.relay_start_hold(report, member, [band, twin])[0]['ok'])
+
+    def test_majority_relay_uses_last_raise_effective_tick(self):
+        import arena_map_test as arena
+        member = dict(index=0, id=10, span=[0, 300], relay_samples=[[100, 144, 44, 11], [248, 270, 22, 11]])
+        report = dict(arm='A3M', t_on=100, event_clients=[1, 2, 3], phases=dict(D=[100, 150]),
+                      clients=[member, dict(index=1, id=11, leads=[dict(e=180, k=20)]),
+                               dict(index=2, id=12, leads=[dict(e=190, k=20)]),
+                               dict(index=3, id=13, leads=[dict(e=200, k=20)])])
+        band = dict(arm='A0', lead_adjust='off', clients=[dict(index=0, id=20, relay_samples=[[100, 122, 22, 21]]),
+                                                               dict(index=1, id=21)])
+        result = arena.relay_start_hold(report, member, [band])[0]
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['last_effective'], 200)
+        member['relay_samples'][0][2] = 45
+        self.assertFalse(arena.relay_start_hold(report, member, [band])[0]['ok'])
+        member['relay_samples'][0][2] = 44
+        member['relay_samples'][1][2] = 23
+        self.assertFalse(arena.relay_start_hold(report, member, [band])[0]['ok'])
+        member['relay_samples'][1][0] = 247
+        member['relay_samples'].append([249, 271, 22, 11])
+        self.assertTrue(arena.relay_start_hold(report, member, [band])[0]['ok'])
+
     def test_injected_span_includes_recovery_and_filters_sessions(self):
         text = ('[session 7] S1 clock-skew begin tick=300 ms=8000 percent=7.5\n'
                 '[session 8] S1 clock-skew end tick=999\n'

@@ -713,3 +713,59 @@ TEST(LatenessMeter, SlackOfTimePoints) {
     EXPECT_NEAR(lateness_slack_ticks(deadline, deadline - std::chrono::milliseconds(150)), 150.0 / kTickMs, 1e-9);
     EXPECT_NEAR(lateness_slack_ticks(deadline, deadline + std::chrono::microseconds(15152)), -15152.0 / (1e6 / 66), 1e-9);
 }
+
+TEST(LatenessMeter, AbsolutePersistenceRestartsWhenSharednessChanges) {
+    for (bool initially_shared: {false, true}) {
+        relative_meter meter;
+        const uint32_t before = initially_shared ? 200 : 100;
+        for (uint32_t tick = 1; tick <= before; ++tick) {
+            meter.sample_absolute(tick, -10, 6);
+            EXPECT_EQ(meter.on_tick(tick, initially_shared).action, lateness_action::none);
+        }
+        const uint32_t persistence = initially_shared ? relative_meter::kRaiseTicks : relative_meter::kSharedPersistTicks;
+        for (uint32_t elapsed = 1; elapsed <= persistence; ++elapsed) {
+            const uint32_t tick = before + elapsed;
+            meter.sample_absolute(tick, -10, 6);
+            const auto decision = meter.on_tick(tick, !initially_shared);
+            EXPECT_EQ(decision.action, elapsed == persistence ? lateness_action::raise : lateness_action::none);
+        }
+    }
+}
+
+TEST(LatenessMeter, SharedReanchorKeepsAbsoluteEvidenceAndMinorityTakesPrecedence) {
+    relative_meter shared, minority;
+    int shared_raises = 0, minority_raises = 0;
+    for (uint32_t tick = 1; tick <= 800; ++tick) {
+        if (tick == 400) {
+            const auto samples = shared.samples_total();
+            const auto streak = shared.raise_streak();
+            shared.reset(tick, true);
+            EXPECT_EQ(shared.samples_total(), samples);
+            EXPECT_EQ(shared.raise_streak(), streak);
+            EXPECT_TRUE(shared.absolute_majority());
+            EXPECT_FALSE(shared.sample_absolute(tick - 1, -10, 6));
+        }
+        shared.sample_absolute(tick, -10, 6);
+        shared.sample_relative(tick, 0, 0);
+        minority.sample_absolute(tick, -10, 6);
+        if (tick > 1) minority.sample_relative(tick, 0, 16);
+        const auto common = shared.on_tick(tick, true);
+        const auto other = minority.on_tick(tick, true);
+        if (common.action != lateness_action::none) {
+            ++shared_raises;
+            EXPECT_STREQ(common.rule, "shared-absolute");
+            EXPECT_EQ(tick, 693u);
+            EXPECT_EQ(common.k, 16);
+        }
+        if (other.action != lateness_action::none) {
+            ++minority_raises;
+            EXPECT_STREQ(other.rule, "minority");
+            EXPECT_EQ(tick, 694u);
+        }
+    }
+    EXPECT_EQ(shared_raises, 1);
+    EXPECT_EQ(minority_raises, 1);
+    shared.reset(900);
+    EXPECT_EQ(shared.samples_total(), 0u);
+    EXPECT_FALSE(shared.absolute_majority());
+}

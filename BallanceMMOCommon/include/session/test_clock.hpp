@@ -47,6 +47,15 @@ namespace bmmo::session {
                 : span + (t - span * (1 + rate)) / (1 - rate);
             return start_ + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(real));
         }
+        clock::time_point nominal_time(clock::time_point real) const {
+            if (!spec_.enabled() || real <= start_) return real;
+            const double elapsed = std::chrono::duration<double>(real - start_).count();
+            const double span = spec_.ms / 1000.0, rate = spec_.percent / 100.0;
+            if (elapsed >= 2 * span) return real;
+            const double nominal = elapsed <= span ? elapsed * (1 + rate)
+                : span * (1 + rate) + (elapsed - span) * (1 - rate);
+            return start_ + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(nominal));
+        }
     private:
         test_clock_skew spec_;
         clock::time_point start_{};

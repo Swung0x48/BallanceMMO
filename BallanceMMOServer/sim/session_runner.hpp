@@ -649,6 +649,7 @@ namespace bmmo::sim {
         // on_event_accepted.  `why` names a server reset in the log and box.
         void queue_trafo(session_state& s, const bmmo::session::trafo_decision& d, const float position[3],
                          std::chrono::steady_clock::time_point arrival, uint64_t token, const char* why);
+        static bool shared_absolute(const session_state& s);
         void observe_lateness(session_state& s, uint32_t tick);
         void observe_relative(session_state& s, uint32_t tick, std::chrono::steady_clock::time_point now);
         std::vector<bmmo::session::quorum_member> quorum_members(const session_state& s, uint32_t tick) const;
@@ -714,7 +715,7 @@ namespace bmmo::sim {
         // (start_ticking, the one place a schedule starts).
         struct view { uint32_t next_tick = 0; bool running = false; std::chrono::steady_clock::time_point start{}; uint32_t first_tick = 0;
                       std::string journal; std::chrono::steady_clock::time_point schedule_start{}; bool scheduled = false;
-                      uint32_t leaving_horizon = 0; };
+                      uint32_t leaving_horizon = 0; bmmo::session::scheduler_clock_fault clock_fault; };
         std::map<uint32_t, view> views_;
     };
 }

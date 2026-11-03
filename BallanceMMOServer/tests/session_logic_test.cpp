@@ -414,11 +414,16 @@ TEST(TickScheduler, TestClockFaultRunsFastThenReturnsAtTheSameRate) {
     bmmo::session::scheduler_clock_fault fault;
     const auto start = tick_scheduler::clock::time_point(1000s);
     EXPECT_EQ(fault.real_deadline(start + 8s), start + 8s);
+    EXPECT_EQ(fault.nominal_time(start + 8s), start + 8s);
     fault.begin(start, {0, 8000, 7.5});
     EXPECT_EQ(fault.real_deadline(start - 1s), start - 1s);
     EXPECT_NEAR(std::chrono::duration<double>(fault.real_deadline(start + 8600ms) - start).count(), 8.0, 1e-8);
     EXPECT_NEAR(std::chrono::duration<double>(fault.real_deadline(start + 12300ms) - start).count(), 12.0, 1e-8);
     EXPECT_EQ(fault.real_deadline(start + 16s), start + 16s);
+    for (auto elapsed: {-1s, 0s, 4s, 8s, 12s, 16s, 20s}) {
+        const auto real = start + elapsed;
+        EXPECT_NEAR(std::chrono::duration<double>(fault.real_deadline(fault.nominal_time(real)) - real).count(), 0.0, 1e-8);
+    }
 }
 
 TEST(TickScheduler, TestClockFaultParsingRejectsNonMonotoneClocks) {

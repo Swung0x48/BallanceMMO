@@ -555,10 +555,20 @@ patience (§2.6), where its sizing is given.
 | relative miss | `L_p > M`: p came more than M ticks later than the others, against its baseline |
 | minority miss | `L'_p > M` |
 | absolute miss | a per-datagram newest-frame sample with slack below `θ = 3` ticks (`kAbsoluteMissTicks`). As built: `s = (deadline(t_new) - arrival) / tick`, one per datagram, newer ticks only. The threshold moves from 0 to 3. |
-| raise | One of three majorities over its trailing 66 samples holds at every fresh tick for its persistence: relative, 132 ticks; minority, 660 ticks (`kMinorityPersistTicks`); absolute, 132 ticks, or 660 (`kSharedPersistTicks`) while the absolute majority is **shared**, meaning at least two counted members, and more than half of them, hold one at that tick. k: relative `max(2, ceil(q90(L)))`; minority `max(2, ceil(q90(L')))`; absolute `ceil(q50(n))` over the trailing 132 samples (660 when shared). When several hold, the largest. |
+| raise | One of three majorities over its trailing 66 samples holds at every fresh tick for its persistence: relative, 132 ticks; minority, 660 ticks (`kMinorityPersistTicks`); absolute, 132 ticks, or 660 (`kSharedPersistTicks`) while the absolute majority is **shared**, meaning at least two ready members with a baseline, and more than half of them, hold one at that tick. k: relative `max(2, ceil(q90(L)))`; minority `max(2, ceil(q90(L')))`; absolute `ceil(q50(n))` over the trailing 132 samples (660 when shared). When several hold, the largest. |
 | lower | `lead_offset > 0`, the relative window full, `q95(L) < -4` (`kLowerMarginTicks`) at every fresh tick for 660 consecutive ticks, and no absolute majority. `k = -min(lead_offset, floor(-q95(L)) - 1, floor(q10(slack)) - 3)`; nothing when that is not negative. |
 | cooldown, gates | Unchanged: no decision until `E + |k|·2 + 132` after an acknowledgment; samples below E discarded; one decision outstanding; at most two raises that do not restore the arrivals; the total cap latches; the Sector bound defers (§2.2, §2.9). |
 | solo | no relative samples, so only the absolute rule applies, at 132 ticks |
+
+Absolute persistence restarts whenever sharedness changes: every fresh tick
+of the persistence must belong to the same shared/lone state. While a member's
+minority majority holds (someone is on time), do not consider its shared
+absolute candidate; the lone absolute rule is unchanged (LBF1, 2026-11-03).
+
+Sharedness counts ready members with a baseline by their kept absolute
+evidence, even during a re-anchor/resync gap, pending lead reset, or a held
+or settled tick without a frame. This same definition controls resync
+retention in §2.8; patience's own exemptions are unchanged.
 
 **The raise's size.**
 
@@ -1577,7 +1587,12 @@ revision 3 it had only 14 to give back.
   31 is about 27 (inside the reach once the stall is gone), and no arm of
   this step measures it (A8 would).
 - A resync re-anchors at `L_eff_p` (§2.5). It resets that player's meter
-  samples, `held_total` and epoch, and keeps `lead_offset[p]` **and the
+  samples, except that an already-ready member re-anchored while the shared
+  absolute majority holds keeps its absolute window, streak, normalized and
+  slack series. This applies to every such resync, regardless of its trigger
+  (protocol 28 carries no reason); new samples begin at the new base. A late
+  join, a lead acknowledgement and a resync outside that majority reset as
+  before (LBF1, 2026-11-03). It resets `held_total` and epoch, and keeps `lead_offset[p]` **and the
   baseline**: re-anchoring at `L_eff` restores the lead the baseline was
   measured against plus the offset, so p's frames fall where they fell. Only
   when the re-anchor's lead differs from `assigned_lead + lead_offset` (L_eff
@@ -3148,10 +3163,14 @@ A9h, A10 and A10x there are fewer or none):
 - mechanism error within the control band in B, D and A;
 - in D, rollbacks per class within the control band, and input rewinds that
   name the late ball no more often than in the control;
-- relay lag, overall and per source player: p99 in D no higher than the
-  arm's own control twin and the A0-off band's upper edge (one-sided, both
-  checked), and above it only in the first two ticks of an episode (the
-  quorum's M, or M2 in A5p);
+- relay lag, overall and per source player: one patience hold at the start
+  of an episode is allowed. Samples above the A0-off band's upper edge
+  may occur only in the episode's first M frames, each at most M above
+  that edge; use M2 = 10 instead when a minority of two or more of at least
+  four members is late, as the quorum does (otherwise M = 4). In the rest
+  of D, p99 must be no higher than both the A0-off band's upper edge and
+  the arm's own control twin (one-sided, both checked). A3m's client 0
+  instead uses that arm's accepted-cost relay rule below;
 - substituted ticks within the A0-off band + 0.5 % of their ticks (one-sided):
   the late member's episode never cuts them;
 - relay_late Δ 0, lead_adj 0, resyncs 0;
@@ -3196,14 +3215,13 @@ span as [T_on, T_off].
 
 **A9h20:**
 
-- every member is raised exactly once, by the shared absolute rule, about 726
-  ticks after the fault's start, with the k it prints (`ceil(q50(n))`, capped
-  only by the total cap and the Sector bound);
-- each is lowered exactly once after the fault, within cooldown + 660 + 66
-  ticks of its end;
-- no second raise, and no raise after a lower;
-- until step 12, relay_late and resyncs are reported, not failed: the raise
-  puts every member's relay lag past the reach.
+- every raise comes from a rule decision with k within the total cap and
+  the Sector bound; raises occur only inside the fault's span (the H11
+  fault is a 100-tick ramp, not a single shift);
+- every member is lowered back to offset <= 2 within cooldown + 660 + 66
+  ticks of the fault's end;
+- no raise or resync after the fault's end + 48 (no endless cycle);
+- resyncs and relay_late inside the fault are reported.
 
 **A11:** no raise; the client's substitutions lie only inside the blackout.
 **A11u:** one raise by the absolute rule, about 132 + 66 ticks after 1500,
@@ -3278,7 +3296,10 @@ to that player.
 - Client 0 is never raised and never cut.
 - Client 0's relay lag carries about 20 extra ticks from 1500 until the raises'
   E. That is §2.6's accepted cost. It is back in the A0-off band after that
-  E, and its resyncs are 0.
+  E, and its resyncs are 0. Judge from T_on until the last raise's E at no
+  more than the A0-off band + 22 ticks (ceil(300/15) + 2); from E + 48
+  onward its p99 is within the A0-off band. The every-arm relay rule does
+  not apply to client 0 in this arm.
 
 **A10:**
 

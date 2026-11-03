@@ -272,13 +272,24 @@ namespace bmmo::session {
         static constexpr uint32_t kSharedPersistTicks = 660;
         static constexpr uint32_t kLowerTicks = 660;
 
-        void reset(uint32_t base) {
+        void reset(uint32_t base, bool keep_absolute = false) {
+            const auto previous = *this;
             const int offset = offset_;
             const uint32_t sequence = sequence_;
             *this = relative_meter{};
             offset_ = offset;
             sequence_ = sequence;
             base_ = discard_below_ = base;
+            if (keep_absolute) {
+                slack_ = previous.slack_;
+                normalized_ = previous.normalized_;
+                absolute_samples_ = previous.absolute_samples_;
+                absolute_evaluated_ = previous.absolute_evaluated_;
+                absolute_at_ = previous.absolute_at_;
+                absolute_streak_ = previous.absolute_streak_;
+                misses_total_ = previous.misses_total_;
+                absolute_shared_ = previous.absolute_shared_;
+            }
         }
         bool sample_absolute(uint32_t tick, double slack, double baseline) {
             if (tick < discard_below_ || (absolute_samples_ && tick <= newest_absolute_)) return false;
@@ -298,6 +309,8 @@ namespace bmmo::session {
             return true;
         }
         relative_decision on_tick(uint32_t tick, bool shared) {
+            if (shared != absolute_shared_) absolute_streak_ = 0;
+            absolute_shared_ = shared;
             if (absolute_samples_ != absolute_evaluated_) {
                 absolute_evaluated_ = absolute_samples_;
                 absolute_at_ = tick;
@@ -339,7 +352,8 @@ namespace bmmo::session {
                     decision.streak = minority_streak_;
                 }
             }
-            if (!at_cap_ && absolute_streak_ >= (shared ? kSharedPersistTicks : kRaiseTicks)) {
+            if (!at_cap_ && !(shared && minority_majority)
+                    && absolute_streak_ >= (shared ? kSharedPersistTicks : kRaiseTicks)) {
                 const int amount = static_cast<int>(std::ceil(normalized_.quantile(.5, shared ? kSharedPersistTicks : kRaiseTicks)));
                 if (amount > decision.k) {
                     decision.k = amount;
@@ -467,7 +481,7 @@ namespace bmmo::session {
         relative_decision pending_;
         uint64_t misses_total_ = 0;
         uint32_t base_ = 0;
-        bool pending_capped_ = false, at_cap_ = false;
+        bool pending_capped_ = false, at_cap_ = false, absolute_shared_ = false;
         int offset_ = 0, unrestored_raises_ = 0;
         bool judge_restore_ = false, given_up_ = false;
     };

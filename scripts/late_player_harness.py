@@ -134,15 +134,16 @@ def parse_s1(text, session=None):
     for line in text.splitlines():
         sid = re.search(r'\[session (\d+)\]', line)
         if session is not None and sid and int(sid[1]) != session: continue
-        m = re.search(r'\bS1 (quorum|lateness|sector|arrival|clock-skew|lead|would-raise2|would-lower2)(?:\s|$)(.*)', line)
+        m = re.search(r'\bS1 (quorum|lateness|sector|arrival|clock-skew|lead|raise|lower|lead-ack|reset|would-raise2|would-lower2)(?:\s|$)(.*)', line)
         if not m: continue
-        fields = dict(re.findall(r'([\w-]+)=([^\s;,]+)', m[2]))
+        body = m[2].split(';', 1)[0] if m[1] in ('raise', 'lower') else m[2]
+        fields = dict(re.findall(r'([\w-]+)=([^\s;,]+)', body))
         for k, value in list(fields.items()):
             try: fields[k] = int(value) if re.fullmatch(r'-?\d+', value) else float(value)
             except ValueError: pass
         if m[1] == 'clock-skew': fields['phase'] = m[2].strip().split()[0]
         kind = m[1]
-        if kind in ('would-raise2', 'would-lower2'):
+        if kind in ('raise', 'lower', 'lead-ack', 'reset', 'would-raise2', 'would-lower2'):
             fields['action'], kind = kind, 'decisions'
         if kind != 'lead': groups[kind].append(fields)
         if kind != 'sector' and any(k in fields for k in ('sector-late', 'union', 'sector-margin')):

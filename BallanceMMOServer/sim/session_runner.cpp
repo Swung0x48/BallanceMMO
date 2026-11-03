@@ -195,7 +195,7 @@ namespace bmmo::sim {
             if (!v.scheduled) return v.next_tick + lead;
             first_tick = v.first_tick;
             next_tick = v.next_tick;
-            p = bmmo::sim::reanchor_on_schedule_parts(v.schedule_start, v.first_tick, clock::now(), lead, v.next_tick,
+            p = bmmo::sim::reanchor_on_schedule_parts(v.schedule_start, v.first_tick, v.clock_fault.nominal_time(clock::now()), lead, v.next_tick,
                                                       margin);
         }
         // Step DX9 (H3's harness item): the rule's parts in the server's log,
@@ -702,6 +702,7 @@ namespace bmmo::sim {
             auto& s = *it->second;
             if (!s.players.count(player)) return;
             auto& arrivals = s.arrivals[player];
+            const bool keep_absolute = s.ready.count(player) && shared_absolute(s);
             const int lead = static_cast<int>(assigned_lead) - s.lateness[player].meter.offset();
             if (s.ready.count(player)) arrivals.baseline.rebase(lead - arrivals.lead);
             arrivals.lead = lead;
@@ -737,7 +738,7 @@ namespace bmmo::sim {
                     text += " hold-released=[" + std::to_string(hold_until_after) + "," + std::to_string(hold_until_before) + ")";
                 log(text);
             }
-            lateness.meter.reset(first_tick);
+            lateness.meter.reset(first_tick, keep_absolute);
             // The decision sent under the old base goes with it (design 2.8:
             // the client drops it by its epoch), and so does the newest tick
             // of the old numbering.  The caps and the assigned lead stay.
@@ -1597,17 +1598,24 @@ namespace bmmo::sim {
         }
     }
 
-    void session_runner::observe_lateness(session_state& s, uint32_t tick) {
-        using bmmo::session::lateness_action;
-        const std::string prefix = "[session " + std::to_string(s.id) + "] S1 ";
+    // Design 2.1: more than half of at least two counted members hold an
+    // absolute majority.  A member exempt from the quorum (a resync gap, a
+    // pending lead) still counts by its kept evidence (step LBF1).
+    bool session_runner::shared_absolute(const session_state& s) {
         size_t counted = 0, absolute_majorities = 0;
         if (!s.quorum_history.empty())
             for (const auto& member: s.quorum_history.back().members) {
-                if (!member.ready || !member.has_baseline || member.exempt) continue;
+                if (!member.ready || !member.has_baseline) continue;
                 ++counted;
                 absolute_majorities += s.lateness.at(member.player).meter.absolute_majority();
             }
-        const bool shared = counted >= 2 && 2 * absolute_majorities > counted;
+        return counted >= 2 && 2 * absolute_majorities > counted;
+    }
+
+    void session_runner::observe_lateness(session_state& s, uint32_t tick) {
+        using bmmo::session::lateness_action;
+        const std::string prefix = "[session " + std::to_string(s.id) + "] S1 ";
+        const bool shared = shared_absolute(s);
         for (auto& [player, entry]: s.lateness) {
             auto& meter = entry.meter;
             const auto decision = meter.on_tick(tick, shared);
@@ -2022,6 +2030,10 @@ namespace bmmo::sim {
                             s.skew_began = true;
                             s.skew_started = at;
                             s.scheduler.inject_clock_skew(at, fault);
+                            {
+                                std::lock_guard lk(view_mutex_);
+                                views_[s.id].clock_fault.begin(at, fault);
+                            }
                             log(prefix + "begin tick=" + std::to_string(tick) + " ms=" + std::to_string(fault.ms)
                                 + " percent=" + std::to_string(fault.percent));
                         }
