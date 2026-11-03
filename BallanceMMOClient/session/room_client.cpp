@@ -86,10 +86,25 @@ void BallanceMMOClient::room_panel_toggle() {
 }
 
 // LoginAcceptedV3: the panel opens with a fresh list.  The background list
-// does not print the roster in BML's message area (announce=false).
+// does not print the roster in BML's message area (announce=false).  A login
+// inside a level, outside a core session, also opens the pause menu through
+// Gameplay_Events' own ESC Key Event (the user, 2026-11-02), so the level
+// waits behind the panel.
 void BallanceMMOClient::room_panel_on_login() {
     room_panel_ui.open();
     send_room_request(bmmo::room::action::List, 0, 0, bmmo::room::mode::Physics, {}, false);
+    utils_.run_on_game_thread([this] {
+        if (!m_bml->IsIngame() || m_bml->IsPaused() || core_host_running()) return;
+        auto* esc = static_cast<CKBehaviorIO*>(m_bml->GetCKContext()->GetObject(esc_event_));
+        if (!esc) {
+            logger_->Warn("Room panel: login could not find the ESC pause output.");
+            return;
+        }
+        CKBOOL pressed = TRUE;
+        esc->GetOwner()->SetOutputParameterValue(0, &pressed);
+        esc->Activate();
+        logger_->Info("Room panel: login in a level activated the ESC pause chain.");
+    });
 }
 
 // OnProcess, every frame (before its not-connected return: a disconnect's
