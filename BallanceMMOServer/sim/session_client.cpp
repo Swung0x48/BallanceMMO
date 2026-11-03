@@ -1076,6 +1076,10 @@ namespace {
             engine_ = bmmo::sim::headless_engine::create(eo, error);
             if (!engine_) { logf("engine: %s", error.c_str()); return false; }
             if (!engine_->load_composition(error)) { logf("composition: %s", error.c_str()); return false; }
+            // Step FIN: Level_Finish goes to All_Gameplay; keep its last frame's messages.
+            if (auto* gameplay = static_cast<CKBeObject*>(engine_->context()->GetObjectByNameAndParentClass(
+                    const_cast<CKSTRING>("All_Gameplay"), CKCID_BEOBJECT, nullptr)))
+                gameplay->SetAsWaitingForMessages();
             for (int i = 0; i < args_.boot_ticks; ++i)
                 if (!engine_->tick(error)) { logf("boot tick: %s", error.c_str()); return false; }
             bmmo::physics::drain_event_log(engine_->physics());
@@ -2537,7 +2541,7 @@ namespace {
             bool own_ready = true;
             for (const auto& m: msg.members)
                 if (m.id == core_.own_id()) own_ready = m.ready;
-            if (!own_ready) {
+            if (!own_ready && !level_finished_) {
                 // First time, or the room went back to the lobby (session ended
                 // by the server, host restart): ready again, at most once a second.
                 const auto now = wall_now(bmmo::sim::wall_site::room_ready);
@@ -2562,6 +2566,8 @@ namespace {
 
         // ---------------------------------------------------------- session
         void begin_session(const bmmo::session_start_msg& msg) {
+            level_finished_ = false;
+            session_map_ = msg.map;
             // The session's parameters and the core's fresh state (shared-core
             // design E3: session_client_core::begin).
             rejoin_waiting_ = false;   // step F0: the rejoin's next life began (or was refused)
@@ -3734,6 +3740,34 @@ namespace {
             core_.pre_step();
             const bool ticked = engine_->tick(error);
             live_tick_serial_ = 0;
+            // Step FIN: the vanilla finish is reported as retail reports it.  Looked up
+            // each frame: the All_Gameplay found at boot is not the one the level's
+            // Level_Finish reaches.
+            if (ticked && !level_finished_) {
+                auto* context = engine_->context();
+                auto* gameplay = static_cast<CKBeObject*>(context->GetObjectByNameAndParentClass(
+                        const_cast<CKSTRING>("All_Gameplay"), CKCID_BEOBJECT, nullptr));
+                for (int index = 0; gameplay && index < gameplay->GetLastFrameMessageCount(); ++index) {
+                    const char* name = context->GetMessageManager()->GetMessageTypeName(
+                            gameplay->GetLastFrameMessage(index)->GetMsgType());
+                    if (!name || std::strcmp(name, "Level_Finish") != 0) continue;
+                    bmmo::level_finish_v2_msg finish{};
+                    finish.content.map = session_map_;
+                    if (auto* energy = engine_->data_array("Energy")) {
+                        energy->GetElementValue(0, 0, &finish.content.points);
+                        energy->GetElementValue(0, 1, &finish.content.lives);
+                        energy->GetElementValue(0, 5, &finish.content.lifeBonus);
+                    }
+                    if (auto* levels = engine_->data_array("AllLevel"))
+                        levels->GetElementValue(args_.level - 1, 6, &finish.content.levelBonus);
+                    finish.content.timeElapsed = static_cast<float>(core_.frames_since_anchor())
+                            * bmmo::sim::kFixedDeltaMs / 1000.0f;
+                    send_bytes(std::string(reinterpret_cast<const char*>(&finish), sizeof(finish)),
+                               k_nSteamNetworkingSend_ReliableNoNagle);
+                    level_finished_ = true;
+                    break;
+                }
+            }
             if (!core_.post_step(ticked)) { logf("tick failed: %s", error.c_str()); ended_ = true; return; }
             // Step T3 (H8): the leave switches.
             if (core_.assigned()) {
@@ -4869,6 +4903,8 @@ namespace {
         clock_type::time_point last_ready_sent_{};
         uint32_t room_id_ = 0;
         bool ended_ = false;
+        bool level_finished_ = false;
+        bmmo::map session_map_{};
         bool play_frame_seen_ = false, play_limit_failed_ = false;
         std::optional<clock_type::time_point> play_started_;
         size_t notified_ticks_ = 0;

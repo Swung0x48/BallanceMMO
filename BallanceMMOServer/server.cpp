@@ -532,6 +532,16 @@ public:
         for (const auto& m: r->members) send_room_state(m.id);
     }
 
+    // A member's ready flag changed: the refreshed roster goes out first - it
+    // carries the new flag, and the clients render the event from it.
+    void notify_ready_changed(HSteamNetConnection c) {
+        const uint32_t room = rooms_.room_of(c);
+        send_room_state_to_room(room);
+        if (const auto* r = rooms_.find(room))
+            for (const auto& m: r->members)
+                send_room_event(m.id, bmmo::room::event_type::ReadyChanged, bmmo::room::error_code::None, room, c, c);
+    }
+
     // Room membership / list changed: refresh everyone's view (rare events).
     void broadcast_room_states() {
         for (const auto& [conn, _]: clients_) send_room_state(conn);
@@ -3232,14 +3242,8 @@ public:
                     send_room_event(c, event_type::RequestDenied, err, 0);
                     break;
                 }
-                const uint32_t room = rooms_.room_of(c);
-                // The refreshed roster goes out first: it carries the new flag,
-                // and the clients render the event from it.
-                send_room_state_to_room(room);
-                if (const auto* r = rooms_.find(room))
-                    for (const auto& m: r->members)
-                        send_room_event(m.id, event_type::ReadyChanged, error_code::None, room, c, c);
-                send_room_event(c, event_type::RequestAccepted, error_code::None, room, c, c);
+                notify_ready_changed(c);
+                send_room_event(c, event_type::RequestAccepted, error_code::None, rooms_.room_of(c), c, c);
                 break;
             }
             case action::Start: {
@@ -4144,6 +4148,20 @@ protected:
                 auto* msg = bmmo::message_utils::view_as<bmmo::level_finish_v2_msg>(networking_msg);
                 if (!msg) break;
                 msg->content.player_id = networking_msg->m_conn;
+
+#if BMMO_BUILD_SIM
+                // Step FIN: the vanilla finish (boarding the airship) ends the
+                // finisher's physics session; it stays in the room, not ready.
+                if (const auto cs = client_session_.find(networking_msg->m_conn); cs != client_session_.end()) {
+                    const auto session = physics_sessions_.find(cs->second);
+                    if (session != physics_sessions_.end() && session->second.ticking) {
+                        send_session_end(cs->second, networking_msg->m_conn, "Level finished.");
+                        physics_session_member_left(networking_msg->m_conn);
+                        rooms_.set_ready(networking_msg->m_conn, false);
+                        notify_ready_changed(networking_msg->m_conn);
+                    }
+                }
+#endif
 
                 // Cheat check
                 if (msg->content.map.level * 100 != msg->content.levelBonus || msg->content.lifeBonus != 200) {

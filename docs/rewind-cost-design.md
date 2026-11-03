@@ -2338,6 +2338,17 @@ this commit; only a fresh config gets the new default (SP10's
 `placement_clones: true`) set by hand at its next deployment. A one-time
 config migration would be a design choice and is not made here.
 
+## As built (step FIN)
+
+The owner's vanilla `Level_Finish` (boarding, not the airship collision zone)
+now ends only that member's running physics session with `Level finished.`.
+The member stays in the room, not ready; the ordinary removal path retires
+its mirrors while the other members play on. The headless client observes
+the CK message on `All_Gameplay` after a live frame and sends `LevelFinishV2`,
+as retail does. Retail session teardown hands the level back to vanilla;
+it does not unload the level or reset the airship. Physics protocol stays 27;
+the airship-zone rules are unchanged.
+
 ## As built (step BALA)
 
 (Step BALL, below SPGH2's note: the relayed pose is retired at protocol 17 -
