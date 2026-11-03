@@ -163,9 +163,11 @@ def host_clock(s1, client_cadence, server_cadence=None):
     # An un-injected host fault must be supported by all members' negative
     # slack at the same reporting tick and normal client tick cadence.
     grouped = {}
+    # The slack median: `slack-q50` since LB4's revision-3 meter, `q50` before.
     for row in s1.get('lateness') or []:
-        if 'tick' in row and 'player' in row and 'q50' in row:
-            grouped.setdefault(row['tick'], {})[row['player']] = row['q50']
+        q50 = row.get('slack-q50', row.get('q50'))
+        if 'tick' in row and 'player' in row and q50 is not None:
+            grouped.setdefault(row['tick'], {})[row['player']] = q50
     normal = bool(client_cadence) and all(v is not None and 14 <= v <= 16.5 for v in client_cadence.values())
     common = [tick for tick, rows in grouped.items() if len(rows) == len(client_cadence) and all(v < 0 for v in rows.values())]
     # A shared network delay (A10) also makes all slack negative. Require

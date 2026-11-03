@@ -228,7 +228,7 @@ namespace bmmo::session {
     // the player's input buffer, reset over [N, E) for a sent raise.  With
     // `lead_adjust` off or no CAP_LEAD the route is observe and nothing is
     // touched.
-    inline lead_plan lead_decide(bool lead_adjust, lead_player& p, lateness_meter& meter,
+    inline lead_plan lead_decide(bool lead_adjust, lead_player& p, relative_meter& meter,
                                  const lateness_decision& d, uint32_t next_tick, input_buffer& buffer) {
         lead_plan plan;
         if (d.action != lateness_action::raise && d.action != lateness_action::lower) return plan;
@@ -317,7 +317,7 @@ namespace bmmo::session {
     // kept in step with the meter, but an offset must never be lost) the
     // offset still moves, since the client did move its clock.  p's Sector
     // margin samples move with its clock.
-    inline bool lead_acknowledge(lead_player& p, lateness_meter& meter, uint32_t id, int applied,
+    inline bool lead_acknowledge(lead_player& p, relative_meter& meter, uint32_t id, int applied,
                                  int* bounded = nullptr) {
         if (!p.outstanding || id != p.id) return false;
         p.outstanding = false;

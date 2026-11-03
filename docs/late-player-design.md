@@ -3741,6 +3741,33 @@ cut window. A1's other-client gate remains open: the off twin reproduces a
 confirmed-FINAL client3 discrepancy. Details and test selection are in the
 LB3 handoff report; this is not a completed live close-out.
 
+**As built (step LB4, 2026-11-03).** Based on 608b5e85 (protocol 27).
+Revision 3's relative meter now drives SessionLead through the existing
+send/ack path; revision 2's reference and duplicate meter are gone. The
+existing cap latch, Sector deferral, cooldown and two-unrestored-raise
+limit are live on the new meter. `lead_decide`, `apply_lead_decision` and
+revision 2's Sector bound are unchanged apart from the meter type. Both flags still default off.
+
+Assignments retain the baseline and acknowledged offset. The rebase uses
+RL1's actual fixed-schedule lead (including its floor), less the offset,
+against the preceding assignment's corresponding lead; SAXH still opens
+collection at the assignment instant/correction. Acknowledging a raise
+never moves the baseline.
+
+x64/x86 builds, 778 unit tests, GCC syntax and the flags-off protocol-26
+wire comparison pass (ALL SAME). Three 60-second E-core arena runs: A5u
+on raises only client 2 once (+21 decided/sent/acked, uncapped), DX6 resyncs
+0 versus the off twin's 0; A0 on has lead_adj 0 on all four. FINAL rows
+retain the known per-world airship exception, also present off. Retail L11,
+two copies on E-cores, both flags on: copy 2's uplink raised by 300 ms at
+session tick 1000 (after both baselines froze) was raised once, +20 by the
+relative rule at 1185, applied at 1208 and slewed to completion by 1261
+(CAP_LEAD), no resync; its substitutions fell from 70 per 60 ticks to 0, and
+both copies' confirmed FINAL rows are bit-equal (18,986 rows each). A first
+attempt stepped the link at tick 41, before the baseline froze, and was
+absorbed into it - a recipe error, rerun. The remaining R4 matrix stays with
+LBM. The harness's host-clock check reads the slack median as `slack-q50`.
+
 #### 6.2.1 Built since 177c337
 
 | plan step | built by | commit | what revision 3 takes from it |

@@ -102,7 +102,7 @@ namespace {
                          [](const datagram& a, const datagram& b) { return a.at < b.at; });
 
         std::vector<input_buffer> buffers(n);
-        std::vector<lateness_meter> meters(n);
+        std::vector<relative_meter> meters(n);
         std::vector<arrival_ring> arrivals(n);
         std::vector<lateness_baseline> baselines(n);
         std::vector<lead_player> leads(n);
@@ -212,7 +212,7 @@ namespace {
                 baselines[d.player].sample(d.newest, slack, arrival);
                 for (uint32_t frame_tick = first; frame_tick <= d.newest; ++frame_tick)
                     arrivals[d.player].record(frame_tick, arrival, arrival, frame_tick == d.newest);
-                if (meters[d.player].sample(d.newest, slack)) leads[d.player].received(d.newest, tick);
+                if (meters[d.player].sample_absolute(d.newest, slack, baselines[d.player].value())) leads[d.player].received(d.newest, tick);
             } else {
                 now = std::max(now, wake);
             }
@@ -507,12 +507,13 @@ TEST(LeadReset, AReanchorsSkippedTicksDoNotWaitForTheirDeadlines) {
 // ---------------------------------------------------------------------------
 
 namespace {
-    // A meter with a measured reference of about 6 ticks of slack, and then
-    // `late` slack for as long as `ticks`; on_tick evaluated every tick.
+    // Arrivals against an on-time peer, evaluated at each stepped tick.
     struct meter_rig {
-        lateness_meter meter;
+        relative_meter meter;
         input_buffer buffer;
         lead_player lead;
+        lateness_baseline baseline;
+        arrival_ring arrivals;
         uint32_t tick = 100;
 
         meter_rig() {
@@ -522,20 +523,33 @@ namespace {
             lead.assigned_lead = 20;
             lead.rtt_ms = 150;
             lead.have_rtt = true;
-            feed(6.0, 400);
-            EXPECT_TRUE(meter.reference_measured());
+            baseline.assigned(100, true, 100);
+            baseline.settled(100, arrival_ring::time_point{});
+            feed(0.0, 400);
+            EXPECT_TRUE(baseline.frozen());
         }
         // Feeds `ticks` ticks of samples at `slack`, calling `on` for every
         // decision; returns how many there were.
-        int feed(double slack, uint32_t ticks,
+        int feed(double delay, uint32_t ticks,
                  const std::function<void(const lateness_decision&)>& on = {}) {
             int decisions = 0;
             for (uint32_t i = 0; i < ticks; ++i, ++tick) {
-                if (meter.sample(tick, slack)) lead.received(tick, tick + 3);
+                const auto deadline = arrival_ring::time_point{} + std::chrono::microseconds(
+                    static_cast<int64_t>(tick * kLatenessTickMicros));
+                const auto at = deadline - std::chrono::microseconds(
+                    static_cast<int64_t>((6.0 - delay) * kLatenessTickMicros));
+                arrivals.record(tick, at, at, true);
+                const double slack = lateness_slack_ticks(deadline, arrivals.find(tick)->at);
+                baseline.sample(tick, slack, at);
+                if (baseline.frozen() && meter.sample_absolute(tick, slack, baseline.value())) {
+                    const double normalized = baseline.value() - slack;
+                    meter.sample_relative(tick, normalized, normalized);
+                    lead.received(tick, tick + 3);
+                }
                 bool fresh = false;
                 buffer.submit(tick, std::vector<input_frame>{frame_of(0, tick)});
                 buffer.take(tick, fresh);
-                const auto d = meter.on_tick(tick);
+                const auto d = meter.on_tick(tick, false);
                 if (d.action == lateness_action::none) continue;
                 ++decisions;
                 if (on) on(d);
@@ -550,7 +564,7 @@ TEST(LeadDecide, NoCapLeadMeansOneObservedDecisionAndNothingSent) {
     rig.lead.cap_lead = false;
     const uint32_t cursor_before = rig.buffer.next_tick();
     std::vector<lead_plan> plans;
-    const int decisions = rig.feed(-3.0, 2000, [&](const lateness_decision& d) {
+    const int decisions = rig.feed(9.0, 2000, [&](const lateness_decision& d) {
         plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
     });
     ASSERT_EQ(decisions, 1);
@@ -567,7 +581,7 @@ TEST(LeadDecide, NoCapLeadMeansOneObservedDecisionAndNothingSent) {
 TEST(LeadDecide, FlagOffObservesEvenWithCapLead) {
     meter_rig rig;
     std::vector<lead_plan> plans;
-    rig.feed(-3.0, 2000, [&](const lateness_decision& d) {
+    rig.feed(9.0, 2000, [&](const lateness_decision& d) {
         plans.push_back(lead_decide(false, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
     });
     ASSERT_EQ(plans.size(), 1u);
@@ -579,7 +593,7 @@ TEST(LeadDecide, FlagOffObservesEvenWithCapLead) {
 TEST(LeadDecide, NoSecondDecisionWhileOneIsUnacknowledged) {
     meter_rig rig;
     std::vector<lead_plan> plans;
-    const int decisions = rig.feed(-3.0, 3000, [&](const lateness_decision& d) {
+    const int decisions = rig.feed(9.0, 3000, [&](const lateness_decision& d) {
         plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
     });
     ASSERT_EQ(decisions, 1);
@@ -597,7 +611,7 @@ TEST(LeadDecide, NoSecondDecisionWhileOneIsUnacknowledged) {
     EXPECT_FALSE(rig.lead.outstanding);
     EXPECT_EQ(rig.meter.offset(), plans[0].k);
     EXPECT_EQ(rig.meter.cooldown_until(),
-              plans[0].effective + static_cast<uint32_t>(plans[0].k) * 2 + lateness_meter::kCooldownTicks);
+              plans[0].effective + static_cast<uint32_t>(plans[0].k) * 2 + relative_meter::kCooldownTicks);
     EXPECT_FALSE(lead_acknowledge(rig.lead, rig.meter, plans[0].k, plans[0].k));
 }
 
@@ -605,7 +619,7 @@ TEST(LeadDecide, TwoRaisesThatDoNotRestoreThenNoMore) {
     meter_rig rig;
     std::vector<lead_plan> plans;
     std::vector<lateness_action> actions;
-    rig.feed(-3.0, 8000, [&](const lateness_decision& d) {
+    rig.feed(9.0, 8000, [&](const lateness_decision& d) {
         actions.push_back(d.action);
         const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer);
         plans.push_back(plan);
@@ -625,7 +639,7 @@ TEST(LeadDecide, TheTotalCapCutsARaiseAndStopsTheNext) {
     meter_rig rig;
     rig.lead.assigned_lead = kLeadCapTicks - 3;   // room for 3
     std::vector<lead_plan> plans;
-    const int decisions = rig.feed(-6.0, 4000, [&](const lateness_decision& d) {
+    const int decisions = rig.feed(12.0, 4000, [&](const lateness_decision& d) {
         const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer);
         plans.push_back(plan);
         if (plan.route == lead_route::send) lead_acknowledge(rig.lead, rig.meter, rig.lead.id, plan.k);
@@ -649,7 +663,7 @@ TEST(LeadDecide, ARaiseWithNoRoomIsDeclined) {
     meter_rig rig;
     rig.lead.assigned_lead = kLeadCapTicks;
     std::vector<lead_plan> plans;
-    const int decisions = rig.feed(-3.0, 4000, [&](const lateness_decision& d) {
+    const int decisions = rig.feed(9.0, 4000, [&](const lateness_decision& d) {
         plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
     });
     ASSERT_EQ(decisions, 1);
@@ -669,7 +683,7 @@ TEST(LeadDecide, TheSectorMarginCapsARaise) {
     rig.lead.sector_margin.push(4);
     rig.lead.sector_margin.push(12);
     std::vector<lead_plan> plans;
-    rig.feed(-6.0, 4000, [&](const lateness_decision& d) {
+    rig.feed(12.0, 4000, [&](const lateness_decision& d) {
         plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
     });
     ASSERT_EQ(plans.size(), 1u);
@@ -689,7 +703,7 @@ TEST(LeadDecide, ASectorRewindingClientIsNotCappedByTheMargin) {
     rig.lead.sector_margin.push(4);
     rig.lead.sector_margin.push(12);
     std::vector<lead_plan> plans;
-    rig.feed(-6.0, 4000, [&](const lateness_decision& d) {
+    rig.feed(12.0, 4000, [&](const lateness_decision& d) {
         plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
     });
     ASSERT_EQ(plans.size(), 1u);
@@ -710,7 +724,7 @@ TEST(LeadDecide, TheRewindReachBoundsARaise) {
         rig.lead.rewinds_sectors = true;
         rig.lead.sector_margin.push(-44);   // the reach leaves 48 - 45 = 3
         std::vector<lead_plan> plans;
-        rig.feed(-6.0, 4000, [&](const lateness_decision& d) {
+        rig.feed(12.0, 4000, [&](const lateness_decision& d) {
             plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
         });
         ASSERT_EQ(plans.size(), 1u);
@@ -725,7 +739,7 @@ TEST(LeadDecide, TheRewindReachBoundsARaise) {
         rig.lead.rewinds_sectors = true;
         rig.lead.sector_margin.push(-47);   // nothing left: deferred
         std::vector<lead_plan> plans;
-        rig.feed(-6.0, 4000, [&](const lateness_decision& d) {
+        rig.feed(12.0, 4000, [&](const lateness_decision& d) {
             plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
         });
         ASSERT_GE(plans.size(), 1u);
@@ -755,7 +769,7 @@ TEST(LeadSector, TheBoundIsTheMarginPlusTheClientsRewindReach) {
 }
 
 TEST(LeadDecide, ALowerMovesNoRange) {
-    lateness_meter meter;
+    relative_meter meter;
     meter.reset(0);
     input_buffer buffer;
     buffer.reset(0);
@@ -776,7 +790,7 @@ TEST(LeadDecide, ALowerMovesNoRange) {
 TEST(LeadDecide, AReassignmentDropsTheOutstandingDecision) {
     meter_rig rig;
     std::vector<lead_plan> plans;
-    rig.feed(-3.0, 2000, [&](const lateness_decision& d) {
+    rig.feed(9.0, 2000, [&](const lateness_decision& d) {
         plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
     });
     ASSERT_EQ(plans.size(), 1u);
@@ -802,78 +816,25 @@ TEST(LeadArithmetic, ClientTickEstimateAndRoundTrip) {
     EXPECT_EQ(margin.worst(), 11);   // the last 8: 18 .. 11
 }
 
-// ---------------------------------------------------------------------------
-// The gap step 7 left: a member late from its start whose peers lack a
-// measured reference.
-// ---------------------------------------------------------------------------
-
-TEST(LatenessReference, SoloStructurallyLateMemberTakesTheDeadlineReferenceAndIsRaised) {
-    lateness_meter meter;
-    meter.reset(0);
-    uint32_t tick = 0;
-    // Every sample 3 ticks after the deadline: no window qualifies.
-    const auto feed = [&](double slack, uint32_t ticks) {
-        std::vector<lateness_decision> out;
-        for (uint32_t i = 0; i < ticks; ++i, ++tick) {
-            meter.sample(tick, slack);
-            lateness_settle_reference(meter, {}, {});
-            const auto d = meter.on_tick(tick);
-            if (d.action != lateness_action::none) out.push_back(d);
-        }
-        return out;
-    };
-    auto decisions = feed(-3.0, 66 * lateness_meter::kReferenceMaxWindows);
-    EXPECT_TRUE(decisions.empty());
-    EXPECT_TRUE(meter.wants_fallback());
-    EXPECT_FALSE(meter.has_reference());   // no peer: the fallback has nothing yet
-    decisions = feed(-3.0, 66 * (lateness_meter::kReferenceSelfWindows - lateness_meter::kReferenceMaxWindows));
-    ASSERT_TRUE(meter.has_reference());
-    EXPECT_STREQ(meter.reference_source(), "deadline");
-    EXPECT_DOUBLE_EQ(meter.r01(), lateness_meter::kDeadlineReferenceR01);
-    decisions = feed(-3.0, 1000);
-    ASSERT_EQ(decisions.size(), 1u);
-    EXPECT_EQ(decisions[0].action, lateness_action::raise);
-    // Back to two ticks before the deadline, the deadline reference's q10.
-    EXPECT_EQ(decisions[0].k, static_cast<int>(std::ceil(lateness_meter::kDeadlineReferenceR10 + 3.0)));
-}
-
-TEST(LatenessReference, AMeasuredPeerStillWinsOverTheDeadline) {
-    lateness_meter meter;
-    meter.reset(0);
-    for (uint32_t t = 0; t < 66 * lateness_meter::kReferenceMaxWindows; ++t) meter.sample(t, -3.0);
-    ASSERT_TRUE(meter.wants_fallback());
-    EXPECT_STREQ(lateness_settle_reference(meter, {5.0, 7.0}, {2.0, 3.0}), "fallback");
-    EXPECT_STREQ(meter.reference_source(), "fallback");
-    EXPECT_DOUBLE_EQ(meter.r10(), 6.0);
-    EXPECT_DOUBLE_EQ(meter.r01(), 2.5);
-    // Settled: nothing more is adopted.
-    EXPECT_EQ(lateness_settle_reference(meter, {}, {}), nullptr);
-}
-
-TEST(LatenessReference, EveryPeerOnTheFallbackTooTakesTheDeadline) {
-    // Two members both late from the start: neither has a measured
-    // reference to lend the other, so both settle on the deadline at 12.
-    lateness_meter a, b;
-    a.reset(0);
-    b.reset(0);
-    for (uint32_t t = 0; t < 66 * lateness_meter::kReferenceSelfWindows; ++t) {
-        a.sample(t, -2.0);
-        b.sample(t, -5.0);
-        std::vector<double> r10s, r01s;
-        if (b.reference_measured()) { r10s.push_back(b.r10()); r01s.push_back(b.r01()); }
-        lateness_settle_reference(a, r10s, r01s);
-        r10s.clear();
-        r01s.clear();
-        if (a.reference_measured()) { r10s.push_back(a.r10()); r01s.push_back(a.r01()); }
-        lateness_settle_reference(b, r10s, r01s);
+TEST(RelativeMeter, SoloStructurallyLateMemberUsesItsFlooredBaseline) {
+    relative_meter meter;
+    lateness_baseline baseline;
+    const auto at = arrival_ring::time_point{};
+    baseline.assigned(100, false, 100);
+    baseline.settled(100, at);
+    std::vector<relative_decision> decisions;
+    for (uint32_t tick = 100; tick < 2100; ++tick) {
+        baseline.sample(tick, -3.0, at);
+        if (baseline.frozen()) meter.sample_absolute(tick, -3.0, baseline.value());
+        const auto decision = meter.on_tick(tick, false);
+        if (decision.action != lateness_action::none) decisions.push_back(decision);
     }
-    EXPECT_STREQ(a.reference_source(), "deadline");
-    EXPECT_STREQ(b.reference_source(), "deadline");
+    ASSERT_TRUE(baseline.frozen());
+    EXPECT_DOUBLE_EQ(baseline.value(), lateness_baseline::kFloorTicks);
+    ASSERT_EQ(decisions.size(), 1u);
+    EXPECT_STREQ(decisions[0].rule, "absolute");
+    EXPECT_EQ(decisions[0].k, 6);
 }
-
-// ---------------------------------------------------------------------------
-// late_tick.hpp: the per-player leads, and the start base unchanged.
-// ---------------------------------------------------------------------------
 
 namespace {
     // The start base as plan step 9 computed it (late_tick.hpp at 53d8ecc),
@@ -1000,7 +961,7 @@ TEST(LeadDecide, AnAckedRaiseSpendsTheSectorMarginAndTheSectorCapDoesNotLatch) {
     rig.lead.sector_margin.push(10);
     struct seen { lead_plan plan; uint32_t tick; };
     std::vector<seen> plans;
-    rig.feed(-6.0, 6000, [&](const lateness_decision& d) {
+    rig.feed(12.0, 6000, [&](const lateness_decision& d) {
         const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer);
         plans.push_back({plan, rig.tick});
         // The client applies every raise, but its arrivals never improve.
@@ -1037,7 +998,7 @@ TEST(LeadDecide, BothCapsCutTheRaiseAndTheSmallerBinds) {
         rig.lead.assigned_lead = kLeadCapTicks - 5;   // room for 5
         rig.lead.sector_margin.push(8);               // room for 7
         std::vector<lead_plan> plans;
-        rig.feed(-6.0, 3000, [&](const lateness_decision& d) {
+        rig.feed(12.0, 3000, [&](const lateness_decision& d) {
             const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer);
             plans.push_back(plan);
             if (plan.route == lead_route::send) lead_acknowledge(rig.lead, rig.meter, rig.lead.id, plan.k);
@@ -1053,7 +1014,7 @@ TEST(LeadDecide, BothCapsCutTheRaiseAndTheSmallerBinds) {
         rig.lead.assigned_lead = kLeadCapTicks - 9;   // room for 9
         rig.lead.sector_margin.push(4);               // room for 3
         std::vector<lead_plan> plans;
-        rig.feed(-6.0, 400, [&](const lateness_decision& d) {
+        rig.feed(12.0, 400, [&](const lateness_decision& d) {
             const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer);
             plans.push_back(plan);
             if (plan.route == lead_route::send) lead_acknowledge(rig.lead, rig.meter, rig.lead.id, plan.k);
@@ -1081,7 +1042,7 @@ TEST(LeadAck, AppliedIsBoundedByTheDeltaSent) {
         meter_rig rig;
         rig.lead.sector_margin.push(40);
         std::vector<lead_plan> plans;
-        rig.feed(-3.0, 2000, [&](const lateness_decision& d) {
+        rig.feed(9.0, 2000, [&](const lateness_decision& d) {
             plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
         });
         ASSERT_EQ(plans.size(), 1u);
@@ -1104,13 +1065,13 @@ TEST(LeadAck, AnAckedLowerEndsTheCapLatch) {
         plans.push_back(plan);
         if (plan.route == lead_route::send) lead_acknowledge(rig.lead, rig.meter, rig.lead.id, plan.k);
     };
-    rig.feed(-6.0, 800, handle);
+    rig.feed(12.0, 800, handle);
     ASSERT_EQ(plans.size(), 1u);
     ASSERT_EQ(plans[0].k, 3);
     ASSERT_TRUE(rig.meter.at_cap());
     ASSERT_EQ(rig.meter.offset(), 3);
     // Now far earlier than the reference: a lower, down to the offset.
-    rig.feed(20.0, 3000, handle);
+    rig.feed(-14.0, 3000, handle);
     ASSERT_EQ(plans.size(), 2u);
     EXPECT_EQ(plans[1].route, lead_route::send);
     EXPECT_EQ(plans[1].k, -3);

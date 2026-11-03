@@ -168,7 +168,8 @@ namespace bmmo::sim {
         return it->second.first_tick + static_cast<uint32_t>(elapsed * 66 / 1000000) + 66;
     }
 
-    uint32_t session_runner::reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who) const {
+    uint32_t session_runner::reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who, uint32_t* assigned_lead) const {
+        if (assigned_lead) *assigned_lead = lead;
         bmmo::sim::reanchor_parts p;
         uint32_t first_tick = 0, next_tick = 0;
         const uint32_t margin = bmmo::sim::reanchor_margin_ticks(resync_state);
@@ -199,6 +200,7 @@ namespace bmmo::sim {
                           p.base, p.floored() ? "the floor" : "the schedule");
             callbacks_.log(line);
         }
+        if (assigned_lead) *assigned_lead = static_cast<uint32_t>(static_cast<int64_t>(p.base) - p.schedule_tick);
         return p.base;
     }
 
@@ -678,19 +680,21 @@ namespace bmmo::sim {
         });
     }
 
-    void session_runner::player_ready(uint32_t session, uint32_t player, uint32_t first_tick) {
-        post([this, session, player, first_tick] {
+    void session_runner::player_ready(uint32_t session, uint32_t player, uint32_t first_tick, uint32_t assigned_lead) {
+        post([this, session, player, first_tick, assigned_lead] {
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
             if (!s.players.count(player)) return;
-            s.ready.insert(player);
             auto& arrivals = s.arrivals[player];
+            const int lead = static_cast<int>(assigned_lead) - s.lateness[player].meter.offset();
+            if (s.ready.count(player)) arrivals.baseline.rebase(lead - arrivals.lead);
+            arrivals.lead = lead;
+            s.ready.insert(player);
             arrivals.ring = {};
             arrivals.waived = false;
             arrivals.sampled = false;
             arrivals.baseline.assigned(first_tick, !s.running, s.world->tick_index());
-            arrivals.relative.reset(first_tick);
             // A resync or a late join re-anchors a buffer that may already hold
             // frames: reset() keeps everything at or after first_tick and
             // refuses to move the cursor backwards, so the batch the client
@@ -701,17 +705,12 @@ namespace bmmo::sim {
             const uint32_t hold_until_before = buffer.hold_until();
             buffer.reset(first_tick);
             const uint32_t hold_until_after = buffer.hold_until();
-            // Every assignment measures the reference anew (design 2.8); the
-            // meter keeps only the player's total offset.
-            // Said in the log, so a run whose would-raise count reads 0
-            // because a resync threw the evidence away shows why.
             auto& lateness = s.lateness[player];
             {
                 const auto& m = lateness.meter;
                 std::string text = "[session " + std::to_string(s.id) + "] S1 reset player=" + std::to_string(player)
                     + " tick=" + std::to_string(s.world->tick_index()) + " base=" + std::to_string(first_tick)
                     + " offset=" + std::to_string(m.offset()) + " samples=" + std::to_string(m.samples_total())
-                    + " misses=" + std::to_string(m.misses_total())
                     + " streak=" + std::to_string(m.raise_streak()) + "/" + std::to_string(m.lower_streak());
                 if (m.state() == bmmo::session::lateness_state::pending)
                     text += std::string(" dropped=")
@@ -724,7 +723,6 @@ namespace bmmo::sim {
                 log(text);
             }
             lateness.meter.reset(first_tick);
-            lateness.reported = false;
             // The decision sent under the old base goes with it (design 2.8:
             // the client drops it by its epoch), and so does the newest tick
             // of the old numbering.  The caps and the assigned lead stay.
@@ -859,6 +857,7 @@ namespace bmmo::sim {
             // before it is stored.
             const uint32_t cursor = buffer->second.next_tick();
             auto& observed = s.arrivals.at(player);
+            bool sampled = false;
             for (size_t i = 0; i < frames.size(); ++i) {
                 const uint32_t t = first_tick + static_cast<uint32_t>(i);
                 if (t >= cursor + bmmo::session::input_buffer::kMaxLookahead) continue;
@@ -871,7 +870,7 @@ namespace bmmo::sim {
                     const double slack = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(t), arrival);
                     observed.baseline.sample(t, slack, arrival);
                     if (observed.baseline.frozen())
-                        observed.relative.sample_absolute(t, slack, observed.baseline.value());
+                        sampled = s.lateness.at(player).meter.sample_absolute(t, slack, observed.baseline.value());
                     observed.slack.push_back(slack);
                     if (observed.baseline.frozen()) observed.n.push_back(observed.baseline.value() - slack);
                     s.arrival_queue.push_back(bmmo::session::lateness_slack_ticks(seen, arrival));
@@ -908,8 +907,6 @@ namespace bmmo::sim {
             }
             auto meter = s.lateness.find(player);
             if (meter == s.lateness.end()) return;
-            const double slack = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(newest), arrival);
-            const bool sampled = meter->second.meter.sample(newest, slack);
             // E's c_est (design 2.3) is measured from the newest uplink tick
             // and the session tick it arrived at.
             if (sampled && config_.lead_adjust && s.world)
@@ -1560,7 +1557,7 @@ namespace bmmo::sim {
             const auto* frame = entry.ring.find(tick);
             if (!frame || !frame->as_newest) continue;
             const auto relative = bmmo::session::relative_lateness(normalized, index);
-            entry.relative.sample_relative(tick, relative.first, relative.second);
+            s.lateness.at(players[index]).meter.sample_relative(tick, relative.first, relative.second);
         }
     }
 
@@ -1572,57 +1569,18 @@ namespace bmmo::sim {
             for (const auto& member: s.quorum_history.back().members) {
                 if (!member.ready || !member.has_baseline || member.exempt) continue;
                 ++counted;
-                absolute_majorities += s.arrivals.at(member.player).relative.absolute_majority();
+                absolute_majorities += s.lateness.at(member.player).meter.absolute_majority();
             }
         const bool shared = counted >= 2 && 2 * absolute_majorities > counted;
-        for (auto& [player, entry]: s.arrivals) {
-            const auto old = s.lateness.find(player);
-            if (old == s.lateness.end()) continue;
-            entry.relative.set_offset(old->second.meter.offset());
-            const auto decision = entry.relative.on_tick(tick, shared);
-            if (decision.action == lateness_action::raise || decision.action == lateness_action::lower)
-                log(prefix + (decision.action == lateness_action::raise ? "would-raise2" : "would-lower2")
-                    + " player=" + std::to_string(player) + " tick=" + std::to_string(tick)
-                    + " rule=" + decision.rule + " k=" + std::to_string(decision.k)
-                    + " streak=" + std::to_string(decision.streak) + " (observe only: nothing sent)");
-        }
         for (auto& [player, entry]: s.lateness) {
             auto& meter = entry.meter;
-            // A member with no qualifying window after eight takes the median
-            // of the members whose reference was measured.  Nobody's yet:
-            // it waits, and asks again next tick.  With lead_adjust on, a
-            // member still without one after twelve (a solo session, or
-            // every peer on the fallback) takes the deadline reference, so
-            // a member late from its start can still be raised; with the
-            // flag off nothing changes from the observe-only meter.
-            if (meter.wants_fallback()) {
-                std::vector<double> r10s, r01s;
-                for (const auto& [other, other_entry]: s.lateness) {
-                    if (other == player || !other_entry.meter.reference_measured()) continue;
-                    r10s.push_back(other_entry.meter.r10());
-                    r01s.push_back(other_entry.meter.r01());
-                }
-                if (config_.lead_adjust) bmmo::session::lateness_settle_reference(meter, r10s, r01s);
-                else if (!r10s.empty())
-                    meter.adopt_reference(bmmo::session::lateness_median(r10s), bmmo::session::lateness_median(r01s));
-            }
-            if (meter.has_reference() && !entry.reported) {
-                entry.reported = true;
-                log(prefix + "reference player=" + std::to_string(player) + " tick=" + std::to_string(tick)
-                    + " r10=" + fixed2(meter.r10()) + " r01=" + fixed2(meter.r01())
-                    + " source=" + meter.reference_source()
-                    + " windows=" + std::to_string(meter.windows()) + "/" + std::to_string(meter.qualifying_windows())
-                    + " base=" + std::to_string(meter.base()));
-            }
-            const auto decision = meter.on_tick(tick);
+            const auto decision = meter.on_tick(tick, shared);
             if (decision.action == lateness_action::raise || decision.action == lateness_action::lower) {
                 const bool raise = decision.action == lateness_action::raise;
-                const std::string text = std::string(raise ? "would-raise" : "would-lower")
+                const std::string text = std::string(raise ? "raise" : "lower")
                     + " player=" + std::to_string(player) + " tick=" + std::to_string(tick)
                     + " k=" + std::to_string(decision.k)
-                    + (raise ? " q10=" : " q05=") + fixed2(decision.quantile)
-                    + " r10=" + fixed2(meter.r10()) + " r01=" + fixed2(meter.r01())
-                    + " misses=" + std::to_string(decision.misses) + "/" + std::to_string(decision.samples)
+                    + " rule=" + decision.rule
                     + " streak=" + std::to_string(decision.streak)
                     + " offset=" + std::to_string(meter.offset());
                 if (config_.lead_adjust) {
@@ -1635,7 +1593,6 @@ namespace bmmo::sim {
                 }
             } else if (decision.action == lateness_action::give_up) {
                 log(prefix + "gave-up player=" + std::to_string(player) + " tick=" + std::to_string(tick)
-                    + " misses=" + std::to_string(decision.misses) + "/" + std::to_string(decision.samples)
                     + ": two raises did not restore its arrivals; no decision until its next assignment");
             }
         }
@@ -1645,28 +1602,15 @@ namespace bmmo::sim {
             std::string text = "lateness player=" + std::to_string(player) + " tick=" + std::to_string(tick)
                 + " state=" + bmmo::session::lateness_state_name(meter.state())
                 + " samples=" + std::to_string(meter.samples_total())
-                + " misses=" + std::to_string(meter.misses_total())
-                + " trailing=" + std::to_string(meter.trailing_misses()) + "/" + std::to_string(meter.trailing_count());
-            if (meter.have_sampled()) text += " last=" + fixed2(meter.last_slack());
-            if (meter.trailing_count() > 0)
-                text += " q01=" + fixed2(meter.trailing_quantile(0.01)) + " q10=" + fixed2(meter.trailing_quantile(0.10))
-                      + " q50=" + fixed2(meter.trailing_quantile(0.50));
-            if (meter.has_reference())
-                text += " r10=" + fixed2(meter.r10()) + " r01=" + fixed2(meter.r01())
-                      + " ref=" + meter.reference_source();
-            else
-                text += " ref=none windows=" + std::to_string(meter.windows()) + "/" + std::to_string(meter.qualifying_windows());
-            text += " streak=" + std::to_string(meter.raise_streak()) + "/" + std::to_string(meter.lower_streak())
-                  + " decisions=" + std::to_string(meter.decisions()) + " offset=" + std::to_string(meter.offset());
+                + " offset=" + std::to_string(meter.offset())
+                + " streak=" + std::to_string(meter.raise_streak()) + "/" + std::to_string(meter.lower_streak());
             const auto& arrival = s.arrivals.at(player);
-            const auto& relative = arrival.relative;
-            text += std::string(" state2=") + bmmo::session::lateness_state_name(relative.state())
-                + " baseline=" + (arrival.baseline.frozen() ? fixed2(arrival.baseline.value()) : "none")
-                + " L-q50=" + fixed2(relative.relative_quantile(.5)) + " L-q90=" + fixed2(relative.relative_quantile(.9))
-                + " Lprime-q50=" + fixed2(relative.minority_quantile(.5)) + " Lprime-q90=" + fixed2(relative.minority_quantile(.9))
-                + " slack2-q10=" + fixed2(relative.slack_quantile(.1)) + " slack2-q50=" + fixed2(relative.slack_quantile(.5))
-                + " misses2=" + std::to_string(relative.relative_misses()) + "/" + std::to_string(relative.minority_misses())
-                + "/" + std::to_string(relative.absolute_misses()) + " shared2=" + (shared ? "yes" : "no");
+            text += " baseline=" + (arrival.baseline.frozen() ? fixed2(arrival.baseline.value()) : "none")
+                + " L-q50=" + fixed2(meter.relative_quantile(.5)) + " L-q90=" + fixed2(meter.relative_quantile(.9))
+                + " Lprime-q50=" + fixed2(meter.minority_quantile(.5)) + " Lprime-q90=" + fixed2(meter.minority_quantile(.9))
+                + " slack-q10=" + fixed2(meter.slack_quantile(.1)) + " slack-q50=" + fixed2(meter.slack_quantile(.5))
+                + " misses=" + std::to_string(meter.relative_misses()) + "/" + std::to_string(meter.minority_misses())
+                + "/" + std::to_string(meter.absolute_misses()) + " shared=" + (shared ? "yes" : "no");
             if (config_.lead_adjust) {
                 const auto l = s.leads.find(player);
                 if (l != s.leads.end()) {

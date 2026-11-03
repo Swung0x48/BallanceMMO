@@ -1839,11 +1839,11 @@ public:
     // rest of the session.  `resync_state`: the member applies the resync
     // state (CAP_RESYNC_STATE); one that does not keeps a floor of 3 ticks
     // over the runner (step RL1b), it has no base-missed re-answer.
-    uint32_t resync_tick_base(const physics_session_state& s, HSteamNetConnection c, bool resync_state) const {
+    uint32_t resync_tick_base(const physics_session_state& s, HSteamNetConnection c, bool resync_state, uint32_t* assigned_lead = nullptr) const {
         const auto it = clients_.find(c);
         const uint32_t rtt_ms = it == clients_.end() ? 0u : it->second.ping_peak_ms;
         return runner_->reanchor_tick(s.id, bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms), resync_state,
-                                      (it == clients_.end() ? std::string("?") : std::string(it->second.name)) + " (resync)");
+                                      (it == clients_.end() ? std::string("?") : std::string(it->second.name)) + " (resync)", assigned_lead);
     }
 
     // The lead a late joiner is anchored at.  On the per-player path
@@ -2607,8 +2607,9 @@ public:
         // built (step RL1b)").
         const uint32_t join_lead = s.late.count(c) ? late_join_lead(s, c, msg.caps) : 0;
         const bool join_state = (msg.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
+        uint32_t assigned_lead = s.late.count(c) ? join_lead : s.start_tick_base;
         uint32_t assigned = s.late.count(c)
-                ? runner_->reanchor_tick(s.id, join_lead, join_state, std::string(client_it->second.name) + " (late join)")
+                ? runner_->reanchor_tick(s.id, join_lead, join_state, std::string(client_it->second.name) + " (late join)", &assigned_lead)
                 : s.start_tick_base;
         // Step M1 (J4, J-h): not before the removal of any life the server
         // still holds - the joiner was never told of a life that left before
@@ -2643,7 +2644,7 @@ public:
         // gets the full snapshot broadcast, as before.
         const bool late = s.late.count(c) != 0;
         const bool state = late && join_state;
-        runner_->player_ready(msg.session, c, assigned);
+        runner_->player_ready(msg.session, c, assigned, assigned_lead + join_clamp_delta);
         if (late) send_session_assign(s, c, assigned, state ? bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS : 0);
         else assign_start_members(s);
         Printf("Physics session %u: %s ready (assigned tick %u; physics %s, %s; caps %08x).", s.id, client_it->second.name,
@@ -2692,8 +2693,8 @@ public:
         // CAP_LEAD), at L_eff (late-player design 2.5, 2.8): the lead of the
         // member's first assignment plus its acknowledged offset, the lead
         // measured to work, instead of the capped late-tick lead from the
-        // peak round trip.  The offset is kept; the runner measures the
-        // reference anew.  Every other member at the start base's lead,
+        // peak round trip.  The offset is kept; the runner keeps and rebases the
+        // baseline.  Every other member at the start base's lead,
         // clamped inside the window (plan step 20, resync_lead_ticks).  The
         // ticks between the server's tick and that base are not waited for
         // (input_buffer::reanchored): the stall that used to cost every
@@ -2707,11 +2708,12 @@ public:
         const bool state = lead != s.leads.end() && (lead->second.caps & bmmo::session::CAP_RESYNC_STATE) != 0;
         // One rule call (step DX9: each logs its line; the per-player
         // lead's replaced the default one's, unread, before).
+        uint32_t assigned_lead = 0;
         const uint32_t assigned =
             lead != s.leads.end() && bmmo::sim::uses_player_lead(config_.physics_lead_adjust, lead->second.caps)
                 ? runner_->reanchor_tick(s.id, bmmo::sim::effective_lead_ticks(lead->second.assigned_lead, lead->second.offset),
-                                         state, std::string(get_client_name(c)) + " (resync, L_eff)")
-                : resync_tick_base(s, c, state);
+                                         state, std::string(get_client_name(c)) + " (resync, L_eff)", &assigned_lead)
+                : resync_tick_base(s, c, state, &assigned_lead);
         // The newest tick whose held frames were counted: the old epoch's
         // held_total stops here, and the ticks after it up to the base are
         // applied held under no numbering the client has (its notices never
@@ -2719,7 +2721,7 @@ public:
         const uint32_t counted_through = s.relay.newest_tick();
         s.late.insert(c);
         s.ready.insert(c);
-        runner_->player_ready(s.id, c, assigned);
+        runner_->player_ready(s.id, c, assigned, assigned_lead);
         send_session_assign(s, c, assigned, state ? bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS : 0);
         for (const auto& [member, last]: s.last_physicalize)
             if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);

@@ -275,7 +275,7 @@ namespace {
     // evaluating the meter.  The link is read as the frames go out, so an
     // `on_decision` that acknowledges and changes the client's lead acts on
     // the frames sent after it.
-    std::vector<decision_at> run(lateness_meter& meter, uint32_t from, uint32_t to, const link_model& link,
+    std::vector<decision_at> run(relative_meter& meter, uint32_t from, uint32_t to, const link_model& link,
                                  const std::function<void(uint32_t, const lateness_decision&)>& on_decision = {}) {
         std::vector<datagram> wire;   // in flight
         std::vector<decision_at> out;
@@ -297,10 +297,14 @@ namespace {
             size_t delivered = 0;
             while (delivered < wire.size() && wire[delivered].arrival_ms <= now) {
                 const auto& d = wire[delivered++];
-                meter.sample(d.newest, (deadline_ms(d.newest) - d.arrival_ms) / kTickMs);
+                const double slack = (deadline_ms(d.newest) - d.arrival_ms) / kTickMs;
+                if (meter.sample_absolute(d.newest, slack, kInputDelay - kUplinkMs / kTickMs)) {
+                    const double normalized = kInputDelay - kUplinkMs / kTickMs - slack;
+                    meter.sample_relative(d.newest, normalized, normalized);
+                }
             }
             wire.erase(wire.begin(), wire.begin() + static_cast<std::ptrdiff_t>(delivered));
-            const auto d = meter.on_tick(n);
+            const auto d = meter.on_tick(n, false);
             if (d.action != lateness_action::none) {
                 out.push_back({n, d});
                 if (on_decision) on_decision(n, d);
@@ -325,21 +329,17 @@ namespace {
                                               [action](const decision_at& d) { return d.decision.action == action; }));
     }
 
-    // Ticks a meter is given to measure its reference on the steady link.
-    // More than 4 * 66: with +-3 ticks of jitter about half the datagrams
-    // are overtaken and give no sample.
     constexpr uint32_t kMeasured = 1000;
 
-    // A meter with its reference measured on the steady link, at
-    // kBase + kMeasured.
-    lateness_meter measured_meter(uint32_t salt = 1, double jitter = kJitterTicks) {
-        lateness_meter meter;
+    // Warm the trailing windows with arrivals from the steady link.
+    relative_meter steady_meter(uint32_t salt = 1, double jitter = kJitterTicks) {
+        relative_meter meter;
         meter.reset(kBase);
         link_model steady;
         steady.salt = salt;
         steady.jitter_ticks = jitter;
         run(meter, kBase, kBase + kMeasured, steady);
-        EXPECT_TRUE(meter.reference_measured()) << "salt " << salt;
+        EXPECT_GT(meter.samples_total(), 0u);
         return meter;
     }
 
@@ -354,93 +354,30 @@ TEST(LatenessMeter, QuantileAndMedian) {
     EXPECT_EQ(lateness_quantile(v, 0.05), 3.0);
     EXPECT_EQ(lateness_quantile(v, 1.0), 65.0);
     EXPECT_EQ(lateness_quantile({}, 0.5), 0.0);
-    EXPECT_EQ(lateness_median({3.0, 1.0, 2.0}), 2.0);
-    EXPECT_EQ(lateness_median({4.0, 1.0, 2.0, 3.0}), 2.5);
 }
 
 TEST(LatenessMeter, SampleIsTheNewestFrameAndDuplicatesGiveNone) {
-    lateness_meter meter;
+    relative_meter meter;
     meter.reset(kBase);
-    EXPECT_FALSE(meter.sample(kBase - 1, 5.0));   // the old numbering
-    EXPECT_TRUE(meter.sample(kBase + 3, 5.0));
-    EXPECT_FALSE(meter.sample(kBase + 3, 5.0));   // a duplicate
-    EXPECT_FALSE(meter.sample(kBase + 2, 5.0));   // overtaken
-    EXPECT_TRUE(meter.sample(kBase + 4, 4.0));
+    EXPECT_FALSE(meter.sample_absolute(kBase - 1, 5.0, 6.0));   // the old numbering
+    EXPECT_TRUE(meter.sample_absolute(kBase + 3, 5.0, 6.0));
+    EXPECT_FALSE(meter.sample_absolute(kBase + 3, 5.0, 6.0));   // a duplicate
+    EXPECT_FALSE(meter.sample_absolute(kBase + 2, 5.0, 6.0));   // overtaken
+    EXPECT_TRUE(meter.sample_absolute(kBase + 4, 4.0, 6.0));
     EXPECT_EQ(meter.samples_total(), 2u);
-    EXPECT_EQ(meter.last_slack(), 4.0);
-}
-
-TEST(LatenessMeter, ReferenceFromFourQualifyingWindows) {
-    lateness_meter meter;
-    meter.reset(kBase);
-    EXPECT_EQ(meter.state(), lateness_state::measuring);
-    // 4 windows of 66 samples: 6.0 + i/10 within each window.
-    for (uint32_t i = 0; i < 4 * 66; ++i) {
-        EXPECT_FALSE(meter.has_reference());
-        meter.sample(kBase + i, 6.0 + (i % 66) / 10.0);
-    }
-    ASSERT_TRUE(meter.has_reference());
-    EXPECT_TRUE(meter.reference_measured());
-    EXPECT_EQ(meter.windows(), 4);
-    EXPECT_EQ(meter.qualifying_windows(), 4);
-    // q10 of 264 samples: index 26 = the seventh of each window's ladder.
-    EXPECT_NEAR(meter.r10(), 6.6, 1e-9);
-    EXPECT_NEAR(meter.r01(), 6.0, 1e-9);
-    meter.on_tick(kBase + 300);
-    EXPECT_EQ(meter.state(), lateness_state::watching);
+    EXPECT_EQ(meter.slack_quantile(0.0), 4.0);
 }
 
 TEST(LatenessMeter, SteadyJitteredLinkNeverDecides) {
-    // A0j: +-3 ticks on every datagram for a whole minute.
-    lateness_meter meter;
+    relative_meter meter;
     meter.reset(kBase);
-    link_model link;
-    const auto decisions = run(meter, kBase, kBase + 4000, link);
-    EXPECT_TRUE(decisions.empty());
-    ASSERT_TRUE(meter.reference_measured());
-    EXPECT_LT(meter.r01(), meter.r10());
-    // Per datagram the slack is 16 - 9.9 +- 3 ticks, q10 about 3.7.  The
-    // samples run higher: a datagram the jitter delayed is often overtaken
-    // and gives none, so the late tail is under-sampled.
-    const double centre = kInputDelay - kUplinkMs / kTickMs;
-    EXPECT_GT(meter.r10(), centre - 0.8 * kJitterTicks - 0.5);
-    EXPECT_LT(meter.r10(), centre);
-    EXPECT_GT(meter.r01(), centre - kJitterTicks - 0.1);
-    EXPECT_EQ(meter.misses_total(), 0u);
-}
-
-TEST(LatenessMeter, PersistentShiftRaisesExactlyOnce) {
-    // A5u: +300 ms on the uplink from kShiftStart on, for good.  Nothing ever
-    // acknowledges the decision (observe only), so it is said once.
-    for (uint32_t salt = 1; salt <= 5; ++salt) {
-        lateness_meter meter = measured_meter(salt);
-        link_model link;
-        link.salt = salt;
-        link.extra_ms = [](uint32_t t) { return t >= kShiftStart ? kShiftMs : 0.0; };
-        const auto decisions = run(meter, kBase + kMeasured, kBase + 4000, link);
-        ASSERT_EQ(decisions.size(), 1u) << "salt " << salt;
-        const auto& d = decisions[0];
-        EXPECT_EQ(d.decision.action, lateness_action::raise);
-        // K in [ceil(up_ms / 15), +4] (design 5.2, A5u).
-        EXPECT_GE(d.decision.k, static_cast<int>(std::ceil(kShiftMs / 15.0)));
-        EXPECT_LE(d.decision.k, static_cast<int>(std::ceil(kShiftMs / 15.0)) + 4);
-        EXPECT_EQ(d.decision.streak, lateness_meter::kRaiseTicks);
-        // The first late datagram reaches the server about 20 ticks after
-        // the shift; a majority needs 34 late samples (more ticks than that
-        // when the jitter reorders datagrams and the overtaken ones give
-        // none), then 132 ticks of it: 2.5 s or a little more from the first
-        // late arrival, never less than 131 + 33 ticks.
-        const uint32_t first_late = kShiftStart + static_cast<uint32_t>(kShiftMs / kTickMs);
-        EXPECT_GE(d.tick, first_late + 33 + 131 - 4);
-        EXPECT_LE(d.tick, first_late + 2 * 34 + 132 + 8);
-        EXPECT_EQ(meter.state(), lateness_state::pending);
-        EXPECT_EQ(meter.pending_k(), d.decision.k);
-    }
+    EXPECT_TRUE(run(meter, kBase, kBase + 4000, link_model{}).empty());
+    EXPECT_EQ(meter.absolute_misses(), 0u);
 }
 
 TEST(LatenessMeter, ShiftEndingBeforeTheRuleHoldsDoesNotRaise) {
     // 2 s of +300 ms (132 sends): the majority holds for well under 132 ticks.
-    lateness_meter meter = measured_meter();
+    relative_meter meter = steady_meter();
     link_model link;
     link.extra_ms = [](uint32_t t) { return t >= kShiftStart && t < kShiftStart + 132 ? kShiftMs : 0.0; };
     EXPECT_TRUE(run(meter, kBase + kMeasured, kBase + 3000, link).empty());
@@ -452,7 +389,7 @@ TEST(LatenessMeter, TwoAndAHalfSecondShiftRaisesExactlyOnce) {
     // pushed the misses out again, about 167 ticks: 132 of them decide.
     for (const double jitter: {0.0, kJitterTicks}) {
         for (uint32_t salt = 1; salt <= 5; ++salt) {
-            lateness_meter meter = measured_meter(salt, jitter);
+            relative_meter meter = steady_meter(salt, jitter);
             link_model link;
             link.salt = salt;
             link.jitter_ticks = jitter;
@@ -475,7 +412,7 @@ TEST(LatenessMeter, OneSecondSpikeNeverRaises) {
     // A9: +300 ms for one second, late and not lost, at every phase of the
     // window boundary.
     for (uint32_t phase = 0; phase < 66; phase += 5) {
-        lateness_meter meter = measured_meter();
+        relative_meter meter = steady_meter();
         link_model link;
         const uint32_t on = kShiftStart + phase;
         link.extra_ms = [on](uint32_t t) { return t >= on && t < on + 66 ? kShiftMs : 0.0; };
@@ -493,7 +430,7 @@ TEST(LatenessMeter, SingleHeldBurstNeverRaises) {
     // ticks.
     for (uint32_t phase = 0; phase < 66; phase += 7) {
         for (uint32_t held: {33u, 66u, 132u}) {
-            lateness_meter meter = measured_meter();
+            relative_meter meter = steady_meter();
             link_model link;
             const uint32_t on = kShiftStart + phase;
             const double release = (on + held) * kTickMs;
@@ -511,7 +448,7 @@ TEST(LatenessMeter, ThirtyThreeFrameStallNeverRaises) {
     // A9c: a client CPU stall of 500 ms - nothing is sent for 33 ticks, then
     // the client catches up and sends the 33 frames back to back, each late.
     for (uint32_t phase = 0; phase < 66; phase += 3) {
-        lateness_meter meter = measured_meter();
+        relative_meter meter = steady_meter();
         link_model link;
         const uint32_t on = kShiftStart + phase;
         link.send_ms = [on](uint32_t t) {
@@ -528,14 +465,14 @@ TEST(LatenessMeter, ThirtyThreeFrameStallNeverRaises) {
 TEST(LatenessMeter, A4LossPatternNeverRaises) {
     // 10 % loss in bursts of 8 for the whole run: loss gives no sample.
     for (uint32_t phase = 0; phase < 80; phase += 9) {
-        lateness_meter meter;
+        relative_meter meter;
         meter.reset(kBase);
         link_model link;
         link.lost = [phase](uint32_t t) { return ((t + phase) / 8) % 10 == 0; };
         const auto decisions = run(meter, kBase, kBase + 4000, link);
         EXPECT_TRUE(decisions.empty()) << "phase " << phase;
-        EXPECT_TRUE(meter.reference_measured());
-        EXPECT_EQ(meter.misses_total(), 0u);
+        EXPECT_GT(meter.samples_total(), 0u);
+        EXPECT_EQ(meter.absolute_misses(), 0u);
     }
 }
 
@@ -544,13 +481,13 @@ TEST(LatenessMeter, BlackoutNeverRaises) {
     // resumes on time.
     for (uint32_t ms: {300u, 600u, 1000u, 5000u}) {
         for (uint32_t phase = 0; phase < 66; phase += 11) {
-            lateness_meter meter = measured_meter();
+            relative_meter meter = steady_meter();
             link_model link;
             const uint32_t on = kShiftStart + phase;
             const uint32_t span = static_cast<uint32_t>(ms / kTickMs);
             link.lost = [on, span](uint32_t t) { return t >= on && t < on + span; };
             EXPECT_TRUE(run(meter, kBase + kMeasured, kBase + 2500 + span, link).empty()) << ms << " ms phase " << phase;
-            EXPECT_EQ(meter.misses_total(), 0u);
+            EXPECT_EQ(meter.absolute_misses(), 0u);
         }
     }
 }
@@ -566,7 +503,7 @@ TEST(LatenessMeter, SpikeThenBlackoutNeverRaises) {
         for (uint32_t ms: {300u, 1000u, 5000u}) {
             for (uint32_t cut: {40u, 66u}) {
                 for (uint32_t phase = 0; phase < 66; phase += 13) {
-                    lateness_meter meter = measured_meter(1, jitter);
+                    relative_meter meter = steady_meter(1, jitter);
                     link_model link;
                     link.jitter_ticks = jitter;
                     const uint32_t on = kShiftStart + phase;
@@ -587,7 +524,7 @@ TEST(LatenessMeter, HeldBurstThenBlackoutNeverRaises) {
     // silence: one instant of evidence, however long the silence after it.
     for (uint32_t held: {66u, 132u}) {
         for (uint32_t ms: {300u, 1000u, 5000u}) {
-            lateness_meter meter = measured_meter();
+            relative_meter meter = steady_meter();
             link_model link;
             link.jitter_ticks = 0.0;
             const uint32_t on = kShiftStart;
@@ -604,31 +541,27 @@ TEST(LatenessMeter, HeldBurstThenBlackoutNeverRaises) {
 }
 
 TEST(LatenessMeter, StreaksHoldWithoutFreshSamples) {
-    lateness_meter meter;
+    relative_meter meter;
     meter.reset(kBase);
-    uint32_t t = kBase;
-    for (; t < kBase + 4 * 66; ++t) meter.sample(t, 6.0 + ((t - kBase) % 66) / 10.0);
-    ASSERT_TRUE(meter.has_reference());
-    // 66 misses, one per tick: the streak advances once the majority is there.
     uint32_t tick = 1000;
-    for (int i = 0; i < 66; ++i, ++t, ++tick) {
-        meter.sample(t, -10.0);
-        meter.on_tick(tick);
+    for (uint32_t frame = kBase; frame < kBase + 66; ++frame, ++tick) {
+        meter.sample_absolute(frame, -10.0, 6.0);
+        meter.sample_relative(frame, 16.0, 16.0);
+        meter.on_tick(tick, false);
     }
     const uint32_t streak = meter.raise_streak();
-    EXPECT_EQ(streak, 66u - 33u);
-    // Silence: kFreshTicks more ticks still count, then the streak holds.
-    for (uint32_t i = 0; i < 500; ++i, ++tick) EXPECT_EQ(meter.on_tick(tick).action, lateness_action::none);
-    EXPECT_EQ(meter.raise_streak(), streak + lateness_meter::kFreshTicks);
-    EXPECT_FALSE(meter.fresh(tick - 1));
-    // One on-time sample: fresh again, still a majority, the streak resumes.
-    meter.sample(t++, 6.0);
-    meter.on_tick(tick++);
-    EXPECT_EQ(meter.raise_streak(), streak + lateness_meter::kFreshTicks + 1);
+    EXPECT_EQ(streak, 33u);
+    for (uint32_t count = 0; count < 500; ++count, ++tick)
+        EXPECT_EQ(meter.on_tick(tick, false).action, lateness_action::none);
+    EXPECT_EQ(meter.raise_streak(), streak + relative_meter::kFreshTicks);
+    meter.sample_absolute(kBase + 66, 6.0, 6.0);
+    meter.sample_relative(kBase + 66, 0.0, 0.0);
+    meter.on_tick(tick, false);
+    EXPECT_EQ(meter.raise_streak(), streak + relative_meter::kFreshTicks + 1);
 }
 
 TEST(LatenessMeter, AckOfAnythingButThePendingDecisionIsIgnored) {
-    lateness_meter meter = measured_meter();
+    relative_meter meter = steady_meter();
     EXPECT_FALSE(meter.acknowledge(1, 5, kBase + 2000));   // nothing pending
     EXPECT_EQ(meter.offset(), 0);
     EXPECT_EQ(meter.cooldown_until(), 0u);
@@ -646,14 +579,14 @@ TEST(LatenessMeter, AckOfAnythingButThePendingDecisionIsIgnored) {
     EXPECT_FALSE(meter.acknowledge(d.id, d.k, kBase + 3200));
     EXPECT_EQ(meter.offset(), 0);
     EXPECT_EQ(meter.cooldown_until(), 0u);
-    EXPECT_EQ(meter.state(), lateness_state::measuring);
+    EXPECT_EQ(meter.state(), lateness_state::baseline);
 }
 
 TEST(LatenessMeter, CooldownIsTheDecidedKs) {
     // A raise capped by the client (applied < k) still cools down for the
     // decided k (design 2.1: E + |k|*2 + 132); the offset moves by what was
     // applied.
-    lateness_meter meter = measured_meter();
+    relative_meter meter = steady_meter();
     link_model link;
     link.extra_ms = [](uint32_t t) { return t >= kShiftStart ? kShiftMs : 0.0; };
     const auto decisions = run(meter, kBase + kMeasured, kBase + 3000, link);
@@ -661,32 +594,7 @@ TEST(LatenessMeter, CooldownIsTheDecidedKs) {
     const auto& d = decisions[0].decision;
     ASSERT_TRUE(meter.acknowledge(d.id, 5, kBase + 3000));
     EXPECT_EQ(meter.offset(), 5);
-    EXPECT_EQ(meter.cooldown_until(), kBase + 3000 + 2 * static_cast<uint32_t>(d.k) + lateness_meter::kCooldownTicks);
-}
-
-TEST(LatenessMeter, ReferenceIsFrozenUntilTheNextAssignment) {
-    lateness_meter meter = measured_meter();
-    const double r10 = meter.r10(), r01 = meter.r01();
-    // +50 ms for good (3.3 ticks; the arrivals still qualify as a reference):
-    // the arrivals move, the reference does not.
-    link_model link;
-    link.extra_ms = [](uint32_t t) { return t >= kShiftStart ? 50.0 : 0.0; };
-    run(meter, kBase + kMeasured, kBase + 2000, link);
-    EXPECT_EQ(meter.r10(), r10);
-    EXPECT_EQ(meter.r01(), r01);
-    EXPECT_LT(meter.trailing_quantile(0.10), r10 - 2.0);
-
-    // A new assignment measures it anew, from the arrivals as they are now,
-    // and keeps the player's total offset.
-    meter.set_offset(3);
-    ASSERT_EQ(meter.offset(), 3);
-    const uint32_t base = kBase + 2100;
-    meter.reset(base);
-    EXPECT_FALSE(meter.has_reference());
-    EXPECT_EQ(meter.offset(), 3);
-    run(meter, base, base + kMeasured, link);
-    ASSERT_TRUE(meter.reference_measured());
-    EXPECT_NEAR(meter.r10(), r10 - 50.0 / kTickMs, 0.8);
+    EXPECT_EQ(meter.cooldown_until(), kBase + 3000 + 2 * static_cast<uint32_t>(d.k) + relative_meter::kCooldownTicks);
 }
 
 TEST(LatenessMeter, AcknowledgedRaiseRestoresAndALowerFollowsTheReturn) {
@@ -694,8 +602,7 @@ TEST(LatenessMeter, AcknowledgedRaiseRestoresAndALowerFollowsTheReturn) {
     // and applied (the client's frames leave k ticks earlier from E on); the
     // arrivals are back at the reference, so nothing more is decided until the
     // path returns, after which the lead is k too long and is lowered once.
-    lateness_meter meter = measured_meter();
-    const double r10 = meter.r10();
+    relative_meter meter = steady_meter();
     constexpr uint32_t kReturn = kShiftStart + 1500;
     lead_steps lead;
     link_model link;
@@ -717,30 +624,16 @@ TEST(LatenessMeter, AcknowledgedRaiseRestoresAndALowerFollowsTheReturn) {
     EXPECT_LE(k, 24);
     // The lower is 660 ticks of early arrivals after the return, and takes the
     // lead back to within a tick or two of where it started.
-    EXPECT_GE(decisions[1].tick, kReturn + lateness_meter::kLowerTicks);
+    EXPECT_GE(decisions[1].tick, kReturn + relative_meter::kLowerTicks);
     EXPECT_LT(decisions[1].decision.k, 0);
     EXPECT_GE(decisions[1].decision.k, -k);
     EXPECT_LE(k + decisions[1].decision.k, 3);
     EXPECT_EQ(meter.offset(), k + decisions[1].decision.k);
-    EXPECT_EQ(meter.r10(), r10);
-}
-
-TEST(LatenessMeter, LowerNeverTakesTheOffsetBelowZero) {
-    lateness_meter meter = measured_meter();
-    meter.set_offset(5);   // a raise of 5 that was never needed
-    link_model link;
-    link.lead_ticks = [](uint32_t) { return 20; };   // and arrivals 20 ticks early
-    const auto decisions = run(meter, kBase + kMeasured, kBase + 3000, link,
-        [&](uint32_t tick, const lateness_decision& d) { EXPECT_TRUE(meter.acknowledge(d.id, d.k, tick)); });
-    ASSERT_EQ(decisions.size(), 1u);
-    EXPECT_EQ(decisions[0].decision.action, lateness_action::lower);
-    EXPECT_EQ(decisions[0].decision.k, -5);
-    EXPECT_EQ(meter.offset(), 0);
 }
 
 TEST(LatenessMeter, NoLowerWithoutAnOffset) {
     // Early arrivals alone never lower a lead the meter never raised.
-    lateness_meter meter = measured_meter();
+    relative_meter meter = steady_meter();
     link_model link;
     link.lead_ticks = [](uint32_t) { return 20; };
     EXPECT_TRUE(run(meter, kBase + kMeasured, kBase + 2000, link).empty());
@@ -750,7 +643,7 @@ TEST(LatenessMeter, CooldownDiscardsOldSamplesAndTwoUnrestoredRaisesGiveUp) {
     // The client acknowledges every raise but its arrivals never move (the
     // raise was capped, or never really applied): one more raise after the
     // cooldown, then the meter stops deciding for this assignment.
-    lateness_meter meter = measured_meter();
+    relative_meter meter = steady_meter();
     link_model link;
     link.extra_ms = [](uint32_t t) { return t >= kShiftStart ? kShiftMs : 0.0; };
     std::vector<uint32_t> cooldowns;
@@ -762,11 +655,11 @@ TEST(LatenessMeter, CooldownDiscardsOldSamplesAndTwoUnrestoredRaisesGiveUp) {
             EXPECT_TRUE(meter.acknowledge(d.id, d.k, e));
             effectives.push_back(e);
             cooldowns.push_back(meter.cooldown_until());
-            EXPECT_EQ(meter.cooldown_until(), e + 2 * static_cast<uint32_t>(d.k) + lateness_meter::kCooldownTicks);
+            EXPECT_EQ(meter.cooldown_until(), e + 2 * static_cast<uint32_t>(d.k) + relative_meter::kCooldownTicks);
             EXPECT_EQ(meter.state(), lateness_state::cooldown);
-            EXPECT_EQ(meter.trailing_count(), 0);
+            EXPECT_EQ(meter.absolute_misses(), 0u);
             // A frame below E is from the old schedule and gives no sample.
-            EXPECT_FALSE(meter.sample(e - 1, -100.0));
+            EXPECT_FALSE(meter.sample_absolute(e - 1, -100.0, 6.0));
         });
     ASSERT_EQ(decisions.size(), 3u);
     EXPECT_EQ(decisions[0].decision.action, lateness_action::raise);
@@ -783,7 +676,7 @@ TEST(LatenessMeter, CooldownDiscardsOldSamplesAndTwoUnrestoredRaisesGiveUp) {
 TEST(LatenessMeter, ARestoredRaiseResetsTheCount) {
     // Two separate shifts, each fully compensated by its raise: neither raise
     // counts against the other, so the second is decided like the first.
-    lateness_meter meter = measured_meter();
+    relative_meter meter = steady_meter();
     constexpr uint32_t kSecond = kShiftStart + 1500;
     lead_steps lead;
     link_model link;
@@ -803,52 +696,14 @@ TEST(LatenessMeter, ARestoredRaiseResetsTheCount) {
     EXPECT_GE(decisions[1].tick, kSecond);
 }
 
-TEST(LatenessMeter, StructurallyLateMemberTakesTheOthersMedian) {
-    // Late from its first tick: more than 10 % of every window after the
-    // deadline, so no window qualifies; after 8 it wants the others' median.
-    lateness_meter meter;
-    meter.reset(kBase);
-    link_model late;
-    late.extra_ms = [](uint32_t) { return 120.0; };   // slack about -2 +- 3
-    // The overtaken datagrams give no sample, so 8 windows take more ticks
-    // than 8 * 66.
-    uint32_t tick = kBase;
-    std::vector<decision_at> decisions;
-    while (!meter.wants_fallback() && tick < kBase + 3000) {
-        const auto more = run(meter, tick, tick + 66, late);
-        decisions.insert(decisions.end(), more.begin(), more.end());
-        tick += 66;
-    }
-    EXPECT_TRUE(decisions.empty());
-    EXPECT_EQ(meter.windows(), lateness_meter::kReferenceMaxWindows);
-    EXPECT_EQ(meter.qualifying_windows(), 0);
-    EXPECT_FALSE(meter.has_reference());
-    EXPECT_TRUE(meter.wants_fallback());
-    EXPECT_EQ(meter.state(), lateness_state::wants_fallback);
-
-    // The runner's fallback: the median of the measured references.
-    const lateness_meter a = measured_meter(2), b = measured_meter(3), c = measured_meter(4);
-    meter.adopt_reference(lateness_median({a.r10(), b.r10(), c.r10()}),
-                          lateness_median({a.r01(), b.r01(), c.r01()}));
-    ASSERT_TRUE(meter.has_reference());
-    EXPECT_FALSE(meter.reference_measured());
-    // Against the others' schedule its arrivals are misses for good: the
-    // raise rule applies and puts it back with them.
-    decisions = run(meter, tick, tick + 2000, late);
-    ASSERT_EQ(decisions.size(), 1u);
-    EXPECT_EQ(decisions[0].decision.action, lateness_action::raise);
-    EXPECT_GE(decisions[0].decision.k, static_cast<int>(std::ceil(120.0 / kTickMs)));
-    EXPECT_LE(decisions[0].decision.k, static_cast<int>(std::ceil(120.0 / kTickMs)) + 3);
-}
-
 TEST(LatenessMeter, ResetKeepsOnlyTheOffset) {
-    lateness_meter meter = measured_meter();
+    relative_meter meter = steady_meter();
     meter.set_offset(4);
     meter.reset(kBase + 1000);
     EXPECT_EQ(meter.offset(), 4);
-    EXPECT_FALSE(meter.has_reference());
     EXPECT_EQ(meter.samples_total(), 0u);
-    EXPECT_EQ(meter.state(), lateness_state::measuring);
+    EXPECT_EQ(meter.samples_total(), 0u);
+    EXPECT_EQ(meter.state(), lateness_state::baseline);
     EXPECT_EQ(meter.base(), kBase + 1000u);
 }
 

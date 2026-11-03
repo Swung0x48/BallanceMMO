@@ -324,10 +324,8 @@ namespace bmmo::sim {
         // and never moves the cursor back, so the client's first batch after
         // the re-anchor is not lost and the last frame applied stays the
         // fallback for the ticks in between.
-        // The assignment also starts that player's lateness meter over
-        // (late-player design 2.1: its reference is measured anew after every
-        // assignment).
-        void player_ready(uint32_t session, uint32_t player, uint32_t first_tick);
+        // Samples restart; the baseline and acknowledged offset survive.
+        void player_ready(uint32_t session, uint32_t player, uint32_t first_tick, uint32_t assigned_lead);
         void player_start_settled(uint32_t session, uint32_t player, uint32_t epoch);
         // FULL step SAXH (runner_config::scheduled_start): the start handshake
         // is through - the session's schedule starts at `origin` (its tick 0
@@ -399,7 +397,7 @@ namespace bmmo::sim {
         // Step DX9: logs one line with the rule's parts (the time from the
         // schedule's start, the signed schedule tick, the floor, the base),
         // naming `who` (the member and the path) when given.
-        uint32_t reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who = "") const;
+        uint32_t reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who = "", uint32_t* assigned_lead = nullptr) const;
         // Tick to assign to a late joiner anchoring now.
         uint32_t late_join_tick(uint32_t session) const;
         // Step M1 (J4): the largest removal tick of the session's leaving
@@ -446,7 +444,7 @@ namespace bmmo::sim {
             struct arrival_entry {
                 bmmo::session::arrival_ring ring;
                 bmmo::session::lateness_baseline baseline;
-                bmmo::session::relative_meter relative;
+                int lead = 0;
                 bool waived = false;
                 bool sampled = false;
                 uint32_t newest = 0;
@@ -461,15 +459,8 @@ namespace bmmo::sim {
             uint64_t quorum_ticks = 0, quorum_member_ticks = 0, quorum_last = 0, quorum_wide = 0, quorum_waived = 0;
             std::vector<double> quorum_gap, arrival_queue, quorum_wake;
             std::chrono::steady_clock::time_point patience_wake{};
-            // Late-player design 2.1, observe only (plan step 7): every
-            // player's lateness meter, fed one sample per uplink datagram and
-            // evaluated at every stepped tick.  Nothing acts on it yet: its
-            // decisions are logged as S1 lines and never acknowledged, so each
-            // player gets at most one per assignment.  `reported` keeps the
-            // reference line to one per assignment.
             struct lateness_entry {
-                bmmo::session::lateness_meter meter;
-                bool reported = false;
+                bmmo::session::relative_meter meter;
             };
             std::map<uint32_t, lateness_entry> lateness;
             // Late-player design 2.6, behind runner_config::patience: each

@@ -144,7 +144,7 @@ namespace bmmo::sim {
             std::printf("synth: the level needs 3 trafos\n");
             return 1;
         }
-        for (const auto& [id, order]: players) runner.player_ready(S, id, 0);
+        for (const auto& [id, order]: players) runner.player_ready(S, id, 0, 0);
         const auto now_tick = [&] { return runner.current_tick(S); };
         const auto wait_for = [&](uint32_t tick) {
             while (static_cast<int32_t>(now_tick() - tick) < 0) {
