@@ -103,10 +103,14 @@ namespace {
 
         std::vector<input_buffer> buffers(n);
         std::vector<lateness_meter> meters(n);
+        std::vector<arrival_ring> arrivals(n);
+        std::vector<lateness_baseline> baselines(n);
         std::vector<lead_player> leads(n);
         for (size_t p = 0; p < n; ++p) {
             buffers[p].reset(0);
             meters[p].reset(0);
+            baselines[p].assigned(0, true, 0);
+            baselines[p].settled(0, {});
             leads[p].cap_lead = true;
             leads[p].assigned_lead = 20;
             leads[p].rtt_ms = o.rtt_ms;
@@ -139,10 +143,19 @@ namespace {
                     members.push_back(m);
                     continue;
                 }
-                members.push_back(patience_member_of(buffers[p].has(tick), buffers[p].settled(tick), false,
-                                                     &meters[p], 0));
+                patience_member member;
+                member.has = buffers[p].has(tick);
+                member.settled = buffers[p].settled(tick);
+                member.held = buffers[p].held(tick) || buffers[p].reanchored(tick);
+                member.baseline = baselines[p].value();
+                member.counted = baselines[p].frozen() && !member.held && !(member.settled && !member.has);
+                if (const auto* arrival = arrivals[p].find(tick)) {
+                    const auto deadline = arrival_ring::time_point{} + std::chrono::duration_cast<arrival_ring::time_point::duration>(
+                        std::chrono::duration<double, std::milli>(deadline_ms(tick)));
+                    member.ns = member.baseline - lateness_slack_ticks(deadline, arrival->seen);
+                }
+                members.push_back(member);
             }
-            if (o.patience) patience_assign_leads(members);
             return members;
         };
 
@@ -194,6 +207,11 @@ namespace {
                 for (uint32_t t = first; t <= d.newest; ++t) frames.push_back(frame_of(d.player, t));
                 buffers[d.player].submit(first, frames);
                 const double slack = (deadline_ms(d.newest) - d.at) / kTickMs;
+                const auto arrival = arrival_ring::time_point{} + std::chrono::duration_cast<arrival_ring::time_point::duration>(
+                    std::chrono::duration<double, std::milli>(d.at));
+                baselines[d.player].sample(d.newest, slack, arrival);
+                for (uint32_t frame_tick = first; frame_tick <= d.newest; ++frame_tick)
+                    arrivals[d.player].record(frame_tick, arrival, arrival, frame_tick == d.newest);
                 if (meters[d.player].sample(d.newest, slack)) leads[d.player].received(d.newest, tick);
             } else {
                 now = std::max(now, wake);
@@ -812,7 +830,6 @@ TEST(LatenessReference, SoloStructurallyLateMemberTakesTheDeadlineReferenceAndIs
     ASSERT_TRUE(meter.has_reference());
     EXPECT_STREQ(meter.reference_source(), "deadline");
     EXPECT_DOUBLE_EQ(meter.r01(), lateness_meter::kDeadlineReferenceR01);
-    EXPECT_DOUBLE_EQ(patience_lead_ticks(meter.r01()), 0.0);   // its patience is the deadline
     decisions = feed(-3.0, 1000);
     ASSERT_EQ(decisions.size(), 1u);
     EXPECT_EQ(decisions[0].action, lateness_action::raise);

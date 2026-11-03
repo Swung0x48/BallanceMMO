@@ -3719,6 +3719,28 @@ existing parser. Shadow decisions stay pending until reassignment; revision
 is unchanged. Five shared-clock tests cover the three rules, shared dips,
 recovery, the clamp, and both lower bounds.
 
+**As built (step LB3, 2026-11-03).** Started on da51bc1a; checked on the
+room-panel-only follow-up 1afacc01 (protocol 27).
+`physics.patience` now acts on LB1's quorum: the same timer implementation
+serves the step test, the observer, waiver recovery and R12's server wait.
+M = 4 and M2 = 10 ticks, with the existing clamp and real-frame pacing floor.
+Members without a frozen baseline still wait for the deadline. Patience
+no longer reads revision 2's reference or caps a measuring late assignment.
+The flag stays off by default; its step-test branch is byte-identical.
+
+The waiver still starts at an unsettled substitution. Its end is evaluated
+from the saved tick membership and arrival ring after a step and on late
+arrivals, with p counted and both timers; without a counted reference it
+ends at seen slack >= 0. The observer reconstructs hypothetical expiries
+only with patience off; on, it counts the actual cuts. S1 patience records
+M/M2, counted members, the last cutting timer and cumulative cuts by timer.
+R12 keeps its meaning: w is the extra wait for p's missing frame using the
+quorum at that step, or zero while waived and paced by another real frame.
+Build, unit, GCC and wire checks pass, as do A0's cut bounds and A1's late
+cut window. A1's other-client gate remains open: the off twin reproduces a
+confirmed-FINAL client3 discrepancy. Details and test selection are in the
+LB3 handoff report; this is not a completed live close-out.
+
 #### 6.2.1 Built since 177c337
 
 | plan step | built by | commit | what revision 3 takes from it |

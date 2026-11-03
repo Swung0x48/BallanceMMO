@@ -212,18 +212,18 @@ TEST(LatenessBaseline, JoinCorrectionChecksCurrentEpochAndFloor) {
 
 TEST(QuorumObservation, TimersClampAndInterveningExpiry) {
     std::vector<quorum_member> members(4);
-    for (auto& m: members) { m.ready = m.baseline = m.arrived = true; m.a = 20; m.seen = -20; }
-    members[3].seen = -12;
+    for (auto& m: members) { m.counted = m.has = true; m.baseline = 20; m.ns = 0; }
+    members[3].ns = 8;
     EXPECT_EQ(quorum_step_time(members), -16); // expiry before the last arrival woke the runner
-    members[2].seen = -8;
+    members[2].ns = 12;
     EXPECT_EQ(quorum_step_time(members), -10); // two missing: M2
     members.resize(2);
-    members[0].seen = -30;
-    members[1].seen = -10;
+    members[0].ns = -10;
+    members[1].ns = 10;
     EXPECT_EQ(quorum_step_time(members), -16); // the early peer is clamped at on time
-    members[0].baseline = false;
+    members[0].counted = false;
     EXPECT_EQ(quorum_step_time(members), -10); // no reference, waits for both real frames
-    members[0].arrived = members[1].arrived = false;
+    members[0].has = members[1].has = false;
     members[0].waived = members[1].waived = true;
     EXPECT_EQ(quorum_step_time(members), 0); // pacing floor
 }

@@ -166,43 +166,48 @@ namespace bmmo::session {
         bool assigned_ = false, startup_ = true, started_ = false, any_ = false;
     };
 
-    // Observation only. Times are ticks relative to this tick's deadline.
+    struct patience_member {
+        bool has = false, settled = false, held = false, waived = false, counted = false;
+        double baseline = 0, ns = 0;
+    };
+
     // The two timers' margins: M after the last other counted member, M2
     // after the counted majority (late-player design 6.1 R1).
     inline constexpr double kQuorumLastMargin = 4.0;
     inline constexpr double kQuorumWideMargin = 10.0;
-    struct quorum_member {
+    struct quorum_member : patience_member {
         uint32_t player = 0;
-        bool ready = false, baseline = false, exempt = false, waived = false, arrived = false;
-        double a = 0, seen = 0;
-        bool counted() const { return ready && baseline && !exempt && !waived; }
+        // exempt: held, re-anchored, or below its cursor without a frame.
+        bool ready = false, has_baseline = false, exempt = false;
     };
     struct quorum_timer {
         double last = 0, wide = 0; // leads before the deadline; zero means deadline
         double lead() const { return std::max(last, wide); }
     };
-    inline quorum_timer quorum_patience(const std::vector<quorum_member>& members, size_t p, double now) {
+    template<class Member>
+    inline quorum_timer quorum_patience(const std::vector<Member>& members, size_t p, double now,
+                                        double margin = kQuorumLastMargin, double wide_margin = kQuorumWideMargin) {
         quorum_timer timer;
-        if (!members[p].counted()) return timer;
+        if (!members[p].counted) return timer;
         size_t counted = 0, others = 0;
         std::vector<double> seen;
         double latest = 0;
         for (size_t i = 0; i < members.size(); ++i) {
             const auto& m = members[i];
-            if (!m.counted()) continue;
+            if (!m.counted) continue;
             ++counted;
             if (i != p) ++others;
-            if (!m.arrived || m.seen > now) continue;
-            seen.push_back(m.a + m.seen);
-            if (i != p) latest = std::max(latest, m.a + m.seen);
+            if (!m.has || m.ns - m.baseline > now) continue;
+            seen.push_back(m.ns);
+            if (i != p) latest = std::max(latest, m.ns);
         }
         size_t other_seen = seen.size();
-        if (members[p].arrived && members[p].seen <= now) --other_seen;
-        if (others && other_seen == others) timer.last = std::max(0.0, members[p].a - latest - kQuorumLastMargin);
+        if (members[p].has && members[p].ns - members[p].baseline <= now) --other_seen;
+        if (others && other_seen == others) timer.last = std::max(0.0, members[p].baseline - latest - margin);
         const size_t majority = (counted + 1) / 2;
         if (counted >= 4 && seen.size() >= majority) {
             std::sort(seen.begin(), seen.end());
-            timer.wide = std::max(0.0, members[p].a - std::max(0.0, seen[majority - 1]) - kQuorumWideMargin);
+            timer.wide = std::max(0.0, members[p].baseline - std::max(0.0, seen[majority - 1]) - wide_margin);
         }
         return timer;
     }
@@ -212,16 +217,16 @@ namespace bmmo::session {
     // the would-cut count when that post supplied the frame.
     inline double quorum_step_time(const std::vector<quorum_member>& members) {
         std::vector<double> events{0};
-        for (const auto& m: members) if (m.arrived && m.seen < 0) events.push_back(m.seen);
+        for (const auto& m: members) if (m.has && m.ns < m.baseline) events.push_back(m.ns - m.baseline);
         std::sort(events.begin(), events.end());
         double earliest = 0;
         for (const double at: events) {
             double candidate = at;
             bool paced = false;
-            for (const auto& m: members) if (m.arrived && m.seen <= at) paced = true;
+            for (const auto& m: members) if (m.has && m.ns - m.baseline <= at) paced = true;
             for (size_t i = 0; i < members.size(); ++i) {
                 const auto& m = members[i];
-                if ((m.arrived && m.seen <= at) || (paced && (m.exempt || m.waived))) continue;
+                if ((m.has && m.ns - m.baseline <= at) || (paced && (m.settled || m.held || m.waived))) continue;
                 candidate = std::max(candidate, -quorum_patience(members, i, at).lead());
             }
             earliest = std::min(earliest, candidate);
@@ -889,107 +894,6 @@ namespace bmmo::session {
         return "deadline";
     }
 
-    // ---- Patience (late-player design 2.6) ----------------------------------
-    //
-    // Without it the session waits until deadline(T) for every missing frame,
-    // so one late player puts everybody's step on deadlines.  With it, player
-    // p is waited for only until
-    //
-    //     patience_p(T) = min(deadline(T), deadline(T) - (r01_p - 1) ticks),
-    //
-    // anchored on its FROZEN reference (a reference that followed late
-    // arrivals down would move patience later for everybody, for good).  All
-    // of it is in ticks before the deadline, the unit samples are in: a frame
-    // whose slack is at least the lead arrived inside patience.
-
-    // How many ticks before deadline(T) a member with reference q01 `r01`
-    // stops being waited for; 0 means at the deadline (the min() above).
-    inline double patience_lead_ticks(double r01) {
-        const double lead = r01 - kPatienceMarginTicks;
-        return lead > 0.0 ? lead : 0.0;
-    }
-
-    // One member's view at the tick being decided.
-    struct patience_member {
-        bool has = false;              // its frame for T arrived (the rule without patience)
-        bool settled = false;          // input_buffer::settled(T): arrived, or below its cursor
-        bool waived = false;           // the streak waiver holds
-        bool has_statistics = false;   // a frozen reference, measured or adopted
-        double r01 = 0.0;              // that reference's q01, when has_statistics
-        double lead = 0.0;             // set by patience_assign_leads
-        bool capped = false;           // lead is the statistics-less cap, not its own
-        // input_buffer::held(T) or reanchored(T): T lies in a lead reset's
-        // frozen range (design 2.3), or a resync's or late joiner's base
-        // skipped it (plan step 20).  Read by the step test without
-        // patience, where it is the only kind of settled that counts; with
-        // patience it is part of `settled` anyway.
-        bool held = false;
-        // Assigned after the session's start (a late joiner, a resync): the
-        // statistics-less cap applies to it.  A member measuring since the
-        // start waits for the deadline until its own reference is set.
-        bool late_assignment = false;
-    };
-
-    // The runner's view of one member (lead still unassigned): `has` and
-    // `settled` from its input buffer at T, `waived` from its waiver, and
-    // its lateness meter, or null when it has none yet (a member added but
-    // not ready).  A member without a meter, or whose meter was reset to a
-    // base past the session's start base (a late join or a resync: the
-    // server assigns start members the start base and everybody else a
-    // later one), is a late assignment.
-    inline patience_member patience_member_of(bool has, bool settled, bool waived,
-                                              const lateness_meter* meter, uint32_t start_base) {
-        patience_member m;
-        m.has = has;
-        m.settled = settled;
-        m.waived = waived;
-        m.late_assignment = meter == nullptr || meter->base() > start_base;
-        // The frozen reference, measured or adopted from the others' median
-        // (design 2.1); a member still measuring has none.
-        if (meter != nullptr && meter->has_reference()) {
-            m.has_statistics = true;
-            m.r01 = meter->r01();
-        }
-        return m;
-    }
-
-    // Every member's lead.  A member with statistics has its own.  One
-    // without that was assigned after the start (a late joiner in its first
-    // windows, or a member re-measuring after a resync) gets the latest
-    // patience among the members that have statistics, i.e. the smallest
-    // lead: the others' schedule, so it costs them nothing.  When nobody has
-    // statistics that is the deadline, today's behaviour.
-    //
-    // A member measuring since the session's start gets the deadline until
-    // its own reference is set, even when others already have theirs.  The
-    // members of the start measure together, but not in step: the newest-frame
-    // sampling gives a member whose datagrams overtake each other fewer
-    // samples, so the structurally latest member (the one with the most
-    // jitter, typically) is the last to fill its windows.  Capped at the
-    // others' schedule meanwhile, it would be substituted for those ticks at
-    // every session start - the patience_test steady-link run showed 21.
-    //
-    // The cap is deliberately NOT applied to members with statistics: the
-    // structurally latest member would then be cut off on every tick, its
-    // reference comes from that same distribution, the meter would never see
-    // a shift, and it would stay substituted for good.
-    inline void patience_assign_leads(std::vector<patience_member>& members) {
-        bool any = false;
-        double latest = 0.0;
-        for (auto& m: members) {
-            if (!m.has_statistics) continue;
-            m.lead = patience_lead_ticks(m.r01);
-            m.capped = false;
-            if (!any || m.lead < latest) latest = m.lead;
-            any = true;
-        }
-        for (auto& m: members) {
-            if (m.has_statistics) continue;
-            m.capped = any && m.late_assignment;
-            m.lead = m.capped ? latest : 0.0;
-        }
-    }
-
     struct patience_verdict {
         bool step = false;        // the tick may be stepped now
         bool early = false;       // stepped before the deadline with a member unsettled
@@ -1020,12 +924,11 @@ namespace bmmo::session {
     // member beside a freshly re-anchored one, would step every tick at once
     // - max_catch_up_ticks per pass, every post() waking another pass - and
     // run hundreds of ticks ahead of the deadline schedule, after which every
-    // frame its players send is stale.  With nobody's frame here, every
-    // member that lacks one is waited for until its own patience, as if
-    // unwaived: the tick steps at the latest of those patiences, never later
-    // than the deadline.
+    // frame its players send is stale. With nobody's frame here, no counted
+    // reference exists, so the tick waits for the deadline.
     inline patience_verdict patience_step_test(const std::vector<patience_member>& members, bool due,
-                                               double to_deadline, bool patience) {
+                                               double to_deadline, bool patience,
+                                               double margin = kQuorumLastMargin, double wide_margin = kQuorumWideMargin) {
         patience_verdict v;
         if (!patience) {
             // A member whose tick lies in a lead reset's held range, or
@@ -1046,16 +949,18 @@ namespace bmmo::session {
         bool paced = false;
         for (const auto& m: members) if (m.has) { paced = true; break; }
         bool blocked = false, unsettled = false;
-        for (const auto& m: members) {
-            if (m.has) continue;
-            if (m.settled) {
+        for (size_t index = 0; index < members.size(); ++index) {
+            const auto& member = members[index];
+            if (member.has) continue;
+            if (member.settled) {
                 if (paced) continue;
             } else {
                 unsettled = true;
-                if (m.waived && paced) continue;
+                if (member.waived && paced) continue;
             }
-            if (to_deadline <= m.lead) continue;
-            const double until = to_deadline - m.lead;
+            const double lead = quorum_patience(members, index, -to_deadline, margin, wide_margin).lead();
+            if (to_deadline <= lead) continue;
+            const double until = to_deadline - lead;
             if (!blocked || until < v.wait_ticks) v.wait_ticks = until;
             blocked = true;
         }
@@ -1075,7 +980,7 @@ namespace bmmo::session {
     // again, and stay substituted for good.  During a blackout or persistent
     // lateness only the first tick of the episode waits for p - as long as
     // some other member's real frame paces the tick (the pacing floor in
-    // patience_step_test); with nobody's frame there, p's patience applies.
+    // patience_step_test); with nobody's frame there, the deadline applies.
     class patience_waiver {
     public:
         // p was substituted at a tick it had not settled; returns true when
@@ -1086,11 +991,11 @@ namespace bmmo::session {
             if (starts) ++episodes_;
             return starts;
         }
-        // A lateness sample of p (slack in ticks before its frame's deadline)
+        // A seen sample of p (slack in ticks before its frame's deadline)
         // and p's lead: an arrival inside patience ends the waiver.  Returns
         // true when it did.
-        bool sample(double slack, double lead) {
-            if (!waived_ || slack < lead) return false;
+        bool sample(double seen_slack, double lead) {
+            if (!waived_ || seen_slack < lead) return false;
             waived_ = false;
             return true;
         }
@@ -1119,7 +1024,7 @@ namespace bmmo::session {
     // frame - p's WAIT at T, in ticks:
     //   - patience off: until the deadline, `to_deadline` (deadline(T) - the
     //     instant the runner stepped T, in ticks; the step's earliness);
-    //   - patience on: until p's patience, to_deadline - p.lead; nothing
+    //   - patience on: until p's patience, to_deadline - lead; nothing
     //     while p is waived and another member's frame paces T (the pacing
     //     floor).
     // Never negative: a step at or after the deadline (a substituted tick, a
@@ -1128,10 +1033,10 @@ namespace bmmo::session {
     // re-anchor skipped is substituted without a wait, which this
     // over-states (the safe side: a deeper reach costs CPU, not a resync).
     inline double server_wait_ticks(double to_deadline, const patience_member& p, bool patience,
-                                    bool paced_by_others) {
+                                    bool paced_by_others, double lead) {
         if (!patience) return std::max(0.0, to_deadline);
         if (p.waived && paced_by_others) return 0.0;
-        return std::max(0.0, to_deadline - p.lead);
+        return std::max(0.0, to_deadline - lead);
     }
 
     // What one member's relay header carries (session_remote_input_msg's

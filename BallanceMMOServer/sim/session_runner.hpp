@@ -494,6 +494,8 @@ namespace bmmo::sim {
                 bmmo::session::patience_waiver waiver;
                 std::deque<std::pair<uint32_t, bool>> cut;
                 uint64_t cut_patience = 0, cut_waiver = 0;       // ticks substituted by an early step
+                uint64_t cut_last = 0, cut_wide = 0;
+                const char* timer = "none";
                 uint64_t taken_patience = 0, taken_waiver = 0;   // of those, frames that beat the deadline
                 uint64_t late_events = 0;
             };
@@ -647,7 +649,8 @@ namespace bmmo::sim {
         void observe_relative(session_state& s, uint32_t tick, std::chrono::steady_clock::time_point now);
         std::vector<bmmo::session::quorum_member> quorum_members(const session_state& s, uint32_t tick) const;
         void observe_quorum(session_state& s, uint32_t tick,
-                            const std::vector<bmmo::session::quorum_member>& members);
+                            const std::vector<bmmo::session::quorum_member>& members,
+                            std::chrono::steady_clock::time_point at);
         void observe_quorum_arrival(session_state& s, uint32_t player, uint32_t tick);
         // What a decision does with lead_adjust on (design 2.3): the plan,
         // the buffer reset, the S1 lead line, the journal note and on_lead.
@@ -656,7 +659,6 @@ namespace bmmo::sim {
         // Every member's view for patience_step_test at `tick`, in `inputs`
         // order, leads assigned (design 2.6).
         std::vector<bmmo::session::patience_member> patience_members(const session_state& s, uint32_t tick) const;
-        double patience_lead(const session_state& s, uint32_t player) const;
         // The S1 patience lines: every 660 ticks from the run loop, and once
         // more (`final_reason` set) for a player that leaves and for every
         // player when its session ends, so no count after the last 660-tick
