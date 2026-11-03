@@ -18,6 +18,19 @@ namespace bmmo::sim {
     using clock = std::chrono::steady_clock;
 
     namespace {
+        std::string lead_sector_text(const bmmo::session::lead_player& lead, uint32_t tick) {
+            std::string text, late;
+            for (const auto& [sender, margin]: lead.sector_margins) {
+                const auto worst = margin.worst(tick);
+                if (!worst) continue;
+                const auto path = margin.worst(tick, true, false), event = margin.worst(tick, false, true);
+                text += " sector[" + std::to_string(sender) + "]=" + std::to_string(*worst)
+                    + "/" + (path ? std::to_string(*path) : "?") + "/" + (event ? std::to_string(*event) : "?");
+                if (*worst <= 0) late += (late.empty() ? "" : ",") + std::to_string(sender);
+            }
+            return text + " sector-late=" + (late.empty() ? "none" : late);
+        }
+
         // session_<id>_level<N>_<UTC yyyymmddhhmmss>.bmjr.  The same instant
         // goes into the header as utc_ms: file name and wall clock must agree,
         // or a journal cannot be lined up with a player's "it broke at 21:37".
@@ -665,6 +678,7 @@ namespace bmmo::sim {
             s.arrivals.erase(player);
             s.lateness.erase(player);
             s.patience.erase(player);
+            bmmo::session::lead_sector_forget(s.leads, player);
             s.leads.erase(player);
             s.acked.erase(player);
             s.waits.erase(player);
@@ -727,6 +741,7 @@ namespace bmmo::sim {
             // The decision sent under the old base goes with it (design 2.8:
             // the client drops it by its epoch), and so does the newest tick
             // of the old numbering.  The caps and the assigned lead stay.
+            bmmo::session::lead_sector_forget(s.leads, player);
             if (auto l = s.leads.find(player); l != s.leads.end()) l->second.reassigned();
             // Measured anew, waived anew (design 2.8): an episode of the old
             // assignment ends, and its cut ticks lie below the new base where
@@ -835,6 +850,7 @@ namespace bmmo::sim {
                 log(prefix + ": not the outstanding decision, ignored");
                 return;
             }
+            bmmo::session::lead_sector_forget(s.leads, player);
             const auto& m = meter->second.meter;
             log(prefix + (counted != applied ? " counted=" + std::to_string(counted) : std::string())
                 + " effective=" + std::to_string(effective) + " offset=" + std::to_string(m.offset())
@@ -910,9 +926,13 @@ namespace bmmo::sim {
             if (meter == s.lateness.end()) return;
             // E's c_est (design 2.3) is measured from the newest uplink tick
             // and the session tick it arrived at.
-            if (sampled && config_.lead_adjust && s.world)
-                if (auto lead = s.leads.find(player); lead != s.leads.end())
-                    lead->second.received(newest, s.world->tick_index());
+            if (config_.lead_adjust && s.world) {
+                const uint32_t now_tick = s.world->tick_index();
+                if (sampled)
+                    if (auto lead = s.leads.find(player); lead != s.leads.end()) lead->second.received(newest, now_tick);
+                for (auto& [other, lead]: s.leads)
+                    if (other != player) bmmo::session::lead_sector_path_sample(lead, player, newest, s.sector_lead, now_tick);
+            }
         });
     }
 
@@ -1077,7 +1097,7 @@ namespace bmmo::sim {
             // q's path, and is no sample (lead_sector_sample).
             if (config_.lead_adjust && type == bmmo::session::event_type::Sector) {
                 for (auto& [other, lead]: s.leads)
-                    if (other != player) bmmo::session::lead_sector_sample(lead, tick, next);
+                    if (other != player) bmmo::session::lead_sector_sample(lead, player, tick, next);
             }
             const uint32_t applied = verdict.applied;
             pending_event pe{player, tick, applied, std::move(event), arrival};
@@ -1639,8 +1659,10 @@ namespace bmmo::sim {
                           + " observed=" + std::to_string(lead.observed) + " capped=" + std::to_string(lead.capped)
                           + " declined=" + std::to_string(lead.declined)
                           + (lead.outstanding ? " outstanding=" + std::to_string(lead.id) : std::string())
-                          + (lead.sector_margin.known() ? " sector-margin=" + std::to_string(lead.sector_margin.worst())
-                                                        : std::string(" sector-margin=?"))
+                          + lead_sector_text(lead, s.world->tick_index())
+                          + " sector-bound=" + std::to_string(bmmo::session::lead_sector_bound(lead, bmmo::session::kLeadCapTicks,
+                              s.world->tick_index(), s.players.size(), s.union_complete()))
+                          + " union=" + std::to_string(s.requested_sector_count()) + "/" + std::to_string(s.world->level_sector_count())
                           + (meter.at_cap() ? " at-cap" : "");
                 }
             }
@@ -1665,7 +1687,12 @@ namespace bmmo::sim {
         if (meter == s.lateness.end() || buffer == s.inputs.end() || !s.world) return;
         auto& lead = s.leads[player];
         const uint32_t next_tick = s.world->tick_index();
-        const auto plan = bmmo::session::lead_decide(true, lead, meter->second.meter, d, next_tick, buffer->second);
+        const bool complete = s.union_complete();
+        const std::string sector_text = lead_sector_text(lead, next_tick)
+            + " sector-bound=" + std::to_string(bmmo::session::lead_sector_bound(lead, d.k, next_tick, s.players.size(), complete))
+            + " union=" + std::to_string(s.requested_sector_count()) + "/" + std::to_string(s.world->level_sector_count());
+        const auto plan = bmmo::session::lead_decide(true, lead, meter->second.meter, d, next_tick, buffer->second,
+                                                   s.players.size(), complete);
         const bool recording = s.journal.is_open() && !s.journal.capped();
         if (plan.route == lead_route::observe) {
             log(prefix + text + " (no CAP_LEAD from this client: nothing sent)");
@@ -1678,7 +1705,7 @@ namespace bmmo::sim {
                 + " cap leaves nothing of it (caps " + (plan.cap ? plan.cap : "?")
                 + ", assigned " + std::to_string(lead.assigned_lead)
                 + ", offset " + std::to_string(meter->second.meter.offset())
-                + (lead.sector_margin.known() ? ", sector margin " + std::to_string(lead.sector_margin.worst()) : std::string())
+                + sector_text
                 + (declined ? "); no further raise this assignment"
                             : "); no decision before tick " + std::to_string(meter->second.meter.cooldown_until())));
             if (recording)
@@ -1696,7 +1723,7 @@ namespace bmmo::sim {
             + " held-source=" + (plan.held_source == bmmo::session::INPUT_SOURCE_DEFAULT ? std::string("default")
                                                                                       : std::to_string(plan.held_source))
             + " dropped=" + std::to_string(plan.dropped) + " epoch=" + std::to_string(meter->second.meter.base());
-        log(prefix + text + "; " + line);
+        log(prefix + text + "; " + line + sector_text);
         // Design 2.3 (S3): the reset is in the box as a note only; the
         // range's frames are journaled with flag 0 as every substitute is.
         if (recording)

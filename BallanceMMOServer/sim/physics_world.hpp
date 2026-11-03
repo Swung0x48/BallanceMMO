@@ -359,6 +359,7 @@ namespace bmmo::sim {
         // entered (session/sector_union.hpp), each started by update_sectors()
         // before the step of the tick the shared rule picks.
         const std::set<int>& active_sectors() const { return sectors_.active(); }
+        size_t level_sector_count() const { return level_sector_count_; }
         // Step B2SX: the checkpoint chain's private [0][1] (false when this
         // world did not split it); SimTool's --cells-trace.
         bool chain_sector_cell(int& cell) const { return sector_cell_.read(engine_ ? engine_->context() : nullptr, cell); }
@@ -549,6 +550,7 @@ namespace bmmo::sim {
         bool retail_parked_ = false;
         bool callback_pending_ = false;
         CK_ID sector_manager_ = 0;
+        size_t level_sector_count_ = 0;
         CK_ID ingame_parameter_ = 0;
         bmmo::session::gated_sector_union sectors_;   // the rule every side runs (session/sector_union.hpp)
         bmmo::game::checkpoint_phase_split checkpoint_phase_;   // the chain's own phase cell (game/checkpoint_phase.hpp)

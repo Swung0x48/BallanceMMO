@@ -679,9 +679,9 @@ TEST(LeadDecide, TheSectorMarginCapsARaise) {
     meter_rig rig;
     // The others' Sector events reach this client 4 ticks before their
     // stamp at worst: a raise may take 3 of them.
-    rig.lead.sector_margin.push(9);
-    rig.lead.sector_margin.push(4);
-    rig.lead.sector_margin.push(12);
+    rig.lead.sector_margins[2].push(9, rig.tick);
+    rig.lead.sector_margins[2].push(4, rig.tick);
+    rig.lead.sector_margins[2].push(12, rig.tick);
     std::vector<lead_plan> plans;
     rig.feed(12.0, 4000, [&](const lateness_decision& d) {
         plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
@@ -699,9 +699,9 @@ TEST(LeadDecide, TheSectorMarginCapsARaise) {
 TEST(LeadDecide, ASectorRewindingClientIsNotCappedByTheMargin) {
     meter_rig rig;
     rig.lead.rewinds_sectors = true;
-    rig.lead.sector_margin.push(9);
-    rig.lead.sector_margin.push(4);
-    rig.lead.sector_margin.push(12);
+    rig.lead.sector_margins[2].push(9, rig.tick);
+    rig.lead.sector_margins[2].push(4, rig.tick);
+    rig.lead.sector_margins[2].push(12, rig.tick);
     std::vector<lead_plan> plans;
     rig.feed(12.0, 4000, [&](const lateness_decision& d) {
         plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
@@ -719,53 +719,39 @@ TEST(LeadDecide, ASectorRewindingClientIsNotCappedByTheMargin) {
 // stamp - 1 deeper than max_resim_ticks, a resync instead) is cut, not
 // latched, and one the reach leaves nothing of is deferred.
 TEST(LeadDecide, TheRewindReachBoundsARaise) {
-    {
-        meter_rig rig;
-        rig.lead.rewinds_sectors = true;
-        rig.lead.sector_margin.push(-44);   // the reach leaves 48 - 45 = 3
-        std::vector<lead_plan> plans;
-        rig.feed(12.0, 4000, [&](const lateness_decision& d) {
-            plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
-        });
-        ASSERT_EQ(plans.size(), 1u);
-        ASSERT_EQ(plans[0].route, lead_route::send);
-        EXPECT_EQ(plans[0].k, 3);
-        EXPECT_STREQ(plans[0].cap, "sector");
-        EXPECT_STREQ(plans[0].binding, "sector");
-        EXPECT_FALSE(rig.meter.at_cap());
-    }
-    {
-        meter_rig rig;
-        rig.lead.rewinds_sectors = true;
-        rig.lead.sector_margin.push(-47);   // nothing left: deferred
-        std::vector<lead_plan> plans;
-        rig.feed(12.0, 4000, [&](const lateness_decision& d) {
-            plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
-        });
-        ASSERT_GE(plans.size(), 1u);
-        EXPECT_EQ(plans[0].route, lead_route::deferred);
-        EXPECT_EQ(rig.lead.sent, 0u);
-        EXPECT_FALSE(rig.meter.at_cap());
-    }
+    meter_rig rig;
+    rig.lead.rewinds_sectors = true;
+    rig.lead.sector_margins[2].push(4, rig.tick);
+    lateness_decision decision;
+    decision.action = lateness_action::raise;
+    decision.k = 55;
+    const auto plan = lead_decide(true, rig.lead, rig.meter, decision, rig.tick, rig.buffer);
+    EXPECT_EQ(plan.route, lead_route::send);
+    EXPECT_EQ(plan.k, 51);
+    EXPECT_STREQ(plan.binding, "sector");
+    EXPECT_FALSE(rig.meter.at_cap());
 }
 
 TEST(LeadSector, TheBoundIsTheMarginPlusTheClientsRewindReach) {
-    lead_player p;
-    EXPECT_EQ(lead_sector_bound(p, 20), 20);   // no sample: no bound
-    p.sector_margin.push(15);
-    EXPECT_EQ(lead_sector_bound(p, 20), 14);   // no rewind: k <= margin - 1
-    p.rewinds_sectors = true;
-    EXPECT_EQ(lead_sector_bound(p, 20), 14 + kLeadSectorReachTicks);
-    p.sector_margin.push(-60);
-    EXPECT_EQ(lead_sector_bound(p, 20), 0);    // never below 0
-    // The reach is the depth client_core's sector_rewind_reachable allows
-    // at the least: the floor of the per-client reach (late-player plan
-    // step 12), which is also the default max_resim_ticks a session starts
-    // at.  A stamp d ticks late rewinds d + 1.
-    static_assert(kLeadSectorReachTicks == static_cast<int64_t>(bmmo::session::kReachFloorTicks),
-                  "the server's Sector bound is the floor of every client's reach");
-    EXPECT_EQ(kLeadSectorReachTicks, static_cast<int64_t>(bmmo::session::kReachFloorTicks));
-    EXPECT_EQ(kLeadSectorReachTicks, static_cast<int64_t>(bmmo::session::rollback_thresholds{}.max_resim_ticks));
+    lead_player player;
+    EXPECT_EQ(lead_sector_bound(player, 20, 500, 2), 0);
+    EXPECT_EQ(lead_sector_bound(player, 20, 500, 1), 20);
+    player.sector_margins[2].push(15, 500);
+    EXPECT_EQ(lead_sector_bound(player, 20, 500, 2), 14);
+    player.rewinds_sectors = true;
+    EXPECT_EQ(lead_sector_bound(player, 20, 500, 2), 62);
+    player.sector_margins[3].push(9, 500);
+    EXPECT_EQ(lead_sector_bound(player, 20, 500, 3), 56);
+    player.rewinds_sectors = false;
+    EXPECT_EQ(lead_sector_bound(player, 20, 500, 3), 8);
+    player.sector_margins[3].push(0, 500);
+    EXPECT_EQ(lead_sector_bound(player, 20, 500, 3), 14);
+    player.sector_margins[2].push(-60, 500);
+    EXPECT_EQ(lead_sector_bound(player, 20, 500, 3), 20);
+    EXPECT_EQ(lead_sector_bound(player, 20, 500, 3, true), 20);
+    EXPECT_EQ(lead_sector_bound(player, 20, 1188, 3), 0);
+    EXPECT_EQ(kLeadSectorReachTicks, static_cast<int64_t>(kReachFloorTicks));
+    EXPECT_EQ(kLeadSectorReachTicks, static_cast<int64_t>(rollback_thresholds{}.max_resim_ticks));
 }
 
 TEST(LeadDecide, ALowerMovesNoRange) {
@@ -811,9 +797,13 @@ TEST(LeadArithmetic, ClientTickEstimateAndRoundTrip) {
     // the client is 20 ahead of what we heard, 20 ticks later, plus 20.
     EXPECT_EQ(lead_client_tick_estimate(1000, 990, 1010, 300), 1000 + 20 + 20);
     lead_sector_margin margin;
-    EXPECT_FALSE(margin.known());
-    for (int i = 0; i < 10; ++i) margin.push(20 - i);
-    EXPECT_EQ(margin.worst(), 11);   // the last 8: 18 .. 11
+    EXPECT_FALSE(margin.worst(0));
+    margin.push(3, 0);
+    margin.push(15, 65, true);
+    for (uint32_t index = 1; index < 10; ++index) margin.push(20, index * 66);
+    EXPECT_EQ(margin.worst(659), 3);
+    EXPECT_EQ(margin.worst(660), 20);
+    EXPECT_FALSE(margin.worst(1254));
 }
 
 TEST(RelativeMeter, SoloStructurallyLateMemberUsesItsFlooredBaseline) {
@@ -956,50 +946,34 @@ TEST(LeadReset, AResyncAtOrPastEKeepsTheHold) {
     EXPECT_EQ(plain.hold_until(), 0u);
 }
 
-TEST(LeadDecide, AnAckedRaiseSpendsTheSectorMarginAndTheSectorCapDoesNotLatch) {
+TEST(LeadDecide, AnAckedRaiseClearsThePairsAndTheSectorCapDoesNotLatch) {
     meter_rig rig;
-    rig.lead.sector_margin.push(10);
-    struct seen { lead_plan plan; uint32_t tick; };
-    std::vector<seen> plans;
-    rig.feed(12.0, 6000, [&](const lateness_decision& d) {
-        const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer);
-        plans.push_back({plan, rig.tick});
-        // The client applies every raise, but its arrivals never improve.
+    rig.lead.sector_margins[2].push(10, rig.tick);
+    std::vector<lead_plan> plans;
+    rig.feed(12.0, 6000, [&](const lateness_decision& decision) {
+        const auto plan = lead_decide(true, rig.lead, rig.meter, decision, rig.tick + 1, rig.buffer, 2);
+        plans.push_back(plan);
         if (plan.route == lead_route::send) {
             EXPECT_TRUE(lead_acknowledge(rig.lead, rig.meter, rig.lead.id, plan.k));
-            EXPECT_FALSE(rig.meter.at_cap());   // the Sector cap does not latch
+            EXPECT_TRUE(rig.lead.sector_margins.empty());
         }
     });
-    ASSERT_GE(plans.size(), 3u);
-    ASSERT_EQ(plans[0].plan.route, lead_route::send);
-    EXPECT_GT(plans[0].plan.decided_k, 9);
-    EXPECT_EQ(plans[0].plan.k, 9);   // margin 10 - 1
-    EXPECT_STREQ(plans[0].plan.cap, "sector");
-    EXPECT_STREQ(plans[0].plan.binding, "sector");
-    // The ack moved p's clock 9 ticks: the same events now land 1 tick ahead.
-    EXPECT_EQ(rig.lead.sector_margin.worst(), 1);
-    // So the next raise has nothing left (it would have passed against the
-    // stale 10): deferred, not sent, not latched, and retried no sooner than
-    // kSectorRetryTicks later.
-    for (size_t i = 1; i < plans.size(); ++i) {
-        EXPECT_EQ(plans[i].plan.route, lead_route::deferred) << i;
-        EXPECT_EQ(plans[i].plan.k, 0) << i;
-    }
-    EXPECT_GE(plans[2].tick - plans[1].tick, kSectorRetryTicks);
-    EXPECT_EQ(rig.lead.sent, 1u);
+    ASSERT_GE(plans.size(), 2u);
+    EXPECT_EQ(plans[0].k, 9);
+    EXPECT_STREQ(plans[0].binding, "sector");
+    for (size_t index = 1; index < plans.size(); ++index)
+        EXPECT_EQ(plans[index].route, lead_route::deferred);
     EXPECT_FALSE(rig.meter.at_cap());
-    EXPECT_NE(rig.meter.state(), lateness_state::given_up);   // a deferred raise counts nothing
-    EXPECT_EQ(rig.meter.offset(), 9);
 }
 
 TEST(LeadDecide, BothCapsCutTheRaiseAndTheSmallerBinds) {
     {
         meter_rig rig;
         rig.lead.assigned_lead = kLeadCapTicks - 5;   // room for 5
-        rig.lead.sector_margin.push(8);               // room for 7
+        rig.lead.sector_margins[2].push(8, rig.tick);               // room for 7
         std::vector<lead_plan> plans;
         rig.feed(12.0, 3000, [&](const lateness_decision& d) {
-            const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer);
+            const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer, 2);
             plans.push_back(plan);
             if (plan.route == lead_route::send) lead_acknowledge(rig.lead, rig.meter, rig.lead.id, plan.k);
         });
@@ -1012,10 +986,10 @@ TEST(LeadDecide, BothCapsCutTheRaiseAndTheSmallerBinds) {
     {
         meter_rig rig;
         rig.lead.assigned_lead = kLeadCapTicks - 9;   // room for 9
-        rig.lead.sector_margin.push(4);               // room for 3
+        rig.lead.sector_margins[2].push(4, rig.tick);               // room for 3
         std::vector<lead_plan> plans;
         rig.feed(12.0, 400, [&](const lateness_decision& d) {
-            const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer);
+            const auto plan = lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer, 2);
             plans.push_back(plan);
             if (plan.route == lead_route::send) lead_acknowledge(rig.lead, rig.meter, rig.lead.id, plan.k);
         });
@@ -1024,8 +998,7 @@ TEST(LeadDecide, BothCapsCutTheRaiseAndTheSmallerBinds) {
         EXPECT_STREQ(plans[0].cap, "total+sector");
         EXPECT_STREQ(plans[0].binding, "sector");
         EXPECT_FALSE(rig.meter.at_cap());
-        // Not latched, so the arrivals still late give a next raise after
-        // the cooldown; the ack spent the margin to 1, so it is deferred.
+        // The ack cleared the pairs: without new samples the next raise is deferred.
         EXPECT_EQ(plans[1].route, lead_route::deferred);
         EXPECT_STREQ(plans[1].binding, "sector");
     }
@@ -1040,7 +1013,7 @@ TEST(LeadAck, AppliedIsBoundedByTheDeltaSent) {
     EXPECT_EQ(lateness_bound_applied(-2, -4), -2);
     for (const int applied: {32767, -7}) {
         meter_rig rig;
-        rig.lead.sector_margin.push(40);
+        rig.lead.sector_margins[2].push(40, rig.tick);
         std::vector<lead_plan> plans;
         rig.feed(9.0, 2000, [&](const lateness_decision& d) {
             plans.push_back(lead_decide(true, rig.lead, rig.meter, d, rig.tick + 1, rig.buffer));
@@ -1052,7 +1025,7 @@ TEST(LeadAck, AppliedIsBoundedByTheDeltaSent) {
         const int expected = applied > 0 ? plans[0].k : 0;
         EXPECT_EQ(counted, expected) << applied;
         EXPECT_EQ(rig.meter.offset(), expected) << applied;
-        EXPECT_EQ(rig.lead.sector_margin.worst(), 40 - expected) << applied;
+        EXPECT_TRUE(rig.lead.sector_margins.empty()) << applied;
     }
 }
 
@@ -1080,18 +1053,67 @@ TEST(LeadAck, AnAckedLowerEndsTheCapLatch) {
 }
 
 TEST(LeadSector, AnEventLateAtTheServerIsNoSample) {
-    lead_player p;
-    EXPECT_FALSE(lead_sector_sample(p, 600, 500));   // no round trip, no newest tick
-    p.rtt_ms = 300;
-    p.have_rtt = true;
-    EXPECT_FALSE(lead_sector_sample(p, 600, 500));   // no newest tick
-    p.received(520, 490);
-    // c_est at 500: 520 + 10 + 20 = 550.
-    EXPECT_FALSE(lead_sector_sample(p, 499, 500));   // the sender's lateness, not p's
-    EXPECT_FALSE(p.sector_margin.known());
-    EXPECT_TRUE(lead_sector_sample(p, 500, 500));
-    EXPECT_TRUE(lead_sector_sample(p, 560, 500));
-    EXPECT_EQ(p.sector_margin.worst(), 500 - 550);
+    lead_player player;
+    EXPECT_FALSE(lead_sector_sample(player, 2, 600, 500));
+    player.rtt_ms = 300;
+    player.have_rtt = true;
+    EXPECT_FALSE(lead_sector_sample(player, 2, 600, 500));
+    player.received(520, 490);
+    EXPECT_FALSE(lead_sector_sample(player, 2, 499, 500));
+    EXPECT_TRUE(player.sector_margins.empty());
+    EXPECT_TRUE(lead_sector_sample(player, 2, 500, 500));
+    EXPECT_TRUE(lead_sector_sample(player, 2, 560, 500));
+    EXPECT_EQ(player.sector_margins[2].worst(500), 500 - 550);
+}
+
+TEST(LeadSector, PathMarginsFollowTheSenderNotTheReceiversUplink) {
+    lead_player player;
+    player.have_rtt = true;
+    player.rtt_ms = 300;
+    player.received(990, 900);
+    ASSERT_TRUE(lead_sector_path_sample(player, 2, 990, 35, 900));
+    EXPECT_EQ(player.sector_margins[2].worst(900), 15);
+    player.reassigned();
+    player.rtt_ms = 150;
+    player.received(1000, 900);
+    ASSERT_TRUE(lead_sector_path_sample(player, 2, 990, 35, 900));
+    EXPECT_EQ(player.sector_margins[2].worst(900), 15);
+    ASSERT_TRUE(lead_sector_path_sample(player, 2, 984, 35, 900));
+    EXPECT_EQ(player.sector_margins[2].worst(900), 9);
+    EXPECT_EQ(lead_sector_bound(player, 13, 900, 2), 8);
+    ASSERT_TRUE(lead_sector_path_sample(player, 3, 970, 35, 900));
+    EXPECT_EQ(player.sector_margins[3].worst(900), -5);
+    EXPECT_EQ(lead_sector_bound(player, 13, 900, 3), 8);
+}
+
+TEST(LeadSector, NoSamplesDeferUntilTheUnionIsComplete) {
+    for (bool complete: {false, true}) {
+        meter_rig rig;
+        lateness_decision decision;
+        decision.action = lateness_action::raise;
+        decision.k = 13;
+        const auto plan = lead_decide(true, rig.lead, rig.meter, decision, rig.tick, rig.buffer, 2, complete);
+        EXPECT_EQ(plan.route, complete ? lead_route::send : lead_route::deferred);
+        EXPECT_EQ(plan.k, complete ? 13 : 0);
+    }
+}
+
+TEST(LeadSector, AnAckClearsBothSidesOfThePair) {
+    std::map<uint32_t, lead_player> players;
+    players[1].sector_margins[2].push(15, 500);
+    players[2].sector_margins[1].push(9, 500);
+    players[2].sector_margins[3].push(20, 500);
+    relative_meter meter;
+    players[1].outstanding = true;
+    players[1].id = 7;
+    players[1].k = 3;
+    EXPECT_FALSE(lead_acknowledge(players[1], meter, 6, 3));
+    EXPECT_FALSE(players[1].sector_margins.empty());
+    ASSERT_TRUE(lead_acknowledge(players[1], meter, 7, 3));
+    lead_sector_forget(players, 1);
+    EXPECT_TRUE(players[1].sector_margins.empty());
+    EXPECT_EQ(players[2].sector_margins.count(1), 0u);
+    EXPECT_EQ(players[2].sector_margins[3].worst(500), 20);
 }
 
 TEST(LateTickLead, ThePerPlayerPathNeedsTheFlagAndCapLead) {

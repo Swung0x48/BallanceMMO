@@ -176,6 +176,17 @@ namespace bmmo::sim {
             // step Q: the proximity countdowns, recorded the same way.
             bmmo::game::capture_level_file_counters(engine_->context(), level_sequencers_, level_proximities_,
                                                     [this](const std::string& line) { log("world: " + line); });
+            // Step LB5: the level's Sector_01.. groups, counted before
+            // Levelinit consumes them - the size of a complete union.
+            if (level_sector_count_ == 0) {
+                const auto& groups = engine_->context()->GetObjectListByType(CKCID_GROUP, TRUE);
+                for (int index = 0; index < groups.Size(); ++index) {
+                    const char* name = groups[index]->GetName();
+                    if (name && std::strlen(name) == 9 && std::strncmp(name, "Sector_", 7) == 0
+                            && name[7] >= '0' && name[7] <= '9' && name[8] >= '0' && name[8] <= '9'
+                            && (name[7] != '0' || name[8] != '0')) ++level_sector_count_;
+                }
+            }
             if (!engine_->tick(error)) return false;
         }
         log("world: anchor reached after " + std::to_string(waited) + " ticks (engine tick "

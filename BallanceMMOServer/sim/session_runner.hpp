@@ -568,6 +568,19 @@ namespace bmmo::sim {
             uint64_t probe_set_drift = 0;
             uint64_t superseded_births = 0, restamped_events = 0;
             std::vector<pending_event> events;   // sorted by applied tick on insertion
+            // The sector union's progress (step LB5): the sectors requested
+            // so far, a Sector event due at the next tick included, and
+            // whether that is every Sector_NN group of the level.
+            size_t requested_sector_count() const {
+                auto requested = world->sectors().requested();
+                for (const auto& pending: events)
+                    if (pending.event.type == bmmo::session::event_type::Sector && pending.applied <= world->tick_index())
+                        requested.insert(pending.event.sector);
+                return requested.size();
+            }
+            bool union_complete() const {
+                return world->level_sector_count() > 0 && requested_sector_count() == world->level_sector_count();
+            }
             uint32_t input_delay = 0;   // ticks of grace this session gives inputs
             uint32_t late_events = 0;   // applied after the tick they were stamped for (logged, capped)
             // Design 9.26: the start base B the members are numbered from.  The

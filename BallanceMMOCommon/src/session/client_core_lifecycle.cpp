@@ -62,6 +62,8 @@ namespace bmmo::session {
             ++s.event_dups_;
             return;
         }
+        if (msg.player != s.own_id_ && msg.type == bmmo::session::event_type::Sector)
+            s.window_sector_margins_[msg.player].push_back(static_cast<int64_t>(msg.tick) - current_tick());
         // Step T3 (trafo-replication design 2.4): a member first seen in a
         // message gets its piece set now, outside any replay.  Step TRL: the
         // set of the life the event names, and only for a life this client

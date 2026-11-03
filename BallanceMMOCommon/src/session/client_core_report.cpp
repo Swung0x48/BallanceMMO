@@ -162,10 +162,18 @@ namespace bmmo::session {
             }
             for (const auto& [player, n]: s.window_inrew_src_)
                 text += " inrew[" + std::to_string(player) + "]=" + std::to_string(n);
+            for (const auto& [player, margins]: s.window_sector_margins_) {
+                text += " sector-margin[" + std::to_string(player) + "]=";
+                for (size_t index = 0; index < margins.size(); ++index) {
+                    if (index) text += ',';
+                    text += std::to_string(margins[index]);
+                }
+            }
         }
         s.window_base_ = now;
         s.window_lag_.clear();
         s.window_inrew_src_.clear();
+        s.window_sector_margins_.clear();
         return text;
     }
 

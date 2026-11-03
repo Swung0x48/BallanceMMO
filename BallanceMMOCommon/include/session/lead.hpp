@@ -35,6 +35,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <map>
+#include <optional>
 
 #include "../entity/session.hpp"
 #include "lateness.hpp"
@@ -70,28 +72,31 @@ namespace bmmo::session {
     // 1; one that does (lead_player::rewinds_sectors) re-derives the pass at
     // its stamp as long as the rewind, to stamp - 1, stays within its reach,
     // so k <= margin - 1 + kLeadSectorReachTicks (lead_sector_bound).  The
-    // smallest of the last kSamples is what binds: the margin is a property
-    // of the path, and the worst recent one is the one a raise must not
-    // break.
+    // smallest margin in ten 66-tick buckets is kept per sender.
     class lead_sector_margin {
     public:
-        static constexpr size_t kSamples = 8;
-        void push(int64_t margin) {
-            samples_.push_back(margin);
-            if (samples_.size() > kSamples) samples_.pop_front();
+        void push(int64_t margin, uint32_t tick, bool event = false) {
+            const uint32_t index = tick / 66;
+            while (!buckets_.empty() && index - buckets_.front().index >= 10) buckets_.pop_front();
+            if (buckets_.empty() || buckets_.back().index != index) buckets_.push_back({index, {}, {}});
+            auto& value = event ? buckets_.back().event : buckets_.back().path;
+            if (!value || margin < *value) value = margin;
         }
-        bool known() const { return !samples_.empty(); }
-        int64_t worst() const { return samples_.empty() ? 0 : *std::min_element(samples_.begin(), samples_.end()); }
-        void clear() { samples_.clear(); }
-        // p's clock moved by `ticks` (an acknowledged lead delta): every
-        // sample was taken against the old clock, and the same events would
-        // now reach p that much closer to their stamp.  Without this a second
-        // raise would be checked against margins the first already spent.
-        void shift(int64_t ticks) {
-            for (auto& m: samples_) m -= ticks;
+        std::optional<int64_t> worst(uint32_t tick, bool path = true, bool event = true) const {
+            std::optional<int64_t> out;
+            for (const auto& bucket: buckets_) {
+                if (tick / 66 - bucket.index >= 10) continue;
+                if (path && bucket.path && (!out || *bucket.path < *out)) out = bucket.path;
+                if (event && bucket.event && (!out || *bucket.event < *out)) out = bucket.event;
+            }
+            return out;
         }
     private:
-        std::deque<int64_t> samples_;
+        struct bucket {
+            uint32_t index;
+            std::optional<int64_t> path, event;
+        };
+        std::deque<bucket> buckets_;
     };
 
     // How long a raise the Sector margin left nothing of waits before the
@@ -134,7 +139,7 @@ namespace bmmo::session {
         // Its newest uplink tick received, and the session tick then.
         uint32_t newest_tick = 0, newest_at = 0;
         bool have_newest = false;
-        lead_sector_margin sector_margin;
+        std::map<uint32_t, lead_sector_margin> sector_margins;
         // The decision sent and not yet acknowledged.
         bool outstanding = false;
         uint32_t id = 0;
@@ -165,9 +170,32 @@ namespace bmmo::session {
         void reassigned() {
             outstanding = false;
             have_newest = false;
-            sector_margin.clear();
+            sector_margins.clear();
         }
     };
+
+    // A member whose clock or numbering moved (an acknowledged decision, a
+    // reassignment) or who left: every pair it is part of, as receiver or as
+    // sender, was measured against what no longer holds.
+    inline void lead_sector_forget(std::map<uint32_t, lead_player>& players, uint32_t player) {
+        for (auto& [other, lead]: players) {
+            if (other == player) lead.sector_margins.clear();
+            else lead.sector_margins.erase(player);
+        }
+    }
+
+    // Sender q's datagram whose newest frame is `newest`, taken when the
+    // server's next tick is `now_tick`: a Sector event q makes now would be
+    // stamped newest + S and reach p at c_est - so p's margin from q is
+    // newest + S - c_est (design 6.1 R5).  False without a clock estimate.
+    inline bool lead_sector_path_sample(lead_player& p, uint32_t sender, uint32_t newest,
+                                       uint32_t sector_lead, uint32_t now_tick) {
+        if (!p.have_rtt) return false;
+        int64_t client_tick = 0;
+        if (!p.client_tick_estimate(now_tick, client_tick)) return false;
+        p.sector_margins[sender].push(static_cast<int64_t>(newest) + sector_lead - client_tick, now_tick);
+        return true;
+    }
 
     // Another member's Sector event stamped `stamp`, taken by the server
     // when its next tick is `now_tick`: a sample of p's Sector margin (the
@@ -178,22 +206,32 @@ namespace bmmo::session {
     // not p's (design 0: one player's problem must not cost the others).
     // False when no sample was taken (late at the server, or p has no round
     // trip or newest tick to estimate its clock with).
-    inline bool lead_sector_sample(lead_player& p, uint32_t stamp, uint32_t now_tick) {
+    inline bool lead_sector_sample(lead_player& p, uint32_t sender, uint32_t stamp, uint32_t now_tick) {
         if (stamp < now_tick || !p.have_rtt) return false;
         int64_t client_tick = 0;
         if (!p.client_tick_estimate(now_tick, client_tick)) return false;
-        p.sector_margin.push(static_cast<int64_t>(stamp) - client_tick);
+        p.sector_margins[sender].push(static_cast<int64_t>(stamp) - client_tick, now_tick, true);
         return true;
     }
 
     // How far a raise of p may go before another member's Sector event
     // would reach p past what p can take (design 2.9): the worst margin less
     // a tick, plus the rewind reach for a client that rewinds a late remote
-    // Sector; never below 0.  Without a margin sample, `k` (no bound).
-    inline int64_t lead_sector_bound(const lead_player& p, int64_t k) {
-        if (!p.sector_margin.known()) return k;
+    // Sector. Senders already late bind nothing; no samples defer a
+    // multiplayer raise. A complete union needs no further Sector bound.
+    inline int64_t lead_sector_bound(const lead_player& p, int64_t k, uint32_t now_tick,
+                                     size_t members = 1, bool union_complete = false) {
+        if (union_complete) return k;
         const int64_t reach = p.rewinds_sectors ? kLeadSectorReachTicks : 0;
-        return std::max<int64_t>(p.sector_margin.worst() - 1 + reach, 0);
+        std::optional<int64_t> bound;
+        bool sampled = false;
+        for (const auto& [sender, margin]: p.sector_margins) {
+            const auto worst = margin.worst(now_tick);
+            if (!worst) continue;
+            sampled = true;
+            if (*worst >= 1 && (!bound || *worst - 1 + reach < *bound)) bound = *worst - 1 + reach;
+        }
+        return bound ? *bound : (!sampled && members >= 2 ? 0 : k);
     }
 
     // What the runner does with one meter decision.
@@ -229,7 +267,8 @@ namespace bmmo::session {
     // `lead_adjust` off or no CAP_LEAD the route is observe and nothing is
     // touched.
     inline lead_plan lead_decide(bool lead_adjust, lead_player& p, relative_meter& meter,
-                                 const lateness_decision& d, uint32_t next_tick, input_buffer& buffer) {
+                                 const lateness_decision& d, uint32_t next_tick, input_buffer& buffer,
+                                 size_t members = 1, bool union_complete = false) {
         lead_plan plan;
         if (d.action != lateness_action::raise && d.action != lateness_action::lower) return plan;
         plan.decided_k = d.k;
@@ -246,7 +285,7 @@ namespace bmmo::session {
             const int64_t total = static_cast<int64_t>(p.assigned_lead) + meter.offset();
             const int64_t total_bound = std::max<int64_t>(static_cast<int64_t>(kLeadCapTicks) - total, 0);
             const bool cut_total = k > total_bound;
-            const int64_t sector_bound = lead_sector_bound(p, k);
+            const int64_t sector_bound = lead_sector_bound(p, k, next_tick, members, union_complete);
             const bool cut_sector = k > sector_bound;
             const bool total_binds = cut_total && total_bound <= sector_bound;
             if (cut_total || cut_sector) {
@@ -316,7 +355,7 @@ namespace bmmo::session {
     // the meter no longer has it pending (cannot happen while outstanding is
     // kept in step with the meter, but an offset must never be lost) the
     // offset still moves, since the client did move its clock.  p's Sector
-    // margin samples move with its clock.
+    // margin samples are cleared; the runner clears its pairs as sender too.
     inline bool lead_acknowledge(lead_player& p, relative_meter& meter, uint32_t id, int applied,
                                  int* bounded = nullptr) {
         if (!p.outstanding || id != p.id) return false;
@@ -325,7 +364,7 @@ namespace bmmo::session {
         applied = lateness_bound_applied(applied, p.k);
         if (bounded) *bounded = applied;
         if (!meter.acknowledge(id, applied, p.effective)) meter.set_offset(meter.offset() + applied);
-        p.sector_margin.shift(applied);
+        p.sector_margins.clear();
         return true;
     }
 }

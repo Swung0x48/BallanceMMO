@@ -726,6 +726,7 @@ namespace bmmo::session {
         uint32_t window_index_ = 0xFFFFFFFFu;
         std::map<uint32_t, std::map<uint32_t, uint32_t>> window_lag_;   // source -> lag -> first arrivals
         std::map<uint32_t, uint32_t> window_inrew_src_;                 // source -> input rewinds naming its ball
+        std::map<uint32_t, std::vector<int64_t>> window_sector_margins_;   // sender -> remote Sector stamp less the own tick at receipt (q9)
         struct window_base {
             uint64_t inrew = 0, inrew_depth = 0, life = 0, life_depth = 0, forced = 0, forced_depth = 0;
             uint64_t snaprb = 0, snaprb_depth = 0, snaps = 0, resyncs_sent = 0, resyncs_done = 0;

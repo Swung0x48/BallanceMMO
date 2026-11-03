@@ -3768,6 +3768,40 @@ attempt stepped the link at tick 41, before the baseline froze, and was
 absorbed into it - a recipe error, rerun. The remaining R4 matrix stays with
 LBM. The harness's host-clock check reads the slack median as `slack-q50`.
 
+**As built (step LB5, 2026-11-03).** Based on 47e0fd4f, protocol 28;
+no wire-format or default-flag change. The Sector window is now per sender:
+ten 66-tick bucket minima, with path and on-time-event minima printed
+separately as `sector[q]=minimum/path/event`. Every eligible input datagram
+feeds `newest_q + S - c_est_p`, without an on-time-sender filter; c_est and
+its newest-frame measurement are unchanged. An acknowledged decision clears
+the receiver's pairs and its pairs as sender, instead of shifting them;
+reassignments and leaves retire those pairs too. No samples with two or more
+members defer a raise; nonpositive sender minima are reported as
+`sector-late=` and do not bind.
+
+Section 6.2.3(e) takes precedence over the old margin-only gate wording:
+each qualifying pair retains B2's +48 for a rollback client. LB4's saved
+A5u already sent +21 without a Sector cap (margin 15, bound 62), not 14.
+LB5's final A5u sent +21 at N=1686, bound 60; A5p sent +21 to each of clients
+2 and 3 at N=1686/1687, bounds 61/60. No other member moved. The union
+progressed 1/4, 3/4, 4/4 at ticks 660, 1320, 1980; once complete the bound
+returns the queried raise unchanged (the summary queries 80). The level's
+Sector_NN groups are counted during boot, before Levelinit destroys them,
+not at the anchor. create_session already carried S, so its API did not
+change. Pending Sector events at a stamp <= N count as requested too.
+
+Both final runs discarded every snapshot; all eight clients had zero
+resyncs and relay_late. Server replays each matched 2231/2231 ticks and
+1115/1115 checkpoints. Confirmed pre-first-FIN ball states (pose, velocities,
+flags) were exact outside the documented airship spans; raw shared-body and
+in-airship rows are not all exact. Both builds, GCC syntax and 783 tests
+passed. The required rAZX/rLB5 wire command returned DIFFERENCES: 15/44
+send traces SAME, 29 differing FIN hashes with identical tick/flags/size;
+45/45 journals IDENTICAL. All 29 hashes are compatible with the pre-existing
+FIN padding bytes 34/35; this is not an ALL SAME result. Full numbers,
+failed setup/counting attempts and the acceptance status FAILED are in
+`.local-tools/work/HANDOFF/reports/LB5.md`; the full matrix stays with LBM.
+
 #### 6.2.1 Built since 177c337
 
 | plan step | built by | commit | what revision 3 takes from it |
@@ -4325,6 +4359,25 @@ rewind sectors.
    event samples as a bound, and prints per pair the path minimum, the event
    minimum and the client's actual margin at receipt. If the actual margins
    sit at the model's, the event samples can go.
+
+   **LB5 measurement (2026-11-03, protocol 28).** Final A5u/A5p, S=35,
+   150 ms base paths, a +300 ms uplink step on client 2 / clients 2 and 3:
+   each receiver recorded all three remote senders' three Sector receipts
+   (36 receipts per run). Before the step the actual margins were 15-16,
+   against model 15; at tick 1320 the per-pair path minima were 13-14 and
+   event minima 15-16. After a +21 raise, healthy senders reached the raised
+   receiver at -5 (A5u) or -6 (A5p), against the shifted model -6. The late
+   client-2 crossing reached healthy receivers at -4; A5p client 3 received
+   it at -23. These are real late receipts, not solely a c_est error; a
+   crossing generated before its sender's slew cannot be judged by the
+   sender's later offset. A5p's actual receipt margins ranged from -23 to
+   17. After acknowledgments, tick-1980 path minima were 11-15
+   for healthy receivers and -8..-6 for raised ones; on-time event minima
+   included -6..-5. The report gives every receipt per sender, including
+   the late-at-server events excluded from the event window. The steady
+   pre-step receipts sit at the model, but there is no blanket claim that
+   the post-step receipts do. Event samples are retained: the reviewer,
+   not this step, decides whether these numbers justify removing them.
 
 ## 8. Review record
 
