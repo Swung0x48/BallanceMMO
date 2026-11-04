@@ -603,6 +603,9 @@ public:
         std::set<HSteamNetConnection> assigned;             // got their SessionAssign
         std::set<HSteamNetConnection> late;                 // joined a running session: no hash check
         bool world_ready = false, ticking = false;
+        // Protocol 32 (step SPL): when the world's boot was asked for (the
+        // boot statuses' log lines count from it).
+        std::chrono::steady_clock::time_point boot_requested{};
         // Start barrier (design 8.3): armed when SessionStart goes out, so a
         // member that never reports SessionReady cannot pin the session at its
         // boot for ever.  Checked by check_start_barriers() from the main loop.
@@ -911,6 +914,9 @@ public:
         bmmo::sim::session_callbacks callbacks;
         callbacks.log = [](const std::string& text) { Printf("[Sim] %s", text); };
         callbacks.on_world_ready = [this](const bmmo::sim::world_ready_info& info) { on_world_ready(info); };
+        callbacks.on_boot_progress = [this](uint32_t session, bmmo::session::boot_phase phase) {
+            on_boot_progress(session, phase);
+        };
         callbacks.on_snapshot = [this](const bmmo::sim::session_snapshot& snapshot) { on_session_snapshot(snapshot); };
         callbacks.on_resync_state = [this](const bmmo::sim::resync_state_out& out) { on_session_resync_state(out); };
         callbacks.on_resync_base_missed = [this](uint32_t session, uint32_t player, uint32_t base) {
@@ -1148,6 +1154,7 @@ public:
         const uint32_t sector_lead = s.sector_lead;
         const uint32_t world_options = s.world_options;
         const uint8_t mechanism_slots = s.mechanism_slots;
+        s.boot_requested = std::chrono::steady_clock::now();
         physics_sessions_.emplace(id, std::move(s));
         // The world is numbered from the same base its members are (design 9.25
         // phase alignment): its first simulated tick is `start_base`, so the
@@ -1348,6 +1355,27 @@ public:
     }
 
     // Simulation thread: the world finished booting.
+    // Runner thread (protocol 32, step SPL): a phase of the world's boot has
+    // begun; the members (those of the SessionStart to come) see it while
+    // they wait for that SessionStart.
+    void on_boot_progress(uint32_t session, bmmo::session::boot_phase phase) {
+        std::lock_guard lk(state_mutex_);
+        auto it = physics_sessions_.find(session);
+        if (it == physics_sessions_.end()) return;
+        auto& s = it->second;
+        bmmo::session_boot_status_msg msg;
+        msg.session = session;
+        msg.level = s.map.level;
+        msg.phase = static_cast<uint8_t>(phase);
+        msg.serialize();
+        for (const auto m: s.members) send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        static constexpr const char* kPhases[] = {"booting the game", "entering the level", "preparing the world"};
+        Printf("Physics session %u: boot phase %u (%s) at %.3f s, sent to %zu players.", session,
+               static_cast<unsigned>(phase), kPhases[static_cast<size_t>(phase)],
+               std::chrono::duration<double>(std::chrono::steady_clock::now() - s.boot_requested).count(),
+               s.members.size());
+    }
+
     void on_world_ready(const bmmo::sim::world_ready_info& info) {
         std::lock_guard lk(state_mutex_);
         auto it = physics_sessions_.find(info.session);
@@ -1374,9 +1402,11 @@ public:
         // members that never answer with SessionReady once the window is up.
         s.start_barrier_armed = true;
         s.start_deadline = std::chrono::steady_clock::now() + bmmo::sim::kStartBarrierTimeout;
-        Printf("Physics session %u: world ready (anchor %016llx, placement %016llx), SessionStart sent to %zu players.",
-                s.id, static_cast<unsigned long long>(s.anchor_hash), static_cast<unsigned long long>(s.anchor_placement),
-                s.members.size());
+        Printf("Physics session %u: world ready %.3f s after the boot request (anchor %016llx, placement %016llx), "
+               "SessionStart sent to %zu players.", s.id,
+               std::chrono::duration<double>(std::chrono::steady_clock::now() - s.boot_requested).count(),
+               static_cast<unsigned long long>(s.anchor_hash), static_cast<unsigned long long>(s.anchor_placement),
+               s.members.size());
     }
 
     // Simulation thread: fan a snapshot out to the room.

@@ -487,6 +487,7 @@ void BallanceMMOClient::OnProcess() {
     process_command_pipe();
     process_room_requests();
     room_panel_frame();   // the ImGui room panel (before the not-connected return: a disconnect must unblock)
+    core_host_panel_frame();   // step SPL: the session start's panel while the world runs
     process_level_request();
     process_tick_record();
     poll_local_input();

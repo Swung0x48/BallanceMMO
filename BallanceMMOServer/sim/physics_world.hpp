@@ -165,6 +165,9 @@ namespace bmmo::sim {
         std::function<void(CKContext*)> before_level_load;
         std::function<void(CKContext*)> before_anchor;
         std::function<void(const std::string&)> log;
+        // Protocol 32 (step SPL): each boot phase as it begins - the boot, the
+        // level request, the anchor (the session runner tells the room).
+        std::function<void(bmmo::session::boot_phase)> progress;
     };
 
     // A client-reported lifecycle transition (protocol section 2.2,
