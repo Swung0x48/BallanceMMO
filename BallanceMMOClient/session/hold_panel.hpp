@@ -292,7 +292,7 @@ namespace bmmo::retail {
         };
         if (stage_ == stage::server_boot) {
             static constexpr const char* kPhases[] = {"The server is starting the game", "The server is loading the level",
-                                                      "The server is placing the mechanisms"};
+                                                      "The server is preparing its world"};
             const size_t phase = std::min<size_t>(boot_phase_, 2);
             line = kPhases[phase];
             fraction = (static_cast<float>(phase) + creeping(seconds_since(phase_since_), 1.5)) / 3.0f;
@@ -305,7 +305,7 @@ namespace bmmo::retail {
             widest = "00.0 s";
         } else if (stage_ == stage::placing) {
             char counts[64];
-            std::snprintf(counts, sizeof(counts), "Placing the mechanisms %zu/%zu", placed_, to_place_);
+            std::snprintf(counts, sizeof(counts), "Placing the mechanisms in your level %zu/%zu", placed_, to_place_);
             line = counts;
             fraction = to_place_ ? static_cast<float>(placed_) / static_cast<float>(to_place_) : 1.0f;
             std::snprintf(ms, sizeof(ms), "%.1f s", seconds_since(since_));

@@ -7556,7 +7556,7 @@ start", the countdown local to each client, option B). Protocol 32:
   `core_booting` lets a failed boot's SessionEnd through to take the panel
   down) and shows the panel from the first one, in the game's own ImGui
   frame (`core_host_panel_frame`, OnProcess): "The server is starting the
-  game / loading the level / placing the mechanisms", the time since the
+  game / loading the level / preparing its world", the time since the
   first, the room's members. The start barrier is 20 s (was 8).
 - **The order.** The level restarts (or reloads, SP9) at the SessionStart;
   "Restarting the level" with its time. At the anchor, after the counters'
@@ -7564,7 +7564,8 @@ start", the countdown local to each client, option B). Protocol 32:
   (`core_host_freeze`, host phase `anchoring`); each rendered frame
   (`core_host_prepare_frame` from `core_host_hold_frame`) runs one
   `sector_placement::step` of 10 ms (at least one copy) behind "Placing the
-  mechanisms n/N"; after the last copy `core_host_anchor_finish` (the
+  mechanisms in your level n/N" (the server's own placement is inside
+  "preparing its world"); after the last copy `core_host_anchor_finish` (the
   placement kept, the hash, the filter, the selection, the rewires, the
   report), then the 3-2-1 in the panel with the chat lines and sounds
   (`core_host_countdown`), "Go!", then `core_host_anchor_ready`
