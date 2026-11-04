@@ -59,10 +59,12 @@ namespace bmmo::session {
     // A recipient whose acknowledgement is older than the history has to
     // resync whatever it holds: its own frames were substituted for longer
     // than any rewind reaches, and the others' it lacks are gone.  It gets
-    // the header alone (from = the tick before the oldest kept, its cue),
-    // 1, 2, 4 .. this many ticks apart, so a client that crashed or froze
-    // costs a small datagram a second instead of the whole history every
-    // tick; the first one a live client receives starts its resync.
+    // the header alone (from = the tick before the oldest kept, its cue):
+    // every tick while its uplink still arrives (only its downlink is out,
+    // and the next notice must not wait), else 1, 2, 4 .. this many ticks
+    // apart, so a client that crashed or froze costs a small datagram a
+    // second instead of the whole history every tick; the first one a live
+    // client receives starts its resync.
     constexpr uint32_t kPastHistoryNoticeMaxGap = 64;
 
     // ------------------------------------------------------------ held notices
@@ -197,7 +199,9 @@ namespace bmmo::session {
         }
         void acknowledge(uint32_t recipient, uint32_t tick) {
             const auto it = recipients_.find(recipient);
-            if (it == recipients_.end() || static_cast<int32_t>(tick - it->second.acked) <= 0) return;
+            if (it == recipients_.end()) return;
+            it->second.heard = true;
+            if (static_cast<int32_t>(tick - it->second.acked) <= 0) return;
             if (!ticks_.empty() && static_cast<int32_t>(tick - newest_tick()) > 0) tick = newest_tick();
             it->second.acked = tick;
         }
@@ -264,9 +268,10 @@ namespace bmmo::session {
                                               std::optional<uint32_t> held_from = std::nullopt) {
             auto& r = recipients_[recipient];
             const uint32_t from = r.acked;
+            const bool heard = std::exchange(r.heard, false);   // an uplink datagram since the last build
             if (!ticks_.empty() && static_cast<int32_t>(from + 1 - ticks_.front().tick) < 0) {
-                if (r.notice_gap != 0 && static_cast<int32_t>(newest_tick() - r.next_notice) < 0) return {};
-                r.notice_gap = r.notice_gap == 0 ? 1 : std::min(2 * r.notice_gap, kPastHistoryNoticeMaxGap);
+                if (!heard && r.notice_gap != 0 && static_cast<int32_t>(newest_tick() - r.next_notice) < 0) return {};
+                r.notice_gap = heard || r.notice_gap == 0 ? 1 : std::min(2 * r.notice_gap, kPastHistoryNoticeMaxGap);
                 r.next_notice = newest_tick() + r.notice_gap;
                 datagram notice;
                 notice.from = ticks_.front().tick - 1;
@@ -321,6 +326,7 @@ namespace bmmo::session {
         struct recipient_state {
             uint32_t acked = 0;
             uint32_t notice_gap = 0, next_notice = 0;   // past the history: the header-only notices' backoff
+            bool heard = false;                         // an uplink datagram (acknowledge) since the last build
             // Per player, per base (its since), the newest tick of the first
             // datagram that carried it to this recipient, inline or attached.
             std::map<uint32_t, std::map<uint32_t, uint32_t>> carried;

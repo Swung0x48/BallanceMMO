@@ -152,6 +152,15 @@ TEST(RelayRing, PastTheHistoryOnlyHeaderNoticesWithBackoff) {
     for (size_t i = 1; i < sent.size(); ++i) gaps.push_back(sent[i] - sent[i - 1]);
     ASSERT_GE(gaps.size(), 8u);
     EXPECT_EQ(std::vector<uint32_t>(gaps.begin(), gaps.begin() + 8), (std::vector<uint32_t>{1, 2, 4, 8, 16, 32, 64, 64}));
+    // Its uplink still arriving (an acknowledgement that moves nothing): a
+    // notice every tick, the next one at once.
+    for (int i = 0; i < 3; ++i, ++t) {
+        ring.push(t, applied_list{{1, frame(1)}, {2, frame(2)}});
+        ring.acknowledge(1, 0);
+        const auto notice = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget);
+        ASSERT_EQ(notice.size(), 1u) << i;
+        EXPECT_TRUE(notice[0].entries.empty());
+    }
     ring.acknowledge(1, t - 10);
     ring.push(t, applied_list{{1, frame(1)}, {2, frame(2)}});
     const auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget);
