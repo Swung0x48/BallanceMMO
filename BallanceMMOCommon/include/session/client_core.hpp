@@ -763,6 +763,11 @@ namespace bmmo::session {
         uint32_t relay_held_ = 0;
         std::map<uint32_t, uint64_t> relay_parts_;
         uint64_t relay_undefined_ = 0;   // datagrams turning a camera base not held
+        // Protocol 33: the session's recipe dictionary (the relay's events
+        // section names a Physicalize's recipe by its id), and the section's
+        // messages taken and those whose recipe was not held.
+        std::map<uint8_t, bmmo::session::ball_recipe> relay_recipes_;
+        uint64_t relay_events_ = 0, relay_events_unresolved_ = 0;
         // Protocol 7 (late-player design 1.3): the server's notices of our own
         // substituted ticks, taken once per tick (keyed by our own id) and
         // applied (note_held_section): recv inside the reach, late past it
@@ -2166,6 +2171,12 @@ namespace bmmo::session {
                                    const bmmo::session::input_frame& relayed);
         // Protocol 29: the acknowledged span (client_core_messages.cpp).
         void note_relay_span(const bmmo::session_remote_input_msg& msg);
+        bool deliver_relayed_events(const bmmo::session_remote_input_msg& msg);
+        // The server's last fresh tick of ours, as its relay header says
+        // (protocol 33: what our piggybacked events ride until).
+        std::optional<uint32_t> own_acked() const {
+            return s.acked_header_known_ ? std::optional<uint32_t>(s.header_acked_) : std::nullopt;
+        }
         void restart_relay_span();
         void encode_uplink_cameras(bmmo::session_input_msg& msg);
         // Section J (E5, client_core_held.cpp): late-player parts one and two.

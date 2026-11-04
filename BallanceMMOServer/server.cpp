@@ -1249,6 +1249,19 @@ public:
     // member that has its SessionStart, except the player itself, reliably
     // and through the lifecycle events' unreliable repeats (a lost reliable
     // copy is ~400 ms late by retransmit).  --hold-member-ms holds both.
+    // A lifecycle message's copies after its reliable one: in the relay
+    // datagrams of every member (protocol 33, docs/relay-protocol-design.md
+    // 4.9: until its acknowledgement reaches the first that carried it), the
+    // unreliable repeats for anyone else.
+    void send_copies(physics_session_state& s, std::string bytes, std::vector<uint32_t> to) {
+        std::vector<uint32_t> members, others;
+        for (const uint32_t m: to)
+            (std::find(s.members.begin(), s.members.end(), static_cast<HSteamNetConnection>(m)) != s.members.end()
+                 ? members : others).push_back(m);
+        if (!members.empty()) s.relay.push_message(members, bytes);
+        if (!others.empty()) s.event_repeats.push(std::move(bytes), std::move(others));
+    }
+
     void send_session_member(physics_session_state& s, uint8_t kind, uint32_t tick, const bmmo::session::player_entry& entry) {
         bmmo::session_member_msg msg;
         msg.session = s.id;
@@ -1275,7 +1288,7 @@ public:
         }
         for (const auto m: to)
             send(static_cast<HSteamNetConnection>(m), bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
-        s.event_repeats.push(std::move(bytes), std::move(to));
+        send_copies(s, std::move(bytes), std::move(to));
     }
 
     bmmo::session::player_entry member_entry(const physics_session_state& s, const bmmo::sim::member_change& c) const {
@@ -1508,6 +1521,8 @@ public:
                     }
                     msg.held.push_back(r);
                 }
+                msg.recipes = std::move(datagram.recipes);
+                msg.events = std::move(datagram.events);
                 msg.serialize();
                 const EResult result = send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
                 if (result != k_EResultOK || msg.held.empty()) continue;
@@ -2453,7 +2468,7 @@ public:
                 for (const auto m: h->to)
                     send(static_cast<HSteamNetConnection>(m), h->bytes.data(), h->bytes.size(),
                          k_nSteamNetworkingSend_ReliableNoNagle);
-                if (!h->to.empty()) s.event_repeats.push(std::move(h->bytes), std::move(h->to));
+                if (!h->to.empty()) send_copies(s, std::move(h->bytes), std::move(h->to));
                 h = s.held_members.erase(h);
             }
             s.event_repeats.send_due([this, &s](uint32_t to, const std::string& bytes) {
@@ -3083,7 +3098,7 @@ public:
         msg.serialize();
         const std::string bytes = msg.raw.str();
         send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
-        s.event_repeats.push(bytes, {static_cast<uint32_t>(c)});
+        send_copies(s, bytes, {static_cast<uint32_t>(c)});
     }
 
     // Simulation thread: the runner accepted a lifecycle event and fixed the
@@ -3194,12 +3209,11 @@ public:
         }
         for (const auto m: to)
             send(static_cast<HSteamNetConnection>(m), bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
-        // ...and again, unreliably, on each of the next ticks: a lost
-        // reliable copy is otherwise ~400 ms late by retransmit, past the
-        // rollback's reach, and a mirror whose respawn or beam is applied that
-        // late sits metres off until the next forced snapshot.
+        // ...and again, unreliably: a lost reliable copy is otherwise ~400 ms
+        // late by retransmit, past the rollback's reach, and a mirror whose
+        // respawn or beam is applied that late sits metres off.
         const size_t recipients = to.size();
-        s.event_repeats.push(bytes, std::move(to));
+        send_copies(s, bytes, std::move(to));
         const auto delay_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - a.intake).count();
         // Step F3 (LCM): the arrival margin goes last, after the flag word,

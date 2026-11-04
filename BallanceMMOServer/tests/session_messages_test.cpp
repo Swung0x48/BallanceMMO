@@ -188,7 +188,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(32u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(33u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -669,10 +669,12 @@ TEST(SessionInputMsg, PreviousProtocolAndForgedEventsRefused) {
 }
 
 // The client core's piggyback list (session/event_piggyback.hpp): an event
-// rides every datagram until the datagram's newest frame passes stamp + 7;
-// over the budget the OLDEST event is left out of that datagram only, and
-// counted.
-TEST(EventPiggyback, WindowAndBudgetDrop) {
+// rides every datagram until the server's header acknowledges a frame at or
+// past max(stamp, the newest frame of the first datagram of its carry)
+// (protocol 33); over the budget the OLDEST event is left out of that datagram
+// only, counted, and its carry starts again; unacknowledged it goes once its
+// stamp is kPiggybackReachTicks behind.
+TEST(EventPiggyback, UntilAcknowledgedAndBudgetDrop) {
     using bmmo::session::event_type;
     bmmo::session::event_piggyback list;
     EXPECT_TRUE(bmmo::session::event_rides_input(event_type::Physicalize));
@@ -686,31 +688,39 @@ TEST(EventPiggyback, WindowAndBudgetDrop) {
     const std::string p = event_bytes(event_type::Physicalize, 121);
     list.push(u, 121, event_type::Unphysicalize);
     list.push(p, 121, event_type::Physicalize);
-    // Newest frame 120 (sent before the stamp's frame) .. 128 = 121 + 7:
-    // carried (frame 121 is in every one of these datagrams but the first).
-    for (uint32_t newest = 120; newest <= 128; ++newest) {
-        list.prune(newest);
+    // The server's acknowledgement short of the stamp: carried, far past
+    // stamp + 7 (LBM5 swing seed 2: every datagram with the frame lost).
+    for (uint32_t newest = 120; newest <= 140; ++newest) {
+        list.prune(newest, 120u);
         auto msg = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, newest - 7);
         EXPECT_EQ(list.attach(msg), 0u);
         ASSERT_EQ(msg.events.size(), 2u) << newest;
         EXPECT_EQ(msg.events[0], u);
         EXPECT_EQ(msg.events[1], p);
     }
-    list.prune(129);   // frame 121 is no longer in any datagram
+    list.prune(141, 121u);   // the stamp's frame applied: the events were taken with it
     EXPECT_EQ(list.pending(), 0u);
-    EXPECT_EQ(list.counters().expired, 2u);
-    EXPECT_EQ(list.counters().carried, 18u);
-    // An event released after its window (a held event: stamped 100, sent
-    // when the newest frame is 140) rides the eight datagrams after its
-    // send, 140 .. 147, never fewer than DX8's seven copies.
+    EXPECT_EQ(list.counters().taken, 2u);
+    EXPECT_EQ(list.counters().carried, 42u);
+    // An event sent after the server passed its stamp (a held one: stamped
+    // 100, sent when the newest frame is 140) rides until the
+    // acknowledgement reaches the newest frame of its first datagram.
     list.push(u, 100, event_type::Unphysicalize);
-    for (uint32_t newest = 140; newest <= 148; ++newest) {
-        list.prune(newest);
+    for (uint32_t newest = 140; newest <= 141; ++newest) {
+        list.prune(newest, newest - 2);
         auto late = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, newest - 7);
         list.attach(late);
-        EXPECT_EQ(late.events.size(), newest <= 147 ? 1u : 0u) << newest;
+        EXPECT_EQ(late.events.size(), 1u) << newest;
     }
+    list.prune(142, 140u);
     EXPECT_EQ(list.pending(), 0u);
+    // Never acknowledged: gone once the stamp is the reach behind.
+    list.push(u, 300, event_type::Unphysicalize);
+    list.prune(300 + bmmo::session::kPiggybackReachTicks);
+    EXPECT_EQ(list.pending(), 1u);
+    list.prune(301 + bmmo::session::kPiggybackReachTicks);
+    EXPECT_EQ(list.pending(), 0u);
+    EXPECT_EQ(list.counters().expired, 1u);
 
     // The budget: two events that do not both fit; the older one is left out
     // of this datagram (it stays in the list) and counted.
@@ -730,6 +740,12 @@ TEST(EventPiggyback, WindowAndBudgetDrop) {
     auto roomy = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, 194);
     EXPECT_EQ(tight.attach(roomy), 0u);
     EXPECT_EQ(roomy.events.size(), 2u);
+    // The one left out of the first datagram started its carry at the
+    // second (newest 201): frame 200 acknowledged shows only the other taken.
+    tight.prune(202, 200u);
+    EXPECT_EQ(tight.pending(), 1u);
+    tight.prune(202, 201u);
+    EXPECT_EQ(tight.pending(), 0u);
 }
 
 // ---------------------------------------------------------------------
@@ -1317,7 +1333,7 @@ TEST(SessionRemoteInputMsg, SerializeDeserializeRoundTripWithRuns) {
     se.headings.assign(60, 0);
     still.entries.push_back(se);
     ASSERT_TRUE(still.serialize());
-    EXPECT_EQ(still.size(), bmmo::session::kRelayDatagramHeader + 4 + 1 + 1 + 4 + 1);
+    EXPECT_EQ(still.size(), bmmo::session::kRelayDatagramHeader + 4 + 1 + 1 + 4 + 1 + bmmo::session::kEventCountBytes);
 }
 
 TEST(SessionRemoteInputMsg, RejectsTruncationAndBadCounts) {
@@ -1360,6 +1376,78 @@ TEST(SessionRemoteInputMsg, RejectsTruncationAndBadCounts) {
 // Protocol 7 (late-player design 1.1): the recipient's acked, held_total and
 // epoch in the header, and the held section after the entries - by
 // reference, inline, and the default frame.
+// Protocol 33 (docs/relay-protocol-design.md 4.9): the events section - a
+// recipe, one pose for two births, every compact type and a raw message -
+// round-trips bit for bit, a compact birth is 13 bytes beside its shared pose,
+// the client rebuilds the reliable copy's very bytes from it, and every
+// truncation is refused.
+TEST(SessionRemoteInputMsg, EventsSectionRoundTripsCompactAndRaw) {
+    using bmmo::session::event_type;
+    bmmo::session::recipe_numbering numbering;
+    const auto event = [](event_type type, uint32_t player, uint32_t tick, uint32_t origin) {
+        bmmo::session_event_msg m;
+        m.session = 3;
+        m.player = player;
+        m.type = type;
+        m.tick = tick;
+        m.origin_tick = origin;
+        m.life = 2;
+        m.ball_type = 1;
+        m.flags = 1;
+        m.position[0] = -20.0f;
+        m.position[1] = 3.65f;
+        m.rotation[0] = m.rotation[4] = m.rotation[8] = 1.0f;
+        m.rotation[2] = -0.0f;   // a sign bit only a bitwise copy keeps
+        m.recipe.mass = 10.0f;
+        m.recipe.friction = 0.5f;
+        m.recipe.collision_surface = "Ball_Stone_Mesh";
+        m.recipe.balls = {{{0.f, 0.f, 0.f}, 2.f}};
+        m.sector = type == event_type::Sector ? 4 : 0;
+        if (type == event_type::Physicalize && origin != tick) m.state = bmmo::session::EVENT_STATE_MOVED;
+        EXPECT_TRUE(m.serialize());
+        return m.raw.str();
+    };
+    const std::vector<std::string> reliable = {
+        event(event_type::Physicalize, 7, 231, 231), event(event_type::Physicalize, 8, 231, 220),
+        event(event_type::Unphysicalize, 7, 300, 300), event(event_type::Sector, 7, 250, 250),
+        event(event_type::Trafo, 8, 260, 260)};
+    bmmo::session_member_msg member;
+    member.session = 3;
+    member.kind = bmmo::session::MEMBER_ADDED;
+    member.tick = 240;
+    member.entry.id = 9;
+    ASSERT_TRUE(member.serialize());
+    bmmo::session_remote_input_msg msg{};
+    msg.session = 3;
+    msg.tick = 245;
+    for (const auto& bytes: reliable) msg.events.push_back(bmmo::session::relay_event_of(bytes, numbering));
+    msg.events.push_back(bmmo::session::relay_event_of(member.raw.str(), numbering));
+    msg.recipes.emplace_back(0, numbering.recipe(0));
+    for (size_t i = 0; i < reliable.size(); ++i) EXPECT_TRUE(msg.events[i].compact()) << i;
+    EXPECT_FALSE(msg.events.back().compact());
+    auto parsed = round_trip(msg);
+    const size_t recipe = 1 + bmmo::session::recipe_bytes(numbering.recipe(0)).size();
+    const size_t events = 13 + 14 + 9 + 13 + 23 + 3 + member.raw.str().size();
+    EXPECT_EQ(msg.size(), bmmo::session::kRelayDatagramHeader + 1 + bmmo::session::kEventCountBytes + recipe
+                              + bmmo::session::kRelayPoseBytes + events);
+    ASSERT_EQ(parsed.events.size(), msg.events.size());
+    std::map<uint8_t, bmmo::session::ball_recipe> dictionary;
+    for (const auto& [id, r]: parsed.recipes) dictionary[id] = r;
+    for (size_t i = 0; i < reliable.size(); ++i) {
+        EXPECT_TRUE(parsed.events[i] == msg.events[i]) << i;
+        bmmo::session_event_msg rebuilt;
+        ASSERT_TRUE(bmmo::session::event_msg_of(parsed.events[i], 3, dictionary, rebuilt)) << i;
+        ASSERT_TRUE(rebuilt.serialize());
+        EXPECT_EQ(rebuilt.raw.str(), reliable[i]) << i;
+    }
+    EXPECT_EQ(parsed.events.back().raw, member.raw.str());
+    // Without its recipe a birth cannot be rebuilt.
+    bmmo::session_event_msg orphan;
+    EXPECT_FALSE(bmmo::session::event_msg_of(parsed.events[0], 3, {}, orphan));
+    msg.raw = std::stringstream{};
+    expect_rejects_every_truncation(msg);
+}
+
 TEST(SessionRemoteInputMsg, V3RoundTripWithTheHeldSection) {
     bmmo::session_remote_input_msg msg{};
     msg.session = 4;
@@ -1412,7 +1500,7 @@ TEST(SessionRemoteInputMsg, V3RoundTripWithTheHeldSection) {
     // 5 B a reference, 41 B inline, 1 B of count; the entry's two runs carry
     // their cameras inline (no codes in memory).
     const size_t entry_bytes = 4 + 1 + 1 + 2 * (4 + 36);
-    EXPECT_EQ(msg.size(), bmmo::session::kRelayDatagramHeader + entry_bytes + 1 + 5 + 41 + 5);
+    EXPECT_EQ(msg.size(), bmmo::session::kRelayDatagramHeader + entry_bytes + 1 + 5 + 41 + 5 + bmmo::session::kEventCountBytes);
     msg.raw = std::stringstream{};   // serialize() appends
     expect_rejects_every_truncation(msg);
     // A header-only datagram: nothing relayed, nothing substituted.
@@ -1422,7 +1510,7 @@ TEST(SessionRemoteInputMsg, V3RoundTripWithTheHeldSection) {
     header_only.epoch = 40;
     header_only.wait = 255;
     auto parsed_header = round_trip(header_only);
-    EXPECT_EQ(header_only.size(), bmmo::session::kRelayDatagramHeader + 1);
+    EXPECT_EQ(header_only.size(), bmmo::session::kRelayDatagramHeader + 1 + bmmo::session::kEventCountBytes);
     EXPECT_TRUE(parsed_header.entries.empty());
     EXPECT_TRUE(parsed_header.held.empty());
     EXPECT_EQ(parsed_header.acked, 50u);
@@ -1469,12 +1557,16 @@ TEST(SessionRemoteInputMsg, V3RejectsBadHeldSectionsAndAV6Datagram) {
         return copy;
     };
     // 33 records, with the bytes for all of them there: the count is refused.
-    std::string thirty_three = with(nheld_offset, 33);
-    for (int i = 0; i < 32; ++i) thirty_three += payload.substr(back_offset, 5);
-    EXPECT_FALSE(parses(thirty_three));
-    std::string thirty_two = with(nheld_offset, 32);
-    for (int i = 0; i < 31; ++i) thirty_two += payload.substr(back_offset, 5);
-    EXPECT_TRUE(parses(thirty_two));
+    // (The records go before the events section, the datagram's last.)
+    const std::string tail(bmmo::session::kEventCountBytes, '\0');
+    const auto records = [&](char count, int extra) {
+        std::string bytes = with(nheld_offset, count);
+        bytes.resize(bytes.size() - tail.size());
+        for (int i = 0; i < extra; ++i) bytes += payload.substr(back_offset, 5);
+        return bytes + tail;
+    };
+    EXPECT_FALSE(parses(records(33, 32)));
+    EXPECT_TRUE(parses(records(32, 31)));
     EXPECT_FALSE(parses(with(back_offset, 3 | 0x20)));
     EXPECT_FALSE(parses(with(back_offset, 3 | 0x40)));
     EXPECT_FALSE(parses(payload + std::string(1, '\0')));   // nothing may follow the section
@@ -1484,13 +1576,13 @@ TEST(SessionRemoteInputMsg, V3RejectsBadHeldSectionsAndAV6Datagram) {
     before_zero.back = 3;
     early.held.push_back(before_zero);
     ASSERT_TRUE(early.serialize());
-    EXPECT_EQ(early.size(), bmmo::session::kRelayDatagramHeader + 1);   // the serializer drops it ...
+    EXPECT_EQ(early.size(), bmmo::session::kRelayDatagramHeader + 1 + bmmo::session::kEventCountBytes);   // the serializer drops it ...
     std::string early_payload = stream_payload(early.raw);
+    early_payload.resize(early_payload.size() - tail.size());
     early_payload.back() = 1;
-    early_payload += std::string(1, 3) + std::string(4, '\0');
-    EXPECT_FALSE(parses(early_payload));                                // ... and the reader refuses it
-    early_payload[early_payload.size() - 5] = 2;
-    EXPECT_TRUE(parses(early_payload));                                 // back 2 at tick 2 is tick 0
+    const auto early_record = [](char back) { return std::string(1, back) + std::string(4, '\0'); };
+    EXPECT_FALSE(parses(early_payload + early_record(3) + tail));   // ... and the reader refuses it
+    EXPECT_TRUE(parses(early_payload + early_record(2) + tail));    // back 2 at tick 2 is tick 0
     // A v6 datagram is a v7 one without the three header fields and the
     // section: with no entries, with one, with several.
     for (const size_t members: {0u, 1u, 3u}) {

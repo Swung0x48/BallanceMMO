@@ -253,7 +253,17 @@ namespace bmmo::session {
     //      its SessionReady, so the start barrier (kStartBarrierTimeout) is
     //      20 s instead of 8.  No journal version: the journal records no
     //      boot status.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 32;
+    //  33  Lifecycle messages ride the acknowledged relay (docs/relay-
+    //      protocol-design.md 4.9, the user's decisions of 2026-11-04): a
+    //      SessionEvent or SessionMember goes reliably and then in every relay
+    //      datagram to its member from the first that carries it until the
+    //      member's acknowledgement reaches that datagram's tick - the events
+    //      section after the held one, compact (a session-wide recipe
+    //      dictionary, a pose table per datagram) - instead of six unreliable
+    //      copies over twelve ticks; a client's own piggybacked events ride
+    //      until the server's header acknowledges them, not only to stamp + 7.
+    //      No journal version.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 33;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

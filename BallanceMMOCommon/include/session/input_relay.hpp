@@ -34,6 +34,7 @@
 
 #include "../entity/session.hpp"
 #include "camera_heading.hpp"
+#include "relay_events.hpp"
 
 namespace bmmo::session {
     // How many ticks of every member's applied frames the server keeps: a
@@ -96,6 +97,7 @@ namespace bmmo::session {
     static_assert(kSentInputRing >= kHeldMaxReachTicks + kHeldInlineDistance - 1,
                   "every reference inside the deepest reach must still be in the sent ring");
     constexpr size_t kHeldCountBytes = 1;           // nheld, in every datagram
+    constexpr size_t kEventCountBytes = 3;          // protocol 33: nrecipes, nposes, nevents, in every datagram
     constexpr size_t kHeldReferenceBytes = 1 + 4;   // back u8, source u32
     constexpr size_t kHeldInlineBytes = 1 + 40;     // back u8, the frame with its camera
 
@@ -156,11 +158,28 @@ namespace bmmo::session {
             uint32_t from = 0;
             std::vector<member_entry> entries;
             std::vector<held_entry> held;
+            std::vector<std::pair<uint8_t, ball_recipe>> recipes;   // protocol 33
+            std::vector<relay_event> events;
         };
 
         bool empty() const { return ticks_.empty(); }
         uint32_t newest_tick() const { return ticks_.empty() ? 0 : ticks_.back().tick; }
-        void clear() { ticks_.clear(); held_.clear(); recipients_.clear(); bases_.clear(); }
+        void clear() { ticks_.clear(); held_.clear(); recipients_.clear(); bases_.clear(); recipes_.clear(); }
+
+        // Protocol 33 (docs/relay-protocol-design.md 4.9): a message the
+        // server sends `to` reliably, for their relay too - in every datagram
+        // to each of them from the first that carries it until the
+        // recipient's acknowledgement reaches that datagram's tick (any
+        // datagram it applied from there on carried the message).  Left out
+        // of a datagram (the budget, a notice), its carry starts again.
+        void push_message(const std::vector<uint32_t>& to, const std::string& bytes) {
+            const relay_event e = relay_event_of(bytes, recipes_);
+            for (const uint32_t r: to) recipients_[r].events.push_back(pending_event{e, std::nullopt});
+        }
+        size_t pending_messages(uint32_t recipient) const {
+            const auto it = recipients_.find(recipient);
+            return it == recipients_.end() ? 0 : it->second.events.size();
+        }
 
         // What the world applied at `tick`.  A tick at or behind the newest
         // already held replaces the ring from there (the server never
@@ -196,6 +215,8 @@ namespace bmmo::session {
             r.acked = tick;
             r.carried.clear();
             r.notice_gap = 0;
+            for (auto& p: r.events) p.since.reset();
+            r.recipes.clear();
         }
         void acknowledge(uint32_t recipient, uint32_t tick) {
             const auto it = recipients_.find(recipient);
@@ -203,7 +224,19 @@ namespace bmmo::session {
             it->second.heard = true;
             if (static_cast<int32_t>(tick - it->second.acked) <= 0) return;
             if (!ticks_.empty() && static_cast<int32_t>(tick - newest_tick()) > 0) tick = newest_tick();
-            it->second.acked = tick;
+            auto& r = it->second;
+            r.acked = tick;
+            const auto delivered = [tick](const std::optional<uint32_t>& since) {
+                return since && static_cast<int32_t>(tick - *since) >= 0;
+            };
+            r.events.erase(std::remove_if(r.events.begin(), r.events.end(),
+                                          [&](const pending_event& p) { return delivered(p.since); }),
+                           r.events.end());
+            for (auto at = r.recipes.begin(); at != r.recipes.end();) {
+                if (!delivered(at->second)) { ++at; continue; }
+                r.known.insert(at->first);
+                at = r.recipes.erase(at);
+            }
         }
         // A leaver: as recipient, and its camera bases (a member that comes
         // back starts with an inline camera).
@@ -275,10 +308,12 @@ namespace bmmo::session {
                 r.next_notice = newest_tick() + r.notice_gap;
                 datagram notice;
                 notice.from = ticks_.front().tick - 1;
+                for (auto& p: r.events) p.since.reset();
+                for (auto& [id, since]: r.recipes) since.reset();
                 return {notice};
             }
             r.notice_gap = 0;
-            const size_t fixed = kRelayDatagramHeader + kHeldCountBytes;
+            const size_t fixed = kRelayDatagramHeader + kHeldCountBytes + kEventCountBytes;
             std::vector<datagram> out;
             std::vector<size_t> used;
             const auto open = [&] {
@@ -313,17 +348,28 @@ namespace bmmo::session {
                     out.back().held.push_back(records[k]);
                 }
             }
+            carry_events(r, out, used, budget, open);
             if (out.empty()) open();
             return out;
         }
 
     private:
+        struct pending_event {
+            relay_event event;
+            std::optional<uint32_t> since;   // the tick of the first datagram of its current carry
+        };
         struct tick_entry {
             uint32_t tick = 0;
             std::vector<applied_input> applied;
             std::vector<uint8_t> headings;   // one per applied frame
         };
         struct recipient_state {
+            // Protocol 33: the messages still to deliver, oldest first; the
+            // recipes it may lack, each with the tick of the first datagram of
+            // its current carry; the recipes it holds.
+            std::vector<pending_event> events;
+            std::map<uint8_t, std::optional<uint32_t>> recipes;
+            std::set<uint8_t> known;
             uint32_t acked = 0;
             uint32_t notice_gap = 0, next_notice = 0;   // past the history: the header-only notices' backoff
             bool heard = false;                         // an uplink datagram (acknowledge) since the last build
@@ -399,6 +445,58 @@ namespace bmmo::session {
             for (size_t i = 0; i < entry.headings.size(); ++i)
                 if (entry.headings[i] == kHeadingInline) carried.emplace(first + static_cast<uint32_t>(i), newest_tick());
         }
+        // The events section: the pending messages, oldest first, with the
+        // recipes their Physicalizes need and the recipient may lack, into
+        // the first datagram with room, else one of its own; what one packet
+        // cannot hold waits (its carry starts again when it goes).
+        template <class Open>
+        void carry_events(recipient_state& r, std::vector<datagram>& out, std::vector<size_t>& used, size_t budget,
+                          Open&& open) {
+            if (r.events.empty()) return;
+            const uint32_t tick = newest_tick();
+            std::set<uint8_t> needed;
+            for (const auto& p: r.events)
+                if (relay_compact_at(p.event, tick) && p.event.kind == static_cast<uint8_t>(event_type::Physicalize)
+                        && !r.known.count(p.event.recipe))
+                    needed.insert(p.event.recipe);
+            size_t recipes = 0;
+            for (const uint8_t id: needed) recipes += 1 + recipes_.size(id);
+            std::set<std::string> poses;
+            size_t section = recipes;
+            size_t fit = 0;
+            const size_t room = budget - (kRelayDatagramHeader + kHeldCountBytes + kEventCountBytes);
+            for (const auto& p: r.events) {
+                size_t bytes = relay_event_bytes(p.event, tick);
+                if (relay_compact_at(p.event, tick) && p.event.kind == static_cast<uint8_t>(event_type::Physicalize)
+                        && poses.insert(p.event.pose()).second)
+                    bytes += kRelayPoseBytes;
+                if (section + bytes > room || fit == 255) break;
+                section += bytes;
+                ++fit;
+            }
+            size_t at = 0;
+            while (at < out.size() && used[at] + section > budget) ++at;
+            if (at == out.size()) {
+                open();
+                at = out.size() - 1;
+            }
+            used[at] += section;
+            auto& d = out[at];
+            for (const uint8_t id: needed) {
+                d.recipes.emplace_back(id, recipes_.recipe(id));
+                auto& since = r.recipes[id];
+                if (!since) since = tick;
+            }
+            for (size_t i = 0; i < r.events.size(); ++i) {
+                auto& p = r.events[i];
+                if (i >= fit) {
+                    p.since.reset();
+                    continue;
+                }
+                d.events.push_back(p.event);
+                if (!p.since) p.since = tick;
+            }
+        }
         // Held ticks need no run: a record names its own tick.
         void rebuild_held() {
             held_.clear();
@@ -413,6 +511,7 @@ namespace bmmo::session {
         std::map<uint32_t, std::vector<held_entry>> held_;
         std::map<uint32_t, recipient_state> recipients_;
         std::map<uint32_t, camera_bases> bases_;   // per player, the codes' bases
+        recipe_numbering recipes_;                 // protocol 33: the session's recipes
     };
 
     // ------------------------------------------------------------ client
