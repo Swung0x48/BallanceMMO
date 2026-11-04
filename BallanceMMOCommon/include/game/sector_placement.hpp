@@ -10,11 +10,13 @@
 // retail Virtools SDK and Ballanced.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -389,6 +391,23 @@ namespace bmmo::game {
         // was before the call (every row put back, every object the call made
         // destroyed), and the host must not anchor.
         std::string apply(CKContext* context, const placement_hooks& hooks = {});
+        // Step SPL (the user's decision of 2026-11-04: the retail anchor places
+        // over rendered frames behind a progress bar): `apply` in three parts,
+        // in its order and with its all-or-nothing undo.  `begin` runs steps
+        // 1-3 (no job when there is nothing to copy); each `step` runs the
+        // plan's next actions (a copy, a share row's rewrite) until `budget`
+        // has passed, at least one copy; `finish` checks the placed table and
+        // keeps the copies.  A refusal in any part undoes everything the job
+        // made and ends it; `abandon` undoes a job the host gives up between
+        // two steps.  `apply` is begin, step until none is left, finish.
+        std::string begin(CKContext* context, const placement_hooks& hooks = {});
+        std::string step(CKContext* context, std::chrono::steady_clock::duration budget);
+        std::string finish(CKContext* context);
+        void abandon(CKContext* context, const std::string& why);
+        bool in_progress() const { return job_.has_value(); }
+        bool steps_left() const { return job_ && job_->next < job_->plan.actions.size(); }
+        size_t copies_planned() const { return job_ ? job_->plan.copies() : copies_.size(); }
+        size_t copies_done() const { return job_ ? job_->records.size() : copies_.size(); }
         // The signature of the PH table as it stands (design 2.2); every host
         // calls it at every anchor, placement on or off.  0 with `error` set
         // when the table cannot be read.
@@ -413,7 +432,27 @@ namespace bmmo::game {
         int release(CKContext* context);
 
     private:
+        // An apply between its parts: the plan, where it stands, what it has
+        // written and made (the ids each finished action created; nothing
+        // else, so a rendered frame between two steps can make objects the
+        // undo leaves alone).
+        struct job_state {
+            session::placement_plan plan;
+            size_t next = 0;
+            std::string same_pose, rewritten;
+            CK_ID builder = 0;   // the chosen Object Copy block (its dependency words)
+            CK_ID scene = 0;
+            int fail_at_row = -1;
+            std::set<CK_ID> made;
+            std::vector<row_record> written;
+            std::vector<copy_record> records;
+            size_t renamed_longest = 0;
+        };
+        // Puts the job's rows back, destroys what it made (and `pending`, the
+        // ids an unfinished action made), logs and returns why; the job ends.
+        std::string undo(CKContext* context, const std::string& why, const std::set<CK_ID>& pending = {});
         void line(const std::string& text) { lines_.push_back(text); }
+        std::optional<job_state> job_;
         std::vector<copy_record> copies_;
         std::vector<row_record> rows_;
         std::vector<std::string> lines_;
@@ -451,6 +490,7 @@ namespace bmmo::game {
         using namespace placement_detail;
         lines_.clear();
         if (!context) return 0;
+        if (job_) undo(context, "released between two placement steps");
         int restored = 0, destroyed = 0;
         if (CKDataArray* ph = ph_array(context)) {
             for (auto it = rows_.rbegin(); it != rows_.rend(); ++it) {
@@ -503,10 +543,47 @@ namespace bmmo::game {
     }
 
     inline std::string sector_placement::apply(CKContext* context, const placement_hooks& hooks) {
+        if (std::string refused = begin(context, hooks); !refused.empty()) return refused;
+        while (steps_left())
+            if (std::string refused = step(context, std::chrono::steady_clock::duration::max()); !refused.empty())
+                return refused;
+        return job_ ? finish(context) : std::string();
+    }
+
+    inline std::string sector_placement::undo(CKContext* context, const std::string& why, const std::set<CK_ID>& pending) {
+        using namespace placement_detail;
+        job_state& job = *job_;
+        if (CKDataArray* ph = ph_array(context))
+            for (auto it = job.written.rbegin(); it != job.written.rend(); ++it)
+                ph->SetElementObject(it->row, 3, context->GetObject(it->source));
+        std::set<CK_ID> mine = job.made;
+        mine.insert(pending.begin(), pending.end());
+        std::vector<CK_ID> made;
+        for (CK_ID id: mine)
+            if (context->GetObject(id)) made.push_back(id);
+        if (!made.empty()) {
+            CKDependencies none;
+            context->DestroyObjects(made.data(), static_cast<int>(made.size()), 0, &none);
+        }
+        size_t left = 0;
+        for (CK_ID id: made) left += context->GetObject(id) ? 1 : 0;
+        const std::string text = why + " (undone: " + std::to_string(job.written.size()) + " PH row(s) put back, "
+                               + std::to_string(made.size()) + " object(s) destroyed, " + std::to_string(left) + " left)";
+        line("REFUSED: " + text);
+        job_.reset();
+        return text;
+    }
+
+    inline void sector_placement::abandon(CKContext* context, const std::string& why) {
+        if (job_ && context) undo(context, why);
+    }
+
+    inline std::string sector_placement::begin(CKContext* context, const placement_hooks& hooks) {
         using namespace placement_detail;
         using kind = session::placement_action::kind;
         lines_.clear();
         if (!context) return "no context";
+        if (job_) return "a placement is already in progress";
         if (!copies_.empty())
             return "this process already holds " + std::to_string(copies_.size()) + " placement copies (release them first)";
 
@@ -546,7 +623,6 @@ namespace bmmo::game {
                  + (b.out_target.empty() ? "(nothing)" : b.out_target));
             if (b.chosen) chosen = b.block;
         }
-        CKDependencies* deps = builder_copy_dependencies(chosen);
         {
             const std::string words = describe_copy_dependencies(chosen);
             size_t from = 0;
@@ -592,41 +668,49 @@ namespace bmmo::game {
         line(std::string("step 3: no hot source (bodies ") + (hooks.has_body ? "checked" : "NOT checked: no hook")
              + ", force controllers " + (hooks.force_exists ? "checked" : "NOT checked: no hook") + ")");
 
-        // Steps 4-10, undone as a whole on any refusal (step 11): every row
-        // written is put back, every object created since `before_all` is
+        // Steps 4-10 (`step`), undone as a whole on any refusal (step 11, `undo`):
+        // every row written is put back, every object the job created is
         // destroyed (with notification, so groups, scenes, the attribute
         // lists and the managers forget them).
-        const std::set<CK_ID> before_all = all_object_ids(context);
-        std::vector<row_record> written;
-        std::vector<copy_record> records;
-        const auto undo = [&](const std::string& why) -> std::string {
-            for (auto it = written.rbegin(); it != written.rend(); ++it)
-                ph->SetElementObject(it->row, 3, context->GetObject(it->source));
-            std::vector<CK_ID> made;
-            for (CK_ID id: all_object_ids(context))
-                if (!before_all.count(id)) made.push_back(id);
-            if (!made.empty()) {
-                CKDependencies none;
-                context->DestroyObjects(made.data(), static_cast<int>(made.size()), 0, &none);
-            }
-            size_t left = 0;
-            for (CK_ID id: all_object_ids(context)) left += before_all.count(id) ? 0 : 1;
-            const std::string text = why + " (undone: " + std::to_string(written.size()) + " PH row(s) put back, "
-                                   + std::to_string(made.size()) + " object(s) destroyed, " + std::to_string(left) + " left)";
-            line("REFUSED: " + text);
-            return text;
-        };
+        job_state& job = job_.emplace();
+        job.plan = plan;
+        job.same_pose = same_pose;
+        job.rewritten = rewritten;
+        job.builder = chosen ? chosen->GetID() : 0;
+        job.scene = scene->GetID();
+        job.fail_at_row = hooks.fail_at_row;
+        return {};
+    }
+
+    inline std::string sector_placement::step(CKContext* context, std::chrono::steady_clock::duration budget) {
+        using namespace placement_detail;
+        using kind = session::placement_action::kind;
+        if (!job_) return "no placement in progress";
+        if (!context) return "no context";
+        job_state& job = *job_;
+        CKDataArray* ph = ph_array(context);
+        if (!ph) return undo(context, "PH is gone between two placement steps");
+        auto* scene = CKScene::Cast(context->GetObject(job.scene));
+        if (!scene || context->GetCurrentScene() != scene) return undo(context, "the scene changed between two placement steps");
+        CKBehavior* chosen = CKBehavior::Cast(context->GetObject(job.builder));
+        CKDependencies* deps = builder_copy_dependencies(chosen);
         CKAttributeManager* am = context->GetAttributeManager();
         CKParameterManager* pm = context->GetParameterManager();
-        size_t renamed_longest = 0;
-        for (const session::placement_action& a: plan.actions) {
+        std::vector<row_record>& written = job.written;
+        std::vector<copy_record>& records = job.records;
+        size_t& renamed_longest = job.renamed_longest;
+        const auto started = std::chrono::steady_clock::now();
+        bool copied = false;
+        while (job.next < job.plan.actions.size()) {
+            if (copied && std::chrono::steady_clock::now() - started >= budget) break;
+            const session::placement_action& a = job.plan.actions[job.next++];
             const std::string at = "row " + std::to_string(a.row) + ": ";
             if (a.what == kind::share && a.name != a.source) {
                 // Step 10 for a share row whose holder is a copy (L1 row 38).
                 CKObject* holder = nullptr;
                 for (const copy_record& r: records)
                     if (r.name == a.name) holder = context->GetObject(r.root);
-                if (!holder) return undo(at + "the holder copy " + a.name + " does not exist");
+                if (!holder) return undo(context, at + "the holder copy " + a.name + " does not exist");
                 CKObject* now = ph->GetElementObject(a.row, 3);
                 written.push_back({a.row, now ? now->GetID() : 0, name_of(now)});
                 ph->SetElementObject(a.row, 3, holder);
@@ -662,7 +746,12 @@ namespace bmmo::game {
                 const XObjectArray& copied = context->CopyObjects(sources, deps, CK_OBJECTCREATION_DYNAMIC, nullptr);
                 for (int i = 0; i < copied.Size(); ++i) hc.push_back(CK3dEntity::Cast(context->GetObject(copied[i])));
             }
-            const auto refuse = [&](const std::string& why) { return undo(at + why); };
+            const auto refuse = [&](const std::string& why) {
+                std::set<CK_ID> pending;
+                for (CK_ID id: all_object_ids(context))
+                    if (!before.count(id)) pending.insert(id);
+                return undo(context, at + why, pending);
+            };
 
             // Step 5: check, then rename every copied entity.
             if (hc.size() != h.size())
@@ -687,7 +776,7 @@ namespace bmmo::game {
                         return refuse("the copy made the 3D entity " + name_of(o) + ", which is not a copy of the hierarchy");
                 }
             }
-            if (hooks.fail_at_row == a.row) return refuse("test hook: step 5 refuses at this row (--placement-fail-at)");
+            if (job.fail_at_row == a.row) return refuse("test hook: step 5 refuses at this row (--placement-fail-at)");
             // The limit: kPlacementMaxName (the wire's and the bridge's).
             constexpr size_t kMaxEntityName = kPlacementMaxName;
             for (size_t i = 0; i < h.size(); ++i) {
@@ -823,29 +912,44 @@ namespace bmmo::game {
                  + r.census + ", groups " + (r.groups.empty() ? "-" : r.groups) + ", attributes "
                  + (r.attributes.empty() ? "-" : r.attributes) + (skipped ? ", " + std::to_string(skipped)
                  + " DONOTCOPY attribute(s) not set" : ""));
+            for (const auto& [id, cid]: r.objects) job.made.insert(id);
             records.push_back(std::move(r));
+            copied = true;
         }
+        return {};
+    }
 
+    inline std::string sector_placement::finish(CKContext* context) {
+        using namespace placement_detail;
+        using kind = session::placement_action::kind;
+        if (!job_) return "no placement in progress";
+        if (!context) return "no context";
+        if (steps_left()) return undo(context, "finished with " + std::to_string(job_->plan.actions.size() - job_->next)
+                                               + " placement action(s) left");
+        const session::placement_plan& plan = job_->plan;
         // The table the plan promised (design 2.2 "Idempotence"): every row
         // names its action's object now.
         {
             std::vector<session::placement_row> now;
-            if (const std::string e = read_placement_rows(context, now); !e.empty()) return undo("PH after the copies: " + e);
+            if (const std::string e = read_placement_rows(context, now); !e.empty()) return undo(context, "PH after the copies: " + e);
             for (size_t i = 0; i < now.size() && i < plan.actions.size(); ++i)
                 if (plan.actions[i].what != kind::none && now[i].object != plan.actions[i].name)
-                    return undo("row " + std::to_string(now[i].row) + " names " + now[i].object + " after the copies, the plan "
+                    return undo(context, "row " + std::to_string(now[i].row) + " names " + now[i].object + " after the copies, the plan "
                                 + plan.actions[i].name);
             const session::placement_plan again = session::plan_placements(now, kPlacementMaxName);
             if (again.copies() != 0 || again.rewrites() != 0 || !again.error.empty())
-                return undo("the placed table re-plans to " + std::to_string(again.copies()) + " copies, "
+                return undo(context, "the placed table re-plans to " + std::to_string(again.copies()) + " copies, "
                             + std::to_string(again.rewrites()) + " rewrites" + (again.error.empty() ? "" : " (" + again.error + ")"));
         }
-        copies_ = std::move(records);
-        rows_ = std::move(written);
-        summary();
+        const size_t shares = plan.shares(), rewrites = plan.rewrites(), renamed_longest = job_->renamed_longest;
+        line("same-pose rows: " + (job_->same_pose.empty() ? std::string("-") : job_->same_pose));
+        line("rewritten share rows: " + (job_->rewritten.empty() ? std::string("-") : job_->rewritten));
+        copies_ = std::move(job_->records);
+        rows_ = std::move(job_->written);
+        job_.reset();
         char text[160];
         std::snprintf(text, sizeof(text), "placement: %zu copies, %zu shared (%zu rewritten), longest copied name %zu, signature %016llx",
-                      copies_.size(), plan.shares(), plan.rewrites(), renamed_longest,
+                      copies_.size(), shares, rewrites, renamed_longest,
                       static_cast<unsigned long long>(signature(context)));
         line(text);
         return {};
@@ -915,20 +1019,34 @@ namespace bmmo::game {
     // placement_active) every PH row gets its own object, all or nothing;
     // otherwise the option-off policy.  The signature of the table as it then
     // stands is computed either way.  False (with `error`): the host must not
-    // anchor.
+    // anchor.  Step SPL: in two parts for a host that runs the copies itself
+    // (the retail anchor, a slice per rendered frame): `placement_start`
+    // begins the apply (or runs the option-off policy), the host calls
+    // placement.step until none is left (a refusal there ends the job and is
+    // handed to `placement_finish` as `step_refused`), `placement_finish`
+    // keeps the copies, logs the apply's lines and computes the signature.
     template <class Backend>
-    bool place_at_anchor(sector_placement& placement, CKContext* context, const Backend& backend, bool active,
-                         int fail_at_row, const placement_log& log, uint64_t& signature, std::string& error) {
+    bool placement_start(sector_placement& placement, CKContext* context, const Backend& backend, bool active,
+                         int fail_at_row, const placement_log& log, std::string& error) {
+        if (!active) return prepare_unplaced(placement, context, log, error);
+        std::set<std::string> bodies;   // read by the hooks inside begin only
+        const std::string refused = placement.begin(context, placement_hooks_for(backend, bodies, fail_at_row));
+        if (refused.empty()) return true;
+        placement_detail::log_lines(log, placement.describe());
+        error = "sector placement refused: " + refused;
+        return false;
+    }
+
+    inline bool placement_finish(sector_placement& placement, CKContext* context, bool active, const std::string& step_refused,
+                                 const placement_log& log, uint64_t& signature, std::string& error) {
         if (active) {
-            std::set<std::string> bodies;
-            const std::string refused = placement.apply(context, placement_hooks_for(backend, bodies, fail_at_row));
+            const std::string refused = !step_refused.empty() ? step_refused
+                                      : placement.in_progress() ? placement.finish(context) : std::string();
             placement_detail::log_lines(log, placement.describe());
             if (!refused.empty()) {
                 error = "sector placement refused: " + refused;
                 return false;
             }
-        } else if (!prepare_unplaced(placement, context, log, error)) {
-            return false;
         }
         std::string signature_error;
         signature = placement.signature(context, &signature_error);
@@ -937,6 +1055,16 @@ namespace bmmo::game {
                       static_cast<unsigned long long>(signature), active ? "on" : "off", placement.copies().size());
         if (log) log(std::string(text) + (signature_error.empty() ? "" : " - the PH table is unreadable: " + signature_error));
         return true;
+    }
+
+    template <class Backend>
+    bool place_at_anchor(sector_placement& placement, CKContext* context, const Backend& backend, bool active,
+                         int fail_at_row, const placement_log& log, uint64_t& signature, std::string& error) {
+        if (!placement_start(placement, context, backend, active, fail_at_row, log, error)) return false;
+        std::string refused;
+        while (refused.empty() && placement.steps_left())
+            refused = placement.step(context, std::chrono::steady_clock::duration::max());
+        return placement_finish(placement, context, active, refused, log, signature, error);
     }
 
     // The release of the copies a host's placement made (design 2.3 step 11's

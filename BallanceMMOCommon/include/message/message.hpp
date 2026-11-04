@@ -112,6 +112,9 @@ namespace bmmo {
         SessionStartAt,
         SessionStartStatus,
         LoginAcceptedV4,
+        // Protocol 32 (step SPL): the server's world boot, by phase, to the
+        // room's members before their SessionStart.
+        SessionBootStatus,
     };
 
     template<typename T, opcode C = None>

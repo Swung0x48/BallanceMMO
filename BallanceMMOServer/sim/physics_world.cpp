@@ -114,6 +114,7 @@ namespace bmmo::sim {
     }
 
     bool physics_world::boot(std::string& error) {
+        if (options_.progress) options_.progress(bmmo::session::boot_phase::booting_game);
         engine_options eo;
         eo.game_root = options_.game_root;
         eo.map_file = options_.map_file;   // step CMAP
@@ -160,6 +161,7 @@ namespace bmmo::sim {
         }
         bmmo::physics::drain_event_log(engine_->physics());  // install the listener
         if (options_.before_level_load) options_.before_level_load(engine_->context());   // SimTool only (step S7)
+        if (options_.progress) options_.progress(bmmo::session::boot_phase::entering_level);
         engine_->request_level(options_.level);
         int waited = 0;
         while (!gameplay_ingame_active(engine_->context())) {
@@ -198,6 +200,7 @@ namespace bmmo::sim {
         CKContext* context = engine_->context();
         CKIpionManager* manager = engine_->physics();
         if (options_.before_anchor) options_.before_anchor(context);   // SimTool only (step S7)
+        if (options_.progress) options_.progress(bmmo::session::boot_phase::preparing_world);
         // FULL step H1X: the paper hull compiled from the template body before
         // anything can physicalize a paper ball (game/hull_template.hpp).
         // A hull that does not hold the template's build fails the anchor (the

@@ -7542,6 +7542,44 @@ shared file, no wire or journal change, the core unchanged):
   stays late by the slew; pre-existing, absent from the non-blocking arm,
   removed with the blocking arm at LGD.
 
+**As built (step SPL, 2026-11-04): the session start shows every wait.**
+The user's decisions of 2026-11-04 (no unexplained wait; the server's boot
+shown now, prewarming later; the placement split over frames with a
+progress bar, not made faster; the order "preparation -> 3-2-1 -> sync and
+start", the countdown local to each client, option B). Protocol 32:
+- **The server's boot.** `world_options::progress` reports each boot phase
+  as it begins (`physics_world::boot`: the game, the level request;
+  `anchor`: the counters, the placement, the players), the runner's
+  `on_boot_progress` reaches the server, which sends `SessionBootStatus`
+  (session, level, `boot_phase`; reliable) to the members. The retail host
+  takes it before any SessionStart (`core_host_offer` without the latch;
+  `core_booting` lets a failed boot's SessionEnd through to take the panel
+  down) and shows the panel from the first one, in the game's own ImGui
+  frame (`core_host_panel_frame`, OnProcess): "The server is starting the
+  game / loading the level / placing the mechanisms", the time since the
+  first, the room's members. The start barrier is 20 s (was 8).
+- **The order.** The level restarts (or reloads, SP9) at the SessionStart;
+  "Restarting the level" with its time. At the anchor, after the counters'
+  restore, `placement_start` begins the placement and the world freezes
+  (`core_host_freeze`, host phase `anchoring`); each rendered frame
+  (`core_host_prepare_frame` from `core_host_hold_frame`) runs one
+  `sector_placement::step` of 10 ms (at least one copy) behind "Placing the
+  mechanisms n/N"; after the last copy `core_host_anchor_finish` (the
+  placement kept, the hash, the filter, the selection, the rewires, the
+  report), then the 3-2-1 in the panel with the chat lines and sounds
+  (`core_host_countdown`), "Go!", then `core_host_anchor_ready`
+  (`core.anchor`, SessionReady) and the hold as before. A failure in the
+  frozen frames ends the session in the next OnProcess (`end_next_process`,
+  finding 1); a session that ends between two slices undoes the placement
+  whole (`sector_placement::abandon`). The blocking arm places in one frame
+  and has no countdown.
+- **The placement in parts** (`game/sector_placement.hpp`): `begin` (steps
+  1-3), `step(budget)`, `finish` (the placed table's check), `abandon`; the
+  undo destroys only the ids the job's own actions made. `apply` is the
+  three in one call (the server's world, the headless client, SimTool), and
+  SimTool's `--list-placement` checks the parts against it (one copy per
+  step, an abandoned first copy).
+
 **As built (step BEAMF, 2026-11-01): the own beam's stamp is the fresh body
 on retail too.** The user's Q-R6-BEAM (a) (decision 49 item 4), pulled
 forward from R6B: `session_client_core::beam_remakes_body()`

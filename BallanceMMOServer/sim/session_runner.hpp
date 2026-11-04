@@ -218,11 +218,17 @@ namespace bmmo::sim {
     // report SessionReady after SessionStart went out, before the ones that
     // stayed silent are dropped and the rest start without them.  The server
     // checks the deadline from its own main loop rather than from a tick: a
-    // session whose members never answered has no ticks at all.
-    inline constexpr std::chrono::seconds kStartBarrierTimeout{8};
+    // session whose members never answered has no ticks at all.  Protocol 32
+    // (step SPL): 20 s, not 8 - a client now restarts its level, places the
+    // mechanisms over rendered frames and counts down 3-2-1 before its
+    // SessionReady (a level reload no longer overlaps the countdown).
+    inline constexpr std::chrono::seconds kStartBarrierTimeout{20};
 
     struct session_callbacks {
         std::function<void(const world_ready_info&)> on_world_ready;
+        // Runner thread (protocol 32, step SPL): a boot phase of a session's
+        // world has begun (before its on_world_ready).
+        std::function<void(uint32_t session, bmmo::session::boot_phase phase)> on_boot_progress;
         std::function<void(const session_snapshot&)> on_snapshot;
         // Simulation thread (step A3): a requested resync state, after the
         // step of its tick; and a request whose base - 1 the world had

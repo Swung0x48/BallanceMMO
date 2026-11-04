@@ -498,7 +498,7 @@ namespace {
         void arm_if_idle(std::chrono::steady_clock::time_point now) {
             if (armed) return;
             armed = true;
-            deadline = now + std::chrono::seconds(8);   // sim kStartBarrierTimeout
+            deadline = now + std::chrono::seconds(20);   // sim kStartBarrierTimeout (protocol 32)
         }
     };
 }
@@ -508,7 +508,7 @@ TEST(StartBarrierArming, AJoinWhileTheBarrierIsPendingDoesNotExtendIt) {
     const std::chrono::steady_clock::time_point first(std::chrono::seconds(1000));
     barrier.arm_if_idle(first);
     const auto armed_deadline = barrier.deadline;
-    for (int i = 1; i <= 8; ++i) barrier.arm_if_idle(first + std::chrono::seconds(i));
+    for (int i = 1; i <= 20; ++i) barrier.arm_if_idle(first + std::chrono::seconds(i));
     EXPECT_EQ(barrier.deadline, armed_deadline);
     EXPECT_TRUE(barrier.armed);
 }
@@ -518,9 +518,9 @@ TEST(StartBarrierArming, ADisarmedBarrierIsArmedAgainForTheNextJoin) {
     const std::chrono::steady_clock::time_point first(std::chrono::seconds(1000));
     barrier.arm_if_idle(first);
     barrier.armed = false;   // check_start_barriers() dropped the silent members
-    const auto later = first + std::chrono::seconds(20);
+    const auto later = first + std::chrono::seconds(30);
     barrier.arm_if_idle(later);
-    EXPECT_EQ(barrier.deadline, later + std::chrono::seconds(8));
+    EXPECT_EQ(barrier.deadline, later + std::chrono::seconds(20));
 }
 
 // ---------------------------------------------------------------------

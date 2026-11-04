@@ -467,9 +467,40 @@ namespace bmmo::sim {
                     holds_after ? "yes" : "no", static_cast<unsigned long long>(after_release),
                     after_release == off ? "unplaced" : "DIFFERS", again.empty() ? "ok" : again.c_str(),
                     static_cast<unsigned long long>(reapplied), reapplied == on ? "same" : "DIFFERS", release_ok ? "PASS" : "FAIL");
+        // Step SPL: the retail anchor's parts.  A job abandoned after its first
+        // copy leaves the world as it was; the parts with no budget (one copy
+        // per step, as a slow retail frame runs them; share rows after the
+        // last copy take one more) make the same table.
+        bool parts_ok = false;
+        {
+            const size_t copies = placement.copies().size();
+            placement.release(context);
+            std::string begun = placement.begin(context, hooks);
+            const std::string stepped = begun.empty() && placement.steps_left() ? placement.step(context, {}) : std::string();
+            const size_t first = placement.copies_done();
+            placement.abandon(context, "the parts check abandons its job");
+            const bool abandoned_same = compare_placement_inventory(before, capture_placement_inventory(context), "abandon");
+            const uint64_t after_abandon = placement.signature(context);
+            begun = placement.begin(context, hooks);
+            size_t steps = 0;
+            std::string refused;
+            while (begun.empty() && refused.empty() && placement.steps_left()) {
+                refused = placement.step(context, {});
+                ++steps;
+            }
+            const std::string finished = begun.empty() && refused.empty() ? placement.finish(context) : std::string("not run");
+            const uint64_t parts = placement.signature(context);
+            parts_ok = stepped.empty() && first == 1 && abandoned_same && after_abandon == off && begun.empty()
+                    && refused.empty() && finished.empty() && (steps == copies || steps == copies + 1) && placement.copies().size() == copies && parts == on;
+            std::printf("parts check: first step %zu copy, abandoned: inventory %s, signature %016llx (%s); %zu steps "
+                        "for %zu copies, finish %s, signature %016llx (%s): %s\n", first, abandoned_same ? "equal" : "DIFFERS",
+                        static_cast<unsigned long long>(after_abandon), after_abandon == off ? "unplaced" : "DIFFERS", steps,
+                        copies, finished.empty() ? "ok" : finished.c_str(), static_cast<unsigned long long>(parts),
+                        parts == on ? "same" : "DIFFERS", parts_ok ? "PASS" : "FAIL");
+        }
         std::fflush(stdout);
         // Step H2: the option-off policy and the scene refusal on the re-applied world.
         const bool policy_ok = !policy_check || (again.empty() && list_placement_policy_check(context, hooks, placement, before, off, on));
-        return duplicates || !release_ok || !policy_ok ? 3 : 0;
+        return duplicates || !release_ok || !parts_ok || !policy_ok ? 3 : 0;
     }
 }

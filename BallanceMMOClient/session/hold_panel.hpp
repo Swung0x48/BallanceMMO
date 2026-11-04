@@ -12,7 +12,15 @@
 // countdown and a progress bar; every member with a check mark once it has
 // confirmed (AHNP: the grey previous-state and keys lines removed, the user's
 // mockup v2, .local-tools/work/AHN/imgui_wait_mockup_v2.svg). English only;
-// gone at the start (nothing draws it outside the hold).
+// gone at the start.
+//
+// Step SPL (the user, 2026-11-04: no unexplained wait at the session start):
+// the panel's stages, in their order - the server booting its world (each
+// boot phase the server reports, with the time since the first), the level
+// restarting or reloading here, the mechanisms placed (n/N, one slice per
+// rendered frame), the 3-2-1 countdown, then the hold above.  The first two
+// are drawn in the game's own ImGui frame (OnProcess), the rest in the frozen
+// hold's (core_host_hold_frame).
 //
 // Display only: every decision stays the core's.  The panel reads what the
 // host is told - the core's start-handshake notices (hooks.notice), the
@@ -24,6 +32,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -37,6 +46,7 @@ namespace bmmo::retail {
         using clock_type = std::chrono::steady_clock;
 
         enum class mark : uint8_t { pending, confirmed, refused };
+        enum class stage : uint8_t { none, server_boot, restarting, placing, countdown, holding };
         struct member {
             std::string name;
             bool own = false;
@@ -51,8 +61,50 @@ namespace bmmo::retail {
             members_ = std::move(members);
         }
 
+        stage current() const { return stage_; }
+        bool visible() const { return stage_ != stage::none; }
+        void hide() { stage_ = stage::none; }
+        clock_type::time_point stage_since() const { return since_; }
+
+        // A SessionBootStatus: the server's world boot entered `phase`
+        // (session::boot_phase); the members are the room's.  The time shown
+        // counts from the first.
+        void boot(int level, uint8_t phase, std::vector<member> members, clock_type::time_point now) {
+            if (stage_ != stage::server_boot) {
+                *this = hold_panel{};
+                enter(stage::server_boot, now);
+                boot_from_ = now;
+            }
+            level_ = level;
+            members_ = std::move(members);
+            boot_phase_ = phase;
+            phase_since_ = now;
+        }
+
+        // The SessionStart came: the level restarts (or reloads) here.
+        void restarting(bool reload, clock_type::time_point now) {
+            enter(stage::restarting, now);
+            reload_ = reload;
+        }
+
+        // The anchor's placement: `done` of `total` copies made.
+        void placing(size_t done, size_t total, clock_type::time_point now) {
+            if (stage_ != stage::placing) enter(stage::placing, now);
+            placed_ = done;
+            to_place_ = total;
+        }
+
+        // The 3-2-1 lead-in, frozen, from `from` to `until` (its own times: a
+        // start-handshake notice of another member's SessionReady may come
+        // meanwhile and sets the line the hold shows next).
+        void countdown(clock_type::time_point from, clock_type::time_point until) {
+            enter(stage::countdown, from);
+            countdown_until_ = until;
+        }
+
         // The anchor: the hold begins with the anchor's own line.
         void armed(int level, const std::string& line, clock_type::time_point now) {
+            enter(stage::holding, now);
             level_ = level;
             line_ = {};
             set_line(line, now);
@@ -127,6 +179,17 @@ namespace bmmo::retail {
             clock_type::time_point from{}, instant{};
         };
 
+        void enter(stage next, clock_type::time_point now) {
+            stage_ = next;
+            since_ = now;
+        }
+
+        // A bar for a wait of unknown length: it fills towards the end of its
+        // share as the wait goes on (half of it in `half` seconds).
+        static float creeping(double seconds, double half) {
+            return static_cast<float>(1.0 - std::pow(0.5, std::max(0.0, seconds) / half));
+        }
+
         static bool starts_with(const std::string& text, const char* prefix) {
             return text.rfind(prefix, 0) == 0;
         }
@@ -169,6 +232,11 @@ namespace bmmo::retail {
             line_ = next;
         }
 
+        stage stage_ = stage::none;
+        clock_type::time_point since_{}, boot_from_{}, phase_since_{}, countdown_until_{};
+        uint8_t boot_phase_ = 0;
+        bool reload_ = false;
+        size_t placed_ = 0, to_place_ = 0;
         int level_ = 0;
         std::vector<member> members_;
         state_line line_;
@@ -204,7 +272,8 @@ namespace bmmo::retail {
         // The title band holds the name and the level only (AHNP: the user found "Level N · M players · ping X ms"
         // too crowded there); the member list shows the players, and the ping sits small at the panel's foot.
         char header[32];
-        std::snprintf(header, sizeof(header), "Level %d", level_);
+        if (level_ > 0) std::snprintf(header, sizeof(header), "Level %d", level_);
+        else std::snprintf(header, sizeof(header), "Physics session");
         char ping[32];
         std::snprintf(ping, sizeof(ping), "ping %d ms", ping_ms);
         // Measured before Begin, in the unscaled font: every width is multiplied by the panel's font scale.
@@ -215,7 +284,40 @@ namespace bmmo::retail {
         float fraction = 0.0f;
         std::string line;
         char ms[32] = "";
-        if (line_.countdown) {
+        // The number at the right: a countdown in ms, the seconds a wait has
+        // lasted, or the 3-2-1; its widest value keeps the panel's width.
+        const char* widest = "0000 ms";
+        const auto seconds_since = [now](clock_type::time_point t) {
+            return std::chrono::duration<double>(now - t).count();
+        };
+        if (stage_ == stage::server_boot) {
+            static constexpr const char* kPhases[] = {"The server is starting the game", "The server is loading the level",
+                                                      "The server is placing the mechanisms"};
+            const size_t phase = std::min<size_t>(boot_phase_, 2);
+            line = kPhases[phase];
+            fraction = (static_cast<float>(phase) + creeping(seconds_since(phase_since_), 1.5)) / 3.0f;
+            std::snprintf(ms, sizeof(ms), "%.1f s", seconds_since(boot_from_));
+            widest = "00.0 s";
+        } else if (stage_ == stage::restarting) {
+            line = reload_ ? "Reloading the level" : "Restarting the level";
+            fraction = creeping(seconds_since(since_), reload_ ? 2.0 : 0.5);
+            std::snprintf(ms, sizeof(ms), "%.1f s", seconds_since(since_));
+            widest = "00.0 s";
+        } else if (stage_ == stage::placing) {
+            char counts[64];
+            std::snprintf(counts, sizeof(counts), "Placing the mechanisms %zu/%zu", placed_, to_place_);
+            line = counts;
+            fraction = to_place_ ? static_cast<float>(placed_) / static_cast<float>(to_place_) : 1.0f;
+            std::snprintf(ms, sizeof(ms), "%.1f s", seconds_since(since_));
+            widest = "00.0 s";
+        } else if (stage_ == stage::countdown) {
+            const double left = std::max(0.0, std::chrono::duration<double>(countdown_until_ - now).count());
+            const double span = std::chrono::duration<double>(countdown_until_ - since_).count();
+            fraction = span > 0.0 ? static_cast<float>(1.0 - left / span) : 1.0f;
+            line = "Get ready - the session starts in";
+            std::snprintf(ms, sizeof(ms), "%d", static_cast<int>(std::ceil(left)));
+            widest = "0";
+        } else if (line_.countdown) {
             const double left_ms = std::max(0.0, std::chrono::duration<double, std::milli>(line_.instant - now).count());
             const double span_ms = std::chrono::duration<double, std::milli>(line_.instant - line_.from).count();
             fraction = span_ms > 0.0 ? static_cast<float>(1.0 - left_ms / span_ms) : 1.0f;
@@ -232,8 +334,8 @@ namespace bmmo::retail {
             line = line_.text == "Waiting for the other players to confirm the start" ? line_.text + counts : line_.text;
         }
         const float line_w = measure(line.c_str());
-        // The countdown's widest value keeps the panel from changing width as it counts down.
-        const float ms_w = line_.countdown ? measure("0000 ms") : 0.0f;
+        const bool right_number = ms[0] != '\0';
+        const float ms_w = right_number ? measure(widest) : 0.0f;
 
         const float mark_w = ImGui::GetFontSize() * font_scale;
         const float spacing = ImGui::GetStyle().ItemSpacing.x;
@@ -241,7 +343,7 @@ namespace bmmo::retail {
         for (const auto& m: members_)
             member_w = std::max(member_w, mark_w + spacing + measure((m.name + (m.own ? " (you)" : "")).c_str()));
 
-        float need = std::max(name_w + gap + header_w, line_w + (line_.countdown ? gap + ms_w : 0.0f));
+        float need = std::max(name_w + gap + header_w, line_w + (right_number ? gap + ms_w : 0.0f));
         need = std::max(need, members_.size() > 1 ? 2.0f * member_w + gap : member_w);
         const float width = std::clamp(need + 2.0f * pad, 480.0f * scale, std::max(480.0f * scale, io.DisplaySize.x * 0.92f));
         const float content = width - 2.0f * pad;
@@ -279,7 +381,7 @@ namespace bmmo::retail {
 
             // The current state line, its live countdown at the right, and the progress bar.
             ImGui::PushTextWrapPos(right);
-            if (line_.countdown && line_w + gap + ms_w <= content) {
+            if (right_number && line_w + gap + ms_w <= content) {
                 ImGui::TextColored(text, "%s", line.c_str());
                 ImGui::SameLine(right - ImGui::CalcTextSize(ms).x);
                 ImGui::TextColored(amber, "%s", ms);
@@ -287,7 +389,7 @@ namespace bmmo::retail {
                 ImGui::PushStyleColor(ImGuiCol_Text, text);
                 ImGui::TextWrapped("%s", line.c_str());
                 ImGui::PopStyleColor();
-                if (line_.countdown) {
+                if (right_number) {
                     // A line too long for one row (a postponement's): the number under it, at the right.
                     ImGui::SetCursorPosX(right - ImGui::CalcTextSize(ms).x);
                     ImGui::TextColored(amber, "%s", ms);

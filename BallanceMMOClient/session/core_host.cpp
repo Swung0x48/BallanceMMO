@@ -525,7 +525,9 @@ namespace {
         // counting_down / restarting / running, the core's own phase
         // inside it - and what the countdown, the restart and the frame
         // keep.
-        enum class phase_type { idle, counting_down, restarting, running };
+        // Step SPL: anchoring - the anchor's frozen preparation (the placement
+        // over rendered frames, the 3-2-1) between the restart and running.
+        enum class phase_type { idle, counting_down, restarting, anchoring, running };
         phase_type phase = phase_type::idle;
         uint32_t session = 0;
         // FULL step RTDF (decision 66): the room the session runs in (its
@@ -964,10 +966,39 @@ namespace {
         bool drain_frozen = false, fence_waiting = false, drain_next_process = false;
         uint64_t deferred = 0;
         std::string last;
+        // Step SPL: the anchor's preparation inside the freeze, before the
+        // core's anchor - the placement a slice per rendered frame, then the
+        // 3-2-1 - and a failure in it, which ends the session in the next
+        // OnProcess (finding 1: no teardown inside the render).
+        enum class prep_stage { none, placing, countdown } prep = prep_stage::none;
+        clock_type::time_point prep_from{}, countdown_from{};
+        int countdown_said = 0;
+        uint64_t prep_frames = 0;
+        std::string end_next_process;
+        bs::anchor_report report;      // made after the placement, sent after the countdown
     };
     anchor_freeze_state anchor_freeze;
     bmmo::retail::hold_panel hold_panel_ui;
     constexpr double kHoldShotSeconds[] = {0.3, 1.0};
+    // Step SPL: a placement slice per rendered frame (at least one copy), how
+    // long the server's boot is shown with no new phase and no SessionStart
+    // (a server that died without its SessionEnd), and when each
+    // start stage's screenshot is due ('session hold shots DIR').
+    constexpr auto kPlacementSlice = std::chrono::milliseconds(10);
+    constexpr auto kBootPanelTimeout = std::chrono::seconds(180);
+    constexpr double kStageShotSeconds = 0.3;
+    // The start's timeline (step SPL): one log line per panel stage.
+    struct start_timeline_state {
+        clock_type::time_point first{}, since{};
+        std::string stage;
+    } start_timeline;
+    std::atomic<bool> core_booting{false};   // network thread: a boot status came, no SessionStart yet
+    clock_type::time_point boot_last{};
+    struct stage_shot_state {
+        int stage = -1;
+        bool taken = false;
+        int count = 0;
+    } stage_shot;
 
     // The hold's screenshots ('session hold shots DIR'): one post-sprite
     // callback, registered for the hold and removed at the thaw, dumps the
@@ -1074,6 +1105,7 @@ namespace {
         case bmmo::SessionMember: return "SessionMember";
         case bmmo::SessionStartAt: return "SessionStartAt";
         case bmmo::SessionStartStatus: return "SessionStartStatus";
+        case bmmo::SessionBootStatus: return "SessionBootStatus";
         default: return "?";
         }
     }
@@ -1101,6 +1133,7 @@ namespace {
         case bmmo::SessionMember: { bmmo::session_member_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionStartAt: { bmmo::session_start_at_msg m{}; return decode_bytes(bytes, m); }
         case bmmo::SessionStartStatus: { bmmo::session_start_status_msg m{}; return decode_bytes(bytes, m); }
+        case bmmo::SessionBootStatus: { bmmo::session_boot_status_msg m{}; return decode_bytes(bytes, m); }
         default: return false;
         }
     }
@@ -1224,6 +1257,7 @@ namespace {
         switch (phase) {
         case retail_host::phase_type::counting_down: return "counting_down";
         case retail_host::phase_type::restarting: return "restarting";
+        case retail_host::phase_type::anchoring: return "anchoring";
         case retail_host::phase_type::running: return "running";
         default: return "idle";
         }
@@ -2041,12 +2075,26 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
     if (raw->code == bmmo::SessionStart) {
         // Every session is the core's (FULL step LGD): latched here.
         core_latched.store(true);
+        core_booting.store(false);
+        mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
+        return true;
+    }
+    if (raw->code == bmmo::SessionBootStatus) {   // protocol 32, step SPL: before the SessionStart
+        core_booting.store(true);
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         return true;
     }
     switch (raw->code) {
     case bmmo::SessionEnd:
-        if (!core_latched.load()) { core_stray.fetch_add(1); return true; }
+        // Step SPL: a world boot that failed ends with a SessionEnd before any
+        // SessionStart; it takes the boot's panel down (core_host_drain).
+        if (!core_latched.load()) {
+            if (core_booting.exchange(false))
+                mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
+            else
+                core_stray.fetch_add(1);
+            return true;
+        }
         mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
         core_latched.store(false);
         return true;
@@ -2093,6 +2141,7 @@ bmmo::session::pacer_slew* BallanceMMOClient::core_host_pacer() {
 // leave or the countdown.
 void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& msg) {
     ++host.sessions_seen;
+    hold_panel_ui.hide();   // step SPL: the server's boot is over
     if (host.phase != retail_host::phase_type::idle) core_host_end_local("replaced by a new session");
     bs::session_capabilities caps;
     // FULL step R6B (core design 2.3 / 6.2 R6 row, "As built (step R6D)"
@@ -2168,7 +2217,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
             m.name = m.own ? get_display_nickname() : state ? state->name : std::format("player {}", player.id);
             members.push_back(std::move(m));
         }
-        hold_panel_ui.reset(0, std::move(members));
+        hold_panel_ui.reset(static_cast<int>(msg.map.level), std::move(members));
     }
     // The core's configuration (design 3.2 "core_config"): every field set
     // here.  The engine runs as the legacy path's does - its defaults, the
@@ -2282,14 +2331,15 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     core.level_requested();
     host.phase = retail_host::phase_type::counting_down;
     host.saw_ingame_inactive = false;
-    host.restart_deadline = clock_type::now() + std::chrono::seconds(PHYSICS_SESSION_COUNTDOWN + 5);
-    SendIngameMessage(std::format("Physics session {} starting: the level restarts on \"Go!\".", msg.session),
-                      bmmo::ansi::BrightGreen);
-    logger_->Info("Physics session %u (core): countdown started (players=%zu, join order %d, own id %u)", msg.session,
-                  msg.players.size(), core.own_join_order(), db_.get_client_id());
+    host.restart_deadline = clock_type::now() + std::chrono::seconds(5);
+    // Step SPL (the user, 2026-11-04): the level restarts now; the 3-2-1
+    // comes after the anchor's placement, frozen, right before SessionReady.
+    SendIngameMessage(std::format("Physics session {} starting: preparing the level.", msg.session), bmmo::ansi::BrightGreen);
+    logger_->Info("Physics session %u (core): starting, the level restarts now (players=%zu, join order %d, own id %u)",
+                  msg.session, msg.players.size(), core.own_join_order(), db_.get_client_id());
     // Step SP9 (design 2.5): a level that ran a session since its load is
-    // reloaded at the start of the countdown, overlapped with it; a clean one
-    // restarts on "Go!" as before.
+    // reloaded at the session's start; a clean one restarts at once (step
+    // SPL: there is no countdown before the restart any more).
     level_life.reloading = level_life.loaded = level_life.go_waiting = level_life.exit_seen = false;
     if (level_life.ran_union && level_life.enabled) {
         // The session's level (what the server simulates); only an original
@@ -2342,7 +2392,10 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
                           msg.session);
         }
     }
-    core_host_countdown();
+    hold_panel_ui.restarting(level_life.reloading, clock_type::now());
+    core_host_start_stage(level_life.reloading ? "reloading the level" : "restarting the level");
+    if (level_life.reloading) level_life.go_waiting = true;   // core_host_process restarts when the reload is ready
+    else core_host_go();
 }
 
 // Step SP9: the reload's level is ready for the restart - the map load seen
@@ -2529,12 +2582,12 @@ void BallanceMMOClient::core_host_pre_exit_level() {
                   room);
 }
 
-// "Go!": the countdown's last step, the restart (the legacy
-// physics_session_countdown's), with the restart deadline counted from here.
+// The restart (the legacy physics_session_countdown's last step), with the
+// restart deadline counted from here.  Step SPL: at the SessionStart (or when
+// its reload is ready); the 3-2-1 and "Go!" come after the placement
+// (core_host_countdown).
 void BallanceMMOClient::core_host_go() {
     const uint32_t session = host.session;
-    SendIngameMessage(std::format("Physics session {} - Go!", session), bmmo::ansi::BrightGreen);
-    play_countdown_sound(bmmo::countdown_type::Go);
     host.phase = retail_host::phase_type::restarting;
     host.saw_ingame_inactive = false;
     host.restart_deadline = clock_type::now() + std::chrono::seconds(20);
@@ -2543,34 +2596,24 @@ void BallanceMMOClient::core_host_go() {
     restart_current_level();
 }
 
-// The "3 - 2 - 1 - Go!" lead-in, then the restart (the legacy
-// physics_session_countdown, on this host's phase).
+// Step SPL (the user, 2026-11-04): the 3-2-1 after the placement, frozen,
+// polled from core_host_prepare_frame - a chat line and the countdown sound at
+// each second as before, "Go!" at the end - then core.anchor and the hold
+// (core_host_anchor_ready).
 void BallanceMMOClient::core_host_countdown() {
-    const uint32_t session = host.session;
-    const auto still_starting = [session] {
-        return host.session == session && host.phase == retail_host::phase_type::counting_down;
-    };
-    float delay = 0.0f;
-    for (int i = PHYSICS_SESSION_COUNTDOWN; i >= 1; --i) {
-        m_bml->AddTimer(delay, [this, session, i, still_starting] {
-            if (!still_starting()) return;
-            SendIngameMessage(std::format("Physics session {} - {}", session, i), bmmo::ansi::BrightGreen);
-            play_countdown_sound(bmmo::countdown_type::Countdown_1);
-        });
-        delay += 1000.0f;
+    auto& f = anchor_freeze;
+    const double elapsed = seconds_since(f.countdown_from);
+    while (f.countdown_said < PHYSICS_SESSION_COUNTDOWN && elapsed >= f.countdown_said) {
+        SendIngameMessage(std::format("Physics session {} - {}", host.session, PHYSICS_SESSION_COUNTDOWN - f.countdown_said),
+                          bmmo::ansi::BrightGreen);
+        play_countdown_sound(bmmo::countdown_type::Countdown_1);
+        ++f.countdown_said;
     }
-    m_bml->AddTimer(delay, [this, session, still_starting] {
-        if (!still_starting()) return;
-        // Step SP9: a reload still loading takes "Go!" when it is ready
-        // (core_host_process).
-        if (level_life.reloading) {
-            level_life.go_waiting = true;
-            logger_->Info("Physics session %u: \"Go!\" waits for the reload (%.3f s since the exit, map %s)", session,
-                          seconds_since(level_life.started), level_life.loaded ? "loaded" : "not loaded yet");
-            return;
-        }
-        core_host_go();
-    });
+    if (elapsed < PHYSICS_SESSION_COUNTDOWN) return;
+    SendIngameMessage(std::format("Physics session {} - Go!", host.session), bmmo::ansi::BrightGreen);
+    play_countdown_sound(bmmo::countdown_type::Go);
+    f.prep = anchor_freeze_state::prep_stage::none;
+    core_host_anchor_ready();
 }
 
 // Every OnProcess, after the legacy session's turn: the 'net' actions armed
@@ -2613,7 +2656,15 @@ void BallanceMMOClient::core_host_process() {
             logger_->Warn("Physics session %u: the anchor hold was thawed for a session message that did not end "
                           "the session", host.session);
             core_host_end_local("the anchor hold was interrupted");
+        } else if (host.phase == retail_host::phase_type::anchoring) {
+            core_host_end_local("the level's preparation was interrupted");
         }
+    }
+    // Step SPL: a failure in the frozen preparation, ended here (not inside the render).
+    if (!anchor_freeze.end_next_process.empty()) {
+        const std::string why = std::move(anchor_freeze.end_next_process);
+        anchor_freeze.end_next_process.clear();
+        core_host_end_local(why);
     }
     if (core_session_running()) {
         core_host_frame();
@@ -2665,6 +2716,10 @@ void BallanceMMOClient::core_host_process() {
         else if (clock_type::now() > host.restart_deadline) core_host_end_local("the level did not restart");
         return;
     }
+    case retail_host::phase_type::anchoring:
+        // Step SPL: only reachable when the freeze was lost under it.
+        core_host_end_local("the level's preparation was interrupted");
+        return;
     case retail_host::phase_type::running:
         // The core ended under a running host (a SessionEnd is handled in
         // the drain; this is the safety net).
@@ -2748,6 +2803,21 @@ void BallanceMMOClient::core_host_drain() {
             core_host_session_start(msg);
             continue;
         }
+        if (entry.code == bmmo::SessionBootStatus) {   // step SPL (protocol 32)
+            bmmo::session_boot_status_msg msg{};
+            if (decode_bytes(entry.bytes, msg)) core_host_boot_status(msg);
+            else if (host.undecodable++ < 8) logger_->Warn("Physics session core: a SessionBootStatus could not be decoded");
+            continue;
+        }
+        if (entry.code == bmmo::SessionEnd && hold_panel_ui.current() == bmmo::retail::hold_panel::stage::server_boot) {
+            bmmo::session_end_msg msg{};
+            decode_bytes(entry.bytes, msg);
+            logger_->Info("Physics session %u: ended before its SessionStart (%s); the boot's panel is taken down",
+                          msg.session, msg.reason.c_str());
+            hold_panel_ui.hide();
+            core_host_start_stage(nullptr);
+            continue;
+        }
         if (!host.core || host.core->session_phase() == bs::client_core_state::phase::idle) {
             ++host.discarded;
             if (!entry_decodes(entry.code, entry.bytes) && host.undecodable++ < 8)
@@ -2803,18 +2873,13 @@ void BallanceMMOClient::core_host_net_expire() {
 // its release), then rendered frames only.  No behaviour frame runs, nothing
 // is recorded or sent but the mailbox's answers (the core's acknowledgements),
 // so the frame after the release is the world's first step.
-void BallanceMMOClient::core_host_hold_arm() {
+void BallanceMMOClient::core_host_freeze() {
     auto& f = anchor_freeze;
-    CKContext* ctx = m_bml->GetCKContext();
+    if (f.active) return;
     CKTimeManager* tm = m_bml->GetTimeManager();
-    const auto t0 = clock_type::now();
-    f.at_anchor = hold_capture(ctx, physics_view_, host.script_ids, host.script_hooks, tm);
-    f.anchor_capture_ms = std::chrono::duration<double, std::milli>(clock_type::now() - t0).count();
-    f.frames = f.polls = 0;
-    f.gaps.clear();
-    f.next_shot = 0;
-    f.driver_released = f.driver_at_instant = false;
     f.drain_frozen = f.fence_waiting = f.drain_next_process = false;
+    f.prep = anchor_freeze_state::prep_stage::none;
+    f.end_next_process.clear();
     f.saved_limits = tm->GetLimitOptions();
     f.saved_beh_rate = tm->GetBehavioralRateLimit();
     tm->SetBehavioralRateLimit(0.001f);   // one behaviour loop per 1000 s
@@ -2827,22 +2892,43 @@ void BallanceMMOClient::core_host_hold_arm() {
         rc->ChangeCurrentRenderOptions(0, CK_RENDER_FOREGROUNDSPRITES);
         f.render_changed = true;
     }
-    if (!f.shot_dir.empty())
+    if (!f.shot_dir.empty() && !hold_shot.registered)
         if (CKRenderContext* rc = m_bml->GetRenderContext()) {
             hold_shot.pending = hold_shot.written = false;
             rc->AddPostSpriteRenderCallBack(hold_shot_cb, nullptr, FALSE);
             hold_shot.registered = true;
         }
     f.session = host.session;
-    f.armed_at = clock_type::now();
     f.active = true;
+    logger_->Info("Physics session %u: world frozen (the level rendered; limits %08lx -> %08lx, behavioural rate %.3f -> "
+                  "0.001; foreground sprites off)", host.session, static_cast<unsigned long>(f.saved_limits),
+                  static_cast<unsigned long>(tm->GetLimitOptions()), f.saved_beh_rate);
+}
+
+// The hold proper: core.anchor sent SessionReady.  Step SPL: the world is
+// frozen already by the preparation (core_host_freeze at the anchor); the
+// blocking anchor's caller has not frozen it.
+void BallanceMMOClient::core_host_hold_arm() {
+    auto& f = anchor_freeze;
+    CKContext* ctx = m_bml->GetCKContext();
+    CKTimeManager* tm = m_bml->GetTimeManager();
+    core_host_freeze();
+    f.prep = anchor_freeze_state::prep_stage::none;
+    const auto t0 = clock_type::now();
+    f.at_anchor = hold_capture(ctx, physics_view_, host.script_ids, host.script_hooks, tm);
+    f.anchor_capture_ms = std::chrono::duration<double, std::milli>(clock_type::now() - t0).count();
+    f.frames = f.polls = 0;
+    f.gaps.clear();
+    f.next_shot = 0;
+    f.driver_released = f.driver_at_instant = false;
+    f.armed_at = clock_type::now();
     ++f.holds;
     hold_panel_ui.armed(host.core ? static_cast<int>(host.core->config.level) : 0,
                         "level synchronized, waiting for the server.", f.armed_at);
+    core_host_start_stage("waiting for the server and the other players");
     logger_->Info("Physics session %u: anchor hold armed (non-blocking: the world frozen, the level rendered; limits "
-                  "%08lx -> %08lx, behavioural rate %.3f -> 0.001; foreground sprites off); anchor %s (captured in "
-                  "%.2f ms)", host.session, static_cast<unsigned long>(f.saved_limits),
-                  static_cast<unsigned long>(tm->GetLimitOptions()), f.saved_beh_rate, f.at_anchor.describe().c_str(),
+                  "%08lx, behavioural rate %.3f saved); anchor %s (captured in %.2f ms)", host.session,
+                  static_cast<unsigned long>(f.saved_limits), f.saved_beh_rate, f.at_anchor.describe().c_str(),
                   f.anchor_capture_ms);
 }
 
@@ -2853,6 +2939,8 @@ void BallanceMMOClient::core_host_hold_unfreeze(const char* why) {
     auto& f = anchor_freeze;
     if (!f.active) return;
     f.active = false;
+    f.prep = anchor_freeze_state::prep_stage::none;
+    hold_panel_ui.hide();
     CKTimeManager* tm = m_bml->GetTimeManager();
     tm->SetBehavioralRateLimit(f.saved_beh_rate);
     tm->ChangeLimitOptions(CK_RATE_NOP, static_cast<CK_FRAMERATE_LIMITS>(f.saved_limits & CK_BEHRATE_MASK));
@@ -2882,6 +2970,10 @@ void BallanceMMOClient::core_host_hold_unfreeze(const char* why) {
 void BallanceMMOClient::core_host_hold_frame() {
     auto& f = anchor_freeze;
     if (!f.active) return;
+    if (f.prep != anchor_freeze_state::prep_stage::none) {
+        core_host_prepare_frame();
+        return;
+    }
     const auto frame_start = clock_type::now();
     if (f.frames > 0) f.gaps.push_back(std::chrono::duration<double, std::milli>(frame_start - f.last_frame).count());
     f.last_frame = frame_start;
@@ -2995,6 +3087,7 @@ void BallanceMMOClient::core_host_hold_frame() {
         return;
     }
     core_host_hold_unfreeze("released");
+    core_host_start_stage(nullptr);
     const auto t0 = clock_type::now();
     const hold_digest now = hold_capture(m_bml->GetCKContext(), physics_view_, host.script_ids, host.script_hooks,
                                          m_bml->GetTimeManager());
@@ -3265,18 +3358,62 @@ void BallanceMMOClient::core_host_anchor() {
     // before the hash, the selection and every pass.  The core decides
     // (placement_active: the world option and the capability); the apply
     // with its hot-source hooks, the option-off release policy and the
-    // signature are the shared helper's (place_at_anchor, one copy for every
-    // host); a refusal ends the session here, as a failed hash does.
+    // signature are the shared helper's (placement_start / placement_finish,
+    // one copy for every host); a refusal ends the session, as a failed hash
+    // does.
     {
         const bmmo::physics::physics_view* view = &physics_view_;
         placement_host.active = core.placement_active();
         ++placement_host.anchors;
-        if (!bmmo::game::place_at_anchor(placement_host.placement, m_bml->GetCKContext(), view, placement_host.active, -1,
+        if (!bmmo::game::placement_start(placement_host.placement, m_bml->GetCKContext(), view, placement_host.active, -1,
                                          [this](const std::string& line) { logger_->Info("Physics session: %s", line.c_str()); },
-                                         placement_host.signature, error)) {
+                                         error)) {
             ++placement_host.refused;
             core_host_end_local(error);
             return;
+        }
+    }
+    // Step SPL (the user, 2026-11-04): with the non-blocking hold (the
+    // default) the world freezes here, the copies are made a slice per
+    // rendered frame behind the panel's progress bar, then the 3-2-1, and the
+    // rest of the anchor runs in the frozen frames (core_host_prepare_frame).
+    // The blocking hold ('session hold blocking', a control arm) places in
+    // this frame and has no countdown.
+    if (core.capabilities().nonblocking_hold) {
+        auto& f = anchor_freeze;
+        core_host_freeze();
+        host.phase = retail_host::phase_type::anchoring;
+        f.prep = anchor_freeze_state::prep_stage::placing;
+        f.prep_from = clock_type::now();
+        f.prep_frames = 0;
+        hold_panel_ui.placing(placement_host.placement.copies_done(), placement_host.placement.copies_planned(), f.prep_from);
+        core_host_start_stage("placing the mechanisms");
+        return;
+    }
+    std::string refused;
+    while (refused.empty() && placement_host.placement.steps_left())
+        refused = placement_host.placement.step(m_bml->GetCKContext(), std::chrono::steady_clock::duration::max());
+    if (const std::string trouble = core_host_anchor_finish(refused); !trouble.empty()) {
+        core_host_end_local(trouble);
+        return;
+    }
+    core_host_anchor_ready();
+}
+
+// Step SPL: the anchor after its placement - the placement kept (or its
+// refusal), the world hash, the collision filter, the selection and the
+// rewires, the report - in the anchor frame (blocking hold) or the frozen
+// frame the last copy was made in.  Returns what must end the session, or
+// nothing.
+std::string BallanceMMOClient::core_host_anchor_finish(const std::string& step_refused) {
+    auto& core = *host.core;
+    std::string error;
+    {
+        if (!bmmo::game::placement_finish(placement_host.placement, m_bml->GetCKContext(), placement_host.active, step_refused,
+                                          [this](const std::string& line) { logger_->Info("Physics session: %s", line.c_str()); },
+                                          placement_host.signature, error)) {
+            ++placement_host.refused;
+            return error;
         }
         placement_host.made = placement_host.placement.copies().size();
         // Copies in the level make it a level that ran a session even when
@@ -3287,10 +3424,7 @@ void BallanceMMOClient::core_host_anchor() {
         if (placement_host.made > 0) level_life.ran_union = true;
     }
     bmmo::physics::world_hash hash;
-    if (!physics_view_.capture(hash, error)) {
-        core_host_end_local("world hash failed: " + error);
-        return;
-    }
+    if (!physics_view_.capture(hash, error)) return "world hash failed: " + error;
     if (!physics_view_.install_player_collision_filter("P#", error))
         logger_->Warn("Physics session: player collision filter: %s", error.c_str());
     // The world stands still from here until the tick base arrives.
@@ -3328,10 +3462,7 @@ void BallanceMMOClient::core_host_anchor() {
     if (core.proximity_union_active()) {
         const bmmo::game::script_replay::selection sel = host.script_ids.empty()
             ? bmmo::game::session_script_selection(m_bml->GetCKContext(), trafo_host.on) : host.script_ids;
-        if (!proximity_rewire(m_bml->GetCKContext(), physics_view_, sel, core.mechanism_slots(), logger_, error)) {
-            core_host_end_local(error);
-            return;
-        }
+        if (!proximity_rewire(m_bml->GetCKContext(), physics_view_, sel, core.mechanism_slots(), logger_, error)) return error;
         probe_signature = proximity_host.signature;
     }
     // FULL step WFA: the force blocks outside the units and the trafo sets
@@ -3362,7 +3493,8 @@ void BallanceMMOClient::core_host_anchor() {
                       "%d force blocks, %d opaque: %s", st.scripts, st.active, st.satellites, st.blocks, st.parameters,
                       st.force_blocks, st.opaque, bmmo::game::script_replay::names(m_bml->GetCKContext(), host.script_ids).c_str());
     }
-    bs::anchor_report report;
+    bs::anchor_report& report = anchor_freeze.report;
+    report = {};
     report.hash = hash;
     report.physics_sha256 = physics_view_.dll_sha256();
     report.build_id = physics_view_.build_id();
@@ -3370,6 +3502,16 @@ void BallanceMMOClient::core_host_anchor() {
     report.placement = placement_host.signature;   // step SP10 (caps.placement)
     report.probes = probe_signature;               // step WG4 (0 with the bit clear)
     if (CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter")) parameters->GetElementValue(0, 1, &report.sector_cell);
+    return {};
+}
+
+// Step SPL: the anchor's SessionReady half - the host running, the anchor's
+// bodies logged, core.anchor (SessionReady, the journal, the hold armed) -
+// then the hold: the frozen one (the world frozen since the preparation) or
+// the blocking loop.
+void BallanceMMOClient::core_host_anchor_ready() {
+    auto& core = *host.core;
+    const bs::anchor_report report = anchor_freeze.report;
     host.phase = retail_host::phase_type::running;
     host.last_rebases = fixed_tick_.rebases();
     // Step SP9: the level ran a session from here on (the next countdown
@@ -3391,7 +3533,8 @@ void BallanceMMOClient::core_host_anchor() {
     host.event_hold.restart_count();
     core.anchor(report);
     logger_->Info("Physics session %u: anchored (hash %016llx surfaces %016llx), waiting for the tick assignment",
-                  core.session_id(), static_cast<unsigned long long>(hash.pose), static_cast<unsigned long long>(hash.surfaces));
+                  core.session_id(), static_cast<unsigned long long>(report.hash.pose),
+                  static_cast<unsigned long long>(report.hash.surfaces));
     SendIngameMessage("Physics session: level synchronized, waiting for the server.", bmmo::ansi::BrightGreen);
     // FULL step AHN: the non-blocking hold (the default): the world frozen
     // here and the hold polled from OnRender (core_host_hold_frame) while the
@@ -3400,6 +3543,7 @@ void BallanceMMOClient::core_host_anchor() {
         core_host_hold_arm();
         return;
     }
+    core_host_hold_unfreeze("the core holds no anchor");   // step SPL: the preparation's freeze, if any
     // The blocking hold (design 2.3; 'session hold blocking'): no behaviour frame runs, nothing is
     // recorded or sent, so the next frame is the world's first step.
     while (host.core && host.phase == retail_host::phase_type::running && host.core->holding()) {
@@ -3427,6 +3571,190 @@ void BallanceMMOClient::core_host_anchor() {
     // tick at the base is its step 9.
     core_manager_trace_due = false;   // step RT2: only this frame's after_rewinds arms the trace line
     host.core->pre_step();
+}
+
+// Step SPL: one rendered frame of the anchor's frozen preparation - the
+// mailbox polled once (a SessionStart or this session's SessionEnd thaws for
+// the next OnProcess, as in the hold), a slice of the placement (at least one
+// copy, kPlacementSlice), the rest of the anchor after the last copy, the
+// 3-2-1 and at its end core.anchor and the hold; then BML's message queue and
+// one ImGui frame with the panel.  A failure ends the session in the next
+// OnProcess (finding 1: no teardown inside the render).
+void BallanceMMOClient::core_host_prepare_frame() {
+    using prep_stage = anchor_freeze_state::prep_stage;
+    auto& f = anchor_freeze;
+    ++f.prep_frames;
+    core_host_net_expire();   // no OnProcess runs while frozen
+    f.drain_frozen = true;
+    core_host_drain();
+    f.drain_frozen = false;
+    const bool deferred = f.fence_waiting;
+    if (!deferred && (!f.active || !host.core || host.phase != retail_host::phase_type::anchoring)) return;   // ended meanwhile
+    std::string trouble;
+    if (!deferred && !connected()) trouble = "the connection was lost while the level was prepared";
+    if (!deferred && trouble.empty() && f.prep == prep_stage::placing) {
+        auto& placement = placement_host.placement;
+        std::string refused;
+        if (placement.steps_left()) refused = placement.step(m_bml->GetCKContext(), kPlacementSlice);
+        hold_panel_ui.placing(placement.copies_done(), placement.copies_planned(), clock_type::now());
+        if (!refused.empty() || !placement.steps_left()) {
+            const auto placed_at = clock_type::now();
+            trouble = core_host_anchor_finish(refused);
+            if (trouble.empty()) {
+                logger_->Info("Physics session %u: placement made in %.3f s over %llu rendered frame(s); the rest of the "
+                              "anchor took %.1f ms; the 3-2-1 begins", host.session, seconds_since(f.prep_from),
+                              static_cast<unsigned long long>(f.prep_frames), seconds_since(placed_at) * 1000.0);
+                f.prep = prep_stage::countdown;
+                f.countdown_from = clock_type::now();
+                f.countdown_said = 0;
+                hold_panel_ui.countdown(f.countdown_from, f.countdown_from + std::chrono::seconds(PHYSICS_SESSION_COUNTDOWN));
+                core_host_start_stage("counting down 3-2-1");
+            }
+        }
+    }
+    if (!deferred && trouble.empty() && f.prep == prep_stage::countdown) core_host_countdown();
+    {
+        std::lock_guard lk(ingame_msg_mtx_);
+        while (!ingame_msg_queue_.empty()) {
+            m_bml->SendIngameMessage(ingame_msg_queue_.front().c_str());
+            ingame_msg_queue_.pop();
+        }
+    }
+    {
+        // One ImGui frame in BML+'s context, as the hold's (core_host_hold_frame).
+        Bui::ImGuiContextScope scope;
+        if (ImGui::GetCurrentContext()) {
+            ImGui::NewFrame();
+            if (IMod* bml_mod = m_bml->FindMod("BML")) bml_mod->OnProcess();
+            if (!deferred && trouble.empty() && hold_panel_ui.visible())
+                hold_panel_ui.draw(clock_type::now(), connected() ? get_ping() : 0);
+            ImGui::Render();
+        }
+    }
+    core_host_stage_shot();
+    if (deferred) {
+        ++f.deferred;
+        f.fence_waiting = false;
+        f.drain_next_process = true;
+        logger_->Info("Physics session %u: the level's preparation: a SessionStart or this session's SessionEnd arrived "
+                      "%.3f s in; the world thawed and the next OnProcess handles it", f.session, seconds_since(f.prep_from));
+        core_host_hold_unfreeze("a session message waits for the next OnProcess");
+        return;
+    }
+    if (!trouble.empty()) {
+        logger_->Warn("Physics session %u: the level's preparation failed (%s); the session ends in the next OnProcess",
+                      f.session, trouble.c_str());
+        f.end_next_process = trouble;
+        core_host_hold_unfreeze("the preparation failed");
+    }
+}
+
+// Step SPL (protocol 32): a phase of the server's world boot began; the panel
+// shows it with the room's members until the SessionStart.
+void BallanceMMOClient::core_host_boot_status(const bmmo::session_boot_status_msg& msg) {
+    if (host.phase != retail_host::phase_type::idle) return;   // a session runs here: its panel stays
+    std::vector<bmmo::retail::hold_panel::member> members;
+    {
+        std::lock_guard lk(room_state_mtx_);
+        for (const auto& m: last_room_state_.members) {
+            bmmo::retail::hold_panel::member member;
+            member.own = m.id == db_.get_client_id();
+            member.name = member.own ? get_display_nickname() : m.name;
+            members.push_back(std::move(member));
+        }
+    }
+    boot_last = clock_type::now();
+    hold_panel_ui.boot(msg.level, msg.phase, std::move(members), boot_last);
+    static constexpr const char* kPhases[] = {"the server boots the game", "the server enters the level",
+                                              "the server prepares its world"};
+    core_host_start_stage(kPhases[std::min<size_t>(msg.phase, 2)]);
+}
+
+// Step SPL: the start's timeline in the log - one line per panel stage, what
+// the one before took, and the whole at the end (nullptr: the start is over,
+// released or abandoned).
+void BallanceMMOClient::core_host_start_stage(const char* name) {
+    auto& t = start_timeline;
+    const auto now = clock_type::now();
+    if (!t.stage.empty())
+        logger_->Info("Physics session start: '%s' took %.3f s", t.stage.c_str(),
+                      std::chrono::duration<double>(now - t.since).count());
+    if (!name) {
+        if (!t.stage.empty())
+            logger_->Info("Physics session start: %.3f s from the first stage to here",
+                          std::chrono::duration<double>(now - t.first).count());
+        t = {};
+        return;
+    }
+    if (t.stage.empty()) t.first = now;
+    logger_->Info("Physics session start: '%s' from +%.3f s", name, std::chrono::duration<double>(now - t.first).count());
+    t.stage = name;
+    t.since = now;
+}
+
+// Step SPL: OnProcess - the start panel in the game's own ImGui frame while
+// the world runs (the server's boot, the level's restart or reload); the
+// frozen stages draw in core_host_hold_frame.
+void BallanceMMOClient::core_host_panel_frame() {
+    using stage = bmmo::retail::hold_panel::stage;
+    if (anchor_freeze.active) return;
+    const auto now = clock_type::now();
+    bool in_room = false;
+    {
+        std::lock_guard lk(room_state_mtx_);
+        in_room = last_room_state_.own_room != 0;
+    }
+    if (hold_panel_ui.current() == stage::server_boot && (!connected() || !in_room || now - boot_last > kBootPanelTimeout)) {
+        logger_->Info("Physics session: the server's boot panel is taken down (%s)",
+                      !connected() ? "disconnected" : !in_room ? "not in a room any more" : "no word from the server in 180 s");
+        hold_panel_ui.hide();
+        core_host_start_stage(nullptr);
+    }
+    if (hold_panel_ui.current() == stage::restarting && host.phase != retail_host::phase_type::counting_down
+            && host.phase != retail_host::phase_type::restarting)
+        hold_panel_ui.hide();
+    const bool shown = hold_panel_ui.current() == stage::server_boot || hold_panel_ui.current() == stage::restarting;
+    if (shown) {
+        Bui::ImGuiContextScope scope;
+        if (ImGui::GetCurrentContext()) hold_panel_ui.draw(now, connected() ? get_ping() : 0);
+    }
+    core_host_stage_shot();
+    if (!shown && hold_shot.registered) {
+        if (CKRenderContext* rc = m_bml->GetRenderContext()) rc->RemovePostSpriteRenderCallBack(hold_shot_cb, nullptr);
+        hold_shot.registered = hold_shot.pending = false;
+    }
+}
+
+// Step SPL: 'session hold shots DIR' - one back-buffer dump per start stage,
+// kStageShotSeconds into it (the hold keeps its own, kHoldShotSeconds).
+void BallanceMMOClient::core_host_stage_shot() {
+    using stage = bmmo::retail::hold_panel::stage;
+    if (hold_shot.written) {
+        hold_shot.written = false;
+        logger_->Info("Physics session: start screenshot %s written", hold_shot.path.c_str());
+    }
+    const stage now_stage = hold_panel_ui.current();
+    if (anchor_freeze.shot_dir.empty() || now_stage == stage::none || now_stage == stage::holding) return;
+    if (static_cast<int>(now_stage) != stage_shot.stage) {
+        stage_shot.stage = static_cast<int>(now_stage);
+        stage_shot.taken = false;
+    }
+    if (stage_shot.taken || hold_shot.pending) return;
+    const double in_stage = seconds_since(hold_panel_ui.stage_since());
+    if (in_stage < kStageShotSeconds) return;
+    CKRenderContext* rc = m_bml->GetRenderContext();
+    if (!rc) return;
+    if (!hold_shot.registered) {
+        hold_shot.pending = hold_shot.written = false;
+        rc->AddPostSpriteRenderCallBack(hold_shot_cb, nullptr, FALSE);
+        hold_shot.registered = true;
+    }
+    static constexpr const char* kNames[] = {"none", "boot", "restart", "placing", "countdown", "hold"};
+    hold_shot.path = std::format("{}/start_{:02}_{}.bmp", anchor_freeze.shot_dir, ++stage_shot.count,
+                                 kNames[static_cast<size_t>(now_stage)]);
+    hold_shot.pending = true;
+    stage_shot.taken = true;
+    logger_->Info("Physics session: start screenshot %s due (%.3f s into the stage)", hold_shot.path.c_str(), in_stage);
 }
 
 // One OnProcess of a running core session (design 1.3, the retail loop): the
@@ -3585,6 +3913,16 @@ void BallanceMMOClient::core_host_frame() {
 void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     if (host.phase == retail_host::phase_type::idle) return;
     core_host_hold_unfreeze("the session ended");   // FULL step AHN: never left frozen
+    // Step SPL: a placement still being made (the session ended between two
+    // of its slices) is undone whole; the panel goes.
+    if (placement_host.placement.in_progress()) {
+        placement_host.placement.abandon(m_bml->GetCKContext(), "the session ended during the placement: " + reason);
+        bmmo::game::placement_detail::log_lines([this](const std::string& line) { logger_->Info("Physics session: %s", line.c_str()); },
+                                                placement_host.placement.describe());
+    }
+    anchor_freeze.end_next_process.clear();
+    hold_panel_ui.hide();
+    core_host_start_stage(nullptr);
     // Step SP9: a reload in progress is the session's no longer (the menus'
     // load goes on; the level it makes is a fresh one either way).
     if (level_life.reloading) {

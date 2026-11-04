@@ -348,6 +348,9 @@ namespace bmmo::sim {
             options.log = [this, session](const std::string& text) {
                 log("[session " + std::to_string(session) + "] " + text);
             };
+            options.progress = [this, session](bmmo::session::boot_phase phase) {
+                if (callbacks_.on_boot_progress) callbacks_.on_boot_progress(session, phase);
+            };
             std::string error;
             log("[session " + std::to_string(session) + "] booting level " + std::to_string(level) + " from "
                 + config_.game_root.string() + (map_file.empty() ? std::string() : " with the custom map " + map_file.string()));

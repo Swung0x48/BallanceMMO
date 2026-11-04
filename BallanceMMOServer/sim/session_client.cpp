@@ -1531,6 +1531,12 @@ namespace {
                 if (fill(msg)) logf("[server] %s", msg.text_content.c_str());
                 break;
             }
+            case bmmo::SessionBootStatus: {   // protocol 32, step SPL: logged only
+                bmmo::session_boot_status_msg msg;
+                if (fill(msg)) logf("session %u: the server's world boot of level %d is in phase %u", msg.session, msg.level,
+                                    static_cast<unsigned>(msg.phase));
+                break;
+            }
             default:
                 break;
             }

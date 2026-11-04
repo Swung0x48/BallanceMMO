@@ -244,7 +244,16 @@ namespace bmmo::session {
     //      the one reaching the newest tick; the base flag moved into the
     //      extension (an entry of 128 runs no longer reads as base-flagged).
     //      No journal version.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 31;
+    //  32  The session start shows every wait (step SPL, the user's decisions
+    //      of 2026-11-04): SessionBootStatus (a new opcode after
+    //      LoginAcceptedV4) tells the room's members which phase of the
+    //      server's world boot runs (boot_phase), from the room's start to
+    //      the SessionStart; the client restarts its level at the
+    //      SessionStart and counts down 3-2-1 after its own placement, before
+    //      its SessionReady, so the start barrier (kStartBarrierTimeout) is
+    //      20 s instead of 8.  No journal version: the journal records no
+    //      boot status.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 32;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -470,6 +479,13 @@ namespace bmmo::session {
         waiting_start = 1,    // waiting for members to confirm the start instant
         postponed = 2,        // the start instant moved (a member had not confirmed)
         refused = 3,          // a member was refused (it never confirmed)
+    };
+    // session_boot_status_msg::phase (protocol 32): the phase of the server's
+    // world boot that has just begun.
+    enum class boot_phase : uint8_t {
+        booting_game = 0,     // the engine and the game's composition, up to the main menu
+        entering_level = 1,   // the level requested through the menus, loaded, its counters recorded
+        preparing_world = 2,  // the anchor: the counters restored, the mechanisms placed, the players added
     };
 
     // Wire limits, mirroring entity/room.hpp's approach: hard caps so a

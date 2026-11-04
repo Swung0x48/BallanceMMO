@@ -550,6 +550,17 @@ private:
 	void core_host_drain();
 	void core_host_countdown();
 	void core_host_anchor();
+	// Step SPL: the anchor after its placement and its SessionReady half; the
+	// frozen preparation (placement slices, the 3-2-1); the server's boot
+	// statuses; the start panel outside the freeze, its timeline and shots.
+	std::string core_host_anchor_finish(const std::string& step_refused);
+	void core_host_anchor_ready();
+	void core_host_freeze();
+	void core_host_prepare_frame();
+	void core_host_boot_status(const bmmo::session_boot_status_msg& msg);
+	void core_host_panel_frame();
+	void core_host_start_stage(const char* name);
+	void core_host_stage_shot();
 	// FULL step AHN: the non-blocking anchor hold (session/core_host.cpp).
 	void core_host_hold_arm();
 	void core_host_hold_frame();

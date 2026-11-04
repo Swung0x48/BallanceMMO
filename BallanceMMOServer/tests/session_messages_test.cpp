@@ -188,7 +188,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(31u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(32u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -2048,6 +2048,31 @@ TEST(SessionStartHandshakeMsgs, RoundTrip) {
     // Distinct sizes on the wire (the harness proxy anchors a burst on one).
     EXPECT_NE(t.raw.str().size(), a.raw.str().size());
     EXPECT_NE(t.raw.str().size(), k.raw.str().size());
+}
+
+// Protocol 32 (step SPL): the server's world boot by phase, before the
+// SessionStart; an unknown phase or a cut message is refused.
+TEST(SessionMessages, BootStatusRoundTrips) {
+    bmmo::session_boot_status_msg msg;
+    msg.session = 9;
+    msg.level = 11;
+    msg.phase = static_cast<uint8_t>(bmmo::session::boot_phase::entering_level);
+    const auto parsed = round_trip(msg);
+    EXPECT_EQ(parsed.code, bmmo::SessionBootStatus);
+    EXPECT_EQ(parsed.session, 9u);
+    EXPECT_EQ(parsed.level, 11);
+    EXPECT_EQ(parsed.phase, static_cast<uint8_t>(bmmo::session::boot_phase::entering_level));
+    bmmo::session_boot_status_msg cut;
+    cut.session = 9;
+    cut.level = 11;
+    cut.phase = 2;
+    expect_rejects_every_truncation(cut);
+    bmmo::session_boot_status_msg unknown;
+    unknown.phase = 3;
+    ASSERT_TRUE(unknown.serialize());
+    bmmo::session_boot_status_msg read;
+    { const std::string b = unknown.raw.str(); read.raw.write(b.data(), static_cast<std::streamsize>(b.size())); }
+    EXPECT_FALSE(read.deserialize());
 }
 
 // The server's intake of an input datagram with piggybacked events (protocol
