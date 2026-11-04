@@ -122,6 +122,30 @@ none further than that from an exact quarter turn; zero rows only before the fir
   force, since the headless arena camera wanders up to 2e-5 off its first sample and the capture's server applied the
   unsnapped rows - a capture replay cannot agree with a live world that never existed, by construction.
 
+### 4.8 Leavers, stalled recipients and body-set snapshots (protocol 31, 2026-11-04)
+
+Found by the 20-player bandwidth runs (BW20, nftables meter on the server's port):
+
+- **A leaver's last frames.** The ring relayed only players present at the newest tick, so when a member left, its
+  frames still in flight (sent, not yet acknowledged) never reached anyone: every other client drove the leaver's ball
+  with a guess for those ticks and marked every later FINAL row UNCONFIRMED (LBF3's sticky rule; 19 of 20 clients).
+  Now every run of consecutive ticks after the recipient's acknowledgement is relayed, an entry may end before the
+  datagram's tick (`back`, in an entry extension: nruns 0, then flags, nruns, back; the base flag moved there too, so
+  an entry of 128 runs no longer reads as base-flagged), and a leaver's frames go until each recipient acknowledged
+  them. The ticks a leaver stays in the world after it left are still driven with its last relayed frame on every
+  side and not relayed (session_runner `leaving`); its ball is gone by then. Measured: the 20-player run with a member
+  leaving early has no UNCONFIRMED row and no relay hole but those; a 4-player run with a leave at 1800 is exact.
+- **Past the history.** A recipient whose acknowledgement is older than the history must resync whatever it holds
+  (its own frames were substituted for longer than any rewind reaches, the others' it lacks are gone), so it gets
+  header-only notices (from = oldest - 1) 1, 2, 4 .. 64 ticks apart instead of the whole history every tick; the first
+  one a live client receives starts its resync, a dead one costs a small datagram a second. Measured: 3 s downlink
+  and uplink blackouts each end in one resync, FINAL exact.
+- **Body-set snapshots.** With snapshots off the full snapshot of a body-set change is taken for its mechanism names
+  only, and only the level-reset guard still needs a name; it now goes only to a member without names yet. 20 players
+  with deaths and respawns: server upload 6-11.8 Mbps -> 3.0-4.4 Mbps.
+- The headless test client closes its connection when its run ends, before its wind-down (it used to linger ~2 s,
+  which looked like 20 stalled clients: a 7.9 Mbps burst at every run's end).
+
 ## 5. Interactions to handle
 
 - **Numbering and re-anchors.** The acknowledgement is in the recipient's numbering; a resync, rejoin or late join resets `acked` to the base (as `held_notice` does); the camera dictionary and the per-member base frames are re-sent after it.

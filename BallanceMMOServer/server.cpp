@@ -1410,9 +1410,10 @@ public:
         // held every frame behind it until the retransmit landed, and under
         // 10 % loss the corrections reached the clients past the rollback's
         // reach and were applied as pose writes.)
-        // Members only: a step already running when a member left still has
-        // its frame in `applied`, and a datagram about it after PlayerLeft
-        // would re-announce it in every client's journal.  Whole entries per
+        // Every player the world applied a frame for, a leaver included, until
+        // each recipient acknowledged it (protocol 31: its last frames used to
+        // stop at PlayerLeft and never reach anyone who had not yet
+        // acknowledged them).  Whole entries per
         // datagram of one packet's worth: an unreliable message split over
         // packets is lost whole when any of them is, and one past 16.5 KB
         // GameNetworkingSockets quietly sends reliable.
@@ -1451,7 +1452,7 @@ public:
             auto& n = s.notices[m];
             const uint8_t wait = wait_of(m);
             const std::optional<uint32_t> held_from = n.assigned ? std::optional<uint32_t>(n.epoch) : std::nullopt;
-            auto datagrams = s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, is_member, held_from);
+            auto datagrams = s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, held_from);
             for (size_t part = 0; part < datagrams.size(); ++part) {
                 auto& datagram = datagrams[part];
                 bmmo::session_remote_input_msg msg;
@@ -1465,7 +1466,7 @@ public:
                 msg.part = static_cast<uint8_t>(part);
                 msg.parts = static_cast<uint8_t>(datagrams.size());
                 for (auto& w: datagram.entries)
-                    msg.entries.push_back({w.player, std::move(w.frames), std::move(w.headings), w.base});
+                    msg.entries.push_back({w.player, std::move(w.frames), std::move(w.headings), w.base, w.back});
                 for (const auto& h: datagram.held) {
                     bmmo::session_remote_input_msg::held_record r;
                     r.back = static_cast<uint8_t>(tick - h.tick);

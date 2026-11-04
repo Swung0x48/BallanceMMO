@@ -123,12 +123,14 @@ namespace bmmo::session {
     // The session's applied frames for the last kRelayHistory ticks with
     // their heading codes, every player's camera bases, and what every
     // recipient acknowledged.  What a
-    // recipient gets: for every other member present at the newest tick, its
-    // frames for every tick after the recipient's acknowledgement (its
-    // trailing run of consecutive present ticks, so a member that joined
-    // since starts later), and its own substituted ticks within the notice
-    // depth (kHeldNoticeTicks).  A member absent at the newest tick (left)
-    // is not relayed.
+    // recipient gets: every other player's frames for every tick after the
+    // recipient's acknowledgement that the world applied one for, as one
+    // entry per run of consecutive ticks - a member that joined since starts
+    // later, and a leaver's last frames keep coming until the recipient
+    // acknowledges them (protocol 31: before, a player absent at the newest
+    // tick was dropped, and a leaver's frames still in flight never reached
+    // anyone) - and its own substituted ticks within the notice depth
+    // (kHeldNoticeTicks).
     class relay_ring {
     public:
         struct member_entry {
@@ -136,6 +138,7 @@ namespace bmmo::session {
             std::vector<input_frame> frames;   // ticks newest - frames.size() + 1 .. newest, oldest first
             std::vector<uint8_t> headings;     // one per frame
             std::optional<camera_bases::base> base;   // attached: the base in force at the first frame
+            uint8_t back = 0;                  // the entry ends this many ticks before the newest
         };
         // One substituted tick of a player: what the world applied there and
         // the tick that frame came from.
@@ -221,10 +224,11 @@ namespace bmmo::session {
             return out;
         }
 
-        // The wire size of an entry: player u32, nframes u8, nruns u8, an
+        // The wire size of an entry: player u32, nframes u8, nruns u8, the
+        // extension (flags, nruns, back) when it has a base or ends early, an
         // attached base, per run 4 B and an inline camera's rows.
         static size_t entry_bytes(const member_entry& e) {
-            size_t bytes = 4 + 1 + 1 + (e.base ? kCameraBaseBytes : 0);
+            size_t bytes = 4 + 1 + 1 + (e.base || e.back ? 2u + (e.back ? 1u : 0u) : 0u) + (e.base ? kCameraBaseBytes : 0);
             for (size_t i = 0; i < e.frames.size(); ++i)
                 if (i == 0 || !same_run(e, i - 1, i))
                     bytes += 4 + (e.headings[i] == kHeadingInline ? sizeof(camera_rows) : 0);
@@ -237,9 +241,7 @@ namespace bmmo::session {
 
         // The recipient's relay packed into datagrams of at most `budget`
         // bytes each, whole entries per datagram (every entry stands alone,
-        // so a split costs one header).  `keep` says which players are still
-        // members: a leaver the step still applied a frame for is not relayed
-        // after PlayerLeft.
+        // so a split costs one header).
         //
         // `from` is the recipient's acknowledgement.  When that is older than
         // the oldest tick kept, the recipient gets header-only notices with
@@ -258,8 +260,7 @@ namespace bmmo::session {
         // one datagram, a header-only one when there is nothing else: the
         // header carries the recipient's ack and held_total, which a solo
         // player and one with nothing substituted need too.
-        template <class Keep>
-        std::vector<datagram> build_datagrams(uint32_t recipient, size_t budget, const Keep& keep,
+        std::vector<datagram> build_datagrams(uint32_t recipient, size_t budget,
                                               std::optional<uint32_t> held_from = std::nullopt) {
             auto& r = recipients_[recipient];
             const uint32_t from = r.acked;
@@ -280,7 +281,7 @@ namespace bmmo::session {
                 out.back().from = from;
                 used.push_back(fixed);
             };
-            for (member_entry& entry: entries_after(from, recipient, keep)) {
+            for (member_entry& entry: entries_after(from, recipient)) {
                 carry_bases(r, entry);
                 const size_t bytes = entry_bytes(entry);
                 if (out.empty() || used.back() + bytes > budget) open();
@@ -333,33 +334,35 @@ namespace bmmo::session {
                 && e.headings[a] == e.headings[b] && (e.headings[a] != kHeadingInline || same_camera(x, y));
         }
 
-        // Every member's frames for the ticks after `from`: walk back from the
-        // newest tick while the ticks stay consecutive and the member present.
-        template <class Keep>
-        std::vector<member_entry> entries_after(uint32_t from, uint32_t recipient, const Keep& keep) {
+        // Every other player's frames for the ticks after `from`, one entry
+        // per run of consecutive ticks it has a frame at (a tick never
+        // stepped, or the player absent, ends a run), oldest first.
+        std::vector<member_entry> entries_after(uint32_t from, uint32_t recipient) {
             std::vector<member_entry> out;
-            if (ticks_.empty()) return out;
-            const tick_entry& newest = ticks_.back();
-            for (const auto& a: newest.applied) {
-                if (a.player == recipient || !keep(a.player)) continue;
-                std::vector<std::pair<const input_frame*, uint8_t>> run;
-                uint32_t expect = newest.tick;
-                for (auto it = ticks_.rbegin(); it != ticks_.rend() && static_cast<int32_t>(it->tick - from) > 0; ++it) {
-                    if (it->tick != expect) break;
-                    const auto found = std::find_if(it->applied.begin(), it->applied.end(),
-                                                    [&a](const applied_input& b) { return b.player == a.player; });
-                    if (found == it->applied.end()) break;
-                    run.emplace_back(&found->frame, it->headings[static_cast<size_t>(found - it->applied.begin())]);
-                    --expect;
+            std::map<uint32_t, size_t> open;   // player -> its entry in `out` while the run goes on
+            uint32_t previous = 0;
+            bool have_previous = false;
+            for (const auto& t: ticks_) {
+                if (static_cast<int32_t>(t.tick - from) <= 0) continue;
+                if (have_previous && t.tick != previous + 1) open.clear();
+                std::map<uint32_t, size_t> next;
+                for (size_t i = 0; i < t.applied.size(); ++i) {
+                    const uint32_t player = t.applied[i].player;
+                    if (player == recipient) continue;
+                    const auto it = open.find(player);
+                    size_t index = it != open.end() ? it->second : out.size();
+                    if (it == open.end()) {
+                        out.emplace_back();
+                        out.back().player = player;
+                    }
+                    out[index].frames.push_back(t.applied[i].frame);
+                    out[index].headings.push_back(t.headings[i]);
+                    out[index].back = static_cast<uint8_t>(newest_tick() - t.tick);
+                    next[player] = index;
                 }
-                if (run.empty()) continue;
-                member_entry entry;
-                entry.player = a.player;
-                for (auto it = run.rbegin(); it != run.rend(); ++it) {
-                    entry.frames.push_back(*it->first);
-                    entry.headings.push_back(it->second);
-                }
-                out.push_back(std::move(entry));
+                open = std::move(next);
+                previous = t.tick;
+                have_previous = true;
             }
             return out;
         }
@@ -371,14 +374,15 @@ namespace bmmo::session {
         // that tick it held a datagram built before it did, which carried
         // the base or no longer needed it.
         void carry_bases(recipient_state& r, member_entry& entry) {
-            const uint32_t first = newest_tick() - static_cast<uint32_t>(entry.frames.size()) + 1;
+            const uint32_t end = newest_tick() - entry.back;
+            const uint32_t first = end - static_cast<uint32_t>(entry.frames.size()) + 1;
             auto& carried = r.carried[entry.player];
             const auto coded = std::find_if(entry.headings.begin(), entry.headings.end(),
                                             [](uint8_t code) { return code != kHeadingNone; });
             const auto bases = bases_.find(entry.player);
             if (bases != bases_.end() && (coded == entry.headings.end() || *coded < 4)) {
                 const uint32_t tick = coded == entry.headings.end()
-                                    ? newest_tick() : first + static_cast<uint32_t>(coded - entry.headings.begin());
+                                    ? end : first + static_cast<uint32_t>(coded - entry.headings.begin());
                 if (const camera_bases::base* b = bases->second.at(tick)) {
                     const auto it = carried.find(b->since);
                     if (it == carried.end() || static_cast<int32_t>(r.acked - it->second) < 0) entry.base = *b;
