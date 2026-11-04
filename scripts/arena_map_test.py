@@ -1775,8 +1775,8 @@ def relay_start_hold(report, row, controls):
             rest = sorted(sample[2] for sample in selected
                           if last_effective is not None and sample[0] >= last_effective + 48)
         else:
-            bad = [sample for sample in excess if not any(start <= sample[0] < start + margin
-                   and sample[2] <= band + margin for start, margin in margins)]
+            bad = [sample for sample in excess if any(start <= sample[0] < start + margin
+                   and sample[2] > band + margin for start, margin in margins)]
             rest = sorted(sample[2] for sample in selected
                           if not any(start <= sample[0] < start + margin for start, margin in margins))
         p99 = rest[min(len(rest) - 1, int(.99 * len(rest)))] if rest else None
@@ -2406,8 +2406,11 @@ def criteria(report, case, controls):
                     row['own_after'], '/'.join(str(row['phases'][p]['relay_late']) for p in PHASES), resyncs,
                     row['subst_total'], row['subst_outside_event']))
         elif family == 'lead' and arm == 'A5UB' and row['index'] == 0:
+            spike = next(event for link in case['link_events'] for event in link['events']
+                         if event['client'] == row['index'] and event['kind'] == 'spike')
             add(who, 'spike client cut only inside the spike, not raised',
-                None if 'substituted_ticks' not in row else all(2100 <= tick <= 2168 for tick in row['substituted_ticks'])
+                None if 'substituted_ticks' not in row else all(spike['tick'] <= tick <= spike['t_off'] + 2
+                                                              for tick in row['substituted_ticks'])
                 and not row.get('leads') and (lead_none or sum(v or 0 for v in lead) == 0),
                 'subst runs %s; leads %s' % (row['subst_runs'], row.get('leads')))
         elif family == 'lead':

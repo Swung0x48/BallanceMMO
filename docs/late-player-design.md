@@ -3164,8 +3164,8 @@ A9h, A10 and A10x there are fewer or none):
 - in D, rollbacks per class within the control band, and input rewinds that
   name the late ball no more often than in the control;
 - relay lag, overall and per source player: one patience hold at the start
-  of an episode is allowed. Samples above the A0-off band's upper edge
-  may occur only in the episode's first M frames, each at most M above
+  of an episode is allowed. In the episode's first M frames, samples above
+  the A0-off band's upper edge may be at most M above
   that edge; use M2 = 10 instead when a minority of two or more of at least
   four members is late, as the quorum does (otherwise M = 4). In the rest
   of D, p99 must be no higher than both the A0-off band's upper edge and

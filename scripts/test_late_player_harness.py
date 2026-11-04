@@ -70,6 +70,44 @@ class ClockDiagnostics(unittest.TestCase):
         member['relay_samples'] = [[100, 126, 26, 11], [130, 156, 26, 11], [140, 162, 22, 11]]
         self.assertTrue(arena.relay_start_hold(report, member, [band, twin])[0]['ok'])
 
+    def test_rest_relay_uses_p99_not_single_sample_maximum(self):
+        import arena_map_test as arena
+        member = dict(index=0, id=10, relay_samples=[])
+        report = dict(arm='A5UB', lead_adjust='on', clients=[member, dict(index=1, id=11)],
+                      event_clients=[1], t_on=100, phases=dict(D=[100, 400]))
+        band = dict(arm='A0', lead_adjust='off', clients=[dict(member, relay_samples=[[100, 122, 22, 11]]),
+                                                               dict(index=1, id=11)])
+        twin = dict(band, arm='A5UB')
+        member['relay_samples'] = [[100, 126, 26, 11]] + [[tick, tick + 22, 22, 11] for tick in range(104, 400)]
+        member['relay_samples'][-1][2] = 24
+        self.assertTrue(all(result['ok'] for result in arena.relay_start_hold(report, member, [band, twin])))
+        member['relay_samples'][0][2] = 27
+        self.assertFalse(arena.relay_start_hold(report, member, [band, twin])[0]['ok'])
+        member['relay_samples'][0][2] = 26
+        for sample in member['relay_samples'][-4:]:
+            sample[2] = 23
+        self.assertFalse(arena.relay_start_hold(report, member, [band, twin])[0]['ok'])
+
+    def test_a5ub_spike_uses_delivered_span_plus_two(self):
+        import arena_map_test as arena
+        spike = arena.parse_event('0:2100:spike=300:dir=up:dur=1000')
+        member = dict(index=0, phases={phase: dict(lead_adj=0) for phase in arena.PHASES},
+                      snap_rb_in_event=0, received_in_event=0, subst_client=None, resync_bases=[],
+                      subst_runs=[], leads=[], substituted_ticks=[])
+        report = dict(arm='A5UB', family='lead', event_clients=[0], clients=[member],
+                      t_on=1500, t_off=1500, phases={})
+        case = dict(link_events=[dict(events=[spike.as_dict()])])
+        for tick, status in ((2099, 'fail'), (2100, 'pass'), (2188, 'pass'), (2189, 'fail')):
+            member['substituted_ticks'] = [tick]
+            result = next(row for row in arena.criteria(report, case, [])
+                          if row['criterion'].startswith('spike client'))
+            self.assertEqual(result['status'], status)
+        member['substituted_ticks'] = [2185]
+        member['leads'] = [dict(k=20)]
+        result = next(row for row in arena.criteria(report, case, [])
+                      if row['criterion'].startswith('spike client'))
+        self.assertEqual(result['status'], 'fail')
+
     def test_majority_relay_uses_last_raise_effective_tick(self):
         import arena_map_test as arena
         member = dict(index=0, id=10, span=[0, 300], relay_samples=[[100, 144, 44, 11], [248, 270, 22, 11]])
