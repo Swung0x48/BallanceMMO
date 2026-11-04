@@ -44,9 +44,14 @@ The physics deltas (physics_state.cpp:1094, kFixedDeltaMs, the time manager pinn
 ## 3. Changes per component
 
 ### 3.1 Server (VC1)
-- A `session_clock` (now(), sleep_until(virtual), to_real(duration)) owned by the server and the runner; the ~30
-  direct `steady_clock::now()` reads in server.cpp and session_runner.cpp go through it (inventory in the VC1 step's
-  notes). `physics.test_time_scale: S` in config.yml (test builds, BMMO_SERVER_TEST_FLAGS), validated 1..8.
+- A `session_clock` (now(site), sleep_until(virtual), to_real(duration)) owned by the server and the runner, in the
+  form the client core already has (`platform.now(clock_site)`, clock_site.hpp): the ~30 direct
+  `steady_clock::now()` reads in server.cpp and session_runner.cpp go through it, each with a site of its own (a
+  server site enum; inventory in the VC1 step's notes). Why the server has none today: the client's single clock
+  entry came from the headless client's capture replay (E0, 2026-10-22: every clock read is an input, recorded and
+  handed back by site), and the server never needed one - its journal records each tick's outcome (the frames
+  applied, the substitutions, the events' ticks), so a replay re-simulates without re-running any timing decision.
+  The same entry makes the server's timing decisions recordable later (optional, not in this plan). `physics.test_time_scale: S` in config.yml (test builds, BMMO_SERVER_TEST_FLAGS), validated 1..8.
 - The main loop's pass rate becomes 66*S passes a real second (SERVER_RECEIVE_INTERVAL / S), so the assignment and
   start copies (counted in passes, min gap 5 ms virtual) and the 768-pass ping keep their virtual spans.
 - `test_clock_skew` composes on top of the virtual clock (its deadlines are in virtual time).
