@@ -318,6 +318,9 @@ namespace bmmo::session {
         };
 
         uint32_t own_id_ = 0;
+        // A retired tick drove a remote with a guess: every later FINAL row is
+        // UNCONFIRMED until the world is replaced (step LBF3).
+        bool final_unconfirmed_ = false;
         phase phase_ = phase::idle;
         uint32_t session_ = 0;
         // SessionStart::snapshot_interval (the server clamps a longer one to

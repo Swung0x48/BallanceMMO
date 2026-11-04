@@ -18,8 +18,10 @@ FAMILIES = {'A0H': 'control', 'A3M': 'minority', 'A5U2': 'lead', 'A5U3': 'lead',
             'A5S2': 'lead', 'A5UB': 'lead', 'A5P': 'pair', 'A9H8': 'clock', 'A9H20': 'clock',
             'A10': 'shared', 'A10X': 'shared', 'A11': 'burst', 'A11U': 'lead'}
 
-def recipe(name, variant='lane', hold='300'):
+def recipe(name, variant='lane', hold=None):
     name = name.upper()
+    if hold is None:
+        hold = '496' if name == 'A6' else '300'
     if name not in ARMS:
         raise ValueError('unknown scenario ' + name)
     n = {'A5U2': 2, 'A5S2': 2, 'A5U3': 3, 'A11': 1, 'A11U': 1}.get(name, 4)

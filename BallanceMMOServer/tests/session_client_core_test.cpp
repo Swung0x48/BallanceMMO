@@ -4078,6 +4078,96 @@ namespace {
         return life;
     }
 
+    TEST(SessionClientCoreJournal, RetiredRemotePredictionTaintsLaterRows) {
+        for (const bool relayed: {false, true}) {
+            journal_dir dir("final_remote");
+            flow_fake fake;
+            fake.path = dir.path / "client.bmjr";
+            session_client_core core(fake.make_flow(true), session_capabilities{});
+            bmmo::session::core_config config;
+            config.journal_final_checkpoints = true;
+            config.journal_checkpoint_ticks = 2;
+            ASSERT_FALSE(core.begin(start_message(9, 3), config).refused);
+            core.journal().open(bmmo::physics::world_hash{}, "build-x", "Me");
+            auto& state = state_of(core);
+            state.rollback_.thresholds().history_ticks = 1;
+            auto& remote = state.remotes_[4];
+            remote.entity = "Ball_Wood_BMMO_4";
+            bmmo::session::rollback_world world;
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.get_body = [](const std::string&, bmmo_physics_body_state& out) {
+                out = make_body("Ball_Wood_BMMO_4", true, 0);
+                return true;
+            };
+            bmmo::session::rollback_tracked tracked;
+            tracked.remote_entities = {remote.entity};
+            if (relayed) remote.inputs[99] = keys_frame(1);
+            for (uint32_t tick = 99; tick <= 103; ++tick) {
+                if (tick > 99) remote.inputs[tick] = keys_frame(0);
+                state.rollback_.record(world, tick, tracked, {{remote.entity, keys_frame(0)}});
+            }
+            EXPECT_TRUE(state.final_unconfirmed_);
+            core.journal().close("done");
+            bmmo::session::journal journal;
+            std::string error;
+            ASSERT_TRUE(bmmo::session::read_journal(fake.path, journal, error)) << error;
+            size_t checked = 0;
+            for (const auto& tick: journal.ticks)
+                for (const auto& checkpoint: tick.checkpoints) {
+                    EXPECT_NE(checkpoint.flags & bmmo::session::JOURNAL_CHECKPOINT_UNCONFIRMED, 0);
+                    ++checked;
+                }
+            EXPECT_EQ(checked, 2u);
+            EXPECT_EQ(std::count_if(fake.calls.begin(), fake.calls.end(), [](const std::string& call) {
+                return call.find("final checkpoint ") != std::string::npos;
+            }), 1);
+            ASSERT_FALSE(core.begin(start_message(10, 3), config).refused);
+            EXPECT_FALSE(state.final_unconfirmed_);
+        }
+    }
+
+    TEST(SessionClientCoreJournal, OwnUnechoedLifeOnlyBlocksRowsAtOrAfterItsStamp) {
+        journal_dir dir("final_own");
+        flow_fake fake;
+        fake.path = dir.path / "client.bmjr";
+        session_client_core core(fake.make_flow(true), session_capabilities{});
+        bmmo::session::core_config config;
+        config.journal_final_checkpoints = true;
+        config.journal_checkpoint_ticks = 1;
+        ASSERT_FALSE(core.begin(start_message(9, 3), config).refused);
+        core.journal().open(bmmo::physics::world_hash{}, "build-x", "Me");
+        auto& state = state_of(core);
+        state.rollback_.thresholds().history_ticks = 1;
+        auto beam = own_birth(103);
+        beam.what = client_core_state::own_life::kind::beam;
+        state.own_life_ = {own_birth(101), beam};
+        bmmo::session::rollback_world world;
+        for (uint32_t tick = 100; tick <= 102; ++tick)
+            state.rollback_.record(world, tick, {}, {});
+        state.own_life_[0].state = client_core_state::own_life::verdict::acked;
+        state.rollback_.record(world, 103, {}, {});
+        state.rollback_.record(world, 104, {}, {});
+        state.own_life_[1].state = client_core_state::own_life::verdict::acked;
+        state.rollback_.record(world, 105, {}, {});
+        state.own_rereports_ = {own_birth(105)};
+        state.rollback_.record(world, 106, {}, {});
+        state.own_rereports_[0].state = client_core_state::own_life::verdict::acked;
+        state.rollback_.record(world, 107, {}, {});
+        EXPECT_FALSE(state.final_unconfirmed_);
+        core.journal().close("done");
+        bmmo::session::journal journal;
+        std::string error;
+        ASSERT_TRUE(bmmo::session::read_journal(fake.path, journal, error)) << error;
+        size_t checked = 0;
+        for (const auto& tick: journal.ticks)
+            for (const auto& checkpoint: tick.checkpoints) {
+                EXPECT_EQ(bool(checkpoint.flags & bmmo::session::JOURNAL_CHECKPOINT_UNCONFIRMED),
+                          tick.tick == 101 || tick.tick == 103 || tick.tick == 105);
+                ++checked;
+            }
+        EXPECT_EQ(checked, 7u);
+    }
+
     bmmo::session_event_msg own_echo(uint32_t applied, uint32_t origin, uint8_t state) {
         auto msg = event_message(3, bmmo::session::event_type::Physicalize, applied, origin);
         msg.state = state;
@@ -5849,6 +5939,47 @@ namespace {
             EXPECT_EQ(again.position[0], control ? 0.0f : 5.0f) << "the current pose with the control, else the stamp's";
             EXPECT_EQ(state_of(core).own_rereports_.size(), control ? 1u : 0u);
         }
+    }
+
+    TEST(SessionClientCoreOwnLives, MissingBeamEchoResyncsWithoutRereport) {
+        flow_fake fake;
+        session_capabilities caps;
+        caps.own_body_control = true;
+        caps.own_life_take_out = true;
+        session_client_core core(fake.make_flow(), caps);
+        run_to_tick_125(core, fake);
+        auto beam = own_birth(122);
+        beam.what = client_core_state::own_life::kind::beam;
+        auto& state = state_of(core);
+        state.own_life_ = {beam};
+        state.own_physicalized_ = true;
+        state.own_body_entity_ = beam.entity;
+        fake.bodies_there = {beam.entity};
+        steps{core}.retire_own_lives();
+        ASSERT_EQ(state.own_life_.size(), 1u);
+        state.acked_header_known_ = true;
+        state.header_acked_ = 121;
+        state.acked_header_tick_ = 422;
+        const auto sent_before = fake.sent.size();
+        steps{core}.process_own_echoes();
+        EXPECT_EQ(state.own_echo_missing_, 0u);
+        state.header_acked_ = 122;
+        steps{core}.process_own_echoes();
+        EXPECT_EQ(state.own_echo_missing_, 0u);
+        state.acked_header_tick_ += client_core_state::kOwnEchoUplinkSettleTicks + 1;
+        steps{core}.process_own_echoes();
+        EXPECT_EQ(state.own_echo_missing_, 1u);
+        EXPECT_EQ(state.own_moves_resynced_, 1u);
+        EXPECT_TRUE(state.resync_in_flight_);
+        EXPECT_FALSE(state.own_physicalized_);
+        EXPECT_TRUE(state.own_body_entity_.empty());
+        EXPECT_NE(std::find(fake.calls.begin(), fake.calls.end(), "unmake_own:Ball_Wood:125"), fake.calls.end());
+        EXPECT_TRUE(state.own_rereports_.empty());
+        ASSERT_EQ(state.own_unanswered_.size(), 1u);
+        EXPECT_EQ(state.own_unanswered_[0].what, client_core_state::own_life::kind::beam);
+        EXPECT_EQ(fake.sent.size(), sent_before + 1);
+        steps{core}.process_own_echoes();
+        EXPECT_EQ(state.own_moves_resynced_, 1u);
     }
 
     // FULL step R6P (the user's Q-R6-NEVER (a); core design "As built (step
@@ -7803,11 +7934,13 @@ namespace {
             auto& s = state_of(core);
             const size_t from = fake.calls.size();
             core.on_session_resync_state(resync_state(140, {1, 2}));
+            s.final_unconfirmed_ = true;
             EXPECT_TRUE(s.resync_pending_) << "kept until the drain is over";
             EXPECT_TRUE(s.have_resync_state_);
             EXPECT_FALSE(core.poll_resync_hold().held);
             const auto calls = since(fake.calls, from);
             EXPECT_FALSE(s.resync_pending_) << depth;
+            EXPECT_FALSE(s.final_unconfirmed_);
             EXPECT_FALSE(s.have_resync_state_);
             EXPECT_EQ(s.resyncs_restepped_, 1u);
             EXPECT_EQ(core.rollback_stats().resyncs, 1u);

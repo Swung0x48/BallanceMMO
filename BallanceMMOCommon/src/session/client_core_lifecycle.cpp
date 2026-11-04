@@ -3073,7 +3073,7 @@ namespace bmmo::session {
     // rewind anchored inside the gap still crosses the applied tick, and
     // the record is what makes the body there.)
     //
-    // A birth the server has not answered yet stays, past its history
+    // An own event the server has not answered yet stays, past its history
     // too, until its echo or the deadline (expire_own_echoes) says where
     // the server made it: the answer past the history is a resync, and
     // without the record it could not take a never-made body out.  It
@@ -3086,7 +3086,7 @@ namespace bmmo::session {
             if (life.retired) return true;
             if (life.force_pending) return false;   // FULL step R6H: kept until its tick
             if (life.rereported) return false;      // FULL step R6P: kept until its re-report is answered
-            if (life.what == own_life::kind::birth && life.state == own_life::verdict::sent
+            if (life.state == own_life::verdict::sent
                     && static_cast<int32_t>(now - life.origin) < static_cast<int32_t>(client_core_state::kOwnRecordKeepTicks))
                 return false;
             const bool done = life.origin_live && (life.applied_live || !life.made);
@@ -3532,7 +3532,7 @@ namespace bmmo::session {
                                                s.last_snapshot_tick_, server_tick))
             return;
         for (auto& life: s.own_life_) {
-            if (life.retired || life.what != own_life::kind::birth || life.state != own_life::verdict::sent) continue;
+            if (life.retired || life.state != own_life::verdict::sent) continue;
             if (!life.echo_deadline.missing(server_tick, s.acked_header_known_, s.header_acked_, life.origin,
                                             client_core_state::kOwnEchoDeadlineTicks,
                                             client_core_state::kOwnEchoUplinkSettleTicks))
@@ -3560,7 +3560,8 @@ namespace bmmo::session {
             // birth is re-reported at the ball's current pose and that
             // re-report's echo answers it (re_report_current); no resync
             // against a world that has no ball of ours yet.
-            if (own_births_move() && own_life_current(life, current_tick(), true) && !life.rereported) {
+            if (life.what == own_life::kind::birth && own_births_move()
+                && own_life_current(life, current_tick(), true) && !life.rereported) {
                 re_report_current(life, current_tick(), "no echo by the server's tick " + std::to_string(server_tick));
                 continue;
             }
@@ -3821,16 +3822,18 @@ namespace bmmo::session {
         const char* what = life.what == own_life::kind::beam ? "beam" : "birth";
         const std::string head = std::string("own ") + what + " moved " + std::to_string(life.origin) + " -> "
                                + (made ? std::to_string(applied) : std::string("never"));
-        if (life.what == own_life::kind::birth && own_life_current(life, now, true)) {
+        if ((life.what == own_life::kind::birth || life.state == own_life::verdict::missing)
+            && own_life_current(life, now, true)) {
             // FULL step R6S: with the control but own_birth_move off, the
             // no-capability answer (the body kept, a re-report).
-            if (!own_births_move()) {
+            if (life.what == own_life::kind::birth && !own_births_move()) {
                 if (!made && life.state != own_life::verdict::superseded) re_report_own_birth(life, now);
             } else {
                 bmmo_physics_body_state state{};
                 const bool there = platform_.body_state(life.entity, state);
                 if (!made && caps_.own_life_take_out) {
-                    s.rollback_.move_birth(life.entity, life.generation, life.origin, life.origin, false);
+                    if (life.what == own_life::kind::birth)
+                        s.rollback_.move_birth(life.entity, life.generation, life.origin, life.origin, false);
                     if (there) unmake_own_body(life, now, "never made");
                     s.own_physicalized_ = false;
                     s.own_body_entity_.clear();
@@ -3839,8 +3842,8 @@ namespace bmmo::session {
                     // game owns the life (no own_life_take_out): the body
                     // stays, live and in the history, and only the resync
                     // goes out.
-                    logf("own birth stamped %u: never made, the body kept (the host cannot take a current life out)",
-                         life.origin);
+                    logf("own %s stamped %u: never made, the body kept (the host cannot take a current life out)",
+                         what, life.origin);
                 } else if (!there && remake_own_body(life, now, "resync")) {
                     ++s.own_remakes_;
                     s.own_body_entity_ = life.entity;

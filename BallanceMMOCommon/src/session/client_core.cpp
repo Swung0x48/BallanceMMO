@@ -237,6 +237,7 @@ namespace bmmo::session {
         retire_final_checkpoints("a new session started");
         journal_.close("a new session started");
         config = cfg;
+        s.final_unconfirmed_ = false;
         s.rollback_.set_verbose(config.verbose);
         s.rollback_.set_recheck_on_restore(config.restore_recheck);
         s.rollback_.set_two_pass_recheck(config.two_pass_recheck);
@@ -265,14 +266,16 @@ namespace bmmo::session {
         // very tick (the ring has it
         // and it is the recorded one); otherwise it carries UNCONFIRMED -
         // the hold-last prediction, a hole's stand-in, or a relayed frame no
-        // replay applied.  The own ball: a substitution the server notices
+        // replay applied; and since a retired tick is never replayed again,
+        // every later row too, until a new shared base replaces the world
+        // (step LBF3).  The own ball: a substitution the server notices
         // amends the record and replays it, and one whose notice is lost
         // ends in a resync whose re-anchor drops the records it covers; a
         // record leaving while such a notice may still come, or while that
         // resync is pending, is UNCONFIRMED too.
         if (config.journal_final_checkpoints) {
             s.rollback_.set_retire_observer(
-                [this, names = std::map<std::string, uint32_t>{}, unconfirmed_logs = 0u](
+                [this, names = std::map<std::string, uint32_t>{}, unconfirmed_logs = 0u, sticky_logged = false](
                     uint32_t tick, const bmmo::session::rollback_tracked& tracked,
                     const std::map<std::string, bmmo_physics_body_state>& bodies,
                     const std::map<std::string, bmmo::session::input_frame>& inputs) mutable {
@@ -280,6 +283,8 @@ namespace bmmo::session {
                         if (!remote.entity.empty()) names[remote.entity] = id;
                     const char* why = nullptr;
                     const std::string* why_entity = nullptr;
+                    const bool inherited = s.final_unconfirmed_;
+                    if (!inherited) sticky_logged = false;
                     for (const auto& [entity, frame]: inputs) {
                         if (entity.empty() || entity == tracked.own_entity) continue;
                         // No body behind the name at the tick (a dead player's
@@ -296,6 +301,11 @@ namespace bmmo::session {
                         else if (!same_frame(relayed->second, frame)) why = "differs from the relayed frame";
                         if (why) { why_entity = &entity; break; }
                     }
+                    if (why) s.final_unconfirmed_ = true;
+                    if (!why && inherited) {
+                        why = "inherits an unconfirmed retired tick";
+                        why_entity = &tracked.own_entity;
+                    }
                     // The own ball: a substitution notice still missing that
                     // may name this tick (a datagram of server tick >= tick
                     // counted more held ticks than have arrived: the
@@ -304,7 +314,7 @@ namespace bmmo::session {
                     // re-anchor drops the records it covers, but this one is
                     // leaving before).
                     if (!why) {
-                        if (s.resync_pending_) why = "pending: a resync was asked for";
+                        if (s.resync_pending_ || s.resync_in_flight_) why = "pending: a resync was asked for";
                         else
                             for (const auto& [watched, total]: s.held_gap_watch_)
                                 if (static_cast<int32_t>(watched - tick) >= 0
@@ -313,6 +323,14 @@ namespace bmmo::session {
                                     break;
                                 }
                         if (why) why_entity = &tracked.own_entity;
+                    }
+                    const auto pending_life = [tick](const own_life& life) {
+                        return life.state == own_life::verdict::sent && static_cast<int32_t>(tick - life.origin) >= 0;
+                    };
+                    if (!why && (std::any_of(s.own_life_.begin(), s.own_life_.end(), pending_life)
+                                 || std::any_of(s.own_rereports_.begin(), s.own_rereports_.end(), pending_life))) {
+                        why = "pending: own lifecycle echo outstanding";
+                        why_entity = &tracked.own_entity;
                     }
                     std::vector<bmmo::session::body_state> out;
                     out.reserve(bodies.size());
@@ -339,7 +357,9 @@ namespace bmmo::session {
                             | (body.collision_enabled ? bmmo::session::BODY_FLAG_COLLISION_ENABLED : 0u));
                         out.push_back(std::move(state));
                     }
-                    if (journal_.final_checkpoint(tick, out, why == nullptr) && why && unconfirmed_logs < 16) {
+                    if (journal_.final_checkpoint(tick, out, why == nullptr) && why
+                        && (s.final_unconfirmed_ ? !sticky_logged : unconfirmed_logs < 16)) {
+                        if (s.final_unconfirmed_) sticky_logged = true;
                         ++unconfirmed_logs;
                         logf("final checkpoint %u unconfirmed: %s's frame %s", tick, why_entity->c_str(), why);
                     }
