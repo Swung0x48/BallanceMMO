@@ -1228,6 +1228,14 @@ namespace {
                     report();
                 }
             }
+            // The server sees the member go now, not after the wind-down below
+            // and the engine's teardown (BW20: about 2 s in which the server
+            // substituted every frame of a client that had stopped and re-sent
+            // it its whole history every tick).
+            if (connection_ != k_HSteamNetConnection_Invalid && !inbound_.replaying()) {
+                interface_->CloseConnection(connection_, 0, stopped, true);
+                connection_ = k_HSteamNetConnection_Invalid;
+            }
             // A session still running when the client goes down says so in its
             // box rather than just stopping mid-file.
             core_.retire_final_checkpoints(stopped);

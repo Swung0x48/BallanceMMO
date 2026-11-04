@@ -115,16 +115,35 @@ TEST(RelayRing, CoversEverythingAfterTheAcknowledgement) {
     EXPECT_EQ(ring.newest_tick(), 17u);
 }
 
-// An acknowledgement older than the history: the span starts at the oldest
-// tick kept, past what the recipient holds - its cue to resync.
-TEST(RelayRing, PastTheHistoryTheSpanStartsAtTheOldestKept) {
+// An acknowledgement older than the history: header-only notices whose
+// `from` is past what the recipient holds - its cue to resync - at gaps of
+// 1, 2, 4 .. 64 ticks, nothing in between; an acknowledgement inside the
+// history brings the whole span back.
+TEST(RelayRing, PastTheHistoryOnlyHeaderNoticesWithBackoff) {
     relay_ring ring;
     ring.reanchor(1, 0);
-    const uint32_t last = 50 + static_cast<uint32_t>(bmmo::session::kRelayHistory) + 20;
-    for (uint32_t t = 50; t <= last; ++t) ring.push(t, applied_list{{1, frame(1)}, {2, frame(2)}});
+    uint32_t t = 50;
+    for (; t <= 50 + bmmo::session::kRelayHistory + 20; ++t) ring.push(t, applied_list{{1, frame(1)}, {2, frame(2)}});
+    std::vector<uint32_t> sent;
+    for (int i = 0; i < 300; ++i, ++t) {
+        ring.push(t, applied_list{{1, frame(1)}, {2, frame(2)}});
+        const auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
+        if (datagrams.empty()) continue;
+        ASSERT_EQ(datagrams.size(), 1u);
+        EXPECT_TRUE(datagrams[0].entries.empty());
+        EXPECT_EQ(datagrams[0].from, t - bmmo::session::kRelayHistory);
+        sent.push_back(t);
+    }
+    std::vector<uint32_t> gaps;
+    for (size_t i = 1; i < sent.size(); ++i) gaps.push_back(sent[i] - sent[i - 1]);
+    ASSERT_GE(gaps.size(), 8u);
+    EXPECT_EQ(std::vector<uint32_t>(gaps.begin(), gaps.begin() + 8), (std::vector<uint32_t>{1, 2, 4, 8, 16, 32, 64, 64}));
+    ring.acknowledge(1, t - 10);
+    ring.push(t, applied_list{{1, frame(1)}, {2, frame(2)}});
     const auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
-    EXPECT_EQ(datagrams[0].from, last - bmmo::session::kRelayHistory);
-    EXPECT_EQ(datagrams[0].entries[0].frames.size(), bmmo::session::kRelayHistory);
+    ASSERT_EQ(datagrams.size(), 1u);
+    ASSERT_EQ(datagrams[0].entries.size(), 1u);
+    EXPECT_EQ(datagrams[0].entries[0].frames.size(), 10u);
 }
 
 // The owner's snap: the retail turns' rounding (here 1e-5) lands on the

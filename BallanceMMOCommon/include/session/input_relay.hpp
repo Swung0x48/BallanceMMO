@@ -56,6 +56,14 @@ namespace bmmo::session {
     // is quietly sent reliable - the stall this relay exists to remove.
     constexpr size_t kRelayDatagramHeader = 4 + 4 + 4 + 1 + 4 + 4 + 4 + 1 + 4 + 1 + 1;
     constexpr size_t kRelayDatagramBudget = 1100;
+    // A recipient whose acknowledgement is older than the history has to
+    // resync whatever it holds: its own frames were substituted for longer
+    // than any rewind reaches, and the others' it lacks are gone.  It gets
+    // the header alone (from = the tick before the oldest kept, its cue),
+    // 1, 2, 4 .. this many ticks apart, so a client that crashed or froze
+    // costs a small datagram a second instead of the whole history every
+    // tick; the first one a live client receives starts its resync.
+    constexpr uint32_t kPastHistoryNoticeMaxGap = 64;
 
     // ------------------------------------------------------------ held notices
     // Protocol 7 (late-player design 1.1): every datagram also tells its
@@ -182,6 +190,7 @@ namespace bmmo::session {
             auto& r = recipients_[recipient];
             r.acked = tick;
             r.carried.clear();
+            r.notice_gap = 0;
         }
         void acknowledge(uint32_t recipient, uint32_t tick) {
             const auto it = recipients_.find(recipient);
@@ -232,9 +241,11 @@ namespace bmmo::session {
         // members: a leaver the step still applied a frame for is not relayed
         // after PlayerLeft.
         //
-        // `from` is the recipient's acknowledgement, or the tick before the
-        // oldest kept when that is older: the recipient then finds `from`
-        // past what it holds and resyncs.  An entry whose first camera is a
+        // `from` is the recipient's acknowledgement.  When that is older than
+        // the oldest tick kept, the recipient gets header-only notices with
+        // `from` the tick before the oldest, at growing gaps (no datagram at
+        // all between them: kPastHistoryNoticeMaxGap), until an
+        // acknowledgement or a re-anchor brings it back.  An entry whose first camera is a
         // turn of a base the recipient may lack attaches the base, until the
         // recipient acknowledges the first datagram that carried it, inline
         // or attached (by then it held that datagram).
@@ -251,8 +262,16 @@ namespace bmmo::session {
         std::vector<datagram> build_datagrams(uint32_t recipient, size_t budget, const Keep& keep,
                                               std::optional<uint32_t> held_from = std::nullopt) {
             auto& r = recipients_[recipient];
-            uint32_t from = r.acked;
-            if (!ticks_.empty() && static_cast<int32_t>(from + 1 - ticks_.front().tick) < 0) from = ticks_.front().tick - 1;
+            const uint32_t from = r.acked;
+            if (!ticks_.empty() && static_cast<int32_t>(from + 1 - ticks_.front().tick) < 0) {
+                if (r.notice_gap != 0 && static_cast<int32_t>(newest_tick() - r.next_notice) < 0) return {};
+                r.notice_gap = r.notice_gap == 0 ? 1 : std::min(2 * r.notice_gap, kPastHistoryNoticeMaxGap);
+                r.next_notice = newest_tick() + r.notice_gap;
+                datagram notice;
+                notice.from = ticks_.front().tick - 1;
+                return {notice};
+            }
+            r.notice_gap = 0;
             const size_t fixed = kRelayDatagramHeader + kHeldCountBytes;
             std::vector<datagram> out;
             std::vector<size_t> used;
@@ -300,6 +319,7 @@ namespace bmmo::session {
         };
         struct recipient_state {
             uint32_t acked = 0;
+            uint32_t notice_gap = 0, next_notice = 0;   // past the history: the header-only notices' backoff
             // Per player, per base (its since), the newest tick of the first
             // datagram that carried it to this recipient, inline or attached.
             std::map<uint32_t, std::map<uint32_t, uint32_t>> carried;
