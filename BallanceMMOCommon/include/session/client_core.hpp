@@ -577,6 +577,10 @@ namespace bmmo::session {
         std::deque<std::pair<uint32_t, bmmo::session::input_frame>> input_history_;
         float previous_cam_[3][3] = {};
         bool previous_cam_valid_ = false;
+        // Protocol 30: the camera snapped to the quarter turns of our first
+        // one, and our uplink's heading bases.
+        bmmo::session::heading_snap camera_snap_;
+        bmmo::session::camera_bases uplink_bases_;
         // Input freshness as the server saw it (session_snapshot_msg.acked_input_tick).
         uint64_t input_reports_ = 0, input_starved_ = 0;
         uint32_t worst_starved_ = 0;
@@ -750,14 +754,14 @@ namespace bmmo::session {
         int rollback_diag_ = 0;
         bmmo::session::relay_seen relay_seen_;
         bmmo::session::pending_relay pending_relay_;
-        // Protocol 29 (docs/relay-protocol-design.md): the session's camera
-        // dictionary, the newest tick up to which every member's relayed
-        // frames are held (what every input datagram acknowledges), and the
-        // parts seen of the ticks whose relay came split.
-        std::array<std::optional<bmmo::session::camera_rows>, bmmo::session::kCameraInline> relay_cameras_{};
+        // Protocol 29 (docs/relay-protocol-design.md): every member's camera
+        // bases (protocol 30), the newest tick up to which every member's
+        // relayed frames are held (what every input datagram acknowledges),
+        // and the parts seen of the ticks whose relay came split.
+        std::map<uint32_t, bmmo::session::camera_bases> relay_bases_;
         uint32_t relay_held_ = 0;
         std::map<uint32_t, uint64_t> relay_parts_;
-        uint64_t relay_undefined_ = 0;   // datagrams naming a camera not defined yet
+        uint64_t relay_undefined_ = 0;   // datagrams turning a camera base not held
         // Protocol 7 (late-player design 1.3): the server's notices of our own
         // substituted ticks, taken once per tick (keyed by our own id) and
         // applied (note_held_section): recv inside the reach, late past it
@@ -2161,6 +2165,7 @@ namespace bmmo::session {
         // Protocol 29: the acknowledged span (client_core_messages.cpp).
         void note_relay_span(const bmmo::session_remote_input_msg& msg);
         void restart_relay_span();
+        void encode_uplink_cameras(bmmo::session_input_msg& msg);
         // Section J (E5, client_core_held.cpp): late-player parts one and two.
         static bool same_frame(const bmmo::session::input_frame& a, const bmmo::session::input_frame& b);
         void note_held_section(const bmmo::session_remote_input_msg& msg);

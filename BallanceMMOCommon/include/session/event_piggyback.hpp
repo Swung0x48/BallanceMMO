@@ -97,14 +97,14 @@ namespace bmmo::session {
                 for (; first < n - MAX_INPUT_EVENTS; ++first) bytes -= entries_[first].bytes.size();
             }
             while (first < n
-                   && session_input_msg::wire_size(msg.frames, bytes, n - first) > budget) {
+                   && msg.wire_size(bytes, n - first) > budget) {
                 bytes -= entries_[first].bytes.size();
                 ++first;
             }
             for (size_t i = first; i < n; ++i) msg.events.push_back(entries_[i].bytes);
             stats_.carried += n - first;
             stats_.dropped += first;
-            const size_t size = session_input_msg::wire_size(msg.frames, bytes, n - first);
+            const size_t size = msg.wire_size(bytes, n - first);
             if (size > stats_.max_bytes) stats_.max_bytes = size;
             return first;
         }

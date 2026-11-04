@@ -870,9 +870,18 @@ namespace bmmo::session {
         const input_observation seen = platform_.observe_input();
         bmmo::session::input_frame input{};
         input.keys = seen.keys;
-        const float (*basis)[3] = s.previous_cam_valid_ ? s.previous_cam_ : seen.cam;
+        // Protocol 30: the camera snapped to the quarter turns of our first
+        // one - the rows every world, our own ball included, is driven with.
+        float seen_cam[3][3] = {};
+        if (seen.cam_valid) {
+            bmmo::session::camera_rows rows;
+            std::memcpy(rows.data(), seen.cam, sizeof(seen.cam));
+            rows = s.camera_snap_.apply(rows);
+            std::memcpy(seen_cam, rows.data(), sizeof(seen_cam));
+        }
+        const float (*basis)[3] = s.previous_cam_valid_ ? s.previous_cam_ : seen_cam;
         for (int k = 0; k < 3; ++k) { input.cam_right[k] = basis[0][k]; input.cam_up[k] = basis[1][k]; input.cam_dir[k] = basis[2][k]; }
-        if (seen.cam_valid) { std::memcpy(s.previous_cam_, seen.cam, sizeof(seen.cam)); s.previous_cam_valid_ = true; }
+        if (seen.cam_valid) { std::memcpy(s.previous_cam_, seen_cam, sizeof(seen_cam)); s.previous_cam_valid_ = true; }
         input.ball_type = static_cast<uint8_t>(ball_type < 0 ? 0 : ball_type);
         const bool nav_active = seen.nav_active;
         input.flags = static_cast<uint8_t>((physicalized ? bmmo::session::INPUT_FLAG_PHYSICALIZED : 0)
@@ -967,6 +976,7 @@ namespace bmmo::session {
             msg.first_tick = s.input_history_.front().first;
             msg.relay_ack = s.relay_held_;
             for (const auto& [t, fr]: s.input_history_) msg.frames.push_back(fr);
+            encode_uplink_cameras(msg);
             remember_sent(msg);
             // Step EVI (protocol 25): our own P / U / Sector / Trafo events
             // ride the datagram until it no longer carries their stamp's

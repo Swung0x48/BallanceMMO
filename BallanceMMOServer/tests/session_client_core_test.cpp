@@ -198,6 +198,7 @@ namespace {
         std::vector<bmmo::session::body_event> body_events;
         std::vector<bool> body_event_answers;
         bmmo::session::input_observation observation;
+        std::vector<bmmo::session::camera_rows> own_rows;
         std::vector<std::string> mechanisms;
         std::string forced_entity;
 
@@ -365,6 +366,9 @@ namespace {
             };
             p.own_camera_rows = [this](const float (*basis)[3]) {
                 calls.push_back("own_camera_rows:" + std::to_string(basis[2][2]));
+                bmmo::session::camera_rows rows;
+                std::memcpy(rows.data(), basis, sizeof(rows));
+                own_rows.push_back(rows);
             };
             p.movable_bodies = [this]() {
                 calls.push_back("movable_bodies");
@@ -7313,6 +7317,29 @@ namespace {
             ASSERT_TRUE(state_of(core).rollback_.recorded_input("Ball_Wood_BMMO_4", 126, recorded));
             EXPECT_EQ(recorded.keys, expected) << "the record of 126 stores what drove it";
         }
+    }
+
+    // Protocol 30: the observed camera snapped to the quarter turns of the
+    // first one - the retail rounding gone, the frame and the own ball driven
+    // with the same exact turn.
+    TEST(SessionClientCoreSLX, CameraSnappedForTheFrameAndTheOwnBall) {
+        flow_fake fake;
+        session_client_core core(frame_platform(fake, false), session_capabilities{});
+        run_to_tick_125_four(core, fake);
+        const bmmo::session::camera_rows base{0.99999994f, 0.0f, -3.1e-7f, 0.0f, 1.0f, 0.0f, 3.1e-7f, 0.0f, 0.99999994f};
+        bmmo::session::camera_rows noisy = bmmo::session::quarter_turns(base, 1);
+        for (float& x: noisy) x += 1e-5f;
+        fake.observation.cam_valid = true;
+        for (const auto& seen: {base, noisy, noisy}) {
+            std::memcpy(fake.observation.cam, seen.data(), sizeof(fake.observation.cam));
+            core.pre_step();
+            ASSERT_TRUE(core.post_step(true));
+        }
+        const bmmo::session::camera_rows turned = bmmo::session::quarter_turns(base, 1);
+        ASSERT_FALSE(fake.own_rows.empty());
+        EXPECT_TRUE(bmmo::session::same_rows(fake.own_rows.back(), turned));
+        EXPECT_TRUE(bmmo::session::same_rows(bmmo::session::camera_of(state_of(core).input_history_.back().second), turned))
+            << "a frame carries the camera of the tick before";
     }
 
     TEST(SessionClientCoreSLX, RewindRefreshesEveryMirrorsNextDrive) {

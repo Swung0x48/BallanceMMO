@@ -229,7 +229,15 @@ namespace bmmo::session {
     //      A recipient whose acknowledgement is older than the server's
     //      history (kRelayHistory, 128 ticks) resyncs.  No journal version:
     //      nothing the journal records changed.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 29;
+    //  30  Camera headings (docs/relay-protocol-design.md 4.7, the user's
+    //      decision of 2026-11-04): the owner snaps its camera to the quarter
+    //      turns of its first one (session/camera_heading.hpp), and both
+    //      input messages carry a frame's camera as a 3-bit code in the top
+    //      bits of ball_type - a quarter turn of the stream's base, the zero
+    //      rows, or inline (the rows, the base from that tick on) - with the
+    //      base attached while the receiver may lack it.  The relay's camera
+    //      dictionary is gone.  No journal version: the journal records rows.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 30;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).

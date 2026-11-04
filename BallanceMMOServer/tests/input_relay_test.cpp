@@ -1,6 +1,6 @@
 // session/input_relay.hpp: the server's relay ring (protocol 29: every tick
-// after the recipient's acknowledgement, the camera dictionary) and the
-// client's reassembly rules.
+// after the recipient's acknowledgement; protocol 30: camera headings) and
+// the client's reassembly rules; session/camera_heading.hpp.
 #include <gtest/gtest.h>
 
 #include <array>
@@ -34,17 +34,15 @@ namespace {
     using applied_list = std::vector<std::pair<uint32_t, input_frame>>;
     const auto everyone = [](uint32_t) { return true; };
 
-    // A datagram as server.cpp on_session_inputs writes it, through the wire
-    // and back, with the cameras resolved from `dictionary`.
-    using dictionary_t = std::array<std::optional<bmmo::session::camera_rows>, bmmo::session::kCameraInline>;
+    // A datagram as server.cpp on_session_inputs writes it.
+    using bases_t = std::map<uint32_t, bmmo::session::camera_bases>;
     bmmo::session_remote_input_msg to_message(relay_ring::datagram d, uint32_t tick, uint32_t epoch = 0) {
         bmmo::session_remote_input_msg msg;
         msg.session = 1;
         msg.tick = tick;
         msg.epoch = epoch;
         msg.from = d.from;
-        for (const auto& [id, rows]: d.cameras) msg.cameras.push_back({id, rows});
-        for (auto& e: d.entries) msg.entries.push_back({e.player, std::move(e.frames), std::move(e.camera_ids)});
+        for (auto& e: d.entries) msg.entries.push_back({e.player, std::move(e.frames), std::move(e.headings), e.base});
         for (const auto& h: d.held) {
             bmmo::session_remote_input_msg::held_record r;
             r.back = static_cast<uint8_t>(tick - h.tick);
@@ -67,8 +65,7 @@ namespace {
         return parsed;
     }
     size_t datagram_bytes(const relay_ring::datagram& d, uint32_t epoch) {
-        size_t bytes = bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes
-                     + d.cameras.size() * bmmo::session::kRelayCameraBytes;
+        size_t bytes = bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes;
         for (const auto& e: d.entries) bytes += relay_ring::entry_bytes(e);
         for (const auto& h: d.held) bytes += relay_ring::held_bytes(h, epoch);
         return bytes;
@@ -130,47 +127,71 @@ TEST(RelayRing, PastTheHistoryTheSpanStartsAtTheOldestKept) {
     EXPECT_EQ(datagrams[0].entries[0].frames.size(), bmmo::session::kRelayHistory);
 }
 
-// The camera dictionary: one id per exact basis for the whole session, its
-// definition in every datagram until the recipient acknowledges the tick of
-// its first send, and frames that come back bit for bit after the wire.
-TEST(RelayRing, CameraIdsAreDefinedUntilAcknowledgedAndRoundTripExactly) {
+// The owner's snap: the retail turns' rounding (here 1e-5) lands on the
+// exact quarter turns of the first camera, four of which give back its bits;
+// another orientation becomes the base; no camera stays none.
+TEST(CameraHeading, SnapsToTheQuarterTurnsOfTheBase) {
+    using namespace bmmo::session;
+    const camera_rows base{0.99999994f, 0.0f, -3.1e-7f, 0.0f, 1.0f, 0.0f, 3.1e-7f, 0.0f, 0.99999994f};
+    EXPECT_TRUE(same_rows(quarter_turns(base, 4), base));
+    heading_snap snap;
+    EXPECT_TRUE(zero_camera(snap.apply(camera_rows{})));
+    EXPECT_TRUE(same_rows(snap.apply(base), base));
+    camera_rows noisy = quarter_turns(base, 3);
+    for (float& x: noisy) x += 1e-5f;
+    EXPECT_TRUE(same_rows(snap.apply(noisy), quarter_turns(base, 3)));
+    const camera_rows diagonal{0.7071068f, 0.0f, -0.7071068f, 0.0f, 1.0f, 0.0f, 0.7071068f, 0.0f, 0.7071068f};
+    EXPECT_TRUE(same_rows(snap.apply(diagonal), diagonal));
+    EXPECT_TRUE(same_rows(snap.apply(quarter_turns(diagonal, 1)), quarter_turns(diagonal, 1)));
+}
+
+// Headings on the relay: the first camera inline, then quarter turns of it;
+// the base attached to an entry that starts with a turn until the recipient
+// acknowledges the datagram that first carried it; frames come back bit for
+// bit; a recipient numbered later gets the base again.
+TEST(RelayRing, HeadingsCarryTheBaseUntilAcknowledgedAndRoundTripExactly) {
+    using bmmo::session::kHeadingInline;
     relay_ring ring;
     ring.reanchor(1, 99);
-    ring.reanchor(3, 99);
-    const input_frame north = turning(1, 0.0f), east = turning(2, 1.0f);
-    for (uint32_t t = 100; t <= 103; ++t)
-        ring.push(t, applied_list{{1, north}, {2, t < 102 ? north : east}, {3, north}});
+    const input_frame north = turning(1, 0.0f);
+    input_frame east = north;
+    bmmo::session::set_camera(east, bmmo::session::quarter_turns(bmmo::session::camera_of(north), 1));
+    east.keys = 2;
+    for (uint32_t t = 100; t <= 103; ++t) ring.push(t, applied_list{{1, north}, {2, t < 102 ? north : east}});
     auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
-    ASSERT_EQ(datagrams.size(), 1u);
-    EXPECT_EQ(datagrams[0].cameras.size(), 2u);
+    ASSERT_EQ(datagrams[0].entries.size(), 1u);
+    const auto& entry = datagrams[0].entries[0];
+    EXPECT_EQ(entry.headings, (std::vector<uint8_t>{kHeadingInline, 0, 1, 1}));
+    EXPECT_FALSE(entry.base);
+    EXPECT_EQ(relay_ring::entry_bytes(entry), 6u + (4 + 36) + 4 + 4);   // runs: inline, north, east
+    bases_t bases;
     auto msg = to_message(datagrams[0], 103);
-    auto parsed = parse(msg);
-    dictionary_t dictionary{};
-    const auto entries = parsed.resolved_entries(dictionary);
+    auto entries = parse(msg).resolved_entries(bases);
     ASSERT_TRUE(entries);
-    ASSERT_EQ(entries->size(), 2u);
-    for (const auto& e: *entries)
-        for (size_t i = 0; i < e.frames.size(); ++i) {
-            const input_frame& want = e.player == 2 && i >= 2 ? east : north;
-            EXPECT_TRUE(want.keys == e.frames[i].keys && bmmo::session::same_camera(want, e.frames[i])) << e.player << " " << i;
-        }
-    // Two runs for player 2 (north, east), one for player 3.
-    EXPECT_EQ(relay_ring::entry_bytes(datagrams[0].entries[0]), 6u + 2 * 5u);
-    // Not acknowledged yet: still defined; acknowledged past the first send: no more.
-    ring.push(104, applied_list{{1, north}, {2, east}, {3, north}});
-    EXPECT_EQ(ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone)[0].cameras.size(), 2u);
-    ring.acknowledge(1, 103);
-    ring.push(105, applied_list{{1, north}, {2, east}, {3, north}});
+    for (size_t i = 0; i < 4; ++i) {
+        const input_frame& want = i < 2 ? north : east;
+        EXPECT_TRUE(want.keys == (*entries)[0].frames[i].keys && bmmo::session::same_camera(want, (*entries)[0].frames[i])) << i;
+    }
+    // Acknowledged short of that datagram: the next span starts with a turn
+    // and carries the base; once acknowledged, it does not.
+    ring.acknowledge(1, 101);
+    ring.push(104, applied_list{{1, north}, {2, east}});
     datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
-    EXPECT_TRUE(datagrams[0].cameras.empty());
-    // A client with no definition of an id cannot use the datagram.
+    ASSERT_TRUE(datagrams[0].entries[0].base);
+    EXPECT_EQ(datagrams[0].entries[0].base->since, 100u);
+    ring.acknowledge(1, 103);
+    ring.push(105, applied_list{{1, north}, {2, east}});
+    datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
+    EXPECT_FALSE(datagrams[0].entries[0].base);
     msg = to_message(datagrams[0], 105);
-    parsed = parse(msg);
-    dictionary_t empty{};
-    EXPECT_FALSE(parsed.resolved_entries(empty));
-    EXPECT_TRUE(parsed.resolved_entries(dictionary));
-    // Another recipient has its own state: it still needs both.
-    EXPECT_EQ(ring.build_datagrams(3, bmmo::session::kRelayDatagramBudget, everyone)[0].cameras.size(), 2u);
+    bases_t none;
+    EXPECT_FALSE(parse(msg).resolved_entries(none));   // a client without the base cannot use it
+    entries = parse(msg).resolved_entries(bases);
+    ASSERT_TRUE(entries);
+    EXPECT_TRUE(bmmo::session::same_camera((*entries)[0].frames.back(), east));
+    // Re-numbered (a resync): the base again.
+    ring.reanchor(1, 104);
+    EXPECT_TRUE(ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone)[0].entries[0].base);
 }
 
 // Whole entries per datagram of one packet: a room of 64 with every frame
