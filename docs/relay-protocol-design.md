@@ -85,6 +85,43 @@ Held notices (protocol 7) and lifecycle events riding the datagram (protocol 25)
   FINAL row of every client equal to the server's (protocol 28: 1.1-81 m divergences in the same cells), no resync, server
   journals replay exactly; relay datagram mean 71 B (protocol 28: 248 B).
 
+### 4.7 Camera headings (protocol 30, the user's decision of 2026-11-04)
+
+The retail camera only turns by 90 degrees about the vertical axis, but its script computes each turn with sines and
+cosines: one heading arrives in up to 5 bit patterns (1.3e-5 apart at most; census of 767 journals, 1.5 M own frames:
+none further than that from an exact quarter turn; zero rows only before the first camera, never with a key down). So:
+
+- **The owner snaps** (`session/camera_heading.hpp` `heading_snap`, client_core_frame.cpp where the observed rows are
+  stored): rows within 1e-3 of a quarter turn of its first camera (the base) become that turn exactly; a quarter turn
+  swaps two components and negates one, exact on every host. Anything else (another orientation, say a map whose
+  checkpoint faces 45 degrees off) becomes the base. The game's own camera and Cam_OrientRef are untouched (what the
+  player sees); the snapped rows are what every world drives the ball with - the frame, and the own ball's navigation
+  (`own_camera_rows`, fed from the same stored rows; the retail force blocks stay zeroed). The force direction differs
+  from the game's by 1.3e-5 rad at most.
+- **On the wire** a frame's camera is a 3-bit heading code in the top bits of the ball_type byte: 0-3 quarter turns of
+  the stream's base in force at the frame's tick, 4 the zero rows, 7 inline (the rows follow and are the base from that
+  tick on). Lossless whatever the rows: a frame no turn reproduces bit for bit goes inline (`camera_bases::encode`).
+  A relay run is 4 B (was 5), an uplink frame 3 B (was 4, and the first frame of every datagram no longer carries 36 B).
+- **The base reaches the receiver** attached to a message whose first coded frame turns it (since u32 + rows, 40 B,
+  flagged in the top bit of the uplink's count / the entry's nruns), while the receiver may lack it:
+  - uplink: until the relay header's `acked` (the newest of our frames the server applied) reaches the base's tick -
+    the first datagram the server got with a frame that late was sent before the client knew, so it carried the base;
+  - relay: per recipient and player, until the recipient acknowledges the first datagram that carried the base (inline
+    or attached); an entry with no coded frame carries the base in force at its end (the next turn's). A re-anchor
+    forgets what was carried; a leaver's bases are dropped (a returning member starts inline).
+  Both ends keep the bases by tick (`camera_bases`), so a reordered older datagram decodes against the base of its
+  own ticks. A message turning a base its receiver does not hold is not used (the relay: its span is not held, so it
+  comes again with the base).
+- The relay's camera dictionary is gone. Journals record rows, as before: no journal version.
+- Measured (2026-11-04): headless A0 and the loss seeds 0/1/2 (10 %, bursts of 8, every link) - every confirmed FINAL
+  row of every client exact, replays N/N, no resync; relay datagram mean 64-68 B (protocol 29: 71), uplink 42 B for 8
+  frames (86). Wire check against core_ref_s15 (relay datagrams bridged to the protocol-30 layout): with the snap
+  switched off for the experiment, all 45 journals identical to protocol 29's replays and the sends differ only in
+  SessionInput's encoding and SessionReady's protocol - the codec is lossless. With the snap, the level-8 and fan arms
+  differ only in a few own INPUT records (every TICK hash equal); the arena arms' own ball diverges from its first
+  force, since the headless arena camera wanders up to 2e-5 off its first sample and the capture's server applied the
+  unsnapped rows - a capture replay cannot agree with a live world that never existed, by construction.
+
 ## 5. Interactions to handle
 
 - **Numbering and re-anchors.** The acknowledgement is in the recipient's numbering; a resync, rejoin or late join resets `acked` to the base (as `held_notice` does); the camera dictionary and the per-member base frames are re-sent after it.

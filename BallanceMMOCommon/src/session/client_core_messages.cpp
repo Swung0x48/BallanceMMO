@@ -337,10 +337,17 @@ namespace bmmo::session {
         ++s.remote_inputs_received_;
         if (msg.session != s.session_) return;
         note_held_section(msg);
-        // Protocol 29: the frames' cameras from the session's dictionary.  A
-        // datagram naming an id this client has no definition of yet is not
-        // used: its span is not held, so the server keeps sending it.
-        const auto entries = msg.resolved_entries(s.relay_cameras_);
+        // Protocol 29: a `from` past what we hold - the server's history no
+        // longer reaches back to it (kRelayHistory) - only a resync can fill
+        // (the user's decision, docs/relay-protocol-design.md 7).
+        if (s.assigned_ && static_cast<int32_t>(msg.from - s.relay_held_) > 0) {
+            if (!s.resync_pending_) request_resync("relayed input past the server's history", true);
+            return;
+        }
+        // Protocol 30: the frames' cameras from the players' bases.  A
+        // datagram turning a base this client does not hold is not used: its
+        // span is not held, so the server keeps sending it, the base with it.
+        const auto entries = msg.resolved_entries(s.relay_bases_);
         if (!entries) {
             ++s.relay_undefined_;
             return;
@@ -416,28 +423,26 @@ namespace bmmo::session {
 
     // Protocol 29: the frames of every tick in (from, tick] are held once
     // every part of that tick's relay arrived, and the next input datagram
-    // acknowledges it.  A `from` past what we hold means the server's history
-    // no longer reaches back to it (kRelayHistory): only a resync can fill
-    // that (the user's decision, docs/relay-protocol-design.md 7).
+    // acknowledges it.  The camera bases no datagram can need any more go:
+    // the server's `from` never falls further behind than its history.
     void session_client_core::note_relay_span(const bmmo::session_remote_input_msg& msg) {
-        if (!s.assigned_) return;
-        if (static_cast<int32_t>(msg.from - s.relay_held_) > 0) {
-            if (!s.resync_pending_) request_resync("relayed input past the server's history", true);
-            return;
-        }
-        if (msg.parts > 64) return;
+        if (!s.assigned_ || msg.parts > 64) return;
         uint64_t& seen = s.relay_parts_[msg.tick];
         seen |= uint64_t{1} << msg.part;
         if (seen != (msg.parts == 64 ? ~uint64_t{0} : (uint64_t{1} << msg.parts) - 1)) return;
         if (static_cast<int32_t>(msg.tick - s.relay_held_) > 0) s.relay_held_ = msg.tick;
         s.relay_parts_.erase(s.relay_parts_.begin(), s.relay_parts_.upper_bound(s.relay_held_));
+        if (s.relay_held_ > bmmo::session::kRelayRing)
+            for (auto& [player, bases]: s.relay_bases_) bases.forget_before(s.relay_held_ - bmmo::session::kRelayRing);
     }
 
     // A new numbering (the start, a resync, a late join): every tick before
-    // its base is the state this client was given.
+    // its base is the state this client was given; the server re-sends the
+    // camera bases it needs.
     void session_client_core::restart_relay_span() {
         s.relay_held_ = s.tick_base_ - 1;
         s.relay_parts_.clear();
+        s.relay_bases_.clear();
     }
 
     // A relayed frame for a tick this client has already simulated: if it

@@ -630,6 +630,10 @@ public:
         // member acknowledged holding: what its relayed datagrams carry
         // (session/input_relay.hpp, protocol 29).
         bmmo::session::relay_ring relay;
+        // Protocol 30: each member's uplink camera bases (camera_heading.hpp),
+        // and the datagrams that turned one not held yet (not used).
+        std::map<HSteamNetConnection, bmmo::session::camera_bases> uplink_bases;
+        uint64_t uplink_undecoded = 0;
         // Protocol 7 (late-player design 1.2): what each member's relayed
         // datagrams tell it about its OWN inputs.  `epoch` is the base of its
         // last SessionAssign and `held_total` counts its substituted ticks at
@@ -1456,9 +1460,8 @@ public:
                 msg.from = datagram.from;
                 msg.part = static_cast<uint8_t>(part);
                 msg.parts = static_cast<uint8_t>(datagrams.size());
-                for (const auto& [id, rows]: datagram.cameras) msg.cameras.push_back({id, rows});
                 for (auto& w: datagram.entries)
-                    msg.entries.push_back({w.player, std::move(w.frames), std::move(w.camera_ids)});
+                    msg.entries.push_back({w.player, std::move(w.frames), std::move(w.headings), w.base});
                 for (const auto& h: datagram.held) {
                     bmmo::session_remote_input_msg::held_record r;
                     r.back = static_cast<uint8_t>(tick - h.tick);
@@ -1781,6 +1784,7 @@ public:
             s.notices.erase(notice);
         }
         s.relay.forget(c);
+        s.uplink_bases.erase(c);
         s.late.erase(c);
         s.started.erase(c);
         // Step M1 (J2): the order stays held until the runner removed this
@@ -2777,13 +2781,24 @@ public:
         if (received > 0 && age > 0)
             arrival -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::microseconds(age < kMaxAge ? age : kMaxAge));
+        // Protocol 30: the frames' cameras from the member's bases; a
+        // datagram turning one not held yet gives no frames (its events still
+        // count).  Protocol 29: what this member's relay starts after from now
+        // on.  (on_message holds state_mutex_.)
+        const auto s = physics_sessions_.find(msg.session);
+        std::optional<std::vector<bmmo::session::input_frame>> frames;
+        if (s != physics_sessions_.end()) {
+            auto& bases = s->second.uplink_bases[c];
+            frames = msg.resolved_frames(bases);
+            if (!frames && s->second.uplink_undecoded++ == 0)
+                Printf("Physics session %u: an input datagram of %s turned a camera base not held yet (its frames dropped).",
+                       msg.session, client_it->second.name);
+            if (msg.first_tick > bmmo::session::kRelayRing) bases.forget_before(msg.first_tick - bmmo::session::kRelayRing);
+        }
         bmmo::session::take_input_datagram(
                 msg, [&](bmmo::session_event_msg& event) { handle_session_event(client_it, event); },
-                [&] { runner_->submit_input(msg.session, c, msg.first_tick, msg.frames, arrival); });
-        // Protocol 29: what this member's relay starts after from now on
-        // (on_message holds state_mutex_).
-        if (const auto s = physics_sessions_.find(msg.session); s != physics_sessions_.end())
-            s->second.relay.acknowledge(c, msg.relay_ack);
+                [&] { if (frames) runner_->submit_input(msg.session, c, msg.first_tick, *frames, arrival); });
+        if (s != physics_sessions_.end()) s->second.relay.acknowledge(c, msg.relay_ack);
     }
 
     static void copy_name(char* out, size_t size, const std::string& text) {

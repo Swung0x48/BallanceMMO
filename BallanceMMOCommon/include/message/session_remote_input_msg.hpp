@@ -17,29 +17,31 @@ namespace bmmo {
     // holding every member's frame for (session_input_msg::relay_ack), so
     // whatever a loss cost, the next datagram that arrives fills it, and
     // nothing ever waits behind a loss (docs/relay-protocol-design.md,
-    // protocol 29; session/input_relay.hpp).  A client drives its mirrored
+    // protocols 29 and 30; session/input_relay.hpp).  A client drives its mirrored
     // remote balls through the same navigation code as the server (design
     // 9.1) and lands every frame by its tick.
     //
     // Layout: session u32, tick u32 (the newest), count u8, acked u32,
     // held_total u32, epoch u32, wait u8 (protocol 13), from u32, part u8,
-    // parts u8, ncameras u8; per camera definition: id u8 and
-    // cam_right/cam_up/cam_dir f32x3; per entry: player u32, nframes u8 (the
-    // ticks tick-nframes+1..tick, all after `from`, oldest first), nruns u8,
-    // per run: start u8 (the index of its first frame; the first run starts
-    // at 0), keys u8, ball_type u8, flags u8, camera u8 (a defined id, or
-    // kCameraInline followed by the three rows).  A run's frame stands for
-    // every tick up to the next run's start.  `part` of `parts`: the
-    // datagrams one tick's relay was split into, each with whole entries;
-    // the recipient counts the span as held once it has them all.
+    // parts u8; per entry: player u32, nframes u8 (the ticks
+    // tick-nframes+1..tick, all after `from`, oldest first), nruns u8 (bit 7:
+    // a base follows), the base when attached (since u32 and
+    // cam_right/cam_up/cam_dir f32x3), per run: start u8 (the index of its
+    // first frame; the first run starts at 0), keys u8, ball_type u8 with the
+    // heading code in bits 5-7, flags u8, and the three rows when the code is
+    // kHeadingInline.  A run's frame stands for every tick up to the next
+    // run's start.  `part` of `parts`: the datagrams one tick's relay was
+    // split into, each with whole entries; the recipient counts the span as
+    // held once it has them all.
     //
-    // Camera ids are the server's for the whole session (input_relay.hpp
-    // relay_ring), each naming one exact camera basis; a definition rides
-    // every datagram that needs it until the recipient's acknowledgement
-    // passes its first send, and a client keeps the dictionary for the
-    // session.  In memory an entry's frames carry their cameras; on the wire
-    // `camera_ids` (one per frame) replaces them, and a decoded entry has
-    // them filled from the definitions by the client (resolve_cameras).
+    // Protocol 30: a heading code is a quarter turn of the player's camera
+    // base in force at the frame's tick, the zero rows, or inline - the rows
+    // follow and are the base from that tick on (session/camera_heading.hpp).
+    // An entry whose first camera is a turn of a base the recipient may not
+    // hold attaches that base, until the recipient's acknowledgement passes
+    // the datagram that first carried it (input_relay.hpp relay_ring).  In
+    // memory an entry's frames carry their cameras; on the wire the codes
+    // replace them, and the client fills them in (resolved_entries).
     //
     // Protocol 7 (late-player design 1.1): acked, held_total and epoch are the
     // RECIPIENT's - the last tick the server applied a fresh frame of its own,
@@ -61,11 +63,8 @@ namespace bmmo {
         struct entry {
             uint32_t player = 0;
             std::vector<session::input_frame> frames;   // <= MAX_RELAY_FRAMES, oldest first, ending at tick
-            std::vector<uint8_t> camera_ids;            // per frame on the wire; empty: the frames carry their cameras (sent inline)
-        };
-        struct camera_definition {
-            uint8_t id = 0;
-            session::camera_rows rows{};
+            std::vector<uint8_t> headings;              // per frame on the wire; empty: every camera inline (zero rows as none)
+            std::optional<session::camera_bases::base> base;
         };
         struct held_record {
             uint8_t back = 0;                               // tick - (the substituted tick), 0..31
@@ -74,9 +73,10 @@ namespace bmmo {
             session::input_frame frame{};                   // when has_frame
         };
         static constexpr uint8_t FRAME_CAMERA = 1;
+        static constexpr uint8_t RUNS_BASE = 0x80;
         static constexpr uint8_t HELD_BACK_MASK = 0x1F;
         static constexpr uint8_t HELD_INLINE = 0x80;
-        static_assert(sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) * 3 + 1 + sizeof(uint32_t) + 3
+        static_assert(sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) * 3 + 1 + sizeof(uint32_t) + 2
                       == session::kRelayDatagramHeader, "the relay's byte budget counts this header");
         static_assert(session::kHeldNoticeTicks - 1 <= HELD_BACK_MASK, "back fits its bits");
         static_assert(session::MAX_RELAY_FRAMES <= 255, "nframes and a run's start are u8");
@@ -89,7 +89,6 @@ namespace bmmo {
         uint8_t wait = 0;                  // protocol 13: the recipient's wait at the server, ticks
         uint32_t from = 0;                 // protocol 29: the frames are of the ticks after it
         uint8_t part = 0, parts = 1;       // protocol 29: this datagram among the tick's
-        std::vector<camera_definition> cameras;
         std::vector<entry> entries;        // <= MAX_PLAYERS_PER_SESSION
         std::vector<held_record> held;     // <= kHeldNoticeTicks, the recipient's own
 
@@ -100,23 +99,30 @@ namespace bmmo {
         }
         uint32_t held_tick(const held_record& r) const { return tick - r.back; }
 
-        // The client's half of the camera dictionary: takes the definitions
-        // into `dictionary` (id -> rows, a slot per id) and gives the entries
-        // with every frame's camera filled from it.  Empty when an entry
-        // names an id neither this datagram nor an earlier one defined - the
-        // datagram is then not usable, and its span is not held.
-        template <class Dictionary>
-        std::optional<std::vector<entry>> resolved_entries(Dictionary& dictionary) const {
-            for (const auto& d: cameras) dictionary[d.id] = d.rows;
+        // The client's half of the headings: the attached bases and the
+        // inline frames into the players' `bases` (player -> camera_bases),
+        // and the entries with every frame's camera filled.  Empty when a
+        // frame is a turn of a base this client does not hold - the datagram
+        // is then not usable, and its span is not held.
+        template <class Bases>
+        std::optional<std::vector<entry>> resolved_entries(Bases& bases) const {
             std::vector<entry> out = entries;
             for (auto& e: out) {
-                for (size_t i = 0; i < e.camera_ids.size(); ++i) {
-                    if (e.camera_ids[i] == session::kCameraInline) continue;
-                    const auto& rows = dictionary[e.camera_ids[i]];
-                    if (!rows) return std::nullopt;
-                    session::set_camera(e.frames[i], *rows);
+                auto& player = bases[e.player];
+                if (e.base) player.set(e.base->since, e.base->rows);
+                for (size_t i = 0; i < e.frames.size(); ++i) {
+                    const uint32_t t = frame_tick(e, i);
+                    const uint8_t code = heading_at(e, i);
+                    if (code == session::kHeadingInline) {
+                        player.set(t, session::camera_of(e.frames[i]));
+                        continue;
+                    }
+                    session::camera_rows rows;
+                    if (!player.decode(t, code, rows)) return std::nullopt;
+                    session::set_camera(e.frames[i], rows);
                 }
-                e.camera_ids.clear();
+                e.headings.clear();
+                e.base.reset();
             }
             return out;
         }
@@ -128,7 +134,7 @@ namespace bmmo {
             std::vector<const entry*> written;
             for (const auto& e: entries)
                 if (!e.frames.empty() && e.frames.size() <= session::MAX_RELAY_FRAMES
-                        && (e.camera_ids.empty() || e.camera_ids.size() == e.frames.size())
+                        && (e.headings.empty() || e.headings.size() == e.frames.size())
                         && written.size() < session::MAX_PLAYERS_PER_SESSION)
                     written.push_back(&e);
             const uint8_t count = static_cast<uint8_t>(written.size());
@@ -140,12 +146,6 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&from), sizeof(from));
             raw.write(reinterpret_cast<const char*>(&part), sizeof(part));
             raw.write(reinterpret_cast<const char*>(&parts), sizeof(parts));
-            const uint8_t ncameras = static_cast<uint8_t>(std::min<size_t>(cameras.size(), session::kCameraInline));
-            raw.write(reinterpret_cast<const char*>(&ncameras), sizeof(ncameras));
-            for (size_t i = 0; i < ncameras; ++i) {
-                raw.write(reinterpret_cast<const char*>(&cameras[i].id), sizeof(cameras[i].id));
-                raw.write(reinterpret_cast<const char*>(cameras[i].rows.data()), sizeof(cameras[i].rows));
-            }
             for (const entry* e: written) {
                 raw.write(reinterpret_cast<const char*>(&e->player), sizeof(e->player));
                 const uint8_t nframes = static_cast<uint8_t>(e->frames.size());
@@ -153,17 +153,21 @@ namespace bmmo {
                 std::vector<uint8_t> starts;
                 for (size_t i = 0; i < e->frames.size(); ++i)
                     if (i == 0 || !same_run(*e, i - 1, i)) starts.push_back(static_cast<uint8_t>(i));
-                const uint8_t nruns = static_cast<uint8_t>(starts.size());
+                const uint8_t nruns = static_cast<uint8_t>(starts.size() | (e->base ? RUNS_BASE : 0));
                 raw.write(reinterpret_cast<const char*>(&nruns), sizeof(nruns));
+                if (e->base) {
+                    raw.write(reinterpret_cast<const char*>(&e->base->since), sizeof(e->base->since));
+                    raw.write(reinterpret_cast<const char*>(e->base->rows.data()), sizeof(e->base->rows));
+                }
                 for (const uint8_t start: starts) {
                     const auto& f = e->frames[start];
-                    const uint8_t camera = camera_at(*e, start);
+                    const uint8_t code = heading_at(*e, start);
+                    const uint8_t type = static_cast<uint8_t>((f.ball_type & session::kBallTypeMask) | (code << session::kHeadingShift));
                     raw.write(reinterpret_cast<const char*>(&start), sizeof(start));
                     raw.write(reinterpret_cast<const char*>(&f.keys), sizeof(f.keys));
-                    raw.write(reinterpret_cast<const char*>(&f.ball_type), sizeof(f.ball_type));
+                    raw.write(reinterpret_cast<const char*>(&type), sizeof(type));
                     raw.write(reinterpret_cast<const char*>(&f.flags), sizeof(f.flags));
-                    raw.write(reinterpret_cast<const char*>(&camera), sizeof(camera));
-                    if (camera == session::kCameraInline) write_camera(f);
+                    if (code == session::kHeadingInline) write_camera(f);
                 }
             }
             std::vector<const held_record*> records;
@@ -197,14 +201,6 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &part)) return false;
             if (!message_utils::read_variable(raw, &parts)) return false;
             if (parts == 0 || part >= parts) return false;
-            uint8_t ncameras = 0;
-            if (!message_utils::read_variable(raw, &ncameras)) return false;
-            if (ncameras >= session::kCameraInline) return false;
-            cameras.assign(ncameras, {});
-            for (auto& d: cameras) {
-                if (!message_utils::read_variable(raw, &d.id) || d.id == session::kCameraInline) return false;
-                if (!raw.read(reinterpret_cast<char*>(d.rows.data()), sizeof(d.rows))) return false;
-            }
             entries.clear();
             entries.reserve(count);
             for (uint8_t i = 0; i < count; ++i) {
@@ -216,25 +212,35 @@ namespace bmmo {
                 if (static_cast<uint32_t>(nframes) - 1u > tick) return false;          // a frame before tick 0
                 if (static_cast<int32_t>(tick - nframes - from) < 0) return false;     // a frame at or before `from`
                 if (!message_utils::read_variable(raw, &nruns)) return false;
+                if (nruns & RUNS_BASE) {
+                    session::camera_bases::base b;
+                    if (!message_utils::read_variable(raw, &b.since)) return false;
+                    if (!raw.read(reinterpret_cast<char*>(b.rows.data()), sizeof(b.rows))) return false;
+                    e.base = b;
+                    nruns = static_cast<uint8_t>(nruns & ~RUNS_BASE);
+                }
                 if (nruns == 0 || nruns > nframes) return false;
-                struct run { uint8_t start = 0; session::input_frame frame; uint8_t camera = 0; };
+                struct run { uint8_t start = 0; session::input_frame frame; uint8_t heading = 0; };
                 std::vector<run> runs(nruns);
                 for (uint8_t r = 0; r < nruns; ++r) {
                     run& x = runs[r];
                     if (!message_utils::read_variable(raw, &x.start)) return false;
                     if (r == 0 ? x.start != 0 : x.start <= runs[r - 1].start) return false;
                     if (x.start >= nframes) return false;
+                    uint8_t type = 0;
                     if (!message_utils::read_variable(raw, &x.frame.keys)) return false;
-                    if (!message_utils::read_variable(raw, &x.frame.ball_type)) return false;
+                    if (!message_utils::read_variable(raw, &type)) return false;
                     if (!message_utils::read_variable(raw, &x.frame.flags)) return false;
-                    if (!message_utils::read_variable(raw, &x.camera)) return false;
-                    if (x.camera == session::kCameraInline && !read_camera(x.frame)) return false;
+                    x.heading = static_cast<uint8_t>(type >> session::kHeadingShift);
+                    if (!session::valid_heading(x.heading)) return false;
+                    x.frame.ball_type = static_cast<uint8_t>(type & session::kBallTypeMask);
+                    if (x.heading == session::kHeadingInline && !read_camera(x.frame)) return false;
                 }
                 // A run's frame stands for every tick up to the next run's start.
                 for (uint8_t r = 0; r < nruns; ++r) {
                     const size_t end = r + 1 < nruns ? runs[r + 1].start : nframes;
                     e.frames.insert(e.frames.end(), end - runs[r].start, runs[r].frame);
-                    e.camera_ids.insert(e.camera_ids.end(), end - runs[r].start, runs[r].camera);
+                    e.headings.insert(e.headings.end(), end - runs[r].start, runs[r].heading);
                 }
                 entries.push_back(std::move(e));
             }
@@ -263,18 +269,19 @@ namespace bmmo {
         }
 
     private:
-        // One run: the same keys, ball type, flags and camera (the id, and
-        // for an inline one the rows) as the frame before.
+        // One run: the same keys, ball type, flags and heading (and for an
+        // inline one the rows) as the frame before.
         static bool same_run(const entry& e, size_t a, size_t b) {
             const auto& x = e.frames[a];
             const auto& y = e.frames[b];
             return x.keys == y.keys && x.ball_type == y.ball_type && x.flags == y.flags
-                && camera_at(e, a) == camera_at(e, b)
-                && (camera_at(e, a) != session::kCameraInline || session::same_camera(x, y));
+                && heading_at(e, a) == heading_at(e, b)
+                && (heading_at(e, a) != session::kHeadingInline || session::same_camera(x, y));
         }
-        // An entry without ids (built in memory) sends its cameras inline.
-        static uint8_t camera_at(const entry& e, size_t i) {
-            return e.camera_ids.empty() ? session::kCameraInline : e.camera_ids[i];
+        // An entry without codes (built in memory) sends its cameras inline.
+        static uint8_t heading_at(const entry& e, size_t i) {
+            if (!e.headings.empty()) return e.headings[i];
+            return session::zero_camera(session::camera_of(e.frames[i])) ? session::kHeadingNone : session::kHeadingInline;
         }
         void write_camera(const session::input_frame& f) {
             raw.write(reinterpret_cast<const char*>(f.cam_right), sizeof(f.cam_right));

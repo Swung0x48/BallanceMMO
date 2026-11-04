@@ -441,10 +441,12 @@ namespace bmmo::session {
         s.tick_base_ = 0;
         s.frames_since_anchor_ = -1;
         s.input_history_.clear();
-        s.relay_cameras_ = {};
+        s.relay_bases_.clear();
         s.relay_held_ = 0;
         s.relay_parts_.clear();
         s.previous_cam_valid_ = false;
+        s.camera_snap_.reset();
+        s.uplink_bases_.clear();
         s.corrector_.clear();
         s.mechanism_correctors_.clear();
         s.mechanism_tracking_.clear();
@@ -1476,12 +1478,32 @@ namespace bmmo::session {
                 msg.frames.push_back(s.input_history_[index].second);
                 ++index;
             }
+            encode_uplink_cameras(msg);
             remember_sent(msg);
             s.own_piggyback_.attach(msg);
             msg.serialize();
             platform_.send(msg.raw.str(), send_mode::unreliable_no_delay);
             ++s.inputs_sent_;
         }
+    }
+
+    // Protocol 30: our frames' cameras as heading codes against our base,
+    // with the base the first coded frame turns attached until the server
+    // applied one of our frames from its tick on - the first datagram it got
+    // with such a frame was sent before we knew, and carried it.
+    void session_client_core::encode_uplink_cameras(bmmo::session_input_msg& msg) {
+        auto& bases = s.uplink_bases_;
+        msg.headings.clear();
+        for (size_t i = 0; i < msg.frames.size(); ++i)
+            msg.headings.push_back(bases.encode(msg.first_tick + static_cast<uint32_t>(i), bmmo::session::camera_of(msg.frames[i])));
+        msg.base.reset();
+        const auto coded = std::find_if(msg.headings.begin(), msg.headings.end(),
+                                        [](uint8_t code) { return code != bmmo::session::kHeadingNone; });
+        if (coded != msg.headings.end() && *coded < 4) {
+            const auto* b = bases.at(msg.first_tick + static_cast<uint32_t>(coded - msg.headings.begin()));
+            if (b && !(s.acked_header_known_ && static_cast<int32_t>(s.header_acked_ - b->since) >= 0)) msg.base = *b;
+        }
+        bases.forget_before(msg.first_tick);
     }
 
     // The sent ring (late-player design 1.3): the bytes each uplink
