@@ -146,7 +146,7 @@ Found by the 20-player bandwidth runs (BW20, nftables meter on the server's port
 - The headless test client closes its connection when its run ends, before its wind-down (it used to linger ~2 s,
   which looked like 20 stalled clients: a 7.9 Mbps burst at every run's end).
 
-### 4.9 Lifecycle events ride the acknowledged relay (protocol 33, design for review, 2026-11-04)
+### 4.9 Lifecycle events ride the acknowledged relay (protocol 33, 2026-11-04)
 
 **The gap (LBM5, swing seed 2, both twins).** A birth stamped tick 231 reached client 3 at its tick 307 (on twin; 310
 off twin): 76 ticks after its stamp, past the reach of 74, so the client resynced. The client's input frames of the
@@ -221,6 +221,28 @@ repeats stay for a member not yet a recipient. (5) Client: the section decoded b
 dictionary per session, cleared at a reanchor. (6) Uplink: the own events ride until the header's `acked` reaches the
 stamp (raw, as today: one own event at a time). (7) Docs, then the verification above; the wire check's sends differ
 in SessionRemoteInput and SessionInput by construction.
+
+**As built (protocol 33, branch event-relay, 2026-11-04).** session/relay_events.hpp (relay_event, the recipe
+numbering, the compact form's sizes and rebuild), input_relay.hpp (per recipient: the pending messages and the
+recipes it may lack, each with the tick of the first datagram of its current carry - left out of a datagram by the
+budget or a header-only notice, the carry starts again; acknowledge drops what the acknowledgement reached; a
+reanchor starts every carry again and keeps the recipes the recipient holds), session_remote_input_msg (the
+section), server.cpp `send_copies` (members through the ring, anyone else through the old repeats), the client's
+`deliver_relayed_events` (the recipes into the session's dictionary, then every message to its reliable copy's
+handler; while not running nothing is taken and the datagram's span is not acknowledged), event_piggyback (own events
+until the header's `acked` reaches max(stamp, the carry's first newest frame), 128 ticks at most). 794 tests.
+
+Measured (headless twins on the worktree build, RLD Arch server):
+- The gap: the old build at 20 % loss in bursts of 8 resynced once on a late lifecycle event (seed 0, as LBM5 seed 2
+  did at 10 %); the new build never did in 8 loss runs (10 % x 5 with seed 2 twice, 20 % x 3); its events never
+  arrived later than the frames of their datagrams. All FINAL exact, replay N/N; 11 twin arms (A0, swing 0-2, A6b,
+  A6m death/superseded/drop, A6m, A8) exact.
+- A pair of events split at the server's intake (1 tick) is pre-existing: 2 of 70 pairs on the old build, 3 of 71 on
+  the new; A6m superseded's +1 relay tick is timing noise (idle interleave: new 3/3 pass, old 2/3).
+- Bandwidth, 20 players driving (server upload): start burst 4.75 -> 3.52 Mbps (2-s sample), window mean 3.41 ->
+  3.04 Mbps, per player download 171 -> 155 kbit/s.
+- Retail L11 (both flags on, the worktree x86 build): own/mirror/body 784/1000/46385 compared, 0 different, 0
+  missing, replay 2568/2568.
 
 ## 5. Interactions to handle
 
