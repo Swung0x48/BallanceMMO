@@ -712,6 +712,14 @@ namespace bmmo::session {
     // floor: no measurement, no deeper claim than every client made before
     // step 12 (and a client that never rewinds needs no deeper reach).
     constexpr double kReachHitchBudgetMs = 3.0 * 1000.0 / 66.0;   // B: 3 ticks, 45.45 ms
+    // The user's decision after LBM4: the first sample is not left to the
+    // first rewind the session happens to need - that can be minutes in,
+    // the reach held at the floor all the while (lbm4_a4_swing_seed1: no
+    // rewind before tick 256, so at tick 200 a held notice 51 ticks deep
+    // asked for a resync while the reach wanted 74).  The client rewinds
+    // this deep once, for nothing, as soon as its history allows
+    // (session_client_core::calibrate_rewind_cost).
+    constexpr uint32_t kRewindCalibrationTicks = 16;
     class rewind_cost_meter {
     public:
         static constexpr double kWeight = 1.0 / 16.0;

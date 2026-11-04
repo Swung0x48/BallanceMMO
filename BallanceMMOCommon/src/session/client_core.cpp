@@ -379,6 +379,7 @@ namespace bmmo::session {
         // world is what a rewind restores and replays), and its server's
         // headers say the wait.
         s.rollback_.rewind_cost().clear();
+        s.rewind_calibrated_ = false;
         // Its samples are the flow's clock reads (the cap decides the
         // reach): the headless client captures them, retail reads its clock.
         s.rollback_.set_cost_clock([this](clock_site site) { return platform_.now(site); });

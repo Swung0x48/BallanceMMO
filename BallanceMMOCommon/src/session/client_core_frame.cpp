@@ -119,6 +119,30 @@ namespace bmmo::session {
         }
     }
 
+    // The reach's cap from a measured rewind before the session needs a
+    // deep one (rollback.hpp kRewindCalibrationTicks): the recorded inputs
+    // replayed on a deterministic world leave it as it was.  Counted in no
+    // rollback class - it corrects nothing - and only while no other
+    // rewind has measured the cost yet.
+    void session_client_core::calibrate_rewind_cost() {
+        if (!config.rollback || config.reach_ticks != 0 || s.rewind_calibrated_ || s.resync_pending_
+                || s.rollback_.rewind_cost().samples() != 0)
+            return;
+        const uint32_t now = current_tick();
+        const uint32_t anchor = now - bmmo::session::kRewindCalibrationTicks;
+        if (now < bmmo::session::kRewindCalibrationTicks + 2 || !s.rollback_.rewindable(anchor)) return;
+        auto input_at = [this](const std::string& name, uint32_t tick, bmmo::session::input_frame& out) {
+            return recorded_input_at(name, tick, out);
+        };
+        const scope_guard keep_cells = keep_live_cells();
+        if (!rewind_world(anchor, now, input_at, "calibration")) return;
+        s.rewind_calibrated_ = true;
+        drop_carried_own_replay(anchor, false);
+        const auto& cost = s.rollback_.rewind_cost();
+        logf("rewind cost calibrated at tick %u: restore %.2f ms, replay %.3f ms/tick, cap %u", now, cost.restore_ms(),
+             cost.replay_ms_per_tick(), cost.cap());
+    }
+
     // Rewind for no reason at all (the headless --force-rollback, at the
     // host's cadence).  A solo session's world is a pure function of its
     // recorded inputs, so the hashes of a run with these must equal those
@@ -601,6 +625,7 @@ namespace bmmo::session {
         // and the replay ends one tick short of re-issuing it.  The retail
         // client has this order already.
         replay_corrected_inputs();
+        calibrate_rewind_cost();
         retry_owed_resync();
         // A mirror a restore took out for a remake that no replay made
         // again (step LB): made now, not left without a body.

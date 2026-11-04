@@ -721,6 +721,7 @@ namespace bmmo::session {
         // one was received (the WAIT journal record on each change).
         uint8_t server_wait_ = 0;
         bool server_wait_known_ = false;
+        bool rewind_calibrated_ = false;   // calibrate_rewind_cost ran this session
         static constexpr uint32_t kRelayLagBuckets = 129;
         std::array<uint32_t, kRelayLagBuckets> relay_lag_hist_{};
         // The window: line (window_text).  The status line's counters are
@@ -2060,6 +2061,7 @@ namespace bmmo::session {
         // One replay for every input correction the frame collected (the
         // relay's and our own substituted frames').
         void replay_corrected_inputs();
+        void calibrate_rewind_cost();
         void retry_owed_resync();
         // Every rewind the core asks of the engine outside a snapshot
         // (inputs, lifecycle events, sector stamps, the forced one):
