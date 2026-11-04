@@ -2384,9 +2384,16 @@ def criteria(report, case, controls):
                         None if edge is None else D['rb'][cls][1] <= edge + D['rb'][cls][0],
                         '%d ticks in %d rollbacks vs <= %s + 1 a rollback%s' % (D['rb'][cls][1], D['rb'][cls][0], edge, note))
                 if late:
+                    # A count too: one more is no failure while the input
+                    # rollbacks' ticks stay within control (LBM5 A8: the
+                    # joiner's frames one by one, 3 vs 2, fewer ticks).
                     edge, note = band(row['index'], lambda c: c['D']['inrew_late'])
+                    ticks, _ = band(row['index'], lambda c: c['D']['rb']['input'][1])
+                    cheaper = ticks is not None and D['rb']['input'][1] <= ticks + D['rb']['input'][0]
                     add(who, 'input rewinds naming the late ball in D within control',
-                        None if edge is None else D['inrew_late'] <= edge, '%d vs <= %s%s' % (D['inrew_late'], edge, note))
+                        None if edge is None else D['inrew_late'] <= edge or cheaper,
+                        '%d vs <= %s%s%s' % (D['inrew_late'], edge, note,
+                                            '; input rollback ticks within control' if cheaper else ''))
                 lag_phases = ('D', 'A') if family == 'lead' else ('D',)
                 for p in lag_phases:
                     if p == 'D':
