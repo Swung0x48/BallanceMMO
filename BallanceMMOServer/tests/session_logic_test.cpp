@@ -487,9 +487,10 @@ TEST(SnapshotCadence, FullThenDeltas) {
     EXPECT_EQ(cadence.decide(0, false), 2);   // first snapshot is full
     EXPECT_EQ(cadence.decide(1, false), 0);
     EXPECT_EQ(cadence.decide(2, false), 1);
-    EXPECT_EQ(cadence.decide(3, true), 2);    // body set changed
+    EXPECT_EQ(cadence.decide(3, true), 3);    // body set changed (and nothing else)
     EXPECT_EQ(cadence.decide(4, false), 1);
     EXPECT_EQ(cadence.decide(13, false), 2);  // full interval elapsed
+    EXPECT_EQ(cadence.decide(23, true), 2);   // both: a regular full one
 }
 
 namespace {

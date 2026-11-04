@@ -854,6 +854,10 @@ public:
             std::chrono::steady_clock::time_point window_start{};
             double last_position[3] = {};
             bool have_position = false;
+            // A full snapshot with a mechanism row went to this member since
+            // its last assignment: with snapshots off it has the names its
+            // reset guard waits for, and needs no more body-set snapshots.
+            bool named = false;
             // Step G5: BodyRevived dropped under the proximity union (every
             // session since step UOFF; the repeat-event guard that deduplicated
             // the BodyRevived bursts of the bit-clear path went with it).
@@ -1561,7 +1565,22 @@ public:
             for (int k = 0; k < 3; ++k) guard.last_position[k] = body.position[k];
             guard.have_position = true;
         }
+        // With snapshots off a client takes the full snapshot of a body-set
+        // change for its mechanism names only (client_core_messages.cpp,
+        // step RC3), and of those only one thing still needs any: the
+        // level-reset guard waits for a mechanism it has resolved
+        // (sector_reset_guard.hpp).  Sent to every member at every change,
+        // these were most of a 20-member session's upload (BW20: ~7 KB each,
+        // ~3.5 a second with deaths and respawns), so a member gets one
+        // until it has names.  Rollbacks track the local bodies and a resync
+        // carries its own dictionary.
+        const bool snapshots_off = config_.physics_snapshot_interval >= 255;
+        const bool mechanism_rows = std::any_of(snapshot.bodies.begin(), snapshot.bodies.end(),
+            [](const bmmo::session::body_state& b) { return b.kind == bmmo::session::body_kind::Mechanism; });
         for (const auto m: s.members) {
+            auto& guard = s.guards[m];
+            if (snapshot.body_set && snapshots_off && guard.named) continue;
+            if (snapshot.full && mechanism_rows) guard.named = true;
             bmmo::session_snapshot_msg msg;
             msg.session = snapshot.session;
             msg.tick = snapshot.tick;
@@ -2000,6 +2019,7 @@ public:
     }
     void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick, uint8_t flags = 0) {
         const auto sent = std::chrono::steady_clock::now();
+        s.guards[c].named = false;   // a new numbering clears the client's mechanism registry
         bmmo::session_assign_msg assign;
         assign.session = s.id;
         assign.first_tick = first_tick;

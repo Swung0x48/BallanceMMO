@@ -69,7 +69,8 @@ public:
     // govern: the cadence sends one regardless, and one more whenever the body
     // set changes (session/timeline.hpp snapshot_cadence::decide) - a client
     // with snapshots off takes that one for its mechanism names only (step
-    // RC3).  Raising both is how a session runs with the snapshot path off,
+    // RC3), so with snapshots off a member gets it only until it has names
+    // (server.cpp on_session_snapshot).  Raising both is how a session runs with the snapshot path off,
     // holding the relayed input stream alone responsible for keeping clients
     // in step: 100000 since FULL step DEP (66 before).
     uint32_t physics_full_snapshot_interval = 100000;
