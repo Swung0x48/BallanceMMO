@@ -747,6 +747,14 @@ namespace bmmo::session {
         int rollback_diag_ = 0;
         bmmo::session::relay_seen relay_seen_;
         bmmo::session::pending_relay pending_relay_;
+        // Protocol 29 (docs/relay-protocol-design.md): the session's camera
+        // dictionary, the newest tick up to which every member's relayed
+        // frames are held (what every input datagram acknowledges), and the
+        // parts seen of the ticks whose relay came split.
+        std::array<std::optional<bmmo::session::camera_rows>, bmmo::session::kCameraInline> relay_cameras_{};
+        uint32_t relay_held_ = 0;
+        std::map<uint32_t, uint64_t> relay_parts_;
+        uint64_t relay_undefined_ = 0;   // datagrams naming a camera not defined yet
         // Protocol 7 (late-player design 1.3): the server's notices of our own
         // substituted ticks, taken once per tick (keyed by our own id) and
         // applied (note_held_section): recv inside the reach, late past it
@@ -2147,6 +2155,9 @@ namespace bmmo::session {
         // tick already simulated, against the frame the prediction used.
         void note_input_correction(const client_core_state::remote_ball& remote, uint32_t tick,
                                    const bmmo::session::input_frame& relayed);
+        // Protocol 29: the acknowledged span (client_core_messages.cpp).
+        void note_relay_span(const bmmo::session_remote_input_msg& msg);
+        void restart_relay_span();
         // Section J (E5, client_core_held.cpp): late-player parts one and two.
         static bool same_frame(const bmmo::session::input_frame& a, const bmmo::session::input_frame& b);
         void note_held_section(const bmmo::session_remote_input_msg& msg);

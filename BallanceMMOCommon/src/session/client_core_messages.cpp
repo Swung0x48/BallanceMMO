@@ -336,7 +336,15 @@ namespace bmmo::session {
         ++s.remote_inputs_received_;
         if (msg.session != s.session_) return;
         note_held_section(msg);
-        for (const auto& entry: msg.entries) {
+        // Protocol 29: the frames' cameras from the session's dictionary.  A
+        // datagram naming an id this client has no definition of yet is not
+        // used: its span is not held, so the server keeps sending it.
+        const auto entries = msg.resolved_entries(s.relay_cameras_);
+        if (!entries) {
+            ++s.relay_undefined_;
+            return;
+        }
+        for (const auto& entry: *entries) {
             // Step T3 (trafo-replication design 2.4): a member first seen in
             // the relay gets its piece set now, outside any replay.  Step TRL:
             // the set of the member life covering the entry's first frame; a
@@ -358,9 +366,10 @@ namespace bmmo::session {
             for (size_t i = 0; i < entry.frames.size(); ++i) {
                 const uint32_t tick = msg.frame_tick(entry, i);
                 const auto& frame = entry.frames[i];
-                // The window re-delivers a frame up to relay_window
-                // times: the first arrival is the truth, the rest change
-                // nothing (no record, no correction, no predictor move).
+                // Every datagram until our acknowledgement passes it
+                // re-delivers a frame: the first arrival is the truth, the
+                // rest change nothing (no record, no correction, no
+                // predictor move).
                 if (!s.relay_seen_.first(entry.player, tick)) { ++s.relay_dup_; continue; }
                 ++s.relay_new_;
                 // How late the first arrival is, in ticks already
@@ -401,6 +410,33 @@ namespace bmmo::session {
                 remote.have_input = true;
             }
         }
+        note_relay_span(msg);
+    }
+
+    // Protocol 29: the frames of every tick in (from, tick] are held once
+    // every part of that tick's relay arrived, and the next input datagram
+    // acknowledges it.  A `from` past what we hold means the server's history
+    // no longer reaches back to it (kRelayHistory): only a resync can fill
+    // that (the user's decision, docs/relay-protocol-design.md 7).
+    void session_client_core::note_relay_span(const bmmo::session_remote_input_msg& msg) {
+        if (!s.assigned_) return;
+        if (static_cast<int32_t>(msg.from - s.relay_held_) > 0) {
+            if (!s.resync_pending_) request_resync("relayed input past the server's history", true);
+            return;
+        }
+        if (msg.parts > 64) return;
+        uint64_t& seen = s.relay_parts_[msg.tick];
+        seen |= uint64_t{1} << msg.part;
+        if (seen != (msg.parts == 64 ? ~uint64_t{0} : (uint64_t{1} << msg.parts) - 1)) return;
+        if (static_cast<int32_t>(msg.tick - s.relay_held_) > 0) s.relay_held_ = msg.tick;
+        s.relay_parts_.erase(s.relay_parts_.begin(), s.relay_parts_.upper_bound(s.relay_held_));
+    }
+
+    // A new numbering (the start, a resync, a late join): every tick before
+    // its base is the state this client was given.
+    void session_client_core::restart_relay_span() {
+        s.relay_held_ = s.tick_base_ - 1;
+        s.relay_parts_.clear();
     }
 
     // A relayed frame for a tick this client has already simulated: if it

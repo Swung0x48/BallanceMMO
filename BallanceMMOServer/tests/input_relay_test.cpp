@@ -1,7 +1,10 @@
-// session/input_relay.hpp: the server's relay ring and window, and the
-// client's reassembly rules (protocol 5).
+// session/input_relay.hpp: the server's relay ring (protocol 29: every tick
+// after the recipient's acknowledgement, the camera dictionary) and the
+// client's reassembly rules.
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstring>
 #include <optional>
 #include <set>
 
@@ -21,69 +24,177 @@ namespace {
         f.keys = keys;
         return f;
     }
+    input_frame turning(uint8_t keys, float angle) {
+        input_frame f{};
+        f.keys = keys;
+        f.cam_dir[0] = angle;
+        f.cam_dir[2] = 1.0f - angle;
+        return f;
+    }
     using applied_list = std::vector<std::pair<uint32_t, input_frame>>;
+    const auto everyone = [](uint32_t) { return true; };
+
+    // A datagram as server.cpp on_session_inputs writes it, through the wire
+    // and back, with the cameras resolved from `dictionary`.
+    using dictionary_t = std::array<std::optional<bmmo::session::camera_rows>, bmmo::session::kCameraInline>;
+    bmmo::session_remote_input_msg to_message(relay_ring::datagram d, uint32_t tick, uint32_t epoch = 0) {
+        bmmo::session_remote_input_msg msg;
+        msg.session = 1;
+        msg.tick = tick;
+        msg.epoch = epoch;
+        msg.from = d.from;
+        for (const auto& [id, rows]: d.cameras) msg.cameras.push_back({id, rows});
+        for (auto& e: d.entries) msg.entries.push_back({e.player, std::move(e.frames), std::move(e.camera_ids)});
+        for (const auto& h: d.held) {
+            bmmo::session_remote_input_msg::held_record r;
+            r.back = static_cast<uint8_t>(tick - h.tick);
+            if (bmmo::session::held_inline(h.tick, h.source, epoch)) {
+                r.has_frame = true;
+                r.frame = h.frame;
+            } else {
+                r.source = h.source;
+            }
+            msg.held.push_back(r);
+        }
+        return msg;
+    }
+    bmmo::session_remote_input_msg parse(bmmo::session_remote_input_msg& msg) {
+        msg.raw = std::stringstream{};
+        EXPECT_TRUE(msg.serialize());
+        bmmo::session_remote_input_msg parsed;
+        parsed.raw.write(msg.raw.str().data(), static_cast<std::streamsize>(msg.size()));
+        EXPECT_TRUE(parsed.deserialize());
+        return parsed;
+    }
+    size_t datagram_bytes(const relay_ring::datagram& d, uint32_t epoch) {
+        size_t bytes = bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes
+                     + d.cameras.size() * bmmo::session::kRelayCameraBytes;
+        for (const auto& e: d.entries) bytes += relay_ring::entry_bytes(e);
+        for (const auto& h: d.held) bytes += relay_ring::held_bytes(h, epoch);
+        return bytes;
+    }
 }
 
-// Every other member present at the newest tick, with its trailing run of
-// consecutive ticks, oldest first; the recipient itself left out.
-TEST(RelayRing, BuildsTheWindowPerRecipient) {
-    relay_ring ring(4);
+// Every other member's frames for every tick after the recipient's
+// acknowledgement: however many datagrams were lost, the next one covers
+// the whole span; a member that joined inside it starts at its join, one
+// absent at the newest tick (left) is not relayed, and a gap in the ticks
+// ends a run.  The recipient itself is left out.
+TEST(RelayRing, CoversEverythingAfterTheAcknowledgement) {
+    relay_ring ring;
+    ring.reanchor(1, 9);
     for (uint32_t t = 10; t <= 13; ++t)
-        ring.push(t, applied_list{{1, frame(static_cast<uint8_t>(t))}, {2, frame(static_cast<uint8_t>(t + 100))}});
-    const auto window = ring.build(1);
-    ASSERT_EQ(window.size(), 1u);
-    EXPECT_EQ(window[0].player, 2u);
-    ASSERT_EQ(window[0].frames.size(), 4u);
-    EXPECT_EQ(window[0].frames.front().keys, 110);
-    EXPECT_EQ(window[0].frames.back().keys, 113);
-    const auto other = ring.build(2);
-    ASSERT_EQ(other.size(), 1u);
-    EXPECT_EQ(other[0].player, 1u);
-    EXPECT_EQ(other[0].frames.back().keys, 13);
-    // A recipient that is not a member gets everyone.
-    EXPECT_EQ(ring.build(99).size(), 2u);
+        ring.push(t, applied_list{{1, frame(1)}, {2, frame(static_cast<uint8_t>(t))}});
+    auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
+    ASSERT_EQ(datagrams.size(), 1u);
+    EXPECT_EQ(datagrams[0].from, 9u);
+    ASSERT_EQ(datagrams[0].entries.size(), 1u);
+    EXPECT_EQ(datagrams[0].entries[0].player, 2u);
+    ASSERT_EQ(datagrams[0].entries[0].frames.size(), 4u);   // 10..13: nothing acknowledged yet
+    // Acknowledged through 12: only 13 is left; never backwards, never past the newest.
+    ring.acknowledge(1, 12);
+    ring.acknowledge(1, 11);
+    EXPECT_EQ(ring.acked(1), 12u);
+    ring.acknowledge(1, 99);
+    EXPECT_EQ(ring.acked(1), 13u);
+    ring.reanchor(1, 12);
+    datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
+    ASSERT_EQ(datagrams[0].entries[0].frames.size(), 1u);
+    EXPECT_EQ(datagrams[0].entries[0].frames[0].keys, 13);
+    // A tick never stepped (14 missing), a joiner at 16, a leaver.
+    ring.push(15, applied_list{{1, frame(1)}, {2, frame(15)}});
+    ring.push(16, applied_list{{1, frame(1)}, {2, frame(16)}, {3, frame(160)}});
+    ring.push(17, applied_list{{1, frame(1)}, {2, frame(17)}, {3, frame(170)}, {4, frame(4)}});
+    datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, [](uint32_t p) { return p != 4; });
+    ASSERT_EQ(datagrams[0].entries.size(), 2u);
+    EXPECT_EQ(datagrams[0].entries[0].frames.size(), 3u);   // 15..17: the gap at 14 ends the run
+    EXPECT_EQ(datagrams[0].entries[1].player, 3u);
+    EXPECT_EQ(datagrams[0].entries[1].frames.size(), 2u);   // 16, 17: present from its join
+    // A push at an older tick replaces the ring from there.
+    ring.push(17, applied_list{{1, frame(1)}, {2, frame(77)}});
+    datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
+    ASSERT_EQ(datagrams[0].entries.size(), 1u);
+    EXPECT_EQ(datagrams[0].entries[0].frames.back().keys, 77);
+    EXPECT_EQ(ring.newest_tick(), 17u);
 }
 
-TEST(RelayRing, TrimsToTheWindowAndStopsAtAGapOrAJoin) {
-    relay_ring ring(8);
-    ring.push(1, applied_list{{1, frame(1)}, {2, frame(1)}});
-    ring.push(2, applied_list{{1, frame(2)}, {2, frame(2)}});
-    // tick 3 never relayed (one member): a gap
-    ring.push(4, applied_list{{1, frame(4)}, {2, frame(4)}});
-    ring.push(5, applied_list{{1, frame(5)}, {2, frame(5)}, {3, frame(5)}});   // 3 joins
-    ring.push(6, applied_list{{1, frame(6)}, {2, frame(6)}, {3, frame(6)}});
-    const auto window = ring.build(1);
-    ASSERT_EQ(window.size(), 2u);
-    EXPECT_EQ(window[0].player, 2u);
-    EXPECT_EQ(window[0].frames.size(), 3u);   // 4, 5, 6: the gap at 3 ends the run
-    EXPECT_EQ(window[0].frames.front().keys, 4);
-    EXPECT_EQ(window[1].player, 3u);
-    EXPECT_EQ(window[1].frames.size(), 2u);   // 5, 6: present from its join
-    // A member absent at the newest tick (left) is not relayed at all.
-    ring.push(7, applied_list{{1, frame(7)}, {2, frame(7)}});
-    const auto after = ring.build(1);
-    ASSERT_EQ(after.size(), 1u);
-    EXPECT_EQ(after[0].player, 2u);
-    EXPECT_EQ(after[0].frames.size(), 4u);
-    // The window bounds the run.
-    relay_ring small(2);
-    for (uint32_t t = 1; t <= 5; ++t) small.push(t, applied_list{{1, frame(1)}, {2, frame(static_cast<uint8_t>(t))}});
-    const auto bounded = small.build(1);
-    ASSERT_EQ(bounded.size(), 1u);
-    ASSERT_EQ(bounded[0].frames.size(), 2u);
-    EXPECT_EQ(bounded[0].frames.front().keys, 4);
-    EXPECT_EQ(small.newest_tick(), 5u);
+// An acknowledgement older than the history: the span starts at the oldest
+// tick kept, past what the recipient holds - its cue to resync.
+TEST(RelayRing, PastTheHistoryTheSpanStartsAtTheOldestKept) {
+    relay_ring ring;
+    ring.reanchor(1, 0);
+    const uint32_t last = 50 + static_cast<uint32_t>(bmmo::session::kRelayHistory) + 20;
+    for (uint32_t t = 50; t <= last; ++t) ring.push(t, applied_list{{1, frame(1)}, {2, frame(2)}});
+    const auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
+    EXPECT_EQ(datagrams[0].from, last - bmmo::session::kRelayHistory);
+    EXPECT_EQ(datagrams[0].entries[0].frames.size(), bmmo::session::kRelayHistory);
 }
 
-TEST(RelayRing, APushAtAnOlderTickReplacesTheRingFromThere) {
-    relay_ring ring(8);
-    for (uint32_t t = 1; t <= 4; ++t) ring.push(t, applied_list{{1, frame(1)}, {2, frame(static_cast<uint8_t>(t))}});
-    ring.push(3, applied_list{{1, frame(1)}, {2, frame(30)}});
-    const auto window = ring.build(1);
-    ASSERT_EQ(window.size(), 1u);
-    ASSERT_EQ(window[0].frames.size(), 3u);   // 1, 2, 3
-    EXPECT_EQ(window[0].frames.back().keys, 30);
-    EXPECT_EQ(ring.newest_tick(), 3u);
+// The camera dictionary: one id per exact basis for the whole session, its
+// definition in every datagram until the recipient acknowledges the tick of
+// its first send, and frames that come back bit for bit after the wire.
+TEST(RelayRing, CameraIdsAreDefinedUntilAcknowledgedAndRoundTripExactly) {
+    relay_ring ring;
+    ring.reanchor(1, 99);
+    ring.reanchor(3, 99);
+    const input_frame north = turning(1, 0.0f), east = turning(2, 1.0f);
+    for (uint32_t t = 100; t <= 103; ++t)
+        ring.push(t, applied_list{{1, north}, {2, t < 102 ? north : east}, {3, north}});
+    auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
+    ASSERT_EQ(datagrams.size(), 1u);
+    EXPECT_EQ(datagrams[0].cameras.size(), 2u);
+    auto msg = to_message(datagrams[0], 103);
+    auto parsed = parse(msg);
+    dictionary_t dictionary{};
+    const auto entries = parsed.resolved_entries(dictionary);
+    ASSERT_TRUE(entries);
+    ASSERT_EQ(entries->size(), 2u);
+    for (const auto& e: *entries)
+        for (size_t i = 0; i < e.frames.size(); ++i) {
+            const input_frame& want = e.player == 2 && i >= 2 ? east : north;
+            EXPECT_TRUE(want.keys == e.frames[i].keys && bmmo::session::same_camera(want, e.frames[i])) << e.player << " " << i;
+        }
+    // Two runs for player 2 (north, east), one for player 3.
+    EXPECT_EQ(relay_ring::entry_bytes(datagrams[0].entries[0]), 6u + 2 * 5u);
+    // Not acknowledged yet: still defined; acknowledged past the first send: no more.
+    ring.push(104, applied_list{{1, north}, {2, east}, {3, north}});
+    EXPECT_EQ(ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone)[0].cameras.size(), 2u);
+    ring.acknowledge(1, 103);
+    ring.push(105, applied_list{{1, north}, {2, east}, {3, north}});
+    datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
+    EXPECT_TRUE(datagrams[0].cameras.empty());
+    // A client with no definition of an id cannot use the datagram.
+    msg = to_message(datagrams[0], 105);
+    parsed = parse(msg);
+    dictionary_t empty{};
+    EXPECT_FALSE(parsed.resolved_entries(empty));
+    EXPECT_TRUE(parsed.resolved_entries(dictionary));
+    // Another recipient has its own state: it still needs both.
+    EXPECT_EQ(ring.build_datagrams(3, bmmo::session::kRelayDatagramBudget, everyone)[0].cameras.size(), 2u);
+}
+
+// Whole entries per datagram of one packet: a room of 64 with every frame
+// different (keys every tick) splits into several, none over the budget,
+// every other member in exactly one; the budget counts what goes on the wire.
+TEST(RelayRing, PacksDatagramsToTheBudget) {
+    relay_ring ring;
+    ring.reanchor(1, 99);
+    for (uint32_t t = 100; t < 120; ++t) {
+        applied_list applied;
+        for (uint32_t p = 1; p <= 64; ++p) applied.emplace_back(p, turning(static_cast<uint8_t>(t + p), 0.5f));
+        ring.push(t, applied);
+    }
+    const auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone);
+    EXPECT_GT(datagrams.size(), 1u);
+    std::set<uint32_t> players;
+    for (const auto& d: datagrams) {
+        for (const auto& e: d.entries) EXPECT_TRUE(players.insert(e.player).second);
+        auto msg = to_message(d, 119);
+        EXPECT_EQ(parse(msg).entries.size(), d.entries.size());
+        EXPECT_EQ(msg.size(), datagram_bytes(d, 0));
+        EXPECT_LE(msg.size(), bmmo::session::kRelayDatagramBudget);
+    }
+    EXPECT_EQ(players.size(), 63u);
 }
 
 TEST(RelayStore, FirstDeliveryWinsDuplicatesAndStaleFramesDoNothing) {
@@ -114,93 +225,6 @@ TEST(RelaySeen, OncePerPlayerAndTick) {
     EXPECT_TRUE(seen.first(1, 13));    // 10 falls out of the bound
     EXPECT_TRUE(seen.first(1, 10));
     EXPECT_FALSE(seen.first(1, 13));
-}
-
-namespace {
-    input_frame turning(uint8_t keys, float angle) {
-        input_frame f{};
-        f.keys = keys;
-        f.cam_dir[0] = angle;
-        f.cam_dir[2] = 1.0f - angle;
-        return f;
-    }
-    size_t total_frames(const std::vector<relay_ring::datagram>& datagrams) {
-        size_t n = 0;
-        for (const auto& d: datagrams)
-            for (const auto& e: d.entries) n += e.frames.size();
-        return n;
-    }
-}
-
-// Whole entries per datagram of one packet; a room of 30 or 64 with the
-// cameras turning every tick splits into several, none over the budget, every
-// other member in exactly one of them; a leaver is left out.
-TEST(RelayRing, PacksDatagramsToTheBudgetAndKeepsOnlyMembers) {
-    for (const uint32_t members: {4u, 30u, 64u}) {
-        relay_ring ring(8);
-        for (uint32_t t = 100; t < 108; ++t) {
-            applied_list applied;
-            for (uint32_t p = 1; p <= members; ++p) applied.emplace_back(p, turning(static_cast<uint8_t>(t), 0.01f * t + 0.001f * p));
-            ring.push(t, applied);
-        }
-        const auto keep = [](uint32_t player) { return player != 2; };   // 2 left
-        size_t trimmed = 0;
-        const auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, keep, std::nullopt, &trimmed);
-        EXPECT_EQ(trimmed, 0u) << members;
-        std::set<uint32_t> players;
-        for (const auto& d: datagrams) {
-            size_t bytes = bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes;
-            bmmo::session_remote_input_msg msg;
-            msg.tick = 107;
-            EXPECT_TRUE(d.held.empty());
-            for (const auto& e: d.entries) {
-                bytes += relay_ring::entry_bytes(e);
-                EXPECT_EQ(e.frames.size(), 8u);
-                EXPECT_TRUE(players.insert(e.player).second) << "player " << e.player << " in two datagrams";
-                bmmo::session_remote_input_msg::entry me;
-                me.player = e.player;
-                me.frames = e.frames;
-                msg.entries.push_back(me);
-            }
-            EXPECT_LE(bytes, bmmo::session::kRelayDatagramBudget) << members;
-            // The budget counts what goes on the wire.
-            ASSERT_TRUE(msg.serialize());
-            EXPECT_EQ(msg.size(), bytes) << members;
-            EXPECT_LE(msg.size(), bmmo::session::kRelayDatagramBudget) << members;
-        }
-        EXPECT_EQ(players.size(), members - 2u) << members;   // not the recipient, not the leaver
-        EXPECT_EQ(players.count(1), 0u);
-        EXPECT_EQ(players.count(2), 0u);
-        // the turning camera costs 40 B a frame: 325 B an entry, three to a packet
-        if (members == 30) EXPECT_EQ(datagrams.size(), 10u);
-        if (members == 4) EXPECT_EQ(datagrams.size(), 1u);
-    }
-    // An entry that does not fit a packet on its own (window 32, camera
-    // turning: 5 + 32 x 40 B) loses its oldest frames until it does.
-    relay_ring wide(32);
-    for (uint32_t t = 0; t < 32; ++t)
-        wide.push(t, applied_list{{1, turning(1, 0.5f)}, {2, turning(static_cast<uint8_t>(t), 0.01f * t)}});
-    size_t trimmed = 0;
-    const auto datagrams = wide.build_datagrams(1, bmmo::session::kRelayDatagramBudget, [](uint32_t) { return true; },
-                                                std::nullopt, &trimmed);
-    ASSERT_EQ(datagrams.size(), 1u);
-    ASSERT_EQ(datagrams[0].entries.size(), 1u);
-    EXPECT_GT(trimmed, 0u);
-    EXPECT_EQ(datagrams[0].entries[0].frames.size() + trimmed, 32u);
-    EXPECT_EQ(datagrams[0].entries[0].frames.back().keys, 31);   // the newest kept
-    EXPECT_LE(relay_ring::entry_bytes(datagrams[0].entries[0]) + bmmo::session::kRelayDatagramHeader
-              + bmmo::session::kHeldCountBytes, bmmo::session::kRelayDatagramBudget);
-    // A still camera: 8 members, window 8, one datagram of about half a packet.
-    relay_ring still(8);
-    for (uint32_t t = 0; t < 8; ++t) {
-        applied_list applied;
-        for (uint32_t p = 1; p <= 8; ++p) applied.emplace_back(p, frame(static_cast<uint8_t>(t)));
-        still.push(t, applied);
-    }
-    const auto one = still.build_datagrams(1, bmmo::session::kRelayDatagramBudget, [](uint32_t) { return true; });
-    ASSERT_EQ(one.size(), 1u);
-    EXPECT_EQ(one[0].entries.size(), 7u);
-    EXPECT_EQ(total_frames(one), 56u);
 }
 
 // The frame a replay drives a mirror with: the relayed one, the nearest
@@ -277,48 +301,12 @@ namespace {
     applied_input held_input(uint32_t player, const input_frame& f, uint32_t source) {
         return applied_input{player, f, true, source};
     }
-    const auto everyone = [](uint32_t) { return true; };
-
-    // A datagram as server.cpp on_session_inputs writes it, for a recipient
-    // numbered from `epoch`.
-    bmmo::session_remote_input_msg to_message(const relay_ring::datagram& d, uint32_t tick, uint32_t epoch) {
-        bmmo::session_remote_input_msg msg;
-        msg.session = 1;
-        msg.tick = tick;
-        msg.epoch = epoch;
-        for (const auto& e: d.entries) {
-            bmmo::session_remote_input_msg::entry me;
-            me.player = e.player;
-            me.frames = e.frames;
-            msg.entries.push_back(me);
-        }
-        for (const auto& h: d.held) {
-            bmmo::session_remote_input_msg::held_record r;
-            r.back = static_cast<uint8_t>(tick - h.tick);
-            if (bmmo::session::held_inline(h.tick, h.source, epoch)) {
-                r.has_frame = true;
-                r.frame = h.frame;
-            } else {
-                r.source = h.source;
-            }
-            msg.held.push_back(r);
-        }
-        return msg;
-    }
-    size_t datagram_bytes(const relay_ring::datagram& d, uint32_t epoch) {
-        size_t bytes = bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes;
-        for (const auto& e: d.entries) bytes += relay_ring::entry_bytes(e);
-        for (const auto& h: d.held) bytes += relay_ring::held_bytes(h, epoch);
-        return bytes;
-    }
 }
 
-// The notice depth is 32 ticks even though the others' window is 8: a
-// recipient gets its own held ticks of the last 32, from its epoch on, and
-// nobody else's; the others' runs are still cut at the window.
+// A recipient gets its own held ticks of the last 32, from its epoch on, and
+// nobody else's.
 TEST(RelayHeld, TheSectionSpansTheNoticeDepthFromTheEpoch) {
-    relay_ring ring(8);
-    EXPECT_EQ(ring.depth(), bmmo::session::kHeldNoticeTicks);
+    relay_ring ring;
     for (uint32_t t = 100; t <= 140; ++t) {
         // Player 1 is substituted at 100..104 and at 130, player 2 at 135.
         const bool one_held = (t >= 100 && t <= 104) || t == 130;
@@ -327,6 +315,8 @@ TEST(RelayHeld, TheSectionSpansTheNoticeDepthFromTheEpoch) {
             t == 135 ? held_input(2, frame(8), 134) : fresh_input(2, frame(static_cast<uint8_t>(t)))};
         ring.push(t, applied);
     }
+    ring.reanchor(1, 139);
+    ring.reanchor(2, 139);
     // At 140 the last 32 ticks are 109..140: 100..104 have aged out.
     const auto mine = ring.held(1);
     ASSERT_EQ(mine.size(), 1u);
@@ -340,7 +330,6 @@ TEST(RelayHeld, TheSectionSpansTheNoticeDepthFromTheEpoch) {
     EXPECT_EQ(datagrams[0].held[0].tick, 130u);
     ASSERT_EQ(datagrams[0].entries.size(), 1u);
     EXPECT_EQ(datagrams[0].entries[0].player, 2u);
-    EXPECT_EQ(datagrams[0].entries[0].frames.size(), 8u);  // the window, not the depth
     EXPECT_EQ(datagrams[0].entries[0].frames.back().keys, 140);
     // Player 2's datagram carries its own 135 and player 1's frames.
     const auto theirs = ring.build_datagrams(2, bmmo::session::kRelayDatagramBudget, everyone, std::optional<uint32_t>(0));
@@ -352,7 +341,7 @@ TEST(RelayHeld, TheSectionSpansTheNoticeDepthFromTheEpoch) {
     ASSERT_EQ(unassigned.size(), 1u);
     EXPECT_TRUE(unassigned[0].held.empty());
     // Forty held ticks in a row: the last 32 of them are in the section.
-    relay_ring blackout(8);
+    relay_ring blackout;
     for (uint32_t t = 200; t < 240; ++t)
         blackout.push(t, std::vector<applied_input>{held_input(1, frame(3), 199), fresh_input(2, frame(1))});
     const auto all = blackout.held(1);
@@ -366,14 +355,15 @@ TEST(RelayHeld, TheSectionSpansTheNoticeDepthFromTheEpoch) {
 // one header-only datagram.
 TEST(RelayHeld, PlacementAndTheHeaderOnlyDatagram) {
     // Solo: no entries, nothing held - one header-only datagram.
-    relay_ring solo(8);
+    relay_ring solo;
+    solo.reanchor(1, 9);
     solo.push(10, std::vector<applied_input>{fresh_input(1, frame(1))});
     const auto quiet = solo.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone, std::optional<uint32_t>(0));
     ASSERT_EQ(quiet.size(), 1u);
     EXPECT_TRUE(quiet[0].entries.empty());
     EXPECT_TRUE(quiet[0].held.empty());
-    auto quiet_msg = to_message(quiet[0], 10, 0);
-    ASSERT_TRUE(quiet_msg.serialize());
+    auto quiet_msg = to_message(quiet[0], 10);
+    parse(quiet_msg);
     EXPECT_EQ(quiet_msg.size(), bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes);
     // Solo and substituted: the section rides the header-only datagram.
     solo.push(11, std::vector<applied_input>{held_input(1, frame(1), 10)});
@@ -382,44 +372,26 @@ TEST(RelayHeld, PlacementAndTheHeaderOnlyDatagram) {
     ASSERT_EQ(told[0].held.size(), 1u);
     EXPECT_EQ(datagram_bytes(told[0], 0), bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes
                                           + bmmo::session::kHeldReferenceBytes);
-    // 30 members with turning cameras: three entries a packet (26 + 3 x 325
-    // B), and the 16 records (80 B) fit beside the first three.
-    relay_ring room(8);
-    for (uint32_t t = 100; t < 132; ++t) {
-        std::vector<applied_input> applied;
-        for (uint32_t p = 1; p <= 30; ++p) {
-            const input_frame f = turning(static_cast<uint8_t>(t), 0.01f * t + 0.001f * p);
-            applied.push_back(p == 1 && t % 2 == 0 ? held_input(p, f, t - 1) : fresh_input(p, f));
-        }
-        room.push(t, applied);
-    }
-    const auto datagrams = room.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone, std::optional<uint32_t>(0));
-    ASSERT_EQ(datagrams.size(), 10u);   // the section found room: no datagram of its own
-    ASSERT_EQ(datagrams[0].held.size(), 16u);   // the even ticks of 100..131
-    for (const auto& d: datagrams) EXPECT_LE(datagram_bytes(d, 0), bmmo::session::kRelayDatagramBudget);
-    for (size_t i = 1; i < datagrams.size(); ++i) EXPECT_TRUE(datagrams[i].held.empty());
-    // No room beside the entries anywhere: the section gets a datagram of its own.
-    relay_ring packed(8);
-    for (uint32_t t = 0; t < 32; ++t) {
-        std::vector<applied_input> applied;
-        for (uint32_t p = 1; p <= 4; ++p) {
-            const input_frame f = turning(static_cast<uint8_t>(t), 0.01f * t + 0.001f * p);
-            applied.push_back(p == 1 ? held_input(p, f, kHeldSourceDefault) : fresh_input(p, f));
-        }
+    // No room beside the entries: the section gets a datagram of its own.
+    relay_ring packed;
+    packed.reanchor(1, 0);
+    for (uint32_t t = 1; t <= 32; ++t) {
+        std::vector<applied_input> applied{held_input(1, frame(1), kHeldSourceDefault)};
+        for (uint32_t p = 2; p <= 4; ++p) applied.push_back(fresh_input(p, frame(static_cast<uint8_t>(t + p))));
         packed.push(t, applied);
     }
-    // A budget the three entries fill exactly.
-    const size_t tight = bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes + 3 * (5 + 8 * 40);
+    const auto loose = packed.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone, std::optional<uint32_t>(0));
+    ASSERT_EQ(loose.size(), 1u);
+    const size_t tight = datagram_bytes(loose[0], 0) - loose[0].held.size() * bmmo::session::kHeldReferenceBytes;
     const auto own = packed.build_datagrams(1, tight, everyone, std::optional<uint32_t>(0));
     ASSERT_EQ(own.size(), 2u);
     EXPECT_EQ(own[0].entries.size(), 3u);
     EXPECT_TRUE(own[0].held.empty());
     EXPECT_TRUE(own[1].entries.empty());
     EXPECT_EQ(own[1].held.size(), 32u);
-    EXPECT_EQ(datagram_bytes(own[1], 0), 26u + 161u);   // the header (26 B since protocol 13) and a full section by reference
-    auto own_msg = to_message(own[1], 31, 0);
-    ASSERT_TRUE(own_msg.serialize());
-    EXPECT_EQ(own_msg.size(), 26u + 161u);
+    auto own_msg = to_message(own[1], 32);
+    parse(own_msg);
+    EXPECT_EQ(own_msg.size(), bmmo::session::kRelayDatagramHeader + 1u + 32 * bmmo::session::kHeldReferenceBytes);
 }
 
 // A record is a 5-byte reference to the frame the client itself sent, and
@@ -436,57 +408,45 @@ TEST(RelayHeld, InlineOrReferenceAndTheBudget) {
     // A long blackout of player 1 in a full room: every substitute is the
     // frame of tick 100, and at tick 240 the section's ticks 209..240 are all
     // 96 or more past it.
-    relay_ring ring(8);
+    relay_ring ring;
     for (uint32_t t = 101; t <= 240; ++t) {
         std::vector<applied_input> applied{held_input(1, turning(9, 0.25f), 100)};
-        for (uint32_t p = 2; p <= 64; ++p)
-            applied.push_back(fresh_input(p, turning(static_cast<uint8_t>(t), 0.01f * t + 0.001f * p)));
+        for (uint32_t p = 2; p <= 64; ++p) applied.push_back(fresh_input(p, frame(static_cast<uint8_t>(t))));
         ring.push(t, applied);
     }
+    ring.reanchor(1, 239);
     const auto datagrams = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone, std::optional<uint32_t>(0));
-    size_t inline_records = 0, reference_records = 0, entries = 0, with_held = 0;
+    size_t inline_records = 0, entries = 0;
     std::set<uint32_t> ticks;
     for (const auto& d: datagrams) {
         entries += d.entries.size();
-        if (!d.held.empty()) ++with_held;
-        auto msg = to_message(d, 240, 0);
-        ASSERT_TRUE(msg.serialize());
+        auto msg = to_message(d, 240);
+        const auto parsed = parse(msg);
         EXPECT_EQ(msg.size(), datagram_bytes(d, 0));
         EXPECT_LE(msg.size(), bmmo::session::kRelayDatagramBudget);
-        bmmo::session_remote_input_msg parsed;
-        parsed.raw.write(msg.raw.str().data(), static_cast<std::streamsize>(msg.size()));
-        ASSERT_TRUE(parsed.deserialize());
         for (const auto& r: parsed.held) {
             EXPECT_TRUE(ticks.insert(parsed.held_tick(r)).second);
-            if (r.has_frame) {
-                ++inline_records;
-                EXPECT_EQ(r.frame.keys, 9);
-                EXPECT_FLOAT_EQ(r.frame.cam_dir[0], 0.25f);
-            } else {
-                ++reference_records;
-            }
+            ASSERT_TRUE(r.has_frame);
+            ++inline_records;
+            EXPECT_EQ(r.frame.keys, 9);
+            EXPECT_FLOAT_EQ(r.frame.cam_dir[0], 0.25f);
         }
     }
     EXPECT_EQ(entries, 63u);
-    EXPECT_EQ(with_held, 2u);   // 26 + 26 x 41 B, then the other 6
     ASSERT_EQ(ticks.size(), bmmo::session::kHeldNoticeTicks);   // none lost to the budget
     EXPECT_EQ(*ticks.begin(), 209u);
     EXPECT_EQ(inline_records, 32u);
-    EXPECT_EQ(reference_records, 0u);
     // The same blackout 40 ticks in: every record by reference, one datagram.
-    relay_ring early(8);
+    relay_ring early;
+    early.reanchor(1, 139);
     for (uint32_t t = 101; t <= 140; ++t)
         early.push(t, std::vector<applied_input>{held_input(1, frame(9), 100), fresh_input(2, frame(1))});
     const auto refs = early.build_datagrams(1, bmmo::session::kRelayDatagramBudget, everyone, std::optional<uint32_t>(0));
     ASSERT_EQ(refs.size(), 1u);
     ASSERT_EQ(refs[0].held.size(), 32u);
-    auto ref_msg = to_message(refs[0], 140, 0);
-    ASSERT_TRUE(ref_msg.serialize());
-    EXPECT_EQ(ref_msg.size(), bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes
-                              + relay_ring::entry_bytes(refs[0].entries[0]) + 32 * bmmo::session::kHeldReferenceBytes);
-    bmmo::session_remote_input_msg parsed;
-    parsed.raw.write(ref_msg.raw.str().data(), static_cast<std::streamsize>(ref_msg.size()));
-    ASSERT_TRUE(parsed.deserialize());
+    auto ref_msg = to_message(refs[0], 140);
+    const auto parsed = parse(ref_msg);
+    EXPECT_EQ(ref_msg.size(), datagram_bytes(refs[0], 0));
     ASSERT_EQ(parsed.held.size(), 32u);
     EXPECT_FALSE(parsed.held[0].has_frame);
     EXPECT_EQ(parsed.held[0].source, 100u);

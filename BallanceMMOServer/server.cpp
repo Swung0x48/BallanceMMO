@@ -626,10 +626,10 @@ public:
         // fixed at on_world_ready so a late joiner gets the same value.
         float spawn_impulse = 0;
         float spawn_spacing = 0;   // birth cell spacing (SessionStart), fixed with the impulse
-        // The last relay_window ticks' applied frames: what every member's
-        // relayed datagram repeats (session/input_relay.hpp, protocol 5).
+        // The applied frames of the last kRelayHistory ticks and what each
+        // member acknowledged holding: what its relayed datagrams carry
+        // (session/input_relay.hpp, protocol 29).
         bmmo::session::relay_ring relay;
-        bool relay_trim_logged = false;
         // Protocol 7 (late-player design 1.2): what each member's relayed
         // datagrams tell it about its OWN inputs.  `epoch` is the base of its
         // last SessionAssign and `held_total` counts its substituted ticks at
@@ -1395,7 +1395,6 @@ public:
         auto it = physics_sessions_.find(session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
-        if (s.relay.window() != config_.physics_relay_window) s.relay.set_window(config_.physics_relay_window);
         s.relay.push(tick, applied);
         // Unreliable, no delay, with the window: a lost datagram costs nothing
         // unless `relay_window` in a row are lost, and no frame ever waits
@@ -1443,10 +1442,10 @@ public:
         for (const auto m: s.members) {
             auto& n = s.notices[m];
             const uint8_t wait = wait_of(m);
-            size_t trimmed = 0;
             const std::optional<uint32_t> held_from = n.assigned ? std::optional<uint32_t>(n.epoch) : std::nullopt;
-            for (auto& datagram: s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, is_member, held_from,
-                                                         &trimmed)) {
+            auto datagrams = s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, is_member, held_from);
+            for (size_t part = 0; part < datagrams.size(); ++part) {
+                auto& datagram = datagrams[part];
                 bmmo::session_remote_input_msg msg;
                 msg.session = session;
                 msg.tick = tick;
@@ -1454,12 +1453,12 @@ public:
                 msg.held_total = n.held_total;
                 msg.epoch = n.epoch;
                 msg.wait = wait;
-                for (auto& w: datagram.entries) {
-                    bmmo::session_remote_input_msg::entry e;
-                    e.player = w.player;
-                    e.frames = std::move(w.frames);
-                    msg.entries.push_back(std::move(e));
-                }
+                msg.from = datagram.from;
+                msg.part = static_cast<uint8_t>(part);
+                msg.parts = static_cast<uint8_t>(datagrams.size());
+                for (const auto& [id, rows]: datagram.cameras) msg.cameras.push_back({id, rows});
+                for (auto& w: datagram.entries)
+                    msg.entries.push_back({w.player, std::move(w.frames), std::move(w.camera_ids)});
                 for (const auto& h: datagram.held) {
                     bmmo::session_remote_input_msg::held_record r;
                     r.back = static_cast<uint8_t>(tick - h.tick);
@@ -1481,11 +1480,6 @@ public:
                 n.copies += msg.held.size();
                 if (n.run.open && n.run.last == tick)
                     for (const auto& r: msg.held) if (r.back == 0) ++n.run.sent;
-            }
-            if (trimmed && !s.relay_trim_logged) {
-                s.relay_trim_logged = true;
-                Printf("Physics session %u: a member's relayed input window did not fit one datagram (%u bytes); "
-                       "its oldest frames were dropped.", s.id, static_cast<unsigned>(bmmo::session::kRelayDatagramBudget));
             }
         }
     }
@@ -1786,6 +1780,7 @@ public:
             close_held_run(s, c, notice->second);
             s.notices.erase(notice);
         }
+        s.relay.forget(c);
         s.late.erase(c);
         s.started.erase(c);
         // Step M1 (J2): the order stays held until the runner removed this
@@ -2044,6 +2039,7 @@ public:
         n.held_total = 0;
         n.copies = 0;
         n.acked = first_tick - 1;
+        s.relay.reanchor(c, first_tick - 1);
     }
 
     // The session's start base for every member present at the start, sent
@@ -2784,6 +2780,10 @@ public:
         bmmo::session::take_input_datagram(
                 msg, [&](bmmo::session_event_msg& event) { handle_session_event(client_it, event); },
                 [&] { runner_->submit_input(msg.session, c, msg.first_tick, msg.frames, arrival); });
+        // Protocol 29: what this member's relay starts after from now on
+        // (on_message holds state_mutex_).
+        if (const auto s = physics_sessions_.find(msg.session); s != physics_sessions_.end())
+            s->second.relay.acknowledge(c, msg.relay_ack);
     }
 
     static void copy_name(char* out, size_t size, const std::string& text) {

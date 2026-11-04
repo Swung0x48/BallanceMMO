@@ -75,11 +75,6 @@ bool config_manager::load() {
         physics_event_rate_limit = yaml_load_value(physics, "event_rate_limit", physics_event_rate_limit);
         physics_spawn_impulse = yaml_load_value(physics, "spawn_impulse", physics_spawn_impulse);
         physics_spawn_spacing = yaml_load_value(physics, "spawn_spacing", physics_spawn_spacing);
-        physics_relay_window = yaml_load_value(physics, "relay_window", physics_relay_window);
-        // input_delay + a trip + window - 1 has to stay under the rollback's
-        // reach (rollback_thresholds::max_resim_ticks, 48): a frame the window
-        // delivers deeper than that cannot be replayed.
-        physics_relay_window = std::clamp<uint32_t>(physics_relay_window, 1u, 16u);
         physics_patience = yaml_load_value(physics, "patience", physics_patience);
         physics_arrival_trace = yaml_load_value(physics, "arrival_trace", physics_arrival_trace);
         physics_lead_adjust = yaml_load_value(physics, "lead_adjust", physics_lead_adjust);
@@ -294,8 +289,6 @@ void config_manager::save(bool reload_values) {
                    "#     spawn_impulse and spawn_spacing are IGNORED while the spawn ghost is on (every build\n"
                    "#     since protocol 15): each ball is born a ghost at the resetpoint itself, unkicked,\n"
                    "#     and SessionStart carries 0 for both (step SPX),\n"
-                   "#   relay_window (ticks of applied input each unreliable relayed datagram repeats per\n"
-                   "#     member, default 8: a loss costs a gap only when that many in a row are lost),\n"
                    "#   patience (late-player design 2.6, default false: the session waits for a missing frame\n"
                    "#     only until that player's patience, deadline - (r01 - 1) ticks of its own measured\n"
                    "#     arrivals, instead of the deadline; keep it off until the per-player lead exists),\n"

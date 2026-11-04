@@ -188,7 +188,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(28u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(29u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -568,7 +568,7 @@ TEST(SessionInputMsg, PiggybackedEventsRoundTrip) {
         size_t bytes = 0;
         for (const auto& e: msg.events) bytes += e.size();
         auto parsed = round_trip(msg);
-        EXPECT_EQ(msg.size(), bmmo::session_input_msg::wire_size(msg.frames.size(), bytes, n)) << n;
+        EXPECT_EQ(msg.size(), bmmo::session_input_msg::wire_size(msg.frames, bytes, n)) << n;
         EXPECT_EQ(parsed.first_tick, 100u);
         ASSERT_EQ(parsed.frames.size(), bmmo::session::MAX_INPUT_FRAMES);
         EXPECT_EQ(parsed.frames.back().keys, static_cast<uint8_t>(bmmo::session::MAX_INPUT_FRAMES));
@@ -594,8 +594,8 @@ TEST(SessionInputMsg, PiggybackedEventsRoundTrip) {
 // so the Trafo rides too and the lead-stamped types start at the send.
 TEST(SessionInputMsg, PiggybackedEventSizesFitTheBudget) {
     using bmmo::session::event_type;
-    const size_t base = bmmo::session_input_msg::wire_size(bmmo::session::MAX_INPUT_FRAMES, 0, 0);
-    EXPECT_EQ(base, 326u) << "opcode 4 + session 4 + first_tick 4 + count 1 + 8 x 39 + nevents 1";
+    const size_t base = bmmo::session_input_msg::wire_size(input_with_frames(bmmo::session::MAX_INPUT_FRAMES).frames, 0, 0);
+    EXPECT_EQ(base, 86u) << "opcode 4 + session 4 + first_tick 4 + relay_ack 4 + count 1 + 4 + 36 + 7 x 4 + nevents 1";
     EXPECT_EQ(event_bytes(event_type::Unphysicalize, 1).size(), 24u);
     EXPECT_EQ(event_bytes(event_type::Sector, 1, 2).size(), 28u);
     EXPECT_EQ(event_bytes(event_type::Trafo, 1).size(), 38u);
@@ -690,7 +690,7 @@ TEST(EventPiggyback, WindowAndBudgetDrop) {
     tight.push(u, 200, event_type::Unphysicalize);
     tight.push(p, 200, event_type::Physicalize);
     auto msg = input_with_frames(bmmo::session::MAX_INPUT_FRAMES, 193);
-    const size_t budget = bmmo::session_input_msg::wire_size(msg.frames.size(), p.size(), 1);
+    const size_t budget = bmmo::session_input_msg::wire_size(msg.frames, p.size(), 1);
     EXPECT_EQ(tight.attach(msg, budget), 1u);
     ASSERT_EQ(msg.events.size(), 1u);
     EXPECT_EQ(msg.events[0], p);
@@ -1219,7 +1219,7 @@ TEST(SessionResyncMsg, DeserializeRejectsEveryTruncation) {
 }
 
 // ---------------------------------------------------------------------
-// session_remote_input_msg (design 9.1; the window layout, protocol 5)
+// session_remote_input_msg (design 9.1; protocol 29: runs, camera ids)
 // ---------------------------------------------------------------------
 
 namespace {
@@ -1235,64 +1235,64 @@ namespace {
     }
 }
 
-TEST(SessionRemoteInputMsg, SerializeDeserializeRoundTripWithTheWindow) {
+TEST(SessionRemoteInputMsg, SerializeDeserializeRoundTripWithRuns) {
     bmmo::session_remote_input_msg msg{};
     msg.session = 4;
     msg.tick = 1234;
+    msg.from = 1200;
+    msg.part = 1;
+    msg.parts = 2;
+    msg.cameras.push_back({3, bmmo::session::camera_of(relay_frame(0, -1.0f))});
     bmmo::session_remote_input_msg::entry e;
     e.player = 77;
-    e.frames.push_back(relay_frame(5, -1.0f));
-    e.frames.push_back(relay_frame(1, -1.0f));   // the camera did not move: omitted on the wire
-    e.frames.push_back(relay_frame(1, -0.5f));   // it did: carried again
+    e.frames = {relay_frame(5, -1.0f), relay_frame(1, -1.0f), relay_frame(1, -1.0f), relay_frame(1, -0.5f)};
+    e.camera_ids = {3, 3, 3, bmmo::session::kCameraInline};
     msg.entries.push_back(e);
-    bmmo::session_remote_input_msg::entry single;
-    single.player = 78;
-    single.frames.push_back(relay_frame(0, 0.25f));
-    msg.entries.push_back(single);
-    bmmo::session_remote_input_msg::entry empty;   // nothing to say: not written
+    bmmo::session_remote_input_msg::entry no_ids;   // built in memory: its cameras go inline
+    no_ids.player = 78;
+    no_ids.frames.push_back(relay_frame(0, 0.25f));
+    msg.entries.push_back(no_ids);
+    bmmo::session_remote_input_msg::entry empty;    // nothing to say: not written
     empty.player = 79;
     msg.entries.push_back(empty);
     auto parsed = round_trip(msg);
     EXPECT_EQ(parsed.session, 4u);
     EXPECT_EQ(parsed.tick, 1234u);
+    EXPECT_EQ(parsed.from, 1200u);
+    EXPECT_EQ(parsed.part, 1u);
+    EXPECT_EQ(parsed.parts, 2u);
     ASSERT_EQ(parsed.entries.size(), 2u);
-    EXPECT_EQ(parsed.entries[0].player, 77u);
-    ASSERT_EQ(parsed.entries[0].frames.size(), 3u);
-    EXPECT_EQ(parsed.frame_tick(parsed.entries[0], 0), 1232u);
-    EXPECT_EQ(parsed.frame_tick(parsed.entries[0], 2), 1234u);
-    EXPECT_EQ(parsed.entries[0].frames[0].keys, 5);
-    EXPECT_EQ(parsed.entries[0].frames[1].keys, 1);
-    EXPECT_FLOAT_EQ(parsed.entries[0].frames[1].cam_dir[2], -1.0f);   // copied from the frame before
-    EXPECT_FLOAT_EQ(parsed.entries[0].frames[1].cam_right[0], 1.0f);
-    EXPECT_FLOAT_EQ(parsed.entries[0].frames[2].cam_dir[2], -0.5f);
-    EXPECT_EQ(parsed.entries[0].frames[2].ball_type, 2);
-    EXPECT_EQ(parsed.entries[0].frames[2].flags, 5);
-    EXPECT_EQ(parsed.entries[1].player, 78u);
-    ASSERT_EQ(parsed.entries[1].frames.size(), 1u);
-    EXPECT_FLOAT_EQ(parsed.entries[1].frames[0].cam_dir[2], 0.25f);
-    // The still camera is what makes the window affordable: 4 bytes a frame.
+    EXPECT_EQ(parsed.frame_tick(parsed.entries[0], 0), 1231u);
+    std::array<std::optional<bmmo::session::camera_rows>, bmmo::session::kCameraInline> dictionary{};
+    const auto entries = parsed.resolved_entries(dictionary);
+    ASSERT_TRUE(entries);
+    ASSERT_EQ((*entries)[0].frames.size(), 4u);
+    const auto same = [](const bmmo::session::input_frame& a, const bmmo::session::input_frame& b) {
+        return a.keys == b.keys && a.ball_type == b.ball_type && a.flags == b.flags && bmmo::session::same_camera(a, b);
+    };
+    for (size_t i = 0; i < 4; ++i) EXPECT_TRUE(same((*entries)[0].frames[i], e.frames[i])) << i;
+    EXPECT_TRUE(same((*entries)[1].frames[0], no_ids.frames[0]));
+    // A run of still frames is one run: 5 bytes for any length.
     bmmo::session_remote_input_msg still{};
-    still.tick = 10;
+    still.tick = 100;
     bmmo::session_remote_input_msg::entry se;
     se.player = 1;
-    for (int i = 0; i < 8; ++i) se.frames.push_back(relay_frame(static_cast<uint8_t>(i), -1.0f));
+    se.frames.assign(60, relay_frame(1, -1.0f));
+    se.camera_ids.assign(60, 0);
     still.entries.push_back(se);
     ASSERT_TRUE(still.serialize());
-    // opcode, session, tick, count, acked, held_total, epoch, wait
-    // (protocol 13); then the entry's player and nframes; and the empty
-    // held section's count.
-    const size_t header = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) * 3 + 1 + sizeof(uint32_t) + 1;
-    EXPECT_EQ(still.size(), header + 4 + 36 + 7 * 4 + 1);
+    EXPECT_EQ(still.size(), bmmo::session::kRelayDatagramHeader + 4 + 1 + 1 + 5 + 1);
 }
 
-TEST(SessionRemoteInputMsg, RejectsTruncationBadCountsAndUnknownHeaders) {
+TEST(SessionRemoteInputMsg, RejectsTruncationAndBadCounts) {
     bmmo::session_remote_input_msg msg{};
     msg.session = 1;
     msg.tick = 1000;   // far from tick 0, so only the caps below can reject a count
+    msg.from = 990;
     bmmo::session_remote_input_msg::entry e;
     e.player = 9;
-    e.frames.push_back(relay_frame(1, 1.0f));
-    e.frames.push_back(relay_frame(2, 1.0f));
+    e.frames = {relay_frame(1, 1.0f), relay_frame(2, 1.0f)};
+    e.camera_ids = {0, 0};
     msg.entries.push_back(e);
     expect_rejects_every_truncation(msg);
     // serialize() appends: start the stream again, or the payload is two
@@ -1301,9 +1301,9 @@ TEST(SessionRemoteInputMsg, RejectsTruncationBadCountsAndUnknownHeaders) {
     ASSERT_TRUE(msg.serialize());
     const std::string payload = stream_payload(msg.raw);
     const size_t count_offset = sizeof(bmmo::opcode) + sizeof(uint32_t) * 2;
-    const size_t nframes_offset = count_offset + 1 + sizeof(uint32_t) * 3 + 1 + sizeof(uint32_t);   // + wait (protocol 13)
-    const size_t first_header_offset = nframes_offset + 1;
-    const size_t second_header_offset = first_header_offset + 4 + 36;
+    const size_t parts_offset = count_offset + 1 + sizeof(uint32_t) * 3 + 1 + sizeof(uint32_t) + 1;
+    const size_t nframes_offset = bmmo::session::kRelayDatagramHeader + 4;
+    const size_t second_start_offset = nframes_offset + 2 + 5;
     auto parses = [&](size_t offset, char value) {
         std::string copy = payload;
         copy[offset] = value;
@@ -1312,48 +1312,13 @@ TEST(SessionRemoteInputMsg, RejectsTruncationBadCountsAndUnknownHeaders) {
         return parsed.deserialize();
     };
     EXPECT_FALSE(parses(count_offset, static_cast<char>(bmmo::session::MAX_PLAYERS_PER_SESSION + 1)));
+    EXPECT_FALSE(parses(parts_offset, 0));                // no parts
+    EXPECT_FALSE(parses(parts_offset - 1, 1));           // part 1 of 1
     EXPECT_FALSE(parses(nframes_offset, 0));
-    EXPECT_FALSE(parses(nframes_offset, static_cast<char>(bmmo::session::MAX_RELAY_FRAMES + 1)));
-    EXPECT_FALSE(parses(first_header_offset, 0));      // the first frame must carry the camera
-    EXPECT_FALSE(parses(second_header_offset, 2));     // a header bit this reader does not know
-    EXPECT_TRUE(parses(second_header_offset, 0));      // the second frame may omit it
-    // More frames than ticks before tick 0: rejected rather than wrapped.
-    bmmo::session_remote_input_msg early{};
-    early.tick = 2;
-    bmmo::session_remote_input_msg::entry ee;
-    ee.player = 1;
-    for (int i = 0; i < 4; ++i) ee.frames.push_back(relay_frame(1, 1.0f));
-    early.entries.push_back(ee);
-    ASSERT_TRUE(early.serialize());
-    bmmo::session_remote_input_msg parsed_early{};
-    const std::string early_payload = stream_payload(early.raw);
-    parsed_early.raw.write(early_payload.data(), static_cast<std::streamsize>(early_payload.size()));
-    EXPECT_FALSE(parsed_early.deserialize());
-    bmmo::session_remote_input_msg later{};
-    later.tick = 3;
-    later.entries.push_back(ee);
-    ASSERT_TRUE(later.serialize());
-    bmmo::session_remote_input_msg parsed_ok{};
-    const std::string ok_payload = stream_payload(later.raw);
-    parsed_ok.raw.write(ok_payload.data(), static_cast<std::streamsize>(ok_payload.size()));
-    EXPECT_TRUE(parsed_ok.deserialize());
-    EXPECT_EQ(parsed_ok.frame_tick(parsed_ok.entries[0], 0), 0u);
-}
-
-// More frames than the window's cap: the newest MAX_RELAY_FRAMES go out.
-TEST(SessionRemoteInputMsg, ClampsAnEntryToTheNewestFrames) {
-    bmmo::session_remote_input_msg msg{};
-    msg.tick = 100;
-    bmmo::session_remote_input_msg::entry e;
-    e.player = 3;
-    for (int i = 0; i < 40; ++i) e.frames.push_back(relay_frame(static_cast<uint8_t>(i), 1.0f));
-    msg.entries.push_back(e);
-    auto parsed = round_trip(msg);
-    ASSERT_EQ(parsed.entries.size(), 1u);
-    ASSERT_EQ(parsed.entries[0].frames.size(), bmmo::session::MAX_RELAY_FRAMES);
-    EXPECT_EQ(parsed.entries[0].frames.front().keys, 40 - static_cast<int>(bmmo::session::MAX_RELAY_FRAMES));
-    EXPECT_EQ(parsed.entries[0].frames.back().keys, 39);
-    EXPECT_EQ(parsed.frame_tick(parsed.entries[0], 0), 100u - static_cast<uint32_t>(bmmo::session::MAX_RELAY_FRAMES) + 1);
+    EXPECT_FALSE(parses(nframes_offset, 11));            // tick 990 is not after `from`
+    EXPECT_FALSE(parses(nframes_offset + 1, 0));         // no runs
+    EXPECT_FALSE(parses(second_start_offset, 0));        // runs must start further on
+    EXPECT_FALSE(parses(second_start_offset, 2));        // ... inside the entry
 }
 
 // Protocol 7 (late-player design 1.1): the recipient's acked, held_total and
@@ -1408,8 +1373,9 @@ TEST(SessionRemoteInputMsg, V3RoundTripWithTheHeldSection) {
     EXPECT_EQ(parsed.held_tick(parsed.held[2]), 1203u);
     EXPECT_FALSE(parsed.held[2].has_frame);
     EXPECT_EQ(parsed.held[2].source, bmmo::session::kHeldSourceDefault);
-    // 5 B a reference, 41 B inline, 1 B of count.
-    const size_t entry_bytes = 4 + 1 + 40 + 4;
+    // 5 B a reference, 41 B inline, 1 B of count; the entry's two runs carry
+    // their cameras inline (no ids in memory).
+    const size_t entry_bytes = 4 + 1 + 1 + 2 * (5 + 36);
     EXPECT_EQ(msg.size(), bmmo::session::kRelayDatagramHeader + entry_bytes + 1 + 5 + 41 + 5);
     msg.raw = std::stringstream{};   // serialize() appends
     expect_rejects_every_truncation(msg);

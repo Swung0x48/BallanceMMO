@@ -1,24 +1,27 @@
 #ifndef BALLANCEMMOSERVER_INPUT_RELAY_HPP
 #define BALLANCEMMOSERVER_INPUT_RELAY_HPP
-// The server -> client relay of applied input frames, unreliable with a
-// redundancy window, and its reassembly on the client (protocol 5).
+// The server -> client relay of applied input frames and its reassembly on
+// the client (protocol 29, docs/relay-protocol-design.md).
 //
 // The relay is what corrects a client's prediction of the other players'
 // balls when no snapshot does: for every tick the server simulated, the frame
 // it actually applied for every other member.  Sent as a reliable ordered
-// stream (2026-10-19 .. 10-21) a lost datagram stalled everything behind it,
-// and under 10 % loss the corrections arrived past the rollback's reach (48
-// ticks) and were applied as pose writes - the world came apart by 120-150 m.
-// So the relay is unreliable again, like the uplink (session_input_msg,
-// MAX_INPUT_FRAMES of history in every datagram, input_buffer::submit on the
-// server), and every datagram carries, per other member, the frames of the
-// last `window` ticks: a loss costs a gap only if `window` datagrams in a row
-// are lost, and nothing waits for anything.
+// stream (2026-10-19 .. 10-21) a lost datagram stalled everything behind it;
+// sent unreliable with a fixed redundancy window (protocol 5) a loss longer
+// than the window left a tick whose frame never arrived, and the client kept
+// its guess for it for good (the LBM matrix's loss divergences).  So every
+// datagram now carries each other member's frames for every tick after the
+// newest tick the recipient acknowledged holding them all for
+// (session_input_msg::relay_ack): any loss shorter than the server's history
+// (kRelayHistory) is filled by the next datagram that arrives, and nothing
+// waits for anything.  Repeats cost little: a run of equal frames is one
+// run, and a camera basis is a one-byte id of the session's dictionary.
 //
 // Everything here is CK-free and shared by the server (relay_ring), the
 // headless client and the retail mod (relay_store, relay_seen, pending_relay,
 // relay_frame_or_earlier) so the two clients cannot drift apart on the rules.
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -40,22 +43,44 @@ namespace bmmo::session {
             && std::memcmp(a.cam_dir, b.cam_dir, sizeof(a.cam_dir)) == 0;
     }
 
+    // A camera basis, the three rows of an input frame bit for bit, and the
+    // id that names one in the relay's dictionary; kCameraInline (on the
+    // wire) says the rows follow.
+    using camera_rows = std::array<float, 9>;
+    constexpr uint8_t kCameraInline = 255;
+    inline camera_rows camera_of(const input_frame& f) {
+        camera_rows rows;
+        std::memcpy(rows.data(), f.cam_right, sizeof(f.cam_right));
+        std::memcpy(rows.data() + 3, f.cam_up, sizeof(f.cam_up));
+        std::memcpy(rows.data() + 6, f.cam_dir, sizeof(f.cam_dir));
+        return rows;
+    }
+    inline void set_camera(input_frame& f, const camera_rows& rows) {
+        std::memcpy(f.cam_right, rows.data(), sizeof(f.cam_right));
+        std::memcpy(f.cam_up, rows.data() + 3, sizeof(f.cam_up));
+        std::memcpy(f.cam_dir, rows.data() + 6, sizeof(f.cam_dir));
+    }
+
+    // How many ticks of every member's applied frames the server keeps: a
+    // recipient whose acknowledgement is older is beyond help and resyncs.
+    // It covers the deepest rollback reach (design 2.5 clamps it at 120);
+    // an older frame no rewind could use anyway.
+    constexpr size_t kRelayHistory = MAX_RELAY_FRAMES;
     // The per-player ring of relayed frames a client keeps, by tick: longer
-    // than the rollback's history (96) so every tick a rewind can reach has
-    // its frame, and longer than one window so a re-delivery is a duplicate,
-    // never stale.
-    constexpr size_t kRelayRing = 128;
-    static_assert(kRelayRing > MAX_RELAY_FRAMES, "a window must fit the ring");
+    // than the server's history, so a frame a datagram re-delivers is a
+    // duplicate, never stale.
+    constexpr size_t kRelayRing = 2 * kRelayHistory;
 
     // Bytes of one datagram's fixed part (opcode, session, tick, count, and
     // since protocol 7 the recipient's acked, held_total and epoch, since
-    // protocol 13 its wait) and of
-    // one entry on the wire (session_remote_input_msg): the builder packs to a
-    // budget of one GameNetworkingSockets packet, because an unreliable
-    // message split over several packets is lost whole when any of them is,
-    // and one over k_cbMaxUnreliableMsgSizeSend (16.5 KB) is quietly sent
-    // reliable - the stall this relay exists to remove.
-    constexpr size_t kRelayDatagramHeader = 4 + 4 + 4 + 1 + 4 + 4 + 4 + 1;   // opcode u32, session, tick, count, acked, held_total, epoch, wait
+    // protocol 13 its wait, since protocol 29 from, part, parts and the
+    // camera count) and of one entry on the wire (session_remote_input_msg):
+    // the builder packs to a budget of one GameNetworkingSockets packet,
+    // because an unreliable message split over several packets is lost whole
+    // when any of them is, and one over k_cbMaxUnreliableMsgSizeSend (16.5 KB)
+    // is quietly sent reliable - the stall this relay exists to remove.
+    constexpr size_t kRelayDatagramHeader = 4 + 4 + 4 + 1 + 4 + 4 + 4 + 1 + 4 + 1 + 1 + 1;
+    constexpr size_t kRelayCameraBytes = 1 + sizeof(camera_rows);   // a definition: id, rows
     constexpr size_t kRelayDatagramBudget = 1100;
 
     // ------------------------------------------------------------ held notices
@@ -64,8 +89,8 @@ namespace bmmo::session {
     // late player's client is the one side that otherwise never learns that
     // the world drove its ball with another frame.  The section trails the
     // entries: nheld u8, then one record per substituted tick within the last
-    // kHeldNoticeTicks ticks.  It is longer than the relay window because the
-    // late player's own downlink is the link most likely to be bad.
+    // kHeldNoticeTicks ticks, the late player's own downlink being the link
+    // most likely to be bad.
     constexpr size_t kHeldNoticeTicks = 32;
     static_assert(kHeldNoticeTicks <= 32, "a record's back offset is 5 bits");
     // The source of a substitute when nothing had arrived yet: the default frame.
@@ -113,17 +138,20 @@ namespace bmmo::session {
     }
 
     // ------------------------------------------------------------ server
-    // The last ticks' applied frames, and what a recipient gets: for every
-    // other member present at the newest tick, its frames for the trailing
-    // run of consecutive ticks it was present in, at most `window` of them,
-    // oldest first; and the recipient's own substituted ticks within the
-    // notice depth (kHeldNoticeTicks).  A member absent at the newest tick
-    // (left) is not relayed.
+    // The session's applied frames for the last kRelayHistory ticks, the
+    // camera dictionary, and what every recipient acknowledged.  What a
+    // recipient gets: for every other member present at the newest tick, its
+    // frames for every tick after the recipient's acknowledgement (its
+    // trailing run of consecutive present ticks, so a member that joined
+    // since starts later), and its own substituted ticks within the notice
+    // depth (kHeldNoticeTicks).  A member absent at the newest tick (left)
+    // is not relayed.
     class relay_ring {
     public:
-        struct window_entry {
+        struct member_entry {
             uint32_t player = 0;
             std::vector<input_frame> frames;   // ticks newest - frames.size() + 1 .. newest, oldest first
+            std::vector<uint8_t> camera_ids;   // one per frame
         };
         // One substituted tick of a player: what the world applied there and
         // the tick that frame came from.
@@ -132,39 +160,33 @@ namespace bmmo::session {
             uint32_t source = kHeldSourceDefault;
             input_frame frame{};
         };
-        // One datagram's worth: whole entries, and the held records that ride
-        // in it (all of them in one datagram unless they cannot fit one).
+        // One datagram's worth: whole entries, the camera definitions they
+        // need, and the held records that ride in it (all of them in one
+        // datagram unless they cannot fit one).  `from` is the same in every
+        // datagram of a tick.
         struct datagram {
-            std::vector<window_entry> entries;
+            uint32_t from = 0;
+            std::vector<member_entry> entries;
+            std::vector<std::pair<uint8_t, camera_rows>> cameras;
             std::vector<held_entry> held;
         };
 
-        explicit relay_ring(size_t window = MAX_INPUT_FRAMES) { set_window(window); }
-
-        void set_window(size_t window) {
-            window_ = std::clamp<size_t>(window, 1, MAX_RELAY_FRAMES);
-            trim();
-        }
-        size_t window() const { return window_; }
-        // How many ticks the ring keeps: the others' window, or the notice
-        // depth when that is longer.
-        size_t depth() const { return std::max(window_, kHeldNoticeTicks); }
         bool empty() const { return ticks_.empty(); }
         uint32_t newest_tick() const { return ticks_.empty() ? 0 : ticks_.back().tick; }
-        void clear() { ticks_.clear(); runs_.clear(); held_.clear(); }
+        void clear() { ticks_.clear(); held_.clear(); recipients_.clear(); cameras_.clear(); }
 
         // What the world applied at `tick`.  A tick at or behind the newest
         // already held replaces the ring from there (the server never
         // re-simulates, but a re-anchored numbering must not leave two frames
-        // for one tick).  The runs every recipient's window is cut from, and
-        // every player's held ticks, are computed here, once per tick.
+        // for one tick).  Every player's held ticks are computed here, once
+        // per tick.
         void push(uint32_t tick, const std::vector<applied_input>& applied) {
             while (!ticks_.empty() && static_cast<int32_t>(ticks_.back().tick - tick) >= 0) ticks_.pop_back();
             ticks_.push_back(tick_entry{tick, applied});
-            trim();
-            rebuild_runs();
+            while (ticks_.size() > kRelayHistory) ticks_.pop_front();
+            rebuild_held();
         }
-        // Every frame fresh (the tests' and protocol 5's shape).
+        // Every frame fresh (the tests' shape).
         void push(uint32_t tick, const std::vector<std::pair<uint32_t, input_frame>>& applied) {
             std::vector<applied_input> all;
             all.reserve(applied.size());
@@ -172,15 +194,21 @@ namespace bmmo::session {
             push(tick, all);
         }
 
-        // Every member's run, oldest first; what a recipient gets is these
-        // minus its own.
-        const std::vector<window_entry>& runs() const { return runs_; }
-
-        std::vector<window_entry> build(uint32_t recipient) const {
-            std::vector<window_entry> out;
-            for (const auto& run: runs_)
-                if (run.player != recipient) out.push_back(run);
-            return out;
+        // The recipient's numbering starts at tick + 1 (an assignment: the
+        // start, a resync, a late join): everything up to `tick` is the state
+        // it was given.  Its acknowledgements never move backwards and never
+        // past what was relayed.
+        void reanchor(uint32_t recipient, uint32_t tick) { recipients_[recipient].acked = tick; }
+        void acknowledge(uint32_t recipient, uint32_t tick) {
+            const auto it = recipients_.find(recipient);
+            if (it == recipients_.end() || static_cast<int32_t>(tick - it->second.acked) <= 0) return;
+            if (!ticks_.empty() && static_cast<int32_t>(tick - newest_tick()) > 0) tick = newest_tick();
+            it->second.acked = tick;
+        }
+        void forget(uint32_t recipient) { recipients_.erase(recipient); }
+        uint32_t acked(uint32_t recipient) const {
+            const auto it = recipients_.find(recipient);
+            return it == recipients_.end() ? 0 : it->second.acked;
         }
 
         // `player`'s substituted ticks within the notice depth of the newest
@@ -194,12 +222,13 @@ namespace bmmo::session {
             return out;
         }
 
-        // The wire size of an entry (player u32, nframes u8, per frame 4 B and
-        // the camera where it differs from the frame before).
-        static size_t entry_bytes(const window_entry& e) {
-            size_t bytes = 4 + 1;
+        // The wire size of an entry: player u32, nframes u8, nruns u8, per run
+        // 5 B and an inline camera's rows.
+        static size_t entry_bytes(const member_entry& e) {
+            size_t bytes = 4 + 1 + 1;
             for (size_t i = 0; i < e.frames.size(); ++i)
-                bytes += 4 + ((i == 0 || !same_camera(e.frames[i - 1], e.frames[i])) ? 36 : 0);
+                if (i == 0 || !same_run(e, i - 1, i))
+                    bytes += 5 + (e.camera_ids[i] == kCameraInline ? sizeof(camera_rows) : 0);
             return bytes;
         }
         // The wire size of one held record for a recipient numbered from `epoch`.
@@ -207,12 +236,17 @@ namespace bmmo::session {
             return held_inline(h.tick, h.source, epoch) ? kHeldInlineBytes : kHeldReferenceBytes;
         }
 
-        // The recipient's window packed into datagrams of at most `budget`
+        // The recipient's relay packed into datagrams of at most `budget`
         // bytes each, whole entries per datagram (every entry stands alone,
-        // so a split costs one header).  An entry that does not fit a
-        // datagram on its own loses its oldest frames until it does; `trimmed`
-        // counts them.  `keep` says which players are still members: a leaver
+        // so a split costs one header), each with the camera definitions its
+        // entries need.  `keep` says which players are still members: a leaver
         // the step still applied a frame for is not relayed after PlayerLeft.
+        //
+        // `from` is the recipient's acknowledgement, or the tick before the
+        // oldest kept when that is older: the recipient then finds `from`
+        // past what it holds and resyncs.  A definition goes out until the
+        // recipient acknowledges the tick of its first send (by then it held
+        // a datagram that carried it).
         //
         // `held_from` is the recipient's epoch, the base of its last
         // assignment: its held ticks from there on go into the first datagram
@@ -224,25 +258,31 @@ namespace bmmo::session {
         // player and one with nothing substituted need too.
         template <class Keep>
         std::vector<datagram> build_datagrams(uint32_t recipient, size_t budget, const Keep& keep,
-                                              std::optional<uint32_t> held_from = std::nullopt,
-                                              size_t* trimmed = nullptr) const {
+                                              std::optional<uint32_t> held_from = std::nullopt) {
+            auto& r = recipients_[recipient];
+            uint32_t from = r.acked;
+            if (!ticks_.empty() && static_cast<int32_t>(from + 1 - ticks_.front().tick) < 0) from = ticks_.front().tick - 1;
             const size_t fixed = kRelayDatagramHeader + kHeldCountBytes;
             std::vector<datagram> out;
             std::vector<size_t> used;
-            for (const auto& run: runs_) {
-                if (run.player == recipient || !keep(run.player)) continue;
-                window_entry entry = run;
-                size_t bytes = entry_bytes(entry);
-                while (bytes + fixed > budget && entry.frames.size() > 1) {
-                    entry.frames.erase(entry.frames.begin());
-                    if (trimmed) ++*trimmed;
-                    bytes = entry_bytes(entry);
-                }
-                if (out.empty() || used.back() + bytes > budget) {
-                    out.emplace_back();
-                    used.push_back(fixed);
-                }
-                used.back() += bytes;
+            const auto open = [&] {
+                out.emplace_back();
+                out.back().from = from;
+                used.push_back(fixed);
+            };
+            for (member_entry& entry: entries_after(from, recipient, keep)) {
+                std::vector<uint8_t> ids;   // the definitions this entry needs, unless its datagram has them
+                for (const uint8_t id: entry.camera_ids)
+                    if (id != kCameraInline && std::find(ids.begin(), ids.end(), id) == ids.end() && wants_definition(r, id))
+                        ids.push_back(id);
+                const auto bytes = [&](const datagram& d) {
+                    return entry_bytes(entry)
+                         + kRelayCameraBytes * std::count_if(ids.begin(), ids.end(), [&d](uint8_t id) { return !defines(d.cameras, id); });
+                };
+                if (out.empty() || used.back() + bytes(out.back()) > budget) open();
+                used.back() += bytes(out.back());
+                for (const uint8_t id: ids)
+                    if (!defines(out.back().cameras, id)) out.back().cameras.emplace_back(id, cameras_[id]);
                 out.back().entries.push_back(std::move(entry));
             }
             if (held_from) {
@@ -260,15 +300,12 @@ namespace bmmo::session {
                 // them are 1312 B, past one packet, so they are split.
                 for (size_t k = 0; !placed && k < records.size(); ++k) {
                     const size_t bytes = held_bytes(records[k], *held_from);
-                    if (k == 0 || used.back() + bytes > budget) {
-                        out.emplace_back();
-                        used.push_back(fixed);
-                    }
+                    if (k == 0 || used.back() + bytes > budget) open();
                     used.back() += bytes;
                     out.back().held.push_back(records[k]);
                 }
             }
-            if (out.empty()) out.emplace_back();
+            if (out.empty()) open();
             return out;
         }
 
@@ -277,55 +314,98 @@ namespace bmmo::session {
             uint32_t tick = 0;
             std::vector<applied_input> applied;
         };
-        void trim() { while (ticks_.size() > depth()) ticks_.pop_front(); }
-        void rebuild_runs() {
-            runs_.clear();
-            held_.clear();
-            if (ticks_.empty()) return;
+        struct recipient_state {
+            uint32_t acked = 0;
+            std::vector<uint32_t> camera_sent;   // per id, the tick of its first send (0: never)
+        };
+
+        // One run on the wire: the same keys, ball type, flags and camera.
+        static bool same_run(const member_entry& e, size_t a, size_t b) {
+            const auto& x = e.frames[a];
+            const auto& y = e.frames[b];
+            return x.keys == y.keys && x.ball_type == y.ball_type && x.flags == y.flags
+                && e.camera_ids[a] == e.camera_ids[b] && (e.camera_ids[a] != kCameraInline || same_camera(x, y));
+        }
+        static bool defines(const std::vector<std::pair<uint8_t, camera_rows>>& cameras, uint8_t id) {
+            return std::any_of(cameras.begin(), cameras.end(), [id](const auto& c) { return c.first == id; });
+        }
+
+        // Every member's frames for the ticks after `from`: walk back from the
+        // newest tick while the ticks stay consecutive and the member present.
+        template <class Keep>
+        std::vector<member_entry> entries_after(uint32_t from, uint32_t recipient, const Keep& keep) {
+            std::vector<member_entry> out;
+            if (ticks_.empty()) return out;
             const tick_entry& newest = ticks_.back();
             for (const auto& a: newest.applied) {
-                window_entry entry;
-                entry.player = a.player;
-                // Walk back while the ticks stay consecutive and the member is
-                // present, at most `window` ticks: the ring is deeper than the
-                // window when the notices need it.
-                std::vector<const input_frame*> run{&a.frame};
+                if (a.player == recipient || !keep(a.player)) continue;
+                std::vector<const input_frame*> run;
                 uint32_t expect = newest.tick;
-                for (auto it = ticks_.rbegin() + 1; it != ticks_.rend() && run.size() < window_; ++it) {
-                    if (it->tick + 1 != expect) break;
-                    const input_frame* found = nullptr;
-                    for (const auto& b: it->applied)
-                        if (b.player == a.player) { found = &b.frame; break; }
-                    if (!found) break;
-                    run.push_back(found);
-                    expect = it->tick;
+                for (auto it = ticks_.rbegin(); it != ticks_.rend() && static_cast<int32_t>(it->tick - from) > 0; ++it) {
+                    if (it->tick != expect) break;
+                    const auto found = std::find_if(it->applied.begin(), it->applied.end(),
+                                                    [&a](const applied_input& b) { return b.player == a.player; });
+                    if (found == it->applied.end()) break;
+                    run.push_back(&found->frame);
+                    --expect;
                 }
-                entry.frames.reserve(run.size());
-                for (auto it = run.rbegin(); it != run.rend(); ++it) entry.frames.push_back(**it);
-                runs_.push_back(std::move(entry));
+                if (run.empty()) continue;
+                member_entry entry;
+                entry.player = a.player;
+                for (auto it = run.rbegin(); it != run.rend(); ++it) {
+                    entry.frames.push_back(**it);
+                    entry.camera_ids.push_back(camera_id(**it));
+                }
+                out.push_back(std::move(entry));
             }
-            // Held ticks need no run: a record names its own tick.
+            return out;
+        }
+        // The dictionary's id for the frame's camera, a new one for a basis
+        // not seen yet; kCameraInline once the dictionary is full.
+        uint8_t camera_id(const input_frame& f) {
+            const camera_rows rows = camera_of(f);
+            for (size_t id = 0; id < cameras_.size(); ++id)
+                if (std::memcmp(cameras_[id].data(), rows.data(), sizeof(rows)) == 0) return static_cast<uint8_t>(id);
+            if (cameras_.size() >= kCameraInline) return kCameraInline;
+            cameras_.push_back(rows);
+            return static_cast<uint8_t>(cameras_.size() - 1);
+        }
+        // Whether the recipient may still lack the definition of `id`; the
+        // first yes records the send.
+        bool wants_definition(recipient_state& r, uint8_t id) {
+            if (r.camera_sent.size() <= id) r.camera_sent.resize(id + 1u, 0);
+            uint32_t& sent = r.camera_sent[id];
+            if (sent == 0) {
+                sent = newest_tick();
+                return true;
+            }
+            return static_cast<int32_t>(r.acked - sent) < 0;
+        }
+        // Held ticks need no run: a record names its own tick.
+        void rebuild_held() {
+            held_.clear();
+            const uint32_t newest = ticks_.back().tick;
             for (const auto& t: ticks_) {
-                if (newest.tick - t.tick >= kHeldNoticeTicks) continue;
+                if (newest - t.tick >= kHeldNoticeTicks) continue;
                 for (const auto& a: t.applied)
                     if (a.held) held_[a.player].push_back(held_entry{t.tick, a.source, a.frame});
             }
         }
         std::deque<tick_entry> ticks_;
-        std::vector<window_entry> runs_;
         std::map<uint32_t, std::vector<held_entry>> held_;
-        size_t window_ = MAX_INPUT_FRAMES;
+        std::map<uint32_t, recipient_state> recipients_;
+        std::vector<camera_rows> cameras_;
     };
 
     // ------------------------------------------------------------ client
-    // The tick a frame of a window entry is for: the entry's frames end at the
+    // The tick a frame of a relayed entry is for: the entry's frames end at the
     // message's tick.
     inline uint32_t relay_frame_tick(uint32_t newest_tick, size_t frames, size_t index) {
         return newest_tick - static_cast<uint32_t>(frames) + 1 + static_cast<uint32_t>(index);
     }
 
     // A relayed frame into a mirror's per-tick ring (remote.inputs).  A tick
-    // already held is a duplicate from a later window: the first delivery is
+    // already held is a duplicate a later datagram re-delivered: the first delivery is
     // the truth and nothing changes.  A tick older than what the ring would
     // keep is stale (it would be evicted at once, and the journal has it).
     enum class relay_store_result { stored, duplicate, stale };
@@ -375,7 +455,7 @@ namespace bmmo::session {
     // once-only rules (the journal's relayed-input record, the correction
     // note) and the duplicate count.  Bounded per player; a frame arriving
     // later than the bound would be taken again, which at 66 Hz means seconds
-    // late through a window of a few ticks - never.  Cleared only with the
+    // late through the server's history - never.  Cleared only with the
     // session: a leaver's straggling datagram must not re-announce it.
     class relay_seen {
     public:

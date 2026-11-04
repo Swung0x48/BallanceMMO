@@ -961,6 +961,7 @@ namespace bmmo::session {
             bmmo::session_input_msg msg;
             msg.session = s.session_;
             msg.first_tick = s.input_history_.front().first;
+            msg.relay_ack = s.relay_held_;
             for (const auto& [t, fr]: s.input_history_) msg.frames.push_back(fr);
             remember_sent(msg);
             // Step EVI (protocol 25): our own P / U / Sector / Trafo events
