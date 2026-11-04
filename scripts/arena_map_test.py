@@ -344,6 +344,9 @@ class DelayProxy:
 # The session's tick (headless_engine.hpp kTickRate = 66) and the rollback's
 # reach (rollback.hpp max_resim_ticks): the event report's phases are cut on them.
 TICK_S = 1.0 / 66.0
+# lateness.hpp kQuorumLastMargin: patience waits for a late member's frame up
+# to this many ticks after the last other member's.
+QUORUM_LAST_MARGIN = 4
 REACH = 48
 # "0.0000 m" as the criteria print it.
 ZERO_M = 0.00005
@@ -2504,8 +2507,12 @@ def criteria(report, case, controls):
             gap = report['server']['tick_gaps'].get('D', {})
             lo, hi = phases['D']
             edge = control_gap_upper(controls, lo, hi) if controls else None
-            add(who, 'largest server TICK gap near the hold <= control + 15 ms',
-                None if edge is None or not gap else gap['max_ms'] <= edge + 15,
+            # With patience on the server may wait its M for a frame (the
+            # user kept that wait after LBM4: lbm4_a6b's 60 ms at tick 1541
+            # was client2's frame, late behind its own 40-tick rewind).
+            slack = QUORUM_LAST_MARGIN * TICK_S * 1000 if report.get('requested_flags', {}).get('patience') == 'on' else 15
+            add(who, 'largest server TICK gap near the hold <= control + %s' % ('M ticks' if slack != 15 else '15 ms'),
+                None if edge is None or not gap else gap['max_ms'] <= edge + slack,
                 '%s ms at tick %s vs control %s' % (gap.get('max_ms'), gap.get('at'), 'n/a' if edge is None else edge))
             near = [b for b in report['server']['barrier_lines'] if lo <= b['tick'] < hi]
             add(who, 'no barrier line', not near, '%d in D (%d in the run)' % (len(near), len(report['server']['barrier_lines'])))
