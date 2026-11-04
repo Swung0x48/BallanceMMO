@@ -85,20 +85,21 @@ public:
     float physics_spawn_spacing = 4.2f;            // spawn cell spacing, map units (a ball is 4 across); 0 = every ball at the resetpoint
     // Late-player design 2.6: stop waiting for one player at its patience
     // (deadline - (r01 - 1) ticks of its frozen reference) instead of the
-    // deadline, with the streak waiver.  Off by default and in deployments
-    // until the per-player lead (plan step 11) lands: without it, a player
-    // whose frames still beat the deadline but not its patience is
-    // substituted for as long as its lateness lasts.
-    bool physics_patience = false;
+    // deadline, with the streak waiver.  On by default since the LBM gate
+    // passed (LBM5, 2026-11-04, the user's decision 10: both flags on once
+    // the whole late-player matrix passes); it needs lead_adjust below - a
+    // player whose frames beat the deadline but not its patience is
+    // substituted for as long as its lateness lasts unless its lead grows.
+    bool physics_patience = true;
     bool physics_arrival_trace = false;
     // Late-player design 2.2-2.5: a lateness decision for a client that
     // declared CAP_LEAD becomes a SessionLead, a raise resets that player's
     // input buffer over the slew, and a late joiner's first lead and a
     // resync's lead are the player's own (uncapped but for 80 ticks) instead
-    // of the capped late-tick lead.  Off by default and in deployments until
-    // the clients apply the lead (plan steps 11 and 15); off, the server does
-    // exactly what it did before the flag existed.
-    bool physics_lead_adjust = false;
+    // of the capped late-tick lead.  On by default since LBM5 with patience
+    // above; off, the server does exactly what it did before the flag
+    // existed.
+    bool physics_lead_adjust = true;
     std::string physics_test_clock_skew; // test only, T:MS:PCT; empty disables
     // Trafo-replication design 2.14 (protocol 11, step T2): the session's
     // world option WORLD_TRAFO_INPUTS - every member's trafo explosion and
