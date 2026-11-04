@@ -113,6 +113,14 @@ none further than that from an exact quarter turn; zero rows only before the fir
   own ticks. A message turning a base its receiver does not hold is not used (the relay: its span is not held, so it
   comes again with the base).
 - The relay's camera dictionary is gone. Journals record rows, as before: no journal version.
+- Measured (2026-11-04): headless A0 and the loss seeds 0/1/2 (10 %, bursts of 8, every link) - every confirmed FINAL
+  row of every client exact, replays N/N, no resync; relay datagram mean 64-68 B (protocol 29: 71), uplink 42 B for 8
+  frames (86). Wire check against core_ref_s15 (relay datagrams bridged to the protocol-30 layout): with the snap
+  switched off for the experiment, all 45 journals identical to protocol 29's replays and the sends differ only in
+  SessionInput's encoding and SessionReady's protocol - the codec is lossless. With the snap, the level-8 and fan arms
+  differ only in a few own INPUT records (every TICK hash equal); the arena arms' own ball diverges from its first
+  force, since the headless arena camera wanders up to 2e-5 off its first sample and the capture's server applied the
+  unsnapped rows - a capture replay cannot agree with a live world that never existed, by construction.
 
 ## 5. Interactions to handle
 
