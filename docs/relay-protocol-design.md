@@ -146,6 +146,55 @@ Found by the 20-player bandwidth runs (BW20, nftables meter on the server's port
 - The headless test client closes its connection when its run ends, before its wind-down (it used to linger ~2 s,
   which looked like 20 stalled clients: a 7.9 Mbps burst at every run's end).
 
+### 4.9 Lifecycle events ride the acknowledged relay (protocol 33, design for review, 2026-11-04)
+
+**The gap (LBM5, swing seed 2, both twins).** A birth stamped tick 231 reached client 3 at its tick 307 (on twin; 310
+off twin): 76 ticks after its stamp, past the reach of 74, so the client resynced. The client's input frames of the
+same ticks all arrived in time. The two downlink paths differ:
+
+- A relayed frame rides every relay datagram until the recipient's acknowledgement passes it (§4.2), so the first
+  datagram after a loss burst brings it.
+- A lifecycle event (and a SessionMember, and the rejected-event echo) goes once reliably and then as six unreliable
+  copies two ticks apart (lifecycle.hpp kLifecycleEventRepeats/kLifecycleEventRepeatSpacing, server.cpp
+  `event_repeats`): twelve ticks of cover. At 10 % loss in bursts of 8 datagrams the twelve ticks can all be lost,
+  and the reliable copy then comes by GNS's retransmit, 0.4 s or more with its backoff. At session start the relay
+  lag is already 42 ticks, so the event lands past the reach.
+
+**The proposal.** Every message `event_repeats` carries today goes, to a relay recipient, inside its relay datagrams:
+in every one from the first that carries it until the recipient's acknowledgement reaches that first datagram's tick
+(the camera base's rule, §4.7: any datagram the recipient applied from then on carried it, so by then it holds it).
+The reliable copy stays (the backstop, and the order for a recipient that applies it first); the unreliable repeats
+stay only for a member that is not a relay recipient yet (before its first assignment). The client already takes the
+first copy of an event and drops the rest (`event_seen`, SessionMember copies), so a third path needs no new dedupe.
+
+- **Wire (downlink).** After the held section, an events section: nevents u8, then per message len u16 and the
+  message as sent reliably (opcode and body). A datagram of a split tick carries the section in its first part with
+  room; a section past one packet goes into datagrams of its own, as the held section does.
+- **Server.** relay_ring keeps per recipient the pending messages with the tick of the first datagram that carried
+  each; build_datagrams adds them; acknowledge drops those whose first carry the acknowledgement reached; reanchor (a
+  resync, a late join) drops those at or before the anchor (the state holds them) and marks the rest uncarried;
+  forget drops the recipient's. The three push sites of `event_repeats` push here for relay recipients.
+- **Client.** The events section is unpacked and each message handed to the handler a reliable copy goes to
+  (on_session_event, on_session_member, the rejected echo), before the datagram's entries - an event the server took
+  before a tick's frames is applied before them, as the reliable stream gives today.
+- **Uplink, the same rule.** A client's own Physicalize/Unphysicalize/Sector/Trafo already rides every input datagram
+  (protocol 25, event_piggyback.hpp), but only until its stamp + 7. It rides until the server's header `acked` reaches
+  the stamp instead (the server takes an event before the frames of the datagram carrying it, so a frame at the stamp
+  acknowledged means the event was taken). Finish and BodyRevived keep their repeats.
+
+**Cost.** A message is carried for about one round trip: RTT 40 ms -> 3-4 copies, 150 ms each way -> ~20 copies
+(today 1 + 6 at any RTT). A Physicalize is 140 B, an Unphysicalize 24 B. 20 players each respawning once in 10 s at
+RTT 300 ms: ~1 Mbps of server upload; at RTT 40 ms ~0.2 Mbps. The worst moment is the start, every member born at
+one tick: 19 births = 2.7 KB per recipient per tick, past one packet, for a round trip - at RTT 40 ms ~200 KB over
+60 ms (today ~380 KB over 180 ms). If the measured bursts are too large, the alternative is an explicit event
+acknowledgement (a per-recipient sequence number and a u16 in every uplink), which lets copies be spaced (1, 2, 4, 8
+ticks) and capped per datagram; it costs a field each way and more code.
+
+**Verification.** Unit tests (the ring's carry, acknowledge, reanchor and forget of messages; the section's round
+trip and split). Headless: the swing seeds 0-2 twice (no late-event resync), the A6 lifecycle arms (A6b, A6m, death,
+superseded, drop) and A8, all FINAL exact with journal replay N/N; a downlink outage of 20 ticks over a birth (today
+a resync, then on time after the outage); BW20 driving, server upload against 3.0-4.4 Mbps; retail L11.
+
 ## 5. Interactions to handle
 
 - **Numbering and re-anchors.** The acknowledgement is in the recipient's numbering; a resync, rejoin or late join resets `acked` to the base (as `held_notice` does); the camera dictionary and the per-member base frames are re-sent after it.
