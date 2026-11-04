@@ -146,6 +146,104 @@ Found by the 20-player bandwidth runs (BW20, nftables meter on the server's port
 - The headless test client closes its connection when its run ends, before its wind-down (it used to linger ~2 s,
   which looked like 20 stalled clients: a 7.9 Mbps burst at every run's end).
 
+### 4.9 Lifecycle events ride the acknowledged relay (protocol 33, 2026-11-04)
+
+**The gap (LBM5, swing seed 2, both twins).** A birth stamped tick 231 reached client 3 at its tick 307 (on twin; 310
+off twin): 76 ticks after its stamp, past the reach of 74, so the client resynced. The client's input frames of the
+same ticks all arrived in time. The two downlink paths differ:
+
+- A relayed frame rides every relay datagram until the recipient's acknowledgement passes it (§4.2), so the first
+  datagram after a loss burst brings it.
+- A lifecycle event (and a SessionMember, and the rejected-event echo) goes once reliably and then as six unreliable
+  copies two ticks apart (lifecycle.hpp kLifecycleEventRepeats/kLifecycleEventRepeatSpacing, server.cpp
+  `event_repeats`): twelve ticks of cover. At 10 % loss in bursts of 8 datagrams the twelve ticks can all be lost,
+  and the reliable copy then comes by GNS's retransmit, 0.4 s or more with its backoff. At session start the relay
+  lag is already 42 ticks, so the event lands past the reach.
+
+**The proposal.** Every message `event_repeats` carries today goes, to a relay recipient, inside its relay datagrams:
+in every one from the first that carries it until the recipient's acknowledgement reaches that first datagram's tick
+(the camera base's rule, §4.7: any datagram the recipient applied from then on carried it, so by then it holds it).
+The reliable copy stays (the backstop, and the order for a recipient that applies it first); the unreliable repeats
+stay only for a member that is not a relay recipient yet (before its first assignment). The client already takes the
+first copy of an event and drops the rest (`event_seen`, SessionMember copies), so a third path needs no new dedupe.
+
+- **Wire (downlink): a compact events section** (the user's decision of 2026-11-04: the raw messages would ride
+  every datagram of a round trip, at the start 19 births of 140 B each). Of a Physicalize's 140 B, 66 are the ball's
+  recipe (its physics parameters and collision shape, one per ball type in a level) and 48 its pose (position and the
+  rotation rows - at the start every member's is the resetpoint's); what differs per event is ~13 B. So the section
+  after the held one is three tables:
+  - recipes: n u8, per recipe id u8 and the recipe as write_recipe writes it. A session-wide dictionary: the server
+    numbers each distinct recipe on its first use, and attaches it to a recipient until the recipient's
+    acknowledgement reaches the first datagram that carried it (the camera base's rule, §4.7); a reanchor
+    re-attaches. The client keeps id -> recipe for the session.
+  - poses: n u8, per pose position f32x3 and rotation f32x9 - each distinct pose of this datagram's events once.
+  - events: n u8, per event a head u8 (bits 0-2 the type, 7 = a raw message; bits 3-5 the state; bit 6 an origin
+    byte follows), player u32, life u16, tick as i16 from the datagram's tick, the origin byte (tick - origin_tick,
+    when it differs and fits), then by type: Physicalize ball_type u8, flags u8, pose index u8, recipe id u8;
+    Unphysicalize and Finish nothing; Sector i32; Trafo ball_type u8, flags u8, position f32x3. A raw message (code
+    7: len u16 and the bytes as sent reliably) carries every other kind - SessionMember, BodyRevived,
+    AirshipRelease - and any event the compact form cannot (an origin over 255 back, a 256th recipe).
+  Every float is copied bit for bit (a quaternion would change the rotation's bits, and with them the body every
+  world makes). The decoder rebuilds the session_event_msg the reliable copy carries, so the handlers and the dedupe
+  see one message whichever way it came. A datagram of a split tick carries the section in its first part with room;
+  a section past one packet goes into datagrams of its own, as the held section does.
+- **Server.** relay_ring keeps per recipient the pending messages with the tick of the first datagram that carried
+  each; build_datagrams adds them; acknowledge drops those whose first carry the acknowledgement reached; reanchor (a
+  resync, a late join) drops those at or before the anchor (the state holds them) and marks the rest uncarried;
+  forget drops the recipient's. The three push sites of `event_repeats` push here for relay recipients.
+- **Client.** The events section is unpacked and each message handed to the handler a reliable copy goes to
+  (on_session_event, on_session_member, the rejected echo), before the datagram's entries - an event the server took
+  before a tick's frames is applied before them, as the reliable stream gives today.
+- **Uplink, the same rule.** A client's own Physicalize/Unphysicalize/Sector/Trafo already rides every input datagram
+  (protocol 25, event_piggyback.hpp), but only until its stamp + 7. It rides until the server's header `acked` reaches
+  the stamp instead (the server takes an event before the frames of the datagram carrying it, so a frame at the stamp
+  acknowledged means the event was taken). Finish and BodyRevived keep their repeats.
+
+**Cost.** A message is carried for about one round trip: RTT 40 ms -> 3-4 copies, 150 ms each way -> ~20 copies
+(today the reliable one and 6 at any RTT). Compact sizes: a Physicalize 13 B plus its pose (48 B, shared in a
+datagram) and, until acknowledged, its recipe (67 B, once a session); an Unphysicalize 9 B, a Sector 13 B, a Trafo
+23 B (raw today: 140, 24, 28, 38). The start, every member born at one tick: 19 births = 3 + 67 + 48 + 19 x 13 = ~365 B
+per recipient per datagram (~300 B once the recipe is acknowledged), one packet with the relay's entries, for a
+round trip - at RTT 40 ms ~1.5 KB per recipient (today's raw repeats 7 x 2.7 KB = ~19 KB). A respawn elsewhere: 61 B.
+If bursts still measure too large, an explicit event acknowledgement (a per-recipient sequence number and a u16 in
+every uplink) would let copies be spaced and capped per datagram, at a field each way.
+
+**Verification.** Unit tests (the ring's carry, acknowledge, reanchor and forget of messages; the section's round
+trip and split). Headless: the swing seeds 0-2 twice (no late-event resync), the A6 lifecycle arms (A6b, A6m, death,
+superseded, drop) and A8, all FINAL exact with journal replay N/N; a downlink outage of 20 ticks over a birth (today
+a resync, then on time after the outage); BW20 driving, server upload against 3.0-4.4 Mbps; retail L11.
+
+**Implementation steps.** (1) session/event_codec.hpp: the three tables, encode and decode, bit-exact round trips of
+every type and the raw escape, every truncation refused. (2) relay_ring: the pending messages and the recipe carry
+per recipient (build_datagrams, acknowledge, reanchor, forget). (3) session_remote_input_msg: the section (protocol
+33, the held section no longer last). (4) Server: the three push sites go to the ring for relay recipients; the
+repeats stay for a member not yet a recipient. (5) Client: the section decoded before the entries, the recipe
+dictionary per session, cleared at a reanchor. (6) Uplink: the own events ride until the header's `acked` reaches the
+stamp (raw, as today: one own event at a time). (7) Docs, then the verification above; the wire check's sends differ
+in SessionRemoteInput and SessionInput by construction.
+
+**As built (protocol 33, branch event-relay, 2026-11-04).** session/relay_events.hpp (relay_event, the recipe
+numbering, the compact form's sizes and rebuild), input_relay.hpp (per recipient: the pending messages and the
+recipes it may lack, each with the tick of the first datagram of its current carry - left out of a datagram by the
+budget or a header-only notice, the carry starts again; acknowledge drops what the acknowledgement reached; a
+reanchor starts every carry again and keeps the recipes the recipient holds), session_remote_input_msg (the
+section), server.cpp `send_copies` (members through the ring, anyone else through the old repeats), the client's
+`deliver_relayed_events` (the recipes into the session's dictionary, then every message to its reliable copy's
+handler; while not running nothing is taken and the datagram's span is not acknowledged), event_piggyback (own events
+until the header's `acked` reaches max(stamp, the carry's first newest frame), 128 ticks at most). 794 tests.
+
+Measured (headless twins on the worktree build, RLD Arch server):
+- The gap: the old build at 20 % loss in bursts of 8 resynced once on a late lifecycle event (seed 0, as LBM5 seed 2
+  did at 10 %); the new build never did in 8 loss runs (10 % x 5 with seed 2 twice, 20 % x 3); its events never
+  arrived later than the frames of their datagrams. All FINAL exact, replay N/N; 11 twin arms (A0, swing 0-2, A6b,
+  A6m death/superseded/drop, A6m, A8) exact.
+- A pair of events split at the server's intake (1 tick) is pre-existing: 2 of 70 pairs on the old build, 3 of 71 on
+  the new; A6m superseded's +1 relay tick is timing noise (idle interleave: new 3/3 pass, old 2/3).
+- Bandwidth, 20 players driving (server upload): start burst 4.75 -> 3.52 Mbps (2-s sample), window mean 3.41 ->
+  3.04 Mbps, per player download 171 -> 155 kbit/s.
+- Retail L11 (both flags on, the worktree x86 build): own/mirror/body 784/1000/46385 compared, 0 different, 0
+  missing, replay 2568/2568.
+
 ## 5. Interactions to handle
 
 - **Numbering and re-anchors.** The acknowledgement is in the recipient's numbering; a resync, rejoin or late join resets `acked` to the base (as `held_notice` does); the camera dictionary and the per-member base frames are re-sent after it.

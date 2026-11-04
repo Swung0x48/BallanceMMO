@@ -53,6 +53,8 @@ namespace {
             }
             msg.held.push_back(r);
         }
+        msg.recipes = std::move(d.recipes);
+        msg.events = std::move(d.events);
         return msg;
     }
     bmmo::session_remote_input_msg parse(bmmo::session_remote_input_msg& msg) {
@@ -64,7 +66,7 @@ namespace {
         return parsed;
     }
     size_t datagram_bytes(const relay_ring::datagram& d, uint32_t epoch) {
-        size_t bytes = bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes;
+        size_t bytes = bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes + bmmo::session::kEventCountBytes;
         for (const auto& e: d.entries) bytes += relay_ring::entry_bytes(e);
         for (const auto& h: d.held) bytes += relay_ring::held_bytes(h, epoch);
         return bytes;
@@ -427,14 +429,14 @@ TEST(RelayHeld, PlacementAndTheHeaderOnlyDatagram) {
     EXPECT_TRUE(quiet[0].held.empty());
     auto quiet_msg = to_message(quiet[0], 10);
     parse(quiet_msg);
-    EXPECT_EQ(quiet_msg.size(), bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes);
+    EXPECT_EQ(quiet_msg.size(), bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes + bmmo::session::kEventCountBytes);
     // Solo and substituted: the section rides the header-only datagram.
     solo.push(11, std::vector<applied_input>{held_input(1, frame(1), 10)});
     const auto told = solo.build_datagrams(1, bmmo::session::kRelayDatagramBudget, std::optional<uint32_t>(0));
     ASSERT_EQ(told.size(), 1u);
     ASSERT_EQ(told[0].held.size(), 1u);
     EXPECT_EQ(datagram_bytes(told[0], 0), bmmo::session::kRelayDatagramHeader + bmmo::session::kHeldCountBytes
-                                          + bmmo::session::kHeldReferenceBytes);
+                                          + bmmo::session::kHeldReferenceBytes + bmmo::session::kEventCountBytes);
     // No room beside the entries: the section gets a datagram of its own.
     relay_ring packed;
     packed.reanchor(1, 0);
@@ -454,7 +456,7 @@ TEST(RelayHeld, PlacementAndTheHeaderOnlyDatagram) {
     EXPECT_EQ(own[1].held.size(), 32u);
     auto own_msg = to_message(own[1], 32);
     parse(own_msg);
-    EXPECT_EQ(own_msg.size(), bmmo::session::kRelayDatagramHeader + 1u + 32 * bmmo::session::kHeldReferenceBytes);
+    EXPECT_EQ(own_msg.size(), bmmo::session::kRelayDatagramHeader + 1u + 32 * bmmo::session::kHeldReferenceBytes + bmmo::session::kEventCountBytes);
 }
 
 // A record is a 5-byte reference to the frame the client itself sent, and
@@ -514,4 +516,80 @@ TEST(RelayHeld, InlineOrReferenceAndTheBudget) {
     EXPECT_FALSE(parsed.held[0].has_frame);
     EXPECT_EQ(parsed.held[0].source, 100u);
     EXPECT_EQ(parsed.held_tick(parsed.held[0]), 109u);
+}
+
+// Protocol 33 (docs/relay-protocol-design.md 4.9): a lifecycle message rides
+// every datagram to its recipient from the first that carries it until the
+// recipient's acknowledgement reaches that datagram's tick; a birth's recipe
+// goes with it until acknowledged the same way, then the id alone; a reanchor
+// starts every carry again; what one packet cannot hold waits.
+TEST(RelayRing, CarriesMessagesUntilAcknowledged) {
+    relay_ring ring;
+    ring.reanchor(1, 9);
+    const auto birth = [](uint32_t tick) {
+        bmmo::session_event_msg m;
+        m.session = 1;
+        m.player = 2;
+        m.life = 1;
+        m.type = bmmo::session::event_type::Physicalize;
+        m.tick = m.origin_tick = tick;
+        m.recipe.mass = 10.0f;
+        m.recipe.collision_surface = "Ball_Wood";
+        m.rotation[0] = 1.0f;
+        EXPECT_TRUE(m.serialize());
+        return m.raw.str();
+    };
+    ring.push(10, applied_list{{1, frame(1)}, {2, frame(2)}});
+    ring.push_message({1}, birth(12));
+    auto d = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget);
+    ASSERT_EQ(d.size(), 1u);
+    ASSERT_EQ(d[0].events.size(), 1u);
+    EXPECT_TRUE(d[0].events[0].compact());
+    ASSERT_EQ(d[0].recipes.size(), 1u);
+    auto msg = to_message(d[0], 10);
+    const auto parsed = parse(msg);
+    ASSERT_EQ(parsed.events.size(), 1u);
+    EXPECT_EQ(parsed.recipes.size(), 1u);
+    // Not acknowledged yet: in the next datagram too, recipe and all.
+    ring.push(11, applied_list{{1, frame(1)}, {2, frame(2)}});
+    ring.acknowledge(1, 9);
+    d = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget);
+    EXPECT_EQ(d[0].events.size(), 1u);
+    EXPECT_EQ(d[0].recipes.size(), 1u);
+    // The first carry's tick acknowledged: delivered, the recipe held.
+    ring.acknowledge(1, 10);
+    EXPECT_EQ(ring.pending_messages(1), 0u);
+    ring.push(12, applied_list{{1, frame(1)}, {2, frame(2)}});
+    ring.push_message({1}, birth(14));
+    d = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget);
+    ASSERT_EQ(d[0].events.size(), 1u);
+    EXPECT_TRUE(d[0].recipes.empty());
+    // A reanchor (a resync) starts the carry again: 12 no longer proves it.
+    ring.reanchor(1, 11);
+    ring.push(13, applied_list{{1, frame(1)}, {2, frame(2)}});
+    d = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget);
+    EXPECT_EQ(d[0].events.size(), 1u);
+    ring.acknowledge(1, 12);
+    EXPECT_EQ(ring.pending_messages(1), 1u);
+    ring.acknowledge(1, 13);
+    EXPECT_EQ(ring.pending_messages(1), 0u);
+    // More than one packet holds: the rest waits for a later datagram.
+    bmmo::session_member_msg member;
+    member.session = 1;
+    member.kind = bmmo::session::MEMBER_ADDED;
+    ASSERT_TRUE(member.serialize());
+    for (int i = 0; i < 40; ++i) ring.push_message({1}, member.raw.str());
+    ring.push(14, applied_list{{1, frame(1)}, {2, frame(2)}});
+    d = ring.build_datagrams(1, bmmo::session::kRelayDatagramBudget);
+    size_t carried = 0;
+    for (auto& datagram: d) {
+        carried += datagram.events.size();
+        auto part = to_message(datagram, 14);
+        ASSERT_TRUE(part.serialize());
+        EXPECT_LE(part.size(), bmmo::session::kRelayDatagramBudget);
+    }
+    EXPECT_GT(carried, 0u);
+    EXPECT_LT(carried, 40u);
+    ring.acknowledge(1, 14);
+    EXPECT_EQ(ring.pending_messages(1), 40u - carried);
 }

@@ -25,11 +25,21 @@
 // Budget (§3.4): a datagram stays <= kInputDatagramBudget bytes.  Over it, the
 // OLDEST piggybacked event is left out of that datagram (it stays in the list
 // for the next one; its reliable copy travels anyway) and counted.
+//
+// Protocol 33 (docs/relay-protocol-design.md 4.9): an event rides until the
+// server's header `acked` - the last tick it applied a fresh frame of ours -
+// reaches max(stamp, the newest frame of the first datagram of its current
+// carry), not just stamp + 7: the server takes a datagram's events before its
+// frames, and every datagram from that first one on carried the event, so the
+// frame acknowledged came with it.  A datagram that leaves it out starts its
+// carry again.  One whose stamp is kPiggybackReachTicks behind the newest
+// frame goes regardless (only a resync reaches that far back).
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <string>
 
 #include "../entity/session.hpp"
@@ -41,6 +51,7 @@ namespace bmmo::session {
     inline constexpr size_t kInputDatagramBudget = 1100;
     // The last newest-frame tick a datagram carrying `stamp`'s frame can have.
     inline constexpr uint32_t kPiggybackWindowTicks = static_cast<uint32_t>(MAX_INPUT_FRAMES) - 1;
+    inline constexpr uint32_t kPiggybackReachTicks = 128;
 
     // The own event types that ride the input datagram.
     inline bool event_rides_input(event_type t) {
@@ -54,30 +65,30 @@ namespace bmmo::session {
             std::string bytes;   // the event's serialized session_event_msg, as its reliable copy
             uint32_t stamp = 0;
             event_type type = event_type::Physicalize;
-            bool started = false;   // its window fixed by the first datagram after the send
-            uint32_t until = 0;     // the last newest-frame tick of a datagram that carries it
+            std::optional<uint32_t> since;   // the newest frame of the first datagram of its current carry
         };
         struct stats {
             uint64_t carried = 0;    // event copies put into datagrams
             uint64_t dropped = 0;    // copies left out of a datagram by the budget
-            uint64_t expired = 0;    // entries whose window ended
+            uint64_t taken = 0;      // entries the server's acknowledgement showed taken
+            uint64_t expired = 0;    // entries past kPiggybackReachTicks unacknowledged
             size_t max_bytes = 0;    // the largest input datagram assembled (budget check)
         };
 
         void push(std::string bytes, uint32_t stamp, event_type type) {
-            entries_.push_back(entry{std::move(bytes), stamp, type, false, 0});
+            entries_.push_back(entry{std::move(bytes), stamp, type, std::nullopt});
         }
-        // Before a datagram whose newest frame is `newest`: fix the window of
-        // the entries sent since the last datagram (until = max(stamp,
-        // newest) + 7, signed as every tick comparison) and drop those no
-        // datagram from here on carries (newest > until).
-        void prune(uint32_t newest) {
+        // Before a datagram whose newest frame is `newest`: drop the entries
+        // the server has taken (`acked`, the header's, at or past max(stamp,
+        // since)) and those kPiggybackReachTicks behind (signed, as every
+        // tick comparison).
+        void prune(uint32_t newest, std::optional<uint32_t> acked = std::nullopt) {
             for (auto it = entries_.begin(); it != entries_.end();) {
-                if (!it->started) {
-                    it->started = true;
-                    it->until = (static_cast<int32_t>(newest - it->stamp) > 0 ? newest : it->stamp) + kPiggybackWindowTicks;
-                }
-                if (static_cast<int32_t>(newest - it->until) > 0) {
+                const uint32_t proof = it->since && static_cast<int32_t>(*it->since - it->stamp) > 0 ? *it->since : it->stamp;
+                if (acked && it->since && static_cast<int32_t>(*acked - proof) >= 0) {
+                    it = entries_.erase(it);
+                    ++stats_.taken;
+                } else if (static_cast<int32_t>(newest - it->stamp) > static_cast<int32_t>(kPiggybackReachTicks)) {
                     it = entries_.erase(it);
                     ++stats_.expired;
                 } else {
@@ -101,7 +112,12 @@ namespace bmmo::session {
                 bytes -= entries_[first].bytes.size();
                 ++first;
             }
-            for (size_t i = first; i < n; ++i) msg.events.push_back(entries_[i].bytes);
+            const uint32_t newest = msg.first_tick + static_cast<uint32_t>(msg.frames.size()) - 1;
+            for (size_t i = 0; i < first; ++i) entries_[i].since.reset();
+            for (size_t i = first; i < n; ++i) {
+                msg.events.push_back(entries_[i].bytes);
+                if (!entries_[i].since) entries_[i].since = newest;
+            }
             stats_.carried += n - first;
             stats_.dropped += first;
             const size_t size = msg.wire_size(bytes, n - first);

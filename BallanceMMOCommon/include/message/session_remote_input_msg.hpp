@@ -3,8 +3,10 @@
 #include "message.hpp"
 #include "../entity/session.hpp"
 #include "../session/input_relay.hpp"
+#include "../session/relay_events.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <optional>
 #include <vector>
@@ -56,8 +58,20 @@ namespace bmmo {
     // frame as the client sent it the server applied at T, or
     // kHeldSourceDefault for the default frame) or the frame (header u8 with
     // FRAME_CAMERA, keys u8, ball_type u8, flags u8, the three rows).  The
-    // section is always there, nheld 0 when there is nothing to say, and
-    // nothing may follow it.
+    // section is always there, nheld 0 when there is nothing to say.
+    //
+    // Protocol 33 (docs/relay-protocol-design.md 4.9): the events section
+    // trails the held one, always there and last: nrecipes u8 (id u8 and the
+    // recipe as a Physicalize writes it, each), nposes u8 (position f32x3 and
+    // rotation f32x9, each), nevents u8, and per event a head u8 (bits 0-2 the
+    // type or kRelayEventRaw, bits 3-5 the state, bit 6 an origin byte follows,
+    // bit 7 zero) - a raw one: len u16 and the message as sent reliably; a
+    // compact one: player u32, life u16, tick - this tick as i16, the origin
+    // byte (tick - origin_tick), then by type: Physicalize ball_type u8, flags
+    // u8, pose u8 (into the table), recipe u8 (the session's dictionary);
+    // Unphysicalize and Finish nothing; Sector i32; Trafo ball_type u8, flags
+    // u8, position f32x3.  The recipes are the dictionary's entries this
+    // recipient may not hold yet (session/input_relay.hpp relay_ring).
     //
     // Protocol 13 (step R12, late-player design 2.5): wait is the RECIPIENT's
     // wait at the server (lateness.hpp server_wait_meter), which its client
@@ -95,6 +109,8 @@ namespace bmmo {
         uint8_t part = 0, parts = 1;       // protocol 29: this datagram among the tick's
         std::vector<entry> entries;        // <= MAX_PLAYERS_PER_SESSION
         std::vector<held_record> held;     // <= kHeldNoticeTicks, the recipient's own
+        std::vector<std::pair<uint8_t, session::ball_recipe>> recipes;   // protocol 33: attached
+        std::vector<session::relay_event> events;                       // protocol 33, oldest first
 
         session_remote_input_msg() : serializable_message(bmmo::SessionRemoteInput) {}
 
@@ -193,6 +209,7 @@ namespace bmmo {
                 if (r->has_frame) write_frame(r->frame);
                 else raw.write(reinterpret_cast<const char*>(&r->source), sizeof(r->source));
             }
+            write_events();
             return raw.good();
         }
 
@@ -282,11 +299,147 @@ namespace bmmo {
                 }
                 held.push_back(r);
             }
-            // Nothing follows the held section: what does is another layout.
+            if (!read_events()) return false;
+            // Nothing follows the events section: what does is another layout.
             return raw.peek() == std::stringstream::traits_type::eof();
         }
 
     private:
+        template <class T>
+        void put(const T& v) { raw.write(reinterpret_cast<const char*>(&v), sizeof(v)); }
+        void write_events() {
+            const uint8_t nrecipes = static_cast<uint8_t>(std::min<size_t>(recipes.size(), 255));
+            put(nrecipes);
+            for (uint8_t i = 0; i < nrecipes; ++i) {
+                put(recipes[i].first);
+                session_event_msg::write_recipe(recipes[i].second, raw);
+            }
+            std::vector<std::string> poses;
+            std::vector<uint8_t> pose_of(events.size(), 0);
+            for (size_t i = 0; i < events.size() && i < 255; ++i) {
+                const auto& e = events[i];
+                if (!session::relay_compact_at(e, tick) || e.kind != static_cast<uint8_t>(session::event_type::Physicalize))
+                    continue;
+                const std::string pose = e.pose();
+                const auto it = std::find(poses.begin(), poses.end(), pose);
+                pose_of[i] = static_cast<uint8_t>(it - poses.begin());
+                if (it == poses.end()) poses.push_back(pose);
+            }
+            const uint8_t nposes = static_cast<uint8_t>(poses.size());
+            put(nposes);
+            for (const auto& pose: poses) raw.write(pose.data(), static_cast<std::streamsize>(pose.size()));
+            const uint8_t nevents = static_cast<uint8_t>(std::min<size_t>(events.size(), 255));
+            put(nevents);
+            for (uint8_t i = 0; i < nevents; ++i) {
+                const auto& e = events[i];
+                if (!session::relay_compact_at(e, tick)) {
+                    put(session::kRelayEventRaw);
+                    put(static_cast<uint16_t>(e.raw.size()));
+                    raw.write(e.raw.data(), static_cast<std::streamsize>(e.raw.size()));
+                    continue;
+                }
+                const bool origin = e.origin_tick != e.tick;
+                put(static_cast<uint8_t>(e.kind | (e.state << session::kRelayEventStateShift)
+                                         | (origin ? session::kRelayEventOrigin : 0)));
+                put(e.player);
+                put(e.life);
+                put(static_cast<int16_t>(static_cast<int32_t>(e.tick - tick)));
+                if (origin) put(static_cast<uint8_t>(e.tick - e.origin_tick));
+                switch (static_cast<session::event_type>(e.kind)) {
+                    case session::event_type::Physicalize:
+                        put(e.ball_type);
+                        put(e.flags);
+                        put(pose_of[i]);
+                        put(e.recipe);
+                        break;
+                    case session::event_type::Sector:
+                        put(e.sector);
+                        break;
+                    case session::event_type::Trafo:
+                        put(e.ball_type);
+                        put(e.flags);
+                        raw.write(reinterpret_cast<const char*>(e.position), sizeof(e.position));
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+        bool read_events() {
+            uint8_t nrecipes = 0;
+            if (!message_utils::read_variable(raw, &nrecipes)) return false;
+            recipes.clear();
+            for (uint8_t i = 0; i < nrecipes; ++i) {
+                std::pair<uint8_t, session::ball_recipe> r;
+                if (!message_utils::read_variable(raw, &r.first)) return false;
+                if (!session_event_msg::read_recipe(r.second, raw)) return false;
+                recipes.push_back(std::move(r));
+            }
+            uint8_t nposes = 0;
+            if (!message_utils::read_variable(raw, &nposes)) return false;
+            std::vector<std::array<float, 12>> poses(nposes);
+            for (auto& pose: poses)
+                if (!raw.read(reinterpret_cast<char*>(pose.data()), sizeof(pose))) return false;
+            uint8_t nevents = 0;
+            if (!message_utils::read_variable(raw, &nevents)) return false;
+            events.clear();
+            events.reserve(nevents);
+            for (uint8_t i = 0; i < nevents; ++i) {
+                session::relay_event e;
+                uint8_t head = 0;
+                if (!message_utils::read_variable(raw, &head) || (head & 0x80)) return false;
+                e.kind = static_cast<uint8_t>(head & 0x07);
+                if (e.kind == session::kRelayEventRaw) {
+                    uint16_t len = 0;
+                    if (head != session::kRelayEventRaw || !message_utils::read_variable(raw, &len) || len == 0) return false;
+                    e.raw.resize(len);
+                    if (!raw.read(e.raw.data(), len)) return false;
+                    events.push_back(std::move(e));
+                    continue;
+                }
+                const auto type = static_cast<session::event_type>(e.kind);
+                if (type != session::event_type::Physicalize && type != session::event_type::Unphysicalize
+                        && type != session::event_type::Sector && type != session::event_type::Finish
+                        && type != session::event_type::Trafo)
+                    return false;
+                e.state = static_cast<uint8_t>((head >> session::kRelayEventStateShift) & 0x07);
+                int16_t dtick = 0;
+                if (!message_utils::read_variable(raw, &e.player)) return false;
+                if (!message_utils::read_variable(raw, &e.life)) return false;
+                if (!message_utils::read_variable(raw, &dtick)) return false;
+                e.tick = tick + static_cast<uint32_t>(static_cast<int32_t>(dtick));
+                e.origin_tick = e.tick;
+                if (head & session::kRelayEventOrigin) {
+                    uint8_t back = 0;
+                    if (!message_utils::read_variable(raw, &back) || back == 0) return false;
+                    e.origin_tick = e.tick - back;
+                }
+                switch (type) {
+                    case session::event_type::Physicalize: {
+                        uint8_t pose = 0;
+                        if (!message_utils::read_variable(raw, &e.ball_type)) return false;
+                        if (!message_utils::read_variable(raw, &e.flags)) return false;
+                        if (!message_utils::read_variable(raw, &pose) || pose >= poses.size()) return false;
+                        if (!message_utils::read_variable(raw, &e.recipe)) return false;
+                        std::memcpy(e.position, poses[pose].data(), sizeof(e.position));
+                        std::memcpy(e.rotation, poses[pose].data() + 3, sizeof(e.rotation));
+                        break;
+                    }
+                    case session::event_type::Sector:
+                        if (!message_utils::read_variable(raw, &e.sector)) return false;
+                        break;
+                    case session::event_type::Trafo:
+                        if (!message_utils::read_variable(raw, &e.ball_type)) return false;
+                        if (!message_utils::read_variable(raw, &e.flags)) return false;
+                        if (!raw.read(reinterpret_cast<char*>(e.position), sizeof(e.position))) return false;
+                        break;
+                    default:
+                        break;
+                }
+                events.push_back(std::move(e));
+            }
+            return true;
+        }
         // One run: the same keys, ball type, flags and heading (and for an
         // inline one the rows) as the frame before.
         static bool same_run(const entry& e, size_t a, size_t b) {

@@ -480,6 +480,7 @@ namespace bmmo::session {
         s.lead_offset_ = 0;
         s.pending_relay_.clear();
         s.event_seen_.clear();
+        s.relay_recipes_.clear();
         s.own_event_repeats_.clear();
         s.own_piggyback_.clear();
         s.remote_last_physicalize_.clear();
@@ -920,6 +921,7 @@ namespace bmmo::session {
         reset_held_epoch("the session's end");
         s.pending_relay_.clear();
         s.event_seen_.clear();
+        s.relay_recipes_.clear();
         s.own_event_repeats_.clear();
         s.own_piggyback_.clear();
         s.remote_last_physicalize_.clear();
@@ -1468,7 +1470,7 @@ namespace bmmo::session {
         // path caps it each frame, client_core_frame.cpp; the assignment
         // clears it), i.e. one datagram; with more, started
         // entries would be judged against the last chunk's newest frame.
-        s.own_piggyback_.prune(s.input_history_.back().first);
+        s.own_piggyback_.prune(s.input_history_.back().first, own_acked());
         size_t index = 0;
         while (index < s.input_history_.size()) {
             bmmo::session_input_msg msg;

@@ -1474,17 +1474,17 @@ namespace {
         EXPECT_EQ(first.frames.size(), static_cast<size_t>(bmmo::session::MAX_INPUT_FRAMES));
         EXPECT_EQ(second.first_tick, 120u + bmmo::session::MAX_INPUT_FRAMES);
         EXPECT_EQ(second.frames.size(), 3u);
-        // The birth rides both datagrams, as its reliable copy's very bytes;
-        // stamped 125 but sent when the newest frame was 130, its window is
-        // max(125, 130) + 7 = 137 (the eight datagrams after its send).
+        // The birth rides both datagrams, as its reliable copy's very bytes
+        // (the first one's newest frame is 127).
         ASSERT_EQ(first.events.size(), 1u);
         EXPECT_EQ(first.events[0], birth_bytes);
         ASSERT_EQ(second.events.size(), 1u);
         EXPECT_EQ(second.events[0], birth_bytes);
         EXPECT_EQ(state_of(core).sent_inputs_.size(), static_cast<size_t>(bmmo::session::MAX_INPUT_FRAMES) + 3);
         EXPECT_EQ(state_of(core).sent_inputs_.at(121).keys, 121);
-        // Up to newest 137 it still rides; from 138 on it is gone.
-        for (uint32_t t = 131; t <= 138; ++t) {
+        // Protocol 33: past stamp + 7 it still rides while the server's
+        // header has not acknowledged frame 127, and goes once it has.
+        const auto flush_at = [&](uint32_t t) {
             bmmo::session::input_frame frame;
             frame.keys = static_cast<uint8_t>(t);
             state_of(core).input_history_.push_back({t, frame});
@@ -1493,10 +1493,16 @@ namespace {
             steps{core}.flush_inputs();
             const auto msg = decode<bmmo::session_input_msg>(fake.sent.back().first);
             EXPECT_EQ(msg.first_tick + msg.frames.size() - 1, t);
-            EXPECT_EQ(msg.events.size(), t <= 137 ? 1u : 0u) << t;
-        }
+            return msg.events.size();
+        };
+        for (uint32_t t = 131; t <= 140; ++t) EXPECT_EQ(flush_at(t), 1u) << t;
+        state_of(core).acked_header_known_ = true;
+        state_of(core).header_acked_ = 126;
+        EXPECT_EQ(flush_at(141), 1u);
+        state_of(core).header_acked_ = 127;
+        EXPECT_EQ(flush_at(142), 0u);
         EXPECT_EQ(state_of(core).own_piggyback_.pending(), 0u);
-        EXPECT_EQ(state_of(core).own_piggyback_.counters().expired, 1u);
+        EXPECT_EQ(state_of(core).own_piggyback_.counters().taken, 1u);
     }
 
     // SessionEnd: another session's is only logged; ours goes idle, in

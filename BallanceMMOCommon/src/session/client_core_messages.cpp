@@ -344,6 +344,10 @@ namespace bmmo::session {
             if (!s.resync_pending_) request_resync("relayed input past the server's history", true);
             return;
         }
+        // Protocol 33: the lifecycle messages it carries, before its frames.
+        // Not taken (not running yet, a recipe not held), its span is not
+        // held, so the server keeps carrying them.
+        const bool events_taken = deliver_relayed_events(msg);
         // Protocol 30: the frames' cameras from the players' bases.  A
         // datagram turning a base this client does not hold is not used: its
         // span is not held, so the server keeps sending it, the base with it.
@@ -418,7 +422,43 @@ namespace bmmo::session {
                 remote.have_input = true;
             }
         }
-        note_relay_span(msg);
+        if (events_taken) note_relay_span(msg);
+    }
+
+    // Protocol 33 (docs/relay-protocol-design.md 4.9): the events section -
+    // the recipes into the session's dictionary, then every message, oldest
+    // first, to the handler its reliable copy goes to (a copy of one already
+    // taken is nothing there: event_seen, the member lives).  While this
+    // client does not run yet, on_session_event drops events: none is taken,
+    // and the datagram's span must not be acknowledged on their account.
+    bool session_client_core::deliver_relayed_events(const bmmo::session_remote_input_msg& msg) {
+        for (const auto& [id, recipe]: msg.recipes) s.relay_recipes_[id] = recipe;
+        if (msg.events.empty()) return true;
+        if (s.phase_ != client_core_state::phase::running) return false;
+        bool taken = true;
+        for (const auto& e: msg.events) {
+            ++s.relay_events_;
+            if (e.compact()) {
+                bmmo::session_event_msg event;
+                if (!bmmo::session::event_msg_of(e, msg.session, s.relay_recipes_, event)) {
+                    ++s.relay_events_unresolved_;
+                    taken = false;
+                    continue;
+                }
+                on_session_event(std::move(event));
+                continue;
+            }
+            bmmo::session_event_msg event;
+            event.raw.write(e.raw.data(), static_cast<std::streamsize>(e.raw.size()));
+            if (event.deserialize()) {
+                on_session_event(std::move(event));
+                continue;
+            }
+            bmmo::session_member_msg member;
+            member.raw.write(e.raw.data(), static_cast<std::streamsize>(e.raw.size()));
+            if (member.deserialize()) on_session_member(member);
+        }
+        return taken;
     }
 
     // Protocol 29: the frames of every tick in (from, tick] are held once

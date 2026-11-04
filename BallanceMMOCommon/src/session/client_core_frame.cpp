@@ -1004,9 +1004,9 @@ namespace bmmo::session {
             encode_uplink_cameras(msg);
             remember_sent(msg);
             // Step EVI (protocol 25): our own P / U / Sector / Trafo events
-            // ride the datagram until it no longer carries their stamp's
-            // frame (event_piggyback.hpp).
-            s.own_piggyback_.prune(s.input_history_.back().first);
+            // ride the datagram until the server's acknowledgement shows them
+            // taken (protocol 33, event_piggyback.hpp).
+            s.own_piggyback_.prune(s.input_history_.back().first, own_acked());
             s.own_piggyback_.attach(msg);
             msg.serialize();
             platform_.send(msg.raw.str(), send_mode::unreliable_no_delay);
