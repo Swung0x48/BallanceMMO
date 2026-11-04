@@ -305,12 +305,10 @@ namespace {
     // calc_at_quaternion, whose slerp branch (a core turning > 2.6 degrees
     // per PSI) then comes out ~1e-7 off unit length - the journal's rows
     // differ from the server's although the state is exact.  The x87 is
-    // switched to 53 bits around the read that feeds the journal's
-    // checkpoint rows only (platform.list_bodies: its one caller is
-    // client_journal::local_checkpoint) and the caller's control word is
-    // restored on scope exit.  Not around platform.body_state: the core's
-    // corrections, resync and rollback capture read it, and those feed the
-    // simulation.  The x64 and Linux hosts run SSE2 doubles (53-bit) already.
+    // switched to 53 bits around the reads that feed the journal's rows,
+    // including the core's body reads and the rollback records (LBF4),
+    // and the caller's control word is restored on scope exit.  The x64
+    // and Linux hosts run SSE2 doubles (53-bit) already.
     // How many reads ran switched, and how many could not switch (the
     // session end's log line, step SP10: TR4c confirmed in a retail run).
     uint64_t report_precision_reads = 0, report_precision_failed = 0;
@@ -3855,6 +3853,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
 
     // ---- reading the world ----
     p.body_state = [this](const std::string& entity, bmmo_physics_body_state& out) {
+        report_precision_53 precision;
         std::string error;
         return physics_view_.get_body_state(entity.c_str(), out, error);
     };
@@ -3906,6 +3905,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         return physics_view_.capture(out, error);
     };
     p.own_ball = [this]() {
+        report_precision_53 precision;
         bs::own_ball_view own;
         CK3dObject* ball = get_current_ball();
         own.entity = ball && ball->GetName() ? ball->GetName() : "";
@@ -4734,6 +4734,11 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                 logger_->Info("Physics session: %s", diag_entity_line(m_bml->GetCKContext(), "replay", tick).c_str());
             };
         bs::rollback_world world = bs::bind_session_world(physics_view_, hooks, w);
+        const auto get_body = world.get_body;
+        world.get_body = [get_body](const std::string& entity, bmmo_physics_body_state& out) {
+            report_precision_53 precision;
+            return get_body(entity, out);
+        };
         // Step T4: the births a replayed tick made, in the birth log under
         // that tick: a replay across an explosion physicalizes the set's
         // pieces again (step B2SW, T4 finding c: in every session, the trafo

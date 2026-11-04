@@ -7315,6 +7315,57 @@ namespace {
         }
     }
 
+    TEST(SessionClientCoreSLX, RewindRefreshesEveryMirrorsNextDrive) {
+        for (const bool exact: {false, true}) {
+            SCOPED_TRACE(exact ? "exact current frame" : "newest relay tail");
+            flow_fake fake;
+            session_client_core core(frame_platform(fake, false), session_capabilities{});
+            run_to_tick_125_four(core, fake);
+            ASSERT_FALSE(core.config.drive_from_newest_relay);
+            auto& state = state_of(core);
+            for (const uint32_t player: {4u, 5u}) {
+                auto& remote = state.remotes_[player];
+                remote.entity = "Ball_Wood_BMMO_" + std::to_string(player);
+                remote.physicalized = true;
+                remote.navigation = true;
+                remote.applied = keys_frame(1);
+                remote.inputs[125] = keys_frame(5);
+                remote.input = keys_frame(5);
+                remote.input_tick = 125;
+                remote.have_input = true;
+                if (exact) remote.inputs[126] = keys_frame(3);
+            }
+            bmmo::session::rollback_tracked tracked;
+            tracked.remote_entities = {"Ball_Wood_BMMO_4", "Ball_Wood_BMMO_5"};
+            for (uint32_t tick = 123; tick <= 125; ++tick)
+                state.rollback_.record(core.platform().bind_world(bmmo::session::core_world_hooks{}), tick,
+                    tracked,
+                    {{"Ball_Wood_BMMO_4", keys_frame(1)}, {"Ball_Wood_BMMO_5", keys_frame(1)}});
+            state.input_rewind_pending_ = true;
+            state.input_rewind_tick_ = 124;
+            state.input_rewind_entity_ = "Ball_Wood_BMMO_4";
+            state.input_rewind_entities_ = {"Ball_Wood_BMMO_4"};
+            const auto rewinds_before = state.rollback_.stats().rewinds;
+            const size_t from = fake.calls.size();
+            core.pre_step();
+            ASSERT_EQ(state.rollback_.stats().rewinds, rewinds_before + 1);
+            const auto calls = since(fake.calls, from);
+            const int expected = exact ? 3 : 5;
+            for (const uint32_t player: {4u, 5u}) {
+                const auto& remote = state.remotes_.at(player);
+                EXPECT_EQ(remote.applied.keys, expected);
+                EXPECT_NE(std::find(calls.begin(), calls.end(),
+                    "drive:" + remote.entity + ":" + std::to_string(expected)), calls.end());
+            }
+            ASSERT_TRUE(core.post_step(true));
+            for (const uint32_t player: {4u, 5u}) {
+                bmmo::session::input_frame recorded{};
+                ASSERT_TRUE(state.rollback_.recorded_input(state.remotes_.at(player).entity, 126, recorded));
+                EXPECT_EQ(recorded.keys, expected);
+            }
+        }
+    }
+
     // frozen -> resync (design 4.1, 7 Q1; R1, both hosts): a snapshot that
     // needs a rollback while the local physics clock stands still sets the
     // bodies and drops the history with no replay, so the core asks for a

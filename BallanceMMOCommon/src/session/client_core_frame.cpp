@@ -533,6 +533,7 @@ namespace bmmo::session {
     // applies them: after this tick's inputs and before its physics step
     // (session_runner::step).
     void session_client_core::pre_step() {
+        const auto rewinds_before = s.rollback_.stats().rewinds;
         frame_.prepared = true;
         s.spawn_forget_cursor_valid_ = false;   // FULL step GHF: a replay from here on begins at its restore
         frame_.f = s.frames_since_anchor_ + 1;
@@ -649,7 +650,10 @@ namespace bmmo::session {
             if (!remote.physicalized || !remote.navigation) continue;
             // drive_from_newest_relay (R1): chosen now, from the relay the
             // messages since post_step left (the record of T stores it).
-            if (config.drive_from_newest_relay) remote.applied = live_drive(remote, frame_tick);
+            // After a rewind, continue its corrected tail, not the stale
+            // prediction chosen before that correction reached the ring.
+            if (config.drive_from_newest_relay || s.rollback_.stats().rewinds != rewinds_before)
+                remote.applied = live_drive(remote, frame_tick);
             // FULL step SLX (Q-SLOT (a), every host): the relayed frame for
             // this very tick, when it reached the ring in the drain between
             // post_step(T - 1) and now, drives T.  post_step(T - 1) chose
