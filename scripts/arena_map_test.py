@@ -2374,13 +2374,15 @@ def criteria(report, case, controls):
                         None if edge is None else row['phases'][p]['mech_max'] <= edge + 0.0005,
                         '%.4f vs <= %s%s' % (row['phases'][p]['mech_max'], 'n/a' if edge is None else '%.4f' % edge, note))
                 # The re-simulated ticks, not the rollbacks: the CPU spent
-                # (the user's decision after LBM4 - A8's joiner frames
-                # arriving one by one cost one rollback more, fewer ticks).
+                # (the user's decisions after LBM4 - A8's joiner frames
+                # arriving one by one cost one rollback more, fewer ticks;
+                # and a tick per rollback, its message's arrival jitter, as
+                # the relay lag's rest within a tick).
                 for cls in ('input', 'life', 'snap', 'forced'):
                     edge, note = band(row['index'], lambda c: c['D']['rb'][cls][1])
                     add(who, '%s rollback ticks in D within control' % cls,
-                        None if edge is None else D['rb'][cls][1] <= edge,
-                        '%d ticks in %d rollbacks vs <= %s%s' % (D['rb'][cls][1], D['rb'][cls][0], edge, note))
+                        None if edge is None else D['rb'][cls][1] <= edge + D['rb'][cls][0],
+                        '%d ticks in %d rollbacks vs <= %s + 1 a rollback%s' % (D['rb'][cls][1], D['rb'][cls][0], edge, note))
                 if late:
                     edge, note = band(row['index'], lambda c: c['D']['inrew_late'])
                     add(who, 'input rewinds naming the late ball in D within control',
