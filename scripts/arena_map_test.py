@@ -1738,7 +1738,23 @@ def relay_samples(path):
     return samples
 
 
-def relay_start_hold(report, row, controls):
+def relay_start_hold(report, row, controls, control=False):
+    """Relay lag in D with patience on, against the same network healthy (the
+    user's decisions of 2026-11-04, after LBM2/LBM3).
+
+    The baseline is this run's own B for the client and source: A0h and A0j
+    run other links than A0, and a client's lag differs by up to 2 ticks from
+    run to run in every phase alike (A0j's clock anchoring), so neither A0's
+    band nor the off twin's run is the same network.  A control arm (A0, A0h,
+    A0j: no late member) exempts nothing; a fault arm exempts one hold per
+    episode: the first staircase over that baseline at or after
+    the episode - consecutive ticks whose lag never rises and starts at most
+    baseline + margin, the server waiting for the late member and catching up
+    a tick at a time (25, 24, 23 ...; it starts a tick or so after the
+    episode, and an A6 event's 20 ticks later).  Either way the rest's p99
+    may be one tick over the baseline: a single 23 among a short D's 48
+    samples per sender is what every phase of every run shows, the off
+    twin's included."""
     episodes = report.get('relay_episodes') or [dict(tick=report['t_on'], clients=report['event_clients'])]
     margins = [(episode['tick'], 10 if len(report['clients']) >= 4
                 and 2 <= len(episode['clients']) <= len(report['clients']) / 2 else 4) for episode in episodes]
@@ -1754,7 +1770,7 @@ def relay_start_hold(report, row, controls):
     samples = [sample for sample in row.get('relay_samples', []) if lo <= sample[0] < hi]
     output = []
     for sender in [None] + sorted({sample[3] for sample in samples}):
-        def edge(reports):
+        def edge(reports, window):
             values = []
             for rep in reports:
                 member = next((member for member in rep['clients'] if member['index'] == row['index']), None)
@@ -1762,11 +1778,18 @@ def relay_start_hold(report, row, controls):
                     continue
                 source = next((member['index'] for member in report['clients'] if member['id'] == sender), None)
                 source_id = next((member['id'] for member in rep['clients'] if member['index'] == source), None)
+                span = window(rep)
                 values.extend(sample[2] for sample in member.get('relay_samples', [])
-                              if (rep.get('arm') == 'A0' or lo <= sample[0] < hi)
+                              if (span is None or span[0] <= sample[0] < span[1])
                               and (sender is None or sample[3] == source_id))
             return sorted(values)[min(len(values) - 1, int(.99 * len(values)))] if values else None
-        band, twin = edge(bands), edge(twins)
+        twin = edge(twins, lambda rep: rep['phases']['B'])
+        healthy = sorted(sample[2] for sample in row.get('relay_samples', [])
+                         if report['phases']['B'][0] <= sample[0] < report['phases']['B'][1]
+                         and (sender is None or sample[3] == sender))
+        band = healthy[min(len(healthy) - 1, int(.99 * len(healthy)))] if healthy else twin
+        if band is None:
+            band = edge(bands, lambda rep: None)
         selected = [sample for sample in samples if sender is None or sample[3] == sender]
         excess = [sample for sample in selected if band is not None and sample[2] > band]
         if majority_raise:
@@ -1774,13 +1797,26 @@ def relay_start_hold(report, row, controls):
                    and sample[0] < last_effective and sample[2] > band + 22]
             rest = sorted(sample[2] for sample in selected
                           if last_effective is not None and sample[0] >= last_effective + 48)
+            limit = band
         else:
-            bad = [sample for sample in excess if any(start <= sample[0] < start + margin
-                   and sample[2] > band + margin for start, margin in margins)]
-            rest = sorted(sample[2] for sample in selected
-                          if not any(start <= sample[0] < start + margin for start, margin in margins))
+            worst = {}
+            for sample in selected:
+                worst[sample[0]] = max(worst.get(sample[0], sample[2]), sample[2])
+            holds = []
+            for start, margin in ([] if control else margins):
+                first = next((t for t in sorted(worst) if t >= start and band is not None and worst[t] > band
+                              and not any(a <= t < b for a, b in holds)), None)
+                if first is None or worst[first] > band + margin:
+                    continue
+                end = first + 1
+                while end in worst and worst[end] > band and worst[end] <= worst[end - 1]:
+                    end += 1
+                holds.append((first, end))
+            bad = []
+            rest = sorted(sample[2] for sample in selected if not any(a <= sample[0] < b for a, b in holds))
+            limit = None if band is None else band + 1
         p99 = rest[min(len(rest) - 1, int(.99 * len(rest)))] if rest else None
-        ok = None if band is None or p99 is None or (not majority_raise and twin is None) else not bad and p99 <= (band if majority_raise else min(band, twin))
+        ok = None if band is None or p99 is None or (not majority_raise and twin is None) else not bad and p99 <= limit
         output.append(dict(source=sender, ok=ok, margins=margins, band=band, twin=twin, rest_p99=p99,
                            excess=len(excess), bad=bad[:20], samples=len(selected), last_effective=last_effective))
     return output
@@ -2353,7 +2389,7 @@ def criteria(report, case, controls):
                             None if edge is None else st['p99'] <= edge, '%d vs <= %s%s' % (st['p99'], edge, note))
             else:
                 add(who, 'mechanism error / rollbacks / relay lag within control', None, 'no --control given')
-            for result in relay_start_hold(report, row, controls):
+            for result in relay_start_hold(report, row, controls, control=family == 'control'):
                 relay_rule = 'A3m band + 22 until last E, band from E + 48' if arm.upper() == 'A3M' else 'one initial patience hold'
                 add(who, 'relay lag in D: %s (source %s)' % (relay_rule, result['source']),
                     result['ok'], str(result))
