@@ -2692,7 +2692,7 @@ void BallanceMMOClient::core_host_process() {
                               "+%.3f s, capture window passed)%s", host.session, level_life.level,
                               seconds_since(level_life.started),
                               std::chrono::duration<double>(level_life.loaded_at - level_life.started).count(),
-                              level_life.go_waiting ? "; \"Go!\" came first: restarting now" : "");
+                              level_life.go_waiting ? "; restarting it now" : "");
                 if (level_life.go_waiting) {
                     level_life.go_waiting = false;
                     core_host_go();
