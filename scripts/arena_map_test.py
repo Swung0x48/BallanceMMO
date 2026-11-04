@@ -3614,7 +3614,7 @@ def main():
     ap.add_argument('--selftest', action='store_true', help='check the harness\'s own logic offline and exit')
     ap.add_argument('--scenario', type=str.upper, choices=lph.ARMS, default='')
     ap.add_argument('--variant', choices=('lane', 'swing'), default='lane')
-    ap.add_argument('--hold', choices=('300', '1500', 'drop'), default='300')
+    ap.add_argument('--hold', help='lifecycle hold in milliseconds, or drop (A6: 496; A6m/A6b: 300)')
     ap.add_argument('--patience', choices=('off', 'on'), default='off')
     ap.add_argument('--lead-adjust', choices=('off', 'on'), default='off')
     ap.add_argument('--test-clock-skew', default='', metavar='T:MS:PCT')

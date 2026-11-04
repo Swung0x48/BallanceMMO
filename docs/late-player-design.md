@@ -3146,7 +3146,7 @@ Counters to add in code:
 | A5uB | A5u, plus A9's spike on client 0 at tick 2100, after client 2's raise (revision 3: a burst after a raise) |
 | A5d | +300 ms uplink at 1500, back at 2700; once more with C8 `--resync-at 2900` on client 2 |
 | A5p | clients 2 and 3 together, +300 ms uplink, persistent (revision 3: a late pair) |
-| A6 | `--hold-event physicalize:2:{300,1500,drop}` |
+| A6 | `--hold-event physicalize:2:{496,1500,drop}`; at 150 ms each way, 495 ms still fits the off twin's 53-tick reach; 496 ms measures 54 ticks and exactly one owner resync in both twins |
 | A6m | hold 300 ms at 50 ms each way, barrier off: the move inside the reach |
 | A6b | barrier off, 300 ms: hold a Physicalize and the following Unphysicalize together; and two same-type trafos (wood → stone → wood) in one hold |
 | A7 | clients 2 and 3, uplink blackouts of 300 ms, overlapping by 100 ms |

@@ -753,6 +753,7 @@ namespace bmmo::session {
         // (a5u_lead: 0.17 m on the own ball for good).
         s.held_floor_ = anchor;
         s.resync_pending_ = false;
+        s.final_unconfirmed_ = false;
         s.resync_exact_ = false;
         s.resync_join_ = false;   // step A5: the world is the shared one again
         s.have_resync_state_ = false;
