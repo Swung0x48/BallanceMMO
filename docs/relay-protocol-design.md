@@ -167,9 +167,26 @@ The reliable copy stays (the backstop, and the order for a recipient that applie
 stay only for a member that is not a relay recipient yet (before its first assignment). The client already takes the
 first copy of an event and drops the rest (`event_seen`, SessionMember copies), so a third path needs no new dedupe.
 
-- **Wire (downlink).** After the held section, an events section: nevents u8, then per message len u16 and the
-  message as sent reliably (opcode and body). A datagram of a split tick carries the section in its first part with
-  room; a section past one packet goes into datagrams of its own, as the held section does.
+- **Wire (downlink): a compact events section** (the user's decision of 2026-11-04: the raw messages would ride
+  every datagram of a round trip, at the start 19 births of 140 B each). Of a Physicalize's 140 B, 66 are the ball's
+  recipe (its physics parameters and collision shape, one per ball type in a level) and 48 its pose (position and the
+  rotation rows - at the start every member's is the resetpoint's); what differs per event is ~13 B. So the section
+  after the held one is three tables:
+  - recipes: n u8, per recipe id u8 and the recipe as write_recipe writes it. A session-wide dictionary: the server
+    numbers each distinct recipe on its first use, and attaches it to a recipient until the recipient's
+    acknowledgement reaches the first datagram that carried it (the camera base's rule, §4.7); a reanchor
+    re-attaches. The client keeps id -> recipe for the session.
+  - poses: n u8, per pose position f32x3 and rotation f32x9 - each distinct pose of this datagram's events once.
+  - events: n u8, per event a head u8 (bits 0-2 the type, 7 = a raw message; bits 3-5 the state; bit 6 an origin
+    byte follows), player u32, life u16, tick as i16 from the datagram's tick, the origin byte (tick - origin_tick,
+    when it differs and fits), then by type: Physicalize ball_type u8, flags u8, pose index u8, recipe id u8;
+    Unphysicalize and Finish nothing; Sector i32; Trafo ball_type u8, flags u8, position f32x3. A raw message (code
+    7: len u16 and the bytes as sent reliably) carries every other kind - SessionMember, BodyRevived,
+    AirshipRelease - and any event the compact form cannot (an origin over 255 back, a 256th recipe).
+  Every float is copied bit for bit (a quaternion would change the rotation's bits, and with them the body every
+  world makes). The decoder rebuilds the session_event_msg the reliable copy carries, so the handlers and the dedupe
+  see one message whichever way it came. A datagram of a split tick carries the section in its first part with room;
+  a section past one packet goes into datagrams of its own, as the held section does.
 - **Server.** relay_ring keeps per recipient the pending messages with the tick of the first datagram that carried
   each; build_datagrams adds them; acknowledge drops those whose first carry the acknowledgement reached; reanchor (a
   resync, a late join) drops those at or before the anchor (the state holds them) and marks the rest uncarried;
@@ -183,17 +200,27 @@ first copy of an event and drops the rest (`event_seen`, SessionMember copies), 
   acknowledged means the event was taken). Finish and BodyRevived keep their repeats.
 
 **Cost.** A message is carried for about one round trip: RTT 40 ms -> 3-4 copies, 150 ms each way -> ~20 copies
-(today 1 + 6 at any RTT). A Physicalize is 140 B, an Unphysicalize 24 B. 20 players each respawning once in 10 s at
-RTT 300 ms: ~1 Mbps of server upload; at RTT 40 ms ~0.2 Mbps. The worst moment is the start, every member born at
-one tick: 19 births = 2.7 KB per recipient per tick, past one packet, for a round trip - at RTT 40 ms ~200 KB over
-60 ms (today ~380 KB over 180 ms). If the measured bursts are too large, the alternative is an explicit event
-acknowledgement (a per-recipient sequence number and a u16 in every uplink), which lets copies be spaced (1, 2, 4, 8
-ticks) and capped per datagram; it costs a field each way and more code.
+(today the reliable one and 6 at any RTT). Compact sizes: a Physicalize 13 B plus its pose (48 B, shared in a
+datagram) and, until acknowledged, its recipe (67 B, once a session); an Unphysicalize 9 B, a Sector 13 B, a Trafo
+23 B (raw today: 140, 24, 28, 38). The start, every member born at one tick: 19 births = 3 + 67 + 48 + 19 x 13 = ~365 B
+per recipient per datagram (~300 B once the recipe is acknowledged), one packet with the relay's entries, for a
+round trip - at RTT 40 ms ~1.5 KB per recipient (today's raw repeats 7 x 2.7 KB = ~19 KB). A respawn elsewhere: 61 B.
+If bursts still measure too large, an explicit event acknowledgement (a per-recipient sequence number and a u16 in
+every uplink) would let copies be spaced and capped per datagram, at a field each way.
 
 **Verification.** Unit tests (the ring's carry, acknowledge, reanchor and forget of messages; the section's round
 trip and split). Headless: the swing seeds 0-2 twice (no late-event resync), the A6 lifecycle arms (A6b, A6m, death,
 superseded, drop) and A8, all FINAL exact with journal replay N/N; a downlink outage of 20 ticks over a birth (today
 a resync, then on time after the outage); BW20 driving, server upload against 3.0-4.4 Mbps; retail L11.
+
+**Implementation steps.** (1) session/event_codec.hpp: the three tables, encode and decode, bit-exact round trips of
+every type and the raw escape, every truncation refused. (2) relay_ring: the pending messages and the recipe carry
+per recipient (build_datagrams, acknowledge, reanchor, forget). (3) session_remote_input_msg: the section (protocol
+33, the held section no longer last). (4) Server: the three push sites go to the ring for relay recipients; the
+repeats stay for a member not yet a recipient. (5) Client: the section decoded before the entries, the recipe
+dictionary per session, cleared at a reanchor. (6) Uplink: the own events ride until the header's `acked` reaches the
+stamp (raw, as today: one own event at a time). (7) Docs, then the verification above; the wire check's sends differ
+in SessionRemoteInput and SessionInput by construction.
 
 ## 5. Interactions to handle
 
