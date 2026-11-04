@@ -2046,6 +2046,10 @@ def event_report(args, case, case_dir):
         mine = [t for t in mine if not any(lo < t < b for lo, b in unnumbered)]
         row['subst_server'] = {p: sum(1 for t in mine if cphases[p][0] <= t < cphases[p][1]) for p in PHASES}
         row['subst_total'] = len(mine)
+        # The client's subst= counts to its last tick, past the span's end:
+        # its count lies between the span's and this one (LBM4 swing seeds).
+        row['subst_total_full'] = row['subst_total'] + sum(
+            1 for t in substituted.get(pid, []) if end < t <= end + 60 and not fault_overlap(t, t))
         row['substituted_ticks'] = mine
         row['subst_outside_event'] = sum(1 for t in mine if not t_on <= t <= t_off + 2)
         runs = []
@@ -2366,11 +2370,14 @@ def criteria(report, case, controls):
                     add(who, 'mechanism error in %s within control' % p,
                         None if edge is None else row['phases'][p]['mech_max'] <= edge + 0.0005,
                         '%.4f vs <= %s%s' % (row['phases'][p]['mech_max'], 'n/a' if edge is None else '%.4f' % edge, note))
+                # The re-simulated ticks, not the rollbacks: the CPU spent
+                # (the user's decision after LBM4 - A8's joiner frames
+                # arriving one by one cost one rollback more, fewer ticks).
                 for cls in ('input', 'life', 'snap', 'forced'):
-                    edge, note = band(row['index'], lambda c: c['D']['rb'][cls][0])
-                    add(who, '%s rollbacks in D within control' % cls,
-                        None if edge is None else D['rb'][cls][0] <= edge,
-                        '%d vs <= %s%s' % (D['rb'][cls][0], edge, note))
+                    edge, note = band(row['index'], lambda c: c['D']['rb'][cls][1])
+                    add(who, '%s rollback ticks in D within control' % cls,
+                        None if edge is None else D['rb'][cls][1] <= edge,
+                        '%d ticks in %d rollbacks vs <= %s%s' % (D['rb'][cls][1], D['rb'][cls][0], edge, note))
                 if late:
                     edge, note = band(row['index'], lambda c: c['D']['inrew_late'])
                     add(who, 'input rewinds naming the late ball in D within control',
@@ -2419,8 +2426,10 @@ def criteria(report, case, controls):
                 + '%d of %d outside [%d, %d]; runs %s' % (row['subst_outside_event'], row['subst_total'], t_on, t_off + 2,
                                                           row['subst_runs']))
             add(who, 'subst recv == server count, subst late 0',
-                None if not parts or len(parts) < 6 else (parts[0] == row['subst_total'] and parts[5] == 0),
-                no_subst if row['subst_client'] is None else 'subst=%s vs server %d' % (row['subst_client'], row['subst_total']))
+                None if not parts or len(parts) < 6 else
+                (row['subst_total'] <= parts[0] <= row.get('subst_total_full', row['subst_total']) and parts[5] == 0),
+                no_subst if row['subst_client'] is None else 'subst=%s vs server %d..%d' % (
+                    row['subst_client'], row['subst_total'], row.get('subst_total_full', row['subst_total'])))
             add(who, 'own ball 0.0000 from T_off+48', row['own_after'] < ZERO_M,
                 '%.4f m (%.4f m in the 300 ticks after); own error last >= 0.00005 m before tick %d (T_off+%d)%s' % (
                     row['own_after'], row['own_after_300'], row['own_zero_from'], row['own_zero_from'] - t_off,
@@ -2428,8 +2437,9 @@ def criteria(report, case, controls):
             add(who, 'lead_adj 0', None if lead_none else sum(v or 0 for v in lead) == 0, no_lead if lead_none else str(lead))
         elif family == 'a3':
             add(who, 'subst recv + subst late == server count',
-                None if not parts or len(parts) < 6 else parts[0] + parts[5] == row['subst_total'],
-                no_subst if row['subst_client'] is None else 'subst=%s vs server %d' % (row['subst_client'], row['subst_total']))
+                None if not parts or len(parts) < 6 else row['subst_total'] <= parts[0] + parts[5] <= row.get('subst_total_full', row['subst_total']),
+                no_subst if row['subst_client'] is None else 'subst=%s vs server %d..%d' % (
+                    row['subst_client'], row['subst_total'], row.get('subst_total_full', row['subst_total'])))
             add(who, 'exactly one resync if subst late > 0',
                 None if not parts or len(parts) < 6 else (resyncs == 1 if parts[5] > 0 else True),
                 (no_subst + '; ' if not parts else '') + '%d resyncs (bases %s)' % (resyncs, row['resync_bases']))
