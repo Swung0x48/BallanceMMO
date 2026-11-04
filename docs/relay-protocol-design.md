@@ -75,6 +75,16 @@ The uplink today sends the last 8 frames, each with its 36-byte camera (~320 B p
 
 Held notices (protocol 7) and lifecycle events riding the datagram (protocol 25), the late-player meter and the Sector bound (they read uplink arrival times and the newest uplink frame, both unchanged), the rollback and its rewind reach, resync, snapshots (off), GameNetworkingSockets settings (default send rate 256 KB/s per connection is enough: 20 members steady ~11 KB/s per recipient). No reliable lane is needed: everything rides the unreliable datagram and is repeated until acknowledged.
 
+### 4.6 As built (first cut, branch relay-delta)
+
+- The member field stays the 4-byte player id (the 1-byte slot is not wired yet): ~10 B per unchanged member instead of ~7,
+  ~2.9 Mbps of server upload at 20 members steady instead of ~2.1.
+- The rate budget is not a deferral yet: every tick's relay goes out whole, split into one-packet parts (part/parts in the
+  header; the recipient holds a span once it has every part). Only every member at peak change density at once exceeds it.
+- Measured (2026-11-04, 4 clients, 150 ms, 10 % loss in bursts of 8 on every link, seeds 0/1/2, snapshots off): every confirmed
+  FINAL row of every client equal to the server's (protocol 28: 1.1-81 m divergences in the same cells), no resync, server
+  journals replay exactly; relay datagram mean 71 B (protocol 28: 248 B).
+
 ## 5. Interactions to handle
 
 - **Numbering and re-anchors.** The acknowledgement is in the recipient's numbering; a resync, rejoin or late join resets `acked` to the base (as `held_notice` does); the camera dictionary and the per-member base frames are re-sent after it.

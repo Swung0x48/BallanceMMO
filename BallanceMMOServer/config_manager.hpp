@@ -82,7 +82,6 @@ public:
     // kSpawnGhost, session_spawn_separation; step SPX): SessionStart carries 0.
     float physics_spawn_impulse = 3.0f;            // spawn kick speed, m/s (design 9.10); 0 disables
     float physics_spawn_spacing = 4.2f;            // spawn cell spacing, map units (a ball is 4 across); 0 = every ball at the resetpoint
-    uint32_t physics_relay_window = 8;             // ticks of applied input every relayed datagram repeats per member (1..MAX_RELAY_FRAMES)
     // Late-player design 2.6: stop waiting for one player at its patience
     // (deadline - (r01 - 1) ticks of its frozen reference) instead of the
     // deadline, with the streak waiver.  Off by default and in deployments

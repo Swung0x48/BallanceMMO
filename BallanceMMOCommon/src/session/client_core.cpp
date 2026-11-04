@@ -441,6 +441,9 @@ namespace bmmo::session {
         s.tick_base_ = 0;
         s.frames_since_anchor_ = -1;
         s.input_history_.clear();
+        s.relay_cameras_ = {};
+        s.relay_held_ = 0;
+        s.relay_parts_.clear();
         s.previous_cam_valid_ = false;
         s.corrector_.clear();
         s.mechanism_correctors_.clear();
@@ -1222,6 +1225,7 @@ namespace bmmo::session {
                     resent.emplace(it->first, it->second);
             s.tick_base_ = msg.first_tick;
             s.held_floor_ = s.tick_base_;
+            restart_relay_span();
             s.resync_window_ = false;   // the old numbering's
             reset_held_epoch("the new base");
             s.frames_since_anchor_ = 0;
@@ -1317,6 +1321,7 @@ namespace bmmo::session {
         }
         s.tick_base_ = msg.first_tick;
         s.held_floor_ = s.tick_base_;
+        restart_relay_span();
         reset_held_epoch("the new base");
         // The anchor hold ends here: the next frame is the world's
         // first step and it is numbered `tick_base_`, exactly like the
@@ -1466,6 +1471,7 @@ namespace bmmo::session {
             bmmo::session_input_msg msg;
             msg.session = s.session_;
             msg.first_tick = s.input_history_[index].first;
+            msg.relay_ack = s.relay_held_;
             while (index < s.input_history_.size() && msg.frames.size() < bmmo::session::MAX_INPUT_FRAMES) {
                 msg.frames.push_back(s.input_history_[index].second);
                 ++index;

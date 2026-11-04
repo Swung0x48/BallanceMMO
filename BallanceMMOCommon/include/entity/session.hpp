@@ -218,7 +218,18 @@ namespace bmmo::session {
     //      more); accepted only while R is not simulated, refused to the
     //      owner alone otherwise. The journal's event record appends the
     //      release state for that type.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 28;
+    //  29  The relay is acknowledged (docs/relay-protocol-design.md, the
+    //      user's decisions of 2026-11-03): session_input_msg carries
+    //      relay_ack, the newest tick the client holds every member's relayed
+    //      frame for, and its frames omit a camera equal to the frame
+    //      before's; session_remote_input_msg carries every other member's
+    //      frames for every tick after the recipient's acknowledgement
+    //      (from, part, parts), as runs, each camera a one-byte id of the
+    //      session's dictionary with the definitions the recipient may lack.
+    //      A recipient whose acknowledgement is older than the server's
+    //      history (kRelayHistory, 128 ticks) resyncs.  No journal version:
+    //      nothing the journal records changed.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 29;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -454,7 +465,7 @@ namespace bmmo::session {
     // the sender's byte budget (session/event_piggyback.hpp kInputDatagramBudget) binds
     // long before this cap does.
     constexpr size_t MAX_INPUT_EVENTS = 16;
-    constexpr size_t MAX_RELAY_FRAMES = 32;     // frames per member in one relayed datagram (the window's cap)
+    constexpr size_t MAX_RELAY_FRAMES = 128;    // frames per member in one relayed datagram: the server's history (input_relay.hpp kRelayHistory)
     constexpr size_t MAX_BODIES_PER_SNAPSHOT = 1024;
     constexpr size_t MAX_NAME = 64;
     constexpr size_t MAX_REASON = 256;
