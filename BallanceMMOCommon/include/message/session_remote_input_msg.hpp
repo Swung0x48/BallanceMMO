@@ -24,8 +24,11 @@ namespace bmmo {
     // Layout: session u32, tick u32 (the newest), count u8, acked u32,
     // held_total u32, epoch u32, wait u8 (protocol 13), from u32, part u8,
     // parts u8; per entry: player u32, nframes u8 (the ticks
-    // tick-nframes+1..tick, all after `from`, oldest first), nruns u8 (bit 7:
-    // a base follows), the base when attached (since u32 and
+    // end-nframes+1..end, all after `from`, oldest first; end = tick - back),
+    // nruns u8 - or 0, the extension: flags u8 (bit 0 a base follows, bit 1
+    // back follows), nruns u8, back u8 when flagged (an entry that ends
+    // before the newest tick: a leaver's last frames, a run before a gap,
+    // protocol 31) - then the base when attached (since u32 and
     // cam_right/cam_up/cam_dir f32x3), per run: start u8 (the index of its
     // first frame; the first run starts at 0), keys u8, ball_type u8 with the
     // heading code in bits 5-7, flags u8, and the three rows when the code is
@@ -65,6 +68,7 @@ namespace bmmo {
             std::vector<session::input_frame> frames;   // <= MAX_RELAY_FRAMES, oldest first, ending at tick
             std::vector<uint8_t> headings;              // per frame on the wire; empty: every camera inline (zero rows as none)
             std::optional<session::camera_bases::base> base;
+            uint8_t back = 0;                           // the entry ends at tick - back
         };
         struct held_record {
             uint8_t back = 0;                               // tick - (the substituted tick), 0..31
@@ -73,7 +77,7 @@ namespace bmmo {
             session::input_frame frame{};                   // when has_frame
         };
         static constexpr uint8_t FRAME_CAMERA = 1;
-        static constexpr uint8_t RUNS_BASE = 0x80;
+        static constexpr uint8_t ENTRY_BASE = 1, ENTRY_BACK = 2;
         static constexpr uint8_t HELD_BACK_MASK = 0x1F;
         static constexpr uint8_t HELD_INLINE = 0x80;
         static_assert(sizeof(bmmo::opcode) + sizeof(uint32_t) * 2 + 1 + sizeof(uint32_t) * 3 + 1 + sizeof(uint32_t) + 2
@@ -95,7 +99,7 @@ namespace bmmo {
         session_remote_input_msg() : serializable_message(bmmo::SessionRemoteInput) {}
 
         uint32_t frame_tick(const entry& e, size_t index) const {
-            return tick - static_cast<uint32_t>(e.frames.size()) + 1 + static_cast<uint32_t>(index);
+            return tick - e.back - static_cast<uint32_t>(e.frames.size()) + 1 + static_cast<uint32_t>(index);
         }
         uint32_t held_tick(const held_record& r) const { return tick - r.back; }
 
@@ -153,8 +157,15 @@ namespace bmmo {
                 std::vector<uint8_t> starts;
                 for (size_t i = 0; i < e->frames.size(); ++i)
                     if (i == 0 || !same_run(*e, i - 1, i)) starts.push_back(static_cast<uint8_t>(i));
-                const uint8_t nruns = static_cast<uint8_t>(starts.size() | (e->base ? RUNS_BASE : 0));
+                const uint8_t nruns = static_cast<uint8_t>(starts.size());
+                if (e->base || e->back) {
+                    const uint8_t extension = 0;
+                    const uint8_t flags = static_cast<uint8_t>((e->base ? ENTRY_BASE : 0) | (e->back ? ENTRY_BACK : 0));
+                    raw.write(reinterpret_cast<const char*>(&extension), sizeof(extension));
+                    raw.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
+                }
                 raw.write(reinterpret_cast<const char*>(&nruns), sizeof(nruns));
+                if (e->back) raw.write(reinterpret_cast<const char*>(&e->back), sizeof(e->back));
                 if (e->base) {
                     raw.write(reinterpret_cast<const char*>(&e->base->since), sizeof(e->base->since));
                     raw.write(reinterpret_cast<const char*>(e->base->rows.data()), sizeof(e->base->rows));
@@ -209,15 +220,22 @@ namespace bmmo {
                 if (!message_utils::read_variable(raw, &e.player)) return false;
                 if (!message_utils::read_variable(raw, &nframes)) return false;
                 if (nframes == 0 || nframes > session::MAX_RELAY_FRAMES) return false;
-                if (static_cast<uint32_t>(nframes) - 1u > tick) return false;          // a frame before tick 0
-                if (static_cast<int32_t>(tick - nframes - from) < 0) return false;     // a frame at or before `from`
                 if (!message_utils::read_variable(raw, &nruns)) return false;
-                if (nruns & RUNS_BASE) {
+                uint8_t flags = 0;
+                if (nruns == 0) {
+                    if (!message_utils::read_variable(raw, &flags) || (flags & ~(ENTRY_BASE | ENTRY_BACK)) || !flags) return false;
+                    if (!message_utils::read_variable(raw, &nruns)) return false;
+                }
+                if (flags & ENTRY_BACK) {
+                    if (!message_utils::read_variable(raw, &e.back) || e.back == 0) return false;
+                }
+                if (static_cast<uint32_t>(nframes) - 1u + e.back > tick) return false;           // a frame before tick 0
+                if (static_cast<int32_t>(tick - e.back - nframes - from) < 0) return false;    // a frame at or before `from`
+                if (flags & ENTRY_BASE) {
                     session::camera_bases::base b;
                     if (!message_utils::read_variable(raw, &b.since)) return false;
                     if (!raw.read(reinterpret_cast<char*>(b.rows.data()), sizeof(b.rows))) return false;
                     e.base = b;
-                    nruns = static_cast<uint8_t>(nruns & ~RUNS_BASE);
                 }
                 if (nruns == 0 || nruns > nframes) return false;
                 struct run { uint8_t start = 0; session::input_frame frame; uint8_t heading = 0; };

@@ -854,6 +854,10 @@ public:
             std::chrono::steady_clock::time_point window_start{};
             double last_position[3] = {};
             bool have_position = false;
+            // A full snapshot with a mechanism row went to this member since
+            // its last assignment: with snapshots off it has the names its
+            // reset guard waits for, and needs no more body-set snapshots.
+            bool named = false;
             // Step G5: BodyRevived dropped under the proximity union (every
             // session since step UOFF; the repeat-event guard that deduplicated
             // the BodyRevived bursts of the bit-clear path went with it).
@@ -1406,9 +1410,10 @@ public:
         // held every frame behind it until the retransmit landed, and under
         // 10 % loss the corrections reached the clients past the rollback's
         // reach and were applied as pose writes.)
-        // Members only: a step already running when a member left still has
-        // its frame in `applied`, and a datagram about it after PlayerLeft
-        // would re-announce it in every client's journal.  Whole entries per
+        // Every player the world applied a frame for, a leaver included, until
+        // each recipient acknowledged it (protocol 31: its last frames used to
+        // stop at PlayerLeft and never reach anyone who had not yet
+        // acknowledged them).  Whole entries per
         // datagram of one packet's worth: an unreliable message split over
         // packets is lost whole when any of them is, and one past 16.5 KB
         // GameNetworkingSockets quietly sends reliable.
@@ -1447,7 +1452,7 @@ public:
             auto& n = s.notices[m];
             const uint8_t wait = wait_of(m);
             const std::optional<uint32_t> held_from = n.assigned ? std::optional<uint32_t>(n.epoch) : std::nullopt;
-            auto datagrams = s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, is_member, held_from);
+            auto datagrams = s.relay.build_datagrams(m, bmmo::session::kRelayDatagramBudget, held_from);
             for (size_t part = 0; part < datagrams.size(); ++part) {
                 auto& datagram = datagrams[part];
                 bmmo::session_remote_input_msg msg;
@@ -1461,7 +1466,7 @@ public:
                 msg.part = static_cast<uint8_t>(part);
                 msg.parts = static_cast<uint8_t>(datagrams.size());
                 for (auto& w: datagram.entries)
-                    msg.entries.push_back({w.player, std::move(w.frames), std::move(w.headings), w.base});
+                    msg.entries.push_back({w.player, std::move(w.frames), std::move(w.headings), w.base, w.back});
                 for (const auto& h: datagram.held) {
                     bmmo::session_remote_input_msg::held_record r;
                     r.back = static_cast<uint8_t>(tick - h.tick);
@@ -1561,7 +1566,22 @@ public:
             for (int k = 0; k < 3; ++k) guard.last_position[k] = body.position[k];
             guard.have_position = true;
         }
+        // With snapshots off a client takes the full snapshot of a body-set
+        // change for its mechanism names only (client_core_messages.cpp,
+        // step RC3), and of those only one thing still needs any: the
+        // level-reset guard waits for a mechanism it has resolved
+        // (sector_reset_guard.hpp).  Sent to every member at every change,
+        // these were most of a 20-member session's upload (BW20: ~7 KB each,
+        // ~3.5 a second with deaths and respawns), so a member gets one
+        // until it has names.  Rollbacks track the local bodies and a resync
+        // carries its own dictionary.
+        const bool snapshots_off = config_.physics_snapshot_interval >= 255;
+        const bool mechanism_rows = std::any_of(snapshot.bodies.begin(), snapshot.bodies.end(),
+            [](const bmmo::session::body_state& b) { return b.kind == bmmo::session::body_kind::Mechanism; });
         for (const auto m: s.members) {
+            auto& guard = s.guards[m];
+            if (snapshot.body_set && snapshots_off && guard.named) continue;
+            if (snapshot.full && mechanism_rows) guard.named = true;
             bmmo::session_snapshot_msg msg;
             msg.session = snapshot.session;
             msg.tick = snapshot.tick;
@@ -2000,6 +2020,7 @@ public:
     }
     void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick, uint8_t flags = 0) {
         const auto sent = std::chrono::steady_clock::now();
+        s.guards[c].named = false;   // a new numbering clears the client's mechanism registry
         bmmo::session_assign_msg assign;
         assign.session = s.id;
         assign.first_tick = first_tick;

@@ -188,7 +188,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(30u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(31u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -1280,6 +1280,11 @@ TEST(SessionRemoteInputMsg, SerializeDeserializeRoundTripWithRuns) {
     no_ids.player = 78;
     no_ids.frames.push_back(relay_frame(0, 0.25f));
     msg.entries.push_back(no_ids);
+    bmmo::session_remote_input_msg::entry ended;    // protocol 31: ends 3 ticks before the newest
+    ended.player = 80;
+    ended.frames = {relay_frame(2, 0.5f), relay_frame(2, 0.5f)};
+    ended.back = 3;
+    msg.entries.push_back(ended);
     bmmo::session_remote_input_msg::entry empty;    // nothing to say: not written
     empty.player = 79;
     msg.entries.push_back(empty);
@@ -1289,8 +1294,11 @@ TEST(SessionRemoteInputMsg, SerializeDeserializeRoundTripWithRuns) {
     EXPECT_EQ(parsed.from, 1200u);
     EXPECT_EQ(parsed.part, 1u);
     EXPECT_EQ(parsed.parts, 2u);
-    ASSERT_EQ(parsed.entries.size(), 2u);
+    ASSERT_EQ(parsed.entries.size(), 3u);
     EXPECT_EQ(parsed.frame_tick(parsed.entries[0], 0), 1231u);
+    EXPECT_EQ(parsed.entries[2].back, 3u);
+    EXPECT_EQ(parsed.frame_tick(parsed.entries[2], 0), 1230u);
+    EXPECT_EQ(parsed.frame_tick(parsed.entries[2], 1), 1231u);
     std::map<uint32_t, bmmo::session::camera_bases> bases;
     const auto entries = parsed.resolved_entries(bases);
     ASSERT_TRUE(entries);

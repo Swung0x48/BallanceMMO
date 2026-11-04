@@ -249,6 +249,13 @@ namespace {
         std::function<double(uint32_t)> send_ms = [](uint32_t t) { return t * kTickMs; };
         // Extra one-way delay on top of the base trip and the jitter (ms).
         std::function<double(uint32_t)> extra_ms = [](uint32_t) { return 0.0; };
+        // A path that queues: the datagram of frame t arrives no earlier than
+        // this (ms).  Every datagram of a held burst gets the very same
+        // arrival, so their order is the send order whatever the compiler
+        // does with release - t * kTickMs (an FMA there - GCC 15 on the
+        // ubuntu-26.04 runner - left three distinct arrivals and the sort
+        // shuffled a third of the burst out of its samples).
+        std::function<double(uint32_t)> held_until = [](uint32_t) { return -1e300; };
         std::function<bool(uint32_t)> lost = [](uint32_t) { return false; };
         // Ticks the client's lead was raised by for frame t (an acknowledged
         // adjustment): its frames leave that much earlier.
@@ -288,8 +295,8 @@ namespace {
                 if (send > now) break;
                 last_send = send;
                 if (!link.lost(frame))
-                    wire.push_back({send + kUplinkMs + link.extra_ms(frame)
-                                    + unit_noise(frame, link.salt) * link.jitter_ticks * kTickMs, frame});
+                    wire.push_back({std::max(link.held_until(frame), send + kUplinkMs + link.extra_ms(frame)
+                                    + unit_noise(frame, link.salt) * link.jitter_ticks * kTickMs), frame});
                 ++frame;
             }
             std::stable_sort(wire.begin(), wire.end(),
@@ -433,10 +440,8 @@ TEST(LatenessMeter, SingleHeldBurstNeverRaises) {
             relative_meter meter = steady_meter();
             link_model link;
             const uint32_t on = kShiftStart + phase;
-            const double release = (on + held) * kTickMs;
-            link.extra_ms = [on, held, release](uint32_t t) {
-                return t >= on && t < on + held ? release - t * kTickMs : 0.0;
-            };
+            const double release = (on + held) * kTickMs + kUplinkMs;
+            link.held_until = [on, held, release](uint32_t t) { return t >= on && t < on + held ? release : -1e300; };
             link.jitter_ticks = 0.0;
             EXPECT_TRUE(run(meter, kBase + kMeasured, kBase + 2500, link).empty()) << "phase " << phase << " held " << held;
             EXPECT_GE(meter.misses_total(), held - 8) << "phase " << phase << " held " << held;
@@ -529,10 +534,8 @@ TEST(LatenessMeter, HeldBurstThenBlackoutNeverRaises) {
             link.jitter_ticks = 0.0;
             const uint32_t on = kShiftStart;
             const uint32_t span = static_cast<uint32_t>(ms / kTickMs);
-            const double release = (on + held) * kTickMs;
-            link.extra_ms = [on, held, release](uint32_t t) {
-                return t >= on && t < on + held ? release - t * kTickMs : 0.0;
-            };
+            const double release = (on + held) * kTickMs + kUplinkMs;
+            link.held_until = [on, held, release](uint32_t t) { return t >= on && t < on + held ? release : -1e300; };
             link.lost = [on, held, span](uint32_t t) { return t >= on + held && t < on + held + span; };
             EXPECT_TRUE(run(meter, kBase + kMeasured, kBase + 2500 + span, link).empty()) << "held " << held << " " << ms << " ms";
             EXPECT_GE(meter.misses_total(), held - 8);

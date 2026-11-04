@@ -169,6 +169,7 @@ namespace bmmo::sim {
         uint32_t session = 0;
         uint32_t tick = 0;
         bool full = false;
+        bool body_set = false;   // full only because the body set changed (snapshot_cadence 3)
         std::vector<bmmo::session::body_state> bodies;
         // per player: the last tick whose input was actually applied
         std::vector<std::pair<uint32_t, uint32_t>> acked_inputs;
@@ -683,7 +684,7 @@ namespace bmmo::sim {
         // here would make piggybacked events late again.
         void post(std::function<void()> command);
         void step(session_state& s);
-        void emit_snapshot(session_state& s, bool full);
+        void emit_snapshot(session_state& s, bool full, bool body_set = false);
         void emit_resync_states(session_state& s, uint32_t tick, bool recording);
         void log(const std::string& text);
         void publish_state(const session_state& s);

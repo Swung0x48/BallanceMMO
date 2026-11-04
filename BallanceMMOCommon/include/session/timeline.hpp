@@ -436,12 +436,16 @@ namespace bmmo::session {
         uint32_t last_full = 0;
         bool have_full = false;
 
-        // Returns 0 = nothing, 1 = delta, 2 = full.
+        // Returns 0 = nothing, 1 = delta, 2 = full, 3 = full for a body-set
+        // change alone (the server sends it with snapshots off only to a
+        // member that has no mechanism names yet: server.cpp
+        // on_session_snapshot).
         int decide(uint32_t tick, bool body_set_changed) {
             if (!have_full || body_set_changed || tick - last_full >= full_interval) {
+                const bool body_set_only = have_full && tick - last_full < full_interval;
                 have_full = true;
                 last_full = tick;
-                return 2;
+                return body_set_only ? 3 : 2;
             }
             if (interval == 0 || tick % interval == 0) return 1;
             return 0;

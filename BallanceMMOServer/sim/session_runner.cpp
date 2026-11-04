@@ -1246,11 +1246,12 @@ namespace bmmo::sim {
         });
     }
 
-    void session_runner::emit_snapshot(session_state& s, bool full) {
+    void session_runner::emit_snapshot(session_state& s, bool full, bool body_set) {
         session_snapshot snapshot;
         snapshot.session = s.id;
         snapshot.tick = s.world->tick_index() - 1;  // the tick just simulated
         snapshot.full = full;
+        snapshot.body_set = body_set;
         s.world->snapshot(full, snapshot.bodies);
         for (const auto& [player, tick]: s.acked) snapshot.acked_inputs.emplace_back(player, tick);
         if (callbacks_.on_snapshot) callbacks_.on_snapshot(snapshot);
@@ -1546,7 +1547,7 @@ namespace bmmo::sim {
         }
         const bool changed = s.world->body_set_changed();
         const int decision = s.cadence.decide(tick, changed);
-        if (decision != 0) emit_snapshot(s, decision == 2);
+        if (decision != 0) emit_snapshot(s, decision >= 2, decision == 3);
         // Step A3: the resync states due after this step (base - 1 == tick),
         // after the snapshot so its numbering of new bodies comes first.
         if (!s.resync_requests.empty()) emit_resync_states(s, tick, recording);

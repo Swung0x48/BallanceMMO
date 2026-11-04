@@ -237,7 +237,14 @@ namespace bmmo::session {
     //      rows, or inline (the rows, the base from that tick on) - with the
     //      base attached while the receiver may lack it.  The relay's camera
     //      dictionary is gone.  No journal version: the journal records rows.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 30;
+    //  31  A relay entry may end before the datagram's tick (an extension:
+    //      nruns 0, then flags, nruns, back) - a leaver's last frames keep
+    //      coming until each recipient acknowledges them, and every run of
+    //      consecutive ticks after the acknowledgement is relayed, not only
+    //      the one reaching the newest tick; the base flag moved into the
+    //      extension (an entry of 128 runs no longer reads as base-flagged).
+    //      No journal version.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 31;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
