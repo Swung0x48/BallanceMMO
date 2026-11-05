@@ -718,6 +718,17 @@ namespace bmmo::session {
                 if (s.lead_force_logs_++ < 8)   // the ball may be unphysicalized for the whole range
                     logf("lead: forced own input at tick %u: %s", frame_tick, force_error.c_str());
         }
+        // Step K8: an injected own frame drives the ball the same way.
+        frame_.injected_frame = bmmo::session::input_frame{};
+        frame_.injected = !frame_.forced && own_input_source_ && own_input_source_(frame_tick, frame_.injected_frame);
+        if (frame_.injected) {
+            bool ok = true;
+            std::string force_error;
+            frame_.forced_entity = platform_.force_own(frame_.injected_frame, ok, force_error);
+            if (!frame_.forced_entity.empty() && !ok)
+                if (s.lead_force_logs_++ < 8)
+                    logf("own input injected at tick %u: %s", frame_tick, force_error.c_str());
+        }
         // The own ball's Physicalize is captured inside this tick's step,
         // before the PSIs (the headless PreSimulate capture).  Armed here,
         // after the rewinds above: a replayed step runs the PreSimulate
@@ -905,6 +916,19 @@ namespace bmmo::session {
             std::memcpy(seen_cam, rows.data(), sizeof(seen_cam));
         }
         const float (*basis)[3] = s.previous_cam_valid_ ? s.previous_cam_ : seen_cam;
+        // Step K8: an injected tick's keys and camera are its source's.
+        float injected_cam[3][3] = {};
+        if (frame_.injected) {
+            const auto& f = frame_.injected_frame;
+            for (int k = 0; k < 3; ++k) {
+                injected_cam[0][k] = f.cam_right[k];
+                injected_cam[1][k] = f.cam_up[k];
+                injected_cam[2][k] = f.cam_dir[k];
+            }
+            basis = injected_cam;
+            input.keys = f.keys;
+            ++own_inputs_injected_;
+        }
         for (int k = 0; k < 3; ++k) { input.cam_right[k] = basis[0][k]; input.cam_up[k] = basis[1][k]; input.cam_dir[k] = basis[2][k]; }
         if (seen.cam_valid) { std::memcpy(s.previous_cam_, seen_cam, sizeof(seen_cam)); s.previous_cam_valid_ = true; }
         input.ball_type = static_cast<uint8_t>(ball_type < 0 ? 0 : ball_type);

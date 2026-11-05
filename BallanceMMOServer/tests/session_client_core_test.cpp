@@ -6779,6 +6779,57 @@ namespace {
     // 31 (the window: line the tick closes, with the host's counters), 32
     // (the TICK hash, a checkpoint, its hook); the next frame's events are
     // drained in its pre_step, not on arrival.
+    // Step K8: an injected own frame drives the ball as a forced one does
+    // (force_own, polling back after the step) and is the tick's own input:
+    // its keys and camera, the world's flags, journaled FRESH; a tick the
+    // source has not is the poll's.
+    TEST(SessionClientCoreFrame, AnInjectedOwnFrameIsPlayedAndJournaledFresh) {
+        journal_dir dir("inject");
+        flow_fake fake;
+        fake.path = dir.path / "client.bmjc";
+        session_capabilities caps;
+        caps.own_body_control = true;
+        session_client_core core(frame_platform(fake, true), caps);
+        run_to_tick_125_four(core, fake);
+        fake.own_physical = true;
+        fake.driven = "Ball_Wood";
+        fake.replica_name = "Ball_Wood";
+        fake.forced_entity = "Ball_Wood";
+        fake.observation.keys = 5;
+        fake.observation.cam_valid = true;
+        fake.observation.cam[2][2] = 1.0f;
+        fake.observation.nav_active = true;
+        core.set_own_input_source([](uint32_t tick, bmmo::session::input_frame& frame) {
+            if (tick != 126) return false;
+            frame.keys = 7;
+            frame.cam_dir[0] = 1.0f;
+            frame.flags = bmmo::session::INPUT_FLAG_NAV_ACTIVE;
+            return true;
+        });
+
+        ASSERT_EQ(core.next_tick(), 126u);
+        size_t from = fake.calls.size();
+        core.pre_step();
+        const auto pre = since(fake.calls, from);
+        EXPECT_NE(std::find(pre.begin(), pre.end(), "force_own:7"), pre.end());
+        from = fake.calls.size();
+        ASSERT_TRUE(core.post_step(true));
+        const auto post = since(fake.calls, from);
+        EXPECT_EQ(post.front(), "unforce_own:Ball_Wood");
+        EXPECT_NE(std::find(post.begin(), post.end(), "own_camera_rows:0.000000"), post.end()) << "the injected camera";
+        const auto& input = state_of(core).input_history_.back().second;
+        EXPECT_EQ(input.keys, 7);
+        EXPECT_EQ(input.cam_dir[0], 1.0f);
+        EXPECT_NE(input.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE, 0) << "the world's flags";
+        EXPECT_EQ(core.own_inputs_injected(), 1u);
+
+        core.pre_step();   // 127: the source has none - the poll's
+        ASSERT_TRUE(core.post_step(true));
+        EXPECT_EQ(state_of(core).input_history_.back().second.keys, 5);
+        EXPECT_EQ(core.own_inputs_injected(), 1u);
+        EXPECT_EQ(state_of(core).lead_forced_played_, 0u) << "the tick's own input, not a forced one: journaled FRESH";
+    }
+
     TEST(SessionClientCoreFrame, OneCycleMakesTheTablesCallsInOrder) {
         journal_dir dir("frame");
         flow_fake fake;

@@ -1701,6 +1701,19 @@ namespace bmmo::session {
             scope_guard keep_cells;
         };
         forced_rewind force_rewind(uint32_t depth);
+        // Step K8 (docs/canned-tests-plan.md, seam C8): the own ball's frame of
+        // a tick from outside instead of the platform's poll - a canned test's
+        // recipe (stage 2, T2).  `source(tick, frame)` fills the keys, the
+        // camera rows (cam_right / cam_up / cam_dir) and the nav-active flag
+        // of a tick it has and returns true; false leaves the tick to the
+        // poll.  An injected tick is played the way a forced one is (the ball
+        // driven by the frame, polling off) and is this client's own input:
+        // recorded, journaled FRESH and sent; the frame's flags and ball type
+        // are the world's, as for a polled tick.  A SessionLead's forced tick
+        // comes first.  Kept across sessions; empty (the default): the poll.
+        using own_input_source = std::function<bool(uint32_t tick, bmmo::session::input_frame& frame)>;
+        void set_own_input_source(own_input_source source) { own_input_source_ = std::move(source); }
+        uint64_t own_inputs_injected() const { return own_inputs_injected_; }
 
         // ---- a forced own move (FULL step R6H, a test tool) ----
         // The next own birth record (record_own_birth) is handled `after`
@@ -2164,7 +2177,12 @@ namespace bmmo::session {
             bool forced = false;
             client_core_state::forced_own forced_frame;
             std::string forced_entity;
+            // Step K8: this tick's frame came from the own-input source.
+            bool injected = false;
+            bmmo::session::input_frame injected_frame;
         } frame_;
+        own_input_source own_input_source_;
+        uint64_t own_inputs_injected_ = 0;
         core_world_hooks world_hooks_;
 
         // The snapshot path (E4, client_core_messages.cpp): the resync

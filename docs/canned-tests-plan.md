@@ -487,6 +487,16 @@ test uses (a measured machine's numbers, e.g. the LBM x64 3.0 ms + 0.46 ms a tic
 wire check ALL SAME; live P-core h1_150 with `--rewind-cost 3:0.46` on all four: harness PASS, server replay exact,
 every status line `cap=92/3.00/0.460/1` (the measured smoke's moved 48 -> 82..87).
 
+As built (K8, 2026-11-05): `session_client_core::set_own_input_source(source)` - `source(tick, frame)` fills the
+keys, the camera rows and the nav-active flag of a tick it has (false: the poll's). An injected tick takes the forced
+tick's path (`platform_.force_own`: the ball driven by the frame, polling off; `unforce_own` after the step) and is
+the tick's own input: its keys and camera recorded, journaled FRESH and sent, the flags and ball type the world's
+(a SessionLead's forced tick still comes first); `own_inputs_injected()` counts them. The source is kept across
+sessions; empty (production, every host today): the poll. No host flag yet - T2 gives the headless client a recipe.
+Checked: 813/813 (one new: an injected tick forces 7, plays keys 7 and its camera with the world's flags, not as a
+forced tick; the next tick, which the source has not, is the poll's); x64 and x86 build; the wire check ALL SAME; live
+P-core h1_150: harness PASS, server replay exact. K1-K8 are done but K7 (the retail host, stage 3, the user's call).
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |
