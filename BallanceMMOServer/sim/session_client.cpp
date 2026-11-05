@@ -4940,7 +4940,8 @@ namespace {
         // --leave-room-at (step M0): the Leave sent, and when.
         bool room_left_ = false;
         clock_type::time_point room_left_at_{};
-        clock_type::time_point last_report_ = clock_type::now();
+        // The real clock until sync_report_clock takes it at report_init (step K1: through the clock entry).
+        clock_type::time_point last_report_ = bmmo::session::real_session_clock().now(bmmo::session::clock_site::report_init);
         // --capture-inbound / --replay-inbound (inbound_capture.hpp): the file,
         // the main loop's passes and the steps (load_step() and frame() calls)
         // so far - the frame index of every captured record - and a replay

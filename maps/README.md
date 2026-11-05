@@ -449,7 +449,7 @@ input records, and then checks four things:
 
 1. every client exits 0 with no hard corrections, no resyncs and no sustained
    input starvation;
-2. the server's own `.bmjr` journal replays bit-for-bit under
+2. the server's own journal (`.bmjs`; `.bmjr` before journal version 10) replays bit-for-bit under
    `BallanceMMOSimTool --replay-session`;
 3. the clients actually had local mechanism bodies (`mechanisms=<known>/<resolved>`
    with a non-zero *second* number — zero mechanism corrections on its own is

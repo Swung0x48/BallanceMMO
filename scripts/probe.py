@@ -109,7 +109,7 @@ def main():
                 cf = open(logpath, 'wb'); handles.append(cf)
                 cmd = [str(bindir/'BallanceMMOSessionClient.exe'), '--root', DATA,
                        '--server', f'127.0.0.1:{client_port}', '--name', f'Probe{i}', '--level', str(level),
-                       '--seconds', str(args.seconds), '--trace', '--journal', str(case_dir/f'client{i}.bmjr')]
+                       '--seconds', str(args.seconds), '--trace', '--journal', str(case_dir/f'client{i}.bmjc')]
                 if start_sector: cmd += ['--start-sector', str(start_sector)]
                 # beams: one per client (cycled), applied at the given session tick
                 if beams:

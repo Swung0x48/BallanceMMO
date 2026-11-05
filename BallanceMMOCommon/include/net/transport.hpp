@@ -4,8 +4,9 @@
 // (docs/canned-tests-plan.md 3.1, seam C2).  Every host - the server, the
 // headless client, the retail client, the console tools - talks to the
 // network through a `transport` and these types only; GameNetworkingSockets
-// is one implementation (gns_transport.hpp, the only file that includes the
-// library), a simulated network and a recorder / replayer are others.
+// is one implementation (net/gns.hpp; src/net/gns_transport.cpp is the only
+// file that includes the library), a simulated network (net/sim_transport.hpp)
+// another.
 //
 // The values below are the library's own (the handles it hands out, its send
 // flags, its connection states and end-reason ranges): a handle is also a

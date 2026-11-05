@@ -279,6 +279,9 @@ namespace bmmo::session {
                     uint32_t tick, const bmmo::session::rollback_tracked& tracked,
                     const std::map<std::string, bmmo_physics_body_state>& bodies,
                     const std::map<std::string, bmmo::session::input_frame>& inputs) mutable {
+                    // No journal (retail's SessionJournal off): no rows, so
+                    // no verdict either - nothing else reads it.
+                    if (!journal_.journalling()) return;
                     for (const auto& [id, remote]: s.remotes_)
                         if (!remote.entity.empty()) names[remote.entity] = id;
                     const char* why = nullptr;

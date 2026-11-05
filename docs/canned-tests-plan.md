@@ -56,8 +56,9 @@ worlds hold different body sets (names, mirrors, per-world airship), so the judg
   lifecycle events - with the harness's own thresholds. LOCAL rows are reported (they hold predictions), FINAL
   rows judged. Calibrated on core_ref_s16's eleven arms: 11/11 replays N/N, 7 verdicts as the harness's, 4
   explained differences (the harness's own notify-tick deadline; test-requested resyncs; a fault-injected
-  client's starvation the harness exempts).
-- 0b (this step): every client journal can be judged strictly. Journal version 10: a client journal carries
+  client's starvation the harness exempts). Its first body rule (positions within 0.05 m, the end's 60 ticks
+  cut, a body only one side has reported, a run with nothing compared passing) was too weak; see 0c.
+- 0b: every client journal can be judged strictly. Journal version 10: a client journal carries
   FINAL rows at its checkpoint cadence by default (the D0 diagnostic made the default, nothing new in the
   layout); the server journal is named `.bmjs` and a client journal `.bmjc` (readers take `.bmjr` too); the
   judge fails a version 10 client journal without FINAL rows instead of falling back to LOCAL. A server and its
@@ -78,9 +79,10 @@ worlds hold different body sets (names, mirrors, per-world airship), so the judg
   - with `--no-final-checkpoints`: wire check ALL SAME (44 send traces SAME, 45 journals IDENTICAL);
   - by default: 44 send traces SAME; each of the 45 journals equals its no-FINAL replay record for record once
     its FINAL rows are left out (so the rows are the only difference);
-  - strict judgment of those replays (the arms' server journals against the clients' FINAL rows, every 2
-    ticks): every shared body within 0.05 m and every own ball exact (< 0.00005 m) in all 45 client journals
-    of the 11 arms. Left: the server-side starvation of the client each arm injects a fault into (the harness
+  - judgment of those replays (the arms' server journals against the clients' FINAL rows, every 2 ticks),
+    first with 0a's tolerance rule, then with 0c's exact one: every confirmed row bit-exact (own, mirror and
+    mechanism rows; position, rotation, velocities, flags) and no body only one side has, in all 45 client
+    journals of the 11 arms (e.g. h1_150 c0: own 0/944, mirror 0/2948, mechanism rows 0/95598 different). Left: the server-side starvation of the client each arm injects a fault into (the harness
     exempts it, a journal cannot tell) and resync_snapoff c2's unrequested resync, as the harness has them.
     Before PE_Box_slide was excluded it failed in cliff and swing_snapoff: each client starts the slide when
     its own ball reaches x ~ 861, the server when the first ball does - the keep-local exception, not a new
@@ -91,6 +93,17 @@ worlds hold different body sets (names, mirrors, per-world airship), so the judg
   For the wire check: a version 10 binary writes FINAL rows, so its replays' journals differ from every
   reference set captured before it; pass `NEW_EXTRA=--no-final-checkpoints` to compare them, or re-capture.
   The retail mod (x86) builds; no retail session has been run with it.
+
+- 0c (the orchestrator's review, 2026-11-05): the judge's default is the project's standard. Every
+  confirmed FINAL row bit-exact on the LBM audit's packed row (position, rotation, linear and angular
+  velocity, flags), per kind (own, mirror, mechanism); a body only one side has fails; no end cut; coverage
+  fails when nothing is compared, when unconfirmed rows appear before the session's last 128 ticks (rollback.hpp
+  kReachHistoryTicks: the rows its end retires) outside a test-requested resync's or a join import's pending
+  window, or when the compared rows stop before that tail; the replay needs matched == ticks > 0; no --simtool
+  fails (--no-replay: N/A); no server journal fails (--client-only: a reported diagnostic against the received
+  snapshots); an empty run directory exits 2; --tolerance and --end-cut remain as diagnostics. On the 45 client
+  journals: all exact; the remaining FAILs are the fault-injected clients' starvation and resync_snapoff c2's
+  unrequested resync (with its unconfirmed rows), as before. The live K1 / K2 smoke runs: exact too.
 
 ### Stage 1: event-driven server and headless clients
 A coordinator owns one virtual clock and a simulated network; each process does the work of instant t and
@@ -188,8 +201,8 @@ Checked offline: 794/794 unit tests; the wire check of core_ref_s16 with `--no-f
 (44 send traces, 45 journals identical); x64 and x86 build. Live smoke (2026-11-04 23:53-23:54, h1_150: 4
 headless clients, 150 ms, 40 s, against this tree's Windows server as a renamed exe on port 26995, all on
 P-cores 0-15): harness PASS, server journal replay 2641/2641, and the judge on the v10 journals (the first live
-`.bmjs` / `.bmjc` with FINAL rows): every shared body within 0.05 m and every own ball exact in all four
-clients' FINAL rows, no resync. LBM not run.
+`.bmjs` / `.bmjc` with FINAL rows): every confirmed row of all four clients bit-exact (0c's rule), no resync.
+LBM not run.
 
 As built (K2, the user's call: every GNS type replaced, a platform layer): `net/transport.hpp` (the
 connection handle, the transport clock, send flags, connection states and end-reason ranges with the

@@ -20,9 +20,9 @@
 #include "config_manager.hpp"
 #include "room/room_manager.hpp"
 #include <session/io_pool.hpp>   // the session journals' pool (step SIO) and the log's (step IOX)
+#include <session/session_clock.hpp>   // step K1: the main loop and the time broadcast read it in every build
 #if BMMO_BUILD_SIM
 #include "sim/session_runner.hpp"
-#include <session/session_clock.hpp>
 #include "sim/crash_report.hpp"
 #include "sim/late_tick.hpp"
 #include "sim/assign_copies.hpp"

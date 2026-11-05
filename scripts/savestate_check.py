@@ -320,7 +320,7 @@ def arena_run(args, base, label, client_args):
         statuses = [s for s in log.read_text(errors='replace').splitlines() if s.startswith('status:')]
         status = statuses[-1] if statuses else ''
     forced = re.search(r'\bforced=(\d+)/(\d+)', status)
-    return {'rc': proc.returncode, 'journal': case / 'client0.bmjr', 'status': status,
+    return {'rc': proc.returncode, 'journal': next((p for p in (case / 'client0.bmjc', case / 'client0.bmjr') if p.exists()), case / 'client0.bmjc'), 'status': status,
             'forced': int(forced.group(1)) if forced else None,
             'forced_missed': int(forced.group(2)) if forced else None}
 
