@@ -97,3 +97,65 @@ TEST(SimTransport, UnreliableLossFollowsTheSeed) {
 }
 
 }
+
+// The capture seams (session/capture_seams.hpp, step K3): what a recording
+// transport and clock write, their replaying twins hand back in order.
+#include <filesystem>
+
+#include <session/capture_seams.hpp>
+
+namespace {
+
+TEST(CaptureSeams, RecordThenReplay) {
+    const auto path = (std::filesystem::temp_directory_path() / "bmmo_capture_seams_test.bmic").string();
+    const int64_t den = 1000000000;
+    std::vector<std::string> live_messages, replayed_messages;
+    std::vector<bmmo::net::connection_state> live_states, replayed_states;
+    int live_ping = 0;
+    int64_t live_read = 0;
+    {
+        bmmo::session::capture_file file;
+        std::string error;
+        ASSERT_TRUE(file.open_capture(path, "test", den, error)) << error;
+        bmmo::net::sim_network net;
+        auto server = net.make_transport();
+        bmmo::session::recording_transport client(net.make_transport(), file);
+        bmmo::session::recording_clock clock(bmmo::session::real_session_clock(), file);
+        server->listen(1);
+        const auto c = client.connect(":1");
+        std::vector<bmmo::net::status_change> s;
+        server->poll_status([&](const bmmo::net::status_change& x) { s.push_back(x); });
+        server->accept(s[0].conn);
+        server->send(s[0].conn, "hi", 2, bmmo::net::kSendReliable);
+        client.receive([&](const bmmo::net::message& m) { live_messages.emplace_back(static_cast<const char*>(m.data), m.size); }, 16);
+        client.poll_status([&](const bmmo::net::status_change& x) { live_states.push_back(x.state); });
+        bmmo::net::connection_status status;
+        client.status(c, status);
+        live_ping = status.ping_ms;
+        live_read = clock.now(bmmo::session::clock_site::journal_ms).time_since_epoch().count();
+        file.close();
+    }
+    bmmo::session::capture_file file;
+    std::string error;
+    ASSERT_TRUE(file.open_replay(path, den, error)) << error;
+    EXPECT_EQ(file.version(), 2u);
+    std::string diverged;
+    const auto on_diverged = [&](const std::string& why) { diverged = why; };
+    bmmo::session::replay_transport transport(file, on_diverged);
+    bmmo::session::replay_clock clock(file, bmmo::session::real_session_clock(), on_diverged);
+    transport.receive([&](const bmmo::net::message& m) { replayed_messages.emplace_back(static_cast<const char*>(m.data), m.size); }, 16);
+    transport.poll_status([&](const bmmo::net::status_change& x) { replayed_states.push_back(x.state); });
+    bmmo::net::connection_status status;
+    transport.status(1, status);
+    EXPECT_EQ(clock.now(bmmo::session::clock_site::journal_ms).time_since_epoch().count(), live_read);
+    EXPECT_EQ(replayed_messages, live_messages);
+    EXPECT_EQ(replayed_states, live_states);
+    EXPECT_EQ(status.ping_ms, live_ping);
+    EXPECT_TRUE(diverged.empty()) << diverged;
+    EXPECT_TRUE(file.complete());
+    clock.now(bmmo::session::clock_site::journal_ms);   // a read the live run did not make
+    EXPECT_FALSE(diverged.empty());
+    std::filesystem::remove(path);
+}
+
+}

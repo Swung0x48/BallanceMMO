@@ -59,6 +59,7 @@
 #include <physics/physics_savestate.hpp>
 #include <physics/physics_direct.hpp>
 #include <session/client_core.hpp>
+#include <session/capture_seams.hpp>
 #include <session/session_clock.hpp>
 #include <session/event_hold.hpp>
 #include <session/rollback_binding.hpp>
@@ -1257,14 +1258,22 @@ namespace {
                     logf("capture-inbound: %s", error.c_str());
                     return false;
                 }
+                clock_owned_ = std::make_unique<bmmo::session::recording_clock>(bmmo::session::real_session_clock(), inbound_);
+                clock_ = clock_owned_.get();
+                transport_ = std::make_unique<bmmo::session::recording_transport>(std::move(transport_), inbound_);
                 logf("capture-inbound: recording to %s", args_.capture_inbound.c_str());
             } else if (!args_.replay_inbound.empty()) {
                 if (!inbound_.open_replay(args_.replay_inbound, den, error)) {
                     logf("replay-inbound: %s", error.c_str());
                     return false;
                 }
-                logf("replay-inbound: replaying %s, captured as: %s", args_.replay_inbound.c_str(),
-                     inbound_.command_line().c_str());
+                const auto diverged = [this](const std::string& why) { inbound_diverged(why); };
+                clock_owned_ = std::make_unique<bmmo::session::replay_clock>(inbound_, bmmo::session::real_session_clock(),
+                                                                            diverged);
+                clock_ = clock_owned_.get();
+                transport_ = std::make_unique<bmmo::session::replay_transport>(inbound_, diverged);
+                logf("replay-inbound: replaying %s (capture v%u), captured as: %s", args_.replay_inbound.c_str(),
+                     inbound_.version(), inbound_.command_line().c_str());
                 if (args_.replay_free_cost_clock) {
                     for (const auto site: {bmmo::sim::wall_site::rewind_start, bmmo::sim::wall_site::rewind_replay,
                                            bmmo::sim::wall_site::rewind_end})
@@ -1332,39 +1341,17 @@ namespace {
         bool replaying_inbound() const { return inbound_.replaying(); }
 
         int poll_incoming_messages() override {
-            if (inbound_.replaying()) return replay_incoming_messages();
-            const int count = transport_->receive([this](const bmmo::net::message& msg) {
-                if (inbound_.capturing()) inbound_.message(msg.data, static_cast<uint32_t>(msg.size));
-                on_message(msg);
-            }, ONCE_RECV_MSG_COUNT);
+            const int count = transport_->receive([this](const bmmo::net::message& msg) { on_message(msg); },
+                                                  ONCE_RECV_MSG_COUNT);
             return count <= 0 ? 0 : count;
         }
 
-        void poll_connection_state_changes() override {
-            if (!inbound_.replaying()) {
-                role::poll_connection_state_changes();
-                return;
-            }
-            int32_t state = 0;
-            uint32_t handle = 0;
-            std::string end_debug;
-            while (inbound_.take_connection(state, handle, end_debug)) {
-                bmmo::net::status_change info;
-                info.conn = handle;
-                info.state = static_cast<bmmo::net::connection_state>(state);
-                info.end_debug = end_debug;
-                on_connection_status_changed(info);
-            }
-        }
-
         void on_connection_status_changed(const bmmo::net::status_change& info) override {
-            if (inbound_.capturing())
-                inbound_.connection(static_cast<int32_t>(info.state), info.conn, info.end_debug.c_str());
             switch (info.state) {
             case bmmo::net::connection_state::closed_by_peer:
             case bmmo::net::connection_state::problem_detected_locally:
                 logf("connection lost: %s", info.end_debug.c_str());
-                if (!inbound_.replaying()) transport_->close(info.conn, 0, {}, false);
+                transport_->close(info.conn, 0, {}, false);
                 connection_ = bmmo::net::kInvalidConnection;
                 running_ = false;
                 break;
@@ -1772,7 +1759,7 @@ namespace {
                     bmmo::opcode code{};
                     std::memcpy(&code, bytes.data(), sizeof(code));
                     if (code == bmmo::SessionReady) {
-                        if (!inbound_.replaying()) transport_->flush(connection_);
+                        transport_->flush(connection_);
                         logf("test stall: %d ms right after SessionReady at tick %u", args_.stall_after_ready_ms,
                              core_.current_tick());
                         wall_sleep(std::chrono::milliseconds(args_.stall_after_ready_ms));
@@ -2331,36 +2318,13 @@ namespace {
         }
 
         // ------------------------------------------------- inbound capture
-        // The wall clock as the session flow reads it: the live clock (clock_,
-        // step K1), written to the capture by `site` when capturing; the
-        // captured value when replaying (a read at another site than the
-        // capture's next one is a divergence).
-        clock_type::time_point wall_now(bmmo::sim::wall_site site) {
-            if (inbound_.replaying() && inbound_.is_free(site)) return clock_.now(site);
-            if (inbound_.replaying()) {
-                int64_t value = 0;
-                std::string error;
-                if (!inbound_.take_clock(site, value, error)) inbound_diverged(error);
-                return clock_type::time_point(clock_type::duration(value));
-            }
-            const auto now = clock_.now(site);
-            if (inbound_.capturing()) inbound_.clock(site, static_cast<int64_t>(now.time_since_epoch().count()));
-            return now;
-        }
+        // The wall clock as the session flow reads it, by site: clock_ (step
+        // K1), which records into the capture or replays from it (step K3).
+        clock_type::time_point wall_now(bmmo::sim::wall_site site) { return clock_->now(site); }
 
         // The system clock in ms since the epoch (the journal header's utc_ms,
         // read at wall_site::journal_utc).
-        uint64_t wall_utc_ms(bmmo::sim::wall_site site) {
-            if (inbound_.replaying()) {
-                int64_t value = 0;
-                std::string error;
-                if (!inbound_.take_clock(site, value, error)) inbound_diverged(error);
-                return static_cast<uint64_t>(value);
-            }
-            const auto ms = clock_.utc_ms(site);
-            if (inbound_.capturing()) inbound_.clock(site, static_cast<int64_t>(ms));
-            return ms;
-        }
+        uint64_t wall_utc_ms(bmmo::sim::wall_site site) { return clock_->utc_ms(site); }
 
         // A replay is unpaced: its clock is the capture's, so a wait only
         // costs time.
@@ -2403,16 +2367,6 @@ namespace {
                                  + " steps, this replay's pass " + std::to_string(pass) + " after "
                                  + std::to_string(flow_steps_));
             return true;
-        }
-
-        int replay_incoming_messages() {
-            int count = 0;
-            std::string bytes;
-            while (inbound_.take_message(bytes)) {
-                on_message(bmmo::net::message{bmmo::net::kInvalidConnection, bytes.data(), static_cast<int>(bytes.size()), 0});
-                ++count;
-            }
-            return count;
         }
 
         // A replay that met a read or a pass the live run did not make: the
@@ -4947,9 +4901,11 @@ namespace {
         // so far - the frame index of every captured record - and a replay
         // that ended with records left.
         bmmo::sim::inbound_capture inbound_;
-        // The live clock wall_now / wall_utc_ms read (step K1); the frame-time
-        // histogram reads the real clock itself.
-        bmmo::session::session_clock& clock_ = bmmo::session::real_session_clock();
+        // The clock wall_now / wall_utc_ms read (step K1): the real one, or
+        // (step K3) the capture's recording or replaying twin of it.  The
+        // frame-time histogram reads the real clock itself.
+        std::unique_ptr<bmmo::session::session_clock> clock_owned_;
+        bmmo::session::session_clock* clock_ = &bmmo::session::real_session_clock();
         uint64_t flow_pass_ = 0;
         uint64_t flow_steps_ = 0;
         bool inbound_failed_ = false;

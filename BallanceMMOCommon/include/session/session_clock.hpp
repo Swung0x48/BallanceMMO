@@ -30,9 +30,10 @@ namespace bmmo::session {
         virtual ~session_clock() = default;
         virtual time_point now(clock_site site) = 0;
         // Microseconds since the Unix epoch (the system clock); utc_ms is the
-        // same read in whole milliseconds.
+        // same read in whole milliseconds (a read of its own: a capture holds
+        // the value in the unit it was read in).
         virtual int64_t utc_us(clock_site site) = 0;
-        uint64_t utc_ms(clock_site site) { return static_cast<uint64_t>(utc_us(site) / 1000); }
+        virtual uint64_t utc_ms(clock_site site) { return static_cast<uint64_t>(utc_us(site) / 1000); }
     };
 
     class real_clock final : public session_clock {

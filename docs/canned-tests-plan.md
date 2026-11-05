@@ -228,6 +228,26 @@ mapping onto C1 waits for the stage 1 coordinator. Also live (00:25:09-00:25:58,
 Unexercised GNS adapter paths: accept refused / no receive set, the retail `net lag` / `net blackout` verbs,
 `connection_timeout_ms`.
 
+As built (K3, narrowed): `session/capture.hpp` (`capture_file`: the headless inbound capture moved into
+Common, format version 2 - N messages with the connection and the transport's receive time, T state changes
+with every field, P status reads, L transport-clock reads - written in place of v1's M and S; the header and
+the I / C / E records unchanged, a version 1 file reads as before) and `session/capture_seams.hpp`
+(`recording_clock` / `replay_clock` / `recording_transport` / `replay_transport`: the record is written
+before the host handles a message or a state change, a free site is read from the replay's own clock, utc_ms
+and utc_us are recorded in the unit read, a read the live run did not make calls the host's divergence). The
+headless client runs on them: `--capture-inbound` wraps its clock and transport with the recording twins,
+`--replay-inbound` with the replaying ones; its own copies of the capture and replay code are gone (the pass
+records, the report_init value, the divergence report and the send guards stay: loop structure). Not in
+K3, changed from the table above: the server's recorder lands with K4 (its two racing threads make a capture
+unreplayable until then), the retail one with K7; no generic tap bus until a second consumer exists. Checked:
+798/798 unit tests (one new: record a simulated session, replay it, a read too many diverges); the wire check
+of core_ref_s16 (version 1 captures through the replaying twins) ALL SAME; live (2026-11-05 01:02:16-01:03:20,
+P-cores, h1_150, every client capturing): harness PASS, server replay 2641/2641, and each client's new v2
+capture replayed by the same build gave its live send trace (SAME) and its live journal (IDENTICAL) back.
+Readers outside the repo: `.local-tools/e0_replay.py` reads only the header (unchanged); the one-off parsers in
+`.local-tools/work/` (FIN/level_finish_test.py, LBX/capture_relay.py, ...) stop at an unknown tag, so they
+read version 1 captures only.
+
 Two limits of `sim_network` for stage 1: it is single-threaded (today's server sends from its runner thread
 too, so it can carry the server only once K4 runs the server's two loops from one thread), and its loss
 draws come from `std::uniform_real_distribution`, which differs between standard libraries: "same seed, same
@@ -245,7 +265,8 @@ generator.
 
 ## 4. Decisions
 
-Taken: stage 0 first (user, 2026-11-04); journal version 10 with `.bmjs` / `.bmjc` (user); 0b as FINAL rows
+Taken: the gate (user, 2026-11-05): each K step lands on unit tests, the wire check and a P-core live smoke;
+LBM runs in full once, before the branch is merged into collision-overhaul. Stage 0 first (user, 2026-11-04); journal version 10 with `.bmjs` / `.bmjc` (user); 0b as FINAL rows
 by default at the checkpoint cadence (recommendation; the alternative, a per-tick hash over the bodies both
 sides share, needs one shared-set definition on every side and is left open); SessionJournal off by default
 in retail (user); the seams before the tools (user).
