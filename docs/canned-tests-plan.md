@@ -180,7 +180,7 @@ C4 / C7 (timing) the LBM arms.
 | K1 | C1 clock | server.cpp + session_runner (~30 reads), the headless wall_now (moves into C1), the retail p.now (sites honoured) | a missed or mis-routed read moves a deadline | every read in the three hosts goes through C1 (a grep has no `steady_clock::now` left outside C1 and the diagnostics); wire check identical; LBM PASS |
 | K2 | C2 transport | role.hpp, the server's sends / receives / callbacks, client.h, session_client.cpp | message lifetime, callback order (messages before status changes), linger | the three hosts hold a `net::transport`; GNS calls only in `gns_transport`; wire check identical; LBM PASS; a unit test pair over the simulated transport |
 | K3 | C3 tap + capture v2 | the headless inbound capture becomes C3's writer and a C1 / C2 replayer; the server and the retail host get the same recorder | capture cost on the hot path when off (must be a branch) | core_ref_s16's `.bmic` files still replay (v1 read) and a new v2 capture of each host replays its own run bit for bit |
-| K4 | C4 pumps | session_runner's loop, the server's network loop, the headless pacer, the retail driver | the server's threading: input arrival vs the tick's take, the cutoff, a deadlock | the same two server threads call the pumps; wire check identical; server journal replay N/N; LBM PASS (timing criteria at S = 1) |
+| K4 | C4 waits (split 2026-11-05, section 3.2a) | K4a: the audit of thread-order dependencies (done); K4b: the server's decisions from data only; K4c: the wait seam in session_runner's loop, the server's network loop, the headless pacer | K4b changes the server's scheduling (late-frame boundary, one poll before each step); K4c a deadlock if a wait point held a lock | K4b: unit tests, wire check identical, smoke, LBM PASS (timing criteria); K4c: production waits unchanged, wire check identical, server journal replay N/N |
 | K5 | C5 entropy + epoch | the login uuid, the wire's steady values, the broadcast | the clients use those values as differences only (`client_core.cpp:951-1046`; 0 means absent) - to verify; a value change on the wire may need a protocol bump | production bytes unchanged in meaning; a test run with a seed is byte-identical twice |
 | K6 | C6 cost model | rollback's rewind timer | none in production (the measurement stays) | the fixed model in unit tests |
 | K7 | C7 retail host | fixed_tick, core_host, BallanceMMOClient network handlers and render callbacks | the retail feel and stability (highest retail risk) | a retail run (with the user's go-ahead) PASS on LBM's retail arms; a retail capture replays its own run bit for bit |
@@ -253,6 +253,72 @@ too, so it can carry the server only once K4 runs the server's two loops from on
 draws come from `std::uniform_real_distribution`, which differs between standard libraries: "same seed, same
 losses" holds within one build; a coordinator mixing a Linux server with Windows clients needs its own
 generator.
+
+### 3.2a K4a: where the server's results depend on thread order (audit, 2026-11-05)
+
+The user's rule (2026-11-05): the server's results must not depend on how its two threads overlap. Today they
+do, so K4 is split: K4a lists the dependencies (this section), K4b makes each decision depend only on data (a
+message's receive time, a tick number), K4c adds the wait seam (C4) and the virtual clock. Once K4b is done, the
+stage 1 coordinator need not keep the threads from overlapping; running one black box under several thread
+orders and getting the same journals becomes a test of K4b.
+
+The mechanism behind most items: the network thread polls the transport once per pass (15.15 ms,
+`server.cpp:81-87`) and `post()`s each message's work to the runner (`session_runner.cpp:131-137`); the runner
+applies the queue only when it drains it, once before each step (`:2013`, B2SX), and then reads "now" or the
+tick it is on. A message's receive time is data (`server.cpp:2829-2833`, back-dated from the transport's stamp);
+**the drain time and the tick at the drain are not**: they shift with the pass phase, with the step's cost and
+with the OS scheduler.
+
+**A. What a message counts for is decided at the drain (outcome: the world, the wire)**
+
+| # | where | decided from | outcome that varies |
+|---|---|---|---|
+| A1 | the frame take, `step()` `session_runner.cpp:1343-1356`, `take` `:1380` | the buffer's content at the drain; the arrival cutoff applies only to a step more than a tick past its deadline | a frame that arrived before the deadline is applied or substituted |
+| A2 | patience, `run()` `:2021-2063` (`patience_step_test` on the members' buffers at `at`, `due(at)`), the wait `:2145-2154` | the buffers and the clock when the runner wakes | a tick steps early without a member (a later frame is late), or waits; the cut lists |
+| A3 | an event's applied tick, `submit_event` `:973-975` (`max(stamp, next)`), the trafo ledger `:1034, 1050` | `next` = the tick at the drain | a late event is applied at another tick; supersede / refuse verdicts |
+| A4 | joins and leaves, `add_player` `:472`, `remove_player` `:565`, the leaver's events `:631-663` | the tick at the drain | the tick a ball is added or taken out |
+| A5 | a resync request, `request_resync_state` `:1161-1185` | the tick at the drain vs the base | answered, or "base missed" and re-anchored |
+| A6 | a ready / re-assign, `player_ready` `:701-769` (`buffer.reset`, `baseline.assigned(..., tick)`); `player_start_settled` `:777` (`settled(epoch, now)`) | the tick and the clock at the drain | the baseline the lateness meter measures from |
+| A7 | the lead control's inputs: `submit_input` `:868-940` (the lookahead cursor at the drain `:880`, `c_est` from the tick at the drain `:925-932`); `observe_relative` `:1580-1606` (a missing frame counted at the step's `now`, `:2119`); `observe_quorum_arrival` `:1788` (waiver samples from `seen`, the drain time); the R12 wait meter `:2084-2097` (from `at`) | the drain time and tick, the step's clock | which tick a lead raise / lower is decided at (SessionLead on the wire); the wait value in every relay header |
+
+**B. The network thread reads the runner's published view (stale by up to one runner pass)**
+
+| # | where | outcome that varies |
+|---|---|---|
+| B1 | `running()` at `server.cpp:1718, 1775` | a joiner waits for the handshake / joins as a start member / joins late |
+| B2 | `running()` at `server.cpp:2202, 2348` | the pass in which waiting joiners and the start resyncs go out |
+| B3 | `running()` at `server.cpp:2512` | the start barrier fires (silent members dropped) or is disarmed |
+| B4 | `running()` at `server.cpp:2746` | a SessionResync is answered or ignored |
+| B5 | `reanchor_tick` `session_runner.cpp:184-221` (the floor from the view's `next_tick`), `leaving_horizon` `server.cpp:2682` | a late joiner's or a resync's base when the floor or the horizon binds |
+
+**C. Two threads send**
+
+| # | where | outcome that varies |
+|---|---|---|
+| C1 | the runner's callbacks send under `state_mutex_` (`on_inputs` relay, `on_event_accepted`, `on_player_added` SessionStart, `on_lead`, snapshots, resync states, base missed: `server.cpp:899-920`), the network thread sends too (`tick()` broadcast, assign repeats, handshake) | the order of the two streams on one connection; not yet checked whether any client reads one stream relative to the other |
+
+**Not thread-order dependencies (no change for K4b)**: the step itself given its inputs; events of one tick,
+applied in join order (`:1405-1416`, order-independent by design); the network thread's own deadlines (start
+barrier, assign repeats, handshake, rtt posts), which depend on the pass times only and so follow the virtual
+clock; the scheduled start's origin (`server.cpp:879`, `scheduled_start`: from the handshake, not the drain);
+diagnostics only: the event's `intake` / margin / slack (`:945`), `arrival_queue`, `quorum_wake`, `current_tick`
+in log lines (`server.cpp:3076, 3241`), the step-cost timers.
+
+**K4b direction (to agree before code)**
+- Every posted command carries its message's receive time; the runner applies it by that time against the
+  tick's deadline, not by the drain (A3-A7: the tick a command counts for is the first tick whose deadline is at
+  or after its receive time, or a rule of the same kind).
+- A handover mark: the network thread publishes "every message received up to W is posted"; the runner takes
+  tick T (A1) or makes a patience decision at instant X (A2) only with W at or past that instant, from the frames
+  received by it. The network thread must then poll on demand (woken by the runner) instead of only every 15.15
+  ms, or the mark lags by up to a pass. A fixed grace after the deadline (today's runner wakes 1-2 ms late and
+  takes what came meanwhile) keeps today's leniency as a rule instead of luck.
+- B1-B5: the decision taken from the session's own data (the schedule and the message's receive time), or moved
+  to the runner and answered by a callback, instead of a read of the view.
+- C1: first check whether any client depends on the order between the two streams; if one does, one sender per
+  connection.
+- Cost: a frame that today lands in the runner's late wake-up gap becomes late unless the grace covers it;
+  the handover adds up to one network poll before each step. Measured by LBM (timing criteria) before K4c.
 
 ### 3.3 The tools (thin, after the seams)
 
