@@ -447,6 +447,23 @@ with the main session's work logged (.local-tools/work/LBM5/contention.log); non
 an arm whose criterion it could explain. Harness notes for a rerun: the Arch journal mirror must copy .bmjs; the
 retail chain's data files and scripts/retail/server must exist in the tree that runs it.
 
+As built (K4c, 2026-11-05): the waits are C1's (`session_clock`): `sleep_for(site, d)`, `wait_until(site, cv,
+lock, t, ready)`, `wait_for(site, cv, lock, d, ready)` - the real clock sleeps and waits exactly as before (an
+unbounded wait is a plain `cv.wait`), and a wait reads no clock, so a capture holds the same reads as before (the
+version 1 reference captures replay unchanged). Through it: the server's network-loop wait (`server_loop_wait`),
+the runner's three (idle, until a step instant, the 5 ms wait after asking for a pass: `runner_wait`, ended early
+by a post, a mark or the stop - `changes_`), the headless client's seven sleeps (`wait_idle`, `wait_test_stall`,
+`wait_room_list`, `wait_hold` x2, `wait_test_pause`, `wait_pace`). The capture twins: the recording clock waits on
+the live one; the replaying one sleeps nothing on the capture's thread (a replay is unpaced, as before) and waits on
+its own clock elsewhere. `session/virtual_clock.hpp`: now() is what `advance_to` set, a wait ends at its time or
+when its condition holds, `next_wake` / `waiting` for the coordinator (T1); a condition wait rechecks every 1 ms of
+real time (advance_to notifies without the waiters' locks). Left on the real clock: the test knobs' sleeps
+(BMMO_SESSION_STALL, BMMO_RUNNER_JITTER), `settle`'s handshake, shutdown and console sleeps. K4 as planned is the
+three parts K4a-K4c; the coordinator itself is T1. Checked: 811/811 unit tests (one new, the virtual clock's three
+ends; 50 repeats clean); the wire check of core_ref_s16 ALL SAME (5 known-stale journals skipped); live P-core
+h1_150 with the server captured: harness PASS, server replay 2641/2641; the K4b acceptance test again: the capture
+replayed plain and with 2 / 5 / 20 ms runner jitter, the live server journal byte for byte all four times.
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |

@@ -1214,7 +1214,7 @@ namespace {
                 }
                 switch (core_.session_phase()) {
                 case phase::idle:
-                    wall_sleep(std::chrono::milliseconds(5));
+                    wall_sleep(bmmo::session::clock_site::wait_idle, std::chrono::milliseconds(5));
                     break;
                 case phase::loading:
                     ++flow_steps_;
@@ -1766,7 +1766,7 @@ namespace {
                         transport_->flush(connection_);
                         logf("test stall: %d ms right after SessionReady at tick %u", args_.stall_after_ready_ms,
                              core_.current_tick());
-                        wall_sleep(std::chrono::milliseconds(args_.stall_after_ready_ms));
+                        wall_sleep(bmmo::session::clock_site::wait_test_stall, std::chrono::milliseconds(args_.stall_after_ready_ms));
                     }
                 }
             };
@@ -2330,11 +2330,12 @@ namespace {
         // read at wall_site::journal_utc).
         uint64_t wall_utc_ms(bmmo::sim::wall_site site) { return clock_->utc_ms(site); }
 
-        // A replay is unpaced: its clock is the capture's, so a wait only
-        // costs time.
+        // Step K4c: a wait through the clock, by site (a virtual clock ends
+        // it at its time; the capture's replaying twin sleeps nothing - a
+        // replay is unpaced, its clock is the capture's).
         template <class Duration>
-        void wall_sleep(Duration duration) {
-            if (!inbound_.replaying()) std::this_thread::sleep_for(duration);
+        void wall_sleep(bmmo::session::clock_site site, Duration duration) {
+            clock_->sleep_for(site, std::chrono::duration_cast<clock_type::duration>(duration));
         }
 
         // last_report_ is read at construction, before the capture is open:
@@ -2492,7 +2493,7 @@ namespace {
                 if (target == 0 && !msg.rooms.empty()) target = msg.rooms.front().id;
                 if (target == 0) {
                     if (!msg.rooms.empty() || list_retries_++ % 20 == 0) logf("no lobby room to join yet (%zu rooms)", msg.rooms.size());
-                    wall_sleep(std::chrono::milliseconds(500));
+                    wall_sleep(bmmo::session::clock_site::wait_room_list, std::chrono::milliseconds(500));
                     room_request(bmmo::room::action::List, 0);
                     return;
                 }
@@ -3404,14 +3405,14 @@ namespace {
             // assignment never comes the client runs on rather than sitting
             // here for ever, and says so.
             if (core_.poll_hold().held) {
-                wall_sleep(std::chrono::milliseconds(1));
+                wall_sleep(bmmo::session::clock_site::wait_hold, std::chrono::milliseconds(1));
                 return;   // poll the network, step nothing
             }
             // Step A3 (resync design 2.6.6): a pending exact resync whose
             // anchor would leave the history with the next step holds the
             // world the same way, until its state is applied (or 2 s).
             if (core_.poll_resync_hold().held) {
-                wall_sleep(std::chrono::milliseconds(1));
+                wall_sleep(bmmo::session::clock_site::wait_hold, std::chrono::milliseconds(1));
                 return;
             }
             // Frames run from the assignment, and the server's world starts at
@@ -3424,7 +3425,7 @@ namespace {
                 paused_once_ = true;
                 logf("test pause: %d ms at tick %u", args_.pause_ms, current_tick());
                 if (args_.stall_named) logf("stall: %d ms at tick %u (--stall-ms)", args_.pause_ms, current_tick());
-                wall_sleep(std::chrono::milliseconds(args_.pause_ms));
+                wall_sleep(bmmo::session::clock_site::wait_test_pause, std::chrono::milliseconds(args_.pause_ms));
             }
             // A SessionLead's slew (late-player design 2.4) moves the origin
             // before the schedule is read: one tick earlier per tick period
@@ -3452,7 +3453,7 @@ namespace {
                     std::chrono::duration<double>(static_cast<double>(next_frame) / bmmo::sim::kTickRate));
                 const auto now = wall_now(bmmo::sim::wall_site::pace_due);
                 if (due > now) {
-                    wall_sleep(std::min(due - now, clock_type::duration(std::chrono::milliseconds(2))));
+                    wall_sleep(bmmo::session::clock_site::wait_pace, std::min(due - now, clock_type::duration(std::chrono::milliseconds(2))));
                     return;   // poll the network again before the frame is due
                 }
             }

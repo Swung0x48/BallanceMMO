@@ -168,6 +168,7 @@ namespace bmmo::sim {
             stamp = std::max(stamp, last_stamp_);
             last_stamp_ = stamp;
             commands_.push_back(stamped_command{stamp, std::move(command)});
+            ++changes_;
         }
         wake_.notify_all();
     }
@@ -213,6 +214,7 @@ namespace bmmo::sim {
         {
             std::lock_guard lk(mutex_);
             mark_ = std::max(mark_, at);
+            ++changes_;
         }
         wake_.notify_all();
     }
@@ -2218,8 +2220,13 @@ namespace bmmo::sim {
                 lk.lock();
                 continue;
             }
+            // Step K4c: the waits go through the clock (a virtual one ends them
+            // at their time); a post, a mark or the stop ends them early.
+            const uint64_t seen = changes_;
+            const auto changed = [&] { return changes_ != seen || stopping_; };
             if (move == bmmo::session::logical_move::idle) {
-                wake_.wait(lk);
+                clock_->wait_until(bmmo::session::clock_site::runner_wait, wake_, lk,
+                                   std::chrono::steady_clock::time_point::max(), changed);
                 continue;
             }
             // A step instant the mark has not passed: wait for it in real
@@ -2227,7 +2234,7 @@ namespace bmmo::sim {
             // answers); a post wakes this thread meanwhile.
             const auto now = clock_->now(bmmo::session::clock_site::runner_wait);
             if (now < due_at) {
-                wake_.wait_for(lk, due_at - now);
+                clock_->wait_until(bmmo::session::clock_site::runner_wait, wake_, lk, due_at, changed);
                 continue;
             }
             if (poll_asked_ < due_at) {
@@ -2237,7 +2244,7 @@ namespace bmmo::sim {
                 lk.lock();
                 continue;
             }
-            wake_.wait_for(lk, std::chrono::milliseconds(5));
+            clock_->wait_for(bmmo::session::clock_site::runner_wait, wake_, lk, std::chrono::milliseconds(5), changed);
         }
         lk.unlock();
         // A session still running when the server goes down says so in its box

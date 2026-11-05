@@ -15,6 +15,10 @@
 #include <session/lead_slew.hpp>
 #include <session/own_correction.hpp>
 #include <session/timeline.hpp>
+#include <session/virtual_clock.hpp>
+
+#include <atomic>
+#include <thread>
 
 using namespace bmmo::session;
 using namespace std::chrono_literals;
@@ -37,6 +41,51 @@ TEST(LogicalMove, CommandsAndStepsInStampOrderAStepWaitsForTheMark) {
     EXPECT_EQ(next_logical_move(std::nullopt, t5, t0), logical_move::wait);   // nothing known up to t5 yet
     EXPECT_EQ(next_logical_move(std::nullopt, t5, t5), logical_move::step);   // the mark passed it
     EXPECT_EQ(next_logical_move(std::nullopt, std::nullopt, t9), logical_move::idle);
+}
+
+// Step K4c: on a virtual clock a wait ends when the coordinator's time
+// reaches it - a sleep at its time, a condition wait when its condition holds
+// or at its time - and next_wake names the earliest pending one.
+TEST(VirtualClock, AWaitEndsAtItsTimeOrWhenItsConditionHolds) {
+    using bmmo::session::clock_site;
+    const std::chrono::steady_clock::time_point t0{};
+    bmmo::session::virtual_clock clock(t0);
+    std::mutex m;
+    std::condition_variable cv;
+    bool flag = false;
+    std::atomic<int> done{0};
+    const auto settle = [&](size_t waiting) {
+        for (int i = 0; i < 2000 && clock.waiting() != waiting; ++i) std::this_thread::sleep_for(1ms);
+    };
+    std::thread sleeper([&] { clock.sleep_for(clock_site::wait_pace, 10ms); done |= 1; });
+    std::thread waiter([&] {
+        std::unique_lock lk(m);
+        done |= clock.wait_until(clock_site::runner_wait, cv, lk, t0 + 50ms, [&] { return flag; }) ? 2 : 4;
+    });
+    std::thread timed_out([&] {
+        std::unique_lock lk(m);
+        done |= clock.wait_for(clock_site::server_loop_wait, cv, lk, 30ms, [] { return false; }) ? 8 : 16;
+    });
+    settle(3);
+    EXPECT_EQ(clock.next_wake(), t0 + 10ms);
+    clock.advance_to(t0 + 5ms);
+    std::this_thread::sleep_for(20ms);
+    EXPECT_EQ(done.load(), 0);   // nothing is due at +5 ms
+    clock.advance_to(t0 + 10ms);
+    sleeper.join();
+    EXPECT_EQ(done.load(), 1);
+    {
+        std::lock_guard lk(m);
+        flag = true;
+    }
+    cv.notify_all();
+    waiter.join();
+    EXPECT_EQ(done.load(), 1 | 2);   // its condition, before its time
+    EXPECT_EQ(clock.next_wake(), t0 + 30ms);
+    clock.advance_to(t0 + 30ms);
+    timed_out.join();
+    EXPECT_EQ(done.load(), 1 | 2 | 16);   // its time, not its condition
+    EXPECT_EQ(clock.waiting(), 0u);
 }
 
 TEST(InputBuffer, TakesFreshFramesAndFallsBackToLast) {

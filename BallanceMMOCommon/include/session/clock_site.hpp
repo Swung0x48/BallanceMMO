@@ -101,6 +101,13 @@ namespace bmmo::session {
         runner_self_mark,            // no network thread: the runner's own clock is the mark (K4b)
         runner_wait,                 // run: how long until the next step instant (K4b)
         server_time_origin,          // the network loop's start: the handlers' wall clock origin (K4b-iii)
+        server_loop_wait,            // the network loop's wait for its next pass or a requested receive (K4c)
+        wait_idle,                   // headless: no session yet (K4c)
+        wait_test_stall,             // headless: --stall-after-ready (K4c)
+        wait_room_list,              // headless: no lobby room yet, ask again (K4c)
+        wait_hold,                   // headless: the start hold, poll the network (K4c)
+        wait_test_pause,             // headless: --pause-at (K4c)
+        wait_pace,                   // headless: the next frame is not due yet (K4c)
         count_
     };
 
@@ -113,7 +120,8 @@ namespace bmmo::session {
             "resync_hold", "resync_release", "resync_hold_timeout", "rewind_start", "rewind_replay", "rewind_end",
             "handshake_stamp", "handshake_release", "handshake_lateness",
             "server_loop_pass", "server_boot_requested", "server_hold_member", "server_boot_log", "server_start_deadline", "server_start_deadline_join", "server_rtt_post", "server_lead_repeat", "server_assign_sent", "server_assign_copy", "server_handshake_begin", "server_start_at_sent", "server_handshake_check", "server_input_arrival", "server_assign_repeats", "server_start_barrier", "server_event_arrival", "server_event_rate", "server_event_relay_delay", "server_time_broadcast", "runner_journal_utc", "runner_handshake_elapsed", "runner_reanchor", "runner_schedule_origin", "runner_journal_start", "runner_leaver_event", "runner_leaver_intake", "runner_leaver_trafo", "runner_baseline_settled", "runner_start_ahead", "runner_input_seen", "runner_event_arrival", "runner_cutoff", "runner_journal_ms", "runner_deadline_trafo", "runner_pass", "runner_skew_start", "runner_step_observed", "runner_until_due", "server_poll", "runner_post_unstamped", "runner_self_mark",
-            "runner_wait", "server_time_origin"};
+            "runner_wait", "server_time_origin", "server_loop_wait", "wait_idle",
+            "wait_test_stall", "wait_room_list", "wait_hold", "wait_test_pause", "wait_pace"};
         static_assert(sizeof(names) / sizeof(names[0]) == static_cast<size_t>(clock_site::count_),
                       "a name for every clock site");
         const auto i = static_cast<size_t>(site);

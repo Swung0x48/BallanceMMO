@@ -55,6 +55,16 @@ namespace bmmo::session {
             if (owner.here()) file_.clock(site, static_cast<int64_t>(v));
             return v;
         }
+        // The waits are the live clock's: they read nothing to record.
+        void sleep_for(clock_site site, clock_type::duration d) override { live_.sleep_for(site, d); }
+        bool wait_until(clock_site site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock, time_point t,
+                        const ready_test& ready) override {
+            return live_.wait_until(site, cv, lock, t, ready);
+        }
+        bool wait_for(clock_site site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
+                      clock_type::duration d, const ready_test& ready) override {
+            return live_.wait_for(site, cv, lock, d, ready);
+        }
         capture_owner owner;
 
     private:
@@ -75,6 +85,19 @@ namespace bmmo::session {
         int64_t utc_us(clock_site site) override { return owner.here() ? take(site) : own_.utc_us(site); }
         uint64_t utc_ms(clock_site site) override {
             return owner.here() ? static_cast<uint64_t>(take(site)) : own_.utc_ms(site);
+        }
+        // A replay is unpaced: the capture's thread sleeps nothing; a wait on
+        // another thread (or on something to happen) is the own clock's.
+        void sleep_for(clock_site site, clock_type::duration d) override {
+            if (!owner.here()) own_.sleep_for(site, d);
+        }
+        bool wait_until(clock_site site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock, time_point t,
+                        const ready_test& ready) override {
+            return own_.wait_until(site, cv, lock, t, ready);
+        }
+        bool wait_for(clock_site site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
+                      clock_type::duration d, const ready_test& ready) override {
+            return own_.wait_for(site, cv, lock, d, ready);
         }
         capture_owner owner;
 

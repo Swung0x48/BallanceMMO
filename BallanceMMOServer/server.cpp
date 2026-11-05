@@ -180,7 +180,8 @@ public:
             return;
         }
         std::unique_lock lk(poll_mutex_);
-        while (poll_cv_.wait_until(lk, until, [this] { return poll_requested_; })) {
+        while (clock_->wait_until(bmmo::session::clock_site::server_loop_wait, poll_cv_, lk, until,
+                                  [this] { return poll_requested_; })) {
             poll_requested_ = false;
             lk.unlock();
             receive_pass();

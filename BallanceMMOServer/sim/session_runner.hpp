@@ -777,6 +777,9 @@ namespace bmmo::sim {
         // Step K4b (mutex_): the handover mark, the newest stamp posted, and
         // the step instant a receive pass was last asked for.
         std::chrono::steady_clock::time_point mark_{}, last_stamp_{}, poll_asked_{};
+        // Step K4c (mutex_): one more for every post and mark from another
+        // thread - what ends the runner's wait besides its time.
+        uint64_t changes_ = 0;
         // Step K4b (simulation thread): the logical now - the stamp of the
         // command being applied, or the step instant of the tick being
         // stepped.  Every deciding time the runner reads is this one.

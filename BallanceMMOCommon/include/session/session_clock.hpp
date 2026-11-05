@@ -12,11 +12,23 @@
 // split, a placement's slice budget) - they measure real work and stay
 // steady_clock - and the log's date stamps.
 //
+// The waits of every host's loops go through it too (step K4c, seam C4), by
+// site, so a virtual clock (virtual_clock.hpp) ends a wait when its time
+// comes instead of the OS: sleep_for (nothing to wait on but time),
+// wait_until / wait_for (a condition variable, with its lock held, until
+// `ready()` or the time).  The real clock sleeps and waits exactly as the
+// loops did before.  A wait reads no clock: a capture holds the same reads
+// with or without it.
+//
 // An implementation is called from any thread (the server reads from its
 // network thread and its runner thread).  CK-free and header-only.
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <functional>
+#include <mutex>
+#include <thread>
 
 #include "clock_site.hpp"
 
@@ -34,6 +46,14 @@ namespace bmmo::session {
         // the value in the unit it was read in).
         virtual int64_t utc_us(clock_site site) = 0;
         virtual uint64_t utc_ms(clock_site site) { return static_cast<uint64_t>(utc_us(site) / 1000); }
+
+        using ready_test = std::function<bool()>;
+        virtual void sleep_for(clock_site site, clock_type::duration d) = 0;
+        // Returns ready().
+        virtual bool wait_until(clock_site site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
+                                time_point t, const ready_test& ready) = 0;
+        virtual bool wait_for(clock_site site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
+                              clock_type::duration d, const ready_test& ready) = 0;
     };
 
     class real_clock final : public session_clock {
@@ -42,6 +62,19 @@ namespace bmmo::session {
         int64_t utc_us(clock_site) override {
             return std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
+        }
+        void sleep_for(clock_site, clock_type::duration d) override { std::this_thread::sleep_for(d); }
+        bool wait_until(clock_site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock, time_point t,
+                        const ready_test& ready) override {
+            if (t == time_point::max()) {
+                cv.wait(lock, ready);
+                return true;
+            }
+            return cv.wait_until(lock, t, ready);
+        }
+        bool wait_for(clock_site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
+                      clock_type::duration d, const ready_test& ready) override {
+            return cv.wait_for(lock, d, ready);
         }
     };
 
