@@ -1223,10 +1223,13 @@ namespace bmmo::session {
             // what the new numbering plays for the same ticks.  Taken from
             // the sent ring before the epoch reset clears it, and played
             // again below (forced own frames, as a SessionLead's range).
+            // Step RSO: a second re-assign can precede frames this one kept
+            // from the numbering before it.  They are still the server's
+            // first copies, even past old_tick: keep them through it too.
             std::map<uint32_t, bmmo::session::input_frame> resent;
             if (exact)
                 for (auto it = s.sent_inputs_.lower_bound(msg.first_tick);
-                     it != s.sent_inputs_.end() && static_cast<int32_t>(it->first - old_tick) <= 0; ++it)
+                     it != s.sent_inputs_.end(); ++it)
                     resent.emplace(it->first, it->second);
             s.tick_base_ = msg.first_tick;
             s.held_floor_ = s.tick_base_;
@@ -1250,9 +1253,9 @@ namespace bmmo::session {
             s.sectors_.forget_walk_tick();   // step A5: an old numbering's tick
             // An own beam the new numbering has not reached yet is the
             // server's to apply at its stamp, and so ours: live once
-            // more, rather than retired with the history.  The births
-            // go: the full snapshot puts the server's own ball in.
-            rebase_own_lives();
+            // more, rather than retired with the history.  An exact
+            // resync keeps a known own birth after its anchor too.
+            rebase_own_lives(exact);
             s.own_inputs_.clear();
             s.mechanism_tracking_.clear();
             s.resync_pending_ = true;
@@ -1269,6 +1272,7 @@ namespace bmmo::session {
             if (exact) {
                 anchor_resync(msg.first_tick, old_tick);
                 for (const auto& [tick, frame]: resent) s.forced_own_[tick] = client_core_state::forced_own{frame, false};
+                s.sent_inputs_ = resent;
                 s.resync_resent_ += resent.size();
                 if (!resent.empty())
                     logf("resync: the old numbering sent own frames for %u..%u (%zu): played again at those ticks, "

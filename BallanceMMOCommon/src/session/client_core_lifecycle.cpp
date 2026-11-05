@@ -3086,6 +3086,8 @@ namespace bmmo::session {
             if (life.retired) return true;
             if (life.force_pending) return false;   // FULL step R6H: kept until its tick
             if (life.rereported) return false;      // FULL step R6P: kept until its re-report is answered
+            if (s.resync_pending_ && s.resync_exact_ && life.what == own_life::kind::birth
+                    && static_cast<int32_t>(life.applied - s.tick_base_) >= 0) return false;
             if (life.state == own_life::verdict::sent
                     && static_cast<int32_t>(now - life.origin) < static_cast<int32_t>(client_core_state::kOwnRecordKeepTicks))
                 return false;
@@ -3100,13 +3102,18 @@ namespace bmmo::session {
     // puts the server's own ball in: the births go.  A beam the new
     // numbering has not reached yet is the server's to apply at its stamp,
     // and so ours: live once more.
-    // A birth still unanswered is set aside (own_unanswered_): its echo,
-    // when it comes, is not one a record of the new numbering can take.
-    void session_client_core::rebase_own_lives() {
+    // Step RSO: an exact state before a confirmed own birth has no row
+    // for it: keep its server-applied tick for the ordinary birth remake.
+    // An unanswered one stays aside until its echo supplies that tick.
+    void session_client_core::rebase_own_lives(bool exact) {
         clear_own_window_state();
         set_aside_unanswered(own_life::aside::resync);
         s.own_rereports_.clear();   // FULL step R6P: set aside above with the births
-        s.own_life_.erase(std::remove_if(s.own_life_.begin(), s.own_life_.end(), [this](own_life& life) {
+        s.own_life_.erase(std::remove_if(s.own_life_.begin(), s.own_life_.end(), [this, exact](own_life& life) {
+            if (exact && life.what == own_life::kind::birth && life.made && !life.retired
+                    && (life.state == own_life::verdict::acked || life.state == own_life::verdict::moved)
+                    && static_cast<int32_t>(life.applied - s.tick_base_) >= 0
+                    && own_life_current(life, current_tick(), true)) return false;
             if (life.what != own_life::kind::beam || static_cast<int32_t>(life.origin - s.tick_base_) < 0) return true;
             life.origin_live = false;
             life.applied_live = false;
@@ -3489,6 +3496,19 @@ namespace bmmo::session {
         // flight or pending (settle_replaced_rereports).
         if (made && life.link != 0 && static_cast<int32_t>(applied - s.tick_base_) >= 0) {
             keep_replaced_rereport(life, applied, "set aside by a resync");
+            return;
+        }
+        // Step RSO: this echo answers the old numbering's birth, but its
+        // applied tick is still the server's in the new numbering.  An
+        // exact state before it must take the live body out and remake it
+        // there, as an ordinary rewind does; never infer it from origin.
+        if (made && !missing && s.resync_pending_ && s.resync_exact_ && !life.retired
+                && static_cast<int32_t>(applied - s.tick_base_) >= 0
+                && own_life_current(life, current_tick(), true)) {
+            life.applied = applied;
+            life.state = applied == life.origin ? own_life::verdict::acked : own_life::verdict::moved;
+            life.why = own_life::aside::none;
+            s.own_life_.push_back(std::move(life));
             return;
         }
         logf("own physicalize stamped %u echoed %s by the server (applied %u) at local tick %u: %s, nothing to do",
