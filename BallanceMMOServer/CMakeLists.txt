@@ -83,6 +83,13 @@ add_executable(BallanceMMOMockClient client.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_S
 target_include_directories(BallanceMMOMockClient PRIVATE)
 target_link_libraries(BallanceMMOMockClient GameNetworkingSockets::shared replxx)
 add_executable(BallanceMMORecordParser record_parser.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
+# Step T1c (docs/canned-tests-plan.md): a coordinated run's network and time.
+add_executable(BallanceMMOCoordinator sim/coordinator_main.cpp)
+target_include_directories(BallanceMMOCoordinator PRIVATE ../BallanceMMOCommon/include)
+if(UNIX)
+    find_package(Threads REQUIRED)
+    target_link_libraries(BallanceMMOCoordinator PRIVATE Threads::Threads)
+endif()
 target_include_directories(BallanceMMORecordParser PRIVATE)
 target_link_libraries(BallanceMMORecordParser GameNetworkingSockets::shared replxx)
 

@@ -587,6 +587,16 @@ releases a blocked `wait_idle`. Checked: 815/815 (one new: a server and a client
 over TCP to a coordinator, 10 ms each way: the server sees a 20 ms round trip, the "hi" sent at +20 ms arrives and is
 taken at +30 ms, and two runs log the same events at the same virtual times; 20 repeats clean).
 
+As built (T1c, 2026-11-05): `--coordinator HOST:PORT` (the server's a test flag; the headless client's an
+argument): the process opens a `remote_transport` on a `virtual_clock` before it boots (hello, welcome), runs on them
+- the server's runner too - and starts the run when its loop starts (participants: the server's network loop and
+runner, or the headless loop); the coordinator's stop ends the loop; the server has no console then. The thread rank
+lives in transport.hpp (`set_thread_rank`: the server's loop 0, the runner 1). `~server()` releases the runner and the
+transport before the clocks (the runner is declared before `clock_owned_`, so it outlived the clock it waits on) and
+`~session_client()` the transport. `BallanceMMOCoordinator --processes N [--port P] [--latency-ms L] [--loss-pct X]
+[--seed S] [--virtual-seconds T]`: prints its port, runs, reports the steps and the virtual and real seconds.
+Checked: 815/815; x64 build with the new exe; the wire check ALL SAME. No live run (the main session's trial games).
+
 ## 4. Decisions
 
 Taken: the gate (user, 2026-11-05): each K step lands on unit tests, the wire check and a P-core live smoke;

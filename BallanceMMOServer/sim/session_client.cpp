@@ -60,6 +60,8 @@
 #include <physics/physics_direct.hpp>
 #include <session/client_core.hpp>
 #include <session/capture_seams.hpp>
+#include <session/virtual_clock.hpp>
+#include <net/remote_transport.hpp>
 #include <session/session_clock.hpp>
 #include <session/event_hold.hpp>
 #include <session/rollback_binding.hpp>
@@ -457,6 +459,9 @@ namespace {
         // no network and nothing sent.  Off by default.
         std::string capture_inbound;
         std::string replay_inbound;
+        // --coordinator HOST:PORT (step T1c): a coordinated run - the
+        // coordinator's network and virtual time (net/coordinator.hpp).
+        std::string coordinator;
         // --replay-free-cost-clock (step B5RC, landed as harness tooling at
         // B5RX: a measurement aid for paired replays): with --replay-inbound,
         // the rewind cost's clock reads (rewind_start, rewind_replay,
@@ -837,6 +842,7 @@ namespace {
             }
             else if (arg == "--capture-inbound") { if (!(v = next())) return false; out.capture_inbound = v; }
             else if (arg == "--replay-inbound") { if (!(v = next())) return false; out.replay_inbound = v; }
+            else if (arg == "--coordinator") { if (!(v = next())) return false; out.coordinator = v; }
             else if (arg == "--replay-free-cost-clock") out.replay_free_cost_clock = true;
             else if (arg == "--pacer-restart-on-resync") out.pacer_restart_on_resync = true;
             else if (arg == "--join-cue") { if (!(v = next())) return false; out.join_cue = v; }
@@ -1078,6 +1084,7 @@ namespace {
         explicit session_client(arguments args) : args_(std::move(args)) {}
         // Step S6: the copies go before the engine (release_placement).
         ~session_client() {
+            transport_.reset();   // step T1c: a remote transport closes the virtual clock, a member of ours
             if (g_physicalize_client == this) g_physicalize_client = nullptr;
             release_proximity("the client exits");
             release_placement("the client exits");
@@ -1189,6 +1196,8 @@ namespace {
 
         // ------------------------------------------------------------ role
         void run() override {
+            // Step T1c: the run starts; this loop is the one participant.
+            if (remote_) remote_->start(1, [this] { running_ = false; });
             sync_report_clock();
             const auto started = wall_now(bmmo::sim::wall_site::run_start);
             mark_running();
@@ -1273,6 +1282,20 @@ namespace {
         // before the engine boots: the engine changes the working directory.
         bool open_inbound(const std::string& command_line) {
             std::string error;
+            if (!args_.coordinator.empty()) {   // step T1c
+                auto clock = std::make_unique<bmmo::session::virtual_clock>();
+                auto remote = std::make_unique<bmmo::net::remote_transport>(*clock);
+                if (!remote->open(args_.coordinator, 1, args_.name, error)) {
+                    logf("coordinator: %s", error.c_str());
+                    return false;
+                }
+                remote_ = remote.get();
+                clock_owned_ = std::move(clock);
+                clock_ = clock_owned_.get();
+                transport_ = std::move(remote);
+                logf("coordinator: a coordinated run through %s (process %u)", args_.coordinator.c_str(), remote_->index());
+                return true;
+            }
             const int64_t den = static_cast<int64_t>(clock_type::period::den / clock_type::period::num);
             if (!args_.capture_inbound.empty()) {
                 if (!inbound_.open_capture(args_.capture_inbound, command_line, den, error, session_io_strand(),
@@ -4938,6 +4961,7 @@ namespace {
         // (step K3) the capture's recording or replaying twin of it.  The
         // frame-time histogram reads the real clock itself.
         std::unique_ptr<bmmo::session::session_clock> clock_owned_;
+        bmmo::net::remote_transport* remote_ = nullptr;   // step T1c: through transport_
         bmmo::session::session_clock* clock_ = &bmmo::session::real_session_clock();
         uint64_t flow_pass_ = 0;
         uint64_t flow_steps_ = 0;

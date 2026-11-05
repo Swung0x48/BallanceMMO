@@ -1,4 +1,5 @@
 #include "session_runner.hpp"
+#include <net/transport.hpp>
 #include "late_tick.hpp"
 
 #include "CKAll.h"
@@ -2180,6 +2181,7 @@ namespace bmmo::sim {
     // has passed it - so when this thread gets to it never changes what it
     // does, only when the results go out.
     void session_runner::run() {
+        bmmo::net::set_thread_rank(1);   // step T1c: after the network loop in a step's sends
         std::unique_lock lk(mutex_);
         while (!stopping_) {
             // No network thread (the tests, the SimTool): the clock is the mark.

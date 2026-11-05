@@ -22,6 +22,8 @@
 #include <session/io_pool.hpp>   // the session journals' pool (step SIO) and the log's (step IOX)
 #include <session/session_clock.hpp>   // step K1: the main loop and the time broadcast read it in every build
 #include <session/capture_seams.hpp>   // step K4b-ii: --capture-inbound / --replay-inbound
+#include <session/virtual_clock.hpp>   // step T1c: --coordinator
+#include <net/remote_transport.hpp>
 #if BMMO_BUILD_SIM
 #include "sim/session_runner.hpp"
 #include "sim/crash_report.hpp"
@@ -56,6 +58,34 @@ public:
     explicit server(uint16_t port) {
         port_ = port;
     }
+    // The runner and the transport go before the clocks they hold (step T1c:
+    // a coordinated run's runner and transport wait on and close the virtual
+    // clock, a member declared after them).
+    ~server() override {
+        runner_.reset();
+        transport_.reset();
+    }
+
+    // Step T1c (test builds): a coordinated run - the network is the
+    // coordinator's at `address` (net/coordinator.hpp), the time a virtual
+    // clock it advances; the runner runs on it too.  No console.
+    bool open_coordinator(const std::string& address) {
+        auto clock = std::make_unique<bmmo::session::virtual_clock>();
+        auto remote = std::make_unique<bmmo::net::remote_transport>(*clock);
+        std::string error;
+        if (!remote->open(address, 0, "server", error)) {
+            Printf("coordinator: %s", error);
+            return false;
+        }
+        virtual_ = clock.get();
+        remote_ = remote.get();
+        clock_owned_ = std::move(clock);
+        clock_ = clock_owned_.get();
+        transport_ = std::move(remote);
+        Printf("coordinator: a coordinated run through %s (process %u)", address, remote_->index());
+        return true;
+    }
+    bool coordinated() const { return remote_ != nullptr; }
 
     // Every clock read that decides something (step K1, docs/canned-tests-plan.md 3.1 C1): the
     // network thread's here, the runner's through runner_config::clock.  The step-cost
@@ -129,6 +159,9 @@ public:
     // loop through state_mutex_.
     void run() override {
         for (auto* owner: capture_owners_) owner->claim();   // step K4b-ii: this thread's reads are the capture's
+        bmmo::net::set_thread_rank(0);   // step T1c: first in a step's sends
+        // Step T1c: the run starts - this loop and the runner take part.
+        if (remote_) remote_->start(runner_ ? 2 : 1, [this] { running_ = false; });
         // Step K4b-iii: the wall clock a handler on the runner thread reads,
         // counted from here on the logical clock (utc_ms_now).
         steady_origin_ = clock_->now(bmmo::session::clock_site::server_time_origin);
@@ -1130,7 +1163,9 @@ public:
         for (const auto& f: bmmo::session::scan_custom_maps(custom_maps_dir_, &custom_map_md5s_))
             Printf("Physics sessions: custom map %s (md5 %s).", f.path.string(), bmmo::md5::to_hex(f.md5));
         // (The runner keeps the real clock, step K4b-ii: a capture is the
-        // network thread's alone.)
+        // network thread's alone - but a coordinated run's runner is on its
+        // virtual time, step T1c.)
+        if (virtual_) rc.clock = virtual_;
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
                "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s).",
@@ -4991,6 +5026,9 @@ protected:
     bmmo::session::capture_file inbound_;
     std::unique_ptr<bmmo::session::session_clock> clock_owned_;
     std::vector<bmmo::session::capture_owner*> capture_owners_;
+    // Step T1c (open_coordinator): owned through clock_owned_ / transport_.
+    bmmo::session::virtual_clock* virtual_ = nullptr;
+    bmmo::net::remote_transport* remote_ = nullptr;
     // Step K4b (network thread): the current receive pass's instant on the
     // session clock and on the transport's clock (receive_pass).
     std::chrono::steady_clock::time_point poll_at_{};
@@ -5012,13 +5050,14 @@ protected:
 // SAXE).
 static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run,
                       uint32_t& hold_member_ms, int& assign_volley, std::string& capture_inbound,
-                      std::string& replay_inbound) {
-    enum option_values { DryRun = UINT8_MAX + 1, HoldMemberMs, AssignVolley, CaptureInbound, ReplayInbound };
+                      std::string& replay_inbound, std::string& coordinator) {
+    enum option_values { DryRun = UINT8_MAX + 1, HoldMemberMs, AssignVolley, CaptureInbound, ReplayInbound, Coordinator };
 #if !defined(BMMO_SERVER_TEST_FLAGS)
     (void)hold_member_ms;  // the flags exist in test builds only
     (void)assign_volley;
     (void)capture_inbound;
     (void)replay_inbound;
+    (void)coordinator;
 #endif
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
@@ -5031,6 +5070,7 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
         {"assign-volley", required_argument, 0, AssignVolley},
         {"capture-inbound", required_argument, 0, CaptureInbound},
         {"replay-inbound", required_argument, 0, ReplayInbound},
+        {"coordinator", required_argument, 0, Coordinator},
 #endif
         {0, 0, 0, 0}
     };
@@ -5056,6 +5096,7 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
                 puts("      --assign-volley=K\t (test build) K extra UnreliableNoNagle SessionAssign copies in its own pass.");
                 puts("      --capture-inbound=PATH\t (test build) Record the network thread's inputs to PATH (.bmic).");
                 puts("      --replay-inbound=PATH\t (test build) Replay a --capture-inbound file: no network, no pacing.");
+                puts("      --coordinator=HOST:PORT\t (test build) A coordinated run: the coordinator's network and virtual time.");
 #endif
                 return -1;
             case 'v':
@@ -5081,6 +5122,9 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
             case ReplayInbound:
                 replay_inbound = optarg;
                 break;
+            case Coordinator:
+                coordinator = optarg;
+                break;
 #endif
         }
     }
@@ -5093,8 +5137,9 @@ int main(int argc, char** argv) {
     std::string log_path;
     uint32_t hold_member_ms = 0;
     int assign_volley = 0;
-    std::string capture_inbound, replay_inbound;
-    if (parse_args(argc, argv, port, log_path, dry_run, hold_member_ms, assign_volley, capture_inbound, replay_inbound) < 0)
+    std::string capture_inbound, replay_inbound, coordinator;
+    if (parse_args(argc, argv, port, log_path, dry_run, hold_member_ms, assign_volley, capture_inbound, replay_inbound,
+                   coordinator) < 0)
         return 0;
 
     if (port == 0) {
@@ -5152,6 +5197,8 @@ int main(int argc, char** argv) {
         for (int i = 0; i < argc; ++i) command_line += (i ? " " : "") + std::string(argv[i]);
         if (!server.open_inbound(capture_inbound, replay_inbound, command_line))
             return 1;
+        if (!coordinator.empty() && !server.open_coordinator(coordinator))
+            return 1;
     }
 
     printf("Bootstrapping server...\n");
@@ -5159,8 +5206,9 @@ int main(int argc, char** argv) {
     if (!server.setup())
         FatalError("Server failed on setup.");
     std::thread server_thread([&server]() { server.run(); });
-    // Step K4b-ii: a replay ends with its capture; no console.
-    if (server.replaying()) {
+    // Step K4b-ii: a replay ends with its capture; no console.  Step T1c: a
+    // coordinated run ends when the coordinator stops it.
+    if (server.replaying() || server.coordinated()) {
         server_thread.join();
         server::destroy();
         return 0;

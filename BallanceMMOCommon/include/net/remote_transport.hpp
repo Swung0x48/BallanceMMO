@@ -37,12 +37,6 @@
 
 namespace bmmo::net {
 
-    // The sending thread's rank: the coordinator orders one step's ops of a
-    // process by rank, then sequence.  The server's network loop 0, its runner
-    // 1; a thread that sets none is 0.
-    inline thread_local uint8_t t_thread_rank = 0;
-    inline void set_thread_rank(uint8_t rank) { t_thread_rank = rank; }
-
     class remote_transport final : public transport {
     public:
         explicit remote_transport(session::virtual_clock& clock) : clock_(clock), socket_(io_) {}
@@ -185,7 +179,7 @@ namespace bmmo::net {
         bool tagged(coord::op o, const coord::body_out& b) {
             std::lock_guard lk(write_);
             coord::body_out framed;
-            framed.put<uint8_t>(t_thread_rank).put<uint64_t>(++sequence_[t_thread_rank]);
+            framed.put<uint8_t>(thread_rank()).put<uint64_t>(++sequence_[thread_rank()]);
             return coord::write_frame(socket_, o, framed.bytes() + b.bytes());
         }
 

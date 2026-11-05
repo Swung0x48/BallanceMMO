@@ -90,6 +90,14 @@ namespace bmmo::net {
     // local_timestamp, the log's elapsed stamps, the legacy stream's times.
     microseconds process_timestamp();
 
+    // Step T1b: the sending thread's rank in a coordinated run (remote_transport:
+    // the coordinator applies one step's sends of a process by rank, then
+    // sequence).  The server's network loop 0, its runner 1; a thread that sets
+    // none is 0.  Nothing else reads it.
+    inline thread_local uint8_t t_thread_rank = 0;
+    inline void set_thread_rank(uint8_t rank) { t_thread_rank = rank; }
+    inline uint8_t thread_rank() { return t_thread_rank; }
+
     class transport {
     public:
         virtual ~transport() = default;
