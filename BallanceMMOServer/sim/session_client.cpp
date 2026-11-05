@@ -99,6 +99,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
@@ -114,6 +115,10 @@ namespace {
         std::string root;
         std::string server = "127.0.0.1:26676";
         std::string name = "Headless";
+        // --uuid-seed N (step K5, seam C5): the login uuid from N - a canned
+        // test's run is the same bytes twice; without it, from the system
+        // clock, as before (two clients on one machine get two uuids).
+        std::optional<uint64_t> uuid_seed;
         int level = 1;
         // --map FILE (step CMAP): a custom map (BML+'s custom-map loading) loaded into --level's slot; the client
         // announces it as a custom map by the file's md5 instead of the slot's canonical hash.
@@ -560,7 +565,7 @@ namespace {
     constexpr int kLaneSteerOff = -2;       // keep_lane_key: the steer does not act this frame
 
     void usage() {
-        std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N] [--map FILE]\n"
+        std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--uuid-seed N] [--level N] [--map FILE]\n"
                   "       [--record <file.bmrc>] [--journal <file.bmjc>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS | --stall-ms TICK:MS]\n"
                   "       [--play-seconds S] [--notify-tick T ...] (play budget after the first assigned frame; live milestones)\n"
@@ -615,6 +620,7 @@ namespace {
             if (arg == "--root") { if (!(v = next())) return false; out.root = v; }
             else if (arg == "--server") { if (!(v = next())) return false; out.server = v; }
             else if (arg == "--name") { if (!(v = next())) return false; out.name = v; }
+            else if (arg == "--uuid-seed") { if (!(v = next())) return false; out.uuid_seed = std::strtoull(v, nullptr, 10); }
             else if (arg == "--level") { if (!(v = next())) return false; out.level = std::atoi(v); }
             else if (arg == "--map") { if (!(v = next())) return false; out.map = std::filesystem::absolute(v).string(); }   // the engine chdir's into Bin
             else if (arg == "--record") { if (!(v = next())) return false; out.record = v; }
@@ -1365,7 +1371,8 @@ namespace {
                 msg.version = bmmo::current_version;
                 msg.nickname = args_.name;
                 msg.cheated = 0;
-                std::mt19937 rng(static_cast<unsigned>(std::chrono::system_clock::now().time_since_epoch().count()));
+                std::mt19937_64 rng(args_.uuid_seed ? *args_.uuid_seed
+                                                    : static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()));
                 for (auto& byte: msg.uuid) byte = static_cast<uint8_t>(rng());
                 msg.serialize();
                 send_bytes(msg.raw.str(), bmmo::net::kSendReliable);

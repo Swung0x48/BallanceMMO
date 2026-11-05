@@ -7,6 +7,10 @@
 // coordinator advances it to the earliest pending wake (next_wake) once the
 // process has nothing left to do before it.
 //
+// It never starts at 0 (kDefaultStart): a steady value of 0 on the wire means
+// "absent" (a SessionAssign's server_us, a clock ack's), so the session epoch
+// a coordinator picks must be past it.
+//
 // A condition-variable wait rechecks every kRecheck of real time besides being
 // notified: advance_to notifies the waiting variables without the waiters'
 // locks, so a notify can land between a waiter's check and its wait.
@@ -27,8 +31,9 @@ namespace bmmo::session {
     class virtual_clock final : public session_clock {
     public:
         static constexpr auto kRecheck = std::chrono::milliseconds(1);
+        static constexpr time_point kDefaultStart = time_point{} + std::chrono::hours(1);
 
-        explicit virtual_clock(time_point start = time_point{}, int64_t utc_us_at_start = 0)
+        explicit virtual_clock(time_point start = kDefaultStart, int64_t utc_us_at_start = 0)
             : start_(start), now_(start), utc_at_start_(utc_us_at_start) {}
 
         time_point now(clock_site) override {

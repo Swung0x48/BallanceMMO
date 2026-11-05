@@ -464,6 +464,19 @@ ends; 50 repeats clean); the wire check of core_ref_s16 ALL SAME (5 known-stale 
 h1_150 with the server captured: harness PASS, server replay 2641/2641; the K4b acceptance test again: the capture
 replayed plain and with 2 / 5 / 20 ms runner jitter, the live server journal byte for byte all four times. The judge on the live run's four clients: every confirmed row bit-exact, no resync.
 
+As built (K5, 2026-11-05), narrowed by K1-K4: of C5's three inputs, two were already on C1 - the server's steady
+values on the wire (`server_us` in SessionAssign / SessionStartAt / the clock acks) are `instant()`, the logical
+time, and the real-world broadcast reads `clock_->utc_us`; the clients only echo `server_us` and read 0 as absent
+(the start instant they act on, `start_us`, the server maps onto the client's own clock), so under a virtual clock
+they follow its epoch, which `virtual_clock::kDefaultStart` (1 h) keeps past 0. Left: the headless login uuid, from
+the system clock: `--uuid-seed N` takes it from N instead (`mt19937_64`; without it, from the clock as before). Not
+an input of a session (audited): the server's `rand()` for an unnamed login and the console's random-player injection,
+the login time (display), the config's backup names; the mock client's and record parser's randomness. No
+`session::entropy` class: one seed, one consumer. Checked: 811/811; the wire check ALL SAME; two live P-core runs
+(h1_150, 20 s) with seeds 11-14 logged the same four uuids twice (f335fdf1, 64395222, 0f83cba2, 477e8b87), harness
+PASS, server replay exact. "A seeded run byte-identical twice" needs T1's virtual clock: a live run's timing still
+varies.
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |
