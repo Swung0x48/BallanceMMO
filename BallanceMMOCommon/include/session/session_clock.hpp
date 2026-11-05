@@ -54,6 +54,9 @@ namespace bmmo::session {
                                 time_point t, const ready_test& ready) = 0;
         virtual bool wait_for(clock_site site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
                               clock_type::duration d, const ready_test& ready) = 0;
+        // Wakes the waits on `cv` (notify_all; step T1a: a virtual clock also
+        // counts them as running from here, so its idle is exact).
+        virtual void notify(clock_site site, std::condition_variable& cv) = 0;
     };
 
     class real_clock final : public session_clock {
@@ -76,6 +79,7 @@ namespace bmmo::session {
                       clock_type::duration d, const ready_test& ready) override {
             return cv.wait_for(lock, d, ready);
         }
+        void notify(clock_site, std::condition_variable& cv) override { cv.notify_all(); }
     };
 
     // The process's real clock, for a host that is given no other.

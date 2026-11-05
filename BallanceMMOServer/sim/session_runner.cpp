@@ -142,7 +142,7 @@ namespace bmmo::sim {
             std::lock_guard lk(mutex_);
             stopping_ = true;
         }
-        wake_.notify_all();
+        clock_->notify(bmmo::session::clock_site::runner_wait, wake_);
         if (thread_.joinable()) thread_.join();
     }
 
@@ -170,7 +170,7 @@ namespace bmmo::sim {
             commands_.push_back(stamped_command{stamp, std::move(command)});
             ++changes_;
         }
-        wake_.notify_all();
+        clock_->notify(bmmo::session::clock_site::runner_wait, wake_);
     }
 
     void session_runner::jitter() {
@@ -216,7 +216,7 @@ namespace bmmo::sim {
             mark_ = std::max(mark_, at);
             ++changes_;
         }
-        wake_.notify_all();
+        clock_->notify(bmmo::session::clock_site::runner_wait, wake_);
     }
 
     void session_runner::publish_state(const session_state& s) {

@@ -1116,7 +1116,7 @@ public:
                 std::lock_guard lk(poll_mutex_);
                 poll_requested_ = true;
             }
-            poll_cv_.notify_one();
+            clock_->notify(bmmo::session::clock_site::server_loop_wait, poll_cv_);
         };
         // Step CMAP: the custom maps a session may run, resolved before the first world chdir's into Bin.
         custom_maps_dir_ = config_.physics_custom_maps.empty()

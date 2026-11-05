@@ -88,6 +88,52 @@ TEST(VirtualClock, AWaitEndsAtItsTimeOrWhenItsConditionHolds) {
     EXPECT_EQ(clock.waiting(), 0u);
 }
 
+// Step T1a: a wait the clock ends - by notify or by an advance that reaches
+// it - stops counting as waiting at once, so the process is not idle while the
+// woken thread has yet to run; idle again once it waits again.
+TEST(VirtualClock, IdleIsExactAcrossNotifyAndAdvance) {
+    using bmmo::session::clock_site;
+    bmmo::session::virtual_clock clock;
+    const auto t0 = clock.now(clock_site::runner_wait);
+    clock.set_participants(2);
+    std::mutex m;
+    std::condition_variable cv;
+    int work = 0;
+    std::atomic<int> handled{0};
+    std::thread worker([&] {
+        std::unique_lock lk(m);
+        while (work >= 0) {
+            clock.wait_until(clock_site::runner_wait, cv, lk, std::chrono::steady_clock::time_point::max(),
+                             [&] { return work != 0; });
+            if (work > 0) {
+                --work;
+                ++handled;
+            }
+        }
+    });
+    std::thread pacer([&] { clock.sleep_for(clock_site::wait_pace, 15ms); });
+    EXPECT_EQ(clock.wait_idle(), t0 + 15ms) << "both wait; the pacer's is the earliest time";
+    {
+        std::lock_guard lk(m);
+        work = 1;
+    }
+    clock.notify(clock_site::runner_wait, cv);
+    EXPECT_FALSE(clock.idle()) << "woken, not yet run: not idle";
+    EXPECT_EQ(clock.wait_idle(), t0 + 15ms);
+    EXPECT_EQ(handled.load(), 1) << "idle only after the worker handled it and waited again";
+    clock.advance_to(t0 + 15ms);
+    EXPECT_FALSE(clock.idle()) << "the pacer's wait ended";
+    pacer.join();
+    clock.set_participants(1);
+    EXPECT_EQ(clock.wait_idle(), std::nullopt) << "the worker waits for nothing but work";
+    {
+        std::lock_guard lk(m);
+        work = -1;
+    }
+    clock.notify(clock_site::runner_wait, cv);
+    worker.join();
+}
+
 TEST(InputBuffer, TakesFreshFramesAndFallsBackToLast) {
     input_buffer buffer;
     buffer.reset(0);

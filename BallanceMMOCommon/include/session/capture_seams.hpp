@@ -65,6 +65,7 @@ namespace bmmo::session {
                       clock_type::duration d, const ready_test& ready) override {
             return live_.wait_for(site, cv, lock, d, ready);
         }
+        void notify(clock_site site, std::condition_variable& cv) override { live_.notify(site, cv); }
         capture_owner owner;
 
     private:
@@ -99,6 +100,7 @@ namespace bmmo::session {
                       clock_type::duration d, const ready_test& ready) override {
             return own_.wait_for(site, cv, lock, d, ready);
         }
+        void notify(clock_site site, std::condition_variable& cv) override { own_.notify(site, cv); }
         capture_owner owner;
 
     private:

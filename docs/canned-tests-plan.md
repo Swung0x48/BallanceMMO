@@ -554,12 +554,23 @@ protocol (Common, a unit test over a socket pair); T1c the coordinator exe (Ball
 Decided (the user, 2026-11-05: "还是按照你的推荐来吧", after weighing one process with the roles linked in as
 libraries - set aside: the IVP random state and the Random hook are process-global, several CK contexts in one process
 are unverified, and their steps would have to take turns): separate processes, the coordinator in C++, TCP through
-asio, the fixed rewind cost 3.0 ms + 0.46 ms a tick. The options as they were put:
+asio, the fixed rewind cost adjustable (the coordinator's `--rewind-cost R:P`, passed to every client, a
+per-client override; default 3.0 ms + 0.46 ms a tick - the user: "回滚耗时需要是可调的，那个只是默认值"). The options as
+they were put:
 1. Language of the coordinator: C++ (reuses `sim_network` as is; recommended) or Python (thin, but re-implements the
    connection model).
 2. The IPC: TCP on localhost through asio (already a submodule; works the same on Windows and Linux; recommended).
 3. The fixed rewind cost for T1 runs (K6, decision 1): LBM's x64 measurement, 3.0 ms + 0.46 ms a tick (cap 92;
    recommended), or another.
+
+As built (T1a, 2026-11-05): `session_clock::notify(site, cv)` (real: `notify_all`; the capture twins forward); the
+host notifies that end a participant's wait go through it (the runner's post, mark and stop; the server's poll
+request). `virtual_clock` rewritten around exact idle: a wait the clock ends (notify, or an advance_to reaching its
+time) counts as running at once and counts as waiting again only when its thread re-arms it (a generation per wait
+closes the race between a waiter's check and its wait); `set_participants(n)`, `wait_idle()` (blocks until all n wait,
+returns the earliest time one waits for), `idle()`, `next_wake()`, `waiting()`. Checked: 814/814 (one new: idle is
+false between a notify and the woken thread's next wait, and between an advance and the sleeper's end; 30 repeats
+clean); the wire check ALL SAME. No live run (the main session's trial games).
 
 ## 4. Decisions
 
