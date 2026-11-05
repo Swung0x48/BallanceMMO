@@ -177,7 +177,7 @@ namespace bmmo::game {
         // them, and an empty selection can be given and classify() called
         // when the selection exists).  The log lines are in describe().
         std::string rewire(CKContext* context, probe_class which, const script_replay::selection& sel,
-                           const rewire_options& options) {
+                           const rewire_options& options, const script_replay_hooks& hooks = {}) {
             // Step G3 (WG1's note): a host that anchors again on the same
             // level (a retail session after another, a resync's re-anchor)
             // gives the previous rewire's sources back first - clear() alone
@@ -196,7 +196,9 @@ namespace bmmo::game {
             // test like the originals, and named by slot).
             std::string error;
             if (options_.slots > 0) {
-                error = copy_units(context, sel);
+                script_replay_hooks anchor_hooks = hooks;
+                anchor_hooks.slots = nullptr;
+                error = copy_units(context, sel, anchor_hooks);
                 lines_.insert(lines_.end(), unit_lines_.begin(), unit_lines_.end());
             }
             if (error.empty()) error = rewire_probes(context, sel);
@@ -278,7 +280,7 @@ namespace bmmo::game {
             // "Frame").
             std::vector<int> choice(probes_.size(), -1);
             for (size_t i = 0; i < probes_.size(); ++i) {
-                const probe& p = probes_[i];
+                probe& p = probes_[i];
                 if (p.slot >= 0) {
                     const int k = slot_ball(p.slot);
                     choice[i] = k;
@@ -287,6 +289,7 @@ namespace bmmo::game {
                     const VxVector position(balls[static_cast<size_t>(k)].position[0], balls[static_cast<size_t>(k)].position[1],
                                             balls[static_cast<size_t>(k)].position[2]);
                     frame->SetPosition(&position);
+                    p.at_anchor = false;
                     continue;
                 }
                 if (balls.empty()) continue;
@@ -366,8 +369,9 @@ namespace bmmo::game {
                 std::memcpy(&u, &v, 4);
                 u32(u);
             };
-            u16(static_cast<uint16_t>(probe_order_.size()));
-            for (size_t i: probe_order_) {
+            const auto frames = held_probes();
+            u16(static_cast<uint16_t>(frames.size()));
+            for (size_t i: frames) {
                 VxVector v(0.0f, 0.0f, 0.0f);
                 if (auto* frame = context ? CK3dEntity::Cast(context->GetObject(probes_[i].frame)) : nullptr)
                     frame->GetPosition(&v);
@@ -407,8 +411,9 @@ namespace bmmo::game {
                 std::memcpy(&u, &v, 4);
                 for (int s = 0; s < 32; s += 8) out.push_back(static_cast<uint8_t>(u >> s));
             };
-            u16(static_cast<uint16_t>(probe_order_.size()));
-            for (size_t i: probe_order_) {
+            const auto frames = held_probes();
+            u16(static_cast<uint16_t>(frames.size()));
+            for (size_t i: frames) {
                 VxVector v(0.0f, 0.0f, 0.0f);
                 if (auto* frame = context ? CK3dEntity::Cast(context->GetObject(probes_[i].frame)) : nullptr)
                     frame->GetPosition(&v);
@@ -475,8 +480,9 @@ namespace bmmo::game {
                 out.push_back(static_cast<uint8_t>(v));
                 out.push_back(static_cast<uint8_t>(v >> 8));
             };
-            put16(static_cast<uint16_t>(probe_order_.size()));
-            for (size_t i: probe_order_) {
+            const auto held_frames = held_probes();
+            put16(static_cast<uint16_t>(held_frames.size()));
+            for (size_t i: held_frames) {
                 const auto it = frames_at.find(probes_[i].frame_name);
                 if (it == frames_at.end()) { error = "the server's hold has no frame " + probes_[i].frame_name; out.clear(); return false; }
                 out.insert(out.end(), data + it->second, data + it->second + 12);
@@ -512,9 +518,10 @@ namespace bmmo::game {
                 return false;
             }
             const uint16_t frames = u16();
-            if (frames != probe_order_.size() || !need(static_cast<size_t>(frames) * 12 + 2)) {
+            const auto held_frames = held_probes();
+            if (frames != held_frames.size() || !need(static_cast<size_t>(frames) * 12 + 2)) {
                 error = "proximity hold section: " + std::to_string(frames) + " frames, this world has "
-                        + std::to_string(probe_order_.size());
+                        + std::to_string(held_frames.size());
                 return false;
             }
             std::vector<VxVector> positions(frames);
@@ -533,9 +540,21 @@ namespace bmmo::game {
                         + std::to_string(by_name.size());
                 return false;
             }
-            for (uint16_t f = 0; f < frames; ++f)
-                if (auto* frame = CK3dEntity::Cast(context->GetObject(probes_[probe_order_[f]].frame)))
+            for (uint16_t f = 0; f < frames; ++f) {
+                probe& held = probes_[held_frames[f]];
+                if (auto* frame = CK3dEntity::Cast(context->GetObject(held.frame))) {
                     frame->SetPosition(&positions[f]);
+                    held.at_anchor = false;
+                }
+            }
+            for (probe& held: probes_)
+                if (held.slot >= 0 && !recorded_slots_.bound(static_cast<uint8_t>(held.slot)) && !held.at_anchor) {
+                    if (auto* frame = CK3dEntity::Cast(context->GetObject(held.frame))) {
+                        const VxVector anchor(options_.reset[0], options_.reset[1], options_.reset[2]);
+                        frame->SetPosition(&anchor);
+                    }
+                    held.at_anchor = true;
+                }
             for (size_t n = 0; n < by_name.size(); ++n) {
                 identity& r = identities_[by_name[n]];
                 const CK_ID held = static_cast<CK_ID>(u32());
@@ -688,6 +707,7 @@ namespace bmmo::game {
             return n;
         }
         uint64_t unslotted() const { return unslotted_; }
+        script_slots& recorded_slots() { return recorded_slots_; }
         // The record bytes the copies add (each copy's blocks as the v2
         // record writes them, measured at the copy step; C1).
         size_t copy_record_bytes() const { return copy_record_bytes_; }
@@ -718,7 +738,7 @@ namespace bmmo::game {
         // "player mechanisms: K slots, U units, C copies, +B record bytes" (C1).
         std::string units_summary() const {
             return "player mechanisms: " + std::to_string(slots_) + " slots, " + std::to_string(units_.size()) + " units, "
-                   + std::to_string(copy_count()) + " copies, +" + std::to_string(copy_record_bytes_) + " record bytes";
+                   + std::to_string(copy_count()) + " copies, +" + std::to_string(copy_record_bytes_) + " record bytes at full capacity";
         }
 
     private:
@@ -731,6 +751,7 @@ namespace bmmo::game {
             int axes = -1, use_outputs = -1, barycenter = -1;
             bool mechanism = false;
             int slot = -1;   // step Q7: a unit's probe: its slot (walk = the original's pre-copy position)
+            bool at_anchor = true;
         };
         struct identity {
             CK_ID block = 0, array = 0, parameter = 0, root = 0;
@@ -787,6 +808,7 @@ namespace bmmo::game {
             unslotted_ = 0;
             units_.clear();
             unit_blocks_.clear();
+            recorded_slots_.clear();
             force_alias_.clear();
             unit_lines_.clear();
             slots_ = 0;
@@ -1185,6 +1207,7 @@ namespace bmmo::game {
         };
         std::vector<unit_rec> units_;
         std::map<CK_ID, slot_ref> unit_blocks_;   // every block of a unit and of its copies
+        script_slots recorded_slots_;
         std::map<CK_ID, std::string> force_alias_;
         std::vector<std::string> unit_lines_;
         uint8_t slots_ = 0;
@@ -1194,6 +1217,12 @@ namespace bmmo::game {
         // The by-name copies with a hold entry (§4.2): a slot's by-name cell
         // has none (§2.10: it is BMMO_NoBall or the candidate's type, a
         // function of the tick).
+        std::vector<size_t> held_probes() const {
+            std::vector<size_t> out;
+            for (size_t index: probe_order_)
+                if (probes_[index].slot < 0 || recorded_slots_.bound(static_cast<uint8_t>(probes_[index].slot))) out.push_back(index);
+            return out;
+        }
         std::vector<size_t> held_identities() const {
             std::vector<size_t> out;
             for (size_t i: identity_order_)
@@ -1477,7 +1506,7 @@ namespace bmmo::game {
         // links and operations with it), added to the unit's graph, and
         // linked by the rules (inside, fan-out, fan-in; the original's
         // initial delay).
-        std::string copy_units(CKContext* context, const script_replay::selection& sel) {
+        std::string copy_units(CKContext* context, const script_replay::selection& sel, const script_replay_hooks& hooks) {
             namespace mu = session::units;
             slots_ = options_.slots;
             CKObject* ball_frame = context->GetObjectByNameAndParentClass(const_cast<CKSTRING>("Ball_Pos_Frame"), CKCID_3DENTITY, nullptr);
@@ -1637,14 +1666,21 @@ namespace bmmo::game {
             dependencies[CKCID_OBJECT] = CK_DEPENDENCIES_COPY_OBJECT_NAME;   // the originals' names, unchanged
             for (uint8_t k = 1; k < slots_; ++k)
                 for (size_t u = 0; u < plans.size(); ++u) {
-                    const std::string error = copy_unit(context, plans[u], units_[u], k, dependencies);
+                    const std::string error = copy_unit(context, plans[u], units_[u], k, dependencies, hooks);
                     if (!error.empty()) return error;
+                }
+            for (const auto& plan: plans)
+                for (uint32_t id: plan.unit.copy_roots()) {
+                    std::vector<uint8_t> bytes;
+                    script_replay::capture_script_block(CKBehavior::Cast(context->GetObject(id)), hooks, bytes);
+                    recorded_slots_.add(id, 0, std::move(bytes));
                 }
             lines_.push_back(units_summary());
             return {};
         }
 
-        std::string copy_unit(CKContext* context, const unit_plan& p, unit_rec& rec, uint8_t k, CKDependencies& dependencies) {
+        std::string copy_unit(CKContext* context, const unit_plan& p, unit_rec& rec, uint8_t k, CKDependencies& dependencies,
+                              const script_replay_hooks& hooks) {
             namespace mu = session::units;
             const mu::graph_model& m = *p.model;
             const mu::unit& u = p.unit;
@@ -1765,8 +1801,9 @@ namespace bmmo::game {
             }
             for (CK_ID id: c.roots) {
                 std::vector<uint8_t> bytes;
-                script_replay::capture_script_block(CKBehavior::Cast(context->GetObject(id)), script_replay_hooks{}, bytes);
+                script_replay::capture_script_block(CKBehavior::Cast(context->GetObject(id)), hooks, bytes);
                 copy_record_bytes_ += bytes.size() + 1;   // + the child's presence byte
+                recorded_slots_.add(id, k, std::move(bytes));
             }
             std::vector<CK_ID> copy_roots(c.roots.begin(), c.roots.end());
             const uint64_t structure = structure_of(context, rec.root, copy_roots, c.links, c.operations);
@@ -1806,6 +1843,7 @@ namespace bmmo::game {
             units_.clear();
             unit_blocks_.clear();
             force_alias_.clear();
+            recorded_slots_.clear();
         }
     };
 

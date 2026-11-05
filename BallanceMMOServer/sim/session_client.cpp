@@ -1983,7 +1983,7 @@ namespace {
                     };
                 return bmmo::game::localize_session_scripts(engine_->context(), scripts_, portable, anchor, out, error, report,
                                                             trafo_on_ ? &trafo_registry_.part() : nullptr,
-                                                            core_.proximity_union_active() ? &hold : nullptr);
+                                                            core_.proximity_union_active() ? &hold : nullptr, script_hooks_.slots);
             };
             p.forget_activations_from = [this](uint32_t tick) {
                 const size_t activations = manager_activations_.forget_from(tick);
@@ -2972,7 +2972,9 @@ namespace {
             // Step Q7 (world-agreement-gaps-design.md 2.10): the per-player
             // units copied K times under WORLD_PLAYER_MECHANISMS.
             options.slots = core_.mechanism_slots();
-            const std::string error = proximity_.rewire(context, bmmo::game::probe_class::mechanism, sel, options);
+            const std::string error = proximity_.rewire(context, bmmo::game::probe_class::mechanism, sel, options, script_hooks_);
+            script_hooks_.slots = proximity_.slots() ? &proximity_.recorded_slots() : nullptr;
+            proximity_.recorded_slots().select(bmmo::session::bound_member_slots(core_.member_lives(), core_.next_tick()));
             for (const std::string& line: proximity_.lines()) logf("%s", line.c_str());
             if (!error.empty()) {
                 logf("the proximity union (world option) refused: %s", error.c_str());
@@ -4676,6 +4678,7 @@ namespace {
                 so.context = engine_->context();
                 so.scripts = &scripts_;
                 so.hooks = &script_hooks_;
+                so.bound_slots = [this](uint32_t tick) { return bmmo::session::bound_member_slots(core_.member_lives(), tick); };
                 so.scripts_replayed = &scripts_replayed_;
                 so.reset_ticks = &script_reset_ticks_;
                 so.reset_skips = &script_reset_skips_;
