@@ -433,6 +433,20 @@ the judge exact on all four clients; **the acceptance test passes**: the capture
 perturbed (BMMO_RUNNER_JITTER 2 / 5 / 20 ms before every command and step) gives the live server journal byte for
 byte all four times (12,337,074 bytes). Not run: LBM (next, before K4c).
 
+LBM on K4b (2026-11-05, the user: "Run LBM now"; base bc2cc076, LBM5's 19 headless twin arms + the 2 retail L11
+arms, on this branch's own Arch server, Windows headless clients and x86 retail client, compared arm by arm with the
+main line's LBM5): all 38 headless twins FINAL exact and server replay exact; every one of LBM5's 11 open failures
+passes on the flags-on twin (a6m_death c1 rollback ticks / late-ball rewinds, a4_swing_seed2 c3's resync, a8_r1..r3's
+late-ball rewinds: the late frames are now judged by their arrival, so the server's own queueing no longer makes them
+later); new raw failures: only three "own ball 0.0000" LOCAL items in the 10 %-loss A4 swing arms (LBM5's carried
+class B, a different client per run); two timing items seen in overlap windows (A6M's server TICK gap, A8:r1's
+joiner lead on an rtt tick boundary, 516.2 ms) did not recur in quiet reruns. Retail L11 ctl and raised: both
+clients' FINAL rows exact (own, mirror, 46k body rows), no missing rows, server replay exact, the raised arm's one
+lead decision identical to the main line's. The first retail run of this branch (K2's transport, K3, K4b). Overlap
+with the main session's work logged (.local-tools/work/LBM5/contention.log); none of the reported results comes from
+an arm whose criterion it could explain. Harness notes for a rerun: the Arch journal mirror must copy .bmjs; the
+retail chain's data files and scripts/retail/server must exist in the tree that runs it.
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |
