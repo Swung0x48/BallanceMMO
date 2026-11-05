@@ -209,7 +209,17 @@ SimTool, tests, mock client, record parser) and x86 build; live smoke on P-cores
 h1_150): harness PASS, server replay 2641/2641, the judge exact on all four clients' FINAL rows, the server's
 connection-request and closed-by-peer lines as before. Not run: LBM, a retail session, the mock client and the
 record parser against a server. The received time stays on the transport's clock (as the library's was); its
-mapping onto C1 waits for the stage 1 coordinator.
+mapping onto C1 waits for the stage 1 coordinator. Also live (00:25:09-00:25:58, 2 clients, 30 s, no proxy,
+`BMMO_FAKE_LAG_MS=75`): the transport's fake lag took (both clients logged it), the server's status read a
+150 ms round trip and sized the room's input delay from it (9 ticks), harness PASS, replay 1981/1981.
+Unexercised GNS adapter paths: accept refused / no receive set, the retail `net lag` / `net blackout` verbs,
+`connection_timeout_ms`.
+
+Two limits of `sim_network` for stage 1: it is single-threaded (today's server sends from its runner thread
+too, so it can carry the server only once K4 runs the server's two loops from one thread), and its loss
+draws come from `std::uniform_real_distribution`, which differs between standard libraries: "same seed, same
+losses" holds within one build; a coordinator mixing a Linux server with Windows clients needs its own
+generator.
 
 ### 3.3 The tools (thin, after the seams)
 
