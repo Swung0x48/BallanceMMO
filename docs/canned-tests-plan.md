@@ -34,7 +34,7 @@ A client's TICK hash holds its predictions and is not rewritten after a rollback
 worlds hold different body sets (names, mirrors, per-world airship), so the judges compare bodies
 (`scripts/first_divergence.py` keys a ball by its owner, a body by its name), never hashes.
 
-## 2. Stages
+## 2. Stages (goals; built from the seams of section 3)
 
 | | 0 offline judge | 1 event-driven | 2 black-box re-drive | 3 retail capture |
 |---|---|---|---|---|
@@ -130,11 +130,66 @@ locked frame time before the anchor (fixed_tick.cpp:61-64); mouse, ImGui, consol
 further inputs. Recordings die with every behaviour change and need a human to make: a debugging tool, not a
 regression library.
 
-## 3. Decisions
+## 3. Order of work (revised 2026-11-04): the seams in core first, the tools last
+
+The user's rule: the changes that carry risk for the shipped product come first, built once in
+BallanceMMOCommon (DRY across the server, the headless client and the retail client), observable, and split
+behind narrow interfaces (GNS among them); the stage tools come after, each a thin layer over those seams.
+
+Today every host does its own: the headless client records and replays its clock and messages itself
+(`session_client.cpp:2336` wall_now, `inbound_capture.hpp`), the retail host ignores the clock sites
+(`core_host.cpp:4182`), the server reads `steady_clock` directly (~30 places) and mixes it with GNS's own
+clock (`server.cpp:2400-2405`), and all three hold a raw `ISteamNetworkingSockets*` (`role.hpp:60`) with a
+static callback trampoline (`role.hpp:125-144`). The seams below replace those per-host copies.
+
+### 3.1 The seams (product code, BallanceMMOCommon)
+
+| | seam | what it owns | production implementation | other implementations | observable through |
+|---|---|---|---|---|---|
+| C1 | `session::clock` | every clock read that decides something, by site: `now(site)`, `utc_ms(site)`, `wait_until(t)`; one site enum for every process (the client's `clock_site`, append-only, gains the server's sites) | `steady_clock` / `system_clock`, as today | recorder, replayer, virtual (coordinator) | C3 |
+| C2 | `net::transport` | the GNS calls the code uses (listen, connect, accept, close with linger, send by mode, receive, status changes, ping), a message as `{connection, bytes, received_at}` with `received_at` already on C1's clock; connection handles it hands out | `gns_transport`: GNS init/kill, the callback registry instead of `role::this_instance_` | recorder, replayer, simulated (coordinator) | C3 |
+| C3 | `session::tap` | one typed record stream of every outside input a process takes (a C1 read, a C2 message or status change, a loop pass, a C8 input) and every send; the capture file is one consumer, `--trace-sends` another | off (no consumer: one branch per call) | capture writer (`.bmic` v2, any process), send trace, live counters | - |
+| C4 | `pump(now) -> next_due` | each loop's work of one instant: the server's network pass and its runner pass (today two threads racing, `session_runner.cpp:1980-1997`), the headless pacer, the retail fixed-tick driver | the same threads as today, each calling its pump and waiting `wait_until(next_due)` | the coordinator calls the pumps one after another at its instants | `next_due` |
+| C5 | `session::entropy` + wire epoch | the login uuid's seed (`session_client.cpp:1376`), the server's steady-epoch values on the wire (`server.cpp:2063-2065`) counted from C1's session epoch, the system-time broadcast (`server.cpp:4725`) through C1 | random seed, real epoch | a seed from the recipe, epoch 0 | C3 |
+| C6 | `session::cost_model` | the rewind cost the reach cap is sized from (`rollback.hpp:723-766`, sites rewind_*) | the measurement, as today | a fixed model (decision 1) | C3 |
+| C7 | the retail host's own outside inputs | the direct clock reads (`fixed_tick.cpp:87-108`, the deadlines, the 3-2-1, `core_host.cpp:2645, 5323`), Virtools `GetTime()` in mod state (`BallanceMMOClient.cpp:406, 436, 627, 716`), logic on the network thread (`BallanceMMOClient.cpp:1971-1973, 2252-2267`), state changes in `OnRender` (`core_host.cpp:2845, 2970-3126, 3583-3650`), the keyboard buffer (`session/input_injector.cpp`, already hooked) | through C1, C2 and C3; network-thread logic moved to the game thread's C2 receive | the C3 recorder / replayer | C3 |
+| C8 | own-input source in the core | where the own ball's frame of a tick comes from: the platform's poll (today), or an injected frame keys + camera, journaled FRESH and sent (the forced-frame path, `client_core_held.cpp:322, 666, 674`, `client_core_frame.cpp:915-931`, made a public, test-only source) | the poll, as today | a recipe's frames | C3 |
+
+Every seam lands with today's behaviour as its production implementation and is proven unchanged before
+anything uses its other implementations: unit tests, the wire check of core_ref_s16
+(`NEW_EXTRA=--no-final-checkpoints`: sends and journals identical), the server journal replay N/N, and for
+C4 / C7 (timing) the LBM arms.
+
+### 3.2 Steps
+
+| step | seam | touches | risk for the product | done when |
+|---|---|---|---|---|
+| K1 | C1 clock | server.cpp + session_runner (~30 reads), the headless wall_now (moves into C1), the retail p.now (sites honoured) | a missed or mis-routed read moves a deadline | every read in the three hosts goes through C1 (a grep has no `steady_clock::now` left outside C1 and the diagnostics); wire check identical; LBM PASS |
+| K2 | C2 transport | role.hpp, the server's sends / receives / callbacks, client.h, session_client.cpp | message lifetime, callback order (messages before status changes), linger | the three hosts hold a `net::transport`; GNS calls only in `gns_transport`; wire check identical; LBM PASS; a unit test pair over the simulated transport |
+| K3 | C3 tap + capture v2 | the headless inbound capture becomes C3's writer and a C1 / C2 replayer; the server and the retail host get the same recorder | capture cost on the hot path when off (must be a branch) | core_ref_s16's `.bmic` files still replay (v1 read) and a new v2 capture of each host replays its own run bit for bit |
+| K4 | C4 pumps | session_runner's loop, the server's network loop, the headless pacer, the retail driver | the server's threading: input arrival vs the tick's take, the cutoff, a deadlock | the same two server threads call the pumps; wire check identical; server journal replay N/N; LBM PASS (timing criteria at S = 1) |
+| K5 | C5 entropy + epoch | the login uuid, the wire's steady values, the broadcast | the clients use those values as differences only (`client_core.cpp:951-1046`; 0 means absent) - to verify; a value change on the wire may need a protocol bump | production bytes unchanged in meaning; a test run with a seed is byte-identical twice |
+| K6 | C6 cost model | rollback's rewind timer | none in production (the measurement stays) | the fixed model in unit tests |
+| K7 | C7 retail host | fixed_tick, core_host, BallanceMMOClient network handlers and render callbacks | the retail feel and stability (highest retail risk) | a retail run (with the user's go-ahead) PASS on LBM's retail arms; a retail capture replays its own run bit for bit |
+| K8 | C8 own-input source | the client core's forced-frame path | the server's substitutions use the same path | unit tests; wire check identical |
+
+K1-K6 and K8 are shared by every stage; K7 serves stage 3 only and can wait for the user's call on stage 3.
+
+### 3.3 The tools (thin, after the seams)
+
+| tool | built on | does |
+|---|---|---|
+| T0 `scripts/journal_judge.py` (done) | the journals | judges any run |
+| T1 coordinator | C1 virtual + C2 simulated + C4 `next_due` + C5 seed + C6 model | starts the server and N headless clients, owns the one clock and the link model (the harness proxy's), advances to the earliest `next_due`; stage 1 |
+| T2 recipe | C8 + T1 | extracts each player's frames, joins and leaves from a journal into a recipe, runs it in T1; stage 2 |
+| T3 capture replay | C3 + C1 / C2 replayers | replays any process's v2 capture (the server's too); for retail inside Player.exe with renders skipped; method B and stage 3 |
+
+## 4. Decisions
 
 Taken: stage 0 first (user, 2026-11-04); journal version 10 with `.bmjs` / `.bmjc` (user); 0b as FINAL rows
 by default at the checkpoint cadence (recommendation; the alternative, a per-tick hash over the bodies both
-sides share, needs one shared-set definition on every side and is left open).
+sides share, needs one shared-set definition on every side and is left open); SessionJournal off by default
+in retail (user); the seams before the tools (user).
 
 Open:
 1. Stage 1's rewind cost: the real measurement (the real cap, not reproducible) or a fixed model
@@ -142,7 +197,10 @@ Open:
 2. The retail scaled clock (old VC4): kept or dropped.
 3. The black-box library's first members: core_ref arms' server journals, the user's play journals (retail
    keeps the last 10 in `ModLoader/BMMOJournals`).
+4. One clock-site enum for every process (the client's, append-only, gains the server's sites) or one per
+   process (recommended: one, so the capture format is one).
+5. K7 (the retail host) now, or with stage 3.
 
-## 4. Not covered by any stage
+## 5. Not covered by any stage
 GNS internals (retransmit, Nagle, timeouts), CPU stalls (zero virtual time unless charged), and retail-only
 code outside stage 3: the real-time harness and the LBM arms stay for those.
