@@ -1,9 +1,4 @@
-#include <steam/steamnetworkingsockets.h>
-#include <steam/isteamnetworkingutils.h>
 
-#ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
-#include <steam/steam_api.h>
-#endif
 
 #ifdef _WIN32
 #include <io.h>
@@ -47,33 +42,28 @@ class record_replayer: public role {
 public:
     explicit record_replayer(uint16_t port) {
         port_ = port;
-        set_logging_level(k_ESteamNetworkingSocketsDebugOutputType_Important);
+        set_logging_level(bmmo::log_type::important);
     }
 
-    EResult send(const bmmo::net::connection destination, void* buffer, size_t size, int send_flags, int64* out_message_number = nullptr) {
-        return interface_->SendMessageToConnection(destination,
-                                                   buffer,
-                                                   size,
-                                                   send_flags,
-                                                   out_message_number);
+    bool send(const bmmo::net::connection destination, void* buffer, size_t size, int send_flags) {
+        return transport_->send(destination, buffer, size, send_flags);
 
     }
 
     template<bmmo::trivially_copyable_msg T>
-    EResult send(const bmmo::net::connection destination, T msg, int send_flags, int64* out_message_number = nullptr) {
+    bool send(const bmmo::net::connection destination, T msg, int send_flags) {
         static_assert(std::is_trivially_copyable<T>());
         return send(destination,
                     &msg,
                     sizeof(msg),
-                    send_flags,
-                    out_message_number);
+                    send_flags);
     }
 
     void broadcast_message(void* buffer, size_t size, int send_flags, const bmmo::net::connection ignored_client = bmmo::net::kInvalidConnection) {
         std::lock_guard lk(state_mutex_);
         for (const auto& i: clients_)
             if (ignored_client != i.first)
-                send(i.first, buffer, size, send_flags, nullptr);
+                send(i.first, buffer, size, send_flags);
     }
 
     template<bmmo::trivially_copyable_msg T>
@@ -336,20 +326,9 @@ public:
         Printf("Record end time: \t%s", time_str);
 
         if (!init_) {
-            SteamNetworkingIPAddr local_address{};
-            local_address.Clear();
-            local_address.m_port = port_;
-            SteamNetworkingConfigValue_t opt = generate_opt();
-
-            listen_socket_ = interface_->CreateListenSocketIP(local_address, 1, &opt);
-            if (listen_socket_ == k_HSteamListenSocket_Invalid) {
-                return false;
-            }
-
-            poll_group_ = interface_->CreatePollGroup();
-            if (poll_group_ == k_HSteamNetPollGroup_Invalid) {
-                return false;
-            }
+            if (!transport_->listen(port_)) {
+            return false;
+        }
 
             init_ = true;
         }
@@ -495,7 +474,7 @@ public:
         {
             std::lock_guard lk(state_mutex_);
             for (const auto& i: clients_)
-                interface_->CloseConnection(i.first, k_ESteamNetConnectionEnd_App_Min + 150 + 3, "Seeking data, please wait", true);
+                transport_->close(i.first, bmmo::net::kEndApp + 150 + 3, "Seeking data, please wait", true);
         }
         seeking_ = true;
         if (dest_time <= current_record_time_) {
@@ -512,11 +491,11 @@ public:
 
     void shutdown(int reconnection_delay = 0) {
         Printf("Shutting down...");
-        int nReason = reconnection_delay == 0 ? 0 : k_ESteamNetConnectionEnd_App_Min + 150 + reconnection_delay;
+        int nReason = reconnection_delay == 0 ? 0 : bmmo::net::kEndApp + 150 + reconnection_delay;
         {
             std::lock_guard lk(state_mutex_);
             for (const auto& i: clients_)
-                interface_->CloseConnection(i.first, nReason, "Server closed", true);
+                transport_->close(i.first, nReason, "Server closed", true);
         }
         running_ = false;
         playing_ = false; // let the player thread fall out of its loop
@@ -567,7 +546,7 @@ public:
 
         msg.crashed = (type >= bmmo::connection_end::Crash && type < bmmo::connection_end::PlayerKicked_Max);
 
-        interface_->CloseConnection(client, type, kick_notice.c_str(), true);
+        transport_->close(client, type, kick_notice.c_str(), true);
         msg.serialize();
         broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
 
@@ -626,18 +605,10 @@ public:
 
 
     int poll_incoming_messages() override {
-        int msg_count = interface_->ReceiveMessagesOnPollGroup(poll_group_, incoming_messages_, ONCE_RECV_MSG_COUNT);
-        if (msg_count == 0)
-            return 0;
-        else if (msg_count < 0)
+        const int msg_count = transport_->receive([this](const bmmo::net::message& msg) { on_message(msg); },
+                                                  ONCE_RECV_MSG_COUNT);
+        if (msg_count < 0)
             FatalError("Error checking for messages.");
-        assert(msg_count > 0);
-
-        for (int i = 0; i < msg_count; ++i) {
-            on_message(incoming_messages_[i]);
-            incoming_messages_[i]->Release();
-        }
-
         return msg_count;
     }
 
@@ -668,7 +639,7 @@ private:
                 // auto* raw_msg = reinterpret_cast<bmmo::general_message*>(entry.data);
                 // Printf("Time: %7.2lf | Code: %2u | Size: %4d\n", current_record_time_ / 1e6, raw_msg->code, entry.size);
 
-                const auto current_timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+                const auto current_timestamp = transport_->local_timestamp();
                 if (current_timestamp - last_realworld_timestamp_ > 4194304) { // 4.194304 seconds
                     broadcast_record_realworld_timestamp();
                     last_realworld_timestamp_ = current_timestamp;
@@ -731,21 +702,22 @@ private:
         broadcast_message(bmmo::real_world_timestamp_msg{.content = timestamp}, bmmo::net::kSendReliable);
     }
 
-    void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override {
+    void on_connection_status_changed(const bmmo::net::status_change& change) override {
+        const auto* pInfo = &change;
         std::lock_guard lk(state_mutex_);
-        switch (pInfo->m_info.m_eState) {
-            case k_ESteamNetworkingConnectionState_None:
+        switch (pInfo->state) {
+            case bmmo::net::connection_state::none:
                 // NOTE: We will get callbacks here when we destroy connections.  You can ignore these.
-            case k_ESteamNetworkingConnectionState_ClosedByPeer:
-            case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: {
+            case bmmo::net::connection_state::closed_by_peer:
+            case bmmo::net::connection_state::problem_detected_locally: {
                 // Ignore if they were not previously connected.  (If they disconnected
                 // before we accepted the connection.)
-                if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connected) {
+                if (pInfo->old_state == bmmo::net::connection_state::connected) {
                     // Select appropriate log messages
                     const char* pszDebugLogAction;
-                    if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
+                    if (pInfo->state == bmmo::net::connection_state::problem_detected_locally) {
                         pszDebugLogAction = "problem detected locally";
-                    } else if (pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer) {
+                    } else if (pInfo->state == bmmo::net::connection_state::closed_by_peer) {
                         // Note that here we could check the reason code to see if
                         // it was a "usual" connection or an "unusual" one.
                         pszDebugLogAction = "closed by peer";
@@ -757,16 +729,16 @@ private:
                     // as the connection description, it will show up, along with their
                     // transport-specific data (e.g. their IP address)
                     Printf( "[%s] %s (%d): %s\n",
-                            pInfo->m_info.m_szConnectionDescription,
+                            pInfo->description.c_str(),
                             pszDebugLogAction,
-                            pInfo->m_info.m_eEndReason,
-                            pInfo->m_info.m_szEndDebug
+                            pInfo->end_reason,
+                            pInfo->end_debug.c_str()
                     );
 
-                    cleanup_disconnected_client(pInfo->m_hConn);
+                    cleanup_disconnected_client(pInfo->conn);
                 } else {
-                    assert(pInfo->m_eOldState == k_ESteamNetworkingConnectionState_Connecting
-                           || pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_None);
+                    assert(pInfo->old_state == bmmo::net::connection_state::connecting
+                           || pInfo->state == bmmo::net::connection_state::none);
                 }
 
                 // Clean up the connection.  This is important!
@@ -776,31 +748,31 @@ private:
                 // and we cannot linger because it's already closed on the other end,
                 // so we just pass 0's.
 
-                interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
+                transport_->close(pInfo->conn, 0, {}, false);
 
                 break;
             }
 
-            case k_ESteamNetworkingConnectionState_Connecting: {
+            case bmmo::net::connection_state::connecting: {
                 // This must be a new connection
-                assert(clients_.find(pInfo->m_hConn) == clients_.end());
+                assert(clients_.find(pInfo->conn) == clients_.end());
 
-                Printf("Connection request from %s\n", pInfo->m_info.m_szConnectionDescription);
+                Printf("Connection request from %s\n", pInfo->description.c_str());
 
                 // A client is attempting to connect
                 // Try to accept the connection.
-                if (interface_->AcceptConnection(pInfo->m_hConn) != k_EResultOK) {
+                const auto accepted = transport_->accept(pInfo->conn);
+                if (accepted == bmmo::net::transport::accept_result::refused) {
                     // This could fail.  If the remote host tried to connect, but then
                     // disconnected, the connection may already be half closed.  Just
                     // destroy whatever we have on our side.
-                    interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
+                    transport_->close(pInfo->conn, 0, {}, false);
                     Printf("Can't accept connection.  (It was already closed?)\n");
                     break;
                 }
 
-                // Assign the poll group
-                if (!interface_->SetConnectionPollGroup(pInfo->m_hConn, poll_group_)) {
-                    interface_->CloseConnection(pInfo->m_hConn, 0, nullptr, false);
+                if (accepted == bmmo::net::transport::accept_result::no_receive_set) {
+                    transport_->close(pInfo->conn, 0, {}, false);
                     Printf("Failed to set poll group?");
                     break;
                 }
@@ -815,13 +787,13 @@ private:
                 sprintf(nick, "Unidentified%05d", rand() % 100000);
 
                 // DO NOT add client here.
-                //clients_[pInfo->m_hConn] = {nick};
-                interface_->SetConnectionName(pInfo->m_hConn, nick);
-//                SetClientNick( pInfo->m_hConn, nick );
+                //clients_[pInfo->conn] = {nick};
+                transport_->set_name(pInfo->conn, nick);
+//                SetClientNick( pInfo->conn, nick );
                 break;
             }
 
-            case k_ESteamNetworkingConnectionState_Connected:
+            case bmmo::net::connection_state::connected:
                 // We will get a callback immediately after accepting the connection.
                 // Since we are the server, we can ignore this, it's not news to us.
                 break;
@@ -858,18 +830,19 @@ private:
         broadcast_message(text_msg.raw.str().data(), text_msg.size(), bmmo::net::kSendReliable);
     }
 
-    void on_message(ISteamNetworkingMessage* networking_msg) override {
+    void on_message(const bmmo::net::message& received) override {
+        const auto* networking_msg = &received;
         std::lock_guard lk(state_mutex_);
-        auto client_it = clients_.find(networking_msg->m_conn);
-        auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
+        auto client_it = clients_.find(networking_msg->conn);
+        auto* raw_msg = reinterpret_cast<bmmo::general_message*>(networking_msg->data);
 
-        if (networking_msg->m_cbSize < static_cast<decltype(networking_msg->m_cbSize)>(sizeof(bmmo::opcode))) {
+        if (networking_msg->size < static_cast<decltype(networking_msg->size)>(sizeof(bmmo::opcode))) {
             Printf("Error: invalid message with size %d received from #%u.",
-                    networking_msg->m_cbSize, networking_msg->m_conn);
+                    networking_msg->size, networking_msg->conn);
             return;
         }
         if (!(client_it != clients_.end() || raw_msg->code == bmmo::LoginRequest || raw_msg->code == bmmo::LoginRequestV2 || raw_msg->code == bmmo::LoginRequestV3)) { // ignore limbo clients message
-            interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_AppException_Min, "Invalid client", true);
+            transport_->close(networking_msg->conn, bmmo::net::kEndAppException, "Invalid client", true);
             return;
         }
 
@@ -877,9 +850,9 @@ private:
             case bmmo::LoginRequestV3: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::login_request_v3_msg>(networking_msg);
 
-                interface_->SetConnectionName(networking_msg->m_conn, msg.nickname.c_str());
+                transport_->set_name(networking_msg->conn, msg.nickname);
                 if (msg.version < record_version_) {
-                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 1,
+                    transport_->close(networking_msg->conn, bmmo::net::kEndApp + 1,
                         Sprintf("Outdated client; please use BMMO >= v%s", record_version_.to_string()).c_str(), true);
                     break;
                 }
@@ -892,21 +865,21 @@ private:
                             (msg.version.minor == record_version_.minor ? "subminor" : "minor"),
                             record_version_.to_string(), msg.version.to_string());
                     warning_msg.serialize();
-                    send(networking_msg->m_conn, warning_msg.raw.str().data(), warning_msg.size(), bmmo::net::kSendReliable);
+                    send(networking_msg->conn, warning_msg.raw.str().data(), warning_msg.size(), bmmo::net::kSendReliable);
                     warning_msg.text_content = "Proceed at your own risk.";
                     warning_msg.clear();
                     warning_msg.serialize();
-                    send(networking_msg->m_conn, warning_msg.raw.str().data(), warning_msg.size(), bmmo::net::kSendReliable);
+                    send(networking_msg->conn, warning_msg.raw.str().data(), warning_msg.size(), bmmo::net::kSendReliable);
                 }
                 if (seeking_) {
-                    interface_->CloseConnection(networking_msg->m_conn, k_ESteamNetConnectionEnd_App_Min + 150 + 2,
+                    transport_->close(networking_msg->conn, bmmo::net::kEndApp + 150 + 2,
                         "Seeking data, please wait", true);
                     break;
                 }
 
-                clients_[networking_msg->m_conn] = {msg.nickname, {}};  // add the client here
-                memcpy(clients_[networking_msg->m_conn].uuid, msg.uuid, sizeof(msg.uuid));
-                username_[msg.nickname] = networking_msg->m_conn;
+                clients_[networking_msg->conn] = {msg.nickname, {}};  // add the client here
+                memcpy(clients_[networking_msg->conn].uuid, msg.uuid, sizeof(msg.uuid));
+                username_[msg.nickname] = networking_msg->conn;
                 std::string uuid_str(16, '\0');
                 bmmo::string_utils::string_from_hex_chars(uuid_str, msg.uuid, sizeof(msg.uuid));
                 Printf(bmmo::color_code(bmmo::LoginAcceptedV3), "%s (%s; v%s) logged in!\n",
@@ -915,18 +888,18 @@ private:
                 bmmo::map_names_msg names_msg;
                 names_msg.maps = record_map_names_;
                 names_msg.serialize();
-                send(networking_msg->m_conn, names_msg.raw.str().data(), names_msg.size(), bmmo::net::kSendReliable);
+                send(networking_msg->conn, names_msg.raw.str().data(), names_msg.size(), bmmo::net::kSendReliable);
 
                 bmmo::login_accepted_v3_msg accepted_msg{};
                 accepted_msg.online_players = record_clients_;
                 accepted_msg.serialize();
-                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), bmmo::net::kSendReliable);
+                send(networking_msg->conn, accepted_msg.raw.str().data(), accepted_msg.size(), bmmo::net::kSendReliable);
 
                 if (!record_permanent_notification_.second.empty()) {
                     bmmo::permanent_notification_msg bulletin_msg{};
                     std::tie(bulletin_msg.title, bulletin_msg.text_content) = record_permanent_notification_;
                     bulletin_msg.serialize();
-                    send(networking_msg->m_conn, bulletin_msg.raw.str().data(), bulletin_msg.size(), bmmo::net::kSendReliable);
+                    send(networking_msg->conn, bulletin_msg.raw.str().data(), bulletin_msg.size(), bmmo::net::kSendReliable);
                 }
 
                 bmmo::plain_text_msg text_msg;
@@ -938,7 +911,7 @@ private:
             }
             case bmmo::Chat: {
                 auto msg = bmmo::message_utils::deserialize<bmmo::chat_msg>(networking_msg);
-                Printf("(%u, %s): %s", networking_msg->m_conn, client_it->second.name, msg.chat_content);
+                Printf("(%u, %s): %s", networking_msg->conn, client_it->second.name, msg.chat_content);
                 bmmo::plain_text_msg text_msg;
                 text_msg.text_content.resize(2048);
                 Sprintf(text_msg.text_content, "[Reality] %s: %s", client_it->second.name, msg.chat_content);
@@ -952,7 +925,7 @@ private:
                 msg.player_id = bmmo::net::kInvalidConnection;
 
                 Printf(msg.get_ansi_color(), "[%s] (%u, %s): %s",
-                    msg.get_type_name(), networking_msg->m_conn, client_it->second.name, msg.chat_content);
+                    msg.get_type_name(), networking_msg->conn, client_it->second.name, msg.chat_content);
                 std::string old_content = msg.chat_content;
                 msg.chat_content.resize(2048);
                 Sprintf(msg.chat_content, "[Reality] [%s]\n%s", client_it->second.name, old_content);
@@ -971,14 +944,14 @@ private:
                         && !superuser_uuids.contains(uuid)) {
                     Printf(bmmo::ansi::Italic,
                         "Warning: non-superuser (#%u, %s) attempted to use remote command: %s",
-                        networking_msg->m_conn, client_it->second.name, msg.text_content);
-                    send(networking_msg->m_conn,
+                        networking_msg->conn, client_it->second.name, msg.text_content);
+                    send(networking_msg->conn,
                         bmmo::action_denied_msg{.content = {bmmo::deny_reason::NoPermission}},
                         bmmo::net::kSendReliable);
                     break;
                 }
                 Printf(bmmo::ansi::WhiteInverse, "[Remote Command] (%u, %s): %s",
-                    networking_msg->m_conn, client_it->second.name, msg.text_content);
+                    networking_msg->conn, client_it->second.name, msg.text_content);
                 console.execute_async(msg.text_content);
                 break;
             }
@@ -1079,9 +1052,6 @@ private:
     bmmo::net::microseconds current_record_time_{};
     std::unordered_map<bmmo::net::connection, bmmo::player_status_v3> record_clients_;
     std::unordered_map<std::string, std::string> record_map_names_;
-
-    HSteamListenSocket listen_socket_ = k_HSteamListenSocket_Invalid;
-    HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
 
     std::unordered_map<bmmo::net::connection, client_data> clients_;
     std::unordered_map<std::string, bmmo::net::connection> username_;

@@ -10,7 +10,7 @@ private:
 		VxVector position; VxQuaternion rotation;
 		player_ball->GetPosition(&position);
 		player_ball->GetQuaternion(&rotation);
-		const auto timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+		const auto timestamp = bmmo::net::process_timestamp();
 		std::lock_guard lk(state_mutex_);
 		if (position != local_ball_state_.position || rotation != local_ball_state_.rotation) {
 			memcpy(&local_ball_state_.position, &position, sizeof(VxVector));
@@ -43,7 +43,7 @@ public:
 	void poll_and_send_state_forced(CK3dObject* ball) override {
 		{
 			std::lock_guard lk(state_mutex_);
-			local_ball_state_.timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+			local_ball_state_.timestamp = bmmo::net::process_timestamp();
 		}
 		assemble_and_send_state_forced();
 	};

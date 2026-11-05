@@ -14,13 +14,11 @@
 
 namespace {
 
-// SteamNetworkingMessage_t has a protected destructor (the real library
-// manages instances on the heap); for view_as tests we only need m_pData
-// and m_cbSize, so a trivial subclass lets us stack-allocate one.
-struct test_networking_message: SteamNetworkingMessage_t {
-    test_networking_message(void* data, int size) {
-        m_pData = data;
-        m_cbSize = size;
+// A received message as the transport hands it over (view_as reads its data and size).
+struct test_networking_message: bmmo::net::message {
+    test_networking_message(void* bytes, int length) {
+        data = bytes;
+        size = length;
     }
 };
 

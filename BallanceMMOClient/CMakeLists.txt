@@ -162,7 +162,7 @@ add_library(bmmo_minhook STATIC
         ${bmmo_minhook_SOURCE_DIR}/src/hde/hde64.c)
 target_include_directories(bmmo_minhook PUBLIC ${bmmo_minhook_SOURCE_DIR}/include)
 set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
-file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp)
+file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/net/*.cpp)
 
 # The shared session-client core (cmake/SessionCore.cmake), hosted by session/core_host.cpp
 # behind 'session core on' (step R0: built and checked; the session runs on it from R1).

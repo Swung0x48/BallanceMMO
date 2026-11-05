@@ -6,7 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <steam/steamnetworkingtypes.h>
+#include <net/transport.hpp>
 #include "../../BallanceMMOCommon/include/entity/room.hpp"
 
 // Pure room bookkeeping for the collision-overhaul room system

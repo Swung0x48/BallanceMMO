@@ -1112,7 +1112,7 @@ namespace {
     }
 
     // A mailbox entry's bytes into its message (the bytes as the network
-    // thread copied them, m_cbSize of them).
+    // thread copied them, `size` of them).
     template <class Msg>
     bool decode_bytes(const std::string& bytes, Msg& msg) {
         msg.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
@@ -2072,18 +2072,18 @@ std::string bmmo::session::retail::trafo_scripts_loaded(CKContext* context) {
 // here and counted (`stray=` in 'session core status') instead of reaching
 // on_message's default, which would log it as an invalid opcode.  Any other
 // message: false.
-bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
-    const auto* raw = reinterpret_cast<const bmmo::general_message*>(network_msg->m_pData);
+bool BallanceMMOClient::core_host_offer(const bmmo::net::message* network_msg) {
+    const auto* raw = reinterpret_cast<const bmmo::general_message*>(network_msg->data);
     if (raw->code == bmmo::SessionStart) {
         // Every session is the core's (FULL step LGD): latched here.
         core_latched.store(true);
         core_booting.store(false);
-        mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
+        mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size));
         return true;
     }
     if (raw->code == bmmo::SessionBootStatus) {   // protocol 32, step SPL: before the SessionStart
         core_booting.store(true);
-        mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
+        mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size));
         return true;
     }
     switch (raw->code) {
@@ -2092,12 +2092,12 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
         // SessionStart; it takes the boot's panel down (core_host_drain).
         if (!core_latched.load()) {
             if (core_booting.exchange(false))
-                mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
+                mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size));
             else
                 core_stray.fetch_add(1);
             return true;
         }
-        mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
+        mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size));
         core_latched.store(false);
         return true;
     case bmmo::SessionAssign:
@@ -2110,7 +2110,7 @@ bool BallanceMMOClient::core_host_offer(ISteamNetworkingMessage* network_msg) {
     case bmmo::SessionStartAt:       // FULL step SAXH (protocol 24)
     case bmmo::SessionStartStatus:
         if (!core_latched.load()) { core_stray.fetch_add(1); return true; }
-        mailbox.push(static_cast<int>(raw->code), network_msg->m_pData, static_cast<size_t>(network_msg->m_cbSize));
+        mailbox.push(static_cast<int>(raw->code), network_msg->data, static_cast<size_t>(network_msg->size));
         return true;
     default:
         return false;
@@ -2854,14 +2854,14 @@ void BallanceMMOClient::OnRender(CK_RENDER_FLAGS) {
 void BallanceMMOClient::core_host_net_expire() {
     if (!host.blackout_up && !host.blackout_down) return;
     const auto now = clock_type::now();
-    auto* utils = SteamNetworkingUtils();
+    auto& net = transport();
     if (host.blackout_up && now >= host.blackout_up_until) {
-        utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Send, 0.0f);
+        net.set_fake_loss(bmmo::net::transport::direction::send, 0.0f);
         host.blackout_up = false;
         logger_->Info("Automation: net blackout (up) over at tick %u", session_tick_now());
     }
     if (host.blackout_down && now >= host.blackout_down_until) {
-        utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Recv, 0.0f);
+        net.set_fake_loss(bmmo::net::transport::direction::recv, 0.0f);
         host.blackout_down = false;
         logger_->Info("Automation: net blackout (down) over at tick %u", session_tick_now());
     }
@@ -5640,7 +5640,7 @@ std::string BallanceMMOClient::core_host_net_verb(const std::string& rest) {
     }
     const bool up = direction.empty() || direction == "up" || direction == "both";
     const bool down = direction.empty() || direction == "down" || direction == "both";
-    auto* utils = SteamNetworkingUtils();
+    auto& net = transport();
     if (what == "lag" || what == "blackout") {
         const bool lag = what == "lag";
         if (lag ? ms < 0 || ms > 10000 : ms <= 0 || ms > 60000)
@@ -5656,8 +5656,8 @@ std::string BallanceMMOClient::core_host_net_verb(const std::string& rest) {
     if (what == "lag") {
         const int32_t value = static_cast<int32_t>(ms);
         bool ok = true;
-        if (up) ok = utils->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_FakePacketLag_Send, value) && ok;
-        if (down) ok = utils->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_FakePacketLag_Recv, value) && ok;
+        if (up) ok = net.set_fake_lag(bmmo::net::transport::direction::send, value) && ok;
+        if (down) ok = net.set_fake_lag(bmmo::net::transport::direction::recv, value) && ok;
         if (!ok) return "error GNS refused the fake lag";
         if (up) host.lag_up_ms = value;
         if (down) host.lag_down_ms = value;
@@ -5668,8 +5668,8 @@ std::string BallanceMMOClient::core_host_net_verb(const std::string& rest) {
     }
     if (what == "blackout") {
         bool ok = true;
-        if (up) ok = utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Send, 100.0f) && ok;
-        if (down) ok = utils->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Recv, 100.0f) && ok;
+        if (up) ok = net.set_fake_loss(bmmo::net::transport::direction::send, 100.0f) && ok;
+        if (down) ok = net.set_fake_loss(bmmo::net::transport::direction::recv, 100.0f) && ok;
         if (!ok) return "error GNS refused the fake loss";
         const auto until = clock_type::now() + std::chrono::milliseconds(ms);
         if (up) {
@@ -5682,13 +5682,9 @@ std::string BallanceMMOClient::core_host_net_verb(const std::string& rest) {
         }
         // GNS's connected timeout (role.hpp sets 7.2 s): a blackout that
         // long drops the connection, not just the link.
-        int32_t timeout = 0;
-        size_t size = sizeof(timeout);
-        ESteamNetworkingConfigDataType type{};
+        const int timeout = net.connection_timeout_ms();
         std::string warning;
-        if (utils->GetConfigValue(k_ESteamNetworkingConfig_TimeoutConnected, k_ESteamNetworkingConfig_Global, 0, &type,
-                                  &timeout, &size) == k_ESteamNetworkingGetConfigValue_OK
-                && timeout > 0 && ms >= timeout)
+        if (timeout > 0 && ms >= timeout)
             warning = std::format(" - at least GNS's connected timeout ({} ms): the connection will drop", timeout);
         const uint32_t tick = session_tick_now();
         logger_->Info("Automation: net blackout %ld ms (%s) from tick %u%s", ms, join_flags(up, down).c_str(), tick,
@@ -5995,7 +5991,7 @@ void BallanceMMOClient::core_host_report_own_sector() {
     current_sector_ = sector;
     current_sector_timestamp_ = db_.get_timestamp_ms();
     if (connected()) {
-        current_sector_timestamp_ += get_status().m_nPing;
+        current_sector_timestamp_ += get_status().ping_ms;
         if (!spectator_mode_) update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
     }
     max_sector_ = std::max(current_sector_.load(), max_sector_.load());

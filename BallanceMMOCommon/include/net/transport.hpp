@@ -50,6 +50,7 @@ namespace bmmo::net {
     // on an application error.
     inline constexpr int kEndInvalid = 0;
     inline constexpr int kEndApp = 1000;
+    inline constexpr int kEndAppMax = 1999;
     inline constexpr int kEndAppException = 2000;
 
     // The largest message a send takes (512 KiB).
@@ -58,8 +59,8 @@ namespace bmmo::net {
     // A received message, valid while the receiver's callback runs.
     struct message {
         connection conn = kInvalidConnection;
-        const void* data = nullptr;
-        uint32_t size = 0;
+        void* data = nullptr;   // the receiver may decode in place
+        int size = 0;
         microseconds received = 0;   // on the transport's clock (local_timestamp)
     };
 
@@ -83,6 +84,10 @@ namespace bmmo::net {
         int pending_unreliable = 0, pending_reliable = 0, sent_unacked_reliable = 0;
         microseconds queue_time = 0;
     };
+
+    // The network layer's process clock (the library's): every transport's
+    // local_timestamp, the log's elapsed stamps, the legacy stream's times.
+    microseconds process_timestamp();
 
     class transport {
     public:

@@ -1,9 +1,4 @@
 #pragma once
-#include <steam/steamnetworkingsockets.h>
-#include <steam/isteamnetworkingutils.h>
-#ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
-#include <steam/steam_api.h>
-#endif
 #include "bml_includes.h"
 #include "entity/map.hpp"
 
@@ -147,7 +142,7 @@ public:
 		// has a different timestamp, so we have to account for this
 		// and record everyone's average timestamp differences.
 		auto& state = states_[id];
-		const auto new_diff = SteamNetworkingUtils()->GetLocalTimestamp() - timestamp;
+		const auto new_diff = bmmo::net::process_timestamp() - timestamp;
 		const bool no_recalibration = (state.time_diff == std::numeric_limits<decltype(state.time_diff)>::min());
 		state.time_diff = no_recalibration ? new_diff
 			: state.time_diff + (new_diff - state.time_diff) / (PREV_DIFF_WEIGHT + 1);
@@ -352,7 +347,7 @@ public:
 	}
 
 	static inline auto get_timestamp_ms(bmmo::net::microseconds timestamp = 0) {
-		return ((timestamp ? timestamp : SteamNetworkingUtils()->GetLocalTimestamp()) - INIT_TIMESTAMP) / 1000;
+		return ((timestamp ? timestamp : bmmo::net::process_timestamp()) - INIT_TIMESTAMP) / 1000;
 	}
 
 	bool is_nametag_visible() const {
@@ -395,5 +390,5 @@ private:
 	std::atomic_bool nametag_visible_ = true, ping_visible_ = true;
 	std::atomic_bool pending_cheat_flush_ = false;
 	static constexpr inline const int64_t PREV_DIFF_WEIGHT = 15, PREV_VARIANCE_WEIGHT = 31;
-	static const inline auto INIT_TIMESTAMP = SteamNetworkingUtils()->GetLocalTimestamp();
+	static const inline auto INIT_TIMESTAMP = bmmo::net::process_timestamp();
 };

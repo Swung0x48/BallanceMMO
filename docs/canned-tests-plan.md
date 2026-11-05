@@ -191,6 +191,26 @@ P-cores 0-15): harness PASS, server journal replay 2641/2641, and the judge on t
 `.bmjs` / `.bmjc` with FINAL rows): every shared body within 0.05 m and every own ball exact in all four
 clients' FINAL rows, no resync. LBM not run.
 
+As built (K2, the user's call: every GNS type replaced, a platform layer): `net/transport.hpp` (the
+connection handle, the transport clock, send flags, connection states and end-reason ranges with the
+library's values; `message {conn, data, size, received}`, `status_change`, `connection_status`; the
+`transport` interface: listen, accept, connect, send, flush, close with linger, set_name, status,
+detailed_status, remote_address, receive, poll_status, local_timestamp, the test link faults, the connection
+timeout; `process_timestamp()`), `net/gns.hpp` + `src/net/gns_transport.cpp` (init / kill / log level /
+make_transport: the one file that includes GNS, static_asserts that every value is the library's), and
+`net/sim_transport.hpp` (`sim_network`: in-process transports on one virtual clock, per-direction latency,
+reliable in order, seeded unreliable loss, a lingering close that arrives after its data). `role` owns a
+transport (GNS by default, any other through its constructor) and dispatches `message` / `status_change`; the
+server, the headless client, the retail client, the mock client and the record parser use only these types;
+`bmmo::log_type` replaces the library's debug output type in the logger. Steps: K2a 1169fec4 (names), K2b + K2c
+(this commit). Checked: 797/797 unit tests (3 new: the simulated transport's life, order and linger, seeded
+loss); the wire check of core_ref_s16 (`--no-final-checkpoints`) ALL SAME; x64 (server, session client,
+SimTool, tests, mock client, record parser) and x86 build; live smoke on P-cores (2026-11-05 00:17:58-00:19:03,
+h1_150): harness PASS, server replay 2641/2641, the judge exact on all four clients' FINAL rows, the server's
+connection-request and closed-by-peer lines as before. Not run: LBM, a retail session, the mock client and the
+record parser against a server. The received time stays on the transport's clock (as the library's was); its
+mapping onto C1 waits for the stage 1 coordinator.
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |

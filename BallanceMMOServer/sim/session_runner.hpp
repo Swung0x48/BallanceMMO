@@ -350,7 +350,7 @@ namespace bmmo::sim {
         // cap is measured.  Called once per player, before its first
         // player_ready; a resync keeps both.
         void set_player_lead(uint32_t session, uint32_t player, uint32_t caps, uint32_t assigned_lead);
-        // The player's current round trip (the connection's m_nPing, not the
+        // The player's current round trip (the connection's ping, not the
         // peak), which E is sized with (design 2.3).  The server posts it
         // once a second, with lead_adjust on only.
         void set_player_rtt(uint32_t session, uint32_t player, uint32_t rtt_ms);

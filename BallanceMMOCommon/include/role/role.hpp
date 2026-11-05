@@ -4,60 +4,45 @@
 #include <iostream>
 #include <thread>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <condition_variable>
 #include <cassert>
 #include <csignal>
 #include <cstdlib>
-#include <steam/steamnetworkingsockets.h>
-#include <steam/isteamnetworkingutils.h>
-#ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
-#include <steam/steam_api.h>
-#endif
 #include "../entity/globals.hpp"
+#include "../net/gns.hpp"
+#include "../net/transport.hpp"
 #include "../utility/ansi_colors.hpp"
 
 #include "../utility/misc.hpp"
 
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
 
+// A process's network side: the server, a client.  It talks to the network
+// through a bmmo::net::transport (step K2: the platform layer); GNS is the
+// default one.
 class role {
 public:
     static void init_socket() {
-#ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
-        SteamDatagramErrMsg err_msg;
-        if (!GameNetworkingSockets_Init(nullptr, err_msg))
-            bmmo::FatalError("GameNetworkingSockets_Init failed.  %s", err_msg);
-#else
-        SteamDatagramClient_SetAppID(570); // Just set something, doesn't matter what
-        //SteamDatagramClient_SetUniverse( k_EUniverseDev );
-
-        SteamDatagramErrMsg errMsg;
-        if (!SteamDatagramClient_Init(true, errMsg))
-            FatalError("SteamDatagramClient_Init failed.  %s", errMsg);
-
-        // Disable authentication when running with Steam, for this
-        // example, since we're not a real app.
-        //
-        // Authentication is disabled automatically in the open-source
-        // version since we don't have a trusted third party to issue
-        // certs.
-        SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_IP_AllowWithoutAuth, 1);
-#endif
+        std::string error;
+        if (!bmmo::net::gns::init(bmmo::DebugOutput, error))
+            bmmo::FatalError("GameNetworkingSockets_Init failed.  %s", error.c_str());
 #ifdef _WIN32
         DWORD mode;
         GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
         SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         // std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
 #endif
-        init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
+        init_timestamp_ = process_timestamp();
         init_time_t_ = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg,
-                bmmo::DebugOutput);
     }
 
-    role() {
-        interface_ = SteamNetworkingSockets();
+    // The network layer's process clock (a message's `received` is on it).
+    static bmmo::net::microseconds process_timestamp() { return bmmo::net::process_timestamp(); }
+
+    explicit role(std::unique_ptr<bmmo::net::transport> transport = bmmo::net::gns::make_transport())
+            : transport_(std::move(transport)) {
 
         auto close_log_and_exit = [](int) { // signal handler
             // Keep this minimal: most functions (printf, locks, exit with
@@ -72,6 +57,8 @@ public:
         std::signal(SIGINT, close_log_and_exit);
     }
 
+    virtual ~role() = default;
+
     virtual bool setup() { return true; };
     virtual void run() = 0;
 
@@ -85,27 +72,19 @@ public:
         startup_cv_.wait(lk, [this] { return running_.load(); });
     }
 
-    static SteamNetworkingConfigValue_t generate_opt() {
-        SteamNetworkingConfigValue_t opt{};
-        SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_TimeoutConnected, 7200);
-        opt.SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
-                   (void*)SteamNetConnectionStatusChangedCallbackWrapper);
-        return opt;
-    }
-
+    // Messages first, then the connection state changes (the order the
+    // session code relies on).
     virtual bool update() {
         int msg_count = poll_incoming_messages();
         poll_connection_state_changes();
         return msg_count > 0;
     }
 
+    bmmo::net::transport& transport() { return *transport_; }
+
     static void destroy() {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-#ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
-        GameNetworkingSockets_Kill();
-#else
-        SteamDatagramClient_Kill();
-#endif
+        bmmo::net::gns::kill();
         bmmo::close_log();
     }
 
@@ -121,29 +100,24 @@ protected:
         startup_cv_.notify_all();
     }
 
-    ISteamNetworkingSockets* interface_ = nullptr;
+    std::unique_ptr<bmmo::net::transport> transport_;
     static inline role* this_instance_ = nullptr;
     static inline bmmo::net::microseconds init_timestamp_;
     static inline time_t init_time_t_;
     std::atomic_bool running_ = false;
     std::mutex startup_mutex_;
     std::condition_variable startup_cv_;
-    ISteamNetworkingMessage* incoming_messages_[ONCE_RECV_MSG_COUNT];
 
     virtual int poll_incoming_messages() = 0;
 
     virtual void poll_connection_state_changes() {
         this_instance_ = this;
-        interface_->RunCallbacks();
+        transport_->poll_status([this](const bmmo::net::status_change& change) { on_connection_status_changed(change); });
     }
 
-    virtual void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) = 0;
+    virtual void on_connection_status_changed(const bmmo::net::status_change& change) = 0;
 
-    virtual void on_message(ISteamNetworkingMessage* msg) = 0;
-
-    static void SteamNetConnectionStatusChangedCallbackWrapper(SteamNetConnectionStatusChangedCallback_t* pInfo) {
-        this_instance_->on_connection_status_changed(pInfo);
-    }
+    virtual void on_message(const bmmo::net::message& msg) = 0;
 
     // triggers an actual segmentation fault; I was too lazy to fake one
     static void trigger_fatal_error() {
@@ -151,8 +125,8 @@ protected:
     }
 
 public:
-    static void set_logging_level(ESteamNetworkingSocketsDebugOutputType eType) {
-        SteamNetworkingUtils()->SetDebugOutputFunction(eType, bmmo::DebugOutput);
+    static void set_logging_level(bmmo::log_type least_serious) {
+        bmmo::net::gns::set_log_level(least_serious);
     }
 };
 

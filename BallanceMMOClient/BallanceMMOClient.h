@@ -53,8 +53,8 @@ public:
 		utils_(bml),
 		config_manager_(&log_manager_, [this] { return GetConfig(); }),
 		console_window_(bml, &log_manager_, [this](auto bml, auto args) { OnCommand(bml, args); })
-		//client_([this](ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
-		//	[this](SteamNetConnectionStatusChangedCallback_t* pInfo) { OnConnectionStatusChanged(pInfo); })
+		//client_([this](bmmo::log_type eType, const char* pszMsg) { LoggingOutput(eType, pszMsg); },
+		//	[this](const bmmo::net::status_change* pInfo) { OnConnectionStatusChanged(pInfo); })
 	{
 		// Step IOX: the mod's log lines are written by a strand of
 		// thread_pool_ from here on (log_manager.h bmmo::retail_log), not by
@@ -98,22 +98,10 @@ public:
 	virtual BMLVersion GetBMLVersion() override { return source_version_; }
 
 	static void init_socket() {
-#ifdef STEAMNETWORKINGSOCKETS_OPENSOURCE
-		SteamDatagramErrMsg err_msg;
-		if (!GameNetworkingSockets_Init(nullptr, err_msg))
-			FatalError("GameNetworkingSockets_Init failed.  %s", err_msg);
-#else
-		SteamDatagramClient_SetAppID(570); // Just set something, doesn't matter what
-		//SteamDatagramClient_SetUniverse( k_EUniverseDev );
-
-		SteamDatagramErrMsg errMsg;
-		if (!SteamDatagramClient_Init(true, errMsg))
-			FatalError("SteamDatagramClient_Init failed.  %s", errMsg);
-
-		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_IP_AllowWithoutAuth, 1);
-#endif
-		init_timestamp_ = SteamNetworkingUtils()->GetLocalTimestamp();
-		SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, LoggingOutput);
+		std::string error;
+		if (!bmmo::net::gns::init(LoggingOutput, error))
+			FatalError("GameNetworkingSockets_Init failed.  %s", error.c_str());
+		init_timestamp_ = bmmo::net::process_timestamp();
 	}
 
 	static inline auto get_instance() { return static_cast<BallanceMMOClient*>(role::this_instance_); } // public
@@ -231,16 +219,11 @@ private:
 	void OnPeerTrafo(uint64_t id, int from, int to);
 
 	// Callbacks from client
-	static void LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg);
-	void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* pInfo) override;
-	void on_message(ISteamNetworkingMessage* network_msg) override;
+	static void LoggingOutput(bmmo::log_type eType, const char* pszMsg);
+	void on_connection_status_changed(const bmmo::net::status_change& change) override;
+	void on_message(const bmmo::net::message& received) override;
 	void receive(void* data, size_t size) override {
-		auto* networking_msg = SteamNetworkingUtils()->AllocateMessage(0);
-		networking_msg->m_conn = connection_;
-		networking_msg->m_pData = data;
-		networking_msg->m_cbSize = size;
-		on_message(networking_msg);
-		networking_msg->Release();
+		on_message(bmmo::net::message{connection_, data, static_cast<int>(size), 0});
 	}
 
 	void on_fatal_error(char* extra_text);
@@ -335,7 +318,7 @@ private:
 		char* nl = strchr(text, '\0') - 1;
 		if (nl >= text && *nl == '\n')
 			*nl = '\0';
-		LoggingOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
+		LoggingOutput(bmmo::log_type::bug, text);
 	}
 
 	std::recursive_mutex bml_mtx_;
@@ -544,7 +527,7 @@ private:
 	// 'net' and 'replay session' verbs.  Methods only - its state is file-scope
 	// statics in that file, as this class must not gain a data member (see
 	// apply_pending_ping_text).
-	bool core_host_offer(ISteamNetworkingMessage* network_msg);   // network thread
+	bool core_host_offer(const bmmo::net::message* network_msg);   // network thread
 	void core_host_session_start(const bmmo::session_start_msg& msg);
 	void core_host_process();
 	void core_host_drain();
@@ -812,7 +795,7 @@ private:
 		current_sector_ = sector;
 		current_sector_timestamp_ = db_.get_timestamp_ms();
 		if (connected()) {
-			current_sector_timestamp_ += get_status().m_nPing;
+			current_sector_timestamp_ += get_status().ping_ms;
 			if (!spectator_mode_)
 				update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
 		}
@@ -1034,7 +1017,7 @@ private:
 			if (input_manager_->IsKeyPressed(CKKEY_D)) {
 				if (current_map_.level == 0 || spectator_mode_)
 					return;
-				auto timestamp = SteamNetworkingUtils()->GetLocalTimestamp();
+				auto timestamp = bmmo::net::process_timestamp();
 				if (timestamp < dnf_cooldown_end_timestamp_)
 					return;
 				if (timestamp - last_dnf_hotkey_timestamp_ <= 3000000) {

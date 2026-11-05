@@ -1,7 +1,6 @@
 #ifndef BALLANCEMMOSERVER_SERVER_DATA_HPP
 #define BALLANCEMMOSERVER_SERVER_DATA_HPP
-#include <steam/steamnetworkingsockets.h>
-#include <steam/isteamnetworkingutils.h>
+#include <net/transport.hpp>
 #include "../BallanceMMOCommon/common.hpp"
 #include <map>
 

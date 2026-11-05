@@ -114,11 +114,11 @@ bool config_manager::load() {
 
     std::string logging_level_string = yaml_load_value(config_, "logging_level", std::string{"important"});
     if (logging_level_string == "msg")
-        logging_level = k_ESteamNetworkingSocketsDebugOutputType_Msg;
+        logging_level = bmmo::log_type::msg;
     else if (logging_level_string == "warning")
-        logging_level = k_ESteamNetworkingSocketsDebugOutputType_Warning;
+        logging_level = bmmo::log_type::warning;
     else {
-        logging_level = k_ESteamNetworkingSocketsDebugOutputType_Important;
+        logging_level = bmmo::log_type::important;
     }
     role::set_logging_level(logging_level);
 
@@ -307,9 +307,7 @@ void config_manager::save(bool reload_values) {
     config_file.close();
 }
 
-void config_manager::save_login_data(const SteamNetworkingIPAddr& ip, const std::string& uuid_str, const std::string& name) {
-    char ip_str[SteamNetworkingIPAddr::k_cchMaxString]{};
-    ip.ToString(ip_str, sizeof(ip_str), false);
+void config_manager::save_login_data(const std::string& ip_str, const std::string& uuid_str, const std::string& name) {
 
     // format the timestamp here, where we still know when the login happened
     auto time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());

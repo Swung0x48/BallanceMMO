@@ -169,18 +169,18 @@ std::string utils::pretty_bytes(float bytes) {
 }
 
 static inline const std::string MICRO_SIGN = bmmo::string_utils::ConvertWideToANSI(bmmo::string_utils::ConvertUtf8ToWide("µ"));
-std::string utils::pretty_status(const SteamNetConnectionRealTimeStatus_t& status) {
+std::string utils::pretty_status(const bmmo::net::connection_status& status) {
     std::string s;
     s.reserve(512);
-    s += std::format("Ping: {} ms\n", status.m_nPing);
-    s += "ConnectionQualityLocal: " + pretty_percentage(status.m_flConnectionQualityLocal) + "\n";
-    s += "ConnectionQualityRemote: " + pretty_percentage(status.m_flConnectionQualityRemote) + "\n";
-    s += std::format("Tx: {:.3g}pps, ", status.m_flOutPacketsPerSec) + pretty_bytes(status.m_flOutBytesPerSec) + "/s\n";
-    s += std::format("Rx: {:.3g}pps, ", status.m_flInPacketsPerSec) + pretty_bytes(status.m_flInBytesPerSec) + "/s\n";
-    s += "Est. MaxBandwidth: " + pretty_bytes((float)status.m_nSendRateBytesPerSecond) + "/s\n";
-    s += std::format("Queue time: {}{}s\n", status.m_usecQueueTime, MICRO_SIGN);
-    s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.m_cbPendingReliable, status.m_cbSentUnackedReliable);
-    s += std::format("\nUnreliable:          \nPending: {}\n", status.m_cbPendingUnreliable);
+    s += std::format("Ping: {} ms\n", status.ping_ms);
+    s += "ConnectionQualityLocal: " + pretty_percentage(status.quality_local) + "\n";
+    s += "ConnectionQualityRemote: " + pretty_percentage(status.quality_remote) + "\n";
+    s += std::format("Tx: {:.3g}pps, ", status.out_packets_per_sec) + pretty_bytes(status.out_bytes_per_sec) + "/s\n";
+    s += std::format("Rx: {:.3g}pps, ", status.in_packets_per_sec) + pretty_bytes(status.in_bytes_per_sec) + "/s\n";
+    s += "Est. MaxBandwidth: " + pretty_bytes((float)status.send_rate_bytes_per_sec) + "/s\n";
+    s += std::format("Queue time: {}{}s\n", status.queue_time, MICRO_SIGN);
+    s += std::format("\nReliable:            \nPending: {}\nUnacked: {}\n", status.pending_reliable, status.sent_unacked_reliable);
+    s += std::format("\nUnreliable:          \nPending: {}\n", status.pending_unreliable);
     return s;
 }
 

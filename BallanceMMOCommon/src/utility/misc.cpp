@@ -198,9 +198,9 @@ namespace bmmo {
             text[el - text - 1] = '\0';
     }
  
-    void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg, int ansiColor) {
+    void DebugOutput(bmmo::log_type eType, const char* pszMsg, int ansiColor) {
         using namespace std;
-        // bmmo::net::microseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
+        // bmmo::net::microseconds time = bmmo::net::process_timestamp() - init_timestamp_;
         auto time = chrono::system_clock::to_time_t(chrono::system_clock::now());
         char timeStr[15];
         format_local_time(timeStr, sizeof(timeStr), time);
@@ -214,7 +214,7 @@ namespace bmmo {
             if (w.active) {
                 if (log_file && w.file.is_open())
                     append_line(w, w.file, Sprintf("[%s] %s\n", timeStr, pszMsg));
-                if (eType != k_ESteamNetworkingSocketsDebugOutputType_Bug) {
+                if (eType != bmmo::log_type::bug) {
                     std::string line;
                     if (!w.tty)
                         line = Sprintf("[%s] %s\n", timeStr, pszMsg);
@@ -243,7 +243,7 @@ namespace bmmo {
             if (auto_flush) fflush(log_file);
         }
 
-        if (eType == k_ESteamNetworkingSocketsDebugOutputType_Bug) {
+        if (eType == bmmo::log_type::bug) {
             fprintf(stderr, "\r[%s] %s\n> ", timeStr, pszMsg);
             fflush(stdout);
             fflush(stderr);
@@ -271,7 +271,7 @@ namespace bmmo {
         // bmmo::replxx_instance.invoke(replxx::Replxx::ACTION::REPAINT, '\0');
     }
 
-    void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg) {
+    void DebugOutput(bmmo::log_type eType, const char* pszMsg) {
         DebugOutput(eType, pszMsg, bmmo::ansi::Reset);
     }
 

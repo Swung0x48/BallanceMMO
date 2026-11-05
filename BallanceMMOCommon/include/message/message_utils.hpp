@@ -1,6 +1,6 @@
 #ifndef BALLANCEMMOSERVER_MESSAGE_UTILS_HPP
 #define BALLANCEMMOSERVER_MESSAGE_UTILS_HPP
-#include <steam/steamnetworkingtypes.h>
+#include "../net/transport.hpp"
 #include <algorithm>
 #include <limits>
 #include <string>
@@ -96,8 +96,8 @@ namespace bmmo::message_utils {
     }
 
     template<typename T>
-    constexpr inline T deserialize(ISteamNetworkingMessage* networking_msg) {
-        return deserialize<T>(networking_msg->m_pData, networking_msg->m_cbSize);
+    constexpr inline T deserialize(const bmmo::net::message* networking_msg) {
+        return deserialize<T>(networking_msg->data, networking_msg->size);
     }
 
     // Size-checked view of a fixed-layout message payload.
@@ -105,10 +105,10 @@ namespace bmmo::message_utils {
     // protecting reinterpret_cast message handlers from out-of-bounds
     // reads on truncated or malicious packets.
     template<trivially_copyable_msg T>
-    inline T* view_as(ISteamNetworkingMessage* networking_msg) {
-        if (networking_msg->m_cbSize < static_cast<int>(sizeof(T)))
+    inline T* view_as(const bmmo::net::message* networking_msg) {
+        if (networking_msg->size < static_cast<int>(sizeof(T)))
             return nullptr;
-        return reinterpret_cast<T*>(networking_msg->m_pData);
+        return reinterpret_cast<T*>(networking_msg->data);
     }
 }
 

@@ -1,7 +1,7 @@
 #ifndef BALLANCEMMOSERVER_LATENCY_DATA_MSG_HPP
 #define BALLANCEMMOSERVER_LATENCY_DATA_MSG_HPP
 #include <cstdint>
-#include <steam/steamnetworkingtypes.h>
+#include "../net/transport.hpp"
 #include "message.hpp"
 
 namespace bmmo {

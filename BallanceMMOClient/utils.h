@@ -3,7 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <thread>
-#include <steam/steamnetworkingtypes.h>
+#include <net/transport.hpp>
 #include "bml_includes.h"
 
 class utils {
@@ -55,7 +55,7 @@ public:
 
     static std::string pretty_percentage(float value);
     static std::string pretty_bytes(float bytes);
-    static std::string pretty_status(const SteamNetConnectionRealTimeStatus_t& status);
+    static std::string pretty_status(const bmmo::net::connection_status& status);
 
     inline void schedule_sync_call(std::function<void()>&& func) const {
         bml_->AddTimer(CKDWORD(0), [func = std::move(func)] { func(); });

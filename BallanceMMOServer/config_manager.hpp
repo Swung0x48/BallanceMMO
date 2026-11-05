@@ -159,7 +159,7 @@ public:
     // auto_flush_log (true = record, false = none).
     bmmo::session::io_flush session_io_log_flush = bmmo::session::io_flush::batch;
     std::unordered_map<std::string, std::string> physics_allowed_mods;  // mod id -> version; empty = no check
-    ESteamNetworkingSocketsDebugOutputType logging_level = k_ESteamNetworkingSocketsDebugOutputType_Important;
+    bmmo::log_type logging_level = bmmo::log_type::important;
 
     // The headless engine switches the process working directory to the game's
     // Bin directory (retail scripts use relative paths), so every file this
@@ -183,7 +183,7 @@ public:
 
     void save(bool reload_values = true);
     // Queues a login for the writer thread; never touches the disk itself.
-    void save_login_data(const SteamNetworkingIPAddr& ip, const std::string& uuid_str, const std::string& name);
+    void save_login_data(const std::string& ip, const std::string& uuid_str, const std::string& name);   // ip: no port
     void save_player_status(const client_data_collection& clients);
     void set_status_writer(bmmo::session::io_poster poster) { status_writer_ = std::move(poster); }
 

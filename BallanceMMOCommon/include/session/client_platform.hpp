@@ -59,7 +59,7 @@ namespace bmmo::session {
     struct journal_header;   // session/journal.hpp
     class session_client_core;   // session/client_core.hpp
 
-    // How a message goes out; the host maps it to k_nSteamNetworkingSend_*.
+    // How a message goes out; the host maps it to bmmo::net::kSend*.
     enum class send_mode : uint8_t { reliable, reliable_no_nagle, unreliable_no_delay };
 
     enum class log_level : uint8_t { info, warn };

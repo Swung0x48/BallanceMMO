@@ -1145,15 +1145,13 @@ namespace {
             // a local one, so the server's own logs are at hand.
             if (const char* lag = std::getenv("BMMO_FAKE_LAG_MS"); lag && *lag) {
                 const int32_t ms = static_cast<int32_t>(std::atoi(lag));
-                SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_FakePacketLag_Send, ms);
-                SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_FakePacketLag_Recv, ms);
+                transport_->set_fake_lag(bmmo::net::transport::direction::send, ms);
+                transport_->set_fake_lag(bmmo::net::transport::direction::recv, ms);
                 logf("fake packet lag: %d ms each way (round trip %d ms)", ms, ms * 2);
             }
-            SteamNetworkingIPAddr address{};
-            if (!address.ParseString(args_.server.c_str())) { logf("bad server address %s", args_.server.c_str()); return false; }
-            SteamNetworkingConfigValue_t opt = generate_opt();
-            connection_ = interface_->ConnectByIPAddress(address, 1, &opt);
-            return connection_ != bmmo::net::kInvalidConnection;
+            connection_ = transport_->connect(args_.server);
+            if (connection_ == bmmo::net::kInvalidConnection) { logf("bad server address %s", args_.server.c_str()); return false; }
+            return true;
         }
 
         int exit_code() const {
@@ -1237,7 +1235,7 @@ namespace {
             // substituted every frame of a client that had stopped and re-sent
             // it its whole history every tick).
             if (connection_ != bmmo::net::kInvalidConnection && !inbound_.replaying()) {
-                interface_->CloseConnection(connection_, 0, stopped, true);
+                transport_->close(connection_, 0, stopped, true);
                 connection_ = bmmo::net::kInvalidConnection;
             }
             // A session still running when the client goes down says so in its
@@ -1335,15 +1333,11 @@ namespace {
 
         int poll_incoming_messages() override {
             if (inbound_.replaying()) return replay_incoming_messages();
-            const int count = interface_->ReceiveMessagesOnConnection(connection_, incoming_messages_, ONCE_RECV_MSG_COUNT);
-            if (count <= 0) return 0;
-            for (int i = 0; i < count; ++i) {
-                if (inbound_.capturing())
-                    inbound_.message(incoming_messages_[i]->m_pData, static_cast<uint32_t>(incoming_messages_[i]->m_cbSize));
-                on_message(incoming_messages_[i]);
-                incoming_messages_[i]->Release();
-            }
-            return count;
+            const int count = transport_->receive([this](const bmmo::net::message& msg) {
+                if (inbound_.capturing()) inbound_.message(msg.data, static_cast<uint32_t>(msg.size));
+                on_message(msg);
+            }, ONCE_RECV_MSG_COUNT);
+            return count <= 0 ? 0 : count;
         }
 
         void poll_connection_state_changes() override {
@@ -1355,26 +1349,26 @@ namespace {
             uint32_t handle = 0;
             std::string end_debug;
             while (inbound_.take_connection(state, handle, end_debug)) {
-                SteamNetConnectionStatusChangedCallback_t info{};
-                info.m_hConn = handle;
-                info.m_info.m_eState = static_cast<ESteamNetworkingConnectionState>(state);
-                std::snprintf(info.m_info.m_szEndDebug, sizeof(info.m_info.m_szEndDebug), "%s", end_debug.c_str());
-                on_connection_status_changed(&info);
+                bmmo::net::status_change info;
+                info.conn = handle;
+                info.state = static_cast<bmmo::net::connection_state>(state);
+                info.end_debug = end_debug;
+                on_connection_status_changed(info);
             }
         }
 
-        void on_connection_status_changed(SteamNetConnectionStatusChangedCallback_t* info) override {
+        void on_connection_status_changed(const bmmo::net::status_change& info) override {
             if (inbound_.capturing())
-                inbound_.connection(static_cast<int32_t>(info->m_info.m_eState), info->m_hConn, info->m_info.m_szEndDebug);
-            switch (info->m_info.m_eState) {
-            case k_ESteamNetworkingConnectionState_ClosedByPeer:
-            case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
-                logf("connection lost: %s", info->m_info.m_szEndDebug);
-                if (!inbound_.replaying()) interface_->CloseConnection(info->m_hConn, 0, nullptr, false);
+                inbound_.connection(static_cast<int32_t>(info.state), info.conn, info.end_debug.c_str());
+            switch (info.state) {
+            case bmmo::net::connection_state::closed_by_peer:
+            case bmmo::net::connection_state::problem_detected_locally:
+                logf("connection lost: %s", info.end_debug.c_str());
+                if (!inbound_.replaying()) transport_->close(info.conn, 0, {}, false);
                 connection_ = bmmo::net::kInvalidConnection;
                 running_ = false;
                 break;
-            case k_ESteamNetworkingConnectionState_Connected: {
+            case bmmo::net::connection_state::connected: {
                 logf("connected, logging in as %s", args_.name.c_str());
                 bmmo::login_request_v3_msg msg;
                 msg.version = bmmo::current_version;
@@ -1391,11 +1385,12 @@ namespace {
             }
         }
 
-        void on_message(ISteamNetworkingMessage* networking_msg) override {
-            if (networking_msg->m_cbSize < static_cast<int>(sizeof(bmmo::opcode))) return;
-            auto* raw = reinterpret_cast<bmmo::general_message*>(networking_msg->m_pData);
+        void on_message(const bmmo::net::message& received) override {
+            const auto* networking_msg = &received;
+            if (networking_msg->size < static_cast<int>(sizeof(bmmo::opcode))) return;
+            auto* raw = reinterpret_cast<bmmo::general_message*>(networking_msg->data);
             auto fill = [&](auto& msg) {
-                msg.raw.write(reinterpret_cast<char*>(networking_msg->m_pData), networking_msg->m_cbSize);
+                msg.raw.write(reinterpret_cast<char*>(networking_msg->data), networking_msg->size);
                 return msg.deserialize();
             };
             switch (raw->code) {
@@ -1777,7 +1772,7 @@ namespace {
                     bmmo::opcode code{};
                     std::memcpy(&code, bytes.data(), sizeof(code));
                     if (code == bmmo::SessionReady) {
-                        if (!inbound_.replaying()) interface_->FlushMessagesOnConnection(connection_);
+                        if (!inbound_.replaying()) transport_->flush(connection_);
                         logf("test stall: %d ms right after SessionReady at tick %u", args_.stall_after_ready_ms,
                              core_.current_tick());
                         wall_sleep(std::chrono::milliseconds(args_.stall_after_ready_ms));
@@ -2414,12 +2409,7 @@ namespace {
             int count = 0;
             std::string bytes;
             while (inbound_.take_message(bytes)) {
-                ISteamNetworkingMessage* message = SteamNetworkingUtils()->AllocateMessage(static_cast<int>(bytes.size()));
-                if (!message) inbound_diverged("AllocateMessage failed");
-                if (!bytes.empty()) std::memcpy(message->m_pData, bytes.data(), bytes.size());
-                message->m_cbSize = static_cast<int>(bytes.size());
-                on_message(message);
-                message->Release();
+                on_message(bmmo::net::message{bmmo::net::kInvalidConnection, bytes.data(), static_cast<int>(bytes.size()), 0});
                 ++count;
             }
             return count;
@@ -2500,7 +2490,7 @@ namespace {
         void send_bytes(const std::string& bytes, int flags) {
             trace_send(bytes.data(), bytes.size(), flags);
             if (inbound_.replaying()) return;   // a replay sends nothing
-            interface_->SendMessageToConnection(connection_, bytes.data(), static_cast<uint32_t>(bytes.size()), flags, nullptr);
+            transport_->send(connection_, bytes.data(), bytes.size(), flags);
         }
 
         void announce_map() {
@@ -2520,7 +2510,7 @@ namespace {
             msg.content.type = bmmo::current_map_state::EnteringMap;
             trace_send(&msg, sizeof(msg), bmmo::net::kSendReliable);
             if (inbound_.replaying()) return;
-            interface_->SendMessageToConnection(connection_, &msg, sizeof(msg), bmmo::net::kSendReliable, nullptr);
+            transport_->send(connection_, &msg, sizeof(msg), bmmo::net::kSendReliable);
         }
 
         void room_request(bmmo::room::action action, uint32_t room, const std::string& name = "") {

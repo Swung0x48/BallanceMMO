@@ -4,15 +4,15 @@
 #include <cstdarg>
 #include <cstdint>
 #include <functional>
-#include <steam/steamnetworkingtypes.h>
+#include "log_type.hpp"
 
 namespace bmmo {
     void set_log_file(FILE* file);
 
     void LogFileOutput(const char* pMsg);
 
-    void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg, int ansiColor);
-    void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg);
+    void DebugOutput(bmmo::log_type eType, const char* pszMsg, int ansiColor);
+    void DebugOutput(bmmo::log_type eType, const char* pszMsg);
 
     void RightTrim(char* text);
 
@@ -58,7 +58,7 @@ namespace bmmo {
         // vsprintf(text, fmt, ap);
         // va_end(ap);
         RightTrim(text);
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
+        DebugOutput(bmmo::log_type::important, text);
     }
 
     template<typename ... Args>
@@ -66,14 +66,14 @@ namespace bmmo {
         char text[2048]{};
         std::snprintf(text, sizeof(text), fmt, ConvertArgument(args)...);
         RightTrim(text);
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text, ansiColor);
+        DebugOutput(bmmo::log_type::important, text, ansiColor);
     }
 
     inline void Printf(const char* fmt) {
         char text[2048]{};
         std::strncpy(text, fmt, sizeof(text) - 1);
         RightTrim(text);
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Important, text);
+        DebugOutput(bmmo::log_type::important, text);
     }
 
     inline void Printf(int ansiColor, const char* fmt) {
@@ -87,7 +87,7 @@ namespace bmmo {
         vsprintf(text, fmt, ap);
         va_end(ap);
         RightTrim(text);
-        DebugOutput(k_ESteamNetworkingSocketsDebugOutputType_Bug, text);
+        DebugOutput(bmmo::log_type::bug, text);
     }
 
     void set_auto_flush_log(bool flush);

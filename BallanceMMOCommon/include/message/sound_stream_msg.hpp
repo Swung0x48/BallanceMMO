@@ -3,7 +3,7 @@
 #include <sstream>
 #include <fstream>
 #include <filesystem>
-#include <steam/isteamnetworkingutils.h> // SteamNetworkingUtils(), used below
+#include <chrono>
 #include "message.hpp"
 #include "message_utils.hpp"
 
@@ -75,7 +75,8 @@ namespace bmmo {
             if (!message_utils::read_variable(raw, &pitch))
                 return false;
 
-            path = "BMMO_" + std::to_string(SteamNetworkingUtils()->GetLocalTimestamp()) + get_extension();
+            path = "BMMO_" + std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()) + get_extension();
             if (!save_to_pwd) path = (std::filesystem::temp_directory_path() / path).string();
             while (std::filesystem::exists(path)) path += get_extension();
             if (save_sound_file) {
