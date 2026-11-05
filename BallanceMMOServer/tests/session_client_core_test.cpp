@@ -2089,6 +2089,39 @@ namespace {
     // is clamp(p99 of the last 4 windows + 8, 48, 120), re-derived at each
     // sample, and the history grows to 128 with it.  A pinned reach
     // (config.reach_ticks) ignores the samples; a new session starts over.
+    // A frame past the reach whose tick is still recorded: a body that ran on another frame (or on none)
+    // leaves this world wrong for good without snapshots, so it asks for a resync; the prediction that
+    // was right, or a tick with no body behind the name, does not (trial 2's level 8, client 1).
+    TEST(SessionClientCoreRelay, ALateFrameThatDiffersFromTheSteppedOneAsksForAResync) {
+        for (const int arm: {0, 1, 2}) {   // 0 differs, 1 the same frame, 2 no body at the tick
+            flow_fake fake;
+            session_client_core core(fake.make_flow(), session_capabilities{});
+            run_to_tick_125(core, fake);
+            auto& st = state_of(core);
+            auto& remote = st.remotes_[4];
+            remote.entity = "Ball_Wood_BMMO_4";
+            remote.physicalized = true;
+            bmmo::session::rollback_world world;
+            world.get_nav = [](const std::string&, bmmo_physics_nav_state&) { return false; };
+            world.get_body = [arm](const std::string& name, bmmo_physics_body_state& out) {
+                out = make_body(name.c_str(), true, 0);
+                return arm != 2;
+            };
+            bmmo::session::rollback_tracked tracked;
+            tracked.remote_entities = {remote.entity};
+            for (uint32_t tick = 70; tick <= 80; ++tick)
+                st.rollback_.record(world, tick, tracked, {{remote.entity, keys_frame(0)}});
+            bmmo::session_remote_input_msg msg = relay_message(76, 120);
+            bmmo::session_remote_input_msg::entry e;
+            e.player = 4;
+            e.frames = {keys_frame(arm == 1 ? 0 : 1)};
+            msg.entries = {e};
+            core.on_session_remote_input(msg);
+            EXPECT_EQ(st.relay_late_, 1u) << arm;
+            EXPECT_EQ(st.resync_in_flight_, arm == 0) << arm;
+        }
+    }
+
     TEST(SessionClientCoreRelay, PerClientReachFollowsTheRelayLag) {
         flow_fake fake;
         session_client_core core(fake.make_flow(), session_capabilities{});

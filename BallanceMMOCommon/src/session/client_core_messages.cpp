@@ -526,6 +526,14 @@ namespace bmmo::session {
         // (rewindable, step SRT4: a light anchor needs its whole base too.)
         if (current_tick() - anchor > window_rewind_reach(tick) || !s.rollback_.rewindable(anchor)) {
             ++s.relay_late_;
+            // Without snapshots nothing else repairs it (trial 2, level 8: client 2's frames 92-108 ticks
+            // late, client 1 kept its wrong world and every later FINAL row UNCONFIRMED): a tick still
+            // recorded whose body ran on another frame asks for the server's state.  A frame past the
+            // history cannot be judged here.
+            bmmo::session::input_frame predicted{};
+            if (s.rollback_.recorded_body(entity, tick)
+                && !(s.rollback_.recorded_input(entity, tick, predicted) && same_frame(predicted, relayed)))
+                request_resync("a remote frame arrived past the reach and differs from the one stepped", true);
             return;
         }
         // A frame also stands in for the holes after it (the nearest
