@@ -160,10 +160,14 @@ TEST(CaptureSeams, RecordThenReplay) {
 
 }
 
-// Step T1b: a coordinated run - two processes over TCP to a coordinator, each on
-// its own virtual clock.  The client's link carries 10 ms each way: the server
-// sees a 20 ms round trip and the client's "hi" 10 ms after it was sent, and
-// the whole run, done twice, logs the same events at the same virtual times.
+// Steps T1b, T1e: a coordinated run - two processes over TCP to a coordinator,
+// each on its own virtual clock.  The client's link carries 10 ms each way: the
+// connect reaches the server 10 ms after it was made, the accept the client 10 ms
+// after that, the server sees a 20 ms round trip and the client's "hi" 10 ms
+// after it was sent.  The run, done twice in lockstep and twice with the
+// lookahead (each process running ahead by the link's latency), logs the same
+// events at the same virtual times all four times, the lookahead in fewer rounds.
+#include <algorithm>
 #include <atomic>
 #include <thread>
 
@@ -174,12 +178,13 @@ namespace {
 
 using namespace std::chrono_literals;
 
-std::vector<std::string> coordinated_run() {
+std::vector<std::string> coordinated_run(bool lockstep, uint64_t& rounds) {
     using bmmo::session::clock_site;
     bmmo::net::coordinator_options options;
     options.processes = 2;
     options.client_latency_ms = 10;
     options.until_us = options.start_us + 300000;
+    options.lockstep = lockstep;
     bmmo::net::coordinator coordinator(options);
     const std::string address = "127.0.0.1:" + std::to_string(coordinator.port());
     std::string run_error;
@@ -241,21 +246,31 @@ std::vector<std::string> coordinated_run() {
     server_loop.join();
     client_loop.join();
     EXPECT_TRUE(run_error.empty()) << run_error;
-    EXPECT_GT(coordinator.steps(), 20u);
+    rounds = coordinator.rounds();
+    // The two processes log concurrently: each one's lines in its own order.
+    std::stable_sort(log.begin(), log.end(), [](const std::string& a, const std::string& b) {
+        return a.substr(0, a.find(' ')) < b.substr(0, b.find(' '));
+    });
     return log;
 }
 
-TEST(Coordinator, TwoProcessesOneVirtualTimeTheSameRunTwice) {
-    const auto first = coordinated_run();
-    const auto second = coordinated_run();
-    EXPECT_EQ(first, second);
+TEST(Coordinator, TwoProcessesOneVirtualTimeTheSameRunInLockstepAndAhead) {
+    uint64_t lockstep_rounds = 0, ahead_rounds = 0, ignored = 0;
+    const auto first = coordinated_run(true, lockstep_rounds);
+    EXPECT_EQ(coordinated_run(true, ignored), first);
+    const auto ahead = coordinated_run(false, ahead_rounds);
+    EXPECT_EQ(ahead, first);
+    EXPECT_EQ(coordinated_run(false, ignored), first);
+    EXPECT_GT(lockstep_rounds, 40u);
+    EXPECT_LT(ahead_rounds * 3, lockstep_rounds * 2);   // 5 ms wakes, 10 ms ahead
     std::string all;
     for (const auto& line: first) all += line + '\n';
-    // The server's link sees the client's 10 ms each way; the client's "hi",
-    // sent at +20 ms, arrives at +30 ms and the server's pass at +30 ms takes it.
-    EXPECT_NE(all.find("client 20000 sent hi"), std::string::npos) << all;
+    // The connect, made at 0, reaches the server at +10 ms; its pass at +15 ms
+    // accepts, which reaches the client at +25 ms; its "hi", sent then,
+    // arrives at +35 ms and the server's pass at +45 ms takes it.
+    EXPECT_NE(all.find("client 25000 sent hi"), std::string::npos) << all;
     EXPECT_NE(all.find("ping 20"), std::string::npos) << all;
-    EXPECT_NE(all.find("server 30000 got hi received 30000"), std::string::npos) << all;
+    EXPECT_NE(all.find("server 45000 got hi received 35000"), std::string::npos) << all;
 }
 
 }

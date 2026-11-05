@@ -25,9 +25,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "session_clock.hpp"
@@ -75,15 +77,21 @@ namespace bmmo::session {
                     seen = waits_[id].generation;
                 }
                 if (ready()) break;
-                {
-                    std::lock_guard lk(mutex_);
-                    if (now_ >= t) break;
-                    auto& w = waits_[id];
-                    if (w.generation != seen) continue;   // ended meanwhile: look again
-                    w.woken = false;
-                    signal_if_idle();
-                }
-                cv.wait_for(lock, kRecheck);
+                std::unique_lock lk(mutex_);
+                if (now_ >= t) break;
+                auto& w = waits_[id];
+                if (w.generation != seen) continue;   // ended meanwhile: look again
+                w.woken = false;
+                signal_if_idle();
+                // The end of this wait comes under the clock's lock (step
+                // T1e): the caller's lock goes only once the clock's is held,
+                // so an end cannot fall between the two and be missed - on
+                // Windows a missed one cost a recheck of up to a timer tick
+                // (15.6 ms), many times a second.
+                lock.unlock();
+                changed_.wait_for(lk, kRecheck, [&] { return waits_[id].generation != seen; });
+                lk.unlock();
+                lock.lock();
             }
             std::lock_guard lk(mutex_);
             waits_.erase(id);
@@ -98,6 +106,7 @@ namespace bmmo::session {
             for (auto& [id, w]: waits_)
                 if (w.cv == &cv) end(w);
             cv.notify_all();
+            changed_.notify_all();   // a wait_until waits on it (step T1e)
         }
 
         // The coordinator's side.  `participants`: the threads that take part
@@ -115,6 +124,24 @@ namespace bmmo::session {
             std::unique_lock lk(mutex_);
             idle_.wait(lk, [&] { return closed_ || idle_locked(); });
             return closed_ ? std::nullopt : next_wake_locked();
+        }
+        // The same, saying what it waits for (describe()) after every `slow`
+        // of real time without idle - a diagnostic for a run that hangs.
+        std::optional<time_point> wait_idle(std::chrono::milliseconds slow, const std::function<void(const std::string&)>& on_slow) {
+            std::unique_lock lk(mutex_);
+            while (!idle_.wait_for(lk, slow, [&] { return closed_ || idle_locked(); })) {
+                const auto what = describe_locked();
+                lk.unlock();
+                on_slow(what);
+                lk.lock();
+            }
+            return closed_ ? std::nullopt : next_wake_locked();
+        }
+        // The participants, the waits (time from the start in us; "ended": by
+        // a notify or an advance, its thread not yet back).
+        std::string describe() const {
+            std::lock_guard lk(mutex_);
+            return describe_locked();
         }
         // No more wait_idle (the process is going): a blocked one returns.
         void close() {
@@ -150,6 +177,7 @@ namespace bmmo::session {
                     due.push_back(w.cv);
                 }
             for (auto* cv: due) cv->notify_all();
+            if (!due.empty()) changed_.notify_all();   // sleeps and wait_untils wait on it
         }
 
     private:
@@ -176,6 +204,17 @@ namespace bmmo::session {
             for (const auto& [id, w]: waits_)
                 if (!w.woken && w.at != time_point::max() && (!earliest || w.at < *earliest)) earliest = w.at;
             return earliest;
+        }
+        std::string describe_locked() const {
+            const auto us = [&](time_point t) {
+                return t == time_point::max() ? std::string("never")
+                     : std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(t - start_).count());
+            };
+            std::string out = "now +" + us(now_) + " us, " + std::to_string(waiting_locked()) + " of "
+                            + std::to_string(participants_) + " participants waiting:";
+            for (const auto& [id, w]: waits_)
+                out += " [" + std::to_string(id) + " at +" + us(w.at) + (w.woken ? " ended" : "") + "]";
+            return out;
         }
         void signal_if_idle() {
             if (idle_locked()) idle_.notify_all();

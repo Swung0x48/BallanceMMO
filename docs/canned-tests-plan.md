@@ -541,7 +541,7 @@ clock and GNS; nothing else in it changes.
   does, so `journal_judge.py` and the LBM scripts read them unchanged. The clients use `--drive` (scripted, by tick),
   `--uuid-seed` (K5), `--rewind-cost` (K6); T2 adds recipes (K8).
 - **Not in T1:** the retail client (stage 3), jitter and bursty loss in the link model (sim_network has neither;
-  they come when a test needs them), running processes ahead within the link latency (a speed-up for later).
+  they come when a test needs them). (Running processes ahead within the link latency came as T1e.)
 
 Acceptance: (1) the same run twice gives byte-identical server and client journals and send traces; (2) the judge
 on a T1 run is exact (FINAL rows), like a live run's; (3) speed: virtual seconds per real second for h1_150's shape,
@@ -619,7 +619,55 @@ Results (h1_150's shape: 4 clients, 150 ms each way, 40 s of play, P-cores):
 - **speed:** 43.4 virtual s in 43 real s (1.0x) with four clients (0.87x with snapshots on); one client 1.92x. About 1.7 ms of real time a
   step (a round trip with every process); the clients' 2 ms pacing waits make most of the steps. Speed-ups for later:
   the processes running ahead within the link latency (conservative lookahead), a pacer that waits for its frame's
-  time in one wait under a virtual clock.
+  time in one wait under a virtual clock. (T1e found most of that 1.0x was page heap on the server, below.)
+
+As built (T1e, 2026-11-05, "先提速"): the processes run ahead within the link latency (conservative lookahead).
+- **Rounds.** The coordinator grants every process a time, t0 (the earliest wake of all) + the network's lowest
+  latency - 1 us: nothing sent from t0 on can arrive by then, so each process runs to it on its own (its link thread
+  advances its clock to its next wake while that is within the grant) and reports idle only past it. The ops carry the
+  process's virtual time and go in one batch with the idle; the coordinator applies a round's ops in the order time,
+  process, rank, sequence, then hands each process what reaches it by the next grant, each message and state change with
+  its time - the process holds them until its clock gets there. Anything that turns up inside a granted round fails the
+  run. `--lockstep 1` (the exe) / `--lockstep` (arena_map_test.py) grants t0 alone: one wake time per round, the
+  reference the lookahead must equal.
+- **The network model** (sim_network): a connect reaches the listener, an accept the connector and a close the peer
+  only after the link's latency (they were instant, a channel faster than the lookahead); an endpoint learns its own
+  connect's "connecting" and its own accept's "connected" at once (remote_transport makes them locally); a close drops
+  nothing in flight. `take(until)` hands a process its due messages and notices early; `lowest_latency()`.
+- **The end.** Once every client has gone, everything runs to one time - the last client's going + the link's
+  latency + 1 s (`kWindDown`: the server's session sees them go) - then stops. (Stopping at once left the server where
+  its round happened to end: its journal's tail differed between lockstep and lookahead.)
+- **virtual_clock:** a condition wait (`wait_until`) now waits for its end on the clock's own lock and condition (the
+  caller's lock is released only once the clock's is held), so an end cannot fall between the two and be missed; a
+  missed one cost a 1 ms recheck, which Windows rounds up to its timer tick. `wait_idle(slow, on_slow)` and
+  `describe()`: a process not idle for 5 s of real time prints what its clock waits for; the coordinator reports who it
+  waits for every 5 s (12 times a round).
+- **`--server-exe NAME`** (arena_map_test.py): this machine runs `BallanceMMOServer.exe` under page heap (an Image File
+  Execution Options GlobalFlag, matched by the file name); for timings use a copy under another name. Under page heap
+  the coordinated run's server took 34.4 s of CPU, without it 1.8 s.
+- **Android arm64** (`BMMO_WITHOUT_GNS`, CMake): the server and the headless client without GameNetworkingSockets -
+  `src/net_stub/gns_stub.cpp` answers `role`'s GNS calls (init succeeds; the transport made before the coordinated
+  one replaces it is an empty sim network); coordinated runs only. A stub because `role`'s constructor initializes GNS
+  and makes a GNS transport whatever the host runs on; the user's follow-up (2026-11-05): move that choice to the hosts
+  so no stub is needed. Bionic defines the termios `B0` through asio's `<sys/ioctl.h>` (VxIntersect.h names a parameter
+  so): undefined after asio in coordinator_protocol.hpp. Build: NDK 28.2, android-29, `c++_static`, the headless
+  engine's portable math.
+
+Results (h1_150's shape, 4 clients, 150 ms each way, 40 s of play; the server copy without page heap):
+
+| run | rounds | virtual s / real s | speed | CPU s: server, each client |
+|---|---|---|---|---|
+| PC P-cores, lookahead | 297 | 44.8 / 8.2 | 5.45x | 1.8, 3.8-4.0 |
+| PC P-cores, lockstep | 29,077 | 44.8 / 11.9 | 3.75x | 2.6, 5.7-6.1 (coordinator 2.7) |
+| Phone (SM8850, 8 cores), lookahead | 297 | 44.8 / 10.9 | 4.11x | 2.7, 5.5-6.6 |
+
+- lookahead and lockstep: the server journal, all four client journals and all four send traces identical byte for
+  byte (9 of 9); three lookahead runs among themselves likewise; the judge exact on all four clients; the harness PASS,
+  the server replay 2638/2638.
+- the phone (arm64 Android, NDK clang) and the PC (x64 Windows, MSVC): the same nine files identical byte for byte.
+- The earlier "stall near tick 2650" was not a bug: that run was killed (by me, for the LBM6 quiet machine).
+- Unit tests: 815/815; the coordinator test runs lockstep twice and lookahead twice: the same log all four times, the
+  lookahead in fewer rounds.
 
 ## 4. Decisions
 

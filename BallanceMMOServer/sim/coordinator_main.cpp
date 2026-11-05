@@ -4,7 +4,8 @@
 // time (net/coordinator.hpp) until --virtual-seconds, then stops them.
 //
 //   BallanceMMOCoordinator --processes N [--port P] [--latency-ms L] [--loss-pct X]
-//                          [--seed S] [--virtual-seconds T]
+//                          [--seed S] [--virtual-seconds T] [--lockstep 1] [--trace 1]
+// --lockstep 1: one wake time per round, no lookahead (step T1e's reference).
 
 #include <chrono>
 #include <cstdio>
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
         else if (arg == "--seed") options.seed = std::strtoull(v, nullptr, 10);
         else if (arg == "--virtual-seconds") seconds = std::atof(v);
         else if (arg == "--trace") { trace = std::atoi(v) != 0; }
+        else if (arg == "--lockstep") options.lockstep = std::atoi(v) != 0;
         else { std::fprintf(stderr, "unknown argument %s\n", arg.c_str()); return 2; }
     }
     if (options.processes == 0) { std::fprintf(stderr, "usage: BallanceMMOCoordinator --processes N [...]\n"); return 2; }
@@ -46,8 +48,8 @@ int main(int argc, char** argv) {
     const bool ok = coordinator.run(error);
     const double real = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     const double virtual_s = static_cast<double>(coordinator.now() - options.start_us) / 1e6;
-    std::printf("coordinator: %s - %llu steps, %.3f virtual s in %.3f real s (%.2fx)\n", ok ? "done" : error.c_str(),
-                static_cast<unsigned long long>(coordinator.steps()), virtual_s, real, real > 0 ? virtual_s / real : 0.0);
+    std::printf("coordinator: %s - %llu rounds%s, %.3f virtual s in %.3f real s (%.2fx)\n", ok ? "done" : error.c_str(),
+                static_cast<unsigned long long>(coordinator.rounds()), options.lockstep ? " (lockstep)" : "", virtual_s, real, real > 0 ? virtual_s / real : 0.0);
     std::fflush(stdout);
     return ok ? 0 : 1;
 }

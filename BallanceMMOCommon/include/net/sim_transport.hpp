@@ -2,21 +2,31 @@
 
 // A simulated network for bmmo::net::transport (step K2): any number of
 // transports in one process, on one virtual clock the owner advances.  For
-// unit tests of the session code over a network, and the shape the stage 1
-// coordinator's network takes (docs/canned-tests-plan.md).
+// unit tests of the session code over a network, and the coordinator's
+// network (docs/canned-tests-plan.md, T1).
 //
 // The model, deliberately small: a link's latency per direction; reliable
 // messages arrive in order after it (a loss costs nothing but its latency:
 // the retransmit is not modelled); unreliable ones are lost with the link's
 // loss rate (a seeded generator: the same seed loses the same messages).
+//
+// Nothing crosses a link faster than its latency (T1e, the coordinator's
+// lookahead): a connect reaches the listener after the link's latency, an
+// accept the connector, a close the peer.  What an endpoint did itself (its own
+// connect's "connecting", its own accept's "connected") it learns at once - a
+// local notice.  A close drops nothing in flight: the data on the wire arrives
+// before the close does (with `linger`, also the reliable data still queued).
 // Handles count from 1 in the order connections are made.  Header-only.
 
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -29,9 +39,30 @@ namespace bmmo::net {
         explicit sim_network(uint64_t seed = 1) : random_(seed) {}
 
         microseconds now() const { return now_; }
-        void advance(microseconds by) { now_ += by; }
+        void advance(microseconds by) { advance_to(now_ + by); }
+        // Moves the time forward (never back); a state change due by then
+        // takes effect.
+        void advance_to(microseconds t) {
+            now_ = std::max(now_, t);
+            settle();
+        }
 
         std::unique_ptr<transport> make_transport();
+
+        // The coordinator's side (T1e).  What `t` is due by `until` - the
+        // messages to it and the state changes it learns from its peers, each
+        // with its time - taken now, before the network gets there (a
+        // coordinated process holds them until its own clock does).  Its local
+        // notices are dropped: the process makes its own.
+        void take(transport& t, microseconds until,
+                  const std::function<void(connection, microseconds at, const std::string& bytes)>& message,
+                  const std::function<void(connection, microseconds at, connection_state, int reason,
+                                           const std::string& debug)>& notice);
+        // The fastest any endpoint can reach another: the least of a sender's
+        // send latency plus a receiver's receive latency over every pair (with
+        // fewer than two endpoints, kNoLink).
+        static constexpr microseconds kNoLink = std::numeric_limits<microseconds>::max() / 4;
+        microseconds lowest_latency() const;
 
     private:
         class endpoint;
@@ -41,11 +72,14 @@ namespace bmmo::net {
             connection to = kInvalidConnection;
             std::string bytes;
         };
-        struct pending_close {   // a close the peer learns once its link has carried it
+        struct notice {   // a state change its endpoint learns at `at`
             microseconds at = 0;
-            connection to = kInvalidConnection;
+            uint64_t seq = 0;
+            connection conn = kInvalidConnection;
+            connection_state state = connection_state::none;
             int reason = kEndInvalid;
             std::string debug;
+            bool local = false;
         };
         struct half {   // one side of a connection
             endpoint* owner = nullptr;
@@ -59,10 +93,13 @@ namespace bmmo::net {
             const auto it = halves_.find(c);
             return it == halves_.end() ? nullptr : &it->second;
         }
-        void change(connection c, connection_state to, int reason = kEndInvalid, std::string debug = {});
+        microseconds latency(const half& from, const half* to) const;
+        // `c` changes to `to` at `at`: the state then, its owner's notice for then.
+        void schedule(connection c, connection_state to, microseconds at, bool local, int reason = kEndInvalid,
+                      std::string debug = {});
+        void settle();
         bool deliver(connection from, const void* data, size_t size, int flags);
         void close(connection c, int reason, const std::string& debug, bool linger);
-        void settle_closes();
 
         microseconds now_ = 0;
         uint64_t seq_ = 0;
@@ -70,16 +107,18 @@ namespace bmmo::net {
         std::mt19937_64 random_;
         std::map<connection, half> halves_;
         std::map<uint16_t, endpoint*> listeners_;
-        std::vector<packet> packets_;   // in flight
-        std::vector<pending_close> closes_;
+        std::set<endpoint*> endpoints_;
+        std::vector<packet> packets_;   // in flight, by (at, seq)
+        std::vector<notice> flips_;     // the state changes still to come, by (at, seq)
 
         friend class endpoint;
     };
 
     class sim_network::endpoint final : public transport {
     public:
-        explicit endpoint(sim_network& net) : net_(net) {}
+        explicit endpoint(sim_network& net) : net_(net) { net_.endpoints_.insert(this); }
         ~endpoint() override {
+            net_.endpoints_.erase(this);
             for (auto it = net_.listeners_.begin(); it != net_.listeners_.end();)
                 it = it->second == this ? net_.listeners_.erase(it) : std::next(it);
             for (auto& [c, h]: net_.halves_)
@@ -95,8 +134,10 @@ namespace bmmo::net {
         accept_result accept(connection c) override {
             half* h = net_.find(c);
             if (!h || h->owner != this || h->state != connection_state::connecting) return accept_result::refused;
-            net_.change(c, connection_state::connected);
-            net_.change(h->peer, connection_state::connected);
+            const microseconds at = net_.now_ + net_.latency(*h, net_.find(h->peer));
+            const connection peer = h->peer;
+            net_.schedule(c, connection_state::connected, net_.now_, true);
+            net_.schedule(peer, connection_state::connected, at, false);
             return accept_result::ok;
         }
 
@@ -109,8 +150,9 @@ namespace bmmo::net {
             const connection mine = net_.next_++, theirs = net_.next_++;
             net_.halves_[mine] = half{this, theirs, connection_state::none, 0, {}};
             net_.halves_[theirs] = half{server->second, mine, connection_state::none, 0, {}};
-            net_.change(mine, connection_state::connecting);
-            net_.change(theirs, connection_state::connecting);
+            const microseconds at = net_.now_ + net_.latency(net_.halves_[mine], &net_.halves_[theirs]);
+            net_.schedule(mine, connection_state::connecting, net_.now_, true);
+            net_.schedule(theirs, connection_state::connecting, at, false);
             return mine;
         }
 
@@ -150,7 +192,8 @@ namespace bmmo::net {
             std::vector<packet> due;
             for (auto it = net_.packets_.begin(); it != net_.packets_.end() && static_cast<int>(due.size()) < max;) {
                 const half* h = net_.find(it->to);
-                if (h && h->owner == this && h->state == connection_state::connected && it->at <= net_.now_) {
+                // (a peer's close does not stop what was sent before it)
+                if (h && h->owner == this && it->at <= net_.now_) {
                     due.push_back(std::move(*it));
                     it = net_.packets_.erase(it);
                 } else {
@@ -163,10 +206,20 @@ namespace bmmo::net {
         }
 
         void poll_status(const std::function<void(const status_change&)>& each) override {
-            net_.settle_closes();
-            while (!changes_.empty()) {
-                const status_change change = std::move(changes_.front());
-                changes_.pop_front();
+            net_.settle();
+            while (!notices_.empty() && notices_.front().at <= net_.now_) {
+                const notice n = std::move(notices_.front());
+                notices_.pop_front();
+                const half* h = net_.find(n.conn);
+                if (!h) continue;   // closed here meanwhile
+                status_change change;
+                change.conn = n.conn;
+                change.old_state = told_[n.conn];
+                change.state = n.state;
+                change.end_reason = n.reason;
+                change.end_debug = n.debug;
+                change.description = "#" + std::to_string(n.conn) + (h->name.empty() ? "" : " " + h->name);
+                told_[n.conn] = n.state;
                 each(change);
             }
         }
@@ -186,25 +239,45 @@ namespace bmmo::net {
     private:
         friend class sim_network;
         sim_network& net_;
-        std::deque<status_change> changes_;
+        std::deque<notice> notices_;                 // by (at, seq)
+        std::map<connection, connection_state> told_;
         microseconds lag_us_[2] = {0, 0};   // send, recv
         float loss_[2] = {0, 0};             // percent
     };
 
     inline std::unique_ptr<transport> sim_network::make_transport() { return std::make_unique<endpoint>(*this); }
 
-    inline void sim_network::change(connection c, connection_state to, int reason, std::string debug) {
+    inline microseconds sim_network::latency(const half& from, const half* to) const {
+        return (from.owner ? from.owner->lag_us_[0] : 0) + (to && to->owner ? to->owner->lag_us_[1] : 0);
+    }
+
+    inline microseconds sim_network::lowest_latency() const {
+        microseconds lowest = kNoLink;
+        for (const auto* a: endpoints_)
+            for (const auto* b: endpoints_)
+                if (a != b) lowest = std::min(lowest, a->lag_us_[0] + b->lag_us_[1]);
+        return lowest;
+    }
+
+    inline void sim_network::schedule(connection c, connection_state to, microseconds at, bool local, int reason,
+                                      std::string debug) {
         half* h = find(c);
         if (!h) return;
-        status_change ch;
-        ch.conn = c;
-        ch.old_state = h->state;
-        ch.state = to;
-        ch.end_reason = reason;
-        ch.end_debug = std::move(debug);
-        ch.description = "#" + std::to_string(c) + (h->name.empty() ? "" : " " + h->name);
-        h->state = to;
-        if (h->owner) h->owner->changes_.push_back(std::move(ch));
+        const auto by_time = [](const notice& a, const notice& b) { return a.at != b.at ? a.at < b.at : a.seq < b.seq; };
+        notice n{at, seq_++, c, to, reason, std::move(debug), local};
+        if (h->owner) {
+            auto& q = h->owner->notices_;
+            q.insert(std::upper_bound(q.begin(), q.end(), n, by_time), n);
+        }
+        flips_.insert(std::upper_bound(flips_.begin(), flips_.end(), n, by_time), std::move(n));
+        settle();
+    }
+
+    inline void sim_network::settle() {
+        size_t done = 0;
+        for (; done < flips_.size() && flips_[done].at <= now_; ++done)
+            if (half* h = find(flips_[done].conn)) h->state = flips_[done].state;
+        flips_.erase(flips_.begin(), flips_.begin() + static_cast<std::ptrdiff_t>(done));
     }
 
     inline bool sim_network::deliver(connection from, const void* data, size_t size, int flags) {
@@ -214,7 +287,7 @@ namespace bmmo::net {
         if (!peer) return false;
         const auto* sender = h->owner;
         const auto* receiver = peer->owner;
-        microseconds at = now_ + sender->lag_us_[0] + (receiver ? receiver->lag_us_[1] : 0);
+        microseconds at = now_ + latency(*h, peer);
         if (flags & kSendReliable) {
             at = std::max(at, h->last_reliable);
             h->last_reliable = at;
@@ -222,34 +295,45 @@ namespace bmmo::net {
             const float loss = sender->loss_[0] + (receiver ? receiver->loss_[1] : 0.0f);
             if (std::uniform_real_distribution<float>(0.0f, 100.0f)(random_) < loss) return true;   // sent, lost
         }
-        packets_.push_back(packet{at, seq_++, h->peer, std::string(static_cast<const char*>(data), size)});
-        std::stable_sort(packets_.begin(), packets_.end(),
-                         [](const packet& a, const packet& b) { return a.at != b.at ? a.at < b.at : a.seq < b.seq; });
+        packet p{at, seq_++, h->peer, std::string(static_cast<const char*>(data), size)};
+        packets_.insert(std::upper_bound(packets_.begin(), packets_.end(), p,
+                                         [](const packet& a, const packet& b) { return a.at != b.at ? a.at < b.at : a.seq < b.seq; }),
+                        std::move(p));
         return true;
     }
 
     // The peer learns of a close after the link's latency; with `linger`, only
     // once the reliable data still in flight has arrived (receive() hands that
-    // over first, poll_status the close after it).  Without it the data is lost.
+    // over first, poll_status the close after it).
     inline void sim_network::close(connection c, int reason, const std::string& debug, bool linger) {
         half* h = find(c);
         if (!h) return;
         const connection peer = h->peer;
-        microseconds at = now_ + (h->owner ? h->owner->lag_us_[0] : 0);
+        microseconds at = now_ + latency(*h, find(peer));
         if (linger) at = std::max(at, h->last_reliable);
-        else
-            packets_.erase(std::remove_if(packets_.begin(), packets_.end(),
-                                          [peer](const packet& p) { return p.to == peer; }), packets_.end());
         const bool was_open = h->state == connection_state::connected || h->state == connection_state::connecting;
         halves_.erase(c);
-        if (was_open && find(peer)) closes_.push_back(pending_close{at, peer, reason, debug});
+        if (was_open && find(peer)) schedule(peer, connection_state::closed_by_peer, at, false, reason, debug);
     }
 
-    inline void sim_network::settle_closes() {
-        for (auto it = closes_.begin(); it != closes_.end();) {
-            if (it->at > now_) { ++it; continue; }
-            change(it->to, connection_state::closed_by_peer, it->reason, it->debug);
-            it = closes_.erase(it);
+    inline void sim_network::take(transport& t, microseconds until,
+                                  const std::function<void(connection, microseconds, const std::string&)>& message,
+                                  const std::function<void(connection, microseconds, connection_state, int,
+                                                           const std::string&)>& notice_of) {
+        auto& e = static_cast<endpoint&>(t);
+        while (!e.notices_.empty() && e.notices_.front().at <= until) {
+            const notice n = std::move(e.notices_.front());
+            e.notices_.pop_front();
+            if (!n.local) notice_of(n.conn, n.at, n.state, n.reason, n.debug);
+        }
+        for (auto it = packets_.begin(); it != packets_.end() && it->at <= until;) {
+            const half* h = find(it->to);
+            if (!h || h->owner == &e) {   // to a connection closed at its end: gone
+                if (h) message(it->to, it->at, it->bytes);
+                it = packets_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 

@@ -1030,7 +1030,7 @@ def run_case(args, sector, case_dir):
             coordinator = subprocess.Popen(
                 [str(bindir / f'BallanceMMOCoordinator{EXE}'), '--processes', str(args.players + 1),
                  '--latency-ms', str(int(link['latency_ms'])), '--loss-pct', str(link['loss_pct']),
-                 '--seed', str(args.loss_seed)],
+                 '--seed', str(args.loss_seed), *(['--lockstep', '1'] if args.lockstep else [])],
                 cwd=case_dir, stdin=subprocess.DEVNULL, stdout=cf_log, stderr=subprocess.STDOUT, creationflags=FLAGS)
             children.append(coordinator)
             for _ in range(200):
@@ -1048,7 +1048,7 @@ def run_case(args, sector, case_dir):
             sf = open(case_dir / 'server.log', 'wb')
             handles.append(sf)
             server = subprocess.Popen(
-                [str(bindir / f'BallanceMMOServer{EXE}'), '--port', str(args.port),
+                [str(bindir / f'{args.server_exe}{EXE}'), '--port', str(args.port),
                  *(['--coordinator', coordinator_addr] if coordinator_addr else [])],
                 cwd=case_dir, stdin=subprocess.PIPE, stdout=sf,
                 stderr=subprocess.STDOUT, creationflags=FLAGS)
@@ -3617,6 +3617,13 @@ def main():
                     help='step T1 (docs/canned-tests-plan.md): run the server and the clients on one virtual time '
                          'through BallanceMMOCoordinator (its network: --latency-ms and --loss-pct, the same for every '
                          'client; no proxies, no jitter, no link events)')
+    ap.add_argument('--server-exe', default='BallanceMMOServer',
+                    help="the server's executable in --bin, without the extension: for timings, a copy under "
+                         'another name (on this machine BallanceMMOServer.exe runs under page heap, an '
+                         'Image File Execution Options setting matched by the file name)')
+    ap.add_argument('--lockstep', action='store_true',
+                    help='--coordinated: the coordinator steps one wake time at a time instead of running every '
+                         'process ahead by a link latency (T1e: the reference the lookahead must equal, byte for byte)')
     ap.add_argument('--snapshots', choices=('on', 'off'), default=None,
                     help="the harness's own server: snapshots every 2 ticks, a full one every 66 (on, the default "
                          'without --scenario) or none (off, as every --scenario and the LBM arms run)')
