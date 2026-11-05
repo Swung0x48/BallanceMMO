@@ -377,6 +377,28 @@ stamp order - and of nothing else; when it runs only decides when the results co
   smoke. K4b-ii: the server capture and the perturbed replay test (it finds any callback-written state that a
   post depends on). K4b-iii: B1-B5 and whatever K4b-ii found. Each committed on its gate; LBM after K4b-iii.
 
+As built (K4b-i, 2026-11-05): `session_runner::input_stamp` (a thread-local stamp the network thread holds per
+message - its arrival from the pass's one clock pair, `server::arrival_of` - and per status change and pass timers -
+the pass's instant `poll_at_`), `post` stamps every command (nondecreasing), `mark` takes the handover mark after
+every receive pass; `run` is the logical loop (`bmmo::session::next_logical_move`: command, step, wait, idle;
+unit-tested), `step_instant` / `step_verdict` / `step_session` the step rule on `logical_` with `kStepGrace` = 2 ms
+shifting the deadline and every patience threshold; every deciding runner time is `logical_` (the take's cutoff, the
+event's arrival, `seen`, the start origin, the journal's start and TICK ms, the leaver's and the deadline trafo's
+times, the baseline's settle); the server's waits are `wait_until` (a requested receive pass: messages, status, the
+mark; no timers, no `main_pass_`), a receive repeats past its 1024 cap. Removed: B2SX's catch-up-only cutoff, the
+drain-time `seen`, `late_join_tick` (no caller), `max_catch_up_ticks`, the wake / patience_wake diagnostics. New log
+fields (S1 quorum line, a product log change): `seen-at` is now the real arrival-to-apply lag, `step-lag-ms` the
+real time a step ran after its step instant, `after-deadline` / `after-deadline-ms` the frames the grace took.
+The grace: three P-core arms on the old code (h1_150; + 20 ms jitter and 2 % loss; + 50 ms jitter, lead adjust off)
+stepped no tick past its deadline and cut nothing by patience, so no p99 could be measured; 2 ms is the old late
+wake's bound (GNS sets the 1 ms timer resolution; the old sleep was whole milliseconds), to be read in LBM's stall /
+blackout arms from the new fields. Checked: 809/809 unit tests; the wire check of core_ref_s16: 44 send traces SAME,
+5 journals DIFFERENT (resync_snapoff c2, resync_at150 c0, resync_at150_down c0, fan_dr c0, fan_dr c3.rejoin1) - the
+same 5 with collision-overhaul's own build (6861e716, whose replays these match record for record): the merged
+CBF1 F1 / CBF3 client changes, not K4b (core_ref_s16 predates them); live P-core smoke (h1_150): harness PASS,
+server replay 2641/2641, the judge exact on all four clients; `step-lag-ms` p50 8 ms / p95 16 ms - the network
+pass's 15.15 ms cadence, the same queueing the old `seen-at` showed (0.53 ticks). Not run: LBM (after K4b-iii).
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |

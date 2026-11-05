@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <vector>
 
 #include "../entity/session.hpp"
@@ -149,6 +150,11 @@ namespace bmmo::session {
         uint64_t late_by_arrival() const { return late_by_arrival_; }
 
         bool has(uint32_t tick) const { return frames_.count(tick) != 0; }
+        // The stored frame's arrival (kOnTime: none stored, or unstamped).
+        arrival_clock::time_point arrival_of(uint32_t tick) const {
+            const auto at = arrivals_.find(tick);
+            return at == arrivals_.end() ? kOnTime : at->second;
+        }
         // Nothing more will come for `tick` that the step could use: its frame
         // is here, or the buffer was re-anchored past it (a late joiner's or a
         // resync's base, later a lead reset's range), so waiting for it would
@@ -378,6 +384,20 @@ namespace bmmo::session {
         uint32_t hold_from_ = 0, hold_until_ = 0;
         uint64_t received_ = 0, stored_ = 0, stale_ = 0;
     };
+
+    // Step K4b: the server runner's next move on its logical timeline, from
+    // the oldest queued command's stamp, the earliest tick's step instant and
+    // the handover mark (every command stamped at or before it is queued).
+    // Stamps are nondecreasing in the queue, so a command stamped after a
+    // step instant also proves every command up to it is there.
+    enum class logical_move { command, step, wait, idle };
+    inline logical_move next_logical_move(std::optional<std::chrono::steady_clock::time_point> command,
+                                          std::optional<std::chrono::steady_clock::time_point> step,
+                                          std::chrono::steady_clock::time_point mark) {
+        if (command && (!step || *command <= *step)) return logical_move::command;
+        if (step && (command || *step <= mark)) return logical_move::step;
+        return step ? logical_move::wait : logical_move::idle;
+    }
 
     class tick_scheduler {
     public:

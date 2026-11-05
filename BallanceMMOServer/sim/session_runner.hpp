@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -45,7 +46,6 @@ namespace bmmo::sim {
         uint32_t input_delay = 6;           // floor; each session sizes its own from ping
         uint32_t snapshot_interval = 2;
         uint32_t full_snapshot_interval = 66;
-        uint32_t max_catch_up_ticks = 10;   // ticks simulated per loop when behind
         int seed = 1;
         // Every clock read of the runner that decides something (step K1); null:
         // the real clock.  The step-cost timers read the real clock themselves.
@@ -268,6 +268,11 @@ namespace bmmo::sim {
         std::function<void(const member_change&)> on_player_removed;
         // A tick failed or the world died; the server ends the session.
         std::function<void(uint32_t session, const std::string& reason)> on_failed;
+        // Step K4b: the runner needs the handover mark (session_runner::mark)
+        // past an instant it is due to step at and asks the network thread
+        // for a receive pass now.  Empty (the tests, the SimTool): no network
+        // thread feeds the runner, and its own clock is the mark.
+        std::function<void()> request_poll;
         std::function<void(const std::string&)> log;
     };
 
@@ -277,6 +282,30 @@ namespace bmmo::sim {
         ~session_runner();
         session_runner(const session_runner&) = delete;
         session_runner& operator=(const session_runner&) = delete;
+
+        // Step K4b (the user's rule, 2026-11-05: the server's results never
+        // depend on how its threads overlap).  Every command carries a stamp
+        // on the session clock - the receive time of the input it came from -
+        // and the runner applies the commands in stamp order on a logical
+        // timeline, between its ticks' step instants: what a step takes and
+        // the tick a command counts for follow from the stamps alone, never
+        // from when the runner thread got to them.  The network thread holds
+        // an input_stamp while it handles a message, a status change or a
+        // pass's timers; a post with none (the console, the tests) is stamped
+        // when it is posted.
+        class input_stamp {
+        public:
+            explicit input_stamp(std::chrono::steady_clock::time_point at);
+            ~input_stamp();
+            input_stamp(const input_stamp&) = delete;
+            input_stamp& operator=(const input_stamp&) = delete;
+
+        private:
+            std::optional<std::chrono::steady_clock::time_point> outer_;
+        };
+        // The handover mark: every command stamped at or before `at` has been
+        // posted (the network thread, after each receive pass).
+        void mark(std::chrono::steady_clock::time_point at);
 
         // Boots a world for the level; on_world_ready follows.  Each player is
         // paired with its join order (design 9.10): the world's per-player
@@ -409,8 +438,6 @@ namespace bmmo::sim {
         // schedule's start, the signed schedule tick, the floor, the base),
         // naming `who` (the member and the path) when given.
         uint32_t reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who = "", uint32_t* assigned_lead = nullptr) const;
-        // Tick to assign to a late joiner anchoring now.
-        uint32_t late_join_tick(uint32_t session) const;
         // Step M1 (J4): the largest removal tick of the session's leaving
         // lives, 0 when none.  A late joiner's base is not before it, so a
         // life the joiner is never told of has ended in the server's world
@@ -468,8 +495,12 @@ namespace bmmo::sim {
             };
             std::deque<quorum_tick> quorum_history;
             uint64_t quorum_ticks = 0, quorum_member_ticks = 0, quorum_last = 0, quorum_wide = 0, quorum_waived = 0;
-            std::vector<double> quorum_gap, arrival_queue, quorum_wake;
-            std::chrono::steady_clock::time_point patience_wake{};
+            // Diagnostics (step K4b): `arrival_queue` the real time from a
+            // frame's arrival to the runner thread applying it (ticks);
+            // `step_lag_ms` the real time a step ran after its step instant;
+            // `after_deadline_ms` the fresh frames a step took that arrived
+            // after the tick's deadline (the grace's).
+            std::vector<double> quorum_gap, arrival_queue, step_lag_ms, after_deadline_ms;
             struct lateness_entry {
                 bmmo::session::relative_meter meter;
             };
@@ -686,13 +717,28 @@ namespace bmmo::sim {
                           uint64_t anchor_surfaces, uint32_t first_tick, uint64_t anchor_placement = 0);
 
         void run();
-        // ONE FIFO queue for every command, run in posting order.  Relied on
-        // (step EVI, protocol 25): the server's handle_session_input posts a
-        // datagram's piggybacked events (submit_event) before its frames
-        // (submit_input), so a frame never reaches the simulation thread
-        // ahead of an event stamped at it; a second queue or any reordering
-        // here would make piggybacked events late again.
+        // ONE FIFO queue for every command, run in posting order (stamps are
+        // nondecreasing in it).  Relied on (step EVI, protocol 25): the
+        // server's handle_session_input posts a datagram's piggybacked events
+        // (submit_event) before its frames (submit_input), so a frame never
+        // reaches the simulation thread ahead of an event stamped at it; a
+        // second queue or any reordering here would make piggybacked events
+        // late again.
         void post(std::function<void()> command);
+        // Step K4b: the earliest instant at or after logical_ at which the
+        // session's next tick may be stepped, from its state as of logical_:
+        // logical_ itself when the step test passes there, a member's
+        // patience threshold, or the deadline plus kStepGrace.  None when the
+        // session is not ticking.
+        std::optional<std::chrono::steady_clock::time_point> step_instant(const session_state& s) const;
+        // The step test of `tick` at `at` (patience_step_test), the rule's
+        // instants - the deadline, a member's patience - honoured kStepGrace
+        // late.
+        bmmo::session::patience_verdict step_verdict(const session_state& s,
+                                                     const std::vector<bmmo::session::patience_member>& members,
+                                                     uint32_t tick, std::chrono::steady_clock::time_point at) const;
+        // One tick of `s` at logical_ (its step instant).
+        void step_session(session_state& s);
         void step(session_state& s);
         void emit_snapshot(session_state& s, bool full, bool body_set = false);
         void emit_resync_states(session_state& s, uint32_t tick, bool recording);
@@ -708,7 +754,18 @@ namespace bmmo::sim {
         std::thread thread_;
         std::mutex mutex_;
         std::condition_variable wake_;
-        std::deque<std::function<void()>> commands_;
+        struct stamped_command {
+            std::chrono::steady_clock::time_point stamp;
+            std::function<void()> run;
+        };
+        std::deque<stamped_command> commands_;   // mutex_
+        // Step K4b (mutex_): the handover mark, the newest stamp posted, and
+        // the step instant a receive pass was last asked for.
+        std::chrono::steady_clock::time_point mark_{}, last_stamp_{}, poll_asked_{};
+        // Step K4b (simulation thread): the logical now - the stamp of the
+        // command being applied, or the step instant of the tick being
+        // stepped.  Every deciding time the runner reads is this one.
+        std::chrono::steady_clock::time_point logical_{};
         bool stopping_ = false;
         std::map<uint32_t, std::unique_ptr<session_state>> sessions_;  // simulation thread only
         // Step B2SW: the harness's server-side stall, from the environment

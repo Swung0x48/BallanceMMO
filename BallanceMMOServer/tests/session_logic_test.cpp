@@ -27,6 +27,18 @@ namespace {
     }
 }
 
+// Step K4b: the runner applies commands and steps ticks in stamp order, and
+// steps only once every command stamped up to the step is known.
+TEST(LogicalMove, CommandsAndStepsInStampOrderAStepWaitsForTheMark) {
+    const std::chrono::steady_clock::time_point t0{}, t5 = t0 + 5ms, t9 = t0 + 9ms;
+    EXPECT_EQ(next_logical_move(t5, t9, t0), logical_move::command);       // the earlier stamp first
+    EXPECT_EQ(next_logical_move(t9, t9, t0), logical_move::command);       // a command at the instant is in time
+    EXPECT_EQ(next_logical_move(t9, t5, t0), logical_move::step);          // a later command proves the rest queued
+    EXPECT_EQ(next_logical_move(std::nullopt, t5, t0), logical_move::wait);   // nothing known up to t5 yet
+    EXPECT_EQ(next_logical_move(std::nullopt, t5, t5), logical_move::step);   // the mark passed it
+    EXPECT_EQ(next_logical_move(std::nullopt, std::nullopt, t9), logical_move::idle);
+}
+
 TEST(InputBuffer, TakesFreshFramesAndFallsBackToLast) {
     input_buffer buffer;
     buffer.reset(0);

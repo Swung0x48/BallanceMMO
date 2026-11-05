@@ -40,6 +40,16 @@
 
 using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
 
+// Step K4b: the stamp every runner command posted while an input is handled
+// carries (session_runner::input_stamp); nothing to stamp without the runner.
+#if BMMO_BUILD_SIM
+using input_stamp = bmmo::sim::session_runner::input_stamp;
+#else
+struct input_stamp {
+    explicit input_stamp(std::chrono::steady_clock::time_point) {}
+};
+#endif
+
 class server: public role {
 public:
     explicit server(uint16_t port) {
@@ -73,7 +83,8 @@ public:
     //   1. update(): drain incoming messages and run connection callbacks;
     //   2. if ticking, wait until SERVER_TICK_DELAY into the iteration and
     //      broadcast the collected ball states (tick());
-    //   3. sleep out the remainder of SERVER_RECEIVE_INTERVAL.
+    //   3. wait out the remainder of SERVER_RECEIVE_INTERVAL.
+    // A receive pass the runner asks for cuts a wait short (wait_until).
     // Console commands run on the main thread and synchronize with this
     // loop through state_mutex_.
     void run() override {
@@ -81,11 +92,52 @@ public:
             auto update_begin = clock_.now(bmmo::session::clock_site::server_loop_pass);
             update();
             if (ticking_) {
-                std::this_thread::sleep_until(update_begin + bmmo::SERVER_TICK_DELAY);
+                wait_until(update_begin + bmmo::SERVER_TICK_DELAY);
                 tick();
             }
-            std::this_thread::sleep_until(update_begin + bmmo::SERVER_RECEIVE_INTERVAL);
+            wait_until(update_begin + bmmo::SERVER_RECEIVE_INTERVAL);
         }
+    }
+
+    // Step K4b: the loop's wait.  The runner steps a tick only once the
+    // handover mark has passed its step instant (session_runner::mark); when
+    // it is due before the next pass it asks for a receive pass now
+    // (request_poll): messages, status changes and the mark, none of the
+    // pass's timers - they keep the 15.15 ms cadence, and main_pass_ counts
+    // regular passes only (the assign copies' schedule counts them).
+    void wait_until(std::chrono::steady_clock::time_point until) {
+        std::unique_lock lk(poll_mutex_);
+        while (poll_cv_.wait_until(lk, until, [this] { return poll_requested_; })) {
+            poll_requested_ = false;
+            lk.unlock();
+            receive_pass();
+#if BMMO_BUILD_SIM
+            if (runner_) runner_->mark(poll_at_);
+#endif
+            lk.lock();
+        }
+    }
+
+    // One receive pass: the poll's instant first (every arrival in it is
+    // measured from it, and it is the pass's handover mark - GNS stamps a
+    // packet and queues its message under the one lock its receive takes, so
+    // nothing stamped before it is left out), then messages and status
+    // changes, each under its input stamp.
+    bool receive_pass() {
+        poll_at_ = clock_.now(bmmo::session::clock_site::server_poll);
+        poll_transport_ = transport_->local_timestamp();
+        input_stamp stamp(poll_at_);   // status changes: the poll's instant
+        return role::update();
+    }
+
+    // A message's receive time on the session clock, from the transport's
+    // stamp and the pass's clock pair (no clock read per message); a stamp
+    // older than 10 s counts as 10 s.
+    std::chrono::steady_clock::time_point arrival_of(bmmo::net::microseconds received) const {
+        constexpr bmmo::net::microseconds kMaxAge = 10000000;
+        const bmmo::net::microseconds age = poll_transport_ - received;
+        if (received <= 0 || age <= 0) return poll_at_;
+        return poll_at_ - std::chrono::microseconds(std::min(age, kMaxAge));
     }
 
     // The start barrier is a wall-clock deadline, so it is checked from the
@@ -94,15 +146,17 @@ public:
     // the server is ticking.  Runs before the tick broadcast every iteration.
     bool update() override {
         main_pass_.fetch_add(1, std::memory_order_relaxed);   // step SAXE: before this pass's messages
-        const bool had_messages = role::update();
+        const bool had_messages = receive_pass();
 #if BMMO_BUILD_SIM
         {
             std::lock_guard lk(state_mutex_);
+            input_stamp stamp(poll_at_);   // step K4b: the pass's timers act at its instant
             check_start_barriers();
             check_start_handshakes();   // FULL step SAXH
             send_assign_repeats();
             post_player_rtts();
         }
+        if (runner_) runner_->mark(poll_at_);
 #endif
         return had_messages;
     }
@@ -921,6 +975,14 @@ public:
         callbacks.on_failed = [this](uint32_t session, const std::string& reason) {
             std::lock_guard lk(state_mutex_);
             end_physics_session(session, "simulation failed: " + reason);
+        };
+        // Step K4b: the runner's ask for a receive pass now (wait_until).
+        callbacks.request_poll = [this] {
+            {
+                std::lock_guard lk(poll_mutex_);
+                poll_requested_ = true;
+            }
+            poll_cv_.notify_one();
         };
         // Step CMAP: the custom maps a session may run, resolved before the first world chdir's into Bin.
         custom_maps_dir_ = config_.physics_custom_maps.empty()
@@ -2390,12 +2452,7 @@ public:
             physics_session_member_left(c);
             return;
         }
-        auto arrival = clock_.now(bmmo::session::clock_site::server_input_arrival);
-        constexpr bmmo::net::microseconds kMaxAge = 10000000;
-        const bmmo::net::microseconds age = transport_->local_timestamp() - received;
-        if (received > 0 && age > 0)
-            arrival -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                    std::chrono::microseconds(age < kMaxAge ? age : kMaxAge));
+        const auto arrival = arrival_of(received);
         if (msg.server_us <= 0) return;
         const int64_t arrival_us = steady_us(arrival);
         s.handshake.add_sample(c, bmmo::session::make_clock_sample(msg.server_us, msg.client_us, arrival_us), arrival_us);
@@ -2834,12 +2891,7 @@ public:
         const bmmo::net::connection c = client_it->first;
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
-        auto arrival = clock_.now(bmmo::session::clock_site::server_event_arrival);
-        constexpr bmmo::net::microseconds kMaxAge = 10000000;
-        const bmmo::net::microseconds age = transport_->local_timestamp() - received;
-        if (received > 0 && age > 0)
-            arrival -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                    std::chrono::microseconds(age < kMaxAge ? age : kMaxAge));
+        const auto arrival = arrival_of(received);
         // Protocol 30: the frames' cameras from the member's bases; a
         // datagram turning one not held yet gives no frames (its events still
         // count).  Protocol 29: what this member's relay starts after from now
@@ -4643,12 +4695,20 @@ protected:
         }
     }
 
+    // Step K4b: until the queue is empty, so the pass's mark holds - a
+    // receive that returns its cap leaves messages stamped before the poll.
     int poll_incoming_messages() override {
-        const int msg_count = transport_->receive([this](const bmmo::net::message& msg) { on_message(msg); },
-                                                  ONCE_RECV_MSG_COUNT);
-        if (msg_count < 0)
-            FatalError("Error checking for messages.");
-        return msg_count;
+        int total = 0, count = 0;
+        do {
+            count = transport_->receive([this](const bmmo::net::message& msg) {
+                input_stamp stamp(arrival_of(msg.received));
+                on_message(msg);
+            }, ONCE_RECV_MSG_COUNT);
+            if (count < 0)
+                FatalError("Error checking for messages.");
+            total += count;
+        } while (count == static_cast<int>(ONCE_RECV_MSG_COUNT));
+        return total;
     }
 
     // Runs on the network thread SERVER_TICK_DELAY into each loop iteration:
@@ -4759,6 +4819,14 @@ protected:
     // the pass it was sent in and its first copy waits for the next one
     // (bmmo::sim::assign_copy_schedule).
     std::atomic<uint64_t> main_pass_{0};
+    // Step K4b (network thread): the current receive pass's instant on the
+    // session clock and on the transport's clock (receive_pass).
+    std::chrono::steady_clock::time_point poll_at_{};
+    bmmo::net::microseconds poll_transport_ = 0;
+    // Step K4b: the runner's ask for a receive pass (callbacks.request_poll).
+    std::mutex poll_mutex_;
+    std::condition_variable poll_cv_;
+    bool poll_requested_ = false;
 
     std::unordered_map<std::string, std::string> map_names_;
     // Bounds on what clients may add to map_names_; the whole map is sent to

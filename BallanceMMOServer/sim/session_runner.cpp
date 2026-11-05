@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -18,6 +19,17 @@ namespace bmmo::sim {
     using clock = std::chrono::steady_clock;
 
     namespace {
+        // Step K4b: the stamp of the posts this thread makes (input_stamp).
+        thread_local std::optional<clock::time_point> t_input_stamp;
+        // Step K4b (the user's choice): the step rule's instants - a tick's
+        // deadline, a member's patience - are honoured this late.  Before K4b
+        // the runner woke up to ~2 ms past them (1 ms timer resolution, set
+        // by GNS, and a whole-millisecond sleep) and took what had come in
+        // meanwhile; the grace keeps that leniency as a rule instead of luck.
+        constexpr auto kStepGrace = std::chrono::milliseconds(2);
+
+        double ms_of(clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); }
+
         std::string lead_sector_text(const bmmo::session::lead_player& lead, uint32_t tick) {
             std::string text, late;
             for (const auto& [sender, margin]: lead.sector_margins) {
@@ -128,10 +140,26 @@ namespace bmmo::sim {
         if (callbacks_.log) callbacks_.log(text);
     }
 
+    session_runner::input_stamp::input_stamp(clock::time_point at) : outer_(t_input_stamp) { t_input_stamp = at; }
+    session_runner::input_stamp::~input_stamp() { t_input_stamp = outer_; }
+
     void session_runner::post(std::function<void()> command) {
         {
             std::lock_guard lk(mutex_);
-            commands_.push_back(std::move(command));
+            // Stamps never go backwards in the queue: a pass's timers are
+            // stamped with its poll instant, at or after its arrivals.
+            auto stamp = t_input_stamp ? *t_input_stamp : clock_->now(bmmo::session::clock_site::runner_post_unstamped);
+            stamp = std::max(stamp, last_stamp_);
+            last_stamp_ = stamp;
+            commands_.push_back(stamped_command{stamp, std::move(command)});
+        }
+        wake_.notify_all();
+    }
+
+    void session_runner::mark(clock::time_point at) {
+        {
+            std::lock_guard lk(mutex_);
+            mark_ = std::max(mark_, at);
         }
         wake_.notify_all();
     }
@@ -166,19 +194,6 @@ namespace bmmo::sim {
         std::lock_guard lk(view_mutex_);
         auto it = views_.find(session);
         return it != views_.end() && it->second.running;
-    }
-
-    uint32_t session_runner::late_join_tick(uint32_t session) const {
-        std::lock_guard lk(view_mutex_);
-        auto it = views_.find(session);
-        if (it == views_.end() || !it->second.running) return 0;
-        // (FULL step SAXH: a scheduled start's view starts at its instant,
-        // which may still be ahead.)
-        const auto elapsed = std::max<long long>(
-                0, std::chrono::duration_cast<std::chrono::microseconds>(clock_->now(bmmo::session::clock_site::runner_handshake_elapsed) - it->second.start).count());
-        // the tick the server reaches now, plus a second so the joiner's
-        // first inputs arrive in time
-        return it->second.first_tick + static_cast<uint32_t>(elapsed * 66 / 1000000) + 66;
     }
 
     uint32_t session_runner::reanchor_tick(uint32_t session, uint32_t lead, bool resync_state, const std::string& who, uint32_t* assigned_lead) const {
@@ -226,7 +241,7 @@ namespace bmmo::sim {
         // the members keep the wall-clock lead the base gives them.
         // FULL step SAXH: from the start instant the handshake fixed instead
         // of now (the members' frames are scheduled from the same instant).
-        const auto now = s.start_scheduled ? s.start_origin : clock_->now(bmmo::session::clock_site::runner_schedule_origin);
+        const auto now = s.start_scheduled ? s.start_origin : logical_;
         const auto schedule_start = now + std::chrono::duration_cast<clock::duration>(
                 std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0));
         s.scheduler.start(schedule_start, s.world->tick_index(), s.input_delay);
@@ -292,7 +307,7 @@ namespace bmmo::sim {
         header.mechanism_slots = s.mechanism_slots;   // journal v8 (world agreement step Q7)
         header.utc_ms = clock_->utc_ms(bmmo::session::clock_site::runner_journal_utc);
         const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
-        s.journal_start = clock_->now(bmmo::session::clock_site::runner_journal_start);
+        s.journal_start = logical_;
         std::string error;
         if (!s.journal.open(path, header, config_.journal_max_bytes, error, std::move(poster),
                             bmmo::session::kJournalMaxQueued, config_.journal_flush, {},
@@ -628,7 +643,7 @@ namespace bmmo::sim {
                     lifecycle_event death;
                     death.type = bmmo::session::event_type::Unphysicalize;
                     death.tick = gone.applied;
-                    pending_event pe{player, gone.origin, gone.applied, std::move(death), clock_->now(bmmo::session::clock_site::runner_leaver_event)};
+                    pending_event pe{player, gone.origin, gone.applied, std::move(death), logical_};
                     auto pos = std::upper_bound(s.events.begin(), s.events.end(), gone.applied,
                         [](uint32_t t, const pending_event& e) { return static_cast<int32_t>(t - e.applied) < 0; });
                     s.events.insert(pos, std::move(pe));
@@ -644,7 +659,7 @@ namespace bmmo::sim {
                         a.origin = gone.origin;
                         a.applied = gone.applied;
                         a.type = bmmo::session::event_type::Unphysicalize;
-                        a.intake = clock_->now(bmmo::session::clock_site::runner_leaver_intake);
+                        a.intake = logical_;
                         a.life = life_of(s, player);
                         callbacks_.on_event_accepted(a);
                     }
@@ -660,7 +675,7 @@ namespace bmmo::sim {
                     // Step TRL: the leaving life's set (a rejoin, added at
                     // this life's removal, is another life with its own).
                     for (const auto& d: s.trafo.leaver(player, life_of(s, player), F))
-                        queue_trafo(s, d, none, clock_->now(bmmo::session::clock_site::runner_leaver_trafo), 0, "leaver");
+                        queue_trafo(s, d, none, logical_, 0, "leaver");
                 }
                 if (bmmo::session::leaver_stays(has_ball, queued)) {
                     auto& leaving = s.leaving[player];
@@ -774,7 +789,7 @@ namespace bmmo::sim {
             if (s == sessions_.end()) return;
             const auto p = s->second->arrivals.find(player);
             if (p == s->second->arrivals.end() || !s->second->running) return;
-            p->second.baseline.settled(epoch, clock_->now(bmmo::session::clock_site::runner_baseline_settled));
+            p->second.baseline.settled(epoch, logical_);
         });
     }
 
@@ -795,7 +810,7 @@ namespace bmmo::sim {
             }
             s.start_scheduled = true;
             s.start_origin = origin;
-            const auto ahead = std::chrono::duration_cast<std::chrono::milliseconds>(origin - clock_->now(bmmo::session::clock_site::runner_start_ahead)).count();
+            const auto ahead = std::chrono::duration_cast<std::chrono::milliseconds>(origin - logical_).count();
             if (s.players.empty()
                     || !std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
                 log("[session " + std::to_string(session) + "] start instant set (" + std::to_string(ahead)
@@ -868,7 +883,7 @@ namespace bmmo::sim {
     void session_runner::submit_input(uint32_t session, uint32_t player, uint32_t first_tick,
                                       std::vector<bmmo::session::input_frame> frames, clock::time_point arrival) {
         post([this, session, player, first_tick, arrival, frames = std::move(frames)] {
-            const auto seen = clock_->now(bmmo::session::clock_site::runner_input_seen);
+            const auto seen = logical_;
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
             auto& s = *it->second;
@@ -894,7 +909,7 @@ namespace bmmo::sim {
                         sampled = s.lateness.at(player).meter.sample_absolute(t, slack, observed.baseline.value());
                     observed.slack.push_back(slack);
                     if (observed.baseline.frozen()) observed.n.push_back(observed.baseline.value() - slack);
-                    s.arrival_queue.push_back(bmmo::session::lateness_slack_ticks(seen, arrival));
+                    s.arrival_queue.push_back(bmmo::session::lateness_slack_ticks(clock::now(), arrival));   // real lag, diagnostic
                 }
                 observe_quorum_arrival(s, player, t);
                 observe_relative(s, t, seen);
@@ -942,8 +957,8 @@ namespace bmmo::sim {
 
     void session_runner::submit_event(uint32_t session, uint32_t player, uint32_t tick, lifecycle_event event,
                                       uint64_t token) {
-        const auto arrival = clock_->now(bmmo::session::clock_site::runner_event_arrival);
-        post([this, session, player, tick, arrival, token, event = std::move(event)]() mutable {
+        post([this, session, player, tick, token, event = std::move(event)]() mutable {
+            const auto arrival = logical_;
             // Not taken: the server still lets go of the message it parked.
             const auto dropped = [&] {
                 if (!callbacks_.on_event_accepted) return;
@@ -1340,18 +1355,19 @@ namespace bmmo::sim {
             ++l;
             if (due) finish_leave(s, player, tick);
         }
-        // Step B2SX (the trial's server stall, the user's option (b)): a step
-        // that runs more than a tick past its deadline is a catch-up (a
-        // stalled runner stepping overdue ticks); it takes a frame only if
-        // the frame arrived by this tick's deadline, and one that arrived
-        // after it is late, as it would have been without the stall.  Any
-        // other step takes what has arrived, as before: the runner wakes a
-        // millisecond or two past a deadline, and a frame that came in that
-        // gap is applied at its tick exactly as it always was.
-        auto cutoff = clock::time_point::max();
+        // Step K4b: the take judges each frame by its arrival against the
+        // step instant.  The commands run in stamp order before the step
+        // that follows them, so every frame applied arrived by it; a straggler
+        // of an earlier tick is released by the same cutoff (step B2SX's
+        // rule, which only a catch-up step used to apply).
+        const auto cutoff = logical_;
         if (s.scheduler.started() && tick >= s.scheduler.first_tick()) {
             const auto deadline = s.scheduler.deadline(tick);
-            if (clock_->now(bmmo::session::clock_site::runner_cutoff) - deadline > bmmo::session::kTickDuration) cutoff = deadline;
+            for (const auto& [player, buffer]: s.inputs) {
+                const auto at = buffer.arrival_of(tick);
+                if (buffer.has(tick) && at != bmmo::session::input_buffer::kOnTime && at > deadline)
+                    s.after_deadline_ms.push_back(ms_of(at - deadline));
+            }
         }
         std::vector<bmmo::session::applied_input> applied;
         applied.reserve(s.inputs.size());
@@ -1535,7 +1551,7 @@ namespace bmmo::sim {
             // record; a replay reports those as not compared instead of failing.
             if (bmmo::physics::capture_world_hash(s.world->physics(), hash, hash_error))
                 s.journal.tick(tick, hash, static_cast<uint32_t>(
-                        std::chrono::duration_cast<std::chrono::milliseconds>(clock_->now(bmmo::session::clock_site::runner_journal_ms) - s.journal_start).count()));
+                        std::chrono::duration_cast<std::chrono::milliseconds>(logical_ - s.journal_start).count()));
         }
         s.scheduler.advance();
         // Trafo-replication design 2.2, the deadline (decision 9.6): after
@@ -1546,7 +1562,7 @@ namespace bmmo::sim {
         if (s.trafo_on()) {
             const float none[3] = {};
             for (const auto& d: s.trafo.deadline(s.world->tick_index(), s.sector_lead))
-                queue_trafo(s, d, none, clock_->now(bmmo::session::clock_site::runner_deadline_trafo), 0, "deadline");
+                queue_trafo(s, d, none, logical_, 0, "deadline");
         }
         const bool changed = s.world->body_set_changed();
         const int decision = s.cadence.decide(tick, changed);
@@ -1875,8 +1891,10 @@ namespace bmmo::sim {
             + (config_.patience ? " cut-M2=" : " would-cut-M2=") + std::to_string(s.quorum_wide)
             + (config_.patience ? " cut-waiver=" : " would-cut-waiver=") + std::to_string(s.quorum_waived)
             + " gap=" + quantiles(s.quorum_gap)
-            + " seen-at=" + quantiles(s.arrival_queue) + " wake=" + quantiles(s.quorum_wake)
-            + " wake-samples=" + std::to_string(s.quorum_wake.size()) + " quantiles=p50/p95/p99/max");
+            + " seen-at=" + quantiles(s.arrival_queue)
+            + " step-lag-ms=" + quantiles(s.step_lag_ms)
+            + " after-deadline-ms=" + quantiles(s.after_deadline_ms) + " after-deadline=" + std::to_string(s.after_deadline_ms.size())
+            + " quantiles=p50/p95/p99/max");
         for (auto& [player, entry]: s.arrivals) {
             log("[session " + std::to_string(s.id) + "] S1 quorum player=" + std::to_string(player)
                 + " tick=" + std::to_string(tick) + " baseline=" + std::to_string(entry.baseline.value())
@@ -1890,7 +1908,8 @@ namespace bmmo::sim {
         s.quorum_member_ticks = s.quorum_last = s.quorum_wide = s.quorum_waived = 0;
         s.quorum_gap.clear();
         s.arrival_queue.clear();
-        s.quorum_wake.clear();
+        s.step_lag_ms.clear();
+        s.after_deadline_ms.clear();
     }
 
     std::vector<bmmo::session::patience_member> session_runner::patience_members(const session_state& s,
@@ -1963,195 +1982,204 @@ namespace bmmo::sim {
             + ", with the streak waiver and the pacing floor (late-player design 2.6)");
     }
 
+    bmmo::session::patience_verdict session_runner::step_verdict(const session_state& s,
+                                                                 const std::vector<bmmo::session::patience_member>& members,
+                                                                 uint32_t tick, clock::time_point at) const {
+        const auto judged = at - kStepGrace;
+        const auto deadline = s.scheduler.deadline(tick);
+        return bmmo::session::patience_step_test(members, judged >= deadline,
+                config_.patience ? bmmo::session::lateness_slack_ticks(deadline, judged) : 0.0,
+                config_.patience, bmmo::session::kQuorumLastMargin, bmmo::session::kQuorumWideMargin);
+    }
+
+    std::optional<clock::time_point> session_runner::step_instant(const session_state& s) const {
+        if (!s.running || s.failed || !s.world || !s.scheduler.started()) return std::nullopt;
+        const uint32_t tick = s.world->tick_index();
+        const auto verdict = step_verdict(s, patience_members(s, tick), tick, logical_);
+        if (verdict.step) return logical_;
+        const auto deadline = s.scheduler.deadline(tick) + kStepGrace;
+        if (!verdict.wait) return std::max(deadline, logical_);
+        // A microsecond past the threshold, so the test there passes.
+        const auto patience = logical_ + std::chrono::microseconds(
+                static_cast<int64_t>(std::ceil(verdict.wait_ticks * bmmo::session::kLatenessTickMicros)) + 1);
+        return std::min(patience, std::max(deadline, logical_));
+    }
+
+    void session_runner::step_session(session_state& s) {
+        const uint32_t tick = s.world->tick_index();
+        const auto at = logical_;
+        // With patience off this is the rule the runner always had: every
+        // buffer has its frame, or the deadline passed.
+        const auto members = patience_members(s, tick);
+        for (auto& [player, entry]: s.arrivals)
+            if (entry.baseline.timeout(tick, at))
+                log("[session " + std::to_string(s.id) + "] S1 quorum player=" + std::to_string(player)
+                    + " baseline-start=timeout epoch=" + std::to_string(entry.baseline.epoch()));
+        if (config_.test_clock_skew.enabled() && !s.skew_ended) {
+            const auto& fault = config_.test_clock_skew;
+            const std::string prefix = "[session " + std::to_string(s.id) + "] S1 clock-skew ";
+            if (!s.skew_began && tick >= fault.tick) {
+                s.skew_began = true;
+                s.skew_started = at;
+                s.scheduler.inject_clock_skew(at, fault);
+                {
+                    std::lock_guard lk(view_mutex_);
+                    views_[s.id].clock_fault.begin(at, fault);
+                }
+                log(prefix + "begin tick=" + std::to_string(tick) + " ms=" + std::to_string(fault.ms)
+                    + " percent=" + std::to_string(fault.percent));
+            }
+            if (s.skew_began && !s.skew_peaked && at - s.skew_started >= std::chrono::milliseconds(fault.ms)) {
+                s.skew_peaked = true;
+                log(prefix + "recover tick=" + std::to_string(tick));
+            }
+            if (s.skew_began && !s.skew_ended && at - s.skew_started >= std::chrono::milliseconds(2 * fault.ms)) {
+                s.skew_ended = true;
+                log(prefix + "end tick=" + std::to_string(tick));
+            }
+        }
+        // A member whose patience is still ahead (another one's passed, or
+        // the skew moved the deadline): step_instant names the next instant.
+        const auto verdict = step_verdict(s, members, tick, at);
+        if (!verdict.step) return;
+        const auto observed = quorum_members(s, tick);
+        if (verdict.early) {
+            // Stepped before the deadline without some frames: remember
+            // which, so a frame that still beats the deadline is counted as
+            // one patience cut off.
+            ++s.early_steps;
+            s.early_ticks.push_back(tick);
+            if (s.early_ticks.size() > 256) s.early_ticks.pop_front();
+            size_t i = 0;
+            for (const auto& [player, buffer]: s.inputs) {
+                const auto& m = members[i++];
+                // Not ready yet: nothing was ever coming for it.
+                if (m.settled || !s.ready.count(player)) continue;
+                auto& entry = s.patience[player];
+                ++(m.waived ? entry.cut_waiver : entry.cut_patience);
+                entry.cut.emplace_back(tick, m.waived);
+                if (entry.cut.size() > 256) entry.cut.pop_front();
+            }
+        }
+        // Step R12: each member's wait at this step (lateness.hpp
+        // server_wait_ticks), from the same view the test just passed: how
+        // much longer it would have held this tick for that member's missing
+        // frame.
+        {
+            const double to_deadline = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), at - kStepGrace);
+            s.step_waits.assign(members.size(), 0.0);
+            for (size_t i = 0; i < members.size(); ++i) {
+                bool paced = false;
+                for (size_t k = 0; k < members.size(); ++k)
+                    if (k != i && members[k].has) { paced = true; break; }
+                const double lead = config_.patience
+                    ? bmmo::session::quorum_patience(members, i, -to_deadline).lead() : 0.0;
+                s.step_waits[i] = bmmo::session::server_wait_ticks(to_deadline, members[i], config_.patience, paced, lead);
+            }
+        }
+        {
+            const auto started = clock::now();
+            // The real time this step runs after its step instant (only
+            // meaningful on the real clock).
+            s.step_lag_ms.push_back(ms_of(started - at));
+            // Step B2SW: the harness's stall (BMMO_SESSION_STALL), inside the
+            // step's timing as a slow step would be.
+            if (!debug_stalls_.empty())
+                if (const auto stall = debug_stalls_.find(tick); stall != debug_stalls_.end()) {
+                    const uint32_t ms = stall->second;
+                    debug_stalls_.erase(stall);
+                    log("[session " + std::to_string(s.id) + "] debug stall: the step of tick " + std::to_string(tick)
+                        + " held " + std::to_string(ms) + " ms (BMMO_SESSION_STALL)");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                }
+            step(s);
+            observe_quorum(s, tick, observed, at);
+            observe_relative(s, tick, at);
+            s.step_waits.clear();
+            s.step_us.push_back(static_cast<uint32_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count()));
+            // Every 10 s of ticks: the step's cost, the budget being one tick
+            // (15.15 ms) per tick.
+            if (s.step_us.size() >= 660) {
+                std::vector<uint32_t> v;
+                v.swap(s.step_us);
+                std::sort(v.begin(), v.end());
+                log("[session " + std::to_string(s.id) + "] step time over ticks " + std::to_string(tick + 1 - v.size())
+                    + ".." + std::to_string(tick) + ": p50 " + std::to_string(v[v.size() / 2]) + " us, p99 "
+                    + std::to_string(v[v.size() * 99 / 100]) + " us, max " + std::to_string(v.back()) + " us");
+            }
+        }
+        if (s.running) {
+            observe_lateness(s, tick);
+            if (config_.patience) report_patience(s, tick);
+        }
+        publish_state(s);
+    }
+
+    // Step K4b: the commands and the steps in logical order.  The next thing
+    // done is the earliest of the next command (its stamp) and the earliest
+    // step instant; a step is taken only once every command stamped up to it
+    // is in the queue - one stamped after it is queued, or the handover mark
+    // has passed it - so when this thread gets to it never changes what it
+    // does, only when the results go out.
     void session_runner::run() {
         std::unique_lock lk(mutex_);
         while (!stopping_) {
-            while (!commands_.empty()) {
-                auto command = std::move(commands_.front());
+            // No network thread (the tests, the SimTool): the clock is the mark.
+            if (!callbacks_.request_poll) mark_ = std::max(mark_, clock_->now(bmmo::session::clock_site::runner_self_mark));
+            // The sessions are this thread's own; mutex_ guards the queue.
+            session_state* due = nullptr;
+            clock::time_point due_at{};
+            for (auto& [id, sp]: sessions_) {
+                if (!sp) continue;
+                if (const auto at = step_instant(*sp); at && (!due || *at < due_at)) {
+                    due = sp.get();
+                    due_at = *at;
+                }
+            }
+            const auto move = bmmo::session::next_logical_move(
+                    commands_.empty() ? std::nullopt : std::optional(commands_.front().stamp),
+                    due ? std::optional(due_at) : std::nullopt, mark_);
+            if (move == bmmo::session::logical_move::command) {
+                auto next = std::move(commands_.front());
                 commands_.pop_front();
                 lk.unlock();
-                command();
+                logical_ = std::max(logical_, next.stamp);
+                next.run();
+                // What the network thread reads of a session (running, the
+                // leaving horizon) as of this command.
+                for (const auto& [id, sp]: sessions_)
+                    if (sp) publish_state(*sp);
                 lk.lock();
+                continue;
             }
-            lk.unlock();
-
-            auto sleep_for = std::chrono::milliseconds(20);
-            const auto now = clock_->now(bmmo::session::clock_site::runner_pass);
-            // Step B2SX (the trial's server stall, the user's option (b)):
-            // before each step the queue is drained, so the frames the
-            // network thread received while a step (or a stall) held this
-            // thread are in their buffers when their tick is taken, and the
-            // take judges each by its arrival against its own tick's deadline
-            // (input_buffer::take's cutoff).  A drained command may end a
-            // session, so the sessions are walked by id and looked up again.
-            const auto drain = [this, &lk]() {
-                lk.lock();
-                while (!commands_.empty()) {
-                    auto command = std::move(commands_.front());
-                    commands_.pop_front();
-                    lk.unlock();
-                    command();
-                    lk.lock();
-                }
+            if (move == bmmo::session::logical_move::step) {
                 lk.unlock();
-            };
-            std::vector<uint32_t> ids;
-            ids.reserve(sessions_.size());
-            for (const auto& entry: sessions_) ids.push_back(entry.first);
-            for (const uint32_t id: ids) {
-                const auto found = sessions_.find(id);
-                if (found == sessions_.end() || !found->second) continue;
-                session_state* sp = found->second.get();
-                if (!sp->running || sp->failed || !sp->world) continue;
-                uint32_t simulated = 0;
-                // When the tick waits for a player's patience (design 2.6),
-                // how long until it ends: a blacked-out player posts nothing,
-                // so nothing else would wake the runner there.
-                bool patience_wait = false;
-                std::chrono::milliseconds patience_sleep{0};
-                bool gone = false;
-                while (simulated < config_.max_catch_up_ticks) {
-                    drain();
-                    if (const auto again = sessions_.find(id); again == sessions_.end() || again->second.get() != sp) {
-                        gone = true;
-                        break;
-                    }
-                    auto& s = *sp;
-                    if (!s.running || s.failed || !s.world) break;
-                    const uint32_t tick = s.world->tick_index();
-                    // With patience off this is the rule the runner always had:
-                    // every buffer has its frame, or the deadline passed.
-                    const auto members = patience_members(s, tick);
-                    const auto at = clock_->now(bmmo::session::clock_site::runner_skew_start);
-                    for (auto& [player, entry]: s.arrivals)
-                        if (entry.baseline.timeout(tick, at))
-                            log("[session " + std::to_string(s.id) + "] S1 quorum player=" + std::to_string(player)
-                                + " baseline-start=timeout epoch=" + std::to_string(entry.baseline.epoch()));
-                    if (config_.test_clock_skew.enabled() && !s.skew_ended) {
-                        const auto& fault = config_.test_clock_skew;
-                        const std::string prefix = "[session " + std::to_string(s.id) + "] S1 clock-skew ";
-                        if (!s.skew_began && tick >= fault.tick) {
-                            s.skew_began = true;
-                            s.skew_started = at;
-                            s.scheduler.inject_clock_skew(at, fault);
-                            {
-                                std::lock_guard lk(view_mutex_);
-                                views_[s.id].clock_fault.begin(at, fault);
-                            }
-                            log(prefix + "begin tick=" + std::to_string(tick) + " ms=" + std::to_string(fault.ms)
-                                + " percent=" + std::to_string(fault.percent));
-                        }
-                        if (s.skew_began && !s.skew_peaked && at - s.skew_started >= std::chrono::milliseconds(fault.ms)) {
-                            s.skew_peaked = true;
-                            log(prefix + "recover tick=" + std::to_string(tick));
-                        }
-                        if (s.skew_began && !s.skew_ended && at - s.skew_started >= std::chrono::milliseconds(2 * fault.ms)) {
-                            s.skew_ended = true;
-                            log(prefix + "end tick=" + std::to_string(tick));
-                        }
-                    }
-                    const auto verdict = bmmo::session::patience_step_test(members, s.scheduler.due(at),
-                            config_.patience ? bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), at) : 0.0,
-                            config_.patience, bmmo::session::kQuorumLastMargin, bmmo::session::kQuorumWideMargin);
-                    const auto observed = quorum_members(s, tick);
-                    if (s.patience_wake != clock::time_point{}) {
-                        s.quorum_wake.push_back(bmmo::session::lateness_slack_ticks(at, s.patience_wake));
-                        s.patience_wake = {};
-                    }
-                    if (!verdict.step) {
-                        if (verdict.wait) {
-                            patience_wait = true;
-                            patience_sleep = std::chrono::ceil<std::chrono::milliseconds>(
-                                    std::chrono::duration<double, std::micro>(
-                                            verdict.wait_ticks * bmmo::session::kLatenessTickMicros));
-                            s.patience_wake = at + patience_sleep;
-                        }
-                        break;
-                    }
-                    if (verdict.early) {
-                        // Stepped before the deadline without some frames:
-                        // remember which, so a frame that still beats the
-                        // deadline is counted as one patience cut off.
-                        ++s.early_steps;
-                        s.early_ticks.push_back(tick);
-                        if (s.early_ticks.size() > 256) s.early_ticks.pop_front();
-                        size_t i = 0;
-                        for (const auto& [player, buffer]: s.inputs) {
-                            const auto& m = members[i++];
-                            // Not ready yet: nothing was ever coming for it.
-                            if (m.settled || !s.ready.count(player)) continue;
-                            auto& entry = s.patience[player];
-                            ++(m.waived ? entry.cut_waiver : entry.cut_patience);
-                            entry.cut.emplace_back(tick, m.waived);
-                            if (entry.cut.size() > 256) entry.cut.pop_front();
-                        }
-                    }
-                    // Step R12: each member's wait at this step (lateness.hpp
-                    // server_wait_ticks), from the same view the test just
-                    // passed: how much longer it would have held this tick
-                    // for that member's missing frame.
-                    {
-                        const double to_deadline = bmmo::session::lateness_slack_ticks(s.scheduler.deadline(tick), at);
-                        s.step_waits.assign(members.size(), 0.0);
-                        for (size_t i = 0; i < members.size(); ++i) {
-                            bool paced = false;
-                            for (size_t k = 0; k < members.size(); ++k)
-                                if (k != i && members[k].has) { paced = true; break; }
-                            const double lead = config_.patience
-                                ? bmmo::session::quorum_patience(members, i, -to_deadline).lead() : 0.0;
-                            s.step_waits[i] = bmmo::session::server_wait_ticks(to_deadline, members[i], config_.patience, paced, lead);
-                        }
-                    }
-                    {
-                        const auto started = clock::now();
-                        // Step B2SW: the harness's stall (BMMO_SESSION_STALL),
-                        // inside the step's timing as a slow step would be.
-                        if (!debug_stalls_.empty())
-                            if (const auto stall = debug_stalls_.find(tick); stall != debug_stalls_.end()) {
-                                const uint32_t ms = stall->second;
-                                debug_stalls_.erase(stall);
-                                log("[session " + std::to_string(s.id) + "] debug stall: the step of tick " + std::to_string(tick)
-                                    + " held " + std::to_string(ms) + " ms (BMMO_SESSION_STALL)");
-                                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-                            }
-                        step(s);
-                        observe_quorum(s, tick, observed, at);
-                        observe_relative(s, tick, clock_->now(bmmo::session::clock_site::runner_step_observed));
-                        s.step_waits.clear();
-                        s.step_us.push_back(static_cast<uint32_t>(
-                            std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count()));
-                        // Every 10 s of ticks: the step's cost, the budget
-                        // being one tick (15.15 ms) per tick.
-                        if (s.step_us.size() >= 660) {
-                            std::vector<uint32_t> v;
-                            v.swap(s.step_us);
-                            std::sort(v.begin(), v.end());
-                            log("[session " + std::to_string(s.id) + "] step time over ticks " + std::to_string(tick + 1 - v.size())
-                                + ".." + std::to_string(tick) + ": p50 " + std::to_string(v[v.size() / 2]) + " us, p99 "
-                                + std::to_string(v[v.size() * 99 / 100]) + " us, max " + std::to_string(v.back()) + " us");
-                        }
-                    }
-                    if (s.running) {
-                        observe_lateness(s, tick);
-                        if (config_.patience) report_patience(s, tick);
-                    }
-                    ++simulated;
-                    if (!s.running) break;
-                }
-                if (gone) continue;
-                auto& s = *sp;
-                publish_state(s);
-                if (s.running) {
-                    auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(s.scheduler.until_due(clock_->now(bmmo::session::clock_site::runner_until_due)));
-                    if (patience_wait) wait = std::min(wait, patience_sleep);
-                    sleep_for = std::min(sleep_for, std::max(std::chrono::milliseconds(1), wait));
-                }
+                logical_ = std::max(logical_, due_at);
+                step_session(*due);
+                lk.lock();
+                continue;
             }
-            (void)now;
-
-            lk.lock();
-            if (!commands_.empty() || stopping_) continue;
-            wake_.wait_for(lk, sleep_for);
+            if (move == bmmo::session::logical_move::idle) {
+                wake_.wait(lk);
+                continue;
+            }
+            // A step instant the mark has not passed: wait for it in real
+            // time, then ask the network thread for a receive pass (its mark
+            // answers); a post wakes this thread meanwhile.
+            const auto now = clock_->now(bmmo::session::clock_site::runner_wait);
+            if (now < due_at) {
+                wake_.wait_for(lk, due_at - now);
+                continue;
+            }
+            if (poll_asked_ < due_at) {
+                poll_asked_ = due_at;
+                lk.unlock();
+                callbacks_.request_poll();
+                lk.lock();
+                continue;
+            }
+            wake_.wait_for(lk, std::chrono::milliseconds(5));
         }
         lk.unlock();
         // A session still running when the server goes down says so in its box
