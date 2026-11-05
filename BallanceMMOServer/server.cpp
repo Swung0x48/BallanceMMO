@@ -141,39 +141,6 @@ public:
     // carries the value; M1's send points read it.  0 (the default, and
     // every build without the flag): sent at once.
     void set_test_hold_member_ms(uint32_t ms) { test_hold_member_ms_ = ms; }
-    // --test-life NAME:LIFE:ADD:BASE:LEAVE (step T2, test builds only; a
-    // recipe's life, scripts/journal_recipe.py): NAME's life LIFE joins the
-    // physics session at tick ADD, starts at BASE and leaves at LEAVE (0: as
-    // it comes) - what the server's journal records for them.  A join, a
-    // SessionReady or a leave that comes earlier waits, whole, until the
-    // runner is there (the pass timers release it): the join at ADD, the
-    // ready kReadyMargin ticks before the base it would be given makes BASE
-    // (so the late joiner's lead is the usual one, plus at most that margin
-    // to reach BASE - as if it had loaded the level that long, the original's
-    // retail joiner's case), the leave two ticks before LEAVE (a leave handled
-    // at the runner's next tick T is the PLAYER record of T + 2: the leaver's
-    // Unphysicalize at T, out at T + 1).  So a re-driven player joins,
-    // starts and leaves at the recipe's ticks whatever the network and its
-    // client's lead.
-    struct test_life { uint32_t add = 0, base = 0, leave = 0; };
-    struct held_change {
-        enum kind_t { join, ready, leave } kind = join;
-        bmmo::net::connection c = 0;
-        uint32_t session = 0;
-        uint32_t at = 0;
-        std::string ready_bytes;   // ready: the SessionReady as it came
-    };
-    static constexpr uint32_t kReadyMargin = 20;
-    bool add_test_life(const std::string& spec) {
-        const auto parts = bmmo::string_utils::split_strings(spec, ':');
-        if (parts.size() != 5) return false;
-        test_life t;
-        t.add = static_cast<uint32_t>(std::strtoul(parts[2].c_str(), nullptr, 10));
-        t.base = static_cast<uint32_t>(std::strtoul(parts[3].c_str(), nullptr, 10));
-        t.leave = static_cast<uint32_t>(std::strtoul(parts[4].c_str(), nullptr, 10));
-        test_lives_[{parts[0], static_cast<uint16_t>(std::strtoul(parts[1].c_str(), nullptr, 10))}] = t;
-        return true;
-    }
     // Step IOX: player_status.json's writer (a strand of main's log pool).
     void set_status_writer(bmmo::session::io_poster poster) { config_.set_status_writer(std::move(poster)); }
     uint32_t test_hold_member_ms() const { return test_hold_member_ms_; }
@@ -304,7 +271,6 @@ public:
             post_input(poll_at_, poll_transport_, [this, links = std::move(links)]() mutable {
                 link_cache_ = std::move(links);
                 std::lock_guard lk(state_mutex_);
-                release_held_changes();   // step T2 (--test-life)
                 check_start_barriers();
                 check_start_handshakes();   // FULL step SAXH
                 send_assign_repeats();
@@ -2001,53 +1967,7 @@ public:
 
     // The join itself (physics_session_member_joined's body until SAXH; also
     // the release of a joiner that waited for the start handshake).
-    // Step T2 (--test-life): the life's ticks, if the test gave them.
-    const test_life* test_life_of(bmmo::net::connection c, uint16_t life) {
-        if (test_lives_.empty()) return nullptr;
-        const auto it = test_lives_.find({get_client_name(c), life});
-        return it == test_lives_.end() ? nullptr : &it->second;
-    }
-    // A join or leave of a life the test ticks for, before its tick: held
-    // (once) until the pass timers see the runner there.
-    bool hold_change(held_change::kind_t kind, uint32_t session, bmmo::net::connection c, uint16_t life,
-                     uint32_t lead = 0, std::string ready_bytes = {}) {
-        if (releasing_held_ || !runner_) return false;
-        const test_life* t = test_life_of(c, life);
-        uint32_t at = 0;
-        if (t && kind == held_change::join) at = t->add;
-        if (t && kind == held_change::ready && t->base > lead + kReadyMargin) at = t->base - lead - kReadyMargin;
-        if (t && kind == held_change::leave && t->leave > 2) at = t->leave - 2;
-        if (at == 0 || runner_->current_tick(session) >= at) return false;
-        for (const auto& h: held_changes_)
-            if (h.kind == kind && h.c == c) return true;
-        held_changes_.push_back({kind, c, session, at, std::move(ready_bytes)});
-        static const char* const names[] = {"join", "SessionReady", "leave"};
-        Printf("Physics session %u: %s's %s (life %u) waits for tick %u (--test-life).", session, get_client_name(c),
-               names[kind], static_cast<unsigned>(life), at);
-        return true;
-    }
-    void release_held_changes() {
-        for (size_t i = 0; i < held_changes_.size();) {
-            const held_change h = held_changes_[i];
-            if (runner_->current_tick(h.session) < h.at) { ++i; continue; }
-            held_changes_.erase(held_changes_.begin() + static_cast<std::ptrdiff_t>(i));
-            releasing_held_ = true;
-            if (h.kind == held_change::leave) {
-                physics_session_member_left(h.c);
-            } else if (h.kind == held_change::join) {
-                if (auto it = physics_sessions_.find(h.session); it != physics_sessions_.end()) join_member(it->second, h.c);
-            } else if (auto client_it = clients_.find(h.c); client_it != clients_.end()) {
-                std::string bytes = h.ready_bytes;
-                handle_session_ready(client_it, bmmo::message_utils::deserialize<bmmo::session_ready_msg>(
-                                                    bytes.data(), static_cast<int>(bytes.size())));
-            }
-            releasing_held_ = false;
-        }
-    }
-
     void join_member(physics_session_state& s, bmmo::net::connection c) {
-        if (hold_change(held_change::join, s.id, c, s.lives.count(c) ? static_cast<uint16_t>(s.lives.at(c) + 1) : uint16_t{1}))
-            return;
         // Step Q7 (world-agreement-gaps-design.md 2.10 "The cap"): with K
         // mechanism slots a joiner takes an order below K; it waits for a
         // retiring one, or - every order below K held by a live life - is
@@ -2118,9 +2038,6 @@ public:
         auto cs = client_session_.find(c);
         if (cs == client_session_.end()) return;
         const uint32_t session = cs->second;
-        if (const auto held = physics_sessions_.find(session); held != physics_sessions_.end() && held->second.lives.count(c)
-                && hold_change(held_change::leave, session, c, held->second.lives.at(c)))
-            return;
         client_session_.erase(cs);
         auto it = physics_sessions_.find(session);
         if (it == physics_sessions_.end()) return;
@@ -2875,10 +2792,6 @@ public:
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto& s = physics_sessions_[msg.session];
-        // Step T2 (--test-life): a late life's SessionReady waits for its base.
-        if (s.late.count(c) && hold_change(held_change::ready, s.id, c, s.lives.count(c) ? s.lives.at(c) : uint16_t{1},
-                                           late_join_lead(s, c, msg.caps), msg.raw.str()))
-            return;
         // Same protocol, or the two builds do not compute and compare the same
         // things (entity/session.hpp).  Before everything else, so a mixed
         // pair is told exactly that instead of "world mismatch".
@@ -3015,13 +2928,6 @@ public:
                        client_it->second.name, assigned, clamped);
             join_clamp_delta = clamped - assigned;
             assigned = clamped;
-            // Step T2 (--test-life): not before the life's base.
-            if (const test_life* t = test_life_of(c, s.lives.count(c) ? s.lives.at(c) : uint16_t{1}); t && t->base > assigned) {
-                Printf("Physics session %u: %s's base %u moved to %u (--test-life).", s.id, client_it->second.name, assigned,
-                       t->base);
-                join_clamp_delta += t->base - assigned;
-                assigned = t->base;
-            }
         }
         if (!s.leads.count(c)) {
             auto& lead = s.leads[c];
@@ -5105,10 +5011,6 @@ protected:
     config_manager config_;
     // --hold-member-ms (step M0, test builds): see set_test_hold_member_ms.
     uint32_t test_hold_member_ms_ = 0;
-    // --test-life (step T2, test builds): see add_test_life.
-    std::map<std::pair<std::string, uint16_t>, test_life> test_lives_;
-    std::vector<held_change> held_changes_;
-    bool releasing_held_ = false;
     // --assign-volley (step SAXE, test builds): see set_test_assign_volley.
     int test_assign_volley_ = 0;
     // The main loop's pass counter (step SAXE): one more at the start of every
@@ -5154,16 +5056,14 @@ protected:
 // SAXE).
 static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_path, bool& dry_run,
                       uint32_t& hold_member_ms, int& assign_volley, std::string& capture_inbound,
-                      std::string& replay_inbound, std::string& coordinator, std::vector<std::string>& test_lives) {
-    enum option_values { DryRun = UINT8_MAX + 1, HoldMemberMs, AssignVolley, CaptureInbound, ReplayInbound, Coordinator,
-                         TestLife };
+                      std::string& replay_inbound, std::string& coordinator) {
+    enum option_values { DryRun = UINT8_MAX + 1, HoldMemberMs, AssignVolley, CaptureInbound, ReplayInbound, Coordinator };
 #if !defined(BMMO_SERVER_TEST_FLAGS)
     (void)hold_member_ms;  // the flags exist in test builds only
     (void)assign_volley;
     (void)capture_inbound;
     (void)replay_inbound;
     (void)coordinator;
-    (void)test_lives;
 #endif
     static struct option long_options[] = {
         {"port", required_argument, 0, 'p'},
@@ -5177,7 +5077,6 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
         {"capture-inbound", required_argument, 0, CaptureInbound},
         {"replay-inbound", required_argument, 0, ReplayInbound},
         {"coordinator", required_argument, 0, Coordinator},
-        {"test-life", required_argument, 0, TestLife},
 #endif
         {0, 0, 0, 0}
     };
@@ -5204,7 +5103,6 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
                 puts("      --capture-inbound=PATH\t (test build) Record the network thread's inputs to PATH (.bmic).");
                 puts("      --replay-inbound=PATH\t (test build) Replay a --capture-inbound file: no network, no pacing.");
                 puts("      --coordinator=HOST:PORT\t (test build) A coordinated run: the coordinator's network and virtual time.");
-                puts("      --test-life=NAME:LIFE:ADD:BASE:LEAVE\t (test build) That life joins, starts and leaves no earlier than those ticks.");
 #endif
                 return -1;
             case 'v':
@@ -5233,9 +5131,6 @@ static int parse_args(int argc, char** argv, uint16_t& port, std::string& log_pa
             case Coordinator:
                 coordinator = optarg;
                 break;
-            case TestLife:
-                test_lives.emplace_back(optarg);
-                break;
 #endif
         }
     }
@@ -5249,9 +5144,8 @@ int main(int argc, char** argv) {
     uint32_t hold_member_ms = 0;
     int assign_volley = 0;
     std::string capture_inbound, replay_inbound, coordinator;
-    std::vector<std::string> test_lives;
     if (parse_args(argc, argv, port, log_path, dry_run, hold_member_ms, assign_volley, capture_inbound, replay_inbound,
-                   coordinator, test_lives) < 0)
+                   coordinator) < 0)
         return 0;
 
     if (port == 0) {
@@ -5323,13 +5217,6 @@ int main(int argc, char** argv) {
         server.set_test_assign_volley(assign_volley);
         printf("Test flag: --assign-volley %d (%d UnreliableNoNagle SessionAssign copies in the reliable one's pass).\n",
                assign_volley, assign_volley);
-    }
-    for (const auto& spec: test_lives) {
-        if (!server.add_test_life(spec)) {
-            printf("--test-life %s: NAME:LIFE:ADD:BASE:LEAVE\n", spec.c_str());
-            return 1;
-        }
-        printf("Test flag: --test-life %s.\n", spec.c_str());
     }
 
     {

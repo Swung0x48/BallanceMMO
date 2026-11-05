@@ -5,9 +5,12 @@ A recipe holds only what the players did - each player's frame of every tick (th
 the nav-active flag), when each joined and left, the level and the map - and nothing a build computes, so a later
 client and server still play it (the journal is read here, once; every later build reads the recipe).
 
-    journal_recipe.py SERVER_JOURNAL [--client CLIENT_JOURNAL ...] [--map MAP_FILE] -o RECIPE_DIR
+    journal_recipe.py SERVER_JOURNAL [--client CLIENT_JOURNAL ...] [--map MAP_FILE] -o RECIPE.bmrp
 
-RECIPE_DIR gets recipe.json (the manifest) and player<N>.frames (N: the player's index in the manifest).
+RECIPE.bmrp is one zip file: recipe.json (the manifest), player<N>.frames (N: the player's index in the manifest) and,
+once a run has calibrated it (scripts/recipe_run.py), calibration.json - when each re-driven client sends its joins,
+SessionReadys and leaves so that the server gives every life the recipe's ticks.  The calibration is not an input: it
+belongs to the build and the run parameters that made it, and recipe_run.py makes it again whenever a run misses.
 
 A tick the server substituted (the player's own frame came late or never): the player's client journal's own FRESH
 frame when one is given (--client), else the frame the server applied (the user's decision 1, 2026-11-05).
@@ -31,6 +34,7 @@ import pathlib
 import re
 import struct
 import sys
+import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import journal_trace as jt  # noqa: E402
@@ -104,8 +108,69 @@ def start_of(journal, player, join, leave, applied):
     return min(fresh) if fresh else join
 
 
-def write_frames(path, frames, first_tick):
-    """frames: sorted [(tick, key)] -> the run-length stream; returns the record count."""
+RECIPE_MANIFEST = "recipe.json"
+RECIPE_CALIBRATION = "calibration.json"
+
+
+def read_recipe(path):
+    """(manifest, calibration or None) of a .bmrp."""
+    with zipfile.ZipFile(path) as z:
+        manifest = json.loads(z.read(RECIPE_MANIFEST).decode("utf-8"))
+        names = z.namelist()
+        calibration = json.loads(z.read(RECIPE_CALIBRATION).decode("utf-8")) if RECIPE_CALIBRATION in names else None
+    if manifest.get("format") != FORMAT:
+        raise ValueError("%s: not an input recipe" % path)
+    return manifest, calibration
+
+
+def extract_frames(path, name, dest):
+    """One member (a player's frame stream) of a .bmrp, written to `dest`."""
+    with zipfile.ZipFile(path) as z:
+        pathlib.Path(dest).write_bytes(z.read(name))
+
+
+def write_calibration(path, calibration):
+    """The .bmrp rewritten with `calibration` (every other member as it was)."""
+    path = pathlib.Path(path)
+    with zipfile.ZipFile(path) as z:
+        members = {n: z.read(n) for n in z.namelist() if n != RECIPE_CALIBRATION}
+    members[RECIPE_CALIBRATION] = (json.dumps(calibration, indent=2) + "\n").encode("utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, data in members.items():
+            z.writestr(n, data)
+    tmp.replace(path)
+
+
+TICK_MS = 1000.0 / 66.0
+
+
+def recipe_estimate(manifest, start_ms, latency_ms):
+    """A recipe's first calibration (scripts/scripts/recipe_run.py corrects it): when each client sends what, on the session
+    clock from the run's start - a late life's Join at its join tick, its SessionReady 50 ticks before its start (the
+    server's base: the tick the Ready reaches plus the joiner's lead), its leave two of its own ticks before the
+    server's removal (a leave handled at T is the PLAYER record of T + 2), a rejoin's Join after its Leave by the gap
+    between them. `start_ms` is the session clock at the session's first tick, an estimate."""
+    out = {'players': []}
+    for p in sorted(manifest['players'], key=lambda q: q['join_order']):
+        lives, entry = p['lives'], {'join_ms': None, 'lives': []}
+        if lives[0]['join_tick'] > 0:
+            entry['join_ms'] = max(1, int(round(start_ms + lives[0]['join_tick'] * TICK_MS - latency_ms)))
+        for k, life in enumerate(lives):
+            late = k > 0 or life['join_tick'] > 0
+            ready = int(round(start_ms + (life['start_tick'] - 50) * TICK_MS - latency_ms)) if late else 0
+            leave = life['leave_tick']
+            entry['lives'].append({
+                'ready_ms': max(ready, 0),
+                'leave_tick': leave - 2 if leave is not None else None,
+                'rejoin_delay_ms': (int(round((lives[k + 1]['join_tick'] - leave) * TICK_MS))
+                                    if leave is not None and k + 1 < len(lives) else None)})
+        out['players'].append(entry)
+    return out
+
+
+def frames_bytes(frames, first_tick):
+    """frames: sorted [(tick, key)] -> (the run-length stream, its record count)."""
     buf = bytearray(FRAMES_MAGIC + struct.pack("<I", FRAMES_VERSION))
     records = 0
     i = 0
@@ -118,8 +183,7 @@ def write_frames(path, frames, first_tick):
         buf += _RECORD.pack(tick - first_tick, count, keys, nav, *cam)
         records += 1
         i += count
-    path.write_bytes(bytes(buf))
-    return records
+    return bytes(buf), records
 
 
 def main():
@@ -127,7 +191,7 @@ def main():
     ap.add_argument("server_journal")
     ap.add_argument("--client", action="append", default=[], help="a client journal of the same session")
     ap.add_argument("--map", default="", help="the custom map the session ran (its file name and md5 go in)")
-    ap.add_argument("-o", "--out", required=True, help="the recipe directory (must not exist)")
+    ap.add_argument("-o", "--out", required=True, help="the recipe file, RECIPE.bmrp (must not exist)")
     args = ap.parse_args()
 
     server = jt.read_journal(args.server_journal)
@@ -147,8 +211,9 @@ def main():
         if r["added"] and r["id"] not in [i for i, _, _ in ids]:
             ids.append((r["id"], r["join_order"], r["name"]))
     out = pathlib.Path(args.out)
-    out.mkdir(parents=True, exist_ok=False)
-    players = []
+    if out.suffix != ".bmrp" or out.exists():
+        ap.error("-o: a new .bmrp file")
+    players, streams = [], {}
     for index, (pid, join_order, name) in enumerate(sorted(ids, key=lambda e: e[1])):
         applied = expand(server, pid)
         own = expand(clients[pid], pid) if pid in clients else {}
@@ -166,7 +231,7 @@ def main():
         # or ahead of the server's last tick): inputs too, from its client journal.
         beyond = [t for t in sorted(own) if own[t][1] and t not in applied and t >= first]
         frames = sorted(frames + [(t, frame_key(own[t][0])) for t in beyond])
-        records = write_frames(out / ("player%d.frames" % index), frames, first)
+        streams["player%d.frames" % index], records = frames_bytes(frames, first)
         players.append({
             "name": name, "join_order": join_order,
             "lives": [{"join_tick": j - first, "start_tick": start_of(server, pid, j, l, applied) - first,
@@ -191,7 +256,10 @@ def main():
                    "build_id": header["build_id"], "utc_ms": header["utc_ms"], "session": header["session"],
                    "input_delay": header["input_delay"]},
     }
-    (out / "recipe.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(RECIPE_MANIFEST, json.dumps(manifest, indent=2) + "\n")
+        for name, data in streams.items():
+            z.writestr(name, data)
     for p in players:
         s = p["source"]
         print("%-12s join order %d, lives (join, start, leave) %s, %d ticks (%d records); substituted %d: %d from its client journal, %d "

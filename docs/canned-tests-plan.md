@@ -743,7 +743,7 @@ The options as they were put:
    clients, a late joiner; recommended), or a core_ref arm's server journal.
 
 As built (T2, 2026-11-05):
-- `scripts/journal_recipe.py SERVER_JOURNAL [--client CLIENT_JOURNAL ...] [--map FILE] -o DIR`: `recipe.json`
+- `scripts/journal_recipe.py SERVER_JOURNAL [--client CLIENT_JOURNAL ...] [--map FILE] -o RECIPE.bmrp` (a zip; below): `recipe.json`
   (format `bmmo-input-recipe` 1: level, map {file, md5}, session_first_tick, session_ticks, players [{name,
   join_order, lives [{join_tick, leave_tick}], frames, ticks, source}], source) and `player<N>.frames` ("BMRF" 1:
   runs of u32 tick from the session's first tick, u32 count, u8 keys, u8 nav_active, f32 camera rows [9]). A
@@ -753,7 +753,7 @@ As built (T2, 2026-11-05):
 - The headless client: `--recipe-frames FILE --recipe-first-tick S` (K8's source: a covered tick plays the run's keys
   and camera; past it, the poll's) and `--join-at-ms MS` (`--join-cue`'s pre-booted joiner, cued by the session clock).
   The coordinator: `--latency-ms-for NAME:MS` (decision 3); the harness passes it for a client whose `--link`
-  latency differs. `arena_map_test.py --coordinated --recipe DIR [--recipe-start-ms MS] [--recipe-first-tick S]`:
+  latency differs. `scripts/recipe_run.py RECIPE.bmrp --label L [harness arguments]` (calibrates, below) over `arena_map_test.py --coordinated --recipe RECIPE.bmrp [--recipe-calibration JSON] [--recipe-until-tick T] [--recipe-start-ms MS] [--recipe-first-tick S]`:
   one client per recipe player, level and map from the manifest (the map found by md5), a late joiner at
   `--recipe-start-ms` + its join tick in ms, one session; every life's join, start and leave at the recipe's ticks
   (below, "Lives at the recipe's ticks").
@@ -798,19 +798,33 @@ Lives at the recipe's ticks (the user, 2026-11-05: "玩家离开和复活只报�
   after it joined, the pre-booted headless one is ready at once); a leave 2 ticks late (a leave the server handles at T
   is its PLAYER record of T + 2). Moving the base itself 333 ticks later broke the joiner: the base's delay is added to
   the joiner's lead (as the J4 clamp's few ticks are), so it ran 333 ticks ahead - resyncs, relayed frames past reach.
-- **Now:** the recipe's lives carry `start_tick` (the base the server assigned, from its join-state note; else the
-  life's first FRESH frame; a start member's join). The server test flag `--test-life NAME:LIFE:ADD:BASE:LEAVE` holds
-  whatever comes early, whole, until the runner is there (the pass timers release it): the join until ADD, the
-  SessionReady until 20 ticks before the base it would be given makes BASE (the lead the usual one plus at most that
-  margin - the original joiner's loading time, in effect), the leave until LEAVE - 2. The harness passes it for every
-  late life and every leave; the client asks early: a late joiner's Join a second before its tick, a leave at LEAVE - 2
-  (as the original's client did), a rejoin's Join right after its Leave (`--rejoin-at` may now come again, one per
-  later life). The host may not leave (its leave hands the room over): refused.
-- **Checked:** trial 2 level 8: the joiner's life (1409, 1791) as the original's, twice byte-identical, the judge
-  exact, harness PASS (no resyncs), 15.5x. A coordinated drive with a rejoin (client 1 at 900, back 500 ms later) and
-  a leave (client 2 at 1500), re-driven from its recipe: every life the original's - (28, 28, 902), (933, 983, -),
-  (28, 28, 1502) - and the judge exact on all four journals (the rejoin's life included). (A start member's removal at
-  the session's end - its client's play time ran out - is the run's end, not a recipe leave.)
+- **First fix, withdrawn the same day:** a server test flag (`--test-life`) that held an early join, SessionReady or
+  leave until its tick (53c1f87b). It landed every life, but it put test logic in the server; the user: the replay
+  sees the whole trace and runs on one virtual clock, so the test side can time the clients exactly - the server is
+  restored as it was (09509d3d's server.cpp), the clients are timed instead.
+- **The recipe file, `.bmrp`** (the user: one zip file): `recipe.json`, `player<N>.frames` and, once calibrated,
+  `calibration.json`. The lives carry `start_tick` (the base the server assigned, from its join-state note; else the
+  life's first FRESH frame; a start member's join).
+- **The calibration** (scripts/recipe_run.py; the server a black box): its ticks go on a fixed grid of the session
+  clock, so a message sent d ms later lands d * 66 / 1000 ticks later. Per client: a late joiner's Join time
+  (`--join-at-ms`), each life's SessionReady time (`--ready-at-ms MS`, new, repeatable: the life's level load waits
+  until then - the original's player's machine still loading - and its SessionReady goes when it anchors), each
+  leave's tick (`--leave-room-at`, or `--rejoin-at TICK:MS` with the next life's Join MS after the Leave; repeatable
+  now). A run's misses move those by the ticks missed; a SessionReady that went later than its hold (its life could
+  not anchor sooner: a rejoin waits for its old life's removal) moves from when it really went - the client logs
+  "--ready-at-ms: life K anchored at X ms of the run" in a recipe run only - so the base follows a tick per tick.
+  Without a calibration: `recipe_estimate`'s times, then short passes (each ends a second past the last life's
+  event; the coordinator's `--virtual-seconds` through `--recipe-until-tick`) until every life lands, stored in the
+  .bmrp, then the full run, checked. With one: one full run, checked; a miss moves the times and runs it again. A
+  recipe with every player there from the first tick to the end runs once with nothing to time. The calibration
+  belongs to the build and the run's parameters, not to the original: a miss makes it again. The host may not leave
+  (its leave hands the room over): refused.
+- **Checked:** the rejoin-and-leave recipe (client 1 leaves at 900 and is back 500 ms later, client 2 leaves at 1500):
+  first run, no calibration: 3 short passes (about 5 s each), then the full run - every life the original's, (28, 28,
+  902), (933, 983, -), (28, 28, 1502); again with the stored calibration: one run, every life landed, its 4 journals
+  byte-identical to the first's. Trial 2 level 8: 2 short passes (7.5 s each), then the full run - the joiner (1409,
+  1791) as the original's, 16.2x; again: one run, landed, the judge exact on both clients. (A start member's removal
+  at the session's end - its client's play time ran out - is the run's end, not a recipe leave.)
 
 ## 4. Decisions
 

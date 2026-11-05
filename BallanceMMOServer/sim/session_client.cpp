@@ -506,6 +506,12 @@ namespace {
         // which the driver passes); past it, the poll's.
         std::string recipe_frames;
         int64_t recipe_first_tick = -1;
+        // --ready-at-ms MS (step T2, repeatable: one per life, in order; 0: no
+        // hold): the life's level load waits until MS after the run started
+        // on the session clock, as a player whose machine was still loading -
+        // its SessionReady (sent at the anchor) goes then.  A recipe's
+        // calibration sets it so the server gives the life the recipe's base.
+        std::vector<uint32_t> ready_at_ms;
         // --trace-sends FILE: one line per payload the session flow sends
         // (tick, Steam flags, size, FNV-1a 64), written in a replay too, where
         // nothing reaches the wire: the replay's check of the sends.  Off by
@@ -625,6 +631,7 @@ namespace {
                   "       [--join-cue FILE]   (a pre-booted late joiner: --level loaded and held after the boot; the Join\n"
                   "         waits until FILE exists)\n"
                   "       [--join-at-ms MS]   (the same, the Join MS after the run started on the session clock)\n"
+                  "       [--ready-at-ms MS]...   (one per life: its level load, and so its SessionReady, waits until MS of the run)\n"
                   "       [--recipe-frames FILE --recipe-first-tick S]   (the own ball plays a recipe's frames, counted\n"
                   "         from the session's first tick S: scripts/journal_recipe.py)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
@@ -870,6 +877,7 @@ namespace {
             else if (arg == "--join-at-ms") { if (!(v = next())) return false; out.join_at_ms = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--recipe-frames") { if (!(v = next())) return false; out.recipe_frames = v; }
             else if (arg == "--recipe-first-tick") { if (!(v = next())) return false; out.recipe_first_tick = std::strtoll(v, nullptr, 10); }
+            else if (arg == "--ready-at-ms") { if (!(v = next())) return false; out.ready_at_ms.push_back(static_cast<uint32_t>(std::strtoul(v, nullptr, 10))); }
             else if (arg == "--trace-sends") { if (!(v = next())) return false; out.trace_sends = v; }
             else if (arg == "--io-flush") {
                 if (!(v = next()) || !bmmo::session::parse_io_flush_config(v, out.io_flush)) return false;
@@ -1339,8 +1347,19 @@ namespace {
                     wall_sleep(bmmo::session::clock_site::wait_idle, std::chrono::milliseconds(5));
                     break;
                 case phase::loading:
+                    // --ready-at-ms (step T2): this life's load waits for its time.
+                    if (ready_hold_ms_ && wall_now(bmmo::sim::wall_site::run_report) - run_started_
+                                              < std::chrono::milliseconds(ready_hold_ms_)) {
+                        wall_sleep(bmmo::session::clock_site::wait_idle, std::chrono::milliseconds(5));
+                        break;
+                    }
                     ++flow_steps_;
                     load_step();
+                    // (a recipe's run: when this life anchored - its SessionReady went - for the calibration)
+                    if (!args_.ready_at_ms.empty() && core_.session_phase() != phase::loading)
+                        logf("--ready-at-ms: life %zu anchored at %.1f ms of the run", lives_begun_,
+                             std::chrono::duration<double, std::milli>(wall_now(bmmo::sim::wall_site::run_report)
+                                                                       - run_started_).count());
                     break;
                 case phase::running:
                     pace_and_frame();
@@ -2681,6 +2700,10 @@ namespace {
 
         // ---------------------------------------------------------- session
         void begin_session(const bmmo::session_start_msg& msg) {
+            // --ready-at-ms (step T2): this life's hold.
+            ready_hold_ms_ = lives_begun_ < args_.ready_at_ms.size() ? args_.ready_at_ms[lives_begun_] : 0;
+            if (ready_hold_ms_) logf("--ready-at-ms: life %zu's load waits until %u ms of the run", lives_begun_ + 1, ready_hold_ms_);
+            ++lives_begun_;
             level_finished_ = false;
             session_map_ = msg.map;
             // The session's parameters and the core's fresh state (shared-core
@@ -5211,6 +5234,8 @@ namespace {
         bool cue_joined_ = false;
         clock_type::time_point run_started_{};   // --join-at-ms's origin
         std::vector<recipe_run> recipe_;          // step T2: --recipe-frames
+        size_t lives_begun_ = 0;                  // step T2: --ready-at-ms's index
+        uint32_t ready_hold_ms_ = 0;
         unsigned char lane_keys_[256] = {};                  // --keep-lane: this frame's keys with the steer added
         int lane_steers_ = 0;
         int lane_dwell_key_ = -1;                            // --keep-lane-dwell: the steer's held key, -1 none

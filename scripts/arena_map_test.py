@@ -946,12 +946,15 @@ def parse_client_ticks(specs, players, what, delays=None):
     return out
 
 
+RECIPE_TICK_MS = 1000.0 / 66.0
+
+
 def apply_recipe(args):
-    """--recipe (step T2): the players, the level and the map from the recipe's manifest."""
-    manifest_path = pathlib.Path(args.recipe) / 'recipe.json'
-    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    if manifest.get('format') != 'bmmo-input-recipe':
-        raise ValueError('%s: not an input recipe' % manifest_path)
+    """--recipe RECIPE.bmrp (step T2): the players, the level and the map from the recipe's manifest; when each
+    client joins, readies and leaves from its calibration (--recipe-calibration, else the recipe's own, else
+    recipe_estimate)."""
+    import journal_recipe
+    manifest, stored = journal_recipe.read_recipe(args.recipe)
     if not args.coordinated:
         raise ValueError('--recipe runs coordinated (--coordinated)')
     if args.drive or args.beam_bays or args.join_late:
@@ -959,6 +962,8 @@ def apply_recipe(args):
     players = sorted(manifest['players'], key=lambda p: p['join_order'])
     if not players or players[0]['lives'][0]['join_tick'] != 0:
         raise ValueError('--recipe: the first player (the host) must be in the session from its first tick')
+    if len(players[0]['lives']) > 1 or players[0]['lives'][0]['leave_tick'] is not None:
+        raise ValueError('--recipe: the host (%s) leaves - its leave would hand the room over' % players[0]['name'])
     args.recipe_players = players
     args.players = len(players)
     args.sectors = '1'   # one session: the recipe's
@@ -973,36 +978,32 @@ def apply_recipe(args):
         args.map = 'none'
     if args.recipe_first_tick < 0:
         args.recipe_first_tick = manifest['session_first_tick']
-    # Every life at the recipe's ticks: the server holds a join or leave that comes early until its tick, and
-    # gives no base before the life's start (--test-life, a server test flag); the client asks early - a late
-    # joiner's Join a second before its tick (the session clock at the first tick is --recipe-start-ms, an
-    # estimate), a leave two ticks before the server's removal, a rejoin's Join right after the Leave.
     first = args.recipe_first_tick
-    args.recipe_joins, args.recipe_client_args, args.recipe_server_args = {}, {}, []
-    for i, p in enumerate(players):
-        lives, extra = p['lives'], []
-        if lives[0]['join_tick'] > 0:
-            args.recipe_joins[i] = max(1, args.recipe_start_ms + int(lives[0]['join_tick'] * 1000.0 / 66.0) - 1000)
-        for k, life in enumerate(lives):
-            late = k > 0 or life['join_tick'] > 0
-            add = first + life['join_tick'] if late else 0
-            base = first + life.get('start_tick', life['join_tick']) if late else 0
-            leave = first + life['leave_tick'] if life['leave_tick'] is not None else 0
-            if add or base or leave:
-                args.recipe_server_args += ['--test-life', 'Arena%d:%d:%d:%d:%d' % (i, k + 1, add, base, leave)]
-            # The client leaves two of its ticks before the server's removal, as the original's client did (a
-            # leave the server handles at T is its record at T + 2); the server holds one that comes earlier.
-            if leave and k + 1 < len(lives):
-                extra += ['--rejoin-at', '%d:0' % (leave - 2)]
-            elif leave:
-                extra += ['--leave-room-at', str(leave - 2)]
-        if i == 0 and extra:
-            raise ValueError('--recipe: the host (%s) leaves - its leave would hand the room over' % p['name'])
+    if args.recipe_calibration:
+        calibration, source = json.loads(pathlib.Path(args.recipe_calibration).read_text(encoding='utf-8')), 'given'
+    elif stored:
+        calibration, source = stored, 'the recipe\'s'
+    else:
+        calibration, source = journal_recipe.recipe_estimate(manifest, args.recipe_start_ms, args.latency_ms or 0), 'estimated'
+    args.recipe_calibration_used = calibration
+    args.recipe_joins, args.recipe_client_args = {}, {}
+    for i, entry in enumerate(calibration['players']):
+        extra = []
+        if entry['join_ms']:
+            args.recipe_joins[i] = entry['join_ms']
+        for life in entry['lives']:
+            extra += ['--ready-at-ms', str(life['ready_ms'])]
+            if life['leave_tick'] is not None:
+                at = first + life['leave_tick']
+                extra += (['--rejoin-at', '%d:%d' % (at, life['rejoin_delay_ms'])] if life['rejoin_delay_ms'] is not None
+                          else ['--leave-room-at', str(at)])
         args.recipe_client_args[i] = extra
     args.seconds = max(args.seconds, int(manifest['session_ticks'] / 66.0) + 1)
-    print('recipe: %s - level %d, %d players (%d joining late), %d ticks from session tick %d' % (
-        args.recipe, args.level, args.players, len(args.recipe_joins), manifest['session_ticks'],
-        args.recipe_first_tick), flush=True)
+    if args.recipe_until_tick:   # a calibration pass: the run ends a little past that tick of the session
+        args.recipe_virtual_seconds = (args.recipe_start_ms + args.recipe_until_tick * RECIPE_TICK_MS) / 1000.0 + 2.0
+    print('recipe: %s - level %d, %d players (%d joining late), %d ticks from session tick %d; calibration %s' % (
+        args.recipe, args.level, args.players, len(args.recipe_joins), manifest['session_ticks'], first, source),
+        flush=True)
 
 
 def member_args(args, i):
@@ -1094,6 +1095,8 @@ def run_case(args, sector, case_dir):
                 [str(bindir / f'BallanceMMOCoordinator{EXE}'), '--processes', str(args.players + 1),
                  '--latency-ms', str(int(link['latency_ms'])), '--loss-pct', str(link['loss_pct']),
                  '--seed', str(args.loss_seed), *(['--lockstep', '1'] if args.lockstep else []),
+                 *(['--virtual-seconds', '%.3f' % args.recipe_virtual_seconds]
+                   if getattr(args, 'recipe_virtual_seconds', None) else []),
                  *[a for i, l in sorted(links.items()) if l['latency_ms'] != link['latency_ms']
                    for a in ('--latency-ms-for', 'Arena%d:%d' % (i, int(l['latency_ms'])))]],
                 cwd=case_dir, stdin=subprocess.DEVNULL, stdout=cf_log, stderr=subprocess.STDOUT, creationflags=FLAGS)
@@ -1114,7 +1117,6 @@ def run_case(args, sector, case_dir):
             handles.append(sf)
             server = subprocess.Popen(
                 [str(bindir / f'{args.server_exe}{EXE}'), '--port', str(args.port),
-                 *getattr(args, 'recipe_server_args', []),
                  *(['--coordinator', coordinator_addr] if coordinator_addr else [])],
                 cwd=case_dir, stdin=subprocess.PIPE, stdout=sf,
                 stderr=subprocess.STDOUT, creationflags=FLAGS)
@@ -1196,8 +1198,13 @@ def run_case(args, sector, case_dir):
             if sector > 1:
                 cmd += ['--start-sector', str(sector)]
             if args.recipe:   # step T2: the own ball plays the recipe's frames
-                cmd += ['--recipe-frames', str(pathlib.Path(args.recipe) / args.recipe_players[i]['frames']),
-                        '--recipe-first-tick', str(args.recipe_first_tick)]
+                import journal_recipe
+                frames = case_dir / ('recipe_player%d.frames' % i)
+                journal_recipe.extract_frames(args.recipe, args.recipe_players[i]['frames'], frames)
+                if i == 0:
+                    (case_dir / 'recipe_calibration.json').write_text(json.dumps(args.recipe_calibration_used, indent=2),
+                                                                      encoding='utf-8')
+                cmd += ['--recipe-frames', str(frames), '--recipe-first-tick', str(args.recipe_first_tick)]
                 if i in args.recipe_joins:
                     cmd += ['--join-at-ms', str(args.recipe_joins[i])]
                 cmd += args.recipe_client_args.get(i, [])
@@ -3691,12 +3698,17 @@ def main():
                          'through BallanceMMOCoordinator (its network: --latency-ms and --loss-pct, the same for every '
                          'client; no proxies, no jitter, no link events)')
     ap.add_argument('--recipe', default='',
-                    help='step T2: the players play a recipe (scripts/journal_recipe.py): one client per recipe player, '
+                    help='step T2: the players play a recipe, RECIPE.bmrp (scripts/journal_recipe.py; scripts/recipe_run.py '
+                         'calibrates and runs it): one client per recipe player, '
                          "each the own ball driven by its frames; the level and map, the players and their joins from "
                          'the recipe (--coordinated; --players, --level, --map, --drive and the beams do not apply)')
     ap.add_argument('--recipe-start-ms', type=int, default=3500,
                     help='--recipe: the session clock at the session\'s first tick (a late joiner joins at this plus its '
                          'join tick; the run reports the ticks it joined at)')
+    ap.add_argument('--recipe-calibration', default='',
+                    help='--recipe: a calibration JSON to use instead of the recipe\'s own (scripts/recipe_run.py)')
+    ap.add_argument('--recipe-until-tick', type=int, default=0,
+                    help='--recipe: a calibration pass - the run ends about that tick of the session')
     ap.add_argument('--recipe-first-tick', type=int, default=-1,
                     help="--recipe: the session's first tick of this run (default: the recipe's source session's)")
     ap.add_argument('--server-exe', default='BallanceMMOServer',
