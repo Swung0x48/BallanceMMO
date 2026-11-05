@@ -94,8 +94,11 @@ namespace bmmo::physics::ivp_access {
     // The time manager's event list: an event's scheduled time is its
     // element's value, relative to the manager's base time.
     struct ml_elems { using type = IVP_U_Min_List_Element* IVP_U_Min_List::*; friend type steal(ml_elems); };
+    struct ml_size { using type = unsigned short IVP_U_Min_List::*; friend type steal(ml_size); };
     template struct thief<ml_elems, &IVP_U_Min_List::elems>;
+    template struct thief<ml_size, &IVP_U_Min_List::malloced_size>;
     inline IVP_U_Min_List_Element* elements(IVP_U_Min_List& list) { return list.*steal(ml_elems()); }
+    inline unsigned short allocated_size(IVP_U_Min_List& list) { return list.*steal(ml_size()); }
 
     // IVP_Real_Object::get_all_near_mindists is protected: the recheck of the
     // object's overlap element in the IVP_MT_GET_MINDIST movement state, which
@@ -1507,13 +1510,15 @@ namespace bmmo::physics {
         // time until each one's scheduled event.
         IVP_Time_Manager* manager = env->get_time_manager();
         IVP_U_Min_List_Element* events = manager && manager->min_hash ? ivp_access::elements(*manager->min_hash) : nullptr;
+        const unsigned event_slots = events ? ivp_access::allocated_size(*manager->min_hash) : 0;
         out += " | mind=";
         for (IVP_Synapse_Real* syn = real->get_first_exact_synapse(); syn; syn = syn->get_next()) {
             IVP_Mindist* md = syn->get_mindist();
             if (!md) continue;
             double event_in = 0.0;
             bool scheduled = false;
-            if (events && md->index >= 0) {
+            if (events && md->index >= 0 && static_cast<unsigned>(md->index) < event_slots
+                    && events[md->index].element == static_cast<IVP_Time_Event*>(md)) {
                 IVP_Time at = manager->base_time;
                 at += static_cast<double>(events[md->index].value);
                 event_in = at - env->get_current_time();
