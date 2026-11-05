@@ -506,6 +506,58 @@ P-core h1_150: harness PASS, server replay exact. K1-K8 are done but K7 (the ret
 | T2 recipe | C8 + T1 | extracts each player's frames, joins and leaves from a journal into a recipe, runs it in T1; stage 2 |
 | T3 capture replay | C3 + C1 / C2 replayers | replays any process's v2 capture (the server's too); for retail inside Player.exe with renders skipped; method B and stage 3 |
 
+#### T1 design (2026-11-05, for the user's review)
+
+Goal (stage 1): the server and N headless clients run one session on one virtual time, as fast as the CPU allows,
+and the same recipe and seed give the same bytes twice (journals, sends). K4 made this possible: the server's
+results no longer depend on how its threads overlap (K4b), and every wait is on the clock (K4c).
+
+Shape: one coordinator process and the usual processes (the server exe, N headless client exes), each started with
+`--coordinator 127.0.0.1:PORT`. A process then runs on a `virtual_clock` and a `remote_transport` instead of the real
+clock and GNS; nothing else in it changes.
+
+- **The network lives in the coordinator.** It holds one `sim_network` (K2: connections, per-direction latency,
+  reliable in order, seeded loss) with one endpoint per process. A process's `remote_transport` forwards its calls:
+  a send goes to the coordinator (tagged with the sending thread's rank and its sequence), received messages and
+  connection state changes come from it, `status()` answers the link model's round trip. No call waits on the
+  coordinator except connect/listen at start.
+- **Time moves only at the coordinator.** The loop: every process reports "idle, next wake t_i" (or "no wake");
+  the coordinator applies the sends each one made since the last step (in a fixed order: process, thread rank,
+  sequence), advances the network to t = min t_i, hands each process the messages and state changes due by t, and
+  tells every process "advance to t". A process's threads wake, run, and wait again; when all of them wait, the
+  process reports again. Computation costs no virtual time (a world boot, a step); the client's rewind cost is
+  K6's fixed model.
+- **Idle detection in the process.** `virtual_clock` learns how many threads take part (server: network loop +
+  runner; headless: its one loop) and calls the process's coordinator link when all of them wait. To make that exact,
+  the K4c seam gains `notify(site, cv)`: a notify through the clock counts the woken waiter out at once, so a thread
+  that has been woken but has not run yet never counts as waiting (a plain `cv.notify_all` could let the
+  coordinator advance past it). The four host notifies move to it (the runner's post and mark, the server's poll
+  request; the runner-thread ones stay plain).
+- **Same instant, fixed order.** Two server threads may send at the same virtual instant (K4a's C1). The coordinator
+  orders a step's sends by (process, thread rank, sequence), so the wire order is the same every run; each thread's
+  own order is kept.
+- **Runs.** `BallanceMMOCoordinator --server ARGS --clients N --client-args ... --latency-ms L [--loss-pct P --seed S]
+  --virtual-seconds T` starts the processes, runs to T, stops them, and leaves the journals where the live harness
+  does, so `journal_judge.py` and the LBM scripts read them unchanged. The clients use `--drive` (scripted, by tick),
+  `--uuid-seed` (K5), `--rewind-cost` (K6); T2 adds recipes (K8).
+- **Not in T1:** the retail client (stage 3), jitter and bursty loss in the link model (sim_network has neither;
+  they come when a test needs them), running processes ahead within the link latency (a speed-up for later).
+
+Acceptance: (1) the same run twice gives byte-identical server and client journals and send traces; (2) the judge
+on a T1 run is exact (FINAL rows), like a live run's; (3) speed: virtual seconds per real second for h1_150's shape,
+reported.
+
+Steps: T1a the clock's `notify` and idle callback (Common, unit-tested); T1b `remote_transport` + the coordinator
+protocol (Common, a unit test over a socket pair); T1c the coordinator exe (BallanceMMOServer/sim) and the
+`--coordinator` flag in the server and the headless client; T1d the two-runs acceptance and the judge.
+
+Decisions for the user:
+1. Language of the coordinator: C++ (reuses `sim_network` as is; recommended) or Python (thin, but re-implements the
+   connection model).
+2. The IPC: TCP on localhost through asio (already a submodule; works the same on Windows and Linux; recommended).
+3. The fixed rewind cost for T1 runs (K6, decision 1): LBM's x64 measurement, 3.0 ms + 0.46 ms a tick (cap 92;
+   recommended), or another.
+
 ## 4. Decisions
 
 Taken: the gate (user, 2026-11-05): each K step lands on unit tests, the wire check and a P-core live smoke;
