@@ -11607,6 +11607,24 @@ namespace {
         }
     };
 
+    TEST(SessionClientCoreForcedOwnMove, SessionAssignSetsAsideAPendingForcedMove) {
+        forced_move_fixture fixture(true);
+        auto& core = *fixture.core;
+        ASSERT_TRUE(core.force_own_move(4, 10));
+        steps{core}.report_physicalize("Ball_Wood", 122);
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        ASSERT_TRUE(state_of(core).own_life_[0].force_pending);
+        core.on_session_assign(assign_message(9, 2000));
+        EXPECT_TRUE(state_of(core).own_life_.empty());
+        ASSERT_EQ(state_of(core).own_unanswered_.size(), 1u);
+        EXPECT_FALSE(state_of(core).own_unanswered_[0].force_pending);
+        const size_t before = fixture.fake.calls.size();
+        steps{core}.process_own_echoes();
+        EXPECT_EQ(count_prefix(since(fixture.fake.calls, before), "unmake_own:"), 0u);
+        EXPECT_EQ(count_prefix(since(fixture.fake.calls, before), "make_own:"), 0u);
+        EXPECT_EQ(core.forced_own_moves(), 0u);
+    }
+
     TEST(SessionClientCoreForcedOwnMove, KZeroTheAbsenceIsLiveAndTheBodyIsMadeAtTPrime) {
         for (const bool control: {false, true}) {
             SCOPED_TRACE(control ? "own body control" : "retail capabilities");

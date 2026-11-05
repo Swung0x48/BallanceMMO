@@ -127,6 +127,9 @@ namespace {
         // --final-checkpoints (step D0): also journal each checkpoint tick's
         // FINAL state, as its rollback record leaves the history (diagnostic).
         bool final_checkpoints = false;
+        // --non-spawn-first-birth (CBF3, GHF's deferred check): the first own
+        // birth is reported as not at the spawn point (diagnostic).
+        bool non_spawn_first_birth = false;
         // --force-rollback <every>:<depth>: rewind `depth` ticks every `every`
         // ticks, with no network reason to.  Isolates how faithful a replay is
         // from everything else: in a solo session the world is a pure function
@@ -642,6 +645,7 @@ namespace {
                     at = comma + 1;
                 }
             }
+            else if (arg == "--non-spawn-first-birth") out.non_spawn_first_birth = true;
             else if (arg == "--reset-level-at" || arg == "--activate-script") {   // close-out step H1
                 if (!(v = next())) return false;
                 std::string spec = v;
@@ -3309,6 +3313,11 @@ namespace {
             const float dy = world[3][1] - reset[3][1];
             const float dz = world[3][2] - reset[3][2];
             own_pre_.spawn = (dx * dx + dy * dy + dz * dz) < 1e-6f;
+            if (args_.non_spawn_first_birth) {
+                args_.non_spawn_first_birth = false;
+                own_pre_.spawn = false;
+                logf("--non-spawn-first-birth: %s at live frame %u", name.c_str(), live_tick_serial_);
+            }
             // Step SPGH2: the own birth as seen before the block makes the
             // body, where the retail host's own_physicalized sees it; the
             // core decides whether it begins a spawn ghost life.

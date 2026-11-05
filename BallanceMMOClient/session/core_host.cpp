@@ -1650,6 +1650,7 @@ namespace {
     // (BMMO_CELLS_MEMO=off | on | verify, on when unset); dropped with every
     // new selection.  File-scope (BallanceMMOClient takes no member).
     bmmo::game::array_reads::cells_memo cells_memo_host;
+    size_t cells_memo_notes_logged = 0;
 
     int32_t controller_alias_cb(void* user, const char* name, char* out, uint32_t out_size);
 
@@ -4013,7 +4014,8 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     }
     // Step OPB: the written-cell columns' memo (this process, every session).
     logger_->Info("Physics session: %s", cells_memo_host.line().c_str());
-    for (const std::string& note: cells_memo_host.notes()) logger_->Warn("Physics session: %s", note.c_str());
+    while (cells_memo_notes_logged < cells_memo_host.notes().size())
+        logger_->Warn("Physics session: %s", cells_memo_host.notes()[cells_memo_notes_logged++].c_str());
     {   // step OPC
         const auto& reuse = bmmo::game::script_reuse_totals();
         logger_->Info("Physics session: %s", reuse.line(bmmo::game::script_reuse_mode_from_env()).c_str());

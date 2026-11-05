@@ -140,6 +140,9 @@ namespace bmmo::game {
     struct written_column {
         CK_ID array = 0;
         int column = -1;
+        bool operator==(const written_column& other) const {
+            return array == other.array && column == other.column;
+        }
     };
 
     class script_replay {
