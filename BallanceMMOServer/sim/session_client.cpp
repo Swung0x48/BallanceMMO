@@ -548,6 +548,9 @@ namespace {
         // when MS is long enough (a real reconnect, J > R).
         uint32_t rejoin_at = 0;
         uint32_t rejoin_delay_ms = 0;
+        // Step T2 (a recipe's lives): --rejoin-at may come again - the later
+        // ones, in order, each armed once the one before has fired.
+        std::vector<std::pair<uint32_t, uint32_t>> later_rejoins;
         // --leave-room-at TICK (world-agreement design 7.3 J2/J4, step M0):
         // at TICK the client leaves the room (room Leave), ends its session
         // and exits once the server has taken it out of the room (2 s at
@@ -892,8 +895,10 @@ namespace {
             else if (arg == "--rejoin-at") {
                 if (!(v = next())) return false;
                 char* end = nullptr;
-                out.rejoin_at = static_cast<uint32_t>(std::strtoul(v, &end, 10));
-                if (end && *end == ':') out.rejoin_delay_ms = static_cast<uint32_t>(std::strtoul(end + 1, nullptr, 10));
+                const auto at = static_cast<uint32_t>(std::strtoul(v, &end, 10));
+                const uint32_t delay = end && *end == ':' ? static_cast<uint32_t>(std::strtoul(end + 1, nullptr, 10)) : 0;
+                if (out.rejoin_at == 0) { out.rejoin_at = at; out.rejoin_delay_ms = delay; }
+                else out.later_rejoins.emplace_back(at, delay);
             }
             else if (arg == "--leave-room-at") { if (!(v = next())) return false; out.leave_room_at = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--leave-after-unphys") { if (!(v = next())) return false; out.leave_after_unphys = std::atoll(v); }
@@ -1305,7 +1310,7 @@ namespace {
                 // --rejoin-at TICK:MS (step TRL): the delayed Join.
                 if (rejoin_join_pending_ && wall_now(bmmo::sim::wall_site::run_report) >= rejoin_join_due_) {
                     rejoin_join_pending_ = false;
-                    logf("--rejoin-at: joining room %u again (%u ms after the Leave)", room_id_, args_.rejoin_delay_ms);
+                    logf("--rejoin-at: joining room %u again (%u ms after the Leave)", room_id_, rejoin_join_delay_ms_);
                     room_request(bmmo::room::action::Join, room_id_);
                 }
                 // --join-cue (step DX9): the pre-booted joiner's Join, on the cue.
@@ -3936,6 +3941,13 @@ namespace {
                     rejoin_done_ = true;
                     logf("--rejoin-at: leaving room %u at tick %u (own ball %s) and joining it again", room_id_, now,
                          core_.own_physicalized() ? "physicalized" : "without a body");
+                    const uint32_t delay_ms = args_.rejoin_delay_ms;
+                    if (!args_.later_rejoins.empty()) {   // step T2: the next life's
+                        args_.rejoin_at = args_.later_rejoins.front().first;
+                        args_.rejoin_delay_ms = args_.later_rejoins.front().second;
+                        args_.later_rejoins.erase(args_.later_rejoins.begin());
+                        rejoin_done_ = false;
+                    }
                     core_.end("--rejoin-at: left the room to rejoin it");
                     ++rejoins_;
                     rejoin_waiting_ = true;
@@ -3944,13 +3956,13 @@ namespace {
                     // joining a room on its own while the delay runs.
                     join_sent_ = true;
                     ready_sent_ = false;
-                    if (args_.rejoin_delay_ms == 0) {
+                    if (delay_ms == 0) {
                         room_request(bmmo::room::action::Join, room_id_);
                     } else {
-                        rejoin_join_due_ = wall_now(bmmo::sim::wall_site::run_report)
-                                         + std::chrono::milliseconds(args_.rejoin_delay_ms);
+                        rejoin_join_due_ = wall_now(bmmo::sim::wall_site::run_report) + std::chrono::milliseconds(delay_ms);
+                        rejoin_join_delay_ms_ = delay_ms;
                         rejoin_join_pending_ = true;
-                        logf("--rejoin-at: the Join goes %u ms after the Leave", args_.rejoin_delay_ms);
+                        logf("--rejoin-at: the Join goes %u ms after the Leave", delay_ms);
                     }
                     return;
                 }
@@ -5031,6 +5043,7 @@ namespace {
         // --rejoin-at (step M0): done once; the lives this run began after a
         // rejoin (names the next journal).
         bool rejoin_done_ = false;
+        uint32_t rejoin_join_delay_ms_ = 0;   // the pending Join's (the log)
         uint32_t rejoins_ = 0;
         // Step F0: a rejoin's Join is out and no SessionStart came yet (a
         // RequestDenied then ends the run).

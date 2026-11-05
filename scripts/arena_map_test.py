@@ -973,12 +973,32 @@ def apply_recipe(args):
         args.map = 'none'
     if args.recipe_first_tick < 0:
         args.recipe_first_tick = manifest['session_first_tick']
-    args.recipe_joins = {i: args.recipe_start_ms + int(round(p['lives'][0]['join_tick'] * 1000.0 / 66.0))
-                         for i, p in enumerate(players) if p['lives'][0]['join_tick'] > 0}
+    # Every life at the recipe's ticks: the server holds a join or leave that comes early until its tick, and
+    # gives no base before the life's start (--test-life, a server test flag); the client asks early - a late
+    # joiner's Join a second before its tick (the session clock at the first tick is --recipe-start-ms, an
+    # estimate), a leave two ticks before the server's removal, a rejoin's Join right after the Leave.
+    first = args.recipe_first_tick
+    args.recipe_joins, args.recipe_client_args, args.recipe_server_args = {}, {}, []
     for i, p in enumerate(players):
-        later = [l for l in p['lives'][1:]] + ([p['lives'][0]] if p['lives'][0]['leave_tick'] is not None else [])
-        if later:
-            print('  note: %s\'s leaves and later lives are not re-created (%s)' % (p['name'], later), flush=True)
+        lives, extra = p['lives'], []
+        if lives[0]['join_tick'] > 0:
+            args.recipe_joins[i] = max(1, args.recipe_start_ms + int(lives[0]['join_tick'] * 1000.0 / 66.0) - 1000)
+        for k, life in enumerate(lives):
+            late = k > 0 or life['join_tick'] > 0
+            add = first + life['join_tick'] if late else 0
+            base = first + life.get('start_tick', life['join_tick']) if late else 0
+            leave = first + life['leave_tick'] if life['leave_tick'] is not None else 0
+            if add or base or leave:
+                args.recipe_server_args += ['--test-life', 'Arena%d:%d:%d:%d:%d' % (i, k + 1, add, base, leave)]
+            # The client leaves two of its ticks before the server's removal, as the original's client did (a
+            # leave the server handles at T is its record at T + 2); the server holds one that comes earlier.
+            if leave and k + 1 < len(lives):
+                extra += ['--rejoin-at', '%d:0' % (leave - 2)]
+            elif leave:
+                extra += ['--leave-room-at', str(leave - 2)]
+        if i == 0 and extra:
+            raise ValueError('--recipe: the host (%s) leaves - its leave would hand the room over' % p['name'])
+        args.recipe_client_args[i] = extra
     args.seconds = max(args.seconds, int(manifest['session_ticks'] / 66.0) + 1)
     print('recipe: %s - level %d, %d players (%d joining late), %d ticks from session tick %d' % (
         args.recipe, args.level, args.players, len(args.recipe_joins), manifest['session_ticks'],
@@ -1094,6 +1114,7 @@ def run_case(args, sector, case_dir):
             handles.append(sf)
             server = subprocess.Popen(
                 [str(bindir / f'{args.server_exe}{EXE}'), '--port', str(args.port),
+                 *getattr(args, 'recipe_server_args', []),
                  *(['--coordinator', coordinator_addr] if coordinator_addr else [])],
                 cwd=case_dir, stdin=subprocess.PIPE, stdout=sf,
                 stderr=subprocess.STDOUT, creationflags=FLAGS)
@@ -1179,6 +1200,7 @@ def run_case(args, sector, case_dir):
                         '--recipe-first-tick', str(args.recipe_first_tick)]
                 if i in args.recipe_joins:
                     cmd += ['--join-at-ms', str(args.recipe_joins[i])]
+                cmd += args.recipe_client_args.get(i, [])
             if args.drive:
                 record = case_dir / f'input{i}.bmrc'
                 write_drive_record(record, args.level, args.seconds * 66 + 200, i,

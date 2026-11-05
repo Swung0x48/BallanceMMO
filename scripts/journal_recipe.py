@@ -14,7 +14,9 @@ frame when one is given (--client), else the frame the server applied (the user'
 
 The manifest (format "bmmo-input-recipe", version 1; fields are only ever added):
     level, map {file, md5} (null: the level's own map), session_first_tick (the source's; every tick in the recipe
-    counts from it), session_ticks, players [{name, join_order, lives [{join_tick, leave_tick}], frames, ticks}],
+    counts from it), session_ticks, players [{name, join_order, lives [{join_tick (the server added the life),
+    start_tick (its first tick of its own: the base it was assigned), leave_tick (null: to the session's end)}],
+    frames, ticks}],
     source {...} (where it came from: informational, nothing reads it to play)
 The frame stream: "BMRF", u32 version 1, then records of
     u32 tick (from the session's first tick), u32 count (the frame holds for count ticks), u8 keys,
@@ -26,6 +28,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import struct
 import sys
 
@@ -81,6 +84,24 @@ def lives_of(journal, player, last_tick):
     if open_at is not None:
         lives.append((open_at, None))
     return lives
+
+
+_BASE_NOTE = re.compile(r"resync state for player (\d+): tick \d+ base (\d+)")
+
+
+def start_of(journal, player, join, leave, applied):
+    """A life's first tick of the player's own: the base the server assigned it (the join state's note), else its
+    first FRESH frame in the life, else its join (a member from the session's start)."""
+    end = leave if leave is not None else float("inf")
+    for group in journal.ticks:
+        if group.tick < join or group.tick >= end:
+            continue
+        for note in group.notes:
+            m = _BASE_NOTE.search(note["text"])
+            if m and int(m.group(1)) == player:
+                return int(m.group(2))
+    fresh = [t for t, (_, f) in applied.items() if f and join <= t < end]
+    return min(fresh) if fresh else join
 
 
 def write_frames(path, frames, first_tick):
@@ -148,7 +169,8 @@ def main():
         records = write_frames(out / ("player%d.frames" % index), frames, first)
         players.append({
             "name": name, "join_order": join_order,
-            "lives": [{"join_tick": j - first, "leave_tick": (l - first) if l is not None else None}
+            "lives": [{"join_tick": j - first, "start_tick": start_of(server, pid, j, l, applied) - first,
+                       "leave_tick": (l - first) if l is not None else None}
                       for j, l in lives_of(server, pid, last)],
             "frames": "player%d.frames" % index, "ticks": len(frames),
             "source": {"id": pid, "substituted_ticks": substituted, "from_client_journal": from_client,
@@ -172,9 +194,10 @@ def main():
     (out / "recipe.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     for p in players:
         s = p["source"]
-        print("%-12s join order %d, lives %s, %d ticks (%d records); substituted %d: %d from its client journal, %d "
+        print("%-12s join order %d, lives (join, start, leave) %s, %d ticks (%d records); substituted %d: %d from its client journal, %d "
               "as the server applied; %d own frames past the server's" % (
-                  p["name"], p["join_order"], [(l["join_tick"], l["leave_tick"]) for l in p["lives"]], p["ticks"],
+                  p["name"], p["join_order"], [(l["join_tick"], l["start_tick"], l["leave_tick"]) for l in p["lives"]],
+                  p["ticks"],
                   s["records"], s["substituted_ticks"], s["from_client_journal"], s["applied_by_server"],
                   s["beyond_the_server"]))
     print("recipe: %s (level %d, %d ticks from session tick %d)" % (out, header["level"], last - first + 1, first))

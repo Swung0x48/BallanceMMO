@@ -755,8 +755,8 @@ As built (T2, 2026-11-05):
   The coordinator: `--latency-ms-for NAME:MS` (decision 3); the harness passes it for a client whose `--link`
   latency differs. `arena_map_test.py --coordinated --recipe DIR [--recipe-start-ms MS] [--recipe-first-tick S]`:
   one client per recipe player, level and map from the manifest (the map found by md5), a late joiner at
-  `--recipe-start-ms` + its join tick in ms (the run logs the tick it got), one session; leaves and later lives are
-  reported, not re-created yet.
+  `--recipe-start-ms` + its join tick in ms, one session; every life's join, start and leave at the recipe's ticks
+  (below, "Lives at the recipe's ticks").
 - **Two fixes the first re-drives found:**
   - **K8's nav-active:** an injected tick forced the ball with the SOURCE frame's nav-active and sent the world's:
     in a re-drive the two differ where the new world's navigation is not the original's (trial 2 level 8, tick
@@ -789,8 +789,28 @@ journal so carries the player's own camera keys - what a keyboard-level re-drive
 game's own camera script turning the camera) would need; a journal from before has only the camera rows (the K8 path
 above). Checked: 815/815; x64 and x86 builds; a coordinated smoke (2 clients: PASS, the server replay exact, camera
 keys 42 / 57 read from the array); the wire check of core_ref_s17 ALL SAME. Not run: retail (whether its Keyboard array holds the player's own keys at the navigation's discovery).
-The late joiner joined at tick 1471 (recipe: 1409 = 1381 + 28; `--recipe-start-ms` 3500 is an estimate). The
-original's 626 ticks the server stood in for the stalled joiner are played as the server applied them (decision 1).
+The original's 626 ticks the server stood in for the stalled joiner are played as the server applied them (decision 1).
+
+Lives at the recipe's ticks (the user, 2026-11-05: "玩家离开和复活只报告，不重现？这个要做的。然后中途加入为啥不准看一下"):
+- **Why the first re-drives missed:** the server decides a life's ticks from when its messages arrive, and the re-drive
+  is not the original. The join came 12 ticks late (1421 against 1409: the Join's time was estimated without the
+  150 ms trip); the start 320 ticks early (1471 against 1791: the original's retail joiner spent 5.8 s loading the level
+  after it joined, the pre-booted headless one is ready at once); a leave 2 ticks late (a leave the server handles at T
+  is its PLAYER record of T + 2). Moving the base itself 333 ticks later broke the joiner: the base's delay is added to
+  the joiner's lead (as the J4 clamp's few ticks are), so it ran 333 ticks ahead - resyncs, relayed frames past reach.
+- **Now:** the recipe's lives carry `start_tick` (the base the server assigned, from its join-state note; else the
+  life's first FRESH frame; a start member's join). The server test flag `--test-life NAME:LIFE:ADD:BASE:LEAVE` holds
+  whatever comes early, whole, until the runner is there (the pass timers release it): the join until ADD, the
+  SessionReady until 20 ticks before the base it would be given makes BASE (the lead the usual one plus at most that
+  margin - the original joiner's loading time, in effect), the leave until LEAVE - 2. The harness passes it for every
+  late life and every leave; the client asks early: a late joiner's Join a second before its tick, a leave at LEAVE - 2
+  (as the original's client did), a rejoin's Join right after its Leave (`--rejoin-at` may now come again, one per
+  later life). The host may not leave (its leave hands the room over): refused.
+- **Checked:** trial 2 level 8: the joiner's life (1409, 1791) as the original's, twice byte-identical, the judge
+  exact, harness PASS (no resyncs), 15.5x. A coordinated drive with a rejoin (client 1 at 900, back 500 ms later) and
+  a leave (client 2 at 1500), re-driven from its recipe: every life the original's - (28, 28, 902), (933, 983, -),
+  (28, 28, 1502) - and the judge exact on all four journals (the rejoin's life included). (A start member's removal at
+  the session's end - its client's play time ran out - is the run's end, not a recipe leave.)
 
 ## 4. Decisions
 
