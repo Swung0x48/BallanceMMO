@@ -107,6 +107,35 @@ and OS sleep resolution (1 ms).
 
 S = 1 must be today's code path to the byte (wire check and the existing tests); every step lands with that check.
 
+## 5a. VC6: an event-driven mode for the server and the headless clients (S -> infinity)
+
+A scaled clock has a ceiling: a tick's real time (15.15 ms / S) must stay above every process's per-tick CPU, sleeps
+are 1 ms coarse, and GameNetworkingSockets' retransmits and timeouts run on its own real clock. The other way is
+discrete-event time: a coordinator owns one global virtual clock; each process does the work of the current instant,
+reports "done, my next event is at t", and the coordinator advances the clock to the earliest next event once every
+process is done. The network is simulated by the coordinator too (a datagram with 150 ms of latency is handed over at
+virtual +150 ms), so no step ever waits on real time and the run goes as fast as the slowest process computes a tick
+(the headless clients' 2-3 ms: about 5-7x real time, adapting by itself, without a timer-resolution limit).
+
+- What it buys beyond a scaled clock: full reproducibility - one recipe and one loss seed give the same bytes every
+  run (today's runs move with the machine's load: A6m superseded's +1 relay tick); no idle waiting; no S to choose.
+- Its costs:
+  - the transport: GNS cannot be driven from outside, so in this mode the server and the headless clients use a
+    coordinator-controlled transport (loss, latency, reordering modelled in virtual time) behind the interface the
+    session code already sends through;
+  - CPU in virtual time: a 40 ms rollback stall costs 0 virtual ms unless the measured real cost is charged to the
+    virtual clock (realism back, reproducibility partly lost) - a per-run switch, off by default;
+  - every wait becomes "report and wait for the coordinator's release" (the VC1-VC2 clock entries are where).
+- Scope: the server and the headless clients only; the retail client keeps the scaled clock (the Virtools frame loop,
+  its render and its GNS are not ours to step).
+- Use: statistical reruns, protocol and soak runs, FINAL/replay arms. Never the timing criteria or perf figures.
+- Order: after VC5 - VC1-VC2's single clock entries are its prerequisite. Effort: two to three times VC1-VC3.
+- Done when: the same headless arm run twice in this mode gives byte-identical journals on every side; its scale-safe
+  criteria agree with the same arm at S = 1; the wall time per pair is reported.
+
+Note: for FINAL and determinism alone an infinitely fast path exists today - the server's journal replay and the
+headless capture replay run at full CPU speed, with no real time involved.
+
 ## 6. Decisions for the user
 
 1. Which tests use the fast tier: proposed - FINAL/replay/protocol arms, soak runs and reruns for statistics at
