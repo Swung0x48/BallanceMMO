@@ -629,6 +629,7 @@ class JournalReader(object):
         version = _U32.unpack_from(data, len(MAGIC))[0]
         if version < OLDEST_READABLE or version > VERSION:
             raise JournalError("journal version %d, this reader knows %d..%d" % (version, OLDEST_READABLE, VERSION))
+        journal.version = version
         off = len(MAGIC) + 4
         record = self._next(off)
         if record is None or record[0] != TAG_HEADER:

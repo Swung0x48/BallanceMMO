@@ -143,7 +143,7 @@ def compare(server, client, tolerance, tick_from=0):
         if only:
             missing.append((tick, sorted(show(k) for k in only)))
         worst_name, worst = None, 0.0
-        for name in set(a) & set(b):
+        for name in sorted(set(a) & set(b)):   # sorted: a tie names the same body every run
             d = max(abs(a[name][k] - b[name][k]) for k in range(3))
             if d > worst:
                 worst, worst_name = d, name
