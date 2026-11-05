@@ -18,19 +18,26 @@
 //   M  a message (v1: bytes only; read as connection 0, receive time 0)
 //   S  a connection state change (v1: state, handle, end text)
 //   E  the end marker (a capture without one was cut short)
+//   Q  a take from a host's queue (v4, the retail mod, K7d): the take's site
+//      (a u8 the host numbers), how many entries, each entry's bytes - every
+//      take is written, an empty one too, so a replay takes at the same place
+//   K  a frame's keyboard (v4, K7d): the frame's number, the state's bytes
+//   O  a session message sent (v4, K7d): the send mode, the bytes
 //
 // File: "BMIC", u32 version, i64 clock ticks per second, str32 command line,
 // then the records (u8 tag, little-endian fields).  Version 2 adds N, T, P and
 // L and writes them in place of M and S; a version 1 file reads unchanged.
 // Version 3 (step T3), the same records: the headless client's login uuid
 // seed is a clock read (clock_site::login_uuid) - a replay of an older
-// capture takes that site from its own clock.
+// capture takes that site from its own clock.  Version 4 (K7d) adds Q, K and
+// O; the older records are unchanged.
 // CK-free and header-only.
 
 #include <bitset>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -44,9 +51,9 @@ namespace bmmo::session {
     public:
         enum class tag : uint8_t {
             iteration = 'I', clock = 'C', message = 'N', status = 'T', link_status = 'P', link_clock = 'L',
-            message_v1 = 'M', status_v1 = 'S', end = 'E',
+            message_v1 = 'M', status_v1 = 'S', end = 'E', take = 'Q', keys = 'K', sent = 'O',
         };
-        static constexpr uint32_t kVersion = 3;
+        static constexpr uint32_t kVersion = 4;
 
         // A message as captured (its bytes owned).
         struct message_record {
@@ -76,6 +83,22 @@ namespace bmmo::session {
                 error = "cannot write " + path;
                 return false;
             }
+            put_bytes("BMIC", 4);
+            put_u32(kVersion);
+            put_i64(clock_den);
+            put_string32(command_line);
+            hand_over();
+            return true;
+        }
+
+        // The retail mod's open (K7d, step IOX's rule: no file-system call on
+        // its game thread): the parent directory, `prepare` (the prune) and
+        // the file are made on the writer strand; a failure shows later as
+        // write_failed().
+        bool open_capture_deferred(const std::string& path, const std::string& command_line, int64_t clock_den,
+                                   io_poster poster, std::function<void()> prepare, std::string& error) {
+            if (!file_.open_deferred(path, std::move(poster), kMaxQueued, error, io_flush::batch, true, std::move(prepare)))
+                return false;
             put_bytes("BMIC", 4);
             put_u32(kVersion);
             put_i64(clock_den);
@@ -135,6 +158,32 @@ namespace bmmo::session {
             if (!capturing()) return;
             put_u8(static_cast<uint8_t>(tag::link_clock));
             put_i64(value);
+        }
+
+        void take(uint8_t site, const std::vector<std::string>& entries) {
+            if (!capturing()) return;
+            put_u8(static_cast<uint8_t>(tag::take));
+            put_u8(site);
+            put_u32(static_cast<uint32_t>(entries.size()));
+            for (const auto& e: entries) put_string32(e);
+            messages_ += entries.size();
+            if (pending_.size() >= kHandOverBytes) hand_over();
+        }
+
+        void keys(uint64_t frame, const void* state, size_t size) {
+            if (!capturing()) return;
+            put_u8(static_cast<uint8_t>(tag::keys));
+            put_u64(frame);
+            put_u32(static_cast<uint32_t>(size));
+            put_bytes(state, size);
+        }
+
+        void sent(uint8_t mode, const std::string& bytes) {
+            if (!capturing()) return;
+            put_u8(static_cast<uint8_t>(tag::sent));
+            put_u8(mode);
+            put_string32(bytes);
+            if (pending_.size() >= kHandOverBytes) hand_over();
         }
 
         // The end marker: a replay that meets it knows the live run got here
@@ -327,6 +376,78 @@ namespace bmmo::session {
             return true;
         }
 
+        // The take at `site`: false, with `error`, when the next record is
+        // anything else.
+        bool take_take(uint8_t site, std::vector<std::string>& out, std::string& error) {
+            skip_free();
+            if (peek() != tag::take || pos_ + 6 > data_.size()) {
+                error = "expected a take at site " + std::to_string(site) + ", the capture has " + describe_next();
+                return false;
+            }
+            if (data_[pos_ + 1] != site) {
+                error = "expected a take at site " + std::to_string(site) + ", the capture has one at site "
+                      + std::to_string(data_[pos_ + 1]);
+                return false;
+            }
+            const size_t at = pos_;
+            pos_ += 2;
+            uint32_t count = 0;
+            out.clear();
+            bool ok = get_u32(count);
+            for (uint32_t i = 0; ok && i < count; ++i) {
+                out.emplace_back();
+                ok = get_string32(out.back());
+            }
+            if (!ok) { pos_ = at; error = "a truncated take"; return false; }
+            messages_ += count;
+            ++records_;
+            return true;
+        }
+
+        // The keyboard of `frame` when the next record holds it (a frame
+        // whose keys did not change has none).
+        bool take_keys(uint64_t frame, std::string& out) {
+            skip_free();
+            if (peek() != tag::keys || pos_ + 13 > data_.size()) return false;
+            const size_t at = pos_++;
+            uint64_t captured = 0;
+            uint32_t size = 0;
+            if (!get_u64(captured) || captured != frame || !get_u32(size) || pos_ + size > data_.size()) {
+                pos_ = at;
+                return false;
+            }
+            out.assign(reinterpret_cast<const char*>(data_.data() + pos_), size);
+            pos_ += size;
+            ++records_;
+            return true;
+        }
+
+        // The next send, which must be this one.
+        bool take_sent(uint8_t mode, const std::string& bytes, std::string& error) {
+            skip_free();
+            if (peek() != tag::sent || pos_ + 6 > data_.size()) {
+                error = "expected a send, the capture has " + describe_next();
+                return false;
+            }
+            const size_t at = pos_;
+            pos_ += 1;
+            uint8_t captured_mode = 0;
+            std::string captured;
+            if (!get_bytes(&captured_mode, 1) || !get_string32(captured)) {
+                pos_ = at;
+                error = "a truncated send";
+                return false;
+            }
+            ++records_;
+            if (captured_mode != mode || captured != bytes) {
+                error = "the send differs from the capture's (" + std::to_string(bytes.size()) + " bytes, mode "
+                      + std::to_string(mode) + "; the capture's " + std::to_string(captured.size()) + " bytes, mode "
+                      + std::to_string(captured_mode) + ")";
+                return false;
+            }
+            return true;
+        }
+
         std::string describe_next() const {
             const size_t at = next_pos();
             switch (peek()) {
@@ -339,6 +460,9 @@ namespace bmmo::session {
             case tag::status: case tag::status_v1: return "a connection state change";
             case tag::link_status: return "a connection status read";
             case tag::link_clock: return "a transport clock read";
+            case tag::take: return at + 1 < data_.size() ? "a take at site " + std::to_string(data_[at + 1]) : "a truncated take";
+            case tag::keys: return "a frame's keyboard";
+            case tag::sent: return "a send";
             case tag::end: return at >= data_.size() ? "the end of the data (no end marker)" : "the end marker";
             }
             return "an unknown record";

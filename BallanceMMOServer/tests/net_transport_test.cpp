@@ -206,6 +206,42 @@ TEST(CaptureSeams, RecordThenReplay) {
     std::filesystem::remove(path);
 }
 
+// K7d: the retail mod's records - a queue's takes (empty ones too), a frame's
+// keys, a send - come back where they were written; a free site is not written.
+TEST(CaptureSeams, RetailRecords) {
+    const auto path = (std::filesystem::temp_directory_path() / "bmmo_capture_retail_test.bmic").string();
+    const int64_t den = 1000000000;
+    {
+        bmmo::session::capture_file file;
+        std::string error;
+        ASSERT_TRUE(file.open_capture(path, "retail", den, error)) << error;
+        file.set_free(bmmo::session::clock_site::retail_display);
+        bmmo::session::recording_clock clock(bmmo::session::real_session_clock(), file);
+        file.take(1, {"start", "assign"});
+        file.take(2, {});
+        clock.now(bmmo::session::clock_site::retail_display);
+        file.keys(7, "keys", 4);
+        file.sent(2, "input");
+        file.close();
+    }
+    bmmo::session::capture_file file;
+    std::string error;
+    ASSERT_TRUE(file.open_replay(path, den, error)) << error;
+    std::vector<std::string> taken;
+    EXPECT_FALSE(file.take_take(2, taken, error));   // the next take is site 1's
+    ASSERT_TRUE(file.take_take(1, taken, error)) << error;
+    EXPECT_EQ(taken, (std::vector<std::string>{"start", "assign"}));
+    ASSERT_TRUE(file.take_take(2, taken, error)) << error;
+    EXPECT_TRUE(taken.empty());
+    std::string keys;
+    EXPECT_FALSE(file.take_keys(6, keys));   // another frame's
+    ASSERT_TRUE(file.take_keys(7, keys));
+    EXPECT_EQ(keys, "keys");
+    EXPECT_FALSE(file.take_sent(2, "other", error));
+    EXPECT_TRUE(file.complete());
+    std::filesystem::remove(path);
+}
+
 }
 
 // Steps T1b, T1e: a coordinated run - two processes over TCP to a coordinator,

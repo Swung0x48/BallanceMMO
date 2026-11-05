@@ -36,6 +36,7 @@
 // network thread pushes into it at once); the core is made lazily.
 #include "../BallanceMMOClient.h"
 #include "host_clock.hpp"
+#include "retail_capture.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -426,6 +427,8 @@ namespace {
     // session (it then follows the server's interval, as before DEP).
     // Host-local: nothing goes on the wire.
     std::atomic<bool> snapshots_next{false};
+    // K7e: a replay's journal cadence, the capture's (0: none).
+    uint32_t replay_checkpoint_ticks = 0;
     // FULL step R6B: core_config::own_births_parked ('session own-births
     // parked|remade', a test verb: the same-build control arm of the
     // in-window own-birth remake).  Off (remade) by default: with
@@ -2245,12 +2248,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // capability `slew`, not a switch: the core amends, forces and slews
     // a SessionLead, the tick driver moves its schedule (core_host_pacer).
     bs::core_config config;
-    config.journal_checkpoint_ticks = static_cast<uint32_t>(bmmo::retail::journal_files::kCheckpointTicks);
-    if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
-        const long value = std::strtol(env, nullptr, 10);
-        if (value >= 1 && value <= static_cast<long>(bmmo::retail::journal_files::kCheckpointTicks))
-            config.journal_checkpoint_ticks = static_cast<uint32_t>(value);
-    }
+    config.journal_checkpoint_ticks = journal_checkpoint_ticks();
     config.journal_final_checkpoints = diag_final_checkpoints();   // step D0's rows, on by default (journal v10)
     config.level = msg.map.level > 0 ? msg.map.level : 1;
     config.verbose = core_trace;   // 'session trace on|off' (not reset per session; FULL step LGM: the core host's own)
@@ -2740,6 +2738,161 @@ void BallanceMMOClient::core_host_process() {
 // session; a SessionEnd goes to the core, and the host's session ends with
 // it; every other entry goes to the core while it has a session, or is
 // decoded (to check the copy), counted and dropped.
+// <game>/ModLoader/BMMOCaptures/session_<id>_level<N>_<UTC>_p<own id>.bmic,
+// the newest 10 kept; the header names the build and what a replay must set
+// as this session found it.
+void BallanceMMOClient::core_host_start_capture(const std::string& start_bytes) {
+    auto* prop = config_manager_["session_capture"];
+    if (!prop || !prop->GetBoolean()) return;
+    bmmo::session_start_msg msg{};
+    if (!decode_bytes(start_bytes, msg)) return;
+    const auto directory = bmmo::retail::journal_files::directory().parent_path() / "BMMOCaptures";
+    auto name = bmmo::retail::journal_files::file_name(msg.session, msg.map.level, db_.get_client_id());
+    name = name.substr(0, name.rfind('.')) + ".bmic";
+    std::string md5;
+    for (const auto byte: msg.map.md5) md5 += std::format("{:02x}", static_cast<unsigned>(static_cast<uint8_t>(byte)));
+    const std::string header = std::format(
+        "bmmo-retail-capture 1 build={} session={} level={} map={} own={} snapshots={} cache={} parked={} trace={} "
+        "rollback={} nonblocking={} fpu53={} final_checkpoints={} checkpoint_ticks={}",
+        physics_view_.build_id(), msg.session, msg.map.level, md5, db_.get_client_id(), snapshots_next.load() ? 1 : 0,
+        static_cast<int>(capture_cache_next.load()), own_births_parked_next.load() ? 1 : 0, core_trace ? 1 : 0,
+        core_rollback ? 1 : 0, anchor_freeze.nonblocking ? 1 : 0, fpu53_ ? 1 : 0, diag_final_checkpoints() ? 1 : 0,
+        journal_checkpoint_ticks())
+        + core_host_capture_players();
+    std::string error;
+    auto prune = [directory] { bmmo::retail::session_capture::prune(directory, bmmo::retail::journal_files::kKeepFiles - 1); };
+    if (bmmo::retail::session_capture::instance().start_recording(directory / name, header,
+            bs::strand_poster(thread_pool_.get_executor()), std::move(prune), error))
+        logger_->Info("Physics session %u: capture %s", msg.session, (directory / name).string().c_str());
+    else
+        logger_->Warn("Physics session %u: no capture: %s", msg.session, error.c_str());
+}
+
+// The journal's LOCAL checkpoint cadence: BMMO_JOURNAL_CHECKPOINT_TICKS (1 ..
+// kCheckpointTicks), else the ceiling - or, in a replay, the capture's (K7e:
+// the journal it writes is compared with the live one).
+uint32_t BallanceMMOClient::journal_checkpoint_ticks() {
+    if (replay_checkpoint_ticks != 0) return replay_checkpoint_ticks;
+    uint32_t ticks = static_cast<uint32_t>(bmmo::retail::journal_files::kCheckpointTicks);
+    if (const char* env = std::getenv("BMMO_JOURNAL_CHECKPOINT_TICKS")) {
+        const long value = std::strtol(env, nullptr, 10);
+        if (value >= 1 && value <= static_cast<long>(bmmo::retail::journal_files::kCheckpointTicks))
+            ticks = static_cast<uint32_t>(value);
+    }
+    return ticks;
+}
+
+// The other players the mod knows (its player list, from the login and the
+// PlayerConnected messages before the session, which a capture does not
+// hold): " players=<id>:<name in hex>:<cheated>,...", for the replay to make
+// them again - their spirit balls are the session's mirrors.
+std::string BallanceMMOClient::core_host_capture_players() {
+    std::string out;
+    db_.for_each([&](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
+        if (pair.first == db_.get_client_id()) return true;
+        std::string hex;
+        for (const auto c: pair.second.name) hex += std::format("{:02x}", static_cast<unsigned>(static_cast<uint8_t>(c)));
+        out += std::format("{}{}:{}:{}", out.empty() ? " players=" : ",", pair.first, hex.empty() ? "-" : hex,
+                           pair.second.cheated ? 1 : 0);
+        return true;
+    });
+    return out;
+}
+
+// The session is over (idle again): its capture ends; a replay reports how
+// it ended.
+void BallanceMMOClient::core_host_capture_idle() {
+    auto& capture = bmmo::retail::session_capture::instance();
+    if (host.phase != retail_host::phase_type::idle) return;
+    if (capture.recording()) {
+        capture.stop_recording();
+        logger_->Info("Physics session: capture closed%s", capture.write_failed() ? " (a write FAILED: incomplete)" : "");
+    } else if (capture.replaying()) {
+        capture.end_replay();
+        core_host_report_replay();
+    }
+}
+
+void BallanceMMOClient::core_host_report_replay() {
+    auto& capture = bmmo::retail::session_capture::instance();
+    const std::string line = capture.divergence().empty()
+        ? std::format("Replay: the session ended at frame {}; {}", capture.frames(),
+                      capture.replay_complete() ? "the capture's end marker reached: every read matched"
+                                                : "the capture holds more (" + capture.where() + ")")
+        : "Replay DIVERGED: " + capture.divergence();
+    logger_->Info("%s", line.c_str());
+    SendIngameMessage(line, capture.divergence().empty() ? bmmo::ansi::BrightGreen : bmmo::ansi::BrightRed);
+}
+
+// replay capture <file.bmic> | replay capture status | replay capture stop:
+// arm a capture's replay - the level must be the capture's and loaded, and
+// no session running; the replay begins at the next drain (the SessionStart
+// it holds), with the capture header's switches and own id.
+std::string BallanceMMOClient::core_host_capture_verb(const std::string& rest) {
+    auto& capture = bmmo::retail::session_capture::instance();
+    static const char* const kModes[] = {"off", "recording", "armed", "replaying", "ended"};
+    if (rest.empty() || rest == "status")
+        return std::format("ok replay capture mode={} frames={} path={} divergence={}",
+                           kModes[static_cast<int>(capture.state())], capture.frames(),
+                           capture.path().empty() ? "-" : capture.path(),
+                           capture.divergence().empty() ? "-" : capture.divergence());
+    if (rest == "stop") {
+        capture.end_replay();
+        return "ok replay capture stopped";
+    }
+    if (host.phase != retail_host::phase_type::idle) return "error a session is running";
+    std::string error;
+    if (!capture.arm_replay(rest, error, [this](const std::string& why) {
+            logger_->Warn("Replay DIVERGED: %s", why.c_str());
+            SendIngameMessage("Replay DIVERGED: " + why, bmmo::ansi::BrightRed);
+        }))
+        return "error " + error;
+    std::map<std::string, std::string> h;
+    {
+        std::istringstream words(capture.header());
+        std::string word;
+        while (words >> word)
+            if (const auto eq = word.find('='); eq != std::string::npos) h[word.substr(0, eq)] = word.substr(eq + 1);
+    }
+    const auto number = [&](const char* key) { return h.count(key) ? std::strtoll(h[key].c_str(), nullptr, 10) : 0LL; };
+    std::string refused;
+    if (h["build"] != physics_view_.build_id()) refused = "captured by build " + h["build"] + ", this is " + physics_view_.build_id();
+    else if (number("fpu53") != (fpu53_ ? 1 : 0)) refused = "captured with fpu53 " + h["fpu53"];
+    else if (number("level") != current_map_.level) refused = std::format("captured in level {}, this game is in level {}", h["level"], current_map_.level);
+    else if (!m_bml->IsIngame()) refused = "load the capture's level first";
+    if (!refused.empty()) {
+        capture.end_replay();
+        return "error " + refused;
+    }
+    db_.set_client_id(static_cast<bmmo::net::connection>(number("own")));
+    {
+        std::istringstream players(h["players"]);
+        std::string player;
+        while (std::getline(players, player, ',')) {
+            const auto a = player.find(':'), b = player.rfind(':');
+            if (a == std::string::npos || b == a) continue;
+            const auto id = static_cast<bmmo::net::connection>(std::strtoull(player.substr(0, a).c_str(), nullptr, 10));
+            const std::string hex = player.substr(a + 1, b - a - 1);
+            std::string name;
+            for (size_t i = 0; hex != "-" && i + 1 < hex.size(); i += 2)
+                name += static_cast<char>(std::strtoul(hex.substr(i, 2).c_str(), nullptr, 16));
+            db_.create(id, name, player.substr(b + 1) == "1");
+            objects_.ensure_player(id);
+        }
+    }
+    snapshots_next.store(number("snapshots") != 0);
+    capture_cache_next.store(static_cast<uint8_t>(number("cache")));
+    own_births_parked_next.store(number("parked") != 0);
+    core_trace = number("trace") != 0;
+    core_rollback = number("rollback") != 0;
+    anchor_freeze.nonblocking = number("nonblocking") != 0;
+    replay_checkpoint_ticks = static_cast<uint32_t>(number("checkpoint_ticks"));
+    if (number("final_checkpoints") != (diag_final_checkpoints() ? 1 : 0))
+        logger_->Warn("Replay: the capture was taken with final checkpoints %s, this game has them %s: the journals differ there",
+                      h["final_checkpoints"].c_str(), diag_final_checkpoints() ? "on" : "off");
+    return "ok replay capture armed: " + rest + " (" + capture.header() + ")";
+}
+
 void BallanceMMOClient::core_host_drain() {
     // FULL step AHN (review finding 1): inside the frozen anchor hold's
     // OnRender the drain stops before a SessionStart (always a replacement)
@@ -2758,6 +2911,39 @@ void BallanceMMOClient::core_host_drain() {
         }, anchor_freeze.fence_waiting);
     } else {
         entries = mailbox.take();
+    }
+    // K7d / K7e: the take as the session's capture holds it.  A take with a
+    // SessionStart starts a capture (core_host_start_capture) from that entry
+    // on - what came before it is not the session's.  A replay begins at its
+    // first take, as the capture did, and hands the capture's entries back
+    // instead of the mailbox's (no network feeds it).
+    {
+        auto& capture = bmmo::retail::session_capture::instance();
+        if (capture.armed()) capture.begin_replay();
+        size_t first = 0;
+        bool held = capture.recording() || capture.replaying();
+        if (!held) {
+            const auto start = std::find_if(entries.begin(), entries.end(),
+                                            [](const mailbox_entry& e) { return e.code == bmmo::SessionStart; });
+            if (start != entries.end()) {
+                first = static_cast<size_t>(start - entries.begin());
+                core_host_start_capture(start->bytes);
+                held = capture.recording();
+            }
+        }
+        if (held) {
+            std::vector<std::string> taken;
+            for (size_t i = first; i < entries.size(); ++i) taken.push_back(entries[i].bytes);
+            capture.take(bmmo::retail::take_site::mailbox, taken);
+            if (capture.replaying()) {
+                entries.clear();
+                for (auto& bytes: taken) {
+                    const int code = bytes.size() >= sizeof(bmmo::opcode)
+                        ? static_cast<int>(reinterpret_cast<const bmmo::general_message*>(bytes.data())->code) : -1;
+                    entries.push_back({code, std::move(bytes)});
+                }
+            }
+        }
     }
     // Without the input rewind (R1; R2 turns it on), a relayed frame that reaches
     // the core after a snapshot of the same batch is stored after that
@@ -2843,6 +3029,13 @@ void BallanceMMOClient::core_host_drain() {
         }
         core_host_dispatch(entry.code, entry.bytes);
     }
+    core_host_capture_idle();
+}
+
+// K7d: the connection's state where it steers the session, as a capture
+// holds it (a replay has no connection).
+bool BallanceMMOClient::core_host_link_up() {
+    return bmmo::retail::session_capture::instance().flag(bs::clock_site::retail_connected, connected());
 }
 
 // FULL step AHN: IMod::OnRender (BML+'s post-render callback) - while the
@@ -3015,7 +3208,7 @@ void BallanceMMOClient::core_host_hold_frame() {
             out = outcome::released;
             break;
         }
-        if (!connected()) {
+        if (!core_host_link_up()) {
             host.core->release_hold("the connection was lost");
             out = outcome::released;
             break;
@@ -3557,7 +3750,7 @@ void BallanceMMOClient::core_host_anchor_ready() {
         core_host_drain();
         if (!host.core || host.phase != retail_host::phase_type::running) return;   // ended or replaced meanwhile
         if (!host.core->holding()) break;
-        if (!connected()) {
+        if (!core_host_link_up()) {
             host.core->release_hold("the connection was lost");
             break;
         }
@@ -3598,7 +3791,7 @@ void BallanceMMOClient::core_host_prepare_frame() {
     const bool deferred = f.fence_waiting;
     if (!deferred && (!f.active || !host.core || host.phase != retail_host::phase_type::anchoring)) return;   // ended meanwhile
     std::string trouble;
-    if (!deferred && !connected()) trouble = "the connection was lost while the level was prepared";
+    if (!deferred && !core_host_link_up()) trouble = "the connection was lost while the level was prepared";
     if (!deferred && trouble.empty() && f.prep == prep_stage::placing) {
         auto& placement = placement_host.placement;
         std::string refused;
@@ -4184,6 +4377,8 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         int flags = bmmo::net::kSendReliable;
         if (mode == bs::send_mode::reliable_no_nagle) flags = bmmo::net::kSendReliableNoNagle;
         else if (mode == bs::send_mode::unreliable_no_delay) flags = bmmo::net::kSendUnreliableNoDelay;
+        // K7d / K7e: recorded, or compared with the capture's (a replay sends nothing).
+        if (!bmmo::retail::session_capture::instance().send(static_cast<uint8_t>(mode), bytes)) return;
         std::string copy = bytes;   // client::send takes a mutable buffer
         send(copy.data(), copy.size(), flags);
     };
@@ -5181,7 +5376,11 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         return mode;
     };
     p.journal_path = [this](const bs::journal_header& header) -> std::filesystem::path {
-        if (!config_manager_["session_journal"]->GetBoolean()) return {};
+        // K7d: a captured session always has its journal (a replay compares
+        // with it); a replay's journal goes beside its capture.
+        auto& capture = bmmo::retail::session_capture::instance();
+        if (capture.replaying()) return std::filesystem::path(capture.path() + ".replay.bmjc");
+        if (!capture.recording() && !config_manager_["session_journal"]->GetBoolean()) return {};
         // Step IOX: no file-system call on the game thread - the directory is
         // created and the old journals pruned by the journal's writer strand,
         // just before it creates this file (journal_prepare below).

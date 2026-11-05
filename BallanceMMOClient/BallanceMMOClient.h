@@ -584,6 +584,16 @@ private:
 	std::string core_host_session_verb(const std::string& rest);
 	std::string core_host_net_verb(const std::string& rest);
 	std::string core_host_replay_verb(const std::string& rest);
+	// K7d / K7e (session/retail_capture.hpp): a session's capture and its replay.
+	void core_host_start_capture(const std::string& start_bytes);
+	std::string core_host_capture_players();
+	uint32_t journal_checkpoint_ticks();
+	void core_host_capture_idle();
+	void core_host_report_replay();
+	std::string core_host_capture_verb(const std::string& rest);
+	bool core_host_link_up();
+	void queue_console_command(std::string line);
+	void process_console_commands();
 	void core_host_feed_replay_keys(unsigned char* state);
 	bmmo::session::session_platform core_host_platform();
 	void core_host_dispatch(int code, const std::string& bytes);

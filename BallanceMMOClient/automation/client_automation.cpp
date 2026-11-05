@@ -3,6 +3,7 @@
 
 #include "BallanceMMOClient.h"
 #include "session/core_host.hpp"
+#include "session/retail_capture.hpp"
 #include <game/custom_map.hpp>
 #include <game/navigation_graph.hpp>   // the navgraph verb (FULL step LGD: no longer through physics_session.hpp)
 #include <cfloat>
@@ -14,6 +15,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -149,20 +151,36 @@ void BallanceMMOClient::process_command_file() {
                     poll.polling = false;
                 });
             }
-            return;
+        } else {
+            content = std::move(poll.content);
+            poll.have = false;
         }
-        content = std::move(poll.content);
-        poll.have = false;
     }
 
+    std::vector<std::string> live;
+    {
+        std::istringstream lines(content);
+        std::string line;
+        while (std::getline(lines, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+                line.pop_back();
+            if (!line.empty() && line[0] != '#') live.push_back(line);
+        }
+    }
+    // K7d / K7e: the frame's lines as a session's capture holds them - every
+    // frame, none too.  A replay runs the capture's, then the live file's
+    // (unrecorded: the replay's own control).
+    auto& capture = bmmo::retail::session_capture::instance();
+    std::vector<std::string> held = capture.replaying() ? std::vector<std::string>{} : live;
+    capture.take(bmmo::retail::take_site::command_file, held);
+    if (capture.replaying())
+        for (const auto& line: held)
+            logger_->Info("CommandFile (replayed): %s -> %s", line.c_str(),
+                          dispatch_automation_command(line).substr(0, 300).c_str());
+    if (live.empty()) return;
+
     std::ostringstream out;
-    std::istringstream lines(content);
-    std::string line;
-    while (std::getline(lines, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
-            line.pop_back();
-        if (line.empty() || line[0] == '#')
-            continue;
+    for (const auto& line: live) {
         std::string response;
         try {
             response = dispatch_automation_command(line);
@@ -180,19 +198,54 @@ void BallanceMMOClient::process_command_file() {
 }
 
 void BallanceMMOClient::process_command_pipe() {
-    if (command_pipe_.running()) {
-        for (const auto& command: command_pipe_.drain()) {
-            std::string response;
-            try {
-                response = dispatch_automation_command(command.line);
-            } catch (const std::exception& e) {
-                response = std::string("error ") + e.what();
-            }
-            logger_->Info("Automation: %s -> %s", command.line.c_str(),
-                          response.substr(0, 200).c_str());
-            command_pipe_.respond(command.id, response);
+    // K7d / K7e: the frame's commands as a session's capture holds them; a
+    // replay runs the capture's, then the live pipe's (unrecorded).
+    auto& capture = bmmo::retail::session_capture::instance();
+    auto commands = command_pipe_.running() ? command_pipe_.drain() : decltype(command_pipe_.drain()){};
+    std::vector<std::string> held;
+    if (!capture.replaying())
+        for (const auto& command: commands) held.push_back(command.line);
+    capture.take(bmmo::retail::take_site::command_pipe, held);
+    if (capture.replaying())
+        for (const auto& line: held)
+            logger_->Info("Automation (replayed): %s -> %s", line.c_str(), dispatch_automation_command(line).substr(0, 200).c_str());
+    for (const auto& command: commands) {
+        std::string response;
+        try {
+            response = dispatch_automation_command(command.line);
+        } catch (const std::exception& e) {
+            response = std::string("error ") + e.what();
         }
+        logger_->Info("Automation: %s -> %s", command.line.c_str(), response.substr(0, 200).c_str());
+        command_pipe_.respond(command.id, response);
     }
+}
+
+// K7d: '/mmo auto' and '/mmo journal' from the command bar (BML runs them on
+// the thread pool, OnAsyncCommand) are run on the game thread, each frame
+// after the pipe's, so a session's capture holds them where they ran.
+namespace {
+    std::mutex console_mutex;
+    std::vector<std::string> console_lines;
+}
+
+void BallanceMMOClient::queue_console_command(std::string line) {
+    std::lock_guard lk(console_mutex);
+    console_lines.push_back(std::move(line));
+}
+
+void BallanceMMOClient::process_console_commands() {
+    std::vector<std::string> lines;
+    auto& capture = bmmo::retail::session_capture::instance();
+    std::vector<std::string> live;
+    {
+        std::lock_guard lk(console_mutex);
+        live.swap(console_lines);
+    }
+    if (!capture.replaying()) lines = live;
+    capture.take(bmmo::retail::take_site::console, lines);
+    if (capture.replaying()) lines.insert(lines.end(), live.begin(), live.end());
+    for (const auto& line: lines) SendIngameMessage(dispatch_automation_command(line));
 }
 
 void BallanceMMOClient::install_input_hook() {
@@ -227,6 +280,9 @@ void BallanceMMOClient::on_input_polled(unsigned char* state) {
     // 'replay session <file>': the armed key record's frame for the tick about
     // to step (session/core_host.cpp).
     core_host_feed_replay_keys(state);
+    // K7d / K7e: the frame's keyboard as the scripts will read it - recorded
+    // when it changed, or the capture's in a replay.
+    bmmo::retail::session_capture::instance().keyboard(state, frame_keys_.size());
     std::memcpy(frame_keys_.data(), state, frame_keys_.size());
     frame_keys_tick_ = m_bml->GetTimeManager()->GetMainTickCount();
 }
@@ -815,6 +871,12 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
             std::string what = rest.substr(7);
             if (!what.empty() && what.front() == ' ') what.erase(0, 1);
             return core_host_replay_verb(what);
+        }
+        // replay capture <file.bmic> | status | stop (K7e, session/retail_capture.hpp)
+        if (rest.rfind("capture", 0) == 0) {
+            std::string what = rest.substr(7);
+            if (!what.empty() && what.front() == ' ') what.erase(0, 1);
+            return core_host_capture_verb(what);
         }
         // replay start <in.bmrc> <out.bmrc>
         std::istringstream args(rest);

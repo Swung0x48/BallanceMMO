@@ -40,19 +40,21 @@ namespace bmmo::session {
     class recording_clock final : public session_clock {
     public:
         recording_clock(session_clock& live, capture_file& file) : live_(live), file_(file) {}
+        // A free site (capture_file::set_free) is not written: its replay
+        // reads its own clock there.
         time_point now(clock_site site) override {
             const auto v = live_.now(site);
-            if (owner.here()) file_.clock(site, static_cast<int64_t>(v.time_since_epoch().count()));
+            if (records(site)) file_.clock(site, static_cast<int64_t>(v.time_since_epoch().count()));
             return v;
         }
         int64_t utc_us(clock_site site) override {
             const int64_t v = live_.utc_us(site);
-            if (owner.here()) file_.clock(site, v);
+            if (records(site)) file_.clock(site, v);
             return v;
         }
         uint64_t utc_ms(clock_site site) override {
             const uint64_t v = live_.utc_ms(site);
-            if (owner.here()) file_.clock(site, static_cast<int64_t>(v));
+            if (records(site)) file_.clock(site, static_cast<int64_t>(v));
             return v;
         }
         // The waits are the live clock's: they read nothing to record.
@@ -69,6 +71,7 @@ namespace bmmo::session {
         capture_owner owner;
 
     private:
+        bool records(clock_site site) const { return owner.here() && !file_.is_free(site); }
         session_clock& live_;
         capture_file& file_;
     };

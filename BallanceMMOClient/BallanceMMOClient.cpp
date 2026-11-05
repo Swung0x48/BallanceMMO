@@ -8,6 +8,7 @@
 #include "CommandMMO.h"
 #include "BallanceMMOClient.h"
 #include "session/host_clock.hpp"
+#include "session/retail_capture.hpp"
 
 // ---- the inbox (K7a, docs/k7-retail-capture-design.md) ----
 // The network thread handles no message any more: on_message hands the
@@ -532,6 +533,7 @@ void BallanceMMOClient::OnProcess() {
     fixed_tick_.on_process(m_bml, core_host_pacer());
     core_host_process();
     process_command_pipe();
+    process_console_commands();
     process_room_requests();
     room_panel_frame();   // the ImGui room panel (before the not-connected return: a disconnect must unblock)
     core_host_panel_frame();   // step SPL: the session start's panel while the world runs
@@ -824,7 +826,7 @@ void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key
         ignore_forced_sounds_ = prop->GetBoolean();
         return;
     }
-    else if (prop == config_manager_["session_journal"]) {
+    else if (prop == config_manager_["session_journal"] || prop == config_manager_["session_capture"]) {
         // Purely local recording: without this branch the reconnect below would
         // drop the running physics session (cleanup() ends it) just because a
         // player unticked the black box in the mod menu.  The property is the
@@ -1212,14 +1214,14 @@ void BallanceMMOClient::init_commands() {
                               "\"/mmo auto record start D:/rec/a.bmrc 2\" or \"/mmo auto status\".");
             return;
         }
-        SendIngameMessage(dispatch_automation_command(line));
+        queue_console_command(line);
     });
     // The session black box (the session core's journal, the 'journal' verb), straight from
     // the command bar: "/mmo journal mark the ball went through the floor"
     // leaves a note and a body checkpoint at the tick it was typed at.
     console_.register_command("journal", [&] {
         const auto line = console_.get_rest_of_line();
-        SendIngameMessage(dispatch_automation_command("journal " + line));
+        queue_console_command("journal " + line);
     });
     console_.register_command("dnf", [&] {
         if (current_map_.level == 0 || spectator_mode_)
@@ -2003,17 +2005,20 @@ int BallanceMMOClient::countdown_delay_ms() {
 
 // Game thread.  A Countdown waits countdown_delay_ms() from when the game
 // thread first sees it, and the messages behind it wait with it (the network
-// thread used to sleep that long before handling the next one).
+// thread used to sleep that long before handling the next one).  What is due
+// is taken at once, given to a session's capture (K7d; a replay's are the
+// capture's, K7e), then handled.
 void BallanceMMOClient::drain_inbox() {
-    for (;;) {
-        inbox_entry entry;
-        {
-            std::lock_guard lk(inbox_mutex);
+    std::vector<std::string> taken;
+    auto& capture = bmmo::retail::session_capture::instance();
+    if (!capture.replaying()) {
+        std::lock_guard lk(inbox_mutex);
+        for (;;) {
             while (!inbox.empty() && inbox.front().epoch != inbox_epoch.load())
                 inbox.pop_front();
             if (inbox.empty()) {
                 inbox_emptied.notify_all();
-                return;
+                break;
             }
             auto& front = inbox.front();
             if (inbox_code(front) == bmmo::Countdown) {
@@ -2022,14 +2027,15 @@ void BallanceMMOClient::drain_inbox() {
                     front.timed = true;
                     front.due = now + std::chrono::milliseconds(countdown_delay_ms());
                 }
-                if (now < front.due) return;
+                if (now < front.due) break;
             }
-            entry = std::move(front);
+            taken.push_back(std::move(front.bytes));
             inbox.pop_front();
         }
-        handle_message(bmmo::net::message{entry.conn, entry.bytes.data(), static_cast<int>(entry.bytes.size()),
-                                          entry.received});
     }
+    capture.take(bmmo::retail::take_site::inbox, taken);
+    for (auto& bytes: taken)
+        handle_message(bmmo::net::message{connection_, bytes.data(), static_cast<int>(bytes.size()), 0});
 }
 
 void BallanceMMOClient::handle_message(const bmmo::net::message& received) {

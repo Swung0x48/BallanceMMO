@@ -123,6 +123,12 @@ void config_manager::init_config() {
                          "\"/mmo journal mark <text>\" leaves a note at the current tick. On by default.");
     tmp_prop->SetDefaultBoolean(true);
     props_["session_journal"] = tmp_prop;
+    tmp_prop = config->GetProperty("Gameplay", "SessionCapture");
+    tmp_prop->SetComment("Record every physics session's inputs to ModLoader/BMMOCaptures (the newest 10 kept), so the "
+                         "session can be replayed exactly in the game (\"/mmo auto replay capture <file>\") to debug it. "
+                         "A captured session always writes its journal too. Read when a session starts. On by default.");
+    tmp_prop->SetDefaultBoolean(true);
+    props_["session_capture"] = tmp_prop;
     // Step IOF: the session journal writer's flush mode (session/io_queue.hpp
     // io_flush); read with SessionJournal when a session starts.
     tmp_prop = config->GetProperty("Gameplay", "SessionJournalFlush");
