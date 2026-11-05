@@ -37,6 +37,13 @@
 // member whenever the value it puts in that member's headers changes;
 // client: whenever the newest header's value it received changes).  Nothing
 // replays it; it is what sized the reach.
+// Version 10 (canned tests step 0b, docs/canned-tests-plan.md) changes no
+// layout: a client journal carries FINAL rows by default (each checkpoint
+// tick's state once no rewind reaches it, step D0's diagnostic made the
+// default), so a reader may judge a version 10 client journal without them as
+// broken.  From the same version the files are named by their writer:
+// kServerJournalExtension and kClientJournalExtension, where every journal
+// was kLegacyJournalExtension before (a reader takes all three).
 //
 //   file   = magic "BMMOJRNL" (8 bytes) , u32 version , record*
 //   record = u8 tag , u32 payload_size , payload[payload_size]
@@ -112,10 +119,17 @@ namespace bmmo::session {
     //    trailing lives of its trafo reconcile entries (one u16 each, after
     //    the entries; written only when an entry's life is not 1).  Old
     //    readers stop before both.
-    constexpr uint32_t kJournalVersion = 9;
+    // 10: no layout change; FINAL rows in every client journal, and the
+    //    writer-named file extensions below (canned tests step 0b).
+    constexpr uint32_t kJournalVersion = 10;
     // The oldest version this reader still takes (see the format note above).
     constexpr uint32_t kJournalOldestReadable = 2;
     constexpr char kJournalMagic[8] = {'B', 'M', 'M', 'O', 'J', 'R', 'N', 'L'};
+    // The file names' extensions (version 10): the server's black box, a
+    // client's (headless or retail), and the one name both had before.
+    constexpr const char* kServerJournalExtension = ".bmjs";
+    constexpr const char* kClientJournalExtension = ".bmjc";
+    constexpr const char* kLegacyJournalExtension = ".bmjr";
     constexpr uint8_t kJournalMaxTag = static_cast<uint8_t>(journal_tag::wait);
     // A str never exceeds this; a longer one makes the record invalid.
     constexpr size_t kJournalMaxString = 4096;

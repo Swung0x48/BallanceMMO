@@ -1866,13 +1866,14 @@ namespace {
     }
 
     // ------------------------------------------- diagnostics (FULL step RT1)
-    // BMMO_JOURNAL_FINAL_CHECKPOINTS=1: the core also journals each checkpoint
-    // tick's FINAL rows (core_config::journal_final_checkpoints, step D0, the
-    // headless --final-checkpoints), so a retail journal is judged on the
-    // post-rewind state as the headless batches are.  Off by default.
+    // The core journals each checkpoint tick's FINAL rows
+    // (core_config::journal_final_checkpoints, step D0), so a retail journal
+    // is judged on the post-rewind state as the headless batches are.  On by
+    // default since journal version 10; BMMO_JOURNAL_FINAL_CHECKPOINTS=0
+    // turns it off.
     bool diag_final_checkpoints() {
         const char* v = std::getenv("BMMO_JOURNAL_FINAL_CHECKPOINTS");
-        return v && *v && std::strcmp(v, "0") != 0;
+        return !(v && std::strcmp(v, "0") == 0);
     }
     // The frame times of a core session (RCX-x86), in the headless client's
     // frame_time line format but NOT its quantity: 'core_frame_time' =
@@ -2246,7 +2247,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
         if (value >= 1 && value <= static_cast<long>(bmmo::retail::journal_files::kCheckpointTicks))
             config.journal_checkpoint_ticks = static_cast<uint32_t>(value);
     }
-    config.journal_final_checkpoints = diag_final_checkpoints();   // FULL step RT1 diagnostics, off by default
+    config.journal_final_checkpoints = diag_final_checkpoints();   // step D0's rows, on by default (journal v10)
     config.level = msg.map.level > 0 ? msg.map.level : 1;
     config.verbose = core_trace;   // 'session trace on|off' (not reset per session; FULL step LGM: the core host's own)
     config.trace = core_trace;

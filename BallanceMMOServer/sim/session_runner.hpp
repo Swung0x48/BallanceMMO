@@ -47,7 +47,7 @@ namespace bmmo::sim {
         uint32_t max_catch_up_ticks = 10;   // ticks simulated per loop when behind
         int seed = 1;
         // The session black box (design 9.15): every input the world consumed
-        // goes to <journal_dir>/session_<id>_level<N>_<UTC>.bmjr, so a bug that
+        // goes to <journal_dir>/session_<id>_level<N>_<UTC>.bmjs, so a bug that
         // only happens in a live room can be replayed offline bit for bit.
         // Empty = record nothing.
         std::filesystem::path journal_dir;

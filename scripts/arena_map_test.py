@@ -53,7 +53,7 @@ The late-player additions (docs/late-player-design.md 5.1, H1-H8):
                                        the same tick or MS milliseconds later
                                        (the client's --rejoin-at T[:MS], step
                                        TRL); its second life's journal is
-                                       client{N}.rejoin1.bmjr
+                                       client{N}.rejoin1.bmjc
   --outage N:ANCHOR[+DELAY]:MS[:up|down|both]
                                        (FULL step HXP) a time-shaped outage on client
                                        N's link before or after tick 0: from the
@@ -126,6 +126,14 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 # run this with python -I, which leaves the script's own directory off the path.
 sys.path.insert(0, str(REPO / 'scripts'))
 import late_player_harness as lph
+from journal_trace import client_journal, journal_files, SERVER_EXT, LEGACY_EXT
+
+
+def server_journals(directory):
+    """The server journals in `directory`: journal v10's .bmjs and an older build's .bmjr."""
+    return journal_files(directory, SERVER_EXT, LEGACY_EXT)
+
+
 FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 EXE = '.exe' if sys.platform == 'win32' else ''
 
@@ -1002,7 +1010,7 @@ def run_case(args, sector, case_dir):
     case_started = time.time()
     # Step B2SX: the journals already there, by name and mtime, so a case
     # never takes an earlier one (a mirrored journal lands seconds late).
-    journals_before = ({q.name: q.stat().st_mtime for q in journals.glob('*.bmjr')}
+    journals_before = ({q.name: q.stat().st_mtime for q in server_journals(journals)}
                        if journals.exists() else {})
     links = client_links(args)
     # --external-server points the clients at a server someone else is running
@@ -1088,7 +1096,7 @@ def run_case(args, sector, case_dir):
                    '--seconds', str(seconds + args.startup_timeout),
                    '--play-seconds', str(seconds),
                    '--trace',
-                   '--journal', str(case_dir / f'client{i}.bmjr'),
+                   '--journal', str(case_dir / f'client{i}.bmjc'),
                    # the client's own world at the same cadence as the server's,
                    # so the two can be compared body by body at the same ticks
                    '--checkpoint-ticks', str(args.checkpoint_ticks)]
@@ -1311,11 +1319,11 @@ def run_case(args, sector, case_dir):
         def own_journals():
             if not journals.exists():
                 return []
-            return [q for q in journals.glob('*.bmjr') if journals_before.get(q.name) != q.stat().st_mtime]
+            return [q for q in server_journals(journals) if journals_before.get(q.name) != q.stat().st_mtime]
         wait_until = time.time() + 20
         while time.time() < wait_until and not own_journals():
             time.sleep(0.25)
-    journal_paths = sorted(journals.glob('*.bmjr')) if journals.exists() else []
+    journal_paths = server_journals(journals) if journals.exists() else []
     if args.external_server:
         # The external server's directory may hold earlier sessions' journals:
         # only the ones this case wrote are its own.
@@ -1851,16 +1859,16 @@ def lead_mode(text):
 
 def life_journals(case_dir, i, lives):
     """Step F0: (journal, from tick, to tick) per life of client i: the first
-    life's client{i}.bmjr up to the second life's base, a rejoin's next life
-    client{i}.rejoin{k}.bmjr from its own base on."""
+    life's client{i}.bmjc up to the second life's base, a rejoin's next life
+    client{i}.rejoin{k}.bmjc from its own base on (.bmjr: an older build's)."""
     bases = [lf['base'] for lf in lives[1:]]
     out = []
-    first = case_dir / f'client{i}.bmjr'
+    first = client_journal(case_dir, f'client{i}')
     if first.exists():
         out.append((first, -(1 << 31), bases[0] if bases and bases[0] is not None else 1 << 31))
     for k, base in enumerate(bases, start=1):
         nxt = bases[k] if k < len(bases) and bases[k] is not None else 1 << 31
-        path = case_dir / f'client{i}.rejoin{k}.bmjr'
+        path = client_journal(case_dir, f'client{i}.rejoin{k}')
         if path.exists() and base is not None:
             out.append((path, base, nxt))
     return out
@@ -1886,7 +1894,7 @@ def event_report(args, case, case_dir):
     s1 = lph.parse_s1(server_log_text(case_dir), server.header['session'])
     client_cadence = {}
     for i in range(args.players):
-        path = case_dir / ('client%d.bmjr' % i)
+        path = client_journal(case_dir, 'client%d' % i)
         client_cadence[i] = lph.cadence(jt.read_journal(path).tick_records()) if path.exists() else None
     cadence_by_tick = {r['tick']: lph.cadence([g.record for g in server.ticks if g.has_tick
                                              and r['tick'] - 659 <= g.tick <= r['tick']])
@@ -2010,7 +2018,7 @@ def event_report(args, case, case_dir):
     for i in range(args.players):
         log = logs[i]
         pid = id_of.get(i, 0)
-        path = case_dir / f'client{i}.bmjr'
+        path = client_journal(case_dir, f'client{i}')
         lives = log.get('lives') or []
         row = {'index': i, 'id': pid, 'base': log['bases'][0] if log['bases'] else None,
                # step F0: a join import (a late joiner's or a rejoin's first
@@ -2068,7 +2076,7 @@ def event_report(args, case, case_dir):
         presence = {}   # tick -> (server has the own ball, client has it)
         received = []
         # Step F0: every life's journal (a rejoin's next life writes
-        # client{i}.rejoin{k}.bmjr), each from its own base to the next
+        # client{i}.rejoin{k}.bmjc), each from its own base to the next
         # life's; the ticks before a join's import are not compared (the
         # joiner's world is not yet the session's), nor a ball in its
         # airship span.
@@ -3520,8 +3528,9 @@ def report_only(args):
     base = pathlib.Path(args.report_only)
     cases = json.loads((base / 'summary.json').read_text(encoding='utf8'))
     for case in cases:
-        if (base / 'server.bmjr').exists():
-            case['journal'] = [str(base / 'server.bmjr')]
+        kept = [base / name for name in ('server.bmjs', 'server.bmjr') if (base / name).exists()]
+        if kept:
+            case['journal'] = [str(kept[0])]
         # The verdict again too (DX7: a run judged afterwards with --expect-refused).
         case['dir'] = str(base / f'sector{case["sector"]}')
         problems, warnings = verdict(case, {ev.client for ev in args.events if ev.kind != 'none'},
@@ -3687,7 +3696,7 @@ def main():
     ap.add_argument('--dry-run', action='store_true', help='print the resolved scenario without starting processes')
     ap.add_argument('--report-only', default='',
                     help='redo the event report and criteria of an earlier run directory (give the run\'s own '
-                         '--players and event flags, and --control); its server.bmjr, when the batch copied one '
+                         '--players and event flags, and --control); its server.bmjs (server.bmjr from an older build), when the batch copied one '
                          'there, is the journal')
     args = ap.parse_args()
     if args.selftest:

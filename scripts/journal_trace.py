@@ -42,13 +42,31 @@ import datetime
 import io
 import mmap
 import os
+import pathlib
 import re
 import struct
 import sys
 import tempfile
 
 MAGIC = b"BMMOJRNL"
-VERSION = 9   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9); 4: RESYNC (protocol 10); 5: HEADER world_options, Trafo EVENT (protocol 11); 6: HEADER anchor_placement (protocol 12); 7: WAIT (protocol 13); 8: HEADER mechanism_slots (protocol 19); 9: PLAYER life and RESYNC trafo lives, trailing (protocol 21, step TRL)
+# File names (version 10, journal.hpp kServerJournalExtension / kClientJournalExtension):
+# the server's black box, a client's, and the one name both had before.
+SERVER_EXT, CLIENT_EXT, LEGACY_EXT = ".bmjs", ".bmjc", ".bmjr"
+
+
+def journal_files(directory, *extensions):
+    """The journals in `directory` (top level) with one of `extensions`
+    (default: all three), sorted by name."""
+    extensions = extensions or (SERVER_EXT, CLIENT_EXT, LEGACY_EXT)
+    return sorted(p for p in pathlib.Path(directory).iterdir() if p.suffix in extensions and p.is_file())
+
+
+def client_journal(directory, stem):
+    """<directory>/<stem>.bmjc, or the <stem>.bmjr an older build wrote there."""
+    path = pathlib.Path(directory) / (stem + CLIENT_EXT)
+    legacy = pathlib.Path(directory) / (stem + LEGACY_EXT)
+    return legacy if not path.exists() and legacy.exists() else path
+VERSION = 10   # 2: order-independent world hash (world_hash.hpp); 3: EVENT origin and state (protocol 9); 4: RESYNC (protocol 10); 5: HEADER world_options, Trafo EVENT (protocol 11); 6: HEADER anchor_placement (protocol 12); 7: WAIT (protocol 13); 8: HEADER mechanism_slots (protocol 19); 9: PLAYER life and RESYNC trafo lives, trailing (protocol 21, step TRL); 10: no layout change, FINAL rows in every client journal, files .bmjs / .bmjc (canned tests step 0b)
 OLDEST_READABLE = 2   # a version 2 file has no event origin: its stamp is the origin
 
 TAG_HEADER = 0

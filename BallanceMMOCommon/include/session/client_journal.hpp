@@ -113,6 +113,7 @@ namespace bmmo::session {
             // history, its bodies already keyed by owner by the core), at the
             // LOCAL cadence's ticks only; flags LOCAL | FINAL, and UNCONFIRMED
             // unless `confirmed`.  Whether a row was written.
+            bool final_due(uint32_t tick) const;
             bool final_checkpoint(uint32_t tick, const std::vector<bmmo::session::body_state>& bodies, bool confirmed);
 
             // The records the flow writes itself (INPUT, TICK, RECEIVED

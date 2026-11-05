@@ -458,7 +458,7 @@ TEST(SessionJournal, ResyncRecordRoundTrip) {
     EXPECT_EQ(300u, r.scripts.size());
     EXPECT_EQ(70003u, r.savestate.size());
     EXPECT_EQ("end", r.savestate.substr(70000));
-    EXPECT_EQ(9u, kJournalVersion) << "9: lives in PLAYER and RESYNC (protocol 21, step TRL)";
+    EXPECT_EQ(10u, kJournalVersion) << "10: FINAL rows by default, .bmjs / .bmjc (canned tests step 0b)";
     EXPECT_EQ(2u, kJournalOldestReadable) << "version 2, 3 and 4 files still read";
 }
 

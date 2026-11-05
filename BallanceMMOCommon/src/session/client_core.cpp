@@ -332,6 +332,9 @@ namespace bmmo::session {
                         why = "pending: own lifecycle echo outstanding";
                         why_entity = &tracked.own_entity;
                     }
+                    // The verdict above runs every tick (it is sticky); the
+                    // rows are built only for a tick the journal keeps.
+                    if (!journal_.final_due(tick)) return;
                     std::vector<bmmo::session::body_state> out;
                     out.reserve(bodies.size());
                     for (const auto& [entity, body]: bodies) {

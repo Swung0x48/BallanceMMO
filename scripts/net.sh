@@ -18,7 +18,8 @@ python -I scripts/arena_map_test.py --bin build-agent/BallanceMMOServer \
     --sectors 2 --players 4 --seconds 40 --drive --beam-bays 9,9,9,9 \
     --beam-spread 3 --latency-ms "$LAT" $ARGS 2>&1 \
   | grep -E "VERDICT|replay rc|client[0-9] rc"
-S=$(ls -t maps/arena-test/wsl/journals/*.bmjr 2>/dev/null | head -1)
-[ -n "$S" ] && [ -d "maps/arena-test/$L" ] && cp "$S" "maps/arena-test/$L/server.bmjr" && echo "server journal kept as maps/arena-test/$L/server.bmjr"
+S=$(ls -t maps/arena-test/wsl/journals/*.bmjs maps/arena-test/wsl/journals/*.bmjr 2>/dev/null | head -1)
+E=${S##*.}   # bmjs (journal v10) or an older build's bmjr
+[ -n "$S" ] && [ -d "maps/arena-test/$L" ] && cp "$S" "maps/arena-test/$L/server.$E" && echo "server journal kept as maps/arena-test/$L/server.$E"
 [ -f maps/arena-test/wsl/server.log ] && [ -d "maps/arena-test/$L" ] && cp maps/arena-test/wsl/server.log "maps/arena-test/$L/server.log"
 echo "=== done $L"

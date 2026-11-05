@@ -223,12 +223,12 @@ def stop(label):
     dest = ROOT / label
     dest.mkdir(parents=True, exist_ok=True)
     if not remote:
-        for f in (sdir / 'journals').glob('*.bmjr'):
+        for f in [*(sdir / 'journals').glob('*.bmjs'), *(sdir / 'journals').glob('*.bmjr')]:
             shutil.copy2(f, dest / f.name)
         shutil.copy2(sdir / 'server.log', dest / 'server.log')
     for i, copy in COPIES.items():
         jd = copy / 'ModLoader/BMMOJournals'
-        newest = sorted(jd.glob('*.bmjr'), key=lambda p: p.stat().st_mtime)[-1:] if jd.exists() else []
+        newest = sorted([*jd.glob('*.bmjc'), *jd.glob('*.bmjr')], key=lambda p: p.stat().st_mtime)[-1:] if jd.exists() else []
         for f in newest:
             shutil.copy2(f, dest / f'client{i}_{f.name}')
         log = copy / 'ModLoader/ModLoader.log'

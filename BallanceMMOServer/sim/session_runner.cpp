@@ -31,7 +31,7 @@ namespace bmmo::sim {
             return text + " sector-late=" + (late.empty() ? "none" : late);
         }
 
-        // session_<id>_level<N>_<UTC yyyymmddhhmmss>.bmjr.  The same instant
+        // session_<id>_level<N>_<UTC yyyymmddhhmmss>.bmjs.  The same instant
         // goes into the header as utc_ms: file name and wall clock must agree,
         // or a journal cannot be lined up with a player's "it broke at 21:37".
         std::string journal_file_name(uint32_t session, int level, uint64_t& utc_ms) {
@@ -48,7 +48,7 @@ namespace bmmo::sim {
             char stamp[16] = {};
             std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &parts);
             return "session_" + std::to_string(session) + "_level" + std::to_string(level)
-                 + "_" + stamp + ".bmjr";
+                 + "_" + stamp + bmmo::session::kServerJournalExtension;
         }
 
         // The server's lifecycle_event as the journal stores it: a plain field

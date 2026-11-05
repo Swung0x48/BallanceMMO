@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include <session/journal.hpp>
+
 namespace bmmo::retail::journal_files {
     // The LOCAL checkpoint cadence's ceiling (every 10 s at 66 Hz) and the
     // number of journals kept in the directory.
@@ -35,17 +37,19 @@ namespace bmmo::retail::journal_files {
         return bin.parent_path() / "ModLoader" / "BMMOJournals";
     }
 
-    // session_<id>_level<N>_<UTC yyyymmddhhmmss>_p<own id>.bmjr
+    // session_<id>_level<N>_<UTC yyyymmddhhmmss>_p<own id>.bmjc
     inline std::string file_name(uint32_t session, int32_t level, uint32_t own_player) {
         const std::time_t seconds = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::tm utc{};
         gmtime_s(&utc, &seconds);
         char stamp[32] = {};
         std::strftime(stamp, sizeof(stamp), "%Y%m%d%H%M%S", &utc);
-        return std::format("session_{}_level{}_{}_p{}.bmjr", session, level, stamp, own_player);
+        return std::format("session_{}_level{}_{}_p{}{}", session, level, stamp, own_player,
+                           bmmo::session::kClientJournalExtension);
     }
 
-    // Deletes every session_*.bmjr in `directory` beyond the newest `keep`.
+    // Deletes every session_*.bmjc in `directory` beyond the newest `keep`, the
+    // older builds' session_*.bmjr counted with them.
     // Nothing here throws (it runs on the journal's writer strand, just
     // before a session's file is created).
     inline void prune(const std::filesystem::path& directory, size_t keep) {
@@ -55,7 +59,10 @@ namespace bmmo::retail::journal_files {
         for (; !ec && it != end; it.increment(ec)) {
             if (!it->is_regular_file(ec) || ec) { ec.clear(); continue; }
             const auto name = it->path().filename().string();
-            if (name.rfind("session_", 0) != 0 || it->path().extension() != ".bmjr") continue;
+            const auto extension = it->path().extension();
+            if (name.rfind("session_", 0) != 0
+                || (extension != bmmo::session::kClientJournalExtension
+                    && extension != bmmo::session::kLegacyJournalExtension)) continue;
             files.emplace_back(it->last_write_time(ec), it->path());
             ec.clear();
         }

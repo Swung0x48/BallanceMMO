@@ -296,7 +296,7 @@ void config_manager::save(bool reload_values) {
                    "#     gets a longer lead of its own through SessionLead, if its client declared it can apply\n"
                    "#     one; a late joiner's first lead and a resync's lead are then per player instead of\n"
                    "#     capped at 34 ticks),\n"
-                   "#   journal_dir (session black box, design 9.15: one .bmjr per session with everything\n"
+                   "#   journal_dir (session black box, design 9.15: one .bmjs per session with everything\n"
                    "#     its world consumed, replayable offline with BallanceMMOSimTool --replay-session;\n"
                    "#     relative to the server's own directory, empty = record nothing),\n"
                    "#   journal_max_mb (cap per session file; recording stops there),\n"

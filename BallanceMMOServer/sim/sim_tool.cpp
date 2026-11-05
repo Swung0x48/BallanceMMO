@@ -2,7 +2,7 @@
 //
 //   BallanceMMOSimTool --root <game dir> [--level N] [--ticks N] [--level-at N]
 //   BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--dump-diverge]
-//   BallanceMMOSimTool --root <game dir> --replay-session <file.bmjr> [--list] [--write-journal <out.bmjr>] [--map FILE]
+//   BallanceMMOSimTool --root <game dir> --replay-session <file.bmjs> [--list] [--write-journal <out.bmjs>] [--map FILE]
 //   BallanceMMOSimTool --root <game dir> --level N --spawn-test N [--spawn-impulse S] [--spawn-ball T]
 //       [--ticks K] [--report-every R]
 //   BallanceMMOSimTool --root <game dir> --level N --level-at T --explode wood|paper|stone AT_TICK [--ticks N]
@@ -113,7 +113,7 @@ namespace {
         std::string root;
         std::string map;                  // --map FILE (step CMAP): a custom map in the level slot
         std::string replay;
-        // --replay-session <file.bmjr>: the session black box (design 9.15).
+        // --replay-session <file.bmjs>: the session black box (design 9.15).
         // --list prints the file and simulates nothing (no --root needed);
         // --journal-trace turns on the world's per-tick diagnostics;
         // --write-journal writes this replay's own journal so two platforms'
@@ -10091,9 +10091,9 @@ int main(int argc, char** argv) {
             "[--track ENTITY] [--verbose]\n"
             "       BallanceMMOSimTool --root <game dir> --replay <record.bmrc> [--boot-ticks N]\n"
             "           [--nav clone] (session navigation replica; --nav retail-cxx is a diagnostic mode)\n"
-            "       BallanceMMOSimTool [--root <game dir>] --replay-session <file.bmjr> [--list] [--ticks N]\n"
+            "       BallanceMMOSimTool [--root <game dir>] --replay-session <file.bmjs> [--list] [--ticks N]\n"
             "           [--from A --to B] [--dump-entity NAME] [--stop-on-divergence] [--journal-trace]\n"
-            "           [--write-journal <out.bmjr>] [--report-every N] [--continue-after-jump]\n"
+            "           [--write-journal <out.bmjs>] [--report-every N] [--continue-after-jump]\n"
             "           [--io-flush MODE | journal=MODE,...]   (step IOF; the SimTool writes --write-journal on its own\n"
             "            thread, with the synchronous journal's flush points: no mode changes them)\n"
             "           [--ignore-resync]\n"

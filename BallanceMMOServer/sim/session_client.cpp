@@ -6,7 +6,7 @@
 // Single-threaded: the network is polled between engine frames.
 //
 //   BallanceMMOSessionClient --root <game dir> --server <ip:port>
-//       [--name <nick>] [--level N] [--record <file.bmrc>] [--journal <file.bmjr>]
+//       [--name <nick>] [--level N] [--record <file.bmrc>] [--journal <file.bmjc>]
 //       [--join-first | --room <id> | --host --expect N]
 //       [--seconds S] [--trace] [--no-correct]
 //       [--start-sector N] [--beam X Y Z TICK]
@@ -117,16 +117,18 @@ namespace {
         // announces it as a custom map by the file's md5 instead of the slot's canonical hash.
         std::string map;
         std::string record;
-        std::string journal;          // --journal <file.bmjr>: the session black box (design 9.15)
+        std::string journal;          // --journal <file.bmjc>: the session black box (design 9.15)
         // How often the box records this client's OWN world, in ticks.  The
         // default is one every ten seconds, which is a black box: enough to
         // show where a session ended up.  To find WHICH body first disagreed
         // with the server, it has to be dense enough to bisect - pass 2, the
         // same as the server's journal_checkpoint_ticks.
         uint32_t checkpoint_ticks = 660;
-        // --final-checkpoints (step D0): also journal each checkpoint tick's
-        // FINAL state, as its rollback record leaves the history (diagnostic).
-        bool final_checkpoints = false;
+        // Also journal each checkpoint tick's FINAL state, as its rollback
+        // record leaves the history (step D0; on by default since journal
+        // version 10, --no-final-checkpoints turns it off; --final-checkpoints
+        // stays accepted).
+        bool final_checkpoints = true;
         // --force-rollback <every>:<depth>: rewind `depth` ticks every `every`
         // ticks, with no network reason to.  Isolates how faithful a replay is
         // from everything else: in a solo session the world is a pure function
@@ -554,7 +556,7 @@ namespace {
 
     void usage() {
         std::puts("usage: BallanceMMOSessionClient --root <game dir> --server <ip:port> [--name N] [--level N] [--map FILE]\n"
-                  "       [--record <file.bmrc>] [--journal <file.bmjr>] [--join-first | --room <id> | --host --expect N]\n"
+                  "       [--record <file.bmrc>] [--journal <file.bmjc>] [--join-first | --room <id> | --host --expect N]\n"
                   "       [--seconds S] [--trace] [--no-correct] [--no-rollback] [--pause-at TICK --pause-ms MS | --stall-ms TICK:MS]\n"
                   "       [--play-seconds S] [--notify-tick T ...] (play budget after the first assigned frame; live milestones)\n"
                   "       [--resync-at TICK | --resync-at s<SECTOR>+<TICKS>] [--record-by-tick]\n"
@@ -663,6 +665,7 @@ namespace {
                 out.checkpoint_ticks = static_cast<uint32_t>(std::max(1, std::atoi(v)));
             }
             else if (arg == "--final-checkpoints") out.final_checkpoints = true;
+            else if (arg == "--no-final-checkpoints") out.final_checkpoints = false;
             else if (arg == "--join-first") out.join_first = true;
             else if (arg == "--room") { if (!(v = next())) return false; out.room = static_cast<uint32_t>(std::atoi(v)); }
             else if (arg == "--host") out.host = true;
@@ -1309,8 +1312,11 @@ namespace {
                         continue;
                     }
                     // A replay switch with no value (step B5RX): the
-                    // harness's clock choice, not the capture's.
-                    if (w == "--replay-free-cost-clock" || w == "--pacer-restart-on-resync") continue;
+                    // harness's clock choice, not the capture's; and the
+                    // FINAL rows' switches (journal v10): what the journal
+                    // holds, not what the session does.
+                    if (w == "--replay-free-cost-clock" || w == "--pacer-restart-on-resync"
+                        || w == "--final-checkpoints" || w == "--no-final-checkpoints") continue;
                     kept.push_back(w);
                     if (w == "--record") { kept.push_back("<path>"); ++i; }
                 }

@@ -2,7 +2,8 @@
 """Judge one finished session from its black boxes alone.
 
 The harness judge (arena_map_test.py --report-only) needs the harness's own
-logs; a retail play session leaves nothing but the journals (.bmjr) behind,
+logs; a retail play session leaves nothing but the journals (.bmjs / .bmjc,
+.bmjr before journal version 10) behind,
 often only the clients'.  This reads those, and only those, and prints one
 judgment table (and, with --json, writes it): every row a check, a verdict
 (PASS / FAIL / REPORTED / N/A) and the numbers behind it.
@@ -15,7 +16,9 @@ judgment table (and, with --json, writes it): every row a check, a verdict
                    (--simtool, --root, --map); N/A without them.
     3. bodies      each client against the server, body by body, at every tick
                    both checkpointed: FINAL rows when the client wrote them
-                   (headless --final-checkpoints), else the live LOCAL rows.
+                   (every version 10 client journal; before it only with the
+                   headless --final-checkpoints), else the live LOCAL rows; a
+                   version 10 client journal without them fails.
                    The first tick any shared body is off by more than the
                    tolerance, the worst body, the own ball against the
                    harness's "own ball 0.0000", the bodies only one side has,
@@ -24,6 +27,9 @@ judgment table (and, with --json, writes it): every row a check, a verdict
                    Live LOCAL rows hold the predictions a later rewind
                    replaced (session-client-core-design, step D0), so on them
                    these are REPORTED; on FINAL rows they are PASS / FAIL.
+                   PE_Balloon and PE_Box_slide (resync_rules.hpp's keep-local
+                   bodies, the user's "fix everything except the balloon") are
+                   left out (--exclude) and reported on their own.
     4. health      resyncs (a test-requested one and a join import are
                    reported, any other fails, as arena_map_test.verdict has
                    it), corrections by kind (hard fails), the server's
@@ -51,12 +57,12 @@ arena_map_test.event_report's and verdict()'s, the drift window is
 server_client_drift.py's 500 ticks.
 
 usage: python -X utf8 -I scripts/journal_judge.py RUN_DIR [RUN_DIR ...]
-       python -X utf8 -I scripts/journal_judge.py --server server.bmjr --clients c0.bmjr c1.bmjr ...
+       python -X utf8 -I scripts/journal_judge.py --server server.bmjs --clients c0.bmjc c1.bmjc ...
            [--json OUT] [--tolerance 0.05]
            [--simtool BallanceMMOSimTool.exe --root GAME_DIR [--map MAP.nmo]] [--replay-dir DIR]
        python -X utf8 -I scripts/journal_judge.py --self-test
 
-A RUN_DIR's *.bmjr files (top level only) are sorted by their header into
+A RUN_DIR's journals (*.bmjs, *.bmjc, *.bmjr; top level only) are sorted by their header into
 the server's and the clients'.  Without --map, a server whose start note names
 a custom map is replayed with <root>/ModLoader/Maps/<that map> when it exists.
 Exit code 1 when any row FAILs, 0 otherwise.
@@ -84,6 +90,10 @@ END_CUT = 60           # arena_map_test.event_report: a client's span ends 60 ti
 DRIFT_WINDOW = 500     # server_client_drift.py --window default
 REPLAY_TIMEOUT = 1800  # arena_map_test.replay
 SESSION_GAP_MS = 60000 # client-only grouping: wall-clock spans this close count as overlapping
+# resync_rules.hpp keep_local_body_prefixes: the balloon and the slide jointed to it, the user's
+# "fix everything except the balloon" (lockstep-without-snapshots.md: exception c)
+DEFAULT_EXCLUDE = ['PE_Balloon', 'PE_Box_slide']
+FINAL_BY_DEFAULT = 10  # journal.hpp: the version from which every client journal has FINAL rows
 
 EVENT_SUPERSEDED, EVENT_REJECTED = 2, 4   # entity/session.hpp EVENT_STATE_*
 
@@ -352,7 +362,14 @@ def resync_windows(journal):
     return [(r['tick'], r['applied_at']) for r in resyncs(journal)]
 
 
-def check_bodies(table, server, client, tolerance, end_cut):
+def split_excluded(world, exclude):
+    """(the rows without the bodies `exclude` names, the rows of those bodies alone)."""
+    kept = {t: {k: v for k, v in row.items() if not fd.excluded(k, exclude)} for t, row in world.items()}
+    held = {t: {k: v for k, v in row.items() if fd.excluded(k, exclude)} for t, row in world.items()}
+    return kept, held
+
+
+def check_bodies(table, server, client, tolerance, end_cut, exclude):
     """Check 3 for one client: against the server's FULL rows, or (client
     only) against the snapshots it received."""
     scope = client.name
@@ -373,7 +390,12 @@ def check_bodies(table, server, client, tolerance, end_cut):
     hi = last_tick(client) - end_cut
     authority, _ = trim(authority, spans, lo, hi)
     rows, dropped = trim(rows, spans, lo, hi)
+    authority, held_authority = split_excluded(authority, exclude)
+    rows, held_rows = split_excluded(rows, exclude)
     kind = 'FINAL' if final else 'LOCAL'
+    if not final and client.version >= FINAL_BY_DEFAULT:
+        table.add(scope, 'FINAL rows', FAIL, 'none in a version %d client journal (written by default since '
+                  'version %d: turned off, or no rollback history)' % (client.version, FINAL_BY_DEFAULT))
     r = compare_bodies(authority, rows, client.header['own_player'], tolerance)
     judged = final and server is not None
     detail = '%s rows (%d) vs %s: %d common ticks%s; %d airship ball rows left out%s' % (
@@ -412,6 +434,11 @@ def check_bodies(table, server, client, tolerance, end_cut):
         server_has = any(k[0] == 'body' for row in authority.values() for k in row)
         table.add(scope, 'mechanisms compared', FAIL if server_has and not r['mechanisms'] else PASS,
                   '%d mechanism bodies in common' % r['mechanisms'])
+    if exclude:
+        h = compare_bodies(held_authority, held_rows, None, tolerance)
+        err, key, tick = h['worst']
+        table.add(scope, 'excluded bodies', REPORTED, '%s: %s' % (
+            ', '.join(exclude), 'worst %s %.4f m at tick %d' % (fd.show(key), err, tick) if key else 'none compared'))
     trend = drift_trend(r['windows'], tolerance)
     text = '%s; worst per %d ticks: %s' % (trend, DRIFT_WINDOW,
                                           ' '.join('%d:%.3f' % (s, v) for s, v in r['windows'].items()))
@@ -636,7 +663,7 @@ def judge(name, server, clients, args):
         names = {p['id']: ' "%s"' % p['name'] for p in server.players() if p['added'] and p['name']}
         check_server_inputs(table, server, clients, names)
     for journal in clients:
-        check_bodies(table, server, journal, args.tolerance, args.end_cut)
+        check_bodies(table, server, journal, args.tolerance, args.end_cut, args.exclude)
         check_resyncs(table, journal)
         check_corrections(table, journal)
         check_client_inputs(table, journal)
@@ -655,7 +682,7 @@ def runs_from_args(args):
         clients = [load(p) for p in args.clients or []]
         out.extend(split(pathlib.Path(args.server or args.clients[0]).parent.name, server, clients))
     for directory in args.run_dir:
-        journals = [load(p) for p in sorted(pathlib.Path(directory).glob('*.bmjr'))]
+        journals = [load(p) for p in jt.journal_files(directory)]
         servers = [j for j in journals if j.is_server]
         if len(servers) > 1:
             sys.exit('%s: %d server journals; name one with --server' % (directory, len(servers)))
@@ -690,7 +717,7 @@ def _self_test(out_dir):
     jt._write_plan(str(out_dir / 'client0.bmjr'), c_header, c_plan)
     jt._write_plan(str(out_dir / 'client1.bmjr'), dict(c_header, level=12), c_plan)
     # end_cut 0: the synthetic client's whole life is shorter than the cut
-    args = argparse.Namespace(tolerance=TOLERANCE, end_cut=0, simtool='', root='', map='', replay_dir='')
+    args = argparse.Namespace(tolerance=TOLERANCE, end_cut=0, simtool='', root='', map='', replay_dir='', exclude=[])
     server = load(out_dir / 'server.bmjr')
     good, other = load(out_dir / 'client0.bmjr'), load(out_dir / 'client1.bmjr')
     table = judge('self-test', server, [good, other], args)
@@ -723,6 +750,9 @@ def main():
     ap.add_argument('--json', help='write the tables here')
     ap.add_argument('--tolerance', type=float, default=TOLERANCE,
                     help='metres on any axis before a body counts as diverged (first_divergence.py default)')
+    ap.add_argument('--exclude', action='append', default=None, metavar='PREFIX',
+                    help='bodies (by name prefix) left out of the body checks and reported on their own; '
+                         'default PE_Balloon and PE_Box_slide (resync_rules.hpp keep-local); --exclude "" for none')
     ap.add_argument('--end-cut', type=int, default=END_CUT,
                     help="ticks at a client's end left out of the body checks (its exit's)")
     ap.add_argument('--simtool', default='', help='BallanceMMOSimTool executable, for the replay check')
@@ -731,6 +761,7 @@ def main():
     ap.add_argument('--replay-dir', default='', help="the SimTool's working directory, kept (default: a temp dir, removed)")
     ap.add_argument('--self-test', action='store_true', help="judge journal_trace's synthetic journals")
     args = ap.parse_args()
+    args.exclude = [p for p in (args.exclude if args.exclude is not None else DEFAULT_EXCLUDE) if p]
     if args.self_test:
         return self_test()
     if not args.run_dir and not args.server and not args.clients:
