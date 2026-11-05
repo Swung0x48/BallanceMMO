@@ -186,7 +186,7 @@ TEST(CaptureSeams, RecordThenReplay) {
     bmmo::session::capture_file file;
     std::string error;
     ASSERT_TRUE(file.open_replay(path, den, error)) << error;
-    EXPECT_EQ(file.version(), 2u);
+    EXPECT_EQ(file.version(), bmmo::session::capture_file::kVersion);
     std::string diverged;
     const auto on_diverged = [&](const std::string& why) { diverged = why; };
     bmmo::session::replay_transport transport(file, on_diverged);

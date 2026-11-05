@@ -504,7 +504,7 @@ P-core h1_150: harness PASS, server replay exact. K1-K8 are done but K7 (the ret
 | T0 `scripts/journal_judge.py` (done) | the journals | judges any run |
 | T1 coordinator | C1 virtual + C2 simulated + C4 `next_due` + C5 seed + C6 model | starts the server and N headless clients, owns the one clock and the link model (the harness proxy's), advances to the earliest `next_due`; stage 1 |
 | T2 recipe | C8 + T1 | extracts each player's frames, joins and leaves from a journal into a recipe, runs it in T1; stage 2 |
-| T3 capture replay | C3 + C1 / C2 replayers | replays any process's v2 capture (the server's too); for retail inside Player.exe with renders skipped; method B and stage 3 |
+| T3 capture replay (done, headless) | C3 + C1 / C2 replayers | replays any process's capture (the server's too); for retail inside Player.exe with renders skipped (stage 3, not done); method B and stage 3 |
 
 #### T1 design (2026-11-05, for the user's review)
 
@@ -861,6 +861,33 @@ comparison). It is a fast check between real-time gates, not the gate: the full 
   patience never acts.
 - **Not modelled:** jitter, a client stall (`--stall-ms` sleeps real time), the proxy's forced drops and
   outages (refused with --coordinated); retail arms.
+
+#### T3: capture replay (2026-11-05)
+
+Any process of a run replayed alone, offline, at CPU speed - the server, a headless client - and checked to give
+its live run back. The seams were there (K3: the client's capture, K4b: the server's); T3 is the tool and the
+last gaps.
+- **`arena_map_test.py --capture`:** every process records its inputs - `server.bmic` (unless the server is
+  external), each client's `clientN.bmic` and its send trace `clientN.send` - real-time and coordinated runs alike.
+- **`scripts/capture_replay.py CASE_DIR`:** each capture replayed with `--replay-inbound` (a client with the
+  live command line from the capture's header, the network, its outputs and the coordinator's arguments
+  dropped; the server in a copy of the case's config with its journal redirected) into `CASE_DIR/replay`, and
+  the live server journal, each client's journal and send trace compared byte for byte; exit 0 when every
+  process gave its run back.
+- **A coordinated run can be captured:** the coordinator's clock and transport are set up first and the capture
+  wraps whatever is there (the recording clock over the virtual clock, kept alive as `inner_clock_`; before,
+  `open_coordinator` replaced the capture's seams, so a coordinated run recorded nothing). A replay runs alone:
+  `--replay-inbound` with `--coordinator` is refused.
+- **The login uuid is an input now:** without `--uuid-seed` the headless client seeded it from the system clock
+  directly, so a replay logged in with another uuid (its first send differed, everything after equal). It is a
+  session clock read (`clock_site::login_uuid`), recorded; capture version 3 (the records unchanged) says so, and
+  a replay of a version 1 or 2 capture takes that site from its own clock, as before (`replay_clock`'s utc reads
+  now honour a free site too: before, only `now` did - the wire check found it).
+- **Checked:** 816/816; a coordinated A5UB (spike, latency step, the ping op) captured: 5 of 5 processes gave
+  their run back (4 client journals and send traces, the server journal, byte for byte); a real-time P-core
+  h1_150 (4 clients, 150 ms, proxies) captured: 5 of 5 too (before the uuid fix: the journals equal, every
+  client's first send not); the wire check of core_ref_s17 (version 2 captures) ALL SAME.
+- **Not in T3:** the retail host (stage 3: its own outside inputs, K7, are the user's call).
 
 ## 4. Decisions
 

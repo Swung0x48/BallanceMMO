@@ -83,9 +83,11 @@ namespace bmmo::session {
             if (file_.is_free(site) || !owner.here()) return own_.now(site);
             return time_point(clock_type::duration(take(site)));
         }
-        int64_t utc_us(clock_site site) override { return owner.here() ? take(site) : own_.utc_us(site); }
+        int64_t utc_us(clock_site site) override {
+            return owner.here() && !file_.is_free(site) ? take(site) : own_.utc_us(site);
+        }
         uint64_t utc_ms(clock_site site) override {
-            return owner.here() ? static_cast<uint64_t>(take(site)) : own_.utc_ms(site);
+            return owner.here() && !file_.is_free(site) ? static_cast<uint64_t>(take(site)) : own_.utc_ms(site);
         }
         // A replay is unpaced: the capture's thread sleeps nothing; a wait on
         // another thread (or on something to happen) is the own clock's.

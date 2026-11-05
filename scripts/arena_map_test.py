@@ -1122,7 +1122,8 @@ def run_case(args, sector, case_dir):
             handles.append(sf)
             server = subprocess.Popen(
                 [str(bindir / f'{args.server_exe}{EXE}'), '--port', str(args.port),
-                 *(['--coordinator', coordinator_addr] if coordinator_addr else [])],
+                 *(['--coordinator', coordinator_addr] if coordinator_addr else []),
+                 *(['--capture-inbound', str(case_dir / 'server.bmic')] if args.capture else [])],
                 cwd=case_dir, stdin=subprocess.PIPE, stdout=sf,
                 stderr=subprocess.STDOUT, creationflags=FLAGS)
             children.append(server)
@@ -1277,6 +1278,10 @@ def run_case(args, sector, case_dir):
             if coordinator_addr:   # step T1: on the coordinator's network and time, reproducibly
                 cmd += ['--coordinator', coordinator_addr, '--rewind-cost', args.rewind_cost, '--uuid-seed', str(1001 + i)]
             cmd.extend(args.client_arg_for.get(i, []))
+            if args.capture:   # step T3: scripts/capture_replay.py replays it
+                cmd += ['--capture-inbound', str(case_dir / f'client{i}.bmic')]
+                if '--trace-sends' not in cmd:
+                    cmd += ['--trace-sends', str(case_dir / f'client{i}.send')]
             # Explicit coverage endpoints supplied by a level driver must be
             # judged too, not merely logged by the client.
             targets.update(int(cmd[k + 1]) for k, option in enumerate(cmd[:-1]) if option == '--notify-tick')
@@ -3745,6 +3750,9 @@ def main():
                     help="the server's executable in --bin, without the extension: for timings, a copy under "
                          'another name (on this machine BallanceMMOServer.exe runs under page heap, an '
                          'Image File Execution Options setting matched by the file name)')
+    ap.add_argument('--capture', action='store_true',
+                    help='step T3: every process records its inputs (the server\'s server.bmic unless external, each '
+                         'client\'s clientN.bmic and clientN.send); scripts/capture_replay.py replays them one by one')
     ap.add_argument('--lockstep', action='store_true',
                     help='--coordinated: the coordinator steps one wake time at a time instead of running every '
                          'process ahead by a link latency (T1e: the reference the lookahead must equal, byte for byte)')

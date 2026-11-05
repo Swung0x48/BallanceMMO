@@ -22,6 +22,9 @@
 // File: "BMIC", u32 version, i64 clock ticks per second, str32 command line,
 // then the records (u8 tag, little-endian fields).  Version 2 adds N, T, P and
 // L and writes them in place of M and S; a version 1 file reads unchanged.
+// Version 3 (step T3), the same records: the headless client's login uuid
+// seed is a clock read (clock_site::login_uuid) - a replay of an older
+// capture takes that site from its own clock.
 // CK-free and header-only.
 
 #include <bitset>
@@ -43,7 +46,7 @@ namespace bmmo::session {
             iteration = 'I', clock = 'C', message = 'N', status = 'T', link_status = 'P', link_clock = 'L',
             message_v1 = 'M', status_v1 = 'S', end = 'E',
         };
-        static constexpr uint32_t kVersion = 2;
+        static constexpr uint32_t kVersion = 3;
 
         // A message as captured (its bytes owned).
         struct message_record {

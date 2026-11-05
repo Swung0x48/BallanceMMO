@@ -100,7 +100,9 @@ public:
     // transport's messages, status changes and reads - recorded to a capture
     // (`capture`) or replayed from one (`replay`); the runner and its
     // callbacks read the real clock and are not in it.  A replay sends
-    // nothing, paces nothing and ends with its capture.
+    // nothing, paces nothing and ends with its capture.  Step T3: a capture
+    // wraps the clock and the transport there are - a coordinated run's too
+    // (open_coordinator comes first; its clock lives on in inner_clock_).
     bool open_inbound(const std::string& capture, const std::string& replay, const std::string& command_line) {
         std::string error;
         const int64_t den = static_cast<int64_t>(std::chrono::steady_clock::period::den / std::chrono::steady_clock::period::num);
@@ -109,7 +111,8 @@ public:
                 Printf("capture-inbound: %s", error);
                 return false;
             }
-            auto c = std::make_unique<bmmo::session::recording_clock>(bmmo::session::real_session_clock(), inbound_);
+            inner_clock_ = std::move(clock_owned_);
+            auto c = std::make_unique<bmmo::session::recording_clock>(*clock_, inbound_);
             auto tr = std::make_unique<bmmo::session::recording_transport>(std::move(transport_), inbound_);
             capture_owners_ = {&c->owner, &tr->owner};
             clock_owned_ = std::move(c);
@@ -5030,6 +5033,7 @@ protected:
     int64_t utc_origin_us_ = 0;
     // Step K4b-ii (open_inbound).
     bmmo::session::capture_file inbound_;
+    std::unique_ptr<bmmo::session::session_clock> inner_clock_;   // step T3: what a recording clock wraps
     std::unique_ptr<bmmo::session::session_clock> clock_owned_;
     std::vector<bmmo::session::capture_owner*> capture_owners_;
     // Step T1c (open_coordinator): owned through clock_owned_ / transport_.
@@ -5222,9 +5226,13 @@ int main(int argc, char** argv) {
     {
         std::string command_line;
         for (int i = 0; i < argc; ++i) command_line += (i ? " " : "") + std::string(argv[i]);
-        if (!server.open_inbound(capture_inbound, replay_inbound, command_line))
+        if (!coordinator.empty() && !replay_inbound.empty()) {
+            printf("--replay-inbound replays alone: not with --coordinator.\n");
             return 1;
+        }
         if (!coordinator.empty() && !server.open_coordinator(coordinator))
+            return 1;
+        if (!server.open_inbound(capture_inbound, replay_inbound, command_line))
             return 1;
     }
 

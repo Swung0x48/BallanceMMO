@@ -1021,6 +1021,7 @@ namespace {
         if (out.force_rollback_every != 0 && !out.force_rollback_at.empty()) return false;   // one forced-rewind mode
         if (!out.join_cue.empty() && out.host) return false;   // step DX9: the host makes the room
         if (out.join_at_ms && (out.host || !out.join_cue.empty())) return false;   // step T2: one cue
+        if (!out.coordinator.empty() && !out.replay_inbound.empty()) return false;   // step T3: a replay runs alone
         if (!out.link_actions.empty() && out.coordinator.empty()) return false;   // step LF: coordinated only
         std::stable_sort(out.link_actions.begin(), out.link_actions.end(),
                          [](const auto& a, const auto& b) { return a.tick < b.tick; });
@@ -1475,7 +1476,6 @@ namespace {
                 clock_ = clock_owned_.get();
                 transport_ = std::move(remote);
                 logf("coordinator: a coordinated run through %s (process %u)", args_.coordinator.c_str(), remote_->index());
-                return open_send_trace();
             }
             const int64_t den = static_cast<int64_t>(clock_type::period::den / clock_type::period::num);
             if (!args_.capture_inbound.empty()) {
@@ -1484,7 +1484,9 @@ namespace {
                     logf("capture-inbound: %s", error.c_str());
                     return false;
                 }
-                clock_owned_ = std::make_unique<bmmo::session::recording_clock>(bmmo::session::real_session_clock(), inbound_);
+                // Step T3: around the clock there is (a coordinated run's: kept in inner_clock_).
+                inner_clock_ = std::move(clock_owned_);
+                clock_owned_ = std::make_unique<bmmo::session::recording_clock>(*clock_, inbound_);
                 clock_ = clock_owned_.get();
                 transport_ = std::make_unique<bmmo::session::recording_transport>(std::move(transport_), inbound_);
                 logf("capture-inbound: recording to %s", args_.capture_inbound.c_str());
@@ -1500,6 +1502,7 @@ namespace {
                 transport_ = std::make_unique<bmmo::session::replay_transport>(inbound_, diverged);
                 logf("replay-inbound: replaying %s (capture v%u), captured as: %s", args_.replay_inbound.c_str(),
                      inbound_.version(), inbound_.command_line().c_str());
+                if (inbound_.version() < 3) inbound_.set_free(bmmo::session::clock_site::login_uuid);   // step T3
                 if (args_.replay_free_cost_clock) {
                     for (const auto site: {bmmo::sim::wall_site::rewind_start, bmmo::sim::wall_site::rewind_replay,
                                            bmmo::sim::wall_site::rewind_end})
@@ -1591,8 +1594,9 @@ namespace {
                 msg.version = bmmo::current_version;
                 msg.nickname = args_.name;
                 msg.cheated = 0;
+                // Without --uuid-seed, from the wall clock - through the session clock (step T3: in a capture).
                 std::mt19937_64 rng(args_.uuid_seed ? *args_.uuid_seed
-                                                    : static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()));
+                                                    : static_cast<uint64_t>(clock_->utc_us(bmmo::session::clock_site::login_uuid)));
                 for (auto& byte: msg.uuid) byte = static_cast<uint8_t>(rng());
                 msg.serialize();
                 send_bytes(msg.raw.str(), bmmo::net::kSendReliable);
@@ -5171,6 +5175,7 @@ namespace {
         // The clock wall_now / wall_utc_ms read (step K1): the real one, or
         // (step K3) the capture's recording or replaying twin of it.  The
         // frame-time histogram reads the real clock itself.
+        std::unique_ptr<bmmo::session::session_clock> inner_clock_;   // step T3: what a recording clock wraps
         std::unique_ptr<bmmo::session::session_clock> clock_owned_;
         bmmo::net::remote_transport* remote_ = nullptr;   // step T1c: through transport_
         size_t link_actions_done_ = 0;                    // step LF
