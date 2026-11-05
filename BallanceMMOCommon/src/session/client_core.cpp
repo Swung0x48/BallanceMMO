@@ -324,8 +324,14 @@ namespace bmmo::session {
                                 }
                         if (why) why_entity = &tracked.own_entity;
                     }
+                    // A never-made birth (REJECTED, MISSING) stays pending
+                    // from its own stamp while its re-report is out: the
+                    // re-report's stamp is later, and the ticks between
+                    // were predicted with a ball the server has not made
+                    // (CBF3, the A6 drop's rows; the user's 1-a).
                     const auto pending_life = [tick](const own_life& life) {
-                        return life.state == own_life::verdict::sent && static_cast<int32_t>(tick - life.origin) >= 0;
+                        return (life.state == own_life::verdict::sent || life.rereported)
+                               && static_cast<int32_t>(tick - life.origin) >= 0;
                     };
                     if (!why && (std::any_of(s.own_life_.begin(), s.own_life_.end(), pending_life)
                                  || std::any_of(s.own_rereports_.begin(), s.own_rereports_.end(), pending_life))) {

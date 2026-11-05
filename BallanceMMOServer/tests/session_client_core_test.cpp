@@ -4178,6 +4178,48 @@ namespace {
         EXPECT_EQ(checked, 7u);
     }
 
+    // CBF3 (the user's 1-a): a birth given up as missing and re-reported
+    // blocks the rows from its own stamp until the re-report is answered,
+    // not only from the re-report's later stamp.
+    TEST(SessionClientCoreJournal, ReReportedLifeBlocksRowsFromTheOriginalStamp) {
+        journal_dir dir("final_rereport");
+        flow_fake fake;
+        fake.path = dir.path / "client.bmjr";
+        session_client_core core(fake.make_flow(true), session_capabilities{});
+        bmmo::session::core_config config;
+        config.journal_final_checkpoints = true;
+        config.journal_checkpoint_ticks = 1;
+        ASSERT_FALSE(core.begin(start_message(9, 3), config).refused);
+        core.journal().open(bmmo::physics::world_hash{}, "build-x", "Me");
+        auto& state = state_of(core);
+        state.rollback_.thresholds().history_ticks = 1;
+        state.own_life_ = {own_birth(101)};
+        state.own_life_[0].state = client_core_state::own_life::verdict::missing;
+        state.own_life_[0].rereported = true;
+        state.own_life_[0].link = 104;
+        state.own_rereports_ = {own_birth(104)};
+        state.own_rereports_[0].link = 101;
+        bmmo::session::rollback_world world;
+        for (uint32_t tick = 100; tick <= 104; ++tick)
+            state.rollback_.record(world, tick, {}, {});
+        state.own_life_[0].rereported = false;
+        state.own_rereports_.clear();
+        state.rollback_.record(world, 105, {}, {});
+        core.journal().close("done");
+        bmmo::session::journal journal;
+        std::string error;
+        ASSERT_TRUE(bmmo::session::read_journal(fake.path, journal, error)) << error;
+        size_t checked = 0;
+        for (const auto& tick: journal.ticks)
+            for (const auto& checkpoint: tick.checkpoints) {
+                EXPECT_EQ(bool(checkpoint.flags & bmmo::session::JOURNAL_CHECKPOINT_UNCONFIRMED),
+                          tick.tick >= 101 && tick.tick <= 103)
+                    << "tick " << tick.tick;
+                ++checked;
+            }
+        EXPECT_EQ(checked, 5u);
+    }
+
     bmmo::session_event_msg own_echo(uint32_t applied, uint32_t origin, uint8_t state) {
         auto msg = event_message(3, bmmo::session::event_type::Physicalize, applied, origin);
         msg.state = state;
