@@ -187,6 +187,10 @@ namespace bmmo::net {
                     const notice n = std::move(notices_.front());
                     notices_.pop_front();
                     auto& l = links_[n.conn];
+                    if (n.ping_only) {
+                        if (l.state == connection_state::connected) l.ping = n.ping;
+                        continue;
+                    }
                     status_change c;
                     c.conn = n.conn;
                     c.old_state = l.state;
@@ -217,6 +221,21 @@ namespace bmmo::net {
         }
         int connection_timeout_ms() override { return 7200; }
 
+        // Step LF (the fast LBM layer): the real-time harness's link events on
+        // this process's end of its links, from its virtual time on - its
+        // latency moved by `delta_ms` (a step and its end; with `dur_ms`, a
+        // spike for what is sent in that long), a blackout of `ms`.
+        void link_lag(direction d, int delta_ms, int dur_ms = 0) {
+            coord::body_out b;
+            b.put<uint8_t>(d == direction::send ? 0 : 1).put<int32_t>(delta_ms).put<int32_t>(dur_ms);
+            tagged(coord::op::link_lag, b);
+        }
+        void link_blackout(direction d, int ms) {
+            coord::body_out b;
+            b.put<uint8_t>(d == direction::send ? 0 : 1).put<int32_t>(ms);
+            tagged(coord::op::link_dark, b);
+        }
+
     private:
         struct inbound {
             connection conn;
@@ -230,6 +249,7 @@ namespace bmmo::net {
             int reason;
             std::string debug;
             int ping;
+            bool ping_only = false;   // step LF: the ping changed, not the state
         };
         struct link_state {
             connection_state state = connection_state::none;
@@ -244,8 +264,9 @@ namespace bmmo::net {
         }
         // A state change this process learns at `at` (its own: now), in time
         // order after what it already holds for then.
-        void learn_locked(connection c, microseconds at, connection_state s, int reason, std::string debug, int ping) {
-            notice n{c, at, s, reason, std::move(debug), ping};
+        void learn_locked(connection c, microseconds at, connection_state s, int reason, std::string debug, int ping,
+                          bool ping_only = false) {
+            notice n{c, at, s, reason, std::move(debug), ping, ping_only};
             notices_.insert(std::upper_bound(notices_.begin(), notices_.end(), n,
                                              [](const notice& a, const notice& b) { return a.at < b.at; }),
                             std::move(n));
@@ -318,6 +339,14 @@ namespace bmmo::net {
                     const auto ping = in.get<int32_t>();
                     std::lock_guard lk(state_);
                     learn_locked(c, at, s, reason, std::move(debug), ping);
+                    break;
+                }
+                case coord::op::ping: {
+                    const connection c = in.get<uint32_t>();
+                    const microseconds at = in.get<int64_t>();
+                    const auto ping = in.get<int32_t>();
+                    std::lock_guard lk(state_);
+                    learn_locked(c, at, connection_state::connected, 0, {}, ping, true);
                     break;
                 }
                 case coord::op::grant:

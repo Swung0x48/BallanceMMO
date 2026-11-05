@@ -7,7 +7,9 @@
 //                          [--seed S] [--virtual-seconds T] [--lockstep 1] [--trace 1]
 // --lockstep 1: one wake time per round, no lookahead (step T1e's reference).
 // --latency-ms-for NAME:MS (repeatable): that client's latency instead of --latency-ms (step T2).
+// --loss-burst B, --loss-for NAME:PCT[:BURST] (repeatable): bursty loss, a client's own loss (step LF).
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +34,16 @@ int main(int argc, char** argv) {
         else if (arg == "--virtual-seconds") seconds = std::atof(v);
         else if (arg == "--trace") { trace = std::atoi(v) != 0; }
         else if (arg == "--lockstep") options.lockstep = std::atoi(v) != 0;
+        else if (arg == "--loss-burst") options.client_loss_burst = std::max(1, std::atoi(v));
+        else if (arg == "--loss-for") {   // NAME:PCT[:BURST], a client's own loss (step LF)
+            const std::string spec = v;
+            const auto a = spec.find(':');
+            if (a == std::string::npos) { std::fprintf(stderr, "--loss-for NAME:PCT[:BURST]\n"); return 2; }
+            const auto b = spec.find(':', a + 1);
+            const float pct = static_cast<float>(std::atof(spec.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1).c_str()));
+            const int burst = b == std::string::npos ? 1 : std::max(1, std::atoi(spec.c_str() + b + 1));
+            options.loss_for[spec.substr(0, a)] = {pct, burst};
+        }
         else if (arg == "--latency-ms-for") {   // NAME:MS, a client's own latency (step T2)
             const std::string spec = v;
             const auto colon = spec.rfind(':');

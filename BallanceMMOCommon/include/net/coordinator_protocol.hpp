@@ -42,12 +42,17 @@ namespace bmmo::net::coord {
         set_loss,    // tagged; direction u8, percent f32
         idle,        // has_wake u8, wake_us i64
         bye,         // at_us i64: the process is going (its connections close then)
+        link_lag,    // tagged; direction u8, delta_ms i32, dur_ms i32: this end's latency moved (step LF:
+                     // a step for good when dur_ms is 0, else a spike for what is sent in the next dur_ms)
+        link_dark,   // tagged; direction u8, ms i32: this end blacked out that long (step LF)
         // coordinator -> process
         welcome = 64,   // index u32
         deliver,        // local u32, at_us i64, bytes str
         status,         // local u32, at_us i64, state i32, reason i32, debug str, ping_ms i32 (-1: none)
         grant,          // until_us i64: run on your own up to it
         stop,
+        ping,           // local u32, at_us i64, ping_ms i32: a connected connection's ping from then (step LF: a
+                        // latency step moved it; GNS measures it all along, a status change carries it otherwise)
     };
     // A tagged op's tag: rank u8, sequence u64, at_us i64.
     constexpr size_t kTagSize = 1 + 8 + 8;

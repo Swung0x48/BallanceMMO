@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -94,6 +95,53 @@ TEST(SimTransport, UnreliableLossFollowsTheSeed) {
     EXPECT_NE(a, c);
     EXPECT_GT(a.size(), 100u);
     EXPECT_LT(a.size(), 180u);
+}
+
+// Step LF: the coordinator's link events - a latency step, a blackout, bursty loss.
+TEST(SimTransport, LinkStepBlackoutAndBursts) {
+    sim_network net(3);
+    auto server = net.make_transport(), client = net.make_transport();
+    server->listen(1);
+    const connection c = client->connect(":1");
+    seen s, k;
+    pump(*server, s);
+    server->accept(s.changes[0].conn);
+    pump(*client, k);
+    sim_network::add_lag(*client, transport::direction::send, 50);
+    client->send(c, "a", 1, kSendReliable);
+    net.advance(49'000);
+    pump(*server, s);
+    EXPECT_TRUE(s.messages.empty());
+    net.advance(1'000);
+    pump(*server, s);
+    EXPECT_EQ(s.messages, std::vector<std::string>{"a"});
+
+    sim_network::blackout(*client, transport::direction::send, net.now() + 30'000);
+    client->send(c, "u", 1, kSendUnreliableNoDelay);   // dropped
+    client->send(c, "r", 1, kSendReliable);            // after the blackout plus the latency
+    net.advance(79'000);
+    pump(*server, s);
+    EXPECT_EQ(s.messages.size(), 1u);
+    net.advance(1'000);
+    pump(*server, s);
+    EXPECT_EQ(s.messages, (std::vector<std::string>{"a", "r"}));
+
+    s.messages.clear();
+    client->set_fake_loss(transport::direction::send, 10.0f);
+    sim_network::set_loss_burst(*client, transport::direction::send, 8);
+    for (int i = 0; i < 2000; ++i) client->send(c, &i, sizeof(i), kSendUnreliableNoDelay);
+    net.advance(100'000);
+    pump(*server, s);
+    pump(*server, s);   // a pump takes 1024
+    int last = -1;
+    for (const auto& m: s.messages) {   // every hole a whole number of bursts
+        int i = 0;
+        std::memcpy(&i, m.data(), sizeof(i));
+        EXPECT_EQ((i - last - 1) % 8, 0) << "hole before " << i;
+        last = i;
+    }
+    EXPECT_GT(s.messages.size(), 1700u);
+    EXPECT_LT(s.messages.size(), 1900u);
 }
 
 }

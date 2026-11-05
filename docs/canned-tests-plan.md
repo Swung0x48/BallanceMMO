@@ -826,6 +826,42 @@ Lives at the recipe's ticks (the user, 2026-11-05: "玩家离开和复活只报�
   1791) as the original's, 16.2x; again: one run, landed, the judge exact on both clients. (A start member's removal
   at the session's end - its client's play time ran out - is the run's end, not a recipe leave.)
 
+#### LF: the fast LBM layer (2026-11-05, the user: "先做LBM快的一层，然后跑，跑完做T3，最终做完整LBM收尾")
+
+LBM6's 19 headless arms (A0 x2, A6B, A6M x3, A6 drop, A4 swing seeds 0-2, A8 x3, A11, A11U, A5D resync, A10X,
+A5UB x2), each as off/on twins, on the coordinator's one virtual time: `scripts/lbm_fast.sh` (LBM6's arguments
+per arm) and `scripts/lbm_fast_judge.py` (the harness's criteria, the server replay, journal_judge's FINAL
+comparison). It is a fast check between real-time gates, not the gate: the full real-time LBM still closes.
+- **The link model, extended** (`net/sim_transport.hpp`): bursty loss (DelayProxy's rule: a loss takes the next
+  burst - 1 with it, the start rate solved so the loss rate holds; both ends' draws taken every time), a latency
+  moved mid-run (`add_lag`, never below the one set at the start: the lookahead's lowest latency counts on that),
+  a spike (more latency for what is sent before an end time), a blackout (unreliable dropped, reliable arriving
+  once it ends - GNS's retransmit, roughly), and every send of a connection's direction in order (the proxy
+  queues across a latency change too).
+- **The events at the client's tick:** `--link-event T:KIND=MS[:dur=MS][:dir=up|down|both][:until=T2]`
+  (session client, coordinated only; the harness's --event spelling) applies the event on its own end of the link
+  through two new coordinator ops (`link_lag` with a duration for a spike, `link_dark`), where the real-time
+  proxy arms it: on the client's "target reached" line. Per-client loss: coordinator `--loss-for NAME:PCT[:BURST]`
+  and `--loss-burst`. A late joiner (A8) is pre-booted and joins at the virtual time the host's tick should have
+  (`--join-at-ms`, from `--recipe-start-ms` 3500 + tick * 1000 / 66: asked 1500, base 1582 off / 1603 on).
+- **A ping that follows the link:** the coordinator sent a connection's ping only with a state change, so after a
+  latency step the server kept its connect-time ping (300 ms for A5UB's stepped client against 603 real) and
+  sized the lead slew from it (E 1728, 14 substituted ticks past E). A new `ping` op tells every process its
+  connected connections' pings from the round after a step (no status change); GNS measures it all along.
+- **Checked** (P-cores, below normal, ~48 s an arm for both twins, 7-13x; LBM6 took 93 min for its 19 pairs
+  and 2 retail sessions; the whole layer ~16 min): 38 of 38 twins FINAL exact (every client's FINAL rows against
+  the server's: own, mirror and mechanism bodies, 0 different; the A4 seeds at 10 % loss in bursts of 8 too),
+  every server replay N/N; A0 twice byte-identical. The raw criteria rows are
+  LBM6's, arm by arm, class by class (A6B, A6M, A5D, A10X, A5UB, A8 on: the same counts, A8 on to the
+  millimetre), but for: no "server TICK gap near the hold" rows (scheduling noise, not in virtual time); A4's
+  loss rows differ in value (another generator, another loss pattern); A11U on raises no lead (3/1 against
+  7/0): the virtual clients send with no processing delay, so their slack is 0.6 tick larger (23.17 against
+  22.59) and the 300 ms step leaves 3.37 ticks, above the absolute rule's line, where the real run's 2.6 crossed
+  it. The patience twins of a fault-free arm are byte-identical: with a fixed latency no frame is late, so
+  patience never acts.
+- **Not modelled:** jitter, a client stall (`--stall-ms` sleeps real time), the proxy's forced drops and
+  outages (refused with --coordinated); retail arms.
+
 ## 4. Decisions
 
 Taken: the gate (user, 2026-11-05): each K step lands on unit tests, the wire check and a P-core live smoke;

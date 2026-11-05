@@ -1082,23 +1082,28 @@ def run_case(args, sector, case_dir):
     coordinator, coordinator_addr = None, None
     try:
         if args.coordinated:
-            # Step T1: the network and the time are the coordinator's.
+            # Step T1: the network and the time are the coordinator's.  Step
+            # LF: a latency and a loss each, and the link events (the client
+            # applies them at its own tick, --link-event); no jitter, no
+            # stall, no forced drops or outages.
             link = links[0]
-            same = lambda l: {k: v for k, v in l.items() if k != 'latency_ms'}
-            if (args.external_server or any(same(l) != same(link) for l in links.values()) or link['jitter_ms']
-                    or args.events):
-                raise SystemExit('--coordinated: one loss for every client (a latency each), no jitter, no link events, '
-                                 'no external server')
+            if (args.external_server or any(l['jitter_ms'] for l in links.values()) or args.drop_downs or args.outage
+                    or any(ev.kind == 'stall' for ev in args.events) or args.stall_ms > 0):
+                raise SystemExit('--coordinated: no jitter, no stall, no forced drop or outage, no external server')
+            loss = lambda l: (l['loss_pct'], max(1, int(l['loss_burst'])))
             cf_log = open(case_dir / 'coordinator.log', 'w+b')
             handles.append(cf_log)
             coordinator = subprocess.Popen(
                 [str(bindir / f'BallanceMMOCoordinator{EXE}'), '--processes', str(args.players + 1),
                  '--latency-ms', str(int(link['latency_ms'])), '--loss-pct', str(link['loss_pct']),
+                 '--loss-burst', str(loss(link)[1]),
                  '--seed', str(args.loss_seed), *(['--lockstep', '1'] if args.lockstep else []),
                  *(['--virtual-seconds', '%.3f' % args.recipe_virtual_seconds]
                    if getattr(args, 'recipe_virtual_seconds', None) else []),
                  *[a for i, l in sorted(links.items()) if l['latency_ms'] != link['latency_ms']
-                   for a in ('--latency-ms-for', 'Arena%d:%d' % (i, int(l['latency_ms'])))]],
+                   for a in ('--latency-ms-for', 'Arena%d:%d' % (i, int(l['latency_ms'])))],
+                 *[a for i, l in sorted(links.items()) if loss(l) != loss(link)
+                   for a in ('--loss-for', 'Arena%d:%s:%d' % (i, l['loss_pct'], loss(l)[1]))]],
                 cwd=case_dir, stdin=subprocess.DEVNULL, stdout=cf_log, stderr=subprocess.STDOUT, creationflags=FLAGS)
             children.append(coordinator)
             for _ in range(200):
@@ -1124,7 +1129,15 @@ def run_case(args, sector, case_dir):
             time.sleep(1.5)
 
         # Step DX9: a cue joiner (--join-late N:cue) starts with the others.
+        # Step LF: so does a coordinated run's late joiner, its Join cued at
+        # the virtual time the host's tick should have (the recipe's
+        # estimate: the session's first tick at --recipe-start-ms); the
+        # report says the tick it joined at.
         late = {i: tick for i, tick in args.join_late.items() if i not in args.join_cue}
+        late_at_ms = {}
+        if args.coordinated:
+            late_at_ms = {i: int(args.recipe_start_ms + tick * 1000.0 / 66.0) for i, tick in late.items()}
+            late = {}
         host_ticks = {}
         tick_watches, tick_targets = {}, {}
         cue_files = {i: str(case_dir / ('join_cue%d' % i)) for i in sorted(args.join_cue)}
@@ -1197,6 +1210,18 @@ def run_case(args, sector, case_dir):
                 cmd.extend(args.client_arg)
             if sector > 1:
                 cmd += ['--start-sector', str(sector)]
+            if args.coordinated:   # step LF: the link events, applied by the client
+                for ev in link_events:
+                    if ev.kind == 'none':
+                        continue
+                    spec = '%d:%s=%d:dir=%s' % (ev.tick, ev.kind, int(ev.ms), ev.direction)
+                    if ev.kind == 'spike':
+                        spec += ':dur=%d' % int(ev.dur_ms)
+                    if ev.until:
+                        spec += ':until=%d' % ev.until
+                    cmd += ['--link-event', spec]
+                if i in late_at_ms:
+                    cmd += ['--join-at-ms', str(late_at_ms[i])]
             if args.recipe:   # step T2: the own ball plays the recipe's frames
                 import journal_recipe
                 frames = case_dir / ('recipe_player%d.frames' % i)
@@ -1271,7 +1296,7 @@ def run_case(args, sector, case_dir):
         for i in range(args.players):
             if i in late:
                 continue
-            launch(i, args.seconds)
+            launch(i, max(1, args.seconds - args.join_late[i] / 66.0) if i in late_at_ms else args.seconds)
             time.sleep(0.4)
         # The host must actually reach T. Loading and backoff do not consume
         # its play budget, nor the late joiner's remaining budget.
@@ -1321,6 +1346,11 @@ def run_case(args, sector, case_dir):
                     {'client': q.index, 'blacked_up': q.blacked['up'], 'blacked_down': q.blacked['down'],
                      'delayed_up': q.delayed['up'], 'delayed_down': q.delayed['down'],
                      'events': [ev.as_dict() for ev in q.events]})
+        if args.coordinated:   # step LF: the client applied them (--link-event); the coordinator counts nothing
+            for i in sorted({ev.client for ev in args.events if ev.kind in PROXY_KINDS}):
+                proxy_stats.setdefault('events', []).append(
+                    {'client': i, 'blacked_up': 0, 'blacked_down': 0, 'delayed_up': 0, 'delayed_down': 0,
+                     'events': [ev.as_dict() for ev in args.events if ev.client == i and ev.kind in PROXY_KINDS]})
         # Prove the loss actually happened: a run that claims to survive
         # dropped datagrams has to show that some were dropped.  Counted here,
         # while the proxies are alive; attached to the result once it exists.

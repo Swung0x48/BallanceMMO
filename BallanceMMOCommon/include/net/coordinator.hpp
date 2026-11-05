@@ -55,6 +55,8 @@ namespace bmmo::net {
         int client_latency_ms = 0;            // each way, on every client's end of its links
         std::map<std::string, int> latency_ms_for;   // a client's own (by its name), instead of client_latency_ms
         float client_loss_pct = 0.0f;         // unreliable messages, each way, on every client's end
+        int client_loss_burst = 1;            // a loss takes the next burst - 1 with it (step LF)
+        std::map<std::string, std::pair<float, int>> loss_for;   // a client's own loss and burst (by its name)
         uint64_t seed = 1;                    // the loss's
         bool lockstep = false;                // one wake time per round (no lookahead)
     };
@@ -124,6 +126,7 @@ namespace bmmo::net {
                             + std::to_string(until - options_.start_us) + " us");
                 for (auto& p: processes_)
                     if (p->alive && !hand_over(*p, until, error)) break;
+                ping_from_.reset();
                 if (!error.empty()) break;
                 lookahead_ = until > *next;
                 stall_reports_ = 0;
@@ -204,7 +207,10 @@ namespace bmmo::net {
                         const int ms = own != options_.latency_ms_for.end() ? own->second : options_.client_latency_ms;
                         p.endpoint->set_fake_lag(d, ms);
                         p.lag_ms[d == transport::direction::send ? 0 : 1] = ms;
-                        p.endpoint->set_fake_loss(d, options_.client_loss_pct);
+                        const auto loss = options_.loss_for.find(p.name);
+                        const bool own_loss = loss != options_.loss_for.end();
+                        p.endpoint->set_fake_loss(d, own_loss ? loss->second.first : options_.client_loss_pct);
+                        sim_network::set_loss_burst(*p.endpoint, d, own_loss ? loss->second.second : options_.client_loss_burst);
                     }
                 }
                 coord::body_out w;
@@ -377,6 +383,24 @@ namespace bmmo::net {
                 p.endpoint->set_fake_lag(d, ms);
                 break;
             }
+            case coord::op::link_lag: {
+                const auto d = in.get<uint8_t>() == 0 ? transport::direction::send : transport::direction::recv;
+                const auto delta = in.get<int32_t>();
+                const auto dur = in.get<int32_t>();
+                if (dur > 0) {
+                    sim_network::spike(*p.endpoint, d, delta, network_.now() + static_cast<microseconds>(dur) * 1000);
+                } else {
+                    p.lag_ms[d == transport::direction::send ? 0 : 1] += delta;
+                    sim_network::add_lag(*p.endpoint, d, delta);
+                    ping_from_ = network_.now();   // every connected connection's ping, told next round
+                }
+                break;
+            }
+            case coord::op::link_dark: {
+                const auto d = in.get<uint8_t>() == 0 ? transport::direction::send : transport::direction::recv;
+                sim_network::blackout(*p.endpoint, d, network_.now() + static_cast<microseconds>(in.get<int32_t>()) * 1000);
+                break;
+            }
             case coord::op::set_loss: {
                 const auto d = in.get<uint8_t>() == 0 ? transport::direction::send : transport::direction::recv;
                 p.endpoint->set_fake_loss(d, in.get<float>());
@@ -431,6 +455,15 @@ namespace bmmo::net {
                         .put<int32_t>(reason).str(debug).put<int32_t>(linked ? st.ping_ms : -1);
                     coord::append_frame(out, coord::op::status, s.bytes());
                 });
+            if (ping_from_) {   // step LF: from the round's start (what ran already saw the old one)
+                for (const auto& [sim, local]: p.to_local) {
+                    connection_status st;
+                    if (!p.endpoint->status(sim, st)) continue;
+                    coord::body_out b;
+                    b.put<uint32_t>(local).put<int64_t>(std::max(*ping_from_, granted_ + 1)).put<int32_t>(st.ping_ms);
+                    coord::append_frame(out, coord::op::ping, b.bytes());
+                }
+            }
             coord::body_out g;
             g.put<int64_t>(until);
             coord::append_frame(out, coord::op::grant, g.bytes());
@@ -450,6 +483,7 @@ namespace bmmo::net {
         uint64_t rounds_ = 0;
         bool lookahead_ = false;      // the last round ran past its start
         microseconds granted_ = 0;    // the last round's grant
+        std::optional<microseconds> ping_from_;   // step LF: a latency step this round
         std::function<void(const std::string&)> report_;
         int stall_reports_ = 0;   // this round's
         bool trace_ = false;

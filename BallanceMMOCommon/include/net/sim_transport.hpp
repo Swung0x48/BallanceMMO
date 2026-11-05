@@ -8,7 +8,14 @@
 // The model, deliberately small: a link's latency per direction; reliable
 // messages arrive in order after it (a loss costs nothing but its latency:
 // the retransmit is not modelled); unreliable ones are lost with the link's
-// loss rate (a seeded generator: the same seed loses the same messages).
+// loss rate (a seeded generator: the same seed loses the same messages), in
+// bursts when the link says so (scripts/arena_map_test.py DelayProxy's rule:
+// a loss takes the next burst - 1 with it, the start rate solved so the loss
+// rate holds).  Every message of a connection's direction arrives in order
+// (the proxy keeps its order across a latency change too).  The link events
+// of the real-time harness (step LF, the fast LBM layer): a latency changed
+// mid-run (a step, a spike), a blackout (unreliable messages dropped, reliable
+// ones arriving once it ends - GNS's retransmit, roughly).
 //
 // Nothing crosses a link faster than its latency (T1e, the coordinator's
 // lookahead): a connect reaches the listener after the link's latency, an
@@ -49,6 +56,15 @@ namespace bmmo::net {
 
         std::unique_ptr<transport> make_transport();
 
+        // The coordinator's link events on `t`'s end (step LF): a loss burst,
+        // a latency moved by `ms` (never below the one set_fake_lag gave: the
+        // lookahead counts on that one), `ms` more for what is sent before
+        // `until` (a spike), a blackout until `until`.
+        static void set_loss_burst(transport& t, transport::direction d, int burst);
+        static void add_lag(transport& t, transport::direction d, int ms);
+        static void spike(transport& t, transport::direction d, int ms, microseconds until);
+        static void blackout(transport& t, transport::direction d, microseconds until);
+
         // The coordinator's side (T1e).  What `t` is due by `until` - the
         // messages to it and the state changes it learns from its peers, each
         // with its time - taken now, before the network gets there (a
@@ -86,6 +102,7 @@ namespace bmmo::net {
             connection peer = kInvalidConnection;
             connection_state state = connection_state::none;
             microseconds last_reliable = 0;   // the in-order floor of its reliable sends
+            microseconds last_any = 0;        // and of all its sends
             std::string name;
         };
 
@@ -94,6 +111,7 @@ namespace bmmo::net {
             return it == halves_.end() ? nullptr : &it->second;
         }
         microseconds latency(const half& from, const half* to) const;
+        bool lost(endpoint& e, int d);   // this message, on e's end in direction d (0 send, 1 recv)
         // `c` changes to `to` at `at`: the state then, its owner's notice for then.
         void schedule(connection c, connection_state to, microseconds at, bool local, int reason = kEndInvalid,
                       std::string debug = {});
@@ -148,8 +166,8 @@ namespace bmmo::net {
             const auto server = net_.listeners_.find(port);
             if (server == net_.listeners_.end()) return kInvalidConnection;
             const connection mine = net_.next_++, theirs = net_.next_++;
-            net_.halves_[mine] = half{this, theirs, connection_state::none, 0, {}};
-            net_.halves_[theirs] = half{server->second, mine, connection_state::none, 0, {}};
+            net_.halves_[mine] = half{this, theirs, connection_state::none, 0, 0, {}};
+            net_.halves_[theirs] = half{server->second, mine, connection_state::none, 0, 0, {}};
             const microseconds at = net_.now_ + net_.latency(net_.halves_[mine], &net_.halves_[theirs]);
             net_.schedule(mine, connection_state::connecting, net_.now_, true);
             net_.schedule(theirs, connection_state::connecting, at, false);
@@ -177,7 +195,8 @@ namespace bmmo::net {
             const half* p = net_.find(h->peer);
             const endpoint* peer = p ? p->owner : nullptr;
             out = connection_status{};
-            out.ping_ms = static_cast<int>((lag_us_[0] + lag_us_[1] + (peer ? peer->lag_us_[0] + peer->lag_us_[1] : 0)) / 1000);
+            out.ping_ms = static_cast<int>((lag_us_[0] + extra_us_[0] + lag_us_[1] + extra_us_[1]
+                                            + (peer ? peer->lag_us_[0] + peer->extra_us_[0] + peer->lag_us_[1] + peer->extra_us_[1] : 0)) / 1000);
             out.quality_local = out.quality_remote = 1.0f - loss_[0] / 100.0f;
             return true;
         }
@@ -243,12 +262,53 @@ namespace bmmo::net {
         std::map<connection, connection_state> told_;
         microseconds lag_us_[2] = {0, 0};   // send, recv
         float loss_[2] = {0, 0};             // percent
+        int burst_[2] = {1, 1};              // a loss takes the next burst - 1 with it
+        int burst_left_[2] = {0, 0};
+        microseconds blackout_until_[2] = {0, 0};
+        microseconds extra_us_[2] = {0, 0};     // add_lag's, on top of lag_us_
+        microseconds spike_us_[2] = {0, 0};
+        microseconds spike_until_[2] = {0, 0};
     };
 
     inline std::unique_ptr<transport> sim_network::make_transport() { return std::make_unique<endpoint>(*this); }
 
+    inline void sim_network::set_loss_burst(transport& t, transport::direction d, int burst) {
+        static_cast<endpoint&>(t).burst_[d == transport::direction::send ? 0 : 1] = std::max(1, burst);
+    }
+    inline void sim_network::add_lag(transport& t, transport::direction d, int ms) {
+        auto& extra = static_cast<endpoint&>(t).extra_us_[d == transport::direction::send ? 0 : 1];
+        extra = std::max<microseconds>(0, extra + static_cast<microseconds>(ms) * 1000);
+    }
+    inline void sim_network::spike(transport& t, transport::direction d, int ms, microseconds until) {
+        auto& e = static_cast<endpoint&>(t);
+        const int i = d == transport::direction::send ? 0 : 1;
+        e.spike_us_[i] = std::max<microseconds>(0, static_cast<microseconds>(ms) * 1000);
+        e.spike_until_[i] = until;
+    }
+    inline void sim_network::blackout(transport& t, transport::direction d, microseconds until) {
+        static_cast<endpoint&>(t).blackout_until_[d == transport::direction::send ? 0 : 1] = until;
+    }
+
+    inline bool sim_network::lost(endpoint& e, int d) {
+        if (e.loss_[d] <= 0.0f) return false;
+        if (e.burst_left_[d] > 0) {
+            --e.burst_left_[d];
+            return true;
+        }
+        // A burst of b started with probability q drops q*b of every 1 + q*(b-1): q solved for the loss rate.
+        const double loss = e.loss_[d] / 100.0, b = e.burst_[d];
+        const double start = loss / (b - loss * (b - 1));
+        if (std::uniform_real_distribution<double>(0.0, 1.0)(random_) >= start) return false;
+        e.burst_left_[d] = e.burst_[d] - 1;
+        return true;
+    }
+
     inline microseconds sim_network::latency(const half& from, const half* to) const {
-        return (from.owner ? from.owner->lag_us_[0] : 0) + (to && to->owner ? to->owner->lag_us_[1] : 0);
+        const auto lag = [this](const endpoint* e, int i) -> microseconds {
+            if (!e) return 0;
+            return e->lag_us_[i] + e->extra_us_[i] + (now_ < e->spike_until_[i] ? e->spike_us_[i] : 0);
+        };
+        return lag(from.owner, 0) + lag(to ? to->owner : nullptr, 1);
     }
 
     inline microseconds sim_network::lowest_latency() const {
@@ -285,16 +345,25 @@ namespace bmmo::net {
         if (!h || h->state != connection_state::connected) return false;
         half* peer = find(h->peer);
         if (!peer) return false;
-        const auto* sender = h->owner;
-        const auto* receiver = peer->owner;
+        auto* sender = h->owner;
+        auto* receiver = peer->owner;
         microseconds at = now_ + latency(*h, peer);
+        microseconds dark = 0;   // a blackout on either end, this direction
+        if (sender && sender->blackout_until_[0] > now_) dark = sender->blackout_until_[0];
+        if (receiver && receiver->blackout_until_[1] > now_) dark = std::max(dark, receiver->blackout_until_[1]);
         if (flags & kSendReliable) {
+            if (dark) at = std::max(at, dark + latency(*h, peer));
             at = std::max(at, h->last_reliable);
             h->last_reliable = at;
         } else {
-            const float loss = sender->loss_[0] + (receiver ? receiver->loss_[1] : 0.0f);
-            if (std::uniform_real_distribution<float>(0.0f, 100.0f)(random_) < loss) return true;   // sent, lost
+            // Both ends' loss draws, every time (the seed's pattern does not
+            // depend on what the other end dropped).
+            const bool lost_up = sender && lost(*sender, 0);
+            const bool lost_down = receiver && lost(*receiver, 1);
+            if (dark || lost_up || lost_down) return true;   // sent, lost
         }
+        at = std::max(at, h->last_any);
+        h->last_any = at;
         packet p{at, seq_++, h->peer, std::string(static_cast<const char*>(data), size)};
         packets_.insert(std::upper_bound(packets_.begin(), packets_.end(), p,
                                          [](const packet& a, const packet& b) { return a.at != b.at ? a.at < b.at : a.seq < b.seq; }),

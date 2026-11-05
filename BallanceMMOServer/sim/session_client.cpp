@@ -498,6 +498,21 @@ namespace {
         // coordinated run, one virtual time for every process).  Not with
         // --host or --join-cue.
         uint32_t join_at_ms = 0;
+        // --link-event T:KIND=MS[:dur=MS][:dir=up|down|both][:until=T2]
+        // (repeatable; step LF, the fast LBM layer): the real-time harness's
+        // link event (scripts/arena_map_test.py --event, the same spelling
+        // without the client) on this client's end of a coordinated run's
+        // link, at its own tick T - KIND step (latency up until T2, or for
+        // good), spike (up for what is sent in the next dur ms, default
+        // 1000), blackout (nothing for MS), none.
+        struct link_action {
+            uint32_t tick = 0;
+            bool dark = false;   // a blackout of ms, else the latency moved by ms (for dur ms when dur > 0)
+            bool up = false, down = false;
+            int ms = 0, dur = 0;
+            std::string what;
+        };
+        std::vector<link_action> link_actions;
         // --recipe-frames FILE [--recipe-first-tick S] (step T2): the own
         // ball plays a recipe's frames (scripts/journal_recipe.py; one
         // player's stream) through the core's own-input source (K8): the
@@ -648,6 +663,52 @@ namespace {
     // The event type names (--hold-event, the own-echo lines) are the core's
     // since E7 (session/lifecycle.hpp).
     using bmmo::session::event_type_name;
+
+    // --link-event's spec (step LF) -> its actions: a step until T2 ends with
+    // the latency moved back.
+    bool parse_link_event(const std::string& spec, std::vector<arguments::link_action>& out) {
+        std::vector<std::string> parts;
+        for (size_t at = 0;;) {
+            const auto colon = spec.find(':', at);
+            parts.push_back(spec.substr(at, colon == std::string::npos ? std::string::npos : colon - at));
+            if (colon == std::string::npos) break;
+            at = colon + 1;
+        }
+        if (parts.size() < 2) return false;
+        arguments::link_action a;
+        a.tick = static_cast<uint32_t>(std::strtoul(parts[0].c_str(), nullptr, 10));
+        const auto eq = parts[1].find('=');
+        const std::string kind = parts[1].substr(0, eq);
+        a.ms = eq == std::string::npos ? 0 : std::atoi(parts[1].c_str() + eq + 1);
+        std::string dir = "both";
+        uint32_t until = 0;
+        for (size_t k = 2; k < parts.size(); ++k) {
+            const auto e = parts[k].find('=');
+            const std::string key = parts[k].substr(0, e), value = e == std::string::npos ? "" : parts[k].substr(e + 1);
+            if (key == "dur") a.dur = std::atoi(value.c_str());
+            else if (key == "dir") dir = value;
+            else if (key == "until") until = static_cast<uint32_t>(std::strtoul(value.c_str(), nullptr, 10));
+            else return false;
+        }
+        if (dir != "up" && dir != "down" && dir != "both") return false;
+        a.up = dir != "down";
+        a.down = dir != "up";
+        a.what = spec;
+        if (kind == "none") return true;
+        if (kind == "blackout") { a.dark = true; a.dur = 0; out.push_back(a); return a.ms > 0; }
+        if (kind == "spike") { if (a.dur <= 0) a.dur = 1000; out.push_back(a); return true; }
+        if (kind != "step") return false;
+        a.dur = 0;
+        out.push_back(a);
+        if (until) {
+            auto back = a;
+            back.tick = until;
+            back.ms = -a.ms;
+            back.what = spec + " (its end)";
+            out.push_back(back);
+        }
+        return true;
+    }
 
     bool parse(int argc, char** argv, arguments& out) {
         for (int i = 1; i < argc; ++i) {
@@ -874,6 +935,9 @@ namespace {
             else if (arg == "--replay-free-cost-clock") out.replay_free_cost_clock = true;
             else if (arg == "--pacer-restart-on-resync") out.pacer_restart_on_resync = true;
             else if (arg == "--join-cue") { if (!(v = next())) return false; out.join_cue = v; }
+            else if (arg == "--link-event") {
+                if (!(v = next()) || !parse_link_event(v, out.link_actions)) return false;
+            }
             else if (arg == "--join-at-ms") { if (!(v = next())) return false; out.join_at_ms = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
             else if (arg == "--recipe-frames") { if (!(v = next())) return false; out.recipe_frames = v; }
             else if (arg == "--recipe-first-tick") { if (!(v = next())) return false; out.recipe_first_tick = std::strtoll(v, nullptr, 10); }
@@ -957,6 +1021,9 @@ namespace {
         if (out.force_rollback_every != 0 && !out.force_rollback_at.empty()) return false;   // one forced-rewind mode
         if (!out.join_cue.empty() && out.host) return false;   // step DX9: the host makes the room
         if (out.join_at_ms && (out.host || !out.join_cue.empty())) return false;   // step T2: one cue
+        if (!out.link_actions.empty() && out.coordinator.empty()) return false;   // step LF: coordinated only
+        std::stable_sort(out.link_actions.begin(), out.link_actions.end(),
+                         [](const auto& a, const auto& b) { return a.tick < b.tick; });
         if (!out.recipe_frames.empty() && out.recipe_first_tick < 0) return false;   // step T2: the driver says S
         if (!out.host && !out.join_first && out.room == 0) out.join_first = true;
         return true;
@@ -3926,6 +3993,18 @@ namespace {
                     logf("harness: target %u reached at tick %u", args_.notify_ticks[notified_ticks_], now);
                     ++notified_ticks_;
                 }
+                // Step LF: the link events, where the harness's proxy arms
+                // them (on the milestone line above).
+                for (; link_actions_done_ < args_.link_actions.size() && args_.link_actions[link_actions_done_].tick <= now;
+                     ++link_actions_done_) {
+                    const auto& a = args_.link_actions[link_actions_done_];
+                    for (const auto d: {bmmo::net::transport::direction::send, bmmo::net::transport::direction::recv}) {
+                        if (!(d == bmmo::net::transport::direction::send ? a.up : a.down)) continue;
+                        if (a.dark) remote_->link_blackout(d, a.ms);
+                        else remote_->link_lag(d, a.ms, a.dur);
+                    }
+                    logf("link-event: %s at tick %u (asked %u)", a.what.c_str(), now, a.tick);
+                }
                 // Step F0 (WM0's review nit): a switch whose tick this client
                 // never steps (behind a late joiner's base) fires at once.
                 if (!switches_checked_) {
@@ -5094,6 +5173,7 @@ namespace {
         // frame-time histogram reads the real clock itself.
         std::unique_ptr<bmmo::session::session_clock> clock_owned_;
         bmmo::net::remote_transport* remote_ = nullptr;   // step T1c: through transport_
+        size_t link_actions_done_ = 0;                    // step LF
         bmmo::session::session_clock* clock_ = &bmmo::session::real_session_clock();
         uint64_t flow_pass_ = 0;
         uint64_t flow_steps_ = 0;
