@@ -1,6 +1,7 @@
 #include "fixed_tick.hpp"
 
 #include "bml_includes.h"
+#include "host_clock.hpp"
 
 #include <thread>
 
@@ -30,7 +31,7 @@ namespace bmmo::session {
         ticks_ = 0;
         skipped_renders_ = 0;
         waited_frames_ = 0;
-        origin_ = std::chrono::steady_clock::now();
+        origin_ = bmmo::retail::host_clock().now(clock_site::retail_pace_origin);
     }
 
     void fixed_tick_driver::set_hold(bool hold) {
@@ -42,7 +43,7 @@ namespace bmmo::session {
         // the pacing would see itself `held frames` behind and either burn
         // through them or restart the schedule (a rebase, which the session
         // reads as a broken numbering and answers with a resync).
-        origin_ = std::chrono::steady_clock::now() - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        origin_ = bmmo::retail::host_clock().now(clock_site::retail_pace_origin) - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::duration<double>(static_cast<double>(ticks_) * kTickSeconds));
     }
 
@@ -84,7 +85,9 @@ namespace bmmo::session {
         if (held_) return ticks_;
 
         const uint64_t tick = ticks_++;
-        const auto now = std::chrono::steady_clock::now();
+        // K7b: the schedule is the session clock's, so a capture holds it
+        // and a replay runs it unpaced (its waits sleep nothing).
+        const auto now = bmmo::retail::host_clock().now(clock_site::pace_expected);
         double max_catch_up = kMaxCatchUpTicks;
         if (pacer) {
             // A SessionLead's slew (step R5) moves the origin before the
@@ -130,7 +133,7 @@ namespace bmmo::session {
             const auto deadline = origin_ + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double>(due));
             if (deadline > now) {
-                std::this_thread::sleep_until(deadline);
+                bmmo::retail::host_clock().sleep_for(clock_site::pace_due, deadline - now);
                 ++waited_frames_;
             }
         }

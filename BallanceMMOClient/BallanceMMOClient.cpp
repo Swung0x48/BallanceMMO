@@ -7,6 +7,7 @@
 // #include <fstream>
 #include "CommandMMO.h"
 #include "BallanceMMOClient.h"
+#include "session/host_clock.hpp"
 
 // ---- the inbox (K7a, docs/k7-retail-capture-design.md) ----
 // The network thread handles no message any more: on_message hands the
@@ -2004,7 +2005,6 @@ int BallanceMMOClient::countdown_delay_ms() {
 // thread first sees it, and the messages behind it wait with it (the network
 // thread used to sleep that long before handling the next one).
 void BallanceMMOClient::drain_inbox() {
-    const auto now = std::chrono::steady_clock::now();
     for (;;) {
         inbox_entry entry;
         {
@@ -2017,6 +2017,7 @@ void BallanceMMOClient::drain_inbox() {
             }
             auto& front = inbox.front();
             if (inbox_code(front) == bmmo::Countdown) {
+                const auto now = bmmo::retail::host_clock().now(bmmo::session::clock_site::retail_inbox);
                 if (!front.timed) {
                     front.timed = true;
                     front.due = now + std::chrono::milliseconds(countdown_delay_ms());

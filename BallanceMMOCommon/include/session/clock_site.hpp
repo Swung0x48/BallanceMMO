@@ -109,6 +109,18 @@ namespace bmmo::session {
         wait_test_pause,             // headless: --pause-at (K4c)
         wait_pace,                   // headless: the next frame is not due yet (K4c)
         login_uuid,                  // headless: the login uuid's seed without --uuid-seed (T3: captured, so a replay logs in alike)
+        // The retail game thread's sites (K7b, BallanceMMOClient/session/host_clock.hpp).
+        retail_deadline,             // core host: a restart / countdown / reload deadline, set or checked
+        retail_reload,               // core host: the reload's start, its map load and the delay after it
+        retail_hold_frame,           // core host: a frozen hold frame's start, its 15 ms poll window and wait
+        retail_hold_armed,           // core host: the anchor hold armed, and how long it is held (screenshots)
+        retail_prep,                 // core host: the frozen preparation (the placement's start, the 3-2-1)
+        retail_net,                  // core host: an automation net blackout's end
+        retail_inbox,                // the inbox: a legacy Countdown's wait (K7a)
+        retail_pace_origin,          // the tick driver's origin (enabled, a hold's end)
+        retail_hold_release,         // the tick driver's release instant when the core has none
+        retail_blocking_wait,        // the blocking hold's and the resync hold's 1 ms polls
+        retail_display,              // FREE (never recorded): what only a panel, a log or a measurement reads
         count_
     };
 
@@ -122,7 +134,9 @@ namespace bmmo::session {
             "handshake_stamp", "handshake_release", "handshake_lateness",
             "server_loop_pass", "server_boot_requested", "server_hold_member", "server_boot_log", "server_start_deadline", "server_start_deadline_join", "server_rtt_post", "server_lead_repeat", "server_assign_sent", "server_assign_copy", "server_handshake_begin", "server_start_at_sent", "server_handshake_check", "server_input_arrival", "server_assign_repeats", "server_start_barrier", "server_event_arrival", "server_event_rate", "server_event_relay_delay", "server_time_broadcast", "runner_journal_utc", "runner_handshake_elapsed", "runner_reanchor", "runner_schedule_origin", "runner_journal_start", "runner_leaver_event", "runner_leaver_intake", "runner_leaver_trafo", "runner_baseline_settled", "runner_start_ahead", "runner_input_seen", "runner_event_arrival", "runner_cutoff", "runner_journal_ms", "runner_deadline_trafo", "runner_pass", "runner_skew_start", "runner_step_observed", "runner_until_due", "server_poll", "runner_post_unstamped", "runner_self_mark",
             "runner_wait", "server_time_origin", "server_loop_wait", "wait_idle",
-            "wait_test_stall", "wait_room_list", "wait_hold", "wait_test_pause", "wait_pace", "login_uuid"};
+            "wait_test_stall", "wait_room_list", "wait_hold", "wait_test_pause", "wait_pace", "login_uuid",
+            "retail_deadline", "retail_reload", "retail_hold_frame", "retail_hold_armed", "retail_prep", "retail_net",
+            "retail_inbox", "retail_pace_origin", "retail_hold_release", "retail_blocking_wait", "retail_display"};
         static_assert(sizeof(names) / sizeof(names[0]) == static_cast<size_t>(clock_site::count_),
                       "a name for every clock site");
         const auto i = static_cast<size_t>(site);
