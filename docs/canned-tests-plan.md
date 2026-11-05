@@ -572,6 +572,21 @@ returns the earliest time one waits for), `idle()`, `next_wake()`, `waiting()`. 
 false between a notify and the woken thread's next wait, and between an advance and the sleeper's end; 30 repeats
 clean); the wire check ALL SAME. No live run (the main session's trial games).
 
+As built (T1b, 2026-11-05): `net/coordinator_protocol.hpp` (frames u32 size | u8 op | body over TCP; process ops
+tagged rank u8 + sequence u64), `net/remote_transport.hpp` (the process side: every transport call an op to the
+coordinator, deliveries and state changes queued until the host polls, `status()` from the link's round trip, the
+clock's time as the transport clock; `set_thread_rank`; a link thread reports idle with the next wake and applies the
+coordinator's answer; on stop the host's `on_stop`, then the clock runs free until the transport goes; own connects
+1, 2, ..., brought-in ones from 0x10000), `net/coordinator.hpp` (the coordinator core: processes numbered by (role,
+name) after every hello; a step applies the ops in the order process, rank, sequence, advances the sim_network to the
+earliest wake, hands each process its deliveries, state changes - with the round trip once connected - and the time;
+a client's latency and loss sit on its end of every link, both ways; a gone process's connections close).
+`sim_network`'s `status()` now reports the link's round trip (both ends' latencies; it used to be the asking end's
+only, so a server saw 0 ms for a client whose link had the delay on the client's side); `virtual_clock::close()`
+releases a blocked `wait_idle`. Checked: 815/815 (one new: a server and a client process on their own virtual clocks
+over TCP to a coordinator, 10 ms each way: the server sees a 20 ms round trip, the "hi" sent at +20 ms arrives and is
+taken at +30 ms, and two runs log the same events at the same virtual times; 20 repeats clean).
+
 ## 4. Decisions
 
 Taken: the gate (user, 2026-11-05): each K step lands on unit tests, the wire check and a P-core live smoke;

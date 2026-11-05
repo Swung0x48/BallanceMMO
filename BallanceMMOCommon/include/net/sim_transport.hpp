@@ -126,10 +126,16 @@ namespace bmmo::net {
             if (half* h = net_.find(c)) h->name = name;
         }
 
+        // The link's round trip: this side's and the peer's latencies, both
+        // ways (step T1b: a coordinated run gives the latency to the clients'
+        // ends, and the server must see it too).
         bool status(connection c, connection_status& out) override {
-            if (!net_.find(c)) return false;
+            const half* h = net_.find(c);
+            if (!h) return false;
+            const half* p = net_.find(h->peer);
+            const endpoint* peer = p ? p->owner : nullptr;
             out = connection_status{};
-            out.ping_ms = static_cast<int>((lag_us_[0] + lag_us_[1]) / 1000);
+            out.ping_ms = static_cast<int>((lag_us_[0] + lag_us_[1] + (peer ? peer->lag_us_[0] + peer->lag_us_[1] : 0)) / 1000);
             out.quality_local = out.quality_remote = 1.0f - loss_[0] / 100.0f;
             return true;
         }

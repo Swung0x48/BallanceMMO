@@ -159,3 +159,103 @@ TEST(CaptureSeams, RecordThenReplay) {
 }
 
 }
+
+// Step T1b: a coordinated run - two processes over TCP to a coordinator, each on
+// its own virtual clock.  The client's link carries 10 ms each way: the server
+// sees a 20 ms round trip and the client's "hi" 10 ms after it was sent, and
+// the whole run, done twice, logs the same events at the same virtual times.
+#include <atomic>
+#include <thread>
+
+#include <net/coordinator.hpp>
+#include <net/remote_transport.hpp>
+
+namespace {
+
+using namespace std::chrono_literals;
+
+std::vector<std::string> coordinated_run() {
+    using bmmo::session::clock_site;
+    bmmo::net::coordinator_options options;
+    options.processes = 2;
+    options.client_latency_ms = 10;
+    options.until_us = options.start_us + 300000;
+    bmmo::net::coordinator coordinator(options);
+    const std::string address = "127.0.0.1:" + std::to_string(coordinator.port());
+    std::string run_error;
+    std::thread run([&] { coordinator.run(run_error); });
+
+    std::mutex log_mutex;
+    std::vector<std::string> log;
+    const auto note = [&](const std::string& who, bmmo::session::virtual_clock& clock, const std::string& what) {
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(clock.now(clock_site::wait_pace).time_since_epoch()).count()
+                      - options.start_us;
+        std::lock_guard lk(log_mutex);
+        log.push_back(who + " " + std::to_string(us) + " " + what);
+    };
+    struct side {
+        bmmo::session::virtual_clock clock;
+        bmmo::net::remote_transport transport{clock};
+        std::atomic<bool> stop{false};
+    };
+    side server, client;
+    // Concurrently, as two processes would: the welcome waits for every hello.
+    std::string server_error, client_error;
+    std::thread server_open([&] { EXPECT_TRUE(server.transport.open(address, 0, "server", server_error)) << server_error; });
+    EXPECT_TRUE(client.transport.open(address, 1, "client", client_error)) << client_error;
+    server_open.join();
+    server.transport.start(1, [&] { server.stop = true; });
+    client.transport.start(1, [&] { client.stop = true; });
+    std::thread server_loop([&] {
+        server.transport.listen(1);
+        while (!server.stop) {
+            server.clock.sleep_for(clock_site::server_loop_wait, 15ms);
+            server.transport.poll_status([&](const bmmo::net::status_change& c) {
+                if (c.state == bmmo::net::connection_state::connecting) server.transport.accept(c.conn);
+                bmmo::net::connection_status st;
+                const bool known = server.transport.status(c.conn, st);
+                note("server", server.clock, "state " + std::to_string(static_cast<int>(c.state)) + " ping " + std::to_string(known ? st.ping_ms : -1));
+            });
+            server.transport.receive([&](const bmmo::net::message& m) {
+                note("server", server.clock, "got " + std::string(static_cast<const char*>(m.data), m.size) + " received "
+                     + std::to_string(m.received - options.start_us));
+            }, 16);
+        }
+    });
+    std::thread client_loop([&] {
+        const auto c = client.transport.connect("127.0.0.1:1");
+        bool connected = false, sent = false;
+        while (!client.stop) {
+            client.clock.sleep_for(clock_site::wait_pace, 5ms);
+            client.transport.poll_status([&](const bmmo::net::status_change& s) {
+                connected = connected || s.state == bmmo::net::connection_state::connected;
+                note("client", client.clock, "state " + std::to_string(static_cast<int>(s.state)));
+            });
+            if (connected && !sent) {
+                sent = client.transport.send(c, "hi", 2, bmmo::net::kSendReliable);
+                note("client", client.clock, "sent hi");
+            }
+        }
+    });
+    run.join();
+    server_loop.join();
+    client_loop.join();
+    EXPECT_TRUE(run_error.empty()) << run_error;
+    EXPECT_GT(coordinator.steps(), 20u);
+    return log;
+}
+
+TEST(Coordinator, TwoProcessesOneVirtualTimeTheSameRunTwice) {
+    const auto first = coordinated_run();
+    const auto second = coordinated_run();
+    EXPECT_EQ(first, second);
+    std::string all;
+    for (const auto& line: first) all += line + '\n';
+    // The server's link sees the client's 10 ms each way; the client's "hi",
+    // sent at +20 ms, arrives at +30 ms and the server's pass at +30 ms takes it.
+    EXPECT_NE(all.find("client 20000 sent hi"), std::string::npos) << all;
+    EXPECT_NE(all.find("ping 20"), std::string::npos) << all;
+    EXPECT_NE(all.find("server 30000 got hi received 30000"), std::string::npos) << all;
+}
+
+}

@@ -109,11 +109,22 @@ namespace bmmo::session {
             signal_if_idle();
         }
         // Blocks until every participant waits; the earliest time one waits
-        // for (none: they all wait for something to happen).
+        // for (none: they all wait for something to happen, or the clock is
+        // closed).
         std::optional<time_point> wait_idle() {
             std::unique_lock lk(mutex_);
-            idle_.wait(lk, [&] { return idle_locked(); });
-            return next_wake_locked();
+            idle_.wait(lk, [&] { return closed_ || idle_locked(); });
+            return closed_ ? std::nullopt : next_wake_locked();
+        }
+        // No more wait_idle (the process is going): a blocked one returns.
+        void close() {
+            std::lock_guard lk(mutex_);
+            closed_ = true;
+            idle_.notify_all();
+        }
+        bool closed() const {
+            std::lock_guard lk(mutex_);
+            return closed_;
         }
         bool idle() const {
             std::lock_guard lk(mutex_);
@@ -177,6 +188,7 @@ namespace bmmo::session {
         std::map<uint64_t, wait_entry> waits_;
         uint64_t last_id_ = 0;
         size_t participants_ = 0;
+        bool closed_ = false;
     };
 
 }
