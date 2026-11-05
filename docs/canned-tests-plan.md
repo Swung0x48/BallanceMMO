@@ -551,7 +551,10 @@ Steps: T1a the clock's `notify` and idle callback (Common, unit-tested); T1b `re
 protocol (Common, a unit test over a socket pair); T1c the coordinator exe (BallanceMMOServer/sim) and the
 `--coordinator` flag in the server and the headless client; T1d the two-runs acceptance and the judge.
 
-Decisions for the user:
+Decided (the user, 2026-11-05: "还是按照你的推荐来吧", after weighing one process with the roles linked in as
+libraries - set aside: the IVP random state and the Random hook are process-global, several CK contexts in one process
+are unverified, and their steps would have to take turns): separate processes, the coordinator in C++, TCP through
+asio, the fixed rewind cost 3.0 ms + 0.46 ms a tick. The options as they were put:
 1. Language of the coordinator: C++ (reuses `sim_network` as is; recommended) or Python (thin, but re-implements the
    connection model).
 2. The IPC: TCP on localhost through asio (already a submodule; works the same on Windows and Linux; recommended).
