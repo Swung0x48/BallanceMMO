@@ -39,6 +39,45 @@ namespace bmmo::retail {
 
     enum class take_site : uint8_t { mailbox = 1, inbox = 2, command_file = 3, command_pipe = 4, console = 5 };
 
+    // A replay's host clock: the capture's reads by site; a free site (what
+    // a panel, a log or a measurement shows) reads the replayed time - the
+    // last instant the capture handed back plus the real time since - so a
+    // panel counts as it did live (the real clock alone is minutes past the
+    // capture's instants: the 3-2-1 would show 0 throughout).
+    class replay_host_clock final : public bmmo::session::session_clock {
+    public:
+        replay_host_clock(bmmo::session::capture_file& file, bmmo::session::capture_diverged diverged)
+            : replay_(file, bmmo::session::real_session_clock(), std::move(diverged)), file_(file) {}
+        time_point now(bmmo::session::clock_site site) override {
+            auto& real = bmmo::session::real_session_clock();
+            if (!replay_.owner.here()) return real.now(site);
+            if (!file_.is_free(site)) {
+                last_ = replay_.now(site);
+                last_real_ = real.now(site);
+                return last_;
+            }
+            return last_real_ == time_point{} ? real.now(site) : last_ + (real.now(site) - last_real_);
+        }
+        int64_t utc_us(bmmo::session::clock_site site) override { return replay_.utc_us(site); }
+        uint64_t utc_ms(bmmo::session::clock_site site) override { return replay_.utc_ms(site); }
+        void sleep_for(bmmo::session::clock_site site, clock_type::duration d) override { replay_.sleep_for(site, d); }
+        bool wait_until(bmmo::session::clock_site site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
+                        time_point t, const ready_test& ready) override {
+            return replay_.wait_until(site, cv, lock, t, ready);
+        }
+        bool wait_for(bmmo::session::clock_site site, std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
+                      clock_type::duration d, const ready_test& ready) override {
+            return replay_.wait_for(site, cv, lock, d, ready);
+        }
+        void notify(bmmo::session::clock_site site, std::condition_variable& cv) override { replay_.notify(site, cv); }
+        void claim() { replay_.owner.claim(); }
+
+    private:
+        bmmo::session::replay_clock replay_;
+        bmmo::session::capture_file& file_;
+        time_point last_{}, last_real_{};
+    };
+
     class session_capture {
     public:
         enum class mode { off, recording, armed, replaying, ended };
@@ -104,9 +143,8 @@ namespace bmmo::retail {
         bool armed() const { return mode_ == mode::armed; }
         void begin_replay() {
             if (mode_ != mode::armed) return;
-            replay_clock_ = std::make_unique<bmmo::session::replay_clock>(*file_, bmmo::session::real_session_clock(),
-                                                                          [this](const std::string& why) { diverge(why); });
-            replay_clock_->owner.claim();
+            replay_clock_ = std::make_unique<replay_host_clock>(*file_, [this](const std::string& why) { diverge(why); });
+            replay_clock_->claim();
             set_host_clock(replay_clock_.get());
             mode_ = mode::replaying;
         }
@@ -236,7 +274,7 @@ namespace bmmo::retail {
         mode mode_ = mode::off;
         std::unique_ptr<bmmo::session::capture_file> file_ = std::make_unique<bmmo::session::capture_file>();
         std::unique_ptr<bmmo::session::recording_clock> recording_clock_;
-        std::unique_ptr<bmmo::session::replay_clock> replay_clock_;
+        std::unique_ptr<replay_host_clock> replay_clock_;
         uint64_t frame_ = 0;
         std::string last_keys_;
         std::string divergence_;
