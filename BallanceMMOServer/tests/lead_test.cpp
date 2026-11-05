@@ -1437,6 +1437,38 @@ TEST(AssignCopies, OneCopyPerMainLoopPass) {
     }
 }
 
+// Step STR: a start message's copies go on until the member answers it -
+// an early answer leaves the first kAssignRepeats as they were, a later one
+// stops them at once, none stops them after the bound.  A commit is not
+// answered by the confirmation of the proposal it replaced.
+TEST(AssignCopies, StartCopiesUntilAnswered) {
+    using namespace bmmo::sim;
+    const std::chrono::steady_clock::time_point t0{std::chrono::seconds(100)};
+    const auto copies = [&](int answer_after) {
+        auto s = assign_copy_schedule::until_answered(0, t0);
+        int sent = 0;
+        for (uint64_t pass = 1; !s.done(); ++pass) {
+            const auto now = t0 + pass * std::chrono::milliseconds(15);
+            if (!s.due(pass, now)) continue;
+            s.sent(pass, now);
+            if (++sent == answer_after) s.answered();
+        }
+        return sent;
+    };
+    EXPECT_EQ(copies(3), kAssignRepeats);
+    EXPECT_EQ(copies(kAssignRepeats + 25), kAssignRepeats + 25);
+    EXPECT_EQ(copies(0), kStartCopiesUntilAnswered);
+
+    EXPECT_TRUE(start_copy_answered(true, 100, 2, false, 100, 2));
+    EXPECT_TRUE(start_copy_answered(true, 100, 2, false, 100, 3));
+    EXPECT_FALSE(start_copy_answered(true, 100, 2, false, 100, 1));
+    EXPECT_TRUE(start_copy_answered(true, 100, 2, true, 100, 1));    // runs on start 1 already
+    EXPECT_FALSE(start_copy_answered(true, 100, 2, false, 90, 2));   // another base
+    EXPECT_TRUE(start_copy_answered(false, 100, 1, false, 100, 1));  // the commit's own confirmation
+    EXPECT_FALSE(start_copy_answered(false, 100, 1, false, 100, 2)); // the replaced proposal's
+    EXPECT_FALSE(start_copy_answered(false, 100, 1, true, 100, 1));
+}
+
 // FULL step SAXH (session/start_handshake.hpp): the clock estimate, the
 // start schedule, the postponement and the refusals.
 TEST(StartHandshake, OffsetEstimateKeepsTheLowestRoundTrip) {

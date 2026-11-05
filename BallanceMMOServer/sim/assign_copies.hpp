@@ -50,11 +50,21 @@
 // epoch, and a resynced member's old numbering already sends ticks at or
 // after the new base, so no frame proves the new assignment arrived.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 
 namespace bmmo::sim {
     inline constexpr int kAssignRepeats = 16;   // unreliable copies after the reliable one, one per main-loop pass
+    // Step STR (the user's decision after CBF1 F2): a SessionStartAt's copies
+    // go on past kAssignRepeats, one per pass, until the member answers it
+    // (server.cpp handle_session_clock_ack) - sixteen were all lost to a
+    // 500 ms downlink outage, the member ran on the start before, and the
+    // members that held for the later one were refused late.  An answer
+    // inside the first kAssignRepeats changes nothing (their echoes are clock
+    // samples); the bound is the start barrier's 20 s of passes, for a member
+    // that never answers.
+    inline constexpr int kStartCopiesUntilAnswered = 20 * 66;
     inline constexpr std::chrono::milliseconds kAssignCopyMinGap{5};
 
     // One assignment's copies still due.  `pass` is the server's main-loop
@@ -83,7 +93,27 @@ namespace bmmo::sim {
             last_sent = now;
         }
         bool done() const { return remaining <= 0; }
+
+        // Step STR: a start message's copies, and what is left of them once
+        // the member answered it - the rest of the first kAssignRepeats.
+        static assign_copy_schedule until_answered(uint64_t pass, time_point now) {
+            return after_reliable(pass, now, kStartCopiesUntilAnswered);
+        }
+        void answered() { remaining = std::max(0, remaining - (kStartCopiesUntilAnswered - kAssignRepeats)); }
     };
+
+    // Step STR: whether a member's clock ack answers a start message (base
+    // `first_tick`, `seq`).  A proposal is answered by a confirmation of it
+    // or of a later one, or by the report that the member already runs
+    // (`started`, CLOCK_ACK_STARTED); a commit or a late joiner's correction
+    // only by its own confirmation - a postponed proposal's late confirmation
+    // names a later seq than the commit that replaced it.
+    constexpr bool start_copy_answered(bool proposal, uint32_t first_tick, uint32_t seq, bool started,
+                                       uint32_t ack_first_tick, uint32_t ack_seq) {
+        if (ack_first_tick != first_tick) return false;
+        if (started) return proposal;
+        return ack_seq == seq || (proposal && ack_seq > seq);
+    }
 
     // A MODEL OF THE HARNESS PROXY's loss rule (scripts/arena_map_test.py),
     // not of a real link, used by the unit test only; it does not exercise
