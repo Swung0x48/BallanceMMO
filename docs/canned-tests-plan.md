@@ -185,8 +185,11 @@ Left on the real clock on purpose: the runner's step-cost timers, the headless f
 and display stamps (login time, uptime); left for later steps: GNS's own clock (K2: the transport turns
 `m_usecTimeReceived` into a C1 time), the login uuid's seed (K5), the retail host's own reads (K7).
 Checked offline: 794/794 unit tests; the wire check of core_ref_s16 with `--no-final-checkpoints` ALL SAME
-(44 send traces, 45 journals identical); x64 and x86 build. The live smoke run (h1_150 against this tree's
-Arch server) is held while another session's timing runs use the machine.
+(44 send traces, 45 journals identical); x64 and x86 build. Live smoke (2026-11-04 23:53-23:54, h1_150: 4
+headless clients, 150 ms, 40 s, against this tree's Windows server as a renamed exe on port 26995, all on
+P-cores 0-15): harness PASS, server journal replay 2641/2641, and the judge on the v10 journals (the first live
+`.bmjs` / `.bmjc` with FINAL rows): every shared body within 0.05 m and every own ball exact in all four
+clients' FINAL rows, no resync. LBM not run.
 
 ### 3.3 The tools (thin, after the seams)
 

@@ -238,7 +238,9 @@ def check_replay(table, server, args):
             table.add('server', 'replay', NA, 'the session ran custom map %s: give --map' % wanted)
             return
         map_path = str(candidate)
-    cmd = [args.simtool, '--root', args.root, '--replay-session', str(pathlib.Path(server.path).resolve())]
+    # absolute: the replay runs in its own working directory
+    cmd = [str(pathlib.Path(args.simtool).resolve()), '--root', args.root,
+           '--replay-session', str(pathlib.Path(server.path).resolve())]
     cmd += ['--map', map_path] if map_path else []
     cmd += ['--report-every', '5000']
     with tempfile.TemporaryDirectory(prefix='journal_judge_') as scratch:
