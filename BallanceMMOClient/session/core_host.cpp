@@ -429,6 +429,15 @@ namespace {
     std::atomic<bool> snapshots_next{false};
     // K7e: a replay's journal cadence, the capture's (0: none).
     uint32_t replay_checkpoint_ticks = 0;
+    // K7e: 'stop-at <tick>' - the replay stops after that tick's step with the
+    // world frozen (the behaviour loop held as the anchor hold holds it, the
+    // level rendered); the saved limits for the thaw.
+    struct replay_stop_state {
+        uint32_t tick = 0;   // 0: run to the end
+        bool frozen = false;
+        CKDWORD saved_limits = 0;
+        float saved_rate = 0.0f;
+    } replay_stop;
     // FULL step R6B: core_config::own_births_parked ('session own-births
     // parked|remade', a test verb: the same-build control arm of the
     // in-window own-birth remake).  Off (remade) by default: with
@@ -2832,17 +2841,30 @@ std::string BallanceMMOClient::core_host_capture_verb(const std::string& rest) {
     auto& capture = bmmo::retail::session_capture::instance();
     static const char* const kModes[] = {"off", "recording", "armed", "replaying", "ended"};
     if (rest.empty() || rest == "status")
-        return std::format("ok replay capture mode={} frames={} path={} divergence={}",
-                           kModes[static_cast<int>(capture.state())], capture.frames(),
+        return std::format("ok replay capture mode={} frozen={} frames={} path={} divergence={}",
+                           kModes[static_cast<int>(capture.state())], replay_stop.frozen ? 1 : 0, capture.frames(),
                            capture.path().empty() ? "-" : capture.path(),
                            capture.divergence().empty() ? "-" : capture.divergence());
     if (rest == "stop") {
         capture.end_replay();
         return "ok replay capture stopped";
     }
+    if (rest == "thaw") {
+        if (!replay_stop.frozen) return "error the replay is not stopped at a tick";
+        core_host_replay_thaw();
+        return "ok replay capture thawed: the game runs on, unreplayed";
+    }
     if (host.phase != retail_host::phase_type::idle) return "error a session is running";
+    // <file> [stop-at <tick>] (the path may hold spaces: the option is read from the end)
+    std::string file = rest;
+    replay_stop.tick = 0;
+    if (const auto at = rest.rfind(" stop-at "); at != std::string::npos) {
+        file = rest.substr(0, at);
+        replay_stop.tick = static_cast<uint32_t>(std::strtoul(rest.c_str() + at + 9, nullptr, 10));
+        if (replay_stop.tick == 0) return "error stop-at needs a tick above 0";
+    }
     std::string error;
-    if (!capture.arm_replay(rest, error, [this](const std::string& why) {
+    if (!capture.arm_replay(file, error, [this](const std::string& why) {
             logger_->Warn("Replay DIVERGED: %s", why.c_str());
             SendIngameMessage("Replay DIVERGED: " + why, bmmo::ansi::BrightRed);
         }))
@@ -2890,7 +2912,8 @@ std::string BallanceMMOClient::core_host_capture_verb(const std::string& rest) {
     if (number("final_checkpoints") != (diag_final_checkpoints() ? 1 : 0))
         logger_->Warn("Replay: the capture was taken with final checkpoints %s, this game has them %s: the journals differ there",
                       h["final_checkpoints"].c_str(), diag_final_checkpoints() ? "on" : "off");
-    return "ok replay capture armed: " + rest + " (" + capture.header() + ")";
+    return "ok replay capture armed: " + file + (replay_stop.tick ? std::format(" (stops at tick {})", replay_stop.tick) : std::string{})
+         + " (" + capture.header() + ")";
 }
 
 void BallanceMMOClient::core_host_drain() {
@@ -3030,6 +3053,36 @@ void BallanceMMOClient::core_host_drain() {
         core_host_dispatch(entry.code, entry.bytes);
     }
     core_host_capture_idle();
+    if (replay_stop.tick != 0 && bmmo::retail::session_capture::instance().replaying()
+            && session_tick_now() >= replay_stop.tick)
+        core_host_replay_freeze();
+}
+
+// K7e: the replay stops at its stop tick (after that tick's step) and the world
+// freezes there: a debugger, the inspection verbs (the command file, served from
+// OnRender while frozen) and the journal see that tick.  'replay capture thaw'
+// lets the game run on, unreplayed.
+void BallanceMMOClient::core_host_replay_freeze() {
+    bmmo::retail::session_capture::instance().end_replay();
+    CKTimeManager* tm = m_bml->GetTimeManager();
+    replay_stop.saved_limits = tm->GetLimitOptions();
+    replay_stop.saved_rate = tm->GetBehavioralRateLimit();
+    tm->SetBehavioralRateLimit(0.001f);
+    tm->ChangeLimitOptions(CK_RATE_NOP, CK_BEHRATE_LIMIT);
+    replay_stop.frozen = true;
+    const std::string line = std::format("Replay stopped at tick {} as asked: the world is frozen ('replay capture thaw' "
+                                         "lets it run on, unreplayed)", session_tick_now());
+    replay_stop.tick = 0;
+    logger_->Info("%s", line.c_str());
+    SendIngameMessage(line, bmmo::ansi::BrightYellow);
+}
+
+void BallanceMMOClient::core_host_replay_thaw() {
+    if (!replay_stop.frozen) return;
+    CKTimeManager* tm = m_bml->GetTimeManager();
+    tm->SetBehavioralRateLimit(replay_stop.saved_rate);
+    tm->ChangeLimitOptions(CK_RATE_NOP, static_cast<CK_FRAMERATE_LIMITS>(replay_stop.saved_limits & CK_BEHRATE_MASK));
+    replay_stop.frozen = false;
 }
 
 // K7d: the connection's state where it steers the session, as a capture
@@ -3042,6 +3095,7 @@ bool BallanceMMOClient::core_host_link_up() {
 // anchor hold is frozen, the frame that polls it.
 void BallanceMMOClient::OnRender(CK_RENDER_FLAGS) {
     core_host_hold_frame();
+    if (replay_stop.frozen) process_command_file();   // K7e: no OnProcess runs while a stopped replay is frozen
 }
 
 // The blackouts of 'net blackout' end at a frame boundary (core_host_process)

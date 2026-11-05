@@ -588,6 +588,8 @@ private:
 	void core_host_start_capture(const std::string& start_bytes);
 	std::string core_host_capture_players();
 	uint32_t journal_checkpoint_ticks();
+	void core_host_replay_freeze();
+	void core_host_replay_thaw();
 	void core_host_capture_idle();
 	void core_host_report_replay();
 	std::string core_host_capture_verb(const std::string& rest);
