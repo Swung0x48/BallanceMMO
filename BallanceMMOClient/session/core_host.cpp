@@ -1651,6 +1651,7 @@ namespace {
     // (BMMO_CELLS_MEMO=off | on | verify, on when unset); dropped with every
     // new selection.  File-scope (BallanceMMOClient takes no member).
     bmmo::game::array_reads::cells_memo cells_memo_host;
+    size_t cells_memo_notes_logged = 0;
 
     int32_t controller_alias_cb(void* user, const char* name, char* out, uint32_t out_size);
 
@@ -1669,7 +1670,8 @@ namespace {
         // Step Q7 (world-agreement-gaps-design.md 2.10): the per-player units
         // copied K times under WORLD_PLAYER_MECHANISMS (the core's K).
         options.slots = slots;
-        error = proximity_host.union_.rewire(context, bmmo::game::probe_class::mechanism, sel, options);
+        error = proximity_host.union_.rewire(context, bmmo::game::probe_class::mechanism, sel, options,
+                                             bmmo::game::force_hooks_for(v));
         for (const std::string& line: proximity_host.union_.lines()) logger->Info("Physics session: %s", line.c_str());
         if (!error.empty()) {
             ++proximity_host.refused;
@@ -3467,6 +3469,8 @@ std::string BallanceMMOClient::core_host_anchor_finish(const std::string& step_r
         if (!proximity_rewire(m_bml->GetCKContext(), physics_view_, sel, core.mechanism_slots(), logger_, error)) return error;
         probe_signature = proximity_host.signature;
     }
+    host.script_hooks.slots = proximity_host.union_.slots() ? &proximity_host.union_.recorded_slots() : nullptr;
+    proximity_host.union_.recorded_slots().select(bmmo::session::bound_member_slots(core.member_lives(), core.next_tick()));
     // FULL step WFA: the force blocks outside the units and the trafo sets
     // by their world-independent names (game/force_block_alias.hpp, the
     // headless anchor's call), installed for the whole session.
@@ -4012,7 +4016,8 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
     }
     // Step OPB: the written-cell columns' memo (this process, every session).
     logger_->Info("Physics session: %s", cells_memo_host.line().c_str());
-    for (const std::string& note: cells_memo_host.notes()) logger_->Warn("Physics session: %s", note.c_str());
+    while (cells_memo_notes_logged < cells_memo_host.notes().size())
+        logger_->Warn("Physics session: %s", cells_memo_host.notes()[cells_memo_notes_logged++].c_str());
     {   // step OPC
         const auto& reuse = bmmo::game::script_reuse_totals();
         logger_->Info("Physics session: %s", reuse.line(bmmo::game::script_reuse_mode_from_env()).c_str());
@@ -4520,7 +4525,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             };
         return bmmo::game::localize_session_scripts(m_bml->GetCKContext(), host.script_ids, portable, anchor, out, error,
                                                     report, trafo_host.on ? &trafo_host.registry.part() : nullptr,
-                                                    proximity_host.active ? &hold : nullptr);
+                                                    proximity_host.active ? &hold : nullptr, host.script_hooks.slots);
     };
     p.forget_activations_from = [this](uint32_t tick) {
         const size_t activations = host.activations.forget_from(tick);
@@ -5029,6 +5034,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             so.context = m_bml->GetCKContext();
             so.scripts = &host.script_ids;
             so.hooks = &host.script_hooks;
+            so.bound_slots = [](uint32_t tick) { return bmmo::session::bound_member_slots(host.core->member_lives(), tick); };
             so.scripts_replayed = &host.scripts_replayed;
             so.reset_ticks = &host.script_reset_ticks;
             so.reset_skips = &host.script_reset_skips;

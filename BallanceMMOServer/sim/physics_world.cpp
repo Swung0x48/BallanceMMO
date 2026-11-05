@@ -315,7 +315,8 @@ namespace bmmo::sim {
                 return object && object->m_RealObject;
             };
             const std::string union_error =
-                proximity_.rewire(context, bmmo::game::probe_class::all, {}, union_options);
+                proximity_.rewire(context, bmmo::game::probe_class::all, {}, union_options,
+                                  bmmo::game::force_hooks_for(bmmo::physics::physics_direct(manager)));
             for (const std::string& line: proximity_.lines()) log("world: " + line);
             if (!union_error.empty()) {
                 error = "proximity union (world option) refused: " + union_error;
@@ -353,6 +354,7 @@ namespace bmmo::sim {
         bmmo::game::build_force_alias_table(force_aliases_, context, proximity_.copied_blocks());
         log("world: " + force_aliases_.summary());
         script_hooks_ = bmmo::game::force_hooks_for(bmmo::physics::physics_direct(manager));   // step HU1: one copy (game/host_backend.hpp)
+        script_hooks_.slots = proximity_.slots() ? &proximity_.recorded_slots() : nullptr;
         // The level's own checkpoint activation, held (game/sector_activation.hpp):
         // update_sectors() is the only path that runs Gameplay_SectorManager in
         // this world.  The rewired proximity probes let any player's clone fire
@@ -658,7 +660,10 @@ namespace bmmo::sim {
                                                 const bmmo::game::script_replay::selection* sel) {
         auto options = proximity_options();
         options.slots = slots;
-        const std::string error = proximity_.rewire(engine_->context(), which, sel ? *sel : script_selection_, options);
+        const std::string error = proximity_.rewire(engine_->context(), which, sel ? *sel : script_selection_, options,
+                                                   bmmo::game::force_hooks_for(bmmo::physics::physics_direct(physics())));
+        script_hooks_.slots = proximity_.slots() ? &proximity_.recorded_slots() : nullptr;
+        proximity_.recorded_slots().select(bound_slots_);
         for (const std::string& line: proximity_.lines()) log("world: " + line);
         return error;
     }
@@ -802,6 +807,8 @@ namespace bmmo::sim {
             context, physics(), nullptr, p.cam_ref, navigation_.leaves,
             navigation_.leaves.empty() ? 0.0f : navigation_.leaves.front().force_value);
         used_slots_.insert(slot);
+        bound_slots_ |= uint64_t{1} << slot;
+        proximity_.recorded_slots().select(bound_slots_);
         players_.emplace(id, std::move(p));
         log("world: player " + std::to_string(id) + " added");
         // Step TRL: the life this add begins.

@@ -164,8 +164,8 @@ namespace bmmo::game {
                     }
                     return value_;
                 }
-                if (!resolves || now_.scripts != key_.scripts) ++stats_.changed_scripts;
-                else if (now_.pins != key_.pins) ++stats_.changed_pins;
+                if (now_.scripts != key_.scripts) ++stats_.changed_scripts;
+                else if (!resolves || now_.pins != key_.pins) ++stats_.changed_pins;
                 else ++stats_.changed_layout;
             } else {
                 ++stats_.first;

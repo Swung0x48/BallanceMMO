@@ -219,6 +219,25 @@ namespace bmmo::session {
             request_resync("the resync state's anchor left the history", true);
             return true;
         }
+        // Step RSO: the synthetic anchor can have today's own body before
+        // the server made it.  Only its echo supplies the birth tick (not
+        // the host's birth log).  Let the new numbering reach it first:
+        // the ordinary restore's take-out/remake then stays in the re-step,
+        // rather than settle_own_due making a future birth early.
+        uint32_t own_birth = 0;
+        if (caps_.own_body_control && !config.own_births_parked && !own_out_of_sync_at(anchor)
+                && std::none_of(st.rows.begin(), st.rows.end(), [this](const auto& body) {
+                       return body.kind == body_kind::Ball && body.owner == s.own_id_;
+                   }))
+            for (const auto& life: s.own_life_)
+                if (life.what == own_life::kind::birth && life.made && !life.retired
+                        && (life.state == own_life::verdict::acked || life.state == own_life::verdict::moved)
+                        && life.entity == platform_.own_driven_entity() && own_life_current(life, now, true)
+                        && static_cast<int32_t>(life.applied - anchor) > 0) {
+                    if (static_cast<int32_t>(life.applied - now) > 0) return false;
+                    own_birth = life.applied;
+                    break;
+                }
         // 1b. Step T3 (trafo-replication design 4.7): a set for every player
         // the server's ledger names, and the rows of the pieces it has bodies
         // for at S - the reconcile below makes them when this world lacks
@@ -530,6 +549,7 @@ namespace bmmo::session {
         resync_spec spec;
         spec.scripts = std::move(localized);
         spec.rows = rows;
+        if (own_birth && !own_entity.empty()) spec.destroy[own_entity] = own_birth;
         spec.gone = trafo_gone;   // step T3
         // Step LJ1 (world-agreement gaps "As built (step H6)", shape (i)):
         // the mirrors the server's state drives from S + 1 (the block
@@ -565,7 +585,7 @@ namespace bmmo::session {
             spec.navs[entity] = nav;
             ++navs;
         }
-        uint32_t keep_local = 0, local_only = 0, destroy = 0, unattributed = 0, unexplained = 0;
+        uint32_t keep_local = 0, local_only = 0, destroy = static_cast<uint32_t>(spec.destroy.size()), unattributed = 0, unexplained = 0;
         std::string unexplained_names;
         if (const rollback_tracked* tracked = s.rollback_.recorded_tracked(anchor)) {
             for (const std::string& name: tracked->mechanisms) {

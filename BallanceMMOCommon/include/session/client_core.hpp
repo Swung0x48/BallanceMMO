@@ -2411,7 +2411,7 @@ namespace bmmo::session {
         bool own_lives_due(uint32_t tick) const;
         void live_own_lives(uint32_t frame_tick);
         void retire_own_lives();
-        void rebase_own_lives();
+        void rebase_own_lives(bool exact);
         void set_aside_unanswered(own_life::aside why);
         own_life* find_unanswered(uint32_t origin, uint8_t ball_type);
         const own_life* moved_own_life(const std::string& entity, uint32_t birth_tick) const;

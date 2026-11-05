@@ -579,6 +579,7 @@ namespace bmmo::sim {
         int64_t first_step_tick_ = -1;
         std::map<uint32_t, player> players_;
         std::set<int> used_slots_;
+        uint64_t bound_slots_ = 0;
         uint64_t join_orders_taken_ = 0;   // step M1: add_player's slot fallbacks (J2 says 0)
         bmmo::game::proximity_union proximity_;   // step G1 (game/proximity_union.hpp)
         bmmo::physics::force_alias::table force_aliases_;   // FULL step WFA (built at the anchor)

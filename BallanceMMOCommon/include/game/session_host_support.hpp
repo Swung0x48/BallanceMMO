@@ -568,7 +568,8 @@ namespace bmmo::game {
                                          std::vector<uint8_t>& out, std::string& error,
                                          bmmo::session::resync_script_report& report,
                                          const script_replay::trafo_part* trafo = nullptr,
-                                         const script_replay::portable_hold_localize* hold = nullptr) {
+                                         const script_replay::portable_hold_localize* hold = nullptr,
+                                         script_slots* slots = nullptr) {
         // `hold` (step G3): the host's union's localize_hold, passed while the
         // union is active (WORLD_PROXIMITY_UNION): the server's hold at S
         // goes into the record; without it the anchor's own hold stays.
@@ -580,7 +581,7 @@ namespace bmmo::game {
         const script_replay::keep_local_fn keep = [](const std::string& owner, const std::string& script) {
             return bmmo::session::keep_local_script(owner, script);
         };
-        const bool ok = script_replay::localize(context, sel, portable, anchor, keep, out, &error, &r, trafo, hold);
+        const bool ok = script_replay::localize(context, sel, portable, anchor, keep, out, &error, &r, trafo, hold, slots);
         report.objects_renamed = r.objects_renamed;
         report.hold = r.hold;
         report.scripts = r.scripts;

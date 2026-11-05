@@ -50,7 +50,7 @@ public:
     // collision-overhaul rooms (docs/rooms-and-sessions-protocol.md section 3)
     bool rooms_enabled = true;
     uint32_t maximum_rooms = 64;
-    uint32_t maximum_members = 8;
+    uint32_t maximum_members = 20;
     // collision-overhaul physics sessions (docs/rooms-and-sessions-protocol.md section 3)
     bool physics_enabled = false;
     std::string physics_game_root;                 // directory containing base.cmo
@@ -131,7 +131,8 @@ public:
     // physics.player_mechanisms (world-agreement-gaps-design.md 2.10, 5;
     // step Q7): session::WORLD_PLAYER_MECHANISMS - every world copies the
     // per-player mechanism units K times (K = maximum_members clamped to
-    // [1, 64]) and the server hands out join orders below K only.  Default
+    // [1, 64], default 20); only ever-bound slots enter the tick records,
+    // and the server hands out join orders below K only.  Default
     // on (with the union only: the units are placed by its rule); off is
     // the negative control and G3's single-ball rules.
     bool physics_player_mechanisms = true;

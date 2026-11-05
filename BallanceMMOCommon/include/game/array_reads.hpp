@@ -99,11 +99,6 @@
 #include <session/resync_rules.hpp>
 
 namespace bmmo::game {
-    // Step OPB: the memo's verify compares two walks' columns.
-    inline bool operator==(const written_column& a, const written_column& b) {
-        return a.array == b.array && a.column == b.column;
-    }
-
     class array_reads {
     public:
         enum class access { read, write, both };

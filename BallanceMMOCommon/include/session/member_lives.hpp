@@ -36,6 +36,14 @@ namespace bmmo::session {
         bool journaled_add = false, journaled_remove = false;
     };
 
+    inline uint64_t bound_member_slots(const std::vector<member_life>& lives, uint32_t tick) {
+        uint64_t bound = 0;
+        for (const auto& life: lives)
+            if (life.entry.join_order < 64 && (life.from == 0 || static_cast<int32_t>(tick - life.from) >= 0))
+                bound |= uint64_t{1} << life.entry.join_order;
+        return bound;
+    }
+
     inline member_life* find_member_life(std::vector<member_life>& lives, uint32_t player, uint16_t life) {
         for (auto& l: lives)
             if (l.entry.id == player && l.entry.life == life) return &l;

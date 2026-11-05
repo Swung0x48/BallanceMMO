@@ -175,7 +175,8 @@ TEST(WrittenCellsMemo, ScriptSetAndGoneBlockWalkAgain) {
     d.world.blocks.pop_back();   // a watched block gone: the probe cannot resolve
     d.get(memo);
     EXPECT_EQ(d.walks, 3);
-    EXPECT_EQ(memo.stats().changed_scripts, 2u);
+    EXPECT_EQ(memo.stats().changed_scripts, 1u);
+    EXPECT_EQ(memo.stats().changed_pins, 1u);
 }
 
 TEST(WrittenCellsMemo, VerifyCatchesForcedStaleMemo) {
@@ -207,6 +208,18 @@ TEST(WrittenCellsMemo, VerifyCatchesForcedStaleMemo) {
     on.force_value({{42, 0}});
     EXPECT_EQ(e.get(on).size(), 1u);
     EXPECT_EQ(on.stats().mismatches, 0u);
+}
+
+TEST(WrittenCellsMemo, MissingWatchedBlockCountsAsChangedPins) {
+    memo_t memo(cells_memo_mode::verify);
+    driver fixture;
+    fixture.get(memo);
+    fixture.world.blocks.erase(fixture.world.blocks.begin());
+    EXPECT_EQ(fixture.get(memo), fixture.world.walk());
+    EXPECT_EQ(memo.stats().changed_scripts, 0u);
+    EXPECT_EQ(memo.stats().changed_pins, 1u);
+    EXPECT_EQ(memo.stats().walks, 2u);
+    EXPECT_EQ(memo.stats().mismatches, 0u);
 }
 
 TEST(WrittenCellsMemo, OffWalksEveryBindAndDropForgets) {

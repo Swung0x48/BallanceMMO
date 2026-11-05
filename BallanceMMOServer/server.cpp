@@ -690,7 +690,8 @@ public:
         // reliable send instant (the instant its base was taken for: a late
         // joiner's correction), `corrected` the epochs a late joiner's
         // correction went out for; `start_repeats` the SessionStartAt copies
-        // still due, one per main-loop pass like the assignment's.
+        // still due, one per main-loop pass like the assignment's, until the
+        // member answers (step STR).
         bmmo::session::start_handshake handshake;
         std::map<bmmo::net::connection, int64_t> assign_sent_us;
         // ...and whether that assignment carried the member's instant (a
@@ -2184,7 +2185,7 @@ public:
                               s.start_repeats.end());
         s.start_repeats.push_back(physics_session_state::start_repeat{
                 c, first_tick, seq, flags, start_server_us, start_us,
-                bmmo::sim::assign_copy_schedule::after_reliable(main_pass_.load(std::memory_order_relaxed), now)});
+                bmmo::sim::assign_copy_schedule::until_answered(main_pass_.load(std::memory_order_relaxed), now)});
     }
 
     // FULL step SAXH: the start handshake's main-loop half (wall-clock
@@ -2371,6 +2372,13 @@ public:
         auto it = physics_sessions_.find(msg.session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
+        // Step STR: the member's answer to a SessionStartAt ends its copies.
+        if (msg.kind == bmmo::session::CLOCK_ACK_START || msg.kind == bmmo::session::CLOCK_ACK_STARTED)
+            for (auto& r: s.start_repeats)
+                if (r.to == c && bmmo::sim::start_copy_answered(
+                            (r.flags & (bmmo::session::START_AT_FLAG_COMMIT | bmmo::session::START_AT_FLAG_CORRECTION)) == 0,
+                            r.first_tick, r.seq, msg.kind == bmmo::session::CLOCK_ACK_STARTED, msg.first_tick, msg.seq))
+                    r.schedule.answered();
         if (msg.kind == bmmo::session::CLOCK_ACK_START_TOO_LATE) {
             const auto notice = s.notices.find(c);
             if (notice == s.notices.end() || !notice->second.assigned || notice->second.epoch != msg.first_tick

@@ -708,19 +708,25 @@ namespace bmmo::sim {
                                   + std::to_string(v3.size()) + " bytes)");
             // (5) step T2: the portable record's version 2 (the trafo part by
             // name, design 4.5/4.7) localized in the same world is record v3
-            // byte for byte; without a trafo part it stays version 1 and
+            // byte for byte (joint presence, not local joint images);
+            // without a trafo part it stays version 1 and
             // localizes to the v2 record; a version 2 record refuses a world
             // that selects no trafo scripts.
             {
+                auto portable_forces = forces;
+                portable_forces.capture_joint = nullptr;
+                std::vector<uint8_t> portable_v2, portable_v3;
+                script_replay::capture(context_, sel, portable_forces, portable_v2);
+                script_replay::capture(context_, sel, portable_forces, portable_v3, &registry_.part());
                 std::vector<uint8_t> p1, p2, l1, l2, none;
                 std::string e1, e2, e3, e4, e5;
                 const bool c1 = script_replay::capture_portable(context_, sel, forces, p1, &e1);
                 const bool c2 = script_replay::capture_portable(context_, sel, forces, p2, &e2, nullptr, &registry_.part());
                 const bool versions = c1 && c2 && p1.size() >= 8 && p2.size() >= 8 && p1[4] == 1 && p2[4] == 2;
                 const bool v3_back = script_replay::localize(context_, sel, p2, nullptr, nullptr, l2, &e3, nullptr, &registry_.part())
-                                  && l2 == v3;
+                                  && l2 == portable_v3;
                 const bool v2_back = script_replay::localize(context_, sel, p1, nullptr, nullptr, l1, &e4, nullptr, &registry_.part())
-                                  && l1 == v2;
+                                  && l1 == portable_v2;
                 const bool refused = !script_replay::localize(context_, sel, p2, nullptr, nullptr, none, &e5);
                 check(versions && v3_back && v2_back && refused,
                       "(5) portable v1 " + std::to_string(p1.size()) + " / v2 " + std::to_string(p2.size()) + " bytes; v2 localized == v3: "

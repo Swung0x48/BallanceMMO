@@ -4178,6 +4178,48 @@ namespace {
         EXPECT_EQ(checked, 7u);
     }
 
+    // CBF3 (the user's 1-a): a birth given up as missing and re-reported
+    // blocks the rows from its own stamp until the re-report is answered,
+    // not only from the re-report's later stamp.
+    TEST(SessionClientCoreJournal, ReReportedLifeBlocksRowsFromTheOriginalStamp) {
+        journal_dir dir("final_rereport");
+        flow_fake fake;
+        fake.path = dir.path / "client.bmjr";
+        session_client_core core(fake.make_flow(true), session_capabilities{});
+        bmmo::session::core_config config;
+        config.journal_final_checkpoints = true;
+        config.journal_checkpoint_ticks = 1;
+        ASSERT_FALSE(core.begin(start_message(9, 3), config).refused);
+        core.journal().open(bmmo::physics::world_hash{}, "build-x", "Me");
+        auto& state = state_of(core);
+        state.rollback_.thresholds().history_ticks = 1;
+        state.own_life_ = {own_birth(101)};
+        state.own_life_[0].state = client_core_state::own_life::verdict::missing;
+        state.own_life_[0].rereported = true;
+        state.own_life_[0].link = 104;
+        state.own_rereports_ = {own_birth(104)};
+        state.own_rereports_[0].link = 101;
+        bmmo::session::rollback_world world;
+        for (uint32_t tick = 100; tick <= 104; ++tick)
+            state.rollback_.record(world, tick, {}, {});
+        state.own_life_[0].rereported = false;
+        state.own_rereports_.clear();
+        state.rollback_.record(world, 105, {}, {});
+        core.journal().close("done");
+        bmmo::session::journal journal;
+        std::string error;
+        ASSERT_TRUE(bmmo::session::read_journal(fake.path, journal, error)) << error;
+        size_t checked = 0;
+        for (const auto& tick: journal.ticks)
+            for (const auto& checkpoint: tick.checkpoints) {
+                EXPECT_EQ(bool(checkpoint.flags & bmmo::session::JOURNAL_CHECKPOINT_UNCONFIRMED),
+                          tick.tick >= 101 && tick.tick <= 103)
+                    << "tick " << tick.tick;
+                ++checked;
+            }
+        EXPECT_EQ(checked, 5u);
+    }
+
     bmmo::session_event_msg own_echo(uint32_t applied, uint32_t origin, uint8_t state) {
         auto msg = event_message(3, bmmo::session::event_type::Physicalize, applied, origin);
         msg.state = state;
@@ -8770,6 +8812,84 @@ namespace {
         EXPECT_EQ(s.resyncs_restepped_, 1u);
     }
 
+    TEST(SessionClientCoreResync, AnOwnBirthAfterTheAnchorIsRemadeAtItsAppliedTick) {
+        for (const bool moved: {false, true})
+            for (const bool queued: {false, true}) {
+                SCOPED_TRACE(std::string(moved ? "moved" : "acked") + (queued ? ", queued echo" : ", known echo"));
+                flow_fake fake;
+                own_matrices matrices;
+                auto platform = rsx_platform(fake, matrices);
+                const auto bind = platform.bind_world;
+                platform.bind_world = [bind, &fake](const bmmo::session::core_world_hooks& hooks) {
+                    auto world = bind(hooks);
+                    world.nav_poll = [](const std::string&, bool) { return true; };
+                    world.destroy_body = [destroy = hooks.destroy_own_birth](const std::string& entity, uint32_t tick) {
+                        bool destroyed = false;
+                        return destroy && destroy(entity, tick, destroyed) && destroyed;
+                    };
+                    world.birth_from_inputs = hooks.own_birth_remade;
+                    world.set_travelling_savestate = [&fake](const bmmo::session::travelling_blob&,
+                                                              bmmo::session::savestate_outcome&) {
+                        fake.calls.push_back("server_blob");
+                        EXPECT_TRUE(fake.bodies_there.empty()) << "the server has no own row at the anchor";
+                        return true;
+                    };
+                    return world;
+                };
+                auto caps = own_replay_caps();
+                caps.own_body_control = true;
+                session_client_core core(std::move(platform), caps);
+                b1_session(core, fake, 125);
+                auto& state = state_of(core);
+                const std::string wood = "Ball_Wood";
+                fake.driven = wood;
+                state.own_physicalized_ = true;
+                state.own_body_entity_ = wood;
+                state.own_ball_entities_ = {wood};
+                fake.bodies_there = {wood};
+                auto birth = own_birth(122);
+                birth.applied = moved ? 124 : 122;
+                birth.state = queued ? client_core_state::own_life::verdict::sent
+                                    : moved ? client_core_state::own_life::verdict::moved
+                                            : client_core_state::own_life::verdict::acked;
+                state.own_life_ = {birth};
+                state.sent_inputs_[124].keys = 1;
+                if (queued) {
+                    auto echo = event_message(state.own_id_, bmmo::session::event_type::Physicalize, birth.applied, birth.origin);
+                    core.on_session_event(std::move(echo));
+                }
+                core.on_session_assign(exact_assign(9, 119));
+                steps{core}.process_own_echoes();
+                core.on_session_assign(exact_assign(9, 121));
+                EXPECT_EQ(state.sent_inputs_.count(124), 1u) << "the server kept the first numbering's frame";
+                ASSERT_EQ(state.forced_own_.count(124), 1u);
+                EXPECT_EQ(state.forced_own_.at(124).frame.keys, 1u);
+                auto msg = resync_state(121, {1});
+                msg.savestate = {1};
+                core.on_session_resync_state(std::move(msg));
+                const size_t from = fake.calls.size();
+                core.poll_resync_hold();
+                EXPECT_TRUE(state.resync_pending_) << "the known birth is still ahead of the new numbering";
+                b1_frames(core, 121, 126);
+                own_span(core, 121, 126, wood, true, 7.0, 0);
+                steps{core}.retire_own_lives();
+                core.poll_resync_hold();
+                const auto calls = since(fake.calls, from);
+                EXPECT_FALSE(state.resync_pending_);
+                EXPECT_EQ(state.resyncs_restepped_, 1u);
+                EXPECT_EQ(b1_count(calls, "unmake_own:" + wood + ":126"), 1u);
+                EXPECT_EQ(b1_count(calls, "make_own:" + wood + ":P#2:" + std::to_string(birth.applied)), 1u);
+                EXPECT_EQ(b1_count(calls, "make_own:"), 1u);
+                EXPECT_EQ(b1_count(calls, "server_blob"), 1u);
+                EXPECT_EQ(state.own_due_settled_, 0u) << "made in the re-step, never settled early";
+                EXPECT_TRUE(state.own_due_.empty());
+                bmmo_physics_body_state body{};
+                EXPECT_FALSE(state.rollback_.recorded_body_state(wood, birth.applied - 1, body));
+                EXPECT_TRUE(state.rollback_.recorded_body_state(wood, birth.applied, body));
+                EXPECT_EQ(core.rollback_stats().births_missing, 0u);
+            }
+    }
+
     TEST(SessionClientCoreResync, AnOwnLifeEndingInsideTheReStepIsMadeFromTheServersRow) {
         const std::string wood = "Ball_Wood";
         {
@@ -8931,7 +9051,9 @@ namespace {
             EXPECT_EQ(s.forced_own_.at(123).frame.keys, 13u);
             EXPECT_FALSE(s.forced_own_.at(123).count);
             EXPECT_EQ(s.resync_resent_, 5u);
-            EXPECT_TRUE(s.sent_inputs_.empty()) << "the epoch's ring starts over";
+            ASSERT_EQ(s.sent_inputs_.size(), 5u) << "first copies kept for another re-assign before their ticks";
+            EXPECT_EQ(s.sent_inputs_.begin()->first, 121u);
+            EXPECT_EQ(s.sent_inputs_.at(123).keys, 13u);
         }
     }
 
@@ -11526,6 +11648,24 @@ namespace {
             fake.bodies_there = {"Ball_Wood"};
         }
     };
+
+    TEST(SessionClientCoreForcedOwnMove, SessionAssignSetsAsideAPendingForcedMove) {
+        forced_move_fixture fixture(true);
+        auto& core = *fixture.core;
+        ASSERT_TRUE(core.force_own_move(4, 10));
+        steps{core}.report_physicalize("Ball_Wood", 122);
+        ASSERT_EQ(state_of(core).own_life_.size(), 1u);
+        ASSERT_TRUE(state_of(core).own_life_[0].force_pending);
+        core.on_session_assign(assign_message(9, 2000));
+        EXPECT_TRUE(state_of(core).own_life_.empty());
+        ASSERT_EQ(state_of(core).own_unanswered_.size(), 1u);
+        EXPECT_FALSE(state_of(core).own_unanswered_[0].force_pending);
+        const size_t before = fixture.fake.calls.size();
+        steps{core}.process_own_echoes();
+        EXPECT_EQ(count_prefix(since(fixture.fake.calls, before), "unmake_own:"), 0u);
+        EXPECT_EQ(count_prefix(since(fixture.fake.calls, before), "make_own:"), 0u);
+        EXPECT_EQ(core.forced_own_moves(), 0u);
+    }
 
     TEST(SessionClientCoreForcedOwnMove, KZeroTheAbsenceIsLiveAndTheBodyIsMadeAtTPrime) {
         for (const bool control: {false, true}) {

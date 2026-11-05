@@ -115,6 +115,7 @@ namespace bmmo::session {
         // BMMO_SCRIPT_REUSE names (on when unset).  Off: walked at every
         // capture, as before (the legacy path).
         bool record_reuse = false;
+        std::function<uint64_t(uint32_t)> bound_slots;
     };
 
     // Gap Q4's executed scripts (rollback-engine gaps design 2.2.4): every
@@ -234,13 +235,14 @@ namespace bmmo::session {
         };
         // Step OPC: the reusing capture, with the host-write generation the
         // engine compares (game/script_record_reuse.hpp).
-        if (o.record_reuse && bmmo::game::script_reuse_mode_from_env() != bmmo::game::script_reuse_mode::off) {
-            world.capture_scripts_from = [context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr, cells, cells_ptr](
+        if (hooks->slots || (o.record_reuse && bmmo::game::script_reuse_mode_from_env() != bmmo::game::script_reuse_mode::off)) {
+            world.capture_scripts_from = [o, context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr, cells, cells_ptr](
                                              std::vector<uint8_t>& out, const std::vector<uint8_t>* previous, uint32_t tick) {
+                if (hooks->slots && o.bound_slots) hooks->slots->select(o.bound_slots(tick));
                 bmmo::game::script_replay::reuse_request reuse;
                 reuse.previous = previous;
                 reuse.tick = tick;
-                reuse.mode = bmmo::game::script_reuse_mode_from_env();
+                reuse.mode = o.record_reuse ? bmmo::game::script_reuse_mode_from_env() : bmmo::game::script_reuse_mode::off;
                 return bmmo::game::script_replay::capture(context, *selection, *hooks, out, trafo, queue_ptr, hold_ptr, cells_ptr,
                                                           &reuse);
             };

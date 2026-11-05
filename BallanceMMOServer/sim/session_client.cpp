@@ -131,6 +131,9 @@ namespace {
         // version 10, --no-final-checkpoints turns it off; --final-checkpoints
         // stays accepted).
         bool final_checkpoints = true;
+        // --non-spawn-first-birth (CBF3, GHF's deferred check): the first own
+        // birth is reported as not at the spawn point (diagnostic).
+        bool non_spawn_first_birth = false;
         // --force-rollback <every>:<depth>: rewind `depth` ticks every `every`
         // ticks, with no network reason to.  Isolates how faithful a replay is
         // from everything else: in a solo session the world is a pure function
@@ -646,6 +649,7 @@ namespace {
                     at = comma + 1;
                 }
             }
+            else if (arg == "--non-spawn-first-birth") out.non_spawn_first_birth = true;
             else if (arg == "--reset-level-at" || arg == "--activate-script") {   // close-out step H1
                 if (!(v = next())) return false;
                 std::string spec = v;
@@ -1972,7 +1976,7 @@ namespace {
                     };
                 return bmmo::game::localize_session_scripts(engine_->context(), scripts_, portable, anchor, out, error, report,
                                                             trafo_on_ ? &trafo_registry_.part() : nullptr,
-                                                            core_.proximity_union_active() ? &hold : nullptr);
+                                                            core_.proximity_union_active() ? &hold : nullptr, script_hooks_.slots);
             };
             p.forget_activations_from = [this](uint32_t tick) {
                 const size_t activations = manager_activations_.forget_from(tick);
@@ -2922,7 +2926,9 @@ namespace {
             // Step Q7 (world-agreement-gaps-design.md 2.10): the per-player
             // units copied K times under WORLD_PLAYER_MECHANISMS.
             options.slots = core_.mechanism_slots();
-            const std::string error = proximity_.rewire(context, bmmo::game::probe_class::mechanism, sel, options);
+            const std::string error = proximity_.rewire(context, bmmo::game::probe_class::mechanism, sel, options, script_hooks_);
+            script_hooks_.slots = proximity_.slots() ? &proximity_.recorded_slots() : nullptr;
+            proximity_.recorded_slots().select(bmmo::session::bound_member_slots(core_.member_lives(), core_.next_tick()));
             for (const std::string& line: proximity_.lines()) logf("%s", line.c_str());
             if (!error.empty()) {
                 logf("the proximity union (world option) refused: %s", error.c_str());
@@ -3257,6 +3263,11 @@ namespace {
             const float dy = world[3][1] - reset[3][1];
             const float dz = world[3][2] - reset[3][2];
             own_pre_.spawn = (dx * dx + dy * dy + dz * dz) < 1e-6f;
+            if (args_.non_spawn_first_birth) {
+                args_.non_spawn_first_birth = false;
+                own_pre_.spawn = false;
+                logf("--non-spawn-first-birth: %s at live frame %u", name.c_str(), live_tick_serial_);
+            }
             // Step SPGH2: the own birth as seen before the block makes the
             // body, where the retail host's own_physicalized sees it; the
             // core decides whether it begins a spawn ghost life.
@@ -4626,6 +4637,7 @@ namespace {
                 so.context = engine_->context();
                 so.scripts = &scripts_;
                 so.hooks = &script_hooks_;
+                so.bound_slots = [this](uint32_t tick) { return bmmo::session::bound_member_slots(core_.member_lives(), tick); };
                 so.scripts_replayed = &scripts_replayed_;
                 so.reset_ticks = &script_reset_ticks_;
                 so.reset_skips = &script_reset_skips_;
