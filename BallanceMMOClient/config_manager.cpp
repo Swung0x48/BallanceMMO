@@ -120,8 +120,8 @@ void config_manager::init_config() {
     tmp_prop->SetComment("Record every physics session to ModLoader/BMMOJournals (inputs, events, snapshots, corrections) "
                          "so a bug seen in play can be analysed afterwards. Read when a session starts, so a change here "
                          "takes effect from the next one; \"/mmo journal on|off\" moves this same setting, and "
-                         "\"/mmo journal mark <text>\" leaves a note at the current tick.");
-    tmp_prop->SetDefaultBoolean(true);
+                         "\"/mmo journal mark <text>\" leaves a note at the current tick. Off by default.");
+    tmp_prop->SetDefaultBoolean(false);
     props_["session_journal"] = tmp_prop;
     // Step IOF: the session journal writer's flush mode (session/io_queue.hpp
     // io_flush); read with SessionJournal when a session starts.

@@ -450,7 +450,8 @@ New Year still lands on the right day). `--diff` compares two journals tick by
 tick (exit 3 on a divergence, 1 when it had nothing to compare).
 
 The client records too, which is what makes a player's report actionable: the
-BML property `Gameplay`/`SessionJournal` (on by default, read when a session
+BML property `Gameplay`/`SessionJournal` (off by default since 2026-11-04; a config that already has the
+property keeps its value; read when a session
 starts) writes the same format to `<game>/ModLoader/BMMOJournals`, keeping the
 newest 10 files. `/mmo journal status` prints the current file,
 `/mmo journal mark <text>` drops a note plus a body checkpoint at the current
