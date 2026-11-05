@@ -75,6 +75,7 @@
 #include <game/tutorial_exit.hpp>
 #include <session/bridge_recipe.hpp>
 #include <session/client_core.hpp>
+#include <session/session_clock.hpp>
 #include <session/event_hold.hpp>
 #include <session/spawn_impulse.hpp>
 
@@ -4180,15 +4181,14 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         std::string copy = bytes;   // client::send takes a mutable buffer
         send(copy.data(), copy.size(), flags);
     };
-    p.now = [](bs::clock_site) { return clock_type::now(); };
+    // Step K1: the core's reads through the one clock entry, by site (the host's own
+    // direct reads move there with step K7).
+    p.now = [](bs::clock_site site) { return bs::real_session_clock().now(site); };
     p.log = [this](bs::log_level level, const std::string& text) {
         if (level == bs::log_level::warn) logger_->Warn("%s", text.c_str());
         else logger_->Info("%s", text.c_str());
     };
-    p.utc_ms = [](bs::clock_site) {
-        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
-    };
+    p.utc_ms = [](bs::clock_site site) { return bs::real_session_clock().utc_ms(site); };
 
     // ---- reading the world ----
     p.body_state = [this](const std::string& entity, bmmo_physics_body_state& out) {

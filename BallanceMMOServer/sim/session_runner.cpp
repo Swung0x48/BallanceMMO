@@ -32,13 +32,11 @@ namespace bmmo::sim {
         }
 
         // session_<id>_level<N>_<UTC yyyymmddhhmmss>.bmjs.  The same instant
-        // goes into the header as utc_ms: file name and wall clock must agree,
-        // or a journal cannot be lined up with a player's "it broke at 21:37".
-        std::string journal_file_name(uint32_t session, int level, uint64_t& utc_ms) {
-            const auto now = std::chrono::system_clock::now();
-            utc_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now.time_since_epoch()).count());
-            const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+        // (utc_ms, the clock's runner_journal_utc read) goes into the header:
+        // file name and wall clock must agree, or a journal cannot be lined up
+        // with a player's "it broke at 21:37".
+        std::string journal_file_name(uint32_t session, int level, uint64_t utc_ms) {
+            const std::time_t seconds = static_cast<std::time_t>(utc_ms / 1000);
             std::tm parts{};
 #ifdef _WIN32
             gmtime_s(&parts, &seconds);
@@ -108,7 +106,8 @@ namespace bmmo::sim {
     }
 
     session_runner::session_runner(runner_config config, session_callbacks callbacks)
-        : config_(std::move(config)), callbacks_(std::move(callbacks)) {
+        : config_(std::move(config)), callbacks_(std::move(callbacks)),
+          clock_(config_.clock ? config_.clock : &bmmo::session::real_session_clock()) {
         debug_stalls_ = parse_session_stalls(std::getenv("BMMO_SESSION_STALL"));
         for (const auto& [tick, ms]: debug_stalls_)
             log("debug: BMMO_SESSION_STALL holds the step of tick " + std::to_string(tick) + " for " + std::to_string(ms)
@@ -176,7 +175,7 @@ namespace bmmo::sim {
         // (FULL step SAXH: a scheduled start's view starts at its instant,
         // which may still be ahead.)
         const auto elapsed = std::max<long long>(
-                0, std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - it->second.start).count());
+                0, std::chrono::duration_cast<std::chrono::microseconds>(clock_->now(bmmo::session::clock_site::runner_handshake_elapsed) - it->second.start).count());
         // the tick the server reaches now, plus a second so the joiner's
         // first inputs arrive in time
         return it->second.first_tick + static_cast<uint32_t>(elapsed * 66 / 1000000) + 66;
@@ -195,7 +194,7 @@ namespace bmmo::sim {
             if (!v.scheduled) return v.next_tick + lead;
             first_tick = v.first_tick;
             next_tick = v.next_tick;
-            p = bmmo::sim::reanchor_on_schedule_parts(v.schedule_start, v.first_tick, v.clock_fault.nominal_time(clock::now()), lead, v.next_tick,
+            p = bmmo::sim::reanchor_on_schedule_parts(v.schedule_start, v.first_tick, v.clock_fault.nominal_time(clock_->now(bmmo::session::clock_site::runner_reanchor)), lead, v.next_tick,
                                                       margin);
         }
         // Step DX9 (H3's harness item): the rule's parts in the server's log,
@@ -227,7 +226,7 @@ namespace bmmo::sim {
         // the members keep the wall-clock lead the base gives them.
         // FULL step SAXH: from the start instant the handshake fixed instead
         // of now (the members' frames are scheduled from the same instant).
-        const auto now = s.start_scheduled ? s.start_origin : clock::now();
+        const auto now = s.start_scheduled ? s.start_origin : clock_->now(bmmo::session::clock_site::runner_schedule_origin);
         const auto schedule_start = now + std::chrono::duration_cast<clock::duration>(
                 std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0));
         s.scheduler.start(schedule_start, s.world->tick_index(), s.input_delay);
@@ -291,8 +290,9 @@ namespace bmmo::sim {
         header.world_options = s.world_options;
         header.anchor_placement = anchor_placement;   // journal v6 (sector placement step S5)
         header.mechanism_slots = s.mechanism_slots;   // journal v8 (world agreement step Q7)
+        header.utc_ms = clock_->utc_ms(bmmo::session::clock_site::runner_journal_utc);
         const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
-        s.journal_start = clock::now();
+        s.journal_start = clock_->now(bmmo::session::clock_site::runner_journal_start);
         std::string error;
         if (!s.journal.open(path, header, config_.journal_max_bytes, error, std::move(poster),
                             bmmo::session::kJournalMaxQueued, config_.journal_flush, {},
@@ -628,7 +628,7 @@ namespace bmmo::sim {
                     lifecycle_event death;
                     death.type = bmmo::session::event_type::Unphysicalize;
                     death.tick = gone.applied;
-                    pending_event pe{player, gone.origin, gone.applied, std::move(death), clock::now()};
+                    pending_event pe{player, gone.origin, gone.applied, std::move(death), clock_->now(bmmo::session::clock_site::runner_leaver_event)};
                     auto pos = std::upper_bound(s.events.begin(), s.events.end(), gone.applied,
                         [](uint32_t t, const pending_event& e) { return static_cast<int32_t>(t - e.applied) < 0; });
                     s.events.insert(pos, std::move(pe));
@@ -644,7 +644,7 @@ namespace bmmo::sim {
                         a.origin = gone.origin;
                         a.applied = gone.applied;
                         a.type = bmmo::session::event_type::Unphysicalize;
-                        a.intake = clock::now();
+                        a.intake = clock_->now(bmmo::session::clock_site::runner_leaver_intake);
                         a.life = life_of(s, player);
                         callbacks_.on_event_accepted(a);
                     }
@@ -660,7 +660,7 @@ namespace bmmo::sim {
                     // Step TRL: the leaving life's set (a rejoin, added at
                     // this life's removal, is another life with its own).
                     for (const auto& d: s.trafo.leaver(player, life_of(s, player), F))
-                        queue_trafo(s, d, none, clock::now(), 0, "leaver");
+                        queue_trafo(s, d, none, clock_->now(bmmo::session::clock_site::runner_leaver_trafo), 0, "leaver");
                 }
                 if (bmmo::session::leaver_stays(has_ball, queued)) {
                     auto& leaving = s.leaving[player];
@@ -774,7 +774,7 @@ namespace bmmo::sim {
             if (s == sessions_.end()) return;
             const auto p = s->second->arrivals.find(player);
             if (p == s->second->arrivals.end() || !s->second->running) return;
-            p->second.baseline.settled(epoch, clock::now());
+            p->second.baseline.settled(epoch, clock_->now(bmmo::session::clock_site::runner_baseline_settled));
         });
     }
 
@@ -795,7 +795,7 @@ namespace bmmo::sim {
             }
             s.start_scheduled = true;
             s.start_origin = origin;
-            const auto ahead = std::chrono::duration_cast<std::chrono::milliseconds>(origin - clock::now()).count();
+            const auto ahead = std::chrono::duration_cast<std::chrono::milliseconds>(origin - clock_->now(bmmo::session::clock_site::runner_start_ahead)).count();
             if (s.players.empty()
                     || !std::includes(s.ready.begin(), s.ready.end(), s.players.begin(), s.players.end())) {
                 log("[session " + std::to_string(session) + "] start instant set (" + std::to_string(ahead)
@@ -868,7 +868,7 @@ namespace bmmo::sim {
     void session_runner::submit_input(uint32_t session, uint32_t player, uint32_t first_tick,
                                       std::vector<bmmo::session::input_frame> frames, clock::time_point arrival) {
         post([this, session, player, first_tick, arrival, frames = std::move(frames)] {
-            const auto seen = clock::now();
+            const auto seen = clock_->now(bmmo::session::clock_site::runner_input_seen);
             auto it = sessions_.find(session);
             if (it == sessions_.end()) return;
             auto& s = *it->second;
@@ -942,7 +942,7 @@ namespace bmmo::sim {
 
     void session_runner::submit_event(uint32_t session, uint32_t player, uint32_t tick, lifecycle_event event,
                                       uint64_t token) {
-        const auto arrival = clock::now();
+        const auto arrival = clock_->now(bmmo::session::clock_site::runner_event_arrival);
         post([this, session, player, tick, arrival, token, event = std::move(event)]() mutable {
             // Not taken: the server still lets go of the message it parked.
             const auto dropped = [&] {
@@ -1351,7 +1351,7 @@ namespace bmmo::sim {
         auto cutoff = clock::time_point::max();
         if (s.scheduler.started() && tick >= s.scheduler.first_tick()) {
             const auto deadline = s.scheduler.deadline(tick);
-            if (clock::now() - deadline > bmmo::session::kTickDuration) cutoff = deadline;
+            if (clock_->now(bmmo::session::clock_site::runner_cutoff) - deadline > bmmo::session::kTickDuration) cutoff = deadline;
         }
         std::vector<bmmo::session::applied_input> applied;
         applied.reserve(s.inputs.size());
@@ -1535,7 +1535,7 @@ namespace bmmo::sim {
             // record; a replay reports those as not compared instead of failing.
             if (bmmo::physics::capture_world_hash(s.world->physics(), hash, hash_error))
                 s.journal.tick(tick, hash, static_cast<uint32_t>(
-                        std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - s.journal_start).count()));
+                        std::chrono::duration_cast<std::chrono::milliseconds>(clock_->now(bmmo::session::clock_site::runner_journal_ms) - s.journal_start).count()));
         }
         s.scheduler.advance();
         // Trafo-replication design 2.2, the deadline (decision 9.6): after
@@ -1546,7 +1546,7 @@ namespace bmmo::sim {
         if (s.trafo_on()) {
             const float none[3] = {};
             for (const auto& d: s.trafo.deadline(s.world->tick_index(), s.sector_lead))
-                queue_trafo(s, d, none, clock::now(), 0, "deadline");
+                queue_trafo(s, d, none, clock_->now(bmmo::session::clock_site::runner_deadline_trafo), 0, "deadline");
         }
         const bool changed = s.world->body_set_changed();
         const int decision = s.cadence.decide(tick, changed);
@@ -1976,7 +1976,7 @@ namespace bmmo::sim {
             lk.unlock();
 
             auto sleep_for = std::chrono::milliseconds(20);
-            const auto now = clock::now();
+            const auto now = clock_->now(bmmo::session::clock_site::runner_pass);
             // Step B2SX (the trial's server stall, the user's option (b)):
             // before each step the queue is drained, so the frames the
             // network thread received while a step (or a stall) held this
@@ -2022,7 +2022,7 @@ namespace bmmo::sim {
                     // With patience off this is the rule the runner always had:
                     // every buffer has its frame, or the deadline passed.
                     const auto members = patience_members(s, tick);
-                    const auto at = clock::now();
+                    const auto at = clock_->now(bmmo::session::clock_site::runner_skew_start);
                     for (auto& [player, entry]: s.arrivals)
                         if (entry.baseline.timeout(tick, at))
                             log("[session " + std::to_string(s.id) + "] S1 quorum player=" + std::to_string(player)
@@ -2116,7 +2116,7 @@ namespace bmmo::sim {
                             }
                         step(s);
                         observe_quorum(s, tick, observed, at);
-                        observe_relative(s, tick, clock::now());
+                        observe_relative(s, tick, clock_->now(bmmo::session::clock_site::runner_step_observed));
                         s.step_waits.clear();
                         s.step_us.push_back(static_cast<uint32_t>(
                             std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count()));
@@ -2142,7 +2142,7 @@ namespace bmmo::sim {
                 auto& s = *sp;
                 publish_state(s);
                 if (s.running) {
-                    auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(s.scheduler.until_due(clock::now()));
+                    auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(s.scheduler.until_due(clock_->now(bmmo::session::clock_site::runner_until_due)));
                     if (patience_wait) wait = std::min(wait, patience_sleep);
                     sleep_for = std::min(sleep_for, std::max(std::chrono::milliseconds(1), wait));
                 }

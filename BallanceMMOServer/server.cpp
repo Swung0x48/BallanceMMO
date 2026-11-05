@@ -28,6 +28,7 @@
 #include <session/io_pool.hpp>   // the session journals' pool (step SIO) and the log's (step IOX)
 #if BMMO_BUILD_SIM
 #include "sim/session_runner.hpp"
+#include <session/session_clock.hpp>
 #include "sim/crash_report.hpp"
 #include "sim/late_tick.hpp"
 #include "sim/assign_copies.hpp"
@@ -50,6 +51,11 @@ public:
     explicit server(uint16_t port) {
         port_ = port;
     }
+
+    // Every clock read that decides something (step K1, docs/canned-tests-plan.md 3.1 C1): the
+    // network thread's here, the runner's through runner_config::clock.  The step-cost
+    // timers and the log stamps read the real clock themselves.
+    bmmo::session::session_clock& clock_ = bmmo::session::real_session_clock();
 
     // --hold-member-ms MS (world-agreement design 7.3 J3, step M0; test
     // builds only, BMMO_SERVER_TEST_FLAGS): the SessionMember message of
@@ -78,7 +84,7 @@ public:
     // loop through state_mutex_.
     void run() override {
         while (running_) {
-            auto update_begin = std::chrono::steady_clock::now();
+            auto update_begin = clock_.now(bmmo::session::clock_site::server_loop_pass);
             update();
             if (ticking_) {
                 std::this_thread::sleep_until(update_begin + bmmo::SERVER_TICK_DELAY);
@@ -948,6 +954,7 @@ public:
         }
         for (const auto& f: bmmo::session::scan_custom_maps(custom_maps_dir_, &custom_map_md5s_))
             Printf("Physics sessions: custom map %s (md5 %s).", f.path.string(), bmmo::md5::to_hex(f.md5));
+        rc.clock = &clock_;
         runner_ = std::make_unique<bmmo::sim::session_runner>(rc, callbacks);
         Printf("Physics sessions enabled (game root %s, input delay >= %u ticks (per session, from ping), "
                "snapshot interval %u, full every %u, journal %s, patience %s, lead adjust %s).",
@@ -1154,7 +1161,7 @@ public:
         const uint32_t sector_lead = s.sector_lead;
         const uint32_t world_options = s.world_options;
         const uint8_t mechanism_slots = s.mechanism_slots;
-        s.boot_requested = std::chrono::steady_clock::now();
+        s.boot_requested = clock_.now(bmmo::session::clock_site::server_boot_requested);
         physics_sessions_.emplace(id, std::move(s));
         // The world is numbered from the same base its members are (design 9.25
         // phase alignment): its first simulated tick is `start_base`, so the
@@ -1282,7 +1289,7 @@ public:
                test_hold_member_ms() ? Sprintf(" (held %u ms)", test_hold_member_ms()).c_str() : "");
         if (to.empty()) return;
         if (test_hold_member_ms() > 0) {
-            s.held_members.push_back({std::chrono::steady_clock::now() + std::chrono::milliseconds(test_hold_member_ms()),
+            s.held_members.push_back({clock_.now(bmmo::session::clock_site::server_hold_member) + std::chrono::milliseconds(test_hold_member_ms()),
                                       std::move(to), std::move(bytes)});
             return;
         }
@@ -1385,7 +1392,7 @@ public:
         static constexpr const char* kPhases[] = {"booting the game", "entering the level", "preparing the world"};
         Printf("Physics session %u: boot phase %u (%s) at %.3f s, sent to %zu players.", session,
                static_cast<unsigned>(phase), kPhases[static_cast<size_t>(phase)],
-               std::chrono::duration<double>(std::chrono::steady_clock::now() - s.boot_requested).count(),
+               std::chrono::duration<double>(clock_.now(bmmo::session::clock_site::server_boot_log) - s.boot_requested).count(),
                s.members.size());
     }
 
@@ -1414,10 +1421,10 @@ public:
         // The barrier starts now: from here on check_start_barriers() will drop
         // members that never answer with SessionReady once the window is up.
         s.start_barrier_armed = true;
-        s.start_deadline = std::chrono::steady_clock::now() + bmmo::sim::kStartBarrierTimeout;
+        s.start_deadline = clock_.now(bmmo::session::clock_site::server_start_deadline) + bmmo::sim::kStartBarrierTimeout;
         Printf("Physics session %u: world ready %.3f s after the boot request (anchor %016llx, placement %016llx), "
                "SessionStart sent to %zu players.", s.id,
-               std::chrono::duration<double>(std::chrono::steady_clock::now() - s.boot_requested).count(),
+               std::chrono::duration<double>(clock_.now(bmmo::session::clock_site::server_boot_log) - s.boot_requested).count(),
                static_cast<unsigned long long>(s.anchor_hash), static_cast<unsigned long long>(s.anchor_placement),
                s.members.size());
     }
@@ -1802,7 +1809,7 @@ public:
             // shares the deadline already running.
             if (!s.start_barrier_armed) {
                 s.start_barrier_armed = true;
-                s.start_deadline = std::chrono::steady_clock::now() + bmmo::sim::kStartBarrierTimeout;
+                s.start_deadline = clock_.now(bmmo::session::clock_site::server_start_deadline_join) + bmmo::sim::kStartBarrierTimeout;
             }
         }
         Printf("Physics session %u: %s joined%s (life %u, join order %u).", s.id, get_client_name(c),
@@ -1950,7 +1957,7 @@ public:
     // gets no extra commands and wakes exactly when it did before.
     void post_player_rtts() {
         if (!runner_ || !config_.physics_lead_adjust) return;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now(bmmo::session::clock_site::server_rtt_post);
         if (now < next_rtt_post_) return;
         next_rtt_post_ = now + std::chrono::seconds(1);
         for (auto& [id, s]: physics_sessions_)
@@ -2000,7 +2007,7 @@ public:
         send(c, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
         retire_lead_repeats(s, c);
         s.lead_repeats.push_back(physics_session_state::lead_repeat{
-            c, notice.id, msg.raw.str(), kLeadRepeats, std::chrono::steady_clock::now() + kLeadRepeatSpacing});
+            c, notice.id, msg.raw.str(), kLeadRepeats, clock_.now(bmmo::session::clock_site::server_lead_repeat) + kLeadRepeatSpacing});
         lead->second.outstanding = notice.id;
         lead->second.outstanding_k = notice.k;
         Printf("Physics session %u: SessionLead %u to %s: %+d ticks, held [%u, %u), base %u.", s.id, notice.id,
@@ -2064,7 +2071,7 @@ public:
         return std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count();
     }
     void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick, uint8_t flags = 0) {
-        const auto sent = std::chrono::steady_clock::now();
+        const auto sent = clock_.now(bmmo::session::clock_site::server_assign_sent);
         s.guards[c].named = false;   // a new numbering clears the client's mechanism registry
         bmmo::session_assign_msg assign;
         assign.session = s.id;
@@ -2092,7 +2099,7 @@ public:
         s.assign_repeats.push_back(physics_session_state::assign_repeat{
             c, first_tick,
             bmmo::sim::assign_copy_schedule::after_reliable(main_pass_.load(std::memory_order_relaxed),
-                                                            std::chrono::steady_clock::now()),
+                                                            clock_.now(bmmo::session::clock_site::server_assign_copy)),
             flags, assign.start_us});
         s.assigned.insert(c);
         // A SessionLead of the previous base is void (the client drops it by
@@ -2135,7 +2142,7 @@ public:
                 ++sent;
             }
         if (sent && s.handshake.current_phase() == bmmo::session::start_handshake::phase::idle) {
-            s.handshake.begin(steady_us(std::chrono::steady_clock::now()));
+            s.handshake.begin(steady_us(clock_.now(bmmo::session::clock_site::server_handshake_begin)));
             Printf("Physics session %u: start handshake: the start base %u went to %zu member(s); waiting for every "
                    "member to confirm it (clock samples).", s.id, s.start_tick_base, sent);
         }
@@ -2190,7 +2197,7 @@ public:
         msg.flags = flags;
         msg.start_server_us = start_server_us;
         msg.start_us = start_us;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now(bmmo::session::clock_site::server_start_at_sent);
         msg.server_us = steady_us(now);
         msg.serialize();
         send(c, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_ReliableNoNagle);
@@ -2207,7 +2214,7 @@ public:
     // postponements, the refusals and the players' status lines.
     void check_start_handshakes() {
         if (!runner_) return;
-        const auto now_tp = std::chrono::steady_clock::now();
+        const auto now_tp = clock_.now(bmmo::session::clock_site::server_handshake_check);
         const int64_t now = steady_us(now_tp);
         std::vector<std::pair<uint32_t, HSteamNetConnection>> refused;   // session, member
         for (auto& [id, s]: physics_sessions_) {
@@ -2397,7 +2404,7 @@ public:
             physics_session_member_left(c);
             return;
         }
-        auto arrival = std::chrono::steady_clock::now();
+        auto arrival = clock_.now(bmmo::session::clock_site::server_input_arrival);
         constexpr SteamNetworkingMicroseconds kMaxAge = 10000000;
         const SteamNetworkingMicroseconds age = SteamNetworkingUtils()->GetLocalTimestamp() - received;
         if (received > 0 && age > 0)
@@ -2459,7 +2466,7 @@ public:
     // loop rather than a tick, so a session with one member left (the
     // leaver's Unphysicalize) still gets them.
     void send_assign_repeats() {
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now(bmmo::session::clock_site::server_assign_repeats);
         for (auto& [id, s]: physics_sessions_) {
             // --hold-member-ms (step M1, test builds): a held SessionMember
             // leaves once its time is up, then repeats like any event.
@@ -2519,7 +2526,7 @@ public:
 
     void check_start_barriers() {
         if (!runner_) return;
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now(bmmo::session::clock_site::server_start_barrier);
         std::vector<uint32_t> all_silent;
         std::vector<std::pair<uint32_t, HSteamNetConnection>> dropped;   // session, member
         for (auto& [id, s]: physics_sessions_) {
@@ -2841,7 +2848,7 @@ public:
         const HSteamNetConnection c = client_it->first;
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
-        auto arrival = std::chrono::steady_clock::now();
+        auto arrival = clock_.now(bmmo::session::clock_site::server_event_arrival);
         constexpr SteamNetworkingMicroseconds kMaxAge = 10000000;
         const SteamNetworkingMicroseconds age = SteamNetworkingUtils()->GetLocalTimestamp() - received;
         if (received > 0 && age > 0)
@@ -2894,7 +2901,7 @@ public:
         const auto intake = bmmo::session::event_intake_admit(
                 s.events_seen, bmmo::session::lifecycle_key_of(msg, c),
                 msg.type != bmmo::session::event_type::BodyRevived, guard.events_in_window, guard.window_start,
-                std::chrono::steady_clock::now(), rate_limit);
+                clock_.now(bmmo::session::clock_site::server_event_rate), rate_limit);
         if (intake == bmmo::session::event_intake::duplicate) {
             ++s.duplicate_events;
             return;
@@ -3215,7 +3222,7 @@ public:
         const size_t recipients = to.size();
         send_copies(s, bytes, std::move(to));
         const auto delay_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - a.intake).count();
+                clock_.now(bmmo::session::clock_site::server_event_relay_delay) - a.intake).count();
         // Step F3 (LCM): the arrival margin goes last, after the flag word,
         // so the existing readers' pattern (arena_map_test.py RE_S5) still
         // matches the line as it was.
@@ -4721,8 +4728,7 @@ protected:
             ping_msg.serialize();
             ping_data_counter_ = 0;
             broadcast_message(ping_msg.raw.str().data(), ping_msg.size(), k_nSteamNetworkingSend_Reliable);
-            using namespace std::chrono;
-            const int64_t now_micros = duration_cast<microseconds>(system_clock::now().time_since_epoch()).count();
+            const int64_t now_micros = clock_.utc_us(bmmo::session::clock_site::server_time_broadcast);
             broadcast_message(bmmo::real_world_timestamp_msg{.content = now_micros}, k_nSteamNetworkingSend_ReliableNoNagle);
         }
     };

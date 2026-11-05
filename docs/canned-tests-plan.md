@@ -175,6 +175,19 @@ C4 / C7 (timing) the LBM arms.
 
 K1-K6 and K8 are shared by every stage; K7 serves stage 3 only and can wait for the user's call on stage 3.
 
+As built (K1): `session/session_clock.hpp` (`session_clock`: `now(site)`, `utc_us(site)`, `utc_ms(site)`;
+`real_clock`, `real_session_clock()`); the server's 39 sites appended to `clock_site` (server_*, runner_*);
+`server::clock_` reaches the runner through `runner_config::clock`; every deciding read of server.cpp and
+session_runner.cpp goes through it, the journal's file name and utc_ms included (one read); the headless
+wall_now / wall_utc_ms read their live value through it; the retail `p.now` / `p.utc_ms` pass their site to
+it. The capture's free-site mask is a `std::bitset<256>` (the site is a u8 in the file; it was one uint64_t).
+Left on the real clock on purpose: the runner's step-cost timers, the headless frame-time histogram, the log
+and display stamps (login time, uptime); left for later steps: GNS's own clock (K2: the transport turns
+`m_usecTimeReceived` into a C1 time), the login uuid's seed (K5), the retail host's own reads (K7).
+Checked offline: 794/794 unit tests; the wire check of core_ref_s16 with `--no-final-checkpoints` ALL SAME
+(44 send traces, 45 journals identical); x64 and x86 build. The live smoke run (h1_150 against this tree's
+Arch server) is held while another session's timing runs use the machine.
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |

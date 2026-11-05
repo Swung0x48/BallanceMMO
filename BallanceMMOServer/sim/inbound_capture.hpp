@@ -23,6 +23,7 @@
 // site, a pass with a different step count) is a divergence and stops the
 // replay at once, naming the record.
 
+#include <bitset>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -170,9 +171,9 @@ namespace bmmo::sim {
         // rule, another build's clock reads): the rewind cost's reads
         // (rewind_*) decide nothing but the cap.  Off by default: every read
         // is taken in order.
-        static_assert(static_cast<size_t>(wall_site::count_) <= 64, "the free-site mask is one uint64_t");
-        void set_free(wall_site site) { free_ |= uint64_t(1) << static_cast<unsigned>(site); }
-        bool is_free(wall_site site) const { return (free_ >> static_cast<unsigned>(site)) & 1u; }
+        static_assert(static_cast<size_t>(wall_site::count_) <= 256, "a site is a u8 in the file");
+        void set_free(wall_site site) { free_.set(static_cast<size_t>(site)); }
+        bool is_free(wall_site site) const { return free_.test(static_cast<size_t>(site)); }
         uint64_t free_skipped() const { return free_skipped_; }
 
         // The next record's tag; tag::end at the end of the data too.
@@ -269,13 +270,13 @@ namespace bmmo::sim {
         // site, i64).
         size_t next_pos() const {
             size_t at = pos_;
-            while (free_ && at + 10 <= data_.size() && static_cast<tag>(data_[at]) == tag::clock
+            while (free_.any() && at + 10 <= data_.size() && static_cast<tag>(data_[at]) == tag::clock
                    && is_free(static_cast<wall_site>(data_[at + 1])))
                 at += 10;
             return at;
         }
         void skip_free() {
-            while (free_ && pos_ + 10 <= data_.size() && static_cast<tag>(data_[pos_]) == tag::clock
+            while (free_.any() && pos_ + 10 <= data_.size() && static_cast<tag>(data_[pos_]) == tag::clock
                    && is_free(static_cast<wall_site>(data_[pos_ + 1]))) {
                 pos_ += 10;
                 ++free_skipped_;
@@ -354,7 +355,7 @@ namespace bmmo::sim {
         std::vector<uint8_t> data_;
         size_t pos_ = 0;
         uint64_t records_ = 0;
-        uint64_t free_ = 0;            // set_free's sites, one bit each
+        std::bitset<256> free_;        // set_free's sites, one bit each
         uint64_t free_skipped_ = 0;    // captured reads at a free site passed over
         uint64_t messages_ = 0;
         std::string command_line_;

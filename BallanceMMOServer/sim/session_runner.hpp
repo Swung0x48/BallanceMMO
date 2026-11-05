@@ -32,6 +32,7 @@
 #include <session/lateness.hpp>
 #include <session/lead.hpp>
 #include <session/lifecycle.hpp>
+#include <session/session_clock.hpp>
 #include <session/timeline.hpp>
 #include <session/trafo_input.hpp>
 
@@ -46,6 +47,9 @@ namespace bmmo::sim {
         uint32_t full_snapshot_interval = 66;
         uint32_t max_catch_up_ticks = 10;   // ticks simulated per loop when behind
         int seed = 1;
+        // Every clock read of the runner that decides something (step K1); null:
+        // the real clock.  The step-cost timers read the real clock themselves.
+        bmmo::session::session_clock* clock = nullptr;
         // The session black box (design 9.15): every input the world consumed
         // goes to <journal_dir>/session_<id>_level<N>_<UTC>.bmjs, so a bug that
         // only happens in a live room can be replayed offline bit for bit.
@@ -700,6 +704,7 @@ namespace bmmo::sim {
 
         runner_config config_;
         session_callbacks callbacks_;
+        bmmo::session::session_clock* clock_;   // config_.clock, or the real clock
         std::thread thread_;
         std::mutex mutex_;
         std::condition_variable wake_;

@@ -59,6 +59,7 @@
 #include <physics/physics_savestate.hpp>
 #include <physics/physics_direct.hpp>
 #include <session/client_core.hpp>
+#include <session/session_clock.hpp>
 #include <session/event_hold.hpp>
 #include <session/rollback_binding.hpp>
 #include <session/rollback_binding_scripts.hpp>
@@ -2335,19 +2336,19 @@ namespace {
         }
 
         // ------------------------------------------------- inbound capture
-        // The wall clock as the session flow reads it: the live clock, written
-        // to the capture by `site` when capturing; the captured value when
-        // replaying (a read at another site than the capture's next one is a
-        // divergence).
+        // The wall clock as the session flow reads it: the live clock (clock_,
+        // step K1), written to the capture by `site` when capturing; the
+        // captured value when replaying (a read at another site than the
+        // capture's next one is a divergence).
         clock_type::time_point wall_now(bmmo::sim::wall_site site) {
-            if (inbound_.replaying() && inbound_.is_free(site)) return clock_type::now();
+            if (inbound_.replaying() && inbound_.is_free(site)) return clock_.now(site);
             if (inbound_.replaying()) {
                 int64_t value = 0;
                 std::string error;
                 if (!inbound_.take_clock(site, value, error)) inbound_diverged(error);
                 return clock_type::time_point(clock_type::duration(value));
             }
-            const auto now = clock_type::now();
+            const auto now = clock_.now(site);
             if (inbound_.capturing()) inbound_.clock(site, static_cast<int64_t>(now.time_since_epoch().count()));
             return now;
         }
@@ -2361,8 +2362,7 @@ namespace {
                 if (!inbound_.take_clock(site, value, error)) inbound_diverged(error);
                 return static_cast<uint64_t>(value);
             }
-            const auto ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
+            const auto ms = clock_.utc_ms(site);
             if (inbound_.capturing()) inbound_.clock(site, static_cast<int64_t>(ms));
             return ms;
         }
@@ -4956,6 +4956,9 @@ namespace {
         // so far - the frame index of every captured record - and a replay
         // that ended with records left.
         bmmo::sim::inbound_capture inbound_;
+        // The live clock wall_now / wall_utc_ms read (step K1); the frame-time
+        // histogram reads the real clock itself.
+        bmmo::session::session_clock& clock_ = bmmo::session::real_session_clock();
         uint64_t flow_pass_ = 0;
         uint64_t flow_steps_ = 0;
         bool inbound_failed_ = false;
