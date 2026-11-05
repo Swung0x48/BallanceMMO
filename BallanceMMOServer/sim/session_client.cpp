@@ -2286,7 +2286,8 @@ namespace {
                 outside_force_blocks_.clear();
                 for (CK_ID id: bmmo::game::outside_force_blocks(engine_->context()))
                     outside_force_blocks_.push_back(static_cast<uint32_t>(id));
-                logf("navigation keys known at tick %u (%zu leaves)", tick, graph.leaves.size());
+                logf("navigation keys known at tick %u (%zu leaves; camera keys %d / %d%s)", tick, graph.leaves.size(),
+                     graph.camera_rotation_key, graph.camera_up_key, graph.camera_keys_from_options ? "" : ", the defaults");
                 install_physicalize_hook();
                 return true;
             };
@@ -4051,7 +4052,8 @@ namespace {
         bmmo::session::input_observation observe_input() {
             bmmo::session::input_observation seen;
             CKContext* context = engine_->context();
-            if (navigation_known_ && frame_keyboard_) seen.keys = navigation_.keys_from_state(frame_keyboard_);
+            if (navigation_known_ && frame_keyboard_)
+                seen.keys = navigation_.keys_from_state(frame_keyboard_) | navigation_.camera_bits_from_state(frame_keyboard_);
             if (auto* orient = CK3dEntity::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>("Cam_OrientRef"), CKCID_3DENTITY, nullptr))) {
                 const VxMatrix& m = orient->GetWorldMatrix();
                 for (int r = 0; r < 3; ++r)

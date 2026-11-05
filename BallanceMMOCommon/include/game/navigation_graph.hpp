@@ -34,6 +34,7 @@
 #include "CKAll.h"
 
 #include "menu_driver.hpp"
+#include "../entity/session.hpp"
 
 namespace bmmo::game {
     struct navigation_leaf {
@@ -51,6 +52,12 @@ namespace bmmo::game {
         CK_ID ball_navigation = 0;            // the "Ball Navigation" behavior
         CK_ID direction_ref = 0;              // Cam_OrientRef (Direction Ref of the leaves)
         CK_ID wake_up_block = 0;              // the shared "Physics WakeUp" block
+        // The camera's keys as the game's options set them (the "Keys"
+        // array's rotation and camup columns, row 0; Shift and Space when it
+        // does not say): input_frame's KEY_SHIFT and KEY_SPACE.
+        int camera_rotation_key = CKKEY_LSHIFT;
+        int camera_up_key = CKKEY_SPACE;
+        bool camera_keys_from_options = false;
         std::string error;
 
         bool valid() const { return error.empty() && !leaves.empty(); }
@@ -61,6 +68,17 @@ namespace bmmo::game {
             for (const auto& leaf: leaves)
                 if (leaf.key >= 0 && leaf.key < 256 && (state[leaf.key] & 1) && leaf.index < 8)
                     mask |= static_cast<uint8_t>(1u << leaf.index);
+            return mask;
+        }
+        // KEY_SHIFT / KEY_SPACE: the camera's turn and raise keys down in
+        // the same state.  Nothing in a world reads them (the leaves drive
+        // the ball; the camera's rows are the frame's): they are the
+        // player's keys, recorded (a recipe replays them).
+        uint8_t camera_bits_from_state(const unsigned char* state) const {
+            uint8_t mask = 0;
+            if (camera_rotation_key > 0 && camera_rotation_key < 256 && (state[camera_rotation_key] & 1))
+                mask |= bmmo::session::KEY_SHIFT;
+            if (camera_up_key > 0 && camera_up_key < 256 && (state[camera_up_key] & 1)) mask |= bmmo::session::KEY_SPACE;
             return mask;
         }
     };
@@ -131,6 +149,16 @@ namespace bmmo::game {
         std::sort(out.leaves.begin(), out.leaves.end(),
                   [](const navigation_leaf& a, const navigation_leaf& b) { return a.key_order < b.key_order; });
         for (size_t i = 0; i < out.leaves.size(); ++i) out.leaves[i].index = static_cast<int>(i);
+        if (auto* keys = static_cast<CKDataArray*>(context->GetObjectByNameAndClass(const_cast<CKSTRING>("Keys"),
+                                                                                    CKCID_DATAARRAY, nullptr))) {
+            for (int c = 0; keys->GetRowCount() > 0 && c < keys->GetColumnCount(); ++c) {
+                const char* name = keys->GetColumnName(c);
+                int key = 0;
+                if (!name || !keys->GetElementValue(0, c, &key) || key <= 0 || key >= 256) continue;
+                if (std::strcmp(name, "rotation") == 0) out.camera_rotation_key = key, out.camera_keys_from_options = true;
+                else if (std::strcmp(name, "camup") == 0) out.camera_up_key = key, out.camera_keys_from_options = true;
+            }
+        }
         return out;
     }
 

@@ -570,8 +570,11 @@ namespace bmmo::session {
     };
 
     // session_input_msg::input_frame::keys bits. The four leaves are the
-    // SetPhysicsForce blocks in Ball Navigation (design doc 8.1); Shift/Space
-    // are recorded but not consumed by the server.
+    // SetPhysicsForce blocks in Ball Navigation (design doc 8.1).  KEY_SHIFT /
+    // KEY_SPACE: the camera's turn key (Shift by default: Shift + Left/Right
+    // turns the camera) and raise key (Space), as the game's "Keys" array sets
+    // them - recorded (since 2026-11-05, game::navigation_graph::
+    // camera_bits_from_state; never before), consumed by no world.
     constexpr uint8_t KEY_LEAF_0 = 1u << 0;
     constexpr uint8_t KEY_LEAF_1 = 1u << 1;
     constexpr uint8_t KEY_LEAF_2 = 1u << 2;

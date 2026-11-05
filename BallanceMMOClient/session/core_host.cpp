@@ -4382,7 +4382,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         bs::input_observation seen;
         const bool muted = host.input_muted;
         if (!muted && host.navigation_known && input_hook_installed_)
-            seen.keys = host.navigation.keys_from_state(frame_keys_.data());
+            seen.keys = host.navigation.keys_from_state(frame_keys_.data()) | host.navigation.camera_bits_from_state(frame_keys_.data());
         if (auto* orient = m_bml->Get3dEntityByName("Cam_OrientRef")) {
             const VxMatrix& m = orient->GetWorldMatrix();
             for (int r = 0; r < 3; ++r)
