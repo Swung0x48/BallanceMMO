@@ -607,13 +607,16 @@ processes it is waiting for after 5 s of real time, and `--trace 1` prints every
 Results (h1_150's shape: 4 clients, 150 ms each way, 40 s of play, P-cores):
 - **byte-identical twice:** two runs, 28,927 steps each, the server journal (11.9 MB) and all four client journals
   (25 MB each) identical byte for byte; the harness PASS both times, the server replay 2630/2630.
-- **the judge: FAIL, a real finding.** From tick 1186 ball 65536's orientation differs in the last bits (qx
-  0.000120463814 vs ...816) between two groups: the server and client1 / clients 0, 2, 3. Clients 0, 2, 3 are the
-  ones that rewound to 1185 to insert ball 65537's birth at 1186 (client1 owns it); 65537 is born six ticks after
-  65536, in the same bay, 2.5 apart. A birth put in by a rewind next to a just-born ball leaves the neighbour a rounding
-  bit off the live step - the IVP collision-state residual the memory notes keep (births / mindist entries). The live
-  runs do 62-74 birth rewinds each and judge exact: the coordinated run's timing reproduces this case every time.
-- **speed:** 43.4 virtual s in 49.6 real s (0.87x) with four clients; one client 1.92x. About 1.7 ms of real time a
+- **the judge.** The first pair ran on the harness's own server defaults - snapshots every 2 ticks, a full one
+  every 66, patience and lead adjust off - and the judge failed (from tick 1186, ball 65536's orientation a rounding
+  bit off the server's on three clients). The control: the same arguments live (proxies, no coordinator) fail the
+  judge too (and client0 starves and resyncs), so that failure belongs to that configuration, not to T1 - the first
+  note here put it down to a birth rewind, wrongly. With the configuration the project ships and LBM judges
+  (snapshots off, patience and lead adjust on - now `--coordinated`'s defaults, `--snapshots on|off` added), two
+  coordinated runs: the judge exact on all four clients both times; the server journal, all four client journals AND
+  all four send traces (2,694-2,702 sends each) identical byte for byte (`--trace-sends` was not opened on the
+  coordinated path - fixed: `open_send_trace` on every flow).
+- **speed:** 43.4 virtual s in 43 real s (1.0x) with four clients (0.87x with snapshots on); one client 1.92x. About 1.7 ms of real time a
   step (a round trip with every process); the clients' 2 ms pacing waits make most of the steps. Speed-ups for later:
   the processes running ahead within the link latency (conservative lookahead), a pacer that waits for its frame's
   time in one wait under a virtual clock.

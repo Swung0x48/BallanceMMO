@@ -983,8 +983,8 @@ def run_case(args, sector, case_dir):
         'physics:\n'
         '  enabled: true\n'
         f'  game_root: {args.root}\n'
-        f'  snapshot_interval: {100000 if args.scenario else 2}\n'
-        f'  full_snapshot_interval: {100000 if args.scenario else 66}\n'
+        f'  snapshot_interval: {100000 if args.scenario or args.snapshots == "off" else 2}\n'
+        f'  full_snapshot_interval: {100000 if args.scenario or args.snapshots == "off" else 66}\n'
         f'  patience: {str(args.patience == "on").lower()}\n'
         f'  lead_adjust: {str(args.lead_adjust == "on").lower()}\n'
         f'  test_clock_skew: "{args.test_clock_skew}"\n'
@@ -3617,6 +3617,9 @@ def main():
                     help='step T1 (docs/canned-tests-plan.md): run the server and the clients on one virtual time '
                          'through BallanceMMOCoordinator (its network: --latency-ms and --loss-pct, the same for every '
                          'client; no proxies, no jitter, no link events)')
+    ap.add_argument('--snapshots', choices=('on', 'off'), default=None,
+                    help="the harness's own server: snapshots every 2 ticks, a full one every 66 (on, the default "
+                         'without --scenario) or none (off, as every --scenario and the LBM arms run)')
     ap.add_argument('--rewind-cost', default='3.0:0.46',
                     help='--coordinated: every client\'s fixed rewind cost R:P (ms of restore, ms a tick; K6); '
                          'a --client-arg-for --rewind-cost overrides one client\'s')
@@ -3724,8 +3727,8 @@ def main():
     ap.add_argument('--scenario', type=str.upper, choices=lph.ARMS, default='')
     ap.add_argument('--variant', choices=('lane', 'swing'), default='lane')
     ap.add_argument('--hold', help='lifecycle hold in milliseconds, or drop (A6: 496; A6m/A6b: 300)')
-    ap.add_argument('--patience', choices=('off', 'on'), default='off')
-    ap.add_argument('--lead-adjust', choices=('off', 'on'), default='off')
+    ap.add_argument('--patience', choices=('off', 'on'), default=None, help='default off (on with --coordinated)')
+    ap.add_argument('--lead-adjust', choices=('off', 'on'), default=None, help='default off (on with --coordinated)')
     ap.add_argument('--test-clock-skew', default='', metavar='T:MS:PCT')
     ap.add_argument('--server-control', default='', metavar='PYTHON_SCRIPT',
                     help='controller called with start/stop and JSON physics flags; required for external-server twins')
@@ -3737,6 +3740,16 @@ def main():
                          '--players and event flags, and --control); its server.bmjs (server.bmjr from an older build), when the batch copied one '
                          'there, is the journal')
     args = ap.parse_args()
+    # Step T1: a coordinated run defaults to what the project ships (the
+    # server's defaults since LBM5: patience and lead adjust on, no snapshots);
+    # without it, the harness's old defaults.
+    shipped = args.coordinated
+    if args.snapshots is None:
+        args.snapshots = 'off' if shipped else 'on'
+    if args.patience is None:
+        args.patience = 'on' if shipped else 'off'
+    if args.lead_adjust is None:
+        args.lead_adjust = 'on' if shipped else 'off'
     if args.selftest:
         return selftest()
     try:

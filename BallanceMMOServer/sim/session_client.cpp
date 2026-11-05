@@ -1294,7 +1294,7 @@ namespace {
                 clock_ = clock_owned_.get();
                 transport_ = std::move(remote);
                 logf("coordinator: a coordinated run through %s (process %u)", args_.coordinator.c_str(), remote_->index());
-                return true;
+                return open_send_trace();
             }
             const int64_t den = static_cast<int64_t>(clock_type::period::den / clock_type::period::num);
             if (!args_.capture_inbound.empty()) {
@@ -1330,12 +1330,16 @@ namespace {
                     logf("replay-inbound: warning: the arguments differ from the capture's (%s); a divergence may be "
                          "the command line, not the code", differ.c_str());
             }
-            if (!args_.trace_sends.empty()) {
-                send_trace_ = std::fopen(args_.trace_sends.c_str(), "wb");
-                if (!send_trace_) {
-                    logf("trace-sends: cannot open %s", args_.trace_sends.c_str());
-                    return false;
-                }
+            return open_send_trace();
+        }
+
+        // --trace-sends: every flow (live, captured, replayed, coordinated).
+        bool open_send_trace() {
+            if (args_.trace_sends.empty()) return true;
+            send_trace_ = std::fopen(args_.trace_sends.c_str(), "wb");
+            if (!send_trace_) {
+                logf("trace-sends: cannot open %s", args_.trace_sends.c_str());
+                return false;
             }
             return true;
         }
