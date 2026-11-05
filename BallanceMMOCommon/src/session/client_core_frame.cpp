@@ -722,6 +722,14 @@ namespace bmmo::session {
         frame_.injected_frame = bmmo::session::input_frame{};
         frame_.injected = !frame_.forced && own_input_source_ && own_input_source_(frame_tick, frame_.injected_frame);
         if (frame_.injected) {
+            // Step T2: whether the navigation listens is this world's - the
+            // source's frame was another world's (a recipe's): the ball is
+            // forced with, and the frame sent with (post_step), the world's
+            // navigation state before the step.
+            auto& f = frame_.injected_frame;
+            const bool nav = platform_.observe_input().nav_active;
+            f.flags = static_cast<uint8_t>((f.flags & ~bmmo::session::INPUT_FLAG_NAV_ACTIVE)
+                                           | (nav ? bmmo::session::INPUT_FLAG_NAV_ACTIVE : 0));
             bool ok = true;
             std::string force_error;
             frame_.forced_entity = platform_.force_own(frame_.injected_frame, ok, force_error);
@@ -932,7 +940,9 @@ namespace bmmo::session {
         for (int k = 0; k < 3; ++k) { input.cam_right[k] = basis[0][k]; input.cam_up[k] = basis[1][k]; input.cam_dir[k] = basis[2][k]; }
         if (seen.cam_valid) { std::memcpy(s.previous_cam_, seen_cam, sizeof(seen_cam)); s.previous_cam_valid_ = true; }
         input.ball_type = static_cast<uint8_t>(ball_type < 0 ? 0 : ball_type);
-        const bool nav_active = seen.nav_active;
+        // (an injected tick: the state its ball was forced with, pre_step)
+        const bool nav_active = frame_.injected
+            ? (frame_.injected_frame.flags & bmmo::session::INPUT_FLAG_NAV_ACTIVE) != 0 : seen.nav_active;
         input.flags = static_cast<uint8_t>((physicalized ? bmmo::session::INPUT_FLAG_PHYSICALIZED : 0)
                     | (seen.paused ? bmmo::session::INPUT_FLAG_PAUSED : 0)
                     | (nav_active ? bmmo::session::INPUT_FLAG_NAV_ACTIVE : 0));

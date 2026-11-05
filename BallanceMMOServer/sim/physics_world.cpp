@@ -1633,6 +1633,7 @@ namespace bmmo::sim {
             out.savestate.clear();
             if (out.error.empty()) out.error = "savestate: " + e;
         }
+        bmmo::physics::clear_environment_identity(out.savestate);   // it travels (step T2: the same bytes every run)
         // Packed for the wire (CKPackData: zlib, the CK file format's own):
         // the client unpacks with its CK's CKUnPackData.  A section that does
         // not pack is carried as it is (size 0).

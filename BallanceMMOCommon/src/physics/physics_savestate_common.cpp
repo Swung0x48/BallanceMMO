@@ -1228,6 +1228,16 @@ namespace bmmo::physics {
         else savestate::controller_aliases().erase(physics);
     }
 
+    void clear_environment_identity(std::vector<uint8_t>& blob) {
+        // magic u32, version u32, then world_record's first field (write_world, io(world_record)).
+        constexpr size_t kIdentityAt = 8;
+        uint32_t magic = 0;
+        if (blob.size() < kIdentityAt + sizeof(uint64_t)) return;
+        std::memcpy(&magic, blob.data(), sizeof(magic));
+        if (magic != savestate::kMagic) return;
+        std::memset(blob.data() + kIdentityAt, 0, sizeof(uint64_t));
+    }
+
     bool get_savestate(CKIpionManager* physics, std::vector<uint8_t>& out, std::string& error, savestate_report* report) {
         error.clear();
         if (report) *report = savestate_report{};

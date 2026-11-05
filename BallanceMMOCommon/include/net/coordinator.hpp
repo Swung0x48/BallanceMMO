@@ -53,6 +53,7 @@ namespace bmmo::net {
         microseconds start_us = 3600ll * 1000 * 1000;   // virtual_clock::kDefaultStart
         microseconds until_us = 0;            // the run ends past it; 0: when no process waits for a time
         int client_latency_ms = 0;            // each way, on every client's end of its links
+        std::map<std::string, int> latency_ms_for;   // a client's own (by its name), instead of client_latency_ms
         float client_loss_pct = 0.0f;         // unreliable messages, each way, on every client's end
         uint64_t seed = 1;                    // the loss's
         bool lockstep = false;                // one wake time per round (no lookahead)
@@ -199,8 +200,10 @@ namespace bmmo::net {
                 p.endpoint = network_.make_transport();
                 if (p.role != 0) {   // a client: the link's latency and loss on its end
                     for (const auto d: {transport::direction::send, transport::direction::recv}) {
-                        p.endpoint->set_fake_lag(d, options_.client_latency_ms);
-                        p.lag_ms[d == transport::direction::send ? 0 : 1] = options_.client_latency_ms;
+                        const auto own = options_.latency_ms_for.find(p.name);
+                        const int ms = own != options_.latency_ms_for.end() ? own->second : options_.client_latency_ms;
+                        p.endpoint->set_fake_lag(d, ms);
+                        p.lag_ms[d == transport::direction::send ? 0 : 1] = ms;
                         p.endpoint->set_fake_loss(d, options_.client_loss_pct);
                     }
                 }

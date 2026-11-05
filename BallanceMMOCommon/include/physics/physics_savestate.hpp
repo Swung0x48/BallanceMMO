@@ -107,6 +107,11 @@ namespace bmmo::physics {
     // engine's own list orders.
     bool get_savestate(CKIpionManager* physics, std::vector<uint8_t>& out, std::string& error,
                        savestate_report* report = nullptr);
+    // A blob that travels to another process (the resync / join state): its
+    // environment identity - this process's IVP_Environment address - means
+    // nothing there (a travelling restore does not check it) and differs run
+    // to run, so the bytes of the same world would too: cleared (step T2).
+    void clear_environment_identity(std::vector<uint8_t>& blob);
 
     // Put the environment back to the blob.  Flags above.  On a false return
     // the world is NOT guaranteed consistent (the teardown may have run):

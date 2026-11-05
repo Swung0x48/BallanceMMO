@@ -6,6 +6,7 @@
 //   BallanceMMOCoordinator --processes N [--port P] [--latency-ms L] [--loss-pct X]
 //                          [--seed S] [--virtual-seconds T] [--lockstep 1] [--trace 1]
 // --lockstep 1: one wake time per round, no lookahead (step T1e's reference).
+// --latency-ms-for NAME:MS (repeatable): that client's latency instead of --latency-ms (step T2).
 
 #include <chrono>
 #include <cstdio>
@@ -31,6 +32,12 @@ int main(int argc, char** argv) {
         else if (arg == "--virtual-seconds") seconds = std::atof(v);
         else if (arg == "--trace") { trace = std::atoi(v) != 0; }
         else if (arg == "--lockstep") options.lockstep = std::atoi(v) != 0;
+        else if (arg == "--latency-ms-for") {   // NAME:MS, a client's own latency (step T2)
+            const std::string spec = v;
+            const auto colon = spec.rfind(':');
+            if (colon == std::string::npos) { std::fprintf(stderr, "--latency-ms-for NAME:MS\n"); return 2; }
+            options.latency_ms_for[spec.substr(0, colon)] = std::atoi(spec.c_str() + colon + 1);
+        }
         else { std::fprintf(stderr, "unknown argument %s\n", arg.c_str()); return 2; }
     }
     if (options.processes == 0) { std::fprintf(stderr, "usage: BallanceMMOCoordinator --processes N [...]\n"); return 2; }

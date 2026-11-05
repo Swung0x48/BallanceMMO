@@ -72,6 +72,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <physics/tick_record.hpp>
 #include <role/role.hpp>
 #include <session/correction.hpp>
@@ -492,6 +493,19 @@ namespace {
         // moment.  In a replay the cue counts as there (its Join is the
         // capture's next send either way).  Not with --host.
         std::string join_cue;
+        // --join-at-ms MS (step T2): a pre-booted late joiner as --join-cue's,
+        // its cue the session clock: MS after the run started (in a
+        // coordinated run, one virtual time for every process).  Not with
+        // --host or --join-cue.
+        uint32_t join_at_ms = 0;
+        // --recipe-frames FILE [--recipe-first-tick S] (step T2): the own
+        // ball plays a recipe's frames (scripts/journal_recipe.py; one
+        // player's stream) through the core's own-input source (K8): the
+        // keys and the camera of every tick the stream covers, counted from
+        // the session's first tick S (default: the recipe's source session's,
+        // which the driver passes); past it, the poll's.
+        std::string recipe_frames;
+        int64_t recipe_first_tick = -1;
         // --trace-sends FILE: one line per payload the session flow sends
         // (tick, Steam flags, size, FNV-1a 64), written in a replay too, where
         // nothing reaches the wire: the replay's check of the sends.  Off by
@@ -607,6 +621,9 @@ namespace {
                   "         to replay a capture of an older build)\n"
                   "       [--join-cue FILE]   (a pre-booted late joiner: --level loaded and held after the boot; the Join\n"
                   "         waits until FILE exists)\n"
+                  "       [--join-at-ms MS]   (the same, the Join MS after the run started on the session clock)\n"
+                  "       [--recipe-frames FILE --recipe-first-tick S]   (the own ball plays a recipe's frames, counted\n"
+                  "         from the session's first tick S: scripts/journal_recipe.py)\n"
                   "       [--trace-sends FILE]   (every payload sent: tick, flags, size, FNV-1a 64; a replay writes it too)\n"
                   "       [--io-flush MODE | log=MODE,journal=MODE,capture=MODE]   (MODE none|batch|record, default batch: the\n"
                   "         I/O thread's fflush - never, once per written batch, or per log line / journal record / capture pass)\n"
@@ -847,6 +864,9 @@ namespace {
             else if (arg == "--replay-free-cost-clock") out.replay_free_cost_clock = true;
             else if (arg == "--pacer-restart-on-resync") out.pacer_restart_on_resync = true;
             else if (arg == "--join-cue") { if (!(v = next())) return false; out.join_cue = v; }
+            else if (arg == "--join-at-ms") { if (!(v = next())) return false; out.join_at_ms = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+            else if (arg == "--recipe-frames") { if (!(v = next())) return false; out.recipe_frames = v; }
+            else if (arg == "--recipe-first-tick") { if (!(v = next())) return false; out.recipe_first_tick = std::strtoll(v, nullptr, 10); }
             else if (arg == "--trace-sends") { if (!(v = next())) return false; out.trace_sends = v; }
             else if (arg == "--io-flush") {
                 if (!(v = next()) || !bmmo::session::parse_io_flush_config(v, out.io_flush)) return false;
@@ -923,6 +943,8 @@ namespace {
         if (!out.capture_inbound.empty() && !out.replay_inbound.empty()) return false;
         if (out.force_rollback_every != 0 && !out.force_rollback_at.empty()) return false;   // one forced-rewind mode
         if (!out.join_cue.empty() && out.host) return false;   // step DX9: the host makes the room
+        if (out.join_at_ms && (out.host || !out.join_cue.empty())) return false;   // step T2: one cue
+        if (!out.recipe_frames.empty() && out.recipe_first_tick < 0) return false;   // step T2: the driver says S
         if (!out.host && !out.join_first && out.room == 0) out.join_first = true;
         return true;
     }
@@ -1139,9 +1161,63 @@ namespace {
                 logf("record: level=%d frames=%zu", record_.header.level, record_.frames.size());
             }
             logf("engine booted (%llu ticks)", static_cast<unsigned long long>(engine_->ticks()));
-            if (!args_.join_cue.empty() && !preload_level()) return false;
+            if (cued_join() && !preload_level()) return false;
+            if (!args_.recipe_frames.empty() && !load_recipe(error)) { logf("recipe: %s", error.c_str()); return false; }
             return true;
         }
+
+        // Step T2: the recipe's frames, as the own-input source (K8).  The
+        // stream (scripts/journal_recipe.py): "BMRF", u32 version 1, records
+        // of u32 tick (from the session's first tick), u32 count, u8 keys,
+        // u8 nav_active, f32 camera rows [3][3].
+        struct recipe_run { uint32_t tick = 0, count = 0; bmmo::session::input_frame frame; };
+        bool load_recipe(std::string& error) {
+            std::ifstream in(args_.recipe_frames, std::ios::binary);
+            char magic[4] = {};
+            uint32_t version = 0;
+            if (!in.read(magic, 4) || std::memcmp(magic, "BMRF", 4) != 0 || !in.read(reinterpret_cast<char*>(&version), 4)
+                    || version != 1) {
+                error = args_.recipe_frames + ": not a version 1 recipe frame stream";
+                return false;
+            }
+            for (;;) {
+                recipe_run r;
+                uint8_t nav = 0;
+                float cam[9] = {};
+                if (!in.read(reinterpret_cast<char*>(&r.tick), 4)) break;
+                if (!in.read(reinterpret_cast<char*>(&r.count), 4) || !in.read(reinterpret_cast<char*>(&r.frame.keys), 1)
+                        || !in.read(reinterpret_cast<char*>(&nav), 1) || !in.read(reinterpret_cast<char*>(cam), sizeof(cam))
+                        || r.count == 0 || (!recipe_.empty() && r.tick < recipe_.back().tick + recipe_.back().count)) {
+                    error = args_.recipe_frames + ": a broken record after " + std::to_string(recipe_.size());
+                    return false;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    r.frame.cam_right[k] = cam[k];
+                    r.frame.cam_up[k] = cam[3 + k];
+                    r.frame.cam_dir[k] = cam[6 + k];
+                }
+                r.frame.flags = nav ? bmmo::session::INPUT_FLAG_NAV_ACTIVE : 0;   // kept; the core takes the world's
+                recipe_.push_back(r);
+            }
+            const auto first = static_cast<uint32_t>(args_.recipe_first_tick);
+            core_.set_own_input_source([this, first](uint32_t tick, bmmo::session::input_frame& frame) {
+                if (tick < first) return false;
+                const uint32_t at = tick - first;
+                const auto it = std::upper_bound(recipe_.begin(), recipe_.end(), at,
+                                                 [](uint32_t t, const recipe_run& r) { return t < r.tick; });
+                if (it == recipe_.begin()) return false;
+                const auto& r = *std::prev(it);
+                if (at >= r.tick + r.count) return false;
+                frame = r.frame;
+                return true;
+            });
+            logf("recipe: %zu runs from %s, ticks counted from session tick %u", recipe_.size(), args_.recipe_frames.c_str(),
+                 first);
+            return true;
+        }
+
+        // A pre-booted late joiner (--join-cue FILE, --join-at-ms MS).
+        bool cued_join() const { return !args_.join_cue.empty() || args_.join_at_ms > 0; }
 
         // --join-cue (step DX9): begin_session's level request and load_step's
         // loading ticks, before any session - the level-file counters
@@ -1170,13 +1246,15 @@ namespace {
             }
             preloaded_level_ = args_.level;
             logf("--join-cue: level %d loaded ahead (%d load ticks) and held; the Join waits for %s", args_.level, waited,
-                 args_.join_cue.c_str());
+                 args_.join_at_ms ? (std::to_string(args_.join_at_ms) + " ms of the run").c_str() : args_.join_cue.c_str());
             return true;
         }
 
         // --join-cue (step DX9): the cue file is there (always, in a replay).
-        bool join_cue_given() const {
+        bool join_cue_given() {
             if (inbound_.replaying()) return true;
+            if (args_.join_at_ms)
+                return wall_now(bmmo::sim::wall_site::run_report) - run_started_ >= std::chrono::milliseconds(args_.join_at_ms);
             std::error_code ec;
             return std::filesystem::exists(args_.join_cue, ec);
         }
@@ -1211,6 +1289,7 @@ namespace {
             if (remote_) remote_->start(1, [this] { running_ = false; });
             sync_report_clock();
             const auto started = wall_now(bmmo::sim::wall_site::run_start);
+            run_started_ = started;
             mark_running();
             const char* stopped = "the client stopped";
             while (running_) {
@@ -1230,7 +1309,7 @@ namespace {
                     room_request(bmmo::room::action::Join, room_id_);
                 }
                 // --join-cue (step DX9): the pre-booted joiner's Join, on the cue.
-                if (!args_.join_cue.empty() && !cue_joined_ && cue_room_ != 0 && !in_room_ && join_cue_given()) {
+                if (cued_join() && !cue_joined_ && cue_room_ != 0 && !in_room_ && join_cue_given()) {
                     cue_joined_ = true;
                     join_sent_ = true;
                     logf("--join-cue: the cue is there: joining room %u", cue_room_);
@@ -2557,7 +2636,7 @@ namespace {
                 }
                 // --join-cue (step DX9): the room is known; the Join waits for
                 // the cue (the run loop).
-                if (!args_.join_cue.empty() && !cue_joined_) {
+                if (cued_join() && !cue_joined_) {
                     if (cue_room_ != target) logf("--join-cue: room %u found; the Join waits for the cue", target);
                     cue_room_ = target;
                     return;
@@ -5115,6 +5194,8 @@ namespace {
         int preloaded_level_ = -1;
         uint32_t cue_room_ = 0;
         bool cue_joined_ = false;
+        clock_type::time_point run_started_{};   // --join-at-ms's origin
+        std::vector<recipe_run> recipe_;          // step T2: --recipe-frames
         unsigned char lane_keys_[256] = {};                  // --keep-lane: this frame's keys with the steer added
         int lane_steers_ = 0;
         int lane_dwell_key_ = -1;                            // --keep-lane-dwell: the steer's held key, -1 none

@@ -681,6 +681,104 @@ Results (h1_150's shape, 4 clients, 150 ms each way, 40 s of play; the server co
 - Unit tests: 815/815; the coordinator test runs lockstep twice and lookahead twice: the same log all four times, the
   lookahead in fewer rounds.
 
+#### T2 design (2026-11-05, for the user's review)
+
+Goal (stage 2): a black box (a session's server journal, its client journals if there are any) drives a coordinated
+run (T1): the same players, each pressing what they pressed tick by tick, joining and leaving at the same ticks, on
+the same level - offline, as fast as T1 runs, the same bytes every time. Not a reproduction (the humans reacted to
+what they saw, and the original's stalls, resyncs and real network are not in it), but a reproducible re-run of the
+session's inputs: a bug that the inputs alone cause comes back every time, and is then cheap to bisect and debug.
+
+What a journal already holds: the HEADER (level, seed, input delay, world options, mechanism slots, first tick), a
+PLAYER record per add and remove (tick, id, join order, name, life), an INPUT record per player per tick (keys, the
+camera rows, ball type, flags; FRESH when the writer had the player's own frame, SUBSTITUTED when the server stood in),
+the EVENTs (lifecycle, client-reported: the re-driven clients make their own), the server's rtt per player in its lead
+notes.
+
+The rule (stage 2's row in section 2, "survives code changes: yes, only inputs recorded"; the user, 2026-11-05: the
+input file holds only the players' inputs and keeps working when the client and the server are upgraded): a recipe is
+extracted from a journal ONCE and holds the inputs and nothing a build computes. A journal is not a recipe: its format
+moves with the protocol (a reader refuses versions it no longer reads) and most of it - hashes, checkpoints, events,
+corrections - is the build's own output. Only the extraction reads a journal; every later build reads the recipe.
+
+The recipe (proposed format, its own version, fields only ever added):
+- the level number and the map's identity (the custom map's file name and md5), so a later build finds the map;
+- per player: the display name, the join order, the join tick, the leave ticks and the lives' rejoin ticks - every
+  tick counted from the session's first tick;
+- per player per tick: the keys (the game keys' bitmask of input_frame), the camera rows (right, up, dir) and the
+  nav-active flag, the floats bit for bit; a run of equal frames as one frame and a count;
+- NOT in it: ball types, events, hashes, checkpoints, the server's configuration, protocol or journal versions (the
+  build makes or knows those); the test's conditions - latency, loss, the rewind cost model, the uuid seeds - are the
+  run's parameters (command line, or a separate section of the recipe marked as such), not inputs.
+
+Shape (proposed):
+- **Extraction,** `scripts/journal_recipe.py SERVER_JOURNAL [--client CLIENT_JOURNAL ...] -o RECIPE` (scripts/
+  journal.py reads the journal; the one version-bound step).
+- **The headless client plays a recipe:** `--recipe FILE --recipe-player N` serves player N's frames through K8's
+  `set_own_input_source`: every tick it has, that tick's frame; past its last one, nothing pressed.
+- **Joins in virtual time:** `--join-at-tick T` - the client boots with the others, holds on the clock and asks to
+  join once the session has reached T (like `--join-cue`'s pre-booted joiner); `--leave-room-at` / `--rejoin-at` exist
+  for leaves and lives.
+- **A driver,** `scripts/recipe_run.py RECIPE`: one client per player, `arena_map_test.py --coordinated`'s pieces,
+  then the judge.
+- **Acceptance:** (1) a coordinated drive run without beams (a beam is a client's own teleport, not an input),
+  extracted and re-driven, gives the original's journals byte for byte (same build); (2) a real black box re-driven
+  twice gives the same bytes twice, and the judge's verdict; (3) a recipe written by this build still plays on a later
+  one (checked from the first change that touches the session).
+
+Decided (the user, 2026-11-05: "3. 客户端的延迟要可配置。别的按推荐"): 1 the client journal's own FRESH frame when
+given, else the server's applied frame; 2 a JSON manifest + a binary frame stream per player; 3 every client's latency
+configurable (the coordinator takes a latency per process); 4 inputs only; 5 the trial 2 level 8 journals first.
+The options as they were put:
+1. A tick the server SUBSTITUTED (the player's own frame came late or never): the player's client journal's own
+   FRESH frame when given, else the server's applied frame (recommended: what the world was driven with), or nothing
+   pressed.
+2. The recipe's encoding: a JSON manifest + a small binary frame stream per player (recommended: compact, frames bit
+   exact, the manifest readable and easy to extend), or all JSON (readable, about 4x larger).
+3. The network: one latency for every client (T1 as built; recommended for now) or each player's from the server's
+   measured rtt (later, once a black box needs it: T1's coordinator has one link today).
+4. The original's stalls and resyncs: not re-created (recommended: inputs only; `--stall-ms` exists for a test that
+   wants one).
+5. The first real black box (decision 3 of section 4): the user's trial 2 level 8 journals (server + two retail
+   clients, a late joiner; recommended), or a core_ref arm's server journal.
+
+As built (T2, 2026-11-05):
+- `scripts/journal_recipe.py SERVER_JOURNAL [--client CLIENT_JOURNAL ...] [--map FILE] -o DIR`: `recipe.json`
+  (format `bmmo-input-recipe` 1: level, map {file, md5}, session_first_tick, session_ticks, players [{name,
+  join_order, lives [{join_tick, leave_tick}], frames, ticks, source}], source) and `player<N>.frames` ("BMRF" 1:
+  runs of u32 tick from the session's first tick, u32 count, u8 keys, u8 nav_active, f32 camera rows [9]). A
+  substituted tick takes the client journal's own FRESH frame when given (decision 1); a client journal also adds the
+  player's own frames the server never applied (its last ticks after the server removed it). Size: the trial 2 level
+  8 session, 16 minutes of two players, is 90 KB (the camera turns in quarter turns).
+- The headless client: `--recipe-frames FILE --recipe-first-tick S` (K8's source: a covered tick plays the run's keys
+  and camera; past it, the poll's) and `--join-at-ms MS` (`--join-cue`'s pre-booted joiner, cued by the session clock).
+  The coordinator: `--latency-ms-for NAME:MS` (decision 3); the harness passes it for a client whose `--link`
+  latency differs. `arena_map_test.py --coordinated --recipe DIR [--recipe-start-ms MS] [--recipe-first-tick S]`:
+  one client per recipe player, level and map from the manifest (the map found by md5), a late joiner at
+  `--recipe-start-ms` + its join tick in ms (the run logs the tick it got), one session; leaves and later lives are
+  reported, not re-created yet.
+- **Two fixes the first re-drives found:**
+  - **K8's nav-active:** an injected tick forced the ball with the SOURCE frame's nav-active and sent the world's:
+    in a re-drive the two differ where the new world's navigation is not the original's (trial 2 level 8, tick
+    6894: the host's ball and the server's split, 1 cm growing to 1,249 m). Now the world's navigation state before
+    the step for both. (A poll-driven run sends the state after the step: a recipe re-drive of a poll-driven
+    original therefore differs from it at nav switches - expected; the recipe's own fixpoint is exact, below.)
+  - **The join state's savestate carried the server's IVP_Environment address** (bytes 8..15, the in-process restore's
+    guard): a late join's journals differed run to run there and only there. `clear_environment_identity` zeroes it
+    in the blob that travels (`physics_world`'s resync state); a travelling restore never read it.
+
+Results (P-cores, the server copy without page heap, 150 ms each way):
+
+| run | what | result |
+|---|---|---|
+| the arena drive (4 clients, no beams) re-driven from its own recipe (before the nav fix) | the original's five journals | 5 of 5 byte for byte |
+| a recipe-driven run, its recipe re-extracted and re-driven (after the fix) | the fixpoint | 5 of 5 byte for byte; 7.3x |
+| trial 2 level 8 (2 players, a late joiner at tick 1381 of 63,810; retail journals of build 387aac27) | twice | 3 of 3 byte for byte; harness PASS, server replay 65265/65265, the judge exact: own 0/31503 and 0/31512, mirror 0/30781 and 0/30878; 993 virtual s in 59 s (16.8x) |
+
+Checked also: 815/815; x64 build; the wire check of core_ref_s17 ALL SAME, nothing skipped.
+The late joiner joined at tick 1471 (recipe: 1409 = 1381 + 28; `--recipe-start-ms` 3500 is an estimate). The
+original's 626 ticks the server stood in for the stalled joiner are played as the server applied them (decision 1).
+
 ## 4. Decisions
 
 Taken: the gate (user, 2026-11-05): each K step lands on unit tests, the wire check and a P-core live smoke;

@@ -108,6 +108,7 @@ usage:
 """
 import argparse
 import collections
+import hashlib
 import json
 import math
 import os
@@ -945,6 +946,45 @@ def parse_client_ticks(specs, players, what, delays=None):
     return out
 
 
+def apply_recipe(args):
+    """--recipe (step T2): the players, the level and the map from the recipe's manifest."""
+    manifest_path = pathlib.Path(args.recipe) / 'recipe.json'
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    if manifest.get('format') != 'bmmo-input-recipe':
+        raise ValueError('%s: not an input recipe' % manifest_path)
+    if not args.coordinated:
+        raise ValueError('--recipe runs coordinated (--coordinated)')
+    if args.drive or args.beam_bays or args.join_late:
+        raise ValueError('--recipe: no --drive, beams or --join-late (the recipe drives and joins)')
+    players = sorted(manifest['players'], key=lambda p: p['join_order'])
+    if not players or players[0]['lives'][0]['join_tick'] != 0:
+        raise ValueError('--recipe: the first player (the host) must be in the session from its first tick')
+    args.recipe_players = players
+    args.players = len(players)
+    args.sectors = '1'   # one session: the recipe's
+    args.level = manifest['level']
+    if manifest.get('map'):
+        path = pathlib.Path(args.root) / 'ModLoader' / 'Maps' / manifest['map']['file']
+        if not path.is_file() or hashlib.md5(path.read_bytes()).hexdigest() != manifest['map']['md5']:
+            raise ValueError('--recipe: the map %s (md5 %s) is not in %s' % (manifest['map']['file'],
+                                                                          manifest['map']['md5'], path.parent))
+        args.map = str(path)
+    else:
+        args.map = 'none'
+    if args.recipe_first_tick < 0:
+        args.recipe_first_tick = manifest['session_first_tick']
+    args.recipe_joins = {i: args.recipe_start_ms + int(round(p['lives'][0]['join_tick'] * 1000.0 / 66.0))
+                         for i, p in enumerate(players) if p['lives'][0]['join_tick'] > 0}
+    for i, p in enumerate(players):
+        later = [l for l in p['lives'][1:]] + ([p['lives'][0]] if p['lives'][0]['leave_tick'] is not None else [])
+        if later:
+            print('  note: %s\'s leaves and later lives are not re-created (%s)' % (p['name'], later), flush=True)
+    args.seconds = max(args.seconds, int(manifest['session_ticks'] / 66.0) + 1)
+    print('recipe: %s - level %d, %d players (%d joining late), %d ticks from session tick %d' % (
+        args.recipe, args.level, args.players, len(args.recipe_joins), manifest['session_ticks'],
+        args.recipe_first_tick), flush=True)
+
+
 def member_args(args, i):
     """Client i's leave / rejoin switches (world-agreement design 7.3 J2-J5,
     step M0), from --leave and --rejoin."""
@@ -1023,14 +1063,19 @@ def run_case(args, sector, case_dir):
         if args.coordinated:
             # Step T1: the network and the time are the coordinator's.
             link = links[0]
-            if args.external_server or any(l != link for l in links.values()) or link['jitter_ms'] or args.events:
-                raise SystemExit('--coordinated: one link for every client, no jitter, no link events, no external server')
+            same = lambda l: {k: v for k, v in l.items() if k != 'latency_ms'}
+            if (args.external_server or any(same(l) != same(link) for l in links.values()) or link['jitter_ms']
+                    or args.events):
+                raise SystemExit('--coordinated: one loss for every client (a latency each), no jitter, no link events, '
+                                 'no external server')
             cf_log = open(case_dir / 'coordinator.log', 'w+b')
             handles.append(cf_log)
             coordinator = subprocess.Popen(
                 [str(bindir / f'BallanceMMOCoordinator{EXE}'), '--processes', str(args.players + 1),
                  '--latency-ms', str(int(link['latency_ms'])), '--loss-pct', str(link['loss_pct']),
-                 '--seed', str(args.loss_seed), *(['--lockstep', '1'] if args.lockstep else [])],
+                 '--seed', str(args.loss_seed), *(['--lockstep', '1'] if args.lockstep else []),
+                 *[a for i, l in sorted(links.items()) if l['latency_ms'] != link['latency_ms']
+                   for a in ('--latency-ms-for', 'Arena%d:%d' % (i, int(l['latency_ms'])))]],
                 cwd=case_dir, stdin=subprocess.DEVNULL, stdout=cf_log, stderr=subprocess.STDOUT, creationflags=FLAGS)
             children.append(coordinator)
             for _ in range(200):
@@ -1129,6 +1174,11 @@ def run_case(args, sector, case_dir):
                 cmd.extend(args.client_arg)
             if sector > 1:
                 cmd += ['--start-sector', str(sector)]
+            if args.recipe:   # step T2: the own ball plays the recipe's frames
+                cmd += ['--recipe-frames', str(pathlib.Path(args.recipe) / args.recipe_players[i]['frames']),
+                        '--recipe-first-tick', str(args.recipe_first_tick)]
+                if i in args.recipe_joins:
+                    cmd += ['--join-at-ms', str(args.recipe_joins[i])]
             if args.drive:
                 record = case_dir / f'input{i}.bmrc'
                 write_drive_record(record, args.level, args.seconds * 66 + 200, i,
@@ -1180,7 +1230,8 @@ def run_case(args, sector, case_dir):
                 cmd += ['--join-cue', cue_files[i]]
             # The host waits for the members that start with it; a late joiner
             # (a cue joiner too) comes into the running session.
-            cmd += ['--host', '--expect', str(args.players - len(args.join_late))] if i == 0 else ['--join-first']
+            cmd += (['--host', '--expect', str(args.players - len(args.join_late) - len(getattr(args, 'recipe_joins', {})))]
+                    if i == 0 else ['--join-first'])
             p = subprocess.Popen(cmd, cwd=client_dir, stdin=subprocess.DEVNULL,
                                  stdout=cf, stderr=subprocess.STDOUT, creationflags=FLAGS)
             clients[i] = p
@@ -3617,6 +3668,15 @@ def main():
                     help='step T1 (docs/canned-tests-plan.md): run the server and the clients on one virtual time '
                          'through BallanceMMOCoordinator (its network: --latency-ms and --loss-pct, the same for every '
                          'client; no proxies, no jitter, no link events)')
+    ap.add_argument('--recipe', default='',
+                    help='step T2: the players play a recipe (scripts/journal_recipe.py): one client per recipe player, '
+                         "each the own ball driven by its frames; the level and map, the players and their joins from "
+                         'the recipe (--coordinated; --players, --level, --map, --drive and the beams do not apply)')
+    ap.add_argument('--recipe-start-ms', type=int, default=3500,
+                    help='--recipe: the session clock at the session\'s first tick (a late joiner joins at this plus its '
+                         'join tick; the run reports the ticks it joined at)')
+    ap.add_argument('--recipe-first-tick', type=int, default=-1,
+                    help="--recipe: the session's first tick of this run (default: the recipe's source session's)")
     ap.add_argument('--server-exe', default='BallanceMMOServer',
                     help="the server's executable in --bin, without the extension: for timings, a copy under "
                          'another name (on this machine BallanceMMOServer.exe runs under page heap, an '
@@ -3770,6 +3830,11 @@ def main():
     if args.dry_run:
         print(json.dumps(vars(args), indent=2))
         return 0
+    if args.recipe:
+        try:
+            apply_recipe(args)
+        except ValueError as e:
+            ap.error(str(e))
     if args.seconds <= 0 or args.startup_timeout <= 0:
         ap.error('--seconds and --startup-timeout must be positive')
     if not args.root and not args.report_only:
