@@ -222,6 +222,10 @@ private:
 	static void LoggingOutput(bmmo::log_type eType, const char* pszMsg);
 	void on_connection_status_changed(const bmmo::net::status_change& change) override;
 	void on_message(const bmmo::net::message& received) override;
+	// K7a: the game thread's half of on_message (BallanceMMOClient.cpp, "the inbox").
+	void handle_message(const bmmo::net::message& received);
+	void drain_inbox();
+	int countdown_delay_ms();
 	void receive(void* data, size_t size) override {
 		on_message(bmmo::net::message{connection_, data, static_cast<int>(size), 0});
 	}

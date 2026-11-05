@@ -1,9 +1,51 @@
 #include <boost/regex.hpp>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <ranges>
 // #include <openssl/sha.h>
 // #include <fstream>
 #include "CommandMMO.h"
 #include "BallanceMMOClient.h"
+
+// ---- the inbox (K7a, docs/k7-retail-capture-design.md) ----
+// The network thread handles no message any more: on_message hands the
+// session's to the core host's mailbox (core_host_offer) and queues every
+// other one's bytes here; the game thread takes them in arrival order at the
+// start of OnProcess and handles them (handle_message), so everything a message does happens on the
+// game thread, in one order a capture can record.  File-scope, like the
+// mailbox: a data member added to BallanceMMOClient hangs the engine.
+namespace {
+    struct inbox_entry {
+        bmmo::net::connection conn = bmmo::net::kInvalidConnection;
+        std::string bytes;
+        bmmo::net::microseconds received = 0;
+        uint64_t epoch = 0;
+        bool timed = false;   // a Countdown whose wait has been set
+        std::chrono::steady_clock::time_point due{};
+    };
+    std::mutex inbox_mutex;
+    std::condition_variable inbox_emptied;
+    std::deque<inbox_entry> inbox;
+    // A closed connection's messages left in the inbox are dropped: cleanup()
+    // has already taken down what they would act on (its players, its room).
+    std::atomic<uint64_t> inbox_epoch{0};
+
+    bmmo::opcode inbox_code(const inbox_entry& e) {
+        return reinterpret_cast<const bmmo::general_message*>(e.bytes.data())->code;
+    }
+
+    // A connection closes: the messages it delivered before are handled
+    // first, as they were when the network thread handled them itself - it
+    // waits up to 200 ms of game frames for that (`wait`: a close the network
+    // thread reports) - and whatever is left is dropped.
+    void close_inbox(bool wait) {
+        std::unique_lock lk(inbox_mutex);
+        if (wait) inbox_emptied.wait_for(lk, std::chrono::milliseconds(200), [] { return inbox.empty(); });
+        inbox_epoch.fetch_add(1);
+        inbox.clear();
+    }
+}
 
 IMod* BMLEntry(IBML* bml) {
     BallanceMMOClient::init_socket();
@@ -480,6 +522,10 @@ void BallanceMMOClient::OnPostStartMenu()
 }
 
 void BallanceMMOClient::OnProcess() {
+    // K7a: the messages since the last frame.  Only here: while the anchor
+    // hold is frozen no OnProcess runs and they wait, as their game-thread
+    // work (a BML timer, which a frozen engine does not run) used to.
+    drain_inbox();
     core_host_capture_level_counters();   // FULL step LGM (HU1 (b)): the level file's counters, the core host's record
     process_command_file();
     fixed_tick_.on_process(m_bml, core_host_pacer());
@@ -1710,6 +1756,7 @@ void BallanceMMOClient::disconnect_from_server() {
         //ping_->update("");
         //status_->update("Disconnected");
         //status_->paint(0xffff0000);
+        close_inbox(false);
         cleanup();
         SendIngameMessage("Disconnected.");
 
@@ -1759,6 +1806,7 @@ void BallanceMMOClient::on_connection_status_changed(const bmmo::net::status_cha
             SendIngameMessage("You've been disconnected from the server.");
         }
         SendIngameMessage(s.c_str());
+        close_inbox(true);
         cleanup();
         const int nReason = pInfo->end_reason;
         if (nReason >= bmmo::connection_end::Crash && nReason <= bmmo::connection_end::PlayerKicked_Max)
@@ -1798,6 +1846,7 @@ void BallanceMMOClient::on_connection_status_changed(const bmmo::net::status_cha
         // so we just pass 0's.
 
         //interface_->CloseConnection(pInfo->conn, 0, nullptr, false);
+        close_inbox(true);
         cleanup();
 
         if (pInfo->end_reason > bmmo::net::kEndAppMax) {
@@ -1916,19 +1965,75 @@ void BallanceMMOClient::play_countdown_sound(bmmo::countdown_type type) {
 }
 
 void BallanceMMOClient::on_message(const bmmo::net::message& received) {
-    const auto* network_msg = &received;
     // general_message is a max-sized view used only to read the opcode, so it
     // is checked against sizeof(opcode) rather than its own (huge) size
-    if (network_msg->size < static_cast<int>(sizeof(bmmo::opcode))) {
-        logger_->Error("Invalid message with size %d received.", network_msg->size);
+    if (received.size < static_cast<int>(sizeof(bmmo::opcode))) {
+        logger_->Error("Invalid message with size %d received.", received.size);
         return;
     }
+    // The shared core's mailbox (session/core_host.cpp): the Session*
+    // messages, SessionStart included, for the game thread's core; the
+    // handlers below never see them (step R1).
+    if (core_host_offer(&received)) return;
+    std::lock_guard lk(inbox_mutex);
+    inbox.push_back({received.conn, std::string(static_cast<const char*>(received.data), received.size),
+                     received.received, inbox_epoch.load()});
+}
+
+// The legacy countdown's wait before it acts, so the "Go" lands at the same
+// moment for every player: 160 ms less the ping and 14 frames.
+int BallanceMMOClient::countdown_delay_ms() {
+    int time_for_14_frames_ms = 0;
+    {
+        std::lock_guard lk(frame_times_mtx_);
+        if (frame_timestamps_in_last_45s_.size() < 1024) {
+            // not enough data - assume 240 fps
+            time_for_14_frames_ms = 14 * 1000 / 240;
+        }
+        else {
+            time_for_14_frames_ms = (int)(
+                (frame_timestamps_in_last_45s_.back() - frame_timestamps_in_last_45s_.front()) /
+                ((int64_t)frame_timestamps_in_last_45s_.size() - 1) * 14 / 1000
+            );
+        }
+    }
+    return std::max(0, 160 - (int)average_ping_ - time_for_14_frames_ms);
+}
+
+// Game thread.  A Countdown waits countdown_delay_ms() from when the game
+// thread first sees it, and the messages behind it wait with it (the network
+// thread used to sleep that long before handling the next one).
+void BallanceMMOClient::drain_inbox() {
+    const auto now = std::chrono::steady_clock::now();
+    for (;;) {
+        inbox_entry entry;
+        {
+            std::lock_guard lk(inbox_mutex);
+            while (!inbox.empty() && inbox.front().epoch != inbox_epoch.load())
+                inbox.pop_front();
+            if (inbox.empty()) {
+                inbox_emptied.notify_all();
+                return;
+            }
+            auto& front = inbox.front();
+            if (inbox_code(front) == bmmo::Countdown) {
+                if (!front.timed) {
+                    front.timed = true;
+                    front.due = now + std::chrono::milliseconds(countdown_delay_ms());
+                }
+                if (now < front.due) return;
+            }
+            entry = std::move(front);
+            inbox.pop_front();
+        }
+        handle_message(bmmo::net::message{entry.conn, entry.bytes.data(), static_cast<int>(entry.bytes.size()),
+                                          entry.received});
+    }
+}
+
+void BallanceMMOClient::handle_message(const bmmo::net::message& received) {
+    const auto* network_msg = &received;
     auto* raw_msg = reinterpret_cast<bmmo::general_message*>(network_msg->data);
-    // The shared core's mailbox (session/core_host.cpp): only for a session
-    // whose SessionStart found 'session core on'; it keeps the Session*
-    // messages, SessionStart included, for the game thread, and the core runs
-    // that session: the handlers below never see its messages (step R1).
-    if (core_host_offer(network_msg)) return;
 
     switch (raw_msg->code) {
     case bmmo::OwnedBallState: {
@@ -2252,22 +2357,8 @@ void BallanceMMOClient::on_message(const bmmo::net::message& received) {
         auto* msg = bmmo::message_utils::view_as<bmmo::countdown_msg>(network_msg);
         if (!msg) break;
 
-        int time_for_14_frames_ms = 0;
-        {
-            std::lock_guard lk(frame_times_mtx_);
-            if (frame_timestamps_in_last_45s_.size() < 1024) {
-                // not enough data - assume 240 fps
-                time_for_14_frames_ms = 14 * 1000 / 240;
-            }
-            else {
-                time_for_14_frames_ms = (int)(
-                    (frame_timestamps_in_last_45s_.back() - frame_timestamps_in_last_45s_.front()) /
-                    ((int64_t)frame_timestamps_in_last_45s_.size() - 1) * 14 / 1000
-                );
-            }
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, 160 - (int)average_ping_ - time_for_14_frames_ms)));
+        // K7a: the wait that lines the "Go" up with the other players
+        // (countdown_delay_ms) is the inbox's: this runs once it is over.
         std::string sender_name = get_username(msg->content.sender),
                     map_name = get_map_name(msg->content.map);
         last_countdown_map_ = msg->content.force_restart ? current_map_ : msg->content.map;
