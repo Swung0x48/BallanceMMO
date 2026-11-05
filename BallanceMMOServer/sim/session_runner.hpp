@@ -306,6 +306,15 @@ namespace bmmo::sim {
         // The handover mark: every command stamped at or before `at` has been
         // posted (the network thread, after each receive pass).
         void mark(std::chrono::steady_clock::time_point at);
+        // Step K4b-iii: the server's handlers run on the runner thread, inside
+        // stamped commands; there a post runs right after the command (at the
+        // same logical instant, as a post from the network thread used to run
+        // after its handler) and logical_now() is the instant they act at.
+        bool on_thread() const { return std::this_thread::get_id() == thread_.get_id(); }
+        // An input of the server's own (its handlers, step K4b-iii), applied in
+        // stamp order with the ticks like every runner command.
+        void post_input(std::function<void()> handle) { post(std::move(handle)); }
+        std::chrono::steady_clock::time_point logical_now() const { return logical_; }
         // Step K4b-ii (a server replay's end): returns once every command and
         // every step up to `at` is done.
         void settle(std::chrono::steady_clock::time_point at);
@@ -772,6 +781,10 @@ namespace bmmo::sim {
         // command being applied, or the step instant of the tick being
         // stepped.  Every deciding time the runner reads is this one.
         std::chrono::steady_clock::time_point logical_{};
+        // Step K4b-iii (simulation thread): the posts the command being run
+        // made, run after it (run_deferred).
+        std::vector<std::function<void()>> deferred_;
+        void run_deferred();
         bool stopping_ = false;
         std::map<uint32_t, std::unique_ptr<session_state>> sessions_;  // simulation thread only
         // Step B2SW: the harness's server-side stall, from the environment

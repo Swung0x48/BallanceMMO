@@ -129,6 +129,10 @@ public:
     // loop through state_mutex_.
     void run() override {
         for (auto* owner: capture_owners_) owner->claim();   // step K4b-ii: this thread's reads are the capture's
+        // Step K4b-iii: the wall clock a handler on the runner thread reads,
+        // counted from here on the logical clock (utc_ms_now).
+        steady_origin_ = clock_->now(bmmo::session::clock_site::server_time_origin);
+        utc_origin_us_ = clock_->utc_us(bmmo::session::clock_site::server_time_origin);
         for (uint64_t pass = 0; running_; ++pass) {
             if (inbound_.capturing()) inbound_.iteration(pass, 0);
             if (inbound_.replaying() && !replay_pass()) break;
@@ -201,8 +205,12 @@ public:
 
     // A message's receive time on the session clock, from the transport's
     // stamp and the pass's clock pair (no clock read per message); a stamp
-    // older than 10 s counts as 10 s.
+    // older than 10 s counts as 10 s.  On the runner thread (step K4b-iii)
+    // the message being handled arrived at the logical now.
     std::chrono::steady_clock::time_point arrival_of(bmmo::net::microseconds received) const {
+#if BMMO_BUILD_SIM
+        if (on_runner()) return runner_->logical_now();
+#endif
         constexpr bmmo::net::microseconds kMaxAge = 10000000;
         const bmmo::net::microseconds age = poll_transport_ - received;
         if (received <= 0 || age <= 0) return poll_at_;
@@ -217,17 +225,72 @@ public:
         main_pass_.fetch_add(1, std::memory_order_relaxed);   // step SAXE: before this pass's messages
         const bool had_messages = receive_pass();
 #if BMMO_BUILD_SIM
-        {
-            std::lock_guard lk(state_mutex_);
-            input_stamp stamp(poll_at_);   // step K4b: the pass's timers act at its instant
-            check_start_barriers();
-            check_start_handshakes();   // FULL step SAXH
-            send_assign_repeats();
-            post_player_rtts();
+        if (runner_) {
+            // Step K4b-iii: the connections' status for the handlers (read
+            // here, where the capture holds it), then the pass's timers - all
+            // at the pass's instant, on the runner thread.
+            std::map<bmmo::net::connection, bmmo::net::connection_status> links;
+            for (const auto c: links_) transport_->status(c, links[c]);
+            post_input(poll_at_, poll_transport_, [this, links = std::move(links)]() mutable {
+                link_cache_ = std::move(links);
+                std::lock_guard lk(state_mutex_);
+                check_start_barriers();
+                check_start_handshakes();   // FULL step SAXH
+                send_assign_repeats();
+                post_player_rtts();
+            });
+            runner_->mark(poll_at_);
         }
-        if (runner_) runner_->mark(poll_at_);
 #endif
         return had_messages;
+    }
+
+#if BMMO_BUILD_SIM
+    // Step K4b-iii (the user's option A: the server's results never depend on
+    // how its threads overlap).  With the runner, every input the network
+    // thread takes - a message, a connection state change, a pass's timers -
+    // is handled on the runner thread, as a command stamped at its arrival (a
+    // pass's instant), in stamp order with the ticks: no handler ever reads
+    // how far the runner has got, it acts at the logical now.  What a handler
+    // would read of the outside world on its own comes with the input: the
+    // pass it arrived in (the assign copies' schedule), the transport's clock
+    // at it, the connections' status read in its pass.
+    void post_input(std::chrono::steady_clock::time_point at, bmmo::net::microseconds transport_at,
+                    std::function<void()> handle) {
+        const uint64_t pass = main_pass_.load(std::memory_order_relaxed);
+        input_stamp stamp(at);
+        runner_->post_input([this, pass, transport_at, handle = std::move(handle)] {
+            input_pass_ = pass;
+            input_transport_ = transport_at;
+            handle();
+        });
+    }
+    bool on_runner() const { return runner_ && runner_->on_thread(); }
+#else
+    bool on_runner() const { return false; }
+#endif
+
+    // The instant a handler acts at: the logical now on the runner thread,
+    // the clock elsewhere (the console, a server without the runner).
+    std::chrono::steady_clock::time_point instant(bmmo::session::clock_site site) {
+#if BMMO_BUILD_SIM
+        if (on_runner()) return runner_->logical_now();
+#endif
+        return clock_->now(site);
+    }
+    uint64_t utc_ms_now(bmmo::session::clock_site site) {
+        if (!on_runner()) return clock_->utc_ms(site);
+        return static_cast<uint64_t>((utc_origin_us_ + std::chrono::duration_cast<std::chrono::microseconds>(
+                instant(site) - steady_origin_).count()) / 1000);
+    }
+    uint64_t pass_now() const { return on_runner() ? input_pass_ : main_pass_.load(std::memory_order_relaxed); }
+    bmmo::net::microseconds transport_now() { return on_runner() ? input_transport_ : transport_->local_timestamp(); }
+    bool link_status(bmmo::net::connection c, bmmo::net::connection_status& out) const {
+        if (!on_runner()) return transport_->status(c, out);
+        const auto it = link_cache_.find(c);
+        if (it == link_cache_.end()) return false;
+        out = it->second;
+        return true;
     }
 
     bool send(const bmmo::net::connection destination, const void* buffer, size_t size, int send_flags = bmmo::net::kSendReliable) const {
@@ -1147,7 +1210,7 @@ public:
         std::string detail;
         for (const auto& m: r.members) {
             bmmo::net::connection_status status{};
-            transport_->status(m.id, status);
+            link_status(m.id, status);
             auto it = clients_.find(m.id);
             const int peak = it == clients_.end() ? 0 : it->second.ping_peak_ms;
             const int ping = std::max(status.ping_ms < 0 ? 0 : status.ping_ms, peak);
@@ -1273,7 +1336,7 @@ public:
         const uint32_t sector_lead = s.sector_lead;
         const uint32_t world_options = s.world_options;
         const uint8_t mechanism_slots = s.mechanism_slots;
-        s.boot_requested = clock_->now(bmmo::session::clock_site::server_boot_requested);
+        s.boot_requested = instant(bmmo::session::clock_site::server_boot_requested);
         physics_sessions_.emplace(id, std::move(s));
         // The world is numbered from the same base its members are (design 9.25
         // phase alignment): its first simulated tick is `start_base`, so the
@@ -1285,7 +1348,7 @@ public:
                             map.get_hash_string(), map.level);
         runner_->create_session(id, map.level, players, input_delay, start_base, spawn_impulse, note, std::move(names),
                                 sector_lead, world_options, mechanism_slots, map_file,
-                                clock_->utc_ms(bmmo::session::clock_site::runner_journal_utc));
+                                utc_ms_now(bmmo::session::clock_site::runner_journal_utc));
         return id;
     }
 
@@ -1402,7 +1465,7 @@ public:
                test_hold_member_ms() ? Sprintf(" (held %u ms)", test_hold_member_ms()).c_str() : "");
         if (to.empty()) return;
         if (test_hold_member_ms() > 0) {
-            s.held_members.push_back({clock_->now(bmmo::session::clock_site::server_hold_member) + std::chrono::milliseconds(test_hold_member_ms()),
+            s.held_members.push_back({instant(bmmo::session::clock_site::server_hold_member) + std::chrono::milliseconds(test_hold_member_ms()),
                                       std::move(to), std::move(bytes)});
             return;
         }
@@ -1505,7 +1568,7 @@ public:
         static constexpr const char* kPhases[] = {"booting the game", "entering the level", "preparing the world"};
         Printf("Physics session %u: boot phase %u (%s) at %.3f s, sent to %zu players.", session,
                static_cast<unsigned>(phase), kPhases[static_cast<size_t>(phase)],
-               std::chrono::duration<double>(clock_->now(bmmo::session::clock_site::server_boot_log) - s.boot_requested).count(),
+               std::chrono::duration<double>(instant(bmmo::session::clock_site::server_boot_log) - s.boot_requested).count(),
                s.members.size());
     }
 
@@ -1534,10 +1597,10 @@ public:
         // The barrier starts now: from here on check_start_barriers() will drop
         // members that never answer with SessionReady once the window is up.
         s.start_barrier_armed = true;
-        s.start_deadline = clock_->now(bmmo::session::clock_site::server_start_deadline) + bmmo::sim::kStartBarrierTimeout;
+        s.start_deadline = instant(bmmo::session::clock_site::server_start_deadline) + bmmo::sim::kStartBarrierTimeout;
         Printf("Physics session %u: world ready %.3f s after the boot request (anchor %016llx, placement %016llx), "
                "SessionStart sent to %zu players.", s.id,
-               std::chrono::duration<double>(clock_->now(bmmo::session::clock_site::server_boot_log) - s.boot_requested).count(),
+               std::chrono::duration<double>(instant(bmmo::session::clock_site::server_boot_log) - s.boot_requested).count(),
                static_cast<unsigned long long>(s.anchor_hash), static_cast<unsigned long long>(s.anchor_placement),
                s.members.size());
     }
@@ -1898,7 +1961,7 @@ public:
         // round-trip allowance at all.
         {
             bmmo::net::connection_status status{};
-            transport_->status(c, status);
+            link_status(c, status);
             const int ping_ms = std::max(status.ping_ms, 0);
             const auto ping = (uint16_t) std::min(ping_ms, (int) std::numeric_limits<uint16_t>::max());
             if (auto ci = clients_.find(c); ci != clients_.end())
@@ -1922,7 +1985,7 @@ public:
             // shares the deadline already running.
             if (!s.start_barrier_armed) {
                 s.start_barrier_armed = true;
-                s.start_deadline = clock_->now(bmmo::session::clock_site::server_start_deadline_join) + bmmo::sim::kStartBarrierTimeout;
+                s.start_deadline = instant(bmmo::session::clock_site::server_start_deadline_join) + bmmo::sim::kStartBarrierTimeout;
             }
         }
         Printf("Physics session %u: %s joined%s (life %u, join order %u).", s.id, get_client_name(c),
@@ -2061,7 +2124,7 @@ public:
     // with it (late-player design 2.3), and the peak only ever grows.
     uint32_t current_rtt_ms(bmmo::net::connection c) const {
         bmmo::net::connection_status status{};
-        transport_->status(c, status);
+        link_status(c, status);
         return static_cast<uint32_t>(std::max(status.ping_ms, 0));
     }
 
@@ -2070,7 +2133,7 @@ public:
     // gets no extra commands and wakes exactly when it did before.
     void post_player_rtts() {
         if (!runner_ || !config_.physics_lead_adjust) return;
-        const auto now = clock_->now(bmmo::session::clock_site::server_rtt_post);
+        const auto now = instant(bmmo::session::clock_site::server_rtt_post);
         if (now < next_rtt_post_) return;
         next_rtt_post_ = now + std::chrono::seconds(1);
         for (auto& [id, s]: physics_sessions_)
@@ -2120,7 +2183,7 @@ public:
         send(c, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         retire_lead_repeats(s, c);
         s.lead_repeats.push_back(physics_session_state::lead_repeat{
-            c, notice.id, msg.raw.str(), kLeadRepeats, clock_->now(bmmo::session::clock_site::server_lead_repeat) + kLeadRepeatSpacing});
+            c, notice.id, msg.raw.str(), kLeadRepeats, instant(bmmo::session::clock_site::server_lead_repeat) + kLeadRepeatSpacing});
         lead->second.outstanding = notice.id;
         lead->second.outstanding_k = notice.k;
         Printf("Physics session %u: SessionLead %u to %s: %+d ticks, held [%u, %u), base %u.", s.id, notice.id,
@@ -2184,7 +2247,7 @@ public:
         return std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count();
     }
     void send_session_assign(physics_session_state& s, bmmo::net::connection c, uint32_t first_tick, uint8_t flags = 0) {
-        const auto sent = clock_->now(bmmo::session::clock_site::server_assign_sent);
+        const auto sent = instant(bmmo::session::clock_site::server_assign_sent);
         s.guards[c].named = false;   // a new numbering clears the client's mechanism registry
         bmmo::session_assign_msg assign;
         assign.session = s.id;
@@ -2211,8 +2274,8 @@ public:
                                s.assign_repeats.end());
         s.assign_repeats.push_back(physics_session_state::assign_repeat{
             c, first_tick,
-            bmmo::sim::assign_copy_schedule::after_reliable(main_pass_.load(std::memory_order_relaxed),
-                                                            clock_->now(bmmo::session::clock_site::server_assign_copy)),
+            bmmo::sim::assign_copy_schedule::after_reliable(pass_now(),
+                                                            instant(bmmo::session::clock_site::server_assign_copy)),
             flags, assign.start_us});
         s.assigned.insert(c);
         // A SessionLead of the previous base is void (the client drops it by
@@ -2255,7 +2318,7 @@ public:
                 ++sent;
             }
         if (sent && s.handshake.current_phase() == bmmo::session::start_handshake::phase::idle) {
-            s.handshake.begin(steady_us(clock_->now(bmmo::session::clock_site::server_handshake_begin)));
+            s.handshake.begin(steady_us(instant(bmmo::session::clock_site::server_handshake_begin)));
             Printf("Physics session %u: start handshake: the start base %u went to %zu member(s); waiting for every "
                    "member to confirm it (clock samples).", s.id, s.start_tick_base, sent);
         }
@@ -2310,7 +2373,7 @@ public:
         msg.flags = flags;
         msg.start_server_us = start_server_us;
         msg.start_us = start_us;
-        const auto now = clock_->now(bmmo::session::clock_site::server_start_at_sent);
+        const auto now = instant(bmmo::session::clock_site::server_start_at_sent);
         msg.server_us = steady_us(now);
         msg.serialize();
         send(c, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliableNoNagle);
@@ -2319,7 +2382,7 @@ public:
                               s.start_repeats.end());
         s.start_repeats.push_back(physics_session_state::start_repeat{
                 c, first_tick, seq, flags, start_server_us, start_us,
-                bmmo::sim::assign_copy_schedule::until_answered(main_pass_.load(std::memory_order_relaxed), now)});
+                bmmo::sim::assign_copy_schedule::until_answered(pass_now(), now)});
     }
 
     // FULL step SAXH: the start handshake's main-loop half (wall-clock
@@ -2327,7 +2390,7 @@ public:
     // postponements, the refusals and the players' status lines.
     void check_start_handshakes() {
         if (!runner_) return;
-        const auto now_tp = clock_->now(bmmo::session::clock_site::server_handshake_check);
+        const auto now_tp = instant(bmmo::session::clock_site::server_handshake_check);
         const int64_t now = steady_us(now_tp);
         std::vector<std::pair<uint32_t, bmmo::net::connection>> refused;   // session, member
         for (auto& [id, s]: physics_sessions_) {
@@ -2581,7 +2644,7 @@ public:
     // loop rather than a tick, so a session with one member left (the
     // leaver's Unphysicalize) still gets them.
     void send_assign_repeats() {
-        const auto now = clock_->now(bmmo::session::clock_site::server_assign_repeats);
+        const auto now = instant(bmmo::session::clock_site::server_assign_repeats);
         for (auto& [id, s]: physics_sessions_) {
             // --hold-member-ms (step M1, test builds): a held SessionMember
             // leaves once its time is up, then repeats like any event.
@@ -2597,7 +2660,7 @@ public:
                 if (std::find(s.members.begin(), s.members.end(), static_cast<bmmo::net::connection>(to)) != s.members.end())
                     send(to, bytes.data(), bytes.size(), bmmo::net::kSendUnreliableNoDelay);
             });
-            const uint64_t pass = main_pass_.load(std::memory_order_relaxed);
+            const uint64_t pass = pass_now();
             for (auto r = s.assign_repeats.begin(); r != s.assign_repeats.end();) {
                 if (!r->schedule.due(pass, now)) { ++r; continue; }
                 bmmo::session_assign_msg assign;
@@ -2641,7 +2704,7 @@ public:
 
     void check_start_barriers() {
         if (!runner_) return;
-        const auto now = clock_->now(bmmo::session::clock_site::server_start_barrier);
+        const auto now = instant(bmmo::session::clock_site::server_start_barrier);
         std::vector<uint32_t> all_silent;
         std::vector<std::pair<uint32_t, bmmo::net::connection>> dropped;   // session, member
         for (auto& [id, s]: physics_sessions_) {
@@ -3011,7 +3074,7 @@ public:
         const auto intake = bmmo::session::event_intake_admit(
                 s.events_seen, bmmo::session::lifecycle_key_of(msg, c),
                 msg.type != bmmo::session::event_type::BodyRevived, guard.events_in_window, guard.window_start,
-                clock_->now(bmmo::session::clock_site::server_event_rate), rate_limit);
+                instant(bmmo::session::clock_site::server_event_rate), rate_limit);
         if (intake == bmmo::session::event_intake::duplicate) {
             ++s.duplicate_events;
             return;
@@ -3332,7 +3395,7 @@ public:
         const size_t recipients = to.size();
         send_copies(s, bytes, std::move(to));
         const auto delay_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                clock_->now(bmmo::session::clock_site::server_event_relay_delay) - a.intake).count();
+                instant(bmmo::session::clock_site::server_event_relay_delay) - a.intake).count();
         // Step F3 (LCM): the arrival margin goes last, after the flag word,
         // so the existing readers' pattern (arena_map_test.py RE_S5) still
         // matches the line as it was.
@@ -3868,6 +3931,18 @@ protected:
     }
 
     void on_connection_status_changed(const bmmo::net::status_change& change) override {
+        if (change.state == bmmo::net::connection_state::connected) links_.insert(change.conn);
+        else if (change.state != bmmo::net::connection_state::connecting) links_.erase(change.conn);
+#if BMMO_BUILD_SIM
+        if (runner_) {   // step K4b-iii: on the runner thread, at the pass's instant
+            post_input(poll_at_, poll_transport_, [this, change] { handle_connection_status(change); });
+            return;
+        }
+#endif
+        handle_connection_status(change);
+    }
+
+    void handle_connection_status(const bmmo::net::status_change& change) {
         const auto* pInfo = &change;
         std::lock_guard lk(state_mutex_);
         switch (pInfo->state) {
@@ -4490,7 +4565,7 @@ protected:
                         if (client_map_it != maps_.end() && client_map_it->second.mode == bmmo::level_mode::Highscore) {
                             bmmo::highscore_timer_calibration_msg hs_msg{.content = {
                                 .map = msg->content.map,
-                                .time_diff_microseconds = transport_->local_timestamp() - client_map_it->second.start_time,
+                                .time_diff_microseconds = transport_now() - client_map_it->second.start_time,
                             }};
                             send(networking_msg->conn, hs_msg, bmmo::net::kSendReliableNoNagle);
                         }
@@ -4631,7 +4706,7 @@ protected:
                 if (msg.type == bmmo::public_notification_type::SeriousWarning
                         && config_.serious_warning_as_dnf && !client_it->second.dnf) {
                     auto client_map_it = maps_.find(client_it->second.current_map.get_hash_bytes_string());
-                    if (client_map_it == maps_.end() || transport_->local_timestamp()
+                    if (client_map_it == maps_.end() || transport_now()
                             - maps_[client_it->second.current_map.get_hash_bytes_string()].start_time > 20ll * 60 * 1000000)
                         break;
                     bmmo::did_not_finish_msg dnf_msg{.content = {
@@ -4773,7 +4848,18 @@ protected:
         int total = 0, count = 0;
         do {
             count = transport_->receive([this](const bmmo::net::message& msg) {
-                input_stamp stamp(arrival_of(msg.received));
+                const auto at = arrival_of(msg.received);
+#if BMMO_BUILD_SIM
+                // Step K4b-iii: handled on the runner thread at its arrival.
+                if (runner_) {
+                    post_input(at, msg.received, [this, conn = msg.conn, received = msg.received,
+                                                  bytes = std::string(static_cast<const char*>(msg.data), msg.size)]() mutable {
+                        on_message(bmmo::net::message{conn, bytes.data(), static_cast<int>(bytes.size()), received});
+                    });
+                    return;
+                }
+#endif
+                input_stamp stamp(at);
                 on_message(msg);
             }, ONCE_RECV_MSG_COUNT);
             if (count < 0)
@@ -4891,6 +4977,15 @@ protected:
     // the pass it was sent in and its first copy waits for the next one
     // (bmmo::sim::assign_copy_schedule).
     std::atomic<uint64_t> main_pass_{0};
+    // Step K4b-iii (post_input): the network thread's connected connections;
+    // on the runner thread, the input being handled - its pass, the transport
+    // clock at it, the connections' status read in its pass.
+    std::set<bmmo::net::connection> links_;
+    uint64_t input_pass_ = 0;
+    bmmo::net::microseconds input_transport_ = 0;
+    std::map<bmmo::net::connection, bmmo::net::connection_status> link_cache_;
+    std::chrono::steady_clock::time_point steady_origin_{};
+    int64_t utc_origin_us_ = 0;
     // Step K4b-ii (open_inbound).
     bmmo::session::capture_file inbound_;
     std::unique_ptr<bmmo::session::session_clock> clock_owned_;

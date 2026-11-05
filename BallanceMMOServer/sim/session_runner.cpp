@@ -154,6 +154,12 @@ namespace bmmo::sim {
     session_runner::input_stamp::~input_stamp() { t_input_stamp = outer_; }
 
     void session_runner::post(std::function<void()> command) {
+        // Step K4b-iii: from a handler the runner runs, the command belongs to
+        // the input being applied - right after it, at its instant.
+        if (on_thread()) {
+            deferred_.push_back(std::move(command));
+            return;
+        }
         {
             std::lock_guard lk(mutex_);
             // Stamps never go backwards in the queue: a pass's timers are
@@ -193,6 +199,14 @@ namespace bmmo::sim {
         }
         std::unique_lock lk(done_mutex);
         done_cv.wait(lk, [&] { return done; });
+    }
+
+    void session_runner::run_deferred() {
+        while (!deferred_.empty()) {
+            auto batch = std::move(deferred_);
+            deferred_.clear();
+            for (auto& command: batch) command();
+        }
     }
 
     void session_runner::mark(clock::time_point at) {
@@ -248,7 +262,7 @@ namespace bmmo::sim {
             if (!v.scheduled) return v.next_tick + lead;
             first_tick = v.first_tick;
             next_tick = v.next_tick;
-            p = bmmo::sim::reanchor_on_schedule_parts(v.schedule_start, v.first_tick, v.clock_fault.nominal_time(clock_->now(bmmo::session::clock_site::runner_reanchor)), lead, v.next_tick,
+            p = bmmo::sim::reanchor_on_schedule_parts(v.schedule_start, v.first_tick, v.clock_fault.nominal_time(on_thread() ? logical_ : clock_->now(bmmo::session::clock_site::runner_reanchor)), lead, v.next_tick,
                                                       margin);
         }
         // Step DX9 (H3's harness item): the rule's parts in the server's log,
@@ -2188,6 +2202,7 @@ namespace bmmo::sim {
                 jitter();
                 logical_ = std::max(logical_, next.stamp);
                 next.run();
+                run_deferred();
                 // What the network thread reads of a session (running, the
                 // leaving horizon) as of this command.
                 for (const auto& [id, sp]: sessions_)

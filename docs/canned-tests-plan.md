@@ -417,6 +417,22 @@ on_session_inputs, on_session_lead and on_event_accepted write network-side stat
 trafo_points, spawn pose, ticking, notices, relay, lead_repeats, last_physicalize, sector_history, trafo_relayed,
 awaiting_events) that the network thread's handlers read. K4b-iii's direction is for the user to choose.
 
+As built (K4b-iii, 2026-11-05, the user's option A): with the runner, every input the network thread takes - a
+message, a connection state change, a pass's timers (start barriers, handshakes, assign repeats, rtt posts) - is
+handled on the runner thread as a command stamped at its arrival (`server::post_input`), in stamp order with the
+ticks; the network thread receives, stamps, posts, marks, keeps its connection list and reads their status once
+per pass (into the capture; the handlers read that snapshot, `link_status`). A handler reads the logical now
+(`server::instant`, 17 sites), the input's pass (`pass_now`: the assign copies' schedule) and transport clock
+(`transport_now`), and a wall clock counted from one origin read at the loop's start (`utc_ms_now`); a post a
+handler makes runs right after the command at its instant (`session_runner::deferred_`, so a session's world boots
+after its handler has sent the room events, as before). Without the runner (physics off, a non-sim build) the
+handlers run on the network thread as before. Cost: a world boot (~3 s) holds every input behind it, not only that
+session's ticks. Checked: 809/809 unit tests; the wire check of core_ref_s16 ALL SAME (44 send traces; 40 journals,
+the 5 known-stale ones skipped); live P-core h1_150 with the server captured: harness PASS, server replay 2641/2641,
+the judge exact on all four clients; **the acceptance test passes**: the capture replayed plain and with the runner
+perturbed (BMMO_RUNNER_JITTER 2 / 5 / 20 ms before every command and step) gives the live server journal byte for
+byte all four times (12,337,074 bytes). Not run: LBM (next, before K4c).
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |
