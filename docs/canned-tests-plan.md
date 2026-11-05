@@ -320,6 +320,63 @@ in log lines (`server.cpp:3076, 3241`), the step-cost timers.
 - Cost: a frame that today lands in the runner's late wake-up gap becomes late unless the grace covers it;
   the handover adds up to one network poll before each step. Measured by LBM (timing criteria) before K4c.
 
+#### K4b design (2026-11-05, the user's choices: grace from today's late-wake p99, a wakeable network poll, no old path, the lateness basis may change, the server capture as the acceptance test)
+
+The principle: the runner is a pure function of the stream the network thread hands it - stamped commands in
+stamp order - and of nothing else; when it runs only decides when the results come out, never what they are.
+
+- **Stamps.** Every `post()` carries a stamp on the session clock (C1): a message's receive time (one clock pair
+  per poll, `arrival = P_c - (P_t - received)`, P_c / P_t read once before the receive: no per-message clock
+  reads); a connection status change or a network-thread timer (start barrier, handshake, assign repeats, rtt
+  posts) the poll's P_c. Stamps are posted in nondecreasing order (the poll group's queue is in enqueue order,
+  which is stamp order; a timer's P_c is at or after every arrival of its pass); a stamp below the last one is
+  raised to it.
+- **The handover mark W.** After a poll (and its timers), the network thread posts the mark W = P_c: every
+  command stamped at or before W has been posted. Exact for GNS: the library stamps a packet
+  (`usecRecvFromEnd`, `steamnetworkingsockets_socketthread.cpp:2573`) and enqueues its message under the one
+  global lock that `ReceiveMessages` takes, so a message stamped before P_t is in the queue by the receive. A
+  receive that returns the batch cap (1024) is repeated in the same pass until it returns less (reliable
+  gap-fills give several messages one stamp, so "the last message's stamp" is no mark). Command stamps are raised
+  to stay monotonic; marks never are.
+- **The logical timeline.** The runner keeps a logical now L. Each running session's next tick T has a step
+  instant X(T): the earliest x >= L at which today's step test passes with the state as of L - all frames in
+  (x = L), a member's patience threshold, or the deadline plus the grace (`due(x)` = x >= deadline(T) + grace).
+  The runner repeatedly takes the earliest of: the next command (stamp a <= W; a command at x = X goes first,
+  the take's "arrived by" being `at <= cutoff`), applied with L = a; or the earliest X <= W, stepped with L = X.
+  With neither, it blocks until a post arrives; the real time reaching the earliest X is only its cue to ask
+  the network thread for a poll (the mark has to pass X) - never a busy loop while W < X, never a sleep on X
+  read against another process's clock (a replay). Every deciding clock read in the runner becomes L (in a
+  command: its stamp; in a step: X); the runner's remaining clock reads only size its waits (free sites, not
+  captured). The tick a command counts for follows: the commands applied before step T are in effect for T.
+- **What this removes.** The drain-time rule of A1-A7 (`seen` becomes the stamp; `tick_index()` inside a
+  command is now the logical one; the B2SX catch-up cutoff becomes the take's cutoff X on every step); the
+  frames a late wake-up used to take are the grace's.
+- **The network thread's waits.** Its two sleeps become a wait the runner can cut short with a poll request
+  ("need W >= X"); a requested poll is a receive pass only (messages, status changes, the mark): the pass timers
+  keep their 15.15 ms cadence and `main_pass_` counts regular passes only (the STR assign-repeat cadence counts
+  them).
+- **B1-B5: the network thread asks, the runner decides at the request's stamp, a callback answers.** The joiner's
+  start / late / waiting choice, the start barrier, the start resyncs and the waiting joiners, a SessionResync,
+  the re-anchor's base (its floor is the logical next tick) - each becomes a stamped command whose answer comes
+  back by callback (under `state_mutex_`, as every runner callback does today) and is sent from there.
+- **Not changed.** The wire and the protocol; the step; C1 (the runner's callbacks still send from the runner
+  thread: their relative order with the network thread's sends is the real-time order, as today; stage 1 fixes
+  it with the coordinator's rule at equal virtual instants, K4c).
+- **To check while building.** Network-thread state written by runner callbacks (`s.late`, `awaiting_events`,
+  relay acknowledgements, ...): a post decided from it would make the stream depend on the runner's timing.
+- **The acceptance test.** The server's capture records the network thread's inputs only (transport messages
+  and status, its clock reads); a replay feeds them back with the runner perturbed (random sleeps before steps
+  and drains) and must give the live server journal byte for byte, several perturbation seeds. Its
+  prerequisites: in a replay a poll request is a no-op and the network thread replays its recorded passes (a
+  regular pass and a requested one look alike in the capture) as fast as it can, then posts a terminal mark;
+  `server::clock_` rebindable (as the headless client's in K3); the runner on the real clock (`rc.clock`), not the
+  recording one, so a second thread never interleaves into the one capture stream; the journal header's start and
+  UTC values read on the network thread and passed in `create_session` (today read in the command body,
+  `session_runner.cpp:295`).
+- **Order.** K4b-i: stamps, the mark, the logical loop, the wakeable poll (A1-A7); gate: unit tests, wire check,
+  smoke. K4b-ii: the server capture and the perturbed replay test (it finds any callback-written state that a
+  post depends on). K4b-iii: B1-B5 and whatever K4b-ii found. Each committed on its gate; LBM after K4b-iii.
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |
