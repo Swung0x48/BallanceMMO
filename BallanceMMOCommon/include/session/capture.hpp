@@ -208,6 +208,13 @@ namespace bmmo::session {
             return static_cast<tag>(data_[at]);
         }
         bool complete() const { return next_pos() < data_.size() && peek() == tag::end; }
+        // Step K4b-ii: whether the next record is a clock read at `site` (the
+        // server's replay tells a requested receive pass from the loop's own
+        // by it).
+        bool next_is_clock(clock_site site) const {
+            const size_t at = next_pos();
+            return peek() == tag::clock && at + 1 < data_.size() && static_cast<clock_site>(data_[at + 1]) == site;
+        }
         bool exhausted() const { return next_pos() >= data_.size() || peek() == tag::end; }
 
         bool take_iteration(uint64_t& index, uint64_t& steps) {

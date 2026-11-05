@@ -6,11 +6,17 @@
 // answers from the file, and a read the live run did not make calls
 // `diverged`.  A message and a state change are written before the host
 // handles them, so the reads their handling makes follow them in the file.
-// Single-threaded, as the capture is.  CK-free and header-only.
+// The capture is one thread's (step K4b-ii: the server's network thread; the
+// headless client's only thread): a read made on any other thread - the
+// server's runner and its callbacks - goes to the live clock or transport
+// (the replay's own clock; a replayed transport answers it with nothing) and
+// is not in the file.  CK-free and header-only.
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "../net/transport.hpp"
 #include "capture.hpp"
@@ -20,24 +26,37 @@ namespace bmmo::session {
 
     using capture_diverged = std::function<void(const std::string& why)>;
 
+    // The thread whose reads the capture holds: the constructing one until
+    // claim() hands it to the caller (the server's network loop, once it runs).
+    class capture_owner {
+    public:
+        void claim() { owner_.store(std::this_thread::get_id()); }
+        bool here() const { return owner_.load() == std::this_thread::get_id(); }
+
+    private:
+        std::atomic<std::thread::id> owner_{std::this_thread::get_id()};
+    };
+
     class recording_clock final : public session_clock {
     public:
         recording_clock(session_clock& live, capture_file& file) : live_(live), file_(file) {}
         time_point now(clock_site site) override {
             const auto v = live_.now(site);
-            file_.clock(site, static_cast<int64_t>(v.time_since_epoch().count()));
+            if (owner.here()) file_.clock(site, static_cast<int64_t>(v.time_since_epoch().count()));
             return v;
         }
         int64_t utc_us(clock_site site) override {
             const int64_t v = live_.utc_us(site);
-            file_.clock(site, v);
+            if (owner.here()) file_.clock(site, v);
             return v;
         }
         uint64_t utc_ms(clock_site site) override {
             const uint64_t v = live_.utc_ms(site);
-            file_.clock(site, static_cast<int64_t>(v));
+            if (owner.here()) file_.clock(site, static_cast<int64_t>(v));
             return v;
         }
+        capture_owner owner;
+
     private:
         session_clock& live_;
         capture_file& file_;
@@ -50,11 +69,15 @@ namespace bmmo::session {
         replay_clock(capture_file& file, session_clock& own, capture_diverged diverged)
             : file_(file), own_(own), diverged_(std::move(diverged)) {}
         time_point now(clock_site site) override {
-            if (file_.is_free(site)) return own_.now(site);
+            if (file_.is_free(site) || !owner.here()) return own_.now(site);
             return time_point(clock_type::duration(take(site)));
         }
-        int64_t utc_us(clock_site site) override { return take(site); }
-        uint64_t utc_ms(clock_site site) override { return static_cast<uint64_t>(take(site)); }
+        int64_t utc_us(clock_site site) override { return owner.here() ? take(site) : own_.utc_us(site); }
+        uint64_t utc_ms(clock_site site) override {
+            return owner.here() ? static_cast<uint64_t>(take(site)) : own_.utc_ms(site);
+        }
+        capture_owner owner;
+
     private:
         int64_t take(clock_site site) {
             int64_t value = 0;
@@ -85,7 +108,7 @@ namespace bmmo::session {
         void set_name(net::connection c, const std::string& name) override { live_->set_name(c, name); }
         bool status(net::connection c, net::connection_status& out) override {
             const bool known = live_->status(c, out);
-            file_.link_status(c, known, out);
+            if (owner.here()) file_.link_status(c, known, out);
             return known;
         }
         std::string detailed_status(net::connection c) override { return live_->detailed_status(c); }
@@ -104,12 +127,13 @@ namespace bmmo::session {
         }
         net::microseconds local_timestamp() override {
             const auto v = live_->local_timestamp();
-            file_.link_clock(v);
+            if (owner.here()) file_.link_clock(v);
             return v;
         }
         bool set_fake_lag(direction d, int ms) override { return live_->set_fake_lag(d, ms); }
         bool set_fake_loss(direction d, float percent) override { return live_->set_fake_loss(d, percent); }
         int connection_timeout_ms() override { return live_->connection_timeout_ms(); }
+        capture_owner owner;
 
     private:
         std::unique_ptr<net::transport> live_;
@@ -130,6 +154,7 @@ namespace bmmo::session {
         void close(net::connection, int, const std::string&, bool) override {}
         void set_name(net::connection, const std::string&) override {}
         bool status(net::connection c, net::connection_status& out) override {
+            if (!owner.here()) return false;
             bool known = false;
             std::string error;
             if (!file_.take_link_status(c, known, out, error)) diverged_(error);
@@ -151,6 +176,7 @@ namespace bmmo::session {
             while (file_.take_status(c)) each(c);
         }
         net::microseconds local_timestamp() override {
+            if (!owner.here()) return 0;
             net::microseconds value = 0;
             std::string error;
             if (!file_.take_link_clock(value, error)) diverged_(error);
@@ -159,6 +185,7 @@ namespace bmmo::session {
         bool set_fake_lag(direction, int) override { return true; }
         bool set_fake_loss(direction, float) override { return true; }
         int connection_timeout_ms() override { return 0; }
+        capture_owner owner;
 
     private:
         capture_file& file_;

@@ -121,6 +121,16 @@ namespace bmmo::sim {
         : config_(std::move(config)), callbacks_(std::move(callbacks)),
           clock_(config_.clock ? config_.clock : &bmmo::session::real_session_clock()) {
         debug_stalls_ = parse_session_stalls(std::getenv("BMMO_SESSION_STALL"));
+        if (const char* jitter = std::getenv("BMMO_RUNNER_JITTER")) {
+            unsigned long long seed = 0;
+            unsigned max_us = 0;
+            if (std::sscanf(jitter, "%llu:%u", &seed, &max_us) == 2 && max_us > 0) {
+                jitter_state_ = seed * 0x9E3779B97F4A7C15ull + 1;
+                jitter_max_us_ = max_us;
+                log("debug: BMMO_RUNNER_JITTER sleeps up to " + std::to_string(max_us)
+                    + " us before each command and step (seed " + std::to_string(seed) + "; a test knob, unset in deployments)");
+            }
+        }
         for (const auto& [tick, ms]: debug_stalls_)
             log("debug: BMMO_SESSION_STALL holds the step of tick " + std::to_string(tick) + " for " + std::to_string(ms)
                 + " ms (a harness stall; unset in deployments)");
@@ -154,6 +164,35 @@ namespace bmmo::sim {
             commands_.push_back(stamped_command{stamp, std::move(command)});
         }
         wake_.notify_all();
+    }
+
+    void session_runner::jitter() {
+        if (!jitter_max_us_) return;
+        jitter_state_ ^= jitter_state_ << 13;
+        jitter_state_ ^= jitter_state_ >> 7;
+        jitter_state_ ^= jitter_state_ << 17;
+        std::this_thread::sleep_for(std::chrono::microseconds(jitter_state_ % (jitter_max_us_ + 1)));
+    }
+
+    void session_runner::settle(clock::time_point at) {
+        // A command stamped just after `at`: the runner gets to it once every
+        // command and step up to `at` is done (one queued after a step
+        // instant is what lets that step go).
+        std::mutex done_mutex;
+        std::condition_variable done_cv;
+        bool done = false;
+        {
+            input_stamp stamp(at + std::chrono::microseconds(1));
+            post([&] {
+                {
+                    std::lock_guard lk(done_mutex);
+                    done = true;
+                }
+                done_cv.notify_all();
+            });
+        }
+        std::unique_lock lk(done_mutex);
+        done_cv.wait(lk, [&] { return done; });
     }
 
     void session_runner::mark(clock::time_point at) {
@@ -305,7 +344,7 @@ namespace bmmo::sim {
         header.world_options = s.world_options;
         header.anchor_placement = anchor_placement;   // journal v6 (sector placement step S5)
         header.mechanism_slots = s.mechanism_slots;   // journal v8 (world agreement step Q7)
-        header.utc_ms = clock_->utc_ms(bmmo::session::clock_site::runner_journal_utc);
+        header.utc_ms = s.journal_utc_ms ? s.journal_utc_ms : clock_->utc_ms(bmmo::session::clock_site::runner_journal_utc);
         const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
         s.journal_start = logical_;
         std::string error;
@@ -327,12 +366,14 @@ namespace bmmo::sim {
                                         uint32_t input_delay, uint32_t start_base, float spawn_impulse,
                                         const std::string& note, std::vector<std::string> names,
                                         uint32_t sector_lead, uint32_t world_option_bits, uint8_t mechanism_slots,
-                                        std::filesystem::path map_file) {
+                                        std::filesystem::path map_file, uint64_t journal_utc_ms) {
         post([this, session, level, players, input_delay, start_base, spawn_impulse, note,
-              names = std::move(names), sector_lead, world_option_bits, mechanism_slots, map_file = std::move(map_file)] {
+              names = std::move(names), sector_lead, world_option_bits, mechanism_slots, map_file = std::move(map_file),
+              journal_utc_ms] {
             auto& s = sessions_[session];
             s = std::make_unique<session_state>();
             s->id = session;
+            s->journal_utc_ms = journal_utc_ms;
             s->level = level;
             s->input_delay = input_delay ? input_delay : config_.input_delay;
             s->sector_lead = sector_lead;
@@ -2144,6 +2185,7 @@ namespace bmmo::sim {
                 auto next = std::move(commands_.front());
                 commands_.pop_front();
                 lk.unlock();
+                jitter();
                 logical_ = std::max(logical_, next.stamp);
                 next.run();
                 // What the network thread reads of a session (running, the
@@ -2155,6 +2197,7 @@ namespace bmmo::sim {
             }
             if (move == bmmo::session::logical_move::step) {
                 lk.unlock();
+                jitter();
                 logical_ = std::max(logical_, due_at);
                 step_session(*due);
                 lk.lock();

@@ -399,6 +399,24 @@ CBF1 F1 / CBF3 client changes, not K4b (core_ref_s16 predates them); live P-core
 server replay 2641/2641, the judge exact on all four clients; `step-lag-ms` p50 8 ms / p95 16 ms - the network
 pass's 15.15 ms cadence, the same queueing the old `seen-at` showed (0.53 ticks). Not run: LBM (after K4b-iii).
 
+As built (K4b-ii, 2026-11-05; the infrastructure - the test does not pass yet): the server's `--capture-inbound` /
+`--replay-inbound` (test builds): `capture_seams.hpp` records / replays the reads of one thread (`capture_owner`:
+the constructing thread, then the network loop's - the runner and its callbacks read the real clock and are not in
+the capture); `capture_file::next_is_clock` lets the replay's `wait_until` replay exactly the receive passes the
+runner asked for; a replay sends nothing, paces nothing and, when the capture ends, `session_runner::settle`s the
+runner at the last mark; the journal header's utc comes from the network thread (`create_session`'s
+`journal_utc_ms`); `server::clock_` is a pointer; the runner keeps the real clock; `BMMO_RUNNER_JITTER=SEED:MAX_US`
+sleeps the runner randomly before each command and step. First run (h1_150 captured live, harness PASS; replayed
+plain and with jitter 2 / 5 / 20 ms): every replay ran to the capture's end, but no session started - the replayed
+network thread reaches the members' messages before the runner has booted the world (2 s for the whole capture),
+and its decisions read what the runner hands back through callbacks: the world's resetpoints and trafo points
+(events REJECTED as "a level without a trafo", "suspicious" poses), `world_ready`, the published tick ("server tick
+0"). The same holds live, only hidden by real-time pacing: the network thread's session decisions depend on how far
+the runner has got - the reverse direction of K4a's group B, and wider: on_world_ready, on_session_snapshot,
+on_session_inputs, on_session_lead and on_event_accepted write network-side state (world_ready, resetpoints,
+trafo_points, spawn pose, ticking, notices, relay, lead_repeats, last_physicalize, sector_history, trafo_relayed,
+awaiting_events) that the network thread's handlers read. K4b-iii's direction is for the user to choose.
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |

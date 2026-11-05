@@ -306,6 +306,9 @@ namespace bmmo::sim {
         // The handover mark: every command stamped at or before `at` has been
         // posted (the network thread, after each receive pass).
         void mark(std::chrono::steady_clock::time_point at);
+        // Step K4b-ii (a server replay's end): returns once every command and
+        // every step up to `at` is done.
+        void settle(std::chrono::steady_clock::time_point at);
 
         // Boots a world for the level; on_world_ready follows.  Each player is
         // paired with its join order (design 9.10): the world's per-player
@@ -338,7 +341,7 @@ namespace bmmo::sim {
                             uint32_t input_delay, uint32_t start_base, float spawn_impulse,
                             const std::string& note = {}, std::vector<std::string> names = {},
                             uint32_t sector_lead = 0, uint32_t world_options = 0, uint8_t mechanism_slots = 0,
-                            std::filesystem::path map_file = {});
+                            std::filesystem::path map_file = {}, uint64_t journal_utc_ms = 0);
         // `reason` goes into the journal as `end: <reason>` before it closes.
         void destroy_session(uint32_t session, const std::string& reason = {});
         // `name` is the player's display name for the journal's PLAYER record.
@@ -495,6 +498,9 @@ namespace bmmo::sim {
             };
             std::deque<quorum_tick> quorum_history;
             uint64_t quorum_ticks = 0, quorum_member_ticks = 0, quorum_last = 0, quorum_wide = 0, quorum_waived = 0;
+            // Step K4b-ii: the journal header's utc_ms, read by the caller of
+            // create_session (0: by the runner when it opens the journal).
+            uint64_t journal_utc_ms = 0;
             // Diagnostics (step K4b): `arrival_queue` the real time from a
             // frame's arrival to the runner thread applying it (ticks);
             // `step_lag_ms` the real time a step ran after its step instant;
@@ -775,6 +781,13 @@ namespace bmmo::sim {
         // to a slow file system).  Read once, before the thread starts;
         // simulation thread only after that.
         std::map<uint32_t, uint32_t> debug_stalls_;
+        // Step K4b-ii: the replay test's perturbation (BMMO_RUNNER_JITTER=
+        // SEED:MAX_US, unset in every deployment): a random sleep of up to
+        // MAX_US before each command and each step - the results must not
+        // move.  Simulation thread only.
+        uint64_t jitter_state_ = 0;
+        uint32_t jitter_max_us_ = 0;
+        void jitter();
 
         // cross-thread view
         mutable std::mutex view_mutex_;
