@@ -1359,6 +1359,12 @@ namespace {
                 array->GetElementStringValue(r, c, cell, static_cast<int>(sizeof(cell)));
                 cell[sizeof(cell) - 1] = 0;
                 out += cell;
+                // A parameter cell whose text is empty (a type with no text
+                // form here, the keyboard keys under the null input manager):
+                // its value's first int.
+                int raw = 0;
+                if (!cell[0] && array->GetColumnType(c) == CKARRAYTYPE_PARAMETER && array->GetElementValue(r, c, &raw))
+                    out += "=" + std::to_string(raw);
             }
             out += "\n";
         }

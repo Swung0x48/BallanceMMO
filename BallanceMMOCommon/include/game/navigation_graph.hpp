@@ -52,7 +52,7 @@ namespace bmmo::game {
         CK_ID ball_navigation = 0;            // the "Ball Navigation" behavior
         CK_ID direction_ref = 0;              // Cam_OrientRef (Direction Ref of the leaves)
         CK_ID wake_up_block = 0;              // the shared "Physics WakeUp" block
-        // The camera's keys as the game's options set them (the "Keys"
+        // The camera's keys as the game's options set them (the "Keyboard"
         // array's rotation and camup columns, row 0; Shift and Space when it
         // does not say): input_frame's KEY_SHIFT and KEY_SPACE.
         int camera_rotation_key = CKKEY_LSHIFT;
@@ -149,7 +149,7 @@ namespace bmmo::game {
         std::sort(out.leaves.begin(), out.leaves.end(),
                   [](const navigation_leaf& a, const navigation_leaf& b) { return a.key_order < b.key_order; });
         for (size_t i = 0; i < out.leaves.size(); ++i) out.leaves[i].index = static_cast<int>(i);
-        if (auto* keys = static_cast<CKDataArray*>(context->GetObjectByNameAndClass(const_cast<CKSTRING>("Keys"),
+        if (auto* keys = static_cast<CKDataArray*>(context->GetObjectByNameAndClass(const_cast<CKSTRING>("Keyboard"),
                                                                                     CKCID_DATAARRAY, nullptr))) {
             for (int c = 0; keys->GetRowCount() > 0 && c < keys->GetColumnCount(); ++c) {
                 const char* name = keys->GetColumnName(c);

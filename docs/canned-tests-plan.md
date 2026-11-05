@@ -780,14 +780,15 @@ Checked also: 815/815; x64 build; the wire check of core_ref_s17 ALL SAME, nothi
 The camera's keys (the user, 2026-11-05: "好的，填进去"; the camera turns with Shift + Left/Right): input_frame
 has had KEY_SHIFT / KEY_SPACE bits since the design, but no client filled them - trial 2's retail journal never sets
 either in 63,951 ticks while its camera takes four directions. Both clients fill them now
-(`navigation_graph::camera_bits_from_state`: the game's "Keys" array's `rotation` and `camup` keys, row 0, Shift and
-Space when the array does not say - the headless engine's array reads empty, so the defaults there; retail reads the
-player's options). No world consumes them (the leaves drive the ball, the frame's camera rows the camera); a frame
+(`navigation_graph::camera_bits_from_state`: the game's "Keyboard" array's `rotation` and `camup` keys, row 0 - the
+options' keys, 42 / 57 = Shift / Space by default; the array is the level's, read when the navigation is; Shift and Space
+only when it is missing. The first version looked for an array named "Keys", which does not exist, and so always used
+the defaults: corrected the same day, the user: "应该是读Keys数组，如果没读到才回退默认"). No world consumes them (the leaves drive the ball, the frame's camera rows the camera); a frame
 that differs only in them costs a rollback where it was predicted otherwise, like any other input change. A later
 journal so carries the player's own camera keys - what a keyboard-level re-drive (keys on the virtual keyboard, the
 game's own camera script turning the camera) would need; a journal from before has only the camera rows (the K8 path
 above). Checked: 815/815; x64 and x86 builds; a coordinated smoke (2 clients: PASS, the server replay exact, camera
-keys 42 / 57); the wire check of core_ref_s17 ALL SAME. Not run: retail (whether its Keys array gives the options' keys at the navigation's discovery).
+keys 42 / 57 read from the array); the wire check of core_ref_s17 ALL SAME. Not run: retail (whether its Keyboard array holds the player's own keys at the navigation's discovery).
 The late joiner joined at tick 1471 (recipe: 1409 = 1381 + 28; `--recipe-start-ms` 3500 is an estimate). The
 original's 626 ticks the server stood in for the stalled joiner are played as the server applied them (decision 1).
 
