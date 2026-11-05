@@ -895,7 +895,8 @@ Taken: the gate (user, 2026-11-05): each K step lands on unit tests, the wire ch
 LBM runs in full once, before the branch is merged into collision-overhaul. Stage 0 first (user, 2026-11-04); journal version 10 with `.bmjs` / `.bmjc` (user); 0b as FINAL rows
 by default at the checkpoint cadence (recommendation; the alternative, a per-tick hash over the bodies both
 sides share, needs one shared-set definition on every side and is left open); SessionJournal off by default
-in retail (user); the seams before the tools (user).
+in retail (user; reversed 2026-11-05, the user: "让客户端SessionJournal默认开" - on by default again, so a real
+game's client journals are there for a recipe); the seams before the tools (user).
 
 Open:
 1. Stage 1's rewind cost: the real measurement (the real cap, not reproducible) or a fixed model
