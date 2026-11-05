@@ -187,9 +187,12 @@ namespace bmmo::net {
             while (!closing_) {
                 const auto wake = clock_.wait_idle();
                 if (closing_ || clock_.closed()) return;
+                // The wake in whole microseconds, rounded up: an advance to it
+                // must reach the wait (a tick's 15151.515 us rounded down is a
+                // time short of it, and the run would step there for ever).
                 coord::body_out idle;
                 idle.put<uint8_t>(wake ? 1 : 0)
-                    .put<int64_t>(wake ? std::chrono::duration_cast<std::chrono::microseconds>(wake->time_since_epoch()).count() : 0);
+                    .put<int64_t>(wake ? std::chrono::ceil<std::chrono::microseconds>(wake->time_since_epoch()).count() : 0);
                 {
                     std::lock_guard lk(write_);
                     if (!coord::write_frame(socket_, coord::op::idle, idle.bytes())) return;

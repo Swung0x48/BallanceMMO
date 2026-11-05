@@ -1018,7 +1018,29 @@ def run_case(args, sector, case_dir):
     # side can read, which is what journal_dir in its own config decides.
     host, _, port = (args.external_server or f'127.0.0.1:{args.port}').partition(':')
     server_addr = (host, int(port))
+    coordinator, coordinator_addr = None, None
     try:
+        if args.coordinated:
+            # Step T1: the network and the time are the coordinator's.
+            link = links[0]
+            if args.external_server or any(l != link for l in links.values()) or link['jitter_ms'] or args.events:
+                raise SystemExit('--coordinated: one link for every client, no jitter, no link events, no external server')
+            cf_log = open(case_dir / 'coordinator.log', 'w+b')
+            handles.append(cf_log)
+            coordinator = subprocess.Popen(
+                [str(bindir / f'BallanceMMOCoordinator{EXE}'), '--processes', str(args.players + 1),
+                 '--latency-ms', str(int(link['latency_ms'])), '--loss-pct', str(link['loss_pct']),
+                 '--seed', str(args.loss_seed)],
+                cwd=case_dir, stdin=subprocess.DEVNULL, stdout=cf_log, stderr=subprocess.STDOUT, creationflags=FLAGS)
+            children.append(coordinator)
+            for _ in range(200):
+                text = (case_dir / 'coordinator.log').read_text(errors='replace')
+                if 'listening on ' in text:
+                    coordinator_addr = text.split('listening on ', 1)[1].split()[0]
+                    break
+                time.sleep(0.05)
+            if not coordinator_addr:
+                raise SystemExit('--coordinated: the coordinator did not start')
         if args.server_control:
             lph.server_control(args, 'start', case_dir / 'server-control-start.log')
             controller_started = True
@@ -1026,7 +1048,8 @@ def run_case(args, sector, case_dir):
             sf = open(case_dir / 'server.log', 'wb')
             handles.append(sf)
             server = subprocess.Popen(
-                [str(bindir / f'BallanceMMOServer{EXE}'), '--port', str(args.port)],
+                [str(bindir / f'BallanceMMOServer{EXE}'), '--port', str(args.port),
+                 *(['--coordinator', coordinator_addr] if coordinator_addr else [])],
                 cwd=case_dir, stdin=subprocess.PIPE, stdout=sf,
                 stderr=subprocess.STDOUT, creationflags=FLAGS)
             children.append(server)
@@ -1059,8 +1082,8 @@ def run_case(args, sector, case_dir):
             # an event on that client's link happens.
             drop_down = args.drop_downs.get(i)
             outages = [parse_outage(spec)[1] for spec in args.outage if parse_outage(spec)[0] == i]
-            if (link['latency_ms'] > 0 or link['loss_pct'] > 0 or link['jitter_ms'] > 0 or link_events or drop_down
-                    or outages):
+            if (not args.coordinated and (link['latency_ms'] > 0 or link['loss_pct'] > 0 or link['jitter_ms'] > 0
+                                          or link_events or drop_down or outages)):
                 pport = args.port + 400 + i
                 proxy = DelayProxy(pport, server_addr, link['latency_ms'], link['loss_pct'], link['jitter_ms'],
                                    link['loss_burst'], args.loss_seed,
@@ -1147,6 +1170,8 @@ def run_case(args, sector, case_dir):
             if args.window_origin:
                 cmd += ['--window-origin', str(args.window_origin)]
             cmd += member_args(args, i)
+            if coordinator_addr:   # step T1: on the coordinator's network and time, reproducibly
+                cmd += ['--coordinator', coordinator_addr, '--rewind-cost', args.rewind_cost, '--uuid-seed', str(1001 + i)]
             cmd.extend(args.client_arg_for.get(i, []))
             # Explicit coverage endpoints supplied by a level driver must be
             # judged too, not merely logged by the client.
@@ -1185,7 +1210,13 @@ def run_case(args, sector, case_dir):
 
         for i, p in sorted(clients.items()):
             p.wait(timeout=args.seconds + args.startup_timeout + 30)
-        if server is not None:
+        if coordinator is not None:
+            # Step T1: the clients gone, the coordinator stops the server.
+            coordinator.wait(timeout=60)
+            if server is not None:
+                server.wait(timeout=60)
+            print('  ' + (case_dir / 'coordinator.log').read_text(errors='replace').strip().splitlines()[-1], flush=True)
+        if server is not None and server.poll() is None:
             server.stdin.write(b'sessions\nstop\n')
             server.stdin.flush()
             try:
@@ -3582,6 +3613,13 @@ def main():
                     help="where the server writes journals, when it is not ours")
     ap.add_argument('--external-server', default='',
                     help='HOST:PORT of a server to use instead of starting one')
+    ap.add_argument('--coordinated', action='store_true',
+                    help='step T1 (docs/canned-tests-plan.md): run the server and the clients on one virtual time '
+                         'through BallanceMMOCoordinator (its network: --latency-ms and --loss-pct, the same for every '
+                         'client; no proxies, no jitter, no link events)')
+    ap.add_argument('--rewind-cost', default='3.0:0.46',
+                    help='--coordinated: every client\'s fixed rewind cost R:P (ms of restore, ms a tick; K6); '
+                         'a --client-arg-for --rewind-cost overrides one client\'s')
     ap.add_argument('--latency-ms', type=float, default=None,
                     help='each way delay added to the affected clients links')
     ap.add_argument('--client-arg', action='append', default=[],

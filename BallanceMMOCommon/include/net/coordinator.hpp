@@ -10,6 +10,8 @@
 //   4. every process gets what the network delivered to it by then and its
 //      connection state changes (with the link's round trip once connected),
 //      then the time.
+// The run ends at until_us, or once every client (role 1) has gone; the server
+// is then stopped.
 // Processes are numbered by (role, name) once all have said hello, so the run
 // does not depend on who connected first.  A process that disconnects is gone:
 // its connections close (the peers learn it after their links' latency).
@@ -19,6 +21,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -65,6 +68,9 @@ namespace bmmo::net {
         }
 
         uint16_t port() const { return acceptor_.local_endpoint().port(); }
+        // Lines worth a log (a process that never goes idle).
+        void set_report(std::function<void(const std::string&)> report) { report_ = std::move(report); }
+        void set_trace(bool trace) { trace_ = trace; }
         uint64_t steps() const { return steps_; }
         microseconds now() const { return network_.now(); }
 
@@ -73,6 +79,9 @@ namespace bmmo::net {
             network_.advance(options_.start_us - network_.now());
             for (;;) {
                 if (!wait_all_idle()) break;   // every process gone
+                // Every client gone (a client ends its own run): the run is over.
+                if (std::none_of(processes_.begin(), processes_.end(), [](const auto& p) { return p->alive && p->role != 0; }))
+                    break;
                 apply_ops();
                 std::optional<microseconds> next;
                 for (auto& p: processes_)
@@ -80,6 +89,7 @@ namespace bmmo::net {
                 if (!next) { error = "no process waits for a time"; break; }
                 if (options_.until_us && *next > options_.until_us) break;
                 network_.advance(*next - network_.now());
+                if (report_ && trace_) report_("step " + std::to_string(steps_) + " to +" + std::to_string(*next - options_.start_us) + " us");
                 for (auto& p: processes_)
                     if (p->alive) hand_over(*p, *next);
                 ++steps_;
@@ -183,11 +193,24 @@ namespace bmmo::net {
                 frame_in f;
                 {
                     std::unique_lock lk(inbox_mutex_);
-                    inbox_cv_.wait(lk, [&] { return !inbox_.empty(); });
+                    // A process that never goes idle stops the run: say which,
+                    // once, after 5 s of real time.
+                    if (!inbox_cv_.wait_for(lk, std::chrono::seconds(5), [&] { return !inbox_.empty(); })) {
+                        if (!stalled_reported_ && report_) {
+                            stalled_reported_ = true;
+                            std::string who;
+                            for (const auto& p: processes_)
+                                if (p->alive && !p->idle) who += (who.empty() ? "" : ", ") + p->name;
+                            report_("waiting 5 s of real time for " + who + " to go idle (step " + std::to_string(steps_) + ")");
+                        }
+                        continue;
+                    }
                     f = std::move(inbox_.front());
                     inbox_.pop_front();
                 }
-                take(*processes_[f.process], f);
+                if (trace_ && report_)
+                report_("frame " + std::to_string(static_cast<int>(f.o)) + (f.eof ? " eof" : "") + " from " + processes_[f.process]->name);
+            take(*processes_[f.process], f);
             }
         }
 
@@ -338,6 +361,9 @@ namespace bmmo::net {
         std::condition_variable inbox_cv_;
         std::deque<frame_in> inbox_;
         uint64_t steps_ = 0;
+        std::function<void(const std::string&)> report_;
+        bool stalled_reported_ = false;
+        bool trace_ = false;
     };
 
 }

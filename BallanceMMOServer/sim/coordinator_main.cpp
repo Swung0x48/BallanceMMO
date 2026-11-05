@@ -16,6 +16,7 @@
 int main(int argc, char** argv) {
     bmmo::net::coordinator_options options;
     double seconds = 0.0;
+    bool trace = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const char* v = i + 1 < argc ? argv[i + 1] : nullptr;
@@ -27,11 +28,17 @@ int main(int argc, char** argv) {
         else if (arg == "--loss-pct") options.client_loss_pct = static_cast<float>(std::atof(v));
         else if (arg == "--seed") options.seed = std::strtoull(v, nullptr, 10);
         else if (arg == "--virtual-seconds") seconds = std::atof(v);
+        else if (arg == "--trace") { trace = std::atoi(v) != 0; }
         else { std::fprintf(stderr, "unknown argument %s\n", arg.c_str()); return 2; }
     }
     if (options.processes == 0) { std::fprintf(stderr, "usage: BallanceMMOCoordinator --processes N [...]\n"); return 2; }
     if (seconds > 0) options.until_us = options.start_us + static_cast<bmmo::net::microseconds>(seconds * 1e6);
     bmmo::net::coordinator coordinator(options);
+    coordinator.set_trace(trace);
+    coordinator.set_report([](const std::string& line) {
+        std::printf("coordinator: %s\n", line.c_str());
+        std::fflush(stdout);
+    });
     std::printf("coordinator: listening on 127.0.0.1:%u for %zu processes\n", coordinator.port(), options.processes);
     std::fflush(stdout);
     const auto started = std::chrono::steady_clock::now();

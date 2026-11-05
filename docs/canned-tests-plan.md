@@ -597,6 +597,27 @@ transport before the clocks (the runner is declared before `clock_owned_`, so it
 [--seed S] [--virtual-seconds T]`: prints its port, runs, reports the steps and the virtual and real seconds.
 Checked: 815/815; x64 build with the new exe; the wire check ALL SAME. No live run (the main session's trial games).
 
+As built (T1d, 2026-11-05): `arena_map_test.py --coordinated [--rewind-cost R:P]` (default 3.0:0.46): the harness
+starts BallanceMMOCoordinator (one link for every client: --latency-ms, --loss-pct, the loss seed; no proxies, no
+jitter, no link events), its own server with `--coordinator`, and every client with `--coordinator`, `--rewind-cost`
+and `--uuid-seed 1001+i`; it waits for the coordinator, which stops the server once every client has gone (a rule
+added here). Two fixes found by the first runs: a wake is reported rounded UP to the microsecond (a tick's 15151.515 us
+rounded down was a time short of the wait: the run stepped in place, 722,000 steps); the coordinator says which
+processes it is waiting for after 5 s of real time, and `--trace 1` prints every step.
+Results (h1_150's shape: 4 clients, 150 ms each way, 40 s of play, P-cores):
+- **byte-identical twice:** two runs, 28,927 steps each, the server journal (11.9 MB) and all four client journals
+  (25 MB each) identical byte for byte; the harness PASS both times, the server replay 2630/2630.
+- **the judge: FAIL, a real finding.** From tick 1186 ball 65536's orientation differs in the last bits (qx
+  0.000120463814 vs ...816) between two groups: the server and client1 / clients 0, 2, 3. Clients 0, 2, 3 are the
+  ones that rewound to 1185 to insert ball 65537's birth at 1186 (client1 owns it); 65537 is born six ticks after
+  65536, in the same bay, 2.5 apart. A birth put in by a rewind next to a just-born ball leaves the neighbour a rounding
+  bit off the live step - the IVP collision-state residual the memory notes keep (births / mindist entries). The live
+  runs do 62-74 birth rewinds each and judge exact: the coordinated run's timing reproduces this case every time.
+- **speed:** 43.4 virtual s in 49.6 real s (0.87x) with four clients; one client 1.92x. About 1.7 ms of real time a
+  step (a round trip with every process); the clients' 2 ms pacing waits make most of the steps. Speed-ups for later:
+  the processes running ahead within the link latency (conservative lookahead), a pacer that waits for its frame's
+  time in one wait under a virtual clock.
+
 ## 4. Decisions
 
 Taken: the gate (user, 2026-11-05): each K step lands on unit tests, the wire check and a P-core live smoke;
