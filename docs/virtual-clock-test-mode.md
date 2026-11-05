@@ -3,6 +3,10 @@
 The user's request: run the test sessions much faster than real time while every component believes time runs
 normally, as BallanceTAS does for one offline game. Plan only; nothing is built.
 
+**Superseded (2026-11-05)** by docs/canned-tests-plan.md: the user re-scoped the work to canned tests (fast,
+reproducible tests from black boxes), built as seams in core first (K1-K8) and thin tools after (T0-T3). VC1-VC5
+and VC6 below are kept as the record of the earlier plan; they are not the plan of work.
+
 ## 1. What BallanceTAS does, and why it is not enough here
 
 BallanceTAS (D:/repos/BallanceTAS) hooks `CKTimeManager::PreProcess` (vtable slot 5, `src/Game/TASHook.h`) and,
@@ -108,6 +112,10 @@ and OS sleep resolution (1 ms).
 S = 1 must be today's code path to the byte (wire check and the existing tests); every step lands with that check.
 
 ## 5a. VC6: an event-driven mode for the server and the headless clients (S -> infinity)
+
+Superseded (2026-11-05): its coordinator, simulated transport and "report and wait" waits are
+canned-tests-plan.md's stage 1 (C2 `sim_network`, the K4c wait seam, T1); its reproducibility premise is K4b there
+(the server's results depend only on data, not on how its threads overlap: section 3.2a).
 
 A scaled clock has a ceiling: a tick's real time (15.15 ms / S) must stay above every process's per-tick CPU, sleeps
 are 1 ms coarse, and GameNetworkingSockets' retransmits and timeouts run on its own real clock. The other way is
