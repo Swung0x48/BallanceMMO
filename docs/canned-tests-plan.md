@@ -462,7 +462,7 @@ real time (advance_to notifies without the waiters' locks). Left on the real clo
 three parts K4a-K4c; the coordinator itself is T1. Checked: 811/811 unit tests (one new, the virtual clock's three
 ends; 50 repeats clean); the wire check of core_ref_s16 ALL SAME (5 known-stale journals skipped); live P-core
 h1_150 with the server captured: harness PASS, server replay 2641/2641; the K4b acceptance test again: the capture
-replayed plain and with 2 / 5 / 20 ms runner jitter, the live server journal byte for byte all four times.
+replayed plain and with 2 / 5 / 20 ms runner jitter, the live server journal byte for byte all four times. The judge on the live run's four clients: every confirmed row bit-exact, no resync.
 
 ### 3.3 The tools (thin, after the seams)
 
