@@ -4,7 +4,7 @@
 
 namespace bmmo {
     struct disconnected_player {
-        HSteamNetConnection connection_id;
+        bmmo::net::connection connection_id;
     };
 
     typedef struct message<disconnected_player, PlayerDisconnected> player_disconnected_msg;

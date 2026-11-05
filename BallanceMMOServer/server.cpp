@@ -69,7 +69,7 @@ public:
     uint32_t test_hold_member_ms() const { return test_hold_member_ms_; }
     // --assign-volley K (FULL step SAXE, test builds only): K extra
     // unreliable copies of every SessionAssign in the reliable one's own pass,
-    // each sent k_nSteamNetworkingSend_UnreliableNoNagle - the user's Q-SAX
+    // each sent bmmo::net::kSendUnreliableNoNagle - the user's Q-SAX
     // (e) as specified, kept so the wire can show what GNS makes of it
     // (sim/assign_copies.hpp: one datagram, not K).  0 (the default, and
     // every build without the flag): no volley.
@@ -113,7 +113,7 @@ public:
         return had_messages;
     }
 
-    EResult send(const HSteamNetConnection destination, const void* buffer, size_t size, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) const {
+    EResult send(const bmmo::net::connection destination, const void* buffer, size_t size, int send_flags = bmmo::net::kSendReliable, int64* out_message_number = nullptr) const {
         return interface_->SendMessageToConnection(destination,
                                                    buffer,
                                                    size,
@@ -123,7 +123,7 @@ public:
     }
 
     template<bmmo::trivially_copyable_msg T>
-    EResult send(const HSteamNetConnection destination, const T& msg, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) {
+    EResult send(const bmmo::net::connection destination, const T& msg, int send_flags = bmmo::net::kSendReliable, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
         return send(destination,
                     &msg,
@@ -132,7 +132,7 @@ public:
                     out_message_number);
     }
 
-    void broadcast_message(const void* buffer, size_t size, int send_flags = k_nSteamNetworkingSend_Reliable, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
+    void broadcast_message(const void* buffer, size_t size, int send_flags = bmmo::net::kSendReliable, const bmmo::net::connection ignored_client = bmmo::net::kInvalidConnection) {
         std::lock_guard lk(state_mutex_);
         for (const auto& i: clients_)
             if (ignored_client != i.first)
@@ -140,7 +140,7 @@ public:
     }
 
     template<bmmo::trivially_copyable_msg T>
-    void broadcast_message(const T& msg, int send_flags = k_nSteamNetworkingSend_Reliable, const HSteamNetConnection ignored_client = k_HSteamNetConnection_Invalid) {
+    void broadcast_message(const T& msg, int send_flags = bmmo::net::kSendReliable, const bmmo::net::connection ignored_client = bmmo::net::kInvalidConnection) {
         static_assert(std::is_trivially_copyable<T>());
 
         broadcast_message(&msg, sizeof(msg), send_flags, ignored_client);
@@ -148,10 +148,10 @@ public:
 
     // Injects a message into on_message() as if it came from the given
     // client (or a random online client if none is specified).
-    void receive(void* data, size_t size, HSteamNetConnection client = k_HSteamNetConnection_Invalid) {
+    void receive(void* data, size_t size, bmmo::net::connection client = bmmo::net::kInvalidConnection) {
         std::lock_guard lk(state_mutex_);
         if (clients_.empty()) { Printf("Error: no online players found."); return; }
-        if (client == k_HSteamNetConnection_Invalid) { // random player
+        if (client == bmmo::net::kInvalidConnection) { // random player
             static std::mt19937 gen{std::random_device{}()};
             std::uniform_int_distribution<size_t> dist(0, clients_.size() - 1);
             client = std::next(clients_.begin(), dist(gen))->first;
@@ -184,12 +184,12 @@ public:
             std::tie(msg.title, msg.text_content) = permanent_notification_;
         }
         msg.serialize();
-        broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
     }
 
     // Returns a copy; the previous reference-returning version dereferenced
     // the end() iterator when the client was not found.
-    std::optional<client_data> get_client(HSteamNetConnection client) {
+    std::optional<client_data> get_client(bmmo::net::connection client) {
         std::lock_guard lk(state_mutex_);
         auto client_it = clients_.find(client);
         if (client_it == clients_.end()) {
@@ -199,8 +199,8 @@ public:
         return client_it->second;
     }
 
-    HSteamNetConnection get_client_id(const std::string& username, bool suppress_error = false) {
-        if (username.empty()) return k_HSteamNetConnection_Invalid;
+    bmmo::net::connection get_client_id(const std::string& username, bool suppress_error = false) {
+        if (username.empty()) return bmmo::net::kInvalidConnection;
         std::lock_guard lk(state_mutex_);
         const std::string begin_name(bmmo::message_utils::to_lower(username));
         // Prefix range: [lower_bound(prefix), first key not starting with it).
@@ -215,7 +215,7 @@ public:
         if (username_it == username_it_end) {
             if (!suppress_error)
                 Printf("Error: client \"%s\" not found.", username);
-            return k_HSteamNetConnection_Invalid;
+            return bmmo::net::kInvalidConnection;
         }
         else if (std::next(username_it) == username_it_end || username_it->first == begin_name) {
             return username_it->second;
@@ -225,11 +225,11 @@ public:
             names += ", " + username_it->first;
         if (!suppress_error)
             Printf("Error: multiple possible players: %s.", names.erase(0, 2));
-        return k_HSteamNetConnection_Invalid;
+        return bmmo::net::kInvalidConnection;
     }
 
-    std::string get_client_name(HSteamNetConnection id) {
-        if (id == k_HSteamNetConnection_Invalid)
+    std::string get_client_name(bmmo::net::connection id) {
+        if (id == bmmo::net::kInvalidConnection)
             return "[Server]";
         std::lock_guard lk(state_mutex_);
         if (auto client_it = clients_.find(id); client_it != clients_.end())
@@ -268,8 +268,8 @@ public:
         return map_it->second.rankings;
     }
 
-    bool kick_client(HSteamNetConnection client, std::string reason = "",
-            HSteamNetConnection executor = k_HSteamNetConnection_Invalid,
+    bool kick_client(bmmo::net::connection client, std::string reason = "",
+            bmmo::net::connection executor = bmmo::net::kInvalidConnection,
             bmmo::connection_end::code type = bmmo::connection_end::Kicked) {
         std::lock_guard lk(state_mutex_);
         if (!client_exists(client))
@@ -279,7 +279,7 @@ public:
         msg.kicked_player_name = clients_[client].name;
 
         std::string kick_notice = "Kicked by ";
-        if (executor != k_HSteamNetConnection_Invalid) {
+        if (executor != bmmo::net::kInvalidConnection) {
             if (!client_exists(executor))
                 return false;
             kick_notice += clients_[executor].name;
@@ -294,7 +294,7 @@ public:
             // worry about the outcome; client will just terminate immediately.
             bmmo::simple_action_msg fatal_error_msg{};
             fatal_error_msg.content = bmmo::simple_action::TriggerFatalError;
-            send(client, fatal_error_msg, k_nSteamNetworkingSend_Reliable);
+            send(client, fatal_error_msg, bmmo::net::kSendReliable);
             reason = "fatal error";
         }
 
@@ -308,7 +308,7 @@ public:
 
         interface_->CloseConnection(client, type, kick_notice.c_str(), true);
         msg.serialize();
-        broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
 
         return true;
     }
@@ -363,7 +363,7 @@ public:
         max_name_length = std::min((int) bmmo::name_validator::max_length + 1, max_name_length);
         // note: must not be a `static` lambda - it captures locals by reference,
         // and a static lambda would keep dangling references after the first call
-        const auto print_client = [&](HSteamNetConnection id, client_data& data) {
+        const auto print_client = [&](bmmo::net::connection id, client_data& data) {
             SteamNetConnectionRealTimeStatus_t status{};
             interface_->GetConnectionRealTimeStatus(id, &status, 0, nullptr);
             char quality_str[32]{};
@@ -490,19 +490,19 @@ public:
     // ---- collision-overhaul room system (docs/rooms-and-sessions-protocol.md) ----
     // All of these run with state_mutex_ held (from on_message or a console command).
 
-    void send_room_event(HSteamNetConnection to, bmmo::room::event_type type,
+    void send_room_event(bmmo::net::connection to, bmmo::room::event_type type,
             bmmo::room::error_code error, uint32_t room,
-            HSteamNetConnection actor = k_HSteamNetConnection_Invalid,
-            HSteamNetConnection subject = k_HSteamNetConnection_Invalid,
+            bmmo::net::connection actor = bmmo::net::kInvalidConnection,
+            bmmo::net::connection subject = bmmo::net::kInvalidConnection,
             const std::string& reason = {}) {
         bmmo::room_event_msg msg;
         msg.type = type; msg.error = error; msg.room = room;
         msg.actor = actor; msg.subject = subject; msg.reason = reason;
         msg.serialize();
-        send(to, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(to, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
     }
 
-    bmmo::room_state_msg build_room_state(HSteamNetConnection recipient) {
+    bmmo::room_state_msg build_room_state(bmmo::net::connection recipient) {
         bmmo::room_state_msg st;
         st.own_room = rooms_.room_of(recipient);
         for (const auto& [id, r]: rooms_.rooms()) {
@@ -526,10 +526,10 @@ public:
         return st;
     }
 
-    void send_room_state(HSteamNetConnection to) {
+    void send_room_state(bmmo::net::connection to) {
         auto st = build_room_state(to);
         st.serialize();
-        send(to, st.raw.str().data(), st.size(), k_nSteamNetworkingSend_Reliable);
+        send(to, st.raw.str().data(), st.size(), bmmo::net::kSendReliable);
     }
 
     void send_room_state_to_room(uint32_t room) {
@@ -540,7 +540,7 @@ public:
 
     // A member's ready flag changed: the refreshed roster goes out first - it
     // carries the new flag, and the clients render the event from it.
-    void notify_ready_changed(HSteamNetConnection c) {
+    void notify_ready_changed(bmmo::net::connection c) {
         const uint32_t room = rooms_.room_of(c);
         send_room_state_to_room(room);
         if (const auto* r = rooms_.find(room))
@@ -566,7 +566,7 @@ public:
 
     // Removes a client from its room (voluntary Leave or a disconnect) and
     // notifies the remaining members. `ack` sends the leaver a RequestAccepted.
-    void room_remove_and_notify(HSteamNetConnection c, bool ack) {
+    void room_remove_and_notify(bmmo::net::connection c, bool ack) {
 #if BMMO_BUILD_SIM
         physics_session_member_left(c);
 #endif
@@ -582,7 +582,7 @@ public:
         for (auto m: rr.remaining) {
             send_room_event(m, bmmo::room::event_type::PlayerLeft,
                     bmmo::room::error_code::None, rr.room, c, c);
-            if (rr.new_host != k_HSteamNetConnection_Invalid)
+            if (rr.new_host != bmmo::net::kInvalidConnection)
                 send_room_event(m, bmmo::room::event_type::HostChanged,
                         bmmo::room::error_code::None, rr.room, rr.new_host);
         }
@@ -604,10 +604,10 @@ public:
     struct physics_session_state {
         uint32_t id = 0, room = 0;
         bmmo::map map{};
-        std::vector<HSteamNetConnection> members;           // join order
-        std::set<HSteamNetConnection> ready;
-        std::set<HSteamNetConnection> assigned;             // got their SessionAssign
-        std::set<HSteamNetConnection> late;                 // joined a running session: no hash check
+        std::vector<bmmo::net::connection> members;           // join order
+        std::set<bmmo::net::connection> ready;
+        std::set<bmmo::net::connection> assigned;             // got their SessionAssign
+        std::set<bmmo::net::connection> late;                 // joined a running session: no hash check
         bool world_ready = false, ticking = false;
         // Protocol 32 (step SPL): when the world's boot was asked for (the
         // boot statuses' log lines count from it).
@@ -641,7 +641,7 @@ public:
         bmmo::session::relay_ring relay;
         // Protocol 30: each member's uplink camera bases (camera_heading.hpp),
         // and the datagrams that turned one not held yet (not used).
-        std::map<HSteamNetConnection, bmmo::session::camera_bases> uplink_bases;
+        std::map<bmmo::net::connection, bmmo::session::camera_bases> uplink_bases;
         uint64_t uplink_undecoded = 0;
         // Protocol 7 (late-player design 1.2): what each member's relayed
         // datagrams tell it about its OWN inputs.  `epoch` is the base of its
@@ -672,7 +672,7 @@ public:
             uint64_t copies = 0;
             held_run run;
         };
-        std::map<HSteamNetConnection, held_notice> notices;
+        std::map<bmmo::net::connection, held_notice> notices;
         uint32_t s2_lines = 0;
         // Lifecycle events (protocol 6): the copies members' events still owe
         // the others, one per tick from on_session_inputs, and which events
@@ -686,7 +686,7 @@ public:
         // it is applied at, not on arrival.  Its message waits here under the
         // token submit_event was given, until on_event_accepted takes it.
         struct awaiting_event {
-            HSteamNetConnection from = k_HSteamNetConnection_Invalid;
+            bmmo::net::connection from = bmmo::net::kInvalidConnection;
             bmmo::session_event_msg msg;
         };
         std::map<uint64_t, awaiting_event> awaiting_events;
@@ -696,7 +696,7 @@ public:
         // pass (bmmo::sim::assign_copy_schedule; send_session_assign,
         // send_assign_repeats).
         struct assign_repeat {
-            HSteamNetConnection to;
+            bmmo::net::connection to;
             uint32_t first_tick;
             bmmo::sim::assign_copy_schedule schedule;
             // Protocol 10: every copy carries the reliable one's flags
@@ -714,17 +714,17 @@ public:
         // correction went out for; `start_repeats` the SessionStartAt copies
         // still due, one per main-loop pass like the assignment's.
         bmmo::session::start_handshake handshake;
-        std::map<HSteamNetConnection, int64_t> assign_sent_us;
+        std::map<bmmo::net::connection, int64_t> assign_sent_us;
         // ...and whether that assignment carried the member's instant (a
         // fresh clock estimate): one that did needs no correction.
-        std::map<HSteamNetConnection, bool> assign_had_instant;
-        std::map<HSteamNetConnection, uint32_t> corrected;
+        std::map<bmmo::net::connection, bool> assign_had_instant;
+        std::map<bmmo::net::connection, uint32_t> corrected;
         // The joiners that came while the start handshake ran (the start
         // members' assignments out, the runner not ticking yet): admitted
         // as late joiners once the runner ticks (check_start_handshakes) -
         // admitted as start members they would hold the runner's start for
         // their level load while the others run (the review of SAXH).
-        std::deque<HSteamNetConnection> start_waiting;
+        std::deque<bmmo::net::connection> start_waiting;
         // FULL step SAXR (the user's decision 63): the members the start
         // handshake resyncs onto the committed start (each runs, or may run,
         // on another start), resynced once the runner ticks
@@ -732,7 +732,7 @@ public:
         std::vector<bmmo::session::start_resync> start_resync;
         uint32_t start_resync_onto = 0;
         struct start_repeat {
-            HSteamNetConnection to;
+            bmmo::net::connection to;
             uint32_t first_tick = 0, seq = 0;
             uint8_t flags = 0;
             int64_t start_server_us = 0, start_us = 0;   // server_us is stamped per copy
@@ -753,11 +753,11 @@ public:
             uint32_t outstanding = 0;   // seq of the SessionLead not yet acknowledged; 0 = none
             int outstanding_k = 0;      // its delta: what an ack may apply at most (lateness_bound_applied)
         };
-        std::map<HSteamNetConnection, member_lead> leads;
+        std::map<bmmo::net::connection, member_lead> leads;
         // A SessionLead's unreliable copies, one every kLeadRepeatSpacing
         // after the reliable one, retired by its ack or a newer assignment.
         struct lead_repeat {
-            HSteamNetConnection to;
+            bmmo::net::connection to;
             uint32_t seq;
             std::string bytes;
             int remaining;
@@ -787,7 +787,7 @@ public:
         // when it leaves.  Both the SessionStart player_entry and the world's
         // per-player slot use this number, so the server and every side agree
         // on the spawn direction without exchanging it separately.
-        std::map<HSteamNetConnection, uint8_t> join_orders;
+        std::map<bmmo::net::connection, uint8_t> join_orders;
         // Step M1 (world-agreement-gaps-design.md 2.7).  `lives`: each id's
         // current life in this session - the count of its adds, from 1; never
         // erased, so a rejoin on the same connection is the next life.
@@ -797,16 +797,16 @@ public:
         // another order; assign_join_order treats them as held, and
         // on_player_removed releases one.  `started`: the members that have
         // their SessionStart, which SessionMember goes to.
-        std::map<HSteamNetConnection, uint16_t> lives;
-        std::map<std::pair<HSteamNetConnection, uint16_t>, uint8_t> retiring_orders;
+        std::map<bmmo::net::connection, uint16_t> lives;
+        std::map<std::pair<bmmo::net::connection, uint16_t>, uint8_t> retiring_orders;
         // Step Q7 (world-agreement-gaps-design.md 2.10 "The cap"): the
         // session's mechanism slot count K (0 without WORLD_PLAYER_MECHANISMS)
         // - join orders are handed out below K only - and the joiners that
         // found every order below K held or retiring, in arrival order: each
         // released order goes to the first of them (admit_waiting).
         uint8_t mechanism_slots = 0;
-        std::deque<HSteamNetConnection> waiting_orders;
-        std::set<HSteamNetConnection> started;
+        std::deque<bmmo::net::connection> waiting_orders;
+        std::set<bmmo::net::connection> started;
         // --hold-member-ms (test builds): SessionMember messages waiting to
         // leave, the reliable copy and then the repeats.
         struct held_member {
@@ -823,12 +823,12 @@ public:
         // every receiver runs.  Updated when the runner accepts an event
         // (on_event_accepted), on the simulation thread.
         struct last_physicalize_entry { uint32_t tick = 0; std::string bytes; };
-        std::map<HSteamNetConnection, last_physicalize_entry> last_physicalize;
+        std::map<bmmo::net::connection, last_physicalize_entry> last_physicalize;
         // The origin of each member's newest accepted Unphysicalize: a birth
         // older by origin that is accepted after it (still applied, before
         // it) is no ball a late joiner may be given - the death already
         // erased the entry, and the birth must not put it back.
-        std::map<HSteamNetConnection, uint32_t> last_unphysicalize;
+        std::map<bmmo::net::connection, uint32_t> last_unphysicalize;
         // Every Sector event relayed in this session (serialized, player set),
         // in order: a late joiner's union has to grow by the same sectors the
         // running members' did (session/sector_union.hpp), and a resynced
@@ -872,7 +872,7 @@ public:
             // the BodyRevived bursts of the bit-clear path went with it).
             uint64_t revived_ignored = 0;
         };
-        std::map<HSteamNetConnection, member_guard> guards;
+        std::map<bmmo::net::connection, member_guard> guards;
         uint64_t rejected_events = 0, flagged_events = 0;
     };
 
@@ -984,7 +984,7 @@ public:
     // the member's stay in the session (design 9.10).
     // Step M1 (J2): an order held by a life the runner has not removed yet
     // (retiring_orders) is not free either.
-    static uint8_t assign_join_order(physics_session_state& s, HSteamNetConnection c) {
+    static uint8_t assign_join_order(physics_session_state& s, bmmo::net::connection c) {
         std::set<uint8_t> used, retiring;
         for (const auto& [member, order]: s.join_orders) used.insert(order);
         for (const auto& [life, order]: s.retiring_orders) retiring.insert(order);
@@ -1012,7 +1012,7 @@ public:
     }
 
     // Step M1: the member's next life in this session (its add's number).
-    static uint16_t begin_life(physics_session_state& s, HSteamNetConnection c) {
+    static uint16_t begin_life(physics_session_state& s, bmmo::net::connection c) {
         return ++s.lives[c];
     }
 
@@ -1176,12 +1176,12 @@ public:
         return id;
     }
 
-    void send_session_end(uint32_t session, HSteamNetConnection to, const std::string& reason) {
+    void send_session_end(uint32_t session, bmmo::net::connection to, const std::string& reason) {
         bmmo::session_end_msg msg;
         msg.session = session;
         msg.reason = reason;
         msg.serialize();
-        send(to, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(to, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
     }
 
     void end_physics_session(uint32_t session, const std::string& reason) {
@@ -1195,7 +1195,7 @@ public:
             client_session_.erase(m);
             send_session_end(session, m, reason);
             send_room_event(m, bmmo::room::event_type::SessionEnded, bmmo::room::error_code::None, s.room,
-                    k_HSteamNetConnection_Invalid, k_HSteamNetConnection_Invalid, reason);
+                    bmmo::net::kInvalidConnection, bmmo::net::kInvalidConnection, reason);
         }
         // Step Q7: the joiners still waiting for a join order are told too
         // (and those waiting for the start handshake, FULL step SAXH).
@@ -1203,13 +1203,13 @@ public:
             client_session_.erase(w);
             send_session_end(session, w, reason);
             send_room_event(w, bmmo::room::event_type::SessionEnded, bmmo::room::error_code::None, s.room,
-                    k_HSteamNetConnection_Invalid, k_HSteamNetConnection_Invalid, reason);
+                    bmmo::net::kInvalidConnection, bmmo::net::kInvalidConnection, reason);
         }
         for (const auto w: s.waiting_orders) {
             client_session_.erase(w);
             send_session_end(session, w, reason);
             send_room_event(w, bmmo::room::event_type::SessionEnded, bmmo::room::error_code::None, s.room,
-                    k_HSteamNetConnection_Invalid, k_HSteamNetConnection_Invalid, reason);
+                    bmmo::net::kInvalidConnection, bmmo::net::kInvalidConnection, reason);
         }
         room_session_.erase(s.room);
         rooms_.reset_session(s.room);
@@ -1218,7 +1218,7 @@ public:
         Printf("Physics session %u (room %u) ended: %s", session, s.room, reason);
     }
 
-    void send_session_start(physics_session_state& s, HSteamNetConnection to, uint32_t first_tick) {
+    void send_session_start(physics_session_state& s, bmmo::net::connection to, uint32_t first_tick) {
         bmmo::session_start_msg msg;
         msg.room = s.room;
         msg.session = s.id;
@@ -1248,7 +1248,7 @@ public:
             msg.players.push_back(entry);
         }
         msg.serialize();
-        send(to, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(to, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         s.started.insert(to);   // step M1: SessionMember goes to it from now on
     }
 
@@ -1263,7 +1263,7 @@ public:
     void send_copies(physics_session_state& s, std::string bytes, std::vector<uint32_t> to) {
         std::vector<uint32_t> members, others;
         for (const uint32_t m: to)
-            (std::find(s.members.begin(), s.members.end(), static_cast<HSteamNetConnection>(m)) != s.members.end()
+            (std::find(s.members.begin(), s.members.end(), static_cast<bmmo::net::connection>(m)) != s.members.end()
                  ? members : others).push_back(m);
         if (!members.empty()) s.relay.push_message(members, bytes);
         if (!others.empty()) s.event_repeats.push(std::move(bytes), std::move(others));
@@ -1279,7 +1279,7 @@ public:
         std::string bytes = msg.raw.str();
         std::vector<uint32_t> to;
         for (const auto m: s.started)
-            if (m != static_cast<HSteamNetConnection>(entry.id)
+            if (m != static_cast<bmmo::net::connection>(entry.id)
                     && std::find(s.members.begin(), s.members.end(), m) != s.members.end())
                 to.push_back(static_cast<uint32_t>(m));
         ++s.member_messages;
@@ -1294,7 +1294,7 @@ public:
             return;
         }
         for (const auto m: to)
-            send(static_cast<HSteamNetConnection>(m), bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+            send(static_cast<bmmo::net::connection>(m), bytes.data(), bytes.size(), bmmo::net::kSendReliableNoNagle);
         send_copies(s, std::move(bytes), std::move(to));
     }
 
@@ -1317,7 +1317,7 @@ public:
         auto it = physics_sessions_.find(c.session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
-        const auto member = static_cast<HSteamNetConnection>(c.player);
+        const auto member = static_cast<bmmo::net::connection>(c.player);
         const bool is_member = std::find(s.members.begin(), s.members.end(), member) != s.members.end();
         if (is_member && s.late.count(member) && !s.started.count(member)) send_session_start(s, member, 0);
         send_session_member(s, bmmo::session::MEMBER_ADDED, c.tick, member_entry(s, c));
@@ -1330,7 +1330,7 @@ public:
         auto it = physics_sessions_.find(c.session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
-        s.retiring_orders.erase({static_cast<HSteamNetConnection>(c.player), c.life});
+        s.retiring_orders.erase({static_cast<bmmo::net::connection>(c.player), c.life});
         if (c.in_world) send_session_member(s, bmmo::session::MEMBER_REMOVED, c.tick, member_entry(s, c));
         admit_waiting(s);   // step Q7: the released order to the first waiting joiner
     }
@@ -1342,7 +1342,7 @@ public:
         std::lock_guard lk(state_mutex_);
         auto it = physics_sessions_.find(c.session);
         if (it == physics_sessions_.end()) return;
-        const auto member = static_cast<HSteamNetConnection>(c.player);
+        const auto member = static_cast<bmmo::net::connection>(c.player);
         Printf("Physics session %u: %s (life %u) could not be added to the world: %s", c.session,
                get_client_name(member), static_cast<unsigned>(c.life), error);
         // Only while the member is still on this life: one that left and
@@ -1367,7 +1367,7 @@ public:
     void admit_waiting(physics_session_state& s) {
         while (!s.waiting_orders.empty()) {
             if (joiner_order(s).verdict != bmmo::session::join_order_verdict::order) return;
-            const HSteamNetConnection c = s.waiting_orders.front();
+            const bmmo::net::connection c = s.waiting_orders.front();
             s.waiting_orders.pop_front();
             Printf("Physics session %u: %s gets a released join order.", s.id, get_client_name(c));
             admit_member(s, c);
@@ -1388,7 +1388,7 @@ public:
         msg.level = s.map.level;
         msg.phase = static_cast<uint8_t>(phase);
         msg.serialize();
-        for (const auto m: s.members) send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        for (const auto m: s.members) send(m, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         static constexpr const char* kPhases[] = {"booting the game", "entering the level", "preparing the world"};
         Printf("Physics session %u: boot phase %u (%s) at %.3f s, sent to %zu players.", session,
                static_cast<unsigned>(phase), kPhases[static_cast<size_t>(phase)],
@@ -1468,24 +1468,24 @@ public:
         // packets is lost whole when any of them is, and one past 16.5 KB
         // GameNetworkingSockets quietly sends reliable.
         const auto is_member = [&s](uint32_t player) {
-            return std::find(s.members.begin(), s.members.end(), static_cast<HSteamNetConnection>(player)) != s.members.end();
+            return std::find(s.members.begin(), s.members.end(), static_cast<bmmo::net::connection>(player)) != s.members.end();
         };
         // Protocol 7: each member's own ack and substitutions, before its
         // datagrams are built from them.
         for (const auto& a: applied) {
             if (!is_member(a.player)) continue;
-            auto& n = s.notices[static_cast<HSteamNetConnection>(a.player)];
+            auto& n = s.notices[static_cast<bmmo::net::connection>(a.player)];
             if (!a.held) {
                 // Never backwards: a frame of the old numbering applied fresh
                 // after the assignment (the runner re-anchors the cursor a
                 // little later) must not undo the move to the base - 1.
                 if (static_cast<int32_t>(tick - n.acked) > 0) n.acked = tick;
-                close_held_run(s, static_cast<HSteamNetConnection>(a.player), n);
+                close_held_run(s, static_cast<bmmo::net::connection>(a.player), n);
                 continue;
             }
             if (!n.assigned || static_cast<int32_t>(tick - n.epoch) < 0) continue;
             ++n.held_total;
-            note_held_tick(s, static_cast<HSteamNetConnection>(a.player), n, tick, a.source);
+            note_held_tick(s, static_cast<bmmo::net::connection>(a.player), n, tick, a.source);
         }
         // Every member every tick, even with nothing else to say: the header
         // and the held section are the recipient's own, and a solo player,
@@ -1493,9 +1493,9 @@ public:
         // anyone (the header-only datagram is 26 bytes).
         // Protocol 13 (step R12): the recipient's wait, as the runner
         // measured it for this step; 0 for a member the step did not drive.
-        const auto wait_of = [&applied](HSteamNetConnection m) -> uint8_t {
+        const auto wait_of = [&applied](bmmo::net::connection m) -> uint8_t {
             for (const auto& a: applied)
-                if (static_cast<HSteamNetConnection>(a.player) == m) return a.wait;
+                if (static_cast<bmmo::net::connection>(a.player) == m) return a.wait;
             return 0;
         };
         for (const auto m: s.members) {
@@ -1531,7 +1531,7 @@ public:
                 msg.recipes = std::move(datagram.recipes);
                 msg.events = std::move(datagram.events);
                 msg.serialize();
-                const EResult result = send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                const EResult result = send(m, msg.raw.str().data(), msg.size(), bmmo::net::kSendUnreliableNoDelay);
                 if (result != k_EResultOK || msg.held.empty()) continue;
                 // A record's first trip is the datagram of its own tick (back
                 // 0); the next 31 ticks' datagrams repeat it.  Counted only
@@ -1558,7 +1558,7 @@ public:
     static constexpr uint32_t kHeldRunLineTicks = 66;
     static constexpr uint32_t kHeldRunLines = 20000;   // per session; past it one line says so
 
-    void note_held_tick(physics_session_state& s, HSteamNetConnection m, physics_session_state::held_notice& n,
+    void note_held_tick(physics_session_state& s, bmmo::net::connection m, physics_session_state::held_notice& n,
                         uint32_t tick, uint32_t source) {
         auto& r = n.run;
         if (r.open && (r.last + 1 != tick || r.count >= kHeldRunLineTicks)) close_held_run(s, m, n);
@@ -1579,7 +1579,7 @@ public:
         else r.delays.emplace_back(delay, 1u);
     }
 
-    void close_held_run(physics_session_state& s, HSteamNetConnection m, physics_session_state::held_notice& n) {
+    void close_held_run(physics_session_state& s, bmmo::net::connection m, physics_session_state::held_notice& n) {
         auto& r = n.run;
         if (!r.open) return;
         r.open = false;
@@ -1644,7 +1644,7 @@ public:
             msg.bodies = snapshot.bodies;
             msg.serialize();
             send(m, msg.raw.str().data(), msg.size(),
-                    snapshot.full ? k_nSteamNetworkingSend_Reliable : k_nSteamNetworkingSend_UnreliableNoDelay);
+                    snapshot.full ? bmmo::net::kSendReliable : bmmo::net::kSendUnreliableNoDelay);
         }
     }
 
@@ -1656,7 +1656,7 @@ public:
         auto it = physics_sessions_.find(out.session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
-        const auto c = static_cast<HSteamNetConnection>(out.player);
+        const auto c = static_cast<bmmo::net::connection>(out.player);
         if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return;
         bmmo::session_resync_state_msg msg;
         msg.session = out.session;
@@ -1688,7 +1688,7 @@ public:
             Printf("Physics session %u: the resync state for %s is cut on the wire (%s): the client will refuse what is cut.",
                    s.id, get_client_name(c), cut.c_str());
         msg.serialize();
-        const EResult sent = send(c, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        const EResult sent = send(c, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         bmmo::session::sector_union::state_type u;
         std::string active;
         if (bmmo::session::sector_union::deserialize(out.state.union_state.data(), out.state.union_state.size(), u))
@@ -1718,14 +1718,14 @@ public:
         auto it = physics_sessions_.find(session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
-        const auto c = static_cast<HSteamNetConnection>(player);
+        const auto c = static_cast<bmmo::net::connection>(player);
         if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return;
         const uint32_t again = resync_member(s, c, 0);
         Printf("Physics session %u: resync base %u for %s was stepped before the request reached the runner: re-assigned at %u.",
                s.id, base, get_client_name(c), again);
     }
 
-    void physics_session_member_joined(uint32_t room, HSteamNetConnection c) {
+    void physics_session_member_joined(uint32_t room, bmmo::net::connection c) {
         auto rs = room_session_.find(room);
         if (rs == room_session_.end() || !runner_) return;
         auto it = physics_sessions_.find(rs->second);
@@ -1749,7 +1749,7 @@ public:
 
     // The join itself (physics_session_member_joined's body until SAXH; also
     // the release of a joiner that waited for the start handshake).
-    void join_member(physics_session_state& s, HSteamNetConnection c) {
+    void join_member(physics_session_state& s, bmmo::net::connection c) {
         // Step Q7 (world-agreement-gaps-design.md 2.10 "The cap"): with K
         // mechanism slots a joiner takes an order below K; it waits for a
         // retiring one, or - every order below K held by a live life - is
@@ -1776,7 +1776,7 @@ public:
 
     // A joiner into the session's world (its order, life and add; step M1's
     // body of physics_session_member_joined, step Q7 calls it for a waiter).
-    void admit_member(physics_session_state& s, HSteamNetConnection c) {
+    void admit_member(physics_session_state& s, bmmo::net::connection c) {
         s.members.push_back(c);
         client_session_[c] = s.id;
         // Sample this connection's round trip now.  The periodic latency
@@ -1816,7 +1816,7 @@ public:
                s.late.count(c) ? " late" : "", static_cast<unsigned>(life), static_cast<unsigned>(join_order));
     }
 
-    void physics_session_member_left(HSteamNetConnection c) {
+    void physics_session_member_left(bmmo::net::connection c) {
         auto cs = client_session_.find(c);
         if (cs == client_session_.end()) return;
         const uint32_t session = cs->second;
@@ -1887,7 +1887,7 @@ public:
     // member reaches it only from here (the relay went before it joined); a
     // member that has one already drops the copy by its key.  Entries far in
     // the past are pruned on the way.
-    void resend_trafo_relayed(physics_session_state& s, HSteamNetConnection c, uint32_t base) {
+    void resend_trafo_relayed(physics_session_state& s, bmmo::net::connection c, uint32_t base) {
         constexpr uint32_t kKeep = 4 * bmmo::session::kTrafoLife;
         s.trafo_relayed.erase(std::remove_if(s.trafo_relayed.begin(), s.trafo_relayed.end(),
                                              [base](const auto& e) { return static_cast<int32_t>(e.first + kKeep - base) < 0; }),
@@ -1895,7 +1895,7 @@ public:
         size_t sent = 0;
         for (const auto& [applied, bytes]: s.trafo_relayed)
             if (static_cast<int32_t>(applied - base) >= 0) {
-                send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+                send(c, bytes.data(), bytes.size(), bmmo::net::kSendReliable);
                 ++sent;
             }
         if (sent)
@@ -1920,7 +1920,7 @@ public:
     // rest of the session.  `resync_state`: the member applies the resync
     // state (CAP_RESYNC_STATE); one that does not keeps a floor of 3 ticks
     // over the runner (step RL1b), it has no base-missed re-answer.
-    uint32_t resync_tick_base(const physics_session_state& s, HSteamNetConnection c, bool resync_state, uint32_t* assigned_lead = nullptr) const {
+    uint32_t resync_tick_base(const physics_session_state& s, bmmo::net::connection c, bool resync_state, uint32_t* assigned_lead = nullptr) const {
         const auto it = clients_.find(c);
         const uint32_t rtt_ms = it == clients_.end() ? 0u : it->second.ping_peak_ms;
         return runner_->reanchor_tick(s.id, bmmo::sim::resync_lead_ticks(s.input_delay, rtt_ms), resync_state,
@@ -1936,7 +1936,7 @@ public:
     // the joiner at the sanity bound, far past its reach.  The caps of 12
     // and 34 stay with the start base, and with every other joiner: the
     // capped late-tick lead from the peak, as before the flag.
-    uint32_t late_join_lead(const physics_session_state& s, HSteamNetConnection c, uint32_t caps) const {
+    uint32_t late_join_lead(const physics_session_state& s, bmmo::net::connection c, uint32_t caps) const {
         if (bmmo::sim::uses_player_lead(config_.physics_lead_adjust, caps))
             return bmmo::sim::late_join_lead_ticks(s.input_delay, current_rtt_ms(c));
         const auto it = clients_.find(c);
@@ -1946,7 +1946,7 @@ public:
 
     // The member's current round trip (m_nPing), not ping_peak_ms: E is sized
     // with it (late-player design 2.3), and the peak only ever grows.
-    uint32_t current_rtt_ms(HSteamNetConnection c) const {
+    uint32_t current_rtt_ms(bmmo::net::connection c) const {
         SteamNetConnectionRealTimeStatus_t status{};
         interface_->GetConnectionRealTimeStatus(c, &status, 0, nullptr);
         return static_cast<uint32_t>(std::max(status.m_nPing, 0));
@@ -1965,7 +1965,7 @@ public:
                 runner_->set_player_rtt(id, m, current_rtt_ms(m));
     }
 
-    void retire_lead_repeats(physics_session_state& s, HSteamNetConnection c) {
+    void retire_lead_repeats(physics_session_state& s, bmmo::net::connection c) {
         s.lead_repeats.erase(std::remove_if(s.lead_repeats.begin(), s.lead_repeats.end(),
                                             [c](const physics_session_state::lead_repeat& r) { return r.to == c; }),
                              s.lead_repeats.end());
@@ -1982,7 +1982,7 @@ public:
         auto it = physics_sessions_.find(notice.session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
-        const auto c = static_cast<HSteamNetConnection>(notice.player);
+        const auto c = static_cast<bmmo::net::connection>(notice.player);
         if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) return;
         const auto n = s.notices.find(c);
         auto lead = s.leads.find(c);
@@ -2004,7 +2004,7 @@ public:
         msg.held_source = notice.held_source;
         msg.epoch = notice.epoch;
         msg.serialize();
-        send(c, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(c, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         retire_lead_repeats(s, c);
         s.lead_repeats.push_back(physics_session_state::lead_repeat{
             c, notice.id, msg.raw.str(), kLeadRepeats, clock_.now(bmmo::session::clock_site::server_lead_repeat) + kLeadRepeatSpacing});
@@ -2021,7 +2021,7 @@ public:
     // resync anchors at) and never below 0, as the meter's own offset; the
     // runner's meter takes the ack for its cooldown and the restore
     // judgement, bounded the same way.
-    void handle_session_lead_ack(HSteamNetConnection c, const bmmo::session_lead_ack_msg& msg) {
+    void handle_session_lead_ack(bmmo::net::connection c, const bmmo::session_lead_ack_msg& msg) {
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto it = physics_sessions_.find(msg.session);
@@ -2070,7 +2070,7 @@ public:
     static int64_t steady_us(std::chrono::steady_clock::time_point t) {
         return std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count();
     }
-    void send_session_assign(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick, uint8_t flags = 0) {
+    void send_session_assign(physics_session_state& s, bmmo::net::connection c, uint32_t first_tick, uint8_t flags = 0) {
         const auto sent = clock_.now(bmmo::session::clock_site::server_assign_sent);
         s.guards[c].named = false;   // a new numbering clears the client's mechanism registry
         bmmo::session_assign_msg assign;
@@ -2088,10 +2088,10 @@ public:
         s.assign_had_instant[c] = assign.start_us != 0;
         if (assign.start_us != 0) runner_->player_start_settled(s.id, c, first_tick);
         assign.serialize();
-        send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+        send(c, assign.raw.str().data(), assign.size(), bmmo::net::kSendReliableNoNagle);
         // --assign-volley (test builds): the (e) volley, for the wire to show.
         for (int i = 0; i < test_assign_volley_; ++i)
-            send(c, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_UnreliableNoNagle);
+            send(c, assign.raw.str().data(), assign.size(), bmmo::net::kSendUnreliableNoNagle);
         // A newer assignment retires the copies of the previous one still due.
         s.assign_repeats.erase(std::remove_if(s.assign_repeats.begin(), s.assign_repeats.end(),
                                               [c](const physics_session_state::assign_repeat& r) { return r.to == c; }),
@@ -2161,7 +2161,7 @@ public:
         std::string out;
         for (const auto m: members) {
             if (!out.empty()) out += ", ";
-            out += get_client_name(static_cast<HSteamNetConnection>(m));
+            out += get_client_name(static_cast<bmmo::net::connection>(m));
         }
         return out;
     }
@@ -2183,12 +2183,12 @@ public:
         msg.seq = seq;
         msg.serialize();
         for (const auto m: s.members)
-            if (!s.late.count(m)) send(m, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            if (!s.late.count(m)) send(m, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         Printf("Physics session %u: start handshake (status of start %u): %s", s.id, seq, text.c_str());
     }
 
     // One SessionStartAt (reliable, then copies one per main-loop pass).
-    void send_start_at(physics_session_state& s, HSteamNetConnection c, uint32_t first_tick, uint32_t seq,
+    void send_start_at(physics_session_state& s, bmmo::net::connection c, uint32_t first_tick, uint32_t seq,
                        uint8_t flags, int64_t start_server_us, int64_t start_us) {
         bmmo::session_start_at_msg msg;
         msg.session = s.id;
@@ -2200,7 +2200,7 @@ public:
         const auto now = clock_.now(bmmo::session::clock_site::server_start_at_sent);
         msg.server_us = steady_us(now);
         msg.serialize();
-        send(c, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+        send(c, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliableNoNagle);
         s.start_repeats.erase(std::remove_if(s.start_repeats.begin(), s.start_repeats.end(),
                                              [c](const physics_session_state::start_repeat& r) { return r.to == c; }),
                               s.start_repeats.end());
@@ -2216,7 +2216,7 @@ public:
         if (!runner_) return;
         const auto now_tp = clock_.now(bmmo::session::clock_site::server_handshake_check);
         const int64_t now = steady_us(now_tp);
-        std::vector<std::pair<uint32_t, HSteamNetConnection>> refused;   // session, member
+        std::vector<std::pair<uint32_t, bmmo::net::connection>> refused;   // session, member
         for (auto& [id, s]: physics_sessions_) {
             // The joiners that waited for the handshake join late now that
             // the runner ticks (its running flag is set by its own thread,
@@ -2254,14 +2254,14 @@ public:
                 std::string waits;
                 for (const auto m: r.in_flight)
                     waits += Sprintf(" %s (confirmed start %u; until %+lld ms)",
-                                     get_client_name(static_cast<HSteamNetConnection>(m)),
+                                     get_client_name(static_cast<bmmo::net::connection>(m)),
                                      s.handshake.confirmed_seq(m),
                                      static_cast<long long>((s.handshake.answer_in_flight_until(m) - now) / 1000));
                 Printf("Physics session %u: start handshake: start %u awaiting confirmation before its deadline; "
                        "not counted missing while "
                        "their answer may still be in flight:%s", id, s.handshake.seq(), waits.c_str());
             }
-            for (const auto m: r.refuse) refused.emplace_back(id, static_cast<HSteamNetConnection>(m));
+            for (const auto m: r.refuse) refused.emplace_back(id, static_cast<bmmo::net::connection>(m));
             if (!r.refuse.empty())
                 send_start_status(s, bmmo::session::start_status_phase::refused, r.total - r.refuse.size(), r.total,
                                   r.moved_from_seq, Sprintf("%s refused: did not confirm the session start in time; the others start "
@@ -2281,10 +2281,10 @@ public:
                     if (std::find(r.refuse.begin(), r.refuse.end(), m) != r.refuse.end()) continue;
                     const auto* e = s.handshake.estimate(m);
                     if (!e) continue;
-                    send_start_at(s, static_cast<HSteamNetConnection>(m), s.start_tick_base, s.handshake.seq(), 0,
+                    send_start_at(s, static_cast<bmmo::net::connection>(m), s.start_tick_base, s.handshake.seq(), 0,
                                   sch.x_us, e->arrival_local(sch.x_us));
                     offsets += Sprintf(" %s rtt %.1f ms offset %+lld us (%u samples);",
-                                       get_client_name(static_cast<HSteamNetConnection>(m)), e->best.rtt_us / 1000.0,
+                                       get_client_name(static_cast<bmmo::net::connection>(m)), e->best.rtt_us / 1000.0,
                                        static_cast<long long>(e->best.offset_us), e->samples);
                 }
                 Printf("Physics session %u: start handshake: start %u at +%lld ms (confirm by +%lld ms, worst rtt "
@@ -2306,12 +2306,12 @@ public:
                         continue;
                     const auto* e = s.handshake.estimate(m);
                     if (!e) continue;
-                    send_start_at(s, static_cast<HSteamNetConnection>(m), s.start_tick_base, r.commit_seq,
+                    send_start_at(s, static_cast<bmmo::net::connection>(m), s.start_tick_base, r.commit_seq,
                                   bmmo::session::START_AT_FLAG_COMMIT, sch.x_us, e->arrival_local(sch.x_us));
                 }
                 send_start_status(s, bmmo::session::start_status_phase::postponed, r.total, r.total, r.commit_seq,
                                   Sprintf("%s started on an earlier start time (start %u): everyone starts on it now",
-                                          get_client_name(static_cast<HSteamNetConnection>(r.committed_by)),
+                                          get_client_name(static_cast<bmmo::net::connection>(r.committed_by)),
                                           r.commit_seq));
             }
             if (r.start_now) {
@@ -2321,7 +2321,7 @@ public:
                 if (r.commit)
                     Printf("Physics session %u: start handshake: start %u committed (%s started on it); its instant "
                            "is %+lld ms from now (the schedule starts from it).", id, r.commit_seq,
-                           get_client_name(static_cast<HSteamNetConnection>(r.committed_by)),
+                           get_client_name(static_cast<bmmo::net::connection>(r.committed_by)),
                            static_cast<long long>((sch.x_us - now) / 1000));
                 else
                     Printf("Physics session %u: start handshake: all %u members confirmed start %u; the schedule "
@@ -2335,7 +2335,7 @@ public:
                 std::string watched;
                 for (const auto m: members)
                     if (s.handshake.watched(m))
-                        watched += Sprintf(" %s (confirmed start %u)", get_client_name(static_cast<HSteamNetConnection>(m)),
+                        watched += Sprintf(" %s (confirmed start %u)", get_client_name(static_cast<bmmo::net::connection>(m)),
                                            s.handshake.confirmed_seq(m));
                 if (!watched.empty())
                     Printf("Physics session %u: start handshake: may run on another start than %u (watched until "
@@ -2343,7 +2343,7 @@ public:
             }
             for (const auto& x: r.resync) {
                 Printf("Physics session %u: start handshake: %s %s on start %u while start %u is committed: resynced "
-                       "onto start %u%s.", id, get_client_name(static_cast<HSteamNetConnection>(x.member)),
+                       "onto start %u%s.", id, get_client_name(static_cast<bmmo::net::connection>(x.member)),
                        x.known ? "runs" : "may run", x.ran_on, r.resync_onto, r.resync_onto,
                        x.known ? " (it said so)"
                                : " (it confirmed that start, its instant passed, and it confirmed nothing later)");
@@ -2371,7 +2371,7 @@ public:
         const auto todo = std::move(s.start_resync);
         s.start_resync.clear();
         for (const auto& x: todo) {
-            const auto c = static_cast<HSteamNetConnection>(x.member);
+            const auto c = static_cast<bmmo::net::connection>(x.member);
             if (std::find(s.members.begin(), s.members.end(), c) == s.members.end()) continue;
             s.start_repeats.erase(std::remove_if(s.start_repeats.begin(), s.start_repeats.end(),
                                                  [c](const physics_session_state::start_repeat& r) { return r.to == c; }),
@@ -2386,8 +2386,8 @@ public:
     // message is answered) and, for a start copy, its confirmation.  A late
     // joiner's first sample also gives it its correction: the instant its
     // frame `base` was due on its own clock.
-    void handle_session_clock_ack(HSteamNetConnection c, const bmmo::session_clock_ack_msg& msg,
-                                  SteamNetworkingMicroseconds received) {
+    void handle_session_clock_ack(bmmo::net::connection c, const bmmo::session_clock_ack_msg& msg,
+                                  bmmo::net::microseconds received) {
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto it = physics_sessions_.find(msg.session);
@@ -2405,8 +2405,8 @@ public:
             return;
         }
         auto arrival = clock_.now(bmmo::session::clock_site::server_input_arrival);
-        constexpr SteamNetworkingMicroseconds kMaxAge = 10000000;
-        const SteamNetworkingMicroseconds age = SteamNetworkingUtils()->GetLocalTimestamp() - received;
+        constexpr bmmo::net::microseconds kMaxAge = 10000000;
+        const bmmo::net::microseconds age = SteamNetworkingUtils()->GetLocalTimestamp() - received;
         if (received > 0 && age > 0)
             arrival -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::microseconds(age < kMaxAge ? age : kMaxAge));
@@ -2473,14 +2473,14 @@ public:
             for (auto h = s.held_members.begin(); h != s.held_members.end();) {
                 if (now < h->due) { ++h; continue; }
                 for (const auto m: h->to)
-                    send(static_cast<HSteamNetConnection>(m), h->bytes.data(), h->bytes.size(),
-                         k_nSteamNetworkingSend_ReliableNoNagle);
+                    send(static_cast<bmmo::net::connection>(m), h->bytes.data(), h->bytes.size(),
+                         bmmo::net::kSendReliableNoNagle);
                 if (!h->to.empty()) send_copies(s, std::move(h->bytes), std::move(h->to));
                 h = s.held_members.erase(h);
             }
             s.event_repeats.send_due([this, &s](uint32_t to, const std::string& bytes) {
-                if (std::find(s.members.begin(), s.members.end(), static_cast<HSteamNetConnection>(to)) != s.members.end())
-                    send(to, bytes.data(), bytes.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                if (std::find(s.members.begin(), s.members.end(), static_cast<bmmo::net::connection>(to)) != s.members.end())
+                    send(to, bytes.data(), bytes.size(), bmmo::net::kSendUnreliableNoDelay);
             });
             const uint64_t pass = main_pass_.load(std::memory_order_relaxed);
             for (auto r = s.assign_repeats.begin(); r != s.assign_repeats.end();) {
@@ -2492,7 +2492,7 @@ public:
                 assign.server_us = steady_us(now);
                 assign.start_us = r->start_us;
                 assign.serialize();
-                send(r->to, assign.raw.str().data(), assign.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                send(r->to, assign.raw.str().data(), assign.size(), bmmo::net::kSendUnreliableNoDelay);
                 r->schedule.sent(pass, now);
                 if (r->schedule.done()) r = s.assign_repeats.erase(r);
                 else ++r;
@@ -2509,14 +2509,14 @@ public:
                 copy.start_us = r->start_us;
                 copy.server_us = steady_us(now);
                 copy.serialize();
-                send(r->to, copy.raw.str().data(), copy.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                send(r->to, copy.raw.str().data(), copy.size(), bmmo::net::kSendUnreliableNoDelay);
                 r->schedule.sent(pass, now);
                 if (r->schedule.done()) r = s.start_repeats.erase(r);
                 else ++r;
             }
             for (auto r = s.lead_repeats.begin(); r != s.lead_repeats.end();) {
                 if (now < r->next_due) { ++r; continue; }
-                send(r->to, r->bytes.data(), r->bytes.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                send(r->to, r->bytes.data(), r->bytes.size(), bmmo::net::kSendUnreliableNoDelay);
                 r->next_due = now + kLeadRepeatSpacing;
                 if (--r->remaining <= 0) r = s.lead_repeats.erase(r);
                 else ++r;
@@ -2528,7 +2528,7 @@ public:
         if (!runner_) return;
         const auto now = clock_.now(bmmo::session::clock_site::server_start_barrier);
         std::vector<uint32_t> all_silent;
-        std::vector<std::pair<uint32_t, HSteamNetConnection>> dropped;   // session, member
+        std::vector<std::pair<uint32_t, bmmo::net::connection>> dropped;   // session, member
         for (auto& [id, s]: physics_sessions_) {
             if (!s.start_barrier_armed || !s.world_ready) continue;
             if (runner_->running(id)) { s.start_barrier_armed = false; continue; }
@@ -2568,7 +2568,7 @@ public:
     }
 
     void handle_session_ready(client_data_collection::iterator client_it, const bmmo::session_ready_msg& msg) {
-        const HSteamNetConnection c = client_it->first;
+        const bmmo::net::connection c = client_it->first;
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto& s = physics_sessions_[msg.session];
@@ -2737,8 +2737,8 @@ public:
             // the union has grown by, then the state of base - 1 (or a full
             // snapshot)
             for (const auto& [member, last]: s.last_physicalize)
-                if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);
-            for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+                if (member != c) send(c, last.bytes.data(), last.bytes.size(), bmmo::net::kSendReliable);
+            for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), bmmo::net::kSendReliable);
             resend_trafo_relayed(s, c, assigned);
             if (state) {
                 runner_->request_resync_state(s.id, c, assigned);
@@ -2759,7 +2759,7 @@ public:
     // base - 1 to that member alone (SessionResyncState), announced by the
     // assignment's ASSIGN_FLAG_STATE_FOLLOWS, instead of a full snapshot
     // broadcast to every member.
-    void handle_session_resync(HSteamNetConnection c, const bmmo::session_resync_msg& msg) {
+    void handle_session_resync(bmmo::net::connection c, const bmmo::session_resync_msg& msg) {
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto it = physics_sessions_.find(msg.session);
@@ -2771,7 +2771,7 @@ public:
 
     // The resync answer (handle_session_resync, and again for a base the
     // runner stepped before the request reached it): returns the base.
-    uint32_t resync_member(physics_session_state& s, HSteamNetConnection c, uint32_t last_full_tick) {
+    uint32_t resync_member(physics_session_state& s, bmmo::net::connection c, uint32_t last_full_tick) {
         // On the per-player path (lead_adjust on, the member declared
         // CAP_LEAD), at L_eff (late-player design 2.5, 2.8): the lead of the
         // member's first assignment plus its acknowledged offset, the lead
@@ -2807,8 +2807,8 @@ public:
         runner_->player_ready(s.id, c, assigned, assigned_lead);
         send_session_assign(s, c, assigned, state ? bmmo::session::ASSIGN_FLAG_STATE_FOLLOWS : 0);
         for (const auto& [member, last]: s.last_physicalize)
-            if (member != c) send(c, last.bytes.data(), last.bytes.size(), k_nSteamNetworkingSend_Reliable);
-        for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_Reliable);
+            if (member != c) send(c, last.bytes.data(), last.bytes.size(), bmmo::net::kSendReliable);
+        for (const auto& bytes: s.sector_history) send(c, bytes.data(), bytes.size(), bmmo::net::kSendReliable);
         resend_trafo_relayed(s, c, assigned);
         // The state of base - 1, after the runner steps it (posted after
         // player_ready, on the same queue).
@@ -2844,13 +2844,13 @@ public:
     // never depend on copy order (lifecycle.hpp, step HLX): a piggybacked
     // copy may come before or after the reliable one.
     void handle_session_input(client_data_collection::iterator client_it, const bmmo::session_input_msg& msg,
-                              SteamNetworkingMicroseconds received) {
-        const HSteamNetConnection c = client_it->first;
+                              bmmo::net::microseconds received) {
+        const bmmo::net::connection c = client_it->first;
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto arrival = clock_.now(bmmo::session::clock_site::server_event_arrival);
-        constexpr SteamNetworkingMicroseconds kMaxAge = 10000000;
-        const SteamNetworkingMicroseconds age = SteamNetworkingUtils()->GetLocalTimestamp() - received;
+        constexpr bmmo::net::microseconds kMaxAge = 10000000;
+        const bmmo::net::microseconds age = SteamNetworkingUtils()->GetLocalTimestamp() - received;
         if (received > 0 && age > 0)
             arrival -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::microseconds(age < kMaxAge ? age : kMaxAge));
@@ -2879,7 +2879,7 @@ public:
     }
 
     void handle_session_event(client_data_collection::iterator client_it, bmmo::session_event_msg& msg) {
-        const HSteamNetConnection c = client_it->first;
+        const bmmo::net::connection c = client_it->first;
         auto cs = client_session_.find(c);
         if (cs == client_session_.end() || cs->second != msg.session || !runner_) return;
         auto& s = physics_sessions_[msg.session];
@@ -3074,7 +3074,7 @@ public:
     // session.
     void reject_trafo(physics_session_state& s, client_data_collection::iterator client_it, bmmo::session_event_msg& msg,
                       const char* why, const bmmo::session::trafo_validation& v) {
-        const HSteamNetConnection c = client_it->first;
+        const bmmo::net::connection c = client_it->first;
         ++s.rejected_events;
         ++s.rejected_trafos;
         // The player's ball type as the server knows it: its last relayed
@@ -3104,7 +3104,7 @@ public:
         msg.clear();
         msg.serialize();
         const std::string bytes = msg.raw.str();
-        send(c, bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+        send(c, bytes.data(), bytes.size(), bmmo::net::kSendReliableNoNagle);
         send_copies(s, bytes, {static_cast<uint32_t>(c)});
     }
 
@@ -3128,7 +3128,7 @@ public:
         auto it = physics_sessions_.find(a.session);
         if (it == physics_sessions_.end()) return;
         auto& s = it->second;
-        const auto owner = static_cast<HSteamNetConnection>(a.player);
+        const auto owner = static_cast<bmmo::net::connection>(a.player);
         bmmo::session_event_msg msg;
         if (a.dropped) {   // the runner did not take it: only the parked message goes
             if (a.token != 0) s.awaiting_events.erase(a.token);
@@ -3168,7 +3168,7 @@ public:
         msg.clear();
         msg.serialize();
         const std::string bytes = msg.raw.str();
-        const auto is_member = [&s](HSteamNetConnection m) {
+        const auto is_member = [&s](bmmo::net::connection m) {
             return std::find(s.members.begin(), s.members.end(), m) != s.members.end();
         };
         std::vector<uint32_t> to;
@@ -3215,7 +3215,7 @@ public:
             for (const auto m: s.members) to.push_back(m);
         }
         for (const auto m: to)
-            send(static_cast<HSteamNetConnection>(m), bytes.data(), bytes.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+            send(static_cast<bmmo::net::connection>(m), bytes.data(), bytes.size(), bmmo::net::kSendReliableNoNagle);
         // ...and again, unreliably: a lost reliable copy is otherwise ~400 ms
         // late by retransmit, past the rollback's reach, and a mirror whose
         // respawn or beam is applied that late sits metres off.
@@ -3274,7 +3274,7 @@ public:
         using bmmo::room::action;
         using bmmo::room::event_type;
         using bmmo::room::error_code;
-        const HSteamNetConnection c = client_it->first;
+        const bmmo::net::connection c = client_it->first;
         rooms_.max_rooms = config_.maximum_rooms;
         rooms_.max_members = static_cast<uint16_t>(std::clamp<uint32_t>(
                 config_.maximum_members, 1, bmmo::room::MAX_MEMBERS_PER_MESSAGE));
@@ -3428,7 +3428,7 @@ public:
                 send_room_event(msg.target, event_type::Kicked, error_code::None, rr.room, c, msg.target);
                 for (auto m: rr.remaining) {
                     send_room_event(m, event_type::PlayerLeft, error_code::None, rr.room, c, msg.target);
-                    if (rr.new_host != k_HSteamNetConnection_Invalid)
+                    if (rr.new_host != bmmo::net::kInvalidConnection)
                         send_room_event(m, event_type::HostChanged, error_code::None, rr.room, rr.new_host);
                 }
                 send_room_event(c, event_type::RequestAccepted, error_code::None, rr.room, c, msg.target);
@@ -3436,7 +3436,7 @@ public:
                 break;
             }
             case action::Close: {
-                std::vector<HSteamNetConnection> members;
+                std::vector<bmmo::net::connection> members;
                 uint32_t room = 0;
 #if BMMO_BUILD_SIM
                 if (const uint32_t own = rooms_.room_of(c); own != 0 && rooms_.find(own) && rooms_.find(own)->host == c)
@@ -3461,7 +3461,7 @@ public:
         }
     }
 
-    void set_ban(HSteamNetConnection client, const std::string& reason) {
+    void set_ban(bmmo::net::connection client, const std::string& reason) {
         std::lock_guard lk(state_mutex_);
         if (!client_exists(client))
             return;
@@ -3473,7 +3473,7 @@ public:
         config_.save();
     }
 
-    void set_mute(HSteamNetConnection client, bool action) {
+    void set_mute(bmmo::net::connection client, bool action) {
         std::lock_guard lk(state_mutex_);
         if (!client_exists(client))
             return;
@@ -3492,7 +3492,7 @@ public:
         config_.save();
     }
 
-    void set_op(HSteamNetConnection client, bool action) {
+    void set_op(bmmo::net::connection client, bool action) {
         std::lock_guard lk(state_mutex_);
         if (!client_exists(client))
             return;
@@ -3516,7 +3516,7 @@ public:
         config_.save();
         bmmo::op_state_msg msg{};
         msg.content.op = action;
-        send(client, msg, k_nSteamNetworkingSend_Reliable);
+        send(client, msg, bmmo::net::kSendReliable);
         // just kick them and let them autoreconnect
         if (config_.ghost_mode) {
             interface_->CloseConnection(client, bmmo::connection_end::AutoReconnection_Min, "Operator status changed", true);
@@ -3538,7 +3538,7 @@ public:
     void toggle_cheat(bool cheat) {
         bmmo::cheat_toggle_msg msg;
         msg.content.cheated = (uint8_t)cheat;
-        broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
+        broadcast_message(msg, bmmo::net::kSendReliable);
         Printf(bmmo::color_code(bmmo::CheatToggle), "Toggled cheat [%s] globally.", cheat ? "on" : "off");
     }
 
@@ -3622,7 +3622,7 @@ public:
     }
 
 protected:
-    void save_login_data(HSteamNetConnection client) {
+    void save_login_data(bmmo::net::connection client) {
         SteamNetConnectionInfo_t pInfo;
         interface_->GetConnectionInfo(client, &pInfo);
         config_.save_login_data(pInfo.m_addrRemote, bmmo::string_utils::get_uuid_string(clients_[client].uuid),
@@ -3631,14 +3631,14 @@ protected:
 
     // Fail silently if the client doesn't exist (e.g. still in limbo state).
     // Caller must hold state_mutex_.
-    void cleanup_disconnected_client(HSteamNetConnection client) {
+    void cleanup_disconnected_client(bmmo::net::connection client) {
         auto itClient = clients_.find(client);
         if (itClient == clients_.end())
             return;
 
         bmmo::player_disconnected_msg msg;
         msg.content.connection_id = client;
-        broadcast_message(msg, k_nSteamNetworkingSend_Reliable, client);
+        broadcast_message(msg, bmmo::net::kSendReliable, client);
         std::string name = itClient->second.name;
         username_.erase(bmmo::message_utils::to_lower(name));
         clients_.erase(itClient);
@@ -3663,8 +3663,8 @@ protected:
         config_.save_player_status(clients_);
     }
 
-    bool client_exists(HSteamNetConnection client, bool suppress_error = false) const {
-        if (client == k_HSteamNetConnection_Invalid)
+    bool client_exists(bmmo::net::connection client, bool suppress_error = false) const {
+        if (client == bmmo::net::kInvalidConnection)
             return false;
         if (!clients_.contains(client)) {
             if (!suppress_error)
@@ -3674,10 +3674,10 @@ protected:
         return true;
     }
 
-    bool deny_action(HSteamNetConnection client) {
+    bool deny_action(bmmo::net::connection client) {
         if (config_.op_mode && op_online() && !is_op(client)) {
             bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::NoPermission}};
-            send(client, denied_msg, k_nSteamNetworkingSend_Reliable);
+            send(client, denied_msg, bmmo::net::kSendReliable);
             return true;
         }
         return false;
@@ -3687,7 +3687,7 @@ protected:
         return config_.muted_players.contains(bmmo::string_utils::get_uuid_string(uuid));
     }
 
-    bool is_op(HSteamNetConnection client) {
+    bool is_op(bmmo::net::connection client) {
         if (!client_exists(client))
             return false;
         std::string name = bmmo::name_validator::get_real_nickname(clients_[client].name);
@@ -3703,19 +3703,19 @@ protected:
         return std::ranges::any_of(clients_, [&](auto& client) { return is_op(client.first); });
     }
 
-    bool process_forced_cheat_mode(std::pair<const HSteamNetConnection, client_data>& data, bool new_cheat_mode) {
+    bool process_forced_cheat_mode(std::pair<const bmmo::net::connection, client_data>& data, bool new_cheat_mode) {
         bool forced_cheat;
         if (!config_.get_forced_cheat_mode(bmmo::string_utils::get_uuid_string(data.second.uuid), forced_cheat)
                 || forced_cheat == new_cheat_mode)
             return false;
         send(data.first, bmmo::cheat_toggle_msg{.content = {.cheated = forced_cheat, .notify = false}},
-                k_nSteamNetworkingSend_Reliable);
+                bmmo::net::kSendReliable);
         Printf(bmmo::color_code(bmmo::CheatToggle), "Forcing cheat mode of (#%u, %s) to [%s].",
                 data.first, data.second.name, forced_cheat ? "on" : "off");
         return true;
     }
 
-    bool validate_client(HSteamNetConnection client, bmmo::login_request_v3_msg& msg) {
+    bool validate_client(bmmo::net::connection client, bmmo::login_request_v3_msg& msg) {
         int nReason = k_ESteamNetConnectionEnd_Invalid;
         std::stringstream reason;
         const std::string real_nickname = bmmo::name_validator::get_real_nickname(msg.nickname);
@@ -3761,7 +3761,7 @@ protected:
 
         if (nReason != k_ESteamNetConnectionEnd_Invalid) {
             bmmo::simple_action_msg new_msg{.content = bmmo::simple_action::LoginDenied};
-            send(client, new_msg, k_nSteamNetworkingSend_Reliable);
+            send(client, new_msg, bmmo::net::kSendReliable);
             interface_->CloseConnection(client, nReason, reason.str().c_str(), true);
             return false;
         }
@@ -3890,7 +3890,7 @@ protected:
         switch (raw_msg->code) {
             case bmmo::LoginRequest: {
                 bmmo::simple_action_msg msg{.content = bmmo::simple_action::LoginDenied};
-                send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
+                send(networking_msg->m_conn, msg, bmmo::net::kSendReliable);
                 interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::OutdatedClient, "Outdated client", true);
                 break;
             }
@@ -3909,7 +3909,7 @@ protected:
                 std::string reason = "Outdated client (client: " + msg.version.to_string()
                         + "; minimum: " + bmmo::minimum_client_version.to_string() + ")";
                 bmmo::simple_action_msg new_msg{.content = bmmo::simple_action::LoginDenied};
-                send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
+                send(networking_msg->m_conn, new_msg, bmmo::net::kSendReliable);
                 interface_->CloseConnection(networking_msg->m_conn, bmmo::connection_end::OutdatedClient, reason.c_str(), true);
                 break;
             }
@@ -3944,7 +3944,7 @@ protected:
                     bmmo::name_update_msg nu_msg;
                     nu_msg.text_content = new_name;
                     nu_msg.serialize();
-                    send(networking_msg->m_conn, nu_msg.raw.str().data(), nu_msg.size(), k_nSteamNetworkingSend_Reliable);
+                    send(networking_msg->m_conn, nu_msg.raw.str().data(), nu_msg.size(), bmmo::net::kSendReliable);
                     if (bmmo::name_validator::is_spectator(msg.nickname))
                         new_name = bmmo::name_validator::get_spectator_nickname(new_name);
                     Printf(R"(Forced name change - #%u: "%s" -> "%s")",
@@ -3973,7 +3973,7 @@ protected:
                     bmmo::map_names_msg name_msg;
                     name_msg.maps = map_names_;
                     name_msg.serialize();
-                    send(networking_msg->m_conn, name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
+                    send(networking_msg->m_conn, name_msg.raw.str().data(), name_msg.size(), bmmo::net::kSendReliable);
                 }
 
                 // notify this client of other online players
@@ -4000,7 +4000,7 @@ protected:
                     accepted_msg.online_players.insert({id, {data.name, data.cheated, data.current_map, data.current_sector}});
                 }
                 accepted_msg.serialize();
-                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), k_nSteamNetworkingSend_Reliable);
+                send(networking_msg->m_conn, accepted_msg.raw.str().data(), accepted_msg.size(), bmmo::net::kSendReliable);
 
                 save_login_data(networking_msg->m_conn);
 
@@ -4012,20 +4012,20 @@ protected:
                 if (process_forced_cheat_mode(*client_it, msg.cheated))
                     connected_msg.cheated = !msg.cheated;
                 connected_msg.serialize();
-                broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
+                broadcast_message(connected_msg.raw.str().data(), connected_msg.size(), bmmo::net::kSendReliable, networking_msg->m_conn);
 
                 if (!config_.ghost_mode || is_ghost_spectator) {
                     bmmo::owned_compressed_ball_state_msg state_msg{};
                     pull_ball_states(state_msg.balls);
                     state_msg.serialize();
-                    send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.size(), k_nSteamNetworkingSend_ReliableNoNagle);
+                    send(networking_msg->m_conn, state_msg.raw.str().data(), state_msg.size(), bmmo::net::kSendReliableNoNagle);
                 }
 
                 if (!permanent_notification_.second.empty()) {
                     bmmo::permanent_notification_msg bulletin_msg{};
                     std::tie(bulletin_msg.title, bulletin_msg.text_content) = permanent_notification_;
                     bulletin_msg.serialize();
-                    send(networking_msg->m_conn, bulletin_msg.raw.str().data(), bulletin_msg.size(), k_nSteamNetworkingSend_Reliable);
+                    send(networking_msg->m_conn, bulletin_msg.raw.str().data(), bulletin_msg.size(), bmmo::net::kSendReliable);
                 }
 
                 bmmo::extra_life_msg life_msg{};
@@ -4079,13 +4079,13 @@ protected:
 
                 // Print chat message to console
                 const std::string& current_player_name = client_it->second.name;
-                const HSteamNetConnection current_player_id  = networking_msg->m_conn;
+                const bmmo::net::connection current_player_id  = networking_msg->m_conn;
                 Printf(muted ? bmmo::ansi::Strikethrough : bmmo::ansi::Reset, "%s(%u, %s): %s",
                         muted ? "[Muted] " : "", current_player_id, current_player_name, msg.chat_content);
 
                 if (muted) {
                     bmmo::action_denied_msg msg{.content = {bmmo::deny_reason::PlayerMuted}};
-                    send(networking_msg->m_conn, msg, k_nSteamNetworkingSend_Reliable);
+                    send(networking_msg->m_conn, msg, bmmo::net::kSendReliable);
                     break;
                 }
 
@@ -4095,7 +4095,7 @@ protected:
                 msg.serialize();
 
                 // No need to ignore the sender, 'cause we will send the message back
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
 
                 break;
             }
@@ -4106,7 +4106,7 @@ protected:
 
                 bmmo::string_utils::sanitize_string(msg.chat_content);
                 const bool muted = is_muted(client_it->second.uuid);
-                const HSteamNetConnection receiver = msg.player_id;
+                const bmmo::net::connection receiver = msg.player_id;
                 msg.player_id = networking_msg->m_conn;
 
                 if (client_exists(receiver, true)) {
@@ -4115,19 +4115,19 @@ protected:
                         muted ? "[Muted] " : "", msg.player_id, client_it->second.name, receiver, clients_[receiver].name, msg.chat_content);
                     if (muted) {
                         bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::PlayerMuted}};
-                        send(networking_msg->m_conn, denied_msg, k_nSteamNetworkingSend_Reliable);
+                        send(networking_msg->m_conn, denied_msg, bmmo::net::kSendReliable);
                         break;
                     }
                     msg.clear();
                     msg.serialize();
-                    send(receiver, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                    send(receiver, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
                 } else {
                     Printf((muted ? bmmo::ansi::Strikethrough : bmmo::ansi::Reset) | bmmo::color_code(msg.code),
                         "%s(%u, %s) -> (%u, %s): %s",
                         muted ? "[Muted] " : "", msg.player_id, client_it->second.name, receiver, "[Server]", msg.chat_content);
-                    if (receiver != k_HSteamNetConnection_Invalid) {
+                    if (receiver != bmmo::net::kInvalidConnection) {
                         bmmo::action_denied_msg denied_msg{.content = {bmmo::deny_reason::TargetNotFound}};
-                        send(msg.player_id, denied_msg, k_nSteamNetworkingSend_Reliable);
+                        send(msg.player_id, denied_msg, bmmo::net::kSendReliable);
                     }
                 };
                 break;
@@ -4149,7 +4149,7 @@ protected:
                 if (muted) break;
                 msg.clear();
                 msg.serialize();
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
                 break;
             }
             case bmmo::PlayerReady: {
@@ -4163,7 +4163,7 @@ protected:
                     networking_msg->m_conn, client_it->second.name,
                     msg->content.ready ? "" : " not",
                     msg->content.count, msg->content.count == 1 ? "" : "s");
-                broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                broadcast_message(*msg, bmmo::net::kSendReliable);
                 break;
             }
             case bmmo::Countdown: {
@@ -4209,7 +4209,7 @@ protected:
                 }
 
                 msg->content.sender = networking_msg->m_conn;
-                broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle);
+                broadcast_message(*msg, bmmo::net::kSendReliableNoNagle);
                 break;
             }
             case bmmo::DidNotFinish: {
@@ -4226,7 +4226,7 @@ protected:
                     msg->content.sector
                 );
                 client_it->second.dnf = true;
-                broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle);
+                broadcast_message(*msg, bmmo::net::kSendReliableNoNagle);
                 maps_[msg->content.map.get_hash_bytes_string()].rankings.second.push_back({
                     {(bool)msg->content.cheated, player_name}, msg->content.sector});
                 break;
@@ -4278,7 +4278,7 @@ protected:
                     current_map.rank, bmmo::string_utils::get_ordinal_suffix(current_map.rank),
                     formatted_score, msg->content.get_formatted_time());
 
-                broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle);
+                broadcast_message(*msg, bmmo::net::kSendReliableNoNagle);
 
                 current_map.rankings.first.push_back({
                     {(bool)msg->content.cheated, player_name}, msg->content.mode,
@@ -4310,7 +4310,7 @@ protected:
                 msg.maps = std::move(accepted_maps);
                 msg.clear();
                 msg.serialize();
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable, networking_msg->m_conn);
+                broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable, networking_msg->m_conn);
                 break;
             }
             case bmmo::CheatState: {
@@ -4326,7 +4326,7 @@ protected:
                 new_msg.content.player_id = networking_msg->m_conn;
                 new_msg.content.state.cheated = state_msg->content.cheated;
                 new_msg.content.state.notify = state_msg->content.notify;
-                broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable);
+                broadcast_message(&new_msg, sizeof(new_msg), bmmo::net::kSendReliable);
 
                 break;
             }
@@ -4340,7 +4340,7 @@ protected:
                 bmmo::owned_cheat_toggle_msg new_msg{};
                 new_msg.content.player_id = client_it->first;
                 new_msg.content.state.cheated = state_msg->content.cheated;
-                broadcast_message(&new_msg, sizeof(new_msg), k_nSteamNetworkingSend_Reliable);
+                broadcast_message(&new_msg, sizeof(new_msg), bmmo::net::kSendReliable);
 
                 break;
             }
@@ -4349,7 +4349,7 @@ protected:
                 msg.raw.write(static_cast<const char*>(networking_msg->m_pData), networking_msg->m_cbSize);
                 if (!msg.deserialize()) break;
 
-                HSteamNetConnection player_id = msg.player_id;
+                bmmo::net::connection player_id = msg.player_id;
                 if (!msg.player_name.empty()) {
                     Printf(bmmo::color_code(msg.code), "%s requested to kick player \"%s\"!",
                             client_it->second.name, msg.player_name);
@@ -4367,7 +4367,7 @@ protected:
                         msg.crash ? bmmo::connection_end::Crash : bmmo::connection_end::Kicked)) {
                     bmmo::action_denied_msg new_msg{};
                     new_msg.content.reason = bmmo::deny_reason::TargetNotFound;
-                    send(networking_msg->m_conn, new_msg, k_nSteamNetworkingSend_Reliable);
+                    send(networking_msg->m_conn, new_msg, bmmo::net::kSendReliable);
                 };
 
                 break;
@@ -4378,7 +4378,7 @@ protected:
                 msg->content.player_id = networking_msg->m_conn;
                 switch (msg->content.type) {
                     case bmmo::current_map_state::Announcement: {
-                        broadcast_message(*msg, k_nSteamNetworkingSend_Reliable);
+                        broadcast_message(*msg, bmmo::net::kSendReliable);
                         Printf(bmmo::color_code(msg->code), "%s(#%u, %s) is at the %d%s sector of %s.",
                             client_it->second.cheated ? "[CHEAT] " : "",
                             networking_msg->m_conn, client_it->second.name,
@@ -4393,14 +4393,14 @@ protected:
                                 .map = msg->content.map,
                                 .time_diff_microseconds = SteamNetworkingUtils()->GetLocalTimestamp() - client_map_it->second.start_time,
                             }};
-                            send(networking_msg->m_conn, hs_msg, k_nSteamNetworkingSend_ReliableNoNagle);
+                            send(networking_msg->m_conn, hs_msg, bmmo::net::kSendReliableNoNagle);
                         }
                         [[fallthrough]];
                     }
                     case bmmo::current_map_state::NameChange: {
                         client_it->second.current_map = msg->content.map;
                         client_it->second.current_sector = msg->content.sector;
-                        broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle, networking_msg->m_conn);
+                        broadcast_message(*msg, bmmo::net::kSendReliableNoNagle, networking_msg->m_conn);
                         break;
                     }
                     default: break;
@@ -4420,7 +4420,7 @@ protected:
                 if (!msg) break;
                 msg->content.player_id = networking_msg->m_conn;
                 client_it->second.current_sector = msg->content.sector;
-                broadcast_message(*msg, k_nSteamNetworkingSend_ReliableNoNagle, networking_msg->m_conn);
+                broadcast_message(*msg, bmmo::net::kSendReliableNoNagle, networking_msg->m_conn);
                 break;
             }
             case bmmo::SimpleAction: {
@@ -4435,7 +4435,7 @@ protected:
                         Printf("(#%u, %s) has encountered a fatal error!",
                             networking_msg->m_conn, client_it->second.name);
                         // they already got their own fatal error, so we don't need to induce one here.
-                        kick_client(networking_msg->m_conn, "fatal error", k_HSteamNetConnection_Invalid, bmmo::connection_end::SelfTriggeredFatalError);
+                        kick_client(networking_msg->m_conn, "fatal error", bmmo::net::kInvalidConnection, bmmo::connection_end::SelfTriggeredFatalError);
                         break;
                     }
                     case sa::BallOff: {
@@ -4474,7 +4474,7 @@ protected:
                         Printf(bmmo::ansi::Italic, "(#%u, %s)'s restart request failed.",
                             msg->content.player_id, get_client_name(msg->content.player_id));
                         if (!client_exists(msg->content.player_id, true)
-                                && msg->content.player_id != k_HSteamNetConnection_Invalid)
+                                && msg->content.player_id != bmmo::net::kInvalidConnection)
                             break;
                         broadcast_message(*msg);
                         break;
@@ -4499,7 +4499,7 @@ protected:
                 permanent_notification_ = {msg.title, msg.text_content};
                 msg.clear();
                 msg.serialize();
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
                 break;
             }
             case bmmo::PlainText: {
@@ -4521,14 +4521,14 @@ protected:
                 if (muted) {
                     send(networking_msg->m_conn,
                             bmmo::action_denied_msg{.content = {bmmo::deny_reason::PlayerMuted}},
-                            k_nSteamNetworkingSend_Reliable);
+                            bmmo::net::kSendReliable);
                     break;
                 }
                 // re-serialize instead of forwarding the client's raw bytes,
                 // so what we broadcast is what we just validated
                 msg.clear();
                 msg.serialize();
-                broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
                 if (msg.type == bmmo::public_notification_type::SeriousWarning
                         && config_.serious_warning_as_dnf && !client_it->second.dnf) {
                     auto client_map_it = maps_.find(client_it->second.current_map.get_hash_bytes_string());
@@ -4572,11 +4572,11 @@ protected:
                 msg.clear();
                 if (!rankings) {
                     send(networking_msg->m_conn, bmmo::action_denied_msg{.content = {bmmo::deny_reason::TargetNotFound}},
-                            k_nSteamNetworkingSend_Reliable);
+                            bmmo::net::kSendReliable);
                     break;
                 }
                 msg.serialize(*rankings);
-                send(networking_msg->m_conn, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                send(networking_msg->m_conn, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
                 break;
             }
             case bmmo::HashData: {
@@ -4597,7 +4597,7 @@ protected:
                     new_msg.text_content = client_it->second.name + " has a modified " + file_name + " (MD5 " + md5_string.substr(0, 12) + "..)! This could be problematic.";
                     Printf("[%s] %s", new_msg.get_type_name(), new_msg.text_content);
                     new_msg.serialize();
-                    broadcast_message(new_msg.raw.str().data(), new_msg.size(), k_nSteamNetworkingSend_Reliable);
+                    broadcast_message(new_msg.raw.str().data(), new_msg.size(), bmmo::net::kSendReliable);
                 }
                 break;
             }
@@ -4697,7 +4697,7 @@ protected:
         std::lock_guard lk(state_mutex_);
         if (config_.ghost_mode) {
             for (const auto& i: ghost_spectator_clients_)
-                send(i, ball_msg.raw.str().data(), ball_msg.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                send(i, ball_msg.raw.str().data(), ball_msg.size(), bmmo::net::kSendUnreliableNoDelay);
         } else {
             // Room-scoped fan-out: a room's members see only their room's balls;
             // players not in any room (room 0) still see one another, as before.
@@ -4710,7 +4710,7 @@ protected:
             for (const auto& [conn, _]: clients_) {
                 auto it = per_room.find(rooms_.room_of(conn));
                 if (it != per_room.end())
-                    send(conn, it->second.raw.str().data(), it->second.size(), k_nSteamNetworkingSend_UnreliableNoDelay);
+                    send(conn, it->second.raw.str().data(), it->second.size(), bmmo::net::kSendUnreliableNoDelay);
             }
         }
 
@@ -4727,9 +4727,9 @@ protected:
             }
             ping_msg.serialize();
             ping_data_counter_ = 0;
-            broadcast_message(ping_msg.raw.str().data(), ping_msg.size(), k_nSteamNetworkingSend_Reliable);
+            broadcast_message(ping_msg.raw.str().data(), ping_msg.size(), bmmo::net::kSendReliable);
             const int64_t now_micros = clock_.utc_us(bmmo::session::clock_site::server_time_broadcast);
-            broadcast_message(bmmo::real_world_timestamp_msg{.content = now_micros}, k_nSteamNetworkingSend_ReliableNoNagle);
+            broadcast_message(bmmo::real_world_timestamp_msg{.content = now_micros}, bmmo::net::kSendReliableNoNagle);
         }
     };
 
@@ -4746,13 +4746,13 @@ protected:
     HSteamListenSocket listen_socket_ = k_HSteamListenSocket_Invalid;
     HSteamNetPollGroup poll_group_ = k_HSteamNetPollGroup_Invalid;
     client_data_collection clients_;
-    std::map<std::string, HSteamNetConnection> username_; // Note: this stores names converted to all-lowercases
-    std::unordered_set<HSteamNetConnection> ghost_spectator_clients_; // ghost mode - only operators and spectators can see other players
+    std::map<std::string, bmmo::net::connection> username_; // Note: this stores names converted to all-lowercases
+    std::unordered_set<bmmo::net::connection> ghost_spectator_clients_; // ghost mode - only operators and spectators can see other players
     bmmo::room_manager rooms_; // collision-overhaul room system (guarded by state_mutex_)
 #if BMMO_BUILD_SIM
     std::map<uint32_t, physics_session_state> physics_sessions_;        // by session id (state_mutex_)
     std::unordered_map<uint32_t, uint32_t> room_session_;               // room -> session
-    std::unordered_map<HSteamNetConnection, uint32_t> client_session_;  // member -> session
+    std::unordered_map<bmmo::net::connection, uint32_t> client_session_;  // member -> session
     uint32_t next_session_id_ = 1;
     // The runner's seed (runner_config::seed): every world's spawn impulse
     // and trafo seeds derive from it, so SessionStart carries this value.
@@ -4943,27 +4943,27 @@ int main(int argc, char** argv) {
         msg.chat_content = console.get_rest_of_line();
         msg.serialize();
 
-        server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        server.broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         Printf("([Server]): %s", msg.chat_content);
     });
-    auto parse_client_id = [&](const std::string& client_input) -> HSteamNetConnection {
+    auto parse_client_id = [&](const std::string& client_input) -> bmmo::net::connection {
         return (client_input.length() > 0 && client_input[0] == '#')
                 ? std::atoll(client_input.substr(1).c_str()) : server.get_client_id(client_input);
     };
-    auto get_client_id_from_console = [&]() -> HSteamNetConnection {
+    auto get_client_id_from_console = [&]() -> bmmo::net::connection {
         std::string client_input = console.get_next_word();
-        HSteamNetConnection client = parse_client_id(client_input);
+        bmmo::net::connection client = parse_client_id(client_input);
         if (client == 0)
             Printf("Error: invalid connection id \"%s\".", client_input.c_str());
         return client;
     };
-    using client_list_t = std::unordered_set<HSteamNetConnection>;
+    using client_list_t = std::unordered_set<bmmo::net::connection>;
     // separated by `,` without spaces
     auto get_multiple_client_ids_from_console = [&]() -> client_list_t {
         std::string client_input = console.get_next_word();
         client_list_t clients;
         for (const auto& client_str: bmmo::string_utils::split_strings(client_input, ',')) {
-            HSteamNetConnection client = parse_client_id(client_str);
+            bmmo::net::connection client = parse_client_id(client_str);
             if (client != 0)
                 clients.insert(client);
             else
@@ -4997,9 +4997,9 @@ int main(int argc, char** argv) {
             msg.text_content += "\033[0m"; // reset formatting
         msg.serialize();
         if (broadcast)
-            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         else for (const auto& client: clients)
-            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.send(client, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         Printf("[Plain%s]: %s",
             broadcast ? "" : " -> " + get_multiple_client_names(clients), msg.text_content);
     };
@@ -5031,9 +5031,9 @@ int main(int argc, char** argv) {
         }
         msg.serialize();
         if (broadcast)
-            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         else for (const auto& client: clients)
-            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.send(client, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         Printf(bmmo::color_code(msg.code), "[Popup%s] {%s}: %s",
                 broadcast ? "" : " -> " + get_multiple_client_names(clients),
                 msg.title, msg.text_content);
@@ -5049,9 +5049,9 @@ int main(int argc, char** argv) {
         msg.type = type;
         msg.serialize();
         if (broadcast)
-            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         else for (const auto& client: clients)
-            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.send(client, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         Printf(msg.get_ansi_color(), "[%s] ([Server])%s: %s",
                 msg.get_type_name(), broadcast ? "" : " -> " + get_multiple_client_names(clients),
                 msg.chat_content);
@@ -5081,9 +5081,9 @@ int main(int argc, char** argv) {
         else if (console.get_command_name() == "fatalerror")
             end_code = bmmo::connection_end::FatalError;
         auto client = get_client_id_from_console();
-        if (client == k_HSteamNetConnection_Invalid) return;
+        if (client == bmmo::net::kInvalidConnection) return;
         std::string text = console.get_rest_of_line();
-        server.kick_client(client, text, k_HSteamNetConnection_Invalid, end_code);
+        server.kick_client(client, text, bmmo::net::kInvalidConnection, end_code);
     });
     console.register_aliases("kick", {"crash", "fatalerror", "kick#"});
     console.register_command("whisper", [&] {
@@ -5094,7 +5094,7 @@ int main(int argc, char** argv) {
         msg.chat_content = text;
         msg.serialize();
         for (const auto& client: clients)
-            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.send(client, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         Printf(bmmo::color_code(msg.code), "([Server]) -> %s: %s",
                 get_multiple_client_names(clients), msg.chat_content);
     });
@@ -5105,7 +5105,7 @@ int main(int argc, char** argv) {
     });
     console.register_command("op", [&] {
         auto client = get_client_id_from_console();
-        if (client == k_HSteamNetConnection_Invalid) return;
+        if (client == bmmo::net::kInvalidConnection) return;
         const auto& cmd = console.get_command_name();
         bool action = (cmd == "op" || cmd == "mute");
         if (cmd == "op" || cmd == "deop")
@@ -5135,7 +5135,7 @@ int main(int argc, char** argv) {
         const auto client = get_client_id_from_console();
         // receive() treats an invalid id as "pick a random online player", so
         // without this a mistyped id sends the countdown as someone else
-        if (client == k_HSteamNetConnection_Invalid) return;
+        if (client == bmmo::net::kInvalidConnection) return;
         if (console.empty()) { print_hint(); return; }
         std::string hash = console.get_next_word(true);
         if (console.empty()) { print_hint(); return; }
@@ -5166,7 +5166,7 @@ int main(int argc, char** argv) {
         msg.content.map.type = bmmo::map_type::OriginalLevel;
         for (int i = 3; i >= 0; --i) {
             msg.content.type = static_cast<bmmo::countdown_type>(i);
-            server.broadcast_message(msg, k_nSteamNetworkingSend_Reliable);
+            server.broadcast_message(msg, bmmo::net::kSendReliable);
             Printf(bmmo::color_code(msg.code), "[[Server]]: Countdown%s - %s",
                 msg.content.mode == bmmo::level_mode::Highscore ? " <HS>" : "",
                 i == 0 ? "Go!" : std::to_string(i));
@@ -5176,7 +5176,7 @@ int main(int argc, char** argv) {
     });
     console.register_command("dnf", [&] {
         auto client = get_client_id_from_console();
-        if (client == k_HSteamNetConnection_Invalid) return;
+        if (client == bmmo::net::kInvalidConnection) return;
         const auto data = server.get_client(client);
         if (!data) return;
         bmmo::did_not_finish_msg msg{};
@@ -5207,7 +5207,7 @@ int main(int argc, char** argv) {
             std::stringstream temp; temp << sounds;
             Printf(bmmo::ansi::WhiteInverse, "Playing sound - %s", temp.str());
             msg.serialize();
-            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         } catch (const std::exception& e) { Printf(e.what()); return; }
     });
     console.register_command("playstream", [&] {
@@ -5240,9 +5240,9 @@ int main(int argc, char** argv) {
                 Printf("Error serializing message.");
                 return;
             }
-            if (broadcast) server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            if (broadcast) server.broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
             else for (const auto& client: clients)
-                server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                server.send(client, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
             Printf(bmmo::ansi::WhiteInverse, "Sound <%s> (size: %d) sent to %s",
                     msg.path, (uint32_t) msg.size(), broadcast ? "[all]" : get_multiple_client_names(clients));
         } catch (const std::exception& e) { Printf(e.what()); return; }
@@ -5267,9 +5267,9 @@ int main(int argc, char** argv) {
         }
         msg.serialize(*rankings);
         if (broadcast)
-            server.broadcast_message(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.broadcast_message(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         else for (const auto& client: clients)
-            server.send(client, msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+            server.send(client, msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         Printf(bmmo::color_code(msg.code), "Score list data sent to %s.",
                 broadcast ? "[all]" : get_multiple_client_names(clients));
     });

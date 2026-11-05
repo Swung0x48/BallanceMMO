@@ -8,7 +8,7 @@ namespace bmmo {
         kick_request_msg(): serializable_message(bmmo::KickRequest) {}
 
         std::string player_name = "";
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
         std::string reason = "";
         bool crash = false;
 

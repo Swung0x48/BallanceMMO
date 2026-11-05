@@ -98,7 +98,7 @@ inline void BallanceMMOClient::update_player_list() {
         player_status_list_.push_back({ map_name, name, sector, timestamp, cheated });
     };
 
-    db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+    db_.for_each([&](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
         if (pair.first == db_.get_client_id() || bmmo::name_validator::is_spectator(pair.second.name))
             return true;
         push_entry(pair.second.current_map, pair.second.name, pair.second.current_sector,
@@ -406,7 +406,7 @@ void BallanceMMOClient::OnPreResetLevel() {
     if (m_bml->GetTimeManager()->GetTime() - it->second.level_start_timestamp
             < bmmo::LEVEL_RESTART_IGNORE_TIMEFRAME_MS)
         return;
-    send(bmmo::simple_action_msg{.content = bmmo::simple_action::LevelRestarted}, k_nSteamNetworkingSend_Reliable);
+    send(bmmo::simple_action_msg{.content = bmmo::simple_action::LevelRestarted}, bmmo::net::kSendReliable);
 }
 
 void BallanceMMOClient::OnCounterActive() {
@@ -526,7 +526,7 @@ void BallanceMMOClient::OnProcess() {
         std::lock_guard lk(frame_times_mtx_);
         frame_timestamps_in_last_45s_.push(current_timestamp);
         while (!frame_timestamps_in_last_45s_.empty()
-                && current_timestamp - frame_timestamps_in_last_45s_.front() > 45 * (SteamNetworkingMicroseconds)1e6)
+                && current_timestamp - frame_timestamps_in_last_45s_.front() > 45 * (bmmo::net::microseconds)1e6)
             frame_timestamps_in_last_45s_.pop();
     }
 
@@ -645,7 +645,7 @@ void BallanceMMOClient::OnBallOff() {
     if (current_level_mode_ == bmmo::level_mode::Highscore) resume_counter();
     ball_off_ = true;
     if (!spectator_mode_)
-        send(bmmo::simple_action_msg{ .content = bmmo::simple_action::BallOff }, k_nSteamNetworkingSend_Reliable);
+        send(bmmo::simple_action_msg{ .content = bmmo::simple_action::BallOff }, bmmo::net::kSendReliable);
 }
 
 void BallanceMMOClient::OnCamNavActive() {
@@ -720,7 +720,7 @@ void BallanceMMOClient::OnLevelFinish() {
         msg.content.map = current_map_;
         logger_->Info("Sending level finish message...");
 
-        send(msg, k_nSteamNetworkingSend_ReliableNoNagle);
+        send(msg, bmmo::net::kSendReliableNoNagle);
     });
 }
 
@@ -749,7 +749,7 @@ void BallanceMMOClient::OnCheatEnabled(bool enable) {
     bmmo::cheat_state_msg msg{};
     msg.content.cheated = enable;
     msg.content.notify = notify_cheat_toggle_;
-    send(msg, k_nSteamNetworkingSend_Reliable);
+    send(msg, bmmo::net::kSendReliable);
 }
 
 void BallanceMMOClient::OnModifyConfig(BMMO_CKSTRING category, BMMO_CKSTRING key, IProperty* prop) {
@@ -826,7 +826,7 @@ inline void BallanceMMOClient::on_fatal_error(char* extra_text) {
     }*/
     bmmo::simple_action_msg msg{};
     msg.content = bmmo::simple_action::FatalError;
-    send(msg, k_nSteamNetworkingSend_Reliable);
+    send(msg, bmmo::net::kSendReliable);
 }
 
 //void BallanceMMOClient::OnUnload() {
@@ -902,9 +902,9 @@ void BallanceMMOClient::init_commands() {
 
     static auto get_client_id_from_console = [this] {
         auto next_word = console_.get_next_word();
-        if (next_word.empty()) return k_HSteamNetConnection_Invalid;
+        if (next_word.empty()) return bmmo::net::kInvalidConnection;
         if (next_word[0] == '#')
-            return (HSteamNetConnection) std::atoll(next_word.substr(1).c_str());
+            return (bmmo::net::connection) std::atoll(next_word.substr(1).c_str());
         return (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
     };
 
@@ -921,7 +921,7 @@ void BallanceMMOClient::init_commands() {
             msg.chat_content.assign(new_text);
 
         msg.serialize();
-        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         return;
     });
     console_.register_aliases("say", {"s"});
@@ -932,7 +932,7 @@ void BallanceMMOClient::init_commands() {
         msg.type = (console_.get_command_name() == "notice") ? in_msg::Notice : in_msg::Announcement;
         msg.serialize();
 
-        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         return;
     });
     console_.register_aliases("announce", {"a", "notice"});
@@ -940,7 +940,7 @@ void BallanceMMOClient::init_commands() {
         bmmo::permanent_notification_msg msg{};
         msg.text_content = console_.get_rest_of_line();
         msg.serialize();
-        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
     });
     console_.register_aliases("bulletin", {"b"});
     console_.register_command("kick", [&] {
@@ -950,13 +950,13 @@ void BallanceMMOClient::init_commands() {
         auto next_word = console_.get_next_word();
         if (next_word.empty()) return;
         if (next_word[0] == '#')
-            msg.player_id = (HSteamNetConnection) atoll(next_word.substr(1).c_str());
+            msg.player_id = (bmmo::net::connection) atoll(next_word.substr(1).c_str());
         else
             msg.player_name = next_word;
         msg.reason = console_.get_rest_of_line();
 
         msg.serialize();
-        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
     });
     console_.register_aliases("kick", {"crash"});
     console_.register_command("remotecommand", [&] {
@@ -965,7 +965,7 @@ void BallanceMMOClient::init_commands() {
         if (msg.text_content.empty()) return;
         SendIngameMessage(std::format("Sent remote command: {}", msg.text_content), bmmo::ansi::WhiteInverse);
         msg.serialize();
-        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
     });
     console_.register_aliases("remotecommand", {"rc"});
     console_.register_command("restartlevel", [&] {
@@ -1010,7 +1010,7 @@ void BallanceMMOClient::init_commands() {
             msg.mode = (mode == "hs") ? bmmo::level_mode::Highscore : bmmo::level_mode::Speedrun;
             if (!use_local_data) {
                 msg.serialize();
-                send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+                send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
                 return;
             }
             {
@@ -1032,7 +1032,7 @@ void BallanceMMOClient::init_commands() {
         msg.player_id = get_client_id_from_console();
         msg.chat_content = console_.get_rest_of_line();
         msg.serialize();
-        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         SendIngameMessage(std::format("Whispered to {}: {}",
             get_username(msg.player_id), msg.chat_content), bmmo::color_code(msg.code));
     });
@@ -1050,11 +1050,11 @@ void BallanceMMOClient::init_commands() {
         bool show_id = (cmd_name == "list-id" || cmd_name == "li");
 
         struct player_data {
-            HSteamNetConnection id; std::string name; bool cheated; uint16_t ping;
+            bmmo::net::connection id; std::string name; bool cheated; uint16_t ping;
         };
         std::vector<player_data> players, spectators;
         players.reserve(db_.player_count() + 1);
-        db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+        db_.for_each([&](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
             if (pair.first == db_.get_client_id())
                 return true;
             if (bmmo::name_validator::is_spectator(pair.second.name))
@@ -1138,9 +1138,9 @@ void BallanceMMOClient::init_commands() {
             msg.action = bmmo::room::action::Kick;
             const auto w = console_.get_next_word();
             if (w.empty()) { SendIngameMessage("Usage: /mmo room kick <player|#id>", bmmo::ansi::BrightRed); return; }
-            if (w[0] == '#') msg.target = static_cast<HSteamNetConnection>(atoll(w.substr(1).c_str()));
+            if (w[0] == '#') msg.target = static_cast<bmmo::net::connection>(atoll(w.substr(1).c_str()));
             else msg.target = db_.get_client_id(w);
-            if (msg.target == k_HSteamNetConnection_Invalid) { SendIngameMessage(std::format("Error: player \"{}\" not found.", w), bmmo::ansi::BrightRed); return; }
+            if (msg.target == bmmo::net::kInvalidConnection) { SendIngameMessage(std::format("Error: player \"{}\" not found.", w), bmmo::ansi::BrightRed); return; }
         }
         else if (sub == "close") { msg.action = bmmo::room::action::Close; }
         else if (sub == "session") { SendIngameMessage(core_host_status_text()); return; }
@@ -1199,7 +1199,7 @@ void BallanceMMOClient::init_commands() {
         if (!connected())
             return;
         std::map<std::string, TimedBallState> states;
-        db_.for_each([this, &states](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+        db_.for_each([this, &states](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
             if (pair.first != db_.get_client_id())
                 states[pair.second.name] = pair.second.ball_state.front();
             return true;
@@ -1217,7 +1217,7 @@ void BallanceMMOClient::init_commands() {
     console_.register_command("getmap", [&] {
         if (!connected())
             return;
-        db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+        db_.for_each([&](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
             if (pair.first == db_.get_client_id())
                 return true;
             SendIngameMessage(std::format("{}{} is at the {}{} sector of {}.",
@@ -1243,7 +1243,7 @@ void BallanceMMOClient::init_commands() {
     });
     console_.register_aliases("reload", {"rl"});
     console_.register_command("gettimestamp", [&] {
-        db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+        db_.for_each([this](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
             SendIngameMessage(std::format("{}: last recalibrated timestamp: {}; mean time diff: {:.4f} s.",
                               pair.second.name,
                               pair.second.ball_state.front().timestamp, pair.second.time_diff / 1e6l));
@@ -1268,7 +1268,7 @@ void BallanceMMOClient::init_commands() {
         if (!connected() || !m_bml->IsIngame() || spectator_mode_)
             return;
         bmmo::player_ready_msg msg{.content = {.ready = (console_.get_command_name() == "ready")}};
-        send(msg, k_nSteamNetworkingSend_Reliable);
+        send(msg, bmmo::net::kSendReliable);
     });
     console_.register_aliases("ready", {"ready-cancel"});
     console_.register_command("hs", [&] {
@@ -1284,7 +1284,7 @@ void BallanceMMOClient::init_commands() {
     console_.register_command("cheat", [&] {
         bmmo::cheat_toggle_msg msg{};
         msg.content.cheated = (console_.get_next_word(true) == "on");
-        send(msg, k_nSteamNetworkingSend_Reliable);
+        send(msg, bmmo::net::kSendReliable);
     });
     console_.register_command("forcenextrestart", [&] {
         force_next_restart_ = !force_next_restart_;
@@ -1300,7 +1300,7 @@ void BallanceMMOClient::init_commands() {
         if (next_word.empty()) return;
         std::optional<PlayerState> state;
         if (next_word[0] == '#')
-            state = db_.get((HSteamNetConnection) atoll(next_word.substr(1).c_str()));
+            state = db_.get((bmmo::net::connection) atoll(next_word.substr(1).c_str()));
         else
             state = db_.get_from_nickname(next_word);
         if (!state.has_value()) {
@@ -1342,8 +1342,8 @@ void BallanceMMOClient::init_commands() {
         bmmo::map_names_msg name_msg{};
         name_msg.maps.emplace(map.get_hash_bytes_string(), next_word);
         name_msg.serialize();
-        send(name_msg.raw.str().data(), name_msg.size(), k_nSteamNetworkingSend_Reliable);
-        send(bmmo::current_map_msg{ .content = {.map = map, .type = bmmo::current_map_state::NameChange} }, k_nSteamNetworkingSend_Reliable);
+        send(name_msg.raw.str().data(), name_msg.size(), bmmo::net::kSendReliable);
+        send(bmmo::current_map_msg{ .content = {.map = map, .type = bmmo::current_map_state::NameChange} }, bmmo::net::kSendReliable);
         SendIngameMessage(std::format("Current map name set to \"{}\".", next_word), bmmo::ansi::WhiteInverse);
     });
     console_.register_command("mode", [&] {
@@ -1412,7 +1412,7 @@ void BallanceMMOClient::init_commands() {
     });
 #ifdef BMMO_WITH_PLAYER_SPECTATION
     console_.register_command("spectate", [&] {
-        HSteamNetConnection id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection id = bmmo::net::kInvalidConnection;
         std::string extra_info;
         if (console_.get_command_name() == "rankspectate") {
             int rank = std::atoi(console_.get_next_word().c_str());
@@ -1443,19 +1443,19 @@ void BallanceMMOClient::init_commands() {
                 extra_info = std::format("bound as #{}", index);
             }
             if (next_word.starts_with('#'))
-                id = (HSteamNetConnection)atoll(next_word.substr(1).c_str());
+                id = (bmmo::net::connection)atoll(next_word.substr(1).c_str());
             else
                 id = (next_word == get_display_nickname()) ? db_.get_client_id() : db_.get_client_id(next_word);
         }
         if (id == objects_.get_spectated_id()) {
-            if (id == k_HSteamNetConnection_Invalid)
+            if (id == bmmo::net::kInvalidConnection)
                 SendIngameMessage("Already not spectating.");
             else
                 SendIngameMessage("Already spectating the same player.");
             return;
         }
         objects_.set_spectated_id(id);
-        if (id == k_HSteamNetConnection_Invalid) {
+        if (id == bmmo::net::kInvalidConnection) {
             m_bml->GetRenderContext()->AttachViewpointToCamera(last_cam_ ? last_cam_ : m_bml->GetTargetCameraByName("InGameCam"));
             spectating_first_person_ = false;
             m_bml->GetGroupByName("HUD_sprites")->Show();
@@ -1535,7 +1535,7 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
                 std::vector<std::string> options;
                 options.reserve(db_.player_count() + 1);
                 bool hint_client_id = (args[args.size() - 1]).starts_with('#');
-                db_.for_each([=, this, &options](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                db_.for_each([=, this, &options](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
                     if (pair.first == db_.get_client_id()) return true;
                     if (hint_client_id)
                         options.push_back('#' + std::to_string(pair.first));
@@ -1557,7 +1557,7 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
                 if (length == 4 && (sub == "ready" || sub == "unready")) return {"on", "off"};
                 if (length == 4 && sub == "kick") {
                     std::vector<std::string> options;
-                    db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+                    db_.for_each([&](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
                         if (pair.first != db_.get_client_id()) options.push_back(pair.second.name);
                         return true;
                     });
@@ -1849,7 +1849,7 @@ void BallanceMMOClient::on_connection_status_changed(SteamNetConnectionStatusCha
         msg.cheated = own_cheat_enabled_.load() && !spectator_mode_; // always false in spectator mode
         memcpy(msg.uuid, &(config_manager_.get_uuid()), sizeof(config_manager_.get_uuid()));
         msg.serialize();
-        send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+        send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
         if (ping_thread_.joinable())
             ping_thread_.join();
         ping_thread_ = utils::create_named_thread(L"BMMO_Ping", [this]() {
@@ -2029,7 +2029,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
         if (logged_in_) {
             logger_->Info("New LoginAccepted message received. Resetting current data.");
 #ifdef BMMO_WITH_PLAYER_SPECTATION
-            if (objects_.get_spectated_id() != k_HSteamNetConnection_Invalid)
+            if (objects_.get_spectated_id() != bmmo::net::kInvalidConnection)
                 OnFullCommand("spectate"); // exit spectation properly
 #endif // BMMO_WITH_PLAYER_SPECTATION
             db_.clear();
@@ -2115,12 +2115,12 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
                 mod_msg.mods.try_emplace(mod_id, bmmo::string_utils::ansi_to_utf8(mod->GetVersion()));
             }
             mod_msg.serialize();
-            send(mod_msg.raw.str().data(), mod_msg.size(), k_nSteamNetworkingSend_Reliable);
+            send(mod_msg.raw.str().data(), mod_msg.size(), bmmo::net::kSendReliable);
 
             bmmo::hash_data_msg hash_msg{};
             hash_msg.data = md5_data_;
             hash_msg.serialize();
-            send(hash_msg.raw.str().data(), hash_msg.size(), k_nSteamNetworkingSend_Reliable);
+            send(hash_msg.raw.str().data(), hash_msg.size(), bmmo::net::kSendReliable);
         });
         break;
     }
@@ -2847,7 +2847,7 @@ void BallanceMMOClient::on_message(ISteamNetworkingMessage* network_msg) {
 void BallanceMMOClient::LoggingOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg)
 {
     static constexpr const char* fmt_string = "[%d] %10.6f %s";
-    SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
+    bmmo::net::microseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
     switch (eType) {
         case k_ESteamNetworkingSocketsDebugOutputType_Bug:
         case k_ESteamNetworkingSocketsDebugOutputType_Error:

@@ -4,7 +4,7 @@
 
 namespace bmmo {
     struct did_not_finish_state {
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
         uint8_t cheated = false;
         struct map map;
         int32_t sector = 0;

@@ -5,7 +5,7 @@
 
 namespace bmmo {
     struct level_finish_v2 {
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
         int32_t points = 0;
         int32_t lives = 0;
         int32_t lifeBonus = 0;

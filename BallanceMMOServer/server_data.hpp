@@ -28,12 +28,12 @@ struct client_data {
 
 struct map_data {
     int rank = 0;
-    SteamNetworkingMicroseconds start_time = 0;
+    bmmo::net::microseconds start_time = 0;
     bmmo::level_mode mode = bmmo::level_mode::Speedrun;
     bmmo::ranking_entry::player_rankings rankings{};
 };
 
 typedef std::unordered_map<std::string, map_data> map_data_collection;
-typedef std::unordered_map<HSteamNetConnection, client_data> client_data_collection;
+typedef std::unordered_map<bmmo::net::connection, client_data> client_data_collection;
 
 #endif //BALLANCEMMOSERVER_SERVER_DATA_HPP

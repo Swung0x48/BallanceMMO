@@ -7,7 +7,7 @@ namespace bmmo {
     struct chat_msg: public serializable_message {
         chat_msg(): serializable_message(bmmo::Chat) {}
 
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
         std::string chat_content;
 
         bool serialize() override {

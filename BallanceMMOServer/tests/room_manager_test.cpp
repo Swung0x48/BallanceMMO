@@ -94,7 +94,7 @@ TEST(RoomManager, CapacityAndClose) {
 
     EXPECT_EQ(rm.join(25, ra), error_code::None);
 
-    std::vector<HSteamNetConnection> members;
+    std::vector<bmmo::net::connection> members;
     uint32_t closed_room = 0;
     EXPECT_EQ(rm.close(25, members, closed_room), error_code::NotHost);
     EXPECT_EQ(rm.close(20, members, closed_room), error_code::None);

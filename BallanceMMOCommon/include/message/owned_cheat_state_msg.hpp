@@ -5,7 +5,7 @@
 namespace bmmo {
     struct owned_cheat_state {
         cheat_state state{};
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
     };
 
     typedef struct message<owned_cheat_state, OwnedCheatState> owned_cheat_state_msg;

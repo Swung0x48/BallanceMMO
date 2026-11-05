@@ -20,7 +20,7 @@
 // still started the member b x 30 ms late (8 ticks for b = 4).
 //
 // SAXE (the user's Q-SAX (e)) tried a volley: k copies in the assignment's
-// own pass, each sent k_nSteamNetworkingSend_UnreliableNoNagle, so that a
+// own pass, each sent bmmo::net::kSendUnreliableNoNagle, so that a
 // count-shaped burst would leave one at once.  This GameNetworkingSockets
 // cannot send them as separate datagrams: no send flag builds a packet in the
 // caller's thread (SendMessageToConnection passes no think-immediately out

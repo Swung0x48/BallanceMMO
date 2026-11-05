@@ -9,7 +9,7 @@ namespace bmmo {
     };
 
     struct login_accepted_v2_msg: public serializable_message {
-        std::unordered_map<HSteamNetConnection, player_status> online_players;
+        std::unordered_map<bmmo::net::connection, player_status> online_players;
 
         login_accepted_v2_msg(): serializable_message(bmmo::LoginAcceptedV2) {}
 
@@ -19,7 +19,7 @@ namespace bmmo {
             uint32_t size = online_players.size();
             raw.write(reinterpret_cast<const char*>(&size), sizeof(size));
             for (auto& i: online_players) {
-                raw.write(reinterpret_cast<const char*>(&i.first), sizeof(i.first)); // HSteamNetConnection - uint32_t
+                raw.write(reinterpret_cast<const char*>(&i.first), sizeof(i.first)); // bmmo::net::connection - uint32_t
                 message_utils::write_string(i.second.name, raw);    // name - string
                 raw.write(reinterpret_cast<const char*>(&i.second.cheated), sizeof(i.second.cheated)); // cheated - uint8_t
             }
@@ -33,7 +33,7 @@ namespace bmmo {
             raw.read(reinterpret_cast<char*>(&size), sizeof(size));
             for (uint32_t i = 0; i < size; ++i) {
                 std::string name;
-                HSteamNetConnection conn;
+                bmmo::net::connection conn;
                 uint8_t cheated;
 
                 if (!raw.good())

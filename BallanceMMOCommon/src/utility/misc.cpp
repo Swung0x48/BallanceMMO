@@ -200,7 +200,7 @@ namespace bmmo {
  
     void DebugOutput(ESteamNetworkingSocketsDebugOutputType eType, const char* pszMsg, int ansiColor) {
         using namespace std;
-        // SteamNetworkingMicroseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
+        // bmmo::net::microseconds time = SteamNetworkingUtils()->GetLocalTimestamp() - init_timestamp_;
         auto time = chrono::system_clock::to_time_t(chrono::system_clock::now());
         char timeStr[15];
         format_local_time(timeStr, sizeof(timeStr), time);

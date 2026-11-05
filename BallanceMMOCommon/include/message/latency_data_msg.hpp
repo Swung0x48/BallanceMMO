@@ -7,7 +7,7 @@
 namespace bmmo {
     struct latency_data_msg: public serializable_message {
         // <id, ping_ms>
-        std::unordered_map<HSteamNetConnection, uint16_t> data;
+        std::unordered_map<bmmo::net::connection, uint16_t> data;
 
         latency_data_msg(): serializable_message(bmmo::LatencyData) {};
 
@@ -36,7 +36,7 @@ namespace bmmo {
                 if (!raw.good())
                     return false;
 
-                HSteamNetConnection id;
+                bmmo::net::connection id;
                 uint16_t ping;
                 if (!message_utils::read_variable(raw, &id))
                     return false;

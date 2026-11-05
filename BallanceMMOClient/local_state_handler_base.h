@@ -56,7 +56,7 @@ protected:
 		static_assert(sizeof(VxQuaternion) == sizeof(bmmo::quaternion));
 		bmmo::timed_ball_state_msg msg{};
 		bool send_full_state = false;
-		SteamNetworkingMicroseconds timestamp{};
+		bmmo::net::microseconds timestamp{};
 		{
 			std::lock_guard lk(state_mutex_);
 			++force_send_counter_;
@@ -74,7 +74,7 @@ protected:
 		}
 		if (send_full_state) {
 			asio::post(thread_pool_, [this, msg] {
-				client_->send(msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+				client_->send(msg, bmmo::net::kSendUnreliableNoDelay);
 			});
 #ifdef DEBUG
 			logger_->Info("(%.2f, %.2f, %.2f), (%.2f, %.2f, %.2f, %.2f)",
@@ -87,7 +87,7 @@ protected:
 			asio::post(thread_pool_, [this, timestamp] {
 				bmmo::timestamp_msg ts_msg{};
 				ts_msg.content = timestamp;
-				client_->send(ts_msg, k_nSteamNetworkingSend_UnreliableNoDelay);
+				client_->send(ts_msg, bmmo::net::kSendUnreliableNoDelay);
 			});
 		}
 	}
@@ -100,7 +100,7 @@ protected:
 			msg.content.timestamp = local_ball_state_.timestamp;
 		}
 		asio::post(thread_pool_, [this, msg] {
-			client_->send(msg, k_nSteamNetworkingSend_Reliable);
+			client_->send(msg, bmmo::net::kSendReliable);
 		});
 	}
 };

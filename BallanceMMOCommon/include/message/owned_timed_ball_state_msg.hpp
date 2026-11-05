@@ -7,11 +7,11 @@
 namespace bmmo {
     struct owned_timed_ball_state {
         timed_ball_state state{};
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
     };
     struct owned_timestamp {
         timestamp_t timestamp{};
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
     };
 
     struct owned_timed_ball_state_msg: public serializable_message {

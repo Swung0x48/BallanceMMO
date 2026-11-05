@@ -20,7 +20,7 @@ public:
         }
         SteamNetworkingConfigValue_t opt = generate_opt();
         connection_ = interface_->ConnectByIPAddress(server_address, 1, &opt);
-        if (connection_ == k_HSteamNetConnection_Invalid)
+        if (connection_ == bmmo::net::kInvalidConnection)
             return false;
 
         return true;
@@ -49,7 +49,7 @@ public:
             get_connection_state() == k_ESteamNetworkingConnectionState_FindingRoute;
     }
 
-    EResult send(void* buffer, size_t size, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) {
+    EResult send(void* buffer, size_t size, int send_flags = bmmo::net::kSendReliable, int64* out_message_number = nullptr) {
         return interface_->SendMessageToConnection(connection_,
             buffer,
             size,
@@ -59,7 +59,7 @@ public:
     }
 
     template<bmmo::trivially_copyable_msg T>
-    EResult send(T msg, int send_flags = k_nSteamNetworkingSend_Reliable, int64* out_message_number = nullptr) {
+    EResult send(T msg, int send_flags = bmmo::net::kSendReliable, int64* out_message_number = nullptr) {
         static_assert(std::is_trivially_copyable<T>());
         return send(&msg,
             sizeof(msg),
@@ -86,11 +86,11 @@ public:
         return get_status().m_nPing;
     }
 
-    void close_connection(HSteamNetConnection connection, bool linger = true) {
-        if (connection != k_HSteamNetConnection_Invalid) {
+    void close_connection(bmmo::net::connection connection, bool linger = true) {
+        if (connection != bmmo::net::kInvalidConnection) {
             interface_->CloseConnection(connection, 0, "Goodbye", linger);
             assert(connection == this->connection_);
-            connection_ = k_HSteamNetConnection_Invalid;
+            connection_ = bmmo::net::kInvalidConnection;
             estate_ = k_ESteamNetworkingConnectionState_None;
         }
     }
@@ -121,6 +121,6 @@ protected:
         return msg_count;
     }
 
-    HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
+    bmmo::net::connection connection_ = bmmo::net::kInvalidConnection;
     ESteamNetworkingConnectionState estate_{};
 };

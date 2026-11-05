@@ -14,7 +14,7 @@ struct PlayerObjects {
 	std::unique_ptr<sprite_interface> username_label;
 	uint32_t visible_ball_type = std::numeric_limits<decltype(visible_ball_type)>::max();
 	float last_opacity = 0.5;
-	SteamNetworkingMicroseconds last_opacity_timestamp = 0;
+	bmmo::net::microseconds last_opacity_timestamp = 0;
 	bool physicalized = false;
 
 	~PlayerObjects() {
@@ -35,7 +35,7 @@ public:
 		PlayerObjects::bml = bml;
 	}
 
-	void init_player(const HSteamNetConnection id, const std::string& name, bool cheat) {
+	void init_player(const bmmo::net::connection id, const std::string& name, bool cheat) {
 		std::lock_guard lk(mutex_);
 		auto& obj = objects_[id];
 		for (size_t i = 0; i < template_balls_.size(); ++i) {
@@ -77,7 +77,7 @@ public:
 	}
 
 	void init_players() {
-		db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+		db_.for_each([this](const std::pair<const bmmo::net::connection, PlayerState>& item) {
 			if (item.first != db_.get_client_id())
 				init_player(item.first, item.second.name, item.second.cheated);
 			return true;
@@ -93,7 +93,7 @@ public:
 	// no lock here: we lock it within the caller function
 	// we can use recursive_mutex here, but that's really only a dirty hack
 	// it's better not to overly rely on that
-	void on_trafo(HSteamNetConnection id, uint32_t from, uint32_t to) {
+	void on_trafo(bmmo::net::connection id, uint32_t from, uint32_t to) {
 		auto& player = objects_[id];
 		if (from != std::numeric_limits<decltype(from)>::max() && is_valid_ball_type(player, from)) {
 			auto* old_ball = bml_->GetCKContext()->GetObject(player.balls[from]);
@@ -110,12 +110,12 @@ public:
 		assert(new_ball);
 	}
 
-	bool update(SteamNetworkingMicroseconds timestamp, bool update_extra_info = false) {
+	bool update(bmmo::net::microseconds timestamp, bool update_extra_info = false) {
 		// Can be costly
 		//cleanup();
 
 		// Can also be costly
-		/*db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+		/*db_.for_each([this](const std::pair<const bmmo::net::connection, PlayerState>& item) {
 			init_player(item.first, item.second.name);
 			return true;
 		});*/
@@ -136,7 +136,7 @@ public:
 		if (camera) camera->GetPosition(&camera_pos);
 
 #if defined(DEBUG) || defined(BMMO_NAME_LABEL_WITH_EXTRA_INFO)
-		static SteamNetworkingMicroseconds last_time_variance_update = 0;
+		static bmmo::net::microseconds last_time_variance_update = 0;
 		bool update_time_variance = false;
 		if (timestamp - last_time_variance_update >= 1000000) {
 			last_time_variance_update = timestamp;
@@ -145,7 +145,7 @@ public:
 #endif
 
 		return db_.try_for_each_const([=, this, &viewport, &rc, &own_ball_pos, &camera_pos]
-				(const std::pair<const HSteamNetConnection, PlayerState>& item) {
+				(const std::pair<const bmmo::net::connection, PlayerState>& item) {
 			// Not creating or updating game object for this client itself.
 			//if (item.first == db_.get_client_id())
 			//	return true;
@@ -195,7 +195,7 @@ public:
 						&& (state_it[0].position - state_it[1].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE
 						&& (state_it[1].position - state_it[2].position).SquareMagnitude() < MAX_EXTRAPOLATION_SQUARE_DISTANCE
 				) {
-					SteamNetworkingMicroseconds tc = timestamp;
+					bmmo::net::microseconds tc = timestamp;
 					if (state_it->timestamp + MAX_EXTRAPOLATION_TIME < timestamp)
 						tc = state_it->timestamp + MAX_EXTRAPOLATION_TIME;
 					const auto& [position, rotation] = (item.second.time_variance > MAX_EXTRAPOLATION_TIME_VARIANCE / 2)
@@ -205,7 +205,7 @@ public:
 					current_ball->SetQuaternion(VT21_REF(rotation));
 					lateral_distance = utils::distance_to_line_segment((
 #ifdef BMMO_WITH_PLAYER_SPECTATION
-						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(spectated_id_) :
+						spectated_id_ != bmmo::net::kInvalidConnection ? get_ball_pos(spectated_id_) :
 #endif
 						own_ball_pos), camera_pos, position);
 				}
@@ -214,7 +214,7 @@ public:
 					current_ball->SetQuaternion(VT21_REF(state_it->rotation));
 					lateral_distance = utils::distance_to_line_segment((
 #ifdef BMMO_WITH_PLAYER_SPECTATION
-						spectated_id_ != k_HSteamNetConnection_Invalid ? get_ball_pos(spectated_id_) :
+						spectated_id_ != bmmo::net::kInvalidConnection ? get_ball_pos(spectated_id_) :
 #endif
 						own_ball_pos), camera_pos, state_it->position);
 				}
@@ -229,7 +229,7 @@ public:
 			) {
 				auto new_opacity = std::clamp(lateral_distance * ALPHA_DISTANCE_RATE + ALPHA_BEGIN, ALPHA_MIN, ALPHA_MAX);
 				float dilation_factor = 1.0f;
-				db_.try_for_each_const([&, this](const std::pair<const HSteamNetConnection, PlayerState>& item2) {
+				db_.try_for_each_const([&, this](const std::pair<const bmmo::net::connection, PlayerState>& item2) {
 					if (item2.first == db_.get_client_id() || item2.first == item.first
 							|| bmmo::name_validator::is_spectator(item2.second.name))
 						return true;
@@ -270,7 +270,7 @@ public:
 		});
 	}
 
-	void physicalize(HSteamNetConnection id) {
+	void physicalize(bmmo::net::connection id) {
 		CKDataArray* physBall = bml_->GetArrayByName("Physicalize_GameBall");
 		if (!physBall) return;
 
@@ -298,19 +298,19 @@ public:
 
 	// Physics sessions: the spirit ball entity of a player's ball type, so the
 	// bridge can give it a body mirrored from the server.
-	CK3dObject* get_ball_entity(HSteamNetConnection id, uint32_t type) {
+	CK3dObject* get_ball_entity(bmmo::net::connection id, uint32_t type) {
 		std::lock_guard lk(mutex_);
 		auto it = objects_.find(id);
 		if (it == objects_.end() || !is_valid_ball_type(it->second, type)) return nullptr;
 		return static_cast<CK3dObject*>(bml_->GetCKContext()->GetObject(it->second.balls[type]));
 	}
-	void ensure_player(HSteamNetConnection id) {
+	void ensure_player(bmmo::net::connection id) {
 		std::lock_guard lk(mutex_);
 		if (objects_.contains(id)) return;
 		if (auto state = db_.get(id)) init_player(id, state->name, state->cheated);
 	}
 	// While set, update() leaves the ball where the physics body put it.
-	void set_physicalized(HSteamNetConnection id, bool physicalized) {
+	void set_physicalized(bmmo::net::connection id, bool physicalized) {
 		std::lock_guard lk(mutex_);
 		auto it = objects_.find(id);
 		if (it == objects_.end() || it->second.physicalized == physicalized) return;
@@ -327,14 +327,14 @@ public:
 	// state says again.  (Step BALA used it for the airship ghost too; since
 	// step BALL that one is set_physicalized(id, false): the legacy stream
 	// moves it.)
-	void set_ghost(HSteamNetConnection id, bool ghost) {
+	void set_ghost(bmmo::net::connection id, bool ghost) {
 		std::lock_guard lk(mutex_);
 		auto it = objects_.find(id);
 		if (it == objects_.end()) return;
 		set_ball_solid(id, it->second, ghost ? false : it->second.physicalized);
 	}
 
-	void remove(HSteamNetConnection id) {
+	void remove(bmmo::net::connection id) {
 		std::lock_guard lk(mutex_);
 		objects_.erase(id);
 	}
@@ -427,12 +427,12 @@ public:
 
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 private:
-	int spectated_id_ = k_HSteamNetConnection_Invalid;
+	int spectated_id_ = bmmo::net::kInvalidConnection;
 
 public:
 	inline const int get_spectated_id() const { return spectated_id_; }
 
-	inline void set_spectated_id(HSteamNetConnection id) {
+	inline void set_spectated_id(bmmo::net::connection id) {
 		if (auto spectated_player = db_.get(spectated_id_); spectated_player.has_value()) {
 			/* for (auto& mat_id : objects_[spectated_id_].materials) {
 				/auto mat = static_cast<CKMaterial*>(bml_->GetCKContext()->GetObject(mat_id));
@@ -448,7 +448,7 @@ public:
 			init_player(spectated_id_, spectated_player.value().name, spectated_player.value().cheated);
 		}
 		if (!db_.exists(id)) {
-			spectated_id_ = k_HSteamNetConnection_Invalid;
+			spectated_id_ = bmmo::net::kInvalidConnection;
 			return;
 		}
 		std::lock_guard lk(mutex_);
@@ -459,7 +459,7 @@ public:
 		}
 	}
 
-	inline const VxVector get_ball_pos(HSteamNetConnection id) {
+	inline const VxVector get_ball_pos(bmmo::net::connection id) {
 		auto state = db_.get(id);
 		if (!state)
 			return {};
@@ -484,7 +484,7 @@ public:
 	void toggle_dynamic_opacity(bool enabled) {
 		dynamic_opacity_ = enabled;
 		if (enabled) return;
-		db_.for_each([this](const std::pair<const HSteamNetConnection, PlayerState>& item) {
+		db_.for_each([this](const std::pair<const bmmo::net::connection, PlayerState>& item) {
 			auto player_it = objects_.find(item.first);
 			if (player_it == objects_.end() || player_it->second.physicalized) return true;
 			for (const CK_ID mat_id : player_it->second.materials) {
@@ -535,7 +535,7 @@ private:
 	// Solid balls (physics sessions) drop alpha blending altogether; shadow
 	// mode balls go back to the translucent default, with the dynamic opacity
 	// timer reset so update() picks a distance-based value right away.
-	void set_ball_solid(HSteamNetConnection id, PlayerObjects& player, bool solid) {
+	void set_ball_solid(bmmo::net::connection id, PlayerObjects& player, bool solid) {
 #ifdef BMMO_WITH_PLAYER_SPECTATION
 		if (!solid && spectated_id_ == id) return; // spectated balls stay solid
 #else
@@ -563,9 +563,9 @@ private:
 	std::function<CK3dObject* ()> get_own_ball_fn_;
 	game_state& db_;
 	std::recursive_mutex mutex_;
-	std::unordered_map<HSteamNetConnection, PlayerObjects> objects_;
+	std::unordered_map<bmmo::net::connection, PlayerObjects> objects_;
 	bool extrapolation_ = false, dynamic_opacity_ = true;
-	static constexpr SteamNetworkingMicroseconds MAX_EXTRAPOLATION_TIME = 163840;
+	static constexpr bmmo::net::microseconds MAX_EXTRAPOLATION_TIME = 163840;
 	static constexpr float MAX_EXTRAPOLATION_SQUARE_DISTANCE = 512.0f;
 	static constexpr int64_t MAX_EXTRAPOLATION_TIME_VARIANCE = 268435456ll;
 	static constexpr float DILATION_MAX_SQUARE_DISTANCE = 14.0f,

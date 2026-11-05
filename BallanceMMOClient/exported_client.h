@@ -10,8 +10,8 @@ namespace bmmo::exported:: inline _v3 {
         virtual void on_logout() {};
         virtual void on_countdown(const bmmo::countdown_msg* msg) {};
         virtual void on_level_finish(const bmmo::level_finish_v2_msg* msg) {};
-        virtual void on_player_login(HSteamNetConnection id) {};
-        virtual void on_player_logout(HSteamNetConnection id) {};
+        virtual void on_player_login(bmmo::net::connection id) {};
+        virtual void on_player_logout(bmmo::net::connection id) {};
 
         // @returns Whether to cancel the event.
         virtual bool on_pre_login(const char* address, const char* name) { return true; };
@@ -32,11 +32,11 @@ namespace bmmo::exported:: inline _v3 {
 
     class client : public ::client {
     public:
-        virtual std::pair<HSteamNetConnection, std::string> get_own_id() = 0;
+        virtual std::pair<bmmo::net::connection, std::string> get_own_id() = 0;
         virtual bool is_spectator() { return false; }
         virtual named_map get_current_map() = 0;
-        virtual std::unordered_map<HSteamNetConnection, std::string> get_client_list() = 0;
-        virtual std::string get_username(HSteamNetConnection client_id) = 0;
+        virtual std::unordered_map<bmmo::net::connection, std::string> get_client_list() = 0;
+        virtual std::string get_username(bmmo::net::connection client_id) = 0;
         virtual std::string get_map_name(const bmmo::map& map) = 0;
 
         virtual bool register_listener(listener* listener) = 0;

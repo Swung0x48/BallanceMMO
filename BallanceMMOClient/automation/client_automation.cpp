@@ -342,7 +342,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     if (verb == "players") {
         std::string out = std::format("ok own sector={} max={} ts={}", current_sector_.load(), max_sector_.load(),
                                       current_sector_timestamp_.load());
-        db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+        db_.for_each([&](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
             if (pair.first == db_.get_client_id()) return true;
             out += std::format(" | peer {} {} sector={} ts={}", pair.first, pair.second.name, pair.second.current_sector,
                                pair.second.current_sector_timestamp);

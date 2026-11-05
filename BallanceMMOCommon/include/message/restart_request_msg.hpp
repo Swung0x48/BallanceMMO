@@ -4,8 +4,8 @@
 
 namespace bmmo {
     struct restart_request {
-        HSteamNetConnection requester = k_HSteamNetConnection_Invalid;
-        HSteamNetConnection victim = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection requester = bmmo::net::kInvalidConnection;
+        bmmo::net::connection victim = bmmo::net::kInvalidConnection;
     };
 
     typedef struct message<restart_request, RestartRequest> restart_request_msg;

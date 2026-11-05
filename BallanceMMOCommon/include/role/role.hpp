@@ -123,7 +123,7 @@ protected:
 
     ISteamNetworkingSockets* interface_ = nullptr;
     static inline role* this_instance_ = nullptr;
-    static inline SteamNetworkingMicroseconds init_timestamp_;
+    static inline bmmo::net::microseconds init_timestamp_;
     static inline time_t init_time_t_;
     std::atomic_bool running_ = false;
     std::mutex startup_mutex_;

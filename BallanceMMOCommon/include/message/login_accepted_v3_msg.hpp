@@ -12,7 +12,7 @@ namespace bmmo {
     };
 
     struct login_accepted_v3_msg: public serializable_message {
-        std::unordered_map<HSteamNetConnection, player_status_v3> online_players;
+        std::unordered_map<bmmo::net::connection, player_status_v3> online_players;
 
         login_accepted_v3_msg(): serializable_message(LoginAcceptedV3) {}
 

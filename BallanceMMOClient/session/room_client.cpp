@@ -68,7 +68,7 @@ void BallanceMMOClient::send_room_request(bmmo::room::action action, uint32_t ro
     msg.mode = mode;
     msg.name = std::move(name);
     msg.serialize();
-    send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+    send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
     push_room_request(pending_room_request{
         .action = action,
         .ready = (action == bmmo::room::action::Ready),
@@ -242,7 +242,7 @@ void BallanceMMOClient::print_room_status() {
 // "X is ready (2/3 ready)." from the roster we already hold: the server pushes
 // the refreshed room_state before the ReadyChanged events, so by now it carries
 // the new flag. Empty if the player is not in our roster.
-std::string BallanceMMOClient::room_ready_text(HSteamNetConnection player) {
+std::string BallanceMMOClient::room_ready_text(bmmo::net::connection player) {
     std::lock_guard lk(room_state_mtx_);
     const auto& members = last_room_state_.members;
     const auto member = std::ranges::find(members, player, &bmmo::room::room_member::id);

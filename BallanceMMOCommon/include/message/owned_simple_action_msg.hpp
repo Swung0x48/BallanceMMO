@@ -11,7 +11,7 @@ namespace bmmo {
 
     struct owned_simple_action {
         owned_simple_action_type type = owned_simple_action_type::Unknown;
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
     };
 
     typedef struct message<owned_simple_action, OwnedSimpleAction> owned_simple_action_msg;

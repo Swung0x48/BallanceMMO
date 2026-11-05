@@ -4,7 +4,7 @@
 
 namespace bmmo {
     struct current_sector {
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
         int32_t sector = 0;
     };
 

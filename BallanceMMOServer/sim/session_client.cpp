@@ -1153,7 +1153,7 @@ namespace {
             if (!address.ParseString(args_.server.c_str())) { logf("bad server address %s", args_.server.c_str()); return false; }
             SteamNetworkingConfigValue_t opt = generate_opt();
             connection_ = interface_->ConnectByIPAddress(address, 1, &opt);
-            return connection_ != k_HSteamNetConnection_Invalid;
+            return connection_ != bmmo::net::kInvalidConnection;
         }
 
         int exit_code() const {
@@ -1236,9 +1236,9 @@ namespace {
             // and the engine's teardown (BW20: about 2 s in which the server
             // substituted every frame of a client that had stopped and re-sent
             // it its whole history every tick).
-            if (connection_ != k_HSteamNetConnection_Invalid && !inbound_.replaying()) {
+            if (connection_ != bmmo::net::kInvalidConnection && !inbound_.replaying()) {
                 interface_->CloseConnection(connection_, 0, stopped, true);
-                connection_ = k_HSteamNetConnection_Invalid;
+                connection_ = bmmo::net::kInvalidConnection;
             }
             // A session still running when the client goes down says so in its
             // box rather than just stopping mid-file.
@@ -1371,7 +1371,7 @@ namespace {
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
                 logf("connection lost: %s", info->m_info.m_szEndDebug);
                 if (!inbound_.replaying()) interface_->CloseConnection(info->m_hConn, 0, nullptr, false);
-                connection_ = k_HSteamNetConnection_Invalid;
+                connection_ = bmmo::net::kInvalidConnection;
                 running_ = false;
                 break;
             case k_ESteamNetworkingConnectionState_Connected: {
@@ -1383,7 +1383,7 @@ namespace {
                 std::mt19937 rng(static_cast<unsigned>(std::chrono::system_clock::now().time_since_epoch().count()));
                 for (auto& byte: msg.uuid) byte = static_cast<uint8_t>(rng());
                 msg.serialize();
-                send_bytes(msg.raw.str(), k_nSteamNetworkingSend_Reliable);
+                send_bytes(msg.raw.str(), bmmo::net::kSendReliable);
                 break;
             }
             default:
@@ -1765,9 +1765,9 @@ namespace {
         bmmo::session::session_platform make_platform() {
             bmmo::session::session_platform p;
             p.send = [this](const std::string& bytes, bmmo::session::send_mode mode) {
-                int flags = k_nSteamNetworkingSend_Reliable;
-                if (mode == bmmo::session::send_mode::reliable_no_nagle) flags = k_nSteamNetworkingSend_ReliableNoNagle;
-                else if (mode == bmmo::session::send_mode::unreliable_no_delay) flags = k_nSteamNetworkingSend_UnreliableNoDelay;
+                int flags = bmmo::net::kSendReliable;
+                if (mode == bmmo::session::send_mode::reliable_no_nagle) flags = bmmo::net::kSendReliableNoNagle;
+                else if (mode == bmmo::session::send_mode::unreliable_no_delay) flags = bmmo::net::kSendUnreliableNoDelay;
                 send_bytes(bytes, flags);
                 // Step DX6: --stall-after-ready - the SessionReady is
                 // flushed out first (a reliable send may wait for Nagle),
@@ -2518,9 +2518,9 @@ namespace {
             }
             msg.content.sector = 1;
             msg.content.type = bmmo::current_map_state::EnteringMap;
-            trace_send(&msg, sizeof(msg), k_nSteamNetworkingSend_Reliable);
+            trace_send(&msg, sizeof(msg), bmmo::net::kSendReliable);
             if (inbound_.replaying()) return;
-            interface_->SendMessageToConnection(connection_, &msg, sizeof(msg), k_nSteamNetworkingSend_Reliable, nullptr);
+            interface_->SendMessageToConnection(connection_, &msg, sizeof(msg), bmmo::net::kSendReliable, nullptr);
         }
 
         void room_request(bmmo::room::action action, uint32_t room, const std::string& name = "") {
@@ -2530,7 +2530,7 @@ namespace {
             req.name = name;
             req.mode = bmmo::room::mode::Physics;
             req.serialize();
-            send_bytes(req.raw.str(), k_nSteamNetworkingSend_Reliable);
+            send_bytes(req.raw.str(), bmmo::net::kSendReliable);
         }
 
         void handle_room_state(const bmmo::room_state_msg& msg) {
@@ -3787,7 +3787,7 @@ namespace {
                     finish.content.timeElapsed = static_cast<float>(core_.frames_since_anchor())
                             * bmmo::sim::kFixedDeltaMs / 1000.0f;
                     send_bytes(std::string(reinterpret_cast<const char*>(&finish), sizeof(finish)),
-                               k_nSteamNetworkingSend_ReliableNoNagle);
+                               bmmo::net::kSendReliableNoNagle);
                     level_finished_ = true;
                     break;
                 }
@@ -4921,7 +4921,7 @@ namespace {
         arguments args_;
         std::unique_ptr<bmmo::sim::headless_engine> engine_;
         bmmo::physics::tick_record record_;
-        HSteamNetConnection connection_ = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection connection_ = bmmo::net::kInvalidConnection;
         bool in_room_ = false, join_sent_ = false, ready_sent_ = false, start_sent_ = false;
         int list_retries_ = 0;
         clock_type::time_point last_ready_sent_{};

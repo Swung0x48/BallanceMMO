@@ -4,7 +4,7 @@
 
 namespace bmmo {
     struct player_ready_data {
-        HSteamNetConnection player_id = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection player_id = bmmo::net::kInvalidConnection;
         uint32_t count = 0;
         uint8_t ready = false;
     };

@@ -124,14 +124,14 @@ public:
 	void exit_size_move();
 
 	// virtual functions from bmmo::exported::client
-	std::pair<HSteamNetConnection, std::string> get_own_id() override {
+	std::pair<bmmo::net::connection, std::string> get_own_id() override {
 		return { db_.get_client_id(), get_display_nickname() };
 	}
 	bool is_spectator() override { return spectator_mode_; }
 	bmmo::named_map get_current_map() override { return current_map_; }
-	std::unordered_map<HSteamNetConnection, std::string> get_client_list() override {
+	std::unordered_map<bmmo::net::connection, std::string> get_client_list() override {
 		decltype(get_client_list()) list;
-		db_.for_each([&](const std::pair<const HSteamNetConnection, PlayerState>& pair) {
+		db_.for_each([&](const std::pair<const bmmo::net::connection, PlayerState>& pair) {
 			if (pair.first == db_.get_client_id() || bmmo::name_validator::is_spectator(pair.second.name))
 				return true;
 			list.emplace(pair.first, pair.second.name);
@@ -161,8 +161,8 @@ public:
 		for (const auto& i : listeners)
 			fn(i);
 	};
-	std::string get_username(HSteamNetConnection client_id) override {
-		if (client_id == k_HSteamNetConnection_Invalid)
+	std::string get_username(bmmo::net::connection client_id) override {
+		if (client_id == bmmo::net::kInvalidConnection)
 			return { "[Server]" };
 		auto state = db_.get(client_id);
 		assert(state.has_value() || (db_.get_client_id() == client_id));
@@ -468,7 +468,7 @@ private:
 	std::optional<pending_room_request> pop_room_request();
 	void process_room_requests();
 	void reset_room_state();
-	std::string room_ready_text(HSteamNetConnection player);
+	std::string room_ready_text(bmmo::net::connection player);
 	void handle_room_request_outcome(const bmmo::room_event_msg& msg, bool accepted);
 	void handle_room_state(bmmo::room_state_msg msg);
 	void handle_room_event(const bmmo::room_event_msg& msg);
@@ -659,10 +659,10 @@ private:
 	std::unordered_map<std::string, std::string> map_names_;
 	std::mutex map_names_mtx_;
 	std::unordered_map<std::string, std::array<uint8_t, 16>> md5_data_;
-	std::atomic<SteamNetworkingMicroseconds> map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
+	std::atomic<bmmo::net::microseconds> map_enter_timestamp_ = 0, hs_begin_delay_ = 0;
 	bool force_hs_calibration_ = false, hs_calibrated_ = false;
 
-	std::queue<SteamNetworkingMicroseconds> frame_timestamps_in_last_45s_;
+	std::queue<bmmo::net::microseconds> frame_timestamps_in_last_45s_;
 	std::mutex frame_times_mtx_;
 
 	struct map_data {
@@ -696,10 +696,10 @@ private:
 	std::string server_addr_, server_name_;
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
-	SteamNetworkingMicroseconds next_update_timestamp_ = 0,
+	bmmo::net::microseconds next_update_timestamp_ = 0,
 		last_dnf_hotkey_timestamp_ = 0, dnf_cooldown_end_timestamp_ = 0;
 	std::atomic_int64_t server_realworld_timestamp_us_ = 0;
-	std::atomic<SteamNetworkingMicroseconds> server_realworld_timestamp_timestamp_ = 0;
+	std::atomic<bmmo::net::microseconds> server_realworld_timestamp_timestamp_ = 0;
 
 	bool notify_cheat_toggle_ = true, did_not_finish_ = false;
 	// Mirrors IsCheatEnabled() for the network thread, which must not call it;
@@ -1285,7 +1285,7 @@ private:
 		if (down)
 			return;
 
-		db_.set_client_id(k_HSteamNetConnection_Invalid + ((rand() << 16) | rand())); // invalid id indicates server
+		db_.set_client_id(bmmo::net::kInvalidConnection + ((rand() << 16) | rand())); // invalid id indicates server
 	}
 
 	void restart_current_level() {
@@ -1355,7 +1355,7 @@ private:
 		msg.content.map = current_map_;
 		msg.content.force_restart = force_next_restart_;
 		if (type == bmmo::countdown_type::Go) force_next_restart_ = false;
-		send(msg, k_nSteamNetworkingSend_Reliable);
+		send(msg, bmmo::net::kSendReliable);
 	}
 
 	void send_dnf_message() {
@@ -1367,7 +1367,7 @@ private:
 		msg.content.sector = max_sector_;
 		msg.content.map = current_map_;
 		msg.content.cheated = m_bml->IsCheatEnabled();
-		send(msg, k_nSteamNetworkingSend_ReliableNoNagle);
+		send(msg, bmmo::net::kSendReliableNoNagle);
 		did_not_finish_ = true;
 	}
 
@@ -1375,7 +1375,7 @@ private:
 		bmmo::map_names_msg msg{};
 		msg.maps[current_map_.get_hash_bytes_string()] = current_map_.name;
 		msg.serialize();
-		send(msg.raw.str().data(), msg.size(), k_nSteamNetworkingSend_Reliable);
+		send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
 	}
 
 	void send_current_map(bmmo::current_map_state::state_type type = bmmo::current_map_state::EnteringMap) {
@@ -1383,11 +1383,11 @@ private:
 		msg.content.map = current_map_;
 		msg.content.type = type;
 		msg.content.sector = current_sector_;
-		send(msg, k_nSteamNetworkingSend_ReliableNoNagle);
+		send(msg, bmmo::net::kSendReliableNoNagle);
 	}
 
 	void send_current_sector() {
-		send(bmmo::current_sector_msg{.content = {.sector = current_sector_}}, k_nSteamNetworkingSend_ReliableNoNagle);
+		send(bmmo::current_sector_msg{.content = {.sector = current_sector_}}, bmmo::net::kSendReliableNoNagle);
 		if (!spectator_mode_) update_sector_timestamp(current_map_, current_sector_, current_sector_timestamp_);
 	}
 

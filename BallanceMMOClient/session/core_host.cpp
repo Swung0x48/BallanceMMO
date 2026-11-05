@@ -2215,7 +2215,7 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
         for (const auto& player: msg.players) {
             bmmo::retail::hold_panel::member m;
             m.own = player.id == db_.get_client_id();
-            const auto state = m.own ? std::nullopt : db_.get(static_cast<HSteamNetConnection>(player.id));
+            const auto state = m.own ? std::nullopt : db_.get(static_cast<bmmo::net::connection>(player.id));
             m.name = m.own ? get_display_nickname() : state ? state->name : std::format("player {}", player.id);
             members.push_back(std::move(m));
         }
@@ -4175,9 +4175,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
 
     // ---- transport and time ----
     p.send = [this](const std::string& bytes, bs::send_mode mode) {
-        int flags = k_nSteamNetworkingSend_Reliable;
-        if (mode == bs::send_mode::reliable_no_nagle) flags = k_nSteamNetworkingSend_ReliableNoNagle;
-        else if (mode == bs::send_mode::unreliable_no_delay) flags = k_nSteamNetworkingSend_UnreliableNoDelay;
+        int flags = bmmo::net::kSendReliable;
+        if (mode == bs::send_mode::reliable_no_nagle) flags = bmmo::net::kSendReliableNoNagle;
+        else if (mode == bs::send_mode::unreliable_no_delay) flags = bmmo::net::kSendUnreliableNoDelay;
         std::string copy = bytes;   // client::send takes a mutable buffer
         send(copy.data(), copy.size(), flags);
     };

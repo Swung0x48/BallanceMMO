@@ -1,6 +1,6 @@
 #ifndef BALLANCEMMOSERVER_CONSTANTS_HPP
 #define BALLANCEMMOSERVER_CONSTANTS_HPP
-#include <steam/steamnetworkingtypes.h>
+#include "../net/transport.hpp"
 #include <chrono>
 #include "globals.hpp"
 
@@ -9,7 +9,7 @@ namespace bmmo {
                                        SERVER_RECEIVE_INTERVAL{(int)1e9 / 66},
                                        CLIENT_RECEIVE_INTERVAL{(int)1e9 / 66};
 
-	constexpr SteamNetworkingMicroseconds CLIENT_MINIMUM_UPDATE_INTERVAL_US = (int64_t)1e6 / 66;
+	constexpr bmmo::net::microseconds CLIENT_MINIMUM_UPDATE_INTERVAL_US = (int64_t)1e6 / 66;
 
     constexpr float LEVEL_RESTART_IGNORE_TIMEFRAME_MS = 15e3f;
 
@@ -31,7 +31,7 @@ namespace bmmo {
         enum code {
             None = 0,
 
-            LoginDenied_Min = k_ESteamNetConnectionEnd_App_Min,
+            LoginDenied_Min = bmmo::net::kEndApp,
             OutdatedClient, ExistingName, InvalidNameLength,
             InvalidNameCharacter, ReservedName, MalformedLogin,
 
@@ -40,7 +40,7 @@ namespace bmmo {
 
             LoginDenied_Max = LoginDenied_Min + 100,
 
-            PlayerKicked_Min = k_ESteamNetConnectionEnd_App_Min + 100,
+            PlayerKicked_Min = bmmo::net::kEndApp + 100,
             Kicked, Crash, FatalError, SelfTriggeredFatalError,
             PlayerKicked_Max = PlayerKicked_Min + 10,
 

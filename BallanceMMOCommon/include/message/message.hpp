@@ -2,7 +2,7 @@
 #define BALLANCEMMOSERVER_PACKET_HPP
 
 #include "../entity/entity.hpp"
-#include <steam/steamnetworkingtypes.h>
+#include "../net/transport.hpp"
 #include <vector>
 #include <unordered_map>
 #include <sstream>
@@ -124,7 +124,7 @@ namespace bmmo {
     };
 
     // DO NOT ALLOCATE THIS! Only for typing pointers
-    typedef struct message<uint8_t[k_cbMaxSteamNetworkingSocketsMessageSizeSend - sizeof(opcode)]> general_message;
+    typedef struct message<uint8_t[bmmo::net::kMaxMessageSize - sizeof(opcode)]> general_message;
 
     struct serializable_message {
         explicit serializable_message(opcode code): code(code) {}

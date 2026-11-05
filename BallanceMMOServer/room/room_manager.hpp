@@ -13,23 +13,23 @@
 // (docs/rooms-and-sessions-protocol.md). It owns no networking: every mutation
 // returns an error_code plus, for removals, a description of the side effects so
 // the server can send the right room_event / room_state messages under its own
-// state mutex. Player identity is the HSteamNetConnection, matching the server.
+// state mutex. Player identity is the bmmo::net::connection, matching the server.
 namespace bmmo {
     struct server_room {
         struct member {
-            HSteamNetConnection id = k_HSteamNetConnection_Invalid;
+            bmmo::net::connection id = bmmo::net::kInvalidConnection;
             bool ready = false;
         };
 
         uint32_t id = 0;
         std::string name;
-        HSteamNetConnection host = k_HSteamNetConnection_Invalid;
+        bmmo::net::connection host = bmmo::net::kInvalidConnection;
         room::phase phase = room::phase::Lobby;
         room::mode mode = room::mode::Shadow;
         uint16_t capacity = 8;
         std::vector<member> members;  // in join order; the host is one of them
 
-        member* find_member(HSteamNetConnection c) {
+        member* find_member(bmmo::net::connection c) {
             for (auto& m : members)
                 if (m.id == c) return &m;
             return nullptr;
@@ -53,11 +53,11 @@ namespace bmmo {
             bool was_member = false;
             uint32_t room = 0;
             bool room_closed = false;                            // room no longer exists
-            HSteamNetConnection new_host = k_HSteamNetConnection_Invalid;  // set if host changed
-            std::vector<HSteamNetConnection> remaining;          // members still in the room
+            bmmo::net::connection new_host = bmmo::net::kInvalidConnection;  // set if host changed
+            std::vector<bmmo::net::connection> remaining;          // members still in the room
         };
 
-        uint32_t room_of(HSteamNetConnection c) const {
+        uint32_t room_of(bmmo::net::connection c) const {
             auto it = client_room_.find(c);
             return it == client_room_.end() ? 0 : it->second;
         }
@@ -73,7 +73,7 @@ namespace bmmo {
 
         const std::map<uint32_t, server_room>& rooms() const { return rooms_; }
 
-        room::error_code create(HSteamNetConnection c, const std::string& name, uint32_t& out_id) {
+        room::error_code create(bmmo::net::connection c, const std::string& name, uint32_t& out_id) {
             if (room_of(c) != 0) return room::error_code::AlreadyInRoom;
             if (rooms_.size() >= max_rooms) return room::error_code::ServerBusy;
             const uint32_t id = next_id_++;
@@ -89,7 +89,7 @@ namespace bmmo {
             return room::error_code::None;
         }
 
-        room::error_code join(HSteamNetConnection c, uint32_t id) {
+        room::error_code join(bmmo::net::connection c, uint32_t id) {
             if (room_of(c) != 0) return room::error_code::AlreadyInRoom;
             auto* r = find(id);
             if (!r) return room::error_code::NotFound;
@@ -99,7 +99,7 @@ namespace bmmo {
             return room::error_code::None;
         }
 
-        room::error_code set_ready(HSteamNetConnection c, bool ready) {
+        room::error_code set_ready(bmmo::net::connection c, bool ready) {
             const uint32_t id = room_of(c);
             if (id == 0) return room::error_code::NotInRoom;
             auto* r = find(id);
@@ -112,7 +112,7 @@ namespace bmmo {
         // Validates a start request and, on success, marks the room Running.
         // Map consistency and physics availability are checked by the caller,
         // which owns the per-player map data; here we only enforce host + ready.
-        room::error_code start(HSteamNetConnection c, room::mode mode) {
+        room::error_code start(bmmo::net::connection c, room::mode mode) {
             const uint32_t id = room_of(c);
             if (id == 0) return room::error_code::NotInRoom;
             auto* r = find(id);
@@ -126,7 +126,7 @@ namespace bmmo {
 
         // Ends the running session and returns the room to the lobby (host action
         // distinct from Close). Everyone is un-readied so a new Start is deliberate.
-        room::error_code end_session(HSteamNetConnection c) {
+        room::error_code end_session(bmmo::net::connection c) {
             const uint32_t id = room_of(c);
             if (id == 0) return room::error_code::NotInRoom;
             auto* r = find(id);
@@ -146,7 +146,7 @@ namespace bmmo {
             for (auto& m : r->members) m.ready = false;
         }
 
-        room::error_code kick(HSteamNetConnection host, HSteamNetConnection target,
+        room::error_code kick(bmmo::net::connection host, bmmo::net::connection target,
                               removal_result& out) {
             const uint32_t id = room_of(host);
             if (id == 0) return room::error_code::NotInRoom;
@@ -160,7 +160,7 @@ namespace bmmo {
 
         // Host closes the room: everyone is removed and the room destroyed.
         // Returns the members that were in it (host last is irrelevant here).
-        room::error_code close(HSteamNetConnection host, std::vector<HSteamNetConnection>& members_out,
+        room::error_code close(bmmo::net::connection host, std::vector<bmmo::net::connection>& members_out,
                                uint32_t& room_out) {
             const uint32_t id = room_of(host);
             if (id == 0) return room::error_code::NotInRoom;
@@ -178,12 +178,12 @@ namespace bmmo {
 
         // Removes a client from whatever room it is in (voluntary leave or
         // disconnect). Safe to call for a client not in any room.
-        removal_result leave(HSteamNetConnection c) {
+        removal_result leave(bmmo::net::connection c) {
             return remove_member(c);
         }
 
     private:
-        removal_result remove_member(HSteamNetConnection c) {
+        removal_result remove_member(bmmo::net::connection c) {
             removal_result res;
             const uint32_t id = room_of(c);
             if (id == 0) return res;
@@ -209,7 +209,7 @@ namespace bmmo {
         }
 
         std::map<uint32_t, server_room> rooms_;
-        std::unordered_map<HSteamNetConnection, uint32_t> client_room_;
+        std::unordered_map<bmmo::net::connection, uint32_t> client_room_;
         uint32_t next_id_ = 1;
     };
 }

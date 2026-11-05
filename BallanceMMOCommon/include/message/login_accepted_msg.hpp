@@ -4,7 +4,7 @@
 
 namespace bmmo {
     struct login_accepted_msg: public serializable_message {
-        std::unordered_map<HSteamNetConnection, std::string> online_players;
+        std::unordered_map<bmmo::net::connection, std::string> online_players;
 
         login_accepted_msg(): serializable_message(bmmo::LoginAccepted) {}
 
@@ -27,7 +27,7 @@ namespace bmmo {
             raw.read(reinterpret_cast<char*>(&size), sizeof(size));
             for (uint32_t i = 0; i < size; ++i) {
                 std::string name;
-                HSteamNetConnection conn;
+                bmmo::net::connection conn;
                 if (!message_utils::read_string(raw, name))
                     return false;
                 if (!raw.good())
