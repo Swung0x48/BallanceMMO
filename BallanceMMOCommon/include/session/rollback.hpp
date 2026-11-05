@@ -720,16 +720,37 @@ namespace bmmo::session {
     // this deep once, for nothing, as soon as its history allows
     // (session_client_core::calibrate_rewind_cost).
     constexpr uint32_t kRewindCalibrationTicks = 16;
+    // Step K6 (docs/canned-tests-plan.md, seam C6): a rewind's cost as a fixed
+    // model - restore_ms, then replay_ms_per_tick for every replayed tick.
+    struct rewind_cost_model {
+        double restore_ms = 0.0;
+        double replay_ms_per_tick = 0.0;
+    };
     class rewind_cost_meter {
     public:
         static constexpr double kWeight = 1.0 / 16.0;
 
         void clear() { *this = rewind_cost_meter{}; }
 
+        // Step K6: the cap from a fixed model instead of this client's own
+        // rewinds - a canned test's: a virtual clock lets no time pass in a
+        // rewind (every rewind would cost nothing), and a real one differs
+        // from machine to machine.  Samples are then ignored, and the rewind
+        // reads no clock for them (fixed()).
+        void fix(const rewind_cost_model& model) {
+            clear();
+            fixed_ = true;
+            samples_ = 1;
+            restore_ms_ = model.restore_ms;
+            replay_ms_sum_ = model.replay_ms_per_tick;
+            replay_ticks_sum_ = 1.0;
+        }
+        bool fixed() const { return fixed_; }
+
         // One rewind: its restore stage, its replay stage, the ticks it
         // replayed (a rewind that replayed none is no sample).
         void sample(double restore_ms, double replay_ms, uint32_t ticks) {
-            if (ticks == 0) return;
+            if (fixed_ || ticks == 0) return;
             if (!samples_) {
                 restore_ms_ = restore_ms;
                 replay_ms_sum_ = replay_ms;
@@ -759,6 +780,7 @@ namespace bmmo::session {
         }
 
     private:
+        bool fixed_ = false;
         uint64_t samples_ = 0;
         double restore_ms_ = 0.0;
         double replay_ms_sum_ = 0.0;
@@ -1361,17 +1383,18 @@ namespace bmmo::session {
                 const std::function<time_point(clock_site)>& clock;
                 uint64_t resim_before = stats.resim_ticks;
                 time_point started = std::chrono::steady_clock::now(), split{};
-                time_point cost_started = read(clock_site::rewind_start), cost_split{}, cost_ended{};
+                // (Step K6: a fixed model reads no clock for its samples.)
+                time_point cost_started = cost.fixed() ? time_point{} : read(clock_site::rewind_start), cost_split{}, cost_ended{};
                 bool have_split = false, have_cost_end = false;
                 time_point read(clock_site site) const { return clock ? clock(site) : std::chrono::steady_clock::now(); }
                 void replay_begins() {
                     split = std::chrono::steady_clock::now();
-                    cost_split = read(clock_site::rewind_replay);
+                    if (!cost.fixed()) cost_split = read(clock_site::rewind_replay);
                     have_split = true;
                 }
                 void cost_ends() {
                     if (!have_split || have_cost_end) return;
-                    cost_ended = read(clock_site::rewind_end);
+                    if (!cost.fixed()) cost_ended = read(clock_site::rewind_end);
                     have_cost_end = true;
                 }
                 ~rewind_timer() {

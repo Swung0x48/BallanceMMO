@@ -1193,6 +1193,10 @@ namespace bmmo::session {
         // history (JOURNAL_CHECKPOINT_FINAL).  Off: no such record, and
         // nothing else changes either way.
         bool journal_final_checkpoints = true;
+        // Step K6 (seam C6): the rewind cost the reach's cap is sized from,
+        // fixed instead of measured (headless --rewind-cost R:P, a canned
+        // test's).  Unset: this client's own rewinds, as before.
+        std::optional<rewind_cost_model> fixed_rewind_cost;
         // The level to load when SessionStart names none (headless --level).
         int level = 1;
         // The rollback engine's switches, applied by begin (E3).  The defaults

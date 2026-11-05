@@ -364,6 +364,9 @@ namespace {
         // the per-client reach from the relay lag (0, the default): the
         // arms of open question 1's measurement.
         uint32_t reach_ticks = 0;
+        // --rewind-cost R:P (step K6): the reach's cap from a fixed rewind
+        // cost (R ms of restore, P ms a replayed tick), not measured.
+        std::optional<bmmo::session::rewind_cost_model> rewind_cost;
         // --body-set-corrections (the control arm of step RC3): a session
         // with its snapshots off compares and rewinds on the full snapshot
         // of each body-set change, as before RC3.  The default (false,
@@ -576,6 +579,7 @@ namespace {
                   "       [--force-own-move N[:K]]   (test: the first own birth after the anchor moved N ticks late, K ticks after it)\n"
                   "       [--window-origin TICK]   (the window: lines' 60-tick grid starts at TICK)\n"
                   "       [--reach N]   (the rollback's reach pinned at N ticks, 48..120; default: per client, from the relay lag)\n"
+                  "       [--rewind-cost R:P]   (the reach's cap from a fixed rewind cost: R ms of restore, P ms a tick; default measured)\n"
                   "       [--starved-resync-reports N]   (N starved input reports in a row ask for a resync; 0 = never; default 330)\n"
                   "       [--stall-after-ready MS]   (test: sleep MS ms right after sending SessionReady)\n"
                   "       [--body-set-corrections]   (snapshots off: a body-set change's full snapshot still corrects, as before RC3; the control arm)\n"
@@ -798,6 +802,14 @@ namespace {
                 out.pause_at = std::atoll(spec.substr(0, colon).c_str());
                 out.pause_ms = std::atoi(spec.substr(colon + 1).c_str());
                 out.stall_named = true;
+            }
+            else if (arg == "--rewind-cost") {
+                if (!(v = next())) return false;
+                bmmo::session::rewind_cost_model m;
+                if (std::sscanf(v, "%lf:%lf", &m.restore_ms, &m.replay_ms_per_tick) != 2 || m.restore_ms < 0.0
+                        || m.replay_ms_per_tick <= 0.0)
+                    return false;
+                out.rewind_cost = m;
             }
             else if (arg == "--reach") {
                 if (!(v = next())) return false;
@@ -2314,6 +2326,7 @@ namespace {
             c.own_corrections = args_.rollback;
             c.window_shift = args_.window_shift;
             c.reach_ticks = args_.reach_ticks;
+            c.fixed_rewind_cost = args_.rewind_cost;
             c.body_set_corrections = args_.body_set_corrections;
             c.capture_cache = args_.capture_cache;
             if (args_.sparse_capture) c.sparse_capture = args_.sparse_capture;

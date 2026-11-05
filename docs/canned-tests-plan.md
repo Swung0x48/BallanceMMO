@@ -477,6 +477,16 @@ the login time (display), the config's backup names; the mock client's and recor
 PASS, server replay exact. "A seeded run byte-identical twice" needs T1's virtual clock: a live run's timing still
 varies.
 
+As built (K6, 2026-11-05): the rewind cost's reads were already C1's (`cost_clock_`, sites rewind_*, K1's era), so
+under a virtual clock no time passes in a rewind and the cap would sit at 120. C6 is a fixed model beside the
+measurement: `rewind_cost_model {restore_ms, replay_ms_per_tick}`, `rewind_cost_meter::fix` (the cap from the
+model, from the session's start; samples ignored; the rewind reads no clock for them), `core_config::fixed_rewind_cost`,
+headless `--rewind-cost R:P`. Production: unset, measured as before. Decision 1 stays the user's: which model a canned
+test uses (a measured machine's numbers, e.g. the LBM x64 3.0 ms + 0.46 ms a tick, or the real measurement). Checked:
+812/812 (one new: the fixed cap holds through ignored samples, clear() returns to measuring); x64 and x86 build; the
+wire check ALL SAME; live P-core h1_150 with `--rewind-cost 3:0.46` on all four: harness PASS, server replay exact,
+every status line `cap=92/3.00/0.460/1` (the measured smoke's moved 48 -> 82..87).
+
 ### 3.3 The tools (thin, after the seams)
 
 | tool | built on | does |

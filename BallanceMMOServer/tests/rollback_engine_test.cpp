@@ -4320,6 +4320,20 @@ TEST(RollbackEngine, ReachAddsTheServerWaitUpToTheCap) {
     EXPECT_EQ(meter.reach(7, 120), 48u) << "20 + 8 + 7 is under the floor";
 }
 
+// Step K6: a fixed model gives the cap its formula gives and keeps it,
+// whatever the rewinds cost.
+TEST(RollbackEngine, RewindCostCapFromAFixedModel) {
+    bmmo::session::rewind_cost_meter meter;
+    meter.fix({3.0, 0.46});
+    EXPECT_TRUE(meter.fixed());
+    EXPECT_EQ(meter.cap(), 92u);   // floor(42.45 / 0.46), the measured example below
+    for (int i = 0; i < 20; ++i) meter.sample(30.0, 2.0 * 48, 48);   // a stall: ignored
+    EXPECT_EQ(meter.cap(), 92u);
+    meter.clear();
+    EXPECT_FALSE(meter.fixed());
+    EXPECT_EQ(meter.cap(), 48u);
+}
+
 // Step R12, the cap: clamp(floor((B - restore) / replay per tick), 48, 120),
 // B = 3 ticks (45.45 ms), from moving averages of this client's own rewinds
 // (restore weighted 1/16 per rewind, the replay by ticks).  Before the first
