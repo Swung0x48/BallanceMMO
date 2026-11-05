@@ -659,6 +659,7 @@ Results (h1_150's shape, 4 clients, 150 ms each way, 40 s of play; the server co
 |---|---|---|---|---|
 | PC P-cores, lookahead | 297 | 44.8 / 8.2 | 5.45x | 1.8, 3.8-4.0 |
 | PC P-cores, lockstep | 29,077 | 44.8 / 11.9 | 3.75x | 2.6, 5.7-6.1 (coordinator 2.7) |
+| PC E-cores 16-27, lookahead | 297 | 44.8 / 12.6 | 3.56x | 3.3, 8.3-8.7 |
 | Phone (SM8850, 8 cores), lookahead | 297 | 44.8 / 10.9 | 4.11x | 2.7, 5.5-6.6 |
 
 - lookahead and lockstep: the server journal, all four client journals and all four send traces identical byte for
