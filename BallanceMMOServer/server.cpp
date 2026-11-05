@@ -24,6 +24,7 @@
 #include <session/capture_seams.hpp>   // step K4b-ii: --capture-inbound / --replay-inbound
 #include <session/virtual_clock.hpp>   // step T1c: --coordinator
 #include <net/remote_transport.hpp>
+#include <net/gns.hpp>
 #if BMMO_BUILD_SIM
 #include "sim/session_runner.hpp"
 #include "sim/crash_report.hpp"
@@ -55,7 +56,9 @@ struct input_stamp {
 
 class server: public role {
 public:
-    explicit server(uint16_t port) {
+    // `transport`: GNS's (the network library started), or none for a
+    // coordinated run (open_coordinator sets the coordinator's).
+    server(uint16_t port, std::unique_ptr<bmmo::net::transport> transport) : role(std::move(transport)) {
         port_ = port;
     }
     // The runner and the transport go before the clocks they hold (step T1c:
@@ -516,6 +519,9 @@ public:
         const bool prev_ghost_mode = config_.ghost_mode;
         if (!config_.load())
             return false;
+#if !BMMO_WITHOUT_GNS
+        if (!coordinated()) bmmo::net::gns::set_log_level(config_.logging_level);
+#endif
         rooms_.max_rooms = config_.maximum_rooms;
         rooms_.max_members = static_cast<uint16_t>(std::clamp<uint32_t>(config_.maximum_members, 1, bmmo::room::MAX_MEMBERS_PER_MESSAGE));
         if (clients_.empty()) map_names_.clear();
@@ -654,12 +660,12 @@ public:
         Printf("Server version: %s; minimum accepted client version: %s.",
                         bmmo::current_version.to_string(),
                         bmmo::minimum_client_version.to_string());
-        auto uptime = process_timestamp() - init_timestamp_;
+        const double uptime = std::chrono::duration<double>(std::chrono::steady_clock::now() - init_steady_).count();
         std::string time_str(20, 0);
         time_str.resize(std::strftime(&time_str[0], time_str.size(),
             "%F %T", std::localtime(&init_time_t_)));
         Printf("Server uptime: %.2f seconds since %s.",
-                        uptime * 1e-6, time_str);
+                        uptime, time_str);
     }
 
     inline void pull_ball_states(std::vector<bmmo::owned_timed_ball_state>& balls) {
@@ -5175,11 +5181,32 @@ int main(int argc, char** argv) {
     // (best effort, bounded).
     bmmo::sim::set_crash_drain([] { bmmo::session::io::drain_all(std::chrono::milliseconds(1000)); });
 #endif
-    printf("Initializing sockets...\n");
-    server::init_socket();
+    server::init_process();
+    // GNS for a server on the network; a coordinated run talks through the
+    // coordinator (step T1c) and starts no network library.
+    const bool on_gns = coordinator.empty();
+#if BMMO_WITHOUT_GNS
+    if (on_gns) {
+        printf("This build has no GameNetworkingSockets (BMMO_WITHOUT_GNS): it runs only coordinated (--coordinator).\n");
+        return 1;
+    }
+    std::unique_ptr<bmmo::net::transport> transport;
+#else
+    if (on_gns) {
+        printf("Initializing sockets...\n");
+        bmmo::net::gns::start(bmmo::DebugOutput);
+    }
+    auto transport = on_gns ? bmmo::net::gns::make_transport() : nullptr;
+#endif
+    const auto shut_down = [on_gns] {
+#if !BMMO_WITHOUT_GNS
+        if (on_gns) bmmo::net::gns::stop();
+#endif
+        server::destroy();
+    };
 
     printf("Starting server at port %u.\n", port);
-    server server(port);
+    server server(port, std::move(transport));
     server.set_status_writer(log_io.strand());   // step IOX
     if (hold_member_ms) {
         server.set_test_hold_member_ms(hold_member_ms);
@@ -5210,7 +5237,7 @@ int main(int argc, char** argv) {
     // coordinated run ends when the coordinator stops it.
     if (server.replaying() || server.coordinated()) {
         server_thread.join();
-        server::destroy();
+        shut_down();
         return 0;
     }
 
@@ -5593,6 +5620,6 @@ int main(int argc, char** argv) {
     if (server_thread.joinable())
         server_thread.join();
 
-    server::destroy();
+    shut_down();
     printf("\r");
 }

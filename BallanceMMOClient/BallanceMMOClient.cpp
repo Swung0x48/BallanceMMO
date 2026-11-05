@@ -799,6 +799,7 @@ void BallanceMMOClient::OnExitGame()
     UnhookWinEvent(move_size_hook_);
     config_manager_.check_and_save_name_change_time();
     cleanup(true);
+    bmmo::net::gns::stop();
     client::destroy();
     // Step SIO: last, after cleanup ended a running session (its journal's
     // close is posted to thread_pool_): what the session journal's writer

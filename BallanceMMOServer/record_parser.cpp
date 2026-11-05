@@ -7,6 +7,7 @@
 #endif
 
 #include "common.hpp"
+#include <net/gns.hpp>
 #include "entity/record_entry.hpp"
 #include <fstream>
 #include <condition_variable>
@@ -40,9 +41,9 @@ namespace {
 
 class record_replayer: public role {
 public:
-    explicit record_replayer(uint16_t port) {
+    explicit record_replayer(uint16_t port) : role(bmmo::net::gns::make_transport()) {
         port_ = port;
-        set_logging_level(bmmo::log_type::important);
+        bmmo::net::gns::set_log_level(bmmo::log_type::important);
     }
 
     bool send(const bmmo::net::connection destination, void* buffer, size_t size, int send_flags) {
@@ -1126,7 +1127,8 @@ int main(int argc, char** argv) {
         return std::max(v, 0);
 
     printf("Initializing sockets...\n");
-    record_replayer::init_socket();
+    record_replayer::init_process();
+    bmmo::net::gns::start(bmmo::DebugOutput);
 
     printf("Starting fake server at port %u.\n", port);
     record_replayer replayer(port);
@@ -1291,6 +1293,7 @@ int main(int argc, char** argv) {
     if (server_thread.joinable())
         server_thread.join();
 
+    bmmo::net::gns::stop();
     record_replayer::destroy();
     printf("\r");
 }

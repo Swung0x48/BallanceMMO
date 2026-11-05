@@ -5,9 +5,13 @@
 
 #include <memory>
 #include "common.hpp"
+#include <net/gns.hpp>
 
 class client : public role {
 public:
+    // Over GNS (BallanceMMOClient::init_socket starts it).
+    client() : role(bmmo::net::gns::make_transport()) {}
+
     bool connect(const std::string& connection_string) {
         connection_ = transport_->connect(connection_string);
         if (connection_ == bmmo::net::kInvalidConnection)

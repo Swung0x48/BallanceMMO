@@ -46,6 +46,7 @@ option(BMMO_WITHOUT_GNS "Build without GameNetworkingSockets: coordinated runs o
 if (NOT BMMO_BUILD_SIM_ONLY)
 if (BMMO_WITHOUT_GNS)
     set(BMMO_GNS_LIB "")
+    add_compile_definitions(BMMO_WITHOUT_GNS=1)   # the hosts leave their GNS paths out (server.cpp, session_client.cpp)
     # (the message headers carry the library's typedefs: headers only)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../submodule/GameNetworkingSockets/include)
 else ()
@@ -86,7 +87,6 @@ set(BMMO_COMMON_SRC_DIRECTORY ../BallanceMMOCommon/src)
 file(GLOB BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/entity/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/utility/*.cpp ${BMMO_COMMON_SRC_DIRECTORY}/net/*.cpp)
 if (BMMO_WITHOUT_GNS)
     list(FILTER BMMO_COMMON_SRC EXCLUDE REGEX "gns_transport\\.cpp$")
-    list(APPEND BMMO_COMMON_SRC ${BMMO_COMMON_SRC_DIRECTORY}/net_stub/gns_stub.cpp)
 endif ()
 
 endif ()  # NOT BMMO_BUILD_SIM_ONLY

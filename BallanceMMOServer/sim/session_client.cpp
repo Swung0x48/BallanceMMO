@@ -62,6 +62,7 @@
 #include <session/capture_seams.hpp>
 #include <session/virtual_clock.hpp>
 #include <net/remote_transport.hpp>
+#include <net/gns.hpp>
 #include <session/session_clock.hpp>
 #include <session/event_hold.hpp>
 #include <session/rollback_binding.hpp>
@@ -1081,7 +1082,17 @@ namespace {
         friend class own_physicalize_callback;
         friend int own_physicalize_hook(const CKBehaviorContext& context);
     public:
-        explicit session_client(arguments args) : args_(std::move(args)) {}
+        // GNS's transport for a client on the network; none for a coordinated
+        // run (open_inbound sets the coordinator's).
+        explicit session_client(arguments args) : role(network_transport(args)), args_(std::move(args)) {}
+        static std::unique_ptr<bmmo::net::transport> network_transport(const arguments& args) {
+#if BMMO_WITHOUT_GNS
+            (void) args;
+            return nullptr;
+#else
+            return args.coordinator.empty() ? bmmo::net::gns::make_transport() : nullptr;
+#endif
+        }
         // Step S6: the copies go before the engine (release_placement).
         ~session_client() {
             transport_.reset();   // step T1c: a remote transport closes the virtual clock, a member of ours
@@ -5201,7 +5212,15 @@ int main(int argc, char** argv) {
         const auto absolute = std::filesystem::absolute(*dir, ec);
         if (!ec) *dir = absolute.string();
     }
-    role::init_socket();
+    role::init_process();
+#if BMMO_WITHOUT_GNS
+    if (args.coordinator.empty()) {
+        logf("this build has no GameNetworkingSockets (BMMO_WITHOUT_GNS): it runs only coordinated (--coordinator)");
+        return 1;
+    }
+#else
+    if (args.coordinator.empty()) bmmo::net::gns::start(bmmo::DebugOutput);
+#endif
     session_client client(args);
     {
         std::string command_line;

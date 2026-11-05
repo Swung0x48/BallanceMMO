@@ -2,6 +2,7 @@
 #define BALLANCEMMOSERVER_ROLE_HPP
 
 #include <iostream>
+#include <chrono>
 #include <thread>
 #include <atomic>
 #include <memory>
@@ -11,7 +12,6 @@
 #include <csignal>
 #include <cstdlib>
 #include "../entity/globals.hpp"
-#include "../net/gns.hpp"
 #include "../net/transport.hpp"
 #include "../utility/ansi_colors.hpp"
 
@@ -20,28 +20,24 @@
 static constexpr inline size_t ONCE_RECV_MSG_COUNT = 1024;
 
 // A process's network side: the server, a client.  It talks to the network
-// through a bmmo::net::transport (step K2: the platform layer); GNS is the
-// default one.
+// through a bmmo::net::transport (step K2: the platform layer) its host
+// chooses - GNS (net/gns.hpp, which the host starts and stops) or a
+// coordinated run's - and gives it, or sets transport_ before the run.
 class role {
 public:
-    static void init_socket() {
-        std::string error;
-        if (!bmmo::net::gns::init(bmmo::DebugOutput, error))
-            bmmo::FatalError("GameNetworkingSockets_Init failed.  %s", error.c_str());
+    // The process's console and start time: every host, first thing.
+    static void init_process() {
 #ifdef _WIN32
         DWORD mode;
         GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
         SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         // std::ignore = _setmode(_fileno(stdin), _O_U16TEXT);
 #endif
-        init_timestamp_ = process_timestamp();
+        init_steady_ = std::chrono::steady_clock::now();
         init_time_t_ = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     }
 
-    // The network layer's process clock (a message's `received` is on it).
-    static bmmo::net::microseconds process_timestamp() { return bmmo::net::process_timestamp(); }
-
-    explicit role(std::unique_ptr<bmmo::net::transport> transport = bmmo::net::gns::make_transport())
+    explicit role(std::unique_ptr<bmmo::net::transport> transport = nullptr)
             : transport_(std::move(transport)) {
 
         auto close_log_and_exit = [](int) { // signal handler
@@ -82,9 +78,8 @@ public:
 
     bmmo::net::transport& transport() { return *transport_; }
 
+    // The log's end (a GNS host stops the library first: gns::stop()).
     static void destroy() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        bmmo::net::gns::kill();
         bmmo::close_log();
     }
 
@@ -102,8 +97,11 @@ protected:
 
     std::unique_ptr<bmmo::net::transport> transport_;
     static inline role* this_instance_ = nullptr;
-    static inline bmmo::net::microseconds init_timestamp_;
+    static inline std::chrono::steady_clock::time_point init_steady_;   // the uptime's (a diagnostic)
     static inline time_t init_time_t_;
+    // The start on GNS's process clock, for the hosts whose streams are on it
+    // (the mock client's record, the retail client): set by them.
+    static inline bmmo::net::microseconds init_timestamp_;
     std::atomic_bool running_ = false;
     std::mutex startup_mutex_;
     std::condition_variable startup_cv_;
@@ -122,11 +120,6 @@ protected:
     // triggers an actual segmentation fault; I was too lazy to fake one
     static void trigger_fatal_error() {
         *(volatile int*) 0 = 0;
-    }
-
-public:
-    static void set_logging_level(bmmo::log_type least_serious) {
-        bmmo::net::gns::set_log_level(least_serious);
     }
 };
 

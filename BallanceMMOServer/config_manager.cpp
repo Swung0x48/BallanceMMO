@@ -120,7 +120,7 @@ bool config_manager::load() {
     else {
         logging_level = bmmo::log_type::important;
     }
-    role::set_logging_level(logging_level);
+    // (the server hands logging_level to the network library: load_config)
 
     if (config_["map_name_list"]) {
         default_map_names.clear();

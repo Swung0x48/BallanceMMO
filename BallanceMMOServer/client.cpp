@@ -20,6 +20,7 @@
 #include <picojson.h>
 
 #include "common.hpp"
+#include <net/gns.hpp>
 #include "entity/record_entry.hpp"
 
 using bmmo::Printf, bmmo::Sprintf, bmmo::LogFileOutput, bmmo::FatalError;
@@ -80,6 +81,11 @@ static struct option_t {
 
 class client: public role {
 public:
+    // Over GNS (started in main); the record's times are on its clock.
+    client() : role(bmmo::net::gns::make_transport()) {
+        init_timestamp_ = bmmo::net::process_timestamp();
+    }
+
     bool connect(const std::string& connection_string) {
         bmmo::hostname_parser hp(connection_string);
         using asio::ip::tcp;
@@ -1036,7 +1042,8 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Initializing sockets..." << std::endl;
-    client::init_socket();
+    client::init_process();
+    bmmo::net::gns::start(bmmo::DebugOutput);
 
     std::cout << "Creating client instance..." << std::endl;
     client client;
@@ -1045,7 +1052,7 @@ int main(int argc, char** argv) {
         options.uuid = get_mock_uuid();
     client.set_uuid(options.uuid);
     client.set_print_states(options.print_states);
-    client.set_logging_level(options.detail);
+    bmmo::net::gns::set_log_level(options.detail);
     if (options.recorder_mode && !client.setup_recorder()) {
         std::cerr << "Cannot start the flight recorder." << std::endl;
         return 1;
@@ -1089,7 +1096,7 @@ int main(int argc, char** argv) {
             if (i != 3) last_squared -= rot[i] * rot[i];
         }
         rot[3] = std::sqrt(std::max(last_squared, 0.0f)); // avoid NaN when x^2+y^2+z^2 > 1
-        msg.content.timestamp = role::process_timestamp();
+        msg.content.timestamp = bmmo::net::process_timestamp();
         Printf("Sending ball state message: (%.2f, %.2f, %.2f), (%.3f, %.3f, %.3f, %.3f)",
             pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], rot[3]);
 //        for (int i = 0; i < 50; ++i)
@@ -1322,7 +1329,7 @@ int main(int argc, char** argv) {
         }
         using namespace std::chrono;
         const auto real_timestamp = server_realworld_timestamp_us +
-                (role::process_timestamp() - server_realworld_timestamp_timestamp);
+                (bmmo::net::process_timestamp() - server_realworld_timestamp_timestamp);
         const auto real_time = system_clock::to_time_t(system_clock::time_point{microseconds{real_timestamp}});
         char time_str[32];
         std::strftime(time_str, sizeof(time_str), "%F %T", std::localtime(&real_time));
@@ -1376,5 +1383,6 @@ int main(int argc, char** argv) {
         client_thread.join();
     if (record_thread.joinable())
         record_thread.join();
+    bmmo::net::gns::stop();
     client::destroy();
 }

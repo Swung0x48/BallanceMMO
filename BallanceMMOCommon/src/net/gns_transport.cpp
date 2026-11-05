@@ -4,8 +4,12 @@
 
 #include <net/gns.hpp>
 
+#include <chrono>
 #include <cstring>
+#include <thread>
 #include <vector>
+
+#include <utility/misc.hpp>
 
 #include <steam/steamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
@@ -222,6 +226,17 @@ namespace bmmo::net::gns {
 #else
         SteamDatagramClient_Kill();
 #endif
+    }
+
+    void start(log_sink sink) {
+        std::string error;
+        if (!init(sink, error))
+            bmmo::FatalError("GameNetworkingSockets_Init failed.  %s", error.c_str());
+    }
+
+    void stop() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        kill();
     }
 
     void set_log_level(bmmo::log_type least_serious) {

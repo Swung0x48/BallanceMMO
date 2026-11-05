@@ -645,13 +645,24 @@ As built (T1e, 2026-11-05, "先提速"): the processes run ahead within the link
 - **`--server-exe NAME`** (arena_map_test.py): this machine runs `BallanceMMOServer.exe` under page heap (an Image File
   Execution Options GlobalFlag, matched by the file name); for timings use a copy under another name. Under page heap
   the coordinated run's server took 34.4 s of CPU, without it 1.8 s.
-- **Android arm64** (`BMMO_WITHOUT_GNS`, CMake): the server and the headless client without GameNetworkingSockets -
-  `src/net_stub/gns_stub.cpp` answers `role`'s GNS calls (init succeeds; the transport made before the coordinated
-  one replaces it is an empty sim network); coordinated runs only. A stub because `role`'s constructor initializes GNS
-  and makes a GNS transport whatever the host runs on; the user's follow-up (2026-11-05): move that choice to the hosts
-  so no stub is needed. Bionic defines the termios `B0` through asio's `<sys/ioctl.h>` (VxIntersect.h names a parameter
-  so): undefined after asio in coordinator_protocol.hpp. Build: NDK 28.2, android-29, `c++_static`, the headless
-  engine's portable math.
+- **Android arm64** (`BMMO_WITHOUT_GNS`, CMake): the server and the headless client without GameNetworkingSockets,
+  coordinated runs only (without `--coordinator` they say so and exit). Bionic defines the termios `B0` through asio's
+  `<sys/ioctl.h>` (VxIntersect.h names a parameter so): undefined after asio in coordinator_protocol.hpp. Build: NDK
+  28.2, android-29, `c++_static`, the headless engine's portable math.
+- **GNS out of `role`** (the user, 2026-11-05: "先用stub吧，但是应该等会要重构一下把这个gns调用移走"; the first
+  Android build answered `role`'s GNS calls with a stub): `role` no longer knows the library. Its constructor takes
+  the transport its host chose (or none, set before the run); `init_socket()` became `init_process()` (the console,
+  the start time); `destroy()` only closes the log; `set_logging_level` went. `net/gns.hpp` gained `start(sink)`
+  (init or FatalError) and `stop()` (half a second for what is queued, then kill - the old destroy's order). The
+  server and the headless client start GNS and make its transport only when not coordinated (a coordinated run
+  starts no network library now); the mock client, the record parser and the retail client always. The server hands
+  `config_.logging_level` to GNS in `load_config`; its uptime reads a steady start (a diagnostic). A
+  `BMMO_WITHOUT_GNS` build leaves `gns_transport.cpp` out and the two hosts' GNS paths behind that macro: no stub.
+  Checked: 815/815; x64, x86 retail and arm64 builds; a live run over GNS (2 clients, 50 ms: harness PASS, server
+  replay exact, GNS started and stopped); a coordinated run the same as before byte for byte but the journals' build
+  id (11 header bytes); the phone the same as the PC 9/9; the wire check of core_ref_s17 ALL SAME, nothing skipped.
+  Not run: the retail client (its change: the constructor names the GNS transport it got by default, and its exit
+  calls `gns::stop()` before `destroy()`, the same order as before).
 
 Results (h1_150's shape, 4 clients, 150 ms each way, 40 s of play; the server copy without page heap):
 
