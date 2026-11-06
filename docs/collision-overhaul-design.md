@@ -75,6 +75,10 @@ Client Mod (BMLPlus, Win32)        Server (x64, GNS)                  Sim thread
 - **游戏内命令栏**：`/mmo auto <自动化命令>`（如 `/mmo auto record start D:/rec/a.bmrc 2`），走同一个 `dispatch_automation_command`，回答直接发到聊天/日志。自己手动跑一段再标注问题时不用再开第二个窗口；`OnFullCommand` 本来就保证在游戏线程上执行。
 - **命令文件**（`BMMO_COMMAND_FILE`，缺省 `Bin/bmmo_command.txt`）：更稳的回退方式。每帧若文件存在则读取整份、逐行派发、把结果写入同目录 `<file>.out` 和 BML 日志（`CommandFile: <cmd> -> <resp>`），随后删除该文件。派发在 OnProcess 最前面执行，即使后续逻辑抛异常也不受影响，因此既能驱动游戏又能用日志观察是否按预期工作。
 
+**要服务器点头的命令（2026-11-05，用户决定）。** 在规则之外改变游戏的命令——`beam`、`sector`、`explode`、`activate`、`restart`、`key`、`keys`、`message`、`rng`、`fixedtick`、`exactframes`、`pausechain` 和 `replay session`——在连着服务器（或正在连接）时，只有持有该服务器的 operator 权限才执行，三条通道一样（`automation_permitted`）。权限由服务器给：服务端控制台 `op <名字>` / `deop <名字>`（按名字 + uuid 存进 config.yml）；服务端在权限变化时和登录时（新增）发 `OpState`，客户端记在 `own_op_`，断线清零。离线时没有对手，照常执行。cheat 模式不解锁。判定结果进会话录制（时钟点 `retail_operator`），回放拒绝的与实时一致。
+
+**服务端替玩家执行。** 服务端控制台 `beam <玩家> <x> <y> <z>`、`sector <玩家> <n>`、`tpsector <玩家> <n>`（玩家写名字或 `#id`）发 `PlayerCommand`（`player_command_msg.hpp`）给那个玩家的客户端，客户端用自己的 `beam` / `sector` 执行（在物理会话里照常打 tick、发给服务器，所有世界同一 tick 生效），结果发到该玩家聊天和日志。`tpsector` = 先激活第 n 节，再把球放到那一节的重生点（关卡的 `ResetPoints` 第 n−1 行）。这是服务器自己的决定，不查 operator 权限。消息走 inbox，所以也在会话录制里。
+
 
 客户端 Mod 通过环境变量 `BMMO_COMMAND_PIPE=<name>` 开启命名管道 `\\.\pipe\<name>`，按行接收命令：`mmo <子命令>`（等价于游戏内 `/mmo ...`）、`bml <命令>`（`IBML::ExecuteCommand`）、`level <n>`、`key <名称> <down|up>`、`screenshot <path>`、`quit`、`status`。所有命令在游戏线程执行。测试脚本 `scripts/bmmo_ctl.py` 负责发送。
 

@@ -477,6 +477,10 @@ private:
 	// out and the game's keyboard stays blocked exactly while it is open.
 	void room_panel_frame();
 	std::string dispatch_automation_command(const std::string& line);
+	bool automation_permitted(const std::string& verb, const std::string& rest);
+	std::string automation_sector(int sector);
+	std::string automation_beam(const double position[3], int64_t at);
+	std::string run_player_command(const bmmo::player_command& command);
 	std::string automation_status_line();
 	std::string automation_dump_script(const std::string& name);
 	std::string automation_load_level(int level);
@@ -498,7 +502,6 @@ private:
 	bmmo::physics::tick_record replay_source_;
 	bool replay_active_ = false;
 	bool replay_anchored_ = false;
-	bool fpu53_ = false;              // experiment: force 53-bit x87 precision per frame
 	uint64_t record_exact_from_ = 0;  // record exact core dumps for frames [from, to]
 	uint64_t record_exact_to_ = 0;   // replay keys apply from the tick after the anchor
 	std::ofstream record_diag_;      // <record path>.txt: bodies and physics events at key frames
@@ -695,6 +698,8 @@ private:
 	std::string server_addr_, server_name_;
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
+	// Operator permission from this server (OpState: at login and on 'op'/'deop'); cleared with the connection.
+	std::atomic_bool own_op_ = false;
 	bmmo::net::microseconds next_update_timestamp_ = 0,
 		last_dnf_hotkey_timestamp_ = 0, dnf_cooldown_end_timestamp_ = 0;
 	std::atomic_int64_t server_realworld_timestamp_us_ = 0;
@@ -1251,6 +1256,7 @@ private:
 
 		resolving_endpoint_ = false;
 		logged_in_ = false;
+		own_op_ = false;
 
 		// Destroying spirit balls, sprites and sounds means destroying CK
 		// objects; when cleanup() is reached from the network thread (a lost

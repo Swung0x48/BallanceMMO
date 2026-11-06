@@ -17,6 +17,7 @@
 #include <fstream>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
@@ -262,9 +263,6 @@ void BallanceMMOClient::install_input_hook() {
 // Game thread, immediately after the retail input manager polled DirectInput
 // and before any behaviour of this frame runs.
 void BallanceMMOClient::on_input_polled(unsigned char* state) {
-#if defined(_MSC_VER) && defined(_M_IX86)
-    if (fpu53_) _controlfp(_PC_53, _MCW_PC);
-#endif
     // The manager's buffer holds KS_IDLE / KS_PRESSED / KS_RELEASED (not
     // DirectInput's 0x80): IsKeyDown tests KS_PRESSED, and a released key
     // reads KS_RELEASED for exactly one frame.
@@ -381,6 +379,80 @@ std::string BallanceMMOClient::automation_load_level(int level) {
     return "ok loading level " + std::to_string(level);
 }
 
+// The verbs that change the game outside its rules run only with the server's approval: while
+// connected to a server (or connecting), this client must hold its operator permission (the
+// server's 'op <name>').  Offline there is no one to play against, so they run.  The answer is a
+// session capture's (retail_operator), so a replay refuses what the live run refused.
+bool BallanceMMOClient::automation_permitted(const std::string& verb, const std::string& rest) {
+    static const std::set<std::string> gated = {"beam", "sector", "explode", "activate", "restart", "key", "keys",
+                                                "message", "rng", "fixedtick", "exactframes", "pausechain"};
+    if (!gated.contains(verb) && !(verb == "replay" && rest.rfind("session", 0) == 0)) return true;
+    const bool live = !(connected() || connecting()) || own_op_.load();
+    return bmmo::retail::session_capture::instance().flag(bmmo::session::clock_site::retail_operator, live);
+}
+
+// sector <n>: activate that sector's mechanisms the way the server's world
+// does, so a later sector's bodies exist without playing the level.  The
+// headless replay does the same with --sector at the same frame, which is how
+// the mechanisms are checked for bit-exactness.
+std::string BallanceMMOClient::automation_sector(int sector) {
+    // In a running session the activation is an input (neutralization N3):
+    // stamped ahead, sent, and run here at that tick, like a crossed
+    // checkpoint - the server activates at the same tick.
+    if (std::string answer; core_host_sector(sector, answer)) return answer;   // the shared core's session (R1)
+    auto* context = m_bml->GetCKContext();
+    CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
+    CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
+    if (!parameters || !manager) return "error IngameParameter or Gameplay_SectorManager missing";
+    int none = 0;
+    parameters->SetElementValue(0, 2, &none, sizeof(none));
+    parameters->SetElementValue(0, 1, &sector, sizeof(sector));
+    if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, TRUE);
+    return std::format("ok sector {} activated at frame {}", sector, record_frames_);
+}
+
+// beam <x> <y> <z>: put the current ball there at rest, so it falls onto a
+// mechanism.  The headless replay does the same with --beam at the same frame.
+// In a physics session the core makes the beam (core_host_beam) so the
+// server's copy of the ball moves with it.
+std::string BallanceMMOClient::automation_beam(const double position[3], int64_t at) {
+    std::string error;
+    if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error))
+        return "error " + error;
+    CK3dObject* ball = get_current_ball();
+    if (!ball || !ball->GetName()) return "error no current ball";
+    // A session the shared core runs: a request the core makes at the end
+    // of this frame's step, in place, stamped T + 1 (R1).
+    if (std::string answer; core_host_beam(position, answer, at)) return answer;
+    if (at >= 0) return "error beam ... at <tick>: only a running session core stamps a beam at a tick";
+    const double upright[4] = {0.0, 0.0, 0.0, 1.0};
+    const float still[3] = {0.0f, 0.0f, 0.0f};
+    if (!physics_view_.set_body_state(ball->GetName(), position, upright, still, still, true, error))
+        return "error " + error;
+    return std::format("ok beamed {} to ({:.3f},{:.3f},{:.3f}) at frame {}", ball->GetName(), position[0], position[1],
+                       position[2], record_frames_);
+}
+
+// The server console's beam / sector / tpsector for this player
+// (player_command_msg.hpp): the server's approval, so no operator check.
+// tpsector: the sector, then the own ball to that sector's reset point (the
+// level's ResetPoints row n - 1, where a death in that sector respawns).
+std::string BallanceMMOClient::run_player_command(const bmmo::player_command& command) {
+    if (!m_bml->IsIngame()) return "error not ingame";
+    double position[3] = {command.position[0], command.position[1], command.position[2]};
+    if (command.kind == bmmo::player_command_kind::Beam) return automation_beam(position, -1);
+    if (command.sector < 1) return "error sector < 1";
+    if (command.kind == bmmo::player_command_kind::Sector) return automation_sector(command.sector);
+    if (command.kind != bmmo::player_command_kind::TeleportSector) return "error unknown player command";
+    CKDataArray* resets = m_bml->GetArrayByName("ResetPoints");
+    if (!resets || command.sector > resets->GetRowCount()) return std::format("error no reset point for sector {}", command.sector);
+    VxMatrix reset;
+    if (!resets->GetElementValue(command.sector - 1, 0, &reset)) return "error ResetPoints unreadable";
+    for (int k = 0; k < 3; ++k) position[k] = reset[3][k];
+    const auto sector = automation_sector(command.sector);
+    return sector + "; " + automation_beam(position, -1);
+}
+
 std::string BallanceMMOClient::dispatch_automation_command(const std::string& line) {
     std::istringstream stream(line);
     std::string verb;
@@ -389,6 +461,8 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     std::getline(stream, rest);
     if (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
 
+    if (!automation_permitted(verb, rest))
+        return "error " + verb + " needs operator permission from the server (its console: op <name>)";
     if (verb == "ping") return "pong";
     if (verb == "status") return automation_status_line();
     // FULL step SLG: what the player list is made of - this client's sector
@@ -673,34 +747,14 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         return "ok level reset requested";
     }
     if (verb == "sector") {
-        // sector <n>: activate that sector's mechanisms the way the server's
-        // world does, so a later sector's bodies exist without playing the
-        // level.  The headless replay does the same with --sector at the same
-        // frame, which is how the mechanisms are checked for bit-exactness.
-        int sector = std::atoi(rest.c_str());
+        const int sector = std::atoi(rest.c_str());
         if (sector < 1) return "error usage: sector <n>";
-        // In a running session the activation is an input (neutralization N3):
-        // stamped ahead, sent, and run here at that tick, like a crossed
-        // checkpoint - the server activates at the same tick.
-        if (std::string answer; core_host_sector(sector, answer)) return answer;   // the shared core's session (R1)
-        auto* context = m_bml->GetCKContext();
-        CKDataArray* parameters = m_bml->GetArrayByName("IngameParameter");
-        CKBehavior* manager = bmmo::game::find_root_script(context, "Gameplay_SectorManager");
-        if (!parameters || !manager) return "error IngameParameter or Gameplay_SectorManager missing";
-        int none = 0;
-        parameters->SetElementValue(0, 2, &none, sizeof(none));
-        parameters->SetElementValue(0, 1, &sector, sizeof(sector));
-        if (CKScene* scene = context->GetCurrentScene()) scene->Activate(manager, TRUE);
-        return std::format("ok sector {} activated at frame {}", sector, record_frames_);
+        return automation_sector(sector);
     }
     if (verb == "beam") {
-        // beam <x> <y> <z>: put the current ball there at rest, so it falls
-        // onto a mechanism.  The headless replay does the same with --beam at
-        // the same frame.  In a physics session the core makes the beam (below,
-        // core_host_beam) so the server's copy of the ball moves with it.
         std::istringstream args(rest);
-        double x = 0, y = 0, z = 0;
-        if (!(args >> x >> y >> z)) return "error usage: beam <x> <y> <z> [at <tick>]";
+        double position[3] = {};
+        if (!(args >> position[0] >> position[1] >> position[2])) return "error usage: beam <x> <y> <z> [at <tick>]";
         // 'at <tick>' (a core session only): the beam stamped exactly that
         // session tick (session/core_host.cpp core_host_due_beams).  Any
         // other trailing word is ignored, as the verb always did.
@@ -708,22 +762,7 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         if (std::string word; args >> word && word == "at") {
             if (!(args >> at) || at < 0) return "error usage: beam <x> <y> <z> [at <tick>]";
         }
-        std::string error;
-        if (!physics_view_.available() && !physics_view_.initialize(m_bml->GetCKContext(), error))
-            return "error " + error;
-        CK3dObject* ball = get_current_ball();
-        if (!ball || !ball->GetName()) return "error no current ball";
-        const double position[3] = {x, y, z};
-        // A session the shared core runs: a request the core makes at the end
-        // of this frame's step, in place, stamped T + 1 (R1).
-        if (std::string answer; core_host_beam(position, answer, at)) return answer;
-        if (at >= 0) return "error beam ... at <tick>: only a running session core stamps a beam at a tick";
-        const double upright[4] = {0.0, 0.0, 0.0, 1.0};
-        const float still[3] = {0.0f, 0.0f, 0.0f};
-        if (!physics_view_.set_body_state(ball->GetName(), position, upright, still, still, true, error))
-            return "error " + error;
-        return std::format("ok beamed {} to ({:.3f},{:.3f},{:.3f}) at frame {}", ball->GetName(), x, y, z,
-                           record_frames_);
+        return automation_beam(position, at);
     }
     if (verb == "array") {
         // array <name>: every cell of a CKDataArray (diagnostics).
@@ -758,12 +797,6 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
         args >> record_exact_from_ >> record_exact_to_;
         return "ok exact core dumps for frames " + std::to_string(record_exact_from_) + ".."
              + std::to_string(record_exact_to_);
-    }
-    if (verb == "fpu53") {
-        // Experiment: force 53-bit x87 precision at every frame start (Direct3D
-        // leaves the game thread at 24 bits).
-        fpu53_ = rest.find("on") != std::string::npos;
-        return fpu53_ ? "ok x87 precision forced to 53 bits each frame" : "ok x87 precision left alone";
     }
     if (verb == "physlog") {
         std::string error;

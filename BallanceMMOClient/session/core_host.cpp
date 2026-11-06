@@ -2762,10 +2762,10 @@ void BallanceMMOClient::core_host_start_capture(const std::string& start_bytes) 
     for (const auto byte: msg.map.md5) md5 += std::format("{:02x}", static_cast<unsigned>(static_cast<uint8_t>(byte)));
     const std::string header = std::format(
         "bmmo-retail-capture 1 build={} session={} level={} map={} own={} snapshots={} cache={} parked={} trace={} "
-        "rollback={} nonblocking={} fpu53={} final_checkpoints={} checkpoint_ticks={}",
+        "rollback={} nonblocking={} final_checkpoints={} checkpoint_ticks={}",
         physics_view_.build_id(), msg.session, msg.map.level, md5, db_.get_client_id(), snapshots_next.load() ? 1 : 0,
         static_cast<int>(capture_cache_next.load()), own_births_parked_next.load() ? 1 : 0, core_trace ? 1 : 0,
-        core_rollback ? 1 : 0, anchor_freeze.nonblocking ? 1 : 0, fpu53_ ? 1 : 0, diag_final_checkpoints() ? 1 : 0,
+        core_rollback ? 1 : 0, anchor_freeze.nonblocking ? 1 : 0, diag_final_checkpoints() ? 1 : 0,
         journal_checkpoint_ticks())
         + core_host_capture_players();
     std::string error;
@@ -2879,7 +2879,6 @@ std::string BallanceMMOClient::core_host_capture_verb(const std::string& rest) {
     const auto number = [&](const char* key) { return h.count(key) ? std::strtoll(h[key].c_str(), nullptr, 10) : 0LL; };
     std::string refused;
     if (h["build"] != physics_view_.build_id()) refused = "captured by build " + h["build"] + ", this is " + physics_view_.build_id();
-    else if (number("fpu53") != (fpu53_ ? 1 : 0)) refused = "captured with fpu53 " + h["fpu53"];
     else if (number("level") != current_map_.level) refused = std::format("captured in level {}, this game is in level {}", h["level"], current_map_.level);
     else if (!m_bml->IsIngame()) refused = "load the capture's level first";
     if (!refused.empty()) {

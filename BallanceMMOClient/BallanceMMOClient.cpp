@@ -1620,7 +1620,7 @@ std::vector<std::string> BallanceMMOClient::OnTabComplete(IBML* bml, const std::
                     return {"status", "session", "journal", "record", "replay", "level", "entity", "objects",
                             "physobjs", "physview", "sector", "restart", "beam", "explode", "activate", "screenshot", "panel",
                             "key", "array", "script", "scripts", "message", "rng", "physlog", "physdump", "fixedtick",
-                            "exactframes", "fpu53", "ping", "quit"};
+                            "exactframes", "ping", "quit"};
                 const auto sub = boost::algorithm::to_lower_copy(args[2]);
                 if (length == 4 && (sub == "record" || sub == "replay")) return {"start", "stop"};
                 if (length == 4 && sub == "explode") return {"wood", "paper", "stone"};
@@ -2732,9 +2732,18 @@ void BallanceMMOClient::handle_message(const bmmo::net::message& received) {
                               : msg.text_content), bmmo::ansi::WhiteInverse);
         break;
     }
+    case bmmo::PlayerCommand: {
+        auto* msg = bmmo::message_utils::view_as<bmmo::player_command_msg>(network_msg);
+        if (!msg) break;
+        const auto answer = run_player_command(msg->content);
+        logger_->Info("Server command: %s", answer.c_str());
+        SendIngameMessage("[Server] " + answer);
+        break;
+    }
     case bmmo::OpState: {
         auto* msg = bmmo::message_utils::view_as<bmmo::op_state_msg>(network_msg);
         if (!msg) break;
+        own_op_ = msg->content.op != 0;
         SendIngameMessage(std::format("You have been {} Operator permission.",
                 msg->content.op ? "granted" : "removed from"), bmmo::color_code(msg->code));
         break;

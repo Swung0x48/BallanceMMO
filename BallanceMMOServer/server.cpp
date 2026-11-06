@@ -4220,6 +4220,10 @@ protected:
                 }
                 accepted_msg.serialize();
                 send(networking_msg->conn, accepted_msg.raw.str().data(), accepted_msg.size(), bmmo::net::kSendReliable);
+                // An operator learns it at login too (set_op tells a change): the client's automation
+                // verbs that change the game run only with this permission while connected.
+                if (is_op(networking_msg->conn))
+                    send(networking_msg->conn, bmmo::op_state_msg{.content = {.op = 1}}, bmmo::net::kSendReliable);
 
                 save_login_data(networking_msg->conn);
 
@@ -5429,6 +5433,39 @@ int main(int argc, char** argv) {
             server.set_mute(client, action);
     });
     console.register_aliases("op", {"deop", "mute", "unmute"});
+    // beam <player> <x> <y> <z> | sector <player> <n> | tpsector <player> <n>: the player's client
+    // runs it (player_command_msg.hpp), so a physics session stays one world.
+    console.register_command("beam", [&] {
+        const auto& cmd = console.get_command_name();
+        const bool beam = cmd == "beam";
+        const char* usage = beam ? "Usage: \"beam <player> <x> <y> <z>\"." : "Usage: \"sector|tpsector <player> <n>\".";
+        auto client = get_client_id_from_console();
+        if (client == 0 || client == bmmo::net::kInvalidConnection) return Printf(usage);
+        bmmo::player_command_msg msg{};
+        auto number = [&](double& out) {
+            const auto word = console.get_next_word();
+            char* end = nullptr;
+            out = std::strtod(word.c_str(), &end);
+            return !word.empty() && end && !*end;
+        };
+        double values[3] = {};
+        if (beam) {
+            if (!number(values[0]) || !number(values[1]) || !number(values[2])) return Printf(usage);
+            for (int k = 0; k < 3; ++k) msg.content.position[k] = static_cast<float>(values[k]);
+        } else {
+            if (!number(values[0]) || values[0] < 1 || values[0] != static_cast<int32_t>(values[0])) return Printf(usage);
+            msg.content.sector = static_cast<int32_t>(values[0]);
+            msg.content.kind = cmd == "sector" ? bmmo::player_command_kind::Sector : bmmo::player_command_kind::TeleportSector;
+        }
+        if (!server.send(client, msg, bmmo::net::kSendReliable))
+            return Printf("Error: could not send %s to #%u.", cmd, client);
+        if (beam)
+            Printf("Sent beam to %s (#%u): (%.3f, %.3f, %.3f).", server.get_client_name(client), client,
+                   msg.content.position[0], msg.content.position[1], msg.content.position[2]);
+        else
+            Printf("Sent %s %d to %s (#%u).", cmd, msg.content.sector, server.get_client_name(client), client);
+    });
+    console.register_aliases("beam", {"sector", "tpsector"});
     console.register_command("listban", [&] { server.print_bans(); });
     console.register_command("listmute", [&] { server.print_mutes(); });
     console.register_command("unban", [&] { server.set_unban(console.get_next_word()); });

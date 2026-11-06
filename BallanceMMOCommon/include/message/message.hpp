@@ -115,6 +115,8 @@ namespace bmmo {
         // Protocol 32 (step SPL): the server's world boot, by phase, to the
         // room's members before their SessionStart.
         SessionBootStatus,
+        // The server console's beam / sector / tpsector for one player (player_command_msg.hpp).
+        PlayerCommand,
     };
 
     template<typename T, opcode C = None>
