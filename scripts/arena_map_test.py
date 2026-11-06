@@ -1876,7 +1876,7 @@ def server_log_text(case_dir):
 def relay_samples(path):
     import journal_trace as jt
     import struct
-    reader = jt.JournalReader(path.read_bytes())
+    reader = jt.JournalReader(jt.read_journal_bytes(path))   # a zstd stream since 901af527
     offset = len(jt.MAGIC) + 4
     _, payload, offset = reader._next(offset)
     current = reader._header(payload)['first_tick']
