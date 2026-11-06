@@ -78,6 +78,7 @@ namespace bmmo::session::core {
         std::function<void()> prepare;
         if (platform.journal_prepare && path.has_parent_path())
             prepare = [hook = platform.journal_prepare, directory = path.parent_path()] { hook(directory); };
+        journal_.set_compressed(true);   // a zstd stream (session/zstd_stream.hpp)
         if (!journal_.open(path, header, kJournalMaxBytes, error, std::move(poster),
                            bmmo::session::kJournalMaxQueued,
                            platform.journal_flush ? platform.journal_flush() : bmmo::session::io_flush::batch,

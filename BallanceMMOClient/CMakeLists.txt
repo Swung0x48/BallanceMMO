@@ -182,6 +182,7 @@ target_include_directories(BallanceMMOClient PRIVATE
                             ${PARALLEL_HASHMAP_INCLUDE_DIR})
 target_link_libraries(BallanceMMOClient PRIVATE
                         bmmo_minhook
+                        bmmo_zstd
                         replxx
                         GameNetworkingSockets::shared
                         OpenSSL::Crypto

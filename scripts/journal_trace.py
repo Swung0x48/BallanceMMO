@@ -936,15 +936,42 @@ class JournalReader(object):
 MMAP_THRESHOLD = 8 << 20
 
 
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def unzstd(data):
+    """A compressed journal's bytes (the hosts write a zstd stream since
+    2026-11-05): decompressed as far as the data goes, so a file cut short by a
+    crash reads up to its last flushed 66-tick segment."""
+    try:
+        from compression import zstd  # Python 3.14+
+        return zstd.ZstdDecompressor().decompress(bytes(data))
+    except ImportError:
+        import zstandard  # older Pythons: pip install zstandard
+        return zstandard.ZstdDecompressor().decompressobj().decompress(bytes(data))
+
+
+def read_journal_bytes(path):
+    """The journal's record bytes, decompressed when the file is a zstd stream."""
+    with open(path, "rb") as handle:
+        data = handle.read()
+    return unzstd(data) if data[:4] == ZSTD_MAGIC else data
+
+
 def read_journal(path, summary=False):
     """Parse one journal; `summary` keeps only what --list prints.
 
     The heap, not the disk, is what hurts on a capped 256 MB journal: a dict
     per INPUT record costs gigabytes for a listing that never looks at one.
     Summary mode drops them as they are parsed and the file is mapped rather
-    than read, so --list stays a triage pass.
+    than read, so --list stays a triage pass.  A compressed journal is
+    decompressed into memory first.
     """
     with open(path, "rb") as handle:
+        if handle.read(4) == ZSTD_MAGIC:
+            handle.seek(0)
+            return JournalReader(unzstd(handle.read()), path, summary).read()
+        handle.seek(0)
         try:
             size = os.fstat(handle.fileno()).st_size
         except OSError:

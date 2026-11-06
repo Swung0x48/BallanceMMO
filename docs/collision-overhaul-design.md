@@ -754,6 +754,8 @@ BodyRevived 是客户端盖 tick 6、服务端 tick 7 才应用的，还有三�
 （协议只把加入通知给加入者本人，既有成员拿不到他的 join order；写死一个错的比写明是猜的更糟）；
 离开则由 `PlayerLeft` 写一条移除记录，因为服务端会把这个玩家连同刚体和输入状态一起从世界里去掉。
 
+**压缩（2026-11-05，用户决定）。** 服务端和客户端（headless、原版模组）的会话 journal 写成 zstd 流（`session/zstd_stream.hpp`，等级 3，zstd v1.5.7 子模块静态链接，无新 DLL）：记录按 66 tick 一段交给写线程，每段压缩后 flush，所以压缩字节只由记录决定（同样的记录 → 同样的文件），崩溃时文件可解到最后一段；大小上限（256 MB）按磁盘上的字节算。实测 trial 2 第 8 关：客户端 9.4×、服务端 6.4×，256 MB 约存 3 小时两人会话（原来客户端 19 分钟、服务端 32 分钟）。文件名不变，读者（`scan_journal`、`journal_trace.py`）认 zstd 魔数，旧的未压缩文件照读。SimTool 的 `--write-journal` 和单元测试仍写未压缩。
+
 命令：`/mmo journal on|off|status|mark <text>`（自动化通道里是 `journal ...`，`/mmo auto journal ...`
 也走同一个分发器，tab 补全已收录）。`on`/`off` 写的就是上面那个 BML 属性，两者是同一个开关，不是两个；
 唯一的即时效果是 `off` 会把当下正开着的文件收尾关闭（打这条命令的人就是要它现在停）。

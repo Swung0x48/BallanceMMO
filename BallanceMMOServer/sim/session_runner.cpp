@@ -365,6 +365,7 @@ namespace bmmo::sim {
         const auto path = config_.journal_dir / journal_file_name(s.id, s.level, header.utc_ms);
         s.journal_start = logical_;
         std::string error;
+        s.journal.set_compressed(true);   // a zstd stream (session/zstd_stream.hpp)
         if (!s.journal.open(path, header, config_.journal_max_bytes, error, std::move(poster),
                             bmmo::session::kJournalMaxQueued, config_.journal_flush, {},
                             [this, prefix](const std::string& text) { log(prefix + text); })) {

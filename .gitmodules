@@ -22,3 +22,6 @@
 [submodule "submodule/picojson"]
 	path = submodule/picojson
 	url = https://github.com/kazuho/picojson.git
+[submodule "submodule/zstd"]
+	path = submodule/zstd
+	url = https://github.com/facebook/zstd.git

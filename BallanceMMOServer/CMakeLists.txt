@@ -93,7 +93,7 @@ endif ()  # NOT BMMO_BUILD_SIM_ONLY
 if (NOT BMMO_BUILD_SIM_ONLY)
 add_executable(BallanceMMOServer server.cpp config_manager.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
 target_include_directories(BallanceMMOServer PRIVATE)
-target_link_libraries(BallanceMMOServer ${BMMO_GNS_LIB} yaml-cpp replxx)
+target_link_libraries(BallanceMMOServer ${BMMO_GNS_LIB} yaml-cpp replxx bmmo_zstd)
 add_executable(BallanceMMOMockClient client.cpp ${BMMO_COMMON_SRC} ${YA_GETOPT_SRC})
 target_include_directories(BallanceMMOMockClient PRIVATE)
 target_link_libraries(BallanceMMOMockClient ${BMMO_GNS_LIB} replxx)
@@ -147,7 +147,7 @@ if (BMMO_BUILD_SIM)
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include"
             "${CMAKE_CURRENT_LIST_DIR}/../BallanceMMOCommon/include/config"
             "${BMMO_PLAYER_SRC_DIR}" "${BMMO_PLAYER_GENERATED_DIR}")
-    target_link_libraries(BallanceMMOSim PUBLIC ${BMMO_HEADLESS_TARGET})
+    target_link_libraries(BallanceMMOSim PUBLIC ${BMMO_HEADLESS_TARGET} bmmo_zstd)
     # The bridge (physics_state.cpp, and the savestate's three translation
     # units physics_savestate_*.cpp) reads IVP classes whose layout the macro
     # changes - engine change #5 adds the per-unit movement-check countdown to
@@ -302,7 +302,7 @@ if (BUILD_SERVER_TESTS)
     add_executable(BallanceMMOMessageTests tests/message_layer_tests.cpp tests/room_manager_test.cpp tests/session_messages_test.cpp tests/session_logic_test.cpp tests/session_lifecycle_test.cpp tests/rollback_engine_test.cpp tests/rollback_binding_test.cpp tests/input_relay_test.cpp tests/spawn_impulse_test.cpp tests/session_journal_test.cpp tests/correction_thresholds_test.cpp tests/sector_pacer_test.cpp tests/sector_union_test.cpp tests/placement_plan_test.cpp tests/world_hash_test.cpp tests/written_cells_memo_test.cpp tests/script_record_reuse_test.cpp tests/lateness_test.cpp tests/patience_test.cpp tests/lead_test.cpp tests/session_client_core_test.cpp tests/trafo_input_test.cpp tests/proximity_rules_test.cpp tests/collectible_rules_test.cpp tests/net_transport_test.cpp
             ${BMMO_SESSION_CORE_SRC})
     target_sources(BallanceMMOMessageTests PRIVATE tests/script_slots_test.cpp)
-    target_link_libraries(BallanceMMOMessageTests PRIVATE GTest::gtest_main ${BMMO_GNS_LIB})
+    target_link_libraries(BallanceMMOMessageTests PRIVATE GTest::gtest_main ${BMMO_GNS_LIB} bmmo_zstd)
     if (WIN32)
         target_compile_definitions(BallanceMMOMessageTests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     endif()

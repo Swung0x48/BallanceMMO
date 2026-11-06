@@ -58,6 +58,25 @@ option(BUILD_CLIENT "Build BallanceMMO Client" ON)
 option(BMMO_BUILD_SIM "Build the headless Ballanced simulation runtime into the server" ON)
 option(BMMO_BUILD_PHYSICS_RT "Build the open-source physics_RT plugin with the BallanceMMO bridge (client)" ON)
 
+# zstd v1.5.7 (submodule/zstd): the session journal's compression stream
+# (session/zstd_stream.hpp), built here and linked statically everywhere -
+# Windows x86 / x64, Linux, Android - so no host needs a zstd of its own and
+# the retail mod brings no new DLL.  Single-threaded, no assembly: the same
+# bytes on every platform.
+file(GLOB BMMO_ZSTD_SRC
+        ${CMAKE_CURRENT_LIST_DIR}/submodule/zstd/lib/common/*.c
+        ${CMAKE_CURRENT_LIST_DIR}/submodule/zstd/lib/compress/*.c
+        ${CMAKE_CURRENT_LIST_DIR}/submodule/zstd/lib/decompress/*.c)
+add_library(bmmo_zstd STATIC ${BMMO_ZSTD_SRC})
+target_include_directories(bmmo_zstd PUBLIC ${CMAKE_CURRENT_LIST_DIR}/submodule/zstd/lib)
+target_compile_definitions(bmmo_zstd PRIVATE ZSTD_DISABLE_ASM)
+set_target_properties(bmmo_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if (MSVC)
+    target_compile_options(bmmo_zstd PRIVATE /W0)
+else ()
+    target_compile_options(bmmo_zstd PRIVATE -w)
+endif ()
+
 if(BUILD_SERVER)
     add_subdirectory(BallanceMMOServer)
 endif()

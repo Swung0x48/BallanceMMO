@@ -144,6 +144,16 @@ namespace bmmo::session {
 
     namespace io_detail {
 
+        // What the bytes pass on the writer on their way to the file (the
+        // journal's zstd stream, session/zstd_stream.hpp): put() takes one
+        // chunk and gives what goes to the file, flushed so the file decodes up
+        // to there; finish() the stream's end, before the file closes.
+        struct io_transform {
+            virtual ~io_transform() = default;
+            virtual bool put(const std::string& chunk, std::string& out) = 0;
+            virtual bool finish(std::string& out) = 0;
+        };
+
         struct queue_state {
             // ---- the queue (queue_mutex: held for a push or a swap, never
             // across I/O; timed, so a crash drain never waits forever on a
@@ -158,6 +168,7 @@ namespace bmmo::session {
             std::FILE* file = nullptr;
             bool own_file = true;          // false: stdout, never closed
             io_sink sink;                  // step IOX: set = chunks go here, not to fwrite(file)
+            std::unique_ptr<io_transform> transform;   // set = each chunk passes it first (io_mutex)
             // Step IOF: the writer's flush mode (io_flush; batch by default,
             // the user's decision of 2026-10-29).  Atomic: the headless
             // client sets its log's mode after the log is open (set_flush).
@@ -185,6 +196,7 @@ namespace bmmo::session {
             std::atomic<uint64_t> batches{0};
             std::atomic<uint64_t> flushes{0};   // the mode's fflushes (step IOF), not the close's or a drain's
             std::atomic<bool> failed{false};
+            std::atomic<uint64_t> written{0};   // bytes that reached the file (after the transform)
 
             queue_state() = default;
             queue_state(const queue_state&) = delete;
@@ -257,11 +269,30 @@ namespace bmmo::session {
             r.queues.swap(live);
         }
 
-        // io_mutex held: one chunk to the file, or to the sink (step IOX).
-        inline void put_chunk(queue_state& s, const std::string& c) {
+        // io_mutex held: bytes to the file, or to the sink (step IOX).
+        inline void put_bytes(queue_state& s, const std::string& c) {
             if (c.empty()) return;
             const bool ok = s.sink ? s.sink(c) : std::fwrite(c.data(), 1, c.size(), s.file) == c.size();
             if (!ok) s.failed.store(true, std::memory_order_relaxed);
+            else s.written.fetch_add(c.size(), std::memory_order_relaxed);
+        }
+        // io_mutex held: one chunk, through the transform when there is one.
+        inline void put_chunk(queue_state& s, const std::string& c) {
+            if (c.empty()) return;
+            if (!s.transform) return put_bytes(s, c);
+            std::string out;
+            if (!s.transform->put(c, out)) s.failed.store(true, std::memory_order_relaxed);
+            else put_bytes(s, out);
+        }
+        // io_mutex held: the transform's end, before the file closes (once).
+        inline void end_transform(queue_state& s) {
+            if (!s.transform) return;
+            std::string out;
+            if (s.file && !s.failed.load(std::memory_order_relaxed)) {
+                if (!s.transform->finish(out)) s.failed.store(true, std::memory_order_relaxed);
+                else put_bytes(s, out);
+            }
+            s.transform.reset();
         }
 
         // io_mutex held.  `flush_each` (the writer's record mode, step IOF):
@@ -278,6 +309,7 @@ namespace bmmo::session {
         }
         // io_mutex held.
         inline void finish_file(queue_state& s) {
+            end_transform(s);
             if (s.file) {
                 if (s.own_file) {
                     if (std::fclose(s.file) != 0) s.failed.store(true, std::memory_order_relaxed);
@@ -392,6 +424,7 @@ namespace bmmo::session {
             if (!file) return;
             for (const auto& c: pending)
                 if (!failed.load(std::memory_order_relaxed)) put_chunk(*this, c);
+            end_transform(*this);
             if (own_file) std::fclose(file);
             else std::fflush(file);
         }
@@ -522,6 +555,15 @@ namespace bmmo::session {
         // close's and the drains' not counted).  After a close it is the
         // count as of the close call: a batch still running then is missed.
         uint64_t flushes() const { return state_ ? state_->flushes.load(std::memory_order_relaxed) : flushes_; }
+
+        // Every chunk from here on passes `transform` on the writer (set it
+        // before the first append: the writer may not have the file yet).
+        void set_transform(std::unique_ptr<io_detail::io_transform> transform) {
+            if (state_) state_->transform = std::move(transform);
+        }
+        // The bytes that reached the file so far (after the transform; the
+        // writer's count, so it lags what is queued).
+        uint64_t written() const { return state_ ? state_->written.load(std::memory_order_relaxed) : 0; }
 
         bool is_open() const { return state_ != nullptr; }
         bool async() const { return state_ && state_->poster; }

@@ -572,6 +572,60 @@ TEST(SessionJournal, TruncatedTailKeepsTheTicksBeforeIt) {
     EXPECT_EQ(22u, complete.records);
 }
 
+// A compressed journal (zstd, 66-tick segments) reads as the plain one, its bytes follow from the
+// records alone, a cut keeps every segment before it, and the cap counts the bytes on disk.
+TEST(SessionJournal, CompressedJournalReadsLikeThePlainOne) {
+    const temp_dir dir("compressed");
+    auto write = [&](const std::filesystem::path& path, bool compressed, uint64_t cap) {
+        journal_writer writer;
+        writer.set_compressed(compressed);
+        std::string error;
+        EXPECT_TRUE(writer.open(path, make_header(), cap, error)) << error;
+        for (uint32_t t = 100; t < 400 && !writer.capped(); ++t) {
+            writer.tick(t, make_hash(t), 1);
+            writer.input(t, 42, t % 7 ? kFrameA : kFrameB, JOURNAL_INPUT_FRESH);
+        }
+        writer.close();
+    };
+    const auto plain = dir.file("plain.bmjs"), packed = dir.file("packed.bmjs"), again = dir.file("again.bmjs");
+    write(plain, false, 0);
+    write(packed, true, 0);
+    write(again, true, 0);
+    const std::string bytes = read_file(packed);
+    EXPECT_EQ(bytes, read_file(again));
+    EXPECT_TRUE(bmmo::session::is_zstd_frame(bytes.data(), bytes.size()));
+    EXPECT_LT(bytes.size() * 3, std::filesystem::file_size(plain));
+
+    journal a, b;
+    std::string error;
+    ASSERT_TRUE(read_journal(plain, a, error)) << error;
+    ASSERT_TRUE(read_journal(packed, b, error)) << error;
+    EXPECT_EQ(300u, b.ticks.size());
+    EXPECT_EQ(a.records, b.records);
+    EXPECT_EQ(a.bytes_read, b.bytes_read);
+    EXPECT_EQ(0u, b.bytes_dropped);
+    EXPECT_TRUE(b.warning.empty()) << b.warning;
+
+    // A process that died mid-session: the file ends inside a segment, with no frame end.
+    const auto cut = dir.file("cut.bmjs");
+    write_file(cut, bytes.substr(0, bytes.size() / 2));
+    journal c;
+    ASSERT_TRUE(read_journal(cut, c, error)) << error;
+    EXPECT_GE(c.ticks.size(), 66u);
+    EXPECT_LT(c.ticks.size(), 300u);
+    EXPECT_EQ(0u, c.ticks.size() % 66) << "whole segments only";
+
+    // The cap on the bytes on disk: the session stops with the cap note, the file near the cap.
+    const auto capped = dir.file("capped.bmjs");
+    write(capped, true, 1500);
+    journal d;
+    ASSERT_TRUE(read_journal(capped, d, error)) << error;
+    ASSERT_FALSE(d.notes.empty());
+    EXPECT_EQ("cap: journal_max_bytes reached, recording stopped", d.notes.back().text);
+    EXPECT_LT(std::filesystem::file_size(capped), 4000u);
+    EXPECT_GT(d.ticks.size(), 66u);
+}
+
 TEST(SessionJournal, UnknownTagIsSkippedAndCounted) {
     const temp_dir dir("unknown_tag");
     const auto path = dir.file("session.bmjr");

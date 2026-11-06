@@ -9,6 +9,14 @@
 // readers parse it (the SimTool's --replay-session, scripts/journal_trace.py,
 // the round-trip unit tests).
 //
+// Compression (2026-11-05, the user's decision): the hosts' session journals
+// (the server's, the headless and retail clients') are a zstd stream of the
+// bytes below (session/zstd_stream.hpp, level 3): the records go out in
+// 66-tick segments, each compressed and flushed by the writer, so the bytes
+// follow from the records alone and a file cut short decodes up to its last
+// segment; the size cap counts the bytes on disk.  The readers (scan_journal,
+// journal_trace.py) recognise the zstd magic and still read a plain file.
+//
 // File format, version 3.  Everything little-endian and written field by
 // field, never a struct dump: the writer may be a Linux x64 server and the
 // reader a Windows x86 client.  Version 2 differs from 1 only in what a TICK
@@ -90,6 +98,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <tuple>
@@ -99,6 +108,7 @@
 #include "../physics/physics_rt_api.h"
 #include "../physics/world_hash.hpp"
 #include "io_queue.hpp"
+#include "zstd_stream.hpp"
 
 namespace bmmo::session {
     enum class journal_tag : uint8_t {
@@ -645,6 +655,9 @@ namespace bmmo::session {
     // records (the As-built note has the measured rate); the retail mod is a
     // 32-bit process.
     constexpr uint64_t kJournalMaxQueued = 32ull << 20;
+    // A compressed journal's segment (the user's decision of 2026-11-05): the
+    // records of 66 ticks (about a second) per compressed flush.
+    constexpr uint32_t kJournalSegmentTicks = 66;
 
     // Writes a journal.  Step SIO: the records go to an io_queue
     // (session/io_queue.hpp).  With an io_poster (the host's I/O strand) the
@@ -658,7 +671,8 @@ namespace bmmo::session {
     class journal_writer {
     public:
         journal_writer() = default;
-        ~journal_writer() = default;   // an open queue closes synchronously (bounded wait)
+        // An open queue closes synchronously (bounded wait), the last segment in it.
+        ~journal_writer() { emit_segment(true); }
         journal_writer(const journal_writer&) = delete;
         journal_writer& operator=(const journal_writer&) = delete;
 
@@ -683,6 +697,8 @@ namespace bmmo::session {
             last_input_.clear();
             capped_ = false;
             bytes_ = 0;
+            segment_.clear();
+            compressed_ = compress_next_;
             last_tick_ = header.first_tick;
             max_bytes_ = max_bytes;
             path_ = path;
@@ -692,6 +708,7 @@ namespace bmmo::session {
                 path_.clear();
                 return false;
             }
+            if (compressed_) sink_.set_transform(std::make_unique<zstd_compressor>(kJournalZstdLevel));
             std::string start(kJournalMagic, sizeof(kJournalMagic));
             journal_detail::write_u32(start, kJournalVersion);
             std::string payload;
@@ -711,9 +728,17 @@ namespace bmmo::session {
             return true;
         }
 
+        // The next open() writes a zstd stream (session/zstd_stream.hpp): the
+        // records in 66-tick segments, each compressed and flushed by the
+        // writer, and the size cap counts the bytes on disk.  The hosts' session
+        // journals (the server's, the clients'); off for the tests and the SimTool.
+        void set_compressed(bool on) { compress_next_ = on; }
+        bool compressed() const { return compressed_; }
+
         bool is_open() const { return sink_.is_open(); }
         bool capped() const { return capped_; }
-        uint64_t bytes() const { return bytes_; }
+        uint64_t bytes() const { return bytes_; }   // the records' bytes, uncompressed
+        uint64_t bytes_on_disk() const { return compressed_ ? sink_.written() : bytes_; }
         const std::filesystem::path& path() const { return path_; }
         // Step SIO: the most bytes this file's writer queue held, and whether
         // a writer thread writes it.
@@ -884,14 +909,20 @@ namespace bmmo::session {
 
         // Explicit and blocking: everything queued is written and handed to
         // the OS.  No session path calls it (step SIO).
-        void flush() { sink_.flush(); }
+        void flush() {
+            emit_segment(true);
+            sink_.flush();
+        }
         // Step IOF: the writer strand's flush mode and its fflushes so far.
         io_flush flush_mode() const { return sink_.flush_mode(); }
         uint64_t writer_flushes() const { return sink_.flushes(); }
 
         // With a writer thread the close is posted (the strand writes what is
         // queued, then closes the file) and this returns at once.
-        void close() { sink_.close(); }
+        void close() {
+            emit_segment(true);
+            sink_.close();
+        }
 
     private:
         bool writable() const { return sink_.is_open() && !capped_; }
@@ -909,14 +940,35 @@ namespace bmmo::session {
             out += payload;
         }
 
-        // One record to the queue; `force`: past its bound (a stop note).
+        // One record to the queue; `force`: past its bound (a stop note).  A
+        // compressed journal gathers its records in segments: a record whose
+        // tick is kJournalSegmentTicks or more past the segment's first starts
+        // the next one, so the flushes (and so the compressed bytes) follow from
+        // the records alone.  A forced record goes out at once.
         bool write_record(journal_tag tag, const std::string& payload, bool force = false) {
             std::string bytes;
             bytes.reserve(5 + payload.size());
             append_record(bytes, tag, payload);
+            if (compressed_) {
+                if (!segment_.empty() && last_tick_ >= segment_tick_ + kJournalSegmentTicks && !emit_segment(force))
+                    return false;
+                if (segment_.empty()) segment_tick_ = last_tick_;
+                segment_ += bytes;
+                bytes_ += bytes.size();
+                return !force || emit_segment(true);
+            }
             if (!sink_.append(std::move(bytes), force)) return false;
             bytes_ += 5 + payload.size();
             return true;
+        }
+
+        // The gathered segment to the queue (false: the queue is full; the
+        // segment is dropped, as one record was before).
+        bool emit_segment(bool force) {
+            if (segment_.empty()) return true;
+            const bool ok = sink_.append(std::move(segment_), force);
+            segment_.clear();
+            return ok;
         }
 
         void record(journal_tag tag, const std::string& payload) {
@@ -933,7 +985,7 @@ namespace bmmo::session {
                 return;
             }
             const uint64_t size = 5 + payload.size();
-            if (max_bytes_ != 0 && bytes_ + size > max_bytes_) {
+            if (max_bytes_ != 0 && (compressed_ ? sink_.written() >= max_bytes_ : bytes_ + size > max_bytes_)) {
                 // The last thing in the file says why it stops; that note is
                 // itself written past the cap so the file is never silently
                 // truncated in the middle of a session.
@@ -969,6 +1021,7 @@ namespace bmmo::session {
                 case journal_tag::note:
                 case journal_tag::correction:
                 case journal_tag::resync:
+                    emit_segment(true);
                     sink_.flush();
                     break;
                 default:
@@ -984,6 +1037,9 @@ namespace bmmo::session {
         uint64_t bytes_ = 0;
         uint32_t last_tick_ = 0;
         bool capped_ = false;
+        bool compress_next_ = false, compressed_ = false;
+        std::string segment_;        // compressed: the records since segment_tick_, not queued yet
+        uint32_t segment_tick_ = 0;
     };
 
     // Records grouped by tick number (every record but the header carries
@@ -1028,7 +1084,8 @@ namespace bmmo::session {
     // (which also counts everything from a record the callback stopped at).
     inline bool scan_journal(const std::filesystem::path& path, journal_header& header,
                              const std::function<bool(journal_tag, const std::string& payload)>& on_record,
-                             std::string& error, uint64_t* bytes_dropped = nullptr, uint64_t* unknown = nullptr) {
+                             std::string& error, uint64_t* bytes_dropped = nullptr, uint64_t* unknown = nullptr,
+                             uint64_t* bytes_read = nullptr) {
         if (bytes_dropped) *bytes_dropped = 0;
         if (unknown) *unknown = 0;
         std::ifstream stream(path, std::ios::binary);
@@ -1045,13 +1102,30 @@ namespace bmmo::session {
         }
         const uint64_t file_size = static_cast<uint64_t>(end);
 
+        // A zstd stream (a host's session journal since 2026-11-05) is read
+        // through its decompression; its decompressed size is not known up
+        // front, so a record's size is bounded by kJournalMaxRecordBytes only.
+        char probe[4] = {};
+        stream.read(probe, sizeof(probe));
+        const bool compressed = stream.gcount() == sizeof(probe) && is_zstd_frame(probe, sizeof(probe));
+        stream.clear();
+        stream.seekg(0, std::ios::beg);
+        std::unique_ptr<zstd_reader> unpacked;
+        if (compressed) unpacked = std::make_unique<zstd_reader>(stream);
+        auto read = [&](char* to, size_t size) -> size_t {
+            if (unpacked) return unpacked->read(to, size);
+            stream.read(to, static_cast<std::streamsize>(size));
+            return static_cast<size_t>(stream.gcount());
+        };
+        const uint64_t data_size = compressed ? UINT64_MAX / 2 : file_size;
+
         char magic[sizeof(kJournalMagic)] = {};
         char version_bytes[4] = {};
-        if (!stream.read(magic, sizeof(magic)) || std::memcmp(magic, kJournalMagic, sizeof(magic)) != 0) {
+        if (read(magic, sizeof(magic)) != sizeof(magic) || std::memcmp(magic, kJournalMagic, sizeof(magic)) != 0) {
             error = "not a BMMO session journal: " + path.string();
             return false;
         }
-        if (!stream.read(version_bytes, sizeof(version_bytes))) {
+        if (read(version_bytes, sizeof(version_bytes)) != sizeof(version_bytes)) {
             error = "truncated journal header: " + path.string();
             return false;
         }
@@ -1064,18 +1138,34 @@ namespace bmmo::session {
         }
         uint64_t consumed = sizeof(kJournalMagic) + 4;
 
-        // tag + size + payload, or false when the file ends inside the record
+        // tag + size + payload, or false when the data ends inside the record
+        // (`partial`: the bytes of it that were there)
         std::string payload;
         uint8_t tag = 0;
+        uint64_t partial = 0;
         auto next_record = [&]() {
             char head[5] = {};
-            if (!stream.read(head, sizeof(head))) return false;
+            partial = read(head, sizeof(head));
+            if (partial != sizeof(head)) return false;
             const uint32_t size = journal_detail::load_u32(head + 1);
-            if (size > kJournalMaxRecordBytes || size > file_size - consumed - sizeof(head)) return false;
+            if (size > kJournalMaxRecordBytes || size > data_size - consumed - sizeof(head)) return false;
             payload.assign(size, '\0');
-            if (size != 0 && !stream.read(payload.data(), static_cast<std::streamsize>(size))) return false;
+            if (size != 0) {
+                const size_t got = read(payload.data(), size);
+                partial += got;
+                if (got != size) return false;
+            }
             tag = static_cast<uint8_t>(head[0]);
             return true;
+        };
+        // What is left from `at` (a record not read, or one the callback
+        // stopped at): the rest of the file, or of the decompressed data.
+        auto dropped_from = [&](uint64_t at, uint64_t read_of_it) -> uint64_t {
+            if (!compressed) return file_size > at ? file_size - at : 0;
+            uint64_t rest = read_of_it;
+            char sink[65536];
+            for (size_t got; (got = read(sink, sizeof(sink))) != 0;) rest += got;
+            return rest;
         };
 
         if (!next_record() || tag != static_cast<uint8_t>(journal_tag::header)
@@ -1088,7 +1178,8 @@ namespace bmmo::session {
         while (true) {
             const uint64_t at = consumed;
             if (!next_record()) {
-                if (bytes_dropped && file_size > at) *bytes_dropped = file_size - at;
+                if (bytes_dropped) *bytes_dropped = dropped_from(at, partial);
+                if (bytes_read) *bytes_read = at;
                 break;
             }
             consumed = at + 5 + payload.size();
@@ -1097,7 +1188,8 @@ namespace bmmo::session {
                 continue;
             }
             if (!on_record(static_cast<journal_tag>(tag), payload)) {
-                if (bytes_dropped && file_size > at) *bytes_dropped = file_size - at;
+                if (bytes_dropped) *bytes_dropped = dropped_from(at, 5 + payload.size());
+                if (bytes_read) *bytes_read = at;
                 break;
             }
         }
@@ -1344,15 +1436,12 @@ namespace bmmo::session {
         };
 
         uint64_t unknown = 0;
-        if (!scan_journal(path, out.header, on_record, error, &out.bytes_dropped, &unknown)) return false;
+        if (!scan_journal(path, out.header, on_record, error, &out.bytes_dropped, &unknown, &out.bytes_read)) return false;
         out.unknown_records = unknown;
         out.records = 1 + delivered + unknown;
         out.ticks.reserve(groups.size());
         for (auto& entry: groups) out.ticks.push_back(std::move(entry.second));
 
-        std::error_code ec;
-        const uintmax_t file_size = std::filesystem::file_size(path, ec);
-        if (!ec && file_size >= out.bytes_dropped) out.bytes_read = file_size - out.bytes_dropped;
         auto warn = [&](const std::string& text) {
             if (!out.warning.empty()) out.warning += "; ";
             out.warning += text;
