@@ -390,7 +390,10 @@ bool BallanceMMOClient::automation_ask_server(const std::string& verb, const std
     static const std::set<std::string> gated = {"beam", "sector", "explode", "activate", "restart", "key", "keys",
                                                 "message", "rng", "fixedtick", "exactframes", "pausechain"};
     if (automation_approved_) return false;
-    if (!gated.contains(verb) && !(verb == "replay" && rest.rfind("session", 0) == 0)) return false;
+    // 'replay session <record>' feeds keys into the session; its status and 'stop' do not.
+    const bool arms_replay = verb == "replay" && rest.rfind("session ", 0) == 0 && rest != "session status"
+                          && rest != "session stop";
+    if (!gated.contains(verb) && !arms_replay) return false;
     return bmmo::retail::session_capture::instance().flag(bmmo::session::clock_site::retail_operator, connected());
 }
 
