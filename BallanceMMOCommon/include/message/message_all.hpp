@@ -77,5 +77,6 @@
 #include "session_start_status_msg.hpp"
 #include "session_boot_status_msg.hpp"
 #include "player_command_msg.hpp"
+#include "automation_request_msg.hpp"
 
 #endif //BALLANCEMMOSERVER_MESSAGE_ALL_HPP

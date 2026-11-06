@@ -122,7 +122,7 @@ namespace bmmo::session {
         retail_blocking_wait,        // the blocking hold's and the resync hold's 1 ms polls
         retail_display,              // FREE (never recorded): what only a panel, a log or a measurement reads
         retail_connected,            // core host: whether the connection is up, where that steers the session (K7d; a value, not a time)
-        retail_operator,             // automation: whether a verb that needs the server's approval may run (a value)
+        retail_operator,             // automation: whether a gated verb is asked of the server (connected; a value)
         count_
     };
 

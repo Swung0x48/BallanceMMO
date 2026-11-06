@@ -2740,10 +2740,14 @@ void BallanceMMOClient::handle_message(const bmmo::net::message& received) {
         SendIngameMessage("[Server] " + answer);
         break;
     }
+    case bmmo::AutomationVerdict: {
+        auto* msg = bmmo::message_utils::view_as<bmmo::automation_verdict_msg>(network_msg);
+        if (msg) run_automation_verdict(msg->content);
+        break;
+    }
     case bmmo::OpState: {
         auto* msg = bmmo::message_utils::view_as<bmmo::op_state_msg>(network_msg);
         if (!msg) break;
-        own_op_ = msg->content.op != 0;
         SendIngameMessage(std::format("You have been {} Operator permission.",
                 msg->content.op ? "granted" : "removed from"), bmmo::color_code(msg->code));
         break;

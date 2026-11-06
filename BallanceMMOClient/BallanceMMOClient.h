@@ -477,7 +477,13 @@ private:
 	// out and the game's keyboard stays blocked exactly while it is open.
 	void room_panel_frame();
 	std::string dispatch_automation_command(const std::string& line);
-	bool automation_permitted(const std::string& verb, const std::string& rest);
+	bool automation_ask_server(const std::string& verb, const std::string& rest);
+	void run_automation_verdict(const bmmo::automation_verdict& verdict);
+	// Gated verbs asked of the server (game thread): the line, and whether the command bar sent it.
+	std::map<uint32_t, std::pair<std::string, bool>> automation_pending_;
+	uint32_t automation_request_id_ = 0;
+	bool automation_approved_ = false;    // dispatching a line the server approved
+	bool automation_from_console_ = false;
 	std::string automation_sector(int sector);
 	std::string automation_beam(const double position[3], int64_t at);
 	std::string run_player_command(const bmmo::player_command& command);
@@ -698,8 +704,6 @@ private:
 	std::string server_addr_, server_name_;
 	std::atomic_bool resolving_endpoint_ = false;
 	bool logged_in_ = false;
-	// Operator permission from this server (OpState: at login and on 'op'/'deop'); cleared with the connection.
-	std::atomic_bool own_op_ = false;
 	bmmo::net::microseconds next_update_timestamp_ = 0,
 		last_dnf_hotkey_timestamp_ = 0, dnf_cooldown_end_timestamp_ = 0;
 	std::atomic_int64_t server_realworld_timestamp_us_ = 0;
@@ -1256,7 +1260,6 @@ private:
 
 		resolving_endpoint_ = false;
 		logged_in_ = false;
-		own_op_ = false;
 
 		// Destroying spirit balls, sprites and sounds means destroying CK
 		// objects; when cleanup() is reached from the network thread (a lost
@@ -1265,6 +1268,7 @@ private:
 		// the game thread, so run_on_game_thread() executes this inline.
 		utils_.run_on_game_thread([this, down] {
 			core_host_end_local("disconnected");
+			automation_pending_.clear();   // requests the server will never answer now
 			toggle_own_spirit_ball(false);
 			objects_.destroy_all_objects();
 			local_state_handler_.reset();

@@ -246,7 +246,9 @@ void BallanceMMOClient::process_console_commands() {
     if (!capture.replaying()) lines = live;
     capture.take(bmmo::retail::take_site::console, lines);
     if (capture.replaying()) lines.insert(lines.end(), live.begin(), live.end());
+    automation_from_console_ = true;
     for (const auto& line: lines) SendIngameMessage(dispatch_automation_command(line));
+    automation_from_console_ = false;
 }
 
 void BallanceMMOClient::install_input_hook() {
@@ -380,15 +382,39 @@ std::string BallanceMMOClient::automation_load_level(int level) {
 }
 
 // The verbs that change the game outside its rules run only with the server's approval: while
-// connected to a server (or connecting), this client must hold its operator permission (the
-// server's 'op <name>').  Offline there is no one to play against, so they run.  The answer is a
-// session capture's (retail_operator), so a replay refuses what the live run refused.
-bool BallanceMMOClient::automation_permitted(const std::string& verb, const std::string& rest) {
+// connected, such a line is asked of the server (AutomationRequest) and runs when its verdict
+// approves it (run_automation_verdict; the server approves an operator only).  Offline there is no
+// one to play against, so it runs at once.  Whether it is asked is a session capture's
+// (retail_operator), and the verdict comes through the inbox, so a replay does what the live run did.
+bool BallanceMMOClient::automation_ask_server(const std::string& verb, const std::string& rest) {
     static const std::set<std::string> gated = {"beam", "sector", "explode", "activate", "restart", "key", "keys",
                                                 "message", "rng", "fixedtick", "exactframes", "pausechain"};
-    if (!gated.contains(verb) && !(verb == "replay" && rest.rfind("session", 0) == 0)) return true;
-    const bool live = !(connected() || connecting()) || own_op_.load();
-    return bmmo::retail::session_capture::instance().flag(bmmo::session::clock_site::retail_operator, live);
+    if (automation_approved_) return false;
+    if (!gated.contains(verb) && !(verb == "replay" && rest.rfind("session", 0) == 0)) return false;
+    return bmmo::retail::session_capture::instance().flag(bmmo::session::clock_site::retail_operator, connected());
+}
+
+// Game thread (the inbox): the server's answer to an automation request.
+void BallanceMMOClient::run_automation_verdict(const bmmo::automation_verdict& verdict) {
+    const auto it = automation_pending_.find(verdict.id);
+    if (it == automation_pending_.end()) return;
+    const auto [line, from_console] = it->second;
+    automation_pending_.erase(it);
+    std::string answer;
+    if (verdict.approved) {
+        automation_approved_ = true;
+        try {
+            answer = dispatch_automation_command(line);
+        } catch (const std::exception& e) {
+            answer = std::string("error ") + e.what();
+        }
+        automation_approved_ = false;
+    } else {
+        answer = "error " + line.substr(0, line.find(' ')) + " refused by the server: "
+               + bmmo::action_denied{verdict.reason}.to_string() + " It needs operator permission (server console: op <name>).";
+    }
+    logger_->Info("Automation (request %u): %s -> %s", verdict.id, line.c_str(), answer.substr(0, 300).c_str());
+    if (from_console || !verdict.approved) SendIngameMessage(answer);
 }
 
 // sector <n>: activate that sector's mechanisms the way the server's world
@@ -461,8 +487,14 @@ std::string BallanceMMOClient::dispatch_automation_command(const std::string& li
     std::getline(stream, rest);
     if (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
 
-    if (!automation_permitted(verb, rest))
-        return "error " + verb + " needs operator permission from the server (its console: op <name>)";
+    if (automation_ask_server(verb, rest)) {
+        const uint32_t id = ++automation_request_id_;
+        automation_pending_[id] = {line, automation_from_console_};
+        bmmo::automation_request_msg request{.content = {.id = id}};
+        std::strncpy(request.content.verb, verb.c_str(), sizeof(request.content.verb) - 1);
+        send(&request, sizeof(request), bmmo::net::kSendReliable);
+        return std::format("ok {} asked of the server (request {}): it runs when the server approves", verb, id);
+    }
     if (verb == "ping") return "pong";
     if (verb == "status") return automation_status_line();
     // FULL step SLG: what the player list is made of - this client's sector

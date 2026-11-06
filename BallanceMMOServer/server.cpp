@@ -4220,10 +4220,6 @@ protected:
                 }
                 accepted_msg.serialize();
                 send(networking_msg->conn, accepted_msg.raw.str().data(), accepted_msg.size(), bmmo::net::kSendReliable);
-                // An operator learns it at login too (set_op tells a change): the client's automation
-                // verbs that change the game run only with this permission while connected.
-                if (is_op(networking_msg->conn))
-                    send(networking_msg->conn, bmmo::op_state_msg{.content = {.op = 1}}, bmmo::net::kSendReliable);
 
                 save_login_data(networking_msg->conn);
 
@@ -4565,6 +4561,21 @@ protected:
                 new_msg.content.state.cheated = state_msg->content.cheated;
                 broadcast_message(&new_msg, sizeof(new_msg), bmmo::net::kSendReliable);
 
+                break;
+            }
+            case bmmo::AutomationRequest: {
+                // A client's automation verb that changes the game: approved for an operator only.
+                auto* request = bmmo::message_utils::view_as<bmmo::automation_request_msg>(networking_msg);
+                if (!request) break;
+                const std::string verb(request->content.verb, strnlen(request->content.verb, sizeof(request->content.verb)));
+                bmmo::automation_verdict_msg verdict{.content = {.id = request->content.id}};
+                verdict.content.approved = is_op(networking_msg->conn) ? 1 : 0;
+                if (!verdict.content.approved) {
+                    verdict.content.reason = bmmo::deny_reason::NoPermission;
+                    Printf(bmmo::color_code(bmmo::ActionDenied), "Denied (#%u, %s) automation \"%s\": not an operator.",
+                           networking_msg->conn, client_it->second.name, verb);
+                }
+                send(networking_msg->conn, verdict, bmmo::net::kSendReliable);
                 break;
             }
             case bmmo::KickRequest: {

@@ -117,6 +117,9 @@ namespace bmmo {
         SessionBootStatus,
         // The server console's beam / sector / tpsector for one player (player_command_msg.hpp).
         PlayerCommand,
+        // A gated automation verb asked of the server, and its answer (automation_request_msg.hpp).
+        AutomationRequest,
+        AutomationVerdict,
     };
 
     template<typename T, opcode C = None>
