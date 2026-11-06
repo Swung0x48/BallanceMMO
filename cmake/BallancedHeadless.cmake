@@ -122,6 +122,7 @@ function(bmmo_add_ballanced_headless BALLANCED_ROOT OUT_TARGET)
         set("CKBB_BUILD_${_module}" ON CACHE BOOL "" FORCE)
     endforeach ()
     set(CKBB_BUILD_MidiManager OFF CACHE BOOL "" FORCE)
+    include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PhysicsX87.cmake")
     add_subdirectory("${_src}/BuildingBlocks" "${CMAKE_BINARY_DIR}/Ballanced/BuildingBlocks")
 
     # physics_RT constructs IVP objects whose layouts depend on the platform
