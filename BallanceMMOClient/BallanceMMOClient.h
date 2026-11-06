@@ -596,6 +596,7 @@ private:
 	// K7d / K7e (session/retail_capture.hpp): a session's capture and its replay.
 	void core_host_start_capture(const std::string& start_bytes);
 	std::string core_host_capture_players();
+	std::string core_host_capture_requests();
 	uint32_t journal_checkpoint_ticks();
 	void core_host_replay_freeze();
 	void core_host_replay_thaw();

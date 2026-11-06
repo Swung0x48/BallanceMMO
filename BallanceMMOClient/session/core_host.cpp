@@ -2767,7 +2767,7 @@ void BallanceMMOClient::core_host_start_capture(const std::string& start_bytes) 
         static_cast<int>(capture_cache_next.load()), own_births_parked_next.load() ? 1 : 0, core_trace ? 1 : 0,
         core_rollback ? 1 : 0, anchor_freeze.nonblocking ? 1 : 0, diag_final_checkpoints() ? 1 : 0,
         journal_checkpoint_ticks())
-        + core_host_capture_players();
+        + core_host_capture_players() + core_host_capture_requests();
     std::string error;
     auto prune = [directory] { bmmo::retail::session_capture::prune(directory, bmmo::retail::journal_files::kKeepFiles - 1); };
     if (bmmo::retail::session_capture::instance().start_recording(directory / name, header,
@@ -2805,6 +2805,22 @@ std::string BallanceMMOClient::core_host_capture_players() {
                            pair.second.cheated ? 1 : 0);
         return true;
     });
+    return out;
+}
+
+// The automation requests (789bc114): a gated verb runs when the server's
+// verdict for its request id arrives, and the ids count from the game's start
+// - a replay, which starts counting at the SessionStart, would match the
+// capture's verdicts to other requests.  " requests=<last id>" and the ones
+// still waiting " pending=<id>:<line in hex>:<from the console>,...".
+std::string BallanceMMOClient::core_host_capture_requests() {
+    std::string out = std::format(" requests={}", automation_request_id_);
+    for (const auto& [id, request]: automation_pending_) {
+        std::string hex;
+        for (const auto c: request.first) hex += std::format("{:02x}", static_cast<unsigned>(static_cast<uint8_t>(c)));
+        out += std::format("{}{}:{}:{}", out.find(" pending=") == std::string::npos ? " pending=" : ",", id,
+                           hex.empty() ? "-" : hex, request.second ? 1 : 0);
+    }
     return out;
 }
 
@@ -2886,6 +2902,22 @@ std::string BallanceMMOClient::core_host_capture_verb(const std::string& rest) {
         return "error " + refused;
     }
     db_.set_client_id(static_cast<bmmo::net::connection>(number("own")));
+    automation_request_id_ = static_cast<uint32_t>(number("requests"));
+    automation_pending_.clear();
+    {
+        std::istringstream pending(h["pending"]);
+        std::string request;
+        while (std::getline(pending, request, ',')) {
+            const auto a = request.find(':'), b = request.rfind(':');
+            if (a == std::string::npos || b == a) continue;
+            const std::string hex = request.substr(a + 1, b - a - 1);
+            std::string line;
+            for (size_t i = 0; hex != "-" && i + 1 < hex.size(); i += 2)
+                line += static_cast<char>(std::strtoul(hex.substr(i, 2).c_str(), nullptr, 16));
+            automation_pending_[static_cast<uint32_t>(std::strtoul(request.substr(0, a).c_str(), nullptr, 10))] =
+                {line, request.substr(b + 1) == "1"};
+        }
+    }
     {
         std::istringstream players(h["players"]);
         std::string player;
