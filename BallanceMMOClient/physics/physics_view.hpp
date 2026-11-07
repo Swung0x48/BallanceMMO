@@ -206,6 +206,8 @@ namespace bmmo::physics {
                               std::string& error) const;
         int airship_zone_contains(const char* entity_name) const;
         void airship_zone_release(const char* entity_name, uint32_t tick, bool undo) const;
+        // v35 (TASX): the x87 model's game-thread precision back to its start, at a level load.
+        void reset_game_precision() const;
         // 1 with the box (min xyz, max xyz) once taken, 0 not yet, -1 off.
         int airship_zone_get(double box[6]) const;
         // ---- bridge API v25 (step SPGH): the spawn ghost

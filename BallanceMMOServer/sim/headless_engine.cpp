@@ -443,6 +443,9 @@ namespace bmmo::sim {
     }
 
     void headless_engine::request_level(int level) {
+        // TASX: the x87 model's game-thread precision starts every level at 24 bits (the client mod does the same
+        // at its map load, bridge v35), before the level's first body.
+        if (CKIpionManager* manager = physics()) manager->ResetGamePrecision();
         level_request_.begin(level);
         map_redirect_pending_ = !options_.map_file.empty();
         map_redirect_waited_ = 0;
@@ -532,6 +535,7 @@ namespace bmmo::sim {
 
     bool headless_engine::load_level(int level, std::string& error) {
         error.clear();
+        if (CKIpionManager* manager = physics()) manager->ResetGamePrecision();   // TASX, as request_level
         if (!options_.map_file.empty() && !redirect_level_file(level, error)) return false;
         CKDataArray* current_level = data_array("CurrentLevel");
         if (!current_level) {

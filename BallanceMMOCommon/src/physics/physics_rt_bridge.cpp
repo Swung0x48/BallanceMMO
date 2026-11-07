@@ -836,6 +836,11 @@ namespace {
         bmmo::physics::airship_zone_release(static_cast<CKIpionManager*>(manager), entity_name, tick, undo != 0);
     }
 
+    // v35 (TASX): the x87 model's game-thread precision at a level load.
+    void api_reset_game_precision(void* manager) {
+        if (manager) static_cast<CKIpionManager*>(manager)->ResetGamePrecision();
+    }
+
     // v25: the spawn ghost (step SPGH).
     int32_t api_spawn_ghost_set(void* manager, int32_t enable, int32_t respawns, double radius, double* info_out,
                                 char* error, uint32_t error_size) {
@@ -1129,6 +1134,7 @@ namespace {
         api_event_log_keep_muted_recipes,
         api_drain_muted_recipes,
         api_airship_zone_release,
+        api_reset_game_precision,
     };
 }
 

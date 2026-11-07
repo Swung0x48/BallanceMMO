@@ -2423,6 +2423,9 @@ bool BallanceMMOClient::core_host_reload_ready() {
 
 // Step SP9: OnLoadObject(isMap) - a fresh level: no session ran on it.
 void BallanceMMOClient::core_host_map_loaded() {
+    // TASX (bridge v35): the x87 model's game-thread precision starts every level at 24 bits, as the server's world
+    // and the headless clients do at their level request (headless_engine), before the level's first body.
+    physics_view_.reset_game_precision();
     // FULL step LGM (HU1 (b)): the level file's counters as loaded, recorded
     // by core_host_capture_level_counters on the frames after this hook (the
     // behaviours are not enumerable from it yet), the legacy capture's window.

@@ -1206,6 +1206,11 @@ namespace bmmo::physics {
         api_->airship_zone_release(manager_, entity_name, tick, undo ? 1 : 0);
     }
 
+    void physics_view::reset_game_precision() const {
+        if (!available() || api_->struct_size < sizeof(bmmo_physics_api_v2) || !api_->reset_game_precision) return;
+        api_->reset_game_precision(manager_);
+    }
+
     bool physics_view::set_controller_alias(int32_t (*alias)(void* user, const char* name, char* out, uint32_t out_size),
                                             void* user, std::string& error) const {
         error.clear();
