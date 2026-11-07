@@ -189,9 +189,10 @@ retail: a body may fall asleep up to two PSIs (30 ms) earlier or later.
 Only during a networked physics session (2026-11-07, TASX). The per-unit
 schedule moved the first TAS divergence of several original levels (SR11:
 a pusher's damping took the slow branch on a different PSI), so it is now
-switched: `IVP_Environment::bmmo_unit_movement_check`, set from
-`CKIpionManager::SetUnitMovementCheck` (kept on the manager, so an
-environment made again by `Reset` follows it). `reset_session_clock` turns
+switched: `IVP_Environment::bmmo_physics`, set from
+`CKIpionManager::SetBmmoPhysics` (kept on the manager, so an
+environment made again by `Reset` follows it; the same switch gates
+#7). `reset_session_clock` turns
 it on at every anchor, lifting the body guard (`set_body_guard(false)`, at
 the end of every session) turns it off; outside a session the retail
 counter and its `ivp_rand()` re-arms decide as in the 2002 DLL. The unit's
@@ -254,8 +255,9 @@ pointers - the addresses of the `CK3dEntity` objects. That order fixes the
 sign of the contact plane and the roles of the two cores in the impact and
 friction solve, so two processes simulating the same pair (the game and its
 authoritative server, whose heaps differ) could diverge from the first
-ball-ball contact on. Retail Ballance never exercises the branch: the player
-ball is the only `IVP_Ball` in a level, every other body is a polygon. The
+ball-ball contact on. Retail Ballance does exercise the branch: the player
+ball meets the level's spare balls (`P_Ball_Wood_MF`, `P_Ball_Stone_MF`),
+which are balls too (TAS SR01 t=56.13, SR02 t=23.67, SR06 t=156.24). The
 collision overhaul makes ball-ball contact routine (player balls collide with
 each other, and design 9.10 spawns them at the same point), so the order now
 comes from keys both processes give the same objects: the nocoll group ident
@@ -282,6 +284,19 @@ compared here are three headless builds; the pair that actually matters is
 the game against the server, whose allocator states differ at least as much.
 Single-player replays are unaffected because the branch is never reached
 (`rec_m3b.bmrc` still 4169/4169).
+
+Only during a networked physics session (2026-11-07, TASX). The original
+TASes showed the claim above wrong: a player ball meeting a spare ball took
+the other synapse order than the 2002 DLL, and the first divergence of SR01,
+SR02 and SR06 was exactly that impact (the cores' roles swapped, the impact
+times equal). The name order now applies only while
+`IVP_Environment::bmmo_physics` is on (engine change #5's switch,
+`reset_session_clock` to `set_body_guard(false)`); outside a session the
+retail `client_data` comparison decides. With it SR01 replays identically
+over the whole level and SR02 reaches the finish. The order is fixed when
+the pair is made, so a ball-ball pair made before a session's anchor keeps
+the address order into the session; every side creates the player and
+mirror balls after its anchor, so no such pair exists today.
 
 ## 8. Quaternion of a physicalized entity computed in the plugin (physics_RT)
 
