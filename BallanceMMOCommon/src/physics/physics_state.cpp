@@ -1089,6 +1089,10 @@ namespace bmmo::physics {
         access::time_of_last_psi(*environment) = IVP_Time(0.0);
         access::time_of_next_psi(*environment) = IVP_Time(0.0) + environment->get_delta_PSI_time();
         access::next_movement_check(*environment) = IVP_MOVEMENT_CHECK_COUNT;
+        // Engine change #5 from here until the guard is lifted (set_body_guard): every unit's movement check on its
+        // own countdown.  Outside a session the original's one counter decides, so a game that never starts one
+        // (a TAS replay) simulates as the 2002 DLL does.
+        physics->SetUnitMovementCheck(TRUE);
         // Fresh-world time factor (CKIpionManager::Reset): a world that already
         // ran the level keeps the 2.0 the Gameplay script set, so without this
         // the first tick after the anchor runs one PSI on one side and two on
@@ -2170,6 +2174,9 @@ namespace bmmo::physics {
         // the guard goes on again; ids of a level that is being left behind
         // do not outlive the guard they belonged to.
         if (!enable) physics->m_KeepLevelBodiesFree.Clear();
+        // The guard is lifted when a session ends; the movement check goes back to the original's schedule with it
+        // (reset_session_clock turned it on at the anchor).
+        if (!enable) physics->SetUnitMovementCheck(FALSE);
         return true;
     }
 

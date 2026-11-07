@@ -186,6 +186,18 @@ Merged and split units start a fresh countdown like any new unit, which is
 deterministic because merging follows contacts. Gameplay difference to
 retail: a body may fall asleep up to two PSIs (30 ms) earlier or later.
 
+Only during a networked physics session (2026-11-07, TASX). The per-unit
+schedule moved the first TAS divergence of several original levels (SR11:
+a pusher's damping took the slow branch on a different PSI), so it is now
+switched: `IVP_Environment::bmmo_unit_movement_check`, set from
+`CKIpionManager::SetUnitMovementCheck` (kept on the manager, so an
+environment made again by `Reset` follows it). `reset_session_clock` turns
+it on at every anchor, lifting the body guard (`set_body_guard(false)`, at
+the end of every session) turns it off; outside a session the retail
+counter and its `ivp_rand()` re-arms decide as in the 2002 DLL. The unit's
+own countdown runs in both modes, so a session starts from the same
+countdowns as before the switch.
+
 ## 6. Body guard for the Unphysicalize block (physics_RT)
 
 Files: `Source/BuildingBlocks/physics_RT/CKIpionManager.h` / `.cpp` (new
