@@ -3,10 +3,11 @@
 #   BMMO_PHYSICS_X87=SOFT  doyaGu's x87 emulation with the portable software arithmetic and the software model of the
 #                          transcendental instructions: the original game's arithmetic rules, identical on every
 #                          platform (x86 builds stay SSE2: IVP_X87_MSVC_IA32 OFF).
-#   BMMO_PHYSICS_X87=HARD  32-bit x86 only: the arithmetic on the host x87 (results identical to SOFT), the
-#                          transcendentals still in software so Intel and AMD hosts agree.
+#   BMMO_PHYSICS_X87=HARD  the arithmetic on the host x87 (results identical to SOFT), the transcendentals still in
+#                          software so Intel and AMD hosts agree. 32-bit x86, or GCC/Clang with an x87 long double
+#                          (x86-64 Linux; clang-cl with -mlong-double-80), where it compiles to inline x87 code.
 #   BMMO_PHYSICS_X87=OFF   no emulation: ordinary IEEE code with the portable libm (the pre-x87 BallanceMMO engine).
-set(BMMO_PHYSICS_X87 SOFT CACHE STRING "Physics engine x87 arithmetic: SOFT, HARD (32-bit x86) or OFF")
+set(BMMO_PHYSICS_X87 SOFT CACHE STRING "Physics engine x87 arithmetic: SOFT, HARD (x87 hosts) or OFF")
 set_property(CACHE BMMO_PHYSICS_X87 PROPERTY STRINGS SOFT HARD OFF)
 if (BMMO_PHYSICS_X87 STREQUAL "SOFT")
     set(IVP_X87_ARITHMETIC SOFT CACHE STRING "" FORCE)
