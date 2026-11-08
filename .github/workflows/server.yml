@@ -2,7 +2,7 @@ name: Server
 
 on:
   push:
-    branches: [ main, collision-overhaul ]
+    branches: [ main, collision-overhaul, x87-soft ]
     paths-ignore:
       - 'BallanceMMOClient/**'
       - '.git*'
@@ -10,7 +10,7 @@ on:
       - 'docs/**'
       - '.github/workflows/client.yml'
   pull_request:
-    branches: [ main, collision-overhaul ]
+    branches: [ main, collision-overhaul, x87-soft ]
     paths-ignore:
       - 'BallanceMMOClient/**'
       - '.git*'
