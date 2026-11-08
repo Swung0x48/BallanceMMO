@@ -30,7 +30,7 @@ upstream:
 |---|---|---|
 | `Source/BuildingBlocks/physics_RT/ivp` | `Swung0x48/source-physics` (before it, `doyaGu/ivp`) | #1 `68bb6cb`, #3 `d8513b1`, #5 `618ca67`, #7 `94fecee`, #12 `c563ad7`, #16 `b22a980`, the `IVP_PORTABLE_BMMO` macro `5d6b57a`, #17 `22b594a` |
 | `Source/BuildingBlocks` (physics_RT) | `Swung0x48/CKBuildingBlocks` (`doyaGu/CKBuildingBlocks`, from `e5d441f` on its `sdl`) | #6 `a9c4b3b`, #8 `1bc05ef`, #9 `673d89b`, #10 `325321c`, #13 `926dc2f`, #14 `0bb5e8c`, #15 `f628978`, #18 `7999d04`, #19 `7daf5eb`; the force block's exported helpers (bridge API v14, not numbered) `19b7758`; the rest are the ivp pointer and its URL |
-| `Source/VxMath` | `Swung0x48/VxMath` (`doyaGu/VxMath`) | #2 `a67bd5d`, #11 `576f3a9` |
+| `Source/VxMath` | `Swung0x48/VxMath` (`doyaGu/VxMath`) | #2 `a67bd5d`, #11 `576f3a9`, #23 `3c0fff4` |
 | `Source/Player` | `Swung0x48/BallancePlayer` (`doyaGu/BallancePlayer`) | #4 `2870c91` |
 | `Source/CK2` | `Swung0x48/CK2` (`doyaGu/CK2`, from `d80b8de` on its `sdl`) | #21 `a821135`, the only one |
 | Ballanced itself | `Swung0x48/Ballanced` (`doyaGu/Ballanced`, from `013afc7` on its `sdl`) | no source file: the four submodule pointers above and their `.gitmodules` URLs (CK2's since `9c52cd1`) |
@@ -842,6 +842,51 @@ The first BallanceMMO change in CK2: the commit is `a821135` on
 of `d80b8de` from upstream's `sdl`), and Ballanced's `.gitmodules` points CK2
 at the fork since `9c52cd1`, as it does VxMath, Player and BuildingBlocks (see
 "Where each change lives" at the top).
+
+---
+
+## 23. No fused multiply-add from the compiler's target (VxMath)
+
+File: `Source/VxMath/include/VxSIMD.h` (the FMA block that defines
+`VX_SIMD_FMA`, which turns `VX_FMADD_PS` / `VX_FNMADD_PS` / `VX_FMSUB_PS` /
+`VX_FNMSUB_PS` into `_mm_fmadd_ps` and friends).
+
+Upstream switched `VX_SIMD_FMA` on whenever the compiler predefines `__FMA__`,
+i.e. for any target with FMA (`-march=x86-64-v3`, `-mfma`). A fused
+multiply-add rounds once where the retail VxMath (no FMA) rounds twice, and
+these are explicit intrinsics in header-inline code, so `-ffp-contract=off`
+does not remove them. `VxSIMDCrossProduct3` uses `VX_FNMADD_PS`, and
+`Vx3DInverseMatrix` builds an affine inverse from three such cross products;
+`RCK3dEntity::GetInverseWorldMatrix` caches it and CK uses it for a child's
+local matrix relative to its parent. Since this change `VX_SIMD_FMA` is
+opt-in only (define it explicitly); the macros take the mul + add fallback
+otherwise. No MSVC build changes: MSVC never predefines `__FMA__`, not even
+with `/arch:AVX2`, and nothing in the tree defines `VX_SIMD_FMA`. Not behind
+`IVP_PORTABLE_BMMO` (not an IVP file).
+
+Found by the 2026-11-08 public test. Its Linux server (the CI AppImage, GCC
+15.2 on `ubuntu-latest`) was built for x86-64-v3, with 6966 fused instructions
+in 595 functions, and split from every Windows client: on L9 within 4 s (tick
+11: a 1-ulp difference in the parented `P_Modul_19_Flaps` entity matrix; tick
+249: the stone ball and the flaps), and on L3, L7, L10, L11 and L13. The other
+half was GCC's default `-ffp-contract=fast` re-fusing the explicit mul + add
+that keeps retail's summation order (change #11's `Vx3DMultiplyMatrix`, the
+`RCK3dEntity::WorldMatrixChanged` child matrix) in every target that did not
+get the physics flags. That half is a BallanceMMO build setting, not an
+engine change: the top-level `CMakeLists.txt` now passes `-ffp-contract=off
+-fno-fast-math -fexcess-precision=standard` to every target on GCC/Clang and
+pins `-march=x86-64 -mtune=generic` on x86-64 (aarch64 always has FMA; the
+contraction switch keeps it out there), and the server CI fails if a fused
+instruction appears in the server, SimTool or headless client binaries.
+
+Evidence: a Linux SimTool configured with `-march=x86-64-v3` from outside (the
+runner's default) and built with both halves has no fused instruction, and
+replays the eight split sessions' server journals with every tick's hash
+equal to the Windows SimTool's: 385,241 ticks (2_L9 6930, 1_L9 25409, 2_L11
+68708, 5_L3 8202, 2_L7 44114, 11_L3 29629, 1_L10 71760, 2_L13 130489). The
+Windows SimTool's per-tick hashes are unchanged by the change. The public
+test's own journals were written by the FMA server: only the deployed CI
+Linux SimTool replays them exactly.
 
 ---
 
