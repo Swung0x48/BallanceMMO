@@ -1167,6 +1167,11 @@ namespace bmmo::sim {
                 log(text);
             }
         }
+        // The two loops below look every ball up by name and create, destroy
+        // and rename nothing: one lookup scope serves them from one pass over
+        // the entities (a scan per lookup was a quarter of a 32-player tick,
+        // 2026-11-08).
+        bmmo::physics::entity_lookup_scope_begin(manager);
         for (auto& [id, p]: players_) {
             const int in_zone = p.physicalized && p.ball ? bmmo::physics::airship_zone_contains(manager, p.ball->GetName()) : -1;
             if (in_zone > 0 && p.airship_tick == 0) {
@@ -1189,6 +1194,7 @@ namespace bmmo::sim {
                     + std::to_string(tick_));
             p.spawn_ghost = ghost == 1;
         }
+        bmmo::physics::entity_lookup_scope_end(manager);
         // Step SPGH2: the counters, logged when they move - a resumed body
         // is a trafo's new ball that stayed solid.
         {
