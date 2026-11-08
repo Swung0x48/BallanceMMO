@@ -2774,8 +2774,8 @@ public:
         for (const auto& [session, m]: dropped) {
             send_session_end(session, m, "did not report ready");
             // Out of the session but not out of the room: the rest start
-            // without it (assign_start_members re-checks as it goes), and it
-            // can rejoin the room to late-join what is now a running session.
+            // without it (assign_start_members re-checks as it goes), and a
+            // Ready late-joins it to what is now a running session.
             // Leaving it in the room matters - the client is told the session
             // ended and has no way to learn it was removed from the room.
             physics_session_member_left(m);
@@ -3528,10 +3528,9 @@ public:
                     send_room_event(c, event_type::RequestDenied, err, msg.room);
                     break;
                 }
+                // A joiner starts not ready; a running physics session takes it
+                // in once it says Ready (below), not on the Join itself.
                 send_room_event(c, event_type::RequestAccepted, error_code::None, msg.room, c);
-#if BMMO_BUILD_SIM
-                physics_session_member_joined(msg.room, c);
-#endif
                 if (const auto* r = rooms_.find(msg.room))
                     for (const auto& m: r->members)
                         if (m.id != c)
@@ -3551,6 +3550,12 @@ public:
                 }
                 notify_ready_changed(c);
                 send_room_event(c, event_type::RequestAccepted, error_code::None, rooms_.room_of(c), c, c);
+#if BMMO_BUILD_SIM
+                // A member out of the room's running physics session (a late
+                // joiner, a finisher, one the start left behind) joins it late.
+                if (msg.action == action::Ready && !client_session_.contains(c))
+                    physics_session_member_joined(rooms_.room_of(c), c);
+#endif
                 break;
             }
             case action::Start: {
