@@ -86,6 +86,7 @@ public:
 	// than operator[], which would resurrect entries for players who left.
 	bool create(bmmo::net::connection id, const std::string& name = "", bool cheated = false) {
 		std::unique_lock lk(mutex_);
+		departed_names_.erase(id);
 		return states_.insert({id, {.name = name, .cheated = cheated}}).second;
 	}
 
@@ -262,9 +263,24 @@ public:
 		}
 	}
 
+	// The name stays known after the player is gone: the server announces a
+	// disconnect before the room events it causes ("X left the room").
 	bool remove(bmmo::net::connection id) {
 		std::unique_lock lk(mutex_);
-		return bool(states_.erase(id));
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return false;
+		departed_names_[id] = std::move(it->second.name);
+		states_.erase(it);
+		return true;
+	}
+
+	std::optional<std::string> get_departed_name(bmmo::net::connection id) {
+		std::unique_lock lk(mutex_);
+		auto it = departed_names_.find(id);
+		if (it == departed_names_.end())
+			return {};
+		return it->second;
 	}
 
 	size_t player_count() {
@@ -299,6 +315,7 @@ public:
 	void clear() {
 		std::unique_lock lk(mutex_);
 		states_.clear();
+		departed_names_.clear();
 	}
 
 	void set_nickname(const std::string& name) {
@@ -384,7 +401,8 @@ public:
 private:
 	std::recursive_mutex mutex_; // no more shared_mutexes; we use recursive_mutex to avoid deadlocks
 	std::unordered_map<bmmo::net::connection, PlayerState> states_;
-	std::unordered_map<std::string, uint32_t> ball_name_to_id_; 
+	std::unordered_map<bmmo::net::connection, std::string> departed_names_;  // removed players, until clear()
+	std::unordered_map<std::string, uint32_t> ball_name_to_id_;
 	std::string nickname_;
 	bmmo::net::connection assigned_id_ = bmmo::net::kInvalidConnection;
 	std::atomic_bool nametag_visible_ = true, ping_visible_ = true;
