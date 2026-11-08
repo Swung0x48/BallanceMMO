@@ -246,7 +246,11 @@ def check_replay(table, server, args):
         out_dir = args.replay_dir or scratch
         pathlib.Path(out_dir).mkdir(parents=True, exist_ok=True)
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, cwd=out_dir, timeout=REPLAY_TIMEOUT)
+            # errors='replace': object and player names reach the output in
+            # whatever bytes the level or the player gave them (a Latin-1
+            # name stopped the judge of a public-test session, 2026-11-08).
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace',
+                                  cwd=out_dir, timeout=REPLAY_TIMEOUT)
         except subprocess.TimeoutExpired:
             table.add('server', 'replay', FAIL, 'timed out after %d s' % REPLAY_TIMEOUT)
             return
