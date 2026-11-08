@@ -2408,8 +2408,8 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
         level_life.started = bmmo::retail::host_clock().now(bs::clock_site::retail_reload);
         ++level_life.reloads;
         host.restart_deadline = level_life.started + kReloadTimeout;
-        logger_->Info("Physics session %u: the level ran a union: reloading level %d (exit, then the menus) during "
-                      "the countdown", msg.session, level);
+        logger_->Info("Physics session %u: %s: reloading level %d (exit, then the menus) during the countdown",
+                      msg.session, other_map ? "another level is loaded" : "the level ran a union", level);
     } else {
         if (level_life.ran_union)
             logger_->Info("Physics session %u: the level ran a union, but 'session reload off': restarting it as it is",
