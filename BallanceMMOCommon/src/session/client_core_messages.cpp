@@ -525,6 +525,17 @@ namespace bmmo::session {
         const uint32_t anchor = tick - 1;
         // (rewindable, step SRT4: a light anchor needs its whole base too.)
         if (current_tick() - anchor > window_rewind_reach(tick) || !s.rollback_.rewindable(anchor)) {
+            // A tick of a pending exact resync's window (base and after): the
+            // frame is stored, and the apply's re-step reads it from the
+            // ring, so nothing is lost.  These frames always come late - the
+            // relay to a re-anchored member starts at its base and queues
+            // behind the resync state - and asking for another resync here
+            // was the 2026-11-08 public test's loop: a debt that fired 2 s
+            // after each request, 1621 of its 2154 resyncs.
+            if (resync_amends(tick)) {
+                ++s.relay_pending_window_;
+                return;
+            }
             ++s.relay_late_;
             // Without snapshots nothing else repairs it (trial 2, level 8: client 2's frames 92-108 ticks
             // late, client 1 kept its wrong world and every later FINAL row UNCONFIRMED): a tick still

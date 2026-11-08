@@ -531,6 +531,7 @@ namespace bmmo::session {
         s.have_resync_state_ = false;
         s.resync_state_ = bmmo::session_resync_state_msg{};
         s.resync_held_ = false;
+        s.resync_lost_bodies_.clear();
         s.resync_join_ = false;   // step A5
         s.life_log_.clear();
         s.pending_deaths_.clear();

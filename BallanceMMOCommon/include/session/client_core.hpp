@@ -696,6 +696,7 @@ namespace bmmo::session {
         // relay_late_ (which keeps meaning a correction this client needed
         // and could not apply).
         uint64_t relay_covered_ = 0;
+        uint64_t relay_pending_window_ = 0;   // late frames of a pending exact resync's window (its re-step reads them)
         // ...and first arrivals for a tick at which the mirror had no body
         // (dead, or not born here yet): stored, not replayed.
         uint64_t relay_bodiless_ = 0;
@@ -1003,6 +1004,11 @@ namespace bmmo::session {
         bmmo::session_resync_state_msg resync_state_;
         uint32_t resync_state_arrived_ = 0;
         uint32_t resync_wait_frames_ = 0;
+        // Bodies a state stopped waiting for (try_apply_resync's bound): this
+        // world lost them (a stone ball fallen off, a removed box) while the
+        // server keeps them; later states do not wait for them again.
+        std::set<std::string> resync_lost_bodies_;
+        uint64_t resync_waits_given_up_ = 0;
         uint64_t resync_states_ = 0, resync_states_stale_ = 0, resync_states_refused_ = 0;
         uint64_t resyncs_restepped_ = 0, resync_restep_depth_ = 0;
         uint64_t resync_deferred_ = 0, resync_deferred_ticks_ = 0;   // applies put off for the body set, and their frames
