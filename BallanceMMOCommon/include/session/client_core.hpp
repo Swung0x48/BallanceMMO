@@ -2163,6 +2163,16 @@ namespace bmmo::session {
         bool recorded_input_at(const std::string& entity, uint32_t tick, bmmo::session::input_frame& out) const;
         // The host's world with the core's half of the binding (bind_world).
         rollback_world world() const { return platform_.bind_world(world_hooks_); }
+        // `reads` inside one by-name lookup scope of the host's physics when
+        // it has one (rollback_world::capture_scope; physics_state.hpp
+        // entity_lookup_scope_begin): only for reads that create, destroy
+        // and rename no object.
+        template <typename F> void with_lookup_scope(F&& reads) const {
+            const rollback_world w = world();
+            if (w.capture_scope) w.capture_scope(true);
+            reads();
+            if (w.capture_scope) w.capture_scope(false);
+        }
         // One step of a legacy blend in flight (post_step step 27).
         void apply_blend(const std::string& name, bmmo::session::body_corrector& corrector);
         // What pre_step leaves for post_step: the frame number and tick it

@@ -51,6 +51,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "CKAll.h"
@@ -635,27 +636,39 @@ namespace bmmo::game {
         int release(CKContext* context) {
             int restored = 0;
             if (context) {
+                // Everything goes in ONE DestroyObjects call.  CK's
+                // DeleteObjects walks every object of the notified classes
+                // once per call, so a call per object made the release cost
+                // (objects released) x (objects in the level): about 2-3 s
+                // for a 32-slot room, on the server's one simulation thread
+                // at the room's end and as a freeze in the game at the
+                // session's end (2026-11-08).  The inputs are put back
+                // first; in one call every PreDelete runs before any delete,
+                // which keeps step F1's rule (a copy's parameter outputs
+                // read it in their PreDelete).
+                destroy_batch doomed(context);
                 const std::map<CK_ID, std::vector<CK_ID>> outputs = copy_outputs(context);
                 for (auto it = identities_.rbegin(); it != identities_.rend(); ++it) {
                     if (auto* block = CKBehavior::Cast(context->GetObject(it->block)))
                         if (CKParameterIn* target = block->GetTargetParameter())
                             restored += put_back(context, target, it->prior_direct, it->prior_shared) ? 1 : 0;
-                    destroy(context, it->parameter);
-                    // Step F1 (IDCP): the copy with the parameter outputs it
-                    // owns, in one call (a CKParameterOut's PreDelete reads
-                    // its owner, so the copy must outlive their PreDelete).
-                    const auto owned = outputs.find(it->array);
-                    destroy_with(context, it->array, owned == outputs.end() ? nullptr : &owned->second);
+                    doomed.add(it->parameter);
+                    // Step F1 (IDCP): the copy and the parameter outputs it
+                    // owns (they are not taken with it).
+                    doomed.add(it->array);
+                    if (const auto owned = outputs.find(it->array); owned != outputs.end())
+                        for (CK_ID o: owned->second) doomed.add(o);
                 }
                 for (auto it = probes_.rbegin(); it != probes_.rend(); ++it) {
                     if (auto* block = CKBehavior::Cast(context->GetObject(it->block)))
                         if (CKParameterIn* in = block->GetInputParameterCount() > 1 ? block->GetInputParameter(1) : nullptr)
                             restored += put_back(context, in, it->prior_direct, it->prior_shared) ? 1 : 0;
-                    destroy(context, it->parameter);
-                    destroy(context, it->frame);
+                    doomed.add(it->parameter);
+                    doomed.add(it->frame);
                 }
-                destroy(context, no_ball_);
-                release_units(context);   // step Q7: the slot copies with their links, after the union's own objects
+                doomed.add(no_ball_);
+                release_units(context, doomed);   // step Q7: the slot copies with their links
+                doomed.destroy();
                 note_script_write();      // step OPC: the selected scripts' graphs changed
             }
             clear();
@@ -887,14 +900,22 @@ namespace bmmo::game {
             }
             return out;
         }
-        static void destroy_with(CKContext* context, CK_ID id, const std::vector<CK_ID>* owned) {
-            if (!id || !context->GetObject(id)) return;
-            std::vector<CK_ID> batch{id};
-            if (owned)
-                for (CK_ID o: *owned)
-                    if (context->GetObject(o)) batch.push_back(o);
-            context->DestroyObjects(batch.data(), static_cast<int>(batch.size()));
-        }
+        // The objects of one release, destroyed by one DestroyObjects call
+        // (release): each live id once, in the order added.
+        struct destroy_batch {
+            CKContext* context;
+            std::vector<CK_ID> ids;
+            std::unordered_set<CK_ID> listed;
+            explicit destroy_batch(CKContext* c) : context(c) {}
+            void add(CK_ID id) {
+                if (id && context->GetObject(id) && listed.insert(id).second) ids.push_back(id);
+            }
+            void destroy() {
+                if (!ids.empty()) context->DestroyObjects(ids.data(), static_cast<int>(ids.size()));
+                ids.clear();
+                listed.clear();
+            }
+        };
         static bool put_back(CKContext* context, CKParameterIn* in, CK_ID direct, CK_ID shared) {
             if (shared) {
                 auto* source = static_cast<CKParameterIn*>(context->GetObject(shared));
@@ -1819,24 +1840,25 @@ namespace bmmo::game {
         // §2.10 step 6: the slot copies with their links and operations out
         // of the units' graphs and destroyed (after the union's own sources,
         // frames and identity copies).  Safe on a partial copy step.
-        void release_units(CKContext* context) {
+        // Taken out of the graphs here, destroyed by the caller's one batch.
+        void release_units(CKContext* context, destroy_batch& doomed) {
             for (auto u = units_.rbegin(); u != units_.rend(); ++u) {
                 CKBehavior* parent = CKBehavior::Cast(context->GetObject(u->parent));
                 for (auto c = u->copies.rbegin(); c != u->copies.rend(); ++c) {
                     for (CK_ID id: c->links) {
                         auto* link = object_as<CKBehaviorLink>(context->GetObject(id), CKCID_BEHAVIORLINK);
                         if (link && parent) parent->RemoveSubBehaviorLink(link);
-                        destroy(context, id);
+                        doomed.add(id);
                     }
                     for (CK_ID id: c->operations) {
                         auto* op = object_as<CKParameterOperation>(context->GetObject(id), CKCID_PARAMETEROPERATION);
                         if (op && parent) parent->RemoveParameterOperation(op);
-                        destroy(context, id);
+                        doomed.add(id);
                     }
                     for (CK_ID id: c->roots) {
                         auto* b = CKBehavior::Cast(context->GetObject(id));
                         if (b && parent) parent->RemoveSubBehavior(b);
-                        destroy(context, id);
+                        doomed.add(id);
                     }
                 }
             }

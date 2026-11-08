@@ -1220,8 +1220,17 @@ namespace bmmo::session {
                 journal_.note(text);
             }
         }
-        const int own_zone = s.own_physicalized_ && !s.own_body_entity_.empty()
-                                 ? platform_.airship_zone_contains(s.own_body_entity_) : -1;
+        // Every ball's zone first, in one lookup scope (a by-name scan per
+        // ball grew with the room; 2026-11-08); the display below stays out
+        // of it, since a host's display may make or rename objects.
+        int own_zone = -1;
+        std::vector<int> zones;
+        zones.reserve(s.remotes_.size());
+        with_lookup_scope([&] {
+            own_zone = s.own_physicalized_ && !s.own_body_entity_.empty() ? platform_.airship_zone_contains(s.own_body_entity_) : -1;
+            for (const auto& [id, remote]: s.remotes_)
+                zones.push_back(remote.physicalized ? platform_.airship_zone_contains(remote.entity) : -1);
+        });
         if (own_zone <= 0) {
             if (s.own_airship_tick_ != 0 && own_zone == 0)
                 logf("airship: the own ball %s is not latched in the airship zone at tick %u any more (a rewind to before "
@@ -1248,8 +1257,9 @@ namespace bmmo::session {
                 [tick, keep](const auto& release) { return static_cast<int32_t>(tick - release.tick) > static_cast<int32_t>(keep); }),
                 s.airship_releases_.end());
         // The mirrors.
+        size_t zone_index = 0;
         for (auto& [id, remote]: s.remotes_) {
-            const int in_zone = remote.physicalized ? platform_.airship_zone_contains(remote.entity) : -1;
+            const int in_zone = zones[zone_index++];
             if (in_zone <= 0) {
                 if (remote.airship_tick != 0)
                     logf("airship: player %u's ghost %s is out of the zone at tick %u", id, remote.entity.c_str(), tick);
@@ -1369,7 +1379,15 @@ namespace bmmo::session {
     void session_client_core::spawn_ghost_frame(uint32_t tick) {
         if (!s.spawn_ghost_active_ || !platform_.spawn_ghost_state) return;
         const std::string own_entity = s.own_physicalized_ ? s.own_body_entity_ : std::string();
-        const int own = own_entity.empty() ? -1 : platform_.spawn_ghost_state(own_entity);
+        // Every ball's state first, in one lookup scope (as airship_frame).
+        int own = -1;
+        std::vector<int> states;
+        states.reserve(s.remotes_.size());
+        with_lookup_scope([&] {
+            own = own_entity.empty() ? -1 : platform_.spawn_ghost_state(own_entity);
+            for (const auto& [id, remote]: s.remotes_)
+                states.push_back(remote.physicalized ? platform_.spawn_ghost_state(remote.entity) : -1);
+        });
         if (own == 0 && s.own_spawn_ghost_) {
             ++s.spawn_ghost_transitions_;
             logf("spawn ghost: the own ball %s is solid at tick %u", own_entity.c_str(), tick);
@@ -1392,8 +1410,9 @@ namespace bmmo::session {
                 s.own_spawn_ghost_entity_ = own_entity;
             }
         }
+        size_t state_index = 0;
         for (auto& [id, remote]: s.remotes_) {
-            const int state = remote.physicalized ? platform_.spawn_ghost_state(remote.entity) : -1;
+            const int state = states[state_index++];
             if (state < 0) {
                 // No body: the host shows a bodiless mirror its own way, and
                 // the next life starts from there.
