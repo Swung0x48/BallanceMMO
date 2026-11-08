@@ -486,6 +486,25 @@ namespace bmmo::session {
         bool judge_restore_ = false, given_up_ = false;
     };
 
+    // Design 2.1: more than half of at least two counted members hold an
+    // absolute majority.  `members` is the quorum view of the last stepped
+    // tick, `meters` the live meters by player (entries with a `meter`).  A
+    // member that left after that step has no meter any more and is not
+    // counted: the runner drops a leaver's meter at once, and the view keeps
+    // naming it until the next step records the members anew.
+    template<class Meters>
+    inline bool shared_absolute_majority(const std::vector<quorum_member>& members, const Meters& meters) {
+        size_t counted = 0, absolute_majorities = 0;
+        for (const auto& member: members) {
+            if (!member.ready || !member.has_baseline) continue;
+            const auto meter = meters.find(member.player);
+            if (meter == meters.end()) continue;
+            ++counted;
+            absolute_majorities += meter->second.meter.absolute_majority();
+        }
+        return counted >= 2 && 2 * absolute_majorities > counted;
+    }
+
     struct patience_verdict {
         bool step = false;        // the tick may be stepped now
         bool early = false;       // stepped before the deadline with a member unsettled

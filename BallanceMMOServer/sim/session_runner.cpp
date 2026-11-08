@@ -1672,23 +1672,25 @@ namespace bmmo::sim {
             auto& entry = s.arrivals.at(players[index]);
             const auto* frame = entry.ring.find(tick);
             if (!frame || !frame->as_newest) continue;
+            // A rejoin not ready yet has arrivals (add_now) but no meter,
+            // while an older tick's view still names its old life as ready.
+            const auto meter = s.lateness.find(players[index]);
+            if (meter == s.lateness.end()) continue;
             const auto relative = bmmo::session::relative_lateness(normalized, index);
-            s.lateness.at(players[index]).meter.sample_relative(tick, relative.first, relative.second);
+            meter->second.meter.sample_relative(tick, relative.first, relative.second);
         }
     }
 
     // Design 2.1: more than half of at least two counted members hold an
     // absolute majority.  A member exempt from the quorum (a resync gap, a
-    // pending lead) still counts by its kept evidence (step LBF1).
+    // pending lead) still counts by its kept evidence (step LBF1).  A member
+    // that left since the last step is not counted: player_ready of a resync
+    // in the same gap as a leave reads a view that still names the leaver,
+    // whose meter remove_player has already dropped (the 2026-11-08
+    // map::at crash).
     bool session_runner::shared_absolute(const session_state& s) {
-        size_t counted = 0, absolute_majorities = 0;
-        if (!s.quorum_history.empty())
-            for (const auto& member: s.quorum_history.back().members) {
-                if (!member.ready || !member.has_baseline) continue;
-                ++counted;
-                absolute_majorities += s.lateness.at(member.player).meter.absolute_majority();
-            }
-        return counted >= 2 && 2 * absolute_majorities > counted;
+        return !s.quorum_history.empty()
+            && bmmo::session::shared_absolute_majority(s.quorum_history.back().members, s.lateness);
     }
 
     void session_runner::observe_lateness(session_state& s, uint32_t tick) {
