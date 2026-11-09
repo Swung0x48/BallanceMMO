@@ -128,7 +128,7 @@ void BallanceMMOClient::room_panel_frame() {
     {
         Bui::ImGuiContextScope scope;
         if (ImGui::GetCurrentContext())
-            act = room_panel_ui.draw(state, db_.get_client_id(), pending, connected());
+            act = room_panel_ui.draw(state, db_.get_client_id(), pending, connected(), core_host_running());
     }
     if (act.valid)
         send_room_request(act.type, act.room, act.target, act.mode, act.name, false);

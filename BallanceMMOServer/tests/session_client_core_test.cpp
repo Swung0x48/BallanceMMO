@@ -122,6 +122,7 @@ namespace bmmo::session {
         BMMO_CORE_STEP(try_apply_resync)
         BMMO_CORE_STEP(rewind_for_lifecycle)
         BMMO_CORE_STEP(window_rewind_reach)
+        BMMO_CORE_STEP(life_rewind_reach)
         BMMO_CORE_STEP(drain_pending_deaths)
         BMMO_CORE_STEP(probe_candidates)
         BMMO_CORE_STEP(settle_held_tick)
@@ -8173,6 +8174,9 @@ namespace {
             EXPECT_EQ(steps{core}.window_rewind_reach(139u + depth), depth ? 95u : 48u) << "the apply's tick";
             EXPECT_EQ(steps{core}.window_rewind_reach(140u + depth), 48u) << "after the apply";
             EXPECT_EQ(steps{core}.window_rewind_reach(139u), 48u) << "its anchor would be before S";
+            // A late birth or death stamped in the window rewinds as deep.
+            EXPECT_EQ(steps{core}.life_rewind_reach(140u), depth ? 95u : 0u) << "lifecycle, S + 1";
+            EXPECT_EQ(steps{core}.life_rewind_reach(140u + depth), 0u) << "lifecycle, after the apply";
             core.on_session_assign(exact_assign(9, 200));
             EXPECT_FALSE(s.resync_window_) << "a new numbering ends it";
         }
@@ -8245,6 +8249,37 @@ namespace {
         // The status and window lines carry it.
         const std::string status = core.status_text(bmmo::session::host_counters{});
         EXPECT_NE(status.find(" relay=7/0/1/2/3 "), std::string::npos) << status;
+    }
+
+    // 2026-11-08 public test: a relayed frame of a pending exact resync's
+    // window (its base and after) arriving past the reach is the apply's
+    // re-step's, which reads it from the ring - not late, and no resync is
+    // asked for (that request, owed by the limiter, fired 2 s after the last
+    // one: the owed-resync loop).
+    TEST(SessionClientCoreResync, LateFramesOfAPendingResyncsWindowAskForNothing) {
+        flow_fake fake;
+        session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+        b1_session(core, fake, 125);
+        auto& s = state_of(core);
+        s.remotes_[4].entity = "Ball_Wood_BMMO_4";
+        const auto relay = [&](uint32_t player, uint32_t newest, std::vector<uint8_t> keys, uint32_t epoch) {
+            bmmo::session_remote_input_msg msg = relay_message(newest, epoch);
+            bmmo::session_remote_input_msg::entry e;
+            e.player = player;
+            for (const uint8_t k: keys) e.frames.push_back(keys_frame(k));
+            msg.entries = {e};
+            core.on_session_remote_input(msg);
+        };
+        core.on_session_assign(exact_assign(9, 140));   // S = 139, the state pending
+        ASSERT_TRUE(s.resync_pending_);
+        ASSERT_TRUE(s.resync_exact_);
+        b1_frames(core, 140, 300);
+        ASSERT_FALSE(s.rollback_.knows_tick(144));
+        relay(4, 145, {6}, 140);
+        EXPECT_EQ(s.relay_late_, 0u);
+        EXPECT_EQ(s.relay_pending_window_, 1u);
+        EXPECT_FALSE(s.resync_owed_);
+        EXPECT_EQ(s.remotes_[4].inputs.count(145), 1u) << "stored for the re-step";
     }
 
     // Step A5 (resync design 2.9): a late joiner's first assignment with the
@@ -8413,6 +8448,63 @@ namespace {
         EXPECT_TRUE(steps{core}.try_apply_resync("retry"));
         EXPECT_FALSE(s.resync_pending_);
         EXPECT_EQ(s.resyncs_restepped_, 1u);
+    }
+
+    // 2026-11-08 public test: a body this world lost (a stone ball fallen
+    // off, gone here, kept by the server) never comes.  The wait is bounded -
+    // 60 frames, or the depth about to take the anchor out of the history -
+    // then the state goes on without it, and a later state does not wait for
+    // that name again.
+    TEST(SessionClientCoreResync, TheWaitForALostBodyIsBounded) {
+        const auto lost_row = [] {
+            bmmo::session::body_state row;
+            row.kind = bmmo::session::body_kind::Mechanism;
+            row.owner = 7;
+            row.name = "P_Ball_Stone_MF001";
+            return row;
+        };
+        {   // by frames
+            flow_fake fake;
+            session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+            b1_session(core, fake, 125);
+            core.on_session_assign(exact_assign(9, 140));
+            b1_frames(core, 140, 145);
+            auto msg = resync_state(140, {1});
+            msg.rows.push_back(lost_row());
+            deliver(core, std::move(msg));
+            auto& s = state_of(core);
+            ASSERT_TRUE(s.resync_pending_);
+            while (s.resync_wait_frames_ < 60) ASSERT_FALSE(steps{core}.try_apply_resync("retry"));
+            EXPECT_TRUE(steps{core}.try_apply_resync("retry")) << "the 61st try goes on";
+            EXPECT_FALSE(s.resync_pending_);
+            EXPECT_EQ(s.resyncs_restepped_, 1u);
+            EXPECT_EQ(s.resync_waits_given_up_, 1u);
+            EXPECT_EQ(s.resync_lost_bodies_.count("P_Ball_Stone_MF001"), 1u);
+            // The next state naming it applies at once.
+            core.on_session_assign(exact_assign(9, 200));
+            ASSERT_TRUE(s.resync_pending_);
+            b1_frames(core, 200, 202);
+            auto again = resync_state(200, {1});
+            again.rows.push_back(lost_row());
+            deliver(core, std::move(again));
+            EXPECT_FALSE(s.resync_pending_) << "not waited for again";
+            EXPECT_EQ(s.resyncs_restepped_, 2u);
+            EXPECT_EQ(s.resync_waits_given_up_, 1u);
+        }
+        {   // by depth: the state arrives two ticks short of the resync reach
+            flow_fake fake;
+            session_client_core core(b1_platform(fake, std::make_shared<bool>(false)), session_capabilities{});
+            b1_session(core, fake, 125);
+            core.on_session_assign(exact_assign(9, 140));
+            auto& s = state_of(core);
+            const uint32_t reach = s.rollback_.resync_reach();
+            b1_frames(core, 140, 139 + reach - 2);
+            auto msg = resync_state(140, {1});
+            msg.rows.push_back(lost_row());
+            deliver(core, std::move(msg));
+            EXPECT_FALSE(s.resync_pending_) << "no wait at all this deep";
+            EXPECT_EQ(s.resync_waits_given_up_, 1u);
+        }
     }
 
     // The b1 world, able to drive the navigated balls in the replay (the
@@ -9609,6 +9701,36 @@ namespace {
             EXPECT_FALSE(s.input_rewind_pending_);
             EXPECT_EQ(s.trafo_missed_, 0u);
         }
+    }
+
+    // A client behind its schedule (note_pacer_behind >= 2) puts a remote's
+    // correction off for up to kRemoteReplayCoalesceFrames frames after the
+    // last replay (on schedule it replays at once, as every other test has).
+    TEST(SessionClientCoreTrafo, ARemoteCorrectionWaitsAFewFramesWhileThePacerIsBehind) {
+        flow_fake fake;
+        trafo_fake t;
+        session_client_core core(trafo_rewind_platform(fake, t), trafo_caps());
+        trafo_tick_125(core, fake);
+        core.config.rollback = true;
+        trafo_record_ticks(core, 110, 125);
+        auto& s = state_of(core);
+        const auto late = [&](uint32_t seq, uint32_t tick) {
+            core.on_session_event(trafo_message(4, seq, bmmo::session::TRAFO_RESET | bmmo::session::TRAFO_SERVER
+                                                            | bmmo::session::TRAFO_FINAL, tick, tick));
+            ASSERT_TRUE(s.input_rewind_pending_);
+        };
+        core.note_pacer_behind(5.0);
+        late(1, 120);
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_, 1u) << "nothing ran before it: at once";
+        late(2, 121);
+        steps{core}.replay_corrected_inputs();
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_deferred_, 2u);
+        EXPECT_TRUE(s.input_rewind_pending_);
+        steps{core}.replay_corrected_inputs();
+        EXPECT_EQ(s.input_rewinds_, 2u) << "the third frame after the last replay";
+        EXPECT_FALSE(s.input_rewind_pending_);
     }
 
     TEST(SessionClientCoreTrafo, AnInputPastTheHistoryAsksForAResync) {

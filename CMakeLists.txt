@@ -30,6 +30,25 @@ project(${PROJECT_NAME})
 # 	message(FATAL_ERROR "64-bit Virtools isn't real (yet).")
 # endif()
 
+# Lockstep: every host must compute what the retail client computes (MSVC, no
+# FMA, /fp:precise), for EVERY target - not only IVP and physics_RT: the
+# engine's CK2_3D / VxMath matrices (a parent's inverse, a child's local
+# matrix) feed the physics too.  GCC/Clang fuse a*b+c by default whenever the
+# target has FMA, and a compiler may default to an FMA target: the 2026-11-08
+# public test's Linux server (CI, GCC 15 on ubuntu-latest) came out as
+# x86-64-v3 with 6966 FMA instructions and split from every client within
+# seconds on L9 (and on L3, L7, L10, L11).  So: contraction off everywhere,
+# and x86-64 pinned to the baseline ISA (aarch64 always has FMA; the
+# contraction switch is what keeps it out there).  MSVC is unaffected:
+# /fp:precise never contracts.  Directory scope, before any subdirectory, so
+# the engine, qhull and BallanceMMO's own code all get it.
+if (NOT MSVC)
+    add_compile_options(-ffp-contract=off -fno-fast-math -fexcess-precision=standard)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        add_compile_options(-march=x86-64 -mtune=generic)
+    endif ()
+endif ()
+
 set(BMMO_VER_DEFINED 1)
 set(BMMO_VER            4.0.0-alpha4)
 set(BMMO_MIN_CLIENT_VER 4.0.0-alpha4)

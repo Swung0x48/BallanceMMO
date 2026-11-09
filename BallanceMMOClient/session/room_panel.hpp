@@ -88,8 +88,9 @@ namespace bmmo::retail {
 
         // Game thread, inside BML+'s ImGui frame. Renders the panel when it
         // is visible and returns at most one action.
+        // in_session: this client runs a physics session (see the Ready button).
         action draw(const bmmo::room_state_msg& state, uint32_t own_id,
-                    const std::vector<bmmo::room::action>& pending, bool connected);
+                    const std::vector<bmmo::room::action>& pending, bool connected, bool in_session);
 
     private:
         static const char* mode_name(bmmo::room::mode m) {
@@ -129,7 +130,8 @@ namespace bmmo::retail {
     };
 
     inline room_panel::action room_panel::draw(const bmmo::room_state_msg& state, uint32_t own_id,
-                                               const std::vector<bmmo::room::action>& pending, bool connected) {
+                                               const std::vector<bmmo::room::action>& pending, bool connected,
+                                               bool in_session) {
         using room_action = bmmo::room::action;
         using room_mode = bmmo::room::mode;
         std::lock_guard lk(mtx_);
@@ -310,14 +312,21 @@ namespace bmmo::retail {
                     ImGui::EndTable();
                 }
 
-                // Ready toggle + leave (+ the host's close).
+                // Ready toggle + leave (+ the host's close).  While the room's
+                // physics session runs without us (we joined late, finished,
+                // or the start left us behind) the button is "Join session":
+                // the server takes a Ready of such a member into the session.
+                const bool join_session = !in_session && own_room_it != state.rooms.end()
+                        && own_room_it->room_phase == bmmo::room::phase::Running
+                        && own_room_it->room_mode == room_mode::Physics;
                 ImGui::BeginDisabled(is_pending(room_action::Ready) || is_pending(room_action::Unready));
-                if (ImGui::Button(own_ready ? "Unready" : "Ready")) {
+                if (ImGui::Button(join_session ? "Join session" : own_ready ? "Unready" : "Ready")) {
                     action a;
                     a.valid = true;
-                    a.type = own_ready ? room_action::Unready : room_action::Ready;
+                    a.type = (own_ready && !join_session) ? room_action::Unready : room_action::Ready;
                     a.room = state.own_room;
                     submit(std::move(a));
+                    if (join_session) visible_ = false;   // the session starts; the panel goes away
                 }
                 ImGui::EndDisabled();
                 ImGui::SameLine();

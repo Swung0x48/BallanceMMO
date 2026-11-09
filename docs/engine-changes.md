@@ -29,8 +29,8 @@ upstream:
 | Under `submodule/Ballanced` | Fork (upstream) | BallanceMMO's commits |
 |---|---|---|
 | `Source/BuildingBlocks/physics_RT/ivp` | `Swung0x48/source-physics` (before it, `doyaGu/ivp`) | #1 `68bb6cb`, #3 `d8513b1`, #5 `618ca67`, #7 `94fecee`, #12 `c563ad7`, #16 `b22a980`, the `IVP_PORTABLE_BMMO` macro `5d6b57a`, #17 `22b594a` |
-| `Source/BuildingBlocks` (physics_RT) | `Swung0x48/CKBuildingBlocks` (`doyaGu/CKBuildingBlocks`, from `e5d441f` on its `sdl`) | #6 `a9c4b3b`, #8 `1bc05ef`, #9 `673d89b`, #10 `325321c`, #13 `926dc2f`, #14 `0bb5e8c`, #15 `f628978`, #18 `7999d04`, #19 `7daf5eb`; the force block's exported helpers (bridge API v14, not numbered) `19b7758`; the rest are the ivp pointer and its URL |
-| `Source/VxMath` | `Swung0x48/VxMath` (`doyaGu/VxMath`) | #2 `a67bd5d`, #11 `576f3a9` |
+| `Source/BuildingBlocks` (physics_RT) | `Swung0x48/CKBuildingBlocks` (`doyaGu/CKBuildingBlocks`, from `e5d441f` on its `sdl`) | #6 `a9c4b3b`, #8 `1bc05ef`, #9 `673d89b`, #10 `325321c`, #13 `926dc2f`, #14 `0bb5e8c`, #15 `f628978`, #18 `7999d04`, #19 `7daf5eb`, #24 `962f73b`; the force block's exported helpers (bridge API v14, not numbered) `19b7758`; the rest are the ivp pointer and its URL |
+| `Source/VxMath` | `Swung0x48/VxMath` (`doyaGu/VxMath`) | #2 `a67bd5d`, #11 `576f3a9`, #23 `3c0fff4` |
 | `Source/Player` | `Swung0x48/BallancePlayer` (`doyaGu/BallancePlayer`) | #4 `2870c91` |
 | `Source/CK2` | `Swung0x48/CK2` (`doyaGu/CK2`, from `d80b8de` on its `sdl`) | #21 `a821135`, the only one |
 | Ballanced itself | `Swung0x48/Ballanced` (`doyaGu/Ballanced`, from `013afc7` on its `sdl`) | no source file: the four submodule pointers above and their `.gitmodules` URLs (CK2's since `9c52cd1`) |
@@ -869,6 +869,109 @@ The first BallanceMMO change in CK2: the commit is `a821135` on
 of `d80b8de` from upstream's `sdl`), and Ballanced's `.gitmodules` points CK2
 at the fork since `9c52cd1`, as it does VxMath, Player and BuildingBlocks (see
 "Where each change lives" at the top).
+
+---
+
+## 23. No fused multiply-add from the compiler's target (VxMath)
+
+File: `Source/VxMath/include/VxSIMD.h` (the FMA block that defines
+`VX_SIMD_FMA`, which turns `VX_FMADD_PS` / `VX_FNMADD_PS` / `VX_FMSUB_PS` /
+`VX_FNMSUB_PS` into `_mm_fmadd_ps` and friends).
+
+Upstream switched `VX_SIMD_FMA` on whenever the compiler predefines `__FMA__`,
+i.e. for any target with FMA (`-march=x86-64-v3`, `-mfma`). A fused
+multiply-add rounds once where the retail VxMath (no FMA) rounds twice, and
+these are explicit intrinsics in header-inline code, so `-ffp-contract=off`
+does not remove them. `VxSIMDCrossProduct3` uses `VX_FNMADD_PS`, and
+`Vx3DInverseMatrix` builds an affine inverse from three such cross products;
+`RCK3dEntity::GetInverseWorldMatrix` caches it and CK uses it for a child's
+local matrix relative to its parent. Since this change `VX_SIMD_FMA` is
+opt-in only (define it explicitly); the macros take the mul + add fallback
+otherwise. No MSVC build changes: MSVC never predefines `__FMA__`, not even
+with `/arch:AVX2`, and nothing in the tree defines `VX_SIMD_FMA`. Not behind
+`IVP_PORTABLE_BMMO` (not an IVP file).
+
+Found by the 2026-11-08 public test. Its Linux server (the CI AppImage, GCC
+15.2 on `ubuntu-latest`) was built for x86-64-v3, with 6966 fused instructions
+in 595 functions, and split from every Windows client: on L9 within 4 s (tick
+11: a 1-ulp difference in the parented `P_Modul_19_Flaps` entity matrix; tick
+249: the stone ball and the flaps), and on L3, L7, L10, L11 and L13. The other
+half was GCC's default `-ffp-contract=fast` re-fusing the explicit mul + add
+that keeps retail's summation order (change #11's `Vx3DMultiplyMatrix`, the
+`RCK3dEntity::WorldMatrixChanged` child matrix) in every target that did not
+get the physics flags. That half is a BallanceMMO build setting, not an
+engine change: the top-level `CMakeLists.txt` now passes `-ffp-contract=off
+-fno-fast-math -fexcess-precision=standard` to every target on GCC/Clang and
+pins `-march=x86-64 -mtune=generic` on x86-64 (aarch64 always has FMA; the
+contraction switch keeps it out there), and the server CI fails if a fused
+instruction appears in the server, SimTool or headless client binaries.
+
+Evidence: a Linux SimTool configured with `-march=x86-64-v3` from outside (the
+runner's default) and built with both halves has no fused instruction, and
+replays the eight split sessions' server journals with every tick's hash
+equal to the Windows SimTool's: 385,241 ticks (2_L9 6930, 1_L9 25409, 2_L11
+68708, 5_L3 8202, 2_L7 44114, 11_L3 29629, 1_L10 71760, 2_L13 130489). The
+Windows SimTool's per-tick hashes are unchanged by the change. The public
+test's own journals were written by the FMA server: only the deployed CI
+Linux SimTool replays them exactly.
+
+## 24. Collision surfaces remembered by their inputs (physics_RT)
+
+Files: `Source/BuildingBlocks/physics_RT/CKIpionManager.cpp` / `.h` (new
+`PhysicsSurfaceMemo`, member `m_SurfaceMemo`).
+
+`CreatePhysicsObjectOnParameters` caches a compiled surface under the
+caller's Collision Surface name. The trafo explosion's pieces have one name
+per player (`Ball_Wood_pieceNN_Mesh_Trafo<id>`), and change #9 drops every
+piece's surface while the piece has no body, so every explosion compiled its
+16 hulls again (qhull, the convex template, the rotation inertia) from the
+same vertices - including the same player's later explosions and a client's
+rollback replays through the explosion tick. Profiled 2026-11-08 (16 players,
+level 12, E-core, x64): 4.2 ms of the 6.5 ms explosion tick; the x87-soft
+model's emulated build costs 22 ms (x64 SOFT, x86 HARD) to 57 ms (x86 SOFT).
+
+The manager now also keeps, per convex-only surface it compiled, the full
+inputs (the scale's bits, then per convex mesh its vertex count and vertex
+positions as stored) and a copy of the compiled bytes. A named miss whose
+inputs equal an entry's, byte for byte, gets a fresh copy of those bytes
+instead of a build; the name cache, the owners and change #9 are unchanged,
+and the memo is freed with the named surfaces (`DeleteCollisionSurfaces`, so
+at every reset and level load). A surface with concave meshes is always built
+(its inputs would include the faces; the repeated builds are all convex).
+
+The copy is what the build returns: in a measurement copy that builds every
+hit anyway and compares (`b-perf/add_memo_check.py`), the 144 hits of the
+16-, 24- and 32-player level 12 sessions (collision-overhaul journals) were
+equal byte for byte on x64 and on x86, none different. So no result changes
+and the change is not behind the physics-session switch: the ten
+collision-overhaul 4-32 player journals (L12, L8) replay 2640/2640 with 4/4
+checkpoints on the x64 and x86 SimTools.
+
+Timing: the same SimTool with the memo on and off (`b-perf/memo_time.sh`,
+E-cores 16-18, medians of 6 runs, both orders), whole server tick in ms, off
+-> on. Level 12's first explosion of a world (tick 957 at 16 and 32 players,
+963 at 8) compiles as before; every later explosion copies:
+
+| Tick | x64 | x86 |
+|---|---|---|
+| 16 players, 957 (first) | 5.9 -> 6.7 | 6.8 -> 6.4 |
+| 16 players, 970 | 6.6 -> 2.2 | 7.4 -> 2.4 |
+| 32 players, 957 (first) | 7.0 -> 6.9 | 7.6 -> 8.2 |
+| 32 players, 967 / 970 / 974 / 981 / 993 | 7.2 / 8.0 / 8.1 / 8.6 / 10.1 -> 3.6 / 3.9 / 4.3 / 5.5 / 5.8 | 8.6 / 8.4 / 8.8 / 10.0 / 11.2 -> 3.4 / 3.7 / 4.7 / 5.6 / 6.4 |
+
+The first-explosion differences go both ways (the code up to that tick is the
+same in both modes: noise of about a millisecond). The worst tick of a room is
+that first explosion, so a room's capacity does not change; what changes is
+every later explosion and every rollback replay through one.
+
+On a build with the x87 model (`BMMO_PHYSICS_X87`), the key also holds the
+thread's x87 precision and rounding (AddConvexSurface rounds the scaled
+vertices at them), and a hit raises the thread's precision to 64 bits as the
+skipped build's first `convert_pointsoup_to_compact_ledge` would (the original
+never restores it; a BallanceMMO host resets it to 24 at every level load).
+The raise is one ivp entry point both call,
+`IVP_SurfaceBuilder_Pointsoup::enter_hull_precision` (x87-soft: ivp
+`e2f02da`, BuildingBlocks `37263b7`).
 
 ---
 

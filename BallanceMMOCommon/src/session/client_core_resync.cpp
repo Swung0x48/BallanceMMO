@@ -34,6 +34,17 @@ namespace bmmo::session {
         // mirror's navigation before it goes on with that mirror undriven
         // (the TRL naming point of a wait).
         constexpr uint32_t kNavigationWaitFrames = 60;
+        // The frames a state waits for its body set at most, and the depth
+        // short of the resync reach at which it stops waiting anyway (the
+        // next frames would take the anchor out of the history).  The waits
+        // the design expects (a pass the server ran before S that this world
+        // runs live, its bodies in frame M+5; a birth drained at base) take
+        // a few frames.  A body this world LOST - the 2026-11-08 public
+        // test's stone balls fallen off the track, gone here, kept by the
+        // server - never comes: the hold froze the game 2 s, timed out and
+        // asked for a state that named it again, until the level ended.
+        constexpr uint32_t kBodyWaitFrames = kNavigationWaitFrames;
+        constexpr uint32_t kBodyWaitReachMargin = 2;
     }
 
     // post_step's tracked set, for a record made outside a frame (the
@@ -385,10 +396,29 @@ namespace bmmo::session {
             bmmo_physics_body_state probe{};
             if (entity.empty() && !body.name.empty() && platform_.body_state(body.name, probe)) entity = body.name;
             if (entity.empty()) {
-                waiting.push_back(body.name.empty() ? "#" + std::to_string(body.owner) : body.name);
+                std::string name = body.name.empty() ? "#" + std::to_string(body.owner) : body.name;
+                if (s.resync_lost_bodies_.count(name)) ++unmapped;   // lost here before: not waited for again
+                else waiting.push_back(std::move(name));
                 continue;
             }
             rows[entity] = &body;
+        }
+        // The wait is bounded: past kBodyWaitFrames, or about to take the
+        // anchor out of the history, the state goes on with the missing rows
+        // unmapped (the retail restore skips an object it does not have) and
+        // their names are remembered as lost.
+        if (!waiting.empty()
+                && (s.resync_wait_frames_ >= kBodyWaitFrames || depth + kBodyWaitReachMargin >= s.rollback_.resync_reach())) {
+            std::string names;
+            for (size_t i = 0; i < waiting.size() && i < 24; ++i) names += (i ? ", " : "") + waiting[i];
+            logf("resync: the state of tick %u stops waiting at tick %u (%u frames, depth %u of %u) and goes on without "
+                 "%zu bod%s this world lacks: %s%s", anchor, now, s.resync_wait_frames_, depth, s.rollback_.resync_reach(),
+                 waiting.size(), waiting.size() == 1 ? "y" : "ies", names.c_str(), waiting.size() > 24 ? ", ..." : "");
+            journal_.note("resync: went on without " + std::to_string(waiting.size()) + " bodies (" + names + ")");
+            ++s.resync_waits_given_up_;
+            unmapped += static_cast<uint32_t>(waiting.size());
+            s.resync_lost_bodies_.insert(waiting.begin(), waiting.end());
+            waiting.clear();
         }
         // The server's body set is not all here yet: a pass the server ran
         // before S that this world runs live now (its bodies in frame M+5),
@@ -927,7 +957,8 @@ namespace bmmo::session {
             state.timed_out = true;
             logf("resync hold timed out after %.0f ms at tick %u: running on, asking again", ms, current_tick());
             journal_.note("resync hold timed out after " + std::to_string(static_cast<long long>(ms)) + " ms");
-            request_resync("the resync state did not come within the hold", true);
+            request_resync(s.have_resync_state_ ? "the resync state came but was not applied within the hold"
+                                                : "the resync state did not come within the hold", true);
         } else {
             logf("resync hold released after %.0f ms", ms);
             journal_.note("resync hold " + std::to_string(static_cast<long long>(ms)) + " ms");

@@ -152,9 +152,14 @@ public:
 	std::string get_username(bmmo::net::connection client_id) override {
 		if (client_id == bmmo::net::kInvalidConnection)
 			return { "[Server]" };
-		auto state = db_.get(client_id);
-		assert(state.has_value() || (db_.get_client_id() == client_id));
-		return state.has_value() ? state->name : get_display_nickname();
+		if (auto state = db_.get(client_id))
+			return state->name;
+		if (client_id == db_.get_client_id())
+			return get_display_nickname();
+		// a player who already left (not our own name, which this used to return)
+		if (auto name = db_.get_departed_name(client_id))
+			return *name;
+		return std::format("#{}", client_id);
 	}
 	// map_names_ is filled from the network thread (MapNames messages) and from
 	// the game thread (entering a level), so every access goes through these.

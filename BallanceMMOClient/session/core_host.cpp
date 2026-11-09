@@ -1258,7 +1258,9 @@ namespace {
     class core_pacer_slew final : public bs::pacer_slew {
     public:
         int step(clock_type::time_point now, double behind) override {
-            if (!core_session_running() || !host.core->slewing()) return 0;
+            if (!core_session_running()) return 0;
+            host.core->note_pacer_behind(behind);
+            if (!host.core->slewing()) return 0;
             return host.core->slew_step(now, bs::kTickRate, behind);
         }
         double rebase_threshold() const override {
@@ -2353,7 +2355,22 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
     // reloaded at the session's start; a clean one restarts at once (step
     // SPL: there is no countdown before the restart any more).
     level_life.reloading = level_life.loaded = level_life.go_waiting = level_life.exit_seen = false;
-    if (level_life.ran_union && level_life.enabled) {
+    // The session's map, not the one this game has loaded: a member whose
+    // game moved on (it finished the room's level and the game went to the
+    // next one) joining late anchored that other level on the clean path,
+    // and the server refused it with a placement mismatch (2026-11-08 public
+    // test, sessions 2, 9, 11, 12, 13).  An original level is loaded through
+    // the reload below; another custom map cannot be.
+    const bool other_map = static_cast<const bmmo::map&>(current_map_) != msg.map;
+    if (other_map && (!msg.map.is_original_level() || !level_life.enabled)) {
+        core_host_end_local(std::format("your game is in {}, the session runs {}: load that map first",
+                                        get_map_name(current_map_), get_map_name(msg.map)));
+        return;
+    }
+    if (other_map)
+        logger_->Info("Physics session %u: this game is in %s, the session runs level %d: loading it", msg.session,
+                      get_map_name(current_map_).c_str(), msg.map.level);
+    if ((level_life.ran_union || other_map) && level_life.enabled) {
         // The session's level (what the server simulates); only an original
         // level slot can be started through the menus.
         const int level = msg.map.level;
@@ -2383,17 +2400,18 @@ void BallanceMMOClient::core_host_session_start(const bmmo::session_start_msg& m
         messages->SendMessageSingle(exit_level, all_balls);
         // Step CMAP: a level loaded from a custom map reloads that file into the same slot (BML+'s patch), not
         // the slot's own file.
-        if (const std::string& custom = bmmo::session::retail::loaded_custom_map(); !custom.empty())
+        const std::string custom = other_map ? std::string() : bmmo::session::retail::loaded_custom_map();
+        if (!custom.empty())
             logger_->Info("Physics session %u: the reload loads the custom map %s into slot %d", msg.session,
                           custom.c_str(), level);
-        begin_level_request(level, bmmo::session::retail::loaded_custom_map());
+        begin_level_request(level, custom);
         level_life.reloading = true;
         level_life.level = level;
         level_life.started = bmmo::retail::host_clock().now(bs::clock_site::retail_reload);
         ++level_life.reloads;
         host.restart_deadline = level_life.started + kReloadTimeout;
-        logger_->Info("Physics session %u: the level ran a union: reloading level %d (exit, then the menus) during "
-                      "the countdown", msg.session, level);
+        logger_->Info("Physics session %u: %s: reloading level %d (exit, then the menus) during the countdown",
+                      msg.session, other_map ? "another level is loaded" : "the level ran a union", level);
     } else {
         if (level_life.ran_union)
             logger_->Info("Physics session %u: the level ran a union, but 'session reload off': restarting it as it is",
@@ -4158,8 +4176,10 @@ void BallanceMMOClient::core_host_frame() {
     // Step A3 (resync design 2.6.6): the resync hold.  While a pending exact
     // resync's anchor would leave the history with the next step, nothing
     // steps: the mailbox is drained (its state applies the resync and ends
-    // the hold) under the tick driver's hold, so the wait is no lag and
-    // `rebases` does not move (a rebase would ask for another resync).
+    // the hold) under the tick driver's hold.  The release keeps the held
+    // ticks due, up to kHoldCatchUpFrames, so the pacing catches up the
+    // server's schedule without a rebase (a rebase would ask for another
+    // resync).
     if (core.poll_resync_hold().held) {
         fixed_tick_.set_hold(true);
         while (core_session_running() && host.core->resync_held()) {
@@ -4168,7 +4188,7 @@ void BallanceMMOClient::core_host_frame() {
             if (!host.core->poll_resync_hold().held) break;
             bmmo::retail::host_clock().sleep_for(bs::clock_site::retail_blocking_wait, std::chrono::milliseconds(1));
         }
-        fixed_tick_.set_hold(false);
+        fixed_tick_.release_hold_owing(bs::kHoldCatchUpFrames);
         host.last_rebases = fixed_tick_.rebases();
         if (!core_session_running()) return;
     }

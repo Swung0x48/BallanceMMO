@@ -2774,8 +2774,8 @@ public:
         for (const auto& [session, m]: dropped) {
             send_session_end(session, m, "did not report ready");
             // Out of the session but not out of the room: the rest start
-            // without it (assign_start_members re-checks as it goes), and it
-            // can rejoin the room to late-join what is now a running session.
+            // without it (assign_start_members re-checks as it goes), and a
+            // Ready late-joins it to what is now a running session.
             // Leaving it in the room matters - the client is told the session
             // ended and has no way to learn it was removed from the room.
             physics_session_member_left(m);
@@ -3528,10 +3528,9 @@ public:
                     send_room_event(c, event_type::RequestDenied, err, msg.room);
                     break;
                 }
+                // A joiner starts not ready; a running physics session takes it
+                // in once it says Ready (below), not on the Join itself.
                 send_room_event(c, event_type::RequestAccepted, error_code::None, msg.room, c);
-#if BMMO_BUILD_SIM
-                physics_session_member_joined(msg.room, c);
-#endif
                 if (const auto* r = rooms_.find(msg.room))
                     for (const auto& m: r->members)
                         if (m.id != c)
@@ -3544,6 +3543,16 @@ public:
                 break;
             case action::Ready:
             case action::Unready: {
+#if BMMO_BUILD_SIM
+                // The Ready that would late-join a running physics session
+                // needs cheat mode off (see CheatState).
+                if (msg.action == action::Ready && client_it->second.cheated && !client_session_.contains(c)
+                        && room_session_.contains(rooms_.room_of(c))) {
+                    send_room_event(c, event_type::RequestDenied, error_code::NotReady, rooms_.room_of(c), c, 0,
+                                    "cheat mode is on: turn it off to join the physics session");
+                    break;
+                }
+#endif
                 auto err = rooms_.set_ready(c, msg.action == action::Ready);
                 if (err != error_code::None) {
                     send_room_event(c, event_type::RequestDenied, err, 0);
@@ -3551,6 +3560,12 @@ public:
                 }
                 notify_ready_changed(c);
                 send_room_event(c, event_type::RequestAccepted, error_code::None, rooms_.room_of(c), c, c);
+#if BMMO_BUILD_SIM
+                // A member out of the room's running physics session (a late
+                // joiner, a finisher, one the start left behind) joins it late.
+                if (msg.action == action::Ready && !client_session_.contains(c))
+                    physics_session_member_joined(rooms_.room_of(c), c);
+#endif
                 break;
             }
             case action::Start: {
@@ -3598,6 +3613,16 @@ public:
                     }
                     if (auto mods = check_physics_mods(*r); mods != error_code::None) {
                         send_room_event(c, event_type::RequestDenied, mods, room);
+                        break;
+                    }
+                    // Cheat mode is not allowed in a physics session (CheatState kicks a member who turns it on).
+                    std::string cheaters;
+                    for (const auto& m: r->members)
+                        if (auto mi = clients_.find(m.id); mi != clients_.end() && mi->second.cheated)
+                            cheaters += (cheaters.empty() ? "" : ", ") + mi->second.name;
+                    if (!cheaters.empty()) {
+                        send_room_event(c, event_type::RequestDenied, error_code::NotReady, room, c, 0,
+                                        "cheat mode is on for " + cheaters + "; turn it off for a physics session");
                         break;
                     }
                     if (auto existing = room_session_.find(room); existing != room_session_.end()) {
@@ -4541,6 +4566,19 @@ protected:
                 client_it->second.cheated = state_msg->content.cheated;
                 Printf("(#%u, %s) turned cheat [%s]!",
                     networking_msg->conn, client_it->second.name, state_msg->content.cheated ? "on" : "off");
+#if BMMO_BUILD_SIM
+                // Cheat mode (what BML's debug mods need to switch balls or
+                // fly) is not allowed in a physics session: its player is
+                // kicked and told why.  notify is false when the client only
+                // follows the server's own toggle (the console 'cheat').
+                if (state_msg->content.cheated && state_msg->content.notify
+                        && client_session_.contains(networking_msg->conn)) {
+                    Printf("(#%u, %s) turned cheat mode on in a physics session: kicked.",
+                           networking_msg->conn, client_it->second.name);
+                    kick_client(networking_msg->conn, "you cheated: cheat mode is not allowed in a physics session");
+                    return;
+                }
+#endif
                 bmmo::owned_cheat_state_msg new_msg{};
                 new_msg.content.player_id = networking_msg->conn;
                 new_msg.content.state.cheated = state_msg->content.cheated;

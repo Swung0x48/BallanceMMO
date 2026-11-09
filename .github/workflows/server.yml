@@ -60,6 +60,23 @@ jobs:
       working-directory: ${{github.workspace}}
       run: DESTDIR=AppDir cmake --build ./build --config ${{env.BUILD_TYPE}} --target install
 
+    # Lockstep: the server must compute what the retail client computes (no
+    # FMA).  The 2026-11-08 public test's server came out of this job as
+    # x86-64-v3 with 6966 fused multiply-adds and split from every client;
+    # CMakeLists.txt pins the baseline ISA and turns contraction off.  This
+    # gate fails the job if any fused instruction is back.
+    - name: No fused multiply-add in the physics binaries
+      working-directory: ${{github.workspace}}/build/BallanceMMOServer
+      run: |
+        fused=0; checked=0
+        for bin in BallanceMMOServer BallanceMMOSimTool BallanceMMOSessionClient; do
+          [ -f "$bin" ] || continue
+          n=$(objdump -d --no-show-raw-insn "$bin" | grep -c -E '\svfn?m(add|sub)' || true)
+          echo "$bin: $n fused multiply-add instructions"
+          fused=$((fused + n)); checked=$((checked + 1))
+        done
+        test "$checked" -gt 0 && test "$fused" -eq 0
+
     # enable_testing() is called in BallanceMMOServer/, so the tests live in
     # that subdirectory of the build tree; ctest run anywhere above it reports
     # "No tests were found" and still exits 0.

@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <vector>
 
 using namespace bmmo::session;
@@ -771,4 +772,32 @@ TEST(LatenessMeter, SharedReanchorKeepsAbsoluteEvidenceAndMinorityTakesPrecedenc
     shared.reset(900);
     EXPECT_EQ(shared.samples_total(), 0u);
     EXPECT_FALSE(shared.absolute_majority());
+}
+
+// The 2026-11-08 server crash (std::out_of_range, map::at): a resync's
+// player_ready in the same gap between two steps as another member's leave
+// asks shared_absolute, whose view (the last stepped tick's quorum members)
+// still names the leaver; remove_player already dropped its meter.  The
+// leaver is not counted, and nothing throws: two of the three members left
+// hold an absolute majority (counted with the leaver it would be 2 of 4).
+TEST(LatenessMeter, SharedAbsoluteSkipsAMemberThatLeftAfterTheStep) {
+    struct entry { relative_meter meter; };
+    std::map<uint32_t, entry> meters;
+    for (uint32_t tick = 1; tick <= 400; ++tick) {
+        meters[1].meter.sample_absolute(tick, -10, 6);
+        meters[2].meter.sample_absolute(tick, -10, 6);
+    }
+    meters[3];
+    ASSERT_TRUE(meters[1].meter.absolute_majority());
+    ASSERT_FALSE(meters[3].meter.absolute_majority());
+    std::vector<quorum_member> view(4);
+    for (uint32_t player = 1; player <= 4; ++player) {
+        view[player - 1].player = player;
+        view[player - 1].ready = view[player - 1].has_baseline = true;
+    }
+    bool shared = false;
+    EXPECT_NO_THROW(shared = shared_absolute_majority(view, meters));   // player 4 left: no meter
+    EXPECT_TRUE(shared);
+    meters.erase(2);
+    EXPECT_FALSE(shared_absolute_majority(view, meters));   // 1 of 2
 }

@@ -47,6 +47,16 @@ namespace bmmo::session {
             std::chrono::duration<double>(static_cast<double>(ticks_) * kTickSeconds));
     }
 
+    void fixed_tick_driver::release_hold_owing(double max_behind) {
+        if (!held_) return;
+        held_ = false;
+        const auto now = bmmo::retail::host_clock().now(clock_site::retail_pace_origin);
+        const double behind = std::chrono::duration<double>(now - origin_).count() * kTickRate - static_cast<double>(ticks_);
+        if (behind > max_behind)
+            origin_ = now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>((static_cast<double>(ticks_) + max_behind) * kTickSeconds));
+    }
+
     void fixed_tick_driver::release_hold_at(std::chrono::steady_clock::time_point at) {
         held_ = false;
         origin_ = at - std::chrono::duration_cast<std::chrono::steady_clock::duration>(

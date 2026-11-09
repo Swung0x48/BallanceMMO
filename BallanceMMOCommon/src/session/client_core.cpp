@@ -531,11 +531,13 @@ namespace bmmo::session {
         s.have_resync_state_ = false;
         s.resync_state_ = bmmo::session_resync_state_msg{};
         s.resync_held_ = false;
+        s.resync_lost_bodies_.clear();
         s.resync_join_ = false;   // step A5
         s.life_log_.clear();
         s.pending_deaths_.clear();
         s.life_batch_ = client_core_state::life_rewind_batch{};   // step SRT3
-        s.life_events_coalesced_ = s.input_rewinds_carried_ = 0;
+        s.life_events_coalesced_ = s.input_rewinds_carried_ = s.input_rewinds_deferred_ = 0;
+        s.pacer_behind_ = 0.0;
         // (R1's own_body_backstop state, reset here until FULL step R6V,
         // went with the policy.)
         // Step B2SW (U30): the run of unmatched snapshots and the resyncs it
@@ -1440,9 +1442,11 @@ namespace bmmo::session {
         // reliable channel is counted in it - so the new clock has the
         // whole delta the server decided, not the part the slew had
         // moved.  Only here, past the limiter: a request held back
-        // re-anchors nothing, and the slew carries on.
+        // re-anchors nothing, and the slew carries on.  A stalled raise
+        // says what it moved (lead_slew::finish_reanchored).
         if (s.lead_slew_.active())
-            finish_lead_slew(std::string("ended by a resync request (") + reason + ")", true);
+            finish_lead_slew(std::string("ended by a resync request (") + reason + ")"
+                             + (s.lead_slew_.stalled() ? ", stalled: what it moved" : ""), true);
         bmmo::session_resync_msg msg;
         msg.session = s.session_;
         msg.last_full_tick = s.last_snapshot_tick_;
