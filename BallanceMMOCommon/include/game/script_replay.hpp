@@ -1319,6 +1319,17 @@ namespace bmmo::game {
             const bool with_cells = cells && !cells->empty();   // step RK2: record v6
             put_u32(out, kMagic);
             const bool with_slots = hooks.slots != nullptr;
+            // T3C e3: this capture observes the slot roots (the memo's ledger)
+            // before any block is walked, and only it may use a memo.
+            struct observing_scope {
+                script_slots* slots;
+                ~observing_scope() { if (slots) slots->set_observing(false); }
+            } observing{nullptr};
+            if (with_slots && reuse) {
+                observe_slot_roots(context, *hooks.slots, reuse->tick);
+                hooks.slots->set_observing(true);
+                observing.slots = hooks.slots;
+            }
             if (with_hold || with_cells || with_slots) {
                 put_u32(out, kVersionSections);
                 put_u32(out, (v3 ? kSectionTrafo : 0u) | (with_queue ? kSectionQueue : 0u) | (with_hold ? kSectionHold : 0u)
@@ -1365,12 +1376,17 @@ namespace bmmo::game {
                     // structure mismatch walks the root instead.
                     const size_t at = out.size();
                     const uint64_t imaged_before = joint_stats().imaged;
+                    const slot_memo_stats memo_before = slot_memo_totals();
                     size_t pos = static_cast<size_t>(block - reuse->previous->data());
                     const size_t end = pos + size;
                     uint64_t tails = 0;
                     if (!copy_with_fresh_tails(beh, hooks, *reuse->previous, pos, out, tails, with_slots) || pos != end) {
                         out.resize(at);
                         joint_stats().imaged = imaged_before;   // the walk below images them again
+                        // T3C e3: the walk below is the slot memo's one counted
+                        // pass (it may serve the memos the copy just stored:
+                        // they are the walk's bytes).
+                        restore_memo_counts(memo_before);
                         ++reuse_stats.walked_structure;
                         capture_behavior(beh, hooks, out, with_slots);
                         continue;
@@ -1386,7 +1402,12 @@ namespace bmmo::game {
                         ++reuse_stats.verified;
                         const uint64_t imaged_copy = joint_stats().imaged;
                         const size_t mid = out.size();
+                        // T3C e3: a true walk, the slot memo off (neither served
+                        // nor refreshed), so the compare covers the memo's
+                        // entries in the copy too.
+                        if (with_slots) hooks.slots->set_observing(false);
                         capture_behavior(beh, hooks, out, with_slots);
+                        if (with_slots) hooks.slots->set_observing(observing.slots != nullptr);
                         joint_stats().imaged = imaged_copy;
                         const size_t copied = mid - at, fresh = out.size() - mid;
                         if (fresh != copied || !std::equal(out.begin() + static_cast<std::ptrdiff_t>(at),
@@ -1499,6 +1520,34 @@ namespace bmmo::game {
             for (int i = 0; i < outputs && i < 32; ++i)
                 if (beh->IsOutputActive(i)) outs |= 1u << i;
             return ins == in_mask && outs == out_mask;
+        }
+
+        // T3C e3: one observation of the slot memo's ledger - every unit
+        // root's activation words after this tick's frame (script_slots.hpp
+        // observe).  Every capture of a tick makes one: a whole record's
+        // inside capture, a light record's through rollback_world
+        // observe_scripts.
+        static void observe_slot_roots(CKContext* context, script_slots& slots, uint32_t tick) {
+            slots.begin_observation();
+            for (uint32_t root: slots.roots()) {
+                auto* beh = context ? CKBehavior::Cast(context->GetObject(static_cast<CK_ID>(root))) : nullptr;
+                slots.observe(root, tick, beh != nullptr, beh ? root_words_of(beh) : script_root_words{},
+                              static_cast<uint32_t>(kFrameFlags));
+            }
+        }
+
+        // T3C e3: the slot memo's counters back to `before`, its mismatches and
+        // notes kept (a pass taken back counts nothing).
+        static void restore_memo_counts(const slot_memo_stats& before) {
+            slot_memo_stats& now = slot_memo_totals();
+            now.walked = before.walked;
+            now.hits = before.hits;
+            now.miss_none = before.miss_none;
+            now.miss_gen = before.miss_gen;
+            now.miss_run = before.miss_run;
+            now.miss_tail = before.miss_tail;
+            now.joint = before.joint;
+            now.verified = before.verified;
         }
 
         // Step OPC: a root's activation words as put_activation writes them.
@@ -2987,8 +3036,10 @@ namespace bmmo::game {
         // slot image sections - the selection's scripts of a record with a
         // slot map; never a trafo block or a standalone block image (a
         // copy's base, a trafo set's built state).
+        // `marks` (T3C e3, the slot memo): every force and joint block's tail
+        // as (id, offset in `out`, length).
         static void capture_behavior(CKBehavior* beh, const script_replay_hooks& hooks, std::vector<uint8_t>& out,
-                                     bool images = false) {
+                                     bool images = false, std::vector<script_slots::tail>* marks = nullptr) {
             put_u32(out, static_cast<uint32_t>(beh->GetID()));
             put_activation(beh, out);
             const int locals = beh->GetLocalParameterCount();
@@ -2997,14 +3048,18 @@ namespace bmmo::game {
             const int outs = beh->GetOutputParameterCount();
             put_u16(out, static_cast<uint16_t>(outs));
             for (int i = 0; i < outs; ++i) capture_parameter(beh->GetOutputParameter(i), out);
+            const size_t tail_at = out.size();
             put_force_and_joint(beh, hooks, out, true);
+            if (marks && (is_force_block(beh) || is_joint_block(beh)))
+                marks->push_back({static_cast<uint32_t>(beh->GetID()), static_cast<uint32_t>(tail_at),
+                                  static_cast<uint32_t>(out.size() - tail_at), is_joint_block(beh)});
             if (images) put_omitted_images(beh, hooks, out);
             if (beh->IsUsingFunction()) { put_u16(out, 0); put_u16(out, 0); return; }
             const auto children = recorded_children(beh, hooks.slots);
             put_u16(out, static_cast<uint16_t>(children.size()));
             for (CKBehavior* child: children) {
                 put_u8(out, child ? 1 : 0);
-                if (child) capture_behavior(child, hooks, out, images);
+                if (child) capture_behavior(child, hooks, out, images, marks);
             }
             put_delayed_links(beh, out);
         }
@@ -3021,26 +3076,81 @@ namespace bmmo::game {
             if (!hooks.slots || beh->IsUsingFunction()) return;
             uint16_t count = 0;
             std::unique_ptr<script_replay_hooks> plain;
-            std::vector<uint8_t> image;
+            std::vector<uint8_t> image, tail;
+            // T3C e3: the slot memo (script_slots.hpp), only in a capture that
+            // observed the roots this tick.
+            const script_reuse_mode memo_mode = slot_memo_mode_from_env();
+            const bool memo = memo_mode != script_reuse_mode::off && hooks.slots->observing();
+            slot_memo_stats& memo_stats = slot_memo_totals();
+            const uint64_t writes = script_write_generation();
             for (int index = 0; index < beh->GetSubBehaviorCount(); ++index) {
                 CKBehavior* child = beh->GetSubBehavior(index);
-                if (!child || !hooks.slots->omit(child->GetID())) continue;
-                const std::vector<uint8_t>* base = hooks.slots->base(child->GetID());
-                if (!base) continue;
+                script_slots::copy* c = child ? hooks.slots->find(static_cast<uint32_t>(child->GetID())) : nullptr;
+                if (!c || !hooks.slots->omitted(*c)) continue;
                 if (!plain) {
                     plain = std::make_unique<script_replay_hooks>(hooks);
                     plain->slots = nullptr;
                 }
+                if (memo) {
+                    const char* refused = c->root ? hooks.slots->memo_refused(*c, writes) : "none";
+                    if (!refused) {
+                        // Every force tail as it reads now, against the memo's.
+                        for (const script_slots::tail& t: c->m.tails) {
+                            auto* block = CKBehavior::Cast(child->GetCKContext()->GetObject(static_cast<CK_ID>(t.block)));
+                            tail.clear();
+                            if (block) put_force_and_joint(block, *plain, tail, true);
+                            if (!block || tail.size() != t.length
+                                || !std::equal(tail.begin(), tail.end(), c->m.image.begin() + static_cast<std::ptrdiff_t>(t.offset))) {
+                                refused = "tail";
+                                break;
+                            }
+                        }
+                    }
+                    if (!refused) {
+                        ++memo_stats.hits;
+                        if (memo_mode == script_reuse_mode::verify) {
+                            ++memo_stats.verified;
+                            image.clear();
+                            capture_behavior(child, *plain, image);
+                            if (image != c->m.image)
+                                memo_stats.note("slot_memo mismatch: " + owner_name(child) + " / copy #"
+                                                + std::to_string(child->GetID()) + " under root #" + std::to_string(c->root)
+                                                + ": a fresh walk (" + std::to_string(image.size()) + " bytes) differs from the memo ("
+                                                + std::to_string(c->m.image.size()) + " bytes, walked "
+                                                + std::to_string(hooks.slots->seq() - c->m.seq) + " observations ago) at byte "
+                                                + std::to_string(first_difference(image.data(), image.size(), c->m.image.data(),
+                                                                                  c->m.image.size()))
+                                                + "; recorded the memo's entry");
+                        }
+                        out.insert(out.end(), c->m.entry.begin(), c->m.entry.end());
+                        if (!c->m.entry.empty()) ++count;
+                        continue;
+                    }
+                    if (refused[0] == 'n') ++memo_stats.miss_none;
+                    else if (refused[0] == 'g') ++memo_stats.miss_gen;
+                    else if (refused[0] == 'r') ++memo_stats.miss_run;
+                    else ++memo_stats.miss_tail;
+                }
                 image.clear();
-                capture_behavior(child, *plain, image);
+                std::vector<script_slots::tail> marks;
+                capture_behavior(child, *plain, image, false, memo ? &marks : nullptr);
                 const size_t at = out.size();
                 put_u32(out, static_cast<uint32_t>(child->GetID()));
-                put_u32(out, hooks.slots->base_hash(child->GetID()));
-                if (!script_slots::put_delta(*base, image, out)) {
-                    out.resize(at);
-                    continue;
+                put_u32(out, c->base_hash);
+                const bool differs = script_slots::put_delta(c->base, image, out);
+                if (!differs) out.resize(at);
+                else ++count;
+                if (memo) {
+                    ++memo_stats.walked;
+                    const bool joint = std::any_of(marks.begin(), marks.end(), [](const script_slots::tail& t) { return t.joint; });
+                    if (joint) ++memo_stats.joint;
+                    c->m.valid = !joint && c->root != 0;
+                    c->m.image = image;
+                    c->m.entry.assign(out.begin() + static_cast<std::ptrdiff_t>(at), out.end());
+                    c->m.tails = std::move(marks);
+                    c->m.seq = hooks.slots->seq();
+                    c->m.writes = writes;
                 }
-                ++count;
             }
             out[count_at] = static_cast<uint8_t>(count & 0xff);
             out[count_at + 1] = static_cast<uint8_t>(count >> 8);

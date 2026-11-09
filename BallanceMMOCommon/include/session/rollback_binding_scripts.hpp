@@ -248,6 +248,11 @@ namespace bmmo::session {
             };
             world.script_writes = []() { return bmmo::game::script_write_generation(); };
         }
+        // T3C e3: a light record's observation of the slot memo's ledger.
+        if (hooks->slots)
+            world.observe_scripts = [context, hooks](uint32_t tick) {
+                bmmo::game::script_replay::observe_slot_roots(context, *hooks->slots, tick);
+            };
         world.restore_scripts = [o, context, selection, hooks, trafo, queue, queue_ptr, hold, hold_ptr](
                                     const std::vector<uint8_t>& bytes, uint32_t anchor) {
             // Step OPC: a script restore writes the scripts, whoever calls it

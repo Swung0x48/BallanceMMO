@@ -147,3 +147,74 @@ TEST(ScriptSlots, PortableRecordRetainsHistoricallyBoundSlotsForLateJoiners) {
     slots.select(1);
     EXPECT_TRUE(slots.omit(123));
 }
+
+// T3C e3: the slot memo's quiet-run ledger and the memo's refusals.
+TEST(ScriptSlots, MemoServesOnlyWhileItsRootStaysQuiet) {
+    using bmmo::game::script_root_words;
+    using bmmo::game::script_slots;
+    constexpr uint32_t kActive = 1;   // a frame flag
+    script_slots slots;
+    slots.add(10, 2, {1, 2, 3}, 7);
+    script_slots::copy* c = slots.find(10);
+    ASSERT_NE(c, nullptr);
+    EXPECT_STREQ(slots.memo_refused(*c, 0), "none");
+    script_root_words quiet;
+    quiet.id = 7;
+    const auto observe = [&](uint32_t tick, script_root_words words, bool present = true) {
+        slots.begin_observation();
+        slots.observe(7, tick, present, words, kActive);
+    };
+    const auto walk = [&](uint64_t writes) {
+        c->m.valid = true;
+        c->m.seq = slots.seq();
+        c->m.writes = writes;
+    };
+    observe(100, quiet);
+    walk(5);
+    EXPECT_EQ(slots.memo_refused(*c, 5), nullptr) << "walked at this observation";
+    observe(101, quiet);
+    observe(102, quiet);
+    EXPECT_EQ(slots.memo_refused(*c, 5), nullptr) << "quiet ticks go on";
+    EXPECT_STREQ(slots.memo_refused(*c, 6), "gen") << "a host write";
+    script_root_words active = quiet;
+    active.flags = kActive;
+    observe(103, active);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "the root ran";
+    observe(104, quiet);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "from an active tick: no run either";
+    walk(5);
+    observe(105, quiet);
+    EXPECT_EQ(slots.memo_refused(*c, 5), nullptr);
+    observe(107, quiet);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "a gap";
+    walk(5);
+    observe(107, quiet);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "the same tick again (an amend)";
+    walk(5);
+    observe(90, quiet);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "a backward jump (a rewind)";
+    walk(5);
+    script_root_words other = quiet;
+    other.in_mask = 1;
+    observe(91, other);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "an IO switched";
+    walk(5);
+    observe(92, other, false);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "the root not found";
+    walk(5);
+    observe(93, active);
+    walk(5);
+    observe(94, active);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "active at both ends, words equal: the frame flag alone ends it";
+    slots.add(11, 3, {4, 5}, 8);
+    script_slots::copy* d = slots.find(11);
+    d->m.valid = true;
+    d->m.seq = slots.seq();
+    d->m.writes = 5;
+    EXPECT_STREQ(slots.memo_refused(*d, 5), "run") << "a root never observed";
+    slots.add(10, 2, {1, 2, 3}, 7);
+    EXPECT_STREQ(slots.memo_refused(*slots.find(10), 5), "none") << "a re-copy drops the memo";
+    slots.clear();
+    EXPECT_EQ(slots.find(10), nullptr);
+    EXPECT_TRUE(slots.roots().empty());
+}

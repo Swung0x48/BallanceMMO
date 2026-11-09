@@ -5089,6 +5089,11 @@ namespace {
                 logf("%s", reuse.line(bmmo::game::script_reuse_mode_from_env()).c_str());
                 for (const std::string& note: reuse.notes) logf("%s", note.c_str());
             }
+            if (args_.script_replay) {   // T3C e3
+                const auto& memo = bmmo::game::slot_memo_totals();
+                logf("%s", memo.line(bmmo::game::slot_memo_mode_from_env()).c_str());
+                for (const std::string& note: memo.notes) logf("%s", note.c_str());
+            }
             // Steps RLM / FX1: the restores' membership ledger in this process -
             // registrations, those taken back, settled, and the replayed
             // frames' pending adds a later restore of the same live frame took

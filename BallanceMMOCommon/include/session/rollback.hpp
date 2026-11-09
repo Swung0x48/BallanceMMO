@@ -377,6 +377,10 @@ namespace bmmo::session {
         std::function<bool(std::vector<uint8_t>& out, const std::vector<uint8_t>* previous, uint32_t tick)>
             capture_scripts_from;
         std::function<uint64_t()> script_writes;
+        // T3C e3: a light record's observation of the slot memo's ledger
+        // (game/script_slots.hpp; a whole record observes inside
+        // capture_scripts_from), so every captured tick is one observation.
+        std::function<void(uint32_t tick)> observe_scripts;
         // `anchor` is the tick the bytes were captured at: the adapter keeps
         // live every script the game reset after it (script_replay::restore).
         std::function<bool(const std::vector<uint8_t>& bytes, uint32_t anchor)> restore_scripts;
@@ -3967,6 +3971,7 @@ namespace bmmo::session {
             state.have_globals = world.get_globals && world.set_globals && world.get_globals(globals);
             state.globals = state.have_globals ? globals : bmmo_physics_globals{};
             if (!whole) {
+                if (replay_scripts_ && world.observe_scripts) world.observe_scripts(state.tick);
                 state.script_writes = 0;
                 state.have_scripts = false;
                 state.scripts.clear();

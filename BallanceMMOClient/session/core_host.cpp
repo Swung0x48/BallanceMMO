@@ -4384,6 +4384,11 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
         logger_->Info("Physics session: %s", reuse.line(bmmo::game::script_reuse_mode_from_env()).c_str());
         for (const std::string& note: reuse.notes) logger_->Warn("Physics session: %s", note.c_str());
     }
+    {   // T3C e3
+        const auto& memo = bmmo::game::slot_memo_totals();
+        logger_->Info("Physics session: %s", memo.line(bmmo::game::slot_memo_mode_from_env()).c_str());
+        for (const std::string& note: memo.notes) logger_->Warn("Physics session: %s", note.c_str());
+    }
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     // Step WG4 (world-agreement-gaps design 2.3 "Release"): the level
     // outlives the session, so the union's sources go back now - vanilla play

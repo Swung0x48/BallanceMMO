@@ -1149,3 +1149,37 @@ after the world is ready).
 **Next (by the S0 buckets):** the slot images (plan option e3: a copy with no force or joint block keeps t - 1's
 image; or capture them only where a slot's block can have changed), then the restore's script write (1.3-1.5 ms
 on L12) and set_savestate (~1.1-1.2 ms on L11), then the bookkeeping (c) and the (e1) chain.
+
+## Built (T3C step e3: the slot memo)
+
+`game/script_slots.hpp` (the memo and the quiet-run ledger), `game/script_replay.hpp` (put_omitted_images, the
+observing capture, observe_slot_roots), `session/rollback.hpp` (`rollback_world::observe_scripts`: a light
+record's observation). An omitted slot copy keeps its last walked image and section entry; a whole record appends
+the entry instead of walking when the host-write generation is the memo's, the copy's unit root has been quiet
+(OPC's `reusable_root`) at every observation since the memo was walked - every capture is one observation, light
+ones included; a gap, the same tick again or a backward jump ends a run - and every force tail reads as it did.
+Copies with a joint block are never memoized; only a capture that observed may use a memo (the hold digest's and
+the tools' walk). `BMMO_SLOT_MEMO` = off | on | verify, on by default since the gate.
+
+The design round (`.local-tools/work/E3/design.json`): the literal e3 (copy t - 1's entry for copies without a
+force or joint block) covers 0 of L12's 156 omitted copies (every fan copy has its SetPhysicsForce); the memo
+reaches replayed whole records without e1. Found on the way: the proximity union's relatch wrote a Get Cell output
+without bumping the generation (31bd941b).
+
+**Gate.** Unit tests (the ledger rules); fast LBM with `BMMO_SLOT_MEMO=verify` and `BMMO_SCRIPT_REUSE=verify`
+(every hit walked again and compared; OPC's verify walk with the memo off): 38/38 FINAL exact, criteria equal arm
+by arm, 9.8k hits per client, 0 mismatches; retail verify (L12, L12_h, L11 ctl_h at one-way 150): hit rate 91-95 %,
+0 mismatches for both; fast LBM with the memo on by default: 38/38, criteria equal.
+
+**Measured** (S0's recipe on one diag build: memo on 3 runs, off 1 run, medians over runs x 2 clients):
+
+| | L12 off -> on | L11 off -> on |
+|---|---|---|
+| live core (no rewind) | 3.79-4.00 -> 3.09-3.13 ms | 2.91-3.22 -> 2.71-2.81 ms |
+| live capture | 2.53-2.69 -> 1.82-1.85 ms | 1.79-2.00 -> 1.56-1.63 ms |
+| of it the slot images | 1.05-1.13 -> 0.35 ms | 0.44-0.49 -> 0.19-0.20 ms |
+| slot images per rewind | 3.3-5.4 -> 1.75-2.2 ms | 1.4-2.2 -> 0.8-1.1 ms |
+| L12_h at 150: over-15.15 / over-30.3 frames, T3 p99, T3 max | 39.5 / 20 -> 21 / 7.5, 54.7 -> 47.6, 87.9 -> 72.5 ms | ctl_h: equal within noise |
+
+The retail recipes run K = 8 slots; the public servers run 20 (29 of 30 rooms), about three times the omitted copies,
+so the saving there is about three times as large (a projection, measured by T3C's public-test re-drive).
