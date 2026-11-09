@@ -349,6 +349,7 @@ namespace bmmo::game {
                 if (on_candidate || (latched && latched == value)) continue;
                 block->SetOutputParameterObject(0, value);
                 ++relatched_;
+                note_script_write();   // a selected script's output written: no record reuse across it (T3C e3 review)
             }
         }
 
@@ -1278,6 +1279,7 @@ namespace bmmo::game {
             if (latched && (latched == candidate || latched == value)) return;
             block->SetOutputParameterObject(0, value);
             ++relatched_;
+            note_script_write();   // a selected script's output written: no record reuse across it (T3C e3 review)
         }
 
         template <typename T> static T* object_as(CKObject* o, CK_CLASSID cid) {
