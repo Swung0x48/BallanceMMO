@@ -4607,9 +4607,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         }
         return poll;
     };
-    p.world_hash = [this](bmmo::physics::world_hash& out) {
+    p.world_hash = [this](bmmo::physics::world_hash& out) {   // the TICK record: no surface signature (T3C S1)
         std::string error;
-        return physics_view_.capture(out, error);
+        return physics_view_.capture(out, error, false);
     };
     p.own_ball = [this]() {
         report_precision_53 precision;

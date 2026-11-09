@@ -125,7 +125,7 @@ namespace bmmo::physics {
         savestate_size_hint_ = 0;
     }
 
-    bool physics_view::capture(world_hash& out, std::string& error) const {
+    bool physics_view::capture(world_hash& out, std::string& error, bool surfaces) const {
         error.clear();
         out = {};
         if (!available()) {
@@ -134,7 +134,8 @@ namespace bmmo::physics {
         }
         char text[256] = {};
         bmmo_physics_world_hash raw{};
-        if (!api_->capture_world_hash(manager_, &raw, text, sizeof(text))) {
+        auto* entry = surfaces || !api_->capture_world_hash_tick ? api_->capture_world_hash : api_->capture_world_hash_tick;
+        if (!entry(manager_, &raw, text, sizeof(text))) {
             error = text;
             return false;
         }

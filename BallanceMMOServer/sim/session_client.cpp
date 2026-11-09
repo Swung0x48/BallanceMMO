@@ -2435,7 +2435,7 @@ namespace {
             };
             p.world_hash = [this](bmmo::physics::world_hash& hash) {
                 std::string hash_error;
-                return bmmo::physics::capture_world_hash(engine_->physics(), hash, hash_error);
+                return bmmo::physics::capture_world_hash(engine_->physics(), hash, hash_error, false);   // the TICK record (T3C S1)
             };
             // Only when a dump or a comparison reads the record before its
             // amend: without the hook the core captures each live record once,

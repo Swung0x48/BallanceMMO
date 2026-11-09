@@ -23,8 +23,10 @@ namespace bmmo::physics {
         void shutdown();
         bool available() const { return api_ != nullptr && manager_ != nullptr; }
 
-        // Hash of the IVP world after the last physics step.
-        bool capture(world_hash& out, std::string& error) const;
+        // Hash of the IVP world after the last physics step.  `surfaces`
+        // false: without the surface signature (out.surfaces 0) - the
+        // journal's per-tick TICK record (T3C step S1, bridge v35).
+        bool capture(world_hash& out, std::string& error, bool surfaces = true) const;
         // Session clock + RNG reset performed at the same tick as the server.
         bool reset_session_clock(int seed, std::string& error) const;
         bool reset_random(int seed, std::string& error) const;

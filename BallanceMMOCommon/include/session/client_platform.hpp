@@ -514,7 +514,9 @@ namespace bmmo::session {
         // `tick` is the tick the core decides for, so a line the host writes
         // about the poll names the same tick.
         std::function<sector_poll(uint32_t tick)> poll_sector;
-        // The world's fingerprint (the journal's TICK record; E9).
+        // The world's fingerprint (the journal's TICK record; E9).  Its only
+        // reader is that record, which carries no surfaces, so a host gives
+        // it without the surface signature (T3C step S1).
         std::function<bool(bmmo::physics::world_hash& out)> world_hash;
         // The own ball after the step (own_ball_view; E9).  A read only:
         // the core asks it whenever it needs the own ball's name.

@@ -1692,7 +1692,8 @@ namespace bmmo::sim {
             std::string hash_error;
             // A hash the engine will not produce leaves the tick without a
             // record; a replay reports those as not compared instead of failing.
-            if (bmmo::physics::capture_world_hash(s.world->physics(), hash, hash_error))
+            // The TICK record carries no surfaces: no surface signature (T3C S1).
+            if (bmmo::physics::capture_world_hash(s.world->physics(), hash, hash_error, false))
                 s.journal.tick(tick, hash, static_cast<uint32_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(logical_ - s.journal_start).count()));
         }

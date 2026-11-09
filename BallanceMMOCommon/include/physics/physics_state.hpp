@@ -29,8 +29,12 @@ namespace bmmo::physics {
     using ball_recipe = bmmo_physics_ball_recipe;
     using trafo_set_report = bmmo_physics_trafo_set_report;
 
+    // `surfaces` false: out.surfaces stays 0 and the surface signature is not
+    // computed - the journal's per-tick TICK record, which does not carry it
+    // (T3C step S1: on a tick whose body set changed the signature cost
+    // 12-14 ms on an E-core retail client, Level 12's set-change frames).
     bool capture_world_hash(CKIpionManager* physics, bmmo::physics::world_hash& out,
-                            std::string& error);
+                            std::string& error, bool surfaces = true);
     // Step OPA: the hash's per-object surface values memoized per manager
     // (world_hash_memo.hpp).  The mode starts from BMMO_HASH_MEMO
     // (off | on | verify; on when unset) on every host that hashes.

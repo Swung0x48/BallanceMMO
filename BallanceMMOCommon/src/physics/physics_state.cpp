@@ -377,7 +377,7 @@ namespace bmmo::physics {
         return total;
     }
 
-    bool capture_world_hash(CKIpionManager* physics, world_hash& out, std::string& error) {
+    bool capture_world_hash(CKIpionManager* physics, world_hash& out, std::string& error, bool surfaces) {
         error.clear();
         out = {};
         IVP_Environment* environment = physics ? physics->GetEnvironment() : nullptr;
@@ -443,7 +443,7 @@ namespace bmmo::physics {
         pose_hasher.feed(pose_sum);
         out.hash = hasher.value;
         out.pose = pose_hasher.value;
-        out.surfaces = surface_signature(physics);
+        if (surfaces) out.surfaces = surface_signature(physics);
         if (probe) {
             const IVP_Core* core = probe->get_core();
             std::snprintf(out.probe_name, sizeof(out.probe_name), "%s", probe->get_name() ? probe->get_name() : "");

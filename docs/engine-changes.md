@@ -1523,6 +1523,24 @@ remake's births from the same lines (`physics_view::set_event_log_keep_muted_rec
 the plugin records, emits or simulates does not change; the mod and the
 plugin are rebuilt together (the API version must match).
 
+## Bridge notes: the per-tick world hash without the surface signature (bridge API v35, no engine change)
+
+`capture_world_hash_tick` (T3C step S1) is `capture_world_hash` without the
+surface signature (`physics_state.cpp` `capture_world_hash(..., surfaces =
+false)`: `out.surfaces` stays 0). The journal's per-tick TICK record carries
+hash, pose, cores, ms and probe but no surfaces (`journal.hpp`), and it was the
+only reader of the per-tick call (`client_platform` `world_hash`), so the
+retail host, the headless client and the server's runner now take that one;
+the anchor header, the hold digest, `.bmrc` recordings and SimTool keep the
+full hash. Measured (T3C S0, E-core retail, the diag census): the surface
+signature cost 11.8-14 ms on Level 12's set-change frames (a birth, a sector
+pass: the surface memo is dropped whole when the body set changes) and 8.9 ms
+on Level 11's, against 17-28 us for the rest of the hash - every frame of the
+public test's "15 ms frames without a rewind" (a5). No simulated value
+changes; server journal replays and the fast LBM are exact.
+
+---
+
 ## Notes on things that were verified *not* to need engine changes
 
 - Floating-point flags: `/fp:precise` (MSVC) and `-ffp-contract=off
