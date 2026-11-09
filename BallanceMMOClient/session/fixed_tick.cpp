@@ -7,8 +7,6 @@
 
 namespace bmmo::session {
     namespace {
-        constexpr double kTickSeconds = 1.0 / kTickRate;
-
         // FULL step SRT1 (realtime-design section 5 item 1, f1): whether the
         // previous counted frame skipped its render.  File-scope, not a
         // member: the driver is a data member of BallanceMMOClient, whose
@@ -21,8 +19,8 @@ namespace bmmo::session {
         previous_render_skipped = false;
         auto* time = bml->GetTimeManager();
         time->SetTimeScaleFactor(1.0f);
-        time->SetMinimumDeltaTime(kFixedDeltaMs);
-        time->SetMaximumDeltaTime(kFixedDeltaMs);
+        time->SetMinimumDeltaTime(TICK_DELTA_MS);
+        time->SetMaximumDeltaTime(TICK_DELTA_MS);
         // The Player's loop honours CKTimeManager limits before calling
         // Process; a free-running loop lets the pacing below decide.
         time->ChangeLimitOptions(CK_FRAMERATE_FREE, CK_RATE_NOP);
@@ -44,23 +42,23 @@ namespace bmmo::session {
         // through them or restart the schedule (a rebase, which the session
         // reads as a broken numbering and answers with a resync).
         origin_ = bmmo::retail::host_clock().now(clock_site::retail_pace_origin) - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(static_cast<double>(ticks_) * kTickSeconds));
+            std::chrono::duration<double>(static_cast<double>(ticks_) * TICK_SECONDS));
     }
 
     void fixed_tick_driver::release_hold_owing(double max_behind) {
         if (!held_) return;
         held_ = false;
         const auto now = bmmo::retail::host_clock().now(clock_site::retail_pace_origin);
-        const double behind = std::chrono::duration<double>(now - origin_).count() * kTickRate - static_cast<double>(ticks_);
+        const double behind = std::chrono::duration<double>(now - origin_).count() * TICK_RATE - static_cast<double>(ticks_);
         if (behind > max_behind)
             origin_ = now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::duration<double>((static_cast<double>(ticks_) + max_behind) * kTickSeconds));
+                std::chrono::duration<double>((static_cast<double>(ticks_) + max_behind) * TICK_SECONDS));
     }
 
     void fixed_tick_driver::release_hold_at(std::chrono::steady_clock::time_point at) {
         held_ = false;
         origin_ = at - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(static_cast<double>(ticks_) * kTickSeconds));
+            std::chrono::duration<double>(static_cast<double>(ticks_) * TICK_SECONDS));
     }
 
     void fixed_tick_driver::disable(IBML* bml) {
@@ -78,7 +76,7 @@ namespace bmmo::session {
     void fixed_tick_driver::slew(int ticks) {
         if (ticks == 0) return;
         origin_ -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(static_cast<double>(ticks) * kTickSeconds));
+            std::chrono::duration<double>(static_cast<double>(ticks) * TICK_SECONDS));
     }
 
     uint64_t fixed_tick_driver::on_process(IBML* bml, pacer_slew* pacer) {
@@ -88,8 +86,8 @@ namespace bmmo::session {
         // Re-assert every frame: retail "Time Settings" blocks may touch the
         // limits when scripts start a level.
         time->SetTimeScaleFactor(1.0f);
-        time->SetMinimumDeltaTime(kFixedDeltaMs);
-        time->SetMaximumDeltaTime(kFixedDeltaMs);
+        time->SetMinimumDeltaTime(TICK_DELTA_MS);
+        time->SetMaximumDeltaTime(TICK_DELTA_MS);
         // Held (design 9.26): the session waits inside the anchor frame, so no
         // frame should get here; one that does is neither counted nor paced.
         if (held_) return ticks_;
@@ -103,20 +101,20 @@ namespace bmmo::session {
             // A SessionLead's slew (step R5) moves the origin before the
             // schedule is read, as the headless pacer does: `ticks_` is the
             // frame about to run, the one `expected` is compared with below.
-            const double behind = std::chrono::duration<double>(now - origin_).count() * kTickRate
+            const double behind = std::chrono::duration<double>(now - origin_).count() * TICK_RATE
                                 - static_cast<double>(ticks_);
             slew(pacer->step(now, behind));
             max_catch_up = pacer->rebase_threshold();
         }
         const double elapsed = std::chrono::duration<double>(now - origin_).count();
-        const double expected = elapsed * kTickRate;
+        const double expected = elapsed * TICK_RATE;
         const bool skipped_before = previous_render_skipped;
         previous_render_skipped = false;
         if (static_cast<double>(ticks_) + max_catch_up < expected) {
             // Far behind (level load, debugger): fast-forwarding would render
             // nothing for seconds, so restart the schedule from here.
             origin_ = now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::duration<double>(static_cast<double>(ticks_) * kTickSeconds));
+                std::chrono::duration<double>(static_cast<double>(ticks_) * TICK_SECONDS));
             ++rebases_;
         } else if (static_cast<double>(ticks_) + 1.0 < expected) {
             // Behind by more than one tick: skip the next render so the loop
@@ -139,7 +137,7 @@ namespace bmmo::session {
             }
         } else if (static_cast<double>(ticks_) > expected) {
             // Ahead: wait until this tick's wall-clock slot begins.
-            const double due = static_cast<double>(ticks_) * kTickSeconds;
+            const double due = static_cast<double>(ticks_) * TICK_SECONDS;
             const auto deadline = origin_ + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double>(due));
             if (deadline > now) {

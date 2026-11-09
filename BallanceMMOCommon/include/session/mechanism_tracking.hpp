@@ -46,7 +46,7 @@ namespace bmmo::session {
         // A re-resolve costs one probe per distinct name; the world changes far
         // more slowly than that, and every real change marks the registry dirty
         // anyway.  This is the safety net for the ones nobody reported.
-        static constexpr uint32_t kResolveInterval = 66;   // ticks
+        static constexpr uint32_t kResolveInterval = TICK_RATE;   // ticks
 
         // The dictionary, from full snapshots (a delta row carries no name).
         void note_name(uint32_t owner, const std::string& name) {

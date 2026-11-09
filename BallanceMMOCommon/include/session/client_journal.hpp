@@ -47,8 +47,8 @@ namespace bmmo::session {
         // more often than every half second - a burst of corrections must
         // not fill the file with bodies instead of inputs.  The file stops at
         // 256 MB.
-        constexpr uint32_t kJournalCheckpointTicks = 660;
-        constexpr uint32_t kJournalCheckpointGap = 33;
+        constexpr uint32_t kJournalCheckpointTicks = 10 * TICK_RATE;
+        constexpr uint32_t kJournalCheckpointGap = TICK_RATE / 2;
         constexpr uint64_t kJournalMaxBytes = 256ull << 20;
 
         class client_journal {

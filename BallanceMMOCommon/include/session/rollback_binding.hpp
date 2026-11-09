@@ -34,7 +34,7 @@
 namespace bmmo::session {
 
     struct rollback_binding_options {
-        float delta_ms = 1000.0f / 66.0f;          // one replayed physics step
+        float delta_ms = TICK_DELTA_MS;            // one replayed physics step
         bool restore_clock = false;                // install set_clock (the engine's own switch decides whether it runs)
         bool savestate = true;                     // install get_savestate / set_savestate at all
         // C3 (record-format-gaps design 2.3, step RK1): install get_globals /
@@ -150,6 +150,7 @@ namespace bmmo::session {
             std::string error;
             const bmmo::physics::wake_mode bridge_mode = mode == wake_mode::wake   ? bmmo::physics::wake_mode::wake
                                                        : mode == wake_mode::freeze ? bmmo::physics::wake_mode::freeze
+                                                       : mode == wake_mode::wake_moving ? bmmo::physics::wake_mode::wake_moving
                                                                                    : bmmo::physics::wake_mode::keep;
             if (b->set_body_state(entity.c_str(), state.position, state.rotation, state.linear, state.angular, bridge_mode,
                                   recheck, error))

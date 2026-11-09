@@ -514,7 +514,9 @@ namespace bmmo::session {
         // `tick` is the tick the core decides for, so a line the host writes
         // about the poll names the same tick.
         std::function<sector_poll(uint32_t tick)> poll_sector;
-        // The world's fingerprint (the journal's TICK record; E9).
+        // The world's fingerprint (the journal's TICK record; E9).  Its only
+        // reader is that record, which carries no surfaces, so a host gives
+        // it without the surface signature (T3C step S1).
         std::function<bool(bmmo::physics::world_hash& out)> world_hash;
         // The own ball after the step (own_ball_view; E9).  A read only:
         // the core asks it whenever it needs the own ball's name.
@@ -648,10 +650,6 @@ namespace bmmo::session {
         // anchor body the server has no row for (resync design 2.6.3).
         // Empty: every such body counts as unexplained.
         std::function<uint32_t(const std::string& entity)> birth_tick_of;
-        // Optional: the resync state's packed sections back to `size` bytes
-        // (the server packs them with CKPackData: zlib; the host unpacks with
-        // its CK's CKUnPackData).  Empty: a packed state is refused.
-        std::function<bool(const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out)> unpack_bytes;
         // Optional: a body only this client's world has (the trafo explosion
         // pieces until the trafo replication): the reconcile keeps it from
         // the anchor.  Empty: none.
@@ -1036,7 +1034,6 @@ namespace bmmo::session {
         if (!platform.forget_activations_from) return "forget_activations_from";
         if (!platform.forget_births_after) return "forget_births_after";
         if (!platform.forget_pending_activations) return "forget_pending_activations";   // step A5
-        if (!platform.unpack_bytes) return "unpack_bytes";   // the state's packed sections
         if (caps.own_lifecycle == own_lifecycle_source::event_log && !platform.own_birth_capture)
             return "own_birth_capture";
         if (caps.own_body_control || caps.own_body_in_replay) {

@@ -548,6 +548,8 @@ private:
 	bool core_host_offer(const bmmo::net::message* network_msg);   // network thread
 	void core_host_session_start(const bmmo::session_start_msg& msg);
 	void core_host_process();
+	void core_host_legacy_mute();         // protocol 34: the mute set, once a frame before objects_.update
+	void core_host_legacy_mute_reset();   // at a login
 	void core_host_drain();
 	void core_host_countdown();
 	void core_host_anchor();

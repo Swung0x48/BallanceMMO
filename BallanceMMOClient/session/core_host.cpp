@@ -600,6 +600,12 @@ namespace {
         // (the spirit ball shown, objects_.on_trafo's "from").
         std::map<std::string, uint32_t> mirror_player;
         std::map<uint32_t, uint8_t> mirror_type;
+        // Protocol 34 (core_host_legacy_mute): the mute set the server holds
+        // for us, and the players physicalized at the last pass with their
+        // shown entity.  Not reset with a session: they follow the server
+        // connection (cleared at a login).
+        std::vector<uint32_t> legacy_muted;
+        std::map<uint32_t, CK_ID> legacy_physicalized;
         // Step BMX: the shared rule's contract (game/mirror_clones.hpp) - the
         // spirit ball of (player, type) is the one entity of every life of
         // that player and type in a session; a different one is counted and
@@ -1056,7 +1062,8 @@ namespace {
 
     void ghost_release(game_objects& objects, const std::string& name) {
         if (const auto it = host.mirror_player.find(name); it != host.mirror_player.end())
-            objects.set_physicalized(it->second, true);
+            if (const auto type = host.mirror_type.find(it->second); type != host.mirror_type.end())
+                objects.show_mirror(it->second, type->second);
     }
 
     // The frame's start: every held ghost's physics matrix back.  A frozen
@@ -1261,7 +1268,7 @@ namespace {
             if (!core_session_running()) return 0;
             host.core->note_pacer_behind(behind);
             if (!host.core->slewing()) return 0;
-            return host.core->slew_step(now, bs::kTickRate, behind);
+            return host.core->slew_step(now, bs::TICK_RATE, behind);
         }
         double rebase_threshold() const override {
             return core_session_running() ? host.core->rebase_threshold() : bs::fixed_tick_driver::kMaxCatchUpTicks;
@@ -1848,7 +1855,7 @@ namespace {
         }
         const auto quiesce = bmmo::game::quiesce_originals(context, trafo_host.hooks);
         logger->Info("Physics session: %s (the originals' restore follows in the session clock reset)", quiesce.text().c_str());
-        trafo_host.hold.arm(context, 1000.0f / 66.0f);
+        trafo_host.hold.arm(context, bs::TICK_DELTA_MS);
         if (!view.trafo_set_filter(true, error)) logger->Warn("Physics session: trafo: the piece filter rule: %s", error.c_str());
         trafo_host.on = true;
         logger->Info("Physics session: trafo: inputs on: the originals held (option E %s, the Delayer %u frames), the piece x "
@@ -2654,6 +2661,57 @@ void BallanceMMOClient::core_host_countdown() {
 // while it runs (which drains the mailbox between post_step and pre_step),
 // otherwise the mailbox drained and the countdown's or the restart's checks
 // (the legacy process_physics_session).
+// Protocol 34: once a frame, before objects_.update.  The players whose
+// legacy ball stream we do not need - this session's mirrors while they are
+// physicalized here, so the session moves them - go to the server as our mute
+// set when it changes, and the server leaves them out of its
+// OwnedCompressedBallState (half a member's downstream at 13 players).  Left
+// in: a mirror within kAirshipMargin of the airship box, so its stream runs
+// again before its body freezes there and the ghost is moved by it from the
+// first frame (step BALL).  Our own echo goes too when our own spirit ball is
+// hidden.  A player that leaves the set turns back into a legacy ball (a
+// death, the airship ghost, the session's end): its ring is seeded with the
+// pose it is shown at, so it stays there until the server's catch-up state
+// and the stream that follows move it on (game_state::seed).
+void BallanceMMOClient::core_host_legacy_mute() {
+    constexpr double kAirshipMargin = 4.0;
+    double box[6]{};
+    const bool airship = core_session_running() && physics_view_.available() && physics_view_.airship_zone_get(box) == 1;
+    const auto near_airship = [&](const VxVector& p) {
+        return airship && p.x >= box[0] - kAirshipMargin && p.x <= box[3] + kAirshipMargin
+            && p.z >= box[2] - kAirshipMargin && p.z <= box[5] + kAirshipMargin;
+    };
+    std::vector<uint32_t> muted;
+    std::map<uint32_t, CK_ID> physicalized;
+    for (const auto& b: objects_.shown_balls()) {
+        const uint32_t id = static_cast<uint32_t>(b.id);
+        if (b.physicalized) {
+            physicalized[id] = b.entity;
+            if (host.mirror_type.count(id) && !near_airship(b.position)) muted.push_back(id);
+            continue;
+        }
+        const auto was = host.legacy_physicalized.find(id);
+        if (was != host.legacy_physicalized.end() && was->second == b.entity
+                && std::binary_search(host.legacy_muted.begin(), host.legacy_muted.end(), id))
+            db_.seed(b.id, b.type, b.position, b.rotation);
+    }
+    host.legacy_physicalized = std::move(physicalized);
+    if (!muted.empty() && !own_ball_visible_) muted.push_back(static_cast<uint32_t>(db_.get_client_id()));
+    std::sort(muted.begin(), muted.end());
+    if (muted == host.legacy_muted) return;
+    host.legacy_muted = muted;
+    bmmo::ball_state_mute_msg msg;
+    msg.players = std::move(muted);
+    msg.serialize();
+    send(msg.raw.str().data(), msg.size(), bmmo::net::kSendReliable);
+}
+
+// A new server connection holds no mute set.
+void BallanceMMOClient::core_host_legacy_mute_reset() {
+    host.legacy_muted.clear();
+    host.legacy_physicalized.clear();
+}
+
 void BallanceMMOClient::core_host_process() {
     // (Step SP9 also marked the level dirty here while a legacy session ran;
     // FULL step LGM drops that read of the legacy state: a legacy session
@@ -2790,7 +2848,7 @@ void BallanceMMOClient::core_host_start_capture(const std::string& start_bytes) 
         journal_checkpoint_ticks())
         + core_host_capture_players() + core_host_capture_requests();
     std::string error;
-    auto prune = [directory] { bmmo::retail::session_capture::prune(directory, bmmo::retail::journal_files::kKeepFiles - 1); };
+    auto prune = [directory] { bmmo::retail::session_capture::prune(directory, bmmo::retail::journal_files::kKeepCaptures - 1); };
     if (bmmo::retail::session_capture::instance().start_recording(directory / name, header,
             bs::strand_poster(thread_pool_.get_executor()), std::move(prune), error))
         logger_->Info("Physics session %u: capture %s", msg.session, (directory / name).string().c_str());
@@ -3146,6 +3204,10 @@ bool BallanceMMOClient::core_host_link_up() {
 // FULL step AHN: IMod::OnRender (BML+'s post-render callback) - while the
 // anchor hold is frozen, the frame that polls it.
 void BallanceMMOClient::OnRender(CK_RENDER_FLAGS) {
+    // The hang watch's beat: every rendered frame, the frozen hold's included.
+    char hang_report[384];
+    if (NSDumpFile::HangWatchBeat(core_host_session_running(), hang_report, sizeof(hang_report)))
+        logger_->Warn("%s", hang_report);
     core_host_hold_frame();
     if (replay_stop.frozen) process_command_file();   // K7e: no OnProcess runs while a stopped replay is frozen
 }
@@ -4325,6 +4387,11 @@ void BallanceMMOClient::core_host_end_local(const std::string& reason) {
         logger_->Info("Physics session: %s", reuse.line(bmmo::game::script_reuse_mode_from_env()).c_str());
         for (const std::string& note: reuse.notes) logger_->Warn("Physics session: %s", note.c_str());
     }
+    {   // T3C e3
+        const auto& memo = bmmo::game::slot_memo_totals();
+        logger_->Info("Physics session: %s", memo.line(bmmo::game::slot_memo_mode_from_env()).c_str());
+        for (const std::string& note: memo.notes) logger_->Warn("Physics session: %s", note.c_str());
+    }
     if (host.core && host.core->session_phase() != bs::client_core_state::phase::idle) host.core->end(reason);
     // Step WG4 (world-agreement-gaps design 2.3 "Release"): the level
     // outlives the session, so the union's sources go back now - vanilla play
@@ -4548,9 +4615,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         }
         return poll;
     };
-    p.world_hash = [this](bmmo::physics::world_hash& out) {
+    p.world_hash = [this](bmmo::physics::world_hash& out) {   // the TICK record: no surface signature (T3C S1)
         std::string error;
-        return physics_view_.capture(out, error);
+        return physics_view_.capture(out, error, false);
     };
     p.own_ball = [this]() {
         report_precision_53 precision;
@@ -4846,14 +4913,6 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     // resync window (host support).
     p.forget_pending_activations = [](uint32_t from, uint32_t to) { return host.activations.forget_pending(from, to); };
     p.birth_tick_of = [](const std::string& entity) { return host.births.birth_tick_of(entity); };
-    p.unpack_bytes = [](const std::vector<uint8_t>& packed, uint32_t size, std::vector<uint8_t>& out) {
-        auto* bytes = CKUnPackData(static_cast<int>(size), reinterpret_cast<char*>(const_cast<uint8_t*>(packed.data())),
-                                   static_cast<int>(packed.size()));
-        if (!bytes) return false;
-        out.assign(reinterpret_cast<const uint8_t*>(bytes), reinterpret_cast<const uint8_t*>(bytes) + size);
-        CKDeletePointer(bytes);
-        return true;
-    };
     // Step T4 (as T3's headless host): with the trafo as an input every world
     // has every set's pieces (and no original has a body): none is this
     // world's alone.  Without it, step P's owner-only pieces.
@@ -4915,7 +4974,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         bmmo::game::trafo_set_final(trafo_host.registry, player, life, type, tick);
     };
     p.trafo_frame = [this](uint32_t) {
-        if (trafo_host.on) bmmo::game::trafo_frame(m_bml->GetCKContext(), trafo_host.registry, 1000.0f / 66.0f);
+        if (trafo_host.on) bmmo::game::trafo_frame(m_bml->GetCKContext(), trafo_host.registry, bs::TICK_DELTA_MS);
     };
     // FULL step PRX (game/depth_test.hpp): the level's fall handler for free
     // props, live and in every replayed tick, where the server's world runs it.
@@ -4962,7 +5021,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
                             [](const std::string& entity) { return host.core && host.core->is_ball(entity); });
         r.ok = bs::feed_muted_births(counted_muted_recipes{physics_view_, trafo_host.muted_remake_drains}, feed, [&]() {
             return bmmo::game::remake_type_set(context, trafo_host.registry, trafo_host.hooks, spec.player, spec.life,
-                                               spec.type, spec.position, spec.seed, 1000.0f / 66.0f, r.error);
+                                               spec.type, spec.position, spec.seed, bs::TICK_DELTA_MS, r.error);
         }, [](const std::string&) { ++trafo_host.muted_added; });
         return r;
     };
@@ -5028,13 +5087,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
         check_mirror_contract(logger_, spec.player, spec.ball_type, entity);
         made = bmmo::game::make_mirror_body(physics_view_, entity, spec);
         if (!made.made) return made;
-        const auto shown = host.mirror_type.find(spec.player);
-        const uint32_t previous = shown != host.mirror_type.end() && shown->second != spec.ball_type
-                ? shown->second : std::numeric_limits<uint32_t>::max();
         host.mirror_type[spec.player] = spec.ball_type;
         host.mirror_player[spec.entity] = spec.player;
-        objects_.set_physicalized(spec.player, true);
-        objects_.on_trafo(spec.player, previous, spec.ball_type);
+        objects_.show_mirror(spec.player, spec.ball_type);
         return made;
     };
     p.unmake_mirror = [this](const std::string& entity) {
@@ -5208,7 +5263,9 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             if (body && entity && ghost_pin_matches(pin->second, state)) entity->SetWorldMatrix(pin->second.matrix);
             ghost_pins.erase(pin);
         }
-        if (body) objects_.set_physicalized(it->second, true);
+        if (body)
+            if (const auto type = host.mirror_type.find(it->second); type != host.mirror_type.end())
+                objects_.show_mirror(it->second, type->second);
     };
     // Step SPGH: the spawn ghost over this world (physics_state.hpp, bridge
     // v25) and its display: a ghost is translucent, the own ball's materials
@@ -5262,7 +5319,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
     p.bind_world = [this](const bs::core_world_hooks& hooks) {
         bs::session_world_options w;
         bs::rollback_binding_options& o = w.binding;
-        o.delta_ms = 1000.0f / 66.0f;
+        o.delta_ms = bs::TICK_DELTA_MS;
         o.restore_clock = false;
         o.savestate_flags = 0u;
         o.own_key_codes = host.own_replica.key_codes;
@@ -5342,7 +5399,7 @@ bmmo::session::session_platform BallanceMMOClient::core_host_platform() {
             so.scripts_replayed = &host.scripts_replayed;
             so.reset_ticks = &host.script_reset_ticks;
             so.reset_skips = &host.script_reset_skips;
-            so.delta_ms = 1000.0f / 66.0f;
+            so.delta_ms = bs::TICK_DELTA_MS;
             so.diff_detail = host.core && host.core->config.trace;
             so.replay_activation = true;
             // Step T4: the sets' scripts, recorded (v3), restored and run

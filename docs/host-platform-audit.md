@@ -78,7 +78,6 @@ was measured here.
 | `forget_births_after` (CP:608) | n/a | SC:1880 | CH:2621 | same |
 | `forget_pending_activations` (CP:615) | n/a | SC:1886 | CH:2626 | same |
 | `birth_tick_of` (CP:620) | n/a | SC:1889 | CH:2627 | same |
-| `unpack_bytes` (CP:624) | the packer (CKPackData) | SC:1890 `CKUnPackData` | CH:2628 `CKUnPackData` (retail CK2.dll) | same |
 | `local_only_body` (CP:628) | n/a | SC:1901 `!trafo_on_ && explosion_pieces_` | CH:2639 the same | same |
 | `place_probes` (CP:723) | PW:604 `proximity_.place(probe_candidates())`, called first in `SR::step` (SR:1192) | SC:2087 `proximity_.place` | CH:3262 `proximity_host.union_.place` | same (candidates: PW's `p.physicalized && p.ball`, PW:587; the core's "ball with a body") |
 | `tutorial_exit` (CP:734) | PW:1077 `tutorial_exit_.activate`, frame counted from the world's first step | SC:2092 | CH:3267 | same (one helper, game/tutorial_exit.hpp) |

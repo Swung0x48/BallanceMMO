@@ -24,11 +24,13 @@
 #include <string>
 #include <vector>
 
+#include "../entity/session.hpp"
+
 namespace bmmo::physics {
     struct tick_record_header {
         char magic[4] = {'B', 'M', 'R', 'C'};
         uint32_t version = 3;
-        double tick_rate = 66.0;
+        double tick_rate = static_cast<double>(bmmo::session::TICK_RATE);
         int32_t level = 0;
         char physics_sha256[64] = {};
         char reserved[32] = {};

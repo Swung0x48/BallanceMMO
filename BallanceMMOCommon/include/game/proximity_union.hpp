@@ -349,6 +349,7 @@ namespace bmmo::game {
                 if (on_candidate || (latched && latched == value)) continue;
                 block->SetOutputParameterObject(0, value);
                 ++relatched_;
+                note_script_write();   // a selected script's output written: no record reuse across it (T3C e3 review)
             }
         }
 
@@ -1278,6 +1279,7 @@ namespace bmmo::game {
             if (latched && (latched == candidate || latched == value)) return;
             block->SetOutputParameterObject(0, value);
             ++relatched_;
+            note_script_write();   // a selected script's output written: no record reuse across it (T3C e3 review)
         }
 
         template <typename T> static T* object_as(CKObject* o, CK_CLASSID cid) {
@@ -1694,7 +1696,7 @@ namespace bmmo::game {
                 for (uint32_t id: plan.unit.copy_roots()) {
                     std::vector<uint8_t> bytes;
                     script_replay::capture_script_block(CKBehavior::Cast(context->GetObject(id)), hooks, bytes);
-                    recorded_slots_.add(id, 0, std::move(bytes));
+                    recorded_slots_.add(id, 0, std::move(bytes), plan.root);
                 }
             lines_.push_back(units_summary());
             return {};
@@ -1824,7 +1826,7 @@ namespace bmmo::game {
                 std::vector<uint8_t> bytes;
                 script_replay::capture_script_block(CKBehavior::Cast(context->GetObject(id)), hooks, bytes);
                 copy_record_bytes_ += bytes.size() + 1;   // + the child's presence byte
-                recorded_slots_.add(id, k, std::move(bytes));
+                recorded_slots_.add(id, k, std::move(bytes), rec.root);
             }
             std::vector<CK_ID> copy_roots(c.roots.begin(), c.roots.end());
             const uint64_t structure = structure_of(context, rec.root, copy_roots, c.links, c.operations);

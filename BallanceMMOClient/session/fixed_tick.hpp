@@ -14,12 +14,11 @@
 #include <chrono>
 #include <cstdint>
 
+#include <entity/session.hpp>
+
 class IBML;
 
 namespace bmmo::session {
-    inline constexpr double kTickRate = 66.0;
-    inline constexpr float kFixedDeltaMs = 1000.0f / 66.0f;
-
     // A SessionLead's slew of the schedule (late-player design 2.4 "Retail";
     // session-client-core design 6.2 row R5).  The session that owns the
     // decision (the core host) implements it; on_process asks it once per

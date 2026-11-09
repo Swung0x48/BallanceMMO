@@ -59,7 +59,8 @@ namespace bmmo::session {
     // adapters forward to the bridge: `keep` never touches the sleep state,
     // `wake` revives a body that is not simulated (and leaves an awake body's
     // freeze timers alone), `freeze` disables simulation for a simulated body.
-    enum class wake_mode : uint8_t { keep = 0, wake = 1, freeze = 2 };
+    // wake_moving: physics_state.hpp's (a body made this tick that leaves with its velocity).
+    enum class wake_mode : uint8_t { keep = 0, wake = 1, freeze = 2, wake_moving = 3 };
 
     // A restore that barely moves a body cannot create a new contact, and the
     // mindist recheck it would trigger is not free; past these two the write
@@ -376,6 +377,10 @@ namespace bmmo::session {
         std::function<bool(std::vector<uint8_t>& out, const std::vector<uint8_t>* previous, uint32_t tick)>
             capture_scripts_from;
         std::function<uint64_t()> script_writes;
+        // T3C e3: a light record's observation of the slot memo's ledger
+        // (game/script_slots.hpp; a whole record observes inside
+        // capture_scripts_from), so every captured tick is one observation.
+        std::function<void(uint32_t tick)> observe_scripts;
         // `anchor` is the tick the bytes were captured at: the adapter keeps
         // live every script the game reset after it (script_replay::restore).
         std::function<bool(const std::vector<uint8_t>& bytes, uint32_t anchor)> restore_scripts;
@@ -711,7 +716,7 @@ namespace bmmo::session {
     // the newest sample is 1/16.  Before the first sample the cap is the
     // floor: no measurement, no deeper claim than every client made before
     // step 12 (and a client that never rewinds needs no deeper reach).
-    constexpr double kReachHitchBudgetMs = 3.0 * 1000.0 / 66.0;   // B: 3 ticks, 45.45 ms
+    constexpr double kReachHitchBudgetMs = 3.0 * 1000.0 / TICK_RATE;   // B: 3 ticks, 45.45 ms
     // The user's decision after LBM4: the first sample is not left to the
     // first rewind the session happens to need - that can be minutes in,
     // the reach held at the floor all the while (lbm4_a4_swing_seed1: no
@@ -3966,6 +3971,7 @@ namespace bmmo::session {
             state.have_globals = world.get_globals && world.set_globals && world.get_globals(globals);
             state.globals = state.have_globals ? globals : bmmo_physics_globals{};
             if (!whole) {
+                if (replay_scripts_ && world.observe_scripts) world.observe_scripts(state.tick);
                 state.script_writes = 0;
                 state.have_scripts = false;
                 state.scripts.clear();

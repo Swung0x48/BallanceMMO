@@ -1040,7 +1040,7 @@ def run_case(args, sector, case_dir):
                else case_dir / 'journals')
     config = (
         'rooms_enabled: true\n'
-        'maximum_members: 8\n'
+        f'maximum_members: {args.maximum_members}\n'
         'physics:\n'
         '  enabled: true\n'
         f'  game_root: {args.root}\n'
@@ -3791,6 +3791,9 @@ def main():
                     help='metres between the beam landing points of successive clients')
     ap.add_argument('--beam-offset', type=int, default=0,
                     help='rotate which bays of the sector --beam-bays auto picks')
+    ap.add_argument('--maximum-members', type=int, default=8,
+                    help='the server config\'s maximum_members: the per-player mechanism slot count K '
+                         '(default 8; the public servers run 20)')
     ap.add_argument('--checkpoint-ticks', type=int, default=None,
                     help='ticks between full body checkpoints in the journals; small '
                          'values make contact measurable with collision_report.py')

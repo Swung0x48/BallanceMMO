@@ -8,6 +8,7 @@
 // relative to a window boundary.
 #include <gtest/gtest.h>
 
+#include <entity/session.hpp>
 #include <session/lateness.hpp>
 
 #include <algorithm>
@@ -53,7 +54,7 @@ namespace relative_tests {
         });
         const auto time = [](double tick) {
             return arrival_ring::time_point{} + std::chrono::duration_cast<arrival_ring::time_point::duration>(
-                std::chrono::duration<double, std::micro>(tick * kLatenessTickMicros));
+                std::chrono::duration<double, std::micro>(tick * TICK_MICROS));
         };
         uint32_t stepped = 0;
         for (const auto& event: events) {
@@ -230,7 +231,6 @@ TEST(QuorumObservation, TimersClampAndInterveningExpiry) {
 }
 
 namespace {
-    constexpr double kTickMs = 1000.0 / 66.0;
     constexpr uint32_t kBase = 100;          // the assignment's first tick
     constexpr uint32_t kInputDelay = 16;     // the session's, as at 150 ms each way
     constexpr double kUplinkMs = 150.0;      // base one-way trip: slack about 6.1 ticks
@@ -243,17 +243,17 @@ namespace {
         return static_cast<double>(x) / 4294967295.0 * 2.0 - 1.0;
     }
 
-    double deadline_ms(uint32_t t) { return (t + kInputDelay) * kTickMs; }
+    double deadline_ms(uint32_t t) { return (t + kInputDelay) * TICK_MS; }
 
     struct link_model {
         // When the client sends the datagram whose newest frame is t (ms).
-        std::function<double(uint32_t)> send_ms = [](uint32_t t) { return t * kTickMs; };
+        std::function<double(uint32_t)> send_ms = [](uint32_t t) { return t * TICK_MS; };
         // Extra one-way delay on top of the base trip and the jitter (ms).
         std::function<double(uint32_t)> extra_ms = [](uint32_t) { return 0.0; };
         // A path that queues: the datagram of frame t arrives no earlier than
         // this (ms).  Every datagram of a held burst gets the very same
         // arrival, so their order is the send order whatever the compiler
-        // does with release - t * kTickMs (an FMA there - GCC 15 on the
+        // does with release - t * TICK_MS (an FMA there - GCC 15 on the
         // ubuntu-26.04 runner - left three distinct arrivals and the sort
         // shuffled a third of the burst out of its samples).
         std::function<double(uint32_t)> held_until = [](uint32_t) { return -1e300; };
@@ -292,12 +292,12 @@ namespace {
         for (uint32_t n = from; n < to; ++n) {
             const double now = deadline_ms(n);
             while (frame < to) {
-                const double send = std::max(last_send, link.send_ms(frame) - link.lead_ticks(frame) * kTickMs);
+                const double send = std::max(last_send, link.send_ms(frame) - link.lead_ticks(frame) * TICK_MS);
                 if (send > now) break;
                 last_send = send;
                 if (!link.lost(frame))
                     wire.push_back({std::max(link.held_until(frame), send + kUplinkMs + link.extra_ms(frame)
-                                    + unit_noise(frame, link.salt) * link.jitter_ticks * kTickMs), frame});
+                                    + unit_noise(frame, link.salt) * link.jitter_ticks * TICK_MS), frame});
                 ++frame;
             }
             std::stable_sort(wire.begin(), wire.end(),
@@ -305,9 +305,9 @@ namespace {
             size_t delivered = 0;
             while (delivered < wire.size() && wire[delivered].arrival_ms <= now) {
                 const auto& d = wire[delivered++];
-                const double slack = (deadline_ms(d.newest) - d.arrival_ms) / kTickMs;
-                if (meter.sample_absolute(d.newest, slack, kInputDelay - kUplinkMs / kTickMs)) {
-                    const double normalized = kInputDelay - kUplinkMs / kTickMs - slack;
+                const double slack = (deadline_ms(d.newest) - d.arrival_ms) / TICK_MS;
+                if (meter.sample_absolute(d.newest, slack, kInputDelay - kUplinkMs / TICK_MS)) {
+                    const double normalized = kInputDelay - kUplinkMs / TICK_MS - slack;
                     meter.sample_relative(d.newest, normalized, normalized);
                 }
             }
@@ -441,7 +441,7 @@ TEST(LatenessMeter, SingleHeldBurstNeverRaises) {
             relative_meter meter = steady_meter();
             link_model link;
             const uint32_t on = kShiftStart + phase;
-            const double release = (on + held) * kTickMs + kUplinkMs;
+            const double release = (on + held) * TICK_MS + kUplinkMs;
             link.held_until = [on, held, release](uint32_t t) { return t >= on && t < on + held ? release : -1e300; };
             link.jitter_ticks = 0.0;
             EXPECT_TRUE(run(meter, kBase + kMeasured, kBase + 2500, link).empty()) << "phase " << phase << " held " << held;
@@ -458,8 +458,8 @@ TEST(LatenessMeter, ThirtyThreeFrameStallNeverRaises) {
         link_model link;
         const uint32_t on = kShiftStart + phase;
         link.send_ms = [on](uint32_t t) {
-            if (t >= on && t < on + 33) return (on + 33) * kTickMs + (t - on) * 0.3;
-            return t * kTickMs;
+            if (t >= on && t < on + 33) return (on + 33) * TICK_MS + (t - on) * 0.3;
+            return t * TICK_MS;
         };
         const auto decisions = run(meter, kBase + kMeasured, kBase + 2500, link);
         EXPECT_TRUE(decisions.empty()) << "phase " << phase;
@@ -490,7 +490,7 @@ TEST(LatenessMeter, BlackoutNeverRaises) {
             relative_meter meter = steady_meter();
             link_model link;
             const uint32_t on = kShiftStart + phase;
-            const uint32_t span = static_cast<uint32_t>(ms / kTickMs);
+            const uint32_t span = static_cast<uint32_t>(ms / TICK_MS);
             link.lost = [on, span](uint32_t t) { return t >= on && t < on + span; };
             EXPECT_TRUE(run(meter, kBase + kMeasured, kBase + 2500 + span, link).empty()) << ms << " ms phase " << phase;
             EXPECT_EQ(meter.absolute_misses(), 0u);
@@ -513,7 +513,7 @@ TEST(LatenessMeter, SpikeThenBlackoutNeverRaises) {
                     link_model link;
                     link.jitter_ticks = jitter;
                     const uint32_t on = kShiftStart + phase;
-                    const uint32_t span = static_cast<uint32_t>(ms / kTickMs);
+                    const uint32_t span = static_cast<uint32_t>(ms / TICK_MS);
                     link.extra_ms = [on](uint32_t t) { return t >= on && t < on + 66 ? kShiftMs : 0.0; };
                     link.lost = [on, cut, span](uint32_t t) { return t >= on + cut && t < on + cut + span; };
                     EXPECT_TRUE(run(meter, kBase + kMeasured, kBase + 2500 + span, link).empty())
@@ -534,8 +534,8 @@ TEST(LatenessMeter, HeldBurstThenBlackoutNeverRaises) {
             link_model link;
             link.jitter_ticks = 0.0;
             const uint32_t on = kShiftStart;
-            const uint32_t span = static_cast<uint32_t>(ms / kTickMs);
-            const double release = (on + held) * kTickMs + kUplinkMs;
+            const uint32_t span = static_cast<uint32_t>(ms / TICK_MS);
+            const double release = (on + held) * TICK_MS + kUplinkMs;
             link.held_until = [on, held, release](uint32_t t) { return t >= on && t < on + held ? release : -1e300; };
             link.lost = [on, held, span](uint32_t t) { return t >= on + held && t < on + held + span; };
             EXPECT_TRUE(run(meter, kBase + kMeasured, kBase + 2500 + span, link).empty()) << "held " << held << " " << ms << " ms";
@@ -714,8 +714,8 @@ TEST(LatenessMeter, ResetKeepsOnlyTheOffset) {
 TEST(LatenessMeter, SlackOfTimePoints) {
     using clock = std::chrono::steady_clock;
     const auto deadline = clock::time_point{} + std::chrono::milliseconds(1000);
-    EXPECT_NEAR(lateness_slack_ticks(deadline, deadline - std::chrono::milliseconds(150)), 150.0 / kTickMs, 1e-9);
-    EXPECT_NEAR(lateness_slack_ticks(deadline, deadline + std::chrono::microseconds(15152)), -15152.0 / (1e6 / 66), 1e-9);
+    EXPECT_NEAR(lateness_slack_ticks(deadline, deadline - std::chrono::milliseconds(150)), 150.0 / TICK_MS, 1e-9);
+    EXPECT_NEAR(lateness_slack_ticks(deadline, deadline + std::chrono::microseconds(15152)), -15152.0 / TICK_MICROS, 1e-9);
 }
 
 TEST(LatenessMeter, AbsolutePersistenceRestartsWhenSharednessChanges) {

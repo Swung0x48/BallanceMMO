@@ -1,12 +1,14 @@
 #include "session_runner.hpp"
 #include <net/transport.hpp>
 #include "late_tick.hpp"
+#include "crash_report.hpp"
 
 #include "CKAll.h"
 
 #include <physics/physics_state.hpp>
 #include <session/lifecycle.hpp>
 #include <session/member_lives.hpp>
+#include <message/session_resync_state_msg.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -135,7 +137,12 @@ namespace bmmo::sim {
         for (const auto& [tick, ms]: debug_stalls_)
             log("debug: BMMO_SESSION_STALL holds the step of tick " + std::to_string(tick) + " for " + std::to_string(ms)
                 + " ms (a harness stall; unset in deployments)");
-        thread_ = std::thread([this] { run(); });
+        // An exception nothing catches here ends the server: the reporter's
+        // terminate handler names it (MSVC: per thread, crash_report.hpp).
+        thread_ = std::thread([this] {
+            install_thread_crash_reporter();
+            run();
+        });
     }
 
     session_runner::~session_runner() {
@@ -299,7 +306,7 @@ namespace bmmo::sim {
         // of now (the members' frames are scheduled from the same instant).
         const auto now = s.start_scheduled ? s.start_origin : logical_;
         const auto schedule_start = now + std::chrono::duration_cast<clock::duration>(
-                std::chrono::duration<double>(static_cast<double>(s.start_base) / 66.0));
+                std::chrono::duration<double>(static_cast<double>(s.start_base) / bmmo::session::TICK_RATE));
         s.scheduler.start(schedule_start, s.world->tick_index(), s.input_delay);
         for (auto& [player, entry]: s.arrivals)
             entry.baseline.settled(entry.baseline.epoch(), now);
@@ -507,6 +514,7 @@ namespace bmmo::sim {
                 info.spawn_rotation[3] = rotation.w;
             }
             info.resetpoints = s->world->resetpoints();
+            info.ready_at = clock_->now(bmmo::session::clock_site::runner_world_ready);
             if (callbacks_.on_world_ready) callbacks_.on_world_ready(info);
         });
     }
@@ -622,6 +630,7 @@ namespace bmmo::sim {
         s.join_orders.erase(player);
         s.last_physicalize_tick.erase(player);
         s.last_frames.erase(player);
+        s.stall_released.erase(player);
         s.leaving.erase(player);
         // Its Trafo events stay (trafo-replication design 2.4): they act on
         // the player's piece set, which outlives its slot, and every member
@@ -662,6 +671,8 @@ namespace bmmo::sim {
                 }
                 s.ready.erase(player);
                 s.inputs.erase(player);
+                s.resync_requests.erase(player);   // protocol 34: its state slot goes with it
+                s.resync_sent.erase(player);
                 s.arrivals.erase(player);
                 return;
             }
@@ -752,6 +763,8 @@ namespace bmmo::sim {
             s.players.erase(player);
             s.ready.erase(player);
             s.inputs.erase(player);
+            s.resync_requests.erase(player);   // protocol 34: its state slot goes with it
+            s.resync_sent.erase(player);
             s.arrivals.erase(player);
             s.lateness.erase(player);
             s.patience.erase(player);
@@ -1232,8 +1245,9 @@ namespace bmmo::sim {
         });
     }
 
-    void session_runner::request_resync_state(uint32_t session, uint32_t player, uint32_t base) {
-        post([this, session, player, base] {
+    void session_runner::request_resync_state(uint32_t session, uint32_t player, uint32_t base,
+                                              bmmo::session::resync_ref_id claim) {
+        post([this, session, player, base, claim] {
             auto it = sessions_.find(session);
             if (it == sessions_.end() || !it->second->world) return;
             auto& s = *it->second;
@@ -1255,13 +1269,60 @@ namespace bmmo::sim {
                 if (callbacks_.on_resync_base_missed) callbacks_.on_resync_base_missed(s.id, player, base);
                 return;
             }
-            s.resync_requests[player] = base;
+            s.resync_requests[player] = {base, claim};
         });
+    }
+
+    // Protocol 34: `out`'s sections as one zstd frame - against the body this
+    // runner sent the player last when the member claims exactly that one
+    // (resync_state_codec.hpp), else plain - and that slot replaced by this
+    // body.  Here, on the sim thread, where the state is captured and handed
+    // to the server: nothing else reaches the member in between, so the
+    // message order to it is what it was.
+    void session_runner::encode_resync_state(session_state& s, const bmmo::session::resync_ref_id& claim,
+                                             resync_state_out& out) {
+        const auto started = clock::now();
+        // The sections lent to the message for its body, and given back (the
+        // server's log line reads their sizes): no copy of ~430 KB here.
+        bmmo::session_resync_state_msg body;
+        body.rows.swap(out.state.rows);
+        body.clones.swap(out.state.clones);
+        body.navs.swap(out.state.navs);
+        body.union_state.swap(out.state.union_state);
+        body.scripts.swap(out.state.scripts);
+        body.savestate.swap(out.state.savestate);
+        body.trafo_ledger.swap(out.state.trafo_ledger);
+        std::string raw = body.body_bytes();
+        body.rows.swap(out.state.rows);
+        body.clones.swap(out.state.clones);
+        body.navs.swap(out.state.navs);
+        body.union_state.swap(out.state.union_state);
+        body.scripts.swap(out.state.scripts);
+        body.savestate.swap(out.state.savestate);
+        body.trafo_ledger.swap(out.state.trafo_ledger);
+        const auto slot = s.resync_sent.find(out.player);
+        const bool against = claim.held && slot != s.resync_sent.end() && slot->second.id == claim;
+        bool coded = against && resync_codec_.encode(raw, &slot->second.body, out.frame);
+        if (coded) {
+            out.ref_kind = bmmo::session::RESYNC_REF_PREVIOUS;
+            out.ref_tick = slot->second.id.tick;
+            out.ref_check = slot->second.id.check;
+        } else {
+            coded = resync_codec_.encode(raw, nullptr, out.frame);
+        }
+        if (!coded) {
+            out.frame.clear();
+            if (out.state.error.empty()) out.state.error = "the state does not compress";
+        }
+        out.raw_size = static_cast<uint32_t>(raw.size());
+        if (coded) s.resync_sent[out.player] = {{out.tick, bmmo::session::resync_frame_check(out.frame), true}, std::move(raw)};
+        out.encode_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count());
     }
 
     void session_runner::emit_resync_states(session_state& s, uint32_t tick, bool recording) {
         for (auto r = s.resync_requests.begin(); r != s.resync_requests.end();) {
-            if (r->second - 1 != tick) {
+            if (r->second.base - 1 != tick) {
                 ++r;
                 continue;
             }
@@ -1270,16 +1331,18 @@ namespace bmmo::sim {
             out.session = s.id;
             out.player = r->first;
             out.tick = tick;
-            out.base = r->second;
+            out.base = r->second.base;
             s.world->capture_resync_state(out.player, out.state);
             out.emit_us = static_cast<uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count());
+            encode_resync_state(s, r->second.claim, out);
             if (recording)
                 s.journal.note(tick, "resync state for player " + std::to_string(out.player) + ": tick "
                                      + std::to_string(tick) + " base " + std::to_string(out.base) + ", "
                                      + std::to_string(out.state.rows.size()) + " rows, "
                                      + std::to_string(out.state.scripts.size()) + " script bytes, "
-                                     + std::to_string(out.state.savestate.size()) + " savestate bytes (packed)"
+                                     + std::to_string(out.state.savestate.size()) + " savestate bytes, captured in "
+                                     + std::to_string(out.emit_us) + " us, coded in " + std::to_string(out.encode_us) + " us"
                                      + (out.state.error.empty() ? std::string() : " (" + out.state.error + ")"));
             r = s.resync_requests.erase(r);
             if (callbacks_.on_resync_state) callbacks_.on_resync_state(out);
@@ -1449,7 +1512,29 @@ namespace bmmo::sim {
             uint32_t source = bmmo::session::INPUT_SOURCE_DEFAULT;
             // Before take() moves the cursor past it.
             const bool settled = buffer.settled(tick);
-            const auto& frame = buffer.take(tick, fresh, source, cutoff);
+            // A lead hold's ticks are never released (stall_policy.hpp): the
+            // SessionLead gave the owner their frozen frame as final, and it
+            // drops the held records of that range as already learned.
+            const bool lead_held = buffer.held(tick);
+            const auto& taken = buffer.take(tick, fresh, source, cutoff);
+            bool released = false;
+            const bmmo::session::input_frame frame = fresh ? taken : stall_frame(taken, tick, source, lead_held, released);
+            // Said once a stall: the frames a resumed client sends next are for
+            // its old ticks, each a new (still too old) substitute.
+            if (released) {
+                if (s.stall_released.emplace(player, tick).second) {
+                    const std::string text = "stall: p" + std::to_string(player) + " has sent no frame since tick "
+                                           + std::to_string(source) + ": its keys released from tick " + std::to_string(tick);
+                    log("[session " + std::to_string(s.id) + "] " + text);
+                    if (recording) s.journal.note(tick, text);
+                }
+            } else if (const auto r = s.stall_released.find(player); r != s.stall_released.end()) {
+                const std::string text = "stall: p" + std::to_string(player) + " keys released over ticks "
+                                       + std::to_string(r->second) + ".." + std::to_string(tick - 1);
+                log("[session " + std::to_string(s.id) + "] " + text);
+                if (recording) s.journal.note(tick, text);
+                s.stall_released.erase(r);
+            }
             if (fresh) s.acked[player] = tick;
             // The streak waiver (design 2.6) starts at a substitution of a
             // frame the step had to do without.  A tick below a re-anchored
@@ -1608,7 +1693,8 @@ namespace bmmo::sim {
             std::string hash_error;
             // A hash the engine will not produce leaves the tick without a
             // record; a replay reports those as not compared instead of failing.
-            if (bmmo::physics::capture_world_hash(s.world->physics(), hash, hash_error))
+            // The TICK record carries no surfaces: no surface signature (T3C S1).
+            if (bmmo::physics::capture_world_hash(s.world->physics(), hash, hash_error, false))
                 s.journal.tick(tick, hash, static_cast<uint32_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(logical_ - s.journal_start).count()));
         }
@@ -1650,7 +1736,7 @@ namespace bmmo::sim {
     //
     // Every 660 ticks one summary line per player, so a run shows the meter's
     // view of each member's arrivals without a decision having to happen.
-    static constexpr uint32_t kLatenessSummaryTicks = 660;
+    static constexpr uint32_t kLatenessSummaryTicks = 10 * bmmo::session::TICK_RATE;
 
     void session_runner::observe_relative(session_state& s, uint32_t tick, clock::time_point now) {
         const auto past = std::find_if(s.quorum_history.rbegin(), s.quorum_history.rend(),
@@ -1939,7 +2025,7 @@ namespace bmmo::sim {
             s.quorum_gap.push_back(normalized.back() - normalized[normalized.size() - 2]);
         }
         if (config_.arrival_trace) log(trace + " counted=" + std::to_string(counted));
-        if (++s.quorum_ticks % 660 != 0) return;
+        if (++s.quorum_ticks % (10 * bmmo::session::TICK_RATE) != 0) return;
         const auto quantiles = [](const std::vector<double>& values) {
             return std::to_string(bmmo::session::lateness_quantile(values, .5)) + "/"
                 + std::to_string(bmmo::session::lateness_quantile(values, .95)) + "/"
@@ -2062,7 +2148,7 @@ namespace bmmo::sim {
         if (!verdict.wait) return std::max(deadline, logical_);
         // A microsecond past the threshold, so the test there passes.
         const auto patience = logical_ + std::chrono::microseconds(
-                static_cast<int64_t>(std::ceil(verdict.wait_ticks * bmmo::session::kLatenessTickMicros)) + 1);
+                static_cast<int64_t>(std::ceil(verdict.wait_ticks * bmmo::session::TICK_MICROS)) + 1);
         return std::min(patience, std::max(deadline, logical_));
     }
 
@@ -2161,7 +2247,7 @@ namespace bmmo::sim {
                 std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - started).count()));
             // Every 10 s of ticks: the step's cost, the budget being one tick
             // (15.15 ms) per tick.
-            if (s.step_us.size() >= 660) {
+            if (s.step_us.size() >= 10 * bmmo::session::TICK_RATE) {
                 std::vector<uint32_t> v;
                 v.swap(s.step_us);
                 std::sort(v.begin(), v.end());

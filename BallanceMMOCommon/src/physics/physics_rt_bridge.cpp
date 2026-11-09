@@ -45,15 +45,15 @@ namespace {
         if (buffer && size) std::snprintf(buffer, size, "%s", text.c_str());
     }
 
-    int32_t api_capture_world_hash(void* manager, bmmo_physics_world_hash* out,
-                                   char* error, uint32_t error_size) {
+    int32_t capture_world_hash_out(void* manager, bmmo_physics_world_hash* out, char* error, uint32_t error_size,
+                                   bool surfaces) {
         if (!manager || !out) {
             set_error(error, error_size, "null argument");
             return 0;
         }
         bmmo::physics::world_hash hash;
         std::string text;
-        if (!bmmo::physics::capture_world_hash(static_cast<CKIpionManager*>(manager), hash, text)) {
+        if (!bmmo::physics::capture_world_hash(static_cast<CKIpionManager*>(manager), hash, text, surfaces)) {
             set_error(error, error_size, text);
             return 0;
         }
@@ -77,6 +77,17 @@ namespace {
         out->time_of_last_psi = hash.time_of_last_psi;
         out->time_of_next_psi = hash.time_of_next_psi;
         return 1;
+    }
+
+    int32_t api_capture_world_hash(void* manager, bmmo_physics_world_hash* out,
+                                   char* error, uint32_t error_size) {
+        return capture_world_hash_out(manager, out, error, error_size, true);
+    }
+
+    // v35 (T3C step S1): the per-tick TICK record's hash, no surface signature.
+    int32_t api_capture_world_hash_tick(void* manager, bmmo_physics_world_hash* out,
+                                        char* error, uint32_t error_size) {
+        return capture_world_hash_out(manager, out, error, error_size, false);
     }
 
     int32_t api_reset_session_clock(void* manager, int32_t seed, char* error, uint32_t error_size) {
@@ -497,6 +508,8 @@ namespace {
             mode = bmmo::physics::wake_mode::wake;
         else if (wake_mode == static_cast<int32_t>(bmmo::physics::wake_mode::freeze))
             mode = bmmo::physics::wake_mode::freeze;
+        else if (wake_mode == static_cast<int32_t>(bmmo::physics::wake_mode::wake_moving))
+            mode = bmmo::physics::wake_mode::wake_moving;
         std::string text;
         if (!bmmo::physics::set_body_state(static_cast<CKIpionManager*>(manager), entity_name,
                                            position, rotation, linear, angular, mode, recheck != 0, text)) {
@@ -1134,6 +1147,7 @@ namespace {
         api_event_log_keep_muted_recipes,
         api_drain_muted_recipes,
         api_airship_zone_release,
+        api_capture_world_hash_tick,
         api_reset_game_precision,
     };
 }

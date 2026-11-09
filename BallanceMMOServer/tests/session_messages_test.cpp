@@ -188,7 +188,7 @@ TEST(SessionStartMsg, MechanismSlots) {
 // option WORLD_SESSION_CLOCK (bit 3) round-trips with the others.
 TEST(SessionStartMsg, SessionClockBitRoundTrips) {
     EXPECT_EQ(1u << 3, bmmo::session::WORLD_SESSION_CLOCK);
-    EXPECT_EQ(33u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
+    EXPECT_EQ(36u, bmmo::session::PHYSICS_PROTOCOL_VERSION);
     bmmo::session_start_msg msg{};
     msg.mode = bmmo::room::mode::Physics;
     msg.world_options = bmmo::session::WORLD_SESSION_CLOCK | bmmo::session::WORLD_PLACEMENT_CLONES;
@@ -1049,6 +1049,7 @@ TEST(SessionAssignMsg, FlagsRoundTrip) {
     EXPECT_FALSE(cut.deserialize());
 }
 
+// Protocol 34: the sections are the state's body (body_bytes / read_body_bytes).
 TEST(SessionResyncStateMsg, RoundTripWithEveryTrailingSection) {
     bmmo::session_resync_state_msg msg;
     msg.session = 9;
@@ -1077,16 +1078,10 @@ TEST(SessionResyncStateMsg, RoundTripWithEveryTrailingSection) {
     msg.scripts.assign(4000, 0x5a);
     msg.savestate.assign(150000, 0x11);
     msg.savestate.back() = 0x22;
-    msg.scripts_size = 40125;      // as the server packs them: the unpacked sizes ride along
-    msg.savestate_size = 108289;
-    ASSERT_TRUE(msg.serialize());
-    const std::string bytes = msg.raw.str();
+    const std::string bytes = msg.body_bytes();
     EXPECT_GT(bytes.size(), 154000u);
     bmmo::session_resync_state_msg parsed;
-    parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));   // as a receiver fills it
-    ASSERT_TRUE(parsed.deserialize());
-    EXPECT_EQ(1571u, parsed.tick);
-    EXPECT_EQ(1572u, parsed.base);
+    ASSERT_TRUE(parsed.read_body_bytes(bytes));   // tick and base are the header's
     ASSERT_EQ(2u, parsed.rows.size());
     EXPECT_EQ(bmmo::session::body_kind::Ball, parsed.rows[0].kind);
     EXPECT_EQ(3u, parsed.rows[0].owner);
@@ -1106,15 +1101,79 @@ TEST(SessionResyncStateMsg, RoundTripWithEveryTrailingSection) {
     EXPECT_EQ(msg.union_state, parsed.union_state);
     EXPECT_EQ(msg.scripts, parsed.scripts);
     EXPECT_EQ(msg.savestate, parsed.savestate);
-    EXPECT_EQ(40125u, parsed.scripts_size);
-    EXPECT_EQ(108289u, parsed.savestate_size);
-    // Every truncation is refused.
+    // Every truncation is refused, and so is a trailing byte.
     for (size_t cut: {bytes.size() - 1, bytes.size() - 150000, static_cast<size_t>(20)}) {
         bmmo::session_resync_state_msg shorter;
-        const std::string part = bytes.substr(0, cut);
-        shorter.raw.write(part.data(), static_cast<std::streamsize>(part.size()));
-        EXPECT_FALSE(shorter.deserialize()) << cut;
+        EXPECT_FALSE(shorter.read_body_bytes(bytes.substr(0, cut))) << cut;
     }
+    bmmo::session_resync_state_msg longer;
+    EXPECT_FALSE(longer.read_body_bytes(bytes + '\0'));
+}
+
+// Protocol 34: the body travels as one zstd frame, plain or against the
+// previous body; the header round-trips; a decode is refused unless the
+// size, the whole frame, the reference and zstd's checksum all hold.
+TEST(SessionResyncStateMsg, TheBodyTravelsAsOneZstdFrame) {
+    bmmo::session_resync_state_msg previous;
+    previous.scripts.assign(60000, 0x5a);
+    previous.savestate.assign(180000, 0x11);
+    for (size_t i = 0; i < previous.savestate.size(); i += 7) previous.savestate[i] = static_cast<uint8_t>(i * 131);
+    bmmo::session_resync_state_msg next;
+    next.scripts = previous.scripts;
+    next.savestate = previous.savestate;
+    next.savestate[5000] ^= 0xff;
+    const std::string ref = previous.body_bytes(), body = next.body_bytes();
+    bmmo::session::resync_codec codec;
+    std::vector<uint8_t> plain, delta;
+    ASSERT_TRUE(codec.encode(body, nullptr, plain));
+    ASSERT_TRUE(codec.encode(body, &ref, delta));
+    EXPECT_LT(delta.size() * 4, plain.size()) << "the previous body is the reference";
+    std::string out;
+    ASSERT_TRUE(codec.decode(plain, nullptr, static_cast<uint32_t>(body.size()), out));
+    EXPECT_EQ(body, out);
+    ASSERT_TRUE(codec.decode(delta, &ref, static_cast<uint32_t>(body.size()), out));
+    EXPECT_EQ(body, out) << "bit for bit";
+    EXPECT_FALSE(codec.decode(delta, nullptr, static_cast<uint32_t>(body.size()), out)) << "no reference";
+    const std::string other(ref.size(), 'x');
+    EXPECT_FALSE(codec.decode(delta, &other, static_cast<uint32_t>(body.size()), out)) << "another reference";
+    EXPECT_FALSE(codec.decode(plain, nullptr, static_cast<uint32_t>(body.size()) + 1, out)) << "another size";
+    auto flipped = plain;
+    flipped[flipped.size() / 2] ^= 0x01;
+    EXPECT_FALSE(codec.decode(flipped, nullptr, static_cast<uint32_t>(body.size()), out)) << "the checksum";
+    auto longer = plain;
+    longer.push_back(0);
+    EXPECT_FALSE(codec.decode(longer, nullptr, static_cast<uint32_t>(body.size()), out)) << "one frame, nothing after";
+    // The header carries the frame and its reference.
+    next.session = 9;
+    next.tick = 1571;
+    next.base = 1572;
+    next.ref_kind = bmmo::session::RESYNC_REF_PREVIOUS;
+    next.ref_tick = 1440;
+    next.ref_check = bmmo::session::resync_frame_check(delta);
+    next.raw_size = static_cast<uint32_t>(body.size());
+    next.frame = delta;
+    ASSERT_TRUE(next.serialize());
+    const std::string wire = next.raw.str();
+    EXPECT_LT(wire.size(), 200u + delta.size());
+    bmmo::session_resync_state_msg parsed;
+    parsed.raw.write(wire.data(), static_cast<std::streamsize>(wire.size()));
+    ASSERT_TRUE(parsed.deserialize());
+    EXPECT_EQ(1572u, parsed.base);
+    EXPECT_EQ(bmmo::session::RESYNC_REF_PREVIOUS, parsed.ref_kind);
+    EXPECT_EQ(1440u, parsed.ref_tick);
+    EXPECT_EQ(next.ref_check, parsed.ref_check);
+    EXPECT_EQ(delta, parsed.frame);
+    EXPECT_TRUE(parsed.scripts.empty()) << "the sections are the frame's";
+    std::string kind2 = wire;
+    kind2[sizeof(bmmo::opcode) + 12] = 2;
+    bmmo::session_resync_state_msg unknown;
+    unknown.raw.write(kind2.data(), static_cast<std::streamsize>(kind2.size()));
+    EXPECT_FALSE(unknown.deserialize()) << "an unknown reference kind";
+    // The request names the state the client holds.
+    bmmo::session_resync_msg request;
+    request.session = 9;
+    request.held = {1440, 0xdeadbeef, true};
+    EXPECT_EQ(round_trip(request).held, request.held);
 }
 
 TEST(SessionSnapshotMsg, SerializeDeserializeRoundTrip) {
@@ -1881,11 +1940,9 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
     b.final_applied = 900;
     a.life = 2;                // protocol 21 (step TRL): the set is (player, life)'s
     msg.trafo_ledger = {a, b};
-    ASSERT_TRUE(msg.serialize());
-    const std::string bytes = msg.raw.str();
+    const std::string bytes = msg.body_bytes();   // protocol 34: the body's sections
     bmmo::session_resync_state_msg parsed;
-    parsed.raw.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    ASSERT_TRUE(parsed.deserialize());
+    ASSERT_TRUE(parsed.read_body_bytes(bytes));
     ASSERT_EQ(2u, parsed.trafo_ledger.size());
     EXPECT_EQ(3920120238u, parsed.trafo_ledger[0].player);
     EXPECT_EQ(2, parsed.trafo_ledger[0].type);
@@ -1902,27 +1959,17 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
     EXPECT_EQ(900u, parsed.trafo_ledger[1].final_applied);
     EXPECT_EQ(2u, parsed.trafo_ledger[0].life);
     EXPECT_EQ(1u, parsed.trafo_ledger[1].life);
-    // Every truncation is refused but one: the state cut right after the
-    // ledger is a protocol-20 state (no lives), read as life 1 throughout.
-    const std::string payload = stream_payload(msg.raw);
-    for (size_t len = 0; len < payload.size(); ++len) {
+    // Every truncation is refused (since protocol 34 the lives are always there).
+    for (size_t len = 0; len < bytes.size(); ++len) {
         bmmo::session_resync_state_msg cut{};
-        cut.raw.write(payload.data(), static_cast<std::streamsize>(len));
-        if (len == payload.size() - 2 * 2) {
-            ASSERT_TRUE(cut.deserialize()) << "the protocol-20 layout";
-            EXPECT_EQ(1u, cut.trafo_ledger[0].life);
-            EXPECT_EQ(1u, cut.trafo_ledger[1].life);
-            continue;
-        }
-        EXPECT_FALSE(cut.deserialize()) << "accepted a payload truncated to " << len << " bytes";
+        EXPECT_FALSE(cut.read_body_bytes(bytes.substr(0, len))) << "accepted a body truncated to " << len << " bytes";
     }
     // A life 0 is refused.
     std::string zero = bytes;
     zero[zero.size() - 4] = 0;
     zero[zero.size() - 3] = 0;
     bmmo::session_resync_state_msg zeroed;
-    zeroed.raw.write(zero.data(), static_cast<std::streamsize>(zero.size()));
-    EXPECT_FALSE(zeroed.deserialize());
+    EXPECT_FALSE(zeroed.read_body_bytes(zero));
     // A forged count past the cap, an unknown piece type and an unknown
     // bit are refused.
     std::string forged = bytes;
@@ -1930,18 +1977,15 @@ TEST(TrafoWire, TheResyncStateCarriesTheLedger) {
     const uint16_t too_many = static_cast<uint16_t>(bmmo::session_resync_state_msg::kMaxTrafoLedger + 1);
     std::memcpy(&forged[count_at], &too_many, sizeof(too_many));
     bmmo::session_resync_state_msg capped;
-    capped.raw.write(forged.data(), static_cast<std::streamsize>(forged.size()));
-    EXPECT_FALSE(capped.deserialize());
+    EXPECT_FALSE(capped.read_body_bytes(forged));
     std::string bad_type = bytes;
     bad_type[count_at + 2 + 4] = 3;
     bmmo::session_resync_state_msg typed;
-    typed.raw.write(bad_type.data(), static_cast<std::streamsize>(bad_type.size()));
-    EXPECT_FALSE(typed.deserialize());
+    EXPECT_FALSE(typed.read_body_bytes(bad_type));
     std::string bad_bits = bytes;
     bad_bits[count_at + 2 + 4 + 1] = static_cast<char>(16);
     bmmo::session_resync_state_msg bitted;
-    bitted.raw.write(bad_bits.data(), static_cast<std::streamsize>(bad_bits.size()));
-    EXPECT_FALSE(bitted.deserialize());
+    EXPECT_FALSE(bitted.read_body_bytes(bad_bits));
 }
 
 // ---------------------------------------------------------------------
@@ -2302,4 +2346,35 @@ TEST(EventPiggyback, ServerIntakeEventsBeforeFramesDedupeAndRateOnce) {
     EXPECT_EQ(revive.duplicates, 1u);
     EXPECT_EQ(revive.rate_limited, 0u);
     EXPECT_TRUE(revive.log.empty());
+}
+
+// Protocol 34: a mute set round-trips sorted and unique, a count past the cap
+// is refused, and the server's filter keeps the other players' balls and
+// timestamps (nothing at all when every one is muted).
+TEST(BallStateMuteMsg, RoundTripCapAndFilter) {
+    bmmo::ball_state_mute_msg msg{};
+    msg.players = {7, 3, 7, 9};
+    EXPECT_EQ(round_trip(msg).players, (std::vector<uint32_t>{3, 7, 9}));
+    bmmo::ball_state_mute_msg big{};
+    big.players.assign(bmmo::ball_state_mute_msg::kMaxPlayers, 1u);
+    EXPECT_EQ(round_trip(big).players.size(), 1u);
+    big.serialize();
+    std::string bytes = big.raw.str();
+    const uint16_t over = static_cast<uint16_t>(bmmo::ball_state_mute_msg::kMaxPlayers + 1);
+    std::memcpy(bytes.data() + sizeof(bmmo::opcode), &over, sizeof(over));
+    bmmo::ball_state_mute_msg parsed{};
+    parsed.raw.str(bytes);
+    EXPECT_FALSE(parsed.deserialize());
+
+    bmmo::owned_compressed_ball_state_msg states{};
+    for (const uint32_t id: {3u, 5u, 9u}) states.balls.push_back({{}, static_cast<bmmo::net::connection>(id)});
+    states.unchanged_balls.push_back({{}, static_cast<bmmo::net::connection>(9)});
+    states.unchanged_balls.push_back({{}, static_cast<bmmo::net::connection>(5)});
+    bmmo::owned_compressed_ball_state_msg kept{};
+    ASSERT_TRUE(bmmo::without_muted(states, {3, 9}, kept));
+    ASSERT_EQ(kept.balls.size(), 1u);
+    EXPECT_EQ(kept.balls[0].player_id, 5u);
+    ASSERT_EQ(kept.unchanged_balls.size(), 1u);
+    EXPECT_EQ(kept.unchanged_balls[0].player_id, 5u);
+    EXPECT_FALSE(bmmo::without_muted(states, {3, 5, 9}, kept));
 }

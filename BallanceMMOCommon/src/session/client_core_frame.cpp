@@ -1057,7 +1057,7 @@ namespace bmmo::session {
             s.own_event_repeats_.send_due([this](uint32_t, const std::string& bytes) {
                 platform_.send(bytes, send_mode::unreliable_no_delay);
             });
-        } else if (s.input_history_.size() > 660) {
+        } else if (s.input_history_.size() > 10 * bmmo::session::TICK_RATE) {
             s.input_history_.pop_front();
         }
 
@@ -1360,7 +1360,8 @@ namespace bmmo::session {
             std::copy_n(release.state.rotation, 4, state.rotation);
             std::copy_n(release.state.linear, 3, state.linear);
             std::copy_n(release.state.angular, 3, state.angular);
-            if (!world().set_body(entity, state, bmmo::session::wake_mode::wake, false))
+            // The ball was made this tick: woken before its velocity is written (wake_moving).
+            if (!world().set_body(entity, state, bmmo::session::wake_mode::wake_moving, false))
                 logf("airship: release of p%u at %u failed", release.player, tick);
             else logf("airship: release of p%u applied at %u", release.player, tick);
         }

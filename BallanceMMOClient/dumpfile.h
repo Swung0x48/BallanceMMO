@@ -32,6 +32,21 @@ namespace NSDumpFile
     };
 
     void RunCrashHandler(std::function<void(char*)> Callback);
+
+    // Hang watch (2026-11-08 public test: three client freezes, each ended
+    // from the Task Manager, and nothing on disk said where the game thread
+    // was).  The game thread beats once a rendered frame; while it is armed
+    // (a physics session runs), no beat comes for kHangMs and Windows calls
+    // the game window hung (IsHungAppWindow: no message pumped for 5 s), a
+    // watch thread writes a dump of every thread's stack,
+    // BMMO_<version>_<time>_hang.dmp next to the crash dumps - once a stall.
+    // The beat that ends a stall with a dump returns its report.
+    constexpr unsigned kHangMs = 5000;
+    void StartHangWatch();
+    void StopHangWatch();
+    // Game thread.  Returns true and fills `report` when the stall this beat
+    // ends wrote a dump.
+    bool HangWatchBeat(bool armed, char* report, size_t size);
 };
 
 

@@ -7,8 +7,8 @@ engine change unless proven necessary, and every change recorded.
 **One macro for the IVP changes.** Every BallanceMMO change inside the IVP
 sources - the scalar vector-FPU path (1), the portable transcendental entry
 points (3), the per-unit movement check (5), the ball-ball synapse order (7),
-the merged compact-surface layout (12), the overlap-grid rounding (16) and the
-savestate's access declarations (17) -
+the merged compact-surface layout (12), the overlap-grid rounding (16), the
+savestate's access declarations (17) and the time step's x87 precision (25) -
 compiles only when the build defines `IVP_PORTABLE_BMMO`. Without it each file is the upstream code, platform
 branches included. BallanceMMO's CMake defines the macro on every IVP target
 it builds, the headless server's and the client plugin's alike
@@ -28,7 +28,7 @@ upstream:
 
 | Under `submodule/Ballanced` | Fork (upstream) | BallanceMMO's commits |
 |---|---|---|
-| `Source/BuildingBlocks/physics_RT/ivp` | `Swung0x48/source-physics` (before it, `doyaGu/ivp`) | #1 `68bb6cb`, #3 `d8513b1`, #5 `618ca67`, #7 `94fecee`, #12 `c563ad7`, #16 `b22a980`, the `IVP_PORTABLE_BMMO` macro `5d6b57a`, #17 `22b594a` |
+| `Source/BuildingBlocks/physics_RT/ivp` | `Swung0x48/source-physics` (before it, `doyaGu/ivp`) | #1 `68bb6cb`, #3 `d8513b1`, #5 `618ca67`, #7 `94fecee`, #12 `c563ad7`, #16 `b22a980`, the `IVP_PORTABLE_BMMO` macro `5d6b57a`, #17 `22b594a`, #25 `fcaedc2` |
 | `Source/BuildingBlocks` (physics_RT) | `Swung0x48/CKBuildingBlocks` (`doyaGu/CKBuildingBlocks`, from `e5d441f` on its `sdl`) | #6 `a9c4b3b`, #8 `1bc05ef`, #9 `673d89b`, #10 `325321c`, #13 `926dc2f`, #14 `0bb5e8c`, #15 `f628978`, #18 `7999d04`, #19 `7daf5eb`, #24 `962f73b`; the force block's exported helpers (bridge API v14, not numbered) `19b7758`; the rest are the ivp pointer and its URL |
 | `Source/VxMath` | `Swung0x48/VxMath` (`doyaGu/VxMath`) | #2 `a67bd5d`, #11 `576f3a9`, #23 `3c0fff4` |
 | `Source/Player` | `Swung0x48/BallancePlayer` (`doyaGu/BallancePlayer`) | #4 `2870c91` |
@@ -998,6 +998,43 @@ With the x87 model `RememberConvexSurface` compiles only on a thread already at 
 
 ---
 
+## 25. The time step at 53-bit x87 precision on a 32-bit build (physics_RT / IVP)
+
+File: `Source/BuildingBlocks/physics_RT/ivp/ivp_physics/ivp_time.cxx`
+(`IVP_Time_Manager::event_loop` and `simulate_variable_time_step`), behind
+`IVP_PORTABLE_BMMO`.
+
+Ipion set the x87 to 64-bit (extended) precision around every time step. A
+32-bit MSVC build of IVP computes in SSE2 (`/arch:SSE2`, change #1's flags),
+except where the calling convention returns a double in `ST(0)`: the caller
+multiplies it there (`fmul qword ptr`), e.g. `sind((1 - t) * omega) * i_sinom`
+in `IVP_U_Quat::set_interpolate_smoothly`. At 64 bits that product is rounded
+twice (to 64 bits, then to 53 at the store) and now and then comes out one ulp
+from the SSE2 / NEON product of every 64-bit build. Change #22's 53-bit guard
+in `CKIpionManager::Simulate` did not reach it: the time manager inside the
+step put 64 back (measured: `__control87_2` reads 53 bits on entry to
+`Simulate` and 64 in every PSI). Under the macro the time manager sets 53 bits,
+where an x87 product of two doubles is the IEEE double product; the upstream
+code keeps 64. On a 64-bit build nothing changes (no x87 arithmetic, and the
+precision bits are not settable).
+
+Found by the 2026-11-08 public test: on level 8 every 32-bit retail client,
+the late joiner that imported the server's state at 2575 included, agreed
+bit for bit with the others and not with the x64 server (yuling 2.77e-5 m,
+SomeOne_001 1.38e-5 m at 2640). The x86 SimTool replaying the server journal
+reproduced those clients' rows at 2640 exactly (188 of 188 bodies). The first
+difference is at tick 2146: `synchronize_with_rot_z`'s slerp at a collision,
+every intermediate (omega, 1 / sin omega, both sines, both scales) equal on
+x86 and x64 and the result 2 ulps off on x86 (`q_last` of DRH's ball,
+`--savestate-diff` of the two builds' tick 2146 blobs).
+
+Evidence: the x86 SimTool's replays of the server journals before the change:
+L8 first divergence at 2146, L5 at 23635; after it the per-tick hashes equal
+the server's over L5 55175, L6 36131 and L8 103762 ticks, as the x64
+SimTool's (unchanged).
+
+---
+
 ## Bridge notes: the script replay's record, version 2 (no engine change)
 
 `game/script_replay.hpp` `kVersion = 2`: after a block's force section a byte
@@ -1516,6 +1553,24 @@ remake's births from the same lines (`physics_view::set_event_log_keep_muted_rec
 / `drain_muted_recipes`, `session_host_world.hpp` `feed_muted_births`). What
 the plugin records, emits or simulates does not change; the mod and the
 plugin are rebuilt together (the API version must match).
+
+## Bridge notes: the per-tick world hash without the surface signature (bridge API v35, no engine change)
+
+`capture_world_hash_tick` (T3C step S1) is `capture_world_hash` without the
+surface signature (`physics_state.cpp` `capture_world_hash(..., surfaces =
+false)`: `out.surfaces` stays 0). The journal's per-tick TICK record carries
+hash, pose, cores, ms and probe but no surfaces (`journal.hpp`), and it was the
+only reader of the per-tick call (`client_platform` `world_hash`), so the
+retail host, the headless client and the server's runner now take that one;
+the anchor header, the hold digest, `.bmrc` recordings and SimTool keep the
+full hash. Measured (T3C S0, E-core retail, the diag census): the surface
+signature cost 11.8-14 ms on Level 12's set-change frames (a birth, a sector
+pass: the surface memo is dropped whole when the body set changes) and 8.9 ms
+on Level 11's, against 17-28 us for the rest of the hash - every frame of the
+public test's "15 ms frames without a rewind" (a5). No simulated value
+changes; server journal replays and the fast LBM are exact.
+
+---
 
 ## Notes on things that were verified *not* to need engine changes
 

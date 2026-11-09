@@ -45,6 +45,9 @@ namespace bmmo::session {
         // asked for a state that named it again, until the level ended.
         constexpr uint32_t kBodyWaitFrames = kNavigationWaitFrames;
         constexpr uint32_t kBodyWaitReachMargin = 2;
+        // Step A5: how long a late joiner's state waits for the level's own
+        // walk to end - the gate's own bound, plus the walk.
+        constexpr uint32_t kWalkWaitFrames = 2 * static_cast<uint32_t>(sector_union::kLevelWalkWait);
     }
 
     // post_step's tracked set, for a record made outside a frame (the
@@ -75,6 +78,7 @@ namespace bmmo::session {
         s.resync_old_tick_ = old_tick;
         s.resync_delta_ = static_cast<int64_t>(old_tick) - static_cast<int64_t>(anchor);
         s.resync_wait_frames_ = 0;
+        s.resync_walk_frames_ = 0;
         s.have_resync_state_ = false;
         s.resync_state_ = bmmo::session_resync_state_msg{};
         s.pending_deaths_.clear();
@@ -94,6 +98,38 @@ namespace bmmo::session {
     void session_client_core::on_session_resync_state(bmmo::session_resync_state_msg&& msg) {
         ++s.resync_states_;
         if (msg.session != s.session_ || s.phase_ != client_core_state::phase::running) return;
+        // Protocol 34: the body out of its zstd frame, against the body of
+        // the last state decoded when the server coded it so - only the one
+        // this core holds under the id the message names, and zstd's content
+        // checksum checks the result (session/resync_state_codec.hpp).  A
+        // stale state is decoded too: the server's slot moved to it, so it is
+        // the reference our next request names.  One that does not decode
+        // leaves no reference: the next request names none, and its answer
+        // is plain.
+        const bool against = msg.ref_kind == bmmo::session::RESYNC_REF_PREVIOUS;
+        const bool reference = !against || (s.resync_ref_.held && s.resync_ref_.tick == msg.ref_tick
+                                             && s.resync_ref_.check == msg.ref_check);
+        std::string body;
+        if (!reference || !resync_codec_.decode(msg.frame, against ? &s.resync_ref_body_ : nullptr, msg.raw_size, body)
+                || !msg.read_body_bytes(body)) {
+            ++s.resync_decode_failed_;
+            s.resync_ref_ = {};
+            s.resync_ref_body_.clear();
+            const bool pending = s.resync_pending_ && s.resync_exact_ && msg.base == s.resync_base_ && msg.tick + 1 == msg.base;
+            logf("resync: the state of tick %u (%s) does not decode%s%s", msg.tick,
+                 against ? ("against the state of tick " + std::to_string(msg.ref_tick)).c_str() : "plain",
+                 reference ? "" : ": that reference is not the one held here", pending ? ": asking again" : "");
+            if (pending) {
+                ++s.resync_states_refused_;
+                s.resync_in_flight_ = false;
+                request_resync("the resync state does not decode", true);
+            }
+            return;
+        }
+        if (against) ++s.resync_states_coded_;
+        s.resync_ref_ = {msg.tick, bmmo::session::resync_frame_check(msg.frame), true};
+        s.resync_ref_body_.swap(body);
+        msg.frame = {};
         // The rows as received, like every snapshot's (flag RESYNC).
         if (journal_.journalling())
             journal_.writer().checkpoint(msg.tick, static_cast<uint8_t>(bmmo::session::JOURNAL_CHECKPOINT_RECEIVED
@@ -108,23 +144,6 @@ namespace bmmo::session {
                  s.resync_pending_ && s.resync_exact_ ? "pending" : "none pending, last", s.resync_base_);
             return;
         }
-        // The packed sections back to their bytes (the server packs the
-        // record and the blob: see session_resync_state_msg).
-        for (auto [bytes, size, what]: {std::tuple<std::vector<uint8_t>*, uint32_t, const char*>{&msg.scripts, msg.scripts_size, "script record"},
-                                        {&msg.savestate, msg.savestate_size, "savestate"}}) {
-            if (!size) continue;
-            std::vector<uint8_t> out;
-            if (!platform_.unpack_bytes || !platform_.unpack_bytes(*bytes, size, out) || out.size() != size) {
-                ++s.resync_states_refused_;
-                logf("resync: the state of tick %u: its %s (%zu bytes packed, %u unpacked) does not unpack%s: asking again",
-                     msg.tick, what, bytes->size(), size, platform_.unpack_bytes ? "" : " (no unpack here)");
-                s.resync_in_flight_ = false;
-                request_resync("the resync state does not unpack", true);
-                return;
-            }
-            bytes->swap(out);
-        }
-        msg.scripts_size = msg.savestate_size = 0;
         s.resync_state_ = std::move(msg);
         s.have_resync_state_ = true;
         s.resync_state_arrived_ = current_tick();
@@ -440,6 +459,35 @@ namespace bmmo::session {
             }
             ++s.resync_deferred_ticks_;
             return false;
+        }
+        // Step A5: a late joiner's anchor is the level start, and its own
+        // sector-1 walk runs in its first frames - over several frames
+        // (the manager's delayed links), placing every module of the sector
+        // (Set World Matrix, which no record carries) and resetting their
+        // scripts.  The server's state at S has run that walk long before:
+        // its scripts and bodies replace the walk's, and the walk's placement
+        // is the server's (the same rows, the same matrices).  A state
+        // applied while the walk runs cancels it halfway (the manager is
+        // restored idle: the sector's modules stay unplaced - Level 6's
+        // P_Modul_18_MF001 on its level-file matrix, 756 m from its row), or,
+        // re-issued by the re-step, walks the sector again over the server's
+        // mid-run modules (a module reset: their proximity checks out of phase
+        // with every other world for good).  So the state waits until the
+        // walk was seen and the manager is idle again; the activation is then
+        // dropped below.  Bounded: the gate's timeout opens it, and the reach.
+        if (s.resync_join_) {
+            const auto& opened = s.sectors_.walk_open();
+            const bool walking = !s.sectors_.walk().seen || (opened.known && platform_.sector_manager_active());
+            if (walking && !opened.timed_out && s.resync_walk_frames_ < kWalkWaitFrames
+                    && depth + kBodyWaitReachMargin < s.rollback_.resync_reach()) {
+                if (s.resync_walk_frames_++ == 0)
+                    logf("resync: the state of tick %u waits at tick %u for this world's own level walk", anchor, now);
+                ++s.resync_deferred_ticks_;
+                return false;
+            }
+            if (s.resync_walk_frames_)
+                logf("resync: the state of tick %u waited %u frame(s) for the level walk (%s)", anchor, s.resync_walk_frames_,
+                     walking ? "still running: goes on" : "ended");
         }
         if (s.resync_wait_frames_)
             logf("resync: the state of tick %u waited %u frame(s) for its bodies", anchor, s.resync_wait_frames_);

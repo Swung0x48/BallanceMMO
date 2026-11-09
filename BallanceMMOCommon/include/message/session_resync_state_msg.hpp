@@ -3,8 +3,10 @@
 #include "message.hpp"
 #include "../entity/session.hpp"
 #include "../physics/physics_rt_api.h"
+#include "../session/resync_state_codec.hpp"
 
 #include <cstdint>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,14 +38,6 @@ namespace bmmo {
     //               (game/script_replay.hpp capture_portable);
     //   savestate   the server's IVP savestate of that tick (physics/
     //               physics_savestate.hpp), restored as a travelling blob.
-    //   scripts_size, savestate_size  the two sections' unpacked sizes: the
-    //               server packs them (CKPackData, zlib); 0 = carried as they
-    //               are.  Unpacked the state is 150-250 KB on Level 11, which
-    //               GameNetworkingSockets' default 256 KB/s send rate takes
-    //               0.6-1 s to deliver - 40-65 ticks the client runs on past
-    //               S, which pushed the re-step past the rollback's reach and
-    //               every relayed frame of the window past it too (measured:
-    //               183 KB, D = 72).  Packed it is 5-10 times smaller.
     //   trafo_ledger (protocol 11; trafo-replication design 4.7) the three
     //               type sets of every set the server's world holds at S
     //               (bodies, the newest explosion and reset, the final
@@ -54,8 +48,17 @@ namespace bmmo {
     //               session has WORLD_TRAFO_INPUTS.
     //   ledger lives (protocol 21, step TRL) after the ledger: one u16 per
     //               ledger entry, the life of the set it describes (a set
-    //               is (player, life)'s).  A state that ends after the
-    //               ledger (protocol 20 and older) reads as life 1.
+    //               is (player, life)'s); always there since protocol 34.
+    //
+    // Protocol 34: those sections are the state's BODY (body_bytes /
+    // read_body_bytes, the layout above, with scripts and savestate raw and
+    // the ledger lives always written), and the message carries it as one
+    // zstd frame (session/resync_state_codec.hpp): plain (ref_kind 0), or
+    // against the body of the last state this member decoded (ref_kind 1,
+    // named by its tick and its frame's check), when the member's
+    // SessionResync said it holds that one.  deserialize() reads the header
+    // and the frame only; the core decodes the frame against its reference.
+    // The two packed-size fields and CKPackData are gone.
     struct session_resync_state_msg : public serializable_message {
         static constexpr uint32_t kMaxBytesField = 4u << 20;   // a forged length is refused, never allocated
 
@@ -68,13 +71,18 @@ namespace bmmo {
         std::vector<uint8_t> union_state;
         std::vector<uint8_t> scripts;
         std::vector<uint8_t> savestate;
-        uint32_t scripts_size = 0, savestate_size = 0;   // unpacked sizes; 0 = not packed
         std::vector<session::trafo_ledger_entry> trafo_ledger;   // <= kMaxTrafoLedger
         // Three type sets per set; the sets are the members' and the
         // leavers' not yet retired (a leaver's goes about 230 ticks after
         // its final resets), so twice the member cap.  The server logs a
         // ledger cut at it.
         static constexpr size_t kMaxTrafoLedger = 3 * 2 * session::MAX_PLAYERS_PER_SESSION;
+
+        // The wire (protocol 34): the body as one zstd frame.
+        uint8_t ref_kind = session::RESYNC_REF_NONE;
+        uint32_t ref_tick = 0, ref_check = 0;   // the reference's resync_ref_id (0 when plain)
+        uint32_t raw_size = 0;                  // the decoded body's size
+        std::vector<uint8_t> frame;
 
         session_resync_state_msg() : serializable_message(bmmo::SessionResyncState) {}
 
@@ -83,6 +91,44 @@ namespace bmmo {
             raw.write(reinterpret_cast<const char*>(&session), sizeof(session));
             raw.write(reinterpret_cast<const char*>(&tick), sizeof(tick));
             raw.write(reinterpret_cast<const char*>(&base), sizeof(base));
+            raw.write(reinterpret_cast<const char*>(&ref_kind), sizeof(ref_kind));
+            raw.write(reinterpret_cast<const char*>(&ref_tick), sizeof(ref_tick));
+            raw.write(reinterpret_cast<const char*>(&ref_check), sizeof(ref_check));
+            raw.write(reinterpret_cast<const char*>(&raw_size), sizeof(raw_size));
+            write_bytes(raw, frame);
+            return raw.good();
+        }
+
+        bool deserialize() override {
+            if (!serializable_message::deserialize()) return false;
+            if (!message_utils::read_variable(raw, &session)) return false;
+            if (!message_utils::read_variable(raw, &tick)) return false;
+            if (!message_utils::read_variable(raw, &base)) return false;
+            if (!message_utils::read_variable(raw, &ref_kind) || ref_kind > session::RESYNC_REF_PREVIOUS) return false;
+            if (!message_utils::read_variable(raw, &ref_tick)) return false;
+            if (!message_utils::read_variable(raw, &ref_check)) return false;
+            if (!message_utils::read_variable(raw, &raw_size) || raw_size > session::kMaxResyncRaw) return false;
+            return read_bytes(raw, static_cast<std::streamoff>(raw.tellp()), frame);
+        }
+
+        // The body: the sections, as bytes (what both sides keep as a reference).
+        std::string body_bytes() const {
+            std::stringstream out(std::ios::in | std::ios::out | std::ios::binary);
+            write_body(out);
+            return out.str();
+        }
+        // The sections from a decoded body, which must be read to its end.
+        bool read_body_bytes(const std::string& body) {
+            // Written into, as a received message is (message_utils' string
+            // reads bound a length by the put position).
+            std::stringstream in(std::ios::in | std::ios::out | std::ios::binary);
+            in.write(body.data(), static_cast<std::streamsize>(body.size()));
+            if (!read_body(in, static_cast<std::streamoff>(body.size()))) return false;
+            return in.peek() == std::char_traits<char>::eof();
+        }
+
+    private:
+        void write_body(std::stringstream& raw) const {
             const uint16_t count = static_cast<uint16_t>(std::min<size_t>(rows.size(), session::MAX_BODIES_PER_SNAPSHOT));
             raw.write(reinterpret_cast<const char*>(&count), sizeof(count));
             for (uint16_t i = 0; i < count; ++i) {
@@ -113,11 +159,9 @@ namespace bmmo {
                 raw.write(reinterpret_cast<const char*>(bytes), sizeof(bytes));
                 raw.write(reinterpret_cast<const char*>(n.force), sizeof(n.force));
             }
-            raw.write(reinterpret_cast<const char*>(&scripts_size), sizeof(scripts_size));
-            raw.write(reinterpret_cast<const char*>(&savestate_size), sizeof(savestate_size));
-            write_bytes(union_state);
-            write_bytes(scripts);
-            write_bytes(savestate);
+            write_bytes(raw, union_state);
+            write_bytes(raw, scripts);
+            write_bytes(raw, savestate);
             const uint16_t ledger_count = static_cast<uint16_t>(std::min<size_t>(trafo_ledger.size(), kMaxTrafoLedger));
             raw.write(reinterpret_cast<const char*>(&ledger_count), sizeof(ledger_count));
             for (uint16_t i = 0; i < ledger_count; ++i) {
@@ -134,14 +178,9 @@ namespace bmmo {
             }
             for (uint16_t i = 0; i < ledger_count; ++i)
                 raw.write(reinterpret_cast<const char*>(&trafo_ledger[i].life), sizeof(trafo_ledger[i].life));
-            return raw.good();
         }
 
-        bool deserialize() override {
-            if (!serializable_message::deserialize()) return false;
-            if (!message_utils::read_variable(raw, &session)) return false;
-            if (!message_utils::read_variable(raw, &tick)) return false;
-            if (!message_utils::read_variable(raw, &base)) return false;
+        bool read_body(std::stringstream& raw, std::streamoff end) {
             uint16_t count = 0;
             if (!message_utils::read_variable(raw, &count)) return false;
             if (count > session::MAX_BODIES_PER_SNAPSHOT) return false;
@@ -189,9 +228,8 @@ namespace bmmo {
                 nav.second.create_pending_mask = bytes[3];
                 navs.push_back(nav);
             }
-            if (!message_utils::read_variable(raw, &scripts_size) || scripts_size > kMaxBytesField) return false;
-            if (!message_utils::read_variable(raw, &savestate_size) || savestate_size > kMaxBytesField) return false;
-            if (!read_bytes(union_state) || !read_bytes(scripts) || !read_bytes(savestate)) return false;
+            if (!read_bytes(raw, end, union_state) || !read_bytes(raw, end, scripts) || !read_bytes(raw, end, savestate))
+                return false;
             uint16_t ledger_count = 0;
             if (!message_utils::read_variable(raw, &ledger_count) || ledger_count > kMaxTrafoLedger) return false;
             trafo_ledger.clear();
@@ -211,27 +249,23 @@ namespace bmmo {
                 e.final = (bits & 8u) != 0;
                 trafo_ledger.push_back(e);
             }
-            // Protocol 21: the entries' lives, when the state carries them.
-            if (ledger_count > 0 && raw.peek() != std::char_traits<char>::eof()) {
-                for (auto& e: trafo_ledger)
-                    if (!message_utils::read_variable(raw, &e.life) || e.life == 0) return false;
-            } else {
-                raw.clear();
-            }
+            // The entries' lives (protocol 21; always written since 34).
+            for (auto& e: trafo_ledger)
+                if (!message_utils::read_variable(raw, &e.life) || e.life == 0) return false;
             return true;
         }
 
-    private:
-        void write_bytes(const std::vector<uint8_t>& bytes) {
+        static void write_bytes(std::ostream& raw, const std::vector<uint8_t>& bytes) {
             const uint32_t size = static_cast<uint32_t>(std::min<size_t>(bytes.size(), kMaxBytesField));
             raw.write(reinterpret_cast<const char*>(&size), sizeof(size));
             if (size) raw.write(reinterpret_cast<const char*>(bytes.data()), size);
         }
-        bool read_bytes(std::vector<uint8_t>& out) {
+        // `end`: the stream's size, so a forged length is refused before it is allocated.
+        static bool read_bytes(std::istream& raw, std::streamoff end, std::vector<uint8_t>& out) {
             uint32_t size = 0;
             if (!message_utils::read_variable(raw, &size)) return false;
             if (size > kMaxBytesField) return false;
-            const auto remaining = static_cast<std::streamoff>(raw.tellp()) - raw.tellg();
+            const auto remaining = end - static_cast<std::streamoff>(raw.tellg());
             if (remaining < 0 || static_cast<std::streamoff>(size) > remaining) return false;
             out.resize(size);
             if (size && !raw.read(reinterpret_cast<char*>(out.data()), size)) return false;

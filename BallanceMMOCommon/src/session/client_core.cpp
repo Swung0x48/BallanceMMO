@@ -530,6 +530,8 @@ namespace bmmo::session {
         s.state_anchored_ = false;   // step RLT
         s.have_resync_state_ = false;
         s.resync_state_ = bmmo::session_resync_state_msg{};
+        s.resync_ref_ = {};   // protocol 34: a new session's server holds no state of ours
+        s.resync_ref_body_.clear();
         s.resync_held_ = false;
         s.resync_lost_bodies_.clear();
         s.resync_join_ = false;   // step A5
@@ -799,7 +801,7 @@ namespace bmmo::session {
             const int late = bmmo::session::start_lateness_ticks(
                     std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count(),
                     std::chrono::duration_cast<std::chrono::microseconds>(s.start_instant_.time_since_epoch()).count(),
-                    bmmo::session::kStartTickRate);
+                    bmmo::session::TICK_RATE);
             s.held_ = false;
             s.start_scheduled_ = false;
             s.release_at_instant_ = late == 0;
@@ -811,7 +813,7 @@ namespace bmmo::session {
             if (late > 0) {
                 const int caught = catch_up_start(late, s.started_epoch_, s.started_seq_);
                 s.started_effective_ -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                        std::chrono::duration<double>(caught / bmmo::session::kStartTickRate));
+                        std::chrono::duration<double>(caught / static_cast<double>(bmmo::session::TICK_RATE)));
             }
             const double after_ms = std::chrono::duration<double, std::milli>(now - s.start_instant_).count();
             logf("start handshake: anchor hold released at the scheduled instant of start %u (%.2f ms after it, %d "
@@ -1007,7 +1009,7 @@ namespace bmmo::session {
         s.corrected_ = true;
         s.corrected_epoch_ = epoch;
         const int64_t started_us = std::chrono::duration_cast<std::chrono::microseconds>(started.time_since_epoch()).count();
-        int ticks = bmmo::session::start_lateness_ticks(started_us, due_us, bmmo::session::kStartTickRate);
+        int ticks = bmmo::session::start_lateness_ticks(started_us, due_us, bmmo::session::TICK_RATE);
         logf("start handshake: base %u started %+.2f ms after it was due (%s)%s", epoch,
              static_cast<double>(started_us - due_us) / 1000.0, what,
              ticks > 0 ? (": catching up " + std::to_string(ticks) + " tick(s)").c_str() : "");
@@ -1078,14 +1080,14 @@ namespace bmmo::session {
                 // Started on another (later) start: catch up the difference.
                 const int late = bmmo::session::start_lateness_ticks(
                         std::chrono::duration_cast<std::chrono::microseconds>(s.started_effective_.time_since_epoch()).count(),
-                        msg.start_us, bmmo::session::kStartTickRate);
+                        msg.start_us, bmmo::session::TICK_RATE);
                 logf("start handshake: start %u committed while this client runs on start %u (%+.2f ms): %s", msg.seq,
                      s.started_seq_, std::chrono::duration<double, std::milli>(s.started_effective_ - instant).count(),
                      late > 0 ? ("catching up " + std::to_string(late) + " tick(s)").c_str() : "nothing to catch up");
                 s.started_seq_ = msg.seq;
                 const int caught = catch_up_start(late, msg.first_tick, msg.seq);
                 s.started_effective_ -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                        std::chrono::duration<double>(caught / bmmo::session::kStartTickRate));
+                        std::chrono::duration<double>(caught / static_cast<double>(bmmo::session::TICK_RATE)));
             }
             return;
         }
@@ -1450,6 +1452,7 @@ namespace bmmo::session {
         bmmo::session_resync_msg msg;
         msg.session = s.session_;
         msg.last_full_tick = s.last_snapshot_tick_;
+        msg.held = s.resync_ref_;   // protocol 34: the answer may be coded against it
         msg.serialize();
         platform_.send(msg.raw.str(), send_mode::reliable);
         ++s.resyncs_sent_;

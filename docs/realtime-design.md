@@ -1093,3 +1093,93 @@ after) and the own group's adoption (`adopt_group_now`, before / after), each li
 - Not covered: four members on retail (two copies; the headless arms carry the four-member count), a retail arena
   session (it needs the slot-13 builds, CMAP retires that), a present that blocks on vblank (above), a P-core
   retail session.
+
+## Measured (T3C steps S0 and S1: the census re-baselined on HEAD, and the a5 spike removed)
+
+The user's decision 56 chose (ii), more cost cuts; T3C is that work (plan report
+`.local-tools/work/RCX/plan-report.md`). SRTJ's numbers were 176 commits old (606d37f6: before SLOT, R1's slot
+images, R6B, the 53-bit reads, the remote coalescing, engine changes #24 / #25), so S0 measured again.
+
+**Method (S0).** The SRTJ census patch ported to HEAD (`work/S0/apply_diag.py`, reverted after the runs) with eight
+more buckets (`work/S0/s0_counters.hpp`: the world hash, rollback_world binds, restore_scripts, set_savestate,
+put_omitted_images, list_bodies, the corrector reads, the SectorManager lookups). SRTJ's four retail recipes (L11
+ctl / ctl_h, L12 / L12_h; `work/S0/s0_retail.py` over `work/SRTJ/srtj_retail.py`), the two copies on E-cores 16-21
+and 22-27, each at one-way `net lag` 150 (SRTJ's setting, ~300 ms round trip, D 22-23) and 75 (~150 ms round trip,
+D 12-14), three runs each, checkpoint cadence 660 (the deployed value; four more runs at SRTJ's cadence 1 differ
+from them by noise: list_bodies +25 us, nothing else). Buckets `work/S0/s0_report.py`, the target
+`work/SRTJ/srtj_judge.py` (`work/S0/judge_table.py`); medians over 3 runs x 2 clients.
+
+**What a rollback frame is now (S0, L12 / L11, us):**
+
+| | L12 | L11 |
+|---|---|---|
+| per replayed tick | 800-930 (capture 480-620, pre_step 80-100, step 30-45, rest 140-180) | 820-890 (capture 480-530, pre 85-90, step 65-77, rest 195-205) |
+| restore per rewind | 2170-2420 (restore_scripts 1350-1530, set_savestate 440-620) | 2260-2590 (scripts 810-900, set_savestate 1060-1190) |
+| put_omitted_images per rewind | 3340-4560 | 1390-2090 |
+| live tick (core, no rewind) | 3750 (capture 2490-2520, of it omitted images 1040) | 2960-3040 (capture 1810-1870, omitted images 440-460) |
+| the world hash, a normal frame | 21 | 17-28 |
+| render | 480-560 | 630-670 |
+
+So R1's slot images (`put_omitted_images`, the unbound copies' images of every whole record) are now the largest
+single item after the hash spike: ~40 % of the live capture on L12 and ~0.15-0.2 ms of every replayed tick.
+
+**The a5 spike (S0) is the world hash's surface signature.** On every frame with no rewind and core work over
+10 ms the hash bucket took 11.8-14 ms on L12 (p50 12.4-12.7) and 8.9 ms on L11, against 17-28 us on the others: a
+birth or a sector pass drops the surface memo whole and the per-tick TICK hash recomputed every surface - 5-10
+such frames per 1000. The TICK record carries no surfaces.
+
+**S1 (b76e503d, bridge v35):** the per-tick TICK hash without the surface signature (anchors, hold digests,
+recordings and SimTool keep it). Same recipes on S1 (24 runs): those frames 5-10 / 1000 -> 0 everywhere, the
+hash 9-19 us. The target, one-way 150 (75 in brackets), S0 -> S1:
+
+| recipe | frames over 15.15 ms | T1 max | T3 p99 | T3 max |
+|---|---|---|---|---|
+| L12 scripted | 10.5 -> 3 (11 -> 3) | 33.8 -> 25.3 (31.6 -> 20.8) | 32.2 -> 31.0 (32.3 -> 31.1) | 73 -> 55 (64 -> 46) |
+| L12 human keys | 56 -> 40 (52 -> 39) | 44.9 -> 35.5 (35.0 -> 29.0) | 52.6 -> 49.5 (42.2 -> 39.7) | 96 -> 75 (66 -> 55) |
+| L11 ctl | 32 -> 24.5 (23 -> 20) | 43.3 -> 37.7 (30.6 -> 28.1) | 45.9 -> 40.2 (35.5 -> 33.2) | 103 -> 87 (61 -> 63) |
+| L11 ctl_h | 88 -> 77 (78 -> 64) | 55.9 -> 42.2 (37.3 -> 32.6) | 51.1 -> 46.3 (39.3 -> 37.2) | 106 -> 90 (71 -> 65) |
+
+L12 scripted is at the pacing's own floor (p99 31.0, the floor 31.9-32.0); the rest is the rewind frame itself.
+
+**Found on the way:** three of 28 S0 starts ended "did not report ready" - the server's start barrier took its
+deadline in on_world_ready, on the runner at the logical instant the boot began (the boot blocks the runner), so a
+12-15 s boot left the members 5 s of the 20 (fixed: the deadline is taken at the main loop's first barrier check
+after the world is ready).
+
+**Next (by the S0 buckets):** the slot images (plan option e3: a copy with no force or joint block keeps t - 1's
+image; or capture them only where a slot's block can have changed), then the restore's script write (1.3-1.5 ms
+on L12) and set_savestate (~1.1-1.2 ms on L11), then the bookkeeping (c) and the (e1) chain.
+
+## Built (T3C step e3: the slot memo)
+
+`game/script_slots.hpp` (the memo and the quiet-run ledger), `game/script_replay.hpp` (put_omitted_images, the
+observing capture, observe_slot_roots), `session/rollback.hpp` (`rollback_world::observe_scripts`: a light
+record's observation). An omitted slot copy keeps its last walked image and section entry; a whole record appends
+the entry instead of walking when the host-write generation is the memo's, the copy's unit root has been quiet
+(OPC's `reusable_root`) at every observation since the memo was walked - every capture is one observation, light
+ones included; a gap, the same tick again or a backward jump ends a run - and every force tail reads as it did.
+Copies with a joint block are never memoized; only a capture that observed may use a memo (the hold digest's and
+the tools' walk). `BMMO_SLOT_MEMO` = off | on | verify, on by default since the gate.
+
+The design round (`.local-tools/work/E3/design.json`): the literal e3 (copy t - 1's entry for copies without a
+force or joint block) covers 0 of L12's 156 omitted copies (every fan copy has its SetPhysicsForce); the memo
+reaches replayed whole records without e1. Found on the way: the proximity union's relatch wrote a Get Cell output
+without bumping the generation (31bd941b).
+
+**Gate.** Unit tests (the ledger rules); fast LBM with `BMMO_SLOT_MEMO=verify` and `BMMO_SCRIPT_REUSE=verify`
+(every hit walked again and compared; OPC's verify walk with the memo off): 38/38 FINAL exact, criteria equal arm
+by arm, 9.8k hits per client, 0 mismatches; retail verify (L12, L12_h, L11 ctl_h at one-way 150): hit rate 91-95 %,
+0 mismatches for both; fast LBM with the memo on by default: 38/38, criteria equal.
+
+**Measured** (S0's recipe on one diag build: memo on 3 runs, off 1 run, medians over runs x 2 clients):
+
+| | L12 off -> on | L11 off -> on |
+|---|---|---|
+| live core (no rewind) | 3.79-4.00 -> 3.09-3.13 ms | 2.91-3.22 -> 2.71-2.81 ms |
+| live capture | 2.53-2.69 -> 1.82-1.85 ms | 1.79-2.00 -> 1.56-1.63 ms |
+| of it the slot images | 1.05-1.13 -> 0.35 ms | 0.44-0.49 -> 0.19-0.20 ms |
+| slot images per rewind | 3.3-5.4 -> 1.75-2.2 ms | 1.4-2.2 -> 0.8-1.1 ms |
+| L12_h at 150: over-15.15 / over-30.3 frames, T3 p99, T3 max | 39.5 / 20 -> 21 / 7.5, 54.7 -> 47.6, 87.9 -> 72.5 ms | ctl_h: equal within noise |
+
+The retail recipes run K = 8 slots; the public servers run 20 (29 of 30 rooms), about three times the omitted copies,
+so the saving there is about three times as large (a projection, measured by T3C's public-test re-drive).

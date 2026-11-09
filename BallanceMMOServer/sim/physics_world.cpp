@@ -949,9 +949,11 @@ namespace bmmo::sim {
                 return false;
             if (p.navigation) p.navigation->set_ball(p.ball);
             body_set_changed_ = true;
+            // Made this tick: woken before its velocity is written (wake_moving),
+            // exactly as every client's core applies the same release.
             return bmmo::physics::set_body_state(manager, p.ball->GetName(), event.release.position,
                     event.release.rotation, event.release.linear, event.release.angular,
-                    bmmo::physics::wake_mode::wake, false, error);
+                    bmmo::physics::wake_mode::wake_moving, false, error);
         }
         case event_type::Physicalize: {
             CK3dEntity* clone = clone_ball(p, event.ball_type, error);
@@ -1092,7 +1094,7 @@ namespace bmmo::sim {
         // The trafo frame (design 2.5): after the tick's inputs and the
         // union's pass, before the behaviour pass and the step - every
         // selected set's scripts, sets by player id, with the fixed delta.
-        if (options_.trafo_inputs) bmmo::game::trafo_frame(context, trafo_registry_, kFixedDeltaMs);
+        if (options_.trafo_inputs) bmmo::game::trafo_frame(context, trafo_registry_, bmmo::session::TICK_DELTA_MS);
         // FULL step PRX (game/depth_test.hpp): the fall handler for free
         // props, after the trafo frame and before the behaviour pass, where
         // every client's core runs it (live pre_step, replayed
@@ -1418,7 +1420,7 @@ namespace bmmo::sim {
         const auto quiesce = bmmo::game::quiesce_originals(context, trafo_hooks_);
         log("world: " + quiesce.text() + (quiesce.bodies || quiesce.controllers || quiesce.scripts
                                             ? " - NOT EXPECTED in the server's world (a bug)" : ""));
-        trafo_hold_.arm(context, kFixedDeltaMs);
+        trafo_hold_.arm(context, bmmo::session::TICK_DELTA_MS);
         if (!bmmo::physics::trafo_set_filter(manager, true, error)) {
             error = "trafo filter: " + error;
             return false;
@@ -1640,22 +1642,6 @@ namespace bmmo::sim {
             if (out.error.empty()) out.error = "savestate: " + e;
         }
         bmmo::physics::clear_environment_identity(out.savestate);   // it travels (step T2: the same bytes every run)
-        // Packed for the wire (CKPackData: zlib, the CK file format's own):
-        // the client unpacks with its CK's CKUnPackData.  A section that does
-        // not pack is carried as it is (size 0).
-        const auto pack = [](std::vector<uint8_t>& bytes, uint32_t& size) {
-            if (bytes.empty()) return;
-            int packed_size = 0;
-            char* packed = CKPackData(reinterpret_cast<const char*>(bytes.data()), static_cast<int>(bytes.size()), packed_size, 6);
-            if (!packed) return;
-            if (packed_size > 0 && static_cast<size_t>(packed_size) < bytes.size()) {
-                size = static_cast<uint32_t>(bytes.size());
-                bytes.assign(reinterpret_cast<const uint8_t*>(packed), reinterpret_cast<const uint8_t*>(packed) + packed_size);
-            }
-            CKDeletePointer(packed);
-        };
-        pack(out.scripts, out.scripts_size);
-        pack(out.savestate, out.savestate_size);
         if (options_.trafo_inputs) capture_trafo_ledger(out.trafo_ledger);
     }
 

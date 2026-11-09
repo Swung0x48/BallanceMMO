@@ -35,6 +35,10 @@ for spec in $ARMS; do
     a6m) extra="--control $CONTROL --client-arg-for '2:--beam 74 4 15 1500' --window-origin 1500";;
     a4_swing_seed*) extra="--control $CONTROL --variant swing --loss-pct 10 --loss-burst 8 --loss-seed ${key##*seed}";;
     a5d_resync) extra="--control $CONTROL --client-arg-for '2:--resync-at 2900'";;
+    # Not in the default list (ARMS="a12_stall5:A0 ..."): a client whose game froze (sim/stall_policy.hpp) -
+    # 5 s keeps it (keys released after 3 s), 25 s takes it out of the session at 20 s.
+    a12_stall5) extra="--control $CONTROL --client-arg-for '2:--stall-ms 1500:5000'";;
+    a12_stall25) extra="--control $CONTROL --client-arg-for '2:--stall-ms 1000:25000'";;
     *) extra="--control $CONTROL";;
   esac
   start=$(date +%s)

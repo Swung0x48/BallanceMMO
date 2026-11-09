@@ -3,6 +3,7 @@
 #include <net/transport.hpp>
 #include "../BallanceMMOCommon/common.hpp"
 #include <map>
+#include <vector>
 
 struct client_data {
     std::string name;
@@ -23,6 +24,9 @@ struct client_data {
     // average one.  Sampled with the periodic latency broadcast and again
     // whenever a session starts.
     uint16_t ping_peak_ms = 0;
+    // The players whose legacy ball stream this client said it does not need
+    // (BallStateMute, protocol 34: its live physics mirrors), sorted.
+    std::vector<uint32_t> legacy_muted;
 };
 
 struct map_data {

@@ -27,6 +27,8 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "../entity/session.hpp"
+
 namespace bmmo::session {
     // The own ticks a SessionLead touches, from the client's point of view.
     // Half-open ranges; an empty one has from == to.
@@ -106,7 +108,7 @@ namespace bmmo::session {
         // A raise of k gains its ticks in about k periods while the pacer
         // keeps up, 2k with every other render; past 2k plus this grace it
         // is stalled (finish_reanchored).
-        static constexpr double kStallGracePeriods = 66.0;
+        static constexpr double kStallGracePeriods = static_cast<double>(TICK_RATE);
 
         // A new adjustment.  The server takes no decision while one is
         // unacknowledged, and this one is acknowledged only when it ends, so

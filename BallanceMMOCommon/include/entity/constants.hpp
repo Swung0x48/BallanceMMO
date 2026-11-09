@@ -3,13 +3,14 @@
 #include "../net/transport.hpp"
 #include <chrono>
 #include "globals.hpp"
+#include "session.hpp"
 
 namespace bmmo {
     constexpr std::chrono::nanoseconds SERVER_TICK_DELAY{(int)1e9 / 198},
-                                       SERVER_RECEIVE_INTERVAL{(int)1e9 / 66},
-                                       CLIENT_RECEIVE_INTERVAL{(int)1e9 / 66};
+                                       SERVER_RECEIVE_INTERVAL{(int)1e9 / bmmo::session::TICK_RATE},
+                                       CLIENT_RECEIVE_INTERVAL{(int)1e9 / bmmo::session::TICK_RATE};
 
-	constexpr bmmo::net::microseconds CLIENT_MINIMUM_UPDATE_INTERVAL_US = (int64_t)1e6 / 66;
+	constexpr bmmo::net::microseconds CLIENT_MINIMUM_UPDATE_INTERVAL_US = (int64_t)1e6 / bmmo::session::TICK_RATE;
 
     constexpr float LEVEL_RESTART_IGNORE_TIMEFRAME_MS = 15e3f;
 

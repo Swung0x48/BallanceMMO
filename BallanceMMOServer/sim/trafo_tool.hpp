@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include <entity/session.hpp>
 #include <game/script_replay.hpp>
 #include <game/trafo_sets.hpp>
 #include <physics/physics_direct.hpp>
@@ -165,7 +166,7 @@ namespace bmmo::sim {
                 std::printf("trafo filter %s\n", o_.filter ? "on" : "off");
             }
             if (o_.hold) {
-                hold_.arm(context_, bmmo::sim::kFixedDeltaMs);
+                hold_.arm(context_, bmmo::session::TICK_DELTA_MS);
                 std::printf("trafo hold armed: option E %s (Delayer %u frames)\n", hold_.predicts() ? "available" : "unavailable",
                             hold_.delayer_frames());
             }
@@ -237,7 +238,7 @@ namespace bmmo::sim {
             }
             const int32_t s = bmmo::session::trafo_seed(o_.session_seed, u.player, static_cast<uint32_t>(u.seed_tick), u.type);
             const bool ok = bmmo::game::remake_type_set(context_, registry_, hooks_, u.player, 1, u.type, u.position, s,
-                                                        bmmo::sim::kFixedDeltaMs, error);
+                                                        bmmo::session::TICK_DELTA_MS, error);
             int bodies = 0;
             if (const auto* set = registry_.find(u.player, 1))
                 for (CK_ID id: set->types[u.type].pieces)
@@ -276,7 +277,7 @@ namespace bmmo::sim {
                             in.position[0], in.position[1], in.position[2], in.seed);
             }
         }
-        void run_frame() { bmmo::game::trafo_frame(context_, registry_, bmmo::sim::kFixedDeltaMs); }
+        void run_frame() { bmmo::game::trafo_frame(context_, registry_, bmmo::session::TICK_DELTA_MS); }
 
         // A post-frame activation (--activate with the hold armed): what a
         // script of this frame would have done, Activate Script's way.
@@ -568,7 +569,7 @@ namespace bmmo::sim {
                 return;
             }
             chosen->ActivateInput(0, TRUE);
-            const int result = chosen->Execute(bmmo::sim::kFixedDeltaMs);
+            const int result = chosen->Execute(bmmo::session::TICK_DELTA_MS);
             std::printf("trafo poke t=%lld player %u: Create executed on %s (target %s), result %d, listener=%d\n", tick, player,
                         chosen->GetName() ? chosen->GetName() : "?", chosen->GetTarget()->GetName(), result,
                         bmmo::game::trafo_detail::pointer_local(chosen) ? 1 : 0);

@@ -15,6 +15,7 @@
 #include "ivp_constraint_local.hxx"
 #include <physics/ball_navigation.hpp>
 #include <session/resync_rules.hpp>
+#include <entity/session.hpp>
 #include "ivp_time.hxx"
 #include <physics/ivp_private_access.hpp>
 #include <ivp_time.hxx>
@@ -376,7 +377,7 @@ namespace bmmo::physics {
         return total;
     }
 
-    bool capture_world_hash(CKIpionManager* physics, world_hash& out, std::string& error) {
+    bool capture_world_hash(CKIpionManager* physics, world_hash& out, std::string& error, bool surfaces) {
         error.clear();
         out = {};
         IVP_Environment* environment = physics ? physics->GetEnvironment() : nullptr;
@@ -442,7 +443,7 @@ namespace bmmo::physics {
         pose_hasher.feed(pose_sum);
         out.hash = hasher.value;
         out.pose = pose_hasher.value;
-        out.surfaces = surface_signature(physics);
+        if (surfaces) out.surfaces = surface_signature(physics);
         if (probe) {
             const IVP_Core* core = probe->get_core();
             std::snprintf(out.probe_name, sizeof(out.probe_name), "%s", probe->get_name() ? probe->get_name() : "");
@@ -1098,8 +1099,8 @@ namespace bmmo::physics {
         // the first tick after the anchor runs one PSI on one side and two on
         // the other and the IVP clocks stay 1/66 s apart for the whole session.
         physics->m_PhysicsTimeFactor = 0.001f;
-        physics->m_DeltaTime = 1000.0f / 66.0f;
-        physics->m_PhysicsDeltaTime = (1000.0f / 66.0f) * physics->m_PhysicsTimeFactor;
+        physics->m_DeltaTime = bmmo::session::TICK_DELTA_MS;
+        physics->m_PhysicsDeltaTime = bmmo::session::TICK_DELTA_MS * physics->m_PhysicsTimeFactor;
         ivp_srand(seed == 0 ? 1 : seed);
         // The generator behind the hooked Random blocks (design 9.10): the
         // trafo explosion pieces draw from it, so it starts from the same seed
@@ -1754,7 +1755,7 @@ namespace bmmo::physics {
         // unconditional ensure_in_simulation() of the pre-v10 entries: on an
         // already simulated body that call re-arms IVP's freeze counters, so
         // v10's `wake` only revives a body that is actually frozen.
-        enum class sleep_action { legacy_wake, wake_if_frozen, freeze_if_simulated, keep };
+        enum class sleep_action { legacy_wake, wake_if_frozen, freeze_if_simulated, keep, wake_now };
 
         bool write_body_state(CKIpionManager* physics, const char* entity_name,
                               const double position[3], const double rotation[4],
@@ -1777,6 +1778,10 @@ namespace bmmo::physics {
             }
             bool beamed = false;
             if (hull_probe_matches(real)) hull_probe_write(real, "write_body_state");
+            // wake_mode::wake_moving: revived now, before the state is written,
+            // so the revive's zero-speed PSI cannot throw the velocity away.
+            if (action == sleep_action::wake_now && !IVP_MTIS_SIMULATED(core->movement_state))
+                real->ensure_in_simulation_now();
             // IVP integrates with a leapfrog: at every PSI the core's position
             // is advanced by the delta written at the PREVIOUS one, and the
             // rotation of the next PSI was predicted at this one.  The beam
@@ -1864,6 +1869,9 @@ namespace bmmo::physics {
                 case sleep_action::freeze_if_simulated:
                     if (IVP_MTIS_SIMULATED(core->movement_state)) real->disable_simulation();
                     break;
+                case sleep_action::wake_now:
+                    if (!IVP_MTIS_SIMULATED(core->movement_state)) real->ensure_in_simulation();
+                    break;
                 case sleep_action::keep: break;
             }
             // Same refresh the manager does after every step, so the render side
@@ -1891,6 +1899,7 @@ namespace bmmo::physics {
         sleep_action action = sleep_action::keep;
         if (mode == wake_mode::wake) action = sleep_action::wake_if_frozen;
         else if (mode == wake_mode::freeze) action = sleep_action::freeze_if_simulated;
+        else if (mode == wake_mode::wake_moving) action = sleep_action::wake_now;
         return write_body_state(physics, entity_name, position, rotation, linear, angular,
                                 action, recheck, true, error);
     }
@@ -3692,6 +3701,24 @@ namespace bmmo::physics {
         // same double in every world once its faces are on the 1/8 m grid.
         constexpr double kAirshipMarginSide = 3.0;
         constexpr double kAirshipGrid = 8.0;   // faces on multiples of 1/8 m, rounded outward
+        // The column's y faces (protocol 36; the user, 2026-11-09: "add upper
+        // and lower bounds, loose" - a flung ball must not reach the other
+        // worlds).  AZX left y unbounded so a ball sinking with the platform
+        // or arriving from above counts; these keep that with wide slack:
+        // the deepest ball on a deck in the 2026-11-08 public test was 3.4 m
+        // below the airship's start, a capsized airship (no ball) 16.6 m, the
+        // deepest in-session fall back through a column 19.5 m; the highest
+        // ball +109 m (a steady push, L10).  Below: Level 13's end spiral
+        // winds under the airship - its laps crossed the column's z face once
+        // a lap, and every crossing was an entry and a release (stomach110's
+        // falls); 32.5 m below the start leaves its bottom six laps out, the
+        // face in a gap between two laps (1.1-1.2 m to the nearest pass).
+        // Relative to the airship's start in the level file (the PH row of
+        // PE_Balloon_MF), not to its parts as they stand when the box is
+        // taken: a late joiner that imports an awake airship would otherwise
+        // take faces up to 3 m off the others'.
+        constexpr double kAirshipBelowStart = 32.5;
+        constexpr double kAirshipAboveStart = 1024.0;
 
         class airship_zone_filter;
         class airship_zone_listener;
@@ -3789,8 +3816,28 @@ namespace bmmo::physics {
             if (!core || !state.ready) return false;
             const IVP_U_Point* p = core->get_position_PSI();
             for (int k = 0; k < 3; ++k)
-                if (k != 1 && !(p->k[k] >= state.min[k] && p->k[k] <= state.max[k])) return false;
+                if (!(p->k[k] >= state.min[k] && p->k[k] <= state.max[k])) return false;
             return true;
+        }
+
+        // The airship's start height: the y of the level file's PH row for
+        // PE_Balloon_MF (the same float in every world).  False when the
+        // level has no such row.
+        bool airship_start_y(CKContext* context, double& out) {
+            auto* ph = context ? CKDataArray::Cast(context->GetObjectByNameAndClass(const_cast<CKSTRING>("PH"),
+                                                                                     CKCID_DATAARRAY, nullptr))
+                               : nullptr;
+            if (!ph || ph->GetColumnCount() < 4) return false;
+            for (int r = 0; r < ph->GetRowCount(); ++r) {
+                CKObject* object = ph->GetElementObject(r, 3);
+                const char* name = object ? object->GetName() : nullptr;
+                VxMatrix m;
+                if (name && std::strcmp(name, "PE_Balloon_MF") == 0 && ph->GetElementValue(r, 2, &m)) {
+                    out = m[3][1];
+                    return true;
+                }
+            }
+            return false;
         }
         double airship_now(const IVP_Environment* environment) {
             return environment ? const_cast<IVP_Environment*>(environment)->get_current_time().get_seconds() : 0.0;
@@ -4042,12 +4089,15 @@ namespace bmmo::physics {
                 }
             }
             if (!any) return false;
-            for (int k = 0; k < 3; ++k) {
-                state.min[k] = k == 1 ? -std::numeric_limits<double>::infinity()
-                                     : std::floor(lo[k] * kAirshipGrid) / kAirshipGrid - kAirshipMarginSide;
-                state.max[k] = k == 1 ? std::numeric_limits<double>::infinity()
-                                     : std::ceil(hi[k] * kAirshipGrid) / kAirshipGrid + kAirshipMarginSide;
+            for (int k = 0; k < 3; k += 2) {
+                state.min[k] = std::floor(lo[k] * kAirshipGrid) / kAirshipGrid - kAirshipMarginSide;
+                state.max[k] = std::ceil(hi[k] * kAirshipGrid) / kAirshipGrid + kAirshipMarginSide;
             }
+            // y from the airship's start (a level without the PH row: its parts).
+            double start = 0.0;
+            const bool from_start = airship_start_y(context, start);
+            state.min[1] = std::floor((from_start ? start : lo[1]) * kAirshipGrid) / kAirshipGrid - kAirshipBelowStart;
+            state.max[1] = std::ceil((from_start ? start : hi[1]) * kAirshipGrid) / kAirshipGrid + kAirshipAboveStart;
             state.ready = true;
             return true;
         }

@@ -3,7 +3,12 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <initializer_list>
+#include <typeinfo>
+#if defined(__GNUG__)
+#include <cxxabi.h>
+#endif
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -27,6 +32,37 @@ namespace bmmo::sim {
             if (auto drain = g_crash_drain) {
                 g_crash_drain = nullptr;   // once, even if the drain itself faults
                 drain();
+            }
+        }
+        // The host's log line (set_crash_log): the reason, after the drain,
+        // so it is the log's last line.
+        void (*g_crash_log)(const char*) = nullptr;
+        void finish_report(const char* reason) {
+            std::fflush(stderr);
+            run_crash_drain();
+            if (auto log = g_crash_log) {
+                g_crash_log = nullptr;
+                log(reason);
+            }
+        }
+        // std::terminate's reason: the uncaught exception's type and what().
+        void describe_terminate(char* reason, size_t size) {
+            if (auto e = std::current_exception()) {
+                try {
+                    std::rethrow_exception(e);
+                } catch (const std::exception& x) {
+                    const char* type = typeid(x).name();
+#if defined(__GNUG__)
+                    int status = 0;
+                    char* readable = abi::__cxa_demangle(type, nullptr, nullptr, &status);
+                    if (status == 0 && readable) type = readable;   // not freed: the process ends
+#endif
+                    std::snprintf(reason, size, "[crash] std::terminate: uncaught %s: %s", type, x.what());
+                } catch (...) {
+                    std::snprintf(reason, size, "[crash] std::terminate: uncaught exception of a non-std type");
+                }
+            } else {
+                std::snprintf(reason, size, "[crash] std::terminate called without an active exception");
             }
         }
 #if defined(_WIN32)
@@ -95,14 +131,18 @@ namespace bmmo::sim {
                 print_frame(process, reinterpret_cast<DWORD64>(frames[i]), i);
         }
 
-        // With BMMO_CRASH_DUMP set in the environment, a full-memory minidump
-        // of the crashing process is written to the working directory, so the
-        // state behind a backtrace can be inspected afterwards (a debugger, or
-        // a minidump reader walking the structures by their layouts).  Off
-        // by default: a full dump of a client is hundreds of megabytes.
+        // A minidump of the crashing process in the working directory
+        // (crash-<pid>.dmp): by default a small one (every thread's stack and
+        // the memory they point at, a few MB); with BMMO_CRASH_DUMP set in the
+        // environment a full-memory one, so the state behind a backtrace can be
+        // inspected afterwards (a debugger, or a minidump reader walking the
+        // structures by their layouts; hundreds of MB for a client);
+        // BMMO_CRASH_DUMP=0: none.  `info` null (abort, terminate): the dump
+        // has the calling thread's context at the call.
         void write_minidump(EXCEPTION_POINTERS* info) {
-            char enabled[8];
-            if (!GetEnvironmentVariableA("BMMO_CRASH_DUMP", enabled, sizeof enabled)) return;
+            char enabled[8] = "";
+            const bool full = GetEnvironmentVariableA("BMMO_CRASH_DUMP", enabled, sizeof enabled) != 0;
+            if (full && enabled[0] == '0' && enabled[1] == '\0') return;
             char path[64];
             std::snprintf(path, sizeof path, "crash-%lu.dmp", GetCurrentProcessId());
             HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -111,9 +151,11 @@ namespace bmmo::sim {
                 return;
             }
             MINIDUMP_EXCEPTION_INFORMATION exception{GetCurrentThreadId(), info, FALSE};
-            const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpWithFullMemory | MiniDumpWithHandleData | MiniDumpWithThreadInfo);
-            const BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type, &exception,
-                                                   nullptr, nullptr);
+            const auto type = static_cast<MINIDUMP_TYPE>(
+                    full ? MiniDumpWithFullMemory | MiniDumpWithHandleData | MiniDumpWithThreadInfo
+                         : MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory);
+            const BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
+                                                   info ? &exception : nullptr, nullptr, nullptr);
             CloseHandle(file);
             std::fprintf(stderr, written ? "[crash] minidump written to %s\n" : "[crash] minidump %s failed (%lu)\n", path,
                          GetLastError());
@@ -121,45 +163,94 @@ namespace bmmo::sim {
 
         LONG WINAPI on_unhandled_exception(EXCEPTION_POINTERS* info) {
             const auto* record = info->ExceptionRecord;
-            std::fprintf(stderr, "\n[crash] unhandled exception 0x%08lx at %p", record->ExceptionCode, record->ExceptionAddress);
-            if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2) {
-                std::fprintf(stderr, " (%s address %p)", record->ExceptionInformation[0] ? "writing" : "reading",
-                             reinterpret_cast<void*>(record->ExceptionInformation[1]));
+            char reason[160];
+            int n = std::snprintf(reason, sizeof reason, "[crash] unhandled exception 0x%08lx at %p",
+                                  record->ExceptionCode, record->ExceptionAddress);
+            if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2 && n > 0
+                && n < static_cast<int>(sizeof reason)) {
+                std::snprintf(reason + n, sizeof reason - n, " (%s address %p)",
+                              record->ExceptionInformation[0] ? "writing" : "reading",
+                              reinterpret_cast<void*>(record->ExceptionInformation[1]));
             }
-            std::fprintf(stderr, "\n");
+            std::fprintf(stderr, "\n%s\n", reason);
             // StackWalk64 unwinds the context it is given in place; the dump
             // must see the registers as they were at the fault.
             CONTEXT walked = *info->ContextRecord;
             print_backtrace_from_context(&walked);
             write_minidump(info);
-            std::fflush(stderr);
-            run_crash_drain();
+            finish_report(reason);
             return EXCEPTION_EXECUTE_HANDLER;
         }
 
-        void on_abort(int) {
-            std::fprintf(stderr, "\n[crash] abort() called\n");
+        [[noreturn]] void die_here(const char* reason) {
+            std::fprintf(stderr, "\n%s\n", reason);
             print_backtrace_here();
-            std::fflush(stderr);
-            run_crash_drain();
+            write_minidump(nullptr);
+            finish_report(reason);
             _exit(134);
+        }
+
+        // abort(): the default terminate's too, on a thread that never set
+        // the per-thread handler (MSVC keeps terminate handlers per thread) -
+        // raised synchronously inside the catch(...) that rethrew, so the
+        // uncaught exception is still the current one and is named here.
+        void on_abort(int) {
+            char reason[512];
+            if (std::current_exception()) describe_terminate(reason, sizeof reason);
+            else std::snprintf(reason, sizeof reason, "[crash] abort() called");
+            die_here(reason);
+        }
+
+        // std::terminate (an exception nothing caught): before the default
+        // handler's abort(), so the reason names the exception.  The stack
+        // is still the throw's (terminate runs in the search phase).
+        void on_terminate() {
+            char reason[512];
+            describe_terminate(reason, sizeof reason);
+            die_here(reason);
+        }
+
+        // A CRT function given an invalid argument (release builds pass no
+        // details): would otherwise end the process by __fastfail, which no
+        // filter sees.
+        void on_invalid_parameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
+            die_here("[crash] invalid parameter passed to a C runtime function");
         }
 #elif defined(BMMO_HAVE_EXECINFO)
         void on_fatal_signal(int signal_number) {
-            const char* name = signal_number == SIGSEGV ? "SIGSEGV" : signal_number == SIGABRT ? "SIGABRT"
-                             : signal_number == SIGBUS  ? "SIGBUS"  : signal_number == SIGFPE  ? "SIGFPE" : "signal";
-            std::fprintf(stderr, "\n[crash] %s\n", name);
+            const char* name = signal_number == SIGSEGV ? "[crash] SIGSEGV" : signal_number == SIGABRT ? "[crash] SIGABRT"
+                             : signal_number == SIGBUS  ? "[crash] SIGBUS"  : signal_number == SIGFPE  ? "[crash] SIGFPE"
+                             : "[crash] fatal signal";
+            std::fprintf(stderr, "\n%s\n", name);
             std::fflush(stderr);
             void* frames[64];
             const int count = backtrace(frames, 64);
             backtrace_symbols_fd(frames, count, STDERR_FILENO);
-            run_crash_drain();
+            finish_report(name);
             _exit(128 + signal_number);
+        }
+
+        void on_terminate() {
+            char reason[512];
+            describe_terminate(reason, sizeof reason);
+            std::fprintf(stderr, "\n%s\n", reason);
+            void* frames[64];
+            const int count = backtrace(frames, 64);
+            backtrace_symbols_fd(frames, count, STDERR_FILENO);
+            finish_report(reason);
+            _exit(134);
         }
 #endif
     }
 
     void set_crash_drain(void (*drain)()) { g_crash_drain = drain; }
+    void set_crash_log(void (*log)(const char*)) { g_crash_log = log; }
+
+    void install_thread_crash_reporter() {
+#if defined(_WIN32) || defined(BMMO_HAVE_EXECINFO)
+        std::set_terminate(on_terminate);
+#endif
+    }
 
     void install_crash_reporter() {
 #if defined(_WIN32)
@@ -170,9 +261,11 @@ namespace bmmo::sim {
         // silently exit with code 3.
         _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
         std::signal(SIGABRT, on_abort);
+        _set_invalid_parameter_handler(on_invalid_parameter);
 #elif defined(BMMO_HAVE_EXECINFO)
         for (int signal_number: {SIGSEGV, SIGABRT, SIGBUS, SIGFPE})
             std::signal(signal_number, on_fatal_signal);
 #endif
+        install_thread_crash_reporter();
     }
 }

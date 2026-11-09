@@ -188,6 +188,25 @@ public:
 		return true;
 	}
 
+	// A muted ball (protocol 34) turns back into a legacy one: its ring
+	// becomes the pose it is shown at, a little in the past so the stream's
+	// catch-up state (the server sends it at the unmute) is newer, with no
+	// time variance - the gap since the last state is not lag, and adding it
+	// would switch the extrapolation off for seconds.
+	void seed(bmmo::net::connection id, uint32_t type, const VxVector& position, const VxQuaternion& rotation) {
+		std::unique_lock lk(mutex_);
+		auto it = states_.find(id);
+		if (it == states_.end())
+			return;
+		TimedBallState state;
+		state.type = type;
+		state.position = position;
+		state.rotation = rotation;
+		state.timestamp = bmmo::net::process_timestamp() - 50000;
+		for (int i = 0; i < 3; ++i) it->second.ball_state.push_front(state);
+		it->second.time_variance = 0;
+	}
+
 	bool update(bmmo::net::connection id, bmmo::net::microseconds timestamp) {
 		std::unique_lock lk(mutex_);
 		auto it = states_.find(id);

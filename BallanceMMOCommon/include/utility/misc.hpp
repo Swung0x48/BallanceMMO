@@ -106,6 +106,11 @@ namespace bmmo {
     void close_log();
     // signal-handler safe(r) counterpart of close_log(); see misc.cpp
     void flush_log_on_exit();
+    // A crash handler's reason line, written to the --log file at once and
+    // flushed (not through the writer strand, which the dying process will
+    // not run again): call after the crash drain, so it is the file's last
+    // line.  Nothing without a log file.
+    void crash_log_line(const char* line);
 }
 
 #endif //BALLANCEMMOSERVER_INTERNAL_HPP

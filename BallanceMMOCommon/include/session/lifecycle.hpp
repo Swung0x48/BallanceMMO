@@ -65,7 +65,7 @@ namespace bmmo::session {
     // ticks past the frame that first reports the ball, and a death's frame
     // can still carry the flag for a tick.  The length is what tells a
     // late or lost Physicalize apart.
-    inline constexpr uint32_t kBodilessOpenReportTicks = 66;
+    inline constexpr uint32_t kBodilessOpenReportTicks = TICK_RATE;
 
     class bodiless_tracker {
     public:

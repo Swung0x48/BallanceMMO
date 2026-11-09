@@ -194,8 +194,8 @@ namespace bmmo::sim {
         if (!engine->render_) engine->log("warning: no headless render context; running without one");
 
         engine->time_->SetTimeScaleFactor(1.0f);
-        engine->time_->SetMinimumDeltaTime(kFixedDeltaMs);
-        engine->time_->SetMaximumDeltaTime(kFixedDeltaMs);
+        engine->time_->SetMinimumDeltaTime(bmmo::session::TICK_DELTA_MS);
+        engine->time_->SetMaximumDeltaTime(bmmo::session::TICK_DELTA_MS);
         return engine;
     }
 
@@ -345,8 +345,8 @@ namespace bmmo::sim {
             }
         }
         time_->SetTimeScaleFactor(1.0f);
-        time_->SetMinimumDeltaTime(kFixedDeltaMs);
-        time_->SetMaximumDeltaTime(kFixedDeltaMs);
+        time_->SetMinimumDeltaTime(bmmo::session::TICK_DELTA_MS);
+        time_->SetMaximumDeltaTime(bmmo::session::TICK_DELTA_MS);
         // Re-patch the "Random" block instances while a level is still
         // loading (design 9.10): base.cmo's own instances are already caught
         // by finish_load, this catches whatever a level's file adds, before
@@ -363,7 +363,7 @@ namespace bmmo::sim {
             error = "CKContext::Process failed: " + std::to_string(processed);
             return false;
         }
-        if (std::fabs(time_->GetLastDeltaTime() - kFixedDeltaMs) > 1.0e-4f) {
+        if (std::fabs(time_->GetLastDeltaTime() - bmmo::session::TICK_DELTA_MS) > 1.0e-4f) {
             error = "behaviour delta drifted from the fixed tick: "
                   + std::to_string(time_->GetLastDeltaTime());
             return false;
@@ -379,10 +379,10 @@ namespace bmmo::sim {
         error.clear();
         if (!context_->IsPlaying()) context_->Play();
         time_->SetTimeScaleFactor(1.0f);
-        time_->SetMinimumDeltaTime(kFixedDeltaMs);
-        time_->SetMaximumDeltaTime(kFixedDeltaMs);
+        time_->SetMinimumDeltaTime(bmmo::session::TICK_DELTA_MS);
+        time_->SetMaximumDeltaTime(bmmo::session::TICK_DELTA_MS);
         advance_level_request();
-        const CKERROR started = context_->ProcessDebugStart(kFixedDeltaMs);
+        const CKERROR started = context_->ProcessDebugStart(bmmo::session::TICK_DELTA_MS);
         if (started != CK_OK) {
             error = "ProcessDebugStart failed: " + std::to_string(started);
             return false;

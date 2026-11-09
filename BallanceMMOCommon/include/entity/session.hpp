@@ -1,5 +1,6 @@
 #ifndef BALLANCEMMOSERVER_SESSION_HPP
 #define BALLANCEMMOSERVER_SESSION_HPP
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -263,7 +264,27 @@ namespace bmmo::session {
     //      copies over twelve ticks; a client's own piggybacked events ride
     //      until the server's header acknowledges them, not only to stamp + 7.
     //      No journal version.
-    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 33;
+    //  34  BallStateMute: a session member names the players whose legacy
+    //      ball stream it does not need (its live mirrors) and the server
+    //      leaves them out of its OwnedCompressedBallState; and the resync /
+    //      late-join state travels as one zstd frame, against a reference
+    //      both sides hold when there is one (docs: the 2026-11-08 public
+    //      test's bandwidth notes).  No journal version.
+    //  35  The portable script record's copies of unbound mechanism slots
+    //      (R1, game/script_replay.hpp portable section bit 3): a resync /
+    //      late-join state carries every slot's unit copies, the unbound
+    //      ones included, and the client writes the server's images of the
+    //      copies its record leaves out instead of its copy-step bases; a
+    //      record without the bit is refused.  No journal version (a client
+    //      journal's resync record holds the portable record as received).
+    //  36  World rules: the airship zone's column gets y faces, 32.5 m below
+    //      and 1024 m above the airship's start (its PH row; Level 13's end
+    //      spiral crossed the unbounded column once a lap), and the airship
+    //      release wakes the remade ball before writing its velocity
+    //      (wake_mode::wake_moving: the release used to leave it at ~18% of
+    //      its speed).  No wire change, no journal version: worlds of 35 and
+    //      36 step differently, which the build id refuses anyway.
+    constexpr uint32_t PHYSICS_PROTOCOL_VERSION = 36;
     // The protocol whose SessionStart entries carry `life` (step M1).
     constexpr uint32_t PHYSICS_PROTOCOL_MEMBER_LIVES = 18;
     // The protocol whose SessionStart carries `mechanism_slots` (step Q7).
@@ -593,6 +614,22 @@ namespace bmmo::session {
     // nothing of the player had arrived yet (session/timeline.hpp
     // input_buffer::take, the held records of session_remote_input_msg).
     constexpr uint32_t INPUT_SOURCE_DEFAULT = 0xFFFFFFFFu;
+
+    // The session's fixed tick rate: every host steps this many ticks a
+    // second.  The one definition: a tick's length below and every duration
+    // counted in ticks derive from it - a duration is written as
+    // seconds * TICK_RATE, never as a tick count.  `int`, the type of the
+    // literal 66 it replaced, so every expression keeps its type.
+    constexpr int TICK_RATE = 66;
+    // One tick: in seconds, in milliseconds, in microseconds, as the
+    // engines' fixed step delta (CKTimeManager's and the physics' ms, a
+    // float), and in whole microseconds (truncated: 15151 at 66 Hz; the
+    // schedulers' tick).
+    constexpr double TICK_SECONDS = 1.0 / TICK_RATE;
+    constexpr double TICK_MS = 1000.0 / TICK_RATE;
+    constexpr double TICK_MICROS = 1000000.0 / TICK_RATE;
+    constexpr float TICK_DELTA_MS = 1000.0f / TICK_RATE;
+    constexpr std::chrono::microseconds TICK_DURATION{1000000 / TICK_RATE};
 
     // session_snapshot_msg::body_state::flags bits.
     constexpr uint8_t BODY_FLAG_SIMULATED         = 1u << 0;

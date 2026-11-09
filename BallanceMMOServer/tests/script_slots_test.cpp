@@ -28,55 +28,103 @@ TEST(ScriptSlots, InvalidJoinOrderDoesNotShiftPastTheMask) {
     EXPECT_EQ(bmmo::session::bound_member_slots(lives, 10), 0u);
 }
 
-TEST(ScriptSlots, CaptureRestoreAcrossBindingUsesAnchorBeforeAndRecordAfter) {
+namespace {
+    std::vector<uint8_t> delta_round_trip(const std::vector<uint8_t>& base, const std::vector<uint8_t>& image,
+                                          size_t* bytes = nullptr) {
+        std::vector<uint8_t> out{0xee};   // a byte before the delta: positions are relative
+        EXPECT_TRUE(bmmo::game::script_slots::put_delta(base, image, out));
+        if (bytes) *bytes = out.size() - 1;
+        size_t pos = 1, skipped = 1;
+        std::vector<uint8_t> back;
+        EXPECT_TRUE(bmmo::game::script_slots::get_delta(base, out, pos, back));
+        EXPECT_EQ(pos, out.size());
+        EXPECT_TRUE(bmmo::game::script_slots::skip_delta(out, skipped));
+        EXPECT_EQ(skipped, out.size());
+        return back;
+    }
+}
+
+// R1: an unbound copy's image against its copy-step base.
+TEST(ScriptSlots, DeltaRoundTrips) {
+    std::vector<uint8_t> base(300);
+    for (size_t i = 0; i < base.size(); ++i) base[i] = static_cast<uint8_t>(i * 7);
+    std::vector<uint8_t> out;
+    EXPECT_FALSE(bmmo::game::script_slots::put_delta(base, base, out));
+    EXPECT_TRUE(out.empty());
+    auto few = base;
+    few[40] ^= 1;
+    few[43] ^= 2;   // closer than a run header: one run
+    few[200] ^= 4;
+    size_t bytes = 0;
+    EXPECT_EQ(delta_round_trip(base, few, &bytes), few);
+    EXPECT_LT(bytes, 30u);
+    auto edges = base;
+    edges[0] ^= 1;
+    edges.back() ^= 1;
+    EXPECT_EQ(delta_round_trip(base, edges), edges);
+    auto longer = base;
+    longer.push_back(9);
+    EXPECT_EQ(delta_round_trip(base, longer), longer);
+    const std::vector<uint8_t> shorter(base.begin(), base.begin() + 10);
+    EXPECT_EQ(delta_round_trip(base, shorter), shorter);
+    auto all = base;
+    for (auto& b: all) b ^= 0xff;
+    EXPECT_EQ(delta_round_trip(base, all), all);
+    std::vector<uint8_t> truncated;
+    ASSERT_TRUE(bmmo::game::script_slots::put_delta(base, few, truncated));
+    truncated.pop_back();
+    size_t pos = 0;
+    std::vector<uint8_t> back;
+    EXPECT_FALSE(bmmo::game::script_slots::get_delta(base, truncated, pos, back));
+}
+
+// R1: records captured before a bind, with the copy unchanged (B) and
+// changed (I2), and after it (I3) restore to B / I2 / I3 whatever was
+// restored before: an unbound copy is written base + delta every time.
+TEST(ScriptSlots, RestoreAcrossBindingWritesTheRecordsImage) {
     bmmo::game::script_slots slots;
-    const std::vector<uint8_t> anchor{1, 2, 3}, changed{4, 5, 6};
-    slots.add(123, 3, anchor);
+    const std::vector<uint8_t> B{1, 2, 3, 4}, I2{1, 9, 3, 4}, I3{5, 6, 7, 8, 9};
+    slots.add(123, 3, B);
     std::vector<bmmo::session::member_life> lives(1);
     lives[0].entry.join_order = 3;
     lives[0].from = 20;
-    const auto capture = [&](uint32_t tick, const std::vector<uint8_t>& live) {
+    struct record { uint64_t mask; std::vector<uint8_t> section, body; };
+    const auto capture = [&](uint32_t tick, const std::vector<uint8_t>& live) {   // as capture_behavior
         slots.select(bmmo::session::bound_member_slots(lives, tick));
-        return slots.omit(123) ? std::vector<uint8_t>{} : live;
+        record r{slots.mask(), {}, {}};
+        if (!slots.omit(123)) r.body = live;
+        else bmmo::game::script_slots::put_delta(*slots.base(123), live, r.section);
+        return r;
     };
-    const auto before = capture(19, anchor);
-    const uint64_t before_mask = slots.mask();
-    const auto after = capture(20, changed);
-    const uint64_t after_mask = slots.mask();
-    EXPECT_TRUE(before.empty());
-    EXPECT_EQ(after, changed);
-    std::vector<uint8_t> live = changed;
-    const auto restore = [&](uint64_t mask, const std::vector<uint8_t>& record) {
-        slots.select_record(mask);
-        if (slots.omit(123))
-            return slots.restore_anchor(123, [&](const std::vector<uint8_t>& bytes) { live = bytes; return true; });
-        slots.recorded(123);
-        live = record;
-        return true;
+    const record r1 = capture(18, B), r2 = capture(19, I2), r3 = capture(20, I3);
+    EXPECT_TRUE(r1.section.empty());
+    EXPECT_FALSE(r2.section.empty());
+    EXPECT_EQ(r3.body, I3);
+    std::vector<uint8_t> live = I3;
+    const auto restore = [&](const record& r) {   // as restore_behavior
+        slots.select_record(r.mask);
+        if (!slots.omit(123)) {
+            live = r.body;
+            return;
+        }
+        if (r.section.empty()) {
+            live = *slots.base(123);
+            return;
+        }
+        size_t pos = 0;
+        ASSERT_TRUE(bmmo::game::script_slots::get_delta(*slots.base(123), r.section, pos, live));
     };
-    ASSERT_TRUE(restore(before_mask, before));
-    EXPECT_EQ(live, anchor);
-    ASSERT_TRUE(restore(after_mask, after));
-    EXPECT_EQ(live, changed);
-    ASSERT_TRUE(restore(before_mask, before));
-    EXPECT_EQ(live, anchor);
-    EXPECT_EQ(capture(19, live), before);
-    EXPECT_EQ(capture(20, changed), after);
-}
-
-TEST(ScriptSlots, UnchangedAnchorsAreNotRewrittenAndFailedWritesAreRetried) {
-    bmmo::game::script_slots slots;
-    slots.add(123, 2, {7});
-    int writes = 0;
-    const auto write = [&](const std::vector<uint8_t>&) { ++writes; return true; };
-    ASSERT_TRUE(slots.restore_anchor(123, write));
-    EXPECT_EQ(writes, 0);
-    slots.recorded(123);
-    EXPECT_FALSE(slots.restore_anchor(123, [](const std::vector<uint8_t>&) { return false; }));
-    ASSERT_TRUE(slots.restore_anchor(123, write));
-    ASSERT_TRUE(slots.restore_anchor(123, write));
-    EXPECT_EQ(writes, 1);
-    EXPECT_FALSE(slots.restore_anchor(999, write));
+    for (const auto* order: {"123", "321", "213", "1313", "2121", "3232"}) {
+        for (const char* c = order; *c; ++c) {
+            const record& r = *c == '1' ? r1 : *c == '2' ? r2 : r3;
+            restore(r);
+            EXPECT_EQ(live, *c == '1' ? B : *c == '2' ? I2 : I3) << order;
+        }
+    }
+    EXPECT_EQ(slots.base_hash(123), bmmo::game::script_slots::hash(B));
+    slots.add(123, 3, I2);   // a re-copy: the base is replaced
+    EXPECT_EQ(*slots.base(123), I2);
+    EXPECT_EQ(slots.base_hash(123), bmmo::game::script_slots::hash(I2));
 }
 
 TEST(ScriptSlots, PortableRecordRetainsHistoricallyBoundSlotsForLateJoiners) {
@@ -98,4 +146,75 @@ TEST(ScriptSlots, PortableRecordRetainsHistoricallyBoundSlotsForLateJoiners) {
     slots.add(123, 5, {1});
     slots.select(1);
     EXPECT_TRUE(slots.omit(123));
+}
+
+// T3C e3: the slot memo's quiet-run ledger and the memo's refusals.
+TEST(ScriptSlots, MemoServesOnlyWhileItsRootStaysQuiet) {
+    using bmmo::game::script_root_words;
+    using bmmo::game::script_slots;
+    constexpr uint32_t kActive = 1;   // a frame flag
+    script_slots slots;
+    slots.add(10, 2, {1, 2, 3}, 7);
+    script_slots::copy* c = slots.find(10);
+    ASSERT_NE(c, nullptr);
+    EXPECT_STREQ(slots.memo_refused(*c, 0), "none");
+    script_root_words quiet;
+    quiet.id = 7;
+    const auto observe = [&](uint32_t tick, script_root_words words, bool present = true) {
+        slots.begin_observation();
+        slots.observe(7, tick, present, words, kActive);
+    };
+    const auto walk = [&](uint64_t writes) {
+        c->m.valid = true;
+        c->m.seq = slots.seq();
+        c->m.writes = writes;
+    };
+    observe(100, quiet);
+    walk(5);
+    EXPECT_EQ(slots.memo_refused(*c, 5), nullptr) << "walked at this observation";
+    observe(101, quiet);
+    observe(102, quiet);
+    EXPECT_EQ(slots.memo_refused(*c, 5), nullptr) << "quiet ticks go on";
+    EXPECT_STREQ(slots.memo_refused(*c, 6), "gen") << "a host write";
+    script_root_words active = quiet;
+    active.flags = kActive;
+    observe(103, active);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "the root ran";
+    observe(104, quiet);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "from an active tick: no run either";
+    walk(5);
+    observe(105, quiet);
+    EXPECT_EQ(slots.memo_refused(*c, 5), nullptr);
+    observe(107, quiet);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "a gap";
+    walk(5);
+    observe(107, quiet);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "the same tick again (an amend)";
+    walk(5);
+    observe(90, quiet);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "a backward jump (a rewind)";
+    walk(5);
+    script_root_words other = quiet;
+    other.in_mask = 1;
+    observe(91, other);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "an IO switched";
+    walk(5);
+    observe(92, other, false);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "the root not found";
+    walk(5);
+    observe(93, active);
+    walk(5);
+    observe(94, active);
+    EXPECT_STREQ(slots.memo_refused(*c, 5), "run") << "active at both ends, words equal: the frame flag alone ends it";
+    slots.add(11, 3, {4, 5}, 8);
+    script_slots::copy* d = slots.find(11);
+    d->m.valid = true;
+    d->m.seq = slots.seq();
+    d->m.writes = 5;
+    EXPECT_STREQ(slots.memo_refused(*d, 5), "run") << "a root never observed";
+    slots.add(10, 2, {1, 2, 3}, 7);
+    EXPECT_STREQ(slots.memo_refused(*slots.find(10), 5), "none") << "a re-copy drops the memo";
+    slots.clear();
+    EXPECT_EQ(slots.find(10), nullptr);
+    EXPECT_TRUE(slots.roots().empty());
 }

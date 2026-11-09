@@ -2392,6 +2392,18 @@ FIN struct-padding noise is measured separately. Details, raw verdicts and
 the deferred pre-existing trace-body diagnostic crash are in
 `.local-tools/work/HANDOFF/reports/AZX.md`.
 
+*Protocol 36 (2026-11-09, the 2026-11-08 public test's Level 13 end
+spiral):* the column has y faces again, loose: 32.5 m below and 1024 m above
+the airship's start (the y of the level file's PH row for PE_Balloon_MF, so
+every world takes the same faces whatever its airship is doing), on the 1/8 m
+grid. The spiral winds under the airship and crossed the column's z face once
+a lap; the lower face leaves its bottom six laps out (the top laps, the way on
+board, stay in). The upper face only bounds a ball pushed up for good (L10's
++109 m). And the release itself: the remade ball is woken before its state is
+written (`wake_mode::wake_moving`, `ensure_in_simulation_now`); with the old
+`wake` the revive at the next PSI started it from rest, and every release left
+the ball at about 18% of its speed - no one could cling to the spiral.
+
 ## As built (step BALA)
 
 (Step BALL, below SPGH2's note: the relayed pose is retired at protocol 17 -

@@ -29,8 +29,12 @@ namespace bmmo::physics {
     using ball_recipe = bmmo_physics_ball_recipe;
     using trafo_set_report = bmmo_physics_trafo_set_report;
 
+    // `surfaces` false: out.surfaces stays 0 and the surface signature is not
+    // computed - the journal's per-tick TICK record, which does not carry it
+    // (T3C step S1: on a tick whose body set changed the signature cost
+    // 12-14 ms on an E-core retail client, Level 12's set-change frames).
     bool capture_world_hash(CKIpionManager* physics, bmmo::physics::world_hash& out,
-                            std::string& error);
+                            std::string& error, bool surfaces = true);
     // Step OPA: the hash's per-object surface values memoized per manager
     // (world_hash_memo.hpp).  The mode starts from BMMO_HASH_MEMO
     // (off | on | verify; on when unset) on every host that hashes.
@@ -253,6 +257,15 @@ namespace bmmo::physics {
                      // freeze counters, which the bool overload does and a
                      // per-tick correction must not
         freeze = 2,  // disable_simulation() when the body is simulated
+        // A body made this tick that must leave with the velocity written to
+        // it (the airship release, protocol 35): woken BEFORE the write, at
+        // once (ensure_in_simulation_now, IVP's own attach pattern).  `wake`
+        // only queues a revive, and the revive at the next PSI starts the
+        // core from rest (calc_next_PSI_matrix_zero_speed): every release
+        // used to leave the ball at ~18% of its speed - on Level 13's end
+        // spiral, which the zone column crosses once a lap, the ball could
+        // never cling (2026-11-08 public test, stomach110).
+        wake_moving = 3,
     };
     // The same write with the sleep state under the caller's control, and the
     // one a rollback restore wants: a beam through this overload also carries

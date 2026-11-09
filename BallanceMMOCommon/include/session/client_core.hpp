@@ -126,10 +126,18 @@
 namespace bmmo::session {
 
     // How long the world waits at the anchor for SessionAssign before it starts
-    // stepping anyway (design 9.25 phase alignment).  The assignment is one
-    // reliable round trip behind SessionReady, so this is a fault timeout, not
-    // a schedule: a server that never answers must not freeze the client.
-    constexpr std::chrono::seconds kAnchorHoldTimeout{10};
+    // stepping anyway (design 9.25 phase alignment).  A fault timeout, not a
+    // schedule: a server that never answers must not freeze the client.  The
+    // scheduled assignment waits for the server's start barrier - every
+    // member's SessionReady, up to kStartBarrierTimeout from the world's boot,
+    // which comes before any member's anchor - so the hold must outlast the
+    // barrier with room for a reliable retransmit.  It was 10 s against the
+    // barrier's 20 since protocol 32: in the 2026-11-08 public test one member
+    // that never readied held its L8 room's barrier the full 20 s, the other
+    // twelve gave up at 10 s, ran out of phase and were refused at the start.
+    constexpr std::chrono::seconds kAnchorHoldTimeout{30};
+    static_assert(kAnchorHoldTimeout >= kStartBarrierTimeout + std::chrono::seconds(5),
+                  "the anchor hold must outlast the server's start barrier");
 
     // Step DX6 (F2-a, option (b); resync-and-sector-timing design "As built
     // (step DX6)"): a member whose every input report says the server
@@ -144,7 +152,7 @@ namespace bmmo::session {
     // answers), H3 / DX5 at most 65, the retail
     // trial at most 108 - and the counter starts over after each request, so
     // one more needs another 330 starved reports.  0 = off.
-    constexpr uint32_t kStarvedResyncReports = 330;
+    constexpr uint32_t kStarvedResyncReports = 5 * TICK_RATE;
 
     // An own birth as the host reports it (design 1.3 own_physicalized; E7):
     // the ball's entity and its row in the level's ball table (-1: none, sent
@@ -654,7 +662,7 @@ namespace bmmo::session {
         // ...counted only once the server has applied a frame of ours at or
         // past the birth's origin, and this long after that was first seen
         // (one second for the reliable copy's retransmission).
-        static constexpr uint32_t kOwnEchoUplinkSettleTicks = 66;
+        static constexpr uint32_t kOwnEchoUplinkSettleTicks = TICK_RATE;
         // A birth unanswered this long retires anyway (retire_own_lives).
         static constexpr uint32_t kOwnRecordKeepTicks = 512;
         // A beam asked for (session_client_core::request_beam: the headless
@@ -1009,12 +1017,19 @@ namespace bmmo::session {
         bmmo::session_resync_state_msg resync_state_;
         uint32_t resync_state_arrived_ = 0;
         uint32_t resync_wait_frames_ = 0;
+        uint32_t resync_walk_frames_ = 0;   // step A5: frames a late joiner's state waited for its level walk
         // Bodies a state stopped waiting for (try_apply_resync's bound): this
         // world lost them (a stone ball fallen off, a removed box) while the
         // server keeps them; later states do not wait for them again.
         std::set<std::string> resync_lost_bodies_;
         uint64_t resync_waits_given_up_ = 0;
         uint64_t resync_states_ = 0, resync_states_stale_ = 0, resync_states_refused_ = 0;
+        // Protocol 34: the body of the last resync state decoded and its id -
+        // what the next state may be coded against (our SessionResync names
+        // it); the states that came against it, and those that did not decode.
+        bmmo::session::resync_ref_id resync_ref_;
+        std::string resync_ref_body_;
+        uint64_t resync_states_coded_ = 0, resync_decode_failed_ = 0;
         uint64_t resyncs_restepped_ = 0, resync_restep_depth_ = 0;
         uint64_t resync_deferred_ = 0, resync_deferred_ticks_ = 0;   // applies put off for the body set, and their frames
         uint64_t snapshots_while_resync_ = 0;
@@ -1463,6 +1478,7 @@ namespace bmmo::session {
         // The core's state (design 1.2).  Public from E1 to E10, while the
         // flow still lived in the host (core_.s.<member>); private since E11.
         client_core_state s;
+        bmmo::session::resync_codec resync_codec_;   // protocol 34: the resync state's frames
         // The journal reads the state and the configuration (E2).
         friend class core::client_journal;
         friend struct core_test_access;
